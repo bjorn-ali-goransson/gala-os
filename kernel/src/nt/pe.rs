@@ -470,6 +470,51 @@ pub fn relocation_blocks(
     Ok(())
 }
 
+/// Calls `f(page)` for every 4 KiB page of the image that relocating by a
+/// non-zero delta writes into: each entry's own page, and the page after it
+/// when the entry's bytes cross the boundary (which is why `apply_block`
+/// applies a block to the page after its own as well). ABSOLUTE entries are
+/// padding and write nothing.
+///
+/// A page outside that set holds the same bytes at every base, so a view at
+/// the alternative base shares the preferred base's frame for it instead of
+/// a second copy of identical bytes (`ImageLayout::view_frame`). The set has
+/// to be exact in this direction: a page relocation does write, left out of
+/// it, would be shared with the wrong contents.
+pub fn relocated_pages(
+    image: &[u8],
+    reloc: DataDirectory,
+    mut f: impl FnMut(usize),
+) -> Result<(), PeError> {
+    let start = reloc.rva as usize;
+    let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
+    let mut block = start;
+    while block + 8 <= end {
+        let page = u32_at(image, block).map_err(|_| PeError::BadRelocation)? as usize;
+        let size = u32_at(image, block + 4).map_err(|_| PeError::BadRelocation)? as usize;
+        if size < 8 || block + size > end {
+            return Err(PeError::BadRelocation);
+        }
+        for entry in (block + 8..block + size).step_by(2) {
+            let e = u16_at(image, entry).map_err(|_| PeError::BadRelocation)?;
+            let (kind, offset) = (e >> 12, usize::from(e & 0xfff));
+            let width: usize = match kind {
+                IMAGE_REL_BASED_ABSOLUTE => continue,
+                IMAGE_REL_BASED_HIGHLOW => 4,
+                IMAGE_REL_BASED_DIR64 => 8,
+                _ => return Err(PeError::BadRelocation),
+            };
+            let at = page + offset;
+            f(at / 4096);
+            if (at + width - 1) / 4096 != at / 4096 {
+                f((at + width - 1) / 4096);
+            }
+        }
+        block += size;
+    }
+    Ok(())
+}
+
 /// Applies the block at `block` to `out` (page `page_rva`) if it is this
 /// page's or the one before (entries crossing in); returns the next
 /// block's offset.
@@ -620,6 +665,67 @@ mod tests {
             relocate_page(&image, reloc, delta, page * 0x1000, &mut fast, Some(&index)).unwrap();
             assert_eq!(fast, out, "page {page} (indexed)");
         }
+    }
+
+    /// `relocated_pages` names exactly the pages relocation writes, the page
+    /// an entry's bytes cross into included, and no other. `ImageLayout`
+    /// shares every page outside that set between the preferred and the
+    /// alternative base, so a page missing from it would be shared with the
+    /// wrong contents; one wrongly in it only costs a frame. The test does
+    /// not take the expected set on trust: it relocates each page and
+    /// compares, so the set and the relocation cannot drift apart.
+    #[test]
+    fn relocated_pages_are_the_pages_that_change() {
+        let mut image = vec![0u8; 0x4000];
+        for (i, b) in image.iter_mut().enumerate().take(0x3000) {
+            *b = (i * 7 + i / 256) as u8;
+        }
+        let mut table = Vec::new();
+        let mut block = |page: u32, entries: &[u16]| {
+            let size = 8 + 2 * entries.len() as u32;
+            table.extend_from_slice(&page.to_le_bytes());
+            table.extend_from_slice(&size.to_le_bytes());
+            for e in entries {
+                table.extend_from_slice(&e.to_le_bytes());
+            }
+        };
+        // DIR64 at 0x010 and at 0xffc (its 8 bytes cross into page 1); a
+        // HIGHLOW in page 1 and padding; DIR64s inside page 2, the last at
+        // 0xff8 ending exactly on the page's last byte. Page 3: nothing.
+        block(0x0000, &[0xa010, 0xaffc]);
+        block(0x1000, &[0x3020, 0x0000]);
+        block(0x2000, &[0xa7f8, 0xaff8]);
+        image[0x3000..0x3000 + table.len()].copy_from_slice(&table);
+        let reloc = DataDirectory { rva: 0x3000, size: table.len() as u32 };
+
+        let mut named = [false; 4];
+        relocated_pages(&image, reloc, |p| {
+            if p < named.len() {
+                named[p] = true;
+            }
+        })
+        .unwrap();
+
+        let delta = 0x1234_5678_9abc_u64;
+        let mut changed = [false; 4];
+        for (page, changed) in changed.iter_mut().enumerate() {
+            let mut out = [0u8; 4096];
+            relocate_page(&image, reloc, delta, page * 0x1000, &mut out, None).unwrap();
+            *changed = out[..] != image[page * 0x1000..(page + 1) * 0x1000];
+        }
+
+        assert_eq!(named, changed, "named: {named:?}, actually changed: {changed:?}");
+        assert_eq!(named, [true, true, true, false]);
+    }
+
+    /// An image with no relocation table has no relocated pages at all, so
+    /// every page of a view at the alternative base shares.
+    #[test]
+    fn no_relocation_table_names_no_pages() {
+        let image = vec![0u8; 0x2000];
+        let mut named = 0;
+        relocated_pages(&image, DataDirectory { rva: 0, size: 0 }, |_| named += 1).unwrap();
+        assert_eq!(named, 0);
     }
 
     const TEXT: u32 = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;

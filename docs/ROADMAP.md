@@ -1278,9 +1278,20 @@ samples).
    lost-wake-up stress and the state dump's keyed-event lines found no
    lost wake in the locks); (b) Chrome's out-of-memory exceptions
    (0xE0000008) when a second browser starts with the first still alive,
-   with free frames left: which limit (commit, reservations, a quota);
+   with free frames left: which limit (commit, reservations, a quota).
+   Measured on the Windows machine: an image at a second base cost a
+   second full set of frames here (chrome.dll 327 MiB, where Windows
+   spends 25 MiB -- per page, only what relocation writes goes private),
+   now fixed (ARCHITECTURE "Sections", `pe::relocated_pages`), with the
+   `section:` stats line to show it. Whether the second browser's
+   processes do land on the alternative base is still open: it needs the
+   `chromium_wpt` reproduction, which that machine cannot run until
+   WPT's hosts are in its WSL `/etc/hosts`.
    (c) ChromeDriver not exiting after the client's /shutdown (the
-   scenario then runs to its limit); (d) the whole directory again, then
+   scenario then runs to its limit; not reproduced under KVM on the
+   Windows machine: `chromium_driver` passed 4 of 4, 7-9 s of kernel
+   time against about 2 minutes under TCG, so it wants the `chromium_wpt`
+   run too); (d) the whole directory again, then
    the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the

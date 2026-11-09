@@ -7,6 +7,7 @@
 
 use super::platform;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::object::ObjectRef;
 use super::platform::Frame;
@@ -21,6 +22,42 @@ use crate::sync::IrqMutex;
 pub const SEC_RESERVE: u32 = 0x400_0000;
 pub const SEC_COMMIT: u32 = 0x800_0000;
 pub const SEC_IMAGE: u32 = 0x100_0000;
+
+/// Frames made to hold an image's pages relocated for its alternative base
+/// (the pages relocation writes; the rest share the preferred base's
+/// frames). A second full set of these for a large image is most of a small
+/// machine's memory, so the stats line carries them.
+static RELOCATED_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// Pages mapped into a view at an alternative base from the preferred
+/// base's frames, because relocation does not write them (one per page per
+/// view: each process faults its own).
+static SHARED_ACROSS_BASES: AtomicU64 = AtomicU64::new(0);
+/// Views placed at an image's alternative base, and views placed somewhere
+/// else again (whose pages are private copies: `vm::resolve_fault`).
+/// Both count views `map_image` places, not views a handover carries
+/// across, so a carried view's pages show in the frame counts above with
+/// no view counted here.
+static VIEWS_AT_DYNAMIC: AtomicU64 = AtomicU64::new(0);
+static VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
+
+/// One line for the end of a run: what image views cost in frames, and
+/// where they were placed (ROADMAP BR, GitHub issue #2: a browser's second
+/// set of processes landing on an alternative base is what to look for).
+pub fn log_stats() {
+    let (relocated, shared) =
+        (RELOCATED_FRAMES.load(Ordering::Relaxed), SHARED_ACROSS_BASES.load(Ordering::Relaxed));
+    if relocated == 0 && shared == 0 && VIEWS_ELSEWHERE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    crate::info!(
+        "section: {} views at an image's alternative base, {} elsewhere (private pages); \
+         {relocated} frames ({} KiB) made for relocated pages there, \
+         {shared} page mappings served from the preferred base's frames instead",
+        VIEWS_AT_DYNAMIC.load(Ordering::Relaxed),
+        VIEWS_ELSEWHERE.load(Ordering::Relaxed),
+        relocated * PAGE_SIZE / 1024,
+    );
+}
 
 pub struct Section {
     pub size: u64,
@@ -83,6 +120,15 @@ pub struct ImageLayout {
     /// (`pe::NO_BLOCK` for none): relocating a page reads two blocks, not
     /// the whole table.
     reloc_index: Vec<u32>,
+    /// Per page, whether relocating the image writes into that page
+    /// (`pe::relocated_pages`). A page it does not write holds the same
+    /// bytes at every base, so a view at the alternative base shares the
+    /// preferred base's frame for it rather than taking a second frame for
+    /// identical bytes. Windows does the same, measured per page with
+    /// QueryWorkingSetEx: of chrome.dll's 83833 pages, the 6434 that hold a
+    /// relocation go private at another base and the other 76938 stay
+    /// shared (ARCHITECTURE "Image sections").
+    relocates: Vec<bool>,
     relocatable: bool,
     /// Frames of read-only pages, shared by every view at the preferred
     /// base (made on first use, freed with the section).
@@ -182,10 +228,23 @@ impl ImageLayout {
         let mut reloc_index = Vec::new();
         reloc_index.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
         reloc_index.resize(pages, super::pe::NO_BLOCK);
+        let mut relocates = Vec::new();
+        relocates.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
+        relocates.resize(pages, false);
         if image.relocatable && relocations.size != 0 {
             super::pe::relocation_blocks(&bytes, relocations, |page, at| {
                 if let Some(slot) = reloc_index.get_mut(page / PAGE_SIZE as usize) {
                     *slot = at;
+                }
+            })
+            .map_err(|_| NtStatus::INVALID_IMAGE_FORMAT)?;
+            // Page 0 as well: `relocate_page` rebases the header there.
+            if let Some(slot) = relocates.first_mut() {
+                *slot = true;
+            }
+            super::pe::relocated_pages(&bytes, relocations, |page| {
+                if let Some(slot) = relocates.get_mut(page) {
+                    *slot = true;
                 }
             })
             .map_err(|_| NtStatus::INVALID_IMAGE_FORMAT)?;
@@ -209,6 +268,7 @@ impl ImageLayout {
             page_protect,
             relocations,
             reloc_index,
+            relocates,
             relocatable: image.relocatable,
             shared: IrqMutex::new(shared),
             dynamic: IrqMutex::new(None),
@@ -240,6 +300,21 @@ impl ImageLayout {
                 |top| top.checked_sub(size).filter(|&b| b >= DYNAMIC_BOTTOM),
             );
             *dynamic = taken.ok().map(|top| top - size);
+            match *dynamic {
+                // Once per image, and the moment issue #2 asks about: from
+                // here on a view of it that cannot have the preferred base
+                // goes here, with frames of its own for the pages
+                // relocation writes.
+                Some(base) => crate::info!(
+                    "section: image of {} KiB takes its alternative base {base:#x}",
+                    self.size() / 1024
+                ),
+                None => crate::warn!(
+                    "section: no alternative base left for an image of {} KiB: \
+                     its next view's pages are private",
+                    self.size() / 1024
+                ),
+            }
         }
         *dynamic
     }
@@ -274,6 +349,7 @@ impl ImageLayout {
             }
             None => {
                 *slot = Some(frame);
+                RELOCATED_FRAMES.fetch_add(1, Ordering::Relaxed);
                 Some(frame)
             }
         }
@@ -317,8 +393,9 @@ impl ImageLayout {
 
     /// The shared frame a view at `view_base` maps for page `index` (at the
     /// preferred base the unrelocated one, at the alternative base the
-    /// relocated one), made now if `make`; None for a view elsewhere
-    /// (its pages are private).
+    /// relocated one, or the unrelocated one where relocation does not
+    /// write), made now if `make`; None for a view elsewhere (its pages
+    /// are private).
     pub fn view_frame(&self, index: usize, view_base: u64, make: bool) -> Option<Frame> {
         if view_base == self.base {
             if make {
@@ -328,6 +405,17 @@ impl ImageLayout {
         }
         if self.dynamic() != Some(view_base) {
             return None;
+        }
+        // A page relocation never writes is the same bytes at either base:
+        // the view shares the preferred base's frame instead of a second
+        // frame holding a copy of it. The frame stays owned by `shared`
+        // alone, so `drop` frees it once (it is in no `relocated` slot).
+        if !self.relocates.get(index).copied().unwrap_or(true) {
+            if make {
+                SHARED_ACROSS_BASES.fetch_add(1, Ordering::Relaxed);
+                return self.shared_frame(index);
+            }
+            return *self.shared.lock().get(index)?;
         }
         if make {
             return self.relocated_frame(index, view_base);
@@ -788,6 +876,11 @@ fn map_image_view(
         let _ = vad.release(view_base, 0);
         return Err(NtStatus::CONFLICTING_ADDRESSES);
     }
+    if at_dynamic {
+        VIEWS_AT_DYNAMIC.fetch_add(1, Ordering::Relaxed);
+    } else if delta != 0 {
+        VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
+    }
     // At the preferred base (the layout's shared frames) and at the
     // alternative base (its shared relocated frames) the pages are mapped
     // at their first touch (`frame_for`, `vm::resolve_fault`): a view
@@ -927,9 +1020,10 @@ pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
         let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
         (v.section.clone(), index, v.base)
     };
-    // An image view's page: its shared (or shared relocated) frame, made
-    // now; None for a view with private pages (mapped with the view) or
-    // no memory.
+    // An image view's page: the layout's shared frame, or at the
+    // alternative base its shared relocated one where relocation writes
+    // that page, made now; None for a view with private pages (mapped with
+    // the view) or no memory.
     let frame = match &section_of(&section).image {
         Some(image) => image.view_frame(index, view_base, true)?,
         None => section_of(&section).frame(index)?,
