@@ -1236,6 +1236,19 @@ a packer that stores them (NSIS's `File` without `SetDateSave off`)
 gives a new binary on every run. Check a generated binary by building it
 twice with a `touch` of its inputs in between.
 
+### The Office survey (ROADMAP OF)
+
+The `office-survey` workflow (`.github/workflows/office-survey.yml`; runs
+on a push that changes it or `tools/office_survey.py`, or by hand)
+installs Microsoft 365 Apps unactivated on a Windows runner with the
+Office Deployment Tool (the owner accepted the licence terms for this)
+and uploads only metadata (`tools/office_survey.py`: imports, the
+export lists of Office's DLLs, COM classes, services, scheduled tasks;
+never a binary). Download the `office-survey` artifact, then rank it
+against gala's DLLs: `python3 -I tools/import_survey.py
+target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
+<artifact>/exports`.
+
 ### Linux test programs (user/lx, ROADMAP LX)
 
 Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the

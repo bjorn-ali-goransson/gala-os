@@ -4,7 +4,14 @@ names mapped as nt name normalization maps them). An export counts only if
 it is not a gala_stubs stub (.gstub: GetProcAddress skips those).
 
 usage: python3 -I tools/import_survey.py target/x86_64-pc-windows-msvc/release <pe>...
-(docs/WORKFLOW.md "Chromium")."""
+(docs/WORKFLOW.md "Chromium").
+
+With `--dumps <imports dir> <exports dir>` (tools/office_survey.py's
+output): the `llvm-readobj --coff-imports` dumps under the first
+directory instead of PE files, a program's own DLLs' export lists in the
+second (an import of one of them is satisfied when it exports the name);
+prints a ranked summary: per DLL gala lacks or lacks functions of, how
+many of the program's files need it and what is missing."""
 import os, re, subprocess, sys
 from collections import defaultdict
 
@@ -97,6 +104,54 @@ def resolve(dll):
         if r.startswith("shcore-"): return "shcore.dll"
         if r.startswith("power-"): return "powrprof.dll"
     return d
+
+def own_exports(d):
+    """A program's own DLLs' export lists (--dumps)."""
+    out = {}
+    for n in os.listdir(d):
+        with open(os.path.join(d, n), encoding="utf-8") as f:
+            out[n[:-len(".txt")]] = set(l.strip() for l in f if l.strip())
+    return out
+
+if len(sys.argv) > 2 and sys.argv[2] == "--dumps":
+    own = own_exports(sys.argv[4])
+    need = defaultdict(set)      # (dll, sym) -> files
+    nodll = defaultdict(set)     # dll -> files
+    ownmiss = defaultdict(set)   # (dll, sym) of the program's own DLLs not exported
+    files = 0
+    for dirpath, _, names in os.walk(sys.argv[3]):
+        for n in names:
+            files += 1
+            rel = os.path.relpath(os.path.join(dirpath, n), sys.argv[3])[:-len(".txt")]
+            dll = None
+            with open(os.path.join(dirpath, n), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("Name:"): dll = s[5:].strip()
+                    elif s.startswith("Symbol:"):
+                        m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
+                        sym = m.group(1) if m.group(1) else f"#{m.group(2)}"
+                        d = dll.lower()
+                        if d in own:
+                            if not sym.startswith("#") and sym not in own[d]:
+                                ownmiss[(d, sym)].add(rel)
+                            continue
+                        ex = exports(resolve(d))
+                        if ex is None: nodll[resolve(d)].add(rel); continue
+                        if sym not in ex[0]: need[(resolve(d), sym)].add(rel)
+    print(f"== {files} files; {len(own)} of the program's own DLLs")
+    print("-- DLLs gala does not have (files needing each)")
+    for d, fs in sorted(nodll.items(), key=lambda kv: -len(kv[1])):
+        print(f"  {len(fs):5} {d}: {' '.join(sorted(fs)[:6])}{' ...' if len(fs) > 6 else ''}")
+    per = defaultdict(list)
+    for (d, sym), fs in need.items(): per[d].append((len(fs), sym))
+    print("-- functions gala lacks or only stubs, per DLL (files needing the most-needed)")
+    for d, syms in sorted(per.items(), key=lambda kv: -max(c for c, _ in kv[1])):
+        syms.sort(key=lambda x: (-x[0], x[1]))
+        print(f"  {d} ({len(syms)}): " + " ".join(f"{s}[{c}]" for c, s in syms))
+    if ownmiss:
+        print(f"-- imports of the program's own DLLs not in their export lists: {len(ownmiss)}")
+    sys.exit(0)
 
 for pe in sys.argv[2:]:
     text = readobj(["--coff-imports"], pe)
