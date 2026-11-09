@@ -1118,6 +1118,10 @@ const USER_DLLS_X86: &[Dll] = &[
     // crypt32; wow64_cert_test).
     Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt3232.dll" },
     Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt32.dll" },
+    // normaliz and powrprof (ODT's setup.exe delay-loads them after msi
+    // and imm32; wow64_office_api_test).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz32.dll" },
+    Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
 ];
@@ -3015,6 +3019,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/crypt32.dll", "Windows/SysWOW64"),
     ("office_install", "x86/ncrypt.dll", "Windows/SysWOW64"),
     ("office_install", "x86/msi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("office_install", "ntdll.dll", "Windows/System32"),
     ("office_install", "kernel32.dll", "Windows/System32"),
     ("office_install", "ucrtbase.dll", "Windows/System32"),
@@ -3041,10 +3047,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "ntdll.dll", "Windows/System32"),
     ("office_api_test", "kernel32.dll", "Windows/System32"),
     ("office_api_test", "imm32.dll", "Windows/System32"),
+    ("office_api_test", "normaliz.dll", "Windows/System32"),
+    ("office_api_test", "powrprof.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.

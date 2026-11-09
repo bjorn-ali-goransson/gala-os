@@ -281,13 +281,14 @@ fn handles_and_ui(c: &mut Checks) -> Result<(), u32> {
             INSTALLUILEVEL_DEFAULT.into(),
         )?;
         c.eq(MsiSetInternalUI(0xdead_beef, null_mut()).into(), INSTALLUILEVEL_NOCHANGE.into())?;
-        // The window: swapped with the previous one (none at first).
+        // The window: swapped with the previous one. What a process starts
+        // with is not documented (Windows on the CI runner returns a
+        // nonzero owner, 0x2e1; gala none), so only the swap is checked.
         let mut window = 0x1_0000usize;
         c.eq(
             MsiSetInternalUI(INSTALLUILEVEL_NONE, &mut window).into(),
             INSTALLUILEVEL_DEFAULT.into(),
         )?;
-        c.eq(window as u64, 0)?;
         let mut back = 0usize;
         c.eq(
             MsiSetInternalUI(INSTALLUILEVEL_DEFAULT, &mut back).into(),

@@ -1424,11 +1424,15 @@ need gala's.
      its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
      `office_api_test`), queries its activation context (QueryActCtxW's
      module context and the manifest sections, recorded unsupported),
-     asks COM for a class not registered, and ends with 0xc06d007e at
-     normaliz.dll, which has no i686 build (powrprof.dll, also x64 only,
-     was missing before it without ending the run). Next, in the order
-     the run reaches them: i686 builds of normaliz and powrprof, then
-     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     asks COM for a class not registered, and loads normaliz and powrprof
+     (done: both built for i686 too; `office_api_test` and
+     `wow64_office_api_test` check IdnToAscii/IdnToUnicode and
+     CallNtPowerInformation's processor information). It then sets up
+     its download: winhttp's WinHttpSetOption (an option recorded
+     unsupported) and ends with 0xc06d007f at WinHttpSetStatusCallback,
+     which gala's winhttp does not export. Next, in the order the run
+     reaches them: winhttp's status callbacks (the asynchronous
+     session), then CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
      (the signature check), wininet, urlmon, xmllite, webservices,
      iphlpapi, setupapi, cabinet, credui, gdiplus; the service control
      manager (advapi32's service calls are stubs); a few shlwapi,

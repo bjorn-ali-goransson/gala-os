@@ -1335,6 +1335,9 @@ version = "0.1.0"
 [[package]]
 name = "normaliz"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "noto-sans-mono-bitmap"
@@ -1604,6 +1607,7 @@ name = "powrprof"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]

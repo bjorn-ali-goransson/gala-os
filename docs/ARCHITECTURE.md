@@ -7694,7 +7694,8 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
-(`wow64_msi_test`). crypt32's own
+(`wow64_msi_test`), normaliz and powrprof (`wow64_office_api_test`;
+powrprof reads CPUID through `core::arch::x86` there). crypt32's own
 structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
 `repr(C)` with pointers, and the caller's ones it reads or writes
 (CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the

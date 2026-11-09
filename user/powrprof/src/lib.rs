@@ -10,6 +10,13 @@
 mod scheme;
 mod unimplemented;
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -26,18 +33,32 @@ unsafe extern "C" {
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import. (It becomes a harmless extra data export.)
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemInfo(info: *mut u8);
 }
+
+#[cfg(target_arch = "x86")]
+use core::arch::x86 as arch;
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64 as arch;
 
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
@@ -46,12 +67,12 @@ const PROCESSOR_INFORMATION: u32 = 11;
 
 /// The base frequency in MHz (CPUID 0x16 EAX), or 0.
 fn base_mhz() -> u32 {
-    let max = core::arch::x86_64::__cpuid(0).eax;
+    let max = arch::__cpuid(0).eax;
     if max < 0x16 {
         return 0;
     }
     // Leaf 0x16 exists (checked).
-    core::arch::x86_64::__cpuid(0x16).eax & 0xffff
+    arch::__cpuid(0x16).eax & 0xffff
 }
 
 /// CallNtPowerInformation: ProcessorInformation (11) gives one
