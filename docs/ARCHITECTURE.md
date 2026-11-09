@@ -7317,8 +7317,9 @@ stations and desktops a program creates are refused until stage 3).
   MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
   ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
   INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
-  keeps the process's level and owner window (a value that is not a
-  window, user32's IsWindow, leaves the owner as it was, as on Windows); MsiCloseHandle knows no handle
+  keeps the process's level and owner window (an invalid level returns
+  INSTALLUILEVEL_NOCHANGE yet its known flags replace the current ones,
+  as on Windows); MsiCloseHandle knows no handle
   but 0. Each "nothing installed" answer is recorded (`msi.dll!<function>:
   nothing installed`, kind other, the ordinal as detail). The exports
   carry Windows' ordinals (build.rs; ODT's setup.exe imports them by

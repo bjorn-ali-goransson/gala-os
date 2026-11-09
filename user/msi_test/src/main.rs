@@ -281,22 +281,22 @@ fn handles_and_ui(c: &mut Checks) -> Result<(), u32> {
             INSTALLUILEVEL_DEFAULT.into(),
         )?;
         c.eq(MsiSetInternalUI(0xdead_beef, null_mut()).into(), INSTALLUILEVEL_NOCHANGE.into())?;
-        // The window: the previous owner comes back in its place. What a
-        // process starts with is not documented (Windows on the CI runner
-        // returns a nonzero owner, 0x2e1; gala none), and a value that is
-        // not a window does not become the owner: the next call returns
-        // the same previous owner again.
+        // An invalid level changes nothing but its known flags: Windows
+        // leaves DEFAULT with 0xdeadbeef's UACONLY | ENDDIALOG |
+        // PROGRESSONLY | HIDECANCEL (0x2e0). The window: swapped with the
+        // previous one (what a process starts with is not documented, so
+        // only the swap is checked).
         let mut window = 0x1_0000usize;
         c.eq(
             MsiSetInternalUI(INSTALLUILEVEL_NONE, &mut window).into(),
-            INSTALLUILEVEL_DEFAULT.into(),
+            (INSTALLUILEVEL_DEFAULT | 0x2e0).into(),
         )?;
         let mut back = 0usize;
         c.eq(
             MsiSetInternalUI(INSTALLUILEVEL_DEFAULT, &mut back).into(),
             INSTALLUILEVEL_NONE.into(),
         )?;
-        c.eq(back as u64, window as u64)?;
+        c.eq(back as u64, 0x1_0000)?;
     }
     Ok(())
 }
