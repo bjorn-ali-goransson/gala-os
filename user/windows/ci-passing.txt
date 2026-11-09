@@ -1,7 +1,7 @@
 # The programs that pass on CI's Windows (windows-2025, build 26100), one per
+# line: the windows job fails when one of them does not (user/windows/
 # ci_summary.py). A program that starts passing there is added in the same
 # commit that makes it pass; one is removed only with the Windows measurement
-# line: the windows job fails when one of them does not (user/windows/
 # that shows its expectation was wrong.
 abi_test
 afd_poll_test
