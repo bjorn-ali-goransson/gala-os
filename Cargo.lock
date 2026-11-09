@@ -2797,6 +2797,14 @@ name = "wintrust"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
+]
+
+[[package]]
+name = "wintrust_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
@@ -2935,6 +2943,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_winhttp_cb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_wintrust_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

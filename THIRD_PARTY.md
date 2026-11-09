@@ -23,11 +23,13 @@ Rules for this file:
 |---|---|---|---|---|
 | Limine bootloader | `v11.4.1-binary` (commit `5be26a73d7b7`) | github.com/limine-bootloader/limine | BSD-2-Clause | Prebuilt `BOOTX64.EFI`, `limine-uefi-cd.bin`, `limine-bios-cd.bin` and `limine-bios.sys`, fetched by `cargo xtask` into `target/` and copied onto the ISO; its `limine` host tool (built from `limine.c` in the same checkout) installs the BIOS stages. Not committed. |
 | Public CA bundle (Mozilla's root program, TLS server roots) | `cacert-2026-10-20.pem` from curl.se ("Certificate data from Mozilla as of: Tue Oct 20 13:32:40 2026 GMT", made by mk-ca-bundle.pl 1.35 from NSS's `certdata.txt`), 118 certificates, SHA-256 `796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe` (matching curl.se's published `cacert-2026-10-20.pem.sha256`) | curl.se/ca (curl.se/docs/caextract.html); the data is Mozilla's (github.com/mozilla-firefox/firefox `security/nss/lib/ckfw/builtins/certdata.txt`) | MPL-2.0 (Mozilla's certdata.txt) | `user/roots/public-roots.pem`, unmodified: gala's machine root store's public CAs, shipped in every full image as `C:\Windows\System32\gala\roots\public-roots.pem`, read by Schannel (automatic validation) and crypt32's ROOT store; the `pk_install_https` scenario ships it too. Replaced by `user/roots/update.sh <date>`, which checks the published SHA-256. |
+| Microsoft's code signing roots | Microsoft Root Certificate Authority 2010 (SHA-256 of the DER `df545bf9...6c163e`), 2011 (`847df6a7...ed7c61`) and Microsoft Identity Verification Root Certificate Authority 2020 (`5367f20c...2e1270`), the certificates as published | Microsoft's PKI repository (www.microsoft.com/pki/certs, /pkiops/certs) | public certificates (no licence terms attached) | `user/roots/microsoft-roots.pem`, PEM with a subject comment each: shipped in every full image beside public-roots.pem as the code signing roots Windows' root store holds (WinVerifyTrust, ARCHITECTURE "wintrust: Authenticode"); `wintrust_test` and `office_install` ship it. Remade by `user/roots/microsoft.sh`, which checks the pinned SHA-256s. |
 
 ## Test programs built from third-party source (checked in as binaries)
 
 | Component | Version | Source | License | How it is used |
 |---|---|---|---|---|
+| Wine's self-signed Authenticode test images | `SelfSignedFile32` and `SelfSignedFile64` of Wine's `dlls/wintrust/tests/softpub.c` (gitlab.winehq.org/wine/wine, master as of 2026-11-09): tcc-built images signed with signtool by a "Test CA Root" certificate | gitlab.winehq.org/wine/wine | LGPL-2.1+ | `user/wintrust_test/data/selfsigned32.exe` and `selfsigned64.exe`, the arrays' bytes unmodified; `wintrust_test` verifies them and copies changed as Wine's test_wintrust_digest does, expecting the answers that test records for Windows. |
 | Nginx | 1.30.6 (`nginx-1.30.6.tar.gz`, SHA-256 `3cf46f5e...b8b6c8`) | nginx.org | BSD-2-Clause | `user/bin/nginx.exe`, built unmodified by `user/nginx/build.sh` with mingw-w64 (with zlib, PCRE2 and OpenSSL); run by the `nginx`, `nginx_master` and `nginx_tls` scenarios. Not part of gala itself. |
 | zlib | 1.3.2 (`zlib-1.3.2.tar.gz`, SHA-256 `bb329a0a...0119d16`) | zlib.net | zlib License | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's gzip module). |
 | PCRE2 | 10.49 (`pcre2-10.49.tar.gz`, SHA-256 `929f0b20...e557ae`) | github.com/PCRE2Project/pcre2 releases | BSD-3-Clause (with the PCRE2 exception) | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's rewrite module). |
@@ -166,6 +168,18 @@ Rules for this file:
 
 ## Written from third-party specifications (no code copied)
 
+- gala's wintrust (`user/wintrust`) and crypt32's messages, decoders and
+  Authenticode policies (`user/crypt32/src/msg.rs`, `decode.rs`,
+  `chain.rs`): the order of WinVerifyTrust's steps, its error mapping
+  (TrustStatusToError, the confidence bits), the image hash's ranges and
+  the subject checks from Wine's `dlls/wintrust/softpub.c`,
+  `wintrust_main.c` and `dlls/crypt32/msg.c`, `chain.c` as descriptions
+  of Windows' behaviour, and from Microsoft's "Windows Authenticode
+  Portable Executable Signature Format", RFC 2315, RFC 5652 and RFC 3161
+  (no code copied); CERT_CHAIN_POLICY_MICROSOFT_ROOT's first three keys
+  as SHA-1 hashes of the msPubKey1-3 arrays in Wine's `chain.c` (the 2010
+  and 2011 roots' from Microsoft's certificates); the structure layouts
+  from mingw-w64's wintrust.h and wincrypt.h.
 - The C runtime's file-descriptor inheritance block (STARTUPINFO
   cbReserved2/lpReserved2: a count, a flags byte and a HANDLE per
   descriptor) in gala's msvcrt (`user/msvcrt/src/stdio.rs`), from its

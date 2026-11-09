@@ -62,8 +62,8 @@
 use core::ffi::c_void;
 
 use crate::layout::{
-    ChainPara, ENGINE_CONFIG_SIZES, EngineConfig, EnhKeyUsage, PolicyPara, PolicyStatus,
-    SslExtraPara, UsageMatch, get, has,
+    AuthenticodeExtraPara, ChainPara, ENGINE_CONFIG_SIZES, EngineConfig, EnhKeyUsage, PolicyPara,
+    PolicyStatus, SslExtraPara, UsageMatch, get, has,
 };
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
@@ -949,6 +949,8 @@ const CERT_E_CN_NO_MATCH: u32 = 0x800b_010f;
 const CERT_E_WRONG_USAGE: u32 = 0x800b_0110;
 const CERT_E_INVALID_NAME: u32 = 0x800b_0114;
 const TRUST_E_CERT_SIGNATURE: u32 = 0x8009_6004;
+const CERT_E_REVOKED: u32 = 0x800b_010c;
+const CERT_E_REVOCATION_FAILURE: u32 = 0x800b_010e;
 const TRUST_E_BASIC_CONSTRAINTS: u32 = 0x8009_6019;
 const CRYPT_E_REVOKED: u32 = 0x8009_2010;
 const CRYPT_E_NO_REVOCATION_CHECK: u32 = 0x8009_2012;
@@ -1253,15 +1255,93 @@ fn error_name(code: u32) -> &'static [u8] {
         CRYPT_E_REVOKED => b"CRYPT_E_REVOKED",
         CRYPT_E_REVOCATION_OFFLINE => b"CRYPT_E_REVOCATION_OFFLINE",
         CRYPT_E_NO_REVOCATION_CHECK => b"CRYPT_E_NO_REVOCATION_CHECK",
+        CERT_E_REVOKED => b"CERT_E_REVOKED",
+        CERT_E_REVOCATION_FAILURE => b"CERT_E_REVOCATION_FAILURE",
         _ => b"?",
     }
 }
 
-/// CertVerifyCertificateChainPolicy: CERT_CHAIN_POLICY_BASE (1), SSL (4)
-/// and BASIC_CONSTRAINTS (5); AUTHENTICODE (2), AUTHENTICODE_TS (3),
-/// NT_AUTH (6), MICROSOFT_ROOT (7), EV (8) and SSL_F12 (9) are checked as
-/// BASE (SSL_F12 as SSL) and recorded; a policy named by an OID string
-/// is recorded and fails (CRYPT_E_NOT_FOUND).
+/// AUTHENTICODE_EXTRA_CERT_CHAIN_POLICY_PARA's dwRegPolicySettings: the
+/// Software Publishing state's WTPF_IGNOREREVOKATION and WTPF_OFFLINEOK_*
+/// (an unknown or offline revocation status is acceptable).
+const WTPF_IGNOREREVOKATION: u32 = 0x200;
+const WTPF_OFFLINEOK: u32 = 0x400 | 0x800 | 0x1000 | 0x2000;
+
+/// The Authenticode policies (AUTHENTICODE, 2; AUTHENTICODE_TS, 3): BASE's
+/// checks, a revoked certificate as CERT_E_REVOKED and an unknown
+/// revocation status as CERT_E_REVOCATION_FAILURE unless the extra para's
+/// dwRegPolicySettings accepts it (WTPF_IGNOREREVOKATION, WTPF_OFFLINEOK_*:
+/// Windows' default state, 0x23c00, does), as wintrust maps them.
+fn authenticode(b: &ChainBlock, flags: u32, extra: *const u8) -> Verdict {
+    let reg = if extra.is_null() || !has!(size_of_caller(extra), AuthenticodeExtraPara, reg_policy)
+    {
+        0
+    } else {
+        get!(extra, AuthenticodeExtraPara, reg_policy)
+    };
+    let mut flags = flags;
+    if reg & (WTPF_IGNOREREVOKATION | WTPF_OFFLINEOK) != 0 {
+        if b.context.status.error & REVOCATION_STATUS_UNKNOWN != 0 {
+            unsupported(
+                b"crypt32.dll!AUTHENTICODE: revocation unknown, accepted (WTPF_OFFLINEOK)",
+                0,
+            );
+        }
+        flags |= IGNORE_END_REV_UNKNOWN | IGNORE_CA_REV_UNKNOWN | IGNORE_ROOT_REV_UNKNOWN;
+    }
+    let v = base(b, flags, None);
+    match v.0 {
+        CRYPT_E_REVOKED => (CERT_E_REVOKED, v.1, v.2),
+        CRYPT_E_REVOCATION_OFFLINE | CRYPT_E_NO_REVOCATION_CHECK => {
+            (CERT_E_REVOCATION_FAILURE, v.1, v.2)
+        }
+        _ => v,
+    }
+}
+
+/// The SHA-1 of the public keys (the subjectPublicKey BIT STRING's
+/// contents) of Microsoft's roots that CERT_CHAIN_POLICY_MICROSOFT_ROOT
+/// accepts: Microsoft Root Authority, Microsoft Root Certificate Authority
+/// (2001; its two keys, as Wine's chain.c lists them) and Microsoft Root
+/// Certificate Authority 2010; with
+/// MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG also the
+/// application root, Microsoft Root Certificate Authority 2011 (the
+/// certificates' keys, from Microsoft's PKI repository).
+const MICROSOFT_ROOT_KEYS: [[u8; 20]; 4] = [
+    *b"\x69\x75\xda\xde\x08\x5c\xc5\x64\xe4\x1c\xda\x87\x55\x40\xdc\xaa\x5d\x70\x1f\xf9",
+    *b"\xf2\x44\xbb\xf1\xc3\x03\x76\x1b\x7d\xef\xe6\x1c\xef\xab\x30\x68\xf4\x61\xd5\xcd",
+    *b"\xdc\x6c\x94\xd3\xde\x87\x80\xa9\xf3\x43\xd9\x40\xfa\xa3\xf7\x17\xd9\x31\xde\x3f",
+    *b"\xd5\xf6\x56\xcb\x8f\xe8\xa2\x5c\x62\x68\xd1\x3d\x94\x90\x5b\xd7\xce\x9a\x18\xc4",
+];
+const MICROSOFT_APPLICATION_ROOT_KEY: [u8; 20] =
+    *b"\x72\x2d\x3a\x02\x31\x90\x43\xb9\x14\x05\x4e\xe1\xea\xa7\xc7\x31\xd1\x23\x89\x34";
+const CHECK_APPLICATION_ROOT: u32 = 0x2_0000;
+const ENABLE_TEST_ROOT: u32 = 0x1_0000;
+
+/// CERT_CHAIN_POLICY_MICROSOFT_ROOT: whether the chain's last element has
+/// one of Microsoft's root keys (CERT_E_UNTRUSTEDROOT at that element if
+/// not); nothing else is checked, as documented.
+fn microsoft_root(b: &ChainBlock, flags: u32) -> Verdict {
+    if flags & ENABLE_TEST_ROOT != 0 {
+        unsupported(b"crypt32.dll!MICROSOFT_ROOT(test roots not known)", 0);
+    }
+    let last = b.simple.count as usize - 1;
+    let key = &info(b.elements[last].cert).public_key.key;
+    // SAFETY: the certificate's key blob.
+    let bits = unsafe { core::slice::from_raw_parts(key.data, key.size as usize) };
+    let mut hash = [0u8; 20];
+    let known = crate::cert::hash_with(0x31, bits, &mut hash).is_ok()
+        && (MICROSOFT_ROOT_KEYS.contains(&hash)
+            || (flags & CHECK_APPLICATION_ROOT != 0 && hash == MICROSOFT_APPLICATION_ROOT_KEY));
+    if known { PASS } else { (CERT_E_UNTRUSTEDROOT, 0, last as i32) }
+}
+
+/// CertVerifyCertificateChainPolicy: CERT_CHAIN_POLICY_BASE (1),
+/// AUTHENTICODE (2) and AUTHENTICODE_TS (3) (`authenticode`), SSL (4),
+/// BASIC_CONSTRAINTS (5) and MICROSOFT_ROOT (7); NT_AUTH (6), EV (8) and
+/// SSL_F12 (9) are checked as BASE (SSL_F12 as SSL) and recorded; a
+/// policy named by an OID string is recorded and fails
+/// (CRYPT_E_NOT_FOUND).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertVerifyCertificateChainPolicy(
     policy: usize,
@@ -1306,7 +1386,9 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
             };
             (b"BASIC_CONSTRAINTS", v)
         }
-        2 | 3 | 6..=8 => {
+        2 | 3 => (b"AUTHENTICODE", authenticode(b, flags, extra)),
+        7 => (b"MICROSOFT_ROOT", microsoft_root(b, flags)),
+        6 | 8 => {
             unsupported(b"crypt32.dll!CertVerifyCertificateChainPolicy(as BASE)", policy as u64);
             (b"BASE", base(b, flags, None))
         }

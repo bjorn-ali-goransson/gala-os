@@ -1457,9 +1457,8 @@ need gala's.
      both widths, ARCHITECTURE "The 32-bit system DLLs"). How far it
      gets: it starts, starts its copy (a second setup.exe), whose crypt32
      now loads and answers (its own embedded signature asked of
-     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, is
-     recorded unsupported: `crypt32.dll!CryptQueryObject(content)`
-     0x400); it reads its Office and Click-to-Run registry keys (absent)
+     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: the
+     message and its store, below); it reads its Office and Click-to-Run registry keys (absent)
      and ends with 0xc06d007e at its next delay-loaded DLL, msi.dll,
      imported by ordinal (MsiCloseHandle #8, MsiEnumComponentQualifiersW
      #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
@@ -1594,26 +1593,43 @@ need gala's.
      out-of-process server: `ole32.dll!CoGetClassObject(out-of-process
      server)`, recorded, survived) and the zone policy of the CDN's URL
      (`urlmon.dll!ProcessUrlAction(http://officecdn.microsoft.com/...)`).
-     Where the run ends now: setup.exe delay-loads wintrust.dll, which
-     gala has for x64 only (`wintrust.dll` missing dll): the elevated
-     copy ends with 0xc06d007e (crash report: "delay-loaded DLL not
-     found"), and its parent with it. ODT has written no log yet
+     It then checks signatures with WinVerifyTrust (done: gala's
+     wintrust.dll, x64 and x86, Authenticode over PE images: the image
+     hash, the PKCS #7 SignedData through crypt32's CryptMsg* decoding,
+     the signer's signature, the RFC 3161 timestamp, the chain with the
+     Authenticode policy, Microsoft's code signing roots in the root
+     store, and the three WTHelper functions; CryptQueryObject's
+     embedded PKCS #7, which setup.exe asks for its own signature, is
+     answered too; `wintrust_test`, `wow64_wintrust_test`, expected
+     results from Wine's softpub.c tests run on Windows; ARCHITECTURE
+     "wintrust: Authenticode"): its own setup.exe verifies (primary
+     signature; its WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
+     CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
+     as attached), and it downloads the version descriptor cab from
+     officecdn.microsoft.com over http.
+     Where the run ends now: WinVerifyTrust of that cabinet, twice
+     (`wintrust.dll!WinVerifyTrust(subject: cabinet)`, then
+     TRUST_E_SUBJECT_FORM_UNKNOWN: gala has no cabinet SIP); setup.exe
+     then asks kernelbase for SetSystemFileCacheSize and ntdll for
+     NtSetSystemInformation (missing exports), LoadLibrary("slc.dll")
+     (missing dll), and the elevated copy and its parent exit with
+     0xffffffff after about 7 s. ODT has written no log yet
      (`dump=C:/gala/odtlog` finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: wintrust.dll for i686 with
-     what setup.exe imports of it: WinVerifyTrust (WINTRUST_DATA typed for
-     both widths), WTHelperProvDataFromStateData,
-     WTHelperGetProvSignerFromChain and WTHelperGetProvCertFromChain.
-     gala's wintrust is two `gala_stubs` stubs today, and the signature
-     check is a chunk of its own, not a port: Authenticode (the PE image's
-     hash over its documented ranges, the PKCS #7 SignedData in its
-     security directory, decoded by crypt32's CryptMsgOpenToDecode /
-     CryptMsgGetParam, which are stubs too; the signer's signature; the
-     chain through crypt32's engine with the Authenticode policy; the
-     timestamp countersignature), test first against signed and unsigned
-     images with Windows' answers (Wine's wintrust tests softpub.c); then
+     Next, in the order the run reaches them: Authenticode for cabinets
+     (the cab SIP: the signature's place is in Wine's crypt.c, the
+     reserved header area's offset and size, but the digest a signed
+     cab's SpcIndirectDataContent carries, an SpcLink with a moniker over
+     SHA-256, covers a range the allowed sources do not document and
+     Wine does not check: a contiguous hash of the cab up to the
+     signature, with the size and reserve fields left out or zeroed, does
+     not match a CDN cab; establish it from Windows' behaviour on signed
+     and altered cabs, test first), then whether the cab's acceptance is
+     what ends the run (slc.dll's licensing calls are next on the path);
+     then
+     the other DLLs
      the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
      webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
@@ -1632,9 +1648,9 @@ need gala's.
      (setup.exe's error and progress UI), HKCU from the caller's token,
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
-     the run reaches it; load of URLs is recorded unsupported), then
-     CryptQueryObject's embedded PKCS #7 (the signature check with
-     WinVerifyTrust); FormatMessage's system text for
+     the run reaches it; load of URLs is recorded unsupported);
+     wintrust's secondary signatures and legacy countersignatures,
+     crypt32's detached messages; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),

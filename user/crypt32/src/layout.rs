@@ -117,6 +117,14 @@ pub struct SslExtraPara {
     pub server_name: *const u16,
 }
 
+/// AUTHENTICODE_EXTRA_CERT_CHAIN_POLICY_PARA.
+#[repr(C)]
+pub struct AuthenticodeExtraPara {
+    pub size: u32,
+    pub reg_policy: u32,
+    pub signer_info: *const c_void,
+}
+
 /// CERT_REVOCATION_PARA through pftTimeToUse (the fields gala reads).
 #[repr(C)]
 pub struct RevocationPara {
@@ -244,6 +252,7 @@ check!(offset_of!(PolicyPara, extra), 8, 8);
 check!(size_of::<PolicyStatus>(), 20, 24);
 check!(size_of::<SslExtraPara>(), 16, 24);
 check!(offset_of!(SslExtraPara, server_name), 12, 16);
+check!(size_of::<AuthenticodeExtraPara>(), 12, 16);
 check!(size_of::<RevocationStatus>(), 24, 24);
 check!(size_of::<RevocationPara>(), 24, 48);
 check!(offset_of!(RevocationPara, issuer), 4, 8);

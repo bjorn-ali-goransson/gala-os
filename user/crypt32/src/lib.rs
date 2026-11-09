@@ -4,7 +4,9 @@
 //! memory certificate stores (`store`; ROOT and CA hold gala's machine
 //! directories, `roots`; the other system stores open empty),
 //! CryptQueryObject and CryptDecodeObjectEx for alternative names
-//! (`query`), and smaller helpers (`misc`).
+//! (`query`) and Authenticode's structures, times and timestamp tokens
+//! (`decode`), decoded PKCS #7 messages (`msg`: CryptMsg*), and smaller
+//! helpers (`misc`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -14,9 +16,11 @@ mod base64;
 mod cert;
 mod chain;
 mod crl;
+mod decode;
 mod dpapi;
 mod layout;
 mod misc;
+mod msg;
 mod pfx;
 mod query;
 mod roots;

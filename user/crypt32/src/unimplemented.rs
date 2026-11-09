@@ -46,7 +46,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertGetIssuerCertificateFromStore
     CertGetServerOcspResponseContext
     CertGetStoreProperty
-    CertGetSubjectCertificateFromStore
     CertGetValidUsages
     CertIsRDNAttrsInCertificateName
     CertIsStrongHashToSign
@@ -79,7 +78,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertVerifyValidityNesting
     CryptCreateKeyIdentifierFromCSP
     CryptDecodeMessage
-    CryptDecodeObject
     CryptDecryptAndVerifyMessageSignature
     CryptDecryptMessage
     CryptEncodeObject
@@ -116,16 +114,12 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptInstallDefaultContext
     CryptInstallOIDFunctionAddress
     CryptMsgCalculateEncodedLength
-    CryptMsgControl
     CryptMsgCountersign
     CryptMsgCountersignEncoded
-    CryptMsgDuplicate
     CryptMsgEncodeAndSignCTL
     CryptMsgGetAndVerifySigner
-    CryptMsgOpenToDecode
     CryptMsgOpenToEncode
     CryptMsgSignCTL
-    CryptMsgUpdate
     CryptMsgVerifyCountersignatureEncoded
     CryptMsgVerifyCountersignatureEncodedEx
     CryptRegisterDefaultOIDFunction
@@ -161,7 +155,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptVerifyMessageHash
     CryptVerifyMessageSignature
     CryptVerifyMessageSignatureWithKey
-    CryptVerifyTimeStampSignature
     PFXExportCertStore
     PFXExportCertStoreEx
     PFXVerifyPassword

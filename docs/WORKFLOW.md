@@ -3440,6 +3440,25 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **A message's digest is not its content parameter**: a PKCS #7
+  SignedData whose content is not `data` (Authenticode's
+  SpcIndirectDataContent) is digested over the inner TLV's contents
+  octets, without its tag and length, while CMSG_CONTENT_PARAM gives the
+  whole TLV; a CMS one (an RFC 3161 token's TSTInfo) wraps its content in
+  an OCTET STRING, digested and returned as the octets
+  (crypt32's `msg::Signed::digested` and `content_param`). Hashing the
+  whole TLV makes every Authenticode signer CRYPT_E_HASH_VALUE.
+- **A signed binary's signer may have expired**: Authenticode checks
+  the chain at the RFC 3161 timestamp's time (python.exe's signer was
+  valid for three days in 2024), so a verification that fails with
+  CERT_E_EXPIRED on a real binary means the timestamp was not found or
+  not used, not that the binary is bad. wintrust_test's real images
+  (ODT's setup.exe, CPython's python.exe) come from their PREBUILT
+  downloads, shipped to C:\gala by the scenario (`args=require` makes
+  their absence a failure; on Windows they are skipped when absent).
+- **Small integer LPCSTRs**: a store provider or structure type passed
+  as `1 as *const u8` trips clippy's `manual_dangling_ptr`; write
+  `core::ptr::without_provenance(1)`.
 - **A stub is invisible to GetProcAddress**: gala_stubs' exports live in
   `.gstub`, which ntdll's GetProcAddress skips (a probing program takes
   its fallback), while they are in the export directory. A test of which

@@ -712,7 +712,7 @@ fn digest(alg: usize, data: &[u8], out: &mut [u8]) -> bool {
 
 /// `digest`, with the step that failed: finding BCryptHash (the loader's
 /// error) or BCryptHash itself (its NTSTATUS).
-fn hash_with(alg: usize, data: &[u8], out: &mut [u8]) -> Result<(), SignatureFailure> {
+pub(crate) fn hash_with(alg: usize, data: &[u8], out: &mut [u8]) -> Result<(), SignatureFailure> {
     type HashFn =
         unsafe extern "system" fn(usize, *const u8, u32, *const u8, u32, *mut u8, u32) -> u32;
     let Some(f) = bcrypt(c"BCryptHash") else {
@@ -1715,6 +1715,43 @@ fn signature_algorithm(oid: &[u8]) -> Option<(Scheme, usize, usize, &'static [u1
     Some((scheme, alg, len, name))
 }
 
+/// A digest algorithm (OID contents): its bcrypt pseudo-handle, length
+/// and name: MD5, SHA-1, SHA-256/384/512.
+pub(crate) fn digest_algorithm(oid: &[u8]) -> Option<(usize, usize, &'static [u16])> {
+    const MD5: [u16; 4] = [0x4d, 0x44, 0x35, 0];
+    const SHA1: [u16; 5] = [0x53, 0x48, 0x41, 0x31, 0];
+    const SHA256: [u16; 7] = [0x53, 0x48, 0x41, 0x32, 0x35, 0x36, 0];
+    const SHA384: [u16; 7] = [0x53, 0x48, 0x41, 0x33, 0x38, 0x34, 0];
+    const SHA512: [u16; 7] = [0x53, 0x48, 0x41, 0x35, 0x31, 0x32, 0];
+    const NIST: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+    match oid {
+        [0x2b, 0x0e, 0x03, 0x02, 0x1a] => Some((0x31, 20, &SHA1)),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05] => Some((0x21, 16, &MD5)),
+        [n @ .., last] if n == NIST => match last {
+            1 => Some((0x41, 32, &SHA256)),
+            2 => Some((0x51, 48, &SHA384)),
+            3 => Some((0x61, 64, &SHA512)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a signer's signature algorithm (OID contents) is ECDSA
+/// (id-ecPublicKey or ecdsa-with-*), RSA (rsaEncryption or
+/// *WithRSAEncryption): Some(true) for ECDSA, Some(false) for RSA.
+pub(crate) fn signer_scheme(oid: &[u8]) -> Option<bool> {
+    const PKCS1: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const EC_KEY: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    if oid.len() == 9 && oid[..8] == PKCS1 {
+        return Some(false);
+    }
+    if oid == EC_KEY {
+        return Some(true);
+    }
+    signature_algorithm(oid).map(|(scheme, ..)| scheme == Scheme::Ecdsa)
+}
+
 /// An ECDSA signature (Ecdsa-Sig-Value: SEQUENCE { r INTEGER, s INTEGER })
 /// as bcrypt takes it: r || s, each `size` bytes.
 fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<usize> {
@@ -1831,6 +1868,25 @@ pub(crate) fn verify_signature(
         crate::store::unsupported(b"crypt32.dll!CryptVerifyCertificateSignatureEx(algorithm)", 0);
         return Err(fail(b"algorithm", NTE_BAD_ALGID));
     };
+    let mut hash = [0u8; 64];
+    hash_with(hash_alg, tbs, &mut hash[..hash_len])?;
+    verify_hashed(key_info, scheme == Scheme::Ecdsa, hash_name, &hash[..hash_len], signature)
+}
+
+/// Whether `signature` (RSA PKCS #1 v1.5, or ECDSA's DER
+/// Ecdsa-Sig-Value) over the digest `hash`, made with the hash named
+/// `hash_name` (bcrypt's name, NUL-terminated UTF-16), verifies with the
+/// public key `key_info`; the step that failed otherwise.
+pub(crate) fn verify_hashed(
+    key_info: *const PublicKeyInfo,
+    ecdsa: bool,
+    hash_name: &'static [u16],
+    hash: &[u8],
+    signature: &[u8],
+) -> Result<(), SignatureFailure> {
+    let fail = SignatureFailure::at;
+    let scheme = if ecdsa { Scheme::Ecdsa } else { Scheme::Rsa };
+    let hash_len = hash.len();
     let mut raw = [0u8; 2 * 66];
     let signature = if scheme == Scheme::Ecdsa {
         // SAFETY: the caller's CERT_PUBLIC_KEY_INFO.
@@ -1844,8 +1900,6 @@ pub(crate) fn verify_signature(
     } else {
         signature
     };
-    let mut hash = [0u8; 64];
-    hash_with(hash_alg, tbs, &mut hash[..hash_len])?;
     let mut key = 0usize;
     if CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, key_info, 0, core::ptr::null(), &mut key) == 0
     {
