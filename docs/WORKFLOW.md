@@ -2029,7 +2029,14 @@ keyed by the relay's pid: `open` with its start, then its start and end
 bytes each way and how each side ended in order, or why it could not
 connect; an `open` without its second line never ended) and Chromium maps web-platform.test and its subdomains
 there (`--host-resolver-rules`); our testharnessreport.js replaces the
-tree's (the file WPT leaves to vendors). Each test waits for its
+tree's (the file WPT leaves to vendors). The session also passes
+`--enable-experimental-web-platform-features` and
+`--enable-blink-test-features`, which wptrunner passes whenever it is
+not told otherwise (`browsers/chrome.py`), so every run on wpt.fyi has
+them: without them Chromium 159 splits a qualified name at every colon
+and 20 `dom/nodes` subtests fail that pass there, a difference in the
+flags and not in gala. A flag wptrunner passes and we do not is the
+first thing to suspect when a test fails only here. Each test waits for its
 results as long as testharness's own timeout allows, times 4, plus
 20 s; a test without results is a TIMEOUT whose message says what the
 page was doing (its URL, an error page's being chrome-error://,
