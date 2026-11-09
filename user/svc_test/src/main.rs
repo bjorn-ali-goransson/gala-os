@@ -10,7 +10,8 @@
 //!   "ServicesActive" databases on the local machine ("" too);
 //!   "ServicesFailed" is ERROR_DATABASE_DOES_NOT_EXIST, another name
 //!   ERROR_INVALID_NAME;
-//! - NULL handles are ERROR_INVALID_HANDLE everywhere, except that
+//! - NULL handles are ERROR_INVALID_HANDLE (in the calls Wine's tests
+//!   make with one: Windows faults in others), except that
 //!   QueryServiceStatusEx and EnumServicesStatusExW check the level
 //!   first (ERROR_INVALID_LEVEL) and QueryServiceStatusEx the buffer size
 //!   second (ERROR_INSUFFICIENT_BUFFER, 36 needed); NULL names and paths
@@ -41,8 +42,9 @@
 //!   query AFD's status but not stop it.
 //!
 //! The same source builds `wow64_svc_test`, the 32-bit (x86) program.
-//! Prints `svc_test: ok` (`wow64_svc_test: ok`), or `<name>: check N got
-//! X (line L)` and exits with N. Without the `galatest` account the
+//! Prints `<name>: <section>` before each section, then `svc_test: ok`
+//! (`wow64_svc_test: ok`), or `<name>: check N got X (line L)` and exits
+//! with N. Without the `galatest` account the
 //! standard user's part says it is skipped.
 
 #![no_std]
@@ -403,13 +405,18 @@ const SERVICE: &str = "gala_svc_test";
 const DISPLAY: &str = "gala svc_test service";
 const PATH: &str = "C:\\gala_svc_test\\none.exe";
 
-/// What a NULL handle and NULL arguments give.
+/// What a NULL handle and NULL arguments give: only the calls, with the
+/// arguments, that Wine's conformance tests (dlls/advapi32/tests/service.c)
+/// make on Windows, there in their A forms. Windows Server 2025 (CI's
+/// runner) faulted in ntdll inside this section (x64: a read of 0x10;
+/// x86: of 0x8) before any line was printed, so the calls Wine does not
+/// make with a NULL handle are gone: OpenServiceW with a name,
+/// QueryServiceStatus with a status buffer, QueryServiceConfigW,
+/// StartServiceW and ControlService. A program has no use for what
+/// they give, and on Windows a call may not survive it.
 fn null_handles(c: &mut Checks) -> Result<(), u32> {
-    let deadbeef = wide::<16>("deadbeef_gala");
-    let mut st = ServiceStatus::default();
     let mut sp = StatusProcess::default();
     let mut needed = 0u32;
-    let mut returned = 0u32;
     // SAFETY: plain calls with our buffers throughout.
     unsafe {
         clear_error();
@@ -417,11 +424,7 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
         clear_error();
         c.no_handle(OpenServiceW(0, null(), 0), ERROR_INVALID_HANDLE)?;
         clear_error();
-        c.no_handle(OpenServiceW(0, deadbeef.as_ptr(), GENERIC_READ), ERROR_INVALID_HANDLE)?;
-        clear_error();
         c.fails(QueryServiceStatus(0, null_mut()) != 0, ERROR_INVALID_HANDLE)?;
-        clear_error();
-        c.fails(QueryServiceStatus(0, &mut st) != 0, ERROR_INVALID_HANDLE)?;
         // QueryServiceStatusEx: the level first, then the size, then the
         // handle.
         clear_error();
@@ -434,13 +437,7 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
         let r = QueryServiceStatusEx(0, 0, (&raw mut sp).cast(), 36, &mut needed);
         c.fails(r != 0, ERROR_INVALID_HANDLE)?;
         clear_error();
-        c.fails(QueryServiceConfigW(0, null_mut(), 0, &mut needed) != 0, ERROR_INVALID_HANDLE)?;
-        clear_error();
         c.fails(DeleteService(0) != 0, ERROR_INVALID_HANDLE)?;
-        clear_error();
-        c.fails(StartServiceW(0, 0, null()) != 0, ERROR_INVALID_HANDLE)?;
-        clear_error();
-        c.fails(ControlService(0, SERVICE_CONTROL_STOP, &mut st) != 0, ERROR_INVALID_HANDLE)?;
         clear_error();
         let h = CreateServiceW(
             0,
@@ -459,34 +456,24 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
         );
         c.no_handle(h, ERROR_INVALID_HANDLE)?;
         // EnumServicesStatusExW: the level first, then the handle.
-        clear_error();
-        let r = EnumServicesStatusExW(
-            0,
-            1,
-            0,
-            0,
-            null_mut(),
-            0,
-            null_mut(),
-            null_mut(),
-            null_mut(),
-            null(),
-        );
-        c.fails(r != 0, ERROR_INVALID_LEVEL)?;
-        clear_error();
-        let r = EnumServicesStatusExW(
-            0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
-            null_mut(),
-            0,
-            &mut needed,
-            &mut returned,
-            null_mut(),
-            null(),
-        );
-        c.fails(r != 0, ERROR_INVALID_HANDLE)?;
+        for (level, want) in
+            [(1, ERROR_INVALID_LEVEL), (SC_ENUM_PROCESS_INFO, ERROR_INVALID_HANDLE)]
+        {
+            clear_error();
+            let r = EnumServicesStatusExW(
+                0,
+                level,
+                0,
+                0,
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null(),
+            );
+            c.fails(r != 0, want)?;
+        }
     }
     Ok(())
 }
@@ -983,13 +970,26 @@ fn standard_user_checks(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// Names the section about to run, so that a program that crashes (on
+/// Windows: run-all.ps1 keeps the last `<name>: ` line of one too) says
+/// how far it got.
+fn progress(section: &str) {
+    Line::new().s(NAME.as_bytes()).s(b": ").s(section.as_bytes()).s(b"\r\n").print();
+}
+
 fn run() -> Result<bool, u32> {
     let mut c = Checks(0);
+    progress("NULL handles");
     null_handles(&mut c)?;
+    progress("opening the manager");
     open_manager(&mut c)?;
+    progress("AFD");
     afd(&mut c)?;
+    progress("enumeration");
     enumeration(&mut c)?;
+    progress("creating and deleting a service");
     own_service(&mut c)?;
+    progress("the standard user");
     match standard_user(&mut c) {
         Ok(()) => Ok(true),
         Err(0) => Ok(false),

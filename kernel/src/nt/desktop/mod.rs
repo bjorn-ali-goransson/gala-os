@@ -129,31 +129,173 @@ const CURSOR: [&[u8; 12]; 19] = [
     b"       ##   ",
 ];
 
-/// What the start menu offers: shown when the file exists.
+/// A start menu entry: one of gala's own programs, or a catalog entry
+/// (`package`) installed on a click (ROADMAP SM).
 pub struct Program {
     pub name: &'static str,
-    pub path: &'static str,
+    /// Where its program is, in order: Win32 paths whose `%NAME%`s are
+    /// the boot user's environment variables
+    /// (`process::expand_environment`). The first that exists is started.
+    pub paths: &'static [&'static str],
     /// The icon's gradient.
     pub colors: (u32, u32),
+    /// The winget package that installs it (`gala install <id>`); None
+    /// for gala's own programs, listed only when present.
+    pub package: Option<&'static str>,
 }
 
+/// The start menu's programs, in the order it shows them: gala's own
+/// default programs first, then the catalog (installed or not). The
+/// catalog's paths are where each package's installer puts the program,
+/// as its winget-pkgs manifest says (Scope, InstallLocation,
+/// DefaultInstallLocation) or, when the manifest names none, the
+/// installer's documented default for that scope: the user scope's under
+/// %LOCALAPPDATA% first (what `gala install` picks for the boot user, who
+/// is no administrator), then the machine scope's.
 pub const PROGRAMS: &[Program] = &[
+    // gala's cmd.exe (user/cmd): System32 as on Windows, C:\gala in
+    // images that ship it as a boot module.
+    Program {
+        name: "Command Prompt",
+        paths: &["%SystemRoot%\\System32\\cmd.exe", "C:\\gala\\cmd.exe"],
+        colors: (0x00_4a_4a_4a, 0x00_1e_1e_1e),
+        package: None,
+    },
+    // gala's test window (gui_test), when the image has it.
+    Program {
+        name: "Hello window",
+        paths: &["C:\\gui_test.exe", "C:\\gala\\gui_test.exe"],
+        colors: (0x00_5b_9b_ff, 0x00_2f_5f_d8),
+        package: None,
+    },
+    // The Office Deployment Tool's setup.exe (machine scope): Click-to-Run
+    // puts Word under root\Office16 (ROADMAP OF).
+    Program {
+        name: "Microsoft Office",
+        paths: &["%ProgramFiles%\\Microsoft Office\\root\\Office16\\WINWORD.EXE"],
+        colors: (0x00_e8_6a_3a, 0x00_b7_47_2a),
+        package: Some("Microsoft.Office"),
+    },
+    // FileZilla's NSIS installer's default directory, and the portable
+    // placement of the `filezilla` scenarios. winget-pkgs has no
+    // TimKosse.FileZilla.Client at present: `gala install` says so.
     Program {
         name: "FileZilla",
-        path: "C:\\filezilla\\filezilla.exe",
+        paths: &[
+            "%ProgramFiles%\\FileZilla FTP Client\\filezilla.exe",
+            "C:\\filezilla\\filezilla.exe",
+        ],
         colors: (0x00_e0_4f_3f, 0x00_a3_2a_20),
+        package: Some("TimKosse.FileZilla.Client"),
     },
+    // The .NET SDK's bundle (burn, machine scope).
     Program {
-        name: "Hello window",
-        path: "C:\\gui_test.exe",
-        colors: (0x00_5b_9b_ff, 0x00_2f_5f_d8),
+        name: ".NET",
+        paths: &["%ProgramFiles%\\dotnet\\dotnet.exe"],
+        colors: (0x00_8a_5c_f5, 0x00_51_2b_d4),
+        package: Some("Microsoft.DotNet.SDK.9"),
     },
+    // python.org's installer (burn): DefaultJustForMeTargetDir for the
+    // user scope, DefaultAllUsersTargetDir for the machine's.
     Program {
-        name: "Hello window",
-        path: "C:\\gala\\gui_test.exe",
-        colors: (0x00_5b_9b_ff, 0x00_2f_5f_d8),
+        name: "Python",
+        paths: &[
+            "%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe",
+            "%ProgramFiles%\\Python313\\python.exe",
+        ],
+        colors: (0x00_3c_7d_c0, 0x00_f5_c5_18),
+        package: Some("Python.Python.3.13"),
+    },
+    // Chromium's mini_installer: per user under %LOCALAPPDATA%, with
+    // --system-level (the machine scope) under Program Files.
+    Program {
+        name: "Chromium",
+        paths: &[
+            "%LOCALAPPDATA%\\Chromium\\Application\\chrome.exe",
+            "%ProgramFiles%\\Chromium\\Application\\chrome.exe",
+        ],
+        colors: (0x00_5f_a8_f5, 0x00_1a_5f_c8),
+        package: Some("Hibbiki.Chromium"),
+    },
+    // Git for Windows' Inno Setup installer: {autopf}\Git, which is
+    // %LOCALAPPDATA%\Programs for a user install.
+    Program {
+        name: "Git",
+        paths: &[
+            "%LOCALAPPDATA%\\Programs\\Git\\git-bash.exe",
+            "%ProgramFiles%\\Git\\git-bash.exe",
+        ],
+        colors: (0x00_f0_6a_3f, 0x00_c8_3a_1e),
+        package: Some("Git.Git"),
+    },
+    // 7-Zip's installer (machine scope; the manifest's
+    // DefaultInstallLocation %ProgramFiles%\7-Zip).
+    Program {
+        name: "7-Zip",
+        paths: &["%ProgramFiles%\\7-Zip\\7zFM.exe"],
+        colors: (0x00_3a_3a_3a, 0x00_10_10_10),
+        package: Some("7zip.7zip"),
     },
 ];
+
+/// How many tiles the start menu's grid holds (four rows).
+pub const MAX_TILES: usize = GRID_COLUMNS * 4;
+
+/// A start menu tile: a program (an index into its table) and whether it
+/// is installed (one of its paths exists).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub program: usize,
+    pub installed: bool,
+}
+
+impl Program {
+    /// The first of its paths that exists (`exists` gets each expanded:
+    /// `process::program_exists`), as its index and the expanded path in
+    /// `buf`.
+    pub fn find<'b>(
+        &self,
+        exists: &mut impl FnMut(&str) -> bool,
+        buf: &'b mut [u8; 260],
+    ) -> Option<(usize, &'b str)> {
+        let mut found = None;
+        for (i, raw) in self.paths.iter().enumerate() {
+            let mut b = [0u8; 260];
+            if let Some(path) = super::process::expand_environment(raw, &mut b)
+                && exists(path)
+            {
+                found = Some((i, path.len()));
+                buf[..path.len()].copy_from_slice(path.as_bytes());
+                break;
+            }
+        }
+        let (i, n) = found?;
+        Some((i, core::str::from_utf8(&buf[..n]).ok()?))
+    }
+}
+
+/// The tiles for `programs`, one per name (the first entry of a name
+/// wins): gala's own programs whose file exists, every catalog entry,
+/// installed or not; how many. At most MAX_TILES. Reads the file system
+/// through `exists`: not under the desktop's lock.
+pub fn list_programs(
+    programs: &[Program],
+    exists: &mut impl FnMut(&str) -> bool,
+) -> ([Entry; MAX_TILES], usize) {
+    let mut out = [Entry { program: 0, installed: false }; MAX_TILES];
+    let mut n = 0;
+    for (i, p) in programs.iter().enumerate() {
+        if n == MAX_TILES || out[..n].iter().any(|e| programs[e.program].name == p.name) {
+            continue;
+        }
+        let installed = p.find(exists, &mut [0; 260]).is_some();
+        if installed || p.package.is_some() {
+            out[n] = Entry { program: i, installed };
+            n += 1;
+        }
+    }
+    (out, n)
+}
 
 /// GalaWindowResize's edges (a program's own border: WM_NCHITTEST's
 /// HTLEFT..HTBOTTOMRIGHT).
@@ -350,11 +492,11 @@ pub struct Desktop {
     /// The taskbar's pixels (screen width x TASKBAR, ARGB).
     taskbar: Option<Canvas>,
     taskbar_dirty: bool,
-    /// The start menu's pixels while it is open (ARGB) and the programs
-    /// it lists (indices into PROGRAMS).
+    /// The start menu's pixels while it is open (ARGB) and the tiles it
+    /// lists (PROGRAMS indices, installed or not).
     menu: Option<Canvas>,
     menu_dirty: bool,
-    programs: Vec<usize>,
+    programs: Vec<Entry>,
     /// The mouse pointer's hot spot and the buttons held (bit 0 left,
     /// bit 1 right).
     pointer: (i64, i64),
@@ -680,7 +822,7 @@ impl Desktop {
                 match vk {
                     0x1b => self.close_menu(),
                     0x0d => {
-                        self.launch = self.listed().first().copied();
+                        self.launch = self.listed().first().map(|e| e.program);
                         self.close_menu();
                     }
                     0x08 => self.search_len = self.search_len.saturating_sub(1),
@@ -803,8 +945,8 @@ impl Desktop {
         self.menu.is_some()
     }
 
-    /// The programs the start menu lists (indices into PROGRAMS).
-    pub fn set_programs(&mut self, programs: &[usize]) {
+    /// The tiles the start menu lists (`list_programs` of PROGRAMS).
+    pub fn set_programs(&mut self, programs: &[Entry]) {
         if self.programs.as_slice() != programs {
             self.programs.clear();
             let _ = self.programs.try_extend_from_slice(programs);
@@ -1180,7 +1322,7 @@ impl Desktop {
                 let _ = self.act(a, Action::Minimize);
             }
             (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => {
-                self.launch = self.listed().get(a).copied();
+                self.launch = self.listed().get(a).map(|e| e.program);
                 self.close_menu();
             }
             (Hit::Client(id), _) => {
@@ -1224,13 +1366,13 @@ impl Desktop {
         self.taskbar_dirty = true;
     }
 
-    /// The programs the menu shows: the available ones matching what was
-    /// typed (case-insensitively).
-    fn listed(&self) -> Vec<usize> {
+    /// The tiles the menu shows: those matching what was typed
+    /// (case-insensitively), at most MAX_TILES.
+    fn listed(&self) -> Vec<Entry> {
         let q = &self.search[..self.search_len];
         let mut out = Vec::new();
-        for &p in &self.programs {
-            let Some(prog) = PROGRAMS.get(p) else { continue };
+        for &p in self.programs.iter().take(MAX_TILES) {
+            let Some(prog) = PROGRAMS.get(p.program) else { continue };
             let name = prog.name.as_bytes();
             let matches = q.is_empty()
                 || name
@@ -1460,8 +1602,8 @@ impl Desktop {
         // Pinned programs.
         c.text(52, 84, "Pinned".chars(), TEXT, Font::Ui14Semibold, w);
         let listed = self.listed();
-        for (k, &p) in listed.iter().enumerate() {
-            let Some(program) = PROGRAMS.get(p) else { continue };
+        for (k, &e) in listed.iter().enumerate() {
+            let Some(program) = PROGRAMS.get(e.program) else { continue };
             let r = self.menu_item_rect(k).offset(-m.x, -m.y);
             if r.y + r.h > foot - 120 {
                 break;
@@ -1474,9 +1616,11 @@ impl Desktop {
             if lit > 0 {
                 c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
             }
+            // Not installed yet: the icon dimmed, with a download badge.
+            let alpha = if e.installed { 255 } else { 120 };
             let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-            c.round_rect(ix, iy, 32, 32, 6, program.colors.0, program.colors.1, 255);
-            let letter = program.name.chars().next().unwrap_or('?');
+            c.round_rect(ix, iy, 32, 32, 6, program.colors.0, program.colors.1, alpha);
+            let letter = program.name.chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
             let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
             c.text(
                 ix + 16 - lw / 2,
@@ -1486,15 +1630,10 @@ impl Desktop {
                 Font::Ui14Semibold,
                 ix + 32,
             );
-            let nw = Font::Ui12.measure(program.name.chars()).min(r.w - 8);
-            c.text(
-                r.x + (r.w - nw) / 2,
-                r.y + 50,
-                program.name.chars(),
-                TEXT,
-                Font::Ui12,
-                r.x + r.w - 4,
-            );
+            if !e.installed {
+                download_badge(&mut c, ix + 20, iy + 20);
+            }
+            tile_name(&mut c, r, program.name);
         }
         if listed.is_empty() {
             let text =
@@ -2191,7 +2330,7 @@ fn pointer_on(
     go: impl FnOnce(&mut Desktop) -> Vec<Rect>,
 ) -> Option<&'static Program> {
     // Which programs exist (outside the desktop's lock: the file system).
-    let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
+    let (available, n) = if buttons & 1 != 0 { available_programs() } else { NO_TILES };
     let mut d = shell.d.lock();
     // No pointer moves on a bare desktop.
     if !d.s.live || d.bare.is_some() {
@@ -2238,10 +2377,7 @@ pub fn inject(shell: &Shell, input: Injected) -> Result<Option<&'static Program>
         Injected::Pointer { x, y, buttons } => {
             pointer_on(shell, buttons, |d| d.pointer_at(x, y, buttons))
         }
-        Injected::Key { vk, scan, extended, down } => {
-            key_on(shell, vk, scan, extended, down);
-            None
-        }
+        Injected::Key { vk, scan, extended, down } => key_on(shell, vk, scan, extended, down),
         Injected::Wheel(notches) => {
             wheel_on(shell, notches);
             None
@@ -2249,33 +2385,70 @@ pub fn inject(shell: &Shell, input: Injected) -> Result<Option<&'static Program>
     })
 }
 
-/// The start menu's programs that exist (indices into PROGRAMS, one per
-/// name) and how many. Reads the file system: not under the desktop's
-/// lock.
-fn available_programs() -> ([usize; 8], usize) {
-    let mut available: [usize; 8] = [0; 8];
-    let mut n = 0;
-    let mut seen: [&str; 8] = [""; 8];
-    for (i, p) in PROGRAMS.iter().enumerate() {
-        if n < available.len()
-            && !seen[..n].contains(&p.name)
-            && super::process::program_exists(p.path)
-        {
-            available[n] = i;
-            seen[n] = p.name;
-            n += 1;
+/// A tile's name under its icon, centred: on two lines, broken at a
+/// space, when it is wider than the tile (Windows' start menu does the
+/// same); what still does not fit ends with "...".
+fn tile_name(c: &mut Canvas, r: Rect, name: &str) {
+    let room = r.w - 8;
+    let fits = |t: &str| Font::Ui12.measure(t.chars()) <= room;
+    let (first, second) = match name.find(' ') {
+        Some(space) if !fits(name) => {
+            // The longest first line that fits, else the first word.
+            let at = name.rmatch_indices(' ').map(|(i, _)| i).find(|&i| fits(&name[..i]));
+            let at = at.unwrap_or(space);
+            (&name[..at], name[at..].trim_start())
         }
+        _ => (name, ""),
+    };
+    for (line, y) in [(first, r.y + 48), (second, r.y + 63)] {
+        if line.is_empty() {
+            continue;
+        }
+        let w = Font::Ui12.measure(line.chars()).min(room);
+        c.text(r.x + (r.w - w) / 2, y, line.chars(), TEXT, Font::Ui12, r.x + r.w - 4);
     }
-    (available, n)
 }
 
-/// The start menu's programs that exist (GalaDesktopAction's program
-/// list and `gala start <name>`).
-pub fn start_menu() -> Vec<&'static Program> {
-    let (available, n) = available_programs();
+/// The mark of a catalog entry not installed yet: a round accent badge
+/// with a white downward arrow, its top-left corner at (x, y) (over the
+/// icon's bottom-right corner).
+fn download_badge(c: &mut Canvas, x: i64, y: i64) {
+    c.round_rect(x - 1, y - 1, 18, 18, 9, MENU_COLOR, MENU_COLOR, 255);
+    c.round_rect(x, y, 16, 16, 8, ACCENT, ACCENT, 255);
+    for j in 3..11 {
+        c.put(x + 7, y + j, 0x00ff_ffff, 255);
+        c.put(x + 8, y + j, 0x00ff_ffff, 255);
+    }
+    for t in 0..4 {
+        c.put(x + 4 + t, y + 7 + t, 0x00ff_ffff, 255);
+        c.put(x + 11 - t, y + 7 + t, 0x00ff_ffff, 255);
+    }
+    for i in 4..12 {
+        c.put(x + i, y + 13, 0x00ff_ffff, 255);
+    }
+}
+
+/// The start menu's tiles (`list_programs` of PROGRAMS). Reads the file
+/// system: not under the desktop's lock.
+fn available_programs() -> ([Entry; MAX_TILES], usize) {
+    list_programs(PROGRAMS, &mut |path| super::process::program_exists(path))
+}
+
+/// The start menu's installed programs, each with the path that starts it
+/// (GalaDesktopAction's program list and `gala start <name>`).
+pub fn start_menu() -> Vec<(&'static str, &'static str)> {
+    let (tiles, n) = available_programs();
     let mut out = Vec::new();
-    for &i in &available[..n] {
-        if out.try_push(&PROGRAMS[i]).is_err() {
+    for e in tiles[..n].iter().filter(|e| e.installed) {
+        let Some(program) = PROGRAMS.get(e.program) else { continue };
+        let mut buf = [0; 260];
+        let Some((_, path)) =
+            program.find(&mut |path| super::process::program_exists(path), &mut buf)
+        else {
+            continue;
+        };
+        let Ok(path) = super::process::intern(path) else { break };
+        if out.try_push((program.name, path)).is_err() {
             break;
         }
     }
@@ -2386,22 +2559,36 @@ fn wheel_on(shell: &Shell, notches: i64) {
     signal(wakes);
 }
 
-pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
-    if let Some(desk) = console() {
-        key_on(&desk.shell, vk, scan, extended, down);
-    }
+/// A key to the desktop the console shows. Returns the session and the
+/// program its start menu asked to start (Enter in the menu), if any.
+pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, &'static Program)> {
+    let desk = console()?;
+    key_on(&desk.shell, vk, scan, extended, down).map(|p| (desk.shell.session, p))
 }
 
-fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) {
+/// No tiles (input that cannot open the start menu).
+const NO_TILES: ([Entry; MAX_TILES], usize) =
+    ([Entry { program: 0, installed: false }; MAX_TILES], 0);
+
+fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option<&'static Program> {
+    // The Windows key's release may open the start menu: which programs
+    // exist (outside the desktop's lock: the file system).
+    let opens = (vk == 0x5b || vk == 0x5c) && !down;
+    let (available, n) = if opens { available_programs() } else { NO_TILES };
     let mut d = shell.d.lock();
     if !d.s.live || d.bare.is_some() {
-        return;
+        return None;
+    }
+    if opens && !d.menu_open() {
+        d.set_programs(&available[..n]);
     }
     d.key(vk, scan, extended, down);
     redraw_damage(&mut d);
+    let launch = d.take_launch();
     let wakes = d.take_wakes();
     drop(d);
     signal(wakes);
+    launch
 }
 
 /// GalaWindowListen: `owner`'s input event.

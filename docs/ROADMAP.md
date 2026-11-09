@@ -214,7 +214,7 @@ has a section under "Open items".
 | W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
-| SM | Start menu: default apps and install-on-click | next (the owner) | see "SM. The start menu's apps" below |
+| SM | Start menu: default apps and install-on-click | steps 1-2 done; step 3 next (the owner) | see "SM. The start menu's apps" below |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
@@ -686,23 +686,39 @@ Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
 .NET (`Microsoft.DotNet.SDK.9`), Python (`Python.Python.3.13`), Chromium
 (`Hibbiki.Chromium`), Git (`Git.Git`), 7-Zip (`7zip.7zip`).
 
+**Done**: steps 1 and 2. The start menu lists gala's Command Prompt
+(System32's cmd.exe, else C:\gala's) and the catalog: each entry a name,
+a winget id and where its installer puts the program (checked against
+the winget-pkgs manifests: user scope under %LOCALAPPDATA% first, then
+the machine's). Not installed, a tile is dimmed with a download badge
+and a click runs `gala install <id>` in a console window; installed, it
+starts the program. A console program started from the menu gets its own
+console window. Tests: the desktop's and `nt::action`'s host tests,
+scenario `start_menu` (start_menu_test and a screen check: the tiles,
+the Command Prompt clicked, 7-Zip's install started and its window
+closed). TimKosse.FileZilla.Client is not in winget-pkgs today: its tile
+shows `gala install`'s "no package" in the window (the portable
+C:\filezilla placement of the FileZilla scenarios still counts as
+installed).
+
 **Next** (each test first: the desktop's host tests, a screen scenario,
 a screenshot):
-1. Default apps always listed: Command Prompt
-   (`C:\Windows\System32\cmd.exe`) and gala's own programs there.
-2. Install-on-click tiles: a catalog entry is a name, a winget id and
-   where its program lands; not yet installed it shows with a download
-   mark, and a click starts `gala install <id>` in a console window
-   (its progress and errors in view, recorded in the event stream);
-   once the program exists the tile starts it. Installs that fail on
-   gala (Office until OF is done, an installer needing elevation without
-   UAC's prompt) fail in that window with `gala install`'s own message.
-3. Then the Windows way of listing installed apps: the start menu reads
-   the shortcuts under the Start Menu\Programs folders (all users and
-   the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
+1. Step 3: the Windows way of listing installed apps: the start menu
+   reads the shortcuts under the Start Menu\Programs folders (all users
+   and the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
    anything installed appears without a catalog entry; the catalog then
    only names what can be installed. With SH, all of this moves to
    `shasha.exe`.
+2. gala's cmd.exe has no interactive prompt yet (only `/c`): the
+   Command Prompt's window says so and cmd ends (ledger
+   `cmd.exe!interactive prompt`). The prompt (reading lines from the
+   console, the internal commands it has) makes the tile useful.
+3. A scenario that installs a catalog package on a click from a source
+   the test serves (needs a way to give the boot user's environment
+   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed).
+   Installs that fail on gala (Office until OF is done, an installer
+   needing elevation without UAC's prompt) fail in their window with
+   `gala install`'s own message.
 
 ### SH. The shell in user mode
 

@@ -183,8 +183,8 @@ pub fn run(
             }
             let programs = desktop::start_menu();
             list_header(&mut out, programs.len())?;
-            for p in &programs {
-                program_entry(&mut out, p.name, p.path)?;
+            for (name, path) in &programs {
+                program_entry(&mut out, name, path)?;
             }
         }
         ACTION_WALLPAPER => {
@@ -295,7 +295,7 @@ pub fn start_path(
     args: &str,
     token: Option<super::object::ObjectRef>,
 ) -> Result<u64, NtStatus> {
-    match super::process::launch(path, args, token) {
+    match super::process::launch(path, args, token, None) {
         Ok(pid) => {
             crate::info!("desktop: started {path} (pid {pid})");
             Ok(pid)
@@ -307,23 +307,174 @@ pub fn start_path(
     }
 }
 
+/// What a start menu tile does (`menu_request`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuRequest {
+    /// Start the program at its path with this index (it exists).
+    Start(usize),
+    /// Install its package: `gala install <id>`.
+    Install(&'static str),
+    /// Nothing: one of gala's own programs whose file is gone.
+    Missing,
+}
+
+/// What a click on `program`'s tile does, `exists` saying whether a path
+/// exists: start the program where it is, else install its package.
+pub fn menu_request(
+    program: &desktop::Program,
+    exists: &mut impl FnMut(&str) -> bool,
+) -> MenuRequest {
+    match (program.find(exists, &mut [0; 260]), program.package) {
+        (Some((i, _)), _) => MenuRequest::Start(i),
+        (None, Some(id)) => MenuRequest::Install(id),
+        (None, None) => MenuRequest::Missing,
+    }
+}
+
+/// Where gala's own programs are that the start menu runs: gala.exe for
+/// `gala install`, conhost.exe for console windows (System32 as kernel32's
+/// CreatePseudoConsole looks there, else the boot modules' C:\gala).
+const GALA_EXE: &[&str] = &["C:\\gala\\gala.exe"];
+const CONHOST_EXE: &[&str] = &["%SystemRoot%\\System32\\conhost.exe", "C:\\gala\\conhost.exe"];
+
+/// The first of `paths` that exists (expanded; interned).
+fn first_existing(paths: &'static [&'static str]) -> Option<&'static str> {
+    let p = desktop::Program { name: "", paths, colors: (0, 0), package: None };
+    let mut buf = [0; 260];
+    let (_, path) = p.find(&mut |path| super::process::program_exists(path), &mut buf)?;
+    super::process::intern(path).ok()
+}
+
 /// A desktop's start menu asked for `program` (the mouse or keys on the
 /// console, or injected input): started as the boot user, whose session
-/// is the console's at boot. Another session's start menu starts nothing
-/// yet: a session has no user of its own until B4's session manager
-/// (ROADMAP RS), so a program started for it would land in session 1.
+/// is the console's at boot; a catalog entry not installed yet runs
+/// `gala install <id>` instead. A console program gets a console window
+/// (`start_in_window`). Logged, with a `window` event `start menu`.
+/// Another session's start menu starts nothing yet: a session has no
+/// user of its own until B4's session manager (ROADMAP RS), so a program
+/// started for it would land in session 1.
 pub fn start_from_menu(session: u32, program: &desktop::Program) {
     if session != super::session::CONSOLE {
         crate::warn!(
             "desktop: session {session}'s start menu asked for {}: not started (a session other than {} has no user to start it as yet)",
-            program.path,
+            program.name,
             super::session::CONSOLE
         );
         super::ledger::record("start menu", "session without a user", session.into());
         return;
     }
-    // The same path as GalaDesktopAction's Start (logged there).
-    let _ = start_path(program.path, "", None);
+    // Existence again, now: an install may have finished since the menu
+    // was drawn.
+    let request = menu_request(program, &mut |path| super::process::program_exists(path));
+    let (op, target, started) = match request {
+        MenuRequest::Start(i) => {
+            let mut buf = [0u8; 260];
+            let raw = program.paths.get(i).copied().unwrap_or("");
+            let path = super::process::expand_environment(raw, &mut buf)
+                .and_then(|p| super::process::intern(p).ok());
+            let Some(path) = path else {
+                crate::warn!("desktop: start menu: no memory to start {}", program.name);
+                return;
+            };
+            crate::info!("desktop: start menu starts {}: {path}", program.name);
+            ("start", path, start_in_window(path, ""))
+        }
+        MenuRequest::Install(id) => {
+            let Some(gala) = first_existing(GALA_EXE) else {
+                crate::warn!(
+                    "desktop: start menu cannot install {} ({id}): no gala.exe at {}",
+                    program.name,
+                    GALA_EXE[0]
+                );
+                return;
+            };
+            crate::info!(
+                "desktop: start menu: {} is not installed: {gala} install {id}",
+                program.name
+            );
+            let mut buf = [0u8; 160];
+            let started = match join(&mut buf, &[b"install ", id.as_bytes()]) {
+                Some(args) => start_in_window(gala, args),
+                None => Err(NtStatus::BUFFER_TOO_SMALL),
+            };
+            ("install", id, started)
+        }
+        MenuRequest::Missing => {
+            crate::warn!(
+                "desktop: start menu: {} is not on this machine (none of {:?} exists)",
+                program.name,
+                program.paths
+            );
+            ("missing", "", Err(NtStatus::OBJECT_NAME_NOT_FOUND))
+        }
+    };
+    let (pid, status) = match started {
+        Ok(pid) => (pid, 0),
+        Err(e) => (0, e.0),
+    };
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"{op}","session":{session},"name":"{}","target":"{}","pid":{pid},"status":{status}"#,
+            crate::events::Str(program.name),
+            crate::events::Str(target)
+        ),
+    );
+}
+
+/// Starts the program at `path` with `args` as the boot user (`start_path`)
+/// and, when it is a console program, in a new console window: a console
+/// session hosted by conhost.exe, started first with the session's id and
+/// the program's file name, as `console=` does at boot. On Windows a
+/// console program started from Explorer gets its own console the same
+/// way (CreateProcess without a console to inherit).
+fn start_in_window(path: &'static str, args: &str) -> Result<u64, NtStatus> {
+    if !super::process::is_console_program(path)? {
+        return start_path(path, args, None);
+    }
+    let Some(host) = first_existing(CONHOST_EXE) else {
+        crate::warn!("desktop: no conhost.exe for {path}'s console window ({CONHOST_EXE:?})");
+        return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
+    };
+    let session = super::conhost::create()?;
+    let file = path.rsplit('\\').next().unwrap_or(path);
+    // conhost.exe's arguments: the session's id and the program's name.
+    let mut digits = [0u8; 10];
+    let mut d = digits.len();
+    let mut id = session.id;
+    loop {
+        d -= 1;
+        digits[d] = b'0' + (id % 10) as u8;
+        id /= 10;
+        if id == 0 {
+            break;
+        }
+    }
+    let mut buf = [0u8; 128];
+    let host_args =
+        join(&mut buf, &[&digits[d..], b" ", file.as_bytes()]).ok_or(NtStatus::BUFFER_TOO_SMALL)?;
+    start_path(host, host_args, None)?;
+    match super::process::launch(path, args, None, Some(session)) {
+        Ok(pid) => {
+            crate::info!("desktop: started {path} (pid {pid}) in a console window ({host})");
+            Ok(pid)
+        }
+        Err(e) => {
+            crate::warn!("desktop: cannot start {path}: {e:?}");
+            Err(e)
+        }
+    }
+}
+
+/// `parts` one after another in `buf` (None: they do not fit).
+fn join<'b>(buf: &'b mut [u8], parts: &[&[u8]]) -> Option<&'b str> {
+    let mut n = 0;
+    for part in parts {
+        buf.get_mut(n..n + part.len())?.copy_from_slice(part);
+        n += part.len();
+    }
+    core::str::from_utf8(&buf[..n]).ok()
 }
 
 /// The path of the program `name` names (see `start`; the start menu's
@@ -334,10 +485,10 @@ fn resolve(name: &str, shell: &desktop::Shell) -> Result<&'static str, NtStatus>
     if !has_drive {
         // A start menu name.
         if desktop::has_shell(shell)
-            && let Some(p) =
-                desktop::start_menu().iter().find(|p| p.name.eq_ignore_ascii_case(name))
+            && let Some((_, path)) =
+                desktop::start_menu().iter().find(|(n, _)| n.eq_ignore_ascii_case(name))
         {
-            return Ok(p.path);
+            return Ok(path);
         }
     }
     let exe = if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
@@ -388,6 +539,21 @@ mod tests {
             b.extend_from_slice(&u.to_le_bytes());
         }
         b
+    }
+
+    #[test]
+    fn a_start_menu_tile_starts_its_program_or_installs_its_package() {
+        let find = |name: &str| desktop::PROGRAMS.iter().find(|p| p.name == name).unwrap();
+        let none = &mut |_: &str| false;
+        // Not installed: `gala install <id>`; gala's own program: nothing.
+        assert_eq!(menu_request(find("7-Zip"), none), MenuRequest::Install("7zip.7zip"));
+        assert_eq!(menu_request(find("Python"), none), MenuRequest::Install("Python.Python.3.13"));
+        assert_eq!(menu_request(find("Command Prompt"), none), MenuRequest::Missing);
+        // Installed: the path that exists.
+        let python = "C:\\Program Files\\Python313\\python.exe";
+        assert_eq!(menu_request(find("Python"), &mut |p| p == python), MenuRequest::Start(1));
+        let cmd = "C:\\gala\\cmd.exe";
+        assert_eq!(menu_request(find("Command Prompt"), &mut |p| p == cmd), MenuRequest::Start(1));
     }
 
     #[test]

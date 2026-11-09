@@ -65,7 +65,8 @@ fn click(d: &mut Desktop, x: i64, y: i64) {
 #[test]
 fn the_start_button_opens_and_closes_the_start_menu() {
     let (mut d, _) = desktop_with_window();
-    d.set_programs(&[0]);
+    let tile = Entry { program: 0, installed: true };
+    d.set_programs(&[tile]);
     let start = d.start_rect();
     let inside = (d.menu_rect().x + 20, d.menu_rect().y + d.menu_rect().h - 20);
     let before = d.pixel(inside.0, inside.1);
@@ -97,14 +98,135 @@ fn the_start_button_opens_and_closes_the_start_menu() {
     assert!(!d.menu_open());
     d.key(0x5b, 0x5b, true, false);
     assert!(d.menu_open());
-    for k in b"FILEZ" {
+    for k in b"PROMP" {
         d.key(*k, 0, false, true);
     }
-    assert_eq!(d.listed(), [0]);
+    assert_eq!(d.listed(), [tile]);
     d.key(b'Q', 0, false, true);
     assert!(d.listed().is_empty());
     d.key(0x1b, 1, false, true);
     assert!(!d.menu_open());
+}
+
+/// Whether a path exists, for the listing: these do.
+fn on_disk(present: &'static [&'static str]) -> impl FnMut(&str) -> bool {
+    move |path: &str| present.iter().any(|p| p.eq_ignore_ascii_case(path))
+}
+
+fn names(programs: &[Program], (tiles, n): ([Entry; MAX_TILES], usize)) -> Vec<(&str, bool)> {
+    tiles[..n].iter().map(|e| (programs[e.program].name, e.installed)).collect()
+}
+
+#[test]
+fn the_start_menu_lists_default_programs_and_the_catalog() {
+    // gala's cmd.exe where every image has it (a boot module in C:\gala):
+    // the Command Prompt; the catalog always, none of it installed.
+    let tiles = list_programs(PROGRAMS, &mut on_disk(&["C:\\gala\\cmd.exe"]));
+    assert_eq!(
+        names(PROGRAMS, tiles),
+        [
+            ("Command Prompt", true),
+            ("Microsoft Office", false),
+            ("FileZilla", false),
+            (".NET", false),
+            ("Python", false),
+            ("Chromium", false),
+            ("Git", false),
+            ("7-Zip", false),
+        ]
+    );
+    // Installed: where each package's installer puts the program, the
+    // per-user places under the boot user's %LOCALAPPDATA%; FileZilla
+    // also in the scenarios' portable place. Command Prompt in System32.
+    let present = &[
+        "C:\\Windows\\System32\\cmd.exe",
+        "C:\\gala\\gui_test.exe",
+        "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        "C:\\filezilla\\filezilla.exe",
+        "C:\\Program Files\\dotnet\\dotnet.exe",
+        "C:\\Users\\gala\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "C:\\Program Files\\Chromium\\Application\\chrome.exe",
+        "C:\\Users\\gala\\AppData\\Local\\Programs\\Git\\git-bash.exe",
+        "C:\\Program Files\\7-Zip\\7zFM.exe",
+    ];
+    let tiles = list_programs(PROGRAMS, &mut on_disk(present));
+    let listed = names(PROGRAMS, tiles);
+    assert_eq!(listed.len(), 9);
+    assert!(listed.iter().all(|&(_, installed)| installed), "{listed:?}");
+    assert_eq!(listed[1], ("Hello window", true));
+    // Every tile fits the grid.
+    assert!(PROGRAMS.len() <= MAX_TILES);
+}
+
+#[test]
+fn the_listing_has_one_tile_per_name_and_finds_the_first_existing_path() {
+    const TABLE: &[Program] = &[
+        Program { name: "Tool", paths: &["C:\\a\\tool.exe"], colors: (0, 0), package: None },
+        Program { name: "Tool", paths: &["C:\\b\\tool.exe"], colors: (0, 0), package: None },
+        Program { name: "Gone", paths: &["C:\\gone.exe"], colors: (0, 0), package: None },
+        Program {
+            name: "App",
+            paths: &["%LOCALAPPDATA%\\App\\app.exe", "%ProgramFiles%\\App\\app.exe"],
+            colors: (0, 0),
+            package: Some("Vendor.App"),
+        },
+        Program { name: "App", paths: &["C:\\app.exe"], colors: (0, 0), package: None },
+    ];
+    // The first "Tool" is missing, the second is there: one tile, the
+    // second's. "Gone" (no package) is not listed; "App" once, not
+    // installed.
+    let tiles = list_programs(TABLE, &mut on_disk(&["C:\\b\\tool.exe", "C:\\app.exe"]));
+    assert_eq!(
+        tiles.0[..tiles.1],
+        [Entry { program: 1, installed: true }, Entry { program: 3, installed: false },]
+    );
+    // The machine scope's place when the user's is empty.
+    let mut buf = [0; 260];
+    let found = TABLE[3].find(&mut on_disk(&["C:\\Program Files\\App\\app.exe"]), &mut buf);
+    assert_eq!(found, Some((1, "C:\\Program Files\\App\\app.exe")));
+}
+
+#[test]
+fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: false },
+    ]);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    assert!(d.menu_open());
+    // The badge: the accent over the icon's bottom-right corner, on the
+    // second tile only.
+    let badge = |d: &Desktop, k: usize| {
+        let r = d.menu_item_rect(k);
+        let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
+        d.pixel(ix + 23, iy + 28)
+    };
+    assert_eq!(badge(&d, 1), ACCENT);
+    assert_ne!(badge(&d, 0), ACCENT);
+    // Its name on two lines: something drawn on the second.
+    let r = d.menu_item_rect(1);
+    let dark = |c: u32| (c & 0xff) < 0x80 && (c >> 8 & 0xff) < 0x80 && (c >> 16 & 0xff) < 0x80;
+    let second = (r.x..r.x + r.w).any(|x| (r.y + 63..r.y + 78).any(|y| dark(d.pixel(x, y))));
+    assert!(second);
+    // A click hands the program to the caller, which installs it.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(!d.menu_open());
+    assert_eq!(d.take_launch().map(|p| p.name), Some("Microsoft Office"));
+}
+
+#[test]
+fn enter_in_the_start_menu_starts_the_first_tile_at_once() {
+    let (mut d, _) = desktop_with_window();
+    d.set_programs(&[Entry { program: 0, installed: true }]);
+    d.key(0x5b, 0x5b, true, true);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(d.menu_open());
+    d.key(0x0d, 0x1c, false, true);
+    assert!(!d.menu_open());
+    assert_eq!(d.take_launch().map(|p| p.name), Some("Command Prompt"));
 }
 
 #[test]
