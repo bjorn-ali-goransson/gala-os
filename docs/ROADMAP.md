@@ -214,6 +214,7 @@ has a section under "Open items".
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
+| MCP | The system's actions as tools for AI clients | planned | `gala mcp` and aichat's custom tools from one description per command; tools loaded by category through a tool call |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
@@ -734,13 +735,28 @@ under 10 MB, Chromium over 300 MB; BR brings Edge and WebView2 as an
 installed package, never part of the image). The LLM client is an
 existing CLI, **aichat** (sigoden/aichat, MIT or Apache-2.0, Rust, one
 exe): streaming over server-sent events, many providers, function
-calling (its llm-functions tools are scripts), a REPL, one-shot use and
-`aichat --serve`, a local OpenAI-compatible server. It is installed
-with `gala install sigoden.AIChat` (winget-pkgs: a zip with a portable
-`aichat.exe`, which PK's stages 1-2 handle), not shipped. The tools are
-the `gala` commands (start, windows, activate, snap, close, ...) and
-UIA for driving programs, so the model acts only through what CLI
-parity already exposes.
+calling, a REPL, one-shot use and `aichat --serve`, a local
+OpenAI-compatible server. It is installed with `gala install
+sigoden.AIChat` (winget-pkgs: a zip with a portable `aichat.exe`, which
+PK's stages 1-2 handle), not shipped. The tools are the `gala` commands
+(start, windows, activate, snap, close, ...) and UIA for driving
+programs, so the model acts only through what CLI parity already
+exposes; item MCP describes them once and generates what aichat reads.
+
+aichat's custom tools need nothing of llm-functions (its bash/Node.js
+tool kit, not used): aichat reads the declarations from `functions.json`
+(a JSON array of name, description and a JSON-schema `parameters`),
+runs an executable of the tool's name from its functions `bin`
+directory (found through PATHEXT on Windows) with the arguments as one
+JSON command-line argument, and reads the result (JSON or text) from
+the file `LLM_OUTPUT` names; a nonzero exit code is a failed call
+(aichat `src/function.rs`). `mapping_tools` aliases a set of tools and
+`use_tools` picks the default sets, which item MCP's categories map
+onto. aichat has no MCP client of its own (its MCP route is
+llm-functions' Node.js bridge; native support is an open request,
+issue #1346 and draft PR #1427); if it gains one, it uses `gala mcp`
+instead and nothing else changes. aichat asks no confirmation before a
+tool runs: confirmations are gala's (step 3).
 
 **Next** (each step test first, the ledger leading):
 1. Install and run: a scenario installs `sigoden.AIChat` from a
@@ -760,7 +776,10 @@ parity already exposes.
    in-guest Nginx with the test CA in gala's roots.
 3. `gala ask`: the console entry point (provider and model from
    configuration, the key stored with DPAPI, never in a plain file),
-   streaming to the console, the `gala` commands as tools; every
+   streaming to the console, the `gala` commands as tools (item MCP's
+   generated `functions.json`, `gala.exe` under each tool's name); a
+   test passes awkward JSON (quotes, backslashes, spaces) through the
+   tool's command line and checks it arrives intact; every
    request, tool call (arguments and result) and confirmation in the
    event stream; actions that close, kill or delete ask first; text a
    tool returns is treated as untrusted (prompt injection).
@@ -782,6 +801,95 @@ stream.
 **Design**: to be written in ARCHITECTURE with step 3 (the assistant's
 process, tools, confirmation and key storage); "Installing software"
 (PK); "Schannel (TLS)" for the root store.
+
+### MCP. The system's actions as tools for AI clients
+
+**Goal**: everything the `gala` command can do is a tool an AI client
+can call: `gala mcp` is a Model Context Protocol server, and the same
+tools are aichat's custom tools for item AI, all generated from one
+description of each command.
+
+**Approach**:
+- **One description per command**: each `gala` command's name,
+  summary, category and arguments (a JSON schema), and whether it only
+  reads or changes something (destructive: closes, kills, deletes,
+  installs), are written once; the CLI parser, `gala help`, the MCP tool
+  list and aichat's `functions.json` are generated from them, so a new
+  shasha feature's `gala` command (item SD) is a tool with nothing more
+  to write, and the four never disagree.
+- **Two front ends, one implementation**: `gala mcp` speaks MCP
+  (JSON-RPC) over standard input and output, so any MCP client starts
+  it locally and a remote one reaches it through SSH (`ssh host gala
+  mcp`): no new network service. For aichat, `gala.exe` is installed
+  in aichat's functions `bin` directory under each tool's name (hard
+  links, or copies) and acts as the name it was started as, as busybox
+  does; the arguments come as JSON on its command line and the result
+  goes to `LLM_OUTPUT` (item AI).
+- **Tools loaded by a tool call, by category**: a model chooses worse
+  among hundreds of tools, so a client starts with a small core and
+  loads the rest on demand. Categories: desktop (windows, start, snap,
+  wallpaper), processes, programs (`gala install`, item PK), files,
+  services, registry, accounts and sessions, diagnostics (events, the
+  ledger, crash reports, state dumps, `gala gpu`), UIA (driving
+  programs). The core is `gala_tools` (with no argument the categories
+  and their summaries; with a category its tools' names, descriptions
+  and schemas) and the read-only tools of the session in use. Loading
+  works in each front end as far as its client allows: in `gala mcp`,
+  `gala_tools` with `load` adds the category's tools to the server's
+  list and sends `notifications/tools/list_changed`, and the client
+  lists them again; for clients that do not follow that notification,
+  and for aichat (whose `functions.json` is read once at start),
+  `gala_call` runs any tool by name with JSON arguments that gala
+  checks against the tool's schema, so a tool `gala_tools` described
+  is callable without being declared. aichat's `mapping_tools` gets one
+  alias per category, so a user or a role can also start with a
+  category declared.
+- **Diagnostics as resources**: what is read rather than done (the
+  event stream, the ledger, crash reports, the state dump) is also an
+  MCP resource, so an agent reads gala's own observability directly.
+- **Security**: the server is an ordinary process with the caller's
+  token, so the access checks and UIPI of the actions themselves apply;
+  no tool reaches what the `gala` command cannot. Every tool carries
+  MCP's read-only and destructive hints, and a destructive call asks
+  for confirmation on gala's side (MCP elicitation where the client
+  supports it, otherwise the console or a shasha dialog), never left to
+  the client. A low-integrity server offers the read-only tools only.
+  Text a tool returns (window text, file contents, pages) is marked as
+  untrusted for the client (prompt injection). Nothing leaves the
+  machine unless the user connects a remote model; then what tools
+  return is sent to it, which the AI item's configuration states.
+- **Observability**: every call (client, tool, arguments, result,
+  confirmation asked and answered, time taken) is an event in the event
+  stream; a failed call returns the NTSTATUS and the ledger entry behind
+  it, not a bare error.
+
+**Next** (each step test first):
+1. The command descriptions and the generated CLI parser and `gala
+   help` for the existing commands (`gala_cli` unchanged).
+2. `gala mcp` over stdio with read-only tools and `gala_tools`: a
+   test program acting as an MCP client (initialize, tools/list,
+   tools/call, a malformed request, an unknown tool) in a boot scenario
+   and in gala-um.
+3. Loading by category (`load`, `notifications/tools/list_changed`)
+   and `gala_call` with schema checks.
+4. The actions, with the destructive hints and confirmation (an
+   elicitation answered yes and no by the test client), each call in the
+   event stream.
+5. aichat's front end: the generated `functions.json`, `mapping_tools`
+   aliases per category, `gala.exe` under each tool's name (with item AI
+   step 3).
+6. Diagnostics as resources; UIA's tools (find, invoke, read a value).
+7. Later, if wanted: MCP's HTTP transport with its authorization, for
+   clients that cannot use SSH.
+
+**Done when**: an MCP client test lists the core tools, loads a
+category through `gala_tools`, calls a read-only tool and a destructive
+one (refused when the confirmation says no), and aichat calls the same
+tools through `functions.json`; every call is in the event stream.
+
+**Design**: to be written in ARCHITECTURE with step 1 (the command
+descriptions, the two front ends, categories and loading, confirmation);
+item SD for CLI parity, item AI for the client.
 
 ### UIA. UI Automation and windows across processes
 
