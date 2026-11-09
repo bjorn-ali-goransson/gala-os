@@ -1144,3 +1144,41 @@ pub extern "system" fn UnregisterWaitEx(wait: Handle, completion: Handle) -> Boo
 pub extern "system" fn UnregisterWait(wait: Handle) -> Bool {
     UnregisterWaitEx(wait, core::ptr::null_mut())
 }
+
+/// What QueueUserWorkItem queued: the function and its context.
+struct WorkItem {
+    function: extern "system" fn(*mut c_void) -> u32,
+    context: *mut c_void,
+}
+
+extern "system" fn run_work_item(_instance: *mut c_void, item: *mut c_void) {
+    let item = item.cast::<WorkItem>();
+    // SAFETY: allocated and filled by QueueUserWorkItem, freed here once.
+    let (f, context) = unsafe { ((*item).function, (*item).context) };
+    super::heap::HeapFree(super::heap::GetProcessHeap(), 0, item.cast());
+    f(context);
+}
+
+/// QueueUserWorkItem(function, context, flags): runs `function(context)`
+/// on a thread-pool thread (the pool's simple callbacks). The flags only
+/// say what kind of work it is (WT_EXECUTELONGFUNCTION, ...); the pool
+/// runs every kind the same way.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueueUserWorkItem(
+    function: extern "system" fn(*mut c_void) -> u32,
+    context: *mut c_void,
+    _flags: u32,
+) -> Bool {
+    let item = super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, size_of::<WorkItem>())
+        .cast::<WorkItem>();
+    if item.is_null() {
+        return fail_with(8, FALSE); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    // SAFETY: fresh memory of the item's size.
+    unsafe { item.write(WorkItem { function, context }) };
+    if TrySubmitThreadpoolCallback(run_work_item, item.cast(), core::ptr::null_mut()) == FALSE {
+        super::heap::HeapFree(super::heap::GetProcessHeap(), 0, item.cast());
+        return FALSE;
+    }
+    TRUE
+}

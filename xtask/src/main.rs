@@ -467,6 +467,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["innosetup-7.1.1-x64.exe"],
         excludes: &[],
     },
+    // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
+    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // measured: Microsoft replaces the file at this URL with each release,
+    // so a new one fails the checksum until it is pinned again). Scenario
+    // office_install (ROADMAP OF) runs it inside gala; never committed.
+    Prebuilt {
+        name: "odt",
+        url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
+        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        members: &["setup.exe"],
+        excludes: &[],
+    },
     // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
     // (jrsoftware.org's GitHub release; the SHA-256 is winget-pkgs'
     // JRSoftware.InnoSetup 6.5.4 manifest's, whose only installer is x86):
@@ -948,6 +960,9 @@ const USER_DLLS: &[Dll] = &[
     // gala's msvcrt.dll (the C runtime of mingw-w64 programs), advapi32.dll
     // and user32.dll (only what Nginx imports).
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
+    // gala's ucrtbase.dll (the Universal C Runtime; msvcrt's source with
+    // the UCRT's own functions: ARCHITECTURE "The UCRT").
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's winmm.dll (timer resolution; Go and the JVM load it).
@@ -1063,6 +1078,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit ucrtbase: gala's UCRT built for i686.
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase32.dll" },
     // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
@@ -1383,6 +1400,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "ntdll.dll", "Windows/System32"),
+    ("clipboard_test", "kernel32.dll", "Windows/System32"),
+    ("clipboard_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "gdi32.dll", "Windows/System32"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -1850,9 +1871,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_inno", "crypt32.dll", "Windows/System32"),
     ("pk_install_inno", "msimg32.dll", "Windows/System32"),
     ("pk_install_inno", "msctf.dll", "Windows/System32"),
-    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
-    // Microsoft's redistributable copy from the JDK, as other scenarios).
-    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    // The UCRT: gala's ucrtbase.dll, in System32 as on Windows.
+    ("pk_install_inno", "ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -2313,9 +2333,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
     // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
-    // gala's DLLs it imports, the JDK's UCRT beside it.
+    // gala's DLLs it imports (its UCRT gala's ucrtbase).
     ("python_hello", "target/prebuilt/python/", "python"),
-    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ucrtbase.dll", "Windows/System32"),
     ("python_hello", "ntdll.dll", "Windows/System32"),
     ("python_hello", "kernel32.dll", "Windows/System32"),
     ("python_hello", "advapi32.dll", "Windows/System32"),
@@ -2337,7 +2357,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // P1 step 6: pip and venv on the full CPython layout (PREBUILT
     // `python-full`) in C:\python, as python_hello's.
     ("python_pip", "target/prebuilt/python-full/tools/", "python"),
-    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ucrtbase.dll", "Windows/System32"),
     ("python_pip", "ntdll.dll", "Windows/System32"),
     ("python_pip", "kernel32.dll", "Windows/System32"),
     ("python_pip", "advapi32.dll", "Windows/System32"),
@@ -2660,12 +2680,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     // C++ exceptions with Microsoft's C++ runtime (the JDK's
-    // redistributable copies, app-local).
+    // redistributable vcruntime140, app-local) on gala's UCRT.
     ("cxx_eh_test", "ntdll.dll", "Windows/System32"),
     ("cxx_eh_test", "kernel32.dll", "Windows/System32"),
     ("cxx_eh_test", "user/bin/cxx_eh_test.exe", "gala"),
     ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
-    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "gala"),
+    ("cxx_eh_test", "ucrtbase.dll", "Windows/System32"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -2832,11 +2852,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     // curl for Windows, run by busybox sh (user/curl/curl.sh) against
     // schannel_test's Nginx (MODULE_SETS): curl.se's build (PREBUILT
-    // curl; the UCRT is the JDK's redistributable ucrtbase.dll, in
-    // System32 as on Windows) and Git for Windows' Schannel curl (PREBUILT
+    // curl, on gala's UCRT: ucrtbase.dll in System32, as on Windows) and
+    // Git for Windows' Schannel curl (PREBUILT
     // gitcurl), each as C:\curl.
     ("curl", "target/prebuilt/curl/curl-8.23.0_8-win64-mingw/bin/curl.exe", "curl"),
-    ("curl", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    ("curl", "ucrtbase.dll", "Windows/System32"),
     ("curl", "normaliz.dll", "Windows/System32"),
     ("curl_common", "iphlpapi.dll", "Windows/System32"),
     ("curl_schannel", "target/prebuilt/gitcurl/mingw64/bin/", "curl"),
@@ -2951,12 +2971,67 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
     ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
+    // office_install: the Office Deployment Tool's setup.exe (PREBUILT odt,
+    // 32-bit) with its configuration, the 32-bit DLLs gala has of those it
+    // loads, and the 64-bit ntdll and kernel32 for the 64-bit programs it
+    // starts.
+    ("office_install", "wow64.dll", "Windows/System32"),
+    ("office_install", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/user32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/version.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("office_install", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "ntdll.dll", "Windows/System32"),
+    ("office_install", "kernel32.dll", "Windows/System32"),
+    ("office_install", "ucrtbase.dll", "Windows/System32"),
+    ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
+    ("office_install", "user/office_install/config.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // gala's UCRT, called directly (user/ucrt_test), x64 and x86.
+    ("ucrt_test", "ntdll.dll", "Windows/System32"),
+    ("ucrt_test", "kernel32.dll", "Windows/System32"),
+    ("ucrt_test", "ucrtbase.dll", "Windows/System32"),
+    ("ucrt_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // The kernel32 and ntdll functions Office imports (user/office_api_test),
+    // x64 and x86.
+    ("office_api_test", "ntdll.dll", "Windows/System32"),
+    ("office_api_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3061,6 +3136,7 @@ const USER_PROGRAMS: &[&str] = &[
     "session_test",
     "presenter_test",
     "winsta_test",
+    "clipboard_test",
     "lsa_test",
     "restricted_test",
     "cmd",
@@ -3094,6 +3170,8 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "ucrt_test",
+    "office_api_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -3106,6 +3184,8 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_fs_test",
     "wow64_k32_test",
     "wow64_adv_test",
+    "wow64_ucrt_test",
+    "wow64_office_api_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -4400,6 +4480,20 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // ROADMAP LD step 3: the clipboard's steps across the two
+        // processes, the child's CF_TEXT synthesized from the parent's
+        // CF_UNICODETEXT and the open refused while the other holds it.
+        "clipboard_test",
+        &[
+            r#""ev":"clipboard","op":"set""#,
+            r#""format":13,"kind":0,"size":64"#,
+            r#""format":1,"source":13,"kind":0,"size":64"#,
+            r#""op":"close""#,
+            r#""changed":true,"listeners":1"#,
+            r#""op":"open denied""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -4484,6 +4578,8 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
+    // OF: Office's installer; it needs the CDN (CI's boot runners).
+    "office_install",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -4527,6 +4623,9 @@ enum NetClient {
     Tls,
     /// GETs `/` and expects a 200 whose body contains all of these.
     Contains(&'static [&'static str]),
+    /// Nothing: the guest only connects out (the card and QEMU's NAT to
+    /// the host's network are what the scenario needs).
+    Outbound,
     /// Logs on with the host's ssh and user/sshd/client_ed25519 as
     /// `galatest` and runs `echo` (`ssh_client`).
     Ssh,
@@ -4597,6 +4696,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
+    ("office_install", "run: begin setup.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -5464,6 +5564,16 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP LD step 3: the window station's clipboard, in the
+        // kernel, between two processes (user/clipboard_test): formats
+        // copied through the kernel, the synthesized text formats, the
+        // lock across processes, the sequence number, WM_CLIPBOARDUPDATE.
+        name: "clipboard_test",
+        cmdline: "qemu_exit events=ipc run=clipboard_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clipboard_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Security model S4 (docs/SECURITY.md): LSA logons as sshd makes
         // them, run as SYSTEM (user/lsa_test).
         name: "lsa_test",
@@ -6008,6 +6118,49 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala's UCRT (ucrtbase.dll) called directly: start-up, printf and
+        // scanf with the UCRT's options, streams, strings, locale, math,
+        // the exit sequence (user/ucrt_test).
+        name: "ucrt_test",
+        cmdline: "qemu_exit run=ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ucrt_test: ok",
+            "ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The kernel32 and ntdll functions Office's programs import
+        // (user/office_api_test): CreateFile2, FindFirstFileNameW,
+        // CreateMutexExW, OpenSemaphoreA, K32EnumProcesses, the
+        // activation-context queries, RtlIntegerToUnicodeString,
+        // RtlIsNameInExpression, the AVL generic tables and the rest.
+        name: "office_api_test",
+        cmdline: "qemu_exit run=office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_api_test built for x86).
+        name: "wow64_office_api_test",
+        cmdline: "qemu_exit run=wow64_office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
+        // built for x86), its `_libm_sse2_*` functions included.
+        name: "wow64_ucrt_test",
+        cmdline: "qemu_exit run=wow64_ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_ucrt_test: ok",
+            "wow64_ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "prng_test",
@@ -8191,6 +8344,17 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OF (pending): the Office Deployment Tool's setup.exe (x86,
+        // PREBUILT odt) installs Word, Excel and PowerPoint as
+        // user/office_install/config.xml asks, from Microsoft's CDN (a
+        // net scenario: QEMU's NAT to the host's network). Its log goes to
+        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF).
+        name: "office_install",
+        cmdline: "qemu_exit run=setup.exe args=/configure%20C:\\gala\\config.xml",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -9649,6 +9813,9 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -9671,6 +9838,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
+    ("clipboard_test", "a child process (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
@@ -10704,6 +10872,7 @@ fn run_vm_once(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
+                NetClient::Outbound => Ok(()),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::SshServer => ssh_server_client(port),

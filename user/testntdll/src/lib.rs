@@ -27,6 +27,7 @@ mod arch;
 #[path = "x86.rs"]
 mod arch;
 
+mod avl;
 mod heap;
 mod rtl;
 #[cfg(target_arch = "x86_64")]
@@ -294,6 +295,15 @@ syscall_stubs! {
     GalaUserObjectEnum = 0x7fa5, fn(handle: usize, buffer: *mut u8, length: u32, needed: *mut u32);
     // Sessions' presenters (gala's own; nt::session_calls), for `gala attach`.
     GalaSession = 0x7fb0, fn(op: u64, session: u32, arg: u64, buffer: u64, length: u64);
+    // The window station's clipboard (gala's own; nt::clipboard_calls), for user32.
+    GalaClipboardOpen = 0x7fc0, fn(hwnd: u64);
+    GalaClipboardClose = 0x7fc1, fn(locale: u32);
+    GalaClipboardEmpty = 0x7fc2, fn();
+    GalaClipboardSet = 0x7fc3, fn(format: u32, kind: u32, data: *const u8, length: u32, serial: *mut u32);
+    GalaClipboardGet = 0x7fc4, fn(format: u32, buffer: *mut u8, length: u32, info: *mut u8);
+    GalaClipboardInfo = 0x7fc5, fn(record: *mut u8);
+    GalaClipboardFormats = 0x7fc6, fn(formats: *mut u32, max: u32, count: *mut u32);
+    GalaClipboardListener = 0x7fc7, fn(hwnd: u64, add: u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

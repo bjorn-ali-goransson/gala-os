@@ -7,6 +7,12 @@
 //! sscanf is C-variadic: the architecture's entry point (`x64.rs`,
 //! `x86.rs`) passes its arguments as a `va_list` to vsscanf, as for
 //! printf. The arguments are pointers, one per assigning conversion.
+//!
+//! The UCRT's `__stdio_common_vsscanf` and `vswscanf` (ucrt/stdio.rs)
+//! use `scan` with a `ScanStyle`: the secure form (`sscanf_s`: a buffer
+//! size after each %s, %c and %[ pointer) and strings stored as UTF-16
+//! (the wide functions' %s, and %ls / %S); a wide input is scanned as
+//! UTF-8.
 
 use crate::va::VaList;
 
@@ -103,6 +109,65 @@ pub fn float(s: &[u8], width: usize) -> Option<(f64, usize)> {
 pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> i32 {
     // SAFETY: the caller's NUL-terminated strings.
     let (s, f) = unsafe { (crate::c_str(input), crate::c_str(format)) };
+    scan(s, f, args, ScanStyle { secure: false, wide: false })
+}
+
+/// How `scan` stores strings.
+#[derive(Clone, Copy)]
+pub(crate) struct ScanStyle {
+    /// sscanf_s: each %s, %c and %[ pointer is followed by its buffer's
+    /// size (an unsigned int, in characters).
+    pub(crate) secure: bool,
+    /// %s, %c and %[ store UTF-16 unless `h` (a wide function's rule);
+    /// `l` and %S store UTF-16 in either.
+    pub(crate) wide: bool,
+}
+
+/// Stores `bytes` (UTF-8) at `p` as a string: UTF-16 when `wide`, and NUL-
+/// terminated unless `chars` (%c). False if `size` (characters, secure
+/// form) is too small: then an empty string is stored if there is room.
+fn store(p: *mut u8, bytes: &[u8], wide: bool, chars: bool, size: Option<usize>) -> bool {
+    let terminator = usize::from(!chars);
+    if wide {
+        let text = core::str::from_utf8(bytes).unwrap_or("");
+        let units = text.encode_utf16().count();
+        if size.is_some_and(|n| units + terminator > n) {
+            if size.is_some_and(|n| n > 0) {
+                // SAFETY: room for one character.
+                unsafe { *p.cast::<u16>() = 0 };
+            }
+            return false;
+        }
+        let q = p.cast::<u16>();
+        for (i, u) in text.encode_utf16().enumerate() {
+            // SAFETY: the caller's buffer of at least `units` characters.
+            unsafe { q.add(i).write_unaligned(u) };
+        }
+        if !chars {
+            // SAFETY: room for the terminator (by contract or `size`).
+            unsafe { q.add(units).write_unaligned(0) };
+        }
+        return true;
+    }
+    if size.is_some_and(|n| bytes.len() + terminator > n) {
+        if size.is_some_and(|n| n > 0) {
+            // SAFETY: room for one byte.
+            unsafe { *p = 0 };
+        }
+        return false;
+    }
+    // SAFETY: the caller's buffer, big enough by contract or `size`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+        if !chars {
+            *p.add(bytes.len()) = 0;
+        }
+    }
+    true
+}
+
+/// Scans `s` with the format `f`, storing through `args` in `style`.
+pub(crate) fn scan(s: &[u8], f: &[u8], args: VaList, style: ScanStyle) -> i32 {
     let mut ptrs = args;
     let (mut i, mut k) = (0usize, 0usize);
     let mut assigned = 0;
@@ -148,17 +213,21 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> 
         let width = if width == 0 { usize::MAX } else { width };
         let mut size = Size::Int;
         let mut long_float = false;
+        let (mut narrow_str, mut wide_str) = (false, false);
         loop {
             match f.get(k) {
                 Some(b'h') => {
                     size = if size == Size::Short { Size::Char } else { Size::Short };
+                    narrow_str = true;
                 }
+                Some(b'w') => wide_str = true,
                 Some(b'l') => {
                     // Windows: long is 32 bits; ll is 64.
                     if long_float {
                         size = Size::Long64;
                     }
                     long_float = true;
+                    wide_str = true;
                 }
                 Some(b'L' | b'j') => size = Size::Long64,
                 Some(b'z') => size = Size::Pointer,
@@ -172,6 +241,19 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> 
         }
         let Some(&conv) = f.get(k) else { break };
         k += 1;
+        // Where a string conversion stores UTF-16, and its secure size.
+        let utf16 = match conv {
+            b'S' | b'C' => !narrow_str,
+            _ => wide_str || (style.wide && !narrow_str),
+        };
+        let conv = match conv {
+            b'S' => b's',
+            b'C' => b'c',
+            other => other,
+        };
+        let secure_size = |ptrs: &mut VaList| -> Option<usize> {
+            if style.secure && !suppress { Some(ptrs.int() as usize) } else { None }
+        };
         if !matches!(conv, b'c' | b'[' | b'n') {
             while i < s.len() && is_space(s[i]) {
                 i += 1;
@@ -233,8 +315,10 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> 
                 }
                 if !suppress {
                     let p = ptrs.ptr::<u8>();
-                    // SAFETY: the caller's buffer of at least `n` bytes.
-                    unsafe { core::ptr::copy_nonoverlapping(s[i..].as_ptr(), p, n) };
+                    let size = secure_size(&mut ptrs);
+                    if !store(p, &s[i..i + n], utf16, true, size) {
+                        break;
+                    }
                     assigned += 1;
                 }
                 i += n;
@@ -284,10 +368,9 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> 
                 }
                 if !suppress {
                     let p = ptrs.ptr::<u8>();
-                    // SAFETY: the caller's buffer, big enough by contract.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(s[start..].as_ptr(), p, i - start);
-                        *p.add(i - start) = 0;
+                    let size = secure_size(&mut ptrs);
+                    if !store(p, &s[start..i], utf16, false, size) {
+                        break;
                     }
                     assigned += 1;
                 }

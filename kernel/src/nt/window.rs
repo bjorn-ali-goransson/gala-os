@@ -793,6 +793,28 @@ impl Windows {
         Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
     }
 
+    /// Posts a message the system sends (WM_CLIPBOARDUPDATE to a
+    /// clipboard format listener): no UIPI check, as no process sends it.
+    /// The owner's event to set (by the caller, outside the lock);
+    /// STATUS_INVALID_HANDLE when the window is gone.
+    pub fn post_from_system(
+        &self,
+        hwnd: u64,
+        message: u32,
+        wparam: u64,
+        lparam: u64,
+    ) -> Result<Option<ObjectRef>, NtStatus> {
+        let mut r = self.0.lock();
+        let pid = r.windows.iter().find(|w| w.hwnd == hwnd).ok_or(NtStatus::INVALID_HANDLE)?.pid;
+        if r.posted.len() >= MAX_POSTED {
+            return Err(NtStatus::INSUFFICIENT_RESOURCES);
+        }
+        r.posted
+            .try_push(Posted { pid, tid: 0, hwnd, message, wparam, lparam })
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(r.listeners.iter().find(|(p, _)| *p == pid).map(|(_, e)| e.clone()))
+    }
+
     /// Posts a message from `from` to thread `tid` (any process's, at
     /// integrity level `to_level`: PostThreadMessage); its process's event to
     /// set. STATUS_INVALID_CID when the thread has no message queue (or is

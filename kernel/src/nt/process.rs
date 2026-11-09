@@ -1214,6 +1214,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     );
     super::desktop::process_ended(&process.desk.shell, process.id);
     process.desk.windows.process_ended(process.id as u32);
+    super::clipboard::process_ended(process);
     process.desk.hooks.process_ended(process.id as u32);
     super::conhost::process_ended(process.id);
     super::charge::ended(process);

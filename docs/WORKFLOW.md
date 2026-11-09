@@ -82,6 +82,13 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     round-robin shares of the planned VMs; a batch stays in one share,
     and the shard prints what it took). A failed shard keeps
     `target/failed/` (each failed boot's log and triage) as an artifact.
+    Each shard (and the `linux` job, for what its host tests and
+    gala-um use) keeps its pinned downloads (`target/prebuilt`, without
+    Chromium's symbols) in the Actions cache between runs, keyed by
+    `xtask/src/main.rs` with the shard's older caches restored: every
+    download is checked against its pinned checksum at each use, so only
+    what is missing is fetched (a release host's outage fails only a run
+    that needs a new download).
     The runners have hardware virtualization: a step opens /dev/kvm to
     the runner's user, so the boots run under KVM (the boot log's
     `xtask: vm time` line, and a QEMU standard error without "falling
@@ -459,6 +466,9 @@ or `HOST_PAGE_SCENARIOS` (`-nic none` otherwise).
   files (ssh's key copy and `-v` trace, sftp's transfer, the askpass
   script) are per port in `target/net-client/<port>/`, removed after the
   boot. On failure the end of curl's or ssh's `-v` trace is in the log.
+- A guest that only connects out (`office_install` fetching from
+  Microsoft's CDN) is a net scenario with `NetClient::Outbound`: the card
+  and QEMU's NAT to the host's network, no client run.
 - A UDP client resends until it gets its answer (the guest's first reply
   may wait for ARP) and must skip late duplicates of earlier answers.
 - QEMU's DNS (10.0.2.3) forwards to the host's resolver: a check that
@@ -690,6 +700,13 @@ rest.
   `*.iso`. The session's disk allowance is shared with any agents'
   worktrees (`.claude/worktrees/*/target`); `du -sh target/*
   .claude/worktrees/*/target` shows who uses it.
+- An agent's worktree whose `target` is a symlink to the main
+  checkout's (to save disk) shares `target/debug/xtask` with it: whichever
+  checkout built last owns it, and `cargo xtask` may run the other's
+  sources (paths under `.claude/worktrees/...` in its output, or
+  `export-tests` changing nothing after a test changed). Build and copy
+  the binary (`touch xtask/src/main.rs && cargo build -p xtask && cp
+  target/debug/xtask <scratch>/`) and run that copy while an agent works.
 - Low on disk, a few user programs can be built alone into a scratch
   target directory with xtask's flags (`cargo build --release --target
   x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=
@@ -861,7 +878,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   machine (the processor count, devices, the system locale, the build,
   the volume's number) are read from another API, not typed in; per-user
   state another process may hold (the clipboard) is skipped, naming the
-  holder, when it is held; named sections and symbolic links go in the session's
+  holder, when it is held (a test that changes the clipboard also
+  retries, for a moment, an OpenClipboard meant to succeed: clipboard
+  history and remote-desktop agents open it after each change,
+  `clipboard_test`); named sections and symbolic links go in the session's
   `\Sessions\<n>\BaseNamedObjects` (`\BaseNamedObjects` in session 0):
   creating them in the global one needs SeCreateGlobalPrivilege outside
   session 0, and DIRECTORY_ALL_ACCESS on it is not granted (ask
@@ -1119,6 +1139,17 @@ numbers, 0x7f.., fail there).
   32-bit kernel32 takes `memcpy`, MSVC's 64-bit division helpers,
   `__chkstk` and `strlen` from it; its no_mangle ones become extra
   exports).
+- A cdecl (`extern "C"`) import on x86 with `import_name_type =
+  "undecorated"` loses one leading underscore (rustc takes it for the C
+  decoration: `__acrt_iob_func` is imported as `_acrt_iob_func`): give
+  such names one more with `link_name` (`ucrt_test`'s `ucrt_imports!`
+  macro adds `_` to every name; `malloc` stays `malloc`). stdcall
+  imports are not affected.
+- One source for an x64 and an x86 test program: the x86 package's
+  `[[bin]] path` points at the other's `main.rs` (`wow64_ucrt_test`
+  builds `user/ucrt_test/src/main.rs`); one source for two DLLs: the
+  second package's `[lib] path` and `build` point at the first's
+  (`user/ucrtbase` is msvcrt's source with `cfg(ucrt)`).
 - `raw-dylib` blocks of a crate built for both: `import_name_type` is
   an error on x64, so they carry `#[cfg_attr(target_arch = "x86",
   link(name = "...", kind = "raw-dylib", import_name_type =

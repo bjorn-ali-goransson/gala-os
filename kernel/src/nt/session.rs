@@ -462,6 +462,29 @@ fn dump_stations(id: u32) {
         "statedump: session {id} window stations: {}",
         core::str::from_utf8(&line[..n]).unwrap_or("?").trim_end()
     );
+    // Each used clipboard: who has it open (a holder that never closes
+    // it blocks every other program's copy and paste), the owner, the
+    // formats.
+    for name in &names {
+        let Ok(station) = super::winsta::station_by_name(id, name) else { continue };
+        let Some(s) = super::winsta::station_of(&station) else { continue };
+        let c = s.clipboard.summary();
+        if c.sequence == 0 && c.open.is_none() && c.listeners == 0 {
+            continue;
+        }
+        log!(
+            info,
+            "statedump: session {id} {} clipboard: sequence {}, open by {:?}, owner {:?}, {} formats {:?} ({} bytes), {} listeners",
+            Plain(name),
+            c.sequence,
+            c.open,
+            c.owner,
+            c.count,
+            &c.formats[..c.count.min(8)],
+            c.bytes,
+            c.listeners
+        );
+    }
 }
 
 /// The ids of the sessions that exist, in the order they were made.

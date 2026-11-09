@@ -644,8 +644,8 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
    700 x 500, so its snapped half would be 700 wide as on Windows; the
    desktop's docking test and the scenario's checks change with it);
    SetWindowPos's WM_NCCALCSIZE.
-2. Rich edit: RTF streams, undo, the clipboard (user32 has none yet),
-   OLE callbacks (wx asks for them).
+2. Rich edit: RTF streams, undo, cut, copy and paste over user32's
+   clipboard, OLE callbacks (wx asks for them).
 3. A transfer over SFTP (`filezilla_sftp` lists only): a download and
    an upload through the queue.
 
@@ -749,9 +749,8 @@ parity already exposes.
    endpoint over plain HTTP (a test program serving a scripted SSE
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
-   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today; gala's
-   own is decided, item OF).
+   Burn exe, PK stage 3); the UCRT is gala's own ucrtbase.dll
+   (ARCHITECTURE "The UCRT").
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1046,8 +1045,8 @@ own session and shell.
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
-   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
-   per station.
+   desktops with windows of their own; UOI_USER_SID; atoms per station
+   (the clipboard is the station's: LD step 3).
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -1063,8 +1062,8 @@ own session and shell.
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
-5. Later: several desktops per session, a secure desktop, clipboard,
-   seamless windows, RDP proper. Interim, with no gala work: QEMU's
+5. Later: several desktops per session, a secure desktop, the
+   clipboard over the remote protocol, seamless windows, RDP proper. Interim, with no gala work: QEMU's
    `-vnc`.
 
 **Done when**: B3b: an xtask test client connects through a forwarded
@@ -1117,8 +1116,7 @@ the kernel.
    redistributable). gdi32's GetGlyphOutline (Mesa's
    wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
    (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
-   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
    STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
    resources); everything else it imports gala has. d3d11_test needs
    DXBC shaders, and the host has no HLSL compiler (Ubuntu's
@@ -1357,24 +1355,62 @@ need gala's.
    scenario that boots them, with the files gala's own install put
    there (the owner: no files from elsewhere; the native install below
    comes first).
-   - The UCRT for the installer: gala's own `ucrtbase.dll` and
-     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
-     msvcrt, test first against Windows (the owner's decision; also
-     the answer to PK's AIChat UCRT question and the JDK copies the
-     scenarios carry today).
-   - Alongside, natively: a pending scenario `office_install` runs the
-     Office Deployment Tool's `setup.exe /configure` in gala (its
-     ledger ranks the installer's blockers; the guest needs the CDN, so
-     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
-     32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs it does not load yet: it imports the UCRT
-     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
-     above) and nine kernel32 functions
-     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
-     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
-     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
-     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
-     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+   - The UCRT (the owner's decision: gala's own; also the answer to
+     PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
+     resolve to it), x64 and x86, msvcrt's source with the UCRT's own
+     functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
+     `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
+     covers every UCRT import of ODT's setup.exe and of curl, CPython,
+     `cxx_eh_test`, `pk_install_inno` and NumPy's DLLs, whose scenarios
+     use it and no longer copy the JDK's. Next: what the JDK,
+     PowerShell, .NET, PostgreSQL and SQL Server LocalDB still import
+     that gala's lacks (65 functions across their files: the C++
+     runtime functions Windows' ucrtbase also exports,
+     `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
+     `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
+     `_Gettnames` (recorded, NULL); the `_s` path, date and case
+     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
+     `tools/import_survey.py` on their directories lists them), then those
+     scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
+     files. `ucrt_test`/`wow64_ucrt_test` pass on CI's Windows
+     (`user/windows/ci-passing.txt`).
+   - The load list's kernel32 and ntdll functions, test first in
+     `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
+     CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
+     OpenSemaphoreA/W, K32EnumProcesses, K32GetProcessImageFileNameW,
+     RtlCaptureStackBackTrace (x86 too), WerRegisterMemoryBlock/
+     WerUnregisterMemoryBlock, IsSystemResumeAutomatic,
+     GetPhysicallyInstalledSystemMemory, QueryActCtxW (basic
+     information), FindActCtxSectionStringW, QueueUserWorkItem,
+     GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
+     AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression. Left:
+     NtNotifyChangeMultipleKeys (the kernel has no registry change
+     notification yet; advapi32's RegNotifyChangeKeyValue is a
+     never-signalled stopgap), NtRenameKey (a registry node renamed,
+     with its change-log op), the manifests' sections
+     (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
+     classes), GetThreadIOPendingFlag's count of a thread's pending
+     socket, pipe and watch requests (a recorded stopgap answering
+     FALSE), and the ten functions used once. `office_api_test` and
+     `wow64_office_api_test` pass on CI's Windows (`ci-passing.txt`).
+   - Alongside, natively: the pending scenario `office_install` runs
+     the Office Deployment Tool's `setup.exe /configure` in gala
+     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     re-pinned when Microsoft replaces the file at its URL;
+     `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
+     Current channel, Display None, AcceptEULA; a net scenario, the
+     guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
+     `setup.exe` is a 32-bit x86 program (WOW64); every static import is
+     there (the UCRT and kernel32 functions above). How far it gets: it
+     starts, starts its copy (a second setup.exe), and that copy ends
+     with 0xc06d007e at its first delay-loaded DLL, crypt32.dll, which
+     has no i686 build yet (the ledger's top gap: `crypt32.dll missing
+     dll`). Next: an i686 crypt32 (its structures with pointers audited
+     for the x86 layouts, "Making a gala DLL 32-bit too"), then the rest
+     of the delay-loaded list as the run reaches them. Delay-loaded,
+     needed as it goes: i686 builds of crypt32, wininet,
      wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
      cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
      control manager (advapi32's service calls are stubs); a few
@@ -1608,7 +1644,8 @@ is left is delay-loaded or stubbed.
 **Next** (what is left, by DLL):
 1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
    spy around every operation and track spied blocks), the OLE clipboard
-   and DoDragDrop (need user32's clipboard).
+   (OleSetClipboard and friends, over user32's clipboard) and
+   DoDragDrop.
 2. crypt32: the other decode types the programs use (which ones is only
    seen at run time: the ledger's `CryptDecodeObjectEx` lines),
    CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt
@@ -2297,6 +2334,19 @@ the next breakthroughs).
   (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
   rseq and SA_ONSTACK (below), and the Wayland requests accepted and
   not used (regions, set_cursor, min and max sizes, set_parent).
+- Step 3's first part, Windows' clipboard as Windows has it
+  (`clipboard_test`: two processes, its expectations Windows'
+  documented behaviour; ARCHITECTURE "The clipboard"): one per window
+  station in the kernel (`nt::clipboard`, the GalaClipboard* services
+  0x7fc0-0x7fc7), OpenClipboard's lock across processes
+  (ERROR_ACCESS_DENIED, GetOpenClipboardWindow), the owner
+  (GetClipboardOwner after EmptyClipboard), HGLOBAL formats copied
+  through the kernel and charged to the setter's paged pool quota
+  (GetClipboardData's handle made per process, freed by user32 once the
+  data changes), the synthesized text formats and CF_LOCALE in
+  Windows' enumeration order, the sequence number, the format listeners
+  (WM_CLIPBOARDUPDATE posted across processes), `events=ipc` and the
+  state dump's clipboard line.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2348,13 +2398,20 @@ the next breakthroughs).
    on a MSG_PEEK, collecting rights cycles in flight.
 3. **One clipboard for both personalities** (the owner: "would be
    amazing"), test first at each layer:
-   - Windows' clipboard as Windows has it, one per window station in
-     the kernel (user32's is per process today): OpenClipboard's owner
-     and its lock across processes, SetClipboardData/GetClipboardData
-     of memory handles copied through the kernel, delayed rendering
-     (WM_RENDERFORMAT), the sequence number and the format listeners
-     (WM_CLIPBOARDUPDATE); a test copying between two processes,
-     recorded on Windows;
+   - Windows' clipboard's open ends (its first part is done, above),
+     ledgered where a program reaches them: delayed rendering (SetClipboardData
+     with NULL is kept, WM_RENDERFORMAT and WM_RENDERALLFORMATS are not
+     sent), GDI handle formats across processes (CF_BITMAP,
+     CF_ENHMETAFILE, CF_PALETTE stay the setter's; the bitmap and
+     metafile synthesized formats CF_DIB, CF_DIBV5, CF_METAFILEPICT are
+     not made), registered formats are per process
+     (RegisterClipboardFormat shares user32's table of registered
+     messages: a station-wide atom table is to come), the viewer chain
+     (SetClipboardViewer, WM_DRAWCLIPBOARD), WM_DESTROYCLIPBOARD posted
+     rather than sent, CF_LOCALE's code pages (user32 converts text
+     through the system's ANSI and OEM code pages); `clipboard_test`
+     joins `user/windows/ci-passing.txt` once its Windows result is
+     read;
    - the Wayland selection across clients: data offers to the focused
      client, `receive` passing its descriptor to the source's `send`;
      a two-client test against weston;
@@ -2364,7 +2421,18 @@ the next breakthroughs).
      Windows copy offers Wayland clients the same MIME types, the data
      converted when pasted (delayed rendering on both sides); a
      scenario copying from a GTK window and pasting into a Windows edit
-     control, and back.
+     control, and back. What it needs from the kernel clipboard, beyond
+     the seams there (`Clipboard::offer`: the Wayland server puts text
+     on the clipboard as an owner without a window, refused while a
+     program has it open; `Clipboard::text`; the sequence number to
+     notice a Windows copy): delayed rendering first (a Wayland source
+     offered as formats with no data, rendered by the server's `send`
+     when a Windows program asks: the kernel waiting for the bytes
+     instead of WM_RENDERFORMAT), a kernel-side listener (the server
+     told of a Windows change as WM_CLIPBOARDUPDATE tells windows), the
+     session's interactive station (WinSta0) as the one bridged, and the
+     text conversion user32 does today (UTF-8 to CF_UNICODETEXT) on the
+     kernel side.
 4. Step 3's rest: an application as a distribution ships it (GTK 3, the
    owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
    with its GSettings schemas, icon theme and keyboard input checked on

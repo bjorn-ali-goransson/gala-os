@@ -20,6 +20,9 @@ impl NtStatus {
     pub const THREAD_IS_TERMINATING: NtStatus = NtStatus(0xc000_004b);
     pub const FILE_LOCK_CONFLICT: NtStatus = NtStatus(0xc000_0054);
     pub const LOCK_NOT_GRANTED: NtStatus = NtStatus(0xc000_0055);
+    /// The clipboard is not open by the calling thread (gala's clipboard
+    /// services; user32 makes it ERROR_CLIPBOARD_NOT_OPEN).
+    pub const INVALID_LOCK_SEQUENCE: NtStatus = NtStatus(0xc000_001e);
     pub const RANGE_NOT_LOCKED: NtStatus = NtStatus(0xc000_007e);
     pub const NOT_MAPPED_VIEW: NtStatus = NtStatus(0xc000_0019);
     pub const UNABLE_TO_DELETE_SECTION: NtStatus = NtStatus(0xc000_001b);

@@ -17,7 +17,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateFiber
     CreateFileMappingNumaW
     CreateHardLinkA
-    CreateMutexExW
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
@@ -28,20 +27,15 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumaNodeProcessorMaskEx
     GetNumberFormatEx
     GetNumberFormatW
-    GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
-    GetThreadIOPendingFlag
-    GetVolumePathNamesForVolumeNameW
     GlobalMemoryStatus
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
-    OpenSemaphoreW
     PrepareTape
-    QueueUserWorkItem
     ReadConsoleOutputA
     RemoveDirectoryA
     ResolveLocaleName
@@ -58,8 +52,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WaitNamedPipeW
     WriteConsoleOutputA
     WriteTapemark
-    AllocConsole
-    AttachConsole
     ClearCommBreak
     ClearCommError
     CopyFileA
@@ -90,7 +82,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleInputW
     WriteConsoleOutputW
     EnumResourceNamesW
-    GetDiskFreeSpaceA
     IsBadReadPtr
     ReadConsoleOutputCharacterA
     // Inno Setup's Setup (Delphi's VCL) imports these.

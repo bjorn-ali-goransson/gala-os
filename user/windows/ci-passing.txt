@@ -61,6 +61,7 @@ manifest_test
 netapi32_test
 nginx
 object_test
+office_api_test
 oleaut32_test
 pdh_test
 peb_test
@@ -94,6 +95,7 @@ system_test
 thread_test
 threadinfo_test
 timer_test
+ucrt_test
 udp_test
 vm_test
 vmcycle_test
@@ -108,6 +110,8 @@ wow64_crt_test
 wow64_fs_test
 wow64_gui_test
 wow64_k32_test
+wow64_office_api_test
 wow64_seh_test
 wow64_sock_test
 wow64_test
+wow64_ucrt_test

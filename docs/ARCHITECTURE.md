@@ -594,6 +594,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
+| 0x7fc0-0x7fc7 | GalaClipboardOpen, GalaClipboardClose, GalaClipboardEmpty, GalaClipboardSet, GalaClipboardGet, GalaClipboardInfo, GalaClipboardFormats, GalaClipboardListener | "The clipboard" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -2457,7 +2458,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | Role | DLLs |
 |---|---|
 | core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
-| C runtime | msvcrt (mingw-w64 programs' C runtime) |
+| C runtime | msvcrt (mingw-w64 programs' C runtime), ucrtbase (the Universal C Runtime, msvcrt's source with the UCRT's own functions: "The UCRT") |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
@@ -2632,7 +2633,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   upcase/downcase, to ANSI as UTF-8; ASCII case folding), SIDs, ACLs,
   absolute and self-relative security descriptors (a self-relative copy
   takes the whole AclSize, as Windows'), RtlSetCurrentDirectory_U,
-  NtQueryTimerResolution, and the critical sections: kernel32's
+  NtQueryTimerResolution, RtlIntegerToUnicodeString,
+  RtlIsNameInExpression (`*`, `?` and the DOS wildcards `<`, `>`, `"`,
+  matched over a table of reachable name positions; case folding ASCII),
+  and the critical sections: kernel32's
   Enter/LeaveCriticalSection call ntdll's RtlEnter/LeaveCriticalSection
   (one implementation, so a section works whichever DLL a program uses).
   LockCount is -1 when free and, while taken, the number of waiters; an
@@ -2645,6 +2649,19 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   switches); a thread that polls takes processor time from the one it
   waits for. Without the keyed event (it could not be created: no
   memory) the handover goes through OwningThread and waiters yield.
+- **AVL generic tables** (`avl.rs`, `office_api_test`):
+  RtlInitializeGenericTableAvl and its companions (insert, delete,
+  lookup, enumerate with and without a caller's restart key, get by
+  index, count, empty, first matching) on the caller's RTL_AVL_TABLE in
+  ntddk.h's layout; nodes come from the caller's allocate routine (the
+  balanced links, padded to 8 bytes, then the element) and go back to its
+  free routine. The root's links are a sentinel above the real root; a
+  node's subtree height is kept in its first reserved byte, so a change
+  rebalances along its path only. NumberGenericTableElements and the
+  ordered-element cache are kept in the table.
+- **RtlCaptureStackBackTrace** on x86 (`x86.rs`) walks the saved frame
+  pointers inside the thread's stack (TEB32's limits); kernel32 forwards
+  it on both architectures.
 
 ### kernel32
 
@@ -2772,7 +2789,33 @@ ntdll imports.
   a manifest file) and returns a reference-counted handle;
   ActivateActCtx/DeactivateActCtx keep a per-thread stack (16 deep, 64
   threads) with unique cookies. Nothing is read from the manifests (no
-  side-by-side redirection).
+  side-by-side redirection). QueryActCtxW answers
+  ActivationContextBasicInformation (the active context with
+  QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX; NULL when none is: a program
+  without a manifest); other classes are recorded and refused.
+  FindActCtxSectionStringW checks its arguments (ERROR_INVALID_PARAMETER
+  for no name, no data or a cbSize below ulAssemblyRosterIndex) and finds
+  nothing (ERROR_SXS_KEY_NOT_FOUND; recorded when a context is active,
+  whose manifest might have had the key). `office_api_test`.
+- **What Office imports** (`office_api_test`, `wow64_office_api_test`):
+  CreateFile2 (CreateFileW with the parameters' attributes, flags and
+  QoS flags; an empty name is ERROR_PATH_NOT_FOUND, in CreateFileW too),
+  FindFirstFileNameW/FindNextFileNameW (one name per file: the path from
+  the volume root, GetFinalPathNameByHandleW's VOLUME_NAME_NONE),
+  CreateMutexExW, OpenSemaphoreA/W, K32EnumProcesses
+  (SystemProcessInformation's ids), K32GetProcessImageFileNameW
+  (ProcessImageFileName: `\Device\HarddiskVolume1\...`),
+  QueueUserWorkItem (the pool's simple callbacks), GetShortPathNameA,
+  GetVolumePathNamesForVolumeNameW (gala's one volume: `C:\`),
+  GetPhysicallyInstalledSystemMemory (the physical memory gala manages),
+  IsSystemResumeAutomatic (FALSE), WerRegisterMemoryBlock (accepted and
+  recorded: gala's crash reports are the kernel's),
+  AttachConsole/AllocConsole (every gala process has a console:
+  ERROR_ACCESS_DENIED, as Windows answers a process that has one;
+  FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
+  is a stopgap: gala does not count a thread's pending socket, pipe and
+  directory-watch requests, so it answers FALSE and records it (ROADMAP
+  OF).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA
@@ -2907,7 +2950,17 @@ runtime of mingw-w64 programs.
   digits with zeros after them and then half away from zero at the
   requested digit, as msvcrt.dll's conversion does; exponents have a sign
   and at least three digits. inf and nan print as `inf`/`nan` (msvcrt.dll
-  prints `1.#INF00`: a known difference, TODO).
+  prints `1.#INF00`: a known difference, TODO). The UCRT's style
+  (`float::Style`): every digit exact, two exponent digits.
+- **The formatting engine** (`stdio.rs` `format`) takes a `Style`
+  (msvcrt's, or the UCRT's options: which `%s`/`%c` are UTF-16 in a wide
+  function, `%T`, the float style, `%*2d`) and writes to an `Out`: a
+  handle, a byte buffer, or a UTF-16 buffer (`Sink::Wide` decodes the
+  engine's UTF-8 as it comes; `total` counts UTF-16 units), so the wide
+  functions have no length limit. `scan` takes a `ScanStyle` (the secure
+  form's buffer sizes; strings stored as UTF-16).
+- **The heap's header** keeps the size a block was asked with
+  (`heap::requested`, the UCRT's `_msize`).
 - **Math**: sin, pow, floor, fmod, ... come from the `libm` crate; the
   transcendental ones may differ from msvcrt's in the last bit.
 - **Wide functions** (`wide.rs`, `wide_more.rs`): the wide path functions
@@ -2932,6 +2985,103 @@ runtime of mingw-w64 programs.
 - **Other**: `_chmod` maps the absence of `_S_IWRITE` to
   FILE_ATTRIBUTE_READONLY; `_aligned_malloc` keeps the block's start just
   below the aligned pointer.
+
+### The UCRT
+
+`user/ucrtbase` (`ucrt_test`, `wow64_ucrt_test`): gala's own
+`ucrtbase.dll`, the Universal C Runtime that programs built with Visual
+C++ 2015 and later import, directly or through the `api-ms-win-crt-*`
+API sets (which the loader maps to ucrtbase, "API sets"), for x64
+(System32) and x86 (SysWOW64). Written in Rust, not Microsoft's
+redistributable (the owner's decision).
+
+- **One source, two DLLs**: `user/ucrtbase` has no source of its own:
+  its Cargo.toml points its lib at `user/msvcrt/src/lib.rs` and its build
+  script at msvcrt's, which sets `cfg(ucrt)` for this package. That adds
+  `user/msvcrt/src/ucrt/` (and the UCRT's hooks in shared code, such as
+  the exit sequence). So ucrtbase exports msvcrt's functions plus the
+  UCRT's, and has its own state (heap, errno, stdio, atexit table, argv),
+  as the two runtimes do on Windows: a program that mixes them (a
+  mingw DLL in an MSVC program) has two separate runtimes. What both
+  need is written once, in msvcrt's modules; a UCRT-only helper in them
+  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`.
+- **Start-up** (`ucrt/mod.rs`): what Visual C++'s static start-up code
+  calls: `_configure_narrow_argv`/`_configure_wide_argv` and
+  `_initialize_*_environment` (msvcrt's `__getmainargs`/`__wgetmainargs`
+  build the arrays; wildcard expansion, mode 2, is not done and is
+  recorded), `__p___argc`/`__p___argv`/`__p___wargv`/`__p__environ`/
+  `__p__wenviron`, `_get_narrow/wide_winmain_command_line` (after the
+  program name, quotes toggling, then blanks), `_initterm_e` (stops at
+  the first nonzero result), onexit tables (`_initialize_onexit_table`
+  keeps a table that already has an allocation; entries are plain
+  pointers, not encoded as on Windows; `_execute_onexit_table` takes the
+  table first, runs it last to first and frees it), `_crt_atexit` (the
+  runtime's atexit table), `quick_exit`, `_set_app_type`, `_set_fmode`,
+  `_set_new_mode`, `_seh_filter_exe` (msvcrt's `_XcptFilter`: no signal
+  handlers, so the search goes on). `exit` and `_cexit` first call the
+  `_register_thread_local_exe_atexit_callback` callback (thread_local
+  destructors, with DLL_PROCESS_DETACH), then the atexit functions.
+- **Invalid parameters**: the `_s` functions and the `__stdio_common_*`
+  checks call `invalid_parameter()`: the thread's handler
+  (`_set_thread_local_invalid_parameter_handler`, a TLS slot), else the
+  process's (`_set_invalid_parameter_handler`), with NULL expression,
+  function and file, line 0, then return the documented error; with no
+  handler the process ends with STATUS_STACK_BUFFER_OVERRUN (0xc0000409,
+  Windows' fast-fail status) after a line on stderr naming the cause.
+- **printf and scanf** (`ucrt/stdio.rs`): the `__stdio_common_v*`
+  functions with their option flags: legacy termination (1), standard
+  snprintf (2), neither (-2 when it does not fit); legacy wide specifiers
+  (4: `%s` in a wide function is UTF-16; without it, narrow as the C
+  standard says); three-digit exponents (16); standard rounding (32:
+  an exact tie rounds to even; without it half away from zero, as the
+  UCRT does). The UCRT prints every digit exactly (`%.30f`) and two
+  exponent digits. The `_s` forms: `_TRUNCATE` keeps what fits and returns
+  -1; `sprintf_s` with too small a buffer is an invalid parameter
+  (ERANGE, emptied). scanf's secure flag (1) reads a buffer size after
+  each `%s`/`%c`/`%[` pointer; the count limits the input. Legacy msvcrt
+  compatibility (8: `1.#INF`, `%F`/`%N` sizes) and `%a` are recorded,
+  not done.
+- **Streams**: `__acrt_iob_func` gives msvcrt's `_iob` slots;
+  `_fseeki64`/`_ftelli64`, `_fsopen`/`_wfsopen` (share modes not
+  applied), `fopen_s` and friends, `_get_stream_buffer_pointers` (the
+  FILE's fields; `_cnt` stays 0), `_chsize_s`, `_sopen_s`,
+  `_findfirst64i32`. `_lock_file` does nothing: gala's streams are
+  unbuffered and write each call with one WriteFile. No text-mode CRLF
+  translation (as msvcrt here).
+- **Strings, locale, math, time** (`string.rs`, `locale.rs`, `math.rs`,
+  `time.rs`, `compat.rs`, `c99.rs`): the `_s` string and number functions, the
+  restartable multibyte functions (UTF-8; a character beyond the BMP
+  does not fit one wchar_t: U+FFFD, recorded); one locale, "C", with
+  UTF-8 as the multibyte code page (`_create_locale` returns it and
+  records any other name; `_configthreadlocale` is kept per process);
+  `_dclass` and the classification functions with the UCRT's FP_*
+  values; `_controlfp_s`, `_clearfp`/`_statusfp` (MXCSR, and on x86 the
+  x87 status word); on x86 the `_libm_sse2_*_precise` functions that
+  SSE2 code calls (the argument in xmm0, xmm1 for pow's second, the
+  result in xmm0: naked shims around cdecl Rust); C99's float and long
+  double forms and the complex functions on `_Dcomplex`/`_Fcomplex`
+  (textbook identities; Annex G's special cases for infinite and NaN parts
+  not all followed), `fetestexcept`/`feclearexcept`; local time is UTC.
+- **Aliases** (build.rs `UCRT_ALIASES`): api-ms-win-crt-private's `_o_`
+  names are the same functions, and the `_l` forms (a locale as the last
+  argument) are the plain ones: one locale, and an extra last argument is
+  the caller's to pop in the C convention of both architectures.
+- **The environment**: `_environ` (narrow) is built on first use by
+  getenv if the start-up code built only the wide one (a `wmain`
+  program's: CPython reads PYTHONPATH through `_wgetenv`, which goes
+  through getenv).
+- **Limits**: errno is per process (msvcrt's), as are the rand state
+  and strtok's; `setlocale` answers "C" for any name; console I/O
+  (`_getwch`, `_putwch`) is the standard handles' bytes and `_kbhit`
+  reports no key (recorded); the C++ runtime functions that Windows'
+  ucrtbase also exports (`_CxxThrowException`, `__CxxFrameHandler3`,
+  `__std_exception_copy`, ...) are not there yet, nor about 55 other
+  functions the JDK, PowerShell, .NET, PostgreSQL and SQL Server LocalDB
+  import, so those scenarios still ship Microsoft's copy (ROADMAP OF).
+- **Who uses it**: setup.exe of the Office Deployment Tool (x86; all its
+  UCRT imports), curl (`curl`, `curl_schannel`), CPython (`python_*`,
+  NumPy's DLLs included),
+  `cxx_eh_test` (with Microsoft's vcruntime140), `pk_install_inno`.
 
 ### advapi32
 
@@ -5456,7 +5606,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - **Registered messages** (`message.rs`): RegisterWindowMessageW gives
   0xC000 + an index per name (case-insensitive), process-wide;
   registered clipboard formats share the table (names as first
-  spelled).
+  spelled). The table is the process's, not the window station's: a
+  format registered in two processes may get two numbers (the clipboard
+  itself is the station's: "The clipboard").
 - **Hooks** (`hook.rs`): per kind and thread, newest first;
   CallNextHookEx ignores its handle (as documented) and continues from
   the hook running on the thread. WH_CBT is called on creation
@@ -5807,7 +5959,7 @@ then riched20.dll).
   options are the ES_ styles of the same values (ECO_READONLY is
   ES_READONLY).
 - Not yet (each recorded as `riched20.dll!...`): RTF (EM_STREAMIN/OUT,
-  EM_SETTEXTEX with "{\rtf"), undo, the clipboard (user32 has none), OLE
+  EM_SETTEXTEX with "{\rtf"), undo, cut, copy and paste, OLE
   (EM_GETOLEINTERFACE, EM_SETOLECALLBACK: FileZilla's wx asks for both
   and copes), zoom, per-paragraph formats, find; other EM_ and edit
   messages are recorded as `riched20.dll!message` with the number and
@@ -7123,8 +7275,8 @@ stations and desktops a program creates are refused until stage 3).
   accepted, never signaled, recorded).
 - userenv's group policy notifications; netapi32's join and DS role (a
   workgroup workstation).
-- user32: DPI awareness (96 DPI), power and clipboard registrations,
-  device lists (empty). winmm: audio and MIDI devices (none). ws2_32:
+- user32: DPI awareness (96 DPI), power registrations, device lists
+  (empty). winmm: audio and MIDI devices (none). ws2_32:
   GetAddrInfoExW (synchronous) and the name-space provider calls.
   dbghelp: MiniDumpWriteDump refused (recorded).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
@@ -7238,6 +7390,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit UCRT (SysWOW64) | `user/ucrtbase` built for i686 ("The UCRT"; its `_libm_sse2_*` shims in `ucrt/math.rs`) |
 | The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
 | The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
 | The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
@@ -7248,7 +7401,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_ucrt_test` (the UCRT: `user/ucrt_test` built for x86), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
 
 ### Decisions
 
@@ -7935,8 +8088,8 @@ same program as SYSTEM).
   ERROR_BUSY when the desktop differs); UOI_USER_SID and UOI_HEAPSIZE
   are unsupported (ledger); a process holding a station or desktop
   handle is refused by a kernel handover (B5), and a carried process
-  connects again from its logon session; no clipboard or atom tables
-  per station yet.
+  connects again from its logon session; no atom table per station yet
+  (each station has its clipboard: "The clipboard").
 - **Observability**: the first call logs where the process is and why
   (`winsta: pid 4 (x.exe, session 1) is on WinSta0\Default (its logon
   session's)`, or `(STARTUPINFO.lpDesktop)`, `(its parent's, pid 4)`, `(an
@@ -7946,6 +8099,103 @@ same program as SYSTEM).
   `window`): `"ev":"winsta"` with `"op":"connect"` (pid, session,
   station, desktop, `from`), `"connect failed"`, `"made"`. The state
   dump's sessions part lists each session's stations.
+
+### The clipboard
+
+`kernel/src/nt/clipboard.rs` (the state; host tests there),
+`kernel/src/nt/clipboard_calls.rs` (gala's services),
+`user/user32/src/clipboard.rs`. Test program: `user/clipboard_test`
+(scenario `clipboard_test`, `events=ipc`: a parent and its child copy
+to each other). ROADMAP LD step 3.
+
+- **One per window station** (`WindowStation::clipboard`), as Windows
+  keeps it ("the system keeps a serial number for the clipboard for each
+  window station"): every process connected to the station shares it;
+  a clipboard call connects the process as a window station call does
+  ("Window stations and desktops").
+- **Open**: one thread at a time, with the window it named (NULL
+  allowed): OpenClipboard by another thread, or by the same thread with
+  another window, is STATUS_ACCESS_DENIED (ERROR_ACCESS_DENIED);
+  GetOpenClipboardWindow names the window. CloseClipboard,
+  EmptyClipboard, SetClipboardData, GetClipboardData and
+  EnumClipboardFormats by a thread without it open are
+  STATUS_INVALID_LOCK_SEQUENCE (ERROR_CLIPBOARD_NOT_OPEN). A thread that
+  ends with it open closes it (as CloseClipboard would).
+- **Owner**: EmptyClipboard makes the open window the owner
+  (GetClipboardOwner); the owner it replaces gets WM_DESTROYCLIPBOARD,
+  posted (Windows sends it). An owner's process that ends leaves no
+  owner, and its delayed and handle formats go.
+- **Formats**, in the order set (the kind GalaClipboardSet is told):
+  - memory (every format but those below): user32 copies GlobalSize
+    bytes of the locked HGLOBAL into the kernel, charged to the setter's
+    paged pool quota (`quota::Held`; STATUS_QUOTA_EXCEEDED,
+    ERROR_NOT_ENOUGH_QUOTA); the handle is the system's from then on, as
+    Windows says: user32 keeps it as this process's copy and frees it
+    once the data is gone;
+  - handle values (CF_BITMAP, CF_PALETTE, CF_ENHMETAFILE, CF_DSPBITMAP,
+    CF_DSPENHMETAFILE, 0x200-0x3ff): the value, good in the setting
+    process only (another process gets NULL, ledgered);
+  - delayed (SetClipboardData with NULL): listed, never rendered
+    (ledgered: no WM_RENDERFORMAT).
+  Each format's serial is the sequence number its setting made.
+- **GetClipboardData** gives a process-local HGLOBAL made from the
+  kernel's bytes (GalaClipboardGet: a 16-byte record of size, serial,
+  source format and kind, then the bytes), kept by user32 per (format,
+  serial) and freed at its first clipboard call after an EmptyClipboard
+  or a new set of the format; the setting process gets its own handle
+  back.
+- **Synthesized formats** ("Synthesized Clipboard Formats"): at a close
+  after a change, text without CF_LOCALE gets CF_LOCALE (the closer's
+  input language, GetKeyboardLayout's: 0x0409), then CF_TEXT,
+  CF_OEMTEXT and CF_UNICODETEXT that are missing are listed (that
+  order) as made from the best text present (CF_UNICODETEXT, else
+  CF_TEXT, else CF_OEMTEXT). So CF_UNICODETEXT set enumerates as
+  CF_UNICODETEXT, CF_LOCALE, CF_TEXT, CF_OEMTEXT, as Windows does.
+  user32 converts when asked, through the ANSI and OEM code pages.
+- **Sequence number** (GetClipboardSequenceNumber): grows with each
+  EmptyClipboard and SetClipboardData.
+- **Format listeners** (AddClipboardFormatListener: a window of the
+  caller's; at most 64 per station): each gets WM_CLIPBOARDUPDATE,
+  posted through the session's window registry
+  (`Windows::post_from_system`: no UIPI check, as the system sends it),
+  at every close after a change, its own process's included; a
+  listener whose window is gone is dropped.
+- **Services** (0x7fc0-0x7fc7; numbers in `syscalls.rs`, testntdll and
+  wow64's table):
+
+| Number | Service | |
+|---|---|---|
+| 0x7fc0 | GalaClipboardOpen(Hwnd) | OpenClipboard |
+| 0x7fc1 | GalaClipboardClose(Locale) | CloseClipboard; Locale for CF_LOCALE |
+| 0x7fc2 | GalaClipboardEmpty() | EmptyClipboard |
+| 0x7fc3 | GalaClipboardSet(Format, Kind, *Data, Length, *Serial) | Kind 0 memory, 1 a handle value (8 bytes), 2 delayed |
+| 0x7fc4 | GalaClipboardGet(Format, *Buffer, Length, *Info) | STATUS_BUFFER_TOO_SMALL with the record when short (Length 0: the size) |
+| 0x7fc5 | GalaClipboardInfo(*Record) | 32 bytes: sequence, flags (1 open by the caller, 2 open), open window, owner, count, the last empty's sequence |
+| 0x7fc6 | GalaClipboardFormats(*Formats, Max, *Count) | enumeration order |
+| 0x7fc7 | GalaClipboardListener(Hwnd, Add) | Add/RemoveClipboardFormatListener |
+
+- **Seams for the Wayland selection** (ROADMAP LD step 3's parts 2 and
+  3): `Clipboard::offer` puts bytes on the clipboard in one step as an
+  owner without a window (refused while a program has it open; the
+  listeners to tell come back), `Clipboard::text` reads CF_UNICODETEXT's
+  bytes; ROADMAP lists what the bridge needs beyond them.
+- **Limits** (ROADMAP LD step 3): delayed rendering, GDI handles across
+  processes and the bitmap and metafile synthesized formats, the viewer
+  chain (SetClipboardViewer), registered formats per process
+  (user32's table), CF_LOCALE's code pages (the system's), no DACL check
+  for WINSTA_ACCESSCLIPBOARD (stations have none).
+- **Observability**: events (category `ipc`, `"ev":"clipboard"`, each
+  with pid, tid, session and station): `open` (hwnd), `open denied`
+  (the holder's pid, tid and window), `empty` (the previous owner),
+  `set` (format, kind, size, serial), `get` (format, the source a
+  synthesized format came from, size, the setter's pid), `close`
+  (whether it changed, the listeners told), `listener`. The state dump
+  has a line per used clipboard: `statedump: session 1 WinSta0
+  clipboard: sequence 4, open by Some(Opener { pid, tid, hwnd }), owner
+  Some((pid, hwnd)), 4 formats [1, 16, 7, 13] (35 bytes), 1 listeners`
+  (a holder that never closes it blocks every other program's copy
+  and paste). The ledger has delayed rendering and handle formats
+  asked across processes.
 
 ### Presenters (B3a)
 
@@ -8093,7 +8343,7 @@ alone in `winstate/tests.rs`.
 
 ```
 Session (id, its object directory, its token defaults, presenter)
- └─ window station WinSta0 (later: clipboard, atoms)
+ └─ window station WinSta0 (its clipboard; later: atoms)
      └─ desktop "Default" = window state (registry, Z order, focus,
                             capture, pixel buffers) + input queue
                             + presenter: Console | Remote | None
@@ -8174,7 +8424,7 @@ on Windows too), 1 for the local console, 2+ for remote logons.
 
 Later: several window stations and desktops per session (CreateDesktop,
 OpenDesktop, SetThreadDesktop, SwitchDesktop, a secure desktop for
-credential prompts), clipboard and atom tables per window station, and
+credential prompts), atom tables per window station, and
 Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
 crate is a candidate) if mstsc compatibility is wanted. Without any gala
 work, QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
