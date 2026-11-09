@@ -10555,20 +10555,17 @@ const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
 };
 
 /// weston-simple-shm's window: 250 x 250, the first Wayland window and
-/// so at (64, 48) with shasha's frame (it asks for no decoration: the
-/// server's default), its client area from (65, 81). It paints a moving
-/// pattern inside a 20-pixel margin: many colours there, each frame
-/// different. The active caption above it; then Esc ends it.
+/// so at (64, 48), frameless (it negotiates no decoration: it decorates
+/// itself, which it does not). It paints a moving pattern inside a
+/// 20-pixel margin: many colours there, each frame different; where a
+/// frame's caption would be, its own pixels. Then Esc ends it.
 const SIMPLE_SHM_SCREEN: ScreenCheck = ScreenCheck {
     marker: "desktop: shown window 'simple-shm'",
     steps: &[
         ScreenStep {
             after: "",
             input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(80, 50, 40, 4, 0xeef2f7), // the active caption
-                PixelCheck::Varied(65 + 20, 81 + 20, 210, 210, 64),
-            ],
+            pixels: &[PixelCheck::Varied(64 + 20, 48 + 20, 210, 210, 64)],
         },
         ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
     ],

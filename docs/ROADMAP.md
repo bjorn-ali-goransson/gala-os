@@ -2175,8 +2175,7 @@ the next breakthroughs).
 - Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
   weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
   libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
-  desktop inside shasha's frame (the screen check: many colours in its
-  client area) and ends at Esc, its transcript real Linux's (against
+  desktop (the screen check: many colours in its window) and ends at Esc, its transcript real Linux's (against
   weston's headless backend). Built for it: fallocate (`posix_fallocate`
   of its buffer file; memfd_test, recorded on Linux: allocate, KEEP_SIZE,
   PUNCH_HOLE, the seals, the errors); frame callbacks done at the 60 Hz
@@ -2184,6 +2183,17 @@ the next breakthroughs).
   callbacks no longer redraws as fast as the CPU allows); the
   connection's summary line (requests, commits shown, frame callbacks
   done).
+- Step 2's server, what GTK 3 needs of it (host tests in
+  `kernel/src/wayland/tests.rs`): `wl_data_device_manager` 3 (GTK 3
+  makes its seat only once the global is there): data sources and
+  devices, `selection` (nil) before each keyboard focus, the client's
+  own selection kept and the replaced one cancelled, `start_drag`'s
+  source cancelled at once (ledgered), the protocol's errors; a toplevel
+  without a decoration object is client-side, frameless (xdg-decoration:
+  a client that does not negotiate decorates itself; GTK 3 never binds
+  the manager); a frameless window shows its window geometry, so a
+  client's translucent shadow outside it is not shown as black while
+  alpha is not composed (ARCHITECTURE "Frameless windows").
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2226,7 +2236,12 @@ the next breakthroughs).
      programs see and the change log keeps;
    - more of weston's demos as clients (simple-damage: buffer scale
      and transform, viewporter; eventdemo: input through libwayland),
-     each a `PREBUILT` member of the same package.
+     each a `PREBUILT` member of the same package;
+   - the selection shared across clients and with the Windows clipboard
+     (data offers; `receive`'s descriptor passed to the source's
+     `send`), drag-and-drop; alpha composed by shasha (translucent
+     windows, client-side shadows and rounded corners, which a
+     frameless window's view leaves out today).
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.

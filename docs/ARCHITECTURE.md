@@ -9349,8 +9349,8 @@ one more client of the same window-state interface.
 ### Objects and how they map
 
 Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
-`wl_output` 4, `wl_seat` 7 and `zxdg_decoration_manager_v1` 1 (registry
-names 1 to 6).
+`wl_output` 4, `wl_seat` 7, `zxdg_decoration_manager_v1` 1 and
+`wl_data_device_manager` 3 (registry names 1 to 7).
 
 | Wayland | gala |
 |---|---|
@@ -9358,11 +9358,12 @@ names 1 to 6).
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
 | `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry (a toplevel's: it places its popups), move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
-| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side, and a toplevel without a decoration object is framed too (wl_test; programs that draw their own frame negotiate it: GTK asks for client-side). Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, the surface's size, on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
+| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side. A toplevel without a decoration object is client-side: "if compositor and client do not negotiate the use of a server-side decoration using this protocol, clients continue to self-decorate as they see fit" (the protocol's description). GTK 3 never binds the manager and draws its own title bar (gtk_test), GTK 4 negotiates; a client that draws no frame (weston-simple-shm, wl_test) is shown without one. Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, its window geometry's size ("Frameless windows" below), on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |
-| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
-| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
+| `wl_data_device_manager`, `wl_data_source`, `wl_data_device` | the selection (copy and paste) and drag-and-drop, as far as a client that has them needs them: GTK 3 makes its seat only once this global is there. A data device hears `selection` (nil) right before each keyboard focus while the client holds no selection of its own (the protocol sends it "immediately before receiving keyboard focus"). `set_selection` makes a source the client's selection, kept for itself: the one it replaces gets `cancelled`, as does the old one when it is unset; it is offered to no other client nor to the Windows clipboard yet (ledgered as ignored). `start_drag` is not followed: its source gets `cancelled` at once, as for a drag the compositor ended (ledgered). Errors: a source used twice (`used_source`), a drag's source (one with actions) as a selection and actions on a used source (`invalid_source`), actions set twice or outside copy, move and ask (`invalid_action_mask`), a drag icon with another role (`role`) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet: "Frameless windows") |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) of the part the window shows (its view: the whole buffer, or a frameless window's geometry) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
 | `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
 
 A surface smaller than a framed window's minimum (134 x 34 outer) gets a
@@ -9370,6 +9371,33 @@ larger client area, white beyond the buffer; one larger than
 `winstate::MAX_SIDE` is clipped. When the client goes, its windows go
 (`Client::end`); when its process ends first, `desktop::process_ended`
 takes them.
+
+### Frameless windows
+
+A client that decorates itself (a client-side toplevel, and every
+popup) draws a shadow around its window, translucent pixels outside its
+window geometry (`xdg_surface.set_window_geometry`, xdg-shell's
+"visible bounds" of the window). shasha does not compose alpha yet, so
+those pixels would show as black. The window shows its **view** instead
+(`client::view_of`): the window geometry clamped to the buffer (as
+xdg-shell clamps it), or the whole buffer when none was set; a framed
+window always shows its whole buffer. So:
+
+- the window's size is the view's; its client origin shows the view's
+  corner, and pointer positions on it are moved by the view's offset
+  into surface coordinates (`surface_point`);
+- a popup's window is placed so that its geometry is at the place its
+  configure gave, and its children are placed against that geometry on
+  the screen (`geometry_origin`), as before;
+- the desktop's sizes (maximize, Snap) were already window geometry
+  sizes, which is what xdg-shell's configure carries: a client then
+  draws a buffer of that geometry (GTK drops its shadow when maximized
+  or tiled), and the window takes the view's size.
+
+What is left: the rounded corners of a client's title bar show the
+transparent pixels' colour (a few pixels); translucent windows and
+shadows need the compositor to compose alpha (shasha's presenter;
+ROADMAP LD "Next").
 
 ### Configure from the desktop
 
@@ -9411,9 +9439,11 @@ and the client draws the size it is told:
 - wm_capabilities (xdg_toplevel 5): maximize and minimize.
 
 Next: frame callbacks paced by the presenter's refresh; a decoration mode change
-on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
-clipboard, bridged to the Windows clipboard so copy and paste works
-across personalities), `wp_viewporter`, fractional scale,
+on a mapped window (the frame put on or taken off in place). Later: the
+selection shared (across clients, and bridged to the Windows clipboard
+so copy and paste works across personalities: data offers, receive with
+the descriptor passed to the source's `send`), drag-and-drop,
+`wp_viewporter`, fractional scale,
 `xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
 serve Linux clients through EGL. What the server allocates for a client
 is not charged to its process's quota yet ("Resource limits").
@@ -9457,10 +9487,11 @@ where its headless backend gives them (user/lx/wl_popup_test).
 - **Configure and map**: the first commit (no buffer) is answered with
   `xdg_popup.configure` (x, y, width, height) and `xdg_surface.configure`;
   the place goes with the serial as a toplevel's desktop place does, and
-  applies at the commit of a buffer after the ack. The popup window is at
-  the parent's geometry on the screen plus the place, less the popup's
-  own geometry offset (a client-side shadow outside the geometry), the
-  buffer's size; moved when the place, the geometry or the size changes.
+  applies at the commit of a buffer after the ack. The popup window shows
+  its window geometry (its view: "Frameless windows"; a client-side
+  shadow outside it is not shown), placed with that geometry at the
+  parent's geometry on the screen plus the place; moved when the place,
+  the geometry or the size changes.
   Mapping while the parent shows nothing is `invalid_popup_parent`. A
   null buffer unmaps it and the next commit configures it again.
 - **reposition** (version 3): new rules; `repositioned` with the token,
@@ -9652,13 +9683,14 @@ started with each desktop that has a shell.
   Wayland window does not follow as `wayland window action missing`
   (service: message; detail: the window).
 - The state dump lists the socket, each client (pid, objects, requests,
-  bytes of events waiting) and its objects (a surface's window, size and
-  frame callbacks; a buffer's size and stride; an xdg_surface's
+  bytes of events waiting) and its objects (a surface's window, size,
+  view and frame callbacks; a buffer's size and stride; an xdg_surface's
   configure state, the serials not acked and the place acked; a
   toplevel's title, app id, decoration object and sizing; a
   decoration's mode asked for; a positioner's rules; a popup's parent,
   rules, configured and applied place, where its window is, grab and
-  dismissed) and its seat (the pointer's surface and place, buttons
+  dismissed; a data source's mime types offered, whether it was used,
+  its actions and whether it is the selection) and its seat (the pointer's surface and place, buttons
   held, the keyboard's surface, keys down, modifiers, the active
   surface, the last press's serial, the popup grabs); the session's
   `input queue` line names the window with the desktop's popup grab.
@@ -9756,8 +9788,9 @@ started with each desktop that has a shell.
   and wl_seat, makes its 250x250 buffers in a `memfd` it fallocates,
   waits for the configure, then draws a moving pattern on every frame
   callback. The scenario runs it on a headless desktop
-  (`SIMPLE_SHM_SCREEN`: the active caption, many colours in its client
-  area), then presses Esc (its keyboard handler ends it). Its transcript
+  (`SIMPLE_SHM_SCREEN`: frameless, it negotiates no decoration; many
+  colours in its window), then presses Esc (its keyboard handler ends
+  it). Its transcript
   (`user/lx/weston-simple-shm/lx_simple_shm.txt`: "simple-shm exiting"
   on stderr, status 0) is real Linux's against weston's headless backend,
   ended there by SIGINT (the same flag Esc clears). The server's summary

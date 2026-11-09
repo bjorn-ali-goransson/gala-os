@@ -36,10 +36,11 @@
 //!   repeat_info). A point outside the surface (a client area larger than
 //!   the buffer) is outside: the pointer leaves. A surface unmapped with a
 //!   focus gets its leave; one destroyed loses it without one.
-//! - **Decorations**: a toplevel without a decoration object, or whose
-//!   object asks for nothing or for server-side, wears shasha's frame
-//!   (mode server_side); one that asks for client-side gets it, and a
-//!   frameless window. The mode is fixed when the window is made: asked
+//! - **Decorations**: a toplevel whose decoration object asks for
+//!   nothing or for server-side wears shasha's frame (mode server_side);
+//!   one that asks for client-side gets it, and a frameless window, as
+//!   does a toplevel without a decoration object (a client that does not
+//!   negotiate decorates itself: xdg-decoration's description; GTK 3). The mode is fixed when the window is made: asked
 //!   for again while mapped, the configure says the window's mode; the
 //!   next mapping (after a null buffer) follows the new one.
 //! - **Surfaces**: `attach`, `damage`/`damage_buffer` and `frame` are
@@ -163,10 +164,13 @@ pub static DECORATION_MANAGER: &Interface = find("zxdg_decoration_manager_v1");
 pub static TOPLEVEL_DECORATION: &Interface = find("zxdg_toplevel_decoration_v1");
 pub static XDG_POSITIONER: &Interface = find("xdg_positioner");
 pub static XDG_POPUP: &Interface = find("xdg_popup");
+pub static WL_DATA_DEVICE_MANAGER: &Interface = find("wl_data_device_manager");
+pub static WL_DATA_SOURCE: &Interface = find("wl_data_source");
+pub static WL_DATA_DEVICE: &Interface = find("wl_data_device");
 
 /// The globals offered, in registry order (name = index + 1), with the
 /// version offered.
-pub fn globals() -> [(&'static Interface, u32); 6] {
+pub fn globals() -> [(&'static Interface, u32); 7] {
     [
         (WL_COMPOSITOR, 6),
         (WL_SHM, 2),
@@ -175,6 +179,8 @@ pub fn globals() -> [(&'static Interface, u32); 6] {
         // As weston offers it: axis_discrete, not axis_value120.
         (WL_SEAT, 7),
         (DECORATION_MANAGER, 1),
+        // GTK 3 adds a seat only once this is there too.
+        (WL_DATA_DEVICE_MANAGER, 3),
     ]
 }
 
@@ -208,6 +214,12 @@ const DECORATION_UNCONFIGURED_BUFFER: u32 = 0;
 const DECORATION_ALREADY_CONSTRUCTED: u32 = 1;
 const DECORATION_ORPHANED: u32 = 2;
 const DECORATION_INVALID_MODE: u32 = 3;
+const DATA_SOURCE_INVALID_ACTION_MASK: u32 = 0;
+const DATA_SOURCE_INVALID_SOURCE: u32 = 1;
+const DATA_DEVICE_ROLE: u32 = 0;
+const DATA_DEVICE_USED_SOURCE: u32 = 1;
+/// wl_data_device_manager's dnd_action bits: copy, move, ask.
+const DND_ACTIONS: u32 = 7;
 
 /// xdg_toplevel's states (the configure's array).
 pub const STATE_MAXIMIZED: u32 = 1;
@@ -219,6 +231,9 @@ pub const STATE_TILED_BOTTOM: u32 = 8;
 /// xdg_toplevel's wm_capabilities: the desktop maximizes and minimizes.
 const CAPABILITY_MAXIMIZE: u32 = 2;
 const CAPABILITY_MINIMIZE: u32 = 4;
+/// wl_data_source.cancelled and wl_data_device.selection (event opcodes).
+const DATA_SOURCE_CANCELLED: u16 = 2;
+const DATA_DEVICE_SELECTION: u16 = 5;
 /// Configures sent and not acked kept per xdg_surface (an ack names one
 /// of them); beyond, the oldest is forgotten.
 pub const MAX_CONFIGURES: usize = 16;
@@ -460,6 +475,33 @@ struct Surface {
     window: Option<u32>,
     /// The size of the buffer last shown.
     size: (u32, u32),
+    /// The part of it the window shows (x, y, width, height in surface
+    /// coordinates): a frameless window its window geometry, clamped to
+    /// the buffer (`view_of`), a framed one all of it.
+    view: View,
+}
+
+/// A window's part of its surface: x, y, width, height.
+type View = (i32, i32, u32, u32);
+
+/// What a window shows of a `width` x `height` buffer: a frameless one
+/// (client-side decorations) its window geometry, the "visible bounds"
+/// (xdg-shell), clamped to the buffer as xdg-shell clamps it: a client's
+/// shadows outside it are not shown, since shasha does not compose alpha
+/// (a client drawing its own frame draws them translucent, which would
+/// show as black). A framed window, or one without a geometry, shows the
+/// whole buffer.
+fn view_of(geometry: Option<Rect>, decorated: bool, width: u32, height: u32) -> View {
+    let whole = (0, 0, width, height);
+    let Some((gx, gy, gw, gh)) = geometry.filter(|_| !decorated) else { return whole };
+    let (w, h) = (i64::from(width), i64::from(height));
+    let (x0, y0) = (i64::from(gx).clamp(0, w), i64::from(gy).clamp(0, h));
+    let x1 = (i64::from(gx) + i64::from(gw)).clamp(0, w);
+    let y1 = (i64::from(gy) + i64::from(gh)).clamp(0, h);
+    if x1 <= x0 || y1 <= y0 {
+        return whole;
+    }
+    (x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
 struct XdgSurface {
@@ -562,6 +604,18 @@ enum Kind<F> {
     Keyboard,
     DecorationManager,
     Decoration(Decoration),
+    DataDeviceManager,
+    DataSource(DataSource),
+    DataDevice,
+}
+
+/// A wl_data_source: what it offers (counted, not kept: nothing reads it
+/// yet), whether set_selection or start_drag used it, its drag actions.
+#[derive(Default)]
+struct DataSource {
+    mime_types: u32,
+    used: bool,
+    actions: Option<u32>,
 }
 
 struct Decoration {
@@ -613,6 +667,9 @@ pub struct Client<F> {
     out_fds: VecDeque<(usize, F)>,
     seat: Seat,
     serial: u32,
+    /// The client's selection (`wl_data_device.set_selection`'s source):
+    /// kept for itself, offered to no other client yet.
+    selection: Option<u32>,
     /// The popups that grabbed, bottom (the toplevel's) first: the last
     /// is the topmost, the only one the client may destroy, and the one
     /// with the keyboard focus once shown.
@@ -695,6 +752,7 @@ impl<F> Client<F> {
             out_fds: VecDeque::new(),
             seat: Seat::default(),
             serial: 0,
+            selection: None,
             grabs: Vec::new(),
             due: Vec::new(),
             requests: 0,
@@ -776,6 +834,7 @@ impl<F> Client<F> {
         self.out_fds.clear();
         self.due.clear();
         self.grabs.clear();
+        self.selection = None;
     }
 
     /// Its objects for the state dump, one per line.
@@ -785,10 +844,11 @@ impl<F> Client<F> {
             let (name, v) = (o.iface.name, o.version);
             match &o.kind {
                 Kind::Surface(s) => out(format_args!(
-                    "{name}#{id} v{v}: window {:?}, size {}x{}, xdg {:?}, {} frame callbacks pending",
+                    "{name}#{id} v{v}: window {:?}, size {}x{}, view {:?}, xdg {:?}, {} frame callbacks pending",
                     s.window,
                     s.size.0,
                     s.size.1,
+                    s.view,
                     s.xdg,
                     s.pending.frames.len()
                 )),
@@ -824,6 +884,13 @@ impl<F> Client<F> {
                 Kind::Decoration(d) => out(format_args!(
                     "{name}#{id} v{v}: toplevel {}, mode asked {:?}",
                     d.toplevel, d.wanted
+                )),
+                Kind::DataSource(d) => out(format_args!(
+                    "{name}#{id} v{v}: {} mime types, used {}, actions {:?}, selection {}",
+                    d.mime_types,
+                    d.used,
+                    d.actions,
+                    self.selection == Some(id as u32)
                 )),
                 _ => out(format_args!("{name}#{id} v{v}")),
             }
@@ -1167,6 +1234,9 @@ impl<F> Client<F> {
             Some(Kind::Keyboard) => Tag::Keyboard,
             Some(Kind::DecorationManager) => Tag::DecorationManager,
             Some(Kind::Decoration(_)) => Tag::Decoration,
+            Some(Kind::DataDeviceManager) => Tag::DataDeviceManager,
+            Some(Kind::DataSource(_)) => Tag::DataSource,
+            Some(Kind::DataDevice) => Tag::DataDevice,
             None => return Ok(()),
         };
         let r = Req { id, version, iface, sig, op, args, fd };
@@ -1203,6 +1273,9 @@ impl<F> Client<F> {
             }
             Tag::DecorationManager => self.decoration_manager(host, r),
             Tag::Decoration => self.decoration_request(host, r),
+            Tag::DataDeviceManager => self.data_device_manager(host, r),
+            Tag::DataSource => self.data_source_request(host, r),
+            Tag::DataDevice => self.data_device_request(host, r),
         }
     }
 
@@ -1266,6 +1339,8 @@ impl<F> Client<F> {
             Kind::Seat
         } else if core::ptr::eq(g, DECORATION_MANAGER) {
             Kind::DecorationManager
+        } else if core::ptr::eq(g, WL_DATA_DEVICE_MANAGER) {
+            Kind::DataDeviceManager
         } else {
             Kind::Output
         };
@@ -1797,7 +1872,9 @@ impl<F> Client<F> {
 
     /// The decoration mode of toplevel `t`: its window's while mapped,
     /// else what its decoration object asked for (server-side when it
-    /// asked nothing, or has none).
+    /// asked nothing); without a decoration object client-side: a client
+    /// that does not negotiate decorates itself (xdg-decoration's
+    /// description), as GTK 3 does, which never binds the manager.
     fn mode(&mut self, t: u32) -> u32 {
         let Some(top) = self.toplevel(t) else { return MODE_SERVER_SIDE };
         let (x, decoration) = (top.xdg, top.decoration);
@@ -1816,7 +1893,8 @@ impl<F> Client<F> {
             {
                 MODE_CLIENT_SIDE
             }
-            _ => MODE_SERVER_SIDE,
+            Some(_) => MODE_SERVER_SIDE,
+            None => MODE_CLIENT_SIDE,
         }
     }
 
@@ -1845,21 +1923,27 @@ impl<F> Client<F> {
             None => 0,
         };
         let decorated = self.mode(t) == MODE_SERVER_SIDE;
+        let x = self.toplevel(t).map_or(0, |top| top.xdg);
+        let geometry = self.xdg(x).and_then(|xs| xs.geometry);
         let Some(s) = self.surface(sid) else { return Ok(None) };
-        let (had, resized) = (s.window, s.size != (width, height));
+        let decorated = if s.window.is_some() { s.decorated } else { decorated };
+        let view = view_of(geometry, decorated, width, height);
+        let (had, changed) = (s.window, s.view != view);
+        let resized = (s.view.2, s.view.3) != (view.2, view.3);
         s.size = (width, height);
+        s.view = view;
         let window = match had {
             Some(w) => {
                 if let Some((x, y)) = place {
-                    host.window_place(w, x, y, width, height, s.decorated);
+                    host.window_place(w, x, y, view.2, view.3, s.decorated);
                 } else if resized {
-                    host.window_resize(w, width, height, s.decorated);
+                    host.window_resize(w, view.2, view.3, s.decorated);
                 }
                 Some(w)
             }
             None => {
                 s.decorated = decorated;
-                let w = host.window_create(&title[..n], width, height, decorated);
+                let w = host.window_create(&title[..n], view.2, view.3, decorated);
                 host.note(Note::Mapped { surface: sid, window: w });
                 w
             }
@@ -1867,12 +1951,13 @@ impl<F> Client<F> {
         if let Some(s) = self.surface(sid) {
             s.window = window;
         }
-        let rows = self.present(host, b, window, had.is_none() || resized, damage, height)?;
+        let rows = self.present(host, b, window, had.is_none() || changed, damage, view)?;
         Ok(Some(((width, height), rows)))
     }
 
-    /// Copies buffer `b` (`height` rows) into `window`: every row of a new
-    /// or resized one (`whole`), else the damaged ones. The rows copied.
+    /// Copies the `view` of buffer `b` into `window`: every row of a new
+    /// or changed one (`whole`), else the damaged ones. The rows copied
+    /// (buffer rows).
     fn present<H: Host<Fd = F>>(
         &mut self,
         host: &mut H,
@@ -1880,24 +1965,26 @@ impl<F> Client<F> {
         window: Option<u32>,
         whole: bool,
         damage: Option<(i64, i64)>,
-        height: u32,
+        view: View,
     ) -> Result<Option<(u32, u32)>> {
         let Some(w) = window else { return Ok(None) };
+        let (top, bottom) = (i64::from(view.1), i64::from(view.1) + i64::from(view.3));
         let rows = if whole {
-            Some((0, height))
+            Some((top as u32, bottom as u32))
         } else {
             damage.and_then(|(from, to)| {
-                let (from, to) = (from.clamp(0, height.into()), to.clamp(0, height.into()));
+                let (from, to) = (from.clamp(top, bottom), to.clamp(top, bottom));
                 (from < to).then_some((from as u32, to as u32))
             })
         };
         if let Some((from, to)) = rows {
-            self.copy(host, b, w, from, to)?;
+            self.copy(host, b, w, from, to, view)?;
         }
         Ok(rows)
     }
 
-    /// Copies rows `from..to` of buffer `b` into window `w`.
+    /// Copies rows `from..to` of buffer `b`, the columns of `view`, into
+    /// window `w` (its row 0 is the view's first).
     fn copy<H: Host<Fd = F>>(
         &mut self,
         host: &mut H,
@@ -1905,9 +1992,11 @@ impl<F> Client<F> {
         w: u32,
         from: u32,
         to: u32,
+        view: View,
     ) -> Result {
         let Some(Object { kind: Kind::Buffer(buf), .. }) = self.object(b) else { return Ok(()) };
-        let (width, stride, offset) = (buf.width, buf.stride, buf.offset);
+        let (stride, offset) = (buf.stride, buf.offset + 4 * view.0 as u64);
+        let width = view.2;
         let row_bytes = 4 * width as usize;
         let mut bytes: Vec<u8> = Vec::new();
         let mut pixels: Vec<u32> = Vec::new();
@@ -1941,7 +2030,7 @@ impl<F> Client<F> {
                     bytes.chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
                 );
             }
-            host.window_present(w, y, width, rows, &pixels);
+            host.window_present(w, y - view.1 as u32, width, rows, &pixels);
             y += rows;
         }
         Ok(())
@@ -1968,6 +2057,7 @@ impl<F> Client<F> {
         }
         if let Some(s) = self.surface(sid) {
             s.size = (0, 0);
+            s.view = (0, 0, 0, 0);
             if let Some(w) = s.window.take() {
                 host.window_destroy(w);
             }
@@ -2076,13 +2166,24 @@ impl<F> Client<F> {
     }
 
     /// The screen position of the window geometry of xdg_surface `x`
-    /// (None while it shows no window).
+    /// (None while it shows no window): its window's client origin shows
+    /// the view's corner.
     fn geometry_origin<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32) -> Option<(i32, i32)> {
         let (surface, geometry) = self.xdg(x).map(|xs| (xs.surface, xs.geometry))?;
-        let window = self.surface(surface)?.window?;
-        let (sx, sy) = host.client_origin(window)?;
+        let (window, view) = self.surface(surface).map(|s| (s.window, s.view))?;
+        let (sx, sy) = host.client_origin(window?)?;
         let (gx, gy) = geometry.map_or((0, 0), |g| (g.0, g.1));
-        Some((sx.saturating_add(gx), sy.saturating_add(gy)))
+        Some((sx.saturating_add(gx - view.0), sy.saturating_add(gy - view.1)))
+    }
+
+    /// A point of surface `sid`'s window's client area in surface
+    /// coordinates (the view's corner is the client area's).
+    fn surface_point(&self, sid: u32, x: i32, y: i32) -> (i32, i32) {
+        let (vx, vy) = match self.object(sid) {
+            Some(Object { kind: Kind::Surface(s), .. }) => (s.view.0, s.view.1),
+            _ => (0, 0),
+        };
+        (x.saturating_add(vx), y.saturating_add(vy))
     }
 
     /// Where popup `p`'s parent's window geometry is on the screen: the
@@ -2239,26 +2340,31 @@ impl<F> Client<F> {
         pp.origin = Some(origin);
         let (ax, ay) = pp.at.unwrap_or((pp.configured.0, pp.configured.1));
         let (gx, gy) = geometry.map_or((0, 0), |g| (g.0, g.1));
+        // Frameless: the window shows the popup's window geometry, which
+        // goes at the place (less what of it the buffer clamps).
+        let view = view_of(geometry, false, width, height);
         let at = (
-            origin.0.saturating_add(ax).saturating_sub(gx),
-            origin.1.saturating_add(ay).saturating_sub(gy),
+            origin.0.saturating_add(ax).saturating_sub(gx - view.0),
+            origin.1.saturating_add(ay).saturating_sub(gy - view.1),
         );
         let moved = pp.shown_at != Some(at);
         pp.shown_at = Some(at);
         let grab = pp.grab;
         let Some(s) = self.surface(sid) else { return Ok(None) };
-        let (had, resized) = (s.window, s.size != (width, height));
+        let (had, changed) = (s.window, s.view != view);
+        let resized = (s.view.2, s.view.3) != (view.2, view.3);
         s.size = (width, height);
+        s.view = view;
         s.decorated = false;
         let window = match had {
             Some(w) => {
                 if moved || resized {
-                    host.window_place(w, at.0, at.1, width, height, false);
+                    host.window_place(w, at.0, at.1, view.2, view.3, false);
                 }
                 Some(w)
             }
             None => {
-                let w = host.popup_create(at.0, at.1, width, height);
+                let w = host.popup_create(at.0, at.1, view.2, view.3);
                 host.note(Note::Mapped { surface: sid, window: w });
                 w
             }
@@ -2266,7 +2372,7 @@ impl<F> Client<F> {
         if let Some(s) = self.surface(sid) {
             s.window = window;
         }
-        let rows = self.present(host, b, window, had.is_none() || resized, damage, height)?;
+        let rows = self.present(host, b, window, had.is_none() || changed, damage, view)?;
         if had.is_none() && grab {
             self.grab_changed(host)?;
         }
@@ -2295,6 +2401,7 @@ impl<F> Client<F> {
         self.drop_foci(host, sid)?;
         if let Some(s) = self.surface(sid) {
             s.size = (0, 0);
+            s.view = (0, 0, 0, 0);
             if let Some(w) = s.window.take() {
                 host.window_destroy(w);
             }
@@ -3012,6 +3119,167 @@ impl<F> Client<F> {
         }
     }
 
+    fn data_device_manager<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // create_data_source(id)
+            (0, [Arg::NewId(id)]) => {
+                let kind = Kind::DataSource(DataSource::default());
+                self.insert(host, *id, WL_DATA_SOURCE, r.version, kind)
+            }
+            // get_data_device(id, seat): the client's selection, none, is
+            // told before each keyboard focus (`keyboard_enter`).
+            (1, [Arg::NewId(id), Arg::Object(Some(_))]) => {
+                self.insert(host, *id, WL_DATA_DEVICE, r.version, Kind::DataDevice)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn data_source_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let id = r.id;
+        let Some(Object { kind: Kind::DataSource(d), .. }) = self.object_mut(id) else {
+            return Ok(());
+        };
+        match (r.op, r.args) {
+            // offer(mime_type)
+            (0, [Arg::String(_)]) => {
+                d.mime_types = d.mime_types.saturating_add(1);
+                Ok(())
+            }
+            // destroy: the selection it was goes with it.
+            (1, []) => {
+                if self.selection == Some(id) {
+                    self.selection = None;
+                }
+                self.delete(host, id)
+            }
+            // set_actions(dnd_actions): once, only known actions, and only
+            // for a source not used yet (for a drag: not as a selection).
+            (2, [Arg::Uint(actions)]) => {
+                let (bad, again, used) = (actions & !DND_ACTIONS != 0, d.actions.is_some(), d.used);
+                if bad || again {
+                    let why = if bad { "invalid action mask" } else { "actions already set" };
+                    return Err(self.fail(
+                        host,
+                        id,
+                        DATA_SOURCE_INVALID_ACTION_MASK,
+                        format_args!("wl_data_source@{id}: {why} ({actions:#x})"),
+                    ));
+                }
+                if used {
+                    return Err(self.fail(
+                        host,
+                        id,
+                        DATA_SOURCE_INVALID_SOURCE,
+                        format_args!("wl_data_source@{id} was used already"),
+                    ));
+                }
+                d.actions = Some(*actions);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes source `sid` for set_selection or start_drag: once only
+    /// (`used_source` on the device), and a drag's source (one with
+    /// actions) is no selection (`invalid_source` on the source).
+    fn use_source<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        device: u32,
+        sid: u32,
+        selection: bool,
+    ) -> Result {
+        let Some(Object { kind: Kind::DataSource(d), .. }) = self.object_mut(sid) else {
+            return Ok(());
+        };
+        let (used, drag) = (d.used, d.actions.is_some());
+        d.used = true;
+        if used {
+            return Err(self.fail(
+                host,
+                device,
+                DATA_DEVICE_USED_SOURCE,
+                format_args!("wl_data_source@{sid} has already been used"),
+            ));
+        }
+        if selection && drag {
+            return Err(self.fail(
+                host,
+                sid,
+                DATA_SOURCE_INVALID_SOURCE,
+                format_args!("wl_data_source@{sid} has drag-and-drop actions: not a selection"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn data_device_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // start_drag(source, origin, icon, serial): drag-and-drop is not
+            // done yet: the source, if any, is cancelled at once, as for a
+            // drag the compositor ended.
+            (0, [Arg::Object(source), Arg::Object(Some(_)), Arg::Object(icon), _]) => {
+                if let Some(icon) = *icon
+                    && self.surface(icon).is_some_and(|s| s.xdg.is_some() || s.window.is_some())
+                {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        DATA_DEVICE_ROLE,
+                        format_args!("wl_surface@{icon} has another role than a drag icon"),
+                    ));
+                }
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                if let Some(sid) = *source {
+                    self.use_source(host, r.id, sid, false)?;
+                    self.event(host, sid, WL_DATA_SOURCE, DATA_SOURCE_CANCELLED, &[])?;
+                }
+                Ok(())
+            }
+            // set_selection(source, serial): the client's selection; the
+            // one it replaces is cancelled. Offered to no other client (nor
+            // to the Windows clipboard) yet.
+            (1, [Arg::Object(source), _]) => {
+                if let Some(sid) = *source {
+                    self.use_source(host, r.id, sid, true)?;
+                }
+                let old = core::mem::replace(&mut self.selection, *source);
+                if let Some(old) = old.filter(|&o| Some(o) != *source) {
+                    self.event(host, old, WL_DATA_SOURCE, DATA_SOURCE_CANCELLED, &[])?;
+                }
+                if source.is_some() {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                Ok(())
+            }
+            // release (version 2)
+            (2, []) => self.delete(host, r.id),
+            _ => Ok(()),
+        }
+    }
+
+    /// wl_data_device.selection before a keyboard focus: no selection
+    /// (nil) unless the client holds its own, which it keeps knowing.
+    fn selection_before_focus<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
+        if self.selection.is_some() {
+            return Ok(());
+        }
+        for i in 1..self.objects.len() {
+            if matches!(&self.objects[i], Some(o) if matches!(o.kind, Kind::DataDevice)) {
+                self.event(
+                    host,
+                    i as u32,
+                    WL_DATA_DEVICE,
+                    DATA_DEVICE_SELECTION,
+                    &[Arg::Object(None)],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn decoration_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
         let d = r.id;
         let t = match self.object(d) {
@@ -3143,9 +3411,11 @@ impl<F> Client<F> {
                 self.desktop_sizing(host, sid, window, input)?;
             }
             Input::Motion { x, y, .. } => {
+                let (x, y) = self.surface_point(sid, x, y);
                 self.pointer_at(host, sid, x, y)?;
             }
             Input::Button { x, y, button, pressed, .. } => {
+                let (x, y) = self.surface_point(sid, x, y);
                 let bit = if button == input::BTN_LEFT { 1 } else { 2 };
                 if !pressed && self.seat.buttons & bit == 0 {
                     // Pressed elsewhere: not this client's.
@@ -3174,6 +3444,7 @@ impl<F> Client<F> {
                 host.note(note("button", button, pressed.into()));
             }
             Input::Wheel { x, y, delta, .. } => {
+                let (x, y) = self.surface_point(sid, x, y);
                 if delta == 0 || !self.pointer_at(host, sid, x, y)? {
                     return Ok(());
                 }
@@ -3453,6 +3724,7 @@ impl<F> Client<F> {
         self.seat.keyboard = Some(sid);
         self.seat.keys.clear();
         self.seat.depressed = 0;
+        self.selection_before_focus(host)?;
         for i in 1..self.objects.len() {
             if matches!(&self.objects[i], Some(o) if matches!(o.kind, Kind::Keyboard)) {
                 self.keyboard_enter_one(host, i as u32, sid)?;
@@ -3592,6 +3864,9 @@ enum Tag {
     Keyboard,
     DecorationManager,
     Decoration,
+    DataDeviceManager,
+    DataSource,
+    DataDevice,
 }
 
 /// A decoded request.
