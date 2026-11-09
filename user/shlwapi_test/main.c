@@ -42,16 +42,31 @@
  *   it, and it then opens without.
  * - The URL functions, AssocQueryStringW and SHCreateStreamOnFileEx:
  *   url.c (Wine's url.c vectors).
+ * - What ODT's setup.exe imports beside them (shell_checks):
+ *   PathIsUNCW (the documented examples), PathGetArgsW (after the first
+ *   space outside quotes, else the end), PathGetCharTypeW (GCT_* of a
+ *   letter, a space, '*', '\', '|', a non-ASCII letter),
+ *   PathGetDriveNumberW (path.c test_PathGetDriveNumber), StrRetToBufW
+ *   (string.c test_StrXXX_overflows: a STRRET_WSTR too long is
+ *   E_NOT_SUFFICIENT_BUFFER with an empty buffer, STRRET_CSTR copied,
+ *   no string or an unknown type E_FAIL with an empty buffer).
  *
- * Prints "shlwapi_test: ok" or exits with the number of the failing
+ * One source for shlwapi_test (x64) and wow64_shlwapi_test (x86,
+ * build.sh). Prints "<name>: ok" or exits with the number of the failing
  * check. */
 #define COBJMACROS
 #include <windows.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 #include <stdio.h>
 
+/* The program's name in its output (build.sh: wow64_shlwapi_test for x86). */
+#ifndef NAME
+#define NAME "shlwapi_test"
+#endif
+
 static int check;
-#define CHECK(cond) do { check++; if (!(cond)) { printf("shlwapi_test: check %d (%s line %d) failed\n", check, __FILE_NAME__, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
+#define CHECK(cond) do { check++; if (!(cond)) { printf(NAME ": check %d (%s line %d) failed\n", check, __FILE_NAME__, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
 
 #ifndef INTERNET_MAX_URL_LENGTH
 #define INTERNET_MAX_URL_LENGTH 2084
@@ -70,6 +85,56 @@ static int combine(const wchar_t *dir, const wchar_t *file, const wchar_t *want)
 
 static int ext_at(const wchar_t *path, size_t at) {
     return PathFindExtensionW(path) == path + at;
+}
+
+static void shell_checks(void) {
+    CHECK(PathIsUNCW(L"\\\\path1\\path2"));
+    CHECK(PathIsUNCW(L"\\\\path1"));
+    CHECK(!PathIsUNCW(L"acme\\path4\\path5"));
+    CHECK(!PathIsUNCW(L"C:\\path3"));
+
+    static const wchar_t cmd[] = L"test.exe temp.txt sample.doc";
+    CHECK(PathGetArgsW(cmd) == cmd + 9);
+    static const wchar_t quoted[] = L"\"C:\\Program Files\\a.exe\" x";
+    CHECK(PathGetArgsW(quoted) == quoted + 25);
+    static const wchar_t none[] = L"noargs";
+    CHECK(PathGetArgsW(none) == none + 6);
+
+    CHECK(PathGetCharTypeW(L'a') == (GCT_LFNCHAR | GCT_SHORTCHAR));
+    CHECK(PathGetCharTypeW(L' ') == GCT_LFNCHAR);
+    CHECK(PathGetCharTypeW(L'*') == GCT_WILD);
+    CHECK(PathGetCharTypeW(L'\\') == GCT_SEPARATOR);
+    CHECK(PathGetCharTypeW(L'|') == GCT_INVALID);
+    CHECK(PathGetCharTypeW(0xe9) == (GCT_LFNCHAR | GCT_SHORTCHAR));
+
+    CHECK(PathGetDriveNumberW(NULL) == -1);
+    CHECK(PathGetDriveNumberW(L"a:\\") == 0);
+    CHECK(PathGetDriveNumberW(L"\\\\?\\C:\\dir\\file") == 2);
+    CHECK(PathGetDriveNumberW(L"file:///c:\\test.file") == -1);
+    CHECK(PathGetDriveNumberW(L"") == -1);
+
+    wchar_t buf[16];
+    STRRET r;
+    static const wchar_t long_text[] = L"abbcccdddd"; /* 10 characters */
+    memset(buf, 0xbf, sizeof buf);
+    r.uType = STRRET_WSTR;
+    r.pOleStr = CoTaskMemAlloc(sizeof long_text);
+    CHECK(r.pOleStr != NULL);
+    memcpy(r.pOleStr, long_text, sizeof long_text);
+    CHECK(StrRetToBufW(&r, NULL, buf, 10) == E_NOT_SUFFICIENT_BUFFER);
+    CHECK(buf[0] == 0 && buf[9] == 0 && buf[10] == 0xbfbf);
+    memset(buf, 0xbf, sizeof buf);
+    r.uType = STRRET_CSTR;
+    strcpy(r.cStr, "abbcccddd");
+    CHECK(StrRetToBufW(&r, NULL, buf, 10) == S_OK);
+    CHECK(wcscmp(buf, L"abbcccddd") == 0);
+    memset(buf, 0xbf, sizeof buf);
+    r.uType = STRRET_WSTR;
+    r.pOleStr = NULL;
+    CHECK(StrRetToBufW(&r, NULL, buf, 10) == E_FAIL && buf[0] == 0);
+    memset(buf, 0xbf, sizeof buf);
+    r.uType = 3;
+    CHECK(StrRetToBufW(&r, NULL, buf, 10) == E_FAIL && buf[0] == 0);
 }
 
 int main(void) {
@@ -245,7 +310,8 @@ int main(void) {
     url_checks();
     assoc_checks();
     stream_checks();
+    shell_checks();
 
-    printf("shlwapi_test: ok\n");
+    printf(NAME ": ok\n");
     return 0;
 }

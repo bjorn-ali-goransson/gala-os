@@ -3796,7 +3796,13 @@ x64 and x86.
   _TRANSACTED are E_INVALIDARG), StrToIntW (decimal with an optional
   '-', wrapping), StrTrimW, PathIsFileSpecW, and
   SHCreateMemStream (#12, ole32's memory stream, loaded when first
-  needed).
+  needed); what ODT's setup.exe imports beside them (`shell.rs`):
+  PathIsUNCW, PathGetArgsW, PathGetCharTypeW (GCT_SHORTCHAR by Wine's
+  table of Windows' answers), PathGetDriveNumberW (after `\\?\`) and
+  StrRetToBufW (STRRET typed for both widths; a STRRET_WSTR's string is
+  freed with ole32's CoTaskMemFree, loaded when first needed; too long:
+  E_NOT_SUFFICIENT_BUFFER and an empty buffer). x64 and x86:
+  `wow64_shlwapi_test` is shlwapi_test's C source built for x86.
 - **rpcrt4**: UUID functions (`rpcrt4_test`). **netapi32**:
   NetWkstaGetInfo; NetUserGetInfo levels 0 and 1 for the accounts
   LookupAccountNameW finds as users (all USER_PRIV_USER, password age 0:
@@ -6594,6 +6600,15 @@ windows can use them too.
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
+  - Call cancellation (`lib.rs`): CoEnableCallCancellation counts per
+    thread (in the thread's OLE state; CoUninitialize's last call resets
+    it), CoDisableCallCancellation undoes one (S_OK when that disables
+    it, CO_E_CANCEL_DISABLED while enables remain or when there were
+    none); CoCancelCall is CO_E_CANCEL_DISABLED for a thread that has not
+    enabled it, otherwise E_NOINTERFACE: gala's COM never has a pending
+    cross-apartment call to cancel (recorded,
+    `ole32.dll!CoCancelCall(no pending call)`). `combase_test`,
+    `wow64_combase_test`.
 - **dbghelp** (`user/dbghelp/src/image.rs`, `symbols.rs`, `stack.rs`;
   `dbghelp_test`): ImageNtHeader checks "MZ" and "PE\0\0";
   SymSrvGetFileIndexInfoW reads an image file's headers (no mapping):

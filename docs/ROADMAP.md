@@ -1583,20 +1583,35 @@ need gala's.
      Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator
      (not registered, recorded; REGDB_E_CLASSNOTREG, survived) and opens
      an asynchronous wininet session (`wininet.dll!InternetOpenW(INTERNET_
-     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). Where the run
-     ends now: setup.exe delay-loads `SHLWAPI.dll!PathIsUNCW`, which
-     gala's shlwapi lacks: the elevated copy ends with 0xc06d007f (crash
-     report: "delay load of SHLWAPI.dll!PathIsUNCW"), and its parent with
-     it. ODT has written no log yet (`dump=C:/gala/odtlog` finds no
-     directory).
+     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). It then uses
+     shlwapi's path helpers (done: PathIsUNCW, PathGetArgsW,
+     PathGetCharTypeW, PathGetDriveNumberW, StrRetToBufW, every shlwapi
+     function it imports; `shlwapi_test` and its x86 twin
+     `wow64_shlwapi_test`) and ole32's call cancellation (done:
+     CoEnableCallCancellation, CoDisableCallCancellation, CoCancelCall;
+     `combase_test`, `wow64_combase_test`), asks COM for BITS's
+     BackgroundCopyManager ({4991D34B-80A1-4291-83B6-3328366B9097}, an
+     out-of-process server: `ole32.dll!CoGetClassObject(out-of-process
+     server)`, recorded, survived) and the zone policy of the CDN's URL
+     (`urlmon.dll!ProcessUrlAction(http://officecdn.microsoft.com/...)`).
+     Where the run ends now: setup.exe delay-loads wintrust.dll, which
+     gala has for x64 only (`wintrust.dll` missing dll): the elevated
+     copy ends with 0xc06d007e (crash report: "delay-loaded DLL not
+     found"), and its parent with it. ODT has written no log yet
+     (`dump=C:/gala/odtlog` finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: shlwapi's PathIsUNCW (and
-     what else of shlwapi setup.exe imports), WinINet's asynchronous
-     sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
-     RtlConvertDeviceFamilyInfoToString in ntdll, iphlpapi's
-     CreateSortedAddressPairs (imported, not yet called), urlmon's
+     Next, in the order the run reaches them: wintrust.dll for i686 (and
+     its WinVerifyTrust, the signature check), then the other DLLs
+     setup.exe imports that gala has no i686 build of (xmllite,
+     webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
+     Office's own) and the functions its imports lack (shell32's
+     SHGetSettings, user32's CheckRadioButton and SetCoalescableTimer,
+     iphlpapi's CreateSortedAddressPairs); BITS (the
+     BackgroundCopyManager it asks for: absent, survived); WinINet's
+     asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
+     RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
      ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
      root), then what the run reaches after them (its log
@@ -1607,10 +1622,8 @@ need gala's.
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported), then
-     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
-     (the signature check), xmllite, webservices,
-     iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
-     and shell32 functions; FormatMessage's system text for
+     CryptQueryObject's embedded PKCS #7 (the signature check with
+     WinVerifyTrust); FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),

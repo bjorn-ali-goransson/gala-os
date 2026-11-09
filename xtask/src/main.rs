@@ -1848,7 +1848,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shlwapi_test", "shlwapi.dll", "Windows/System32"),
     ("shlwapi_test", "advapi32.dll", "Windows/System32"),
     ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("shlwapi_test", "ole32.dll", "Windows/System32"),
     ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    // shlwapi_test's source built for x86 (user/shlwapi_test/build.sh).
+    ("wow64_shlwapi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_shlwapi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "user/bin/wow64_shlwapi_test.exe", "gala"),
     ("ole32_test", "ntdll.dll", "Windows/System32"),
     ("ole32_test", "kernel32.dll", "Windows/System32"),
     ("ole32_test", "msvcrt.dll", "Windows/System32"),
@@ -6831,6 +6842,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // The same through WOW64 (shlwapi_test's source built for x86 by
+        // its build.sh), on SysWOW64's shlwapi: ODT's setup.exe's.
+        name: "wow64_shlwapi_test",
+        cmdline: "qemu_exit run=wow64_shlwapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
         // IRunnableObject helpers and proxy blankets against documented
         // behaviour, for what wxWidgets and SQL Server LocalDB import
@@ -10277,6 +10296,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_schannel_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wininet_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_shlwapi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

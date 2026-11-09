@@ -33,7 +33,10 @@
 //!   RO_ERROR_REPORTING_USESETERRORINFO at start; RoOriginateErrorW FALSE
 //!   for S_OK, TRUE for a failure, whose restricted error object
 //!   GetRestrictedErrorInfo hands over with the HRESULT and the message
-//!   (GetErrorDetails), leaving none behind.
+//!   (GetErrorDetails), leaving none behind;
+//! - ole32's call cancellation (`cancellation`; Microsoft's
+//!   documentation of CoEnableCallCancellation, CoDisableCallCancellation
+//!   and CoCancelCall).
 //!
 //! The same source builds `wow64_combase_test`, the 32-bit (x86) program.
 //! Prints `combase_test: ok` (`wow64_combase_test: ok`), or `<name>:
@@ -76,6 +79,17 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn SysFreeString(s: *mut u16);
     fn SysStringLen(s: *const u16) -> u32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ole32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ole32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn CoEnableCallCancellation(reserved: *mut c_void) -> HResult;
+    fn CoDisableCallCancellation(reserved: *mut c_void) -> HResult;
+    fn CoCancelCall(thread: u32, timeout: u32) -> HResult;
 }
 
 #[cfg_attr(
@@ -796,6 +810,28 @@ fn run() -> Result<(), u32> {
     activation(&mut c)?;
     package_manager(&mut c)?;
     errors(&mut c)?;
+    cancellation(&mut c)?;
+    Ok(())
+}
+
+/// ole32's call cancellation (ODT's setup.exe imports it): CoCancelCall
+/// before CoEnableCallCancellation CO_E_CANCEL_DISABLED; two enables
+/// S_OK; with no call pending CoCancelCall finds no cancel object
+/// (E_NOINTERFACE); the first disable CO_E_CANCEL_DISABLED (an enable
+/// remains), the second S_OK, and CoCancelCall is disabled again.
+fn cancellation(c: &mut Checks) -> Result<(), u32> {
+    const CO_E_CANCEL_DISABLED: HResult = 0x8001_0140u32 as i32;
+    const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
+    // SAFETY: plain calls.
+    unsafe {
+        c.hr(CoCancelCall(0, 0), CO_E_CANCEL_DISABLED)?;
+        c.hr(CoEnableCallCancellation(null_mut()), S_OK)?;
+        c.hr(CoEnableCallCancellation(null_mut()), S_OK)?;
+        c.hr(CoCancelCall(0, 0), E_NOINTERFACE)?;
+        c.hr(CoDisableCallCancellation(null_mut()), CO_E_CANCEL_DISABLED)?;
+        c.hr(CoDisableCallCancellation(null_mut()), S_OK)?;
+        c.hr(CoCancelCall(0, 0), CO_E_CANCEL_DISABLED)?;
+    }
     Ok(())
 }
 
