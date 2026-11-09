@@ -3351,7 +3351,12 @@ fn main() -> ExitCode {
                 }
             }
             Some("bench") => {
-                bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
+                // The file is the first argument that is not a flag,
+                // wherever it stands: --release is accepted anywhere for
+                // every other command, and taking position 1 alone made
+                // `bench --release <file>` print an empty Windows column
+                // instead of saying the file had been ignored.
+                bench(release, args[1..].iter().find(|a| !a.starts_with("--")).map(Path::new))
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),

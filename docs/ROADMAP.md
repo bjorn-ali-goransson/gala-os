@@ -122,7 +122,15 @@ In order, after it:
     programs with run-all's `ms` and `cargo xtask compare`, Chromium's
     page loads, Python) profiled on both, compared operation by
     operation, gala's hot spots fixed in order of the gap, each with a
-    benchmark in `bench` and its numbers in PERF.md.
+    benchmark in `bench` and its numbers in PERF.md. `bench` is compared
+    (PERF.md 12): the system call path is 7x Windows' and the widest
+    gap, a reservation split into 4096 runs 6x where one run is faster,
+    `demand_zero_fault` 3-8x with 3x variance of its own, and image
+    loads 8-31x faster here. Next: the scenarios' programs
+    (run-all's `ms` against `cargo xtask report`, then `cargo xtask
+    compare`), Chromium's page loads and Python, then `cargo xtask
+    profile` on the system call path -- which needs #43 first, since
+    the profiler's samples hang the boot thread under KVM.
 
 Then the next breakthroughs (the owner), in this order: **LD**, desktop
 Linux applications (dynamic glibc programs first, then the Wayland

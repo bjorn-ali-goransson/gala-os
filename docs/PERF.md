@@ -179,3 +179,63 @@ kernel. No breakdown taken.
 
     nt: 30254 system calls in 1970 ms (and 2928 waits, 10126 ms),
         24443 user faults in 746 ms, 46 processes created in 95 ms
+
+## 12: gala under KVM against Windows, operation by operation (2026-11-09)
+
+`cargo xtask bench --release bench-windows.txt` on the Windows machine
+(12 host CPUs, WSL2, KVM, QEMU 11.1.3, host load 1.2 throughout)
+against `user/bin/run-all.ps1`'s `bench-windows.txt` from the same
+machine (Windows 11, build 26200, elevated run). Three runs; the first
+after a kernel build is cold and 1.5-2x slower than the two after it
+(`null_syscall` 1228 ns against 787 and 718), so it is discarded and
+the range below is the two quiet runs. A run taken while the host was
+busy with other work was 2-8x worse than any of these
+(`demand_zero_fault` 41 us, `thread_create_exit` 346 us): a number from
+a loaded host is not a measurement.
+
+| benchmark | gala (qemu-kvm) ns/op | Windows ns/op | gala / Windows |
+|---|---|---|---|
+| `cpu_loop` | 2 | 3 | 0.7 |
+| `null_syscall` | 718-787 | 107 | **6.7-7.4** |
+| `null_syscall_200_threads` | 730-737 | 107 | **6.8-6.9** |
+| `handle_create_close` | 1684-1859 | 788 | 2.1-2.4 |
+| `virtual_alloc_free_64k` | 2470-2518 | 2104 | 1.2 |
+| `commit_decommit_page` | 2071-2325 | 3892 | 0.55 |
+| `commit_decommit_page_4096_runs` | 5886-5988 | 1001 | **5.9-6.0** |
+| `demand_zero_fault` | 1950-5589 | 673 | 2.9-8.3 |
+| `section_map_unmap_64k` | 2323-2352 | 2511 | 0.93 |
+| `image_load` | 15390-17432 | 136482 | **0.12** |
+| `image_load_32m_untouched` | 19215-19830 | 606635 | **0.03** |
+| `thread_create_exit` | 82041-94807 | 109170 | 0.8 |
+| `event_pingpong_same_cpu` | 4754-4877 | 2539 | 1.9 |
+| `event_pingpong_cross_cpu` | 33110-38601 | 24902 | 1.3-1.6 |
+
+The hot spots, in order of the gap:
+
+1. **The system call path, 7x.** `null_syscall_200_threads` costs what
+   `null_syscall` costs (730 against 718-787 ns), so the invariant holds
+   and nothing scales with the thread count -- the whole 7x is the entry,
+   dispatch and return of one call. It is the widest gap and every other
+   number carries it.
+2. **A reservation split into 4096 runs, 6x**, where one run is
+   *faster* than Windows (0.55). So the per-page cost grows 2.7x with
+   the runs here (2.2 to 5.9 us) while Windows' falls (3.9 to 1.0 us):
+   the run list, not the commit itself.
+3. **`demand_zero_fault`, 3-8x**, and the only benchmark whose two quiet
+   runs disagree by 2.9x (1950 and 5589 ns). Its own variance has to be
+   understood before the gap is.
+4. `handle_create_close`, 2.2x, and `event_pingpong_same_cpu`, 1.9x.
+
+gala is faster at loading images (8x, and 31x for a 32 MiB image whose
+pages are never touched) and at a single commit. The image numbers are
+not a like-for-like path, though: gala loads from its ramfs, Windows
+through NTFS and its loader's own work (signatures, bookkeeping), so
+read them as "the image path is not a problem here" rather than as a
+win.
+
+A gala figure also includes virtualization: gala runs in a VM on a
+loaded host, Windows on the metal. System calls do not leave the guest,
+so the 7x is gala's own, but interrupt-driven numbers
+(`event_pingpong_cross_cpu`, the timer) carry VM exits. The control that
+would separate the two is Windows in a VM on the same host, which is
+not set up.
