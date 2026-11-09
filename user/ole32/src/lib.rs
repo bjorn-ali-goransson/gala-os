@@ -97,7 +97,6 @@ unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *const c_void;
     fn GetSystemTimeAsFileTime(time: *mut u64);
-    fn GetCurrentThreadId() -> u32;
 }
 
 #[cfg_attr(
