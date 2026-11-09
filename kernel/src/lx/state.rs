@@ -509,7 +509,9 @@ fn child_ended(parent: &LxProcess, child: &LxProcess, status: NtStatus) {
     };
     let (code, value) = signal::child_code(status);
     let info = if child.exit_signal == SIGCHLD {
-        Siginfo::child(code, child.pid as i32, super::exec::UID as u32, value)
+        let uid = crate::nt::process::by_id(child.pid)
+            .map_or(super::identity::NOBODY, |p| super::identity::of_process(&p).uid);
+        Siginfo::child(code, child.pid as i32, uid, value)
     } else {
         Siginfo::from_process(child.exit_signal as i32, 0, child.pid as i32, 0)
     };

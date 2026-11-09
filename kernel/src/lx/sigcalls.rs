@@ -83,7 +83,7 @@ pub fn sigpipe(call: &Call<'_>) {
         abi::SIGPIPE as i32,
         abi::SI_USER,
         call.process.id as i32,
-        super::exec::UID as u32,
+        super::identity::of_process(&call.process).uid,
     );
     raise(call, info, true);
 }
@@ -249,7 +249,7 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
         sig as i32,
         abi::SI_USER,
         call.process.id as i32,
-        super::exec::UID as u32,
+        super::identity::of_process(&call.process).uid,
     );
     if sig == abi::SIGKILL {
         if let Some(p) = process::by_id(pid as u64) {
@@ -287,7 +287,7 @@ pub fn tgkill(call: &Call<'_>, tgid: Option<u64>, tid: u64, sig: u64) -> Result 
         sig as i32,
         abi::SI_TKILL,
         call.process.id as i32,
-        super::exec::UID as u32,
+        super::identity::of_process(&call.process).uid,
     );
     if sig == abi::SIGKILL {
         if let Some(p) = process::by_id(target.pid) {

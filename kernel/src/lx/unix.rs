@@ -164,7 +164,8 @@ fn errno_of(e: &Error) -> u16 {
 
 /// The calling process as a socket's credentials see it.
 fn cred(call: &Call<'_>) -> Cred {
-    Cred { pid: call.process.id, uid: super::exec::UID as u32, gid: super::exec::GID as u32 }
+    let ids = super::identity::of_process(&call.process);
+    Cred { pid: call.process.id, uid: ids.uid, gid: ids.gid }
 }
 
 /// A name as events show it: a path as is, an abstract name after `@`.

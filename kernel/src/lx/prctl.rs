@@ -18,11 +18,10 @@
 //!   counted in the ledger (`"what":"linux option missing"`, service
 //!   `prctl`, detail the option) so the next ones are chosen from data.
 //! - getresuid and getresgid: real, effective and saved ids, all the one
-//!   user's (`exec::UID`, `exec::GID`); EFAULT for a bad pointer.
+//!   user's (`lx::identity`); EFAULT for a bad pointer.
 
 use super::dispatch::{Call, Result};
 use super::errno::{EFAULT, EINVAL};
-use super::exec::{GID, UID};
 use super::state::Comm;
 use crate::nt::ledger;
 
@@ -69,11 +68,36 @@ pub fn prctl(call: &Call<'_>, option: u64, arg2: u64) -> Result {
     }
 }
 
-/// getresuid(ruid, euid, suid) and getresgid: each id an unsigned int.
+/// getresuid(ruid, euid, suid) and getresgid: each id an unsigned int
+/// (real, effective and saved are the same: `lx::identity`).
 pub fn getres(call: &Call<'_>, ptrs: [u64; 3], gid: bool) -> Result {
-    let id = if gid { GID } else { UID } as u32;
+    let ids = super::identity::of_process(&call.process);
+    let id = if gid { ids.gid } else { ids.uid };
     for p in ptrs {
         call.process.write(p, &id.to_le_bytes()).map_err(|_| EFAULT)?;
     }
     Ok(0)
+}
+
+/// getgroups(size, list): the supplementary groups (`lx::identity`); a
+/// size of 0 asks only how many, a smaller one than that is EINVAL.
+pub fn getgroups(call: &Call<'_>, size: u64, list: u64) -> Result {
+    let ids = super::identity::of_process(&call.process);
+    let groups = ids.groups();
+    let size = size as u32 as i32;
+    if size < 0 {
+        return Err(EINVAL);
+    }
+    if size == 0 {
+        return Ok(groups.len() as u64);
+    }
+    if (size as usize) < groups.len() {
+        return Err(EINVAL);
+    }
+    let mut bytes = [0u8; 4 * super::identity::MAX_GROUPS];
+    for (i, g) in groups.iter().enumerate() {
+        bytes[4 * i..4 * i + 4].copy_from_slice(&g.to_le_bytes());
+    }
+    call.process.write(list, &bytes[..4 * groups.len()]).map_err(|_| EFAULT)?;
+    Ok(groups.len() as u64)
 }

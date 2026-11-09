@@ -1354,9 +1354,9 @@ need gala's.
 1. The load list above, test first (a kernel32/ntdll test program for
    the functions, expected results from Windows), until the three
    apps' processes start in gala with Office's files in place; a
-   scenario that boots them (where the files come from: the native
-   install below, or a directory a local run provides; never
-   committed or published).
+   scenario that boots them, with the files gala's own install put
+   there (the owner: no files from elsewhere; the native install below
+   comes first).
    - The UCRT for the installer: gala's own `ucrtbase.dll` and
      `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
      msvcrt, test first against Windows (the owner's decision; also
@@ -2005,6 +2005,14 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   symbolic and hard links kept across reboots (`fs::log` record
   version 3, older records still read; host tests). busybox's applets
   run by their own names through symbolic links (`lx_busybox`).
+- Linux identity from gala's accounts (`lx_id` with id_test, recorded
+  on Linux as an ordinary user; the owner: user accounts from the
+  start): uid, gid and groups from the process's token (the boot user
+  `gala` is 1000, SYSTEM root, other SIDs nobody), everywhere Linux
+  reports them; `/etc/passwd` and `/etc/group` made at boot from the
+  account database, bound over the shared tree's `/etc`; homes on the
+  users' profiles (`/Users/gala`); getgroups (ARCHITECTURE "The lx
+  module", Linux identity).
 - Milestone 4's dynamic linking (LD step 1): glibc programs start
   through their interpreter (PT_INTERP) and ld.so loads their libraries
   (`lx_dyn`, `lx_dyn_pie`); file mappings (views of sections on the
@@ -2039,8 +2047,10 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    FileCaseSensitiveInformation (query, and set on an empty directory),
    FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
    CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
-   delete through a hard link's name removing that name; uid/gid per
-   file with more than one Linux user; a reboot scenario for Linux
+   delete through a hard link's name removing that name; a file's
+   owner from its security descriptor's owner (the Linux ids come from
+   the token, `lx::identity`; a file shows the caller as its owner
+   today); a reboot scenario for Linux
    files (modes and links are host-tested only).
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
@@ -2275,9 +2285,7 @@ the next breakthroughs).
   `LINUX_ROOTS` "gtk3", each .deb's SHA-256 from the signed index, the
   downloads in a shared package cache), with what an installation adds:
   the MIME database's mime.cache (gdk-pixbuf picks its PNG loader by
-  MIME type through GIO), the user database (uid 1000 is the boot user
-  `gala`, its home `/home/gala`, a writable tree where fontconfig keeps
-  its cache), the xkb-data GDK's default keymap reads, DejaVu Sans as
+  MIME type through GIO), the xkb-data GDK's default keymap reads, DejaVu Sans as
   the one font. On a headless desktop its window is drawn frameless with
   GTK's own title bar (`GTK_SCREEN` checks GTK's pixels), a PS/2 click on
   its button prints its line, a click on GTK's close button closes it,
@@ -2332,24 +2340,41 @@ the next breakthroughs).
    - more of weston's demos as clients (simple-damage: buffer scale
      and transform, viewporter; eventdemo: input through libwayland),
      each a `PREBUILT` member of the same package;
-   - the selection shared across clients and with the Windows clipboard
-     (data offers; `receive`'s descriptor passed to the source's
-     `send`), drag-and-drop; alpha composed by shasha (translucent
+   - drag-and-drop (the clipboard is step 3 below); alpha composed by shasha (translucent
      windows, client-side shadows and rounded corners, which a
      frameless window's view leaves out today).
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.
-3. Step 3's rest: an application as a distribution ships it (a GTK 3
-   or GTK 4 calculator or text editor: gnome-calculator, gedit), with its
-   GSettings schemas, icon theme and keyboard input checked on the
-   screen; GTK 4 (its GL renderer falls back to cairo without EGL, or
-   `GSK_RENDERER=cairo`); then a Qt one. A session gives Linux programs
+3. **One clipboard for both personalities** (the owner: "would be
+   amazing"), test first at each layer:
+   - Windows' clipboard as Windows has it, one per window station in
+     the kernel (user32's is per process today): OpenClipboard's owner
+     and its lock across processes, SetClipboardData/GetClipboardData
+     of memory handles copied through the kernel, delayed rendering
+     (WM_RENDERFORMAT), the sequence number and the format listeners
+     (WM_CLIPBOARDUPDATE); a test copying between two processes,
+     recorded on Windows;
+   - the Wayland selection across clients: data offers to the focused
+     client, `receive` passing its descriptor to the source's `send`;
+     a two-client test against weston;
+   - the bridge: the session's clipboard is one; a Wayland selection
+     offers Windows the formats it maps (`text/plain;charset=utf-8` as
+     CF_UNICODETEXT, `image/png` as a PNG format and CF_DIB later) and a
+     Windows copy offers Wayland clients the same MIME types, the data
+     converted when pasted (delayed rendering on both sides); a
+     scenario copying from a GTK window and pasting into a Windows edit
+     control, and back.
+4. Step 3's rest: an application as a distribution ships it (GTK 3, the
+   owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
+   with its GSettings schemas, icon theme and keyboard input checked on
+   the screen; then a Qt one; GTK 4 later. A session gives Linux programs
    their environment (`HOME`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`: the
-   scenarios pass them today) and has no D-Bus session bus yet (GTK goes
+   scenarios pass them today; who the program is comes from its token,
+   `lx::identity`) and has no D-Bus session bus yet (GTK goes
    without it: accessibility and portals are skipped).
-4. X11 programs through Xwayland, once the Wayland server holds.
-5. Linux Chromium beside Windows Chromium (BR's): a distribution's
+5. X11 programs through Xwayland, once the Wayland server holds.
+6. Linux Chromium beside Windows Chromium (BR's): a distribution's
    Chromium (or Google's Linux build) with `--ozone-platform=wayland
    --no-sandbox` in a boot scenario, its window on the same desktop as
    `chromium_window`'s, both browsers running at once and loading a page

@@ -528,11 +528,6 @@ const PREBUILT: &[Prebuilt] = &[
 struct LinuxRoot {
     name: &'static str,
     debs: &'static [Deb],
-    /// Files of gala's own (repository paths under `user/lx/root/`), at
-    /// the same path in the root: what installing a system writes beside
-    /// its packages (the user database); a path ending in `/` is a
-    /// directory made there (the user's home).
-    ours: &'static [&'static str],
 }
 
 /// A Debian package of Ubuntu 24.04 (noble), its release pocket's
@@ -920,12 +915,6 @@ const LINUX_ROOTS: &[LinuxRoot] = &[LinuxRoot {
             ],
         },
     ],
-    // The user database: root and the one Linux user, uid 1000
-    // (`lx::exec::UID`), the boot user `gala` (GLib looks its name and
-    // home up), and that user's home (a writable tree: fontconfig keeps
-    // its cache in ~/.cache, as a desktop install without the fontconfig
-    // package's system cache does).
-    ours: &["etc/passwd", "etc/group", "home/gala/"],
 }];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -1138,7 +1127,7 @@ fn built_dll(file: &str) -> PathBuf {
 
 /// Directory trees shipped writable (`tarw:`): data a program changes, as
 /// an installer leaves it (SQL Server's databases).
-const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp", "home"];
+const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
 
 /// Extra boot modules per scenario: (scenario, built DLL file or repository
 /// path, directory on C: that the kernel puts it in, passed as the module
@@ -1664,6 +1653,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_fs", "user/lx/bin/fs_test", "lx"),
     ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
     ("lx_run", "user/lx/bin/run_test", "lx"),
+    ("lx_id", "user/lx/bin/id_test", "lx"),
+    ("lx_id_pie", "user/lx/bin/id_test-pie", "lx"),
     ("lx_run_pie", "user/lx/bin/run_test-pie", "lx"),
     // Dynamically linked glibc programs (ROADMAP LD): the program and its
     // libraries in C:\lx, glibc where Ubuntu's ld.so looks for it (its
@@ -1694,7 +1685,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_gtk_pie", "user/lx/bin/gtk_test-pie", "lx"),
     ("gtk3", "target/prebuilt/gtk3/usr/", "usr"),
     ("gtk3", "target/prebuilt/gtk3/etc/", "etc"),
-    ("gtk3", "target/prebuilt/gtk3/home/", "home"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -4073,7 +4063,6 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
     };
     let done = dir.join(format!(".assembled-{selection:016x}"));
     if done.exists() {
-        copy_ours(r, &dir)?;
         return if root().join(path).exists() {
             Ok(())
         } else {
@@ -4105,7 +4094,6 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
     }
     update_mime_database(&dir)?;
     write(&done, &format!("{} packages\n", r.debs.len()))?;
-    copy_ours(r, &dir)?;
     if !root().join(path).exists() {
         return Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name));
     }
@@ -4134,24 +4122,6 @@ fn update_mime_database(dir: &Path) -> Result {
         let path = entry.path();
         let gone = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
         gone.map_err(|e| format!("removing {path:?}: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Copies the root's own files (`user/lx/root/<path>`) into `dir`, every
-/// time: they change with the repository, not with the packages.
-fn copy_ours(r: &LinuxRoot, dir: &Path) -> Result {
-    for file in r.ours {
-        if file.ends_with('/') {
-            let made = dir.join(file);
-            fs::create_dir_all(&made).map_err(|e| format!("creating {made:?}: {e}"))?;
-            continue;
-        }
-        let to = dir.join(file);
-        if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
-        }
-        copy(&root().join("user/lx/root").join(file), &to)?;
     }
     Ok(())
 }
@@ -8789,7 +8759,7 @@ const SCENARIOS: &[Scenario] = &[
         // title bar's close button; its transcript is real Linux's
         // (lx-expect, where it clicks itself). HOME as a login gives it.
         name: "lx_gtk",
-        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/home/gala",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "personality linux",
@@ -8803,7 +8773,7 @@ const SCENARIOS: &[Scenario] = &[
         // user/lx/gtk_test as a PIE (LD step 3): the GTK 3 program clicks
         // its own button and closes its own window, as on Linux (lx-expect).
         name: "lx_gtk_pie",
-        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test-pie lxargs=./gtk_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/home/gala",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test-pie lxargs=./gtk_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "personality linux",
@@ -8891,6 +8861,23 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/fs_test-pie lxargs=./fs_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/fs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/id_test (LX "Linux identity"): the ids from the token,
+        // /etc/passwd and /etc/group made from the accounts, the ids where
+        // the kernel reports them; its transcript must be its expected.txt
+        // (real Linux's, as an ordinary user; `lx_expect::check_boot`).
+        name: "lx_id",
+        cmdline: "qemu_exit lxrun=/lx/id_test lxargs=./id_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "lx: identity: ", "run: end /lx/id_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/id_test as a static-pie.
+        name: "lx_id_pie",
+        cmdline: "qemu_exit lxrun=/lx/id_test-pie lxargs=./id_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/id_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // user/lx/run_test (ROADMAP LD): `/run`, a tmpfs mounted in the

@@ -1982,17 +1982,22 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
   The session keeps each process's handler thread as a taker with the
-  last Ctrl+C it took. A process ending itself (NtTerminateProcess on
+  last Ctrl+C it took and the last it is done with: its thread came back
+  to wait with that count (its handlers returned), or the process is
+  ending. A process ending itself (NtTerminateProcess on
   itself, whatever the status: the default handler's
   STATUS_CONTROL_C_EXIT, or a handler that exits, as busybox-w32's does
   with its own) after its handler took Ctrl+C k waits until every other
-  taker has taken k before it ends, so a
+  taker is done with k before it ends, so a
   shell's handler has run before the shell can see its child end (on
   Windows the parent's handler starts about 12 ms before a
   handler-less child's end is visible; handlers otherwise start
-  together and none waits for another; #33). A taker still busy with
-  an earlier event is waited for 1 s at most (`... ends with Ctrl+C k
-  before N other process(es) took it`, a warning).
+  together and none waits for another; #33). Taken is not enough: a
+  handler thread that woke but was scheduled late (a busy host) ran
+  busybox-w32's handler after the shell had cleared its "got a signal"
+  flag for the next line, which then ate the next key as ^C. A handler
+  that blocks is waited for 1 s at most (`... ends with Ctrl+C k
+  before N other process(es) handled it`, a warning).
 - **The host** (`user/conhost`): the kernel starts `conhost.exe` (a boot
   module) with the session's id and the program's file name before the
   program. Its system calls: GalaConsoleHost(id, event) 0x7f3a (become
@@ -8211,8 +8216,9 @@ Design rules:
   objects are core objects; an NT handle and a Linux fd are two views of
   one object (later: a Windows and a Linux program on one pipe, each
   launching the other).
-- **Identity**: Linux uid/gid map to SIDs on the existing tokens; one
-  access-check implementation.
+- **Identity**: Linux uid/gid map to SIDs on the existing tokens
+  (`lx::identity`, "The lx module"); one access-check implementation
+  (not yet: Linux checks a file's mode bits as its owner's).
 - **One file system** for both: case sensitivity per directory, POSIX
   metadata per file, symlinks and hard links, POSIX unlink/rename of
   open files.
@@ -8508,7 +8514,8 @@ The running parts (milestone 1; `lxrun=`):
   - the stack: 8 MiB committed ending at `mm::STACK_END`
     (0x7fff_fffe_0000), executable only if PT_GNU_STACK says so (or is
     missing); `stack::build`'s bytes (gap 0, AT_RANDOM from
-    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, uid/gid 1000)
+    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, AT_UID/AT_GID
+    the program's ids, `lx::identity`)
     copied to its top;
   - then `nt::process::create_bare` (no PEB, ntdll, handles or image
     layout: `Process::layout()` is None) and `thread::create`, which
@@ -8678,6 +8685,34 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Linux identity** (`lx::identity`; id_test, `lx_id`): a Linux
+  program is the account its NT token is. The uid is a function of the
+  token's user SID: SYSTEM is root (0); a local account of this machine
+  with RID 1001 or more is RID - 1 (the boot user `gala`, RID 1001, is
+  1000, Linux's first user); any other SID is `nobody` (65534). The gid
+  is the user's own group of the same number (root's 0); the
+  supplementary groups are it and the enabled token groups with Linux
+  names (BUILTIN\Administrators `sudo` 27, BUILTIN\Users `users` 100).
+  Real, effective and saved ids are the same (no setuid programs):
+  setuid/setgid to one's own id succeed, anything else EPERM; chown
+  keeps the caller's ids. Every place Linux reports ids takes them from
+  there: getuid and friends, getgroups, getresuid/getresgid, auxv's
+  AT_UID/AT_GID, SO_PEERCRED, siginfo's si_uid, stat's owner (the
+  caller's, as before: we own every file; root for the user database),
+  the Wayland server's credentials (the boot user's). **The user
+  database** is made at boot from the accounts (`nt::accounts::
+  local_users`: `gala` and `SAM\Gala\Users`) and published as two
+  files of a ramfs volume of their own, bound by the walk over
+  `/etc/passwd` and `/etc/group` (listed in `/etc`, covering any file
+  of those names there; `/etc` made if missing): root's 0644 files
+  (opening them for writing EACCES, chmod EPERM, unlink or rename
+  EBUSY), never in the change log, never `C:\etc\passwd`. A user's
+  home is their profile, `/Users/<name>` (the boot user's made at boot
+  if no module made it); root's is SYSTEM's
+  (`/Windows/System32/config/systemprofile`); the shell `/bin/sh`.
+  Limits: an account added after boot appears at the next (there is no
+  NetUserAdd yet); a file's owner is not yet its security descriptor's
+  owner (the caller's for every file but the user database's).
 - **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
   `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
   and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
@@ -9158,9 +9193,9 @@ The running parts (milestone 1; `lxrun=`):
   memory; a MAP_SHARED anonymous mapping grown by mremap; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
-  (seam 4's rest; one user so far; the device is per file system:
-  the shared one's and `/run`'s); a /dev
+  ITIMER_VIRTUAL/PROF, rusage); a file's owner from its security
+  descriptor (seam 4's rest: the caller's today; the device is per file
+  system: the shared one's and `/run`'s); a /dev
   directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
   name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
@@ -9878,10 +9913,10 @@ real Linux does not print, or a ledger line):
   at assembly as dpkg and its triggers would: the MIME database's
   `mime.cache` (`update-mime-database` from shared-mime-info's XML;
   gdk-pixbuf picks a loader by MIME type through GIO, so without it GTK
-  aborts on its own PNG icons), the user database (`/etc/passwd`,
-  `/etc/group` from `user/lx/root/etc`: uid 1000, every Linux process's
-  user, is the boot user `gala`, its home `/home/gala`; GLib warns
-  without the entry) and the user's home, a writable tree.
+  aborts on its own PNG icons). The user database is not the root's:
+  the kernel makes `/etc/passwd` and `/etc/group` from gala's accounts
+  ("The lx module", Linux identity); the user's home is their profile
+  (`/Users/gala`), where fontconfig keeps its cache.
 - **A session's environment**: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`
   and `HOME` (fontconfig expands `~` from `HOME` only and keeps its
   cache in `~/.cache/fontconfig`; without a writable cache directory it

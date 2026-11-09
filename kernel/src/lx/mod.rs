@@ -58,6 +58,7 @@ pub mod exec;
 pub mod file;
 pub mod fork;
 pub mod futex;
+pub mod identity;
 pub mod machine;
 pub mod memfd;
 pub mod mm;

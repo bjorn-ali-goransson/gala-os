@@ -211,6 +211,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Err(e) = nt::accounts::assign_boot_profiles() {
         warn!("profiles: {e:?}");
     }
+    // The Linux view's user database, from the accounts (lx::identity):
+    // /etc/passwd and /etc/group, and the boot user's profile.
+    if let Err(e) = lx::identity::publish() {
+        error!("lx: identity: cannot publish the user database: {e:?}");
+    }
     // `persist`: C: is kept on the disk (changes since earlier boots are
     // replayed now, over the boot's files).
     if cmdline.flag("persist") {

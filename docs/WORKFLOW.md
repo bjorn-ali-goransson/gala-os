@@ -1465,9 +1465,9 @@ source).
   The packages are kept in `target/prebuilt/debs/` (shared, checked at
   each use), so a re-assembly or an interrupted fetch downloads only
   what is missing. Assembly runs the host's `update-mime-database`
-  (shared-mime-info) for a root with the MIME XML. Files of gala's own
-  (the user database) are in `user/lx/root/` (the `ours` list) and are
-  copied at every build.
+  (shared-mime-info) for a root with the MIME XML. A root carries no
+  user database: the kernel makes `/etc/passwd` and `/etc/group` from
+  gala's accounts (ARCHITECTURE "The lx module", Linux identity).
 - **Linux programs that are not tests** (busybox): fetched as a
   `PREBUILT` (never run on the host), shipped to `C:\lx` by an
   EXTRA_MODULES entry, driven by a script of ours in
