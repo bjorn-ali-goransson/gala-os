@@ -1442,30 +1442,48 @@ need gala's.
      error, so the scenario runs it as SYSTEM (`as=system`, an
      administrator, as Configuration Manager and Intune run ODT), elevated
      (the `, elevated token` start lines), which asks for no elevation.
-     Where the run ends now: urlmon is asked for and missing (`urlmon.dll`
-     missing dll, survived), two WinHttpSetOption options are recorded
-     unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
+     Its configuration it reads with MSXML 6 (done: gala's msxml6.dll,
+     x64 and x86, DOMDocument60 registered in both registry views;
+     `msxml_test`, `wow64_msxml_test`; ARCHITECTURE "msxml6"): it loads
+     `C:\gala\config.xml` (load, async left on: loaded before load
+     returns, recorded), then documentElement, selectSingleNode("Add"),
+     selectNodes("Product", "Language", "ExcludeApp", "Remove",
+     "RemoveMSI", "Display", "Logging", "Updates", "Property", "@ID"),
+     the node lists' length and item, getAttribute (SourcePath, Version,
+     Channel, OfficeClientEdition, Level, AcceptEULA, Path, Enabled, ...),
+     attributes, nodeType and nodeValue: no DOM method it calls is
+     missing. Where the run ends now: before that, urlmon is asked for and missing
+     (`urlmon.dll` missing dll, survived), two WinHttpSetOption options
+     are recorded unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
      WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
-     (`events=net` shows none), then setup.exe asks COM for
-     {88D96A05-F192-11D4-A65F-0040963251E5} (MSXML 6's DOMDocument60,
-     msxml6.dll: not registered, `ole32.dll!CoGetClassObject(class not
-     registered)`) and, reporting that failure, delay-loads gdiplus.dll,
-     which is missing (`gdiplus.dll` missing dll): the delay-load
-     exception 0xc06d007e is not caught and both copies exit with it.
+     (`events=net` shows none); after the configuration, setup.exe looks
+     up kernel32's GetUserDefaultGeoName (missing export: gala's
+     kernel32 has none) and loads wldp.dll (missing dll), reads
+     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`
+     (absent), and then throws a C++ exception (0xe06d7363) nothing
+     catches in the elevated copy (pid 12): "abnormal program
+     termination", both copies exit with status 3. Which of these it
+     throws over is not known yet (its log, C:\gala\odtlog, stays in
+     the guest).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: MSXML 6 (DOMDocument60 and
-     the XML it parses: the configuration and the CDN's cab manifests),
-     gdiplus (setup.exe's error and progress UI), HKCU from the caller's
-     token, the TLS handshake from 32-bit (schannel.dll has no i686 build:
-     secur32's x86 loads it on first use), winhttp's AUTOLOGON_POLICY and
-     DISABLE_FEATURE, then CryptQueryObject's embedded PKCS #7 and
-     wintrust's WinVerifyTrust (the signature check), wininet, urlmon,
-     xmllite, webservices, iphlpapi, setupapi, cabinet, credui; the
-     service control manager (advapi32's service calls are stubs); a few
-     shlwapi, user32, ole32 and shell32 functions; FormatMessage's system
-     text for ERROR_CANCELLED (1223, recorded on the declined path).
+     Next, in the order the run reaches them: GetUserDefaultGeoName
+     (kernel32: the user's geographic region as a name, "US") and wldp
+     (Windows Lockdown Policy: what setup.exe asks of it), then what the
+     C++ exception stands for (a way to read setup.exe's log out of the
+     guest would name it); gdiplus (setup.exe's error and progress UI),
+     HKCU from the caller's token, the TLS handshake from 32-bit
+     (schannel.dll has no i686 build: secur32's x86 loads it on first
+     use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
+     the XML it downloads (the CDN's cab manifests: more of the DOM as
+     the run reaches it; load of URLs is recorded unsupported), then
+     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     (the signature check), wininet, urlmon, xmllite, webservices,
+     iphlpapi, setupapi, cabinet, credui; the service control manager
+     (advapi32's service calls are stubs); a few shlwapi, user32, ole32
+     and shell32 functions; FormatMessage's system text for
+     ERROR_CANCELLED (1223, recorded on the declined path).
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

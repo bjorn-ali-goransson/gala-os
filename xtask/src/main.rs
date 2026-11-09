@@ -1043,6 +1043,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder.dll" },
     // msi.dll: Windows Installer's queries, nothing installed (msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
+    // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -1124,6 +1126,9 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
+    // wow64_msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -3030,6 +3035,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/crypt32.dll", "Windows/SysWOW64"),
     ("office_install", "x86/ncrypt.dll", "Windows/SysWOW64"),
     ("office_install", "x86/msi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msxml6.dll", "Windows/SysWOW64"),
     ("office_install", "x86/normaliz.dll", "Windows/SysWOW64"),
     ("office_install", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("office_install", "ntdll.dll", "Windows/System32"),
@@ -3101,6 +3107,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // MSXML 6's DOM through COM (user/msxml_test), x64 and x86.
+    ("msxml_test", "ntdll.dll", "Windows/System32"),
+    ("msxml_test", "kernel32.dll", "Windows/System32"),
+    ("msxml_test", "advapi32.dll", "Windows/System32"),
+    ("msxml_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("msxml_test", "ole32.dll", "Windows/System32"),
+    ("msxml_test", "oleaut32.dll", "Windows/System32"),
+    ("msxml_test", "msxml6.dll", "Windows/System32"),
+    ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/msxml6.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3242,6 +3264,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "msi_test",
+    "msxml_test",
     "winhttp_cb_test",
     "runas_test",
 ];
@@ -3260,6 +3283,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_office_api_test",
     "wow64_cert_test",
     "wow64_msi_test",
+    "wow64_msxml_test",
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
 ];
@@ -3638,6 +3662,8 @@ fn unit_tests() -> Result {
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The XML reader galapkg and msxml6.dll share.
+    run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -6288,6 +6314,21 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_msi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
+        // attributes, XPath selection, parse errors (user/msxml_test).
+        name: "msxml_test",
+        cmdline: "qemu_exit run=msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msxml_test built for x86).
+        name: "wow64_msxml_test",
+        cmdline: "qemu_exit run=wow64_msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msxml_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
@@ -9980,6 +10021,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
