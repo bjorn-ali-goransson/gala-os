@@ -2513,10 +2513,12 @@ impl RamFs {
 
     /// A page now in memory and on the disk alike: it may leave memory.
     fn note_clean(&mut self, id: NodeId, i: usize) {
+        // Reserved, then extended (VecDeque::push_back is an out-of-line
+        // call that can still reach the allocation-failure abort).
         if let Some(area) = self.area.as_mut()
             && area.clean.try_reserve(1).is_ok()
         {
-            area.clean.push_back((id, i));
+            area.clean.extend(core::iter::once((id, i)));
         }
     }
 
@@ -2796,8 +2798,12 @@ impl RamFs {
             }
             if mapped {
                 // Later, once nothing maps it.
-                if let Some(a) = self.area.as_mut() {
-                    a.clean.push_back((id, i));
+                // Back in the room pop_front just freed (reserved anyway,
+                // as in note_clean).
+                if let Some(a) = self.area.as_mut()
+                    && a.clean.try_reserve(1).is_ok()
+                {
+                    a.clean.extend(core::iter::once((id, i)));
                 }
                 continue;
             }
