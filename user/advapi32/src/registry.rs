@@ -1,11 +1,14 @@
 //! The registry functions (Reg*), over ntdll's Nt*Key services.
 //!
 //! The predefined keys open, on first use, the key they stand for:
-//! HKEY_LOCAL_MACHINE `\Registry\Machine`, HKEY_USERS `\Registry\User`,
-//! HKEY_CURRENT_USER `\Registry\User\<the user's SID>`, HKEY_CLASSES_ROOT
-//! `\Registry\Machine\SOFTWARE\Classes` (Windows merges the user's
+//! HKEY_LOCAL_MACHINE `\REGISTRY\MACHINE`, HKEY_USERS `\REGISTRY\USER`,
+//! HKEY_CURRENT_USER `\REGISTRY\USER\<the user's SID>`, HKEY_CLASSES_ROOT
+//! `\REGISTRY\MACHINE\SOFTWARE\Classes` (Windows merges the user's
 //! classes over it; gala has no per-user classes yet), HKEY_CURRENT_CONFIG
-//! the current hardware profile. Their handles are kept for the process
+//! the current hardware profile. Spelled in capitals: a key's
+//! KeyNameInformation echoes the case it was opened with, and a key
+//! opened through RegOpenKeyExW reports `\REGISTRY\MACHINE\...`
+//! (measured on 26200, issue #59). Their handles are kept for the process
 //! (RegCloseKey of a predefined key does nothing). Any other HKEY is the
 //! NT key handle itself.
 //!
@@ -335,14 +338,14 @@ fn predefined(key: usize) -> Option<usize> {
         .then(|| low - HKEY_CLASSES_ROOT)
 }
 
-/// `\Registry\User\S-1-5-21-...` of the current user into `out`.
+/// `\REGISTRY\USER\S-1-5-21-...` of the current user into `out`.
 fn current_user_path(out: &mut [u16; 128]) -> usize {
     let mut n = 0;
     let mut push = |c: u8, n: &mut usize| {
         out[*n] = c.into();
         *n += 1;
     };
-    for &c in b"\\Registry\\User\\S-1-5" {
+    for &c in b"\\REGISTRY\\USER\\S-1-5" {
         push(c, &mut n);
     }
     for sub in super::security::USER_SUBS {
@@ -467,13 +470,13 @@ pub(crate) fn resolve(key: usize) -> Result<usize, i32> {
     }
     let mut path = [0u16; 128];
     let n = match index {
-        0 => copy_ascii(&mut path, "\\Registry\\Machine\\SOFTWARE\\Classes"),
+        0 => copy_ascii(&mut path, "\\REGISTRY\\MACHINE\\SOFTWARE\\Classes"),
         1 => current_user_path(&mut path),
-        2 => copy_ascii(&mut path, "\\Registry\\Machine"),
-        3 => copy_ascii(&mut path, "\\Registry\\User"),
+        2 => copy_ascii(&mut path, "\\REGISTRY\\MACHINE"),
+        3 => copy_ascii(&mut path, "\\REGISTRY\\USER"),
         5 => copy_ascii(
             &mut path,
-            "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current",
+            "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current",
         ),
         7 => {
             let n = current_user_path(&mut path);

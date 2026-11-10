@@ -21,6 +21,18 @@ use super::super::status::NtStatus;
 use super::{Call, HANDLE_ATTRIBUTES};
 use crate::mm::heap::TryVec;
 
+/// What a key's OBJECT_ATTRIBUTES name (Call::key_attributes).
+struct KeyName {
+    /// The RootDirectory key, kept while the name is resolved.
+    _root: Option<ObjectRef>,
+    start: KeyId,
+    /// The name below `start`.
+    name: Vec<u16>,
+    attributes: u32,
+    /// The whole name as the caller spelled it.
+    spelled: Vec<u16>,
+}
+
 /// The longest value data accepted (NtSetValueKey).
 const MAX_VALUE_DATA: usize = 16 << 20;
 
@@ -37,23 +49,33 @@ impl Call<'_> {
 
     /// The key OBJECT_ATTRIBUTES start from and the rest of the name: a
     /// RootDirectory key, or the root for an absolute `\Registry` name.
-    fn key_attributes(
-        &self,
-        ptr: u64,
-    ) -> Result<(Option<ObjectRef>, KeyId, Vec<u16>, u32), NtStatus> {
+    /// The last part is the whole name as the caller spelled it (the
+    /// RootDirectory key's name as it was opened, then this name), which
+    /// the opened key's KeyNameInformation echoes.
+    fn key_attributes(&self, ptr: u64) -> Result<KeyName, NtStatus> {
         let (root, mut name, attributes) =
             self.raw_object_attributes(ptr)?.ok_or(NtStatus::INVALID_PARAMETER)?;
         if root == 0 {
+            let spelled = registry::copy_name(&name)?;
             let rest = Registry::absolute(&name)?;
             let skip = name.len() - rest.len();
             name.drain(..skip);
-            return Ok((None, registry::ROOT, name, attributes));
+            return Ok(KeyName { _root: None, start: registry::ROOT, name, attributes, spelled });
         }
         if name.first() == Some(&(b'\\' as u16)) {
             return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
         }
         let (object, id) = self.key(root, 0)?;
-        Ok((Some(object), id, name, attributes))
+        let ObjectBody::Key(k) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+        let mut spelled = registry::copy_name(&k.name)?;
+        if spelled.is_empty() {
+            spelled = registry::with(|r| r.full_name(id))?;
+        }
+        if !name.is_empty() {
+            spelled.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+            spelled.try_extend_from_slice(&name).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        Ok(KeyName { _root: Some(object), start: id, name, attributes, spelled })
     }
 
     /// `name` below `start` in the caller's view of the registry
@@ -91,9 +113,16 @@ impl Call<'_> {
     /// Makes a key object for `id` (already retained) and returns a handle.
     /// return_key after the access check of an open of an existing key (on
     /// failure the key is released).
-    fn return_checked_key(&self, out: u64, id: KeyId, access: u32, attributes: u32) -> NtStatus {
+    fn return_checked_key(
+        &self,
+        out: u64,
+        id: KeyId,
+        access: u32,
+        attributes: u32,
+        spelled: &[u16],
+    ) -> NtStatus {
         match super::security_calls::check_key(self, id, access & !KEY_WOW64_RES, false) {
-            Ok(granted) => self.return_key(out, id, granted, attributes),
+            Ok(granted) => self.return_key(out, id, granted, attributes, spelled),
             Err(e) => {
                 let _ = registry::with(|r| {
                     r.release(id);
@@ -104,10 +133,22 @@ impl Call<'_> {
         }
     }
 
-    fn return_key(&self, out: u64, id: KeyId, access: u32, attributes: u32) -> NtStatus {
+    fn return_key(
+        &self,
+        out: u64,
+        id: KeyId,
+        access: u32,
+        attributes: u32,
+        spelled: &[u16],
+    ) -> NtStatus {
+        // The name it was opened by, where it names this key's own
+        // components (registry::display_name). Without memory for it the
+        // key is still opened, under its stored name.
+        let name = registry::with(|r| registry::display_name(&r.full_name(id)?, spelled))
+            .unwrap_or_default();
         // On failure the key object is dropped here, outside the registry
         // lock, which releases the node.
-        let Ok(object) = KObject::new(ObjectBody::Key(KeyObject { id })) else {
+        let Ok(object) = KObject::new(ObjectBody::Key(KeyObject { id, name })) else {
             return NtStatus::NO_MEMORY;
         };
         self.return_handle(out, object, access & !KEY_WOW64_RES, attributes & HANDLE_ATTRIBUTES)
@@ -150,7 +191,8 @@ pub(super) fn nt_open_key_ex(call: &mut Call<'_>) -> NtStatus {
 
 fn open_key(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
-    let (_root, start, name, attributes) = tri!(call.key_attributes(arg!(call, 2)));
+    let KeyName { _root, start, name, attributes, spelled } =
+        tri!(call.key_attributes(arg!(call, 2)));
     let (start, name, _) = tri!(call.key_view(access, start, name));
     let found = registry::with(|r| {
         let id = r.lookup(start, &name)?;
@@ -167,7 +209,7 @@ fn open_key(call: &mut Call<'_>) -> NtStatus {
             return status;
         }
     };
-    let status = call.return_checked_key(out, id, access, attributes);
+    let status = call.return_checked_key(out, id, access, attributes, &spelled);
     emit_key(call, start, &name, status);
     status
 }
@@ -237,7 +279,8 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (class_ptr, options, disposition_ptr) =
         (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 6));
-    let (_root, start, name, attributes) = tri!(call.key_attributes(arg!(call, 2)));
+    let KeyName { _root, start, name, attributes, spelled } =
+        tri!(call.key_attributes(arg!(call, 2)));
     let (start, name, node) = tri!(call.key_view(access, start, name));
     let class = if class_ptr == 0 { Vec::new() } else { tri!(call.unicode_string(class_ptr)) };
     let now = platform::system_time();
@@ -268,9 +311,9 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
         tri!(super::security_calls::assign_key(call, id, arg!(call, 2)));
     }
     let status = if created {
-        call.return_key(out, id, access, attributes)
+        call.return_key(out, id, access, attributes, &spelled)
     } else {
-        call.return_checked_key(out, id, access, attributes)
+        call.return_checked_key(out, id, access, attributes, &spelled)
     };
     if status == NtStatus::SUCCESS && disposition_ptr != 0 {
         let disposition = if created { REG_CREATED_NEW_KEY } else { REG_OPENED_EXISTING_KEY };
@@ -284,8 +327,15 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
 pub(super) fn nt_query_key(call: &mut Call<'_>) -> NtStatus {
     let class = arg!(call, 1) as u32;
     let access = if matches!(class, 3 | 7) { 0 } else { KEY_QUERY_VALUE };
-    let (_object, id) = tri!(call.key(arg!(call, 0), access));
-    let (data, fixed) = tri!(registry::with(|r| r.key_information(id, class)));
+    let (object, id) = tri!(call.key(arg!(call, 0), access));
+    let ObjectBody::Key(k) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let (data, fixed) = if class == 3 && !k.name.is_empty() {
+        // KEY_NAME_INFORMATION: the name as the key was opened (measured
+        // on 26200, issue #59).
+        tri!(registry::name_information(&k.name))
+    } else {
+        tri!(registry::with(|r| r.key_information(id, class)))
+    };
     call.return_partial(&data, fixed, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
@@ -364,41 +414,56 @@ pub(super) fn nt_delete_value_key(call: &mut Call<'_>) -> NtStatus {
 
 /// NtSetInformationKey(KeyHandle, KeySetInformationClass, KeySetInformation,
 /// KeySetInformationLength), with KEY_SET_VALUE on the handle (as
-/// ZwSetInformationKey's documentation asks). KeyWow64FlagsInformation (1)
-/// and KeyControlFlagsInformation (2) are a ULONG (another length is
-/// STATUS_INFO_LENGTH_MISMATCH) that steers registry virtualization, which
-/// gala has not (every process writes where it names): accepted, nothing
-/// to change, recorded with the flags (Office's Click-to-Run client sets
-/// REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG). KeyWriteTimeInformation
-/// and the classes 3 to 6 are STATUS_NOT_IMPLEMENTED (recorded); others
-/// STATUS_INVALID_INFO_CLASS.
+/// ZwSetInformationKey's documentation asks; a KEY_READ handle is
+/// STATUS_ACCESS_DENIED for an administrator too). What each class
+/// answers was measured on 26200 for a standard user and an administrator
+/// alike (issue #60): KeyWriteTimeInformation (0) sets the key's
+/// LastWriteTime to the 8 bytes given. KeyWow64FlagsInformation (1),
+/// KeyControlFlagsInformation (2), KeySetVirtualizationInformation (3),
+/// KeySetDebugInformation (4) and KeySetHandleTagsInformation (5) are a
+/// ULONG (another length is STATUS_INFO_LENGTH_MISMATCH: measured for 2)
+/// and succeed without a privilege; they steer registry virtualization,
+/// debugging and handle tags, which gala has not (every process writes
+/// where it names): accepted, nothing to change, recorded with the value
+/// (Office's Click-to-Run client sets REG_KEY_DONT_VIRTUALIZE |
+/// REG_KEY_RECURSE_FLAG). KeySetLayerInformation (6) is no class on that
+/// build: STATUS_INVALID_INFO_CLASS, as for any other.
 pub(super) fn nt_set_information_key(call: &mut Call<'_>) -> NtStatus {
-    let (_object, _id) = tri!(call.key(arg!(call, 0), KEY_SET_VALUE));
+    let (_object, id) = tri!(call.key(arg!(call, 0), KEY_SET_VALUE));
     let (class, data, len) = (arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3) as u32);
     match class {
-        1 | 2 => {
+        0 => {
+            if len != 8 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let mut time = [0u8; 8];
+            if call.process.read(data, &mut time).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            tri!(registry::with(|r| r.set_write_time(id, u64::from_le_bytes(time))));
+            NtStatus::SUCCESS
+        }
+        1..=5 => {
             if len != 4 {
                 return NtStatus::INFO_LENGTH_MISMATCH;
             }
-            let mut flags = [0u8; 4];
-            if call.process.read(data, &mut flags).is_err() {
+            let mut value = [0u8; 4];
+            if call.process.read(data, &mut value).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
-            let what = if class == 1 {
-                "wow64 flags: no registry virtualization"
-            } else {
-                "control flags: no registry virtualization"
+            let what = match class {
+                1 => "wow64 flags: no registry virtualization",
+                2 => "control flags: no registry virtualization",
+                3 => "virtualization: no registry virtualization",
+                4 => "debug information: no registry debugging",
+                _ => "handle tags: no handle tags",
             };
             super::super::ledger::record(
                 "NtSetInformationKey",
                 what,
-                u64::from(u32::from_le_bytes(flags)),
+                u64::from(u32::from_le_bytes(value)),
             );
             NtStatus::SUCCESS
-        }
-        0 | 3..=6 => {
-            super::super::ledger::record("NtSetInformationKey", "information class", class.into());
-            NtStatus::NOT_IMPLEMENTED
         }
         _ => NtStatus::INVALID_INFO_CLASS,
     }

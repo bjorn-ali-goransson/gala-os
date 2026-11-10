@@ -226,7 +226,10 @@ pub fn call(
 }
 
 /// RpcMgmtIsServerListening over a binding: the management interface's
-/// rpc__mgmt_is_server_listening, which the server's runtime answers.
+/// rpc__mgmt_is_server_listening, which the server's runtime answers. An
+/// endpoint no server has is RPC_S_NOT_LISTENING, not
+/// RPC_S_SERVER_UNAVAILABLE (ncalrpc and ncacn_np; measured on 26200,
+/// issue #63).
 pub fn is_server_listening(b: &mut Binding) -> u32 {
     let a = match association(b) {
         Ok(a) => a,
@@ -239,6 +242,7 @@ pub fn is_server_listening(b: &mut Binding) -> u32 {
             let listening = pdu::get32(&out, 4).unwrap_or(0);
             if listening != 0 { binding::RPC_S_OK } else { binding::RPC_S_NOT_LISTENING }
         }
+        Err(RPC_S_SERVER_UNAVAILABLE) => binding::RPC_S_NOT_LISTENING,
         Err(e) => e,
     }
 }

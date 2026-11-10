@@ -74,10 +74,40 @@
 [\Registry\Machine\SOFTWARE\Policies\Microsoft\Windows]
 [\Registry\Machine\SOFTWARE\Classes]
 ; The class of files no other class claims (shlwapi's AssocQueryStringW
-; answers an unregistered extension's command from it: Windows 11 25H2's
-; is OpenWith's, issue #57).
-[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\open\command]
+; answers an unregistered extension's command, executable and icon from
+; it). The layout, value types and default verb of Windows 11 25H2's
+; (`reg query HKCR\Unknown /s`, measured on 26200, issue #61): every
+; command REG_EXPAND_SZ with a DelegateExecute CLSID beside it, the
+; default verb `openas` a REG_SZ.
+[\Registry\Machine\SOFTWARE\Classes\Unknown]
+"AlwaysShowExt"=sz:
+"TypeOverlay"=sz:
+[\Registry\Machine\SOFTWARE\Classes\Unknown\DefaultIcon]
+@=expand:%SystemRoot%\System32\shell32.dll,0
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell]
+@=sz:openas
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\InvokeDefaultVerbInOtherProcess]
+"ProgrammaticAccessOnly"=sz:
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\InvokeDefaultVerbInOtherProcess\command]
+"DelegateExecute"=sz:{e44e9428-bdbc-4987-a099-40dc8fd255e7}
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\Open]
+"MultiSelectModel"=sz:Single
+"ProgrammaticAccessOnly"=sz:
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\Open\command]
 @=expand:%SystemRoot%\system32\OpenWith.exe "%1"
+"DelegateExecute"=sz:{e44e9428-bdbc-4987-a099-40dc8fd255e7}
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\openas]
+@=expand:@%SystemRoot%\system32\shell32.dll,-5376
+"MultiSelectModel"=sz:Single
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\openas\command]
+@=expand:%SystemRoot%\system32\OpenWith.exe "%1"
+"DelegateExecute"=sz:{e44e9428-bdbc-4987-a099-40dc8fd255e7}
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\OpenWithSetDefaultOn]
+"MultiSelectModel"=sz:Single
+"ProgrammaticAccessOnly"=sz:
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\OpenWithSetDefaultOn\command]
+@=expand:%SystemRoot%\system32\OpenWith.exe -override "%1"
+"DelegateExecute"=sz:{e44e9428-bdbc-4987-a099-40dc8fd255e7}
 ; In-process COM classes gala's DLLs serve (ole32's CoCreateInstance).
 ; CUIAutomation (UIAutomationClient.h's CLSID_CUIAutomation).
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{ff48dba4-60ef-4201-aa87-54103eef594e}]

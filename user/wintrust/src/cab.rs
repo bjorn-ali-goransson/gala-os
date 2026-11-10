@@ -5,10 +5,17 @@
 //!   CAB format for the header): the header (36 bytes) has the flag
 //!   RESERVE_PRESENT (0x0004), then cbCFHeader (u16), cbCFFolder and
 //!   cbCFData (u8 each) and cbCFHeader bytes of reserve, whose first 12
-//!   are two words (00 00 10 00 in every signed cabinet seen), the
-//!   signature's offset and its size (u32 each). A cabinet without the
-//!   flag, with less than 12 bytes of reserve, a version above 1.3, or a
-//!   signature outside the file is not signed (TRUST_E_NOSIGNATURE).
+//!   are a word 00 00 10 00, the signature's offset and its size (u32
+//!   each). What Windows answers for a cabinet with a byte of each changed
+//!   (`cab_probe`, measured on 26200, issue #59) gives the rules: without
+//!   the flag, with less than 12 bytes of reserve, another first word, a
+//!   cbCFData that is not 0, a signature that does not start at
+//!   cbCabinet, or one outside the file, the cabinet is not signed
+//!   (TRUST_E_NOSIGNATURE). The version is not checked (a changed one is
+//!   TRUST_E_BAD_DIGEST, as any byte of the digest).
+//!   The signature is its DER, then zeros to its size (padding that is
+//!   not zero: TRUST_E_NOSIGNATURE; a size short of the DER: the decode's
+//!   CRYPT_E_BAD_MSG).
 //! - **The digest** (no published source documents it; established by
 //!   matching the SpcIndirectDataContent digest of four signed cabinets
 //!   of Microsoft's CDN, v64.cab, v32.cab, ofl.cab, releasehistory.cab,
@@ -16,9 +23,11 @@
 //!   matches, the same for all four): the file from 0 up to the
 //!   signature, leaving out the header's reserved1 field (bytes 4..8),
 //!   cbCFHeader (36..38) and the reserve area (40..40+cbCFHeader), which
-//!   holds the signature's offset and size. cbCabinet, the folders,
-//!   files and data, and any per-folder and per-data reserve, are in it.
-//!   Bytes after the signature are not (none in the cabinets seen).
+//!   holds the signature's offset and size; then whatever follows the
+//!   signature. cbCabinet, the folders, files and data, and any
+//!   per-folder and per-data reserve, are in it. Microsoft's cabinets end
+//!   with their signature; 4 bytes appended are TRUST_E_BAD_DIGEST on
+//!   Windows (`cab_probe`), so the bytes after it are hashed.
 //!   `cab_probe` measures what Windows answers for altered copies.
 //! - The SpcIndirectDataContent's data is an SpcLink
 //!   (1.3.6.1.4.1.311.2.1.28; SPC_CAB_DATA_OBJID 1.3.6.1.4.1.311.2.1.25 is
@@ -35,6 +44,8 @@ const MAX_SIGNATURE: u64 = 16 << 20;
 
 /// Where a signed cabinet's Authenticode pieces are.
 pub(crate) struct Cabinet {
+    /// The file's size.
+    pub size: u64,
     /// The header's reserve area's size (cbCFHeader).
     pub reserve: u64,
     /// The signature's offset and size.
@@ -57,22 +68,25 @@ pub(crate) fn examine(h: usize, size: u64) -> Result<Cabinet, u32> {
     if size < head.len() as u64 || !read_at(h, 0, &mut head) {
         return Err(crate::pe::TRUST_E_NOSIGNATURE);
     }
-    let (minor, major) = (head[24], head[25]);
+    let cb_cabinet = u64::from(u32_at(&head, 8).unwrap_or(0));
     let flags = u16_at(&head, 30).unwrap_or(0);
     let reserve = u64::from(u16_at(&head, 36).unwrap_or(0));
+    let cb_cf_data = head[39];
+    let first = u32_at(&head, 40).unwrap_or(0);
     let signature = u64::from(u32_at(&head, 44).unwrap_or(0));
     let signature_size = u64::from(u32_at(&head, 48).unwrap_or(0));
-    if major > 1 || (major == 1 && minor > 3) || flags & 0x0004 == 0 || reserve < 12 {
+    if flags & 0x0004 == 0 || reserve < 12 || cb_cf_data != 0 || first != 0x0010_0000 {
         return Err(crate::pe::TRUST_E_NOSIGNATURE);
     }
-    if signature < 40 + reserve
+    if signature != cb_cabinet
+        || signature < 40 + reserve
         || signature_size == 0
         || signature_size > MAX_SIGNATURE
         || signature + signature_size > size
     {
         return Err(crate::pe::TRUST_E_NOSIGNATURE);
     }
-    Ok(Cabinet { reserve, signature, signature_size })
+    Ok(Cabinet { size, reserve, signature, signature_size })
 }
 
 /// The cabinet's PKCS #7 SignedData, in a heap block with its offset and
@@ -82,8 +96,14 @@ pub(crate) fn signature(h: usize, cab: &Cabinet) -> Result<(Heap, usize, usize),
     if !read_at(h, cab.signature, block.bytes()) {
         return Err(crate::pe::TRUST_E_NOSIGNATURE);
     }
-    // The DER's own length: Microsoft pads the signature to 8 bytes.
+    // The DER's own length: Microsoft pads the signature to 8 bytes, with
+    // zeros. Padding that is not zero loses the signature (the
+    // signature's last byte changed is TRUST_E_NOSIGNATURE on Windows,
+    // `cab_probe`, issue #59).
     let len = der_length(block.bytes()).unwrap_or(cab.signature_size as usize);
+    if block.bytes()[len..].iter().any(|&b| b != 0) {
+        return Err(crate::pe::TRUST_E_NOSIGNATURE);
+    }
     Ok((block, 0, len))
 }
 
@@ -111,7 +131,13 @@ fn der_length(b: &[u8]) -> Option<usize> {
 pub(crate) fn hash(h: usize, cab: &Cabinet, alg: usize, out: &mut [u8]) -> Result<(), u32> {
     crate::pe::hash_ranges(
         h,
-        &[(0, 4), (8, 36), (38, 40), (40 + cab.reserve, cab.signature)],
+        &[
+            (0, 4),
+            (8, 36),
+            (38, 40),
+            (40 + cab.reserve, cab.signature),
+            (cab.signature + cab.signature_size, cab.size),
+        ],
         alg,
         out,
     )

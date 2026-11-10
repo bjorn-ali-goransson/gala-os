@@ -1208,6 +1208,14 @@ numbers, 0x7f.., fail there).
   such names one more with `link_name` (`ucrt_test`'s `ucrt_imports!`
   macro adds `_` to every name; `malloc` stays `malloc`). stdcall
   imports are not affected.
+- A 32-bit program whose name contains "setup" (or "install", "update")
+  and that has no manifest is taken for an installer by Windows' UAC
+  installer detection: CreateProcess refuses it without elevation
+  (ERROR_ELEVATION_REQUIRED; 64-bit images are exempt). Give it an
+  embedded `asInvoker` manifest from a `build.rs`
+  (`cargo:rustc-link-arg-bins=/MANIFEST:EMBED` and
+  `/MANIFESTUAC:level='asInvoker' uiAccess='false'`, as
+  `user/wow64_setupcab_test` does), or another name.
 - One source for an x64 and an x86 test program: the x86 package's
   `[[bin]] path` points at the other's `main.rs` (`wow64_ucrt_test`
   builds `user/ucrt_test/src/main.rs`); one source for two DLLs: the

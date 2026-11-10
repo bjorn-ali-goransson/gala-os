@@ -191,8 +191,9 @@ const ASSOCSTR_DEFAULTICON: u32 = 15;
 /// and HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) when it is short;
 /// HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
 /// registered (ASSOCSTR_COMMAND of an extension without a class is the
-/// Unknown class's, OpenWith). REG_EXPAND_SZ values are expanded. Other
-/// kinds are recorded.
+/// Unknown class's, OpenWith, and so are its executable and icon; its
+/// document name is the extension upper-cased and " File"). REG_EXPAND_SZ
+/// values are expanded. Other kinds are recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn AssocQueryStringW(
     _flags: u32,
@@ -222,11 +223,31 @@ pub extern "system" fn AssocQueryStringW(
             };
         }
         if !class_value(&r, a, None, &mut progid) || progid.text().is_empty() {
-            // An extension no class claims: its command is the Unknown
-            // class's (Windows 11 25H2 answers `.galanone`'s command with
-            // OpenWith's, issue #57); the other strings are not measured.
-            if what != ASSOCSTR_COMMAND {
-                return NO_ASSOCIATION;
+            // An extension no class claims: its command, executable and
+            // icon are the Unknown class's, and its document name is made
+            // up from the extension, upper-cased, and " File" (no value
+            // holds it): `.galanone` answers OpenWith's command and
+            // program, shell32's icon 0 and "GALANONE File" (measured on
+            // 26200, issues #57 and #61).
+            match what {
+                ASSOCSTR_COMMAND | ASSOCSTR_EXECUTABLE | ASSOCSTR_DEFAULTICON => {}
+                ASSOCSTR_FRIENDLYDOCNAME => {
+                    let mut v = Buf::new();
+                    for &c in &a[1..] {
+                        let up = if (u16::from(b'a')..=u16::from(b'z')).contains(&c) {
+                            c - 0x20
+                        } else {
+                            c
+                        };
+                        v.push(up);
+                    }
+                    v.extend(&wide(b" File"));
+                    return hand(&v, out, count);
+                }
+                _ => {
+                    unsupported(b"shlwapi.dll!AssocQueryStringW(unclaimed extension)", what.into());
+                    return NO_ASSOCIATION;
+                }
             }
             progid = Buf::new();
             progid.extend(&wide(b"Unknown")[..7]);
@@ -455,7 +476,9 @@ extern "system" fn read(this: *mut FileStream, buf: *mut u8, n: u32, got: *mut u
         // SAFETY: the caller's count.
         unsafe { *got = done };
     }
-    S_OK
+    // Fewer bytes than asked, 0 at the end included, is S_FALSE (measured
+    // on 26200, issue #61).
+    if done < n { S_FALSE } else { S_OK }
 }
 
 extern "system" fn write(this: *mut FileStream, buf: *const u8, n: u32, put: *mut u32) -> i32 {

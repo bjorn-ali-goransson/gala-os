@@ -11,22 +11,36 @@
 //! - a program that is not a service: StartServiceCtrlDispatcher fails
 //!   with ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
 //! - a service whose process exits without connecting: StartService
-//!   fails with ERROR_SERVICE_REQUEST_TIMEOUT, twice alike, the service
-//!   stopped without a process; stopping it is ERROR_SERVICE_NOT_ACTIVE;
-//!   one whose executable does not exist fails, twice alike, stopped;
+//!   fails with ERROR_SERVICE_REQUEST_TIMEOUT, twice alike; stopping it is
+//!   ERROR_SERVICE_NOT_ACTIVE; one whose executable does not exist fails
+//!   with ERROR_FILE_NOT_FOUND, its directory missing or not, twice alike;
+//!   after each failed start the service is stopped, nothing accepted,
+//!   exit code 0, wait hint 2000, no process (measured on 26200, issue
+//!   #65);
 //! - a service that runs: StartService with two arguments succeeds (its
 //!   ServiceMain gets the service's name and both); a second start is
 //!   ERROR_SERVICE_ALREADY_RUNNING; it reports RUNNING (accepting stop and
 //!   shutdown; its wait hint reads 0) with a process id; a user control
 //!   (128) reaches its handler and succeeds though the handler answers
-//!   0xdeadbeef; interrogation succeeds; a pause it does not accept is
-//!   ERROR_INVALID_SERVICE_CONTROL; a stop reaches the handler, the
+//!   0xdeadbeef; interrogation succeeds though the handler answers
+//!   ERROR_CALL_NOT_IMPLEMENTED, and a stop though it answers 0xdeadbeef
+//!   (measured on 26200, issue #65); a pause it does not accept is
+//!   ERROR_INVALID_SERVICE_CONTROL; the stop reaches the handler, the
 //!   service stops (exit code 0, no process) and its process ends;
+//! - a service that stays START_PENDING (check point 1, wait hint 120 s)
+//!   accepting stop: a stop reaches its handler and succeeds, not the
+//!   documented ERROR_SERVICE_CANNOT_ACCEPT_CTRL (measured on 26200,
+//!   issue #65);
 //! - inside the service (its result comes back as its service-specific
 //!   exit code, ERROR_SERVICE_SPECIFIC_ERROR): it runs as SYSTEM (S-1-5-18)
 //!   in session 0, in the system directory, RegisterServiceCtrlHandlerEx
 //!   takes any name (own process), a second StartServiceCtrlDispatcher is
-//!   ERROR_SERVICE_ALREADY_RUNNING;
+//!   ERROR_SERVICE_ALREADY_RUNNING, with a malformed table too; its
+//!   environment is SYSTEM's profile (USERPROFILE, APPDATA, LOCALAPPDATA
+//!   under the Windows directory's system32\config\systemprofile), TEMP
+//!   and TMP the Windows directory's TEMP, USERNAME the machine account
+//!   (`<COMPUTERNAME>$`), PATHEXT the system's, and its three standard
+//!   handles are NULL (measured on 26200, issue #65);
 //! - a service process that is killed: the service is stopped with
 //!   ERROR_PROCESS_ABORTED, nothing accepted, no process;
 //! - a service whose ServiceMain returns after reporting RUNNING (ANSI
@@ -79,6 +93,9 @@ unsafe extern "system" {
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32;
     fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
+    fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> i32;
     fn Sleep(ms: u32);
 }
 
@@ -188,6 +205,7 @@ const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: u32 = 1063;
 const ERROR_SERVICE_SPECIFIC_ERROR: u32 = 1066;
 const ERROR_PROCESS_ABORTED: u32 = 1067;
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 const SC_MANAGER_ALL_ACCESS: u32 = 0x000f_003f;
 const SERVICE_ALL_ACCESS: u32 = 0x000f_01ff;
@@ -195,6 +213,7 @@ const SERVICE_WIN32_OWN_PROCESS: u32 = 0x10;
 const SERVICE_DEMAND_START: u32 = 3;
 const SERVICE_ERROR_IGNORE: u32 = 0;
 const SERVICE_STOPPED: u32 = 1;
+const SERVICE_START_PENDING: u32 = 2;
 const SERVICE_STOP_PENDING: u32 = 3;
 const SERVICE_RUNNING: u32 = 4;
 const SERVICE_ACCEPT_STOP: u32 = 1;
@@ -435,13 +454,24 @@ fn signal(what: &str) {
 }
 
 fn report(state: u32, controls: u32, exit: u32, specific: u32, wait_hint: u32) -> bool {
+    report_point(state, controls, exit, specific, 0, wait_hint)
+}
+
+fn report_point(
+    state: u32,
+    controls: u32,
+    exit: u32,
+    specific: u32,
+    check_point: u32,
+    wait_hint: u32,
+) -> bool {
     let st = ServiceStatus {
         kind: SERVICE_WIN32_OWN_PROCESS,
         state,
         controls,
         exit_code: exit,
         specific_exit_code: specific,
-        check_point: 0,
+        check_point,
         wait_hint,
     };
     // SAFETY: our status and the handle RegisterServiceCtrlHandlerEx gave.
@@ -463,18 +493,20 @@ extern "system" fn handler(
     _data: *mut c_void,
     _ctx: *mut c_void,
 ) -> u32 {
+    // Its answers do not change ControlService's result (measured on
+    // 26200, issue #65): 0xdeadbeef to STOP and to a user control,
+    // ERROR_CALL_NOT_IMPLEMENTED to INTERROGATE.
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             report(SERVICE_STOP_PENDING, 0, 0, 0, 0);
             // SAFETY: the event ServiceMain made.
             unsafe { SetEvent(STOP_EVENT) };
-            0
+            0xdead_beef
         }
         128 => {
             signal("custom");
             0xdead_beef
         }
-        SERVICE_CONTROL_INTERROGATE => 0,
         _ => ERROR_CALL_NOT_IMPLEMENTED,
     }
 }
@@ -541,6 +573,71 @@ fn check_self(argc: u32, argv: *mut *mut u16, args: bool) -> u32 {
         || last_error() != ERROR_SERVICE_ALREADY_RUNNING
     {
         return 109;
+    }
+    // A malformed one (its only entry NULL): the same answer, the table
+    // not looked at (measured on 26200, issue #65).
+    let malformed = [TableW { name: null(), main: None }];
+    // SAFETY: as above.
+    if unsafe { StartServiceCtrlDispatcherW(malformed.as_ptr()) } != 0
+        || last_error() != ERROR_SERVICE_ALREADY_RUNNING
+    {
+        return 111;
+    }
+    environment()
+}
+
+/// The value of environment variable `name` (empty when unset).
+fn variable(name: &str, out: &mut [u16; 260]) -> usize {
+    let name = W::new().s(name);
+    // SAFETY: our buffers.
+    let n = unsafe { GetEnvironmentVariableW(name.p(), out.as_mut_ptr(), 260) } as usize;
+    if n < 260 { n } else { 0 }
+}
+
+/// A LocalSystem own-process service's environment and standard handles
+/// (measured on 26200, issue #65): SYSTEM's profile under the Windows
+/// directory, the Windows directory's TEMP for TEMP and TMP, the machine
+/// account (`<COMPUTERNAME>$`) as USERNAME, the system's PATHEXT, and
+/// no standard handles.
+fn environment() -> u32 {
+    let mut windows = [0u16; 260];
+    // SAFETY: our buffer.
+    let w = unsafe { GetWindowsDirectoryW(windows.as_mut_ptr(), 260) } as usize;
+    if w == 0 || w >= 200 {
+        return 112;
+    }
+    let profile = W::new().u(&windows[..w]).s("\\system32\\config\\systemprofile");
+    let wants = [
+        ("USERPROFILE", W::new().u(&profile.buf[..profile.n])),
+        ("APPDATA", W::new().u(&profile.buf[..profile.n]).s("\\AppData\\Roaming")),
+        ("LOCALAPPDATA", W::new().u(&profile.buf[..profile.n]).s("\\AppData\\Local")),
+        ("TEMP", W::new().u(&windows[..w]).s("\\TEMP")),
+        ("TMP", W::new().u(&windows[..w]).s("\\TEMP")),
+        ("PATHEXT", W::new().s(".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC")),
+    ];
+    let mut value = [0u16; 260];
+    for (i, (name, want)) in wants.iter().enumerate() {
+        let n = variable(name, &mut value);
+        if !same_units(&value[..n], &want.buf[..want.n]) {
+            return 113 + i as u32;
+        }
+    }
+    let mut computer = [0u16; 64];
+    let mut size = 64u32;
+    // SAFETY: our buffer and its size.
+    if unsafe { GetComputerNameW(computer.as_mut_ptr(), &mut size) } == 0 {
+        return 119;
+    }
+    let account = W::new().u(&computer[..size as usize]).s("$");
+    let n = variable("USERNAME", &mut value);
+    if !same_units(&value[..n], &account.buf[..account.n]) {
+        return 120;
+    }
+    for (i, which) in [-10i32, -11, -12].into_iter().enumerate() {
+        // SAFETY: plain call.
+        if unsafe { GetStdHandle(which as u32) } != 0 {
+            return 121 + i as u32;
+        }
     }
     0
 }
@@ -612,6 +709,41 @@ extern "system" fn nostop_main(_argc: u32, _argv: *mut *mut u8) {
     signal("running");
 }
 
+extern "system" fn pending_handler(
+    control: u32,
+    _event: u32,
+    _data: *mut c_void,
+    _ctx: *mut c_void,
+) -> u32 {
+    if control == SERVICE_CONTROL_STOP {
+        report(SERVICE_STOPPED, 0, 0, 0, 0);
+    }
+    0
+}
+
+/// Mode `pending`: stays START_PENDING (check point 1, wait hint 120 s),
+/// accepting stop and shutdown; its handler stops it.
+extern "system" fn pending_main(_argc: u32, _argv: *mut *mut u16) {
+    // SAFETY: plain calls.
+    unsafe {
+        STATUS_HANDLE = RegisterServiceCtrlHandlerExW([0u16].as_ptr(), pending_handler, null_mut());
+        STOP_EVENT = CreateEventW(null(), 1, 0, null());
+    }
+    report_point(
+        SERVICE_START_PENDING,
+        SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN,
+        0,
+        0,
+        1,
+        120_000,
+    );
+    signal("running");
+    // The dispatcher returns once the handler has reported STOPPED, and
+    // the process ends with this thread still waiting.
+    // SAFETY: our event, never set.
+    unsafe { WaitForSingleObject(STOP_EVENT, 0xffff_ffff) };
+}
+
 /// This process as service `name` in `mode`: the dispatcher's result.
 fn run_service(mode: &[u16], name: &[u16]) -> u32 {
     // SAFETY: before any other thread.
@@ -631,8 +763,13 @@ fn run_service(mode: &[u16], name: &[u16]) -> u32 {
         // SAFETY: our table.
         unsafe { StartServiceCtrlDispatcherA(table.as_ptr()) }
     } else {
-        let main: extern "system" fn(u32, *mut *mut u16) =
-            if same(mode, "kill") { kill_main } else { serve_main };
+        let main: extern "system" fn(u32, *mut *mut u16) = if same(mode, "kill") {
+            kill_main
+        } else if same(mode, "pending") {
+            pending_main
+        } else {
+            serve_main
+        };
         let empty = [0u16];
         let table = [
             TableW { name: empty.as_ptr(), main: Some(main) },
@@ -746,8 +883,7 @@ fn failed_starts(c: &mut Checks, scm: Handle) -> Result<(), u32> {
         // SAFETY: our handle.
         c.fails(unsafe { StartServiceW(h, 0, null()) } != 0, ERROR_SERVICE_REQUEST_TIMEOUT)?;
         let sp = query(c, h)?;
-        c.eq(u64::from(sp.state), u64::from(SERVICE_STOPPED))?;
-        c.eq(u64::from(sp.pid), 0)?;
+        expect_failed_start(c, &sp)?;
     }
     let mut st = ServiceStatus { state: 0xdead_beef, ..Default::default() };
     // SAFETY: our handle and status.
@@ -763,22 +899,45 @@ fn failed_starts(c: &mut Checks, scm: Handle) -> Result<(), u32> {
     }
 
     section("a missing executable");
-    let name = service("none");
-    let h = create(c, scm, &name, &W::new().s("C:\\gala_svcrun_none\\none.exe"))?;
-    // SAFETY: our handle.
-    c.ok(unsafe { StartServiceW(h, 0, null()) } == 0, 1)?;
-    let first = last_error();
-    let sp = query(c, h)?;
-    c.eq(u64::from(sp.state), u64::from(SERVICE_STOPPED))?;
-    c.eq(u64::from(sp.pid), 0)?;
-    // SAFETY: our handle.
-    c.fails(unsafe { StartServiceW(h, 0, null()) } != 0, first)?;
-    // SAFETY: our handle.
-    unsafe {
-        DeleteService(h);
-        CloseServiceHandle(h);
+    // In a missing directory and in an existing one alike (measured on
+    // 26200, issue #65).
+    let mut system = [0u16; 260];
+    // SAFETY: our buffer.
+    let n = unsafe { GetSystemDirectoryW(system.as_mut_ptr(), 260) } as usize;
+    c.ok(n > 0 && n < 200, n as u64)?;
+    for path in [
+        W::new().s("C:\\gala_svcrun_none\\none.exe"),
+        W::new().u(&system[..n]).s("\\gala_svcrun_none.exe"),
+    ] {
+        let name = service("none");
+        let h = create(c, scm, &name, &path)?;
+        for _ in 0..2 {
+            // SAFETY: our handle.
+            c.fails(unsafe { StartServiceW(h, 0, null()) } != 0, ERROR_FILE_NOT_FOUND)?;
+            let sp = query(c, h)?;
+            expect_failed_start(c, &sp)?;
+        }
+        // SAFETY: our handle.
+        unsafe {
+            DeleteService(h);
+            CloseServiceHandle(h);
+        }
     }
     Ok(())
+}
+
+/// The status after a start that failed (its process exited before it
+/// connected, or its executable is missing): stopped, nothing accepted,
+/// exit code 0 (no reason recorded), the SCM's wait hint of 2 s, no
+/// process (measured on 26200, issue #65).
+fn expect_failed_start(c: &mut Checks, sp: &StatusProcess) -> Result<(), u32> {
+    c.eq(u64::from(sp.state), u64::from(SERVICE_STOPPED))?;
+    c.eq(u64::from(sp.controls), 0)?;
+    c.eq(u64::from(sp.exit_code), 0)?;
+    c.eq(u64::from(sp.specific_exit_code), 0)?;
+    c.eq(u64::from(sp.check_point), 0)?;
+    c.eq(u64::from(sp.wait_hint), 2000)?;
+    c.eq(u64::from(sp.pid), 0)
 }
 
 /// The status a stopped service reports: `exit`, nothing accepted, no
@@ -861,6 +1020,36 @@ fn running_service(c: &mut Checks, scm: Handle) -> Result<(), u32> {
         unsafe { ControlService(h, SERVICE_CONTROL_STOP, &mut st) } != 0,
         ERROR_SERVICE_NOT_ACTIVE,
     )?;
+
+    section("a stop while it starts");
+    // SAFETY: our handles.
+    unsafe {
+        DeleteService(h);
+        CloseServiceHandle(h);
+        CloseHandle(process);
+    }
+    let name = service("pending");
+    let running = event(&name.buf[..name.n], "running");
+    let h = create(c, scm, &name, &command("pending", &name))?;
+    // SAFETY: our handle.
+    c.succeeds(unsafe { StartServiceW(h, 0, null()) } != 0)?;
+    wait(c, running)?;
+    let sp = query(c, h)?;
+    c.eq(u64::from(sp.state), u64::from(SERVICE_START_PENDING))?;
+    c.eq(u64::from(sp.controls), u64::from(SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN))?;
+    c.eq(u64::from(sp.check_point), 1)?;
+    c.eq(u64::from(sp.wait_hint), 120_000)?;
+    c.ok(sp.pid != 0, 0)?;
+    // SAFETY: plain call.
+    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, sp.pid) };
+    c.succeeds(process != 0)?;
+    // A START_PENDING service that accepts STOP takes it (measured on
+    // 26200, issue #65; not the documented ERROR_SERVICE_CANNOT_ACCEPT_CTRL).
+    // SAFETY: our handle and status.
+    c.succeeds(unsafe { ControlService(h, SERVICE_CONTROL_STOP, &mut st) } != 0)?;
+    wait(c, process)?;
+    let sp = query_stopped(c, h)?;
+    expect_stopped(c, &sp, 0)?;
 
     section("a service process that is killed");
     // SAFETY: our handles.

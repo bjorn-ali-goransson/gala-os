@@ -2,7 +2,8 @@
 //! (rpcdce.h's RpcServer* and RpcMgmt* functions).
 //!
 //! - RpcServerUseProtseqEp makes the endpoint's first pipe instance (one
-//!   another process already holds is RPC_S_DUPLICATE_ENDPOINT) and starts
+//!   this or another process already holds is RPC_S_DUPLICATE_ENDPOINT,
+//!   measured on 26200, issue #63) and starts
 //!   its listener thread; each connection gets a thread that reads its
 //!   PDUs: binds and alter_contexts (an interface is accepted when it is
 //!   registered, or is the management interface, and NDR is offered), and
@@ -417,7 +418,9 @@ fn use_protseq(protseq: &[u16], endpoint: Option<&[u16]>, sd: *const c_void) -> 
         s.endpoints.iter().any(|e| e.protseq == protseq && sys::eq_ignore_case_w(&e.name, &name))
     });
     if known {
-        return RPC_S_OK;
+        // This process's own endpoint again: a duplicate, as one another
+        // process holds (measured on 26200, issue #63).
+        return RPC_S_DUPLICATE_ENDPOINT;
     }
     let path = match transport::pipe_path(protseq, &name) {
         Ok(p) => p,

@@ -38,6 +38,11 @@
 //! - before any protocol sequence: RpcMgmtStopServerListening and
 //!   RpcMgmtWaitServerListen RPC_S_NOT_LISTENING, RpcServerListen
 //!   RPC_S_NO_PROTSEQS_REGISTERED;
+//! - RpcServerUseProtseqEp of an endpoint this process registered already
+//!   RPC_S_DUPLICATE_ENDPOINT (measured on 26200, issue #63);
+//! - RpcMgmtIsServerListening over a binding to an endpoint no server has
+//!   RPC_S_NOT_LISTENING, ncalrpc and ncacn_np alike (measured on 26200,
+//!   issue #63);
 //! - RpcServerListen(DontWait) RPC_S_OK, again RPC_S_ALREADY_LISTENING;
 //!   RpcMgmtIsServerListening(NULL) RPC_S_NOT_LISTENING before it, RPC_S_OK
 //!   while listening, and with a binding to the server RPC_S_OK;
@@ -194,6 +199,7 @@ const RPC_S_ALREADY_LISTENING: Status = 1713;
 const RPC_S_NO_PROTSEQS_REGISTERED: Status = 1714;
 const RPC_S_NOT_LISTENING: Status = 1715;
 const RPC_S_INVALID_STRING_UUID: Status = 1705;
+const RPC_S_DUPLICATE_ENDPOINT: Status = 1740;
 const RPC_S_BINDING_HAS_NO_AUTH: Status = 1746;
 const RPC_S_UNKNOWN_AUTHN_SERVICE: Status = 1747;
 const RPC_C_AUTHN_LEVEL_PKT_PRIVACY: i32 = 6;
@@ -1009,10 +1015,11 @@ fn start_server(c: &mut Checks) -> Result<(), u32> {
             RpcServerUseProtseqEpW(np.as_ptr(), 20, np_ep.as_ptr(), null_mut()).into(),
             RPC_S_OK.into(),
         )?;
-        // The same endpoint again is the same endpoint.
+        // The same endpoint again is a duplicate (measured on 26200,
+        // issue #63).
         c.eq(
             RpcServerUseProtseqEpW(ncalrpc.as_ptr(), 20, lrpc_ep.as_ptr(), null_mut()).into(),
-            RPC_S_OK.into(),
+            RPC_S_DUPLICATE_ENDPOINT.into(),
         )?;
         c.eq(
             RpcServerRegisterIf2(
@@ -1186,6 +1193,25 @@ fn other_process(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A binding to an endpoint no server has: composing and binding
+/// succeed, RpcMgmtIsServerListening is RPC_S_NOT_LISTENING over ncalrpc
+/// and ncacn_np alike (measured on 26200 for a standard user and an
+/// administrator, issue #63).
+fn no_server(c: &mut Checks) -> Result<(), u32> {
+    for (protseq, endpoint, want) in [
+        ("ncalrpc", "no_such_endpoint", "ncalrpc:[no_such_endpoint]"),
+        ("ncacn_np", "\\pipe\\no_such_pipe", "ncacn_np:[\\\\pipe\\\\no_such_pipe]"),
+    ] {
+        let mut h = bind(c, protseq, endpoint, want)?;
+        // SAFETY: a binding of ours.
+        unsafe {
+            c.eq(RpcMgmtIsServerListening(h).into(), RPC_S_NOT_LISTENING.into())?;
+            c.eq(RpcBindingFree(&mut h).into(), RPC_S_OK.into())?;
+        }
+    }
+    Ok(())
+}
+
 fn stop_server(c: &mut Checks, np: Handle) -> Result<(), u32> {
     // SAFETY: documented calls.
     unsafe {
@@ -1203,6 +1229,7 @@ fn server() -> Result<(), u32> {
     let mut c = Checks(0);
     before_listening(&mut c)?;
     string_bindings(&mut c)?;
+    no_server(&mut c)?;
     start_server(&mut c)?;
     let mut lrpc = bind(&mut c, "ncalrpc", LRPC_ENDPOINT, "ncalrpc:[gala_rpc_test]")?;
     // SAFETY: a binding of ours.

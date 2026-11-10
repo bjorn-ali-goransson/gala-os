@@ -14,8 +14,11 @@
 //!   count (u32::MAX: lpsaActions NULL, which leaves the period and the
 //!   actions), then (type, delay) per action. A string NULL leaves it, ""
 //!   removes it; no actions removes them. A restart action needs
-//!   SERVICE_START (`needs_start`). FailureActions is kept as a 20-byte
-//!   header (period, three zeroed fields, count) then the actions.
+//!   SERVICE_START (`needs_start`). FailureActions is kept as Windows'
+//!   SCM writes it (REG_BINARY; measured on 26200, issue #63): a 20-byte
+//!   header (period, the reboot message's and the command's offsets, 0
+//!   for the NULL strings gala keeps beside it as their own values,
+//!   count, the actions' offset 20) then the actions.
 //! - 3 delayed automatic start: 0 or 1 (else ERROR_INVALID_PARAMETER).
 //! - 4 failure actions on non-crash failures: a BOOL.
 //! - 5 service SID type: 0, 1 or 3.
@@ -171,7 +174,7 @@ fn changes(level: u32, record: &[u8]) -> Result<Vec<Change>, NtStatus> {
             } else if count != u32::MAX {
                 let mut b = Vec::new();
                 b.try_reserve_exact(20 + 8 * count as usize).map_err(nomem)?;
-                for v in [reset, 0, 0, count, 0] {
+                for v in [reset, 0, 0, count, 20] {
                     b.try_extend_from_slice(&v.to_le_bytes()).map_err(nomem)?;
                 }
                 for _ in 0..count {
@@ -395,6 +398,13 @@ mod tests {
         assert_eq!(needs_start(2, &rec), Ok(true));
         set(&mut r, id, 2, &rec, 0).unwrap();
         assert_eq!(get(&r, id, 2).unwrap(), rec);
+        // The value as Windows' SCM writes it (issue #63).
+        let mut want = Vec::new();
+        for v in [86_400u32, 0, 0, 2, 20, 1, 5000, 0, 0] {
+            want.extend_from_slice(&v.to_le_bytes());
+        }
+        let v = r.value(id, &name("FailureActions").unwrap()).unwrap();
+        assert_eq!((v.kind, &v.data[..]), (REG_BINARY, &want[..]));
         // lpsaActions NULL: the period and actions stay.
         let mut keep = Vec::new();
         push_u32(&mut keep, 1).unwrap();

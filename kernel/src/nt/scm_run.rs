@@ -39,6 +39,7 @@ pub const SERVICE_CONTROL_STOP: u32 = 1;
 pub const SERVICE_CONTROL_INTERROGATE: u32 = 4;
 
 // The Win32 errors of starting and controlling.
+pub const ERROR_FILE_NOT_FOUND: u32 = 2;
 pub const ERROR_INVALID_DATA: u32 = 13;
 pub const ERROR_SERVICE_REQUEST_TIMEOUT: u32 = 1053;
 pub const ERROR_SERVICE_CANNOT_ACCEPT_CTRL: u32 = 1061;
@@ -268,6 +269,24 @@ fn with_run<R>(name: &[u16], f: impl FnOnce(&mut Run) -> R) -> Option<R> {
     RUNS.lock().iter_mut().find(|r| same(&r.name, name)).map(f)
 }
 
+/// The wait hint a service reports after a start that failed: the
+/// SCM's, 2 s (measured on 26200, issue #65).
+const FAILED_START_WAIT_HINT: u32 = 2000;
+
+/// The status of a service whose start failed (its process exited or
+/// was ended before its dispatcher connected, or could not be made):
+/// stopped, nothing accepted, exit code 0 (no reason is recorded: only
+/// StartService's error tells the failures apart), the SCM's wait hint,
+/// no process (measured on 26200 for each of those, issue #65).
+fn failed_start(r: &mut Run, op: &str) {
+    r.status[1] = SERVICE_STOPPED;
+    r.status[2..9].copy_from_slice(&[0, 0, 0, 0, FAILED_START_WAIT_HINT, 0, 0]);
+    r.process = None;
+    r.returning = true;
+    wait::set_signal(&r.signals.pending, 1);
+    emit(op, &r.name, &r.status);
+}
+
 /// Sets the service stopped (no process, nothing accepted, the given
 /// exit codes) and asks its dispatcher to return; logs and emits `op`.
 fn stop(r: &mut Run, exit: u32, specific: u32, op: &str) {
@@ -289,10 +308,13 @@ fn stop(r: &mut Run, exit: u32, specific: u32, op: &str) {
 /// started ServiceMain's thread (as documented for StartService); the
 /// service is then START_PENDING until it reports. Its Win32 error
 /// otherwise: ERROR_SERVICE_ALREADY_RUNNING; a driver or an account
-/// other than LocalSystem (recorded); the executable's (not found, not
-/// an image); ERROR_SERVICE_REQUEST_TIMEOUT when the dispatcher does not
-/// connect within ServicesPipeTimeout (the process ended or never called
-/// StartServiceCtrlDispatcher: it is ended) or does not answer.
+/// other than LocalSystem (recorded); the executable's (a missing one is
+/// ERROR_FILE_NOT_FOUND, its directory missing or not; not an image);
+/// ERROR_SERVICE_REQUEST_TIMEOUT when the dispatcher does not connect:
+/// at once when the process ends first, else after ServicesPipeTimeout
+/// (the process is then ended) (measured on 26200, issue #65); or when
+/// it does not answer. A start that fails leaves `failed_start`'s
+/// status.
 pub fn start(name: &[u16], c: &Config, args: &[u16]) -> Result<u64, NtStatus> {
     if c.kind & scm::SERVICE_WIN32 == 0 {
         warn!("scm: starting driver \"{}\" (\"{}\") is not supported", Plain(name), Plain(&c.path));
@@ -343,20 +365,24 @@ pub fn start(name: &[u16], c: &Config, args: &[u16]) -> Result<u64, NtStatus> {
             }
         }
     };
-    let launched = super::process::launch_service(path, line, "C:\\Windows\\System32\\", token)
+    // In the system directory, spelled as Windows' SCM gives it
+    // (`C:\WINDOWS\system32` on Windows; measured on 26200, issue #65).
+    let launched = super::process::launch_service(path, line, "C:\\Windows\\system32\\", token)
         .and_then(|(p, t)| Ok((process_object(&p)?, p, t)));
     let (process_ref, process, thread) = match launched {
         Ok(l) => l,
         Err(e) => {
             warn!("scm: service \"{}\": cannot start \"{path}\": {:#010x}", Plain(name), e.0);
-            let mut runs = RUNS.lock();
-            if let Some(at) = runs.iter().position(|r| same(&r.name, name)) {
-                match before {
-                    Some(b) => runs[at] = b,
-                    None => drop(runs.swap_remove(at)),
+            with_run(name, |r| failed_start(r, "cannot start"));
+            drop(before);
+            // A missing executable is ERROR_FILE_NOT_FOUND whether its
+            // directory exists or not (measured on 26200, issue #65).
+            return Err(match e {
+                NtStatus::OBJECT_NAME_NOT_FOUND | NtStatus::OBJECT_PATH_NOT_FOUND => {
+                    win32(ERROR_FILE_NOT_FOUND)
                 }
-            }
-            return Err(e);
+                e => e,
+            });
         }
     };
     let pid = process.id;
@@ -384,12 +410,7 @@ pub fn start(name: &[u16], c: &Config, args: &[u16]) -> Result<u64, NtStatus> {
                 "ended without calling"
             }
         );
-        with_run(name, |r| {
-            if r.status[1] != SERVICE_STOPPED {
-                stop(r, ERROR_SERVICE_REQUEST_TIMEOUT, 0, "start timed out");
-            }
-            r.process = None;
-        });
+        with_run(name, |r| failed_start(r, if alive { "start timed out" } else { "exited" }));
         if alive {
             super::process::terminate(&process, NtStatus(ERROR_SERVICE_REQUEST_TIMEOUT), false);
         }
@@ -477,17 +498,22 @@ fn accept_bit(code: u32) -> u32 {
 }
 
 /// ControlService(code) on service `name` (its right already checked):
-/// ERROR_SERVICE_NOT_ACTIVE when stopped; ERROR_SERVICE_CANNOT_ACCEPT_CTRL
-/// while it starts or stops (as documented); ERROR_INVALID_SERVICE_CONTROL
-/// for a control it does not accept (interrogation and user-defined
-/// controls always go); else the handler runs (its answer is logged, not
-/// returned: Windows' ControlService succeeds for a user-defined control
-/// whose handler answers 0xdeadbeef, Wine's tests). The status after it,
-/// with the answer, either way.
+/// ERROR_SERVICE_NOT_ACTIVE when stopped; while it starts, a control it
+/// says it accepts goes to its handler (a STOP to a START_PENDING service
+/// accepting STOP succeeds and stops it: measured on 26200, issue #65)
+/// and any other is ERROR_SERVICE_CANNOT_ACCEPT_CTRL, as while it stops
+/// (as documented; not measured); ERROR_INVALID_SERVICE_CONTROL for a
+/// control it does not accept (interrogation and user-defined controls
+/// always go); else the handler runs (its answer is logged, not
+/// returned: Windows' ControlService succeeds whatever the handler
+/// answers: ERROR_CALL_NOT_IMPLEMENTED to a user control or to
+/// INTERROGATE, 0xdeadbeef to STOP; Wine's tests, and measured on 26200,
+/// issue #65). The status after it, with the answer, either way.
 pub fn control(name: &[u16], kind: u32, code: u32) -> (Result<(), NtStatus>, [u32; 9]) {
     let now = status(name, kind);
     let refused = match now[1] {
         SERVICE_STOPPED => Some(scm::ERROR_SERVICE_NOT_ACTIVE),
+        SERVICE_START_PENDING if accept_bit(code) != 0 && now[2] & accept_bit(code) != 0 => None,
         SERVICE_START_PENDING | SERVICE_STOP_PENDING => Some(ERROR_SERVICE_CANNOT_ACCEPT_CTRL),
         _ if scm::built_in(name) => {
             (code != SERVICE_CONTROL_INTERROGATE).then_some(scm::ERROR_INVALID_SERVICE_CONTROL)
@@ -669,7 +695,8 @@ pub fn set_status(pid: u64, reported: [u32; 7]) -> Result<(), u32> {
 
 /// Process `process` has ended: a service it ran that had not stopped is
 /// stopped with ERROR_PROCESS_ABORTED (as Windows reports a killed
-/// service process: Wine's tests).
+/// service process: Wine's tests). One whose dispatcher never connected
+/// is left to `start`, which waits for that end (`failed_start`).
 pub fn process_ended(process: &Process) {
     let ended = {
         let mut runs = RUNS.lock();
@@ -678,6 +705,9 @@ pub fn process_ended(process: &Process) {
         else {
             return;
         };
+        if !r.connected {
+            return;
+        }
         r.process = None;
         r.connected = false;
         if r.status[1] == SERVICE_STOPPED {

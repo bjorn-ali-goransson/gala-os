@@ -82,6 +82,7 @@ safepoint_test
 section_test
 session_test
 setupapi_test
+setupcab_test
 shootdown_test
 smp_test
 smpcow_test
@@ -108,6 +109,7 @@ vmcycle_test
 wait_test
 windows_across_test
 winevent_test
+wininet_test
 winsock_test
 winsta_test
 wow64_adv_test
@@ -122,7 +124,9 @@ wow64_msxml_test
 wow64_office_api_test
 wow64_runas_test
 wow64_seh_test
+wow64_setupcab_test
 wow64_sock_test
 wow64_svc_test
 wow64_test
 wow64_ucrt_test
+wow64_wininet_test
