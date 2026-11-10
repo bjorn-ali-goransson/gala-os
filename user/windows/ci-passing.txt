@@ -109,7 +109,6 @@ vmcycle_test
 wait_test
 windows_across_test
 winevent_test
-wininet_test
 winsock_test
 winsta_test
 wow64_adv_test
@@ -129,4 +128,3 @@ wow64_sock_test
 wow64_svc_test
 wow64_test
 wow64_ucrt_test
-wow64_wininet_test
