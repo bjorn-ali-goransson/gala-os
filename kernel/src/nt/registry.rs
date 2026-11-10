@@ -414,6 +414,17 @@ impl Registry {
         Ok(())
     }
 
+    /// NtSetInformationKey(KeyWriteTimeInformation): the key's
+    /// LastWriteTime.
+    pub fn set_write_time(&mut self, id: KeyId, time: u64) -> Result<(), NtStatus> {
+        self.node_mut(id)?.last_write = time;
+        self.record(id, |key, n| {
+            let class = copy(&n.class).ok()?;
+            Some(RegOp::CreateKey { key, class, last_write: time, reset: false })
+        });
+        Ok(())
+    }
+
     /// NtDeleteValueKey.
     pub fn delete_value(&mut self, id: KeyId, name: &[u16], now: u64) -> Result<(), NtStatus> {
         let node = self.node_mut(id)?;
@@ -503,12 +514,7 @@ impl Registry {
                 Ok((b.0, 44))
             }
             // KEY_NAME_INFORMATION: the full name.
-            3 => {
-                let full = self.full_name(id)?;
-                b.u32(2 * full.len() as u32)?;
-                b.wide(&full)?;
-                Ok((b.0, 4))
-            }
+            3 => name_information(&self.full_name(id)?),
             // KEY_CACHED_INFORMATION
             4 => {
                 let (max_name, _) = self.subkey_maxima(node);
@@ -1076,6 +1082,50 @@ pub fn with<R>(f: impl FnOnce(&mut Registry) -> Result<R, NtStatus>) -> Result<R
 /// while the registry is held.
 pub struct KeyObject {
     pub id: KeyId,
+    /// Its full name as it was opened (display_name); empty: the stored
+    /// names (full_name).
+    pub name: Vec<u16>,
+}
+
+/// A copy of a name.
+pub fn copy_name(s: &[u16]) -> Result<Vec<u16>, NtStatus> {
+    copy(s).map_err(nomem)
+}
+
+/// The full name a key opened by `spelled` reports (KeyNameInformation):
+/// each component of its stored full name `stored` (`\REGISTRY\...`) in
+/// the case the caller spelled it, as long as the spelled path names the
+/// key's own components; from the first that differs (a link followed,
+/// a WOW64 redirection to WOW6432Node) the stored names. Windows gives
+/// `\Registry\Machine\SOFTWARE\...` back for an NtOpenKey of that path
+/// and `\REGISTRY\MACHINE\...` for the same key through RegOpenKeyExW,
+/// which opens `\REGISTRY\MACHINE` (measured on 26200, issue #59).
+pub fn display_name(stored: &[u16], spelled: &[u16]) -> Result<Vec<u16>, NtStatus> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(stored.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut theirs = spelled.split(|&c| c == BACKSLASH).filter(|c| !c.is_empty());
+    let mut matching = true;
+    for ours in stored.split(|&c| c == BACKSLASH).filter(|c| !c.is_empty()) {
+        let component = match theirs.next() {
+            Some(t) if matching && same(t, ours) => t,
+            _ => {
+                matching = false;
+                ours
+            }
+        };
+        out.try_push(BACKSLASH).map_err(nomem)?;
+        out.try_extend_from_slice(component).map_err(nomem)?;
+    }
+    Ok(out)
+}
+
+/// KEY_NAME_INFORMATION for the full name `name`: (the structure, its
+/// fixed part's size).
+pub fn name_information(name: &[u16]) -> Result<(Vec<u8>, usize), NtStatus> {
+    let mut b = Bytes::new();
+    b.u32(2 * name.len() as u32)?;
+    b.wide(name)?;
+    Ok((b.0, 4))
 }
 
 impl Drop for KeyObject {
@@ -1099,6 +1149,27 @@ mod tests {
 
     fn s(v: &[u16]) -> String {
         String::from_utf16_lossy(v)
+    }
+
+    #[test]
+    fn display_name_echoes_the_spelling_of_the_keys_own_components() {
+        let stored = w("\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft");
+        let d = |spelled: &str| s(&display_name(&stored, &w(spelled)).unwrap());
+        assert_eq!(
+            d("\\Registry\\Machine\\SOFTWARE\\Microsoft"),
+            "\\Registry\\Machine\\SOFTWARE\\Microsoft"
+        );
+        assert_eq!(
+            d("\\registry\\machine\\software\\microsoft\\"),
+            "\\registry\\machine\\software\\microsoft"
+        );
+        // A component that is not the key's (a link, WOW6432Node): the
+        // stored names from there on.
+        assert_eq!(
+            d("\\Registry\\Machine\\Other\\microsoft"),
+            "\\Registry\\Machine\\SOFTWARE\\Microsoft"
+        );
+        assert_eq!(d(""), "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft");
     }
 
     fn reg() -> Registry {

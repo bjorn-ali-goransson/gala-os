@@ -662,9 +662,10 @@ fn probe(label: &[u8], file: &[u8]) {
 
 /// What ODT's setup.exe calls after verifying its cabinet, three times:
 /// WinVerifyTrust with a WINTRUST_DATA that is all zero (cbStruct 0, no
-/// file) but dwStateAction, WTD_STATEACTION_CLOSE. Wine, and gala, take
-/// a cbStruct that does not reach dwStateAction as WTD_STATEACTION_IGNORE
-/// (a verification without a subject); what does Windows answer?
+/// file) but dwStateAction, WTD_STATEACTION_CLOSE. Wine takes a cbStruct
+/// that does not reach dwStateAction as WTD_STATEACTION_IGNORE (a
+/// verification without a subject); Windows answers 1 with the last
+/// error 1 (measured on 26200, issue #59), and so does gala.
 fn zeroed_close() {
     let mut data = WintrustData {
         size: 0,

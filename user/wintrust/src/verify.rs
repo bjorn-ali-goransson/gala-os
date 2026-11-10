@@ -205,6 +205,7 @@ const TRUST_E_PROVIDER_UNKNOWN: u32 = 0x800b_0001;
 const TRUST_E_NO_SIGNER_CERT: u32 = 0x8009_6002;
 const TRUST_E_TIME_STAMP: u32 = 0x8009_6005;
 const TRUST_E_BAD_DIGEST: u32 = 0x8009_6010;
+const CRYPT_E_BAD_MSG: u32 = 0x8009_200d;
 const TRUST_E_SYSTEM_ERROR: u32 = 0x8009_6001;
 const NTE_BAD_ALGID: u32 = 0x8009_0008;
 
@@ -396,12 +397,17 @@ pub extern "system" fn WinVerifyTrust(
     }
     // SAFETY: the caller's WINTRUST_DATA (its cbStruct says how much).
     let size = unsafe { (*data).size };
-    let state_action = if has!(size, WintrustData, state_action) {
-        // SAFETY: as above.
-        unsafe { (*data).state_action }
-    } else {
-        WTD_STATEACTION_IGNORE
-    };
+    if !has!(size, WintrustData, state_action) {
+        // A cbStruct that does not reach dwStateAction: 1 and last error
+        // 1, whatever the rest holds (ODT's setup.exe's all-zero close;
+        // measured on 26200 with cbStruct 0 and WTD_STATEACTION_CLOSE,
+        // `cab_probe`, issue #59).
+        // SAFETY: plain call.
+        unsafe { SetLastError(1) };
+        return 1;
+    }
+    // SAFETY: as above.
+    let state_action = unsafe { (*data).state_action };
     let r = match state_action {
         WTD_STATEACTION_CLOSE => {
             // SAFETY: as above.
@@ -715,7 +721,13 @@ fn message(s: &mut State, h: usize, subject: &Subject, der: &[u8]) -> Result<(),
         }
         s.data.msg = msg;
         if CryptMsgUpdate(msg, der.as_ptr(), der.len() as u32, 1) == 0 {
-            return Err(failed(b"signature does not decode", GetLastError()));
+            // CRYPT_E_BAD_MSG, whatever ASN.1 error the decoder gave
+            // (a cabinet's signature with its first byte changed, or cut
+            // short: measured on 26200, `cab_probe`, issue #59); the
+            // decoder's error is the log's detail.
+            let e = GetLastError();
+            failed(b"signature does not decode", e);
+            return Err(CRYPT_E_BAD_MSG);
         }
         // CERT_STORE_PROV_MSG.
         let store = CertOpenStore(core::ptr::without_provenance(1), X509_PKCS7, 0, 0, msg);

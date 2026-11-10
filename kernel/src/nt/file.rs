@@ -63,7 +63,6 @@ pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
 pub const FILE_DELETE_ON_CLOSE: u32 = 0x1000;
 pub const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
-/// Directories created at boot.
 /// The directories every boot starts with: the system's, the user's
 /// profile (`gala`, as advapi32's GetUserName names the user) with its
 /// AppData folders, the shared ones.
@@ -74,6 +73,11 @@ const DIRECTORIES: &[&[&str]] = &[
     &["Users", "Public"],
     &["Users", "gala", "AppData", "Roaming"],
     &["Users", "gala", "AppData", "Local", "Temp"],
+    // SYSTEM's profile and the system's temporary directory, a
+    // LocalSystem service's (nt::process::SERVICE_ENVIRONMENT).
+    &["Windows", "System32", "config", "systemprofile", "AppData", "Roaming"],
+    &["Windows", "System32", "config", "systemprofile", "AppData", "Local"],
+    &["Windows", "Temp"],
     &["ProgramData"],
     &["Program Files", "Common Files"],
     // The 32-bit programs' (WOW64; ProgramFiles in a 32-bit process).

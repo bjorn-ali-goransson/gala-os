@@ -47,16 +47,21 @@
 //!   changed is TRUST_E_NOSIGNATURE; the provider data shows one signer.
 //! - A signed cabinet (`data/selfsigned.cab`, from `data/make_cab.py`),
 //!   whose digest is computed as the digests of Microsoft's signed CDN
-//!   cabinets are (ARCHITECTURE "wintrust: Authenticode"): as it is,
-//!   CERT_E_CHAINING (S_OK hash only); with the header's reserved1 changed
-//!   (outside the digest) the same; with cbCabinet or a byte of its file
-//!   changed TRUST_E_BAD_DIGEST (hash only: TRUST_E_NOSIGNATURE, as for
-//!   images); without the RESERVE_PRESENT flag TRUST_E_NOSIGNATURE.
+//!   cabinets are (ARCHITECTURE "wintrust: Authenticode"): `cab_probe`'s
+//!   answers for it on Windows (measured on 26200, issue #59), a byte of
+//!   each field changed. As it is, CERT_E_CHAINING (S_OK hash only);
+//!   reserved1 and the reserve past its first 12 bytes are outside the
+//!   digest; cbCabinet, cbCFHeader's high byte, cbCFData, the reserve's
+//!   first 12 bytes but the size's low byte, the signature's last byte
+//!   and a cleared RESERVE_PRESENT lose the signature
+//!   (TRUST_E_NOSIGNATURE); a smaller signature size is CRYPT_E_BAD_MSG;
+//!   'MSCF' is TRUST_E_SUBJECT_FORM_UNKNOWN; every other header byte, the
+//!   file's data and bytes appended after the signature are
+//!   TRUST_E_BAD_DIGEST. Hash only, everything but success is
+//!   TRUST_E_NOSIGNATURE.
 //!
 //! Not confirmed on Windows yet (CI's run of this program confirms them):
-//! every cabinet answer above (`cab_probe` measures Windows' answers for
-//! Microsoft's cabinets and this one, byte by byte of the header); the
-//! changed digest of `data/selfsigned32.exe` (measured on the 64-bit
+//! the changed digest of `data/selfsigned32.exe` (measured on the 64-bit
 //! image); setup.exe's sftVerifyAsOf, taken as its timestamp's genTime.
 //!
 //! With the argument `require` (gala's scenario) setup.exe must be there;
@@ -269,6 +274,7 @@ const TRUST_E_SUBJECT_FORM_UNKNOWN: u32 = 0x800b_0003;
 const TRUST_E_NOSIGNATURE: u32 = 0x800b_0100;
 const CERT_E_CHAINING: u32 = 0x800b_010a;
 const TRUST_E_BAD_DIGEST: u32 = 0x8009_6010;
+const CRYPT_E_BAD_MSG: u32 = 0x8009_200d;
 /// szOID_NESTED_SIGNATURE (1.3.6.1.4.1.311.2.4.1) as a DER OBJECT IDENTIFIER.
 const NESTED_OID: [u8; 12] =
     [0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x04, 0x01];
@@ -557,21 +563,58 @@ fn cab_cases(c: &mut Checks) -> Result<(), u32> {
     let cab: &[u8] = include_bytes!("../data/selfsigned.cab");
     // cbCabinet: where the signature starts.
     let end = u32::from_le_bytes([cab[8], cab[9], cab[10], cab[11]]) as usize;
+    let size = cab.len();
     let path = temp_path(b"signed.cab");
-    let one = |at: usize| [cab[at] ^ 0x5a];
-    let (reserved1, cb_cabinet, data, flags) = (one(4), one(8), one(end - 3), [0u8]);
-    let cases: [(&[&[u8]], u32, u32); 5] = [
-        (&[cab], CERT_E_CHAINING, S_OK),
+    let at: [usize; 14] =
+        [0, 4, 8, 0x18, 0x19, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2c, 0x30, 0x34, end - 3];
+    let mut x = [[0u8; 1]; 14];
+    for (b, &a) in x.iter_mut().zip(&at) {
+        b[0] = cab[a] ^ 0x5a;
+    }
+    let flags = [cab[30] & !4];
+    let last = [cab[size - 1] ^ 0x5a];
+    let tail = [0x11, 0x22, 0x33, 0x44];
+    // Each case a byte XOR 0x5a unless said otherwise; the answers are
+    // cab_probe's over this file (measured on 26200, issue #59).
+    let one = |i: usize| -> [&[u8]; 3] { [&cab[..at[i]], &x[i], &cab[at[i] + 1..]] };
+    let cases: [([&[u8]; 3], u32, u32); 18] = [
+        ([cab, &[], &[]], CERT_E_CHAINING, S_OK),
+        // 'MSCF': no longer a cabinet.
+        (one(0), TRUST_E_SUBJECT_FORM_UNKNOWN, TRUST_E_NOSIGNATURE),
         // The header's reserved1, outside the digest.
-        (&[&cab[..4], &reserved1, &cab[5..]], CERT_E_CHAINING, S_OK),
-        // cbCabinet and a byte of the file's data, inside it.
-        (&[&cab[..8], &cb_cabinet, &cab[9..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
-        (&[&cab[..end - 3], &data, &cab[end - 2..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (one(1), CERT_E_CHAINING, S_OK),
+        // cbCabinet is where the signature is looked for: none there.
+        (one(2), TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        // The version is in the digest and not checked otherwise.
+        (one(3), TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (one(4), TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        // cbCFHeader's low byte moves the digest's last range; its high
+        // byte puts the reserve past the signature.
+        (one(5), TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (one(6), TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        // cbCFFolder is in the digest; a cbCFData that is not 0 loses
+        // the signature.
+        (one(7), TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (one(8), TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        // The reserve's first word (00 00 10 00) and the signature's
+        // offset: no signature.
+        (one(9), TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        (one(10), TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        // The signature's size, smaller: its DER cut short.
+        (one(11), CRYPT_E_BAD_MSG, TRUST_E_NOSIGNATURE),
+        // The reserve past its first 12 bytes: outside the digest.
+        (one(12), CERT_E_CHAINING, S_OK),
+        // A byte of the file's data, inside the digest.
+        (one(13), TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
         // Without RESERVE_PRESENT the cabinet has no signature.
-        (&[&cab[..30], &flags, &cab[31..]], TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        ([&cab[..30], &flags, &cab[31..]], TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        // The signature's last byte, and bytes after the signature, which
+        // are in the digest.
+        ([&cab[..size - 1], &last, &[]], TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+        ([cab, &tail, &[]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
     ];
     for (parts, full, hash_only) in cases {
-        c.ok(write_file(&path, parts), 0)?;
+        c.ok(write_file(&path, &parts), 0)?;
         let r = verify(c, &path, false)?;
         c.eq(r, full)?;
         let r = verify(c, &path, true)?;
@@ -580,6 +623,34 @@ fn cab_cases(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: a NUL-terminated path.
     unsafe { DeleteFileW(path.as_ptr()) };
     Ok(())
+}
+
+/// What ODT's setup.exe calls after verifying its cabinet: a
+/// WINTRUST_DATA that is all zero (cbStruct 0) but dwStateAction,
+/// WTD_STATEACTION_CLOSE. 1, and the last error 1 (`cab_probe`, measured
+/// on 26200, issue #59).
+fn zeroed_close(c: &mut Checks) -> Result<(), u32> {
+    let mut data = WintrustData {
+        size: 0,
+        policy_callback: 0,
+        sip_client: 0,
+        ui_choice: 0,
+        revocation: 0,
+        union_choice: 0,
+        file: core::ptr::null(),
+        state_action: WTD_STATEACTION_CLOSE,
+        state: 0,
+        url_reference: core::ptr::null(),
+        prov_flags: 0,
+        ui_context: 0,
+        signature_settings: 0,
+    };
+    // SAFETY: our structure; plain calls.
+    unsafe {
+        SetLastError(0xdead_beef);
+        c.eq(WinVerifyTrust(0, &GENERIC_VERIFY_V2, &mut data) as u32, 1)?;
+        c.eq(GetLastError(), 1)
+    }
 }
 
 /// Wine's test_wintrust_digest over one of its two self-signed images.
@@ -854,6 +925,7 @@ fn run() -> Result<(), u32> {
     digest_cases(&mut c, include_bytes!("../data/selfsigned32.exe"), 248)?;
     digest_cases(&mut c, include_bytes!("../data/selfsigned64.exe"), 264)?;
     cab_cases(&mut c)?;
+    zeroed_close(&mut c)?;
 
     let require = required();
     let setup = wide::<32>(b"C:\\gala\\setup.exe");

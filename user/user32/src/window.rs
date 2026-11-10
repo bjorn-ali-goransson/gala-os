@@ -1929,9 +1929,13 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
         // The caption's state: nothing to draw (the desktop draws it);
         // TRUE lets the change proceed.
         WM_NCACTIVATE => 1,
-        // Alt+F4 (the Alt bit is lParam's bit 29): WM_SYSCOMMAND SC_CLOSE
-        // posted to the top-level window, as on Windows.
-        WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 => {
+        // Alt+F4 (the Alt bit is lParam's bit 29) while the Alt key is
+        // held: WM_SYSCOMMAND SC_CLOSE posted to the top-level window. The
+        // message alone, given to DefWindowProc while Alt is not held,
+        // leaves the window on Windows (measured on 26200, issue #59);
+        // that the thread's key state is what it checks is gala's reading
+        // of that (not measured with Alt held).
+        WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 && key_down(VK_MENU) => {
             let top = crate::tree::GetAncestor(hwnd, 2);
             PostMessageW(if top == 0 { hwnd } else { top }, 0x0112, 0xf060, 0);
             0

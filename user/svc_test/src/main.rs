@@ -122,6 +122,22 @@ unsafe extern "system" {
     ) -> Handle;
     fn DeleteService(h: Handle) -> i32;
     fn ChangeServiceConfig2W(h: Handle, level: u32, info: *const u8) -> i32;
+    fn RegOpenKeyExW(
+        key: usize,
+        sub: *const u16,
+        options: u32,
+        access: u32,
+        out: *mut usize,
+    ) -> i32;
+    fn RegQueryValueExW(
+        key: usize,
+        name: *const u16,
+        reserved: *mut u32,
+        kind: *mut u32,
+        data: *mut u8,
+        size: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(key: usize) -> i32;
     fn QueryServiceObjectSecurity(
         h: Handle,
         info: u32,
@@ -1000,7 +1016,9 @@ const SC_ACTION_RESTART: u32 = 1;
 /// preshutdown time-out (10 s by default since Windows 10 1709, 180 s
 /// before), the delayed start flag (0 or 1 only); the failure actions as
 /// documented (NULL strings when none were given; a restart action needs
-/// SERVICE_START, which the handle has).
+/// SERVICE_START, which the handle has); before any, the structure's size
+/// needed and every field 0 or NULL; the key's FailureActions value as
+/// Windows' SCM writes it (both measured on 26200, issue #63).
 fn config2(c: &mut Checks, h: Handle) -> Result<(), u32> {
     const PTR: u32 = size_of::<usize>() as u32;
     let b = buffer();
@@ -1109,6 +1127,24 @@ fn config2(c: &mut Checks, h: Handle) -> Result<(), u32> {
         c.ok(r != 0, last_error().into())?;
         c.eq(v.into(), 1)?;
 
+        // No failure actions yet: the structure's size needed, every field
+        // zero or NULL, lpsaActions NULL rather than an empty array
+        // (measured on 26200, issue #63).
+        let level = SERVICE_CONFIG_FAILURE_ACTIONS;
+        clear_error();
+        let r = QueryServiceConfig2W(h, level, null_mut(), 0, &mut needed);
+        c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+        c.eq(needed.into(), size_of::<FailureActions>() as u64)?;
+        b[..64].fill(0xee);
+        let r = QueryServiceConfig2W(h, level, b.as_mut_ptr(), 1024, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.eq(needed.into(), size_of::<FailureActions>() as u64)?;
+        let got = &*b.as_ptr().cast::<FailureActions>();
+        c.eq(got.reset.into(), 0)?;
+        c.eq(got.count.into(), 0)?;
+        c.ok(got.reboot.is_null() && got.command.is_null(), got.reboot as u64)?;
+        c.ok(got.actions.is_null(), got.actions as u64)?;
+
         // The failure actions: a restart after 5 s, then nothing.
         let actions = [
             ScAction { kind: SC_ACTION_RESTART, delay: 5000 },
@@ -1135,9 +1171,36 @@ fn config2(c: &mut Checks, h: Handle) -> Result<(), u32> {
         c.eq(a[0].kind.into(), SC_ACTION_RESTART.into())?;
         c.eq(a[0].delay.into(), 5000)?;
         c.eq(a[1].kind.into(), SC_ACTION_NONE.into())?;
+        // The SCM keeps them as the key's FailureActions, REG_BINARY: the
+        // period, the two strings' offsets (0: NULL), the count, the
+        // actions' offset (20), then the actions (measured on 26200, issue
+        // #63).
+        let path = wide::<64>("SYSTEM\\CurrentControlSet\\Services\\gala_svc_test");
+        let mut key = 0usize;
+        c.eq(RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) as u64, 0)?;
+        let value = wide::<16>("FailureActions");
+        let (mut kind, mut size) = (0u32, 1024u32);
+        let r =
+            RegQueryValueExW(key, value.as_ptr(), null_mut(), &mut kind, b.as_mut_ptr(), &mut size);
+        RegCloseKey(key);
+        c.eq(r as u64, 0)?;
+        c.eq(kind.into(), REG_BINARY.into())?;
+        c.eq(size.into(), 36)?;
+        let mut want = [0u8; 36];
+        for (i, v) in
+            [86_400u32, 0, 0, 2, 20, SC_ACTION_RESTART, 5000, SC_ACTION_NONE, 0].iter().enumerate()
+        {
+            want[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        c.ok(b[..36] == want, u64::from(b[16]))?;
     }
     Ok(())
 }
+
+/// (HKEY)(LONG)0x80000002, sign-extended as the SDK defines it.
+const HKEY_LOCAL_MACHINE: usize = 0x8000_0002u32 as i32 as isize as usize;
+const KEY_READ: u32 = 0x2_0019;
+const REG_BINARY: u32 = 3;
 
 const DACL_SECURITY_INFORMATION: u32 = 4;
 

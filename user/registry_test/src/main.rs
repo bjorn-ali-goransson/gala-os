@@ -27,15 +27,19 @@
 //! - Nt*Key directly: NtOpenKey by \Registry path (case-insensitive even
 //!   without OBJ_CASE_INSENSITIVE), NtQueryValueKey partial information and
 //!   STATUS_BUFFER_OVERFLOW / STATUS_BUFFER_TOO_SMALL with the needed
-//!   length, NtQueryKey basic and name information (the full name starts
-//!   \REGISTRY\MACHINE), STATUS_NO_MORE_ENTRIES.
+//!   length, NtQueryKey basic and name information, STATUS_NO_MORE_ENTRIES.
 //! - NtSetInformationKey(KeyControlFlagsInformation) with a ULONG of
 //!   REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG (Office's Click-to-Run
 //!   client's call): STATUS_SUCCESS on a handle with KEY_SET_VALUE,
 //!   STATUS_ACCESS_DENIED on a KEY_READ one (ZwSetInformationKey's
-//!   documentation); a length of 3 STATUS_INFO_LENGTH_MISMATCH and class
-//!   99 STATUS_INVALID_INFO_CLASS (the general rules for information
-//!   classes; not confirmed on Windows yet).
+//!   documentation); a length of 3 STATUS_INFO_LENGTH_MISMATCH; classes 0
+//!   (8 bytes of time), 1, 3, 4 and 5 (a ULONG) STATUS_SUCCESS; 6
+//!   (KeySetLayerInformation) and 99 STATUS_INVALID_INFO_CLASS. Measured on
+//!   26200 for a standard user and an administrator alike (issue #60).
+//! - NtQueryKey(KeyNameInformation) gives the name in the case the key
+//!   was opened with: `\Registry\Machine\...` for an NtOpenKey of that
+//!   path, `\REGISTRY\MACHINE\...` through RegOpenKeyExW (measured on
+//!   26200, issue #59).
 //!
 //! The test's own keys are volatile and deleted at the end, so a run
 //! leaves nothing behind on Windows.
@@ -1061,11 +1065,22 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
         c.eq(ret.into(), 16 + 28)?;
         c.eq(u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]).into(), 28)?;
         c.ok(same(&units(&buf[16..44])[..14], "CurrentVersion"), buf[16].into())?;
-        // KEY_NAME_INFORMATION: the full name.
+        // KEY_NAME_INFORMATION: the full name, in the case the key was
+        // opened with (measured on 26200, issue #59).
         c.eq(NtQueryKey(key, 3, buf.as_mut_ptr(), 256, &mut ret).into(), 0)?;
-        let full = "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+        let full = "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
         c.eq(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]).into(), 2 * full.len() as u64)?;
         c.ok(same(&units(&buf[4..4 + 2 * full.len()])[..full.len()], full), buf[4].into())?;
+        // Through RegOpenKeyExW it is \REGISTRY\MACHINE\...: the path
+        // advapi32 opens (measured on 26200, issue #59).
+        let sub = w("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion");
+        let mut hk: Hkey = 0;
+        c.ok0(RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_READ, &mut hk))?;
+        c.eq(NtQueryKey(hk, 3, buf.as_mut_ptr(), 256, &mut ret).into(), 0)?;
+        RegCloseKey(hk);
+        let upper = "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+        c.eq(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]).into(), 2 * upper.len() as u64)?;
+        c.ok(same(&units(&buf[4..4 + 2 * upper.len()])[..upper.len()], upper), buf[4].into())?;
         // NtSetInformationKey needs KEY_SET_VALUE: this handle is KEY_READ.
         let flags = 0xau32.to_le_bytes(); // REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG
         let r = NtSetInformationKey(key, 2, flags.as_ptr(), 4);
@@ -1084,11 +1099,32 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
 
         // KeyControlFlagsInformation, as Office's Click-to-Run client sets
         // it: a ULONG; another length, or a class that is none, fails.
+        // Each class's answer for a standard user and an administrator
+        // alike (measured on 26200, issue #60).
         c.eq(NtSetInformationKey(test, 2, flags.as_ptr(), 4).into(), 0)?;
         let r = NtSetInformationKey(test, 2, flags.as_ptr(), 3);
         c.eq(r.into(), STATUS_INFO_LENGTH_MISMATCH)?;
+        // KeyWow64FlagsInformation, then KeySetVirtualizationInformation,
+        // KeySetDebugInformation and KeySetHandleTagsInformation: a ULONG,
+        // accepted.
+        for class in [1, 3, 4, 5] {
+            c.eq(NtSetInformationKey(test, class, flags.as_ptr(), 4).into(), 0)?;
+        }
+        // KeySetLayerInformation is no class on this build, as 99 is.
+        let r = NtSetInformationKey(test, 6, flags.as_ptr(), 4);
+        c.eq(r.into(), STATUS_INVALID_INFO_CLASS)?;
         let r = NtSetInformationKey(test, 99, flags.as_ptr(), 4);
         c.eq(r.into(), STATUS_INVALID_INFO_CLASS)?;
+        // KeyWriteTimeInformation: the key's LastWriteTime becomes the
+        // 8 bytes given (ZwSetInformationKey's documentation), as
+        // KEY_BASIC_INFORMATION shows.
+        let when = 0x01d9_0000_1234_5678u64.to_le_bytes();
+        c.eq(NtSetInformationKey(test, 0, when.as_ptr(), 8).into(), 0)?;
+        c.eq(NtQueryKey(test, 0, buf.as_mut_ptr(), 256, &mut ret).into(), 0)?;
+        c.eq(
+            u64::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]),
+            0x01d9_0000_1234_5678,
+        )?;
     }
     Ok(())
 }

@@ -1571,7 +1571,9 @@ need gala's.
      functions InternetConnectA, HttpOpenRequestA, HttpAddRequestHeadersA,
      HttpQueryInfoA, InternetCrackUrlA; `wininet_test` and its x86 twin
      `wow64_wininet_test`, expectations from Wine's wininet tests run on
-     Windows; ARCHITECTURE "WinHTTP and WinINet"), asks the 32-bit ntdll
+     Windows, both of which pass on Windows with the test CA trusted
+     (measured on 26200, issue #61; `ci-passing.txt`); ARCHITECTURE
+     "WinHTTP and WinINet"), asks the 32-bit ntdll
      for RtlConvertDeviceFamilyInfoToString through GetProcAddress
      (missing export, survived), lists the network adapters (done:
      gala's iphlpapi.dll for i686 too, with GetAdaptersInfo for both
@@ -1611,7 +1613,8 @@ need gala's.
      officecdn.microsoft.com over http and verifies it (done: the
      cabinet subject in gala's wintrust, its digest the range every
      signed CDN cabinet's signature matches; `wintrust_test`'s cabinet
-     cases, `cab_probe` for Windows' answers; ARCHITECTURE "wintrust:
+     cases, which are `cab_probe`'s answers on Windows (issue #59);
+     ARCHITECTURE "wintrust:
      Authenticode"). Rejected, that cabinet ended the run: ODT's log
      (`C:\Users\Public\GALA-<date>.log`, dumped) said
      `MRO::LoadFromVCab ... InvalidSignature (HR:0x800B0003)`, "Cannot
@@ -1619,12 +1622,14 @@ need gala's.
      way out, came slc.dll and the SetSystemFileCacheSize and
      NtSetSystemInformation lookups (telemetry at exit, not causes).
      Accepted, setup.exe closes three all-zero WINTRUST_DATAs
-     (dwStateAction CLOSE, cbStruct 0: TRUST_E_SUBJECT_FORM_UNKNOWN,
-     recorded, survived; Windows' answer is `cab_probe`'s) and extracts
+     (dwStateAction CLOSE, cbStruct 0: 1 with the last error 1, as
+     Windows answers, `cab_probe` on 26200, issue #59) and extracts
      the cabinet with setupapi's SetupIterateCabinetW (done: x64 and
      x86, over galapkg's cabinet reader, v64.cab being LZX:21;
      `setupcab_test`, `wow64_setupcab_test`, expected results from
-     Wine's setupcab.c tests; ARCHITECTURE "Other DLLs").
+     Wine's setupcab.c tests, both passing on Windows (issue #59; the
+     32-bit one has an `asInvoker` manifest so that UAC's installer
+     detection lets it start unelevated); ARCHITECTURE "Other DLLs").
      It loads the descriptor's XML with MSXML 6 and clones from it
      (done: IXMLDOMNode::cloneNode; `msxml_test`, `wow64_msxml_test`,
      Wine's test_cloneNode), downloads the product's cabinets and
@@ -1663,11 +1668,17 @@ need gala's.
      and QueryServiceObjectSecurity, the descriptor kept in the service
      key's `Security\Security`; `svc_test`, `wow64_svc_test`).
      It starts ClickToRunSvc (done: the SCM runs services, own-process
-     ones as LocalSystem in session 0, with the dispatcher's handshake,
+     ones as LocalSystem in session 0, with SYSTEM's profile environment
+     and no standard handles, the dispatcher's handshake,
      SetServiceStatus, the controls and a killed process's
      ERROR_PROCESS_ABORTED; `svcrun_test`, `wow64_svcrun_test`, Wine's
-     advapi32 and services tests run on Windows; ARCHITECTURE "The
-     service control manager"): `OfficeClickToRun.exe /service` connects
+     advapi32 and services tests run on Windows, and issue #65's
+     measurements on 26200: a failed start's status, a missing
+     executable's ERROR_FILE_NOT_FOUND, a STOP to a START_PENDING
+     service, the second dispatcher, the environment; ARCHITECTURE "The
+     service control manager"; what Windows reports for a live process
+     whose service reported STOPPED with controls accepted is not
+     measured): `OfficeClickToRun.exe /service` connects
      at once and reports RUNNING (accepting stop, shutdown and
      pre-shutdown, 0x85). Its process pool creates its COM objects from
      a thread that never initialized COM while the process has an MTA
@@ -1739,17 +1750,21 @@ need gala's.
      download's speed under TCG (the network path: `memload_test`'s
      loopback HTTP moves about 1.4 MB/s, its AFD calls 4 ms each) and
      what applying it needs; GetCachedSigningLevel and
-     SetCachedSigningLevel; a service's environment
-     (SYSTEM's profile variables, Windows' TEMP for services) and HKCU
-     from the caller's token; the RPC calls the client's
+     SetCachedSigningLevel; HKCU from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
      names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
      piece needs it); CryptCATAdmin*
      (catalogs: a catalog SIP, member lookup
-     by hash); slc.dll and the two exports once a run needs them (their
-     Windows answers for a standard and an elevated caller first);
-     Windows' answers from `cab_probe` (the cabinet cases of
-     `wintrust_test` follow them);
+     by hash); slc.dll and the two exports once a run needs them, with
+     their Windows answers (measured on 26200 for a standard user and an
+     administrator, issue #60): SLOpen S_OK with a non-NULL handle and
+     SLClose S_OK for either; SetSystemFileCacheSize(-1, -1, 0) FALSE
+     with ERROR_ACCESS_DENIED and
+     NtSetSystemInformation(SystemFileCacheInformationEx, 0x51)
+     STATUS_ACCESS_DENIED until SeIncreaseQuotaPrivilege is enabled
+     (an administrator holds it disabled; a standard user does not hold
+     it, so AdjustTokenPrivileges gives ERROR_NOT_ALL_ASSIGNED), then
+     TRUE and STATUS_SUCCESS;
      then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
      webservices, cabinet, credui, gdiplus; osppc.dll is

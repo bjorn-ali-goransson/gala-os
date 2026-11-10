@@ -2423,7 +2423,17 @@ shutdown.
   PARTIAL_INFORMATION and the ALIGN64 forms; a buffer shorter than the
   fixed part is STATUS_BUFFER_TOO_SMALL, one shorter than the whole
   STATUS_BUFFER_OVERFLOW with what fits, and ResultLength is always the
-  size needed.
+  size needed. KEY_NAME_INFORMATION is the full name in the case the
+  key was opened with: each key object keeps the name its opener spelled
+  (the RootDirectory key's name, then the relative one) where it names
+  the key's own components, the stored names from the first component
+  that differs (a WOW6432Node redirection) (`registry::display_name`).
+  NtOpenKey of `\Registry\Machine\SOFTWARE\...` reports
+  `\Registry\Machine\...`, a key opened through RegOpenKeyExW
+  `\REGISTRY\MACHINE\...` (advapi32's predefined keys open the capitalized
+  roots) (measured on 26200, issue #59; a lower-case spelling below the
+  roots is echoed too, which is not measured). An enumerated subkey's
+  name is its stored one.
 - **Access**: checked against the handle (KEY_QUERY_VALUE, KEY_SET_VALUE,
   KEY_ENUMERATE_SUB_KEYS, DELETE; KeyNameInformation needs none), and at
   open against the key's descriptor ("Access checks"). The WOW64 view
@@ -2459,10 +2469,16 @@ shutdown.
   (long-stable on x64), NtSetValueKey 0x60 (to be verified), and gala's
   numbers for NtOpenKeyEx, NtDeleteKey, NtDeleteValueKey, NtFlushKey
   (0x7f06-0x7f09) and NtSetInformationKey (0x7fd6: KEY_SET_VALUE on the
-  handle; KeyWow64FlagsInformation and KeyControlFlagsInformation, a
-  ULONG, accepted and recorded, there being no registry virtualization
-  to steer; KeyWriteTimeInformation and classes 3-6 recorded
-  STATUS_NOT_IMPLEMENTED; `registry_test`).
+  handle, for an administrator too; KeyWriteTimeInformation sets the
+  key's LastWriteTime (8 bytes, recorded as the key's CreateKey op for
+  persistence); KeyWow64FlagsInformation, KeyControlFlagsInformation,
+  KeySetVirtualizationInformation, KeySetDebugInformation and
+  KeySetHandleTagsInformation, a ULONG (another length
+  STATUS_INFO_LENGTH_MISMATCH), succeed without a privilege and are
+  recorded, there being no virtualization, registry debugging or handle
+  tags to steer; KeySetLayerInformation (6) is STATUS_INVALID_INFO_CLASS
+  as any unknown class; measured on 26200 for a standard user and an
+  administrator, issue #60; `registry_test`).
 - **Seeding**: the tree is built at boot from
   `kernel/src/nt/registry.seed` (a small text format, described at its
   top) plus `HARDWARE\DESCRIPTION\System\CentralProcessor\<n>` per
@@ -2550,30 +2566,47 @@ impersonating thread's, as services.exe impersonates its RPC client).
   ERROR_SERVICE_ALREADY_RUNNING), starts its ImagePath (expanded,
   `\SystemRoot\` made `C:\Windows\`; quoted, or the shortest prefix
   before a space that names a file) with the ImagePath as its command
-  line, under a new SYSTEM token (session 0), in `C:\Windows\System32`,
-  with new standard handles that write to the kernel log, suspended
-  until the SCM has recorded its process. The handshake, as documented:
+  line, under a new SYSTEM token (session 0), in `C:\Windows\system32`,
+  with SYSTEM's environment (`process::SERVICE_ENVIRONMENT`: USERPROFILE,
+  APPDATA and LOCALAPPDATA in `C:\Windows\system32\config\systemprofile`,
+  TEMP and TMP `C:\Windows\TEMP`, USERNAME the machine account `GALA$`,
+  PATHEXT; the rest the boot environment's) and no standard handles (all
+  three NULL), as Windows starts a LocalSystem own-process service
+  (measured on 26200, issue #65), suspended until the SCM has recorded
+  its process. The handshake, as documented:
   the process's dispatcher (StartServiceCtrlDispatcher) connects within
   ServicesPipeTimeout (`HKLM\SYSTEM\CurrentControlSet\Control`, else
   30 s), the SCM hands it the start request (the service's type and
   name and StartService's arguments) and StartService returns once the
   dispatcher has started ServiceMain's thread. A process that ends
-  first, or does not connect in time (it is then ended), makes
-  StartService ERROR_SERVICE_REQUEST_TIMEOUT, the service stopped
-  without a process; a missing executable is the open's error
-  (ERROR_PATH_NOT_FOUND, ERROR_FILE_NOT_FOUND) and leaves the status as
-  it was. Each service process has one request slot (events `free`,
+  first makes StartService ERROR_SERVICE_REQUEST_TIMEOUT at once; one
+  that does not connect in time makes it the same after the time-out,
+  and is ended; a missing executable is ERROR_FILE_NOT_FOUND, its
+  directory missing or not. Each failed start leaves the same status
+  (`scm_run::failed_start`): stopped, nothing accepted, exit code 0, wait
+  hint 2000 (the SCM's), no process; Windows records no reason there, so
+  only StartService's error tells them apart (all measured on 26200,
+  issue #65). A process that ends before its dispatcher connected is
+  left to the start's handshake (`process_ended` skips it). Each service process has one request slot (events `free`,
   `pending`, `answered`): StartService and ControlService take it, put
   their request and wait for the answer (30 s each, the documented
   handler limit, else ERROR_SERVICE_REQUEST_TIMEOUT; the process's end
   ends the wait); the dispatcher's thread waits in GalaServiceDispatch
   for the next request and runs it. ControlService: ERROR_SERVICE_NOT_ACTIVE
-  for a stopped service, ERROR_SERVICE_CANNOT_ACCEPT_CTRL while it
-  starts or stops, ERROR_INVALID_SERVICE_CONTROL for a control whose
-  SERVICE_ACCEPT_ bit it did not report (interrogation and user
-  controls 128-255 always go); the handler's answer is logged, not
-  returned (Windows' ControlService succeeds for a user control whose
-  handler answers 0xdeadbeef). SetServiceStatus keeps the state,
+  for a stopped service; while it starts, a control whose SERVICE_ACCEPT_
+  bit it reported goes to its handler (a STOP to a START_PENDING service
+  that accepts STOP succeeds: measured on 26200, issue #65) and any other
+  is ERROR_SERVICE_CANNOT_ACCEPT_CTRL, as every control while it stops
+  (as documented; not measured); ERROR_INVALID_SERVICE_CONTROL for a
+  control whose SERVICE_ACCEPT_ bit it did not report (interrogation and
+  user controls 128-255 always go); the handler's answer is logged, not
+  returned (Windows' ControlService succeeds whatever the handler
+  answers: 0xdeadbeef to a user control or STOP,
+  ERROR_CALL_NOT_IMPLEMENTED to a user control or INTERROGATE; measured
+  on 26200, issue #65). What Windows reports for a service that says
+  STOPPED with controls accepted while its process lives on (gala keeps
+  the controls and reports process id 0) is not measured (#65's item 5
+  was discarded). SetServiceStatus keeps the state,
   accepted controls and exit codes (the type stays the configuration's;
   the check point and wait hint only in the pending states, as Windows
   reports 0 for a running service that gave a wait hint); STOPPED clears
@@ -2623,8 +2656,10 @@ impersonating thread's, as services.exe impersonates its RPC client).
   are checked against it). The service process's side
   (`service_run.rs`): StartServiceCtrlDispatcherW/A connects (else
   ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, as for a console program;
-  a second call ERROR_SERVICE_ALREADY_RUNNING) and runs the requests on
-  the calling thread until every service has stopped (an own-process
+  a second call ERROR_SERVICE_ALREADY_RUNNING before its table is looked
+  at, a malformed one too) and runs the requests on the calling thread
+  until every service has reported STOPPED, without waiting for the
+  ServiceMain threads (both measured on 26200, issue #65) (an own-process
   service is the table's first entry, whatever its name; ServiceMain
   gets the service's name, then the arguments, in the table's width,
   on a new thread); RegisterServiceCtrlHandler(Ex)W/A (any name in an
@@ -2642,9 +2677,14 @@ impersonating thread's, as services.exe impersonates its RPC client).
   preshutdown time-out is 10 s when not set (Windows 10 1709 on). An
   unknown level is ERROR_INVALID_LEVEL before a NULL *Needed is
   ERROR_INVALID_ADDRESS; QueryServiceConfig2A counts its strings as
-  UTF-16 (Wine's service.c on Windows). FailureActions' stored layout
-  (a 20-byte header, then the SC_ACTIONs) is gala's reading of Windows'
-  and not measured. Levels 8, 9 and 12 (triggers, preferred node, launch
+  UTF-16 (Wine's service.c on Windows). FailureActions is REG_BINARY as
+  Windows' SCM writes it: the period, the reboot message's and the
+  command's offsets (0 for NULL; gala keeps the strings as RebootMessage
+  and FailureCommand), the count, the actions' offset (20), then the
+  SC_ACTIONs; no other value is added for NULL strings. With no failure
+  actions QueryServiceConfig2W needs just the structure (40 bytes on
+  x64), every field 0 and lpsaActions NULL (both measured on 26200,
+  issue #63). Levels 8, 9 and 12 (triggers, preferred node, launch
   protection) are recorded and ERROR_NOT_SUPPORTED.
 - **Observability**: every connection, open, creation, deletion mark,
   start request and control is a `scm:` log line (the first 64 per boot;
@@ -2661,9 +2701,9 @@ impersonating thread's, as services.exe impersonates its RPC client).
   account`), drivers do not (ERROR_NOT_SUPPORTED, recorded `start a
   driver`); a share-process service runs in a process of its own
   (recorded `share process: run alone`: svchost is not there); a
-  service's environment is the boot environment (Windows gives SYSTEM's
-  profile variables), its standard handles write to the kernel log
-  (Windows gives none); SERVICE_CONTROL_SHUTDOWN is never sent (gala's
+  service's environment has SYSTEM's profile variables over the boot
+  environment (HOMEDRIVE, HOMEPATH, USERDOMAIN and the like stay the
+  boot user's: not measured); SERVICE_CONTROL_SHUTDOWN is never sent (gala's
   shutdown does not stop services), automatic-start services are not
   started at boot, failure actions are kept but not carried out,
   dependencies are not started first, the controls' event data
@@ -3729,26 +3769,37 @@ through their public functions.
   `cab_probe`): a file starting "MSCF" is the cabinet subject
   (C689AABA-8E78-11D0-8C47-00C04FC295EE, as CryptSIPRetrieveSubjectGUID
   answers in Wine's sip.c tests). Its signature's place is the header's
-  reserve area (flag RESERVE_PRESENT, cbCFHeader at least 12: two words,
-  00 00 10 00 in Microsoft's, then the signature's offset and size;
-  Wine's crypt.c CAB_SIGNINFO); none of these, a version above 1.3 or a
-  signature outside the file is TRUST_E_NOSIGNATURE. The PKCS #7 is
-  read to its DER length (Microsoft pads it to 8 bytes). Its
-  SpcIndirectDataContent's data is an SpcLink (1.3.6.1.4.1.311.2.1.28,
-  or SPC_CAB_DATA_OBJID .25) and its digest covers the file from 0 to
-  the signature but for reserved1 (bytes 4..8), cbCFHeader (36..38) and
-  the reserve area (40..40+cbCFHeader). No published source documents
-  that range: it is the one subset of the header's fields whose hash
-  matches the signed digest of Microsoft's CDN cabinets (v64.cab,
-  v32.cab, ofl.cab, releasehistory.cab: all four, SHA-256), found by
-  hashing every subset; the moniker's one attribute
-  (1.3.6.1.4.1.311.2.5.1) is the SHA-256 of cbCabinet's 4 bytes and is
-  not checked (cbCabinet is in the digest). What Windows answers for
-  altered copies (each header byte, appended bytes, a cut signature, an
-  unsigned cabinet) is `cab_probe`'s output on CI's Windows job;
-  `wintrust_test`'s cabinet cases assume the answers of PE images
-  (TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE hash-only) until it is
-  read.
+  reserve area (flag RESERVE_PRESENT, cbCFHeader at least 12: a word
+  00 00 10 00, then the signature's offset and size; Wine's crypt.c
+  CAB_SIGNINFO). What Windows answers for a cabinet with one byte of the
+  header changed (`cab_probe` over Microsoft's v64.cab and
+  releasehistory.cab and `data/selfsigned.cab`, the same map on all
+  three; measured on 26200, issue #59) gives the rules: without the
+  flag, with less reserve, another first word, a cbCFData that is not 0,
+  a signature that does not start at cbCabinet (cbCabinet is where the
+  signature is looked for, not only a digested field), or one outside the
+  file, the cabinet is not signed (TRUST_E_NOSIGNATURE); a signature
+  size cut short of its DER is CRYPT_E_BAD_MSG; 'MSCF' changed is
+  TRUST_E_SUBJECT_FORM_UNKNOWN (TRUST_E_NOSIGNATURE hash-only, as every
+  failure is). The version is not checked. The PKCS #7 is read to its
+  DER length (Microsoft pads it to 8 bytes). Its SpcIndirectDataContent's
+  data is an SpcLink (1.3.6.1.4.1.311.2.1.28, or SPC_CAB_DATA_OBJID .25)
+  and its digest covers the file from 0 to the signature but for
+  reserved1 (bytes 4..8), cbCFHeader (36..38) and the reserve area
+  (40..40+cbCFHeader), then whatever follows the signature (Microsoft's
+  cabinets end with it; 4 bytes appended are TRUST_E_BAD_DIGEST on
+  Windows). No published source documents that range: it is the one
+  subset of the header's fields whose hash matches the signed digest of
+  Microsoft's CDN cabinets (v64.cab, v32.cab, ofl.cab,
+  releasehistory.cab: all four, SHA-256), found by hashing every subset,
+  and `cab_probe`'s candidate A, which matches on Windows for all three
+  of its cabinets where the six other candidates differ; the moniker's
+  one attribute (1.3.6.1.4.1.311.2.5.1) is the SHA-256 of cbCabinet's 4
+  bytes and is not checked. `wintrust_test`'s cabinet cases are
+  `cab_probe`'s answers for `data/selfsigned.cab`, one per rule. A
+  WINTRUST_DATA whose cbStruct does not reach dwStateAction (ODT's
+  setup.exe closes three all-zero ones) is 1 with the last error 1, as
+  Windows answers a zeroed one with WTD_STATEACTION_CLOSE (`cab_probe`).
 - **State**: one heap block per verification (`State`), the
   CRYPT_PROVIDER_DATA first so its address is hWVTStateData: the step
   errors (38), the provider functions (pfnAlloc/pfnFree on the process
@@ -4095,8 +4146,9 @@ of their own, clients of it) is the yardstick.
   EPT_S_NOT_REGISTERED, recorded).
 - **Server** (`server.rs`): RpcServerUseProtseqEp makes the endpoint's
   first pipe instance (FILE_FLAG_FIRST_PIPE_INSTANCE: an endpoint
-  another process holds is RPC_S_DUPLICATE_ENDPOINT) and its listener
-  thread. Invariant: a listening instance always exists, since the
+  another process holds is RPC_S_DUPLICATE_ENDPOINT, and so is one this
+  process registered already, measured on 26200, issue #63) and its
+  listener thread. Invariant: a listening instance always exists, since the
   listener creates the next instance before it waits on the current one
   (gala has no WaitNamedPipe, so a client finding none would fail). Each
   connection has a thread reading its PDUs; a bind accepts an interface
@@ -4128,14 +4180,23 @@ of their own, clients of it) is the yardstick.
   privacy, NTLM, privileges "DOMAIN\user" (from the token the pipe
   captured, LookupAccountSidW: advapi32 loaded when first asked, so
   rpcrt4 imports only kernel32, ntdll and bcryptprimitives); over
-  unauthenticated ncacn_np RPC_S_BINDING_HAS_NO_AUTH.
+  unauthenticated ncacn_np RPC_S_BINDING_HAS_NO_AUTH. What Windows
+  answers over ncalrpc without authentication (a client that did not
+  call RpcBindingSetAuthInfo), and when the server's rundown routine runs
+  after a client frees its binding, are not measured (#63's items 2 and
+  6 need a server routine of a real interface, which the probe machine
+  could not build; `rpc_test`'s `Who` call over ncalrpc, which sets no
+  authentication, is the first: a Windows run reaches it now that the
+  duplicate endpoint is answered as Windows does).
   RpcImpersonateClient is the pipe's impersonation; RpcBindingSetAuthInfo
   checks its level and service and keeps nothing.
 - **RpcMgmtIsServerListening** with a binding is a call of the
   management interface (afa8bd80-7d8a-11c9-bef4-08002b102989,
   rpc__mgmt_is_server_listening), which the server's runtime answers;
-  a server that is not there is the connection's error
-  (RPC_S_SERVER_UNAVAILABLE: Windows' answer here is not measured yet).
+  an endpoint no server has (the pipe is not there) is
+  RPC_S_NOT_LISTENING over ncalrpc and ncacn_np alike, not
+  RPC_S_SERVER_UNAVAILABLE (measured on 26200 for a standard user and an
+  administrator, issue #63).
 - **NDR** (`ndr.rs`): the procedure's Oi and Oif headers, its explicit
   handle (primitive, generic, context) or implicit one, 6-byte parameter
   descriptors; a simple reference parameter's type is its referent's.
@@ -4199,14 +4260,21 @@ of their own, clients of it) is the yardstick.
   backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
   (the user's classes, then HKCR; shell\<verb>\command;
-  REG_EXPAND_SZ values expanded; ASSOCSTR_COMMAND of an extension no
-  class claims is the `Unknown` class's, OpenWith's command, which the
-  registry seed holds, as Windows 11 25H2 answers;
+  REG_EXPAND_SZ values expanded; an extension no class claims takes
+  its command, executable and icon from the `Unknown` class, which the
+  registry seed holds as Windows 11 has it (`reg query HKCR\Unknown /s`:
+  every command REG_EXPAND_SZ beside a DelegateExecute CLSID, the default
+  verb `openas`), and its document name is the extension upper-cased
+  and " File" (`GALANONE File`); ASSOCSTR_FRIENDLYAPPNAME of it
+  (Windows: "Pick an app", OpenWith's name) is recorded and
+  ERROR_NO_ASSOCIATION (all measured on 26200, issues #57 and #61);
   ASSOCSTR_EXECUTABLE is CO_E_APPNOTFOUND when the program is not
-  there; a short buffer gets the string truncated, the size and
-  HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), as on Windows) and
-  SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
-  transactions, CopyTo, Clone or region locks: recorded) with
+  there (gala has no OpenWith.exe); a short buffer gets the string
+  truncated, the size and HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER),
+  as on Windows) and SHCreateStreamOnFileEx (`assoc.rs`, an IStream over
+  a file handle; a Read that gets fewer bytes than asked, 0 at the end
+  included, is S_FALSE, measured on 26200, issue #61; no transactions,
+  CopyTo, Clone or region locks: recorded) with
   SHCreateStreamOnFileW over it (STGM_CONVERT, _DELETEONRELEASE and
   _TRANSACTED are E_INVALIDARG), StrToIntW (decimal with an optional
   '-', wrapping), StrTrimW, PathIsFileSpecW, and

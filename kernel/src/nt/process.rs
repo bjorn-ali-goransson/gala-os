@@ -563,6 +563,55 @@ const ENVIRONMENT: &[&str] = &[
     "windir=C:\\Windows",
 ];
 
+/// What a LocalSystem service's environment has in place of the boot
+/// user's (ENVIRONMENT): SYSTEM's profile, the system's temporary
+/// directory, the machine account as USERNAME (`<COMPUTERNAME>$`) and
+/// PATHEXT, as Windows' SCM gives a LocalSystem own-process service
+/// (measured on 26200, issue #65). The other variables are the boot
+/// environment's (not measured).
+pub const SERVICE_ENVIRONMENT: &[&str] = &[
+    "APPDATA=C:\\Windows\\system32\\config\\systemprofile\\AppData\\Roaming",
+    "LOCALAPPDATA=C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local",
+    "PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC",
+    "TEMP=C:\\Windows\\TEMP",
+    "TMP=C:\\Windows\\TEMP",
+    "USERNAME=GALA$",
+    "USERPROFILE=C:\\Windows\\system32\\config\\systemprofile",
+];
+
+/// The name of variable `var` (`NAME=value`).
+fn variable_name(var: &str) -> &str {
+    var.split('=').next().unwrap_or(var)
+}
+
+/// Orders variable names as Windows sorts an environment block
+/// (case-insensitive).
+fn name_order(a: &str, b: &str) -> core::cmp::Ordering {
+    a.bytes().map(|c| c.to_ascii_uppercase()).cmp(b.bytes().map(|c| c.to_ascii_uppercase()))
+}
+
+/// `base` with `overrides` in place of its variables of the same names and
+/// the others added, in name order, into `out`: the count.
+fn environment_with<'a>(base: &[&'a str], overrides: &[&'a str], out: &mut [&'a str]) -> usize {
+    let mut n = 0;
+    let replaced = |var: &str| {
+        overrides.iter().any(|o| variable_name(o).eq_ignore_ascii_case(variable_name(var)))
+    };
+    let kept = base.iter().filter(|v| !replaced(v));
+    for &var in kept.chain(overrides) {
+        if n == out.len() {
+            break;
+        }
+        let name = variable_name(var);
+        let at =
+            out[..n].iter().position(|o| name_order(variable_name(o), name).is_gt()).unwrap_or(n);
+        out[at..=n].rotate_right(1);
+        out[at] = var;
+        n += 1;
+    }
+    n
+}
+
 /// Opens a directory (`C:\\...`, Win32 form) as a directory file object.
 fn open_directory(win32: &str) -> Option<ObjectRef> {
     use super::file;
@@ -1565,14 +1614,24 @@ pub fn launch_service(
     let file_name = path.rsplit('\\').next().unwrap_or(path);
     let name = intern(file_name).map_err(|_| NtStatus::NO_MEMORY)?;
     let path = intern(path).map_err(|_| NtStatus::NO_MEMORY)?;
+    // SYSTEM's environment (SERVICE_ENVIRONMENT), and no standard handles:
+    // all three are NULL in a service (measured on 26200, issue #65).
+    let mut cpus = [0u8; 24];
+    let cpus = number_variable(&mut cpus, "NUMBER_OF_PROCESSORS=", platform::online_count());
+    let mut base = [""; ENVIRONMENT.len()];
+    for (slot, var) in base.iter_mut().zip(ENVIRONMENT) {
+        *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus } else { var };
+    }
+    let mut vars = [""; ENVIRONMENT.len() + SERVICE_ENVIRONMENT.len()];
+    let n = environment_with(&base, SERVICE_ENVIRONMENT, &mut vars);
     spawn(Spawn {
         name,
         path,
         image: layout,
         command_line,
         current_directory,
-        environment: None,
-        handles: None,
+        environment: Some(&vars[..n]),
+        handles: Some((HandleTable::default(), [0; 3])),
         suspended: true,
         runtime_data: &[],
         parent_id: 0,
@@ -1587,7 +1646,7 @@ pub fn launch_service(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_environment, number_variable};
+    use super::{environment_with, expand_environment, number_variable};
 
     #[test]
     fn environment_variables_expand_as_the_boot_users() {
@@ -1606,6 +1665,17 @@ mod tests {
         assert_eq!(expand_environment("100% %NoSuch% %%", &mut buf), Some("100% %NoSuch% %%"));
         let mut buf = [0u8; 8];
         assert_eq!(expand_environment("%ProgramFiles%", &mut buf), None);
+    }
+
+    #[test]
+    fn a_service_environment_replaces_and_adds_in_name_order() {
+        let base = ["APPDATA=a", "OS=Windows_NT", "Path=p", "USERNAME=gala"];
+        let mut out = [""; 6];
+        let n = environment_with(&base, &["PATHEXT=.COM", "USERNAME=GALA$"], &mut out);
+        assert_eq!(
+            &out[..n],
+            ["APPDATA=a", "OS=Windows_NT", "Path=p", "PATHEXT=.COM", "USERNAME=GALA$"]
+        );
     }
 
     #[test]

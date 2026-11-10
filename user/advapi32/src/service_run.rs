@@ -56,6 +56,7 @@ const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_DATA: u32 = 13;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_ADDRESS: u32 = 487;
+const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
 const ERROR_SERVICE_CANNOT_ACCEPT_CTRL: u32 = 1061;
 const ERROR_SERVICE_NOT_IN_EXE: u32 = 1083;
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
@@ -243,6 +244,12 @@ fn units_at(b: &[u8], at: usize, n: usize, out: &mut [u16]) -> usize {
 /// The dispatcher: connects, then runs the SCM's requests until every
 /// service of the process has stopped.
 fn dispatch(table: usize, wide: bool) -> i32 {
+    // A dispatcher already connected in this process: that is the answer,
+    // before the table is looked at (one with a NULL entry only is
+    // ERROR_SERVICE_ALREADY_RUNNING too; measured on 26200, issue #65).
+    if TABLE.load(Ordering::Acquire) != 0 {
+        return fail(ERROR_SERVICE_ALREADY_RUNNING, 0);
+    }
     if table == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -332,7 +339,10 @@ fn dispatch(table: usize, wide: bool) -> i32 {
 /// stopped (TRUE). In a process the SCM did not start as a service it
 /// fails with ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, as for a console
 /// program on Windows (programs that run either way, sshd, go on as
-/// console programs); a second call is ERROR_SERVICE_ALREADY_RUNNING.
+/// console programs); a second call is ERROR_SERVICE_ALREADY_RUNNING,
+/// whatever its table. It returns once the services have reported
+/// SERVICE_STOPPED, without waiting for their ServiceMain threads (as on
+/// Windows: measured on 26200, issue #65).
 #[unsafe(no_mangle)]
 pub extern "system" fn StartServiceCtrlDispatcherW(table: *const c_void) -> i32 {
     dispatch(table as usize, true)
