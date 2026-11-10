@@ -115,7 +115,14 @@ for the accounts gala has:
     SE_ERR_ACCESSDENIED, recorded in the ledger
     (`shell32.dll!ShellExecute(runas: elevation prompt)`).
   - An installer that needs an administrator therefore runs as SYSTEM
-    (`as=system`), as Configuration Manager and Intune run them.
+    (`as=system`), as Configuration Manager and Intune run them. As
+    SYSTEM it is in session 0, whose desktop nothing shows; to be seen
+    it is started on the console's desktop by `consolerun.exe`, as
+    `psexec -s -i` and MDT's ServiceUI do: SYSTEM's token duplicated,
+    moved to the console's session (SetTokenInformation TokenSessionId,
+    SeTcbPrivilege) and given to CreateProcessAsUserW with
+    `winsta0\default` (`office_install_gui`). It is still SYSTEM, an
+    administrator, elevated; no UAC prompt is stood in for.
 - **Observability**: the `process ... starting at` line names an
   elevated primary token (`, elevated token`), the `process start` event
   carries `"elevated"`.

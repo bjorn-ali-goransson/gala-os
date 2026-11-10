@@ -270,6 +270,9 @@ impl Metrics {
             Kind::Mono { .. } => self.width,
             Kind::Selawik { face, em64 } => {
                 let Ok(t) = ttf_parser::Face::parse(SELAWIK[face], 0) else { return 0 };
+                if default_ignorable(c) && t.glyph_index(c).is_none() {
+                    return 0;
+                }
                 let g = t.glyph_index(c).or_else(|| t.glyph_index('?')).unwrap_or_default();
                 let adv = i64::from(t.glyph_hor_advance(g).unwrap_or(0));
                 round_div(i64::from(em64) * adv, 64 * i64::from(t.units_per_em()))
@@ -320,6 +323,10 @@ impl Metrics {
                     }
                 }
             }
+            Kind::Selawik { face, .. }
+                if default_ignorable(c)
+                    && ttf_parser::Face::parse(SELAWIK[face], 0)
+                        .is_ok_and(|t| t.glyph_index(c).is_none()) => {}
             Kind::Selawik { face, em64 } => with_glyph(face, em64, c, |g| {
                 let top = self.ascent - g.ymin - g.h;
                 for y in 0..g.h {
@@ -333,6 +340,32 @@ impl Metrics {
             }),
         }
     }
+}
+
+/// Whether `c` is a default-ignorable code point (Unicode's
+/// Default_Ignorable_Code_Point: format controls such as the bidi marks
+/// and embeddings U+200E/F and U+202A-E, zero-width spaces and joiners,
+/// variation selectors, tags), which the Unicode Standard (5.21) says to
+/// render invisibly when a font has no glyph for them, as Windows' fonts
+/// draw them (zero-width). The Hangul fillers and the soft hyphen, which
+/// fonts draw, are left out.
+pub fn default_ignorable(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x034f
+            | 0x061c
+            | 0x17b4..=0x17b5
+            | 0x180b..=0x180f
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x206f
+            | 0xfe00..=0xfe0f
+            | 0xfeff
+            | 0xfff0..=0xfff8
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0000..=0xe0fff
+    )
 }
 
 /// A rasterized glyph: its box (x from the pen, y of the bottom row

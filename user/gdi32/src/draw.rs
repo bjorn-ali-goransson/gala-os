@@ -56,13 +56,25 @@ fn uses_source(rop: u32) -> bool {
     ((t >> 2) & 0x33) != (t & 0x33)
 }
 
+/// Whether ternary raster operation `rop` reads the pattern (the brush):
+/// its result differs between pattern bits 0 and 1.
+fn uses_pattern(rop: u32) -> bool {
+    let t = (rop >> 16) & 0xff;
+    (t >> 4) & 0x0f != t & 0x0f
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn PatBlt(hdc: Handle, x: i32, y: i32, w: i32, h: i32, rop: u32) -> i32 {
     if uses_source(rop) {
         return 0;
     }
     with_dc(hdc, |dc, slots| {
-        let p = brush(dc, slots).unwrap_or(0);
+        // A null brush (NULL_BRUSH, BS_NULL) has no pattern to paint: an
+        // operation that uses it changes nothing (FillRect with one is
+        // how a control is drawn on its parent's background).
+        let Some(p) = brush(dc, slots).or_else(|| (!uses_pattern(rop)).then_some(0)) else {
+            return 1;
+        };
         // Both corners mapped (the extents may scale).
         let (x0, y0) = dc.device_point(x, y);
         let (x1, y1) = dc.device_point(x.saturating_add(w), y.saturating_add(h));

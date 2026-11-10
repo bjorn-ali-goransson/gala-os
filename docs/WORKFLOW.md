@@ -355,6 +355,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_REPEAT=n` | boot one scenario's image n times ("Flaky tests and repeats") |
 | `XTASK_REPEAT_JOBS=n` | VMs at once for repeats (default one per two host CPUs) |
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
+| `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots") |
 | `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
 | `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
 | `XTASK_OTEL=1` | write OTLP files for every boot |
@@ -387,10 +388,10 @@ xtask that change how a scenario boots:
 | `USER_PROGRAMS`, `USER_DLLS`, `GO_PROGRAMS` | what is built and exported |
 | `EXTRA_MODULES` | extra files for a scenario: `(scenario, file, directory on C:)`; repository paths and `target/prebuilt/...` paths work too |
 | `MODULE_SETS` | a named set of modules shared by scenarios (and so a VM); a scenario listed twice gets the union |
-| `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`) |
+| `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`, `office_install_gui`) |
 | `WRITABLE_TREES` | directory modules programs may write to (`sql/data`, `fzs`, `ftp`) |
 | `PENDING` | still being brought up: `boot-test <name>` runs it, `test` and CI do not |
-| `MANUAL` | run by hand only, by design (too long or too large for every change's gate: `office_install`): `boot-test <name>` runs it, `test` and CI never do |
+| `MANUAL` | run by hand only, by design (too long or too large for every change's gate: `office_install`, `office_install_gui`): `boot-test <name>` runs it, `test` and CI never do |
 | `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
 | `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
@@ -406,7 +407,7 @@ xtask that change how a scenario boots:
 
 - **Time limits**: 120 s by default; `SLOW_SCENARIOS` (JVMs, .NET,
   PowerShell, FlaUI, PostgreSQL, FileZilla) 300 s; elasticsearch,
-  java_stress and sqllocaldb* 900 s; office_install (MANUAL) 3600 s,
+  java_stress and sqllocaldb* 900 s; office_install and office_install_gui (MANUAL) 3600 s,
   from what it needs: the 4.44 GB its Click-to-Run client downloads at
   the 3.0 MB/s a gala guest fetched that CDN with under TCG (curl, 512
   MiB in 179 s onto a disk-backed C:), plus the ~6 min before the
@@ -1036,7 +1037,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   screen checks need the boot user (session 1), or the program attaches a
   Test presenter to its session, reads the frame back and brings it input
   (GalaSession's SESSION_FRAME and SESSION_INPUT, `presenter_test`), or
-  moves the console there (`gala attach <session>` as SYSTEM). On a BIOS boot without `presenter=` every
+  moves the console there (`gala attach <session>` as SYSTEM), or starts
+  it through `consolerun.exe <program> [arguments]` (as `psexec -s -i`:
+  SYSTEM's token moved to the console's session, `winsta0\default`;
+  `office_install_gui`). On a BIOS boot without `presenter=` every
   session's desktop is bare (`desktop: session 0 keeps its windows
   (1280x800), shown by none (no screen and no presenter=)`): windows
   work, nothing can show them, no Test frame can be attached. On real Windows a child
@@ -2478,6 +2482,19 @@ and panics red). The boot splash replaces the text console: add
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
+
+`cargo xtask screenshot` boots a bare ISO: no serial log, no disk, no
+network to the outside. To watch a scenario as its boot test runs it
+(its disk, NAT, modules, time limit and serial log), give the boot test
+the times instead: `XTASK_SHOTS=120,300,600 cargo xtask boot-test
+<scenario>` writes `target/screenshots/<scenario>-<t>s.png` at those
+seconds of wall time since QEMU started (through the same monitor
+socket as screen checks; a screendump that fails is reported on stderr
+and the run goes on). The scenario must boot by UEFI to have a
+framebuffer (`UEFI_SCENARIOS`). Under TCG the desktop shows about 15 s
+in and a program's first window 30-60 s in.
+
+    XTASK_SHOTS=60,120,300,600,1200,1800 cargo xtask boot-test office_install_gui
 
 #### Watching the screen live
 
