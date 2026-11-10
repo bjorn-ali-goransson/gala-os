@@ -1767,7 +1767,7 @@ need gala's.
      TRUE and STATUS_SUCCESS;
      then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
-     webservices, cabinet, credui, gdiplus; osppc.dll is
+     webservices, cabinet, credui; osppc.dll is
      Office's own) and the functions its imports lack (shell32's
      SHGetSettings, user32's CheckRadioButton,
      iphlpapi's CreateSortedAddressPairs); BITS (the
@@ -1777,8 +1777,8 @@ need gala's.
      ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
      root), then what the run reaches after them (its log
-     in `target/failed/office_install.dump/` once it writes one); gdiplus
-     (setup.exe's error and progress UI), HKCU from the caller's token,
+     in `target/failed/office_install.dump/` once it writes one); more of
+     gdiplus as setup.exe's error UI asks it, HKCU from the caller's token,
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported);
@@ -1787,6 +1787,69 @@ need gala's.
      crypt32's detached messages; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.
+   - The install to watch: the MANUAL scenario `office_install_gui` is
+     `office_install` with its windows shown
+     (`user/office_install/config_full.xml`: Display Level Full,
+     AcceptEULA), on the same 16 GiB disk and limit, booted by UEFI.
+     setup.exe still runs as SYSTEM, elevated, but on the console's
+     desktop: `consolerun.exe` starts it in the console's session on
+     `winsta0\default` (as `psexec -s -i`, MDT's ServiceUI; SECURITY.md
+     "Elevation"); `wait=all` keeps the boot while Click-to-Run works
+     after setup.exe ends. `XTASK_SHOTS=60,120,300,... cargo xtask
+     boot-test office_install_gui` writes screenshots (WORKFLOW
+     "Screenshots"). Done, test first: setup.exe's splash draws with
+     gala's gdiplus.dll (`gdiplus_test`, `wow64_gdiplus_test`: the
+     seventeen flat-API functions it delay-loads, PNG decoding;
+     ARCHITECTURE "Other DLLs"), asks Windows.UI's UISettings
+     (`uisettings_test`, `wow64_uisettings_test`; gala's windows.ui.dll),
+     LOCALE_IREADINGLAYOUT (`kernel32_locale_test`), answers its
+     static text's WM_CTLCOLORSTATIC with a null brush (which now paints
+     nothing: `gdi32_test`) and wraps its texts in U+202A/U+202C (no
+     width, not drawn: `gdi32_test`). The splash ("We're getting things
+     ready...", the Microsoft logo) shows as on Windows from about 25 s
+     to 70 s of run time.
+     Where the watched install ends now: when setup.exe has started the
+     Click-to-Run client it closes its splash (its main thread sends
+     WM_USER+1; the splash thread destroys its window, posts WM_QUIT)
+     and the splash thread then faults right after its message loop,
+     at setup.exe+0x817f reading 0xffffffec (a NULL object less 0x28,
+     read at +0x14; its thread argument still holds the two HWNDs), with
+     no system call between WM_QUIT and the fault. Not the cause (each
+     tried and ruled out): UISettings' activation, the hide and
+     deactivation messages DestroyWindow sends before WM_DESTROY on
+     Windows, WM_SIZE/WM_MOVE at creation, any GDI+ status (all Ok).
+     setup.exe ending so takes consolerun with it; the Click-to-Run
+     client and service go on downloading (1.4 GB on C: in 900 s), and
+     nothing is on the screen: the client's NotificationFlyout
+     ("Microsoft 365 and Office are installing in the background (0%)")
+     is shown at (-9999, -9999), where it waits to be placed by its
+     notification-area icon, which gala's shell32 refuses
+     (`Shell_NotifyIconW(no notification area)`, NIM_ADD and
+     NIM_SETVERSION); OfficeC2RClient.exe, the client's React Native UI
+     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), does not
+     start: 0xc0000135, its static imports `D3DCOMPILER_47.dll` (a
+     system DLL gala lacks) and, through Office's own DLLs,
+     `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
+     (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
+     ordinal 420. Next, in that order: the splash thread's fault (what
+     its teardown reads that Windows sets: compare the messages and
+     calls of the splash's life with Windows', e.g. a probe program
+     that makes the same window and records them, or Windows' own
+     answers to the calls the thread makes); a notification area in
+     shasha's taskbar (Shell_NotifyIconW and Shell_NotifyIconGetRect,
+     comctl32's LoadIconMetric, PNG icons in CreateIconFromResourceEx);
+     OfficeC2RClient.exe's imports, then its React Native UI (Direct3D
+     11 through GPU G2, DirectComposition). Found on the way, not yet
+     done: CreateWindowEx sends no WM_SIZE/WM_MOVE after WM_CREATE to a
+     child or popup window (Wine's msg.c WmCreateChildSeq,
+     WmCreatePopupSeq) and DestroyWindow sends no WM_WINDOWPOSCHANGING/
+     CHANGED (hide), WM_NCACTIVATE, WM_ACTIVATE and WM_KILLFOCUS before
+     WM_DESTROY (WmDestroyOverlappedSeq, WmDestroyChildSeq);
+     GetSystemMetrics answers 0 for the scroll bar metrics (SM_CXVSCROLL
+     and the others; SystemParametersInfo says 17) and for any index it
+     does not know, without a ledger line; PatBlt is fixed for a null
+     brush but BitBlt and MaskBlt with a pattern raster operation still
+     paint a null brush as black.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

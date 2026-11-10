@@ -147,6 +147,13 @@
 "ActivationType"=dword:0
 "Threading"=dword:0
 "TrustLevel"=dword:0
+; UISettings: the system's colours and UI preferences (user/windows_ui;
+; ODT's setup.exe colours its window with them).
+[\Registry\Machine\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings]
+"DllPath"=expand:%SystemRoot%\System32\Windows.UI.dll
+"ActivationType"=dword:0
+"Threading"=dword:0
+"TrustLevel"=dword:0
 ; The 32-bit view (WOW64, nt::regview): what 32-bit programs read under
 ; HKLM\SOFTWARE. Windows keeps the version there too, and gives them the
 ; (x86) directories as ProgramFilesDir and CommonFilesDir.
@@ -205,6 +212,13 @@
 ; Office Deployment Tool's setup.exe asks it; user/appxdeploymentclient).
 [\Registry\Machine\SOFTWARE\WOW6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager]
 "DllPath"=expand:%SystemRoot%\System32\AppXDeploymentClient.dll
+"ActivationType"=dword:0
+"Threading"=dword:0
+"TrustLevel"=dword:0
+; UISettings: the system's colours and UI preferences (user/windows_ui;
+; ODT's setup.exe colours its window with them).
+[\Registry\Machine\SOFTWARE\WOW6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings]
+"DllPath"=expand:%SystemRoot%\System32\Windows.UI.dll
 "ActivationType"=dword:0
 "Threading"=dword:0
 "TrustLevel"=dword:0

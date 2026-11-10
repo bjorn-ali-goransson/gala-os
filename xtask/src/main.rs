@@ -1089,6 +1089,12 @@ const USER_DLLS: &[Dll] = &[
     // wofutil.dll: the Windows Overlay Filter's API, no filter attached
     // (wofutil_test; Click-to-Run's staging).
     Dll { package: "wofutil", file: "wofutil.dll", exported_as: "testwofutil.dll" },
+    // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
+    // window with (gdiplus_test).
+    Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
+    // Windows.UI.dll: the Windows Runtime class UISettings, the system's
+    // colours and UI preferences (uisettings_test; ODT's setup.exe).
+    Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     // combase.dll: forwarders to ole32's COM and Windows Runtime base;
@@ -1195,6 +1201,12 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // gdiplus (ODT's setup.exe delay-loads it to draw its window;
+    // wow64_gdiplus_test).
+    Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus32.dll" },
+    // Windows.UI.dll (ODT's setup.exe asks UISettings for its window's
+    // colours; wow64_uisettings_test).
+    Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui32.dll" },
     // rstrtmgr (32-bit installers: Inno Setup's; wow64_rstrtmgr_test).
     Dll { package: "rstrtmgr", file: "rstrtmgr.dll", exported_as: "testrstrtmgr32.dll" },
     // wintrust (ODT's setup.exe delay-loads it; wow64_wintrust_test).
@@ -1227,18 +1239,25 @@ fn built_dll_x86(file: &str) -> PathBuf {
     let release = target_dir().join(USER_TARGET_X86).join("release");
     match USER_DLLS_X86.iter().find(|d| d.file == file) {
         // As built_dll: cargo names it `<package>.dll`.
-        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        Some(d) if !plain_dll_name(d.file) => release.join(format!("{}.dll", d.package)),
         _ => release.join(file),
     }
 }
 
+/// Whether cargo can build `file` under its own name: a `.dll` whose
+/// stem is a crate name (no dot; Windows.UI.dll is not).
+fn plain_dll_name(file: &str) -> bool {
+    file.strip_suffix(".dll").is_some_and(|stem| !stem.contains('.'))
+}
+
 /// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
-/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv) is
-/// built under its package's name and shipped under its own.
+/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv,
+/// windows.ui.dll) is built under its package's name and shipped under
+/// its own.
 fn built_dll(file: &str) -> PathBuf {
     let release = target_dir().join(USER_TARGET).join("release");
     match USER_DLLS.iter().find(|d| d.file == file) {
-        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        Some(d) if !plain_dll_name(d.file) => release.join(format!("{}.dll", d.package)),
         _ => release.join(file),
     }
 }
@@ -3208,11 +3227,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/wldp.dll", "Windows/SysWOW64"),
     ("office_install", "x86/combase.dll", "Windows/SysWOW64"),
     ("office_install", "x86/appxdeploymentclient.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdiplus.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/windows.ui.dll", "Windows/SysWOW64"),
     ("office_install", "ntdll.dll", "Windows/System32"),
     ("office_install", "kernel32.dll", "Windows/System32"),
     ("office_install", "ucrtbase.dll", "Windows/System32"),
     ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
     ("office_install", "user/office_install/config.xml", "gala"),
+    // office_install_gui: office_install's files (MODULE_SETS) and the
+    // configuration that shows ODT's and Click-to-Run's windows.
+    ("office_install_gui", "user/office_install/config_full.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -3331,6 +3355,45 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
+    // and x86.
+    ("uisettings_test", "ntdll.dll", "Windows/System32"),
+    ("uisettings_test", "kernel32.dll", "Windows/System32"),
+    ("uisettings_test", "advapi32.dll", "Windows/System32"),
+    ("uisettings_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("uisettings_test", "user32.dll", "Windows/System32"),
+    ("uisettings_test", "gdi32.dll", "Windows/System32"),
+    ("uisettings_test", "ole32.dll", "Windows/System32"),
+    ("uisettings_test", "oleaut32.dll", "Windows/System32"),
+    ("uisettings_test", "combase.dll", "Windows/System32"),
+    ("uisettings_test", "windows.ui.dll", "Windows/System32"),
+    ("wow64_uisettings_test", "wow64.dll", "Windows/System32"),
+    ("wow64_uisettings_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/combase.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/windows.ui.dll", "Windows/SysWOW64"),
+    // GDI+'s flat API (user/gdiplus_test), x64 and x86.
+    ("gdiplus_test", "ntdll.dll", "Windows/System32"),
+    ("gdiplus_test", "kernel32.dll", "Windows/System32"),
+    ("gdiplus_test", "gdi32.dll", "Windows/System32"),
+    ("gdiplus_test", "shlwapi.dll", "Windows/System32"),
+    ("gdiplus_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("gdiplus_test", "ole32.dll", "Windows/System32"),
+    ("gdiplus_test", "gdiplus.dll", "Windows/System32"),
+    ("wow64_gdiplus_test", "wow64.dll", "Windows/System32"),
+    ("wow64_gdiplus_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/gdiplus.dll", "Windows/SysWOW64"),
     // The Windows Overlay Filter's API (user/wofutil_test).
     ("wofutil_test", "ntdll.dll", "Windows/System32"),
     ("wofutil_test", "kernel32.dll", "Windows/System32"),
@@ -3548,6 +3611,8 @@ const USER_PROGRAMS: &[&str] = &[
     "msi_test",
     "rstrtmgr_test",
     "wofutil_test",
+    "gdiplus_test",
+    "uisettings_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -3557,11 +3622,14 @@ const USER_PROGRAMS: &[&str] = &[
     "winhttp_cb_test",
     "runas_test",
     "combase_test",
+    "consolerun",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
 /// x86 runtime), shipped and exported like USER_PROGRAMS.
 const USER_PROGRAMS_X86: &[&str] = &[
+    "wow64_gdiplus_test",
+    "wow64_uisettings_test",
     "wow64_test",
     "wow64_thread_test",
     "wow64_import_test",
@@ -3659,7 +3727,7 @@ fn scenario_timeout(name: &str) -> Duration {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
-    } else if name == "office_install" {
+    } else if name == "office_install" || name == "office_install_gui" {
         OFFICE_INSTALL_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
@@ -5003,6 +5071,9 @@ const MANUAL: &[&str] = &[
     // OF: Office's installer: a ~5.4 GB download from Microsoft's CDN
     // onto a disk-backed C: (OFFICE_INSTALL_TIMEOUT).
     "office_install",
+    // OF: the same install with its windows on the console's desktop, to
+    // watch (screenshots: XTASK_SHOTS).
+    "office_install_gui",
 ];
 
 /// Whether scenario `name` runs only when named exactly (PENDING, MANUAL).
@@ -5013,6 +5084,8 @@ fn named_only(name: &str) -> bool {
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
+    // A framebuffer to show the installer's windows (XTASK_SHOTS).
+    "office_install_gui",
     "chromium_window",
     "boot_config_edited",
     "handover_uefi",
@@ -5126,6 +5199,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     ("office_install", "run: begin setup.exe", NetClient::Outbound),
+    ("office_install_gui", "run: begin consolerun.exe", NetClient::Outbound),
     // A card for GetAdaptersInfo to list (nothing connects).
     ("office_api_test", "run: begin office_api_test.exe", NetClient::Outbound),
     ("wow64_office_api_test", "run: begin wow64_office_api_test.exe", NetClient::Outbound),
@@ -6762,6 +6836,39 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=rstrtmgr_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["rstrtmgr_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GDI+'s flat API as ODT's setup.exe draws with it: startup,
+        // bitmaps over the caller's memory and from a PNG stream, solid
+        // brushes, filling and drawing on a bitmap and on a DIB section's
+        // device context (user/gdiplus_test).
+        name: "gdiplus_test",
+        cmdline: "qemu_exit run=gdiplus_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["gdiplus_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/gdiplus_test built for x86).
+        name: "wow64_gdiplus_test",
+        cmdline: "qemu_exit run=wow64_gdiplus_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_gdiplus_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Windows.UI.ViewManagement.UISettings: its factory and objects,
+        // weak references, the theme's and accent's colours, the classic
+        // elements' system colours (user/uisettings_test).
+        name: "uisettings_test",
+        cmdline: "qemu_exit run=uisettings_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["uisettings_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/uisettings_test built for x86).
+        name: "wow64_uisettings_test",
+        cmdline: "qemu_exit run=wow64_uisettings_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_uisettings_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The Windows Overlay Filter's API with no filter attached
@@ -9130,6 +9237,25 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },
     Scenario {
+        // OF (manual): office_install with its windows shown
+        // (config_full.xml: Display Level Full), to watch the install
+        // (`XTASK_SHOTS=120,300,... cargo xtask boot-test
+        // office_install_gui`: screendumps in target/screenshots/). Still
+        // as SYSTEM, an administrator, but on the console's desktop:
+        // consolerun moves its token to the console's session and starts
+        // setup.exe on `winsta0\default`, as `psexec -s -i` and MDT's
+        // ServiceUI do (as=system alone puts it in session 0, which
+        // nothing shows: WORKFLOW "Windows in another session").
+        // `wait=all`: the boot goes on while the Click-to-Run client and
+        // service work after setup.exe ends (ROADMAP OF: where it ends).
+        name: "office_install_gui",
+        cmdline: "qemu_exit persist as=system wait=all run=consolerun.exe \
+                  args=C:\\gala\\setup.exe%20/configure%20C:\\gala\\config_full.xml \
+                  dump=C:/gala/odtlog,C:/Users/Public",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["consolerun.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -9924,6 +10050,8 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("office_install_gui", "office_install"),
+    ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
@@ -10073,7 +10201,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// (`system_modules`): installers whose product's own programs import
 /// what they will (office_install: ODT starts the 64-bit
 /// OfficeClickToRun.exe, whose imports are only seen in the run).
-const FULL_SYSTEM_SCENARIOS: &[&str] = &["office_install"];
+const FULL_SYSTEM_SCENARIOS: &[&str] = &["office_install", "office_install_gui"];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
@@ -10620,6 +10748,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_gdiplus_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_uisettings_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_rstrtmgr_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -10631,6 +10761,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_wininet_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_shlwapi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install_gui", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -11667,10 +11798,12 @@ fn run_vm_once(
     let clock_marks = clockcheck::Watcher::start(&log, start);
     // The limit counts the VM's run time (vmtime.rs).
     let mut vm_clock = vmtime::VmClock::new(child.id(), start);
+    let mut shots = Shots::from_env(iso_scenario(iso))?;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
+        shots.take_due(&socket, start.elapsed());
         if let Some(check) = screen.filter(|_| screen_verdict.is_none())
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
@@ -11913,6 +12046,77 @@ fn boot_telemetry(f: BootFacts) -> String {
 /// The failure reason for a VM that got fewer CPUs than it asked for.
 fn fewer_cpus(got: u32, want: u32) -> String {
     format!("VM got {got} of {want} CPUs (host overloaded?)")
+}
+
+/// `XTASK_SHOTS=120,300,...`: screendumps of a boot test's screen at
+/// those seconds of wall time since QEMU started, written to
+/// `target/screenshots/<scenario>-<t>s.png` (WORKFLOW "Screenshots"): to
+/// watch a long scenario (office_install_gui) with its serial log, disk
+/// and network, which `cargo xtask screenshot` does not set up.
+struct Shots {
+    scenario: String,
+    times: Vec<f64>,
+    next: usize,
+}
+
+impl Shots {
+    fn from_env(scenario: &str) -> Result<Self> {
+        let mut times = match env::var("XTASK_SHOTS") {
+            Ok(list) if !list.trim().is_empty() => list
+                .split(',')
+                .map(|t| t.trim().parse().map_err(|_| format!("XTASK_SHOTS: bad time {t:?}")))
+                .collect::<Result<Vec<f64>>>()?,
+            _ => Vec::new(),
+        };
+        times.sort_by(f64::total_cmp);
+        Ok(Self { scenario: scenario.to_string(), times, next: 0 })
+    }
+
+    /// Takes the screendumps whose time has come; one that fails is
+    /// reported on stderr and the run goes on (a picture is not a verdict).
+    fn take_due(&mut self, socket: &Path, elapsed: Duration) {
+        while let Some(&t) = self.times.get(self.next) {
+            if elapsed < Duration::from_secs_f64(t) {
+                return;
+            }
+            self.next += 1;
+            let dir = target_dir().join("screenshots");
+            let png = dir.join(format!("{}-{t}s.png", self.scenario));
+            let taken = fs::create_dir_all(&dir)
+                .map_err(|e| format!("creating {dir:?}: {e}"))
+                .and_then(|()| screendump_png(socket, &png));
+            match taken {
+                Ok(()) => {
+                    eprintln!("xtask: wrote {} ({:.0} s in)", png.display(), elapsed.as_secs_f64())
+                }
+                Err(e) => eprintln!("xtask: screenshot at {t} s: {e}"),
+            }
+        }
+    }
+}
+
+/// A screendump through the monitor at `socket`, as a PNG at `png`.
+fn screendump_png(socket: &Path, png: &Path) -> Result {
+    use std::io::Write;
+    let mut monitor = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| format!("cannot connect to the QEMU monitor: {e}"))?;
+    let ppm = png.with_extension("ppm");
+    let _ = fs::remove_file(&ppm);
+    writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
+    // Written once QEMU's size of it stops changing.
+    let mut last = 0;
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        let len = fs::metadata(&ppm).map_or(0, |m| m.len());
+        if len > 0 && len == last {
+            let converted = ppm_to_png(&ppm, png);
+            let _ = fs::remove_file(&ppm);
+            return converted;
+        }
+        last = len;
+    }
+    let _ = fs::remove_file(&ppm);
+    Err(format!("no screendump at {} within 10 s", ppm.display()))
 }
 
 /// A fresh short path for a VM's monitor socket.
@@ -13568,6 +13772,16 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // for its updates and the system. On the host the image grows to
         // what the install writes (the products, ~5.4 GB, and logs).
         name: "office_install",
+        size: 16 << 30,
+        host_mib: Some(6 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // office_install's disk, for the same install shown on the screen.
+        name: "office_install_gui",
         size: 16 << 30,
         host_mib: Some(6 << 10),
         setup: |_| {},

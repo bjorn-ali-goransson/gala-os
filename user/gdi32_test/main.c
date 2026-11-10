@@ -35,7 +35,8 @@
  *   a bigger font measures bigger. GetTextFaceW gives the face name.
  *   Segoe UI -12 has Windows' 16/13/3 cell and is proportional ("iiii"
  *   much narrower than "WWWW", TMPF_FIXED_PITCH | TMPF_TRUETYPE,
- *   FF_SWISS); extents add up; GetTextExtentExPointW gives the fit and
+ *   FF_SWISS); extents add up; the bidi embedding marks U+202A and
+ *   U+202C have no width; GetTextExtentExPointW gives the fit and
  *   the partial widths of what fits, the rest left as they were (all of them
  *   without lpnFit); TextOutW draws only inside its extent;
  *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
@@ -104,6 +105,10 @@
  *   rectangle that meets the clipping region, FALSE for one outside it;
  *   LineDDA reports each point of a line but the last, one per step of
  *   the longer axis.
+ * - A null brush paints nothing (the stock NULL_BRUSH, a BS_NULL brush):
+ *   PatBlt PATCOPY with it selected, and FillRect with it, leave the
+ *   pixels as they were (ODT's setup.exe answers WM_CTLCOLORSTATIC with
+ *   one for its text on a white window).
  *
  * Prints "gdi32_test: ok" or exits with the number of the failing check. */
 #include <windows.h>
@@ -272,6 +277,11 @@ static void fonts(void) {
     // Extents add up: "iiiiWWWW" is the two together.
     SIZE both;
     CHECK(GetTextExtentPoint32W(screen, L"iiiiWWWW", 8, &both) && both.cx == narrow.cx + wide.cx);
+    // Bidi embedding marks (U+202A LRE, U+202C PDF: ODT's setup.exe wraps
+    // its texts in them) have no width in Segoe UI: "iiii" between them
+    // measures as "iiii".
+    SIZE marked;
+    CHECK(GetTextExtentPoint32W(screen, L"\x202aiiii\x202c", 6, &marked) && marked.cx == narrow.cx);
     // GetTextExtentExPointW: the partial widths and how many fit. With
     // lpnFit, only the first lpnFit widths are filled in (documented;
     // Windows 11 25H2's dx[7] was not the whole extent); the size is the
@@ -954,6 +964,41 @@ static void dc_state(void) {
     ReleaseDC(NULL, screen);
 }
 
+static void null_brush(void) {
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = 4;
+    bi.bmiHeader.biHeight = -4;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void *bits = NULL;
+    HDC dc = CreateCompatibleDC(NULL);
+    HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    CHECK(dc != NULL && dib != NULL && bits != NULL);
+    HGDIOBJ old = SelectObject(dc, dib);
+    DWORD *px = bits;
+    for (int i = 0; i < 16; i++)
+        px[i] = 0x00123456;
+    LOGBRUSH lb = {BS_NULL, 0, 0};
+    HBRUSH hollow = CreateBrushIndirect(&lb);
+    CHECK(hollow != NULL);
+    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    CHECK(PatBlt(dc, 0, 0, 4, 4, PATCOPY));
+    SelectObject(dc, hollow);
+    CHECK(PatBlt(dc, 0, 0, 4, 4, PATCOPY));
+    SelectObject(dc, old_brush);
+    RECT r = {0, 0, 4, 4};
+    FillRect(dc, &r, (HBRUSH)GetStockObject(NULL_BRUSH));
+    FillRect(dc, &r, hollow);
+    GdiFlush();
+    for (int i = 0; i < 16; i++)
+        CHECK((px[i] & 0x00ffffff) == 0x00123456);
+    SelectObject(dc, old);
+    DeleteObject(hollow);
+    DeleteObject(dib);
+    DeleteDC(dc);
+}
+
 int main(void) {
     CHECK(MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(9, 96, 72) == 12);
     CHECK(MulDiv(1, 1, 0) == -1 && MulDiv(0x7fffffff, 2, 1) == -1 && MulDiv(7, 1, 2) == 4);
@@ -972,6 +1017,7 @@ int main(void) {
     dibs();
     msimg();
     dc_state();
+    null_brush();
     printf("gdi32_test: ok\n");
     return 0;
 }

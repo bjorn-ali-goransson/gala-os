@@ -382,6 +382,13 @@ name = "console_window_test"
 version = "0.1.0"
 
 [[package]]
+name = "consolerun"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -863,6 +870,22 @@ dependencies = [
  "noto-sans-mono-bitmap",
  "ntrt",
  "ttf-parser",
+]
+
+[[package]]
+name = "gdiplus"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+ "ntrt",
+]
+
+[[package]]
+name = "gdiplus_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
@@ -2582,6 +2605,13 @@ name = "uiautomationcore"
 version = "0.1.0"
 
 [[package]]
+name = "uisettings_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "um"
 version = "0.1.0"
 dependencies = [
@@ -2775,6 +2805,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
+name = "windows_ui"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2925,6 +2962,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_gdiplus_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_import_test"
 version = "0.1.0"
 dependencies = [
@@ -3024,6 +3068,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_uisettings_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

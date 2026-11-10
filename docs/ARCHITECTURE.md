@@ -2736,7 +2736,10 @@ modules in `/boot`.
 `user/bin` as `test<name>.dll` (renamed so that `user/bin`, which also
 runs on Windows, never shadows the system's DLLs). Exceptions: crate
 `user/testntdll` builds `ntdll.dll` (`testntdll.dll` in `user/bin`);
-`user/richedit` is the control behind both `riched20` and `msftedit`.
+`user/richedit` is the control behind both `riched20` and `msftedit`;
+crate `user/windows_ui` builds `windows.ui.dll` (Windows' Windows.UI.dll;
+a crate name has no dots: xtask's `plain_dll_name` ships it under its
+own name).
 `testdll`, `testdll2` and `tlsdll` are test DLLs.
 
 | Role | DLLs |
@@ -2746,7 +2749,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
-| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
+| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
 | COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
@@ -4219,6 +4222,17 @@ of their own, clients of it) is the yardstick.
 
 ### Other DLLs and programs
 
+- **consolerun** (`user/consolerun`, shipped with the test programs in
+  `C:\gala`): `consolerun <program> [arguments]` starts a program on
+  the console session's interactive desktop with its caller's account
+  and waits for it, as `psexec -s -i` and MDT's ServiceUI.exe do for an
+  installer run as SYSTEM: the caller's token duplicated, moved to
+  WTSGetActiveConsoleSessionId's session, CreateProcessAsUserW with
+  `winsta0\default`; its exit code is the program's (`consolerun:
+  started pid P in session S: ...`, `consolerun: pid P exited with X`;
+  a failing step prints its error and exits with 1). Scenario
+  `office_install_gui` runs ODT's setup.exe through it (SECURITY.md
+  "Elevation").
 - **shell32, version, powrprof, comctl32, user32 strings**: profile
   folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
   the profile's, the Start menu's and Programs under it, per user in
@@ -7072,7 +7086,13 @@ then riched20.dll).
     ascent and descent are rounded each, advances the hinted ones rounded to
     pixels and added up, no kerning; tmAveCharWidth from OS/2
     xAvgCharWidth; pitch-and-family 0x27 (variable pitch, TrueType,
-    FF_SWISS).
+    FF_SWISS). A default-ignorable code point Selawik has no glyph for
+    (the bidi marks and embeddings U+200E/F and U+202A-E, zero-width
+    spaces and joiners, variation selectors: Unicode's
+    Default_Ignorable_Code_Point less the Hangul fillers and the soft
+    hyphen) has no width and draws nothing, as Segoe UI's zero-width
+    glyphs on Windows (`gdi32_test`; ODT's setup.exe wraps its texts in
+    U+202A/U+202C); any other missing glyph is drawn as `?`.
   - Fixed-pitch faces (Courier New, Consolas, Lucida Console, other
     known fixed faces, FIXED_PITCH, or FF_MODERN without a name) are
     Noto Sans Mono's bitmaps (16/20/24/32 px, regular and bold) scaled
@@ -7095,7 +7115,11 @@ then riched20.dll).
   recorded) and layout (right-to-left recorded) are kept; ExtCreatePen
   pens are OBJ_EXTPEN (a style bit) and drawn solid; hatch and pattern
   brushes are drawn in one colour (recorded); Arc, Pie and ExtFloodFill
-  are recorded and not drawn.
+  are recorded and not drawn. A null brush (NULL_BRUSH, BS_NULL) paints
+  nothing: PatBlt with a raster operation that reads the pattern changes
+  no pixel, so FillRect with it leaves the background (how a control
+  answered WM_CTLCOLORSTATIC with it is drawn on its parent;
+  `gdi32_test`).
 - **Regions** (`region.rs`): HRGN objects (`Object::Region`, an index
   into a store) hold non-overlapping rectangles in one canonical banded
   form (equal regions, equal lists); CombineRgn cuts the plane at both
@@ -8390,6 +8414,51 @@ stations and desktops a program creates are refused until stage 3).
   HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION), the documented answer
   without a driver, recorded (`wofutil.dll!<function>(no overlay
   filter)`). The WIM functions (WofWim*) are absent.
+- gdiplus (`user/gdiplus`, x64 and x86; `gdiplus_test`,
+  `wow64_gdiplus_test`): GDI+'s flat API, the part ODT's setup.exe
+  draws its window with (Display Level Full): GdiplusStartup (versions
+  1-3, else UnsupportedGdiplusVersion; the notification hooks when the
+  background thread is suppressed; no background thread is ever made),
+  GdipAlloc/GdipFree on the process heap, bitmaps (GdipCreateBitmapFromScan0
+  over the caller's memory, its stride a multiple of four, or zeroed
+  memory of its own; 32 bpp ARGB, PARGB, RGB and 24 bpp RGB; another
+  format is NotImplemented, recorded), GdipLoadImageFromStream (the
+  stream from its start; PNG decoded in `png.rs` from the specification:
+  every colour type, depths 1-16, tRNS, the five filters, the IDAT
+  stream inflated by miniz_oxide; no gamma: a gAMA other than 1/2.2 is
+  recorded; interlaced images and other formats are NotImplemented,
+  recorded), GdipGetImageWidth/Height, GdipCloneImage,
+  GdipDisposeImage, solid brushes (create, clone, delete), and graphics
+  on a bitmap (GdipGetImageGraphicsContext) or a DC (GdipCreateFromHDC;
+  NULL is OutOfMemory) that fill rectangles and draw images
+  (GdipFillRectangleI, GdipDrawImageRectI): source over destination in
+  premultiplied terms, an image drawn at its size copied pixel for
+  pixel, a scaled one sampled bilinearly with clamped edges; on a DC
+  through a 32 bpp DIB section and GdiAlphaBlend. Objects are heap
+  boxes whose first field is a type tag (a wrong or NULL object is
+  InvalidParameter). Not here: pens, paths, text, transforms, clipping,
+  other compositing and interpolation modes, encoders; a negative draw
+  size (mirroring) is recorded and draws nothing.
+- windows.ui (`user/windows_ui`, x64 and x86; `uisettings_test`,
+  `wow64_uisettings_test`): the Windows Runtime class
+  Windows.UI.ViewManagement.UISettings, registered under
+  ActivatableClassId in both registry views (`registry.seed`). A static
+  factory (not agile) makes objects with IUISettings to IUISettings6
+  (agile) and weak references (IWeakReferenceSource; a control block
+  with the strong and weak counts, so the weak reference resolves to
+  NULL once the object is gone). GetColorValue: Foreground and
+  Background from AppsUseLightTheme (light when absent), the accent
+  shades from `HKCU\...\Explorer\Accent` AccentPalette, written with
+  Windows' default palette when absent (Wine's tests on Windows), and
+  Complement E_NOTIMPL (recorded); UIElementColor: GetSysColor for the
+  thirteen classic elements, zero otherwise; the other getters from
+  the Win32 settings they mirror (SPI_GETCLIENTAREAANIMATION,
+  TextScaleFactor from `HKCU\Software\Microsoft\Accessibility`, the
+  system metrics, EnableTransparency, DynamicScrollbars). The change
+  events keep their handlers (AddRef'd until removed) and are never
+  raised, recorded per event: nothing changes these settings while
+  gala runs. An interface asked for that it is not goes to the ledger
+  (`windows.ui.dll!UISettings QueryInterface({iid})`).
 - msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
   window and without effect (no text services to read them; Delphi's
   VCL calls them on its edit controls); the TSF COM objects are not
