@@ -1814,7 +1814,13 @@ need gala's.
      and the splash thread then faults right after its message loop,
      at setup.exe+0x817f reading 0xffffffec (a NULL object less 0x28,
      read at +0x14; its thread argument still holds the two HWNDs), with
-     no system call between WM_QUIT and the fault. Not the cause (each
+     no system call between WM_QUIT and the fault. The crash report's
+     deeper stack places it inside the thread procedure, not in thread
+     exit: the C++ runtime's thread_start (+0x37fdcc) still has its call
+     to the procedure on the stack (return +0x37fdf7), then frames
+     returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx is a
+     heap object whose first word is in setup.exe (a vtable), whose
+     second is its own address and whose fifth to seventh are 0. Not the cause (each
      tried and ruled out): UISettings' activation, the hide and
      deactivation messages DestroyWindow sends before WM_DESTROY on
      Windows, WM_SIZE/WM_MOVE at creation, any GDI+ status (all Ok).
@@ -1832,7 +1838,9 @@ need gala's.
      `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
      (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
      ordinal 420. Next, in that order: the splash thread's fault (what
-     its teardown reads that Windows sets: compare the messages and
+     its teardown reads that Windows sets; next measurement: the words
+     at that object's pointers, and setup.exe's user32/gdiplus calls on
+     Windows under an API logger; compare the messages and
      calls of the splash's life with Windows', e.g. a probe program
      that makes the same window and records them, or Windows' own
      answers to the calls the thread makes); a notification area in
