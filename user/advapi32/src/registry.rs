@@ -90,6 +90,19 @@ unsafe extern "system" {
     ) -> u32;
     fn NtDeleteKey(key: usize) -> u32;
     fn NtDeleteValueKey(key: usize, name: *const UnicodeString) -> u32;
+    fn NtNotifyChangeKey(
+        key: usize,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        filter: u32,
+        tree: u8,
+        buffer: *mut u8,
+        length: u32,
+        asynchronous: u8,
+    ) -> u32;
+    fn NtRenameKey(key: usize, name: *const UnicodeString) -> u32;
     fn NtClose(h: usize) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
 }
@@ -1695,26 +1708,72 @@ pub extern "system" fn RegQueryValueW(
     }
 }
 
+/// The IO_STATUS_BLOCK of asynchronous notifications: the kernel writes
+/// it when one completes, after the call returned (nothing reads it).
+static NOTIFY_IOSB: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+
 /// RegNotifyChangeKeyValue(hKey, bWatchSubtree, dwNotifyFilter, hEvent,
-/// fAsynchronous): gala's registry has no change notification yet. An
-/// asynchronous request is accepted and never signaled (reported to the
-/// ledger, so a program waiting on it is explained); a synchronous one
-/// would wait for ever and is refused (ERROR_NOT_SUPPORTED).
+/// fAsynchronous): NtNotifyChangeKey (the kernel's nt::regnotify). An
+/// asynchronous request signals hEvent at the change (required:
+/// ERROR_INVALID_PARAMETER without one); a synchronous one returns at the
+/// change. The filter's REG_NOTIFY_THREAD_AGNOSTIC keeps the request
+/// alive when the calling thread exits (without it, the thread's exit
+/// signals the event).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegNotifyChangeKeyValue(
     key: usize,
-    _subtree: i32,
+    subtree: i32,
     filter: u32,
     event: usize,
     asynchronous: i32,
 ) -> i32 {
-    if key == 0 || filter & !0x1000_000f != 0 || (asynchronous != 0 && event == 0) {
-        return 87; // ERROR_INVALID_PARAMETER
+    const REG_LEGAL_CHANGE_FILTER: u32 = 0x1000_000f;
+    const STATUS_PENDING: u32 = 0x103;
+    let h = match resolve(key) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    if filter & !REG_LEGAL_CHANGE_FILTER != 0 || (asynchronous != 0 && event == 0) {
+        return ERROR_INVALID_PARAMETER;
     }
-    if asynchronous == 0 {
-        missing(b"advapi32.dll!RegNotifyChangeKeyValue(synchronous)");
-        return 50; // ERROR_NOT_SUPPORTED
+    let mut iosb = [0usize; 2];
+    let (event, iosb) = if asynchronous != 0 {
+        (event, NOTIFY_IOSB.as_ptr().cast::<[usize; 2]>().cast_mut())
+    } else {
+        (0, &raw mut iosb)
+    };
+    let (tree, wait) = (u8::from(subtree != 0), u8::from(asynchronous != 0));
+    // SAFETY: a key handle and an IO_STATUS_BLOCK that outlives the
+    // request (a static one for an asynchronous request).
+    let status = unsafe {
+        NtNotifyChangeKey(h, event, 0, 0, iosb, filter, tree, core::ptr::null_mut(), 0, wait)
+    };
+    // STATUS_PENDING, the change (STATUS_NOTIFY_ENUM_DIR) or another
+    // success: done.
+    if status == STATUS_PENDING || status < 0x8000_0000 { ERROR_SUCCESS } else { error(status) }
+}
+
+/// RegRenameKey(hKey, lpSubKeyName, lpNewKeyName): NtRenameKey of the key
+/// or of its subkey (opened for KEY_WRITE). An empty or absent new name is
+/// ERROR_INVALID_PARAMETER, before the handle is looked at (Wine's
+/// conformance test, which passes on Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn RegRenameKey(key: usize, sub: *const u16, new_name: *const u16) -> i32 {
+    const KEY_WRITE: u32 = 0x0002_0006;
+    let name = wide_arg(new_name);
+    let name = unicode(name);
+    let opened = if sub.is_null() {
+        // The kernel checks the name first, then the handle (0: invalid).
+        let h = if key == 0 { Ok(0) } else { resolve(key) };
+        h.map(|h| Opened { h, owned: false })
+    } else {
+        resolve(key)
+            .and_then(|base| nt_open(base, wide_arg(sub), KEY_WRITE))
+            .map(|h| Opened { h, owned: true })
+    };
+    match opened {
+        // SAFETY: a key handle and a UNICODE_STRING over the caller's name.
+        Ok(o) => error(unsafe { NtRenameKey(o.h, &name) }),
+        Err(e) => e,
     }
-    missing(b"advapi32.dll!RegNotifyChangeKeyValue(never signaled)");
-    0
 }

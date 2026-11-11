@@ -1496,6 +1496,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("registry_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "advapi32.dll", "Windows/System32"),
     ("registry_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("regnotify_test", "ntdll.dll", "Windows/System32"),
+    ("regnotify_test", "kernel32.dll", "Windows/System32"),
+    ("regnotify_test", "advapi32.dll", "Windows/System32"),
+    ("regnotify_test", "bcryptprimitives.dll", "Windows/System32"),
     ("security_test", "ntdll.dll", "Windows/System32"),
     ("security_test", "kernel32.dll", "Windows/System32"),
     ("security_test", "advapi32.dll", "Windows/System32"),
@@ -3249,6 +3253,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "wow64.dll", "Windows/System32"),
+    ("wow64_regnotify_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     // gala's UCRT, called directly (user/ucrt_test), x64 and x86.
     ("ucrt_test", "ntdll.dll", "Windows/System32"),
     ("ucrt_test", "kernel32.dll", "Windows/System32"),
@@ -3613,6 +3622,7 @@ const USER_PROGRAMS: &[&str] = &[
     "pk_install_test",
     "profile_test",
     "registry_test",
+    "regnotify_test",
     "keyed_event_test",
     "iphlpapi_test",
     "afd_poll_test",
@@ -3670,6 +3680,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_fs_test",
     "wow64_k32_test",
     "wow64_adv_test",
+    "wow64_regnotify_test",
     "wow64_ucrt_test",
     "wow64_office_api_test",
     "wow64_cert_test",
@@ -6216,6 +6227,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=registry_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["registry_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Registry change notification (NtNotifyChangeKey,
+        // NtNotifyChangeMultipleKeys, RegNotifyChangeKeyValue) and key
+        // rename (NtRenameKey, RegRenameKey) (user/regnotify_test).
+        name: "regnotify_test",
+        cmdline: "qemu_exit run=regnotify_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["regnotify_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/regnotify_test built for x86).
+        name: "wow64_regnotify_test",
+        cmdline: "qemu_exit run=wow64_regnotify_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_regnotify_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell): the console (CONOUT$, CONIN$) behind redirected
@@ -10838,6 +10865,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_regnotify_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_runas_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),

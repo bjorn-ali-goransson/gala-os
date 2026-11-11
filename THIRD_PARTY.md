@@ -253,6 +253,16 @@ Rules for this file:
   `dlls/wofutil/main.c` and `wofutil.spec` give them (master, fetched
   2026-11-09; LGPL-2.1, behaviour only, no code copied); the rest from
   Microsoft's wofapi.h documentation.
+- The kernel's registry change notification and rename
+  (`kernel/src/nt/regnotify.rs`, `Registry::rename`), advapi32's
+  RegNotifyChangeKeyValue and RegRenameKey, and `user/regnotify_test`:
+  the behaviour Wine's conformance tests record for Windows
+  (`dlls/ntdll/tests/reg.c` test_notify and test_NtRenameKey,
+  `dlls/advapi32/tests/registry.c` test_RegNotifyChangeKeyValue and
+  test_RegRenameKey; the order of RegRenameKey's checks from
+  `dlls/advapi32/registry.c`), wine-10.20 (dl.winehq.org, fetched
+  2026-11-11; LGPL-2.1, expected results and the tests' sequences only,
+  no code copied).
 
 | Our code | Specification | Spec license |
 |---|---|---|

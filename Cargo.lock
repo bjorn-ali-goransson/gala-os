@@ -1793,6 +1793,13 @@ name = "registry_test"
 version = "0.1.0"
 
 [[package]]
+name = "regnotify_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "replay_test"
 version = "0.1.0"
 
@@ -3010,6 +3017,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_regnotify_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

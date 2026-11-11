@@ -363,14 +363,19 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f08, &[H, Us]),                                      // NtDeleteValueKey
     (0x7f09, &[H]),                                          // NtFlushKey
     (0x7fd6, &[H, U, U, U]),                                 // NtSetInformationKey
-    (0x7f0a, &[Oh, U, Oa]),                                  // NtCreateJobObject
-    (0x7f0b, &[H, H]),                                       // NtAssignProcessToJobObject
-    (0x7f0e, &[H, H]),                                       // NtIsProcessInJob
-    (0x7f0f, &[Oh, U, Oa, U]),                               // NtCreateKeyedEvent
-    (0x7f10, &[Oh, U, Oa]),                                  // NtOpenKeyedEvent
-    (0x7f11, &[H, U, U, U]),                                 // NtWaitForKeyedEvent
-    (0x7f12, &[H, U, U, U]),                                 // NtReleaseKeyedEvent
-    (0x7f13, &[H, H, Apc, U, U, U, U, U, U]),                // NtNotifyChangeDirectoryFile
+    (0x7f25, &[H, H, Apc, U, U, U, U, U, U, U]),             // NtNotifyChangeKey
+    // At most one subordinate (a Count over 1 is refused): its
+    // OBJECT_ATTRIBUTES converts as one.
+    (0x7f26, &[H, U, Oa, H, Apc, U, U, U, U, U, U, U]), // NtNotifyChangeMultipleKeys
+    (0x7f27, &[H, Us]),                                 // NtRenameKey
+    (0x7f0a, &[Oh, U, Oa]),                             // NtCreateJobObject
+    (0x7f0b, &[H, H]),                                  // NtAssignProcessToJobObject
+    (0x7f0e, &[H, H]),                                  // NtIsProcessInJob
+    (0x7f0f, &[Oh, U, Oa, U]),                          // NtCreateKeyedEvent
+    (0x7f10, &[Oh, U, Oa]),                             // NtOpenKeyedEvent
+    (0x7f11, &[H, U, U, U]),                            // NtWaitForKeyedEvent
+    (0x7f12, &[H, U, U, U]),                            // NtReleaseKeyedEvent
+    (0x7f13, &[H, H, Apc, U, U, U, U, U, U]),           // NtNotifyChangeDirectoryFile
     // FILE_SEGMENT_ELEMENT is 8 bytes in both layouts (PVOID64).
     (0x7f14, &[H, H, Apc, U, U, U, U, U, U]), // NtReadFileScatter
     (0x7f15, &[H, H, Apc, U, U, U, U, U, U]), // NtWriteFileGather

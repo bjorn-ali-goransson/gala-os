@@ -20,7 +20,9 @@
 //!   REG_DWORD and a REG_BINARY value (RegQueryValueExW: type and data), a
 //!   subkey with a value; a value and a subkey deleted in the first boot
 //!   are gone (ERROR_FILE_NOT_FOUND), and so is a volatile subkey
-//!   (REG_OPTION_VOLATILE: volatile keys do not survive a restart).
+//!   (REG_OPTION_VOLATILE: volatile keys do not survive a restart); a
+//!   subkey renamed (RegRenameKey) is there under its new name with its
+//!   value and its own subkey, and not under the old one.
 //!
 //! Prints `persist_test: first boot` the first time, then `persist_test:
 //! ok` or exits with the number of the failing check.
@@ -129,6 +131,7 @@ unsafe extern "system" {
     ) -> u32;
     fn RegDeleteValueW(key: Handle, name: *const u16) -> u32;
     fn RegDeleteKeyW(key: Handle, subkey: *const u16) -> u32;
+    fn RegRenameKey(key: Handle, subkey: *const u16, new_name: *const u16) -> u32;
     fn RegCloseKey(key: Handle) -> u32;
     fn InitializeSecurityDescriptor(sd: *mut c_void, revision: u32) -> Bool;
     fn InitializeAcl(acl: *mut c_void, len: u32, revision: u32) -> Bool;
@@ -628,6 +631,15 @@ fn registry_first(c: &mut Checks) -> Result<(), u32> {
         let volatile = volatile.unwrap_or(core::ptr::null_mut());
         c.eq(reg_set(volatile, "Lost", REG_DWORD, &1u32.to_le_bytes()).into(), 0)?;
         RegCloseKey(volatile);
+        let before = reg_create(key, "Before", 0);
+        c.ok(before.is_ok(), 0)?;
+        let before = before.unwrap_or(core::ptr::null_mut());
+        c.eq(reg_set(before, "Moved", REG_DWORD, &9u32.to_le_bytes()).into(), 0)?;
+        let inner = reg_create(before, "Inner", 0);
+        c.ok(inner.is_ok(), 0)?;
+        RegCloseKey(inner.unwrap_or(core::ptr::null_mut()));
+        RegCloseKey(before);
+        c.eq(RegRenameKey(key, w("Before").p(), w("After").p()).into(), 0)?;
         RegCloseKey(key);
     }
     Ok(())
@@ -691,6 +703,16 @@ fn registry_second(c: &mut Checks) -> Result<(), u32> {
             RegOpenKeyExW(key, w("Volatile").p(), 0, KEY_ALL_ACCESS, &mut other).into(),
             ERROR_FILE_NOT_FOUND,
         )?;
+        c.eq(
+            RegOpenKeyExW(key, w("Before").p(), 0, KEY_ALL_ACCESS, &mut other).into(),
+            ERROR_FILE_NOT_FOUND,
+        )?;
+        let mut after = core::ptr::null_mut();
+        c.eq(RegOpenKeyExW(key, w("After").p(), 0, KEY_ALL_ACCESS, &mut after).into(), 0)?;
+        reg_check(c, after, "Moved", REG_DWORD, &9u32.to_le_bytes())?;
+        c.eq(RegOpenKeyExW(after, w("Inner").p(), 0, KEY_ALL_ACCESS, &mut other).into(), 0)?;
+        RegCloseKey(other);
+        RegCloseKey(after);
         RegCloseKey(key);
     }
     Ok(())

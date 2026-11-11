@@ -175,7 +175,7 @@ has a section under "Open items".
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
 | Pipes, child processes with redirected stdio | `pipe_test`, `process_test` |
-| Registry | `registry_test`; ARCHITECTURE "Registry" |
+| Registry, change notification, rename | `registry_test`, `regnotify_test`, `wow64_regnotify_test`; ARCHITECTURE "Registry" |
 | Differential runner against Windows | `cargo xtask report`/`compare`, `user/bin/run-all.ps1` |
 
 ### Programs and Win32
@@ -1443,11 +1443,16 @@ need gala's.
      information), FindActCtxSectionStringW, QueueUserWorkItem,
      GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
      AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
-     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression. Left:
-     NtNotifyChangeMultipleKeys (the kernel has no registry change
-     notification yet; advapi32's RegNotifyChangeKeyValue is a
-     never-signalled stopgap), NtRenameKey (a registry node renamed,
-     with its change-log op), the manifests' sections
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression;
+     registry change notification (NtNotifyChangeKey,
+     NtNotifyChangeMultipleKeys, RegNotifyChangeKeyValue with
+     REG_NOTIFY_THREAD_AGNOSTIC) and NtRenameKey/RegRenameKey with its
+     change-log record (`regnotify_test`, `wow64_regnotify_test`,
+     `persist_test`; ARCHITECTURE "Registry"); to measure on Windows
+     before `ci-passing.txt` lists them: the completion statuses, a
+     change kept for the next request, what a rename and a deleted
+     watched key fire, a subordinate key (the tests' `info` lines). Left:
+     the manifests' sections
      (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
      classes), GetThreadIOPendingFlag's count of a thread's pending
      socket, pipe and watch requests (a recorded stopgap answering

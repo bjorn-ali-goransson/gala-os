@@ -2439,6 +2439,45 @@ shutdown.
   RegCreateKeyEx walks the path); a volatile key's children must be
   volatile; a key with subkeys or a hive root cannot be deleted
   (STATUS_CANNOT_DELETE).
+- **Rename** (NtRenameKey, advapi32's RegRenameKey; `regnotify_test`):
+  one component under the same parent, the handle needing KEY_WRITE
+  (KEY_SET_VALUE | KEY_CREATE_SUB_KEY); an empty name is
+  STATUS_INVALID_PARAMETER before the handle is looked at, a path or a
+  name over 255 characters too; a sibling's name, its own (in any case)
+  or a hive root STATUS_CANNOT_DELETE (Wine's `test_NtRenameKey` and
+  `test_RegRenameKey`, which pass on Windows). The key's LastWriteTime
+  is set; other handles' KeyNameInformation follows (each query matches
+  the opener's spelling against the current full name).
+- **Change notification** (`nt::regnotify`; NtNotifyChangeKey,
+  NtNotifyChangeMultipleKeys, advapi32's RegNotifyChangeKeyValue;
+  `regnotify_test`, `wow64_regnotify_test`). A watch belongs to a key
+  object (its address, `KeyObject::owner`), made by its first request,
+  which fixes the filter (REG_NOTIFY_CHANGE_*; 0 is accepted and never
+  fires) and the subtree flag; later requests on the object only add
+  waiters (Wine's `test_notify`). While a watch exists the registry
+  notes each change as `registry::Change` (the key touched, then its
+  ancestors; NAME on the parent for a subkey created, deleted or
+  renamed and on the key itself for its deletion or rename, LAST_SET for
+  a value set or deleted, SECURITY | ATTRIBUTES for a descriptor set,
+  ATTRIBUTES for NtSetInformationKey) and `registry::with` hands the
+  notes to `regnotify::deliver` after releasing the registry. A matching
+  change completes every waiting request of the watch once (IOSB
+  STATUS_NOTIFY_ENUM_DIR, the event, the APC with ApcContext and the
+  IOSB, as `notify`'s I/O completion: the APC slot is reserved at the
+  request); one that comes while none waits is kept and the next request
+  completes at once. Asynchronous=FALSE waits in the kernel. A request
+  without REG_NOTIFY_THREAD_AGNOSTIC (a filter bit at the NT level, in
+  REG_LEGAL_CHANGE_FILTER) belongs to its thread and ends with
+  STATUS_CANCELLED when the thread exits (`thread::exit_current`); the key
+  object's end completes waiting requests with STATUS_NOTIFY_CLEANUP.
+  NtNotifyChangeMultipleKeys takes at most one subordinate
+  OBJECT_ATTRIBUTES (in the caller's view, KEY_NOTIFY checked), opened
+  by the kernel and kept by the watch; its changes count as the master's.
+  Invariant: lock order WATCHES, then a watch's state; no completion, no
+  key object dropped and no registry call under either. Which statuses
+  Windows writes (after a change, a thread's end) and whether it keeps a
+  change for the next request are not measured (`regnotify_test`'s
+  `info` lines; ROADMAP OF).
 - **Information classes**: KEY_BASIC/NODE/FULL/NAME/CACHED_INFORMATION
   (flags and handle tags as zeros), KEY_VALUE_BASIC/FULL/
   PARTIAL_INFORMATION and the ALIGN64 forms; a buffer shorter than the
@@ -6015,12 +6054,18 @@ rather than a format of their own.
 
 - `nt::reglog` records (CreateKey with class, time and a `reset` flag
   for snapshots, SetValue, DeleteValue, DeleteKey with everything below,
-  SetSecurity; keyed by the full name `\REGISTRY\...`, CRC-checked like
+  SetSecurity, RenameKey (the old full name and the new component);
+  keyed by the full name `\REGISTRY\...`, CRC-checked like
   `fs::log`) are appended to `C:\Windows\System32\config\gala.reglog`,
   which the change log of C: keeps.
 - The `Registry` records like the ramfs (boot keys, dirty keys,
   tombstones of deleted boot keys, `apply`, `snapshot`). Volatile keys
   are never recorded, so they are gone after a restart, as on Windows.
+  A renamed boot key leaves a tombstone of its old name, and it and its
+  subtree count as made since boot (dirty), so a snapshot deletes the
+  old tree and writes the new one; a tombstone covers the names below
+  it (no tombstone under another). Replay sets only the times records
+  carry: a replayed create or delete leaves the parent's LastWriteTime.
 - `persist::sync` first moves the registry's records into the file,
   then writes the file system's records; past 1 MiB, or when records
   were lost, the file is rewritten as a snapshot. **Lock order: the
@@ -6029,8 +6074,9 @@ rather than a format of their own.
   after `registry.seed` and the boot's `registry` modules. Replayed
   value changes keep the key's last-write time.
 - Tests: `persist_test`'s registry part (HKCU values of three types, a
-  subkey, a deleted value and key, a volatile key) and host tests of the
-  records, replay and snapshot.
+  subkey, a deleted value and key, a volatile key, a renamed key with
+  its value and subkey) and host tests of the records, replay and
+  snapshot (a renamed boot key and a renamed new key).
 
 ## Windows on the screen
 
@@ -8636,8 +8682,7 @@ stations and desktops a program creates are refused until stage 3).
   VCL calls them on its edit controls); the TSF COM objects are not
   provided (`user32_test`).
 - advapi32: trustees and BuildSecurityDescriptorW, AddMandatoryAce,
-  GetSecurityDescriptorSacl, RegNotifyChangeKeyValue (asynchronous:
-  accepted, never signaled, recorded).
+  GetSecurityDescriptorSacl.
 - userenv's group policy notifications; netapi32's join and DS role (a
   workgroup workstation).
 - user32: DPI awareness (96 DPI), power registrations, device lists
@@ -14066,8 +14111,8 @@ ROADMAP.
 
 - SMP: suspension and context of threads running on other CPUs by IPI,
   ranged (invlpg) TLB shootdowns, PCIDs (ROADMAP S4).
-- Registry: symbolic link keys, change notifications, WOW64 views, hive
-  files in Windows' format.
+- Registry: symbolic link keys, Vista's WOW64 reflection, hive files in
+  Windows' format.
 - Files on the disk are kept in memory, not read on demand (D2).
 - Devices are polled: no interrupts for virtio-net, virtio-blk or
   virtio-gpu.
