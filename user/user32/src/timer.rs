@@ -5,6 +5,14 @@
 //! next timer is due. A TIMERPROC goes in WM_TIMER's lParam and
 //! DispatchMessage calls it instead of the window procedure. Intervals
 //! are clamped to USER_TIMER_MINIMUM (10 ms) and USER_TIMER_MAXIMUM.
+//!
+//! A window's timer belongs to the window's thread, whichever thread of
+//! the process sets or kills it (Wine's msg.c test_timers, run on
+//! Windows: a second thread kills the window's timer and sets another,
+//! which the window's thread then kills); a window of another process is
+//! ERROR_ACCESS_DENIED (Wine's server). A timer without a window is the
+//! calling thread's. ODT's setup.exe sets its splash's timer from its
+//! main thread.
 
 use crate::window::{Hwnd, Msg, me};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -73,18 +81,16 @@ fn reached(t: u32, now: u32) -> bool {
 
 /// SetTimer(hwnd, id, elapse, proc): the timer's id (for a window: `id`;
 /// without one: a new id), replacing the window's timer of that id; 0 for
-/// a window that is not one.
+/// a window that is not one or is another process's.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, proc_: usize) -> usize {
-    if hwnd != 0 && crate::window::IsWindow(hwnd) == 0 {
-        crate::window::set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
-        return 0;
-    }
+    let Some(thread) = owner(hwnd) else { return 0 };
     let interval = elapse.clamp(10, 0x7fff_ffff);
-    let thread = me();
     let id = if hwnd == 0 {
         // An existing window-less timer of this thread keeps its id.
-        if id != 0 && with(|t| t.iter().any(|x| x.used && x.hwnd == 0 && x.id == id)) {
+        if id != 0
+            && with(|t| t.iter().any(|x| x.used && x.hwnd == 0 && x.id == id && x.thread == thread))
+        {
             id
         } else {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -96,12 +102,37 @@ pub extern "system" fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, proc_: usize
     with(|t| {
         let slot = t
             .iter()
-            .position(|x| x.used && x.hwnd == hwnd && x.id == id)
+            .position(|x| x.used && x.hwnd == hwnd && x.id == id && x.thread == thread)
             .or_else(|| t.iter().position(|x| !x.used))?;
         t[slot] = Timer { used: true, hwnd, id, thread, interval, due, proc_ };
         Some(id)
     })
+    .inspect(|_| {
+        // The window's thread may be waiting in GetMessage for its own
+        // next timer: it looks again.
+        if thread != me() {
+            crate::window::wake();
+        }
+    })
     .unwrap_or(0)
+}
+
+/// The thread a timer of `hwnd` belongs to: the calling thread's for no
+/// window, else the window's; None (the last error set) for a window
+/// that is not one or is another process's.
+fn owner(hwnd: Hwnd) -> Option<u32> {
+    if hwnd == 0 {
+        return Some(me());
+    }
+    if let Some(w) = crate::window::window(hwnd) {
+        return Some(w.thread);
+    }
+    crate::window::set_last_error(if crate::window::IsWindow(hwnd) != 0 {
+        5 // ERROR_ACCESS_DENIED: another process's window
+    } else {
+        1400 // ERROR_INVALID_WINDOW_HANDLE
+    });
+    None
 }
 
 /// SetCoalescableTimer(hwnd, id, elapse, proc, tolerance): SetTimer; the
@@ -119,15 +150,19 @@ pub extern "system" fn SetCoalescableTimer(
     SetTimer(hwnd, id, elapse, proc_)
 }
 
-/// KillTimer: TRUE if there was such a timer.
+/// KillTimer: TRUE if there was such a timer (a window's, set by any
+/// thread of the process; a window-less one of the calling thread's).
 #[unsafe(no_mangle)]
 pub extern "system" fn KillTimer(hwnd: Hwnd, id: usize) -> i32 {
-    with(|t| match t.iter_mut().find(|x| x.used && x.hwnd == hwnd && x.id == id) {
-        Some(x) => {
-            *x = NO_TIMER;
-            1
+    let Some(thread) = owner(hwnd) else { return 0 };
+    with(|t| {
+        match t.iter_mut().find(|x| x.used && x.hwnd == hwnd && x.id == id && x.thread == thread) {
+            Some(x) => {
+                *x = NO_TIMER;
+                1
+            }
+            None => 0,
         }
-        None => 0,
     })
 }
 
@@ -135,6 +170,15 @@ pub extern "system" fn KillTimer(hwnd: Hwnd, id: usize) -> i32 {
 pub fn window_destroyed(hwnd: Hwnd) {
     with(|t| {
         for x in t.iter_mut().filter(|x| x.used && x.hwnd == hwnd) {
+            *x = NO_TIMER;
+        }
+    });
+}
+
+/// The thread ended: its timers go (a window's went with the window).
+pub fn thread_ended(thread: u32) {
+    with(|t| {
+        for x in t.iter_mut().filter(|x| x.used && x.thread == thread) {
             *x = NO_TIMER;
         }
     });

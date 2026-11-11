@@ -1822,19 +1822,38 @@ need gala's.
      the splash's own object (the pointer its window keeps in extra
      bytes index 0, which GetWindowLongW returns on every message up to
      WM_NCDESTROY, as on Windows): its first word is in setup.exe (a
-     vtable), its second its own address, its fifth to seventh 0. Not
-     the cause (each tried and ruled out): UISettings' activation, the
-     hide and deactivation messages DestroyWindow sends before
-     WM_DESTROY on Windows, WM_SIZE/WM_MOVE at creation, WM_SHOWWINDOW
-     (now sent, and the window hidden before WM_DESTROY:
+     vtable), its second its own address, its fifth to seventh 0, and
+     none of its first twelve words changes from WM_CREATE to the fault
+     (traced). Not the cause (each tried and ruled out): UISettings'
+     activation, the hide and deactivation messages DestroyWindow sends
+     before WM_DESTROY on Windows, WM_SIZE/WM_MOVE at creation,
+     WM_SHOWWINDOW (now sent, and the window hidden before WM_DESTROY:
      `wow64_gui_test`), any GDI+ status (all Ok), the user32, gdi32 and
-     kernel32 names the thread resolves with GetProcAddress (all
-     exported by gala's x86 DLLs). Measured on Windows (issue #77): the
-     splash gets WM_TIMER during its life (a timer it later kills with
-     KillTimer); on gala its thread waits in GetMessage with no timer
-     for its whole life, so the timer is never set here: what sets it
-     (a message gala does not send, or a call that fails) is the next
-     lead.
+     kernel32 names the process resolves with GetProcAddress (all
+     exported; setup.exe imports no user32 function and resolves every
+     one so), SetForegroundWindow failing (tried: no timer follows), one
+     more loop iteration before WM_QUIT (a WM_NULL first: the same
+     fault), and the timer lead: setup.exe never calls SetTimer; its
+     timers are SetCoalescableTimer's, ids 5 (30 s) and 7 (5 s), on the
+     window of another thread (tid 32 here), which also registers for
+     raw input and six power-setting notifications and kills them on
+     WM_TIMER; the WM_TIMER #77 saw on the splash thread may be its IME
+     windows' (the hooks were per thread). Done on the way: that window
+     died at once before (RegisterRawInputDevices refused the 32-bit
+     RAWINPUTDEVICE, 12 bytes; ARCHITECTURE "Raw input",
+     `wow64_gui_test`), and a window's timer set from another thread
+     now fires on the window's thread, with each waiting thread woken
+     by an event of its own (ARCHITECTURE "Timers", "The message
+     queue"). On gala the splash thread enters GetMessage once and gets
+     no message until WM_QUIT: the main thread's SendMessage(WM_USER+1)
+     runs its close (ShowWindow(SW_HIDE), PostQuitMessage from
+     WM_DESTROY, DestroyWindow); on Windows (#77) the loop dispatches a
+     WM_PAINT between DestroyWindow and WM_QUIT. Next: a Windows
+     measurement of the splash object's words over its life and of the
+     calls the splash thread makes between GetMessage's 0 and its exit
+     (the issue drafted with this change), and a run as SYSTEM on the
+     console (psexec -s -i), the account the scenario uses, to learn
+     whether Windows' setup.exe faults there too.
      setup.exe ending so takes consolerun with it; the Click-to-Run
      client and service go on downloading (1.4 GB on C: in 900 s), and
      nothing is on the screen: the client's NotificationFlyout
@@ -1848,11 +1867,8 @@ need gala's.
      system DLL gala lacks) and, through Office's own DLLs,
      `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
      (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
-     ordinal 420. Next, in that order: the splash thread's fault (what
-     its teardown reads that Windows sets: compare the messages and
-     calls of the splash's life with Windows', e.g. a probe program
-     that makes the same window and records them, or Windows' own
-     answers to the calls the thread makes); a notification area in
+     ordinal 420. Next, in that order: the splash thread's fault (the
+     Windows measurement above); a notification area in
      shasha's taskbar (Shell_NotifyIconW and Shell_NotifyIconGetRect,
      comctl32's LoadIconMetric, PNG icons in CreateIconFromResourceEx);
      OfficeC2RClient.exe's imports, then its React Native UI (Direct3D
@@ -1866,7 +1882,12 @@ need gala's.
      and the others; SystemParametersInfo says 17) and for any index it
      does not know, without a ledger line; PatBlt is fixed for a null
      brush but BitBlt and MaskBlt with a pattern raster operation still
-     paint a null brush as black.
+     paint a null brush as black; PostThreadMessage to a thread of
+     the same process goes through the kernel and arrives after what
+     the thread posted locally since (PostMessage, PostQuitMessage),
+     not in posting order as in Windows' one posted queue; there is
+     no trace of a program's user32 calls (this hunt used a
+     throw-away one over GalaConsoleTrace, which WOW64 does not thunk).
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

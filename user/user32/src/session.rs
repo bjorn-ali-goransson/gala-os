@@ -109,7 +109,7 @@ pub extern "system" fn RegisterPointerDeviceNotifications(hwnd: usize, _range: i
 /// devices (0).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetRawInputDeviceList(_list: *mut u8, count: *mut u32, size: u32) -> u32 {
-    if count.is_null() || size != 16 {
+    if count.is_null() || size as usize != RAWINPUTDEVICELIST_SIZE {
         set_error(87);
         return u32::MAX;
     }
@@ -118,11 +118,19 @@ pub extern "system" fn GetRawInputDeviceList(_list: *mut u8, count: *mut u32, si
     0
 }
 
+/// RAWINPUTDEVICE (usUsagePage, usUsage, dwFlags, hwndTarget): 12 bytes
+/// for a 32-bit caller, 16 for a 64-bit one; RAWINPUTDEVICELIST (hDevice,
+/// dwType): 8 and 16. cbSize is checked against the caller's own (ODT's
+/// 32-bit setup.exe destroys its power-notification window when its
+/// registration fails).
+const RAWINPUTDEVICE_SIZE: usize = 8 + core::mem::size_of::<usize>();
+const RAWINPUTDEVICELIST_SIZE: usize = 2 * core::mem::size_of::<usize>();
+
 /// RegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize):
 /// accepted; no WM_INPUT is ever sent (no raw input devices).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegisterRawInputDevices(devices: *const u8, count: u32, size: u32) -> i32 {
-    if (devices.is_null() && count != 0) || size != 16 {
+    if (devices.is_null() && count != 0) || size as usize != RAWINPUTDEVICE_SIZE {
         set_error(87);
         return 0;
     }

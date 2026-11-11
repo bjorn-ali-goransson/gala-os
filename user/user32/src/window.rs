@@ -62,7 +62,6 @@ unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
     fn CreateEventW(sa: *const c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
     fn SetEvent(h: Handle) -> i32;
-    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn WaitForMultipleObjects(count: u32, handles: *const Handle, all: i32, ms: u32) -> u32;
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
@@ -486,9 +485,109 @@ pub(crate) fn listen() {
     event();
 }
 
+/// Each thread's own wake event (auto-reset), made when it first waits
+/// for a message: (thread id, event). Every thread that waits in
+/// GetMessage or MsgWaitForMultipleObjects waits on its own event and on
+/// the process's (`event`, which the kernel sets); `wake` sets every
+/// thread's, so each waiting thread looks at its queue again. One
+/// auto-reset event for the process alone woke one waiter, which might
+/// not be the thread the message, timer or paint was for: that thread
+/// slept on (ODT's setup.exe waits in GetMessage on three threads).
+static WAITERS: [(AtomicU32, AtomicUsize); MAX_WAITERS] =
+    [const { (AtomicU32::new(0), AtomicUsize::new(0)) }; MAX_WAITERS];
+const MAX_WAITERS: usize = 64;
+/// Threads waiting without an event of their own (WAITERS was full, or
+/// CreateEvent failed): `wake` sets the process's event too while any.
+static UNLISTED: AtomicU32 = AtomicU32::new(0);
+
+/// The calling thread's wake event, made on first use; None if there is
+/// no room (recorded) or no event.
+fn own_event() -> Option<Handle> {
+    let me = me();
+    if let Some((_, e)) = WAITERS.iter().find(|(t, _)| t.load(Ordering::Acquire) == me) {
+        let e = e.load(Ordering::Acquire);
+        return (e != 0).then_some(e as Handle);
+    }
+    let Some((_, slot)) = WAITERS
+        .iter()
+        .find(|(t, _)| t.compare_exchange(0, me, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+    else {
+        unsupported(b"user32.dll!message wait: more than 64 waiting threads", MAX_WAITERS as u64);
+        return None;
+    };
+    // An ended thread's event is kept for the next one (never closed, so
+    // a concurrent `wake` never sets a handle that was reused).
+    let mut e = slot.load(Ordering::Acquire);
+    if e == 0 {
+        // SAFETY: a plain call.
+        e = unsafe { CreateEventW(core::ptr::null(), 0, 0, core::ptr::null()) } as usize;
+        slot.store(e, Ordering::Release);
+    }
+    (e != 0).then_some(e as Handle)
+}
+
+/// The thread ended: its slot is free; its event stays for the next.
+fn drop_own_event() {
+    let me = me();
+    if let Some((t, _)) = WAITERS.iter().find(|(t, _)| t.load(Ordering::Acquire) == me) {
+        t.store(0, Ordering::Release);
+    }
+}
+
+/// Tells every waiting thread of the process to look at its queue again.
 pub(crate) fn wake() {
-    // SAFETY: our event.
-    unsafe { SetEvent(event()) };
+    wake_others(0);
+    if UNLISTED.load(Ordering::Acquire) != 0 {
+        // SAFETY: our event.
+        unsafe { SetEvent(event()) };
+    }
+}
+
+/// Sets every thread's wake event but `except`'s.
+fn wake_others(except: u32) {
+    for (t, e) in WAITERS.iter() {
+        let tid = t.load(Ordering::Acquire);
+        let h = e.load(Ordering::Acquire);
+        if tid != 0 && tid != except && h != 0 {
+            // SAFETY: our event (closed only by its thread, at its end).
+            unsafe { SetEvent(h as Handle) };
+        }
+    }
+}
+
+/// Waits for `handles` (the caller's, at most 63) or for a wake of the
+/// calling thread, up to `ms`: WaitForMultipleObjects' result, the
+/// wake being WAIT_OBJECT_0 + handles.len(). A wake from the kernel
+/// (the process's event: input, messages from other processes, sent
+/// messages) may be another thread's: they are all told.
+fn wait_wake(handles: &[Handle], ms: u32) -> u32 {
+    let n = handles.len();
+    let mut all = [0 as Handle; 66];
+    all[..n].copy_from_slice(handles);
+    all[n] = event();
+    let own = if n + 2 <= 64 { own_event() } else { None };
+    let count = match own {
+        Some(h) => {
+            all[n + 1] = h;
+            n + 2
+        }
+        None => {
+            if n + 2 > 64 {
+                unsupported(b"user32.dll!MsgWaitForMultipleObjects(63 handles: no own wake)", 63);
+            }
+            UNLISTED.fetch_add(1, Ordering::AcqRel);
+            n + 1
+        }
+    };
+    // SAFETY: our array of `count` handles.
+    let r = unsafe { WaitForMultipleObjects(count as u32, all.as_ptr(), 0, ms) };
+    if own.is_none() {
+        UNLISTED.fetch_sub(1, Ordering::AcqRel);
+    }
+    if r == n as u32 {
+        wake_others(me());
+    }
+    if r == n as u32 + 1 { n as u32 } else { r }
 }
 
 pub(crate) fn set_last_error(code: u32) {
@@ -1314,7 +1413,9 @@ pub(crate) fn thread_ended() {
             }
         }
     });
+    crate::timer::thread_ended(thread);
     crate::foreign::thread_ended();
+    drop_own_event();
 }
 
 #[unsafe(no_mangle)]
@@ -3136,6 +3237,9 @@ fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32 {
+    // The thread's wake event exists before it looks at its queue: a wake
+    // between the look and the wait is kept.
+    own_event();
     loop {
         if let Some(m) = next(hwnd, min, max, true) {
             // SAFETY: the caller's MSG.
@@ -3143,8 +3247,7 @@ pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32
             return i32::from(m.message != WM_QUIT);
         }
         // Until a message comes or the next timer is due.
-        // SAFETY: our event.
-        unsafe { WaitForSingleObject(event(), crate::timer::wait_ms()) };
+        wait_wake(&[], crate::timer::wait_ms());
     }
 }
 
@@ -3175,12 +3278,13 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         // SAFETY: the caller's array of `count` handles.
         return unsafe { WaitForMultipleObjects(count, handles, 1, ms) };
     }
-    let mut all = [0 as Handle; 64];
+    // As in GetMessageW: the wake event before the first look.
+    own_event();
+    let mut all = [0 as Handle; 63];
     for (i, h) in all.iter_mut().take(count as usize).enumerate() {
         // SAFETY: the caller's array of `count` handles.
         *h = unsafe { *handles.add(i) };
     }
-    all[count as usize] = event();
     // SAFETY: a plain call.
     let start = unsafe { GetTickCount() };
     loop {
@@ -3191,8 +3295,7 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         let gone = unsafe { GetTickCount() }.wrapping_sub(start);
         let left = if ms == INFINITE { INFINITE } else { ms.saturating_sub(gone) };
         let timer = if mask & QS_TIMER != 0 { crate::timer::wait_ms() } else { INFINITE };
-        // SAFETY: our array of count + 1 handles.
-        let r = unsafe { WaitForMultipleObjects(count + 1, all.as_ptr(), 0, left.min(timer)) };
+        let r = wait_wake(&all[..count as usize], left.min(timer));
         match r {
             // A handle of the caller's (or abandoned: WAIT_ABANDONED_0 + i).
             _ if r < count || (0x80..0x80 + count).contains(&r) => return r,
