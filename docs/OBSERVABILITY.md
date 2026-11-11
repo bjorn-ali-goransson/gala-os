@@ -528,13 +528,7 @@ process. When the process ends with that exception's code (unhandled),
 personality and session, the address as module+offset (the executable or
 an image view), what was read/written/executed, the registers and the
 top eight stack words, each named by module when it points into an
-image; then the eight words at each general register that points to
-readable memory (`[ebx] ...`: the fields of the object a bad pointer was
-read from), and of the next 128 stack words those that point into an
-image (`[esp+0x0dc] 0x77fdf7 (setup.exe+0x37fdf7)`: the return addresses
-of the calls that led there, with how many of the readable words did).
-The note reads the deeper stack a page's part at a time, as every
-delivered exception takes one. ntdll reports an exception no handler took before it calls the
+image. ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
@@ -562,8 +556,7 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - In 32-bit code, `32-bit SEH registrations, newest first`: the frame
   and handler (module+offset) of each registration on the TEB32's
   ExceptionList as the dispatcher offered it to them, up to 12, and
-  whether the list's end was reached. A head that is not a readable frame
-  (NULL) is shown as `32-bit SEH list head`. A frame listed again and again is
+  whether the list's end was reached. A frame listed again and again is
   a list that loops (a registration linked above itself).
 - An MSVC C++ throw (0xe06d7363 with the C++ runtime's magic): `C++
   throw of <type> (<decorated name>), N catchable types`, `catchable

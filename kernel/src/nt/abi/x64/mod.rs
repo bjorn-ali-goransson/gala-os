@@ -518,8 +518,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
             let mut b = [0u8; 4];
             call.process.read(at, &mut b).ok().map(|()| u32::from_le_bytes(b))
         };
-        note.seh_head = word(teb32);
-        let mut frame = note.seh_head.unwrap_or(0);
+        let mut frame = word(teb32).unwrap_or(0);
         while note.seh_len < note.seh.len() {
             if frame == u32::MAX {
                 note.seh_end = true;

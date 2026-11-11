@@ -22,16 +22,8 @@ use super::platform::UserRegs;
 use super::process::Process;
 use super::status::NtStatus;
 
-/// Stack values kept and shown as they are.
+/// Stack values kept.
 const STACK_WORDS: usize = 8;
-/// Stack values kept above those: shown when they point into an image
-/// (return addresses, mostly: the call chain that led to the exception).
-const DEEP_WORDS: usize = 128;
-/// Words kept at each general register that points to readable memory.
-const REG_WORDS: usize = 8;
-/// Registers whose memory is kept (x86 or x64 numbering: ax, cx, dx, bx,
-/// sp skipped, bp, si, di).
-const REG_DUMPED: [usize; 7] = [0, 1, 2, 3, 5, 6, 7];
 
 /// The last exception a process's thread took.
 #[derive(Clone, Copy, Debug)]
@@ -46,13 +38,6 @@ pub struct Note {
     /// The values at the stack pointer and above (None: unreadable); for
     /// 32-bit code the 4-byte values.
     pub stack: [Option<u64>; STACK_WORDS],
-    /// The values above those (`deep_len` readable).
-    pub deep: [u64; DEEP_WORDS],
-    pub deep_len: usize,
-    /// For each register of `REG_DUMPED` in turn: the words at its value
-    /// (`mem_len[i]` readable; 0 when it points nowhere readable).
-    pub mem: [[u64; REG_WORDS]; REG_DUMPED.len()],
-    pub mem_len: [usize; REG_DUMPED.len()],
     /// It happened in 32-bit code (a WOW64 process's): the registers are
     /// those of x86, in their low halves.
     pub wow64: bool,
@@ -71,9 +56,6 @@ pub struct Note {
     pub seh: [(u32, u32); SEH_FRAMES],
     pub seh_len: usize,
     pub seh_end: bool,
-    /// For one in 32-bit code: the TEB32's ExceptionList itself (None:
-    /// unread), shown when the list could not be walked.
-    pub seh_head: Option<u32>,
 }
 
 /// SEH registrations kept for a 32-bit crash report.
@@ -95,65 +77,18 @@ impl Note {
                 _ => None,
             })
             .unwrap_or(0);
-        // A word at `base` + `i` words (4 bytes each for 32-bit code).
-        let word = |base: u64, i: usize| {
-            if wow64 {
+        let mut stack = [None; STACK_WORDS];
+        for (i, slot) in stack.iter_mut().enumerate() {
+            *slot = if wow64 {
                 let mut word = [0u8; 4];
-                let at = (base as u32).wrapping_add(4 * i as u32);
+                let at = (regs.sp() as u32).wrapping_add(4 * i as u32);
                 process
                     .read(u64::from(at), &mut word)
                     .ok()
                     .map(|()| u32::from_le_bytes(word).into())
             } else {
-                process.read_u64(base.wrapping_add(8 * i as u64)).ok()
-            }
-        };
-        let mut stack = [None; STACK_WORDS];
-        for (i, slot) in stack.iter_mut().enumerate() {
-            *slot = word(regs.sp(), i);
-        }
-        // Read a page's part at a time (one read each, not one per word:
-        // every delivered exception takes a note).
-        let size = if wow64 { 4 } else { 8 };
-        let mut deep = [0u64; DEEP_WORDS];
-        let mut deep_len = 0;
-        let mut bytes = [0u8; DEEP_WORDS * 8];
-        let start = regs.sp().wrapping_add((size * STACK_WORDS) as u64);
-        let end = start.wrapping_add((size * DEEP_WORDS) as u64);
-        let mut at = start;
-        while at < end {
-            let chunk = ((at | 0xfff) + 1).min(end) - at;
-            let off = (at - start) as usize;
-            if process.read(at, &mut bytes[off..off + chunk as usize]).is_err() {
-                break;
-            }
-            at += chunk;
-        }
-        for (i, w) in bytes[..(at.wrapping_sub(start)) as usize].chunks_exact(size).enumerate() {
-            let mut v = [0u8; 8];
-            v[..size].copy_from_slice(w);
-            deep[i] = u64::from_le_bytes(v);
-            deep_len = i + 1;
-        }
-        // aarch64's registers are not shown yet (its report has none).
-        #[cfg(not(target_arch = "aarch64"))]
-        let gprs = regs.gprs();
-        #[cfg(target_arch = "aarch64")]
-        let gprs = [0u64; 8];
-        let mut mem = [[0u64; REG_WORDS]; REG_DUMPED.len()];
-        let mut mem_len = [0usize; REG_DUMPED.len()];
-        for (k, &r) in REG_DUMPED.iter().enumerate() {
-            let base = if wow64 { u64::from(gprs[r] as u32) } else { gprs[r] };
-            // Small values are numbers, not pointers.
-            if base < 0x10000 {
-                continue;
-            }
-            while mem_len[k] < REG_WORDS
-                && let Some(v) = word(base, mem_len[k])
-            {
-                mem[k][mem_len[k]] = v;
-                mem_len[k] += 1;
-            }
+                process.read_u64(regs.sp().wrapping_add(8 * i as u64)).ok()
+            };
         }
         Note {
             status,
@@ -161,10 +96,6 @@ impl Note {
             tid,
             regs,
             stack,
-            deep,
-            deep_len,
-            mem,
-            mem_len,
             wow64,
             cxx: None,
             delay: None,
@@ -172,7 +103,6 @@ impl Note {
             seh: [(0, 0); SEH_FRAMES],
             seh_len: 0,
             seh_end: false,
-            seh_head: None,
         }
     }
 }
@@ -576,12 +506,6 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             }
         );
     }
-    if note.seh_len == 0
-        && !note.seh_end
-        && let Some(head) = note.seh_head
-    {
-        info!("crash report:   32-bit SEH list head {head:#010x}: not a frame that reads");
-    }
     if note.seh_len > 0 || note.seh_end {
         info!(
             "crash report:   32-bit SEH registrations, newest first ({}{}):",
@@ -639,44 +563,6 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
         info!("crash report:   C++ throw: its type is unreadable (not MSVC's layout)");
     }
     super::abi::report_registers(note, &stack);
-    report_memory(process, note);
-}
-
-/// The crash report's memory lines: what each general register points
-/// to (an object a NULL or stale pointer came from shows its fields),
-/// then the values higher on the stack that point into an image (return
-/// addresses: the calls that led here).
-fn report_memory(process: &Process, note: &Note) {
-    let width = if note.wow64 { 4 } else { 8 };
-    let names: [&str; REG_DUMPED.len()] = if note.wow64 {
-        ["eax", "ecx", "edx", "ebx", "ebp", "esi", "edi"]
-    } else {
-        ["rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi"]
-    };
-    for (k, name) in names.iter().enumerate() {
-        let len = note.mem_len[k];
-        if len > 0 {
-            info!("crash report:   [{name}] {}", Words(&note.mem[k][..len], width));
-        }
-    }
-    let mut shown = 0;
-    for (i, &v) in note.deep[..note.deep_len].iter().enumerate() {
-        if let Some(m) = module_at(process, v) {
-            info!(
-                "crash report:   [{}sp+{:#05x}] {}",
-                if note.wow64 { "e" } else { "r" },
-                width * (STACK_WORDS + i),
-                At(v, Some(m))
-            );
-            shown += 1;
-        }
-    }
-    if note.deep_len > 0 {
-        info!(
-            "crash report:   ({shown} of the {} stack values above those point into an image)",
-            note.deep_len
-        );
-    }
 }
 
 /// Words in hexadecimal, `width` bytes each.
