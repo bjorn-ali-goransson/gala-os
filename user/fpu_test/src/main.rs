@@ -4,8 +4,10 @@
 //! MXCSR (to a vectored handler registered through ntdll), and changes the
 //! handler makes are restored by NtContinue; NtCreateThread ignores the
 //! CONTEXT's floating-point part (MxCsr, FltSave.MxCsr, XMM registers): the
-//! new thread starts with MXCSR 0x1f80 and xmm0 0. Prints `fpu_test: ok` or exits with the number of the
-//! failing check.
+//! new thread starts with MXCSR 0x1f80 and xmm0 0; NtSetContextThread's
+//! floating-point part on a thread created suspended is what it starts
+//! with. Prints `fpu_test: ok` or exits with the number of the failing
+//! check.
 
 #![no_std]
 #![no_main]
@@ -133,6 +135,10 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
     -1 // EXCEPTION_CONTINUE_EXECUTION
 }
 
+type SetContext = extern "system" fn(Handle, *const Context) -> NtStatus;
+const CONTEXT_FLOATING_POINT: u32 = 0x10_0008;
+const XMM0_SET: u64 = 0x5678_9abc_def0_1234;
+
 type AddHandler =
     extern "system" fn(u32, extern "system" fn(*mut ExceptionPointers) -> i32) -> *mut c_void;
 
@@ -258,6 +264,26 @@ fn run() -> Result<(), u32> {
     close(t);
     c.eq(NEW_THREAD_MXCSR.load(Ordering::SeqCst).into(), mxcsr(0).into())?;
     c.eq(NEW_THREAD_XMM0.load(Ordering::SeqCst), 0)?;
+
+    // (4) NtSetContextThread with CONTEXT_FLOATING_POINT on a thread
+    // created suspended, before it first runs: it starts with that MXCSR
+    // and xmm0 (applied on resume, as for any suspended thread).
+    let Some(set) = find_export(ntdll, b"NtSetContextThread") else { return c.ok(false, 2) };
+    // SAFETY: the documented signature of the export.
+    let set = unsafe { core::mem::transmute::<usize, SetContext>(set) };
+    let (s, t, _) = create_thread(report_mxcsr, 0, true);
+    c.eq(s.into(), ok)?;
+    let mut ctx = Context::for_thread(report_mxcsr, 0, 0);
+    ctx.context_flags = CONTEXT_FLOATING_POINT;
+    ctx.mx_csr = mxcsr(2);
+    ctx.rest[0x18..0x1c].copy_from_slice(&mxcsr(2).to_le_bytes());
+    ctx.rest[0xa0..0xa8].copy_from_slice(&XMM0_SET.to_le_bytes());
+    c.eq(set(t, &ctx).into(), ok)?;
+    c.eq(resume_thread(t).1.into(), 1)?;
+    c.eq(wait(t, None).into(), ok)?;
+    close(t);
+    c.eq(NEW_THREAD_MXCSR.load(Ordering::SeqCst).into(), mxcsr(2).into())?;
+    c.eq(NEW_THREAD_XMM0.load(Ordering::SeqCst), XMM0_SET)?;
     Ok(())
 }
 

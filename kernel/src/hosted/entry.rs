@@ -13,7 +13,7 @@
 //! SyscallFrame or TrapFrame: the NT layer reads and changes it, and the
 //! return from the handler resumes the program with it.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
@@ -68,6 +68,10 @@ std::thread_local! {
     static PENDING: Cell<Option<UserRegs>> = const { Cell::new(None) };
     /// Registers `enter_user` hands to its signal handler.
     static ENTER: Cell<Option<UserRegs>> = const { Cell::new(None) };
+    /// The x87/SSE/AVX state `enter_user` gives the program: what
+    /// `xrstor` or `set_mxcsr` made it before the thread's first entry
+    /// (no signal frame to put it in yet), the initial state otherwise.
+    static ENTER_FX: RefCell<Option<XState>> = const { RefCell::new(None) };
     /// This thread's user GS base (its TEB).
     static GS_BASE: Cell<u64> = const { Cell::new(0) };
     /// This thread's personality (its process's): where its system calls
@@ -442,6 +446,12 @@ extern "C" fn on_enter(_sig: i32, _info: *mut libc::siginfo_t, context: *mut lib
     with_context(context, |uc| {
         if let Some(regs) = ENTER.with(Cell::take) {
             set_regs(&mut uc.uc_mcontext.gregs, &regs);
+            // The frame holds this host thread's own x87/SSE/AVX registers
+            // (inherited at clone, left by host code): never the program's.
+            // As a kernel thread's save area, it starts from the initial
+            // state, or from what was set for this entry.
+            let fx = ENTER_FX.with(|f| f.borrow_mut().take()).unwrap_or_else(XState::initial);
+            xrstor(&fx);
         }
     });
 }
@@ -670,9 +680,13 @@ pub fn xsave() -> XState {
 
 /// Makes `state` what the program resumes with: the signal frame's area
 /// (the return from the handler loads it). Linux's own bytes (the
-/// software-reserved part, the header's other components) stay.
+/// software-reserved part, the header's other components) stay. Before
+/// a thread's first entry (no frame yet), what `enter_user` enters with.
 pub fn xrstor(state: &XState) {
-    let Some(fp) = fpstate() else { return };
+    let Some(fp) = fpstate() else {
+        ENTER_FX.with(|f| *f.borrow_mut() = Some(state.clone()));
+        return;
+    };
     let enabled = xstate_enabled();
     let mut s = state.clone();
     s.normalize(enabled);
@@ -702,8 +716,9 @@ pub fn set_mxcsr(value: u32) {
     match fpstate() {
         // SAFETY: MXCSR is at offset 24 of the FXSAVE area.
         Some(fp) => unsafe { fp.add(24).cast::<u32>().write_unaligned(value) },
-        // SAFETY: loading MXCSR on this host thread, before it enters the
-        // program (the signal frame then carries it).
-        None => unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)) },
+        // Before the thread's first entry: the state `enter_user` gives.
+        None => ENTER_FX.with(|f| {
+            f.borrow_mut().get_or_insert_with(XState::initial).set_mxcsr(value);
+        }),
     }
 }

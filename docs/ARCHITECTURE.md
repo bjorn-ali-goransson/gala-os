@@ -892,7 +892,11 @@ current process, -2 = current thread.
   registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
   ignored whatever ContextFlags say: a new thread starts with a fresh
   x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
-  NtContinue on an existing thread does load it. kernel32's CreateThread
+  NtContinue on an existing thread does load it, and so does
+  NtSetContextThread on one created suspended, before it first runs
+  (`fpu_test`). Every platform's first entry (`platform::enter_user`)
+  starts from the initial state, or from what `platform::xrstor`/
+  `set_mxcsr` set just before it (gala-um: GALA_UM "FPU state"). kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
