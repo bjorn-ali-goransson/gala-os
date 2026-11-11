@@ -48,7 +48,11 @@ Each program below is checked by a boot scenario (its name is in the last
 column): xtask boots gala in QEMU, runs the program and compares the
 output with what Windows gives. `cargo xtask test` (and CI) runs every
 scenario except the *pending* ones, which are run on request with
-`cargo xtask boot-test <name>`.
+`cargo xtask boot-test <name>`, and the *manual* ones, too long or too
+large for CI, which run only by name: among them `office_install` and
+`office_install_gui`, the Office Deployment Tool installing Microsoft 365
+on a disk-backed C: (in progress, ROADMAP OF; `XTASK_SHOTS=60,120 cargo
+xtask boot-test office_install_gui` takes screenshots as it runs).
 
 ### Programs built from source
 
