@@ -1818,12 +1818,23 @@ need gala's.
      deeper stack places it inside the thread procedure, not in thread
      exit: the C++ runtime's thread_start (+0x37fdcc) still has its call
      to the procedure on the stack (return +0x37fdf7), then frames
-     returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx is a
-     heap object whose first word is in setup.exe (a vtable), whose
-     second is its own address and whose fifth to seventh are 0. Not the cause (each
-     tried and ruled out): UISettings' activation, the hide and
-     deactivation messages DestroyWindow sends before WM_DESTROY on
-     Windows, WM_SIZE/WM_MOVE at creation, any GDI+ status (all Ok).
+     returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx can be
+     the splash's own object (the pointer its window keeps in extra
+     bytes index 0, which GetWindowLongW returns on every message up to
+     WM_NCDESTROY, as on Windows): its first word is in setup.exe (a
+     vtable), its second its own address, its fifth to seventh 0. Not
+     the cause (each tried and ruled out): UISettings' activation, the
+     hide and deactivation messages DestroyWindow sends before
+     WM_DESTROY on Windows, WM_SIZE/WM_MOVE at creation, WM_SHOWWINDOW
+     (now sent, and the window hidden before WM_DESTROY:
+     `wow64_gui_test`), any GDI+ status (all Ok), the user32, gdi32 and
+     kernel32 names the thread resolves with GetProcAddress (all
+     exported by gala's x86 DLLs). Measured on Windows (issue #77): the
+     splash gets WM_TIMER during its life (a timer it later kills with
+     KillTimer); on gala its thread waits in GetMessage with no timer
+     for its whole life, so the timer is never set here: what sets it
+     (a message gala does not send, or a call that fails) is the next
+     lead.
      setup.exe ending so takes consolerun with it; the Click-to-Run
      client and service go on downloading (1.4 GB on C: in 900 s), and
      nothing is on the screen: the client's NotificationFlyout
