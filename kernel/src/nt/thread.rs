@@ -7,7 +7,7 @@
 
 use super::platform;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::layout::{self, teb};
 use super::object::{KObject, ObjectBody, ObjectRef};
@@ -100,6 +100,29 @@ pub struct NtThread {
     /// The absolute deadline of the reissued call (`take_restart_deadline`):
     /// Some(None) = none (infinite).
     restart_deadline: IrqMutex<Option<Option<u64>>>,
+    /// Its I/O requests outstanding (`IoPending`): ThreadIsIoPending.
+    io_pending: AtomicU32,
+}
+
+/// One I/O request of a thread, counted while it is outstanding (an IRP
+/// on the thread's list, in Windows' terms): created when the request
+/// starts, dropped when it completes or is cancelled. ThreadIsIoPending
+/// (GetThreadIOPendingFlag) is whether a thread has any.
+pub struct IoPending(ObjectRef);
+
+impl IoPending {
+    /// One request of the running thread (None for kernel threads).
+    pub fn current() -> Option<IoPending> {
+        let object = current()?;
+        as_thread(&object).io_pending.fetch_add(1, Ordering::AcqRel);
+        Some(IoPending(object))
+    }
+}
+
+impl Drop for IoPending {
+    fn drop(&mut self) {
+        as_thread(&self.0).io_pending.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// How a thread a kernel handover carried goes on (ARCHITECTURE
@@ -208,6 +231,11 @@ impl NtThread {
 
     pub fn has_exited(&self) -> bool {
         self.exit_status.lock().is_some()
+    }
+
+    /// ThreadIsIoPending: it has I/O requests outstanding (`IoPending`).
+    pub fn io_pending(&self) -> bool {
+        self.io_pending.load(Ordering::Acquire) != 0
     }
 }
 
@@ -491,6 +519,7 @@ fn create_inner(
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
+        io_pending: AtomicU32::new(0),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -1067,6 +1096,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
+        io_pending: AtomicU32::new(0),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;

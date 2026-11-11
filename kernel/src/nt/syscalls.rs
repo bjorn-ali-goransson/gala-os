@@ -3590,6 +3590,12 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
             let done = u32::from(t.has_exited());
             return call.return_info(&done.to_le_bytes(), buffer, length, ret_ptr);
         }
+        THREAD_IS_IO_PENDING => {
+            // A ULONG: its socket, pipe and directory-watch requests
+            // outstanding (thread::IoPending).
+            let pending = u32::from(t.io_pending());
+            return call.return_info(&pending.to_le_bytes(), buffer, length, ret_ptr);
+        }
         THREAD_NAME_INFORMATION => {
             // THREAD_NAME_INFORMATION { UNICODE_STRING ThreadName }, the
             // characters right after it (Buffer points there).
@@ -3645,6 +3651,7 @@ const THREAD_AFFINITY_MASK: u64 = 4;
 const THREAD_IMPERSONATION_TOKEN: u64 = 5;
 const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
+const THREAD_IS_IO_PENDING: u64 = 16;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
 const THREAD_IS_TERMINATED: u64 = 20;
 const THREAD_NAME_INFORMATION: u64 = 38;

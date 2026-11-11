@@ -115,6 +115,8 @@ unsafe extern "system" {
     ) -> Handle;
     fn SleepEx(ms: u32, alertable: i32) -> u32;
     fn Sleep(ms: u32);
+    fn GetCurrentThread() -> Handle;
+    fn GetThreadIOPendingFlag(thread: Handle, pending: *mut i32) -> i32;
 }
 
 #[cfg_attr(
@@ -682,6 +684,12 @@ fn reg_notify(c: &mut Checks, base: Handle) -> Result<(), u32> {
     // SAFETY: (throughout) our keys and event.
     c.eq(unsafe { RegNotifyChangeKeyValue(key, 1, FILTER, e, 1) }, ERROR_SUCCESS)?;
     c.eq(wait(e), WAIT_TIMEOUT)?;
+    // Whether a waiting registry watch counts as the thread's pending I/O
+    // (gala: no, a watch is not an I/O request).
+    let mut pending = -1;
+    // SAFETY: plain call.
+    unsafe { GetThreadIOPendingFlag(GetCurrentThread(), &mut pending) };
+    info("GetThreadIOPendingFlag with a registry watch waiting", pending as u64);
     let sub = create(key, "SubKey", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     c.eq(wait(e), WAIT_OBJECT_0)?;
     // Watching deeper keys.

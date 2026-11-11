@@ -30,6 +30,15 @@
 //!   WerRegisterFile (WerRegFileTypeOther) and WerUnregisterFile of it
 //!   S_OK (their documentation: the Click-to-Run client imports them);
 //!   RtlCaptureStackBackTrace (kernel32's export) at most what was asked.
+//! - GetThreadIOPendingFlag (Microsoft's documentation; ThreadIsIoPending:
+//!   the thread's I/O requests not yet complete): TRUE while an overlapped
+//!   ConnectNamedPipe waits for a client, for this thread and as another
+//!   thread sees it, FALSE for that other thread; FALSE once the client
+//!   connected; TRUE for an overlapped read waiting for data, FALSE once
+//!   CancelIo ended it (ERROR_OPERATION_ABORTED); TRUE for an overlapped
+//!   ReadDirectoryChangesW, FALSE once CancelIoEx ended it. An `info`
+//!   line: a read on a pipe with a completion port (thread-agnostic I/O,
+//!   which Windows Internals describes: not counted on gala).
 //! - imm32's ImmDisableIME for the calling thread (0) and the process (-1):
 //!   TRUE.
 //! - normaliz's IdnToAscii and IdnToUnicode (setup.exe's next delay-loaded
@@ -256,6 +265,59 @@ unsafe extern "system" {
         flags: u32,
     ) -> i32;
     fn GetThreadIOPendingFlag(thread: Handle, pending: *mut i32) -> i32;
+    fn CreateNamedPipeW(
+        name: *const u16,
+        open: u32,
+        mode: u32,
+        instances: u32,
+        out_size: u32,
+        in_size: u32,
+        timeout: u32,
+        attributes: usize,
+    ) -> Handle;
+    fn ConnectNamedPipe(pipe: Handle, overlapped: *mut Overlapped) -> i32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        attributes: usize,
+        disposition: u32,
+        flags: u32,
+        template: usize,
+    ) -> Handle;
+    fn CancelIo(h: Handle) -> i32;
+    fn CancelIoEx(h: Handle, ov: *mut Overlapped) -> i32;
+    fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: i32) -> i32;
+    fn ReadDirectoryChangesW(
+        dir: Handle,
+        buf: *mut u32,
+        len: u32,
+        subtree: i32,
+        filter: u32,
+        returned: *mut u32,
+        ov: *mut Overlapped,
+        routine: usize,
+    ) -> i32;
+    fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
+    fn CreateDirectoryW(name: *const u16, attributes: usize) -> i32;
+    fn RemoveDirectoryW(name: *const u16) -> i32;
+    fn DuplicateHandle(
+        from: Handle,
+        h: Handle,
+        to: Handle,
+        out: *mut Handle,
+        access: u32,
+        inherit: i32,
+        options: u32,
+    ) -> i32;
+    fn CreateThread(
+        security: usize,
+        stack: usize,
+        start: extern "system" fn(usize) -> u32,
+        param: usize,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
     fn IsSystemResumeAutomatic() -> i32;
     fn GetPhysicallyInstalledSystemMemory(kb: *mut u64) -> i32;
     fn WerRegisterMemoryBlock(p: *mut c_void, size: u32) -> u32;
@@ -548,6 +610,34 @@ impl Line {
 
     fn print(self) {
         print(&self.buf[..self.n]);
+    }
+}
+
+/// An `info` line: what Windows answers, for the record (not checked).
+fn info(what: &str, v: u64) {
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": info ")
+        .s(what.as_bytes())
+        .s(b" ")
+        .hex(v)
+        .s(b"\r\n")
+        .print();
+}
+
+/// OVERLAPPED.
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: Handle,
+}
+
+impl Overlapped {
+    fn with(event: Handle) -> Overlapped {
+        Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event }
     }
 }
 
@@ -1113,10 +1203,133 @@ fn avl(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// GetThreadIOPendingFlag of `thread` (-1 if the call failed).
+fn io_flag(thread: Handle) -> i64 {
+    let mut pending = 7;
+    // SAFETY: plain call.
+    if unsafe { GetThreadIOPendingFlag(thread, &mut pending) } == 0 {
+        return -1;
+    }
+    pending.into()
+}
+
+/// What a second thread sees: the main thread's flag and its own.
+static SEEN: [AtomicUsize; 2] = [AtomicUsize::new(9), AtomicUsize::new(9)];
+
+extern "system" fn see_flags(main: usize) -> u32 {
+    SEEN[0].store(io_flag(main) as usize, Ordering::SeqCst);
+    // SAFETY: plain call.
+    SEEN[1].store(io_flag(unsafe { GetCurrentThread() }) as usize, Ordering::SeqCst);
+    0
+}
+
+/// GetThreadIOPendingFlag while a pipe connect, a pipe read and a
+/// directory watch are outstanding, and after they end.
+fn io_pending(c: &mut Checks) -> Result<(), u32> {
+    const ERROR_IO_PENDING: u32 = 997;
+    const ERROR_OPERATION_ABORTED: u32 = 995;
+    // SAFETY: valid arguments throughout; the OVERLAPPEDs and buffers
+    // outlive their requests (each waited for).
+    unsafe {
+        let me = GetCurrentThread();
+        c.eq(io_flag(me) as u64, 0)?;
+        let name = w::<48>("\\\\.\\pipe\\gala_office_api_iopending");
+        // PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED; byte mode, waiting.
+        let pipe = CreateNamedPipeW(name.as_ptr(), 3 | 0x4000_0000, 0, 1, 512, 512, 0, 0);
+        c.ok(pipe != INVALID, GetLastError().into())?;
+        let e = CreateEventW(0, 1, 0, null());
+        let mut ov = Overlapped::with(e);
+        c.fails(ConnectNamedPipe(pipe, &mut ov) != 0, ERROR_IO_PENDING)?;
+        c.eq(io_flag(me) as u64, 1)?;
+        // Another thread sees it on this one, not on itself.
+        let mut real = 0;
+        c.ok(
+            DuplicateHandle(GetCurrentProcess(), me, GetCurrentProcess(), &mut real, 0, 0, 2) != 0,
+            0,
+        )?;
+        let t = CreateThread(0, 0, see_flags, real, 0, null_mut());
+        c.ok(t != 0, 0)?;
+        c.eq(WaitForSingleObject(t, 10_000).into(), 0)?;
+        CloseHandle(t);
+        CloseHandle(real);
+        c.eq(SEEN[0].load(Ordering::SeqCst) as u64, 1)?;
+        c.eq(SEEN[1].load(Ordering::SeqCst) as u64, 0)?;
+        // A client connects: the request is done.
+        let client = CreateFileW(name.as_ptr(), 0xc000_0000, 0, 0, 3, 0, 0);
+        c.ok(client != INVALID, GetLastError().into())?;
+        c.eq(WaitForSingleObject(e, 10_000).into(), 0)?;
+        c.eq(io_flag(me) as u64, 0)?;
+        // A read waiting for data, ended by CancelIo.
+        let e2 = CreateEventW(0, 1, 0, null());
+        let mut ov2 = Overlapped::with(e2);
+        let mut buf = [0u8; 16];
+        c.fails(
+            ReadFile(pipe, buf.as_mut_ptr(), 16, null_mut(), (&raw mut ov2) as usize) != 0,
+            ERROR_IO_PENDING,
+        )?;
+        c.eq(io_flag(me) as u64, 1)?;
+        c.ok(CancelIo(pipe) != 0, 0)?;
+        c.eq(WaitForSingleObject(e2, 10_000).into(), 0)?;
+        let mut n = 0;
+        c.fails(GetOverlappedResult(pipe, &mut ov2, &mut n, 0) != 0, ERROR_OPERATION_ABORTED)?;
+        c.eq(io_flag(me) as u64, 0)?;
+        // With a completion port (thread-agnostic I/O).
+        let port = CreateIoCompletionPort(pipe, 0, 1, 0);
+        c.ok(port != 0, 0)?;
+        let e3 = CreateEventW(0, 1, 0, null());
+        let mut ov3 = Overlapped::with(e3);
+        c.fails(
+            ReadFile(pipe, buf.as_mut_ptr(), 16, null_mut(), (&raw mut ov3) as usize) != 0,
+            ERROR_IO_PENDING,
+        )?;
+        info(
+            "GetThreadIOPendingFlag with a read on a pipe with a completion port",
+            io_flag(me) as u64,
+        );
+        c.ok(CancelIo(pipe) != 0, 0)?;
+        c.eq(WaitForSingleObject(e3, 10_000).into(), 0)?;
+        CloseHandle(client);
+        CloseHandle(pipe);
+        CloseHandle(port);
+        for h in [e, e2, e3] {
+            CloseHandle(h);
+        }
+
+        // A directory watch, ended by CancelIoEx.
+        let mut temp = [0u16; 260];
+        let n = GetTempPathW(260, temp.as_mut_ptr()) as usize;
+        let tail = w::<32>("gala_office_api_watch");
+        let mut dir = [0u16; 300];
+        dir[..n].copy_from_slice(&temp[..n]);
+        dir[n..n + 21].copy_from_slice(&tail[..21]);
+        CreateDirectoryW(dir.as_ptr(), 0);
+        // FILE_LIST_DIRECTORY; BACKUP_SEMANTICS | OVERLAPPED.
+        let h = CreateFileW(dir.as_ptr(), 1, 7, 0, 3, 0x0200_0000 | 0x4000_0000, 0);
+        c.ok(h != INVALID, GetLastError().into())?;
+        let e4 = CreateEventW(0, 1, 0, null());
+        let mut ov4 = Overlapped::with(e4);
+        let mut changes = [0u32; 256];
+        c.ok(
+            ReadDirectoryChangesW(h, changes.as_mut_ptr(), 1024, 0, 1, null_mut(), &mut ov4, 0)
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.eq(io_flag(me) as u64, 1)?;
+        c.ok(CancelIoEx(h, &mut ov4) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(e4, 10_000).into(), 0)?;
+        c.eq(io_flag(me) as u64, 0)?;
+        CloseHandle(h);
+        CloseHandle(e4);
+        RemoveDirectoryW(dir.as_ptr());
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     files(&mut c)?;
     sync_and_processes(&mut c)?;
+    io_pending(&mut c)?;
     actctx(&mut c)?;
     rtl_strings(&mut c)?;
     avl(&mut c)?;

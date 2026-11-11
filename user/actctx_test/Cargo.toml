@@ -1,0 +1,15 @@
+[package]
+name = "actctx_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+ntrt = { path = "../ntrt" }
+
+[[bin]]
+name = "actctx_test"
+test = false
+bench = false

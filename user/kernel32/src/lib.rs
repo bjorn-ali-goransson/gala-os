@@ -40,6 +40,7 @@ mod address_wait;
 mod ansi;
 mod appmodel;
 mod atom;
+mod buf;
 mod calendar;
 mod console;
 mod context;
@@ -380,6 +381,13 @@ fn process_parameters() -> usize {
 fn unsupported(function: &[u8], detail: u64) {
     // SAFETY: a valid buffer; the service only reads it.
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
+}
+
+/// Records something worth knowing that is not a gap (a refused input, a
+/// fallback taken) in the ledger as "other".
+fn note(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 5, detail) };
 }
 
 /// Sets the last error from an NTSTATUS and returns `value` (the failure
