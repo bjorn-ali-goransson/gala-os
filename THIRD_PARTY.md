@@ -190,6 +190,19 @@ Rules for this file:
   header of Microsoft's signed CDN cabinets until one matched their
   signed digest (ARCHITECTURE "wintrust: Authenticode"), and `cab_probe`
   on Windows for altered copies.
+- Reparse points and NT symbolic links (`kernel/src/nt/syscalls.rs`'s
+  `reparse_fsctl`, `kernel/src/nt/file.rs`'s `resolve_links`,
+  kernel32's CreateSymbolicLinkW in `user/kernel32/src/pool.rs`,
+  `user/reparse_test`): the statuses for each malformed
+  FSCTL_SET/GET/DELETE_REPARSE_POINT buffer, the follow rules (relative
+  targets, loops, other tags) and the reparse data CreateSymbolicLinkW
+  builds (substitute name first, then the print name, each
+  NUL-terminated) from Wine's `dlls/ntdll/tests/file.c`
+  (test_reparse_points, as a record of Windows' answers) and
+  `dlls/kernelbase/file.c` (as a description of the buffer); the
+  NTSTATUS to Win32 error pairs from Wine's `dlls/ntdll/make_errors`;
+  the structures from Microsoft's REPARSE_DATA_BUFFER and
+  FSCTL documentation (no code copied).
 - The C runtime's file-descriptor inheritance block (STARTUPINFO
   cbReserved2/lpReserved2: a count, a flags byte and a HANDLE per
   descriptor) in gala's msvcrt (`user/msvcrt/src/stdio.rs`), from its

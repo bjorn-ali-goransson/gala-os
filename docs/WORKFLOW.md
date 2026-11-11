@@ -357,6 +357,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
 | `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots") |
 | `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
+| `XTASK_REUSE_DISK=1` | boot a disk scenario on the image a failed run kept (`<iso>.disk.img`) instead of a fresh one, and keep it after a pass: a later stage of a long run without its earlier ones ("Disk tests") |
 | `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
 | `XTASK_OTEL=1` | write OTLP files for every boot |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | where `otel` and `XTASK_OTEL=1` post |
@@ -1987,7 +1988,20 @@ it on first use.
   `C:\Windows\Temp\GALA-*.log`, the client and setup.exe to
   `C:\Users\Public`; read both with `cargo xtask disk-files` from the
   kept image. Pass `XTASK_EVENTS=net` for each connection's bytes
-  (`tcp close` lines).
+  (`tcp close` lines). For what happens after the download, start the
+  event stream late (`XTASK_EVENTS=syscall,file,process,image,thread
+  XTASK_CMDLINE=events_from=1950 XTASK_TIMEOUT=2700`): the whole run's
+  system calls would be gigabytes; the service's `file` and `key` events
+  (opens with their names and statuses) and its calls up to a logged
+  error say which call failed (a `GalaRecordMissing` of FormatMessage
+  right after names the Win32 error the program is formatting). The
+  image takes about 4.5 GB on the host: with less free, a symbolic link
+  from `target/debug/test-office_install.disk.img` to a file in
+  `/dev/shm` holds it in memory (xtask writes through the link).
+  `XTASK_REUSE_DISK=1` boots the kept image again, but setup.exe's second
+  run takes another path (the client finds its earlier install and its
+  service fails to initialize its orchestration), so it is not a quicker
+  reproduction of the first run's later stages.
 - **A run that slows down as it goes** (the same work taking longer
   each minute, every process at once): look for kernel work that grows
   with what was ever made rather than what exists. The NMI state dump's

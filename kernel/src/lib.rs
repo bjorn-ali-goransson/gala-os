@@ -296,6 +296,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         info!("spintest: done");
     }
     events::set_mask(cmdline.value("events").map_or(0, events::parse_mask));
+    // `events_from=<seconds>`: the stream starts that long after boot (a
+    // failure late in a long run, without the run's whole stream).
+    if let Some(secs) = cmdline.value("events_from").and_then(|v| v.parse::<u64>().ok()) {
+        events::start_later(secs);
+    }
     if let Some(pids) = cmdline.value("events_pid") {
         events::set_syscall_pids(pids);
     }

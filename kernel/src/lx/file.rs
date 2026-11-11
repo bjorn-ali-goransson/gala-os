@@ -473,6 +473,8 @@ fn errno_of(e: FsError) -> u16 {
         FsError::Sealed => super::errno::EPERM,
         FsError::WriteMapped => EBUSY,
         FsError::NotSealable => EINVAL,
+        // NT's reparse points (FSCTL_SET_REPARSE_POINT): not Linux calls.
+        FsError::ReparseHasData | FsError::ReparseTagMismatch | FsError::NotReparsePoint => EINVAL,
         FsError::CrossVolume => EXDEV,
         FsError::DiskFull => super::errno::ENOSPC,
         // A page that could not be read from the disk (nt::file::with_pages).

@@ -16,6 +16,12 @@
 //! - **Symbolic links**: `Kind::Symlink` keeps the target as the bytes
 //!   given (a Linux path); following them is the caller's (`lx::file`).
 //!   NT sees one as a file with FILE_ATTRIBUTE_REPARSE_POINT.
+//! - **Reparse points** (`set_reparse`: NT's FSCTL_SET_REPARSE_POINT):
+//!   a file or an empty directory may carry one, a tag and its data as
+//!   given, as NTFS keeps them; it shows as FILE_ATTRIBUTE_REPARSE_POINT.
+//!   What a tag means (an NT symbolic link, a junction) is the NT layer's
+//!   (`nt::file`); the Linux personality sees such a node as what it is
+//!   (a file or a directory).
 //! - **Unlink of an open node** (`unlink`, Linux's rule): the name goes at
 //!   once and the node lives on, *detached*, until its last close; NT's
 //!   delete (`set_delete_pending`) keeps the name until the last close.
@@ -95,7 +101,31 @@ pub enum FsError {
     NotResident,
     /// The data area has no free cluster for the pages a write needs.
     DiskFull,
+    /// A symbolic link's reparse point on a file with contents
+    /// (`set_reparse`).
+    ReparseHasData,
+    /// The node has a reparse point of another tag (`set_reparse`,
+    /// `delete_reparse`).
+    ReparseTagMismatch,
+    /// The node has no reparse point (`delete_reparse`).
+    NotReparsePoint,
 }
+
+/// A reparse point's tag and data (`Node::reparse`): the bytes after the
+/// REPARSE_DATA_BUFFER header (for a tag not Microsoft's, its GUID first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reparse {
+    pub tag: u32,
+    pub data: Vec<u8>,
+}
+
+/// IO_REPARSE_TAG_SYMLINK: an NT symbolic link (it must have no contents).
+pub const TAG_SYMLINK: u32 = 0xa000_000c;
+/// IO_REPARSE_TAG_MOUNT_POINT: a junction (a directory's).
+pub const TAG_MOUNT_POINT: u32 = 0xa000_0003;
+/// WSL's tags for a Linux symbolic link and an AF_UNIX socket's name.
+pub const TAG_LX_SYMLINK: u32 = 0xa000_001d;
+pub const TAG_AF_UNIX: u32 = 0x8000_0023;
 
 /// The seals of an anonymous file, as Linux numbers them (fcntl(2)
 /// F_ADD_SEALS): no more seals; no shrinking; no growing; no writing (nor
@@ -474,6 +504,8 @@ pub struct Node {
     /// Created or changed since boot (or by the change log): part of a
     /// snapshot of the changes (`snapshot`).
     dirty: bool,
+    /// Its reparse point (`set_reparse`), if it has one.
+    reparse: Option<Reparse>,
     /// Unique across all nodes ever made (a page read for a node whose id
     /// was reused meanwhile is not taken: `fill`).
     serial: u64,
@@ -527,6 +559,24 @@ impl Node {
         match &self.kind {
             Kind::Symlink(t) => Some(t),
             _ => None,
+        }
+    }
+
+    /// Its reparse point, if it has one (`RamFs::set_reparse`).
+    pub fn reparse(&self) -> Option<&Reparse> {
+        self.reparse.as_ref()
+    }
+
+    /// Its reparse tag as NT reports it (FileAttributeTagInformation, a
+    /// directory entry's EaSize): its reparse point's; a Linux symbolic
+    /// link's and socket's are WSL's (IO_REPARSE_TAG_LX_SYMLINK,
+    /// IO_REPARSE_TAG_AF_UNIX); 0 for none.
+    pub fn reparse_tag(&self) -> u32 {
+        match (&self.reparse, &self.kind) {
+            (Some(r), _) => r.tag,
+            (None, Kind::Symlink(_)) => TAG_LX_SYMLINK,
+            (None, Kind::Socket) => TAG_AF_UNIX,
+            (None, _) => 0,
         }
     }
 
@@ -793,6 +843,7 @@ impl RamFs {
             volume: ROOT,
             boot: true,
             dirty: false,
+            reparse: None,
             serial: next_version(),
             epoch: 0,
         };
@@ -1114,6 +1165,7 @@ impl RamFs {
             volume: self.node(parent).map_or(ROOT, |n| n.volume),
             boot: !self.recording && !self.replaying,
             dirty: self.recording || self.replaying,
+            reparse: None,
             serial: next_version(),
             epoch: 0,
         }
@@ -1663,6 +1715,62 @@ impl RamFs {
         Ok(())
     }
 
+    /// Gives node `id` a reparse point (or replaces its own of the same
+    /// tag), as NTFS's FSCTL_SET_REPARSE_POINT: a directory must be empty,
+    /// a symbolic link's file must have no contents.
+    pub fn set_reparse(&mut self, id: NodeId, tag: u32, data: &[u8]) -> Result<(), FsError> {
+        let node = self.node(id).ok_or(FsError::NotFound)?;
+        if node.reparse.as_ref().is_some_and(|r| r.tag != tag) {
+            return Err(FsError::ReparseTagMismatch);
+        }
+        match &node.kind {
+            Kind::Directory(children) if !children.is_empty() => {
+                return Err(FsError::DirectoryNotEmpty);
+            }
+            Kind::Directory(_) => {}
+            Kind::File(d) if tag == TAG_SYMLINK && d.len() != 0 => {
+                return Err(FsError::ReparseHasData);
+            }
+            Kind::File(_) => {}
+            Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Socket => return Err(FsError::Socket),
+        }
+        if node.is_dir() && self.links.iter().any(|l| l.parent == id) {
+            return Err(FsError::DirectoryNotEmpty);
+        }
+        let data = copy(data).ok_or(FsError::NoMemory)?;
+        let node = self.node_mut(id)?;
+        node.reparse = Some(Reparse { tag, data });
+        node.attributes |= ATTRIBUTE_REPARSE_POINT;
+        self.record_reparse(id);
+        Ok(())
+    }
+
+    /// Removes node `id`'s reparse point of tag `tag`
+    /// (FSCTL_DELETE_REPARSE_POINT).
+    pub fn delete_reparse(&mut self, id: NodeId, tag: u32) -> Result<(), FsError> {
+        let node = self.node_mut(id)?;
+        match &node.reparse {
+            None => return Err(FsError::NotReparsePoint),
+            Some(r) if r.tag != tag => return Err(FsError::ReparseTagMismatch),
+            Some(_) => {}
+        }
+        node.reparse = None;
+        node.attributes &= !ATTRIBUTE_REPARSE_POINT;
+        self.record_reparse(id);
+        Ok(())
+    }
+
+    fn record_reparse(&mut self, id: NodeId) {
+        self.record_node(id, |path, n| {
+            let (tag, data) = match &n.reparse {
+                Some(r) => (r.tag, copy(&r.data)?),
+                None => (0, Vec::new()),
+            };
+            Some(Op::SetReparse { path, tag, data })
+        });
+    }
+
     pub fn delete_pending(&self, id: NodeId) -> bool {
         self.node(id).is_some_and(|n| n.delete_pending)
     }
@@ -1773,8 +1881,8 @@ impl RamFs {
         }
         if let Some(a) = attributes {
             const SETTABLE: u32 = 0x01 | 0x02 | 0x04 | ATTRIBUTE_ARCHIVE | 0x100 | 0x2000;
-            let dir = node.attributes & ATTRIBUTE_DIRECTORY;
-            node.attributes = (a & SETTABLE) | dir;
+            let kept = node.attributes & (ATTRIBUTE_DIRECTORY | ATTRIBUTE_REPARSE_POINT);
+            node.attributes = (a & SETTABLE) | kept;
         }
         self.record_node(id, |path, n| {
             Some(Op::SetBasic {
@@ -2262,6 +2370,18 @@ impl RamFs {
                 let id = self.lookup(path)?;
                 self.set_clusters(id, *size, *written, runs)
             }
+            Op::SetReparse { path, tag, data } => {
+                let id = self.lookup(path)?;
+                match self.node(id).and_then(|n| n.reparse.as_ref()).map(|r| r.tag) {
+                    Some(have) if *tag == 0 => self.delete_reparse(id, have),
+                    _ if *tag == 0 => Ok(()),
+                    Some(have) if have != *tag => {
+                        self.delete_reparse(id, have)?;
+                        self.set_reparse(id, *tag, data)
+                    }
+                    _ => self.set_reparse(id, *tag, data),
+                }
+            }
         }
     }
 
@@ -2297,6 +2417,13 @@ impl RamFs {
                 if let Some(sd) = &n.security {
                     let descriptor = copy(sd).ok_or(FsError::NoMemory)?;
                     push(Op::SetSecurity { path: p()?, descriptor })?;
+                }
+                // Before the contents (a symbolic link has none) and the
+                // children (none either: a reparse point's directory is
+                // empty).
+                if let Some(r) = &n.reparse {
+                    let data = copy(&r.data).ok_or(FsError::NoMemory)?;
+                    push(Op::SetReparse { path: p()?, tag: r.tag, data })?;
                 }
                 if let Kind::File(data) = &n.kind {
                     let len = data.len();
@@ -3943,6 +4070,80 @@ mod tests {
             h.apply(op).unwrap();
         }
         check_posix(&h);
+        assert_eq!(h.snapshot().unwrap(), snap);
+    }
+
+    /// NTFS's rules for FSCTL_SET_REPARSE_POINT and
+    /// FSCTL_DELETE_REPARSE_POINT (Wine's ntdll test_reparse_points, run on
+    /// Windows): an empty directory or a file may carry one, a symbolic
+    /// link's file no contents; another tag is a mismatch; the attribute
+    /// shows it and survives a change of the others.
+    #[test]
+    fn reparse_points_follow_ntfs_rules() {
+        let mut f = fs();
+        let file = f.create(ROOT, &w("l"), false, 1).unwrap();
+        f.set_reparse(file, TAG_SYMLINK, b"target").unwrap();
+        let n = f.node(file).unwrap();
+        assert_eq!(n.reparse(), Some(&Reparse { tag: TAG_SYMLINK, data: b"target".to_vec() }));
+        assert_eq!(n.attributes, ATTRIBUTE_ARCHIVE | ATTRIBUTE_REPARSE_POINT);
+        f.set_basic(file, Times::default(), Some(0x80)).unwrap();
+        assert_eq!(f.node(file).unwrap().attributes, ATTRIBUTE_REPARSE_POINT);
+        // The same tag replaces it; another is a mismatch.
+        f.set_reparse(file, TAG_SYMLINK, b"other").unwrap();
+        assert_eq!(f.set_reparse(file, 0xa000_0003, b"x"), Err(FsError::ReparseTagMismatch));
+        assert_eq!(f.delete_reparse(file, 0xa000_0003), Err(FsError::ReparseTagMismatch));
+        f.delete_reparse(file, TAG_SYMLINK).unwrap();
+        assert_eq!(f.delete_reparse(file, TAG_SYMLINK), Err(FsError::NotReparsePoint));
+        assert_eq!(f.node(file).unwrap().attributes & ATTRIBUTE_REPARSE_POINT, 0);
+        // A symbolic link's file has no contents; another tag's may.
+        f.write(file, 0, b"data", 2).unwrap();
+        assert_eq!(f.set_reparse(file, TAG_SYMLINK, b"t"), Err(FsError::ReparseHasData));
+        f.set_reparse(file, 0xbeef, b"guid and data").unwrap();
+        // A directory must be empty.
+        let dir = f.create(ROOT, &w("d"), true, 1).unwrap();
+        f.create(dir, &w("x"), false, 1).unwrap();
+        assert_eq!(f.set_reparse(dir, 0xa000_0003, b"j"), Err(FsError::DirectoryNotEmpty));
+        f.unlink(dir, &w("x")).unwrap();
+        f.set_reparse(dir, 0xa000_0003, b"j").unwrap();
+        assert_eq!(f.node(dir).unwrap().attributes, ATTRIBUTE_DIRECTORY | ATTRIBUTE_REPARSE_POINT);
+    }
+
+    /// Reparse points are kept across reboots: in the change log and in a
+    /// snapshot, whose replay has them again (and removed ones gone).
+    #[test]
+    fn reparse_points_replay_and_snapshot() {
+        let mut f = booted();
+        let l = f.create(ROOT, &w("link"), false, 3).unwrap();
+        f.set_reparse(l, TAG_SYMLINK, b"\\??\\C:\\t").unwrap();
+        let d = f.create(ROOT, &w("junction"), true, 3).unwrap();
+        f.set_reparse(d, 0xa000_0003, b"j").unwrap();
+        let gone = f.create(ROOT, &w("was"), false, 3).unwrap();
+        f.set_reparse(gone, TAG_SYMLINK, b"x").unwrap();
+        f.delete_reparse(gone, TAG_SYMLINK).unwrap();
+        let check = |g: &RamFs| {
+            let tag = |p: &str| g.node(g.lookup(&w(p)).unwrap()).unwrap().reparse().map(|r| r.tag);
+            assert_eq!(tag("\\link"), Some(TAG_SYMLINK));
+            assert_eq!(tag("\\junction"), Some(0xa000_0003));
+            assert_eq!(tag("\\was"), None);
+            let n = g.node(g.lookup(&w("\\link")).unwrap()).unwrap();
+            assert_eq!(n.reparse().unwrap().data, b"\\??\\C:\\t");
+            assert_ne!(n.attributes & ATTRIBUTE_REPARSE_POINT, 0);
+        };
+        let (ops, lost) = f.take_ops();
+        assert!(!lost);
+        let mut g = booted();
+        g.recording = false;
+        for op in &ops {
+            g.apply(op).unwrap();
+        }
+        check(&g);
+        let snap = f.snapshot().unwrap();
+        let mut h = booted();
+        h.recording = false;
+        for op in &snap {
+            h.apply(op).unwrap();
+        }
+        check(&h);
         assert_eq!(h.snapshot().unwrap(), snap);
     }
 

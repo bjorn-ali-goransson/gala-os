@@ -1,6 +1,6 @@
 //! Command shims. winget links a portable package's commands into its
-//! Links directory as symbolic links; gala has no file symbolic links
-//! yet (CreateSymbolicLinkW: ERROR_PRIVILEGE_NOT_HELD), so a command is a
+//! Links directory as symbolic links, which a standard user cannot make
+//! (CreateSymbolicLinkW: ERROR_PRIVILEGE_NOT_HELD), so a command is a
 //! copy of `gala.exe` named `<alias>.exe` with a `<alias>.shim` text file
 //! beside it:
 //!

@@ -92,6 +92,13 @@ pub enum Op {
         written: u64,
         runs: Vec<Run>,
     },
+    /// The node's reparse point (NT's FSCTL_SET_REPARSE_POINT): its tag
+    /// and data; tag 0: it has none any more (version 5).
+    SetReparse {
+        path: Vec<u16>,
+        tag: u32,
+        data: Vec<u8>,
+    },
 }
 
 /// Consecutive pages of a file in consecutive clusters (`Op::Clusters`).
@@ -115,7 +122,8 @@ const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// 3: Create carries the POSIX mode and case sensitivity after the times;
 /// the SetMode, Symlink and Link records (LX seam 4).
 /// 4: the Clusters record (a disk-backed C:, D4).
-pub const VERSION: u8 = 4;
+/// 5: the SetReparse record (NT symbolic links and other reparse points).
+pub const VERSION: u8 = 5;
 /// Create's mode field when the node has no POSIX mode.
 const NO_MODE: u32 = u32::MAX;
 /// Create's flag bit: a case-sensitive directory.
@@ -184,6 +192,7 @@ impl Op {
             Op::Symlink { .. } => 9,
             Op::Link { .. } => 10,
             Op::Clusters { .. } => 11,
+            Op::SetReparse { .. } => 12,
         }
     }
 
@@ -250,6 +259,11 @@ impl Op {
                     put(out, &r.count.to_le_bytes())?;
                 }
                 Ok(())
+            }
+            Op::SetReparse { path, tag, data } => {
+                put_path(out, path)?;
+                put(out, &tag.to_le_bytes())?;
+                put_bytes(out, data)
             }
         }
     }
@@ -451,6 +465,14 @@ fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemor
             }
             Op::Clusters { path, size, written, runs }
         }
+        12 if version >= 5 => {
+            let path = path!();
+            let tag = r.u32()?;
+            match r.bytes()? {
+                Ok(data) => Op::SetReparse { path, tag, data },
+                Err(e) => return Some(Err(e)),
+            }
+        }
         _ => return None,
     }))
 }
@@ -601,6 +623,7 @@ mod tests {
                     Run { page: 5, cluster: 1, count: 1 },
                 ],
             },
+            Op::SetReparse { path: w("\\d\\l"), tag: 0xa000_000c, data: vec![1, 2, 3] },
         ]
     }
 
