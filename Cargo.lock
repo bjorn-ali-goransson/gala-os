@@ -2559,6 +2559,13 @@ name = "token_test"
 version = "0.1.0"
 
 [[package]]
+name = "tray_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2658,6 +2665,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
+ "miniz_oxide 0.8.9",
  "ntrt",
 ]
 
@@ -3061,6 +3069,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_thread_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_tray_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

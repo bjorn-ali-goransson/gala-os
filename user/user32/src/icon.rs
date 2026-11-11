@@ -7,7 +7,8 @@
 //! and shared; programs' own come from their resources (RT_GROUP_ICON or
 //! RT_GROUP_CURSOR, then the entry nearest the size asked) through
 //! CreateIconFromResourceEx, which reads the BMP form (1-32 bits, the AND
-//! mask after the colours); PNG-compressed entries are not supported yet.
+//! mask after the colours) and the PNG form (gdiplus's decoder, `png.rs`)
+//! and makes the size asked; LoadImageW also reads .ico files.
 
 use crate::window::Handle;
 use core::ffi::c_void;
@@ -26,6 +27,24 @@ unsafe extern "system" {
     fn SizeofResource(module: usize, res: usize) -> u32;
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *const c_void,
+        disposition: u32,
+        flags: u32,
+        template: usize,
+    ) -> Handle;
+    fn GetFileSize(file: Handle, high: *mut u32) -> u32;
+    fn ReadFile(
+        file: Handle,
+        buf: *mut u8,
+        len: u32,
+        read: *mut u32,
+        overlapped: *mut c_void,
+    ) -> i32;
+    fn CloseHandle(h: Handle) -> i32;
 }
 
 /// A zeroed scratch buffer of `n` items of T (freed with `free`).
@@ -432,19 +451,129 @@ fn system(icon: bool) -> usize {
     }
 }
 
+/// LR_DEFAULTSIZE, LR_LOADFROMFILE, LR_SHARED.
+const LR_DEFAULTSIZE: u32 = 0x40;
+const LR_LOADFROMFILE: u32 = 0x10;
+const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// The standard icon (the blue square) at `cx` x `cy`, a new icon (not
+/// shared): LoadImage with a size other than 32 (LoadIconMetric's small
+/// icon).
+fn system_icon_sized(cx: i32, cy: i32) -> usize {
+    let (w, h) = (cx.clamp(1, 256) as usize, cy.clamp(1, 256) as usize);
+    let (Some(pixels), Some(mask)) = (scratch::<u32>(w * h), scratch::<bool>(w * h)) else {
+        return 0;
+    };
+    mask.fill(true);
+    // The square covers 4..28 of 32: the same share of any size.
+    for y in (h * 4 / 32)..(h * 28).div_ceil(32) {
+        for x in (w * 4 / 32)..(w * 28).div_ceil(32) {
+            pixels[y * w + x] = 0xff4d_7fe0;
+            mask[y * w + x] = false;
+        }
+    }
+    let new = from_pixels(w as i32, h as i32, pixels, mask, true, (0, 0), false);
+    free(pixels);
+    free(mask);
+    new
+}
+
+/// `w` x `h` pixels (and their mask, nonzero: transparent) made `cx` x
+/// `cy`: by area average weighted by alpha when the image has alpha
+/// (`smooth`: PNG and 32-bit icons; the mask then follows the alpha),
+/// else by the nearest pixel (the AND mask kept exact). New scratch
+/// buffers (freed by the caller).
+fn resample(
+    w: usize,
+    h: usize,
+    pixels: &[u32],
+    mask: &[u8],
+    cx: usize,
+    cy: usize,
+    smooth: bool,
+) -> Option<(&'static mut [u32], &'static mut [u8])> {
+    let out = scratch::<u32>(cx * cy)?;
+    let Some(m) = scratch::<u8>(cx * cy) else {
+        free(out);
+        return None;
+    };
+    for oy in 0..cy {
+        for ox in 0..cx {
+            let k = oy * cx + ox;
+            if !smooth {
+                let (sx, sy) = (ox * w / cx, oy * h / cy);
+                out[k] = pixels[sy * w + sx];
+                m[k] = mask[sy * w + sx];
+                continue;
+            }
+            let (x0, x1) = (ox * w / cx, ((ox + 1) * w).div_ceil(cx).max(ox * w / cx + 1));
+            let (y0, y1) = (oy * h / cy, ((oy + 1) * h).div_ceil(cy).max(oy * h / cy + 1));
+            let (mut a, mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1.min(h) {
+                for x in x0..x1.min(w) {
+                    let p = pixels[y * w + x];
+                    let pa = u64::from(p >> 24);
+                    a += pa;
+                    r += u64::from((p >> 16) & 0xff) * pa;
+                    g += u64::from((p >> 8) & 0xff) * pa;
+                    b += u64::from(p & 0xff) * pa;
+                    n += 1;
+                }
+            }
+            out[k] = if a == 0 {
+                0
+            } else {
+                let c = |v: u64| (v / a) as u32;
+                (((a / n.max(1)) as u32) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
+            };
+            m[k] = u8::from(out[k] >> 24 == 0);
+        }
+    }
+    Some((out, m))
+}
+
+/// The icon of `w` x `h` decoded pixels, at `want` (cx, cy) when given.
+#[allow(clippy::too_many_arguments)]
+fn make_icon(
+    w: usize,
+    h: usize,
+    pixels: &[u32],
+    mask: &[u8],
+    smooth: bool,
+    icon: bool,
+    hotspot: (u32, u32),
+    want: Option<(usize, usize)>,
+) -> usize {
+    match want {
+        Some((cx, cy)) if (cx, cy) != (w, h) => {
+            let Some((px, m)) = resample(w, h, pixels, mask, cx, cy, smooth) else { return 0 };
+            let hot = (hotspot.0 * cx as u32 / w as u32, hotspot.1 * cy as u32 / h as u32);
+            let r = from_pixels_u8(cx as i32, cy as i32, px, m, icon, hot);
+            free(px);
+            free(m);
+            r
+        }
+        _ => from_pixels_u8(w as i32, h as i32, pixels, mask, icon, hotspot),
+    }
+}
+
 /// CreateIconFromResourceEx(bits, size, icon, version, cx, cy, flags): an
 /// icon or cursor from an RT_ICON/RT_CURSOR resource's data (a cursor's
-/// starts with its hotspot): a BITMAPINFOHEADER of twice the height, the
-/// palette, the colours bottom-up, then the AND mask.
+/// starts with its hotspot): a PNG image (Windows Vista's compressed
+/// icons: its alpha makes the mask), or a BITMAPINFOHEADER of twice the
+/// height, the palette, the colours bottom-up, then the AND mask. Made
+/// `cx` x `cy` when they are given (with LR_DEFAULTSIZE, 0 is the
+/// system's icon size), else the image's own size.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateIconFromResourceEx(
     bits: *const u8,
     size: u32,
     icon: i32,
     _version: u32,
-    _cx: i32,
-    _cy: i32,
-    _flags: u32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
 ) -> usize {
     if bits.is_null() || size < 40 {
         return 0;
@@ -458,9 +587,39 @@ pub extern "system" fn CreateIconFromResourceEx(
     } else {
         ((0, 0), data)
     };
+    let side = |c: i32| {
+        if c > 0 {
+            Some(c as usize)
+        } else if flags & LR_DEFAULTSIZE != 0 {
+            Some(32)
+        } else {
+            None
+        }
+    };
+    let want_for = |w: usize, h: usize| match (side(cx), side(cy)) {
+        (None, None) => None,
+        (x, y) => Some((x.unwrap_or(w).min(256), y.unwrap_or(h).min(256))),
+    };
     if data.starts_with(b"\x89PNG") {
-        crate::window::unsupported(b"user32.dll!CreateIconFromResourceEx(PNG)", 0);
-        return 0;
+        let image = match crate::png::decode(data) {
+            Ok(d) => d,
+            Err(crate::png::Error::Unsupported(what)) => {
+                crate::window::unsupported(what, 0);
+                return 0;
+            }
+            Err(_) => return 0,
+        };
+        let (w, h) = (image.width as usize, image.height as usize);
+        if w > 1024 || h > 1024 {
+            return 0;
+        }
+        let Some(mask) = scratch::<u8>(w * h) else { return 0 };
+        for (m, &p) in mask.iter_mut().zip(image.pixels.iter()) {
+            *m = u8::from(p >> 24 == 0);
+        }
+        let r = make_icon(w, h, &image.pixels, mask, true, icon != 0, hotspot, want_for(w, h));
+        free(mask);
+        return r;
     }
     let u32_at = |at: usize| {
         data.get(at..at + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -511,7 +670,9 @@ pub extern "system" fn CreateIconFromResourceEx(
             mask[y * wu + x] = u8::from(data[msrc + x / 8] & (0x80 >> (x % 8)) != 0);
         }
     }
-    let h_icon = from_pixels_u8(w, h, pixels, mask, icon != 0, hotspot);
+    let smooth = bpp == 32 && pixels.iter().any(|&p| p >> 24 != 0);
+    let (hu, want) = (h as usize, want_for(wu, h as usize));
+    let h_icon = make_icon(wu, hu, pixels, mask, smooth, icon != 0, hotspot, want);
     free(pixels);
     free(mask);
     h_icon
@@ -548,9 +709,69 @@ fn pick(module: Handle, name: *const u16, group: usize, want: i32) -> Option<u16
     }
 }
 
+/// An icon from a .ico file (LR_LOADFROMFILE): its ICONDIR's entry
+/// nearest `want` (each entry: width, height, colours, reserved, planes,
+/// bit count, the image's size and offset), made by
+/// CreateIconFromResourceEx. ERROR_FILE_NOT_FOUND when there is no such
+/// file.
+fn icon_from_file(path: *const u16, cx: i32, cy: i32, flags: u32) -> usize {
+    // SAFETY: plain calls; the file's bytes into our scratch buffer.
+    unsafe {
+        let f = CreateFileW(path, 0x8000_0000, 1, core::ptr::null(), 3, 0, 0);
+        if f as usize == usize::MAX {
+            return 0;
+        }
+        let size = GetFileSize(f, core::ptr::null_mut()) as usize;
+        let Some(buf) = (size > 6 && size < (16 << 20)).then(|| scratch::<u8>(size)).flatten()
+        else {
+            CloseHandle(f);
+            return 0;
+        };
+        let mut read = 0u32;
+        let ok = ReadFile(f, buf.as_mut_ptr(), size as u32, &mut read, core::ptr::null_mut());
+        CloseHandle(f);
+        let d = &buf[..read as usize];
+        let count = if ok != 0 && d.len() >= 6 && d[2] == 1 {
+            u16::from_le_bytes([d[4], d[5]]) as usize
+        } else {
+            0
+        };
+        let want = if cx > 0 { cx } else { 32 };
+        let mut best: Option<(i32, usize, usize)> = None;
+        for k in 0..count {
+            let Some(e) = d.get(6 + 16 * k..22 + 16 * k) else { break };
+            let side = if e[0] == 0 { 256 } else { i32::from(e[0]) };
+            let len = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as usize;
+            let at = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as usize;
+            let score = (side - want).abs();
+            if at.checked_add(len).is_some_and(|end| end <= d.len())
+                && best.is_none_or(|(b, _, _)| score < b)
+            {
+                best = Some((score, at, len));
+            }
+        }
+        let h = match best {
+            Some((_, at, len)) => CreateIconFromResourceEx(
+                d[at..].as_ptr(),
+                len as u32,
+                1,
+                0x30000,
+                cx,
+                cy,
+                flags & LR_DEFAULTSIZE,
+            ),
+            None => 0,
+        };
+        free(buf);
+        h
+    }
+}
+
 /// LoadImageW(module, name, type, cx, cy, flags): IMAGE_ICON (1) and
-/// IMAGE_CURSOR (2) from a module's resources, or the standard ones
-/// (no module, an OIC_/OCR_ id); bitmaps and files are not supported yet.
+/// IMAGE_CURSOR (2) from a module's resources, the standard ones (no
+/// module, an OIC_/OCR_ id; an icon at a size other than 32 is drawn
+/// at that size) or an icon from a .ico file (LR_LOADFROMFILE); bitmaps
+/// and cursor files are not supported yet.
 #[unsafe(no_mangle)]
 pub extern "system" fn LoadImageW(
     module: Handle,
@@ -560,8 +781,7 @@ pub extern "system" fn LoadImageW(
     cy: i32,
     flags: u32,
 ) -> usize {
-    let _ = cy;
-    if kind > 2 || kind == 0 || flags & 0x10 != 0 {
+    if kind > 2 || kind == 0 || (flags & LR_LOADFROMFILE != 0 && kind != 1) {
         crate::window::unsupported(
             b"user32.dll!LoadImageW(type)",
             u64::from(kind) | u64::from(flags) << 8,
@@ -569,13 +789,24 @@ pub extern "system" fn LoadImageW(
         return 0;
     }
     let icon = kind == 1;
+    if flags & LR_LOADFROMFILE != 0 {
+        let h = icon_from_file(name, cx, cy, flags);
+        if h == 0 {
+            crate::window::set_last_error(ERROR_FILE_NOT_FOUND);
+        }
+        return h;
+    }
     if module.is_null() {
+        let (w, h) = (if cx > 0 { cx } else { 32 }, if cy > 0 { cy } else { 32 });
+        if icon && (w, h) != (32, 32) {
+            return system_icon_sized(w, h);
+        }
         return system(icon);
     }
     let want = if cx > 0 { cx } else { 32 };
     let (group, single) = if icon { (14usize, 3usize) } else { (12, 1) };
     let Some(id) = pick(module, name, group, want) else {
-        crate::window::set_last_error(1813); // ERROR_RESOURCE_TYPE_NOT_FOUND
+        crate::window::set_last_error(ERROR_RESOURCE_TYPE_NOT_FOUND);
         return 0;
     };
     // SAFETY: kernel32's resource functions on the caller's module.
@@ -586,7 +817,7 @@ pub extern "system" fn LoadImageW(
         }
         let n = SizeofResource(module as usize, r);
         let p = LoadResource(module as usize, r).cast::<u8>();
-        CreateIconFromResourceEx(p, n, i32::from(icon), 0x30000, cx, cy, 0)
+        CreateIconFromResourceEx(p, n, i32::from(icon), 0x30000, cx, cy, flags & LR_DEFAULTSIZE)
     }
 }
 
@@ -704,6 +935,24 @@ fn bitmap_pixels(h: usize, w: i32, ht: i32) -> Option<&'static mut [u32]> {
         return None;
     }
     Some(px)
+}
+
+/// gala's own export (shell32's notification area hands icons to the
+/// kernel as pixels): icon `h` as `argb` makes it, into `out` (room for
+/// 64 x 64), its side in `*size`. FALSE for no such icon.
+#[unsafe(no_mangle)]
+pub extern "system" fn GalaIconArgb(h: usize, out: *mut u32, size: *mut u32) -> i32 {
+    if out.is_null() || size.is_null() {
+        return 0;
+    }
+    let mut px = [0u32; 64 * 64];
+    let Some(n) = argb(h, &mut px) else { return 0 };
+    // SAFETY: the caller's buffer of 64 x 64 pixels and its size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(px.as_ptr(), out, n * n);
+        *size = n as u32;
+    }
+    1
 }
 
 /// The icon `h` as `size` x `size` 0xAARRGGBB pixels (straight alpha) in

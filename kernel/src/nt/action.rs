@@ -13,14 +13,15 @@
 //! | 0..4   | version (1) |
 //! | 4..8   | action (ACTION_*) |
 //! | 8..16  | the window's HWND (the registry's) |
-//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height |
+//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height; TrayClick's icon id and button (0 left, 1 right) |
 //! | 32..36 | the text's length in UTF-16 units (at most MAX_TEXT) |
 //! | 36..40 | zero |
 //! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name |
 //!
-//! The output: Start writes the new process id (u64). Windows and
-//! Programs write a header (u32 version 1, u32 how many there are), then
-//! as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY bytes each).
+//! The output: Start writes the new process id (u64). Windows, Programs
+//! and Tray write a header (u32 version 1, u32 how many there are), then
+//! as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY / TRAY_ENTRY
+//! bytes each).
 
 use super::desktop::{self, Action, SnapTo};
 use super::status::NtStatus;
@@ -43,6 +44,11 @@ pub const ACTION_SNAP: u32 = 8;
 pub const ACTION_MOVE: u32 = 9;
 pub const ACTION_WALLPAPER: u32 = 10;
 pub const ACTION_PROGRAMS: u32 = 11;
+/// The notification area's icons (`gala tray`).
+pub const ACTION_TRAY: u32 = 12;
+/// A click on a notification-area icon: the request's HWND and its icon
+/// id (args[0]), the button in args[1] (0 left, 1 right).
+pub const ACTION_TRAY_CLICK: u32 = 13;
 
 /// The list outputs' version and header size.
 pub const LIST_VERSION: u32 = 1;
@@ -55,6 +61,11 @@ pub const WINDOW_ENTRY: usize = 40 + 2 * desktop::LISTED_TITLE;
 /// A start menu program: the name's and the path's lengths (2 x u32), the
 /// name (32 UTF-16 units) and the path (128).
 pub const PROGRAM_ENTRY: usize = 8 + 2 * PROGRAM_NAME + 2 * PROGRAM_PATH;
+/// A notification-area icon: HWND (u64), icon id (u32), process id
+/// (u32), version (u32), flags (u32: 1 hidden), the screen rectangle x,
+/// y, width, height (4 x i32; zero when hidden), the tip's length (u32)
+/// and the tip (128 UTF-16 units).
+pub const TRAY_ENTRY: usize = 44 + 2 * desktop::tray::TIP_LEN;
 const PROGRAM_NAME: usize = 32;
 const PROGRAM_PATH: usize = 128;
 
@@ -187,6 +198,32 @@ pub fn run(
                 program_entry(&mut out, name, path)?;
             }
         }
+        ACTION_TRAY => {
+            let icons = desktop::tray_list(&caller.desk.shell)?;
+            list_header(&mut out, icons.len())?;
+            for icon in &icons {
+                tray_entry(&mut out, icon)?;
+            }
+        }
+        ACTION_TRAY_CLICK => {
+            let button = match r.args[1] {
+                0 => desktop::tray::Button::Left,
+                1 => desktop::tray::Button::Right,
+                _ => return Err(NtStatus::INVALID_PARAMETER),
+            };
+            // The clicked icon's window must pass UIPI, as a window's.
+            if !desktop::has_shell(&caller.desk.shell) {
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            let info = caller.desk.windows.query(r.hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
+            let level = level_of(info.pid).ok_or(NtStatus::INVALID_HANDLE)?;
+            let from = super::window::Sender { pid: caller.pid, level: caller.level };
+            if !super::window::may_act_on(from, info.pid, level) {
+                return Err(NtStatus::ACCESS_DENIED);
+            }
+            let key = desktop::tray::Key::Id(r.hwnd, r.args[0] as u32);
+            desktop::tray_click(&caller.desk.shell, key, button)?;
+        }
         ACTION_WALLPAPER => {
             let mut name = [0u8; 32];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
@@ -216,6 +253,22 @@ fn window_entry(out: &mut Vec<u8>, hwnd: u64, w: &desktop::Listed) -> Result<(),
     }
     push(out, &(w.title_len as u32).to_le_bytes())?;
     for c in w.title {
+        push(out, &c.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn tray_entry(out: &mut Vec<u8>, t: &desktop::TrayListed) -> Result<(), NtStatus> {
+    push(out, &t.hwnd.to_le_bytes())?;
+    push(out, &t.uid.to_le_bytes())?;
+    push(out, &(t.owner as u32).to_le_bytes())?;
+    push(out, &t.version.to_le_bytes())?;
+    push(out, &u32::from(t.hidden).to_le_bytes())?;
+    for v in [t.rect.x, t.rect.y, t.rect.w, t.rect.h] {
+        push(out, &(v as i32).to_le_bytes())?;
+    }
+    push(out, &(t.tip_len as u32).to_le_bytes())?;
+    for c in t.tip {
         push(out, &c.to_le_bytes())?;
     }
     Ok(())
@@ -623,6 +676,24 @@ mod tests {
         assert_eq!(e[16..20], 4u32.to_le_bytes());
         assert_eq!(e[28..32], 640i32.to_le_bytes());
         assert_eq!(e[40..44], [b'H', 0, b'i', 0]);
+        let mut tip = [0u16; desktop::tray::TIP_LEN];
+        tip[0] = u16::from(b'T');
+        let t = desktop::TrayListed {
+            hwnd: 0x20040,
+            uid: 9,
+            owner: 77,
+            version: 4,
+            hidden: false,
+            rect: desktop::Rect { x: 1100, y: 756, w: 32, h: 40 },
+            tip,
+            tip_len: 1,
+        };
+        let mut out = Vec::new();
+        tray_entry(&mut out, &t).unwrap();
+        assert_eq!(out.len(), TRAY_ENTRY);
+        assert_eq!(out[8..12], 9u32.to_le_bytes());
+        assert_eq!(out[24..28], 1100i32.to_le_bytes());
+        assert_eq!(out[40..46], [1, 0, 0, 0, b'T', 0]);
         let mut out = Vec::new();
         program_entry(&mut out, "Hello window", "C:\\gui_test.exe").unwrap();
         assert_eq!(out.len(), PROGRAM_ENTRY);

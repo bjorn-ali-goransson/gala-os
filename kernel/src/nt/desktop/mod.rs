@@ -30,6 +30,7 @@
 
 mod paint;
 mod present;
+pub mod tray;
 
 use super::object::ObjectRef;
 use super::platform;
@@ -88,6 +89,11 @@ const TASKBAR_LINE: u32 = 0x00_d7_dc_e3;
 /// A taskbar button (the start button too) and the gap between them.
 const TASK_BUTTON: i64 = 44;
 const TASK_GAP: i64 = 4;
+/// The clock's room at the taskbar's right; the notification area ends
+/// at its left.
+const CLOCK_W: i64 = 96;
+/// The balloon's width (Windows' notifications are about 360 px wide).
+const BALLOON_W: i64 = 360;
 
 /// The start menu: centred above the taskbar.
 pub const MENU_W: u32 = 600;
@@ -335,6 +341,10 @@ enum Hit {
     Task(u32),
     Menu,
     MenuItem(usize),
+    /// A notification-area icon (its window and id).
+    Tray(u64, u32),
+    /// The balloon (NIF_INFO) on show.
+    Balloon,
     Caption(u32),
     Button(u32, CaptionButton),
     Client(u32),
@@ -528,6 +538,12 @@ pub struct Desktop {
     /// release doesn't open the start menu).
     win_key: bool,
     win_used: bool,
+    /// The notification area's icons and balloon (`tray`).
+    tray: tray::Tray,
+    /// The card above the notification area (the balloon, else the tip
+    /// of the icon under the pointer) and where it is.
+    card: Option<(Rect, Canvas)>,
+    card_dirty: bool,
 }
 
 impl Default for Desktop {
@@ -566,6 +582,9 @@ impl Desktop {
             alt: false,
             win_key: false,
             win_used: false,
+            tray: tray::Tray::new(),
+            card: None,
+            card_dirty: false,
         }
     }
 
@@ -739,8 +758,100 @@ impl Desktop {
     /// Removes `owner`'s windows (a process's end).
     pub fn destroy_owned(&mut self, owner: u64) {
         self.s.destroy_owned(owner);
+        if self.tray.drop_owned(owner) {
+            self.tray_changed();
+        }
         self.forget_gone();
         self.refresh();
+    }
+
+    // ---- The notification area -------------------------------------------
+
+    /// Shell_NotifyIcon's message `op` (tray::NIM_*) from process `owner`
+    /// with what its NOTIFYICONDATA carried (`tray::Tray` says how each
+    /// fails).
+    pub fn tray_op(&mut self, owner: u64, op: u32, d: &tray::Data) -> Result<(), NtStatus> {
+        let key = tray::Key::of(d);
+        match op {
+            tray::NIM_ADD => self.tray.add(owner, d)?,
+            tray::NIM_MODIFY => self.tray.modify(d)?,
+            tray::NIM_DELETE => self.tray.delete(key)?,
+            tray::NIM_SETFOCUS => self.tray.set_focus(key)?,
+            tray::NIM_SETVERSION => self.tray.set_version(key, d.version)?,
+            _ => return Err(NtStatus::INVALID_PARAMETER),
+        }
+        self.tray_changed();
+        self.refresh();
+        Ok(())
+    }
+
+    /// The taskbar and the card show the tray as it is now.
+    fn tray_changed(&mut self) {
+        self.taskbar_dirty = true;
+        self.card_dirty = true;
+    }
+
+    /// The screen rectangle of icon `key` (Shell_NotifyIconGetRect):
+    /// None when there is no such icon or it is hidden.
+    pub fn tray_rect(&self, key: tray::Key) -> Option<Rect> {
+        let i = self.tray.find(key)?;
+        let icon = &self.tray.icons[i];
+        self.tray_slots().into_iter().find(|(k, _)| *k == (icon.hwnd, icon.uid)).map(|(_, r)| r)
+    }
+
+    /// A click on icon `key` by `button` (GalaDesktopAction's TrayClick:
+    /// the same messages as the mouse's press and release in its middle).
+    pub fn tray_click(&mut self, key: tray::Key, button: tray::Button) -> Result<(), NtStatus> {
+        let i = self.tray.find(key).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+        let k = (self.tray.icons[i].hwnd, self.tray.icons[i].uid);
+        let r = self.tray_rect(key).ok_or(NtStatus::INVALID_DEVICE_STATE)?;
+        let (x, y) = (r.x + r.w / 2, r.y + r.h / 2);
+        self.tray.button(k, button, true, x, y);
+        self.tray.button(k, button, false, x, y);
+        Ok(())
+    }
+
+    /// The tray's icons as the `gala tray` command lists them: window,
+    /// id, version, hidden, the tip and the screen rectangle (zero when
+    /// hidden).
+    pub fn tray_list(&self) -> Vec<TrayListed> {
+        let mut out = Vec::new();
+        for icon in &self.tray.icons {
+            let rect = self
+                .tray_slots()
+                .into_iter()
+                .find(|(k, _)| *k == (icon.hwnd, icon.uid))
+                .map_or(Rect { x: 0, y: 0, w: 0, h: 0 }, |(_, r)| r);
+            let mut tip = [0u16; tray::TIP_LEN];
+            let n = icon.tip.len().min(tray::TIP_LEN);
+            tip[..n].copy_from_slice(&icon.tip[..n]);
+            let _ = out.try_push(TrayListed {
+                hwnd: icon.hwnd,
+                uid: icon.uid,
+                owner: icon.owner,
+                version: icon.version,
+                hidden: icon.hidden,
+                rect,
+                tip,
+                tip_len: n,
+            });
+        }
+        out
+    }
+
+    /// The callback messages the tray has for programs (posted by the
+    /// caller once the desktop's lock is let go).
+    fn take_tray_posts(&mut self) -> Vec<tray::Post> {
+        core::mem::take(&mut self.tray.posts)
+    }
+
+    /// The icons of window `hwnd` go: it no longer exists.
+    fn tray_window_gone(&mut self, hwnd: u64) {
+        if self.tray.drop_window(hwnd) {
+            crate::info!("desktop: notification-area icons of gone window {hwnd:#x} removed");
+            self.tray_changed();
+            self.refresh();
+        }
     }
 
     /// A drag of a window that is gone ends.
@@ -904,6 +1015,31 @@ impl Desktop {
         out
     }
 
+    /// The notification area's shown icons and their slots, right to
+    /// left from the clock (the first added furthest left).
+    fn tray_slots(&self) -> Vec<((u64, u32), Rect)> {
+        let n = self.tray.visible().count() as i64;
+        let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
+        let x0 = self.s.screen.0 - CLOCK_W - n * tray::SLOT;
+        let mut out = Vec::new();
+        for (i, icon) in self.tray.visible().enumerate() {
+            let r = Rect { x: x0 + i as i64 * tray::SLOT, y: top, w: tray::SLOT, h: 40 };
+            let _ = out.try_push(((icon.hwnd, icon.uid), r));
+        }
+        out
+    }
+
+    /// Where the card above the notification area goes: the balloon at
+    /// the right, a tip centred over its icon (kept on the screen).
+    fn card_rect(&self, w: i64, h: i64, over: Option<Rect>) -> Rect {
+        let bottom = self.s.screen.1 - i64::from(TASKBAR) - 12;
+        let x = match over {
+            Some(r) => (r.x + r.w / 2 - w / 2).clamp(8, (self.s.screen.0 - w - 8).max(8)),
+            None => self.s.screen.0 - w - 12,
+        };
+        Rect { x, y: bottom - h, w, h }
+    }
+
     fn menu_rect(&self) -> Rect {
         let w = i64::from(MENU_W).min(self.s.screen.0 - 24);
         let h = i64::from(MENU_H).min(self.s.screen.1 - i64::from(TASKBAR) - 24);
@@ -966,9 +1102,20 @@ impl Desktop {
             }
             return Hit::Menu;
         }
+        if self.tray.balloon.is_some()
+            && let Some((r, _)) = &self.card
+            && r.contains(x, y)
+        {
+            return Hit::Balloon;
+        }
         if self.taskbar_rect().contains(x, y) {
             if self.start_rect().contains(x, y) {
                 return Hit::Start;
+            }
+            for (key, r) in self.tray_slots() {
+                if r.contains(x, y) {
+                    return Hit::Tray(key.0, key.1);
+                }
             }
             for (id, r) in self.tasks() {
                 if r.contains(x, y) {
@@ -1104,11 +1251,26 @@ impl Desktop {
             let lp = self.s.client_lparam(id, x, y);
             self.s.send(id, WM_MOUSEMOVE, keys, lp);
         }
+        if (dx, dy) != (0, 0)
+            && let Hit::Tray(h, u) = hit
+        {
+            self.tray.mouse_move((h, u), x, y);
+        }
         if pressed & 1 != 0 {
             self.left_down(hit, x, y, keys);
         }
         if released & 1 != 0 {
             self.left_up(hit, x, y, keys);
+        }
+        if let Hit::Tray(h, u) = hit
+            && self.menu.is_none()
+        {
+            if pressed & 2 != 0 {
+                self.tray.button((h, u), tray::Button::Right, true, x, y);
+            }
+            if released & 2 != 0 {
+                self.tray.button((h, u), tray::Button::Right, false, x, y);
+            }
         }
         if pressed & 2 != 0
             && let Hit::Client(id) = hit
@@ -1141,6 +1303,10 @@ impl Desktop {
         for h in [old, hit] {
             match h {
                 Hit::Start | Hit::Task(_) | Hit::Taskbar => self.taskbar_dirty = true,
+                Hit::Tray(..) => {
+                    self.taskbar_dirty = true;
+                    self.card_dirty = true;
+                }
                 Hit::MenuItem(_) | Hit::Menu => self.menu_dirty = true,
                 _ => {}
             }
@@ -1197,7 +1363,8 @@ impl Desktop {
                 self.s.send(id, WM_LBUTTONDOWN, keys, lp);
             }
             Hit::Menu | Hit::MenuItem(_) => self.menu_dirty = true,
-            Hit::Nothing | Hit::Taskbar => {}
+            Hit::Tray(h, u) => self.tray.button((h, u), tray::Button::Left, true, x, y),
+            Hit::Nothing | Hit::Taskbar | Hit::Balloon => {}
         }
     }
 
@@ -1330,6 +1497,13 @@ impl Desktop {
                 self.s.note_button(id, WM_LBUTTONUP, x, y, false);
                 self.s.send(id, WM_LBUTTONUP, keys, lp);
             }
+            (Hit::Tray(a, b), Hit::Tray(c, d)) if (a, b) == (c, d) => {
+                self.tray.button((a, b), tray::Button::Left, false, x, y);
+            }
+            (Hit::Balloon, Hit::Balloon) => {
+                self.tray.balloon_clicked();
+                self.card_dirty = true;
+            }
             (Hit::Menu | Hit::MenuItem(_), _) => self.menu_dirty = true,
             _ => {}
         }
@@ -1440,6 +1614,17 @@ impl Desktop {
             let r = self.taskbar_rect();
             self.s.add_damage(r);
         }
+        if self.card_dirty {
+            self.card_dirty = false;
+            if let Some((r, _)) = self.card.take() {
+                self.s.add_damage(shadow_bounds(r));
+            }
+            self.card = self.render_card();
+            if let Some((r, _)) = &self.card {
+                let b = shadow_bounds(*r);
+                self.s.add_damage(b);
+            }
+        }
         if self.menu.is_some() && self.menu_dirty {
             self.menu = self.render_menu();
             self.menu_dirty = false;
@@ -1542,6 +1727,32 @@ impl Desktop {
                 c.round_rect(x + r.w / 2 - 3, y + 36, 6, 3, 1, 0x00_8a_8a_8a, 0x00_8a_8a_8a, 255);
             }
         }
+        // The notification area: each shown icon in its slot, lit under
+        // the pointer or with the focus (NIM_SETFOCUS).
+        for ((hwnd, uid), r) in self.tray_slots() {
+            let Some(icon) = self.tray.icons.iter().find(|i| (i.hwnd, i.uid) == (hwnd, uid)) else {
+                continue;
+            };
+            let (x, y) = (r.x, r.y - top);
+            let lit = if self.hover == Hit::Tray(hwnd, uid) {
+                130
+            } else if self.tray.focus == Some((hwnd, uid)) {
+                90
+            } else {
+                0
+            };
+            if lit > 0 {
+                c.round_rect(x + 2, y + 4, r.w - 4, r.h - 8, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
+            }
+            if icon.icon.len() == tray::ICON * tray::ICON {
+                let side = tray::ICON as i64;
+                let (ix, iy) = (x + (r.w - side) / 2, y + (r.h - side) / 2);
+                for (k, &p) in icon.icon.iter().enumerate() {
+                    let (px, py) = ((k % tray::ICON) as i64, (k / tray::ICON) as i64);
+                    c.put(ix + px, iy + py, p, p >> 24);
+                }
+            }
+        }
         // The clock: the time over the date, right-aligned.
         let (time, tn, date, dn) = clock(self.minute);
         let tw = Font::Ui12.measure(time[..tn].iter().map(|&b| b as char));
@@ -1550,6 +1761,48 @@ impl Desktop {
         c.text(right - tw, 7, time[..tn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
         c.text(right - dw, 25, date[..dn].iter().map(|&b| b as char), TEXT, Font::Ui12, w);
         Some(c)
+    }
+
+    /// The card above the notification area: the balloon (its title over
+    /// its text, wrapped, on a light card), else the tip of the icon
+    /// under the pointer (one line; a version 4 icon shows its tip only
+    /// with NIF_SHOWTIP, as Windows' shell). None: no card.
+    fn render_card(&self) -> Option<(Rect, Canvas)> {
+        if self.s.screen.0 == 0 {
+            return None;
+        }
+        if let Some(b) = &self.tray.balloon {
+            let lines = wrap(&b.text, Font::Ui12, BALLOON_W - 32, 4);
+            let title_h = if b.title.is_empty() { 0 } else { 26 };
+            let h = 16 + title_h + lines.len() as i64 * 18 + 14;
+            let r = self.card_rect(BALLOON_W, h, None);
+            let mut c = Canvas::new(r.w, r.h, 0)?;
+            c.round_rect(0, 0, r.w, r.h, 8, MENU_COLOR, MENU_COLOR, 255);
+            c.round_outline(0, 0, r.w, r.h, 8, MENU_BORDER, 255);
+            let mut y = 16;
+            if !b.title.is_empty() {
+                c.text(16, y, utf16(&b.title), TEXT, Font::Ui14Semibold, r.w - 16);
+                y += title_h;
+            }
+            for (from, to) in lines {
+                c.text(16, y, utf16(&b.text[from..to]), TEXT_DIM, Font::Ui12, r.w - 16);
+                y += 18;
+            }
+            return Some((r, c));
+        }
+        let Hit::Tray(hwnd, uid) = self.hover else { return None };
+        let icon = self.tray.icons.iter().find(|i| (i.hwnd, i.uid) == (hwnd, uid))?;
+        if icon.tip.is_empty() || (icon.version >= tray::VERSION_4 && !icon.show_tip) {
+            return None;
+        }
+        let slot = self.tray_slots().into_iter().find(|(k, _)| *k == (hwnd, uid))?.1;
+        let tw = Font::Ui12.measure(utf16(&icon.tip)).min(420);
+        let r = self.card_rect(tw + 18, 30, Some(slot));
+        let mut c = Canvas::new(r.w, r.h, 0)?;
+        c.round_rect(0, 0, r.w, r.h, 4, MENU_COLOR, MENU_COLOR, 255);
+        c.round_outline(0, 0, r.w, r.h, 4, MENU_BORDER, 255);
+        c.text(9, 8, utf16(&icon.tip), TEXT, Font::Ui12, r.w - 9);
+        Some((r, c))
     }
 
     /// The start menu, after Windows 11's: a search box at the top, the
@@ -1699,6 +1952,16 @@ impl Desktop {
         {
             c = over(c, bar.get(x - t.x, y - t.y));
         }
+        if let Some((r, card)) = &self.card
+            && shadow_bounds(*r).contains(x, y)
+        {
+            let layer = card.get(x - r.x, y - r.y);
+            if layer >> 24 < 255 {
+                let rect = (r.x + 4, r.y + SHADOW_DROP, r.x + r.w - 4, r.y + r.h + SHADOW_DROP - 2);
+                c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_INACTIVE));
+            }
+            c = over(c, layer);
+        }
         if let Some(menu) = &self.menu
             && self.menu_bounds().contains(x, y)
         {
@@ -1727,6 +1990,75 @@ impl Desktop {
         }
         c
     }
+}
+
+/// A notification-area icon as `gala tray` lists it.
+#[derive(Clone, Copy, Debug)]
+pub struct TrayListed {
+    pub hwnd: u64,
+    pub uid: u32,
+    pub owner: u64,
+    pub version: u32,
+    pub hidden: bool,
+    pub rect: Rect,
+    pub tip: [u16; tray::TIP_LEN],
+    pub tip_len: usize,
+}
+
+/// A layer's rectangle with the room its shadow takes.
+fn shadow_bounds(r: Rect) -> Rect {
+    Rect {
+        x: r.x - SHADOW_REACH,
+        y: r.y - SHADOW_REACH,
+        w: r.w + 2 * SHADOW_REACH,
+        h: r.h + 2 * SHADOW_REACH + SHADOW_DROP,
+    }
+}
+
+/// UTF-16 text as characters (unpaired surrogates as '?').
+fn utf16(t: &[u16]) -> impl Iterator<Item = char> + Clone + '_ {
+    char::decode_utf16(t.iter().copied()).map(|c| c.unwrap_or('?'))
+}
+
+/// `t` broken into at most `max` lines of at most `width` pixels in
+/// `font` (at spaces when it can, at line breaks always): each line's
+/// range of units. The last line takes the rest (drawing ends it with
+/// "...").
+fn wrap(t: &[u16], font: Font, width: i64, max: usize) -> Vec<(usize, usize)> {
+    const SPACE: u16 = b' ' as u16;
+    const NL: u16 = b'\n' as u16;
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < t.len() && out.len() < max {
+        while start < t.len() && matches!(t[start], SPACE | 0x0d) {
+            start += 1;
+        }
+        if start >= t.len() {
+            break;
+        }
+        let line_end = t[start..].iter().position(|&c| c == NL).map_or(t.len(), |p| start + p);
+        let stop = if out.len() + 1 == max {
+            line_end
+        } else {
+            let mut end = start;
+            let mut space = None;
+            while end < line_end && font.measure(utf16(&t[start..=end])) <= width {
+                if t[end] == SPACE {
+                    space = Some(end);
+                }
+                end += 1;
+            }
+            match space {
+                Some(sp) if end < line_end && sp > start => sp,
+                _ => end.max(start + 1),
+            }
+        };
+        if out.try_push((start, stop)).is_err() {
+            break;
+        }
+        start = if stop < t.len() && t[stop] == NL { stop + 1 } else { stop };
+    }
+    out
 }
 
 /// A point on a circle of radius r at a 64th-of-a-turn step: its x (its y
@@ -2345,8 +2677,10 @@ fn pointer_on(
     }
     let launch = d.take_launch();
     let wakes = d.take_wakes();
+    let posts = d.take_tray_posts();
     drop(d);
     signal(wakes);
+    tell_tray(shell, posts);
     launch
 }
 
@@ -2484,6 +2818,116 @@ pub fn list_windows(shell: &Shell) -> Result<Vec<Listed>, NtStatus> {
     Ok(shell.d.lock().list())
 }
 
+/// Shell_NotifyIcon's message `op` from process `owner` on `shell`'s
+/// notification area (GalaTrayIcon). STATUS_NOT_SUPPORTED without
+/// shasha's shell (a bare desktop has no taskbar, as Windows without
+/// Explorer has no notification area); the tray's own failures otherwise.
+/// Adding and deleting are logged; every message is a `window` event
+/// `tray` (NIM_MODIFY can come many times a second: a progress tip).
+pub fn tray_op(shell: &Shell, owner: u64, op: u32, data: &tray::Data) -> Result<(), NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = shell.d.lock();
+    let result = d.tray_op(owner, op, data);
+    redraw_damage(&mut d);
+    let posts = d.take_tray_posts();
+    let shown = d.tray.visible().count();
+    drop(d);
+    let (hwnd, uid) = (data.hwnd, data.uid);
+    let name = match op {
+        tray::NIM_ADD => "added",
+        tray::NIM_DELETE => "deleted",
+        _ => "",
+    };
+    if !name.is_empty() {
+        match result {
+            Ok(()) => crate::info!(
+                "desktop: notification-area icon {name}: window {hwnd:#x} id {uid}, pid {owner} ({shown} shown)"
+            ),
+            Err(e) => crate::info!(
+                "desktop: notification-area icon not {name}: window {hwnd:#x} id {uid}, pid {owner}: {:#x}",
+                e.0
+            ),
+        }
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "tray",
+        format_args!(
+            r#""op":{op},"session":{},"pid":{owner},"hwnd":{hwnd},"id":{uid},"flags":{},"status":{}"#,
+            shell.session,
+            data.flags,
+            result.err().map_or(0, |e| e.0)
+        ),
+    );
+    tell_tray(shell, posts);
+    result
+}
+
+/// Icon `key`'s screen rectangle on `shell`'s taskbar
+/// (Shell_NotifyIconGetRect): STATUS_NOT_SUPPORTED without shasha's
+/// shell, STATUS_OBJECT_NAME_NOT_FOUND when there is no such icon shown.
+pub fn tray_rect(shell: &Shell, key: tray::Key) -> Result<Rect, NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    shell.d.lock().tray_rect(key).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)
+}
+
+/// A click on icon `key` (GalaDesktopAction's TrayClick): what the mouse
+/// would tell its window.
+pub fn tray_click(shell: &Shell, key: tray::Key, button: tray::Button) -> Result<(), NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = shell.d.lock();
+    let result = d.tray_click(key, button);
+    let posts = d.take_tray_posts();
+    drop(d);
+    tell_tray(shell, posts);
+    result
+}
+
+/// The notification area's icons (GalaDesktopAction's Tray).
+pub fn tray_list(shell: &Shell) -> Result<Vec<TrayListed>, NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    Ok(shell.d.lock().tray_list())
+}
+
+/// Posts the tray's callback messages through the session's window
+/// registry (outside the desktop's lock). An icon whose window is gone
+/// goes, as Windows' shell drops it when the pointer passes over it.
+fn tell_tray(shell: &Shell, posts: Vec<tray::Post>) {
+    if posts.is_empty() {
+        return;
+    }
+    let Some(desk) = super::session::desk(shell.session) else { return };
+    let mut gone: Option<u64> = None;
+    for p in posts {
+        match desk.windows.post_from_system(p.hwnd, p.message, p.wparam, p.lparam) {
+            Ok(event) => {
+                if let Some(e) = event {
+                    super::wait::set_signal(&e, 1);
+                }
+            }
+            Err(NtStatus::INVALID_HANDLE) => gone = Some(p.hwnd),
+            Err(e) => crate::warn!(
+                "desktop: notification area: message {:#x} to window {:#x} not posted: {e:?}",
+                p.message,
+                p.hwnd
+            ),
+        }
+    }
+    if let Some(hwnd) = gone {
+        let mut d = shell.d.lock();
+        d.tray_window_gone(hwnd);
+        redraw_damage(&mut d);
+    }
+}
+
 /// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
 /// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
 /// a missing file, STATUS_NOT_SUPPORTED without shasha's shell.
@@ -2586,8 +3030,10 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option
     redraw_damage(&mut d);
     let launch = d.take_launch();
     let wakes = d.take_wakes();
+    let posts = d.take_tray_posts();
     drop(d);
     signal(wakes);
+    tell_tray(shell, posts);
     launch
 }
 
@@ -2640,7 +3086,14 @@ pub fn tick() {
             resize(&mut d, w, h);
         }
         d.set_minute(minute);
+        if d.tray.tick() {
+            d.tray_changed();
+            d.refresh();
+        }
         redraw_damage(&mut d);
+        let posts = d.take_tray_posts();
+        drop(d);
+        tell_tray(&desk.shell, posts);
     }
 }
 

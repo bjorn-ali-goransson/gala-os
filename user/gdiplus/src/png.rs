@@ -9,8 +9,10 @@
 //! palette images, 1, 2 and 4; tRNS for types 0, 2 and 3. No gamma or
 //! colour-space conversion: gAMA, cHRM, sRGB and iCCP are not applied
 //! (an image whose gAMA is not the sRGB-like 1/2.2 is recorded,
-//! `gdiplus.dll!png(gAMA not applied)`). Not decoded (NotImplemented,
-//! recorded): interlaced (Adam7) images.
+//! `<dll>!png(gAMA not applied)`). Not decoded (recorded): interlaced
+//! (Adam7) images. One source for two DLLs: gdiplus (PNG images) and
+//! user32 (PNG icons, `#[path]`); each names its ledger lines
+//! (`crate::PNG_GAMA`, `crate::PNG_INTERLACED`).
 
 use alloc::vec::Vec;
 
@@ -58,7 +60,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
                 idat.extend_from_slice(body);
             }
             b"gAMA" if body.len() >= 4 && !(45000..=46000).contains(&be32(body)) => {
-                crate::record(b"gdiplus.dll!png(gAMA not applied)", be32(body).into());
+                crate::record(crate::PNG_GAMA, be32(body).into());
             }
             b"IEND" => break,
             _ => {}
@@ -75,7 +77,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
         return Err(Error::OutOfMemory);
     }
     if interlace != 0 {
-        return Err(Error::Unsupported(b"gdiplus.dll!png(interlaced)"));
+        return Err(Error::Unsupported(crate::PNG_INTERLACED));
     }
     let channels = match (color, depth) {
         (0, 1 | 2 | 4 | 8 | 16) | (3, 1 | 2 | 4 | 8) => 1,

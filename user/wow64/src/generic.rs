@@ -432,6 +432,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f71, &[U]),                      // GalaWinEventUnhook
     (0x7f72, &[U, U, Hi, U, U]),         // GalaWinEventNotify
     (0x7f73, &[U, U, U]),                // GalaWinEventTake
+    (0x7f74, &[U, U, U, U]),             // GalaTrayIcon
     // Window stations and desktops: their handles are kernel handles.
     (0x7fa0, &[U, U, U, U, U, Oh]), // GalaUserObjectOpen
     (0x7fa1, &[U, U, Oh]),          // GalaUserObjectConnection

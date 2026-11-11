@@ -153,6 +153,10 @@ const PIXEL_FORMAT_32BPP_PARGB: u32 = 0x000e_200b;
 const LEDGER_UNSUPPORTED: u32 = 2;
 const LEDGER_OTHER: u32 = 5;
 
+/// The ledger names of png.rs's limits.
+pub(crate) const PNG_GAMA: &[u8] = b"gdiplus.dll!png(gAMA not applied)";
+pub(crate) const PNG_INTERLACED: &[u8] = b"gdiplus.dll!png(interlaced)";
+
 pub(crate) fn record(what: &[u8], detail: u64) {
     // SAFETY: a valid byte string.
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), LEDGER_UNSUPPORTED, detail) };

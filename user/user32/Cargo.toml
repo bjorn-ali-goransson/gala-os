@@ -13,6 +13,8 @@ bench = false
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
 gala_heap = { path = "../gala_heap" }
+# PNG icons (CreateIconFromResourceEx): gdiplus's png.rs inflates with it.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 # The 32-bit build (SysWOW64's user32): the memory routines, 64-bit
 # division helpers and unwind personality the compiler calls on x86.

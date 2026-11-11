@@ -1109,3 +1109,70 @@ fn a_press_outside_a_popup_grab_s_owner_ends_it_and_goes_nowhere() {
     assert_eq!(d.s.popup_grab, None);
     assert_eq!(d.take_input(7, &mut out), 0);
 }
+
+/// A notification-area icon: drawn left of the clock, its rectangle
+/// known, a click and a right click are its window's callback messages
+/// in version 4's layout, a balloon shows above the taskbar and a click
+/// on it is NIN_BALLOONUSERCLICK; the icon goes with its process.
+#[test]
+fn notification_area_icons_are_drawn_clicked_and_dropped() {
+    let (mut d, _) = desktop_with_window();
+    let red = [0xffff_0000u32; tray::ICON * tray::ICON];
+    let data = tray::Data {
+        flags: tray::NIF_MESSAGE | tray::NIF_ICON | tray::NIF_TIP,
+        hwnd: 0x20040,
+        uid: 3,
+        callback: 0x8001,
+        tip: title("Syncing"),
+        icon: red.to_vec(),
+        ..tray::Data::default()
+    };
+    d.tray_op(7, tray::NIM_ADD, &data).unwrap();
+    assert_eq!(d.tray_op(7, tray::NIM_ADD, &data), Err(NtStatus::OBJECT_NAME_COLLISION));
+    let key = tray::Key::Id(0x20040, 3);
+    let r = d.tray_rect(key).unwrap();
+    assert_eq!(r, Rect { x: 1024 - CLOCK_W - tray::SLOT, y: 768 - 48 + 4, w: tray::SLOT, h: 40 });
+    assert_eq!(d.pixel(r.x + r.w / 2, r.y + r.h / 2), 0x00ff_0000);
+    d.tray_op(7, tray::NIM_SETVERSION, &tray::Data { version: 4, ..data.clone() }).unwrap();
+    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+    click(&mut d, cx, cy);
+    go(&mut d, cx, cy, 2);
+    go(&mut d, cx, cy, 0);
+    let at = (cx as u64) | (cy as u64) << 16;
+    let events: Vec<(u64, u64)> =
+        d.take_tray_posts().iter().map(|p| (p.wparam, p.lparam)).collect();
+    assert_eq!(
+        events,
+        [
+            // The pointer arriving over it.
+            (at, 0x200 | 3 << 16),
+            (at, 0x201 | 3 << 16),
+            (at, 0x202 | 3 << 16),
+            (at, u64::from(tray::NIN_SELECT) | 3 << 16),
+            (at, 0x204 | 3 << 16),
+            (at, 0x205 | 3 << 16),
+            (at, u64::from(tray::WM_CONTEXTMENU) | 3 << 16),
+        ]
+    );
+    // The named action does the same as the mouse.
+    d.tray_click(key, tray::Button::Left).unwrap();
+    assert_eq!(d.take_tray_posts().len(), 3);
+    // A balloon, clicked.
+    let info = tray::Data {
+        flags: tray::NIF_INFO,
+        title: title("Installing"),
+        info: title("Office is installing in the background"),
+        ..data.clone()
+    };
+    d.tray_op(7, tray::NIM_MODIFY, &info).unwrap();
+    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
+    assert_eq!(card.x + card.w, 1024 - 12);
+    assert_eq!(d.pixel(card.x + 8, card.y + card.h - 4), MENU_COLOR);
+    click(&mut d, card.x + 20, card.y + 20);
+    let events: Vec<u64> = d.take_tray_posts().iter().map(|p| p.lparam & 0xffff).collect();
+    assert_eq!(events, [u64::from(tray::NIN_BALLOONSHOW), u64::from(tray::NIN_BALLOONUSERCLICK)]);
+    assert!(d.card.is_none());
+    d.destroy_owned(7);
+    assert_eq!(d.tray_rect(key), None);
+    assert_ne!(d.pixel(cx, cy), 0x00ff_0000);
+}

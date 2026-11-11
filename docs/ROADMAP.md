@@ -1855,23 +1855,26 @@ need gala's.
      console (psexec -s -i), the account the scenario uses, to learn
      whether Windows' setup.exe faults there too.
      setup.exe ending so takes consolerun with it; the Click-to-Run
-     client and service go on downloading (1.4 GB on C: in 900 s), and
-     nothing is on the screen: the client's NotificationFlyout
-     ("Microsoft 365 and Office are installing in the background (0%)")
-     is shown at (-9999, -9999), where it waits to be placed by its
-     notification-area icon, which gala's shell32 refuses
-     (`Shell_NotifyIconW(no notification area)`, NIM_ADD and
-     NIM_SETVERSION); OfficeC2RClient.exe, the client's React Native UI
+     client and service go on downloading (1.4 GB on C: in 900 s). The
+     client's NotificationFlyout ("Microsoft 365 and Office are
+     installing in the background (0%)") is shown at (-9999, -9999),
+     where it waits to be placed by its notification-area icon (NIM_ADD,
+     NIM_SETVERSION). Done: shasha's taskbar has a notification area
+     (Shell_NotifyIconW/A with every NIM_ message, the NOTIFYICONDATA
+     sizes and versions, version 4's callback layout, balloons,
+     Shell_NotifyIconGetRect; `gala tray` and its clicks; comctl32's
+     LoadIconMetric and LoadIconWithScaleDown, PNG icons and sizes in
+     CreateIconFromResourceEx, .ico files in LoadImageW; `tray_test`,
+     `wow64_tray_test`; ARCHITECTURE "The notification area"); whether
+     the flyout then shows is the next run's to see. OfficeC2RClient.exe, the client's React Native UI
      (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), does not
      start: 0xc0000135, its static imports `D3DCOMPILER_47.dll` (a
      system DLL gala lacks) and, through Office's own DLLs,
      `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
      (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
      ordinal 420. Next, in that order: the splash thread's fault (the
-     Windows measurement above); a notification area in
-     shasha's taskbar (Shell_NotifyIconW and Shell_NotifyIconGetRect,
-     comctl32's LoadIconMetric, PNG icons in CreateIconFromResourceEx);
-     OfficeC2RClient.exe's imports, then its React Native UI (Direct3D
+     Windows measurement above); OfficeC2RClient.exe's imports, then its
+     React Native UI (Direct3D
      11 through GPU G2, DirectComposition). Found on the way, not yet
      done: CreateWindowEx sends no WM_SIZE/WM_MOVE after WM_CREATE to a
      child or popup window (Wine's msg.c WmCreateChildSeq,

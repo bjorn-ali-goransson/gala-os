@@ -6130,7 +6130,8 @@ session's is shown by nothing unless GalaSession attaches a presenter
   average from what user32 hands over, or else a letter tile; an accent
   pill under the active one, a grey one under the others); at the right
   a UTC clock over the date in 12-hour M/D/YYYY form (`tick` every
-  second from the input thread).
+  second from the input thread); left of the clock, the notification
+  area (below).
 - **Start menu** (600 x 640, centred above the taskbar): a search box
   (typing filters the programs, Enter starts the first, Esc or the
   Windows key closes; the Windows key pressed and released alone also
@@ -6163,6 +6164,82 @@ session's is shown by nothing unless GalaSession attaches a presenter
   a console window`) and a `window` event `start menu` (op start,
   install or missing; session, name, target, pid, status). Scenario
   `start_menu` (start_menu_test, screen check).
+
+#### The notification area
+
+Code: `desktop/tray.rs` (the icons, their messages, the balloon; host
+tests there and in `desktop/tests.rs`), shell32's `tray.rs`
+(Shell_NotifyIconW/A, Shell_NotifyIconGetRect), user32's GalaIconArgb.
+Test: `tray_test` and its x86 twin `wow64_tray_test` (Windows'
+expectations from Microsoft's documentation and Wine's shell32
+systray.c; on gala also `gala tray`, its clicks and a mouse click
+through the screen check).
+
+- **Icons**: per desktop, at most 64, each keyed by its window and id
+  (or its GUID with NIF_GUID), with the process that added it, its
+  callback message (NIF_MESSAGE), NOTIFYICON version, hidden state
+  (NIF_STATE's NIS_HIDDEN), tip (128 units) and pixels (16 x 16,
+  straight alpha: shell32 reads the HICON with user32's GalaIconArgb,
+  the kernel scales it). NIM_ADD of an icon there fails
+  (STATUS_OBJECT_NAME_COLLISION), NIM_MODIFY/NIM_DELETE/NIM_SETFOCUS/
+  NIM_SETVERSION of one that is not there fail
+  (STATUS_OBJECT_NAME_NOT_FOUND); Shell_NotifyIcon answers FALSE for
+  each. An icon goes with its process, or when a message to its window
+  fails because the window is gone (Windows' shell drops such icons
+  when the pointer passes over them).
+- **Layout**: slots 32 px wide right to left from the clock's 96 px,
+  the first added furthest left; the icon in the middle of its slot,
+  lit under the pointer (or with NIM_SETFOCUS's focus).
+  Shell_NotifyIconGetRect gives the slot's screen rectangle (E_FAIL for
+  an icon not shown).
+- **Messages** (to the icon's window, posted through the window
+  registry as the system's: `window::post_from_system`, after the
+  desktop's lock is let go): WM_MOUSEMOVE as the pointer moves over the
+  icon, the button messages on press and release, then on a release
+  from version 3 on NIN_SELECT (left) or WM_CONTEXTMENU (right). Version
+  4's layout: wParam the point (x, y as 16-bit halves), lParam the event
+  with the id in its high word; older versions: wParam the id, lParam
+  the event. No callback message, no messages.
+- **Balloon** (NIF_INFO): one at a time, a card of the start menu's
+  colours above the taskbar at the right (title in 14 px semibold, the
+  text wrapped to four lines); NIN_BALLOONSHOW when it shows,
+  NIN_BALLOONHIDE when another replaces it, NIN_BALLOONTIMEOUT after
+  BALLOON_SECONDS (7) clock ticks, NIN_BALLOONUSERCLICK when clicked
+  (it goes). NIIF_USER/NIIF_LARGE_ICON's own icon is not drawn
+  (recorded); no sound is played. The same card shows the tip of the
+  icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
+  line.
+- **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
+  one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
+  full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,
+  528/508), else the first version's (Wine's tests record that an
+  invalid cbSize works on Windows); V1 carries NIF_MESSAGE, NIF_ICON and
+  a 64-character NIF_TIP only, V3 and later the GUID. The A form widens
+  its texts from the ANSI code page. GalaTrayIcon's request is one
+  layout for both widths (`syscalls::tray_request`).
+- **Where nothing shows the desktop** (a bare one: no screen and no
+  `presenter=`, the server profile) there is no taskbar and so no
+  notification area: GalaTrayIcon is STATUS_NOT_SUPPORTED and
+  Shell_NotifyIcon FALSE (recorded `shell32.dll!Shell_NotifyIcon(no
+  notification area)`), as on Windows without Explorer.
+- **TaskbarCreated**: RegisterWindowMessage("TaskbarCreated") is a
+  registered message as any other; Windows broadcasts it when Explorer
+  (re)creates its taskbar, which programs answer by adding their icons
+  again. shasha's taskbar is made with the desktop and never re-made, so
+  there is no moment to broadcast it and gala does not. (Registered
+  messages are per process in gala's user32: the session-wide table
+  waits for the kernel's atoms, ROADMAP AG.)
+- **CLI parity**: GalaDesktopAction's Tray lists the icons and
+  TrayClick clicks one (`gala tray`, `gala tray click <hwnd> <id>
+  [right]`): `Desktop::tray_click` sends what the mouse's press and
+  release in the icon's middle send. A click passes UIPI against the
+  icon's window's process, as the window actions do.
+- **Observability**: `desktop: notification-area icon added/deleted:
+  window <hwnd> id <n>, pid <p> (<n> shown)` (and `not added/deleted`
+  with the status); every message a `window` event `tray` (op, session,
+  pid, hwnd, id, flags, status); a post that fails for another reason
+  than a gone window is a warning; gone windows' icons are logged as
+  removed.
 
 #### Window behaviour
 
@@ -6275,6 +6352,7 @@ registry ("Plan: windows across processes").
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
+| 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
@@ -6378,6 +6456,10 @@ CLI-first.
   - Wallpaper (the picture is decoded and scaled outside the desktop's
     lock, then swapped in and the screen redrawn; "drawn" is the drawn
     one).
+  - Tray (the notification area's icons: HWND, id, process id,
+    version, hidden, the screen rectangle, the tip) and TrayClick (the
+    request's HWND, the icon id in the first argument, the button in
+    the second: 0 left, 1 right).
   Windows are named by their HWND: the window registry's record
   (version 2) carries the window's id on the desktop, so the kernel
   goes from HWND to the desktop's window and back. Without shasha's
@@ -6408,6 +6490,7 @@ CLI-first.
 | `gala activate\|minimize\|maximize\|restore\|close <window>` | window actions |
 | `gala snap left\|right\|up\|down <window>`, `gala move <window> x y w h` | Snap, Move |
 | `gala wallpaper <name>` | Wallpaper |
+| `gala tray`, `gala tray click <hwnd> <id> [right]` | Tray, TrayClick |
 | `gala ps` | processes (SystemProcessInformation) |
 | `gala kill <pid\|name>` | OpenProcess/TerminateProcess; a name ends every process of that image but gala itself |
 | `gala install`, `search`, `list`, `upgrade`, `uninstall` | packages ("Installing software") |
@@ -6653,7 +6736,15 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   else AND mask then XOR colour; monochrome icons from the mask's
   halves). System icons and cursors are shared; programs' own load from
   RT_GROUP_ICON/RT_GROUP_CURSOR resources (the nearest size) through
-  CreateIconFromResourceEx (BMP form, 1-32 bits; not PNG entries yet).
+  CreateIconFromResourceEx: the BMP form (1-32 bits) or the PNG form
+  (Vista's compressed icons, decoded by gdiplus's `png.rs`, one source
+  for both DLLs: its alpha makes the mask), made at the cx/cy asked
+  (LR_DEFAULTSIZE: 32) by an alpha-weighted area average when the image
+  has alpha, else by the nearest pixel (the AND mask stays exact).
+  LoadImageW also reads .ico files (LR_LOADFROMFILE: the ICONDIR entry
+  nearest the size) and draws the standard icon at sizes other than 32
+  (a new icon, not the shared one). GalaIconArgb (gala's own export)
+  hands an icon's pixels to shell32's notification area. `tray_test`.
 - LoadBitmapW makes a DDB from an RT_BITMAP resource (a packed DIB)
   through gdi32's CreateDIBitmap; the predefined OBM_ bitmaps are not
   there yet (recorded).
@@ -6912,6 +7003,17 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   window, position); the calls answer as documented while it lasts, but
   nothing draws the drag image yet (recorded per drag; it needs saving
   and restoring the window's pixels under it).
+- **Icons at the metrics' sizes** (`icons.rs`; `tray_test`, Wine's
+  comctl32 misc.c run on Windows): LoadIconMetric (#380: LIM_SMALL
+  SM_CXSMICON x SM_CYSMICON, LIM_LARGE SM_CXICON x SM_CYICON; another
+  metric E_INVALIDARG with the icon NULL) and LoadIconWithScaleDown
+  (#381: any size): a module's group gives its smallest image at least
+  that large (else its largest), scaled down by
+  CreateIconFromResourceEx; without a module an IDI_ id is the standard
+  icon at that size and a string a .ico file. A missing name or out
+  pointer is E_INVALIDARG; no such icon (resource or file)
+  HRESULT_FROM_WIN32(ERROR_RESOURCE_TYPE_NOT_FOUND), as Windows 10 and
+  11 answer. The two ordinals are pinned (`build.rs`).
 - **Flat scroll bars** (`flatsb.rs`): comctl32 6 draws no flat ones, so
   a window's are its user32 scroll bars (every FlatSB_ scroll call is
   user32's); InitializeFlatSB gives the window a record of the
@@ -7254,7 +7356,8 @@ windows can use them too.
   FOF_MULTIDESTFILES, directories recursively; with no dialogs and no
   recycle bin it proceeds without confirmation and deletes for good
   (both recorded when asked otherwise). SHChangeNotify has no listener
-  to tell; Shell_NotifyIconW fails (no notification area, recorded).
+  to tell. Shell_NotifyIconW/A and Shell_NotifyIconGetRect are the
+  notification area's (`tray.rs`, "The notification area").
 - **shell32's shell links** (`link.rs`; `shell32_test`): CLSID_ShellLink,
   registered in the seed's `HKLM\SOFTWARE\Classes\CLSID` with shell32
   as its in-process server (Windows serves it from windows.storage.dll)
