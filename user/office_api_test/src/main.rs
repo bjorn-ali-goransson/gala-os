@@ -86,6 +86,30 @@
 //! - AttachConsole and AllocConsole in a process that has a console
 //!   (GetConsoleCP not 0; run-all.ps1's programs and gala's have one):
 //!   ERROR_ACCESS_DENIED; GetDiskFreeSpaceA of the system drive.
+//! - What the Click-to-Run client's UI (OfficeC2RClient.exe) needs to
+//!   start (Wine's atom.c run on Windows): the local atom table
+//!   (InitAtomTable TRUE; AddAtom W and A one string atom whatever the
+//!   case, FindAtom finds it, the global table does not; GetAtomName the
+//!   first spelling, cut to fit with its NUL and the characters copied
+//!   returned; "#1234" and MAKEINTATOM their own values, "#1234" the
+//!   name of 1234; counted deletes, then ERROR_FILE_NOT_FOUND); the
+//!   app-model API set `api-ms-win-appmodel-runtime-l1-1-2.dll` loads,
+//!   its AppPolicy queries answer a desktop program's policies,
+//!   GetCurrentPackageFullName APPMODEL_ERROR_NO_PACKAGE.
+//!   oleaut32 by ordinal, as the client imports it (Wine's vartest.c,
+//!   safearray.c and olefont.c run on Windows): DECIMAL from an integer
+//!   and a double (15 digits, no trailing zeros) and back; addition and
+//!   subtraction at the larger scale; a product at the scales' sum
+//!   (1.5 x 2 = 3.0); quotients exact where they can be (1/4 = 0.25),
+//!   else 28 digits (1/3), by zero DISP_E_DIVBYZERO; Int towards
+//!   negative infinity, Fix towards zero; Round; Cmp across scales and
+//!   signs. SafeArrayRedim grows the last dimension (its lower bound
+//!   too; old elements kept, new ones zero), shrinks it, and refuses a
+//!   locked array (DISP_E_ARRAYISLOCKED). OleCreateFontIndirect gives
+//!   an IFont with the description's name, size, bold (weight above
+//!   550), italic and weight; put_Bold(FALSE) is weight 400; its HFONT
+//!   has that face, weight and italic at the size in points at the
+//!   screen's pixels per inch.
 //!
 //! Prints `<name>: ok` and exits with 0, or prints `<name>: check N got X
 //! (line L)` and exits with N.
@@ -299,6 +323,17 @@ unsafe extern "system" {
 )]
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
+    fn InitAtomTable(size: u32) -> i32;
+    fn AddAtomW(name: *const u16) -> u16;
+    fn AddAtomA(name: *const u8) -> u16;
+    fn FindAtomW(name: *const u16) -> u16;
+    fn FindAtomA(name: *const u8) -> u16;
+    fn DeleteAtom(atom: u16) -> u16;
+    fn GetAtomNameW(atom: u16, buf: *mut u16, size: i32) -> u32;
+    fn GetAtomNameA(atom: u16, buf: *mut u8, size: i32) -> u32;
+    fn GlobalFindAtomW(name: *const u16) -> u16;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> usize;
     fn GetUserDefaultGeoName(name: *mut u16, size: i32) -> i32;
     fn GetUserGeoID(class: u32) -> i32;
     fn GetGeoInfoW(geo: i32, kind: u32, data: *mut u16, size: i32, lang: u16) -> i32;
@@ -1090,6 +1125,415 @@ fn run() -> Result<(), u32> {
     geo_and_lockdown(&mut c)?;
     url_zones(&mut c)?;
     adapters(&mut c)?;
+    c2r_client(&mut c)?;
+    c2r_oleaut(&mut c)?;
+    #[cfg(target_arch = "x86_64")]
+    c2r_d3dcompiler(&mut c)?;
+    Ok(())
+}
+
+/// d3dcompiler_47.dll, which OfficeC2RClient.exe (64-bit) imports
+/// (D3DCompile): D3DCreateBlob gives a zeroed blob of the size asked
+/// (ID3DBlob: QueryInterface, AddRef, Release, GetBufferPointer,
+/// GetBufferSize). D3DCompile of a one-line pixel shader: on Windows
+/// S_OK with code; on gala, which has no HLSL compiler yet (a recorded
+/// stopgap, ROADMAP GPU G2), a failure with no code and an error-message
+/// blob, as a compile that cannot be done answers.
+#[cfg(target_arch = "x86_64")]
+fn c2r_d3dcompiler(c: &mut Checks) -> Result<(), u32> {
+    type CreateBlob = extern "system" fn(usize, *mut usize) -> i32;
+    type Compile = extern "system" fn(
+        *const u8,
+        usize,
+        *const u8,
+        usize,
+        usize,
+        *const u8,
+        *const u8,
+        u32,
+        u32,
+        *mut usize,
+        *mut usize,
+    ) -> i32;
+    // SAFETY: the DLL's documented functions; our blobs.
+    unsafe {
+        let dll: [u16; 24] = w("d3dcompiler_47.dll");
+        let m = LoadLibraryW(dll.as_ptr());
+        c.ok(m != 0, u64::from(GetLastError()))?;
+        let create = GetProcAddress(m, b"D3DCreateBlob\0".as_ptr());
+        let compile = GetProcAddress(m, b"D3DCompile\0".as_ptr());
+        c.ok(create != 0 && compile != 0, 0)?;
+        let create: CreateBlob = core::mem::transmute(create);
+        let compile: Compile = core::mem::transmute(compile);
+        let slot = |obj: usize, i: usize| -> usize { *(*(obj as *const *const usize)).add(i) };
+        let mut blob = 0usize;
+        c.eq(create(16, &mut blob).into_u64(), 0)?;
+        let size: extern "system" fn(usize) -> usize = core::mem::transmute(slot(blob, 4));
+        let ptr: extern "system" fn(usize) -> *const u8 = core::mem::transmute(slot(blob, 3));
+        c.eq(size(blob) as u64, 16)?;
+        let p = ptr(blob);
+        c.ok(!p.is_null() && core::slice::from_raw_parts(p, 16).iter().all(|&b| b == 0), 0)?;
+        let release: extern "system" fn(usize) -> u32 = core::mem::transmute(slot(blob, 2));
+        c.eq(release(blob).into(), 0)?;
+        let src = b"float4 main() : SV_Target { return float4(1, 0, 0, 1); }";
+        let (mut code, mut errors) = (0usize, 0usize);
+        let hr = compile(
+            src.as_ptr(),
+            src.len(),
+            null(),
+            0,
+            0,
+            b"main\0".as_ptr(),
+            b"ps_4_0\0".as_ptr(),
+            0,
+            0,
+            &mut code,
+            &mut errors,
+        );
+        if ntrt::on_gala() {
+            c.ok(hr < 0 && code == 0 && errors != 0, hr.into_u64())?;
+            c.ok(size(errors) > 1, 0)?;
+            release(errors);
+        } else {
+            c.eq(hr.into_u64(), 0)?;
+            c.ok(code != 0 && size(code) > 0, 0)?;
+            release(code);
+            if errors != 0 {
+                release(errors);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DECIMAL (wtypes.h).
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Decimal {
+    reserved: u16,
+    scale: u8,
+    sign: u8,
+    hi: u32,
+    lo: u64,
+}
+
+fn dec(sign: u8, scale: u8, lo: u64) -> Decimal {
+    Decimal { reserved: 0, scale, sign, hi: 0, lo }
+}
+
+/// FONTDESC (olectl.h).
+#[repr(C)]
+struct FontDesc {
+    size: u32,
+    name: *const u16,
+    cy: i64,
+    weight: i16,
+    charset: i16,
+    italic: i32,
+    underline: i32,
+    strikethrough: i32,
+}
+
+/// SAFEARRAYBOUND.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SafeArrayBound {
+    count: u32,
+    lower: i32,
+}
+
+// oleaut32 by ordinal, as OfficeC2RClient.exe imports it.
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "oleaut32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "oleaut32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    #[link_ordinal(40)]
+    fn SafeArrayRedim(sa: usize, bound: *const SafeArrayBound) -> i32;
+    #[link_ordinal(177)]
+    fn VarDecAdd(a: *const Decimal, b: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(178)]
+    fn VarDecDiv(a: *const Decimal, b: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(179)]
+    fn VarDecMul(a: *const Decimal, b: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(181)]
+    fn VarDecSub(a: *const Decimal, b: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(187)]
+    fn VarDecFix(a: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(188)]
+    fn VarDecInt(a: *const Decimal, out: *mut Decimal) -> i32;
+    #[link_ordinal(192)]
+    fn VarDecFromI4(v: i32, out: *mut Decimal) -> i32;
+    #[link_ordinal(194)]
+    fn VarDecFromR8(v: f64, out: *mut Decimal) -> i32;
+    #[link_ordinal(203)]
+    fn VarDecRound(a: *const Decimal, places: i32, out: *mut Decimal) -> i32;
+    #[link_ordinal(204)]
+    fn VarDecCmp(a: *const Decimal, b: *const Decimal) -> i32;
+    #[link_ordinal(220)]
+    fn VarR8FromDec(a: *const Decimal, out: *mut f64) -> i32;
+    #[link_ordinal(420)]
+    fn OleCreateFontIndirect(desc: *const FontDesc, iid: *const [u8; 16], out: *mut usize) -> i32;
+    #[link_ordinal(411)]
+    fn SafeArrayCreateVector(vt: u16, lower: i32, count: u32) -> usize;
+    #[link_ordinal(16)]
+    fn SafeArrayDestroy(sa: usize) -> i32;
+    #[link_ordinal(21)]
+    fn SafeArrayLock(sa: usize) -> i32;
+    #[link_ordinal(22)]
+    fn SafeArrayUnlock(sa: usize) -> i32;
+    #[link_ordinal(19)]
+    fn SafeArrayGetUBound(sa: usize, dim: u32, out: *mut i32) -> i32;
+    #[link_ordinal(20)]
+    fn SafeArrayGetLBound(sa: usize, dim: u32, out: *mut i32) -> i32;
+    #[link_ordinal(25)]
+    fn SafeArrayGetElement(sa: usize, index: *const i32, out: *mut i32) -> i32;
+    #[link_ordinal(26)]
+    fn SafeArrayPutElement(sa: usize, index: *const i32, value: *const i32) -> i32;
+    #[link_ordinal(6)]
+    fn SysFreeString(s: *mut u16);
+}
+
+/// What OfficeC2RClient.exe imports from oleaut32 by ordinal: DECIMAL
+/// arithmetic and conversions (Wine's vartest.c run on Windows),
+/// SafeArrayRedim (safearray.c), OleCreateFontIndirect (olefont.c).
+fn c2r_oleaut(c: &mut Checks) -> Result<(), u32> {
+    const DISP_E_DIVBYZERO: i32 = 0x8002_0012u32 as i32;
+    const DISP_E_ARRAYISLOCKED: i32 = 0x8002_000du32 as i32;
+    const VT_I4: u16 = 3;
+    let mut out = Decimal::default();
+    let eq = |c: &mut Checks, hr: i32, got: Decimal, want: Decimal| -> Result<(), u32> {
+        c.eq(hr.into_u64(), 0)?;
+        c.ok(got == want, u64::from(got.scale) << 56 | u64::from(got.sign) << 48 | got.lo)
+    };
+    // SAFETY: our DECIMALs, arrays and objects throughout.
+    unsafe {
+        c.eq(VarDecFromI4(-5, &mut out).into_u64(), 0)?;
+        eq(c, 0, out, dec(0x80, 0, 5))?;
+        let r = VarDecAdd(&dec(0, 1, 15), &dec(0, 2, 225), &mut out);
+        eq(c, r, out, dec(0, 2, 375))?; // 1.5 + 2.25 = 3.75
+        let r = VarDecSub(&dec(0, 0, 1), &dec(0, 0, 3), &mut out);
+        eq(c, r, out, dec(0x80, 0, 2))?; // 1 - 3 = -2
+        let r = VarDecMul(&dec(0, 1, 15), &dec(0, 0, 2), &mut out);
+        eq(c, r, out, dec(0, 1, 30))?; // 1.5 * 2 = 3.0
+        let r = VarDecDiv(&dec(0, 0, 1), &dec(0, 0, 4), &mut out);
+        eq(c, r, out, dec(0, 2, 25))?; // 1 / 4 = 0.25
+        let r = VarDecDiv(&dec(0, 0, 1), &dec(0, 0, 3), &mut out);
+        eq(c, r, out, Decimal { scale: 28, hi: 0x0ac5_44ca, lo: 0x14b7_00cb_0555_5555, ..out })?;
+        c.eq(
+            VarDecDiv(&dec(0, 0, 1), &dec(0, 0, 0), &mut out).into_u64(),
+            DISP_E_DIVBYZERO.into_u64(),
+        )?;
+        let r = VarDecInt(&dec(0x80, 1, 15), &mut out);
+        eq(c, r, out, dec(0x80, 0, 2))?; // Int(-1.5) = -2
+        let r = VarDecFix(&dec(0x80, 1, 15), &mut out);
+        eq(c, r, out, dec(0x80, 0, 1))?; // Fix(-1.5) = -1
+        let r = VarDecRound(&dec(0, 3, 1236), 2, &mut out);
+        eq(c, r, out, dec(0, 2, 124))?;
+        let r = VarDecRound(&dec(0, 4, 12345), 2, &mut out);
+        eq(c, r, out, dec(0, 2, 123))?;
+        c.eq(VarDecCmp(&dec(0, 1, 15), &dec(0, 2, 150)).into_u64(), 1)?; // VARCMP_EQ
+        c.eq(VarDecCmp(&dec(0x80, 0, 1), &dec(0, 0, 1)).into_u64(), 0)?; // VARCMP_LT
+        c.eq(VarDecCmp(&dec(0, 0, 2), &dec(0, 0, 1)).into_u64(), 2)?; // VARCMP_GT
+        let r = VarDecFromR8(0.1, &mut out);
+        eq(c, r, out, dec(0, 1, 1))?;
+        let r = VarDecFromR8(-1234.5678, &mut out);
+        eq(c, r, out, dec(0x80, 4, 12_345_678))?;
+        let mut d = 0.0f64;
+        c.eq(VarR8FromDec(&dec(0, 4, 12_345_678), &mut d).into_u64(), 0)?;
+        c.ok(d == 1234.5678, d.to_bits())?;
+
+        // SafeArrayRedim: longer (the lower bound too), shorter, locked.
+        let sa = SafeArrayCreateVector(VT_I4, 0, 3);
+        c.ok(sa != 0, 0)?;
+        for i in 0..3 {
+            let v = 10 + i;
+            c.eq(SafeArrayPutElement(sa, &i, &v).into_u64(), 0)?;
+        }
+        c.eq(SafeArrayRedim(sa, &SafeArrayBound { count: 5, lower: 1 }).into_u64(), 0)?;
+        let (mut lo, mut hi) = (0, 0);
+        SafeArrayGetLBound(sa, 1, &mut lo);
+        SafeArrayGetUBound(sa, 1, &mut hi);
+        c.eq((lo as u64) << 32 | hi as u64, 1 << 32 | 5)?;
+        for (i, want) in [(1, 10), (3, 12), (5, 0)] {
+            let mut v = -1;
+            c.eq(SafeArrayGetElement(sa, &i, &mut v).into_u64(), 0)?;
+            c.eq(v as u64, want)?;
+        }
+        c.eq(SafeArrayRedim(sa, &SafeArrayBound { count: 2, lower: 1 }).into_u64(), 0)?;
+        SafeArrayGetUBound(sa, 1, &mut hi);
+        c.eq(hi as u64, 2)?;
+        SafeArrayLock(sa);
+        let locked = SafeArrayRedim(sa, &SafeArrayBound { count: 4, lower: 0 });
+        c.eq(locked.into_u64(), DISP_E_ARRAYISLOCKED.into_u64())?;
+        SafeArrayUnlock(sa);
+        c.eq(SafeArrayDestroy(sa).into_u64(), 0)?;
+
+        // OleCreateFontIndirect: IFont's properties and its HFONT.
+        const IID_IFONT: [u8; 16] = [
+            0x02, 0xe0, 0xf6, 0xbe, 0x74, 0xa8, 0x1a, 0x10, 0x8b, 0xba, 0x00, 0xaa, 0x00, 0x30,
+            0x0c, 0xab,
+        ];
+        let face: [u16; 8] = w("Arial");
+        let desc = FontDesc {
+            size: size_of::<FontDesc>() as u32,
+            name: face.as_ptr(),
+            cy: 180_000, // 18 points
+            weight: 700,
+            charset: 0,
+            italic: 1,
+            underline: 0,
+            strikethrough: 0,
+        };
+        let mut font = 0usize;
+        c.eq(OleCreateFontIndirect(&desc, &IID_IFONT, &mut font).into_u64(), 0)?;
+        c.ok(font != 0, 0)?;
+        let call = |slot: usize| -> usize { *(*(font as *const *const usize)).add(slot) };
+        let mut name: *mut u16 = null_mut();
+        let get_name: extern "system" fn(usize, *mut *mut u16) -> i32 =
+            core::mem::transmute(call(3));
+        c.eq(get_name(font, &mut name).into_u64(), 0)?;
+        c.ok(!name.is_null() && units(name) == &face[..5], 0)?;
+        SysFreeString(name);
+        let mut cy = 0i64;
+        let get_size: extern "system" fn(usize, *mut i64) -> i32 = core::mem::transmute(call(5));
+        c.eq(get_size(font, &mut cy).into_u64(), 0)?;
+        c.eq(cy as u64, 180_000)?;
+        let get_flag = |slot: usize, out: &mut i32| -> i32 {
+            let f: extern "system" fn(usize, *mut i32) -> i32 = core::mem::transmute(call(slot));
+            f(font, out)
+        };
+        let mut v = 7;
+        c.eq(get_flag(7, &mut v).into_u64(), 0)?; // get_Bold
+        c.eq(v as u64, 1)?;
+        c.eq(get_flag(9, &mut v).into_u64(), 0)?; // get_Italic
+        c.eq(v as u64, 1)?;
+        c.eq(get_flag(11, &mut v).into_u64(), 0)?; // get_Underline
+        c.eq(v as u64, 0)?;
+        let mut weight = 0i16;
+        let get_weight: extern "system" fn(usize, *mut i16) -> i32 = core::mem::transmute(call(15));
+        c.eq(get_weight(font, &mut weight).into_u64(), 0)?;
+        c.eq(weight as u64, 700)?;
+        let put_bold: extern "system" fn(usize, i32) -> i32 = core::mem::transmute(call(8));
+        c.eq(put_bold(font, 0).into_u64(), 0)?;
+        get_weight(font, &mut weight);
+        c.eq(weight as u64, 400)?;
+        let mut hfont = 0usize;
+        let get_hfont: extern "system" fn(usize, *mut usize) -> i32 =
+            core::mem::transmute(call(19));
+        c.eq(get_hfont(font, &mut hfont).into_u64(), 0)?;
+        c.ok(hfont != 0, 0)?;
+        // The HFONT: Arial, 400, italic, 18 points at the screen's LOGPIXELSY.
+        let gdi: [u16; 12] = w("gdi32.dll");
+        let user: [u16; 12] = w("user32.dll");
+        let (g, u) = (LoadLibraryW(gdi.as_ptr()), LoadLibraryW(user.as_ptr()));
+        let get_object: extern "system" fn(usize, i32, *mut u8) -> i32 =
+            core::mem::transmute(GetProcAddress(g, b"GetObjectW\0".as_ptr()));
+        let caps: extern "system" fn(usize, i32) -> i32 =
+            core::mem::transmute(GetProcAddress(g, b"GetDeviceCaps\0".as_ptr()));
+        let get_dc: extern "system" fn(usize) -> usize =
+            core::mem::transmute(GetProcAddress(u, b"GetDC\0".as_ptr()));
+        let release_dc: extern "system" fn(usize, usize) -> i32 =
+            core::mem::transmute(GetProcAddress(u, b"ReleaseDC\0".as_ptr()));
+        let dc = get_dc(0);
+        let dpi = caps(dc, 90);
+        release_dc(0, dc);
+        let mut lf = [0u8; 92];
+        c.eq(get_object(hfont, 92, lf.as_mut_ptr()) as u64, 92)?;
+        let height = i32::from_le_bytes([lf[0], lf[1], lf[2], lf[3]]);
+        c.eq(height as u64, (-(18 * dpi + 36) / 72) as u64)?;
+        c.eq(u64::from(u32::from_le_bytes([lf[16], lf[17], lf[18], lf[19]])), 400)?;
+        c.eq(lf[20].into(), 1)?;
+        c.ok(lf[28..38] == [65, 0, 114, 0, 105, 0, 97, 0, 108, 0], lf[28].into())?;
+        let release: extern "system" fn(usize) -> u32 = core::mem::transmute(call(2));
+        c.eq(release(font).into(), 0)?;
+    }
+    Ok(())
+}
+
+/// What OfficeC2RClient.exe (Click-to-Run's React Native UI) needs of
+/// kernel32 to start: the local atom table (AddAtomW, FindAtomW,
+/// GetAtomNameW/A, DeleteAtom; expectations from Wine's kernel32 atom.c
+/// run on Windows), and the app-model API set its C++ runtime loads for
+/// the app policies (`api-ms-win-appmodel-runtime-l1-1-2.dll`: a desktop
+/// program ends with ExitProcess, initializes no Windows Runtime, shows
+/// developer diagnostics, is a classic desktop window model, and has no
+/// package: APPMODEL_ERROR_NO_PACKAGE).
+fn c2r_client(c: &mut Checks) -> Result<(), u32> {
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
+    print(NAME.as_bytes());
+    print(b": c2r client\r\n");
+    // SAFETY: our strings and buffers with their sizes.
+    unsafe {
+        c.eq(InitAtomTable(37).into_u64(), 1)?;
+        let name: [u16; 16] = w("gala_c2r_atom");
+        let atom = AddAtomW(name.as_ptr());
+        c.ok(atom >= 0xc000, atom.into())?;
+        c.eq(AddAtomA(b"GALA_C2R_ATOM\0".as_ptr()).into(), atom.into())?;
+        let other: [u16; 16] = w("Gala_C2R_Atom");
+        c.eq(FindAtomW(other.as_ptr()).into(), atom.into())?;
+        c.eq(FindAtomA(b"gala_c2r_ATOM\0".as_ptr()).into(), atom.into())?;
+        // The local table is not the global one.
+        SetLastError(0xdead_beef);
+        let global = GlobalFindAtomW(name.as_ptr());
+        c.fails(global != 0, ERROR_FILE_NOT_FOUND)?;
+        // The name as first added, as much as fits with its NUL.
+        let mut buf = [0x2e2eu16; 16];
+        c.eq(GetAtomNameW(atom, buf.as_mut_ptr(), 16).into(), 13)?;
+        c.ok(buf[..14] == name[..14], u64::from(buf[0]))?;
+        let mut short = [0x2e2eu16; 8];
+        c.eq(GetAtomNameW(atom, short.as_mut_ptr(), 6).into(), 5)?;
+        c.ok(
+            short[..6] == [0x67, 0x61, 0x6c, 0x61, 0x5f, 0] && short[6] == 0x2e2e,
+            short[5].into(),
+        )?;
+        let mut a = [b'.'; 16];
+        c.eq(GetAtomNameA(atom, a.as_mut_ptr(), 16).into(), 13)?;
+        c.ok(&a[..14] == b"gala_c2r_atom\0", a[0].into())?;
+        let mut a = [b'.'; 8];
+        c.eq(GetAtomNameA(atom, a.as_mut_ptr(), 6).into(), 5)?;
+        c.ok(&a[..7] == b"gala_\0.", a[5].into())?;
+        // Integer atoms: "#1234" and MAKEINTATOM are their own values.
+        let hash: [u16; 8] = w("#1234");
+        c.eq(AddAtomW(hash.as_ptr()).into(), 1234)?;
+        c.eq(AddAtomW(0x1234 as *const u16).into(), 0x1234)?;
+        let mut n = [0u16; 8];
+        c.eq(GetAtomNameW(1234, n.as_mut_ptr(), 8).into(), 5)?;
+        c.ok(n[..6] == hash[..6], n[0].into())?;
+        // Counted: two adds, two deletes, then gone.
+        c.eq(DeleteAtom(atom).into(), 0)?;
+        c.eq(FindAtomW(name.as_ptr()).into(), atom.into())?;
+        c.eq(DeleteAtom(atom).into(), 0)?;
+        SetLastError(0xdead_beef);
+        let gone = FindAtomW(name.as_ptr());
+        c.fails(gone != 0, ERROR_FILE_NOT_FOUND)?;
+
+        // The app-model API set and its policies.
+        let set: [u16; 48] = w("api-ms-win-appmodel-runtime-l1-1-2.dll");
+        let m = LoadLibraryW(set.as_ptr());
+        c.ok(m != 0, u64::from(GetLastError()))?;
+        let token = -6isize as Handle; // GetCurrentThreadEffectiveToken
+        for (name, want) in [
+            (&b"AppPolicyGetProcessTerminationMethod\0"[..], 0u32), // ExitProcess
+            (b"AppPolicyGetThreadInitializationType\0", 0),         // None
+            (b"AppPolicyGetShowDeveloperDiagnostic\0", 1),          // ShowUI
+            (b"AppPolicyGetWindowingModel\0", 2),                   // ClassicDesktop
+        ] {
+            let f = GetProcAddress(m, name.as_ptr());
+            c.ok(f != 0, 0)?;
+            let f: extern "system" fn(Handle, *mut u32) -> i32 = core::mem::transmute(f);
+            let mut policy = 0xdead_beef;
+            c.eq(f(token, &mut policy).into_u64(), 0)?;
+            c.eq(policy.into(), want.into())?;
+        }
+        let f = GetProcAddress(m, b"GetCurrentPackageFullName\0".as_ptr());
+        c.ok(f != 0, 0)?;
+        let f: extern "system" fn(*mut u32, *mut u16) -> i32 = core::mem::transmute(f);
+        let mut len = 0u32;
+        c.eq(f(&mut len, null_mut()).into_u64(), APPMODEL_ERROR_NO_PACKAGE.into())?;
+    }
     Ok(())
 }
 

@@ -15,6 +15,8 @@ use core::ffi::c_void;
 mod arith;
 mod conversions;
 mod date;
+mod decimal;
+mod font;
 mod safearray;
 mod unimplemented;
 mod variant;

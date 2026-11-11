@@ -1171,6 +1171,16 @@ the kernel.
    vkd3d-shader compiler for `build.sh`, or assemble the two shaders
    with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
    beside the program the same way.
+   `d3dcompiler_47.dll` (the decision, for Office's Click-to-Run UI,
+   which imports D3DCompile): gala's own DLL with a working
+   D3DCreateBlob and no HLSL compiler: D3DCompile, D3DCompile2 and
+   D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message
+   blob, recorded with the target profile (a stopgap, named so: compiled
+   shaders need a Direct3D 11 device, which d3d11's G0 stub does not
+   give, so a program cannot use them yet anyway; `office_api_test`
+   expects Windows' S_OK on Windows). It is replaced by a real compiler
+   with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
+   on it) behind this DLL's exports, PREBUILT.
 3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
 4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
@@ -1866,15 +1876,27 @@ need gala's.
      LoadIconMetric and LoadIconWithScaleDown, PNG icons and sizes in
      CreateIconFromResourceEx, .ico files in LoadImageW; `tray_test`,
      `wow64_tray_test`; ARCHITECTURE "The notification area"); whether
-     the flyout then shows is the next run's to see. OfficeC2RClient.exe, the client's React Native UI
-     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), does not
-     start: 0xc0000135, its static imports `D3DCOMPILER_47.dll` (a
-     system DLL gala lacks) and, through Office's own DLLs,
-     `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
-     (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
-     ordinal 420. Next, in that order: the splash thread's fault (the
-     Windows measurement above); OfficeC2RClient.exe's imports, then its
-     React Native UI (Direct3D
+     the flyout then shows is the next run's to see.
+     OfficeC2RClient.exe, the client's React Native UI
+     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), started with
+     0xc0000135. Done, test first (`office_api_test`,
+     `wow64_office_api_test`; `tools/import_survey.py --roots
+     OfficeC2RClient.exe --static` lists only two stubs left, kernel32's
+     GetCurrencyFormatW and GetNumberFormatW, which end the process if
+     called): kernel32's local atom table (AddAtomW/A,
+     FindAtomW/A, GetAtomNameW/A, DeleteAtom, InitAtomTable, and the
+     global table's A forms); the app-model API sets
+     (`api-ms-win-appmodel-runtime-*`, which its C++ runtime loads for
+     the app policies) resolve to kernelbase, and kernel32 answers the
+     AppPolicy queries and the package queries
+     (APPMODEL_ERROR_NO_PACKAGE); oleaut32's imports by ordinal:
+     OleCreateFontIndirect (#420, an IFont), SafeArrayRedim (#40) and the
+     DECIMAL functions (VarDecAdd/Sub/Mul/Div/Abs/Fix/Int/Neg/Round/Cmp,
+     VarDecFromI4/R8, VarR8FromDec); `d3dcompiler_47.dll` (below and
+     GPU G2's decision). Not yet run: whether the UI then starts (a run
+     of `office_install_gui`). Next, in that order: the splash thread's fault
+     (the Windows measurement above); OfficeC2RClient.exe's React Native
+     UI (Direct3D
      11 through GPU G2, DirectComposition). Found on the way, not yet
      done: CreateWindowEx sends no WM_SIZE/WM_MOVE after WM_CREATE to a
      child or popup window (Wine's msg.c WmCreateChildSeq,

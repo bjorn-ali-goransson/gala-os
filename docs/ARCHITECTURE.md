@@ -2823,7 +2823,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   itself is forwarders to ole32: "COM: ole32 and oleaut32");
   crt to msvcrt); `crt-` sets to ucrtbase, security/eventing/service
   sets to advapi32, `downlevel-<dll>-*` to that DLL, `shcore-*` to
-  shcore, `power-*` to powrprof; unknown contracts are looked up as files
+  shcore, `power-*` to powrprof, `appmodel-runtime-*` to kernelbase
+  (Wine's schema names kernelbase for l1-1-2; kernel32 has the AppPolicy
+  and package queries: a desktop program's policies, no package);
+  unknown contracts are looked up as files
   (and so not found). The same map is in `tools/import_survey.py`.
 - **kernelbase** (`user/kernelbase`) exports Windows' kernelbase list
   (`exports.txt`, made from Wine's kernelbase.spec by
@@ -4040,7 +4043,18 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   SAFEARRAYs (descriptors with the VARTYPE/IRecordInfo/IID prefix, bounds
   stored rightmost first, BSTR/interface/VARIANT elements owned;
   SafeArrayAllocDescriptorEx leaves cbElements 0, as Windows does, and
-  SafeArrayCreate sets it);
+  SafeArrayCreate sets it; SafeArrayRedim changes the last dimension,
+  the stored first: elements cut off released, new ones zeroed, a locked
+  array DISP_E_ARRAYISLOCKED, static data refused and recorded);
+  DECIMAL arithmetic (`decimal.rs`: VarDecAdd/Sub/Mul/Div/Abs/Fix/Int/
+  Neg/Round/Cmp, VarDecFromI4/R8, VarR8FromDec; exact where it fits,
+  else digits dropped from the scale, half to even; quotients exact or
+  28 digits; a double as 15 significant digits); OleCreateFontIndirect
+  (`font.rs`: StdFont with IUnknown and IFont, its HFONT made through
+  gdi32 loaded on first use at the size in points at the screen's
+  LOGPIXELSY over 2540 HIMETRIC; IFontDisp, IPersistStream and
+  QueryTextMetrics recorded unsupported) (`office_api_test`: Office's
+  Click-to-Run UI imports them by ordinal);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are not registered. Its exports have
@@ -7873,10 +7887,14 @@ as winget runs them:
   for every 64-bit process), GetThreadUILanguage and
   SetThreadPreferredUILanguages (en-US is the only valid language: the
   thread's list is en-US or empty, nothing is kept; another language is
-  skipped and recorded), the global atom table (GlobalAddAtomW,
-  GlobalFindAtomW, GlobalDeleteAtom, GlobalGetAtomNameW: integer atoms
-  and counted string atoms from 0xC000; **limit**: per process, where
-  Windows keeps one per session, so other processes do not see them),
+  skipped and recorded), the atom tables (`atom.rs`: the global one,
+  GlobalAddAtomW/A, GlobalFindAtomW/A, GlobalDeleteAtom,
+  GlobalGetAtomNameW/A, and the process's local one, AddAtomW/A,
+  FindAtomW/A, DeleteAtom, GetAtomNameW/A, InitAtomTable: integer atoms
+  and counted string atoms from 0xC000, names cut to the buffer with
+  their NUL; **limit**: the global table is per process too, where
+  Windows keeps one per session, so other processes do not see its
+  atoms; `office_api_test`),
   IsWow64GuestMachineSupported and GetSystemWow64DirectoryW (x86 and
   SysWOW64, through WOW64: Inno's check); the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
   ITIMEMARKPOSN, ICALENDARTYPE, IOPTIONALCALENDAR, IFIRSTDAYOFWEEK,
@@ -11705,6 +11723,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 | Stage | Content | Tests | Status |
 |---|---|---|---|
 | G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
 | G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |

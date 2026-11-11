@@ -1072,6 +1072,12 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
     Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
     Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
+    // The HLSL compiler's DLL: D3DCreateBlob; no compiler yet (G2).
+    Dll {
+        package: "d3dcompiler_47",
+        file: "d3dcompiler_47.dll",
+        exported_as: "testd3dcompiler_47.dll",
+    },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -3278,6 +3284,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "wldp.dll", "Windows/System32"),
     ("office_api_test", "urlmon.dll", "Windows/System32"),
     ("office_api_test", "iphlpapi.dll", "Windows/System32"),
+    // OfficeC2RClient.exe's oleaut32 imports by ordinal; the font's HFONT
+    // through gdi32 and user32 (loaded by the test).
+    ("office_api_test", "oleaut32.dll", "Windows/System32"),
+    ("office_api_test", "user32.dll", "Windows/System32"),
+    ("office_api_test", "gdi32.dll", "Windows/System32"),
+    ("office_api_test", "d3dcompiler_47.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3287,6 +3299,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/iphlpapi.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
