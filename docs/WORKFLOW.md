@@ -412,10 +412,9 @@ xtask that change how a scenario boots:
   the 3.0 MB/s a gala guest fetched that CDN with under TCG (curl, 512
   MiB in 179 s onto a disk-backed C:), plus the ~6 min before the
   download, doubled for a slower host (`OFFICE_INSTALL_TIMEOUT`). The
-  client itself fetches at about 0.7 MB/s under TCG (a connection per
-  256 KiB range and its own work between ranges, ROADMAP OF), so
-  without KVM its download cannot finish in that time; a TCG run shows
-  how far it gets. Dump scenarios 25 s. A
+  client itself fetches at about 0.6 MB/s per connection under TCG
+  (several connections, 256 KiB ranges, ROADMAP OF) and finishes its
+  download in about 1650 s of TCG run time. Dump scenarios 25 s. A
   `SINGLE_THREAD_TCG` scenario's limit doubles without KVM. Every limit
   counts the VM's *run time*, not wall time (`xtask/src/vmtime.rs`): the
   wall time less the run-queue wait of its most-starved vCPU thread
@@ -1977,10 +1976,20 @@ it on first use.
   program's own log, or the events up to the first error path, before
   filling the last gap.
 - **office_install's run time.** Under TCG (no KVM, the agent sandbox)
-  the run takes about 90 s of its 120 s limit before the Click-to-Run
-  client starts; with KVM (CI's boot runners) it is a fraction. Pass
-  `XTASK_TIMEOUT=600` to see further locally rather than raising the
-  scenario's limit.
+  the run takes about 90 s before the Click-to-Run client starts and
+  its download about 1650 s more; with KVM (CI's boot runners) it is a
+  fraction. Its service (the second OfficeClickToRun.exe) logs to
+  `C:\Windows\Temp\GALA-*.log`, the client and setup.exe to
+  `C:\Users\Public`; read both with `cargo xtask disk-files` from the
+  kept image. Pass `XTASK_EVENTS=net` for each connection's bytes
+  (`tcp close` lines).
+- **A run that slows down as it goes** (the same work taking longer
+  each minute, every process at once): look for kernel work that grows
+  with what was ever made rather than what exists. The NMI state dump's
+  backtraces show where the CPUs are; `stats: threads` and the dump's
+  `sched: M threads ... in S slots` show the scheduler's table (it was
+  the cause in office_install: 9000 dead threads' records walked at
+  every tick).
 - **.NET**: the ledger first, then `XTASK_EVENTS=syscall,image,fault`.
   CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the
   OS (read only, as any application's documentation).

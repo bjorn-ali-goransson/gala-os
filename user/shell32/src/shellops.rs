@@ -2,7 +2,7 @@
 //! (ShellExecuteW/ShellExecuteExW), dropped files (DragQueryFileW and
 //! friends on an HDROP), file operations (SHFileOperationW), and the
 //! notifications gala has no receiver for (SHChangeNotify,
-//! Shell_NotifyIconW, SHGetIconOverlayIndexW). As documented; see
+//! SHGetIconOverlayIndexW; the notification area is `tray.rs`). As documented; see
 //! user/shell32_test.
 //!
 //! gala has no file associations: ShellExecute runs programs (.exe and
@@ -631,14 +631,6 @@ pub extern "system" fn SHChangeNotify(
     _item1: *const c_void,
     _item2: *const c_void,
 ) {
-}
-
-/// Shell_NotifyIconW: gala's taskbar has no notification area yet, so
-/// the icon is not added (FALSE, recorded with the message).
-#[unsafe(no_mangle)]
-pub extern "system" fn Shell_NotifyIconW(message: u32, _data: *const c_void) -> i32 {
-    record(b"shell32.dll!Shell_NotifyIconW(no notification area)", message.into());
-    0
 }
 
 /// The icon paths SHGetIconOverlayIndexW has handed indexes for (a hash

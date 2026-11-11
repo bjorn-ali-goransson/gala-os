@@ -644,3 +644,57 @@ pub extern "system" fn SafeArrayGetVartype(sa: *const SafeArray, out: *mut u16) 
     put(out, vt);
     S_OK
 }
+
+const FADF_FIXEDSIZE: u16 = 0x10;
+
+/// SafeArrayRedim(psa, psaboundNew): the least significant dimension (the
+/// last one, stored first, whose elements are contiguous blocks at the
+/// end) takes the new bound: its lower bound, and its count, the
+/// elements cut off released (BSTRs, interfaces, VARIANTs) and new ones
+/// zeroed. A locked array DISP_E_ARRAYISLOCKED; a fixed-size one, or
+/// NULL arguments, E_INVALIDARG.
+#[unsafe(no_mangle)]
+pub extern "system" fn SafeArrayRedim(sa: *mut SafeArray, bound: *const Bound) -> HResult {
+    if sa.is_null() || bound.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's descriptor and bound.
+    let (s, new) = unsafe { (&mut *sa, *bound) };
+    if s.features & FADF_FIXEDSIZE != 0 {
+        return E_INVALIDARG;
+    }
+    if s.locks > 0 {
+        return DISP_E_ARRAYISLOCKED;
+    }
+    let features = s.features;
+    let size = s.element_size as usize;
+    let b = bounds_mut(sa);
+    b[0].lower = new.lower;
+    if new.count == b[0].count {
+        return S_OK;
+    }
+    let inner: usize = b[1..].iter().map(|x| x.count as usize).product();
+    let (old_cells, new_cells) = (b[0].count as usize * inner, new.count as usize * inner);
+    if features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED) != 0 {
+        missing(b"oleaut32.dll!SafeArrayRedim(static data)", features.into());
+        return E_INVALIDARG;
+    }
+    let data = alloc_zeroed((new_cells * size).max(1));
+    if data.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    if !s.data.is_null() {
+        if features & FADF_OWNED != 0 {
+            for i in new_cells..old_cells {
+                // SAFETY: the cells cut off, inside the old data.
+                clear_element(features, unsafe { s.data.add(i * size) });
+            }
+        }
+        // SAFETY: both blocks hold at least this many bytes.
+        unsafe { core::ptr::copy_nonoverlapping(s.data, data, old_cells.min(new_cells) * size) };
+        free(s.data);
+    }
+    s.data = data;
+    b[0].count = new.count;
+    S_OK
+}

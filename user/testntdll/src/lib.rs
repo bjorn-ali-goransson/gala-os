@@ -340,6 +340,8 @@ syscall_stubs! {
     GalaWinEventUnhook = 0x7f71, fn(id: u32);
     GalaWinEventNotify = 0x7f72, fn(event: u32, hwnd: u64, object: i32, child: i32);
     GalaWinEventTake = 0x7f73, fn(records: *mut u8, max: u32, count: *mut u32);
+    // The notification area (Shell_NotifyIcon, Shell_NotifyIconGetRect).
+    GalaTrayIcon = 0x7f74, fn(op: u32, request: *const u8, length: usize, rect: *mut i32);
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);
@@ -1542,9 +1544,10 @@ const CORE_HOSTS: &[(&[u8], &[u8])] = &[
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
 /// implement them (whatever files of those names exist): the core sets to
-/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase;
-/// gala keeps the rest coarse: security, eventing and services are
-/// advapi32; other names are looked up as files.
+/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase,
+/// the app model's runtime sets to kernelbase; gala keeps the rest
+/// coarse: security, eventing and services are advapi32; other names are
+/// looked up as files.
 fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
     let set = name.strip_prefix(b"api-ms-win-")?;
     let host: &[u8] = if set.starts_with(b"crt-") {
@@ -1557,6 +1560,11 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {
         b"powrprof.dll"
+    } else if set.starts_with(b"appmodel-runtime-") {
+        // The app model's queries (AppPolicy*, GetCurrentPackage*): the
+        // schema's host for l1-1-2 is kernelbase (Wine's
+        // apisetschema.spec), which forwards them to kernel32.
+        b"kernelbase.dll"
     } else {
         // Other sets are looked up as files, except the downlevel ones,
         // which name the DLL that implements them

@@ -120,6 +120,10 @@ const USAGE: &str = "usage: gala <command> [arguments]
   snap left|right|up|down <window>
   move <window> <x> <y> <width> <height>
   wallpaper <name>              dunes, ribbons, najdi, night or drawn
+  tray                          list the notification area's icons
+  tray click <hwnd> <id> [right]
+                                click an icon (its program gets what a click
+                                with the mouse sends it)
   ps                            list the processes
   kill <pid|name>               end a process (every one of that name)
   attach <session>              the console shows that session (its desktop on the
@@ -168,6 +172,11 @@ const ACTION_SNAP: u32 = 8;
 const ACTION_MOVE: u32 = 9;
 const ACTION_WALLPAPER: u32 = 10;
 const ACTION_PROGRAMS: u32 = 11;
+const ACTION_TRAY: u32 = 12;
+const ACTION_TRAY_CLICK: u32 = 13;
+/// A notification-area icon's entry (kernel/src/nt/action.rs TRAY_ENTRY).
+const TRAY_ENTRY: usize = 44 + 2 * 128;
+const MAX_TRAY: usize = 64;
 const LIST_HEADER: usize = 8;
 const TITLE: usize = 128;
 const WINDOW_ENTRY: usize = 40 + 2 * TITLE;
@@ -745,6 +754,82 @@ fn list_programs() -> u32 {
     0
 }
 
+/// `gala tray`: the notification area's icons.
+fn list_tray() -> u32 {
+    static mut BUF: [u8; LIST_HEADER + MAX_TRAY * TRAY_ENTRY] =
+        [0; LIST_HEADER + MAX_TRAY * TRAY_ENTRY];
+    // SAFETY: the only reference to BUF while this runs (one thread).
+    let b = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+    let (status, n) = request(ACTION_TRAY, 0, [0; 4], &[], b);
+    if status != STATUS_SUCCESS {
+        return status_error(status, "listed");
+    }
+    let count = n.saturating_sub(LIST_HEADER) / TRAY_ENTRY;
+    Line::new()
+        .s("HWND")
+        .to(10)
+        .s("ID")
+        .to(16)
+        .s("PID")
+        .to(23)
+        .s("VERSION")
+        .to(31)
+        .s("X")
+        .to(37)
+        .s("Y")
+        .to(43)
+        .s("TIP")
+        .print();
+    for i in 0..count {
+        let e = &b[LIST_HEADER + i * TRAY_ENTRY..];
+        let hwnd = u64::from(u32_at(e, 0)) | u64::from(u32_at(e, 4)) << 32;
+        let mut l = Line::new();
+        l.hex(hwnd, 5).to(10).dec(i64::from(u32_at(e, 8))).to(16);
+        l.dec(i64::from(u32_at(e, 12))).to(23).dec(i64::from(u32_at(e, 16))).to(31);
+        if u32_at(e, 20) & 1 != 0 {
+            l.s("hidden").to(43);
+        } else {
+            l.dec(i64::from(u32_at(e, 24) as i32)).to(37).dec(i64::from(u32_at(e, 28) as i32));
+            l.to(43);
+        }
+        let len = (u32_at(e, 40) as usize).min(128);
+        let mut tip = [0u16; 128];
+        for (k, c) in tip.iter_mut().enumerate().take(len) {
+            *c = u16::from_le_bytes([e[44 + 2 * k], e[45 + 2 * k]]);
+        }
+        l.w(&tip[..len]).print();
+    }
+    0
+}
+
+/// `gala tray click <hwnd> <id> [right]`.
+fn tray_click(a: &Args) -> u32 {
+    let usage = "gala tray click <hwnd> <id> [right]";
+    if a.count < 5 || a.count > 6 {
+        return fail(EXIT_USAGE, &[usage]);
+    }
+    let (Some(hwnd), Some(id)) = (number(a.get(3)), number(a.get(4))) else {
+        return fail(EXIT_USAGE, &[usage]);
+    };
+    let button = if a.count == 6 {
+        if !a.is(5, "right") {
+            return fail(EXIT_USAGE, &[usage]);
+        }
+        1
+    } else {
+        0
+    };
+    let (status, _) =
+        request(ACTION_TRAY_CLICK, hwnd as u64, [id as i32, button, 0, 0], &[], &mut []);
+    if status == STATUS_OBJECT_NAME_NOT_FOUND {
+        return fail(EXIT_NOT_FOUND, &["no such icon in the notification area"]);
+    }
+    if status != STATUS_SUCCESS {
+        return status_error(status, "clicked");
+    }
+    0
+}
+
 /// A process from SystemProcessInformation: (pid, parent, threads, name).
 fn for_each_process(mut f: impl FnMut(u32, u32, u32, &[u16])) -> Result<(), u32> {
     // A 256 KiB buffer from the stack would be large; the process heap is
@@ -968,6 +1053,10 @@ fn run() -> u32 {
         list_windows()
     } else if a.is(1, "programs") {
         list_programs()
+    } else if a.is(1, "tray") && a.count == 2 {
+        list_tray()
+    } else if a.is(1, "tray") && a.is(2, "click") {
+        tray_click(&a)
     } else if a.is(1, "snap") {
         let side = ["left", "right", "up", "down"].iter().position(|s| a.is(2, s));
         let Some(side) = side else {

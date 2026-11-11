@@ -103,6 +103,7 @@ def resolve(dll):
         if r.startswith(("security-", "eventing-", "service-")): return "advapi32.dll"
         if r.startswith("shcore-"): return "shcore.dll"
         if r.startswith("power-"): return "powrprof.dll"
+        if r.startswith("appmodel-runtime-"): return "kernelbase.dll"
     return d
 
 def own_exports(d):

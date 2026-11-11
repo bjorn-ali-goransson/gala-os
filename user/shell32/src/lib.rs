@@ -16,6 +16,7 @@ mod fileinfo;
 mod icons;
 mod link;
 mod shellops;
+mod tray;
 mod unimplemented;
 
 // The 32-bit build (SysWOW64) takes the memory routines, 64-bit

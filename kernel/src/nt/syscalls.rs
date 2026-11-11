@@ -204,6 +204,9 @@ pub const GALA_WIN_EVENT_HOOK: u32 = 0x7f70;
 pub const GALA_WIN_EVENT_UNHOOK: u32 = 0x7f71;
 pub const GALA_WIN_EVENT_NOTIFY: u32 = 0x7f72;
 pub const GALA_WIN_EVENT_TAKE: u32 = 0x7f73;
+/// The notification area (Shell_NotifyIcon; ARCHITECTURE "The
+/// notification area").
+pub const GALA_TRAY_ICON: u32 = 0x7f74;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -434,6 +437,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
     (GALA_WIN_EVENT_NOTIFY, "GalaWinEventNotify", 4, gala_win_event_notify),
     (GALA_WIN_EVENT_TAKE, "GalaWinEventTake", 3, gala_win_event_take),
+    (GALA_TRAY_ICON, "GalaTrayIcon", 4, gala_tray_icon),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -2704,6 +2708,123 @@ fn gala_window_capture(call: &mut Call<'_>) -> NtStatus {
     let id = arg!(call, 0) as u32;
     let owner = call.process.id;
     tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((d.capture(id, owner)?, None))));
+    NtStatus::SUCCESS
+}
+
+/// GalaTrayIcon's request (shell32 builds it from NOTIFYICONDATA, the
+/// same bytes for 32- and 64-bit callers): version (1), flags (NIF_*),
+/// hWnd (u64), uID, uCallbackMessage, dwState, dwStateMask, uVersion,
+/// dwInfoFlags, guidItem (16 bytes), the icon's side (0: none, at most
+/// TRAY_MAX_SIDE; the desktop scales it to 16 x 16), zero, then szTip
+/// (128 UTF-16 units), szInfoTitle (64), szInfo (256) and the icon (side
+/// x side 0xAARRGGBB, straight alpha, in room for the largest).
+pub const TRAY_REQUEST_VERSION: u32 = 1;
+pub const TRAY_TEXT_AT: usize = 64;
+pub const TRAY_ICON_AT: usize = TRAY_TEXT_AT
+    + 2 * (super::desktop::tray::TIP_LEN
+        + super::desktop::tray::TITLE_LEN
+        + super::desktop::tray::INFO_LEN);
+pub const TRAY_MAX_SIDE: usize = 64;
+pub const TRAY_REQUEST: usize = TRAY_ICON_AT + 4 * TRAY_MAX_SIDE * TRAY_MAX_SIDE;
+/// GalaTrayIcon's operation besides NIM_*: the icon's screen rectangle
+/// (Shell_NotifyIconGetRect) into `rect` (x, y, width, height as i32).
+pub const TRAY_RECT: u32 = 0x10;
+
+/// Decodes GalaTrayIcon's request (`TRAY_REQUEST` bytes):
+/// STATUS_INVALID_PARAMETER for another version or icon size.
+pub fn tray_request(b: &[u8]) -> Result<super::desktop::tray::Data, NtStatus> {
+    use super::desktop::tray;
+    if b.len() < TRAY_REQUEST {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    if u32_at(0) != TRAY_REQUEST_VERSION {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let side = u32_at(56) as usize;
+    if side > TRAY_MAX_SIDE {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let text = |at: usize, n: usize| -> Result<Vec<u16>, NtStatus> {
+        let units = &b[at..at + 2 * n];
+        let len = units.chunks_exact(2).position(|u| u == [0, 0]).unwrap_or(n);
+        let mut v = Vec::new();
+        v.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
+        v.extend(units[..2 * len].chunks_exact(2).map(|u| u16::from_le_bytes([u[0], u[1]])));
+        Ok(v)
+    };
+    let tip_at = TRAY_TEXT_AT;
+    let title_at = tip_at + 2 * tray::TIP_LEN;
+    let info_at = title_at + 2 * tray::TITLE_LEN;
+    let mut given = Vec::new();
+    given.try_reserve_exact(side * side).map_err(|_| NtStatus::NO_MEMORY)?;
+    given.extend(
+        b[TRAY_ICON_AT..TRAY_ICON_AT + 4 * side * side]
+            .chunks_exact(4)
+            .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+    );
+    let icon = if side == 0 {
+        Vec::new()
+    } else {
+        super::desktop::scale_icon_to(&given, side, tray::ICON).ok_or(NtStatus::NO_MEMORY)?
+    };
+    let mut hwnd = [0u8; 8];
+    hwnd.copy_from_slice(&b[8..16]);
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(&b[40..56]);
+    Ok(tray::Data {
+        flags: u32_at(4),
+        hwnd: u64::from_le_bytes(hwnd),
+        uid: u32_at(16),
+        callback: u32_at(20),
+        state: u32_at(24),
+        state_mask: u32_at(28),
+        version: u32_at(32),
+        info_flags: u32_at(36),
+        guid,
+        tip: text(tip_at, tray::TIP_LEN)?,
+        title: text(title_at, tray::TITLE_LEN)?,
+        info: text(info_at, tray::INFO_LEN)?,
+        icon,
+    })
+}
+
+/// GalaTrayIcon(op, *request, length, *rect): Shell_NotifyIcon's
+/// message `op` (NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETFOCUS,
+/// NIM_SETVERSION) on the caller's session's notification area, or
+/// TRAY_RECT (the icon's screen rectangle into `rect`). Fails with
+/// STATUS_NOT_SUPPORTED where no shell runs (a bare desktop),
+/// OBJECT_NAME_COLLISION for an icon added twice, OBJECT_NAME_NOT_FOUND
+/// for one that is not there.
+fn gala_tray_icon(call: &mut Call<'_>) -> NtStatus {
+    use super::desktop::tray;
+    let op = arg!(call, 0) as u32;
+    let (ptr, len, out) = (arg!(call, 1), arg!(call, 2) as usize, arg!(call, 3));
+    if len != TRAY_REQUEST {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut raw = Vec::new();
+    if raw.try_reserve_exact(TRAY_REQUEST).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    raw.resize(TRAY_REQUEST, 0u8);
+    if call.process.read(ptr, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let data = tri!(tray_request(&raw));
+    let shell = &call.process.desk.shell;
+    if op == TRAY_RECT {
+        let r = tri!(super::desktop::tray_rect(shell, tray::Key::of(&data)));
+        let mut b = [0u8; 16];
+        for (i, v) in [r.x, r.y, r.w, r.h].into_iter().enumerate() {
+            b[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_le_bytes());
+        }
+        if call.process.write(out, &b).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        return NtStatus::SUCCESS;
+    }
+    tri!(super::desktop::tray_op(shell, call.process.id, op, &data));
     NtStatus::SUCCESS
 }
 

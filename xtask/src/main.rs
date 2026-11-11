@@ -1072,6 +1072,12 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
     Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
     Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
+    // The HLSL compiler's DLL: D3DCreateBlob; no compiler yet (G2).
+    Dll {
+        package: "d3dcompiler_47",
+        file: "d3dcompiler_47.dll",
+        exported_as: "testd3dcompiler_47.dll",
+    },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -3278,6 +3284,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "wldp.dll", "Windows/System32"),
     ("office_api_test", "urlmon.dll", "Windows/System32"),
     ("office_api_test", "iphlpapi.dll", "Windows/System32"),
+    // OfficeC2RClient.exe's oleaut32 imports by ordinal; the font's HFONT
+    // through gdi32 and user32 (loaded by the test).
+    ("office_api_test", "oleaut32.dll", "Windows/System32"),
+    ("office_api_test", "user32.dll", "Windows/System32"),
+    ("office_api_test", "gdi32.dll", "Windows/System32"),
+    ("office_api_test", "d3dcompiler_47.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3287,6 +3299,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/iphlpapi.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
@@ -3355,6 +3370,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // The notification area, PNG icons, LoadIconMetric (user/tray_test),
+    // x64 on the screen and x86 on a Test presenter.
+    ("tray_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("tray_test", "ntdll.dll", "Windows/System32"),
+    ("tray_test", "kernel32.dll", "Windows/System32"),
+    ("tray_test", "user32.dll", "Windows/System32"),
+    ("tray_test", "gdi32.dll", "Windows/System32"),
+    ("tray_test", "shell32.dll", "Windows/System32"),
+    ("tray_test", "comctl32.dll", "Windows/System32"),
+    ("wow64_tray_test", "wow64.dll", "Windows/System32"),
+    ("wow64_tray_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/comctl32.dll", "Windows/SysWOW64"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -3613,6 +3644,7 @@ const USER_PROGRAMS: &[&str] = &[
     "wofutil_test",
     "gdiplus_test",
     "uisettings_test",
+    "tray_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -3630,6 +3662,7 @@ const USER_PROGRAMS: &[&str] = &[
 const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_gdiplus_test",
     "wow64_uisettings_test",
+    "wow64_tray_test",
     "wow64_test",
     "wow64_thread_test",
     "wow64_import_test",
@@ -5105,6 +5138,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "filezilla",
     "console_window",
     "start_menu",
+    "tray_test",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -6853,6 +6887,39 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_gdiplus_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_gdiplus_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The notification area (user/tray_test): Shell_NotifyIcon's
+        // messages, the icon on shasha's taskbar, `gala tray` and its
+        // clicks, then a real click (TRAY_SCREEN); PNG icons and
+        // LoadIconMetric. UEFI: a screen.
+        name: "tray_test",
+        cmdline: "qemu_exit wallpaper=night run=tray_test.exe args=screen",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "tray_test: icons",
+            "desktop: notification-area icon added: window",
+            "tray_test: icon at 1168,776",
+            "tray_test: gala tray",
+            "tray_test: click the icon",
+            "tray_test: clicked",
+            "xtask: screen ok",
+            "desktop: notification-area icon deleted: window",
+            "tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same from a 32-bit program, on a Test presenter (a shell
+        // without a screen: BIOS).
+        name: "wow64_tray_test",
+        cmdline: "qemu_exit presenter=test run=wow64_tray_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: notification-area icon added: window",
+            "wow64_tray_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
@@ -10809,6 +10876,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
+    ("tray_test", "needs a screen (the notification area is on the taskbar)"),
+    ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
 ];
 
 /// The kernel flags gala-um applies to a scenario's run (`um_command`),
@@ -12591,6 +12660,35 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
 /// start button (Gala's fortress) and the window's button centred, the
 /// clock at the right; the start menu (600 x 640) opens centred above it
 /// at (340, 100). Shaded colours are checked as "some pixel near".
+/// tray_test's icon on the taskbar (1280 x 800: the first icon's slot is
+/// 32 px left of the clock's 96, its middle at (1168, 776)): the blue
+/// square with the white middle, then a click on it with the mouse
+/// (from the middle of the screen), which the program waits for.
+const TRAY_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "tray_test: click the icon",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(1160, 768, 4, 4, 0x2080f0), // the icon's blue
+                PixelCheck::At(1168, 776, 0xffffff),          // its white middle
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 255",
+                "mouse_move 255 121",
+                "mouse_move 18 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+    ],
+};
+
 const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
     marker: "gui_test: painted",
     steps: &[
@@ -12841,6 +12939,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ),
     ("gui_test", GUI_TEST_SCREEN),
     ("start_menu", START_MENU_SCREEN),
+    ("tray_test", TRAY_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),

@@ -521,6 +521,15 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         heap.slab_pages,
         heap.large_pages
     );
+    #[cfg(not(feature = "hosted"))]
+    {
+        let (threads, dead, slots) = sched::thread_counts();
+        info!(
+            "stats: threads: {} made since boot, {threads} in the scheduler's table \
+             ({dead} dead not reaped yet), {slots} slots",
+            sched::threads_made()
+        );
+    }
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.
     raise_rollback_floor();

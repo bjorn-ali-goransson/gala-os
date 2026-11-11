@@ -242,7 +242,7 @@ const BY_SCHED_MAX: usize = 1 << 16;
 /// kept its process alive. Out of memory it is not indexed and `current`
 /// finds it by a scan.
 fn bind_sched(id: ThreadId, object: &ObjectRef) {
-    let i = id.as_usize();
+    let i = id.index();
     if i >= BY_SCHED_MAX {
         return;
     }
@@ -260,7 +260,7 @@ fn bind_sched(id: ThreadId, object: &ObjectRef) {
 /// Forgets `object` as the NT thread of scheduler thread `id`.
 fn unbind_sched(id: ThreadId, object: &ObjectRef) {
     let mut table = BY_SCHED.lock();
-    if let Some(slot) = table.get_mut(id.as_usize())
+    if let Some(slot) = table.get_mut(id.index())
         && slot.as_ref().is_some_and(|o| KArc::ptr_eq(o, object))
     {
         *slot = None;
@@ -273,7 +273,7 @@ pub fn current() -> Option<ObjectRef> {
     // An entry is checked: a scheduler id is reused once its thread is
     // gone, and an exit that missed `unbind_sched` must not name another
     // thread.
-    let indexed = BY_SCHED.lock().get(me.as_usize()).cloned().flatten();
+    let indexed = BY_SCHED.lock().get(me.index()).cloned().flatten();
     if let Some(o) = indexed
         && *as_thread(&o).sched_id.lock() == Some(me)
     {

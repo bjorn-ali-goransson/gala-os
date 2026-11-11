@@ -26,6 +26,9 @@ mod listbox;
 mod menu;
 mod message;
 mod monitor;
+// PNG-compressed icons: gdiplus's decoder, one source for both DLLs.
+#[path = "../../gdiplus/src/png.rs"]
+mod png;
 mod power;
 mod rect;
 mod scroll;
@@ -159,6 +162,14 @@ unsafe extern "system" {
 }
 
 /// Sets the thread's last error.
+/// The ledger names of png.rs's limits, and its way to record.
+pub(crate) const PNG_GAMA: &[u8] = b"user32.dll!png(gAMA not applied)";
+pub(crate) const PNG_INTERLACED: &[u8] = b"user32.dll!png(interlaced)";
+
+pub(crate) fn record(what: &[u8], detail: u64) {
+    window::unsupported(what, detail);
+}
+
 pub(crate) fn set_last_error(code: u32) {
     // SAFETY: a plain call.
     unsafe { SetLastError(code) };

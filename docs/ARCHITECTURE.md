@@ -495,12 +495,20 @@ stack window; the unmapped rest of the slot is the guard, so an overflow
 faults and is reported as #DF on IST1) and `Context` (saved rsp, the
 thread's XSAVE area; the switch pushes the six callee-saved registers).
 
-`sched` (`kernel/src/sched/`) keeps boxed `Thread`s in a vector indexed by
-`ThreadId` (ids are never reused) and a FIFO ready queue whose capacity is
-reserved at spawn time, so scheduling itself never allocates. Thread #0
+`sched` (`kernel/src/sched/`) keeps boxed `Thread`s in a table
+(`sched/table.rs`) and a FIFO ready queue whose capacity is reserved at
+spawn time (at least the table's slots), so scheduling itself never
+allocates. A `ThreadId` is a slot index (low 32 bits, `index()`) and the
+slot's generation (high bits): reaping a dead thread removes its record
+and frees the slot for the next thread, under a new id, so an id kept
+after its thread is gone (a wait queue's, `join`'s, `nt::thread`'s
+`BY_SCHED` index, which checks the whole id) names no thread, never a
+later one. The first thread in a slot has generation 0, so its id is the
+index (`#6`); a reused slot prints as `#6.2` (`ThreadId(6.2)` in thread
+dumps). Thread #0
 is the boot thread; an idle thread per CPU runs only when nothing else is
-ready and reaps dead threads (their kernel stacks, save areas, last
-address-space references). Every spawn also reaps a batch before it
+ready and reaps dead threads (their records with their kernel stacks,
+save areas, last address-space references). Every spawn also reaps a batch before it
 takes a stack: a machine that never idles (KVM, a program making and
 ending threads back to back) would otherwise fill the stack window's
 1024 slots with dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
@@ -515,13 +523,22 @@ current thread, idle thread (the boot CPU spawns one; each AP adopts its
 startup code as its idle thread in `run_ap`), quantum, need_resched and
 `prev`.
 
-Reaping (`sched::reap`) takes up to 8 dead threads' stacks and address
-spaces and drops them outside the scheduler lock. The idle loop's reap is
+Reaping (`sched::reap`) takes up to 8 dead threads' records out of the
+table and drops them (stacks, address-space references) outside the
+scheduler lock. The idle loop's reap is
 not preempted (`Cpu::reaping`): a preempted idle thread runs again only
 when its CPU is idle and would keep the 8 address spaces meanwhile.
 
 Invariants:
 
+- The table holds what runs and what has not been reaped yet, never
+  every thread made: the boot CPU's tick walks it under `SCHED` for
+  sleepers and timed-out waiters, as do `reap` and the state dump. With
+  records kept forever, the Click-to-Run client's 9000 short threads in
+  an hour made that walk hold the lock most of each tick under TCG
+  (ROADMAP OF). `stats: threads: N made since boot, M in the scheduler's
+  table ..., S slots` at the end of a run and the state dump's
+  `sched: M threads ... in S slots` show it.
 - `on_cpu`: set on a thread from the moment a CPU picks it until that
   CPU, after switching to the next thread, runs `finish_switch` (the lock
   is released before the switch). No other CPU picks a thread with
@@ -2823,7 +2840,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   itself is forwarders to ole32: "COM: ole32 and oleaut32");
   crt to msvcrt); `crt-` sets to ucrtbase, security/eventing/service
   sets to advapi32, `downlevel-<dll>-*` to that DLL, `shcore-*` to
-  shcore, `power-*` to powrprof; unknown contracts are looked up as files
+  shcore, `power-*` to powrprof, `appmodel-runtime-*` to kernelbase
+  (Wine's schema names kernelbase for l1-1-2; kernel32 has the AppPolicy
+  and package queries: a desktop program's policies, no package);
+  unknown contracts are looked up as files
   (and so not found). The same map is in `tools/import_survey.py`.
 - **kernelbase** (`user/kernelbase`) exports Windows' kernelbase list
   (`exports.txt`, made from Wine's kernelbase.spec by
@@ -4040,7 +4060,18 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   SAFEARRAYs (descriptors with the VARTYPE/IRecordInfo/IID prefix, bounds
   stored rightmost first, BSTR/interface/VARIANT elements owned;
   SafeArrayAllocDescriptorEx leaves cbElements 0, as Windows does, and
-  SafeArrayCreate sets it);
+  SafeArrayCreate sets it; SafeArrayRedim changes the last dimension,
+  the stored first: elements cut off released, new ones zeroed, a locked
+  array DISP_E_ARRAYISLOCKED, static data refused and recorded);
+  DECIMAL arithmetic (`decimal.rs`: VarDecAdd/Sub/Mul/Div/Abs/Fix/Int/
+  Neg/Round/Cmp, VarDecFromI4/R8, VarR8FromDec; exact where it fits,
+  else digits dropped from the scale, half to even; quotients exact or
+  28 digits; a double as 15 significant digits); OleCreateFontIndirect
+  (`font.rs`: StdFont with IUnknown and IFont, its HFONT made through
+  gdi32 loaded on first use at the size in points at the screen's
+  LOGPIXELSY over 2540 HIMETRIC; IFontDisp, IPersistStream and
+  QueryTextMetrics recorded unsupported) (`office_api_test`: Office's
+  Click-to-Run UI imports them by ordinal);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are not registered. Its exports have
@@ -6130,7 +6161,8 @@ session's is shown by nothing unless GalaSession attaches a presenter
   average from what user32 hands over, or else a letter tile; an accent
   pill under the active one, a grey one under the others); at the right
   a UTC clock over the date in 12-hour M/D/YYYY form (`tick` every
-  second from the input thread).
+  second from the input thread); left of the clock, the notification
+  area (below).
 - **Start menu** (600 x 640, centred above the taskbar): a search box
   (typing filters the programs, Enter starts the first, Esc or the
   Windows key closes; the Windows key pressed and released alone also
@@ -6163,6 +6195,82 @@ session's is shown by nothing unless GalaSession attaches a presenter
   a console window`) and a `window` event `start menu` (op start,
   install or missing; session, name, target, pid, status). Scenario
   `start_menu` (start_menu_test, screen check).
+
+#### The notification area
+
+Code: `desktop/tray.rs` (the icons, their messages, the balloon; host
+tests there and in `desktop/tests.rs`), shell32's `tray.rs`
+(Shell_NotifyIconW/A, Shell_NotifyIconGetRect), user32's GalaIconArgb.
+Test: `tray_test` and its x86 twin `wow64_tray_test` (Windows'
+expectations from Microsoft's documentation and Wine's shell32
+systray.c; on gala also `gala tray`, its clicks and a mouse click
+through the screen check).
+
+- **Icons**: per desktop, at most 64, each keyed by its window and id
+  (or its GUID with NIF_GUID), with the process that added it, its
+  callback message (NIF_MESSAGE), NOTIFYICON version, hidden state
+  (NIF_STATE's NIS_HIDDEN), tip (128 units) and pixels (16 x 16,
+  straight alpha: shell32 reads the HICON with user32's GalaIconArgb,
+  the kernel scales it). NIM_ADD of an icon there fails
+  (STATUS_OBJECT_NAME_COLLISION), NIM_MODIFY/NIM_DELETE/NIM_SETFOCUS/
+  NIM_SETVERSION of one that is not there fail
+  (STATUS_OBJECT_NAME_NOT_FOUND); Shell_NotifyIcon answers FALSE for
+  each. An icon goes with its process, or when a message to its window
+  fails because the window is gone (Windows' shell drops such icons
+  when the pointer passes over them).
+- **Layout**: slots 32 px wide right to left from the clock's 96 px,
+  the first added furthest left; the icon in the middle of its slot,
+  lit under the pointer (or with NIM_SETFOCUS's focus).
+  Shell_NotifyIconGetRect gives the slot's screen rectangle (E_FAIL for
+  an icon not shown).
+- **Messages** (to the icon's window, posted through the window
+  registry as the system's: `window::post_from_system`, after the
+  desktop's lock is let go): WM_MOUSEMOVE as the pointer moves over the
+  icon, the button messages on press and release, then on a release
+  from version 3 on NIN_SELECT (left) or WM_CONTEXTMENU (right). Version
+  4's layout: wParam the point (x, y as 16-bit halves), lParam the event
+  with the id in its high word; older versions: wParam the id, lParam
+  the event. No callback message, no messages.
+- **Balloon** (NIF_INFO): one at a time, a card of the start menu's
+  colours above the taskbar at the right (title in 14 px semibold, the
+  text wrapped to four lines); NIN_BALLOONSHOW when it shows,
+  NIN_BALLOONHIDE when another replaces it, NIN_BALLOONTIMEOUT after
+  BALLOON_SECONDS (7) clock ticks, NIN_BALLOONUSERCLICK when clicked
+  (it goes). NIIF_USER/NIIF_LARGE_ICON's own icon is not drawn
+  (recorded); no sound is played. The same card shows the tip of the
+  icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
+  line.
+- **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
+  one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
+  full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,
+  528/508), else the first version's (Wine's tests record that an
+  invalid cbSize works on Windows); V1 carries NIF_MESSAGE, NIF_ICON and
+  a 64-character NIF_TIP only, V3 and later the GUID. The A form widens
+  its texts from the ANSI code page. GalaTrayIcon's request is one
+  layout for both widths (`syscalls::tray_request`).
+- **Where nothing shows the desktop** (a bare one: no screen and no
+  `presenter=`, the server profile) there is no taskbar and so no
+  notification area: GalaTrayIcon is STATUS_NOT_SUPPORTED and
+  Shell_NotifyIcon FALSE (recorded `shell32.dll!Shell_NotifyIcon(no
+  notification area)`), as on Windows without Explorer.
+- **TaskbarCreated**: RegisterWindowMessage("TaskbarCreated") is a
+  registered message as any other; Windows broadcasts it when Explorer
+  (re)creates its taskbar, which programs answer by adding their icons
+  again. shasha's taskbar is made with the desktop and never re-made, so
+  there is no moment to broadcast it and gala does not. (Registered
+  messages are per process in gala's user32: the session-wide table
+  waits for the kernel's atoms, ROADMAP AG.)
+- **CLI parity**: GalaDesktopAction's Tray lists the icons and
+  TrayClick clicks one (`gala tray`, `gala tray click <hwnd> <id>
+  [right]`): `Desktop::tray_click` sends what the mouse's press and
+  release in the icon's middle send. A click passes UIPI against the
+  icon's window's process, as the window actions do.
+- **Observability**: `desktop: notification-area icon added/deleted:
+  window <hwnd> id <n>, pid <p> (<n> shown)` (and `not added/deleted`
+  with the status); every message a `window` event `tray` (op, session,
+  pid, hwnd, id, flags, status); a post that fails for another reason
+  than a gone window is a warning; gone windows' icons are logged as
+  removed.
 
 #### Window behaviour
 
@@ -6275,6 +6383,7 @@ registry ("Plan: windows across processes").
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
+| 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
@@ -6378,6 +6487,10 @@ CLI-first.
   - Wallpaper (the picture is decoded and scaled outside the desktop's
     lock, then swapped in and the screen redrawn; "drawn" is the drawn
     one).
+  - Tray (the notification area's icons: HWND, id, process id,
+    version, hidden, the screen rectangle, the tip) and TrayClick (the
+    request's HWND, the icon id in the first argument, the button in
+    the second: 0 left, 1 right).
   Windows are named by their HWND: the window registry's record
   (version 2) carries the window's id on the desktop, so the kernel
   goes from HWND to the desktop's window and back. Without shasha's
@@ -6408,6 +6521,7 @@ CLI-first.
 | `gala activate\|minimize\|maximize\|restore\|close <window>` | window actions |
 | `gala snap left\|right\|up\|down <window>`, `gala move <window> x y w h` | Snap, Move |
 | `gala wallpaper <name>` | Wallpaper |
+| `gala tray`, `gala tray click <hwnd> <id> [right]` | Tray, TrayClick |
 | `gala ps` | processes (SystemProcessInformation) |
 | `gala kill <pid\|name>` | OpenProcess/TerminateProcess; a name ends every process of that image but gala itself |
 | `gala install`, `search`, `list`, `upgrade`, `uninstall` | packages ("Installing software") |
@@ -6653,7 +6767,15 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   else AND mask then XOR colour; monochrome icons from the mask's
   halves). System icons and cursors are shared; programs' own load from
   RT_GROUP_ICON/RT_GROUP_CURSOR resources (the nearest size) through
-  CreateIconFromResourceEx (BMP form, 1-32 bits; not PNG entries yet).
+  CreateIconFromResourceEx: the BMP form (1-32 bits) or the PNG form
+  (Vista's compressed icons, decoded by gdiplus's `png.rs`, one source
+  for both DLLs: its alpha makes the mask), made at the cx/cy asked
+  (LR_DEFAULTSIZE: 32) by an alpha-weighted area average when the image
+  has alpha, else by the nearest pixel (the AND mask stays exact).
+  LoadImageW also reads .ico files (LR_LOADFROMFILE: the ICONDIR entry
+  nearest the size) and draws the standard icon at sizes other than 32
+  (a new icon, not the shared one). GalaIconArgb (gala's own export)
+  hands an icon's pixels to shell32's notification area. `tray_test`.
 - LoadBitmapW makes a DDB from an RT_BITMAP resource (a packed DIB)
   through gdi32's CreateDIBitmap; the predefined OBM_ bitmaps are not
   there yet (recorded).
@@ -6912,6 +7034,17 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   window, position); the calls answer as documented while it lasts, but
   nothing draws the drag image yet (recorded per drag; it needs saving
   and restoring the window's pixels under it).
+- **Icons at the metrics' sizes** (`icons.rs`; `tray_test`, Wine's
+  comctl32 misc.c run on Windows): LoadIconMetric (#380: LIM_SMALL
+  SM_CXSMICON x SM_CYSMICON, LIM_LARGE SM_CXICON x SM_CYICON; another
+  metric E_INVALIDARG with the icon NULL) and LoadIconWithScaleDown
+  (#381: any size): a module's group gives its smallest image at least
+  that large (else its largest), scaled down by
+  CreateIconFromResourceEx; without a module an IDI_ id is the standard
+  icon at that size and a string a .ico file. A missing name or out
+  pointer is E_INVALIDARG; no such icon (resource or file)
+  HRESULT_FROM_WIN32(ERROR_RESOURCE_TYPE_NOT_FOUND), as Windows 10 and
+  11 answer. The two ordinals are pinned (`build.rs`).
 - **Flat scroll bars** (`flatsb.rs`): comctl32 6 draws no flat ones, so
   a window's are its user32 scroll bars (every FlatSB_ scroll call is
   user32's); InitializeFlatSB gives the window a record of the
@@ -7254,7 +7387,8 @@ windows can use them too.
   FOF_MULTIDESTFILES, directories recursively; with no dialogs and no
   recycle bin it proceeds without confirmation and deletes for good
   (both recorded when asked otherwise). SHChangeNotify has no listener
-  to tell; Shell_NotifyIconW fails (no notification area, recorded).
+  to tell. Shell_NotifyIconW/A and Shell_NotifyIconGetRect are the
+  notification area's (`tray.rs`, "The notification area").
 - **shell32's shell links** (`link.rs`; `shell32_test`): CLSID_ShellLink,
   registered in the seed's `HKLM\SOFTWARE\Classes\CLSID` with shell32
   as its in-process server (Windows serves it from windows.storage.dll)
@@ -7770,10 +7904,14 @@ as winget runs them:
   for every 64-bit process), GetThreadUILanguage and
   SetThreadPreferredUILanguages (en-US is the only valid language: the
   thread's list is en-US or empty, nothing is kept; another language is
-  skipped and recorded), the global atom table (GlobalAddAtomW,
-  GlobalFindAtomW, GlobalDeleteAtom, GlobalGetAtomNameW: integer atoms
-  and counted string atoms from 0xC000; **limit**: per process, where
-  Windows keeps one per session, so other processes do not see them),
+  skipped and recorded), the atom tables (`atom.rs`: the global one,
+  GlobalAddAtomW/A, GlobalFindAtomW/A, GlobalDeleteAtom,
+  GlobalGetAtomNameW/A, and the process's local one, AddAtomW/A,
+  FindAtomW/A, DeleteAtom, GetAtomNameW/A, InitAtomTable: integer atoms
+  and counted string atoms from 0xC000, names cut to the buffer with
+  their NUL; **limit**: the global table is per process too, where
+  Windows keeps one per session, so other processes do not see its
+  atoms; `office_api_test`),
   IsWow64GuestMachineSupported and GetSystemWow64DirectoryW (x86 and
   SysWOW64, through WOW64: Inno's check); the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
   ITIMEMARKPOSN, ICALENDARTYPE, IOPTIONALCALENDAR, IFIRSTDAYOFWEEK,
@@ -11602,6 +11740,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 | Stage | Content | Tests | Status |
 |---|---|---|---|
 | G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
 | G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |

@@ -38,6 +38,7 @@ mod actctx;
 #[path = "../../kernelbase/src/address_wait.rs"]
 mod address_wait;
 mod ansi;
+mod appmodel;
 mod atom;
 mod calendar;
 mod console;

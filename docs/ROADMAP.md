@@ -1171,6 +1171,16 @@ the kernel.
    vkd3d-shader compiler for `build.sh`, or assemble the two shaders
    with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
    beside the program the same way.
+   `d3dcompiler_47.dll` (the decision, for Office's Click-to-Run UI,
+   which imports D3DCompile): gala's own DLL with a working
+   D3DCreateBlob and no HLSL compiler: D3DCompile, D3DCompile2 and
+   D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message
+   blob, recorded with the target profile (a stopgap, named so: compiled
+   shaders need a Direct3D 11 device, which d3d11's G0 stub does not
+   give, so a program cannot use them yet anyway; `office_api_test`
+   expects Windows' S_OK on Windows). It is replaced by a real compiler
+   with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
+   on it) behind this DLL's exports, PREBUILT.
 3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
 4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
@@ -1715,20 +1725,33 @@ need gala's.
      which failed for want of memory), eviction is a clock with no queue
      to grow, and pages of a mapped file leave unless a live view shows
      them (ARCHITECTURE "A disk-backed C:").
-     Where the run ends now: at the 3600 s limit with memory flat
-     (29000 frames free, no low-memory warning, the service's
-     reservations at 217), 1.7 GB in the data area: 4070 files (1.66 GB)
-     under `Program Files\Microsoft Office\Updates\Download\PackageFiles`
-     of the 5432 MB the client says it needs. After about 1400 s the
-     client's connections carry 3-10 MB each over 100-300 s, with a
-     connection now and then that receives nothing for 30 s; what it
-     waits for then is the next thing to find (its log,
-     `C:\Users\Public\GALA-*.log`, `cargo xtask disk-files`). Its log
-     also warns per file that kernel32's GetCachedSigningLevel is missing
-     (`kernel32.dll!GetCachedSigningLevel` missing export). At 0.6 MB/s
-     the 4.44 GB cannot arrive within 3600 s of TCG guest time (about
-     7400 s); the limit stays (no measurement says the run would end
-     sooner).
+     Done: the slowdown after about 1400 s (connections carrying 3-10 MB
+     over 100-300 s, TLS handshakes growing from 0.1 s to 1 s, the
+     download at 0.03 MB/s by 2000 s). The client makes a thread per
+     range and per pipe client, about 9000 in an hour, and the scheduler
+     kept every dead thread's record: the boot CPU's tick walked all of
+     them under the scheduler's lock for sleepers and timed-out waiters
+     (the NMI dump caught CPU 0 in `sched::on_tick`'s walk and CPU 1
+     spinning on the lock, with 8961 dead records). Now reaping removes a
+     record and its slot is reused under a new id (a slot's generation in
+     the id; ARCHITECTURE "Threads and scheduling"; `sched::table`'s unit
+     tests; `memload_test`: 2777 threads made, 10 slots).
+     Where the run ends now: the download completes in about 1650 s of
+     run time: 10701 of 10701 files (`CDownloadManager.RetryTelemetry`
+     `completeSuccess`), 1.82 GB over HTTP, 4.41 GB under
+     `Program Files\Microsoft Office\Updates\Download\PackageFiles`,
+     memory flat (the thread table at 33 threads in 40 slots at the
+     end). Then staging fails: repoman's `repoleaves.cpp:1028` `call
+     failed` with hr 0xa0000058, `SetCurrentState failed for operation=...
+     currentState=1 state=2`, `Failed to stage working op`; the stream
+     task is left failed and hibernated, and the client retries it every
+     minute with the same result until the 3600 s limit (its service log,
+     `C:\Windows\Temp\GALA-*.log`, `cargo xtask disk-files`). Its log
+     also warns per file that kernel32's GetCachedSigningLevel and
+     SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
+     getting proc addr for get/set cached signing level`, a warning; it
+     goes on); their answers for a file with no cached level need a
+     Windows measurement.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
@@ -1745,12 +1768,14 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: what the client waits for
-     after its first 1400 s (the 30 s idle connections), the stream
-     download's speed under TCG (the network path: `memload_test`'s
-     loopback HTTP moves about 1.4 MB/s, its AFD calls 4 ms each) and
-     what applying it needs; GetCachedSigningLevel and
-     SetCachedSigningLevel; HKCU from the caller's token; the RPC calls the client's
+     Next, in the order the run reaches them: what staging the
+     downloaded files needs (the 0xa0000058 above: which file-system
+     call repoman's staging makes and gets wrong; the events of the
+     client's file calls around the failure, `XTASK_EVENTS=syscall`),
+     then applying them; the stream download's speed under TCG (the
+     network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
+     its AFD calls 4 ms each); GetCachedSigningLevel and
+     SetCachedSigningLevel (a Windows measurement first); HKCU from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
      names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
      piece needs it); CryptCATAdmin*
@@ -1855,23 +1880,38 @@ need gala's.
      console (psexec -s -i), the account the scenario uses, to learn
      whether Windows' setup.exe faults there too.
      setup.exe ending so takes consolerun with it; the Click-to-Run
-     client and service go on downloading (1.4 GB on C: in 900 s), and
-     nothing is on the screen: the client's NotificationFlyout
-     ("Microsoft 365 and Office are installing in the background (0%)")
-     is shown at (-9999, -9999), where it waits to be placed by its
-     notification-area icon, which gala's shell32 refuses
-     (`Shell_NotifyIconW(no notification area)`, NIM_ADD and
-     NIM_SETVERSION); OfficeC2RClient.exe, the client's React Native UI
-     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), does not
-     start: 0xc0000135, its static imports `D3DCOMPILER_47.dll` (a
-     system DLL gala lacks) and, through Office's own DLLs,
-     `api-ms-win-appmodel-runtime-l1-1-2.dll`, kernel32's local atoms
-     (AddAtomW, FindAtomW, GetAtomNameW/A, DeleteAtom) and oleaut32's
-     ordinal 420. Next, in that order: the splash thread's fault (the
-     Windows measurement above); a notification area in
-     shasha's taskbar (Shell_NotifyIconW and Shell_NotifyIconGetRect,
-     comctl32's LoadIconMetric, PNG icons in CreateIconFromResourceEx);
-     OfficeC2RClient.exe's imports, then its React Native UI (Direct3D
+     client and service go on downloading (1.4 GB on C: in 900 s). The
+     client's NotificationFlyout ("Microsoft 365 and Office are
+     installing in the background (0%)") is shown at (-9999, -9999),
+     where it waits to be placed by its notification-area icon (NIM_ADD,
+     NIM_SETVERSION). Done: shasha's taskbar has a notification area
+     (Shell_NotifyIconW/A with every NIM_ message, the NOTIFYICONDATA
+     sizes and versions, version 4's callback layout, balloons,
+     Shell_NotifyIconGetRect; `gala tray` and its clicks; comctl32's
+     LoadIconMetric and LoadIconWithScaleDown, PNG icons and sizes in
+     CreateIconFromResourceEx, .ico files in LoadImageW; `tray_test`,
+     `wow64_tray_test`; ARCHITECTURE "The notification area"); whether
+     the flyout then shows is the next run's to see.
+     OfficeC2RClient.exe, the client's React Native UI
+     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), started with
+     0xc0000135. Done, test first (`office_api_test`,
+     `wow64_office_api_test`; `tools/import_survey.py --roots
+     OfficeC2RClient.exe --static` lists only two stubs left, kernel32's
+     GetCurrencyFormatW and GetNumberFormatW, which end the process if
+     called): kernel32's local atom table (AddAtomW/A,
+     FindAtomW/A, GetAtomNameW/A, DeleteAtom, InitAtomTable, and the
+     global table's A forms); the app-model API sets
+     (`api-ms-win-appmodel-runtime-*`, which its C++ runtime loads for
+     the app policies) resolve to kernelbase, and kernel32 answers the
+     AppPolicy queries and the package queries
+     (APPMODEL_ERROR_NO_PACKAGE); oleaut32's imports by ordinal:
+     OleCreateFontIndirect (#420, an IFont), SafeArrayRedim (#40) and the
+     DECIMAL functions (VarDecAdd/Sub/Mul/Div/Abs/Fix/Int/Neg/Round/Cmp,
+     VarDecFromI4/R8, VarR8FromDec); `d3dcompiler_47.dll` (below and
+     GPU G2's decision). Not yet run: whether the UI then starts (a run
+     of `office_install_gui`). Next, in that order: the splash thread's fault
+     (the Windows measurement above); OfficeC2RClient.exe's React Native
+     UI (Direct3D
      11 through GPU G2, DirectComposition). Found on the way, not yet
      done: CreateWindowEx sends no WM_SIZE/WM_MOVE after WM_CREATE to a
      child or popup window (Wine's msg.c WmCreateChildSeq,
