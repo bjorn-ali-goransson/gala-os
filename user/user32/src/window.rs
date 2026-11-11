@@ -85,6 +85,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
 const WM_QUIT: u32 = 0x0012;
+pub(crate) const WM_SHOWWINDOW: u32 = 0x0018;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETICON: u32 = 0x007f;
 /// The desktop's request to move a window (Snap; kernel desktop
@@ -1213,7 +1214,8 @@ pub(crate) fn finish_create(
     hwnd
 }
 
-/// DestroyWindow: WM_DESTROY, WM_NCDESTROY, then the window is gone.
+/// DestroyWindow: the window hidden, WM_DESTROY, WM_NCDESTROY, then the
+/// window is gone.
 #[unsafe(no_mangle)]
 pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     if window(hwnd).is_none() {
@@ -1229,6 +1231,22 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     };
     if was_shown {
         raise(EVENT_OBJECT_HIDE, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    }
+    // It is hidden before WM_DESTROY, without WM_SHOWWINDOW: its
+    // procedure sees IsWindowVisible 0 there, and a ShowWindow(SW_HIDE)
+    // of its own returns 0 (setup.exe's splash does that).
+    let hidden_desktop = with(|s| {
+        index_of(hwnd).map_or(0, |i| {
+            let w = &mut s.windows[i];
+            let d = if w.visible { w.desktop } else { 0 };
+            w.visible = false;
+            d
+        })
+    });
+    crate::foreign::sync(hwnd);
+    if hidden_desktop != 0 {
+        // SAFETY: our desktop window, hidden.
+        unsafe { GalaWindowShow(hidden_desktop, 0) };
     }
     // WM_DESTROY to the window, then its children (and theirs).
     SendMessageW(hwnd, WM_DESTROY, 0, 0);
@@ -1327,6 +1345,15 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     }
     let Some(i) = index_of(hwnd) else { return 0 };
     let show = cmd != 0; // SW_HIDE
+    // A change of visibility is announced first, while the window is
+    // still as it was: WM_SHOWWINDOW(shown, 0 for ShowWindow). Showing a
+    // shown window or hiding a hidden one sends nothing.
+    if window(hwnd).is_some_and(|w| w.visible != show) {
+        SendMessageW(hwnd, WM_SHOWWINDOW, usize::from(show), 0);
+        if window(hwnd).is_none() {
+            return 0;
+        }
+    }
     if window(hwnd).is_some_and(|w| w.parent != 0) {
         return crate::tree::show_child(hwnd, show);
     }

@@ -14,6 +14,12 @@ static int failed;
 #define CHECK(c) do { if (!(c)) { printf("wow64_gui_test: check failed at line %d\n", __LINE__); failed = __LINE__; } } while (0)
 
 static int created_cx, created_cy, created_ok, painted, destroyed, posted;
+/* WM_SHOWWINDOW: how many, the last wParam/lParam, whether the window
+   was already visible then, and whether one came before the first
+   WM_WINDOWPOSCHANGING after it was counted from zero. */
+static int shows, show_wp = -1, show_lp = -1, show_visible = -1, poschanging, show_first;
+/* In WM_DESTROY: IsWindowVisible and ShowWindow(SW_HIDE)'s answer. */
+static int destroy_visible = -1, destroy_hide = -1, destroy_shows = -1;
 #define COLOR RGB(0x12, 0x34, 0x56)
 
 static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -42,8 +48,24 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         painted++;
         return 0;
     }
+    case WM_SHOWWINDOW:
+        if (shows++ == 0 && poschanging == 0)
+            show_first = 1;
+        show_wp = (int)wp;
+        show_lp = (int)lp;
+        show_visible = IsWindowVisible(hwnd) != 0;
+        break;
+    case WM_WINDOWPOSCHANGING:
+        poschanging++;
+        break;
     case WM_DESTROY:
         destroyed = 1;
+        /* DestroyWindow hid the window first (no WM_SHOWWINDOW): a hide
+           here finds it hidden (setup.exe's splash does this). */
+        destroy_visible = IsWindowVisible(hwnd) != 0;
+        shows = 0;
+        destroy_hide = ShowWindow(hwnd, SW_HIDE);
+        destroy_shows = shows;
         PostQuitMessage(42);
         return 0;
     }
@@ -118,7 +140,21 @@ int wmain(void)
     CHECK(client.left == 0 && client.top == 0 && client.right > 200 && client.right < 300 &&
           client.bottom > 100 && client.bottom < 200);
 
-    ShowWindow(hwnd, SW_SHOWNORMAL);
+    /* Hiding a hidden window: nothing, 0. */
+    shows = 0;
+    CHECK(ShowWindow(hwnd, SW_HIDE) == 0);
+    CHECK(shows == 0);
+    /* Showing it: WM_SHOWWINDOW(TRUE, 0) first, while still hidden. */
+    poschanging = 0;
+    CHECK(ShowWindow(hwnd, SW_SHOWNORMAL) == 0);
+    CHECK(shows == 1 && show_wp == 1 && show_lp == 0 && show_visible == 0 && show_first);
+    if (failed)
+        printf("wow64_gui_test: WM_SHOWWINDOW %d times, wp %d lp %d visible %d first %d\n", shows,
+               show_wp, show_lp, show_visible, show_first);
+    /* Showing a shown window: nothing, nonzero. */
+    shows = 0;
+    CHECK(ShowWindow(hwnd, SW_SHOW) != 0);
+    CHECK(shows == 0);
     UpdateWindow(hwnd);
     CHECK(painted >= 1);
     HDC dc = GetDC(hwnd);
@@ -129,6 +165,10 @@ int wmain(void)
 
     CHECK(DestroyWindow(hwnd));
     CHECK(destroyed == 1);
+    CHECK(destroy_visible == 0 && destroy_hide == 0 && destroy_shows == 0);
+    if (failed)
+        printf("wow64_gui_test: in WM_DESTROY visible %d, SW_HIDE %d, WM_SHOWWINDOW %d\n",
+               destroy_visible, destroy_hide, destroy_shows);
     CHECK(!IsWindow(hwnd));
     int got = 0;
     while (GetMessageW(&m, NULL, 0, 0) > 0)

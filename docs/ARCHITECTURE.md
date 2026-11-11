@@ -892,7 +892,11 @@ current process, -2 = current thread.
   registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
   ignored whatever ContextFlags say: a new thread starts with a fresh
   x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
-  NtContinue on an existing thread does load it. kernel32's CreateThread
+  NtContinue on an existing thread does load it, and so does
+  NtSetContextThread on one created suspended, before it first runs
+  (`fpu_test`). Every platform's first entry (`platform::enter_user`)
+  starts from the initial state, or from what `platform::xrstor`/
+  `set_mxcsr` set just before it (gala-um: GALA_UM "FPU state"). kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
@@ -6576,8 +6580,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   focus).
 - Siblings keep a Z order: children are added at the bottom, so
   GW_CHILD/GW_HWNDNEXT walk them in creation order (the dialog tab
-  order). DestroyWindow sends WM_DESTROY to the window, then destroys
-  its children.
+  order). DestroyWindow hides the window (no WM_SHOWWINDOW: a
+  ShowWindow(SW_HIDE) in its WM_DESTROY returns 0, as on Windows), sends
+  WM_DESTROY to it, then destroys its children.
+- ShowWindow sends WM_SHOWWINDOW(shown, 0) before a change of
+  visibility, while the window is still as it was (also for a window
+  created WS_VISIBLE, after WM_CREATE); showing a shown window or
+  hiding a hidden one sends nothing (`wow64_gui_test`).
 - SetWindowPos/MoveWindow send WM_WINDOWPOSCHANGING (not with
   SWP_NOSENDCHANGING; the window gets the WINDOWPOS as the procedure
   leaves it) and WM_WINDOWPOSCHANGED, which DefWindowProc turns into

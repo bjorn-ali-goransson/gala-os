@@ -1814,10 +1814,27 @@ need gala's.
      and the splash thread then faults right after its message loop,
      at setup.exe+0x817f reading 0xffffffec (a NULL object less 0x28,
      read at +0x14; its thread argument still holds the two HWNDs), with
-     no system call between WM_QUIT and the fault. Not the cause (each
-     tried and ruled out): UISettings' activation, the hide and
-     deactivation messages DestroyWindow sends before WM_DESTROY on
-     Windows, WM_SIZE/WM_MOVE at creation, any GDI+ status (all Ok).
+     no system call between WM_QUIT and the fault. The crash report's
+     register memory and deeper stack place it inside the thread procedure, not in thread
+     exit: the C++ runtime's thread_start (+0x37fdcc) still has its call
+     to the procedure on the stack (return +0x37fdf7), then frames
+     returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx can be
+     the splash's own object (the pointer its window keeps in extra
+     bytes index 0, which GetWindowLongW returns on every message up to
+     WM_NCDESTROY, as on Windows): its first word is in setup.exe (a
+     vtable), its second its own address, its fifth to seventh 0. Not
+     the cause (each tried and ruled out): UISettings' activation, the
+     hide and deactivation messages DestroyWindow sends before
+     WM_DESTROY on Windows, WM_SIZE/WM_MOVE at creation, WM_SHOWWINDOW
+     (now sent, and the window hidden before WM_DESTROY:
+     `wow64_gui_test`), any GDI+ status (all Ok), the user32, gdi32 and
+     kernel32 names the thread resolves with GetProcAddress (all
+     exported by gala's x86 DLLs). Measured on Windows (issue #77): the
+     splash gets WM_TIMER during its life (a timer it later kills with
+     KillTimer); on gala its thread waits in GetMessage with no timer
+     for its whole life, so the timer is never set here: what sets it
+     (a message gala does not send, or a call that fails) is the next
+     lead.
      setup.exe ending so takes consolerun with it; the Click-to-Run
      client and service go on downloading (1.4 GB on C: in 900 s), and
      nothing is on the screen: the client's NotificationFlyout
@@ -3787,6 +3804,16 @@ exact name (`cargo xtask boot-test office_install`).
 ## Later
 
 Wanted, not scheduled. Each becomes an item with a section when it is.
+
+- **Hygiene sweep** (the owner; in a few months, not now): first
+  enumerate the practices gala's code should not follow, by sweeping
+  the code (e.g. large arrays on the stack in kernel and DLL code,
+  which a signal or exception path runs on a limited stack); then, for
+  each enumerated item, a subagent sweeps the code for instances and
+  fixes them. Prompted by the richer crash report (register memory and
+  the deeper stack, 1 KiB arrays on the exception path), suspected when
+  `fpu_test` failed in gala-um; the cause was elsewhere (a new thread's
+  first entry took the host's SSE registers: docs/GALA_UM.md).
 
 - **Self-hosting**: building gala's own test programs (then Nginx) on
   gala. H1-H10 built the base (pipes, child processes, busybox, TinyCC

@@ -719,6 +719,12 @@ Run a program directly:
 - A failure that reproduces in gala-um is in the NT layer or the
   user-mode DLLs; one that does not points at the kernel's machine code
   (paging, switches, interrupts) or at the emulator.
+- A gala-um-only failure that comes and goes with unrelated NT-layer
+  code (a bigger struct, a new loop) is host state reaching the program:
+  host code's SSE registers (glibc's memcpy/memset), inherited by a new
+  host thread at clone. What the program gets must always be set
+  explicitly (GALA_UM "FPU state"). The `(line N)` a check prints names
+  the failing line itself: read it before the check's neighbours.
 - A builtin or in-process program step can be tried in milliseconds
   (`um ... user/bin/busybox.exe 'sh -c "..."'`: pass the command line
   pre-quoted, as one argument); anything that starts a child needs QEMU.
