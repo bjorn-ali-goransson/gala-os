@@ -16,6 +16,7 @@
 
 #[allow(unsafe_code)]
 mod switch;
+mod table;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -36,10 +37,19 @@ use crate::time;
 /// Timer ticks a thread may run before it is preempted.
 const QUANTUM_TICKS: u32 = 10;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A thread's id: its slot in the scheduler's table (`index`, low 32
+/// bits) and that slot's generation (high bits), so that an id is never
+/// the id of a later thread in the same slot (`table`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId(usize);
 
 impl ThreadId {
+    fn new(index: usize, generation: u32) -> Self {
+        Self((generation as usize) << 32 | index)
+    }
+
+    /// The whole id (unique while the thread's record exists; for atomics,
+    /// `from_raw`, equality).
     pub fn as_usize(self) -> usize {
         self.0
     }
@@ -48,11 +58,34 @@ impl ThreadId {
     pub fn from_raw(raw: usize) -> Self {
         Self(raw)
     }
+
+    /// The thread's slot: small and dense (live threads only), for tables
+    /// indexed by thread; two threads that ever lived may share one, so
+    /// such a table checks the whole id.
+    pub fn index(self) -> usize {
+        self.0 & 0xffff_ffff
+    }
+
+    fn generation(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
 }
 
 impl fmt::Display for ThreadId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{}", self.0)
+        match self.generation() {
+            0 => write!(f, "#{}", self.index()),
+            g => write!(f, "#{}.{g}", self.index()),
+        }
+    }
+}
+
+impl fmt::Debug for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.generation() {
+            0 => write!(f, "ThreadId({})", self.index()),
+            g => write!(f, "ThreadId({}.{g})", self.index()),
+        }
     }
 }
 
@@ -162,11 +195,11 @@ const OFFLINE: Cpu = Cpu {
 };
 
 struct Scheduler {
-    /// Indexed by `ThreadId`; entries are never removed, so ids are unique.
-    /// Boxed so that each `Context` keeps its address when the vector grows.
-    #[allow(clippy::vec_box)]
-    threads: Vec<Box<Thread>>,
-    /// Invariant: capacity >= number of threads, so pushing never allocates.
+    /// By `ThreadId`: the live threads and the dead ones not reaped yet
+    /// (`reap` removes a record and its slot is reused under a new id).
+    /// Boxed so that each `Context` keeps its address when the table grows.
+    threads: table::Table<Box<Thread>>,
+    /// Invariant: capacity >= the table's slots, so pushing never allocates.
     ready: VecDeque<ThreadId>,
     cpus: [Cpu; smp::MAX_CPUS],
     /// A kernel handover is collecting the programs' state: threads that
@@ -203,8 +236,9 @@ fn me() -> usize {
 const ALL_CPUS: u64 = u64::MAX;
 
 impl Scheduler {
+    /// A thread known to be in the table (the current one, a queued one).
     fn thread(&mut self, id: ThreadId) -> &mut Thread {
-        &mut self.threads[id.0]
+        self.threads.get_mut(id).expect("a live thread's record")
     }
 
     /// The thread running on this CPU.
@@ -234,7 +268,7 @@ impl Scheduler {
     /// Whether a queued thread may run on CPU `cpu` now: allowed there and
     /// not still on another CPU's stack (the current thread is fine).
     fn runnable_here(&self, id: ThreadId, cpu: usize) -> bool {
-        let t = &self.threads[id.0];
+        let Some(t) = self.threads.get(id) else { return false };
         t.affinity & (1 << cpu) != 0
             && (!t.on_cpu || id == self.cpus[cpu].current)
             && !(self.users_frozen && t.user.is_some())
@@ -258,12 +292,12 @@ impl Scheduler {
     /// caller can drop it outside the lock.
     #[allow(clippy::result_large_err)]
     fn add_boxed(&mut self, thread: Box<Thread>) -> Result<ThreadId, Box<Thread>> {
-        let grow = self.threads.len() + 1 - self.ready.len();
-        if self.ready.try_reserve(grow).is_err() || self.threads.try_reserve(1).is_err() {
+        let grow = self.threads.slots_after_insert().saturating_sub(self.ready.len());
+        if self.ready.try_reserve(grow).is_err() {
             return Err(thread);
         }
-        let id = ThreadId(self.threads.len());
-        self.threads.try_push(thread).map_err(|_| AllocError).expect("capacity was reserved");
+        let id = self.threads.insert(thread)?;
+        MADE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok(id)
     }
 }
@@ -292,7 +326,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
 /// idle thread.
 pub fn init() -> Result<(), SpawnError> {
     let mut sched = Scheduler {
-        threads: Vec::new(),
+        threads: table::Table::new(),
         ready: VecDeque::new(),
         cpus: [OFFLINE; smp::MAX_CPUS],
         users_frozen: false,
@@ -505,7 +539,7 @@ pub fn current_if_running() -> Option<(ThreadId, bool)> {
     let guard = SCHED.lock();
     let s = guard.as_ref()?;
     let id = s.cpus[me()].current;
-    Some((id, s.threads.get(id.as_usize()).is_some_and(|t| t.is_idle)))
+    Some((id, s.threads.get(id).is_some_and(|t| t.is_idle)))
 }
 
 pub fn current_name() -> &'static str {
@@ -580,7 +614,7 @@ pub fn check_user_return() {
 
 /// How many times a CPU switched to thread `id` (0 for an unknown id).
 pub fn context_switches(id: ThreadId) -> u32 {
-    with(|s| s.threads.get(id.0).map_or(0, |t| t.switches))
+    with(|s| s.threads.get(id).map_or(0, |t| t.switches))
 }
 
 /// The CPU the caller runs on (it may move right after).
@@ -594,7 +628,7 @@ pub fn current_cpu() -> u32 {
 pub fn set_affinity(id: ThreadId, mask: u64) {
     let move_self = with(|s| {
         let here = me();
-        let Some(t) = s.threads.get_mut(id.0) else { return false };
+        let Some(t) = s.threads.get_mut(id) else { return false };
         t.affinity = mask;
         let running = t.state == State::Running;
         for c in 0..smp::MAX_CPUS {
@@ -722,7 +756,8 @@ pub fn join(id: ThreadId) -> Result<(), JoinError> {
             if id == me {
                 return Err(JoinError::JoinSelf);
             }
-            let target = s.threads.get_mut(id.0).ok_or(JoinError::NoSuchThread)?;
+            // A thread whose record is gone has ended (and been reaped).
+            let Some(target) = s.threads.get_mut(id) else { return Ok(false) };
             if target.state == State::Dead {
                 return Ok(false);
             }
@@ -746,49 +781,57 @@ pub fn held_by_reaps() -> usize {
     REAPING.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// `(threads, dead ones, dead ones whose stack is not freed yet)`: for
-/// low-memory reports (a dead thread's stack goes at the next `reap`).
+/// Threads made since boot (each `spawn`, `spawn_user`, adopted CPU).
+static MADE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Threads made since boot: with `thread_counts`, whether the table
+/// stays at what runs while threads come and go (`stats: threads`).
+pub fn threads_made() -> u64 {
+    MADE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// `(threads, dead ones, the table's slots)`: for low-memory reports and
+/// the end-of-run statistics (a dead thread's record, stack and save area
+/// go at the next `reap`; the slots stay, for the threads to come).
 pub fn thread_counts() -> (usize, usize, usize) {
     with(|s| {
-        let dead = s.threads.iter().filter(|t| t.state == State::Dead);
-        let (mut n, mut stacks) = (0, 0);
-        for t in dead {
-            n += 1;
-            if t.stack.is_some() {
-                stacks += 1;
-            }
-        }
-        (s.threads.len(), n, stacks)
+        let dead = s.threads.iter().filter(|(_, t)| t.state == State::Dead).count();
+        (s.threads.len(), dead, s.threads.slots())
     })
 }
 
-/// Frees the stacks of dead threads that no CPU runs on any more.
+/// Removes dead threads that no CPU runs on any more (up to a batch):
+/// their records go, with their stacks, save areas and last
+/// address-space references, and their slots are free for new threads.
 pub fn reap() -> usize {
-    // Take the stacks out under the lock, drop (unmap) them outside it.
-    let mut stacks: [Option<KernelStack>; 8] = Default::default();
-    let mut spaces: [Option<SharedUserSpace>; 8] = Default::default();
-    let mut contexts: [Option<Context>; 8] = Default::default();
+    // Take the records out under the lock, drop them (unmap the stacks)
+    // outside it.
+    let mut records: [Option<Box<Thread>>; 8] = Default::default();
     let mut n = 0;
     with(|s| {
-        for t in s.threads.iter_mut() {
-            if n == stacks.len() {
+        let mut ids = [None; 8];
+        for (id, t) in s.threads.iter() {
+            if n == ids.len() {
                 break;
             }
-            if t.state == State::Dead && !t.on_cpu && t.stack.is_some() {
-                stacks[n] = t.stack.take();
-                // Never switched to again: its save area goes (outside the
-                // lock, with the stack).
-                contexts[n] = t.context.take();
+            if t.state == State::Dead && !t.on_cpu {
+                ids[n] = Some(id);
                 n += 1;
-                // Not active any more (a switch away loaded another root),
-                // so the address space may be freed with its last thread.
-                spaces[n - 1] = t.user.take().map(|u| u.space);
             }
         }
+        for (record, id) in records.iter_mut().zip(ids.into_iter().flatten()) {
+            *record = s.threads.remove(id);
+        }
     });
+    // Not active any more (a switch away loaded another root), so an
+    // address space may be freed with its last thread.
+    let mut spaces: [Option<SharedUserSpace>; 8] = Default::default();
+    for (space, t) in spaces.iter_mut().zip(records.iter_mut().flatten()) {
+        *space = t.user.take().map(|u| u.space);
+    }
     let held = spaces.iter().flatten().count();
     REAPING.fetch_add(held, core::sync::atomic::Ordering::Relaxed);
-    drop(stacks);
+    drop(records);
     drop(spaces);
     REAPING.fetch_sub(held, core::sync::atomic::Ordering::Relaxed);
     n
@@ -826,7 +869,7 @@ pub fn wait() -> WakeReason {
 /// Makes a waiting thread runnable. No effect on threads in other states.
 pub fn wake(id: ThreadId) {
     with(|s| {
-        if let Some(t) = s.threads.get(id.0)
+        if let Some(t) = s.threads.get(id)
             && matches!(t.state, State::Waiting { .. })
         {
             s.make_ready(id);
@@ -842,12 +885,13 @@ pub(crate) fn on_tick(now: u64, raw: u64) {
     {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
-        for i in 0..s.threads.len() {
-            match s.threads[i].state {
-                State::Sleeping { until_tick } if until_tick <= raw => s.make_ready(ThreadId(i)),
+        for i in 0..s.threads.slots() {
+            let Some(id) = s.threads.id_at(i) else { continue };
+            match s.thread(id).state {
+                State::Sleeping { until_tick } if until_tick <= raw => s.make_ready(id),
                 State::Waiting { until_tick: Some(t) } if t <= now => {
-                    s.threads[i].wake_reason = WakeReason::TimedOut;
-                    s.make_ready(ThreadId(i));
+                    s.thread(id).wake_reason = WakeReason::TimedOut;
+                    s.make_ready(id);
                 }
                 _ => {}
             }
@@ -879,7 +923,7 @@ pub(crate) fn on_tick_here() {
         }
         // A thread that must leave this CPU goes even with nothing queued
         // (a user thread too while users are frozen).
-        let current = &s.threads[cpu.current.0];
+        let Some(current) = s.threads.get(cpu.current) else { return };
         let must_move =
             current.affinity & (1 << here) == 0 || (s.users_frozen && current.user.is_some());
         if must_move {
@@ -939,7 +983,7 @@ pub fn freeze_users(frozen: bool) {
 /// Whether no thread that runs user code is on a CPU (after
 /// `freeze_users`).
 pub fn users_quiet() -> bool {
-    with(|s| !s.threads.iter().any(|t| t.user.is_some() && t.on_cpu))
+    with(|s| !s.threads.iter().any(|(_, t)| t.user.is_some() && t.on_cpu))
 }
 
 /// How a thread that runs user code stands, for a kernel handover.
@@ -955,7 +999,7 @@ pub enum UserWait {
 /// `id`'s state and, if it is off every CPU, its saved x87/SSE/AVX state.
 pub fn user_wait(id: ThreadId) -> (UserWait, Option<XState>) {
     with(|s| {
-        let Some(t) = s.threads.get(id.0) else { return (UserWait::Dead, None) };
+        let Some(t) = s.threads.get(id) else { return (UserWait::Dead, None) };
         let state = match t.state {
             State::Waiting { until_tick } if !t.on_cpu => UserWait::Waiting(until_tick),
             State::Dead => UserWait::Dead,
@@ -970,9 +1014,12 @@ pub fn user_wait(id: ThreadId) -> (UserWait, Option<XState>) {
 pub fn dump() {
     let now = time::ticks();
     with(|s| {
-        for (i, t) in s.threads.iter().enumerate() {
+        let (live, slots) = (s.threads.len(), s.threads.slots());
+        info!("sched: {live} threads (dead ones not reaped yet among them) in {slots} slots");
+        for (id, t) in s.threads.iter() {
             info!(
-                "sched: thread {i} ({}) {:?}{} affinity {:#x} (now tick {now})",
+                "sched: thread {} ({}) {:?}{} affinity {:#x} (now tick {now})",
+                ThreadIdNumber(id),
                 t.name,
                 t.state,
                 WaitSite(&t.state, t.wait_site),
@@ -989,14 +1036,26 @@ pub fn try_cpu_threads(mut f: impl FnMut(usize, usize, &'static str, &'static st
     let Some(guard) = SCHED.try_lock_untracked() else { return false };
     if let Some(s) = guard.as_ref() {
         for (cpu, c) in s.cpus.iter().enumerate().filter(|(_, c)| c.online) {
-            let id = c.current.0;
-            if let Some(t) = s.threads.get(id) {
+            if let Some(t) = s.threads.get(c.current) {
                 let idle = c.idle == Some(c.current);
-                f(cpu, id, t.name, if idle { "idle" } else { state_name(&t.state) });
+                f(cpu, c.current.index(), t.name, if idle { "idle" } else { state_name(&t.state) });
             }
         }
     }
     true
+}
+
+/// A thread id as the state dump prints it: `6`, or `6.2` for a reused
+/// slot (as in `ThreadId(6.2)`).
+struct ThreadIdNumber(ThreadId);
+
+impl fmt::Display for ThreadIdNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.generation() {
+            0 => write!(f, "{}", self.0.index()),
+            g => write!(f, "{}.{g}", self.0.index()),
+        }
+    }
 }
 
 /// ` at <file:line>` for a waiting thread whose wait site is known.
@@ -1029,13 +1088,14 @@ pub fn dump_space_holders(root: u64) -> usize {
     let now = time::ticks();
     let mut n = 0;
     with(|s| {
-        for (i, t) in s.threads.iter().enumerate() {
+        for (id, t) in s.threads.iter() {
             if t.user.as_ref().is_some_and(|u| u.root == root) {
                 n += 1;
-                let running_on = s.cpus.iter().position(|c| c.online && c.current.0 == i);
+                let running_on = s.cpus.iter().position(|c| c.online && c.current == id);
                 info!(
-                    "sched: thread {i} ({}) {:?} on_cpu {} running on {running_on:?} \
+                    "sched: thread {} ({}) {:?} on_cpu {} running on {running_on:?} \
                      affinity {:#x} stack {} (now tick {now})",
+                    ThreadIdNumber(id),
                     t.name,
                     t.state,
                     t.on_cpu,
@@ -1051,8 +1111,8 @@ pub fn dump_space_holders(root: u64) -> usize {
 /// `(id, name, state)` for every thread, for diagnostics.
 pub fn for_each_thread(mut f: impl FnMut(ThreadId, &'static str, &'static str)) {
     with(|s| {
-        for (i, t) in s.threads.iter().enumerate() {
-            f(ThreadId(i), t.name, state_name(&t.state));
+        for (id, t) in s.threads.iter() {
+            f(id, t.name, state_name(&t.state));
         }
     });
 }

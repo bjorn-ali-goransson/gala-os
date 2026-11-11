@@ -555,10 +555,10 @@ fn evict() {
                 heap.large_pages,
                 super::platform::FrameUses(super::platform::frame_uses()),
             );
-            let (threads, dead, stacks) = super::platform::thread_counts();
+            let (threads, dead, slots) = super::platform::thread_counts();
             warn!(
-                "persist: {threads} kernel threads, {dead} dead ({stacks} with their stacks not \
-                 freed yet); {} sockets open",
+                "persist: {threads} kernel threads, {dead} dead not reaped yet (their stacks \
+                 not freed; {slots} slots in the thread table); {} sockets open",
                 crate::net::tcp::stats().3
             );
             super::process::dump();

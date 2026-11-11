@@ -58,7 +58,10 @@ port. Lines that tools and agents rely on:
   fewest free since boot; then `stats: frames in use by heap N, page
   tables N, kernel stacks N, user pages N, section pages N, ...`, every
   frame in use by what it is for, ARCHITECTURE "Physical memory"; a
-  state dump has the same as `statedump: frames in use by ...`) and `nt:` (`nt::stats`: system calls, waits,
+  state dump has the same as `statedump: frames in use by ...`; `stats:
+  threads: N made since boot, M in the scheduler's table (D dead not
+  reaped yet), S slots`, whose table must stay at what runs, not grow
+  with N: ARCHITECTURE "Threads and scheduling") and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
@@ -475,7 +478,8 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
-   scheduler thread (a waiting one with where its wait began:
+   scheduler thread (after `sched: M threads (dead ones not reaped yet
+   among them) in S slots`; a waiting one with where its wait began:
    `sched: thread N (x) Waiting { until_tick: None } at
    kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
    `#[track_caller]` wrappers; the only clue for a Linux thread, which

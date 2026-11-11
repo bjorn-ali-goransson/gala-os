@@ -495,12 +495,20 @@ stack window; the unmapped rest of the slot is the guard, so an overflow
 faults and is reported as #DF on IST1) and `Context` (saved rsp, the
 thread's XSAVE area; the switch pushes the six callee-saved registers).
 
-`sched` (`kernel/src/sched/`) keeps boxed `Thread`s in a vector indexed by
-`ThreadId` (ids are never reused) and a FIFO ready queue whose capacity is
-reserved at spawn time, so scheduling itself never allocates. Thread #0
+`sched` (`kernel/src/sched/`) keeps boxed `Thread`s in a table
+(`sched/table.rs`) and a FIFO ready queue whose capacity is reserved at
+spawn time (at least the table's slots), so scheduling itself never
+allocates. A `ThreadId` is a slot index (low 32 bits, `index()`) and the
+slot's generation (high bits): reaping a dead thread removes its record
+and frees the slot for the next thread, under a new id, so an id kept
+after its thread is gone (a wait queue's, `join`'s, `nt::thread`'s
+`BY_SCHED` index, which checks the whole id) names no thread, never a
+later one. The first thread in a slot has generation 0, so its id is the
+index (`#6`); a reused slot prints as `#6.2` (`ThreadId(6.2)` in thread
+dumps). Thread #0
 is the boot thread; an idle thread per CPU runs only when nothing else is
-ready and reaps dead threads (their kernel stacks, save areas, last
-address-space references). Every spawn also reaps a batch before it
+ready and reaps dead threads (their records with their kernel stacks,
+save areas, last address-space references). Every spawn also reaps a batch before it
 takes a stack: a machine that never idles (KVM, a program making and
 ending threads back to back) would otherwise fill the stack window's
 1024 slots with dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
@@ -515,13 +523,22 @@ current thread, idle thread (the boot CPU spawns one; each AP adopts its
 startup code as its idle thread in `run_ap`), quantum, need_resched and
 `prev`.
 
-Reaping (`sched::reap`) takes up to 8 dead threads' stacks and address
-spaces and drops them outside the scheduler lock. The idle loop's reap is
+Reaping (`sched::reap`) takes up to 8 dead threads' records out of the
+table and drops them (stacks, address-space references) outside the
+scheduler lock. The idle loop's reap is
 not preempted (`Cpu::reaping`): a preempted idle thread runs again only
 when its CPU is idle and would keep the 8 address spaces meanwhile.
 
 Invariants:
 
+- The table holds what runs and what has not been reaped yet, never
+  every thread made: the boot CPU's tick walks it under `SCHED` for
+  sleepers and timed-out waiters, as do `reap` and the state dump. With
+  records kept forever, the Click-to-Run client's 9000 short threads in
+  an hour made that walk hold the lock most of each tick under TCG
+  (ROADMAP OF). `stats: threads: N made since boot, M in the scheduler's
+  table ..., S slots` at the end of a run and the state dump's
+  `sched: M threads ... in S slots` show it.
 - `on_cpu`: set on a thread from the moment a CPU picks it until that
   CPU, after switching to the next thread, runs `finish_switch` (the lock
   is released before the switch). No other CPU picks a thread with

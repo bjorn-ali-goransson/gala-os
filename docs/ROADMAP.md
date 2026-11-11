@@ -1725,20 +1725,33 @@ need gala's.
      which failed for want of memory), eviction is a clock with no queue
      to grow, and pages of a mapped file leave unless a live view shows
      them (ARCHITECTURE "A disk-backed C:").
-     Where the run ends now: at the 3600 s limit with memory flat
-     (29000 frames free, no low-memory warning, the service's
-     reservations at 217), 1.7 GB in the data area: 4070 files (1.66 GB)
-     under `Program Files\Microsoft Office\Updates\Download\PackageFiles`
-     of the 5432 MB the client says it needs. After about 1400 s the
-     client's connections carry 3-10 MB each over 100-300 s, with a
-     connection now and then that receives nothing for 30 s; what it
-     waits for then is the next thing to find (its log,
-     `C:\Users\Public\GALA-*.log`, `cargo xtask disk-files`). Its log
-     also warns per file that kernel32's GetCachedSigningLevel is missing
-     (`kernel32.dll!GetCachedSigningLevel` missing export). At 0.6 MB/s
-     the 4.44 GB cannot arrive within 3600 s of TCG guest time (about
-     7400 s); the limit stays (no measurement says the run would end
-     sooner).
+     Done: the slowdown after about 1400 s (connections carrying 3-10 MB
+     over 100-300 s, TLS handshakes growing from 0.1 s to 1 s, the
+     download at 0.03 MB/s by 2000 s). The client makes a thread per
+     range and per pipe client, about 9000 in an hour, and the scheduler
+     kept every dead thread's record: the boot CPU's tick walked all of
+     them under the scheduler's lock for sleepers and timed-out waiters
+     (the NMI dump caught CPU 0 in `sched::on_tick`'s walk and CPU 1
+     spinning on the lock, with 8961 dead records). Now reaping removes a
+     record and its slot is reused under a new id (a slot's generation in
+     the id; ARCHITECTURE "Threads and scheduling"; `sched::table`'s unit
+     tests; `memload_test`: 2777 threads made, 10 slots).
+     Where the run ends now: the download completes in about 1650 s of
+     run time: 10701 of 10701 files (`CDownloadManager.RetryTelemetry`
+     `completeSuccess`), 1.82 GB over HTTP, 4.41 GB under
+     `Program Files\Microsoft Office\Updates\Download\PackageFiles`,
+     memory flat (the thread table at 33 threads in 40 slots at the
+     end). Then staging fails: repoman's `repoleaves.cpp:1028` `call
+     failed` with hr 0xa0000058, `SetCurrentState failed for operation=...
+     currentState=1 state=2`, `Failed to stage working op`; the stream
+     task is left failed and hibernated, and the client retries it every
+     minute with the same result until the 3600 s limit (its service log,
+     `C:\Windows\Temp\GALA-*.log`, `cargo xtask disk-files`). Its log
+     also warns per file that kernel32's GetCachedSigningLevel and
+     SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
+     getting proc addr for get/set cached signing level`, a warning; it
+     goes on); their answers for a file with no cached level need a
+     Windows measurement.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
@@ -1755,12 +1768,14 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: what the client waits for
-     after its first 1400 s (the 30 s idle connections), the stream
-     download's speed under TCG (the network path: `memload_test`'s
-     loopback HTTP moves about 1.4 MB/s, its AFD calls 4 ms each) and
-     what applying it needs; GetCachedSigningLevel and
-     SetCachedSigningLevel; HKCU from the caller's token; the RPC calls the client's
+     Next, in the order the run reaches them: what staging the
+     downloaded files needs (the 0xa0000058 above: which file-system
+     call repoman's staging makes and gets wrong; the events of the
+     client's file calls around the failure, `XTASK_EVENTS=syscall`),
+     then applying them; the stream download's speed under TCG (the
+     network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
+     its AFD calls 4 ms each); GetCachedSigningLevel and
+     SetCachedSigningLevel (a Windows measurement first); HKCU from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
      names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
      piece needs it); CryptCATAdmin*
