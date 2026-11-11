@@ -1814,9 +1814,8 @@ need gala's.
      and the splash thread then faults right after its message loop,
      at setup.exe+0x817f reading 0xffffffec (a NULL object less 0x28,
      read at +0x14; its thread argument still holds the two HWNDs), with
-     no system call between WM_QUIT and the fault. A crash report with
-     register memory and the deeper stack (a change not on main: it
-     broke `fpu_test` in gala-um, cause not found; to redo) placed it inside the thread procedure, not in thread
+     no system call between WM_QUIT and the fault. The crash report's
+     register memory and deeper stack place it inside the thread procedure, not in thread
      exit: the C++ runtime's thread_start (+0x37fdcc) still has its call
      to the procedure on the stack (return +0x37fdf7), then frames
      returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx can be
@@ -3812,9 +3811,9 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   which a signal or exception path runs on a limited stack); then, for
   each enumerated item, a subagent sweeps the code for instances and
   fixes them. Prompted by the richer crash report (register memory and
-  the deeper stack, 1 KiB arrays on the exception path), which broke
-  `fpu_test` in gala-um for a reason not found and was taken out again;
-  it is to be redone.
+  the deeper stack, 1 KiB arrays on the exception path), suspected when
+  `fpu_test` failed in gala-um; the cause was elsewhere (a new thread's
+  first entry took the host's SSE registers: docs/GALA_UM.md).
 
 - **Self-hosting**: building gala's own test programs (then Nginx) on
   gala. H1-H10 built the base (pipes, child processes, busybox, TinyCC
