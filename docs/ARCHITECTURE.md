@@ -6456,8 +6456,20 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup `window::activate` recorded with its owner, while it is there
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
-- **The message queue**: one per process (256 entries, an auto-reset
-  event), filtered by thread. Invariant: a thread's messages come out
+- **The message queue**: one per process (256 entries), filtered by
+  thread. Waking: each thread waiting for a message (GetMessage,
+  MsgWaitForMultipleObjects, WaitMessage) waits on an auto-reset event
+  of its own (made before its first look at the queue, so a wake between
+  the look and the wait is kept) and on the process's event, which the
+  kernel sets (GalaWindowListen); `wake` sets every waiting thread's
+  event, and a thread woken by the process's event sets the others',
+  since what the kernel announced may be theirs. Invariant: a wake is
+  never consumed by a thread it was not for (with the process's event
+  alone, one of several waiting threads took it and the one the
+  message, paint or timer was for slept on). 64 threads have events;
+  more, or MsgWaitForMultipleObjects with 63 handles, wait on the
+  process's event alone (recorded) and `wake` sets it too while any
+  do. Invariant: a thread's messages come out
   oldest first (each queued message has a sequence number; the entries
   are reused in any order, so the first matching entry is not the
   oldest), and the desktop's input (what `pump` takes: keys, buttons,
@@ -6677,13 +6689,26 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   WH_CALLWNDPROC before SendMessage calls a procedure. Keyboard and
   mouse hooks are kept but not called yet; global hooks are refused
   (recorded).
+- **Raw input** (`session.rs`): no devices (GetRawInputDeviceList 0,
+  no WM_INPUT); RegisterRawInputDevices is accepted. Invariant: the
+  structures' cbSize is the caller's width (RAWINPUTDEVICE 12 bytes for
+  a 32-bit program, 16 for a 64-bit one; RAWINPUTDEVICELIST 8 and 16);
+  checked against the x64 sizes, every 32-bit caller failed, and ODT's
+  setup.exe then destroyed the window of its power-notification thread
+  (`wow64_gui_test`).
 - **Timers** (`timer.rs`): WM_TIMER is made on demand when a timer of
   the asking thread is due, after posted messages and WM_PAINT; one per
   due timer (no pile-up); GetMessage waits until the next timer. A
   TIMERPROC rides in lParam and DispatchMessage calls it. Intervals
-  clamp to 10 ms .. 0x7fffffff; a window's timers go with it.
+  clamp to 10 ms .. 0x7fffffff; a window's timers go with it, a
+  thread's window-less ones with the thread.
   SetCoalescableTimer is SetTimer (every timer fires when due, which any
-  tolerance allows; `user32_test`).
+  tolerance allows; `user32_test`). Invariant: a window's timer is the
+  window's thread's, whichever thread of the process sets or kills it
+  (Wine's msg.c test_timers, run on Windows); a window of another
+  process is ERROR_ACCESS_DENIED (Wine's server; not measured on
+  Windows); setting one for another thread wakes the waiters
+  (`wow64_gui_test`).
 - **SystemParametersInfoW** (`spi.rs`): the non-client metrics with the
   GUI font, the work area, the icon title font, high contrast off, three
   wheel lines, and Windows' defaults for the visual-effect switches;
