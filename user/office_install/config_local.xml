@@ -1,0 +1,22 @@
+<!-- ODT's configuration for scenario office_install_local (ROADMAP OF,
+     WORKFLOW "Office's fast path"): office_install's install (config.xml)
+     from C:\OfficeSource, the cached download xtask puts on the disk, so
+     nothing is downloaded. -->
+<Configuration>
+  <Add SourcePath="C:\OfficeSource" OfficeClientEdition="64" Channel="Current">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="OneDrive" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Outlook" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+  </Add>
+  <Updates Enabled="FALSE" />
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Logging Level="Standard" Path="C:\gala\odtlog" />
+</Configuration>

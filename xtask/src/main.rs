@@ -3262,6 +3262,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
+    // office_install_local: office_install's files (MODULE_SETS) and the
+    // configuration that installs from C:\OfficeSource.
+    ("office_install_local", "user/office_install/config_local.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -3834,7 +3837,7 @@ fn scenario_timeout(name: &str) -> Duration {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
-    } else if name == "office_install" || name == "office_install_gui" {
+    } else if name.starts_with("office_install") {
         OFFICE_INSTALL_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
@@ -4046,6 +4049,7 @@ fn main() -> ExitCode {
             },
             Some("feed") => feed::cli(&args[1..]),
             Some("disk-files") => diskimage::disk_files(&args[1..]),
+            Some("office-source") => office_source_command(&args[1..]),
             Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(dir) => release_tree(release, Path::new(dir)),
                 None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
@@ -5186,6 +5190,10 @@ const MANUAL: &[&str] = &[
     // OF: the same install with its windows on the console's desktop, to
     // watch (screenshots: XTASK_SHOTS).
     "office_install_gui",
+    // OF: office_install from the host's cache of the CDN's files
+    // (`cargo xtask office-source`), put on the disk (development's fast
+    // path).
+    "office_install_local",
 ];
 
 /// Whether scenario `name` runs only when named exactly (PENDING, MANUAL).
@@ -5313,6 +5321,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     ("office_install", "run: begin setup.exe", NetClient::Outbound),
+    ("office_install_local", "run: begin setup.exe", NetClient::Outbound),
     ("office_install_gui", "run: begin consolerun.exe", NetClient::Outbound),
     // A card for GetAdaptersInfo to list (nothing connects).
     ("office_api_test", "run: begin office_api_test.exe", NetClient::Outbound),
@@ -9497,6 +9506,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },
     Scenario {
+        // OF (manual, development's fast path): office_install from the
+        // host's cache of the CDN's files for its products (`cargo xtask
+        // office-source`, OFFICE_SOURCE), which xtask puts on the fresh
+        // disk as C:\OfficeSource (`diskimage::inject`, no copy on the
+        // host); config_local.xml names it as SourcePath, so nothing is
+        // downloaded and the run reaches the install's later stages
+        // without the half hour of download.
+        name: "office_install_local",
+        cmdline: "qemu_exit persist as=system run=setup.exe \
+                  args=/configure%20C:\\gala\\config_local.xml \
+                  dump=C:/gala/odtlog,C:/Users/Public",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // OF (manual): office_install with its windows shown
         // (config_full.xml: Display Level Full), to watch the install
         // (`XTASK_SHOTS=120,300,... cargo xtask boot-test
@@ -10316,6 +10340,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("d2d1_window", "d2d1_window"),
     ("office_install_gui", "office_install"),
     ("office_install_gui", "office_install_gui"),
+    ("office_install_local", "office_install"),
+    ("office_install_local", "office_install_local"),
+    ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
@@ -10467,7 +10494,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// (`system_modules`): installers whose product's own programs import
 /// what they will (office_install: ODT starts the 64-bit
 /// OfficeClickToRun.exe, whose imports are only seen in the run).
-const FULL_SYSTEM_SCENARIOS: &[&str] = &["office_install", "office_install_gui"];
+const FULL_SYSTEM_SCENARIOS: &[&str] =
+    &["office_install", "office_install_gui", "office_install_local"];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
@@ -11031,6 +11059,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_shlwapi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install_gui", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install_local", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -14108,6 +14137,17 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // office_install_local's disk: the cached download (put on it by
+        // new_disk) and the install it makes.
+        name: "office_install_local",
+        size: 16 << 30,
+        host_mib: Some(8 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         // office_install's disk, for the same install shown on the screen.
         name: "office_install_gui",
         size: 16 << 30,
@@ -14229,7 +14269,106 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if name == "office_install_local" {
+        let source = office_source()?;
+        let t = Instant::now();
+        let (files, bytes) = diskimage::inject(&path, &source, "\\OfficeSource")?;
+        eprintln!(
+            "xtask: {name}: put {} ({files} files, {} MiB) on the disk as C:\\OfficeSource in {:.1}s",
+            source.display(),
+            bytes >> 20,
+            t.elapsed().as_secs_f64()
+        );
+    }
     Ok(Some(path))
+}
+
+/// The version of Office the host's cache holds: office_install's
+/// products (64-bit, English, Current channel) as the CDN serves them, in
+/// the layout of ODT's `setup.exe /download` (`Office\Data\...`), so that
+/// config_local.xml's SourcePath finds them. Pinned as PREBUILT is: a
+/// newer build is a deliberate change of these lines (the checksums from
+/// `cargo xtask office-source --pin`).
+const OFFICE_SOURCE_VERSION: &str = "16.0.20527.20196";
+/// The Current channel's content on the CDN (the client's own log names
+/// it: `pr/492350f6-.../Office/Data/v64.cab`).
+const OFFICE_SOURCE_URL: &str =
+    "http://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/Office/Data";
+/// The files under `Office\Data` (`{v}`: the version) and their SHA-256s:
+/// those the Click-to-Run client fetched for these products in
+/// office_install's runs (its log names each).
+const OFFICE_SOURCE: &[(&str, &str)] = &[
+    ("v64.cab", "bc33d6f5431f494bbfd36a912b49c3cc488513c50b5ef7bea9f801cb594ba07a"),
+    ("v64_{v}.cab", "231c411348a65fde60f14081f35d9771ea42b60b62e7fd14bbc1f412be58bbd1"),
+    ("{v}/i640.cab", "72b07bef01bc57d9684b380abe01a65910d80411e5bd4cad901c73bcbd87148f"),
+    ("{v}/i641033.cab", "1ddca4b1ed0f68b646ff7f367acec502f4306124fadbbbc630b816da2a017802"),
+    ("{v}/s640.cab", "d2d0ed663372aa38ce24dfe3af0a1db6814f821eff6cb8bf069bca2560bf759c"),
+    ("{v}/s641033.cab", "84892149bac189603809e698014f9b7f0016c26614198116aea21b7ebfbea7f7"),
+    (
+        "{v}/stream.x64.en-us.dat",
+        "6f4c27dddfb1b35dc75fd5e18ba1c403d533aa8c4b18718331b2f2e13e18d59b",
+    ),
+    (
+        "{v}/stream.x64.x-none.dat",
+        "e9ec4b9e32b34f0e6debb4006ee99722ac6e765f1472ac27282c13572bd82f6a",
+    ),
+];
+
+/// The cache's directory for OFFICE_SOURCE_VERSION (outside the
+/// repository's tracked files, like PREBUILT's).
+fn office_source_dir() -> PathBuf {
+    target_dir().join("prebuilt").join("office-source").join(OFFICE_SOURCE_VERSION)
+}
+
+/// The cached files' C:\OfficeSource, or how to make it.
+fn office_source() -> Result<PathBuf> {
+    let dir = office_source_dir().join("OfficeSource");
+    if office_source_dir().join(".complete").exists() {
+        return Ok(dir);
+    }
+    Err(format!(
+        "xtask: no cached Office source at {} (`cargo xtask office-source` fetches it; \
+         WORKFLOW \"Office's fast path\")",
+        dir.display()
+    ))
+}
+
+/// `cargo xtask office-source [--pin]`: fetches OFFICE_SOURCE into the
+/// cache (about 2.4 GB; a file already there is kept), checking each
+/// file's SHA-256; `--pin` prints the table with the checksums of what it
+/// has instead (for a new version).
+fn office_source_command(args: &[String]) -> Result {
+    let pin = args.iter().any(|a| a == "--pin");
+    let base = office_source_dir();
+    let data = base.join("OfficeSource").join("Office").join("Data");
+    fs::create_dir_all(data.join(OFFICE_SOURCE_VERSION)).map_err(|e| e.to_string())?;
+    check_disk_space("office-source", 3 << 10)?;
+    for (name, sum) in OFFICE_SOURCE {
+        let name = name.replace("{v}", OFFICE_SOURCE_VERSION);
+        let file = data.join(&name);
+        if !file.exists() {
+            let part = file.with_extension("part");
+            let url = format!("{OFFICE_SOURCE_URL}/{name}");
+            eprintln!("xtask: fetching {url}");
+            run_cmd(
+                Command::new("curl").args(["-sSfL", "--retry", "5", "-o"]).arg(&part).arg(&url),
+            )?;
+            fs::rename(&part, &file).map_err(|e| e.to_string())?;
+        }
+        let out = Command::new("sha256sum").arg(&file).output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let got = text.split_whitespace().next().unwrap_or("");
+        if pin {
+            println!("    (\"{}\", \"{got}\"),", name.replace(OFFICE_SOURCE_VERSION, "{v}"));
+        } else if got != *sum {
+            return Err(format!("{}: SHA-256 {got}, pinned {sum}", file.display()));
+        }
+    }
+    if !pin {
+        fs::write(base.join(".complete"), OFFICE_SOURCE_VERSION).map_err(|e| e.to_string())?;
+        eprintln!("xtask: Office {OFFICE_SOURCE_VERSION}'s source is in {}", base.display());
+    }
+    Ok(())
 }
 
 /// Checks scenario `name`'s disk image after its run.
