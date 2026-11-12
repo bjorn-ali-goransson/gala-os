@@ -629,6 +629,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
 | 0x7fd0-0x7fd5 | GalaScmOpen, GalaServiceOpen, GalaServiceCreate, GalaServiceQuery, GalaServiceEnum, GalaServiceControl | "The service control manager" |
+| 0x7fe0-0x7fe2 | GalaLxNode, GalaLxSpawn, GalaLxDistro | "The WSL facade" (records: `kernel/src/nt/wsl_calls.rs`) |
 | 0x7fc0-0x7fc7 | GalaClipboardOpen, GalaClipboardClose, GalaClipboardEmpty, GalaClipboardSet, GalaClipboardGet, GalaClipboardInfo, GalaClipboardFormats, GalaClipboardListener | "The clipboard" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
@@ -10541,10 +10542,13 @@ The running parts (milestone 1; `lxrun=`):
   (gala-um refuses: its host libc owns FS). FSGSBASE stays off, so user
   code cannot change them behind the kernel's back.
 - **State** (`lx::state`, a table keyed by pid): the break, the fd table
-  (fds 0-2 on the console; slots holding a shared open file description,
-  `Fd`, whose O_NONBLOCK every dup sees, and the fd's own close-on-exec
-  flag; a description is the console, a pipe end, a file or directory,
-  a character device or a socket), the current directory and umask,
+  (fds 0-2 on the console, or on the NT handles of the program that
+  started it: `lx::ntio`, "The WSL facade"; slots holding a shared open
+  file description, `Fd`, whose O_NONBLOCK every dup sees, and the fd's
+  own close-on-exec flag; a description is the console, a pipe end, a
+  file or directory, a character device, a socket or a Windows-side
+  object), the current directory and umask, the root directory (the
+  shared tree's root, or a WSL distribution's tree),
   ITIMER_REAL, a vfork child's hold on its parent, the signal state
   (`lx::signal::Signals`), the
   parent's pid and the exit signal, the children (running, ended
@@ -11972,9 +11976,108 @@ Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
   terminate, interop launches, hvsocket connects with service ids), the
   container id in process events and crash reports, each distribution's
   console in the serial log.
-- **Limits** (planned work, ROADMAP CT): nothing is built yet; LX is at
-  milestone 1, and the distributions need glibc, systemd and the
-  container system calls beyond milestone 5.
+- **Limits** (planned work, ROADMAP CT): step 2 is built ("The WSL
+  facade" below); the plumbing (step 3), container objects and the
+  distributions' Linux needs (glibc, systemd, the container system
+  calls: step 4) are not.
+
+### The WSL facade
+
+ROADMAP CT step 2: distributions registered and run the way WSL
+presents them, each with a file system of its own. Tests: `wsl_test`
+(scenario `wsl`), the screen scenario `wsl_terminal` (a distribution's
+terminal), host tests in `user/wsl` (tar, gzip, the command line, the
+`-l -v` table) and `lx::file` (a root confining the walk), `lx::ntio`.
+
+- **`wsl.exe`** (`user/wsl`, gala's own program in System32, as
+  Windows has it; written from WSL's documentation and its published
+  source as spec: THIRD_PARTY.md): `--import <name> <dir>
+  <rootfs.tar[.gz]>`, `-l`/`--list` (`-v`, `-q`, `--running`, `--all`),
+  `-d`/`--distribution <name>` with `-e`/`--exec <program> [args]`, `--
+  <command line>` (given to the user's shell as `$SHELL -c`) or nothing
+  (the login shell, `argv[0]` `-sh`), the default distribution without
+  `-d`, `-t`/`--terminate`, `--shutdown`, `--unregister`,
+  `-s`/`--set-default`, `-v`/`--version`. WSL's parsing: the first words
+  up to a space (`ParseArgument`), the rest of the line as written;
+  `--exec` and subcommands' arguments by CommandLineToArgvW's rules.
+  Output as WSL's CRT gives it: UTF-16 with CR LF (UTF-8 with
+  `WSL_UTF8=1`), the console's own characters on a console; WSL's
+  messages and `Error code:` lines; exit code -1 for wsl.exe's own
+  failures, else the Linux program's status (128 + the signal that
+  ended it). Options gala lacks (`--install`, `--export`, `--mount`,
+  `--manage`, `-u`, `--cd`, ...) say so on stderr, exit -1 and go to
+  the ledger (`wsl.exe!<option>`).
+- **The registry** is the per-user one WSL keeps,
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`: a key per
+  distribution named by a random GUID (`{xxxxxxxx-...}`, lowercase) with
+  DistributionName, BasePath (the install directory, absolute), State
+  (3 installing, 1 installed, 4 uninstalling), Version 2 (the
+  registration's format), Flags 0xf (interop, NT path, drive mounting,
+  VM mode: a WSL 2 distribution; `-l -v`'s VERSION comes from the VM
+  bit), DefaultUid 0, RunOOBE 0; and DefaultDistribution, set by the
+  first import and moved to the first one left when the default is
+  unregistered. wsl.exe is the registry's only writer (no WSL service
+  yet: two imports at once can race on the default; the service comes
+  with the COM interface Docker Desktop uses, step 6).
+- **One tree per distribution**: `<BasePath>\rootfs` (WSL 1's layout:
+  no ext4.vhdx, no VM), made by the kernel node by node as wsl.exe
+  reads the tarball (ustar, GNU long names and base-256, pax; gzip
+  through miniz_oxide): GalaLxNode makes Linux nodes (case-sensitive
+  directories, POSIX modes, symbolic and hard links, the times), so the
+  NT side never has to express them; device nodes and FIFOs are not
+  made (ledgered, reported by wsl.exe). An import that fails removes
+  what it made and its registration.
+- **Its processes** (GalaLxSpawn, `lx::exec::spawn_in`): LX processes
+  whose root directory is the distribution's tree (`LxProcess::root`:
+  inherited by forks, kept by execve). Every walk honours it (`lx::file`:
+  `/` and absolute link targets start there, `..` of it is itself,
+  getcwd and `/proc/self/exe` are paths from it, no `/run` or
+  user-database mounts: its `/etc` is its own), so a file written in
+  one distribution is absent from another. They run as a copy of
+  wsl.exe's token (the Linux ids are that user's: "The lx module",
+  Linux identity), in its console session, with its standard handles
+  as fds 0-2 (`lx::ntio`); a program name without a slash is looked up
+  on PATH (execvp's rule). The environment is WSL's default
+  (HOSTTYPE, LANG, PATH, TERM) with HOME, USER, LOGNAME, SHELL from the
+  distribution's `/etc/passwd` entry of DefaultUid and WSL_DISTRO_NAME;
+  the current directory is that home.
+- **Linux fds on NT objects** (`lx::ntio`): a pipe end, console input
+  or output (the session's, or the serial line), a file (at its
+  handle's position) or NUL. Console fds are a terminal: TCGETS/TCSETS
+  keep a termios whose ICANON, ECHO and ISIG are the session's
+  ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT and ENABLE_PROCESSED_INPUT (the
+  console's editing is the line discipline; Enter's CR is NL under
+  ICRNL, a cooked line's CR LF one NL), TIOCGWINSZ is the session's
+  size. So a shell sees a tty: busybox's ash prompts and edits lines
+  itself in raw mode. wsl.exe ignores Ctrl+C (the Linux side's key) and
+  puts the console mode back when its program ends.
+- **A distribution's terminal**: `wsl -d <name>` (or the start menu's
+  WSL tile: `desktop::PROGRAMS`, the default distribution) in a console
+  window (gala's conhost.exe) is its login shell's terminal.
+- **State** (GalaLxDistro): a distribution is Running while it has
+  processes (WSL keeps its instance a few seconds longer: `info` in
+  wsl_test); `--terminate` ends them (SIGKILL) and waits up to 10 s
+  for them to be gone, so `--unregister` removes the tree (GalaLxDistro
+  op 2, refused while processes remain) after; `--shutdown` ends every
+  distribution's processes.
+- **Observability**: `events=wsl` (`wsl import` with the nodes made,
+  `wsl start` with the distribution, starter, path and pid or errno,
+  `wsl terminate`, `wsl remove`, `wsl shutdown`) and a `wsl:` log line
+  for each; each Linux process's start and end (`lx: exec`, `lx: pid N
+  -- exit status`); a window session's output also on the serial line;
+  the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special
+  file`, `ntio`, `ntio ioctl` with the request); the state dump names
+  an fd's Windows object (`lx: pid P fd N: windows Pipe`).
+- **Limits** (ROADMAP CT): no `/mnt/<drive>`, interop or
+  `\\wsl.localhost` yet (step 3: the current directory is the home, not
+  the Windows directory); DefaultUid is not applied (the processes run
+  as the Windows user's Linux ids, not root); no init process (WSL's
+  `/init`), so a distribution stops with its last process; no ptys or
+  process groups (job control is off: `TIOCGPGRP` is ENOTTY), Ctrl+C is
+  not a SIGINT; poll and epoll report NT-backed fds ready at once (no
+  wait queue) and an NT wait is not interrupted by a Linux signal;
+  `--export`, `--install`, `--mount`, `-u` and the WSL service's COM
+  API are not there.
 
 ## Plan: graphics and GPU
 

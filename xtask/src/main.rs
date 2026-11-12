@@ -58,6 +58,7 @@ mod stub_audit;
 mod telemetry;
 mod vmtime;
 mod wpt;
+mod wsl_rootfs;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
@@ -1874,6 +1875,27 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_httpd", "user/lx/busybox/httpd.sh", "lx"),
+    // ROADMAP CT step 2: gala's wsl.exe in System32 as Windows has it,
+    // the busybox rootfs tarballs (`wsl_rootfs`) beside wsl_test.
+    ("wsl", "user/bin/wsl.exe", "Windows/System32"),
+    ("wsl", "ntdll.dll", "Windows/System32"),
+    ("wsl", "kernel32.dll", "Windows/System32"),
+    ("wsl", "advapi32.dll", "Windows/System32"),
+    ("wsl", "bcryptprimitives.dll", "Windows/System32"),
+    ("wsl", "target/wsl/bb-rootfs.tar", "gala"),
+    ("wsl", "target/wsl/bb-rootfs.tar.gz", "gala"),
+    // The distribution's terminal: wsl.exe in a console window (gala's
+    // conhost.exe draws it: user32, gdi32).
+    ("wsl_terminal", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("wsl_terminal", "user/bin/wsl.exe", "Windows/System32"),
+    ("wsl_terminal", "ntdll.dll", "Windows/System32"),
+    ("wsl_terminal", "kernel32.dll", "Windows/System32"),
+    ("wsl_terminal", "advapi32.dll", "Windows/System32"),
+    ("wsl_terminal", "bcryptprimitives.dll", "Windows/System32"),
+    ("wsl_terminal", "user32.dll", "Windows/System32"),
+    ("wsl_terminal", "gdi32.dll", "Windows/System32"),
+    ("wsl_terminal", "target/wsl/bb-rootfs.tar", "gala"),
+    ("wsl_terminal", "target/wsl/bb-rootfs.tar.gz", "gala"),
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
@@ -3638,6 +3660,8 @@ const USER_PROGRAMS: &[&str] = &[
     "gui_test",
     "conhost",
     "console_window_test",
+    "wsl",
+    "wsl_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -4131,6 +4155,8 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // gala's wsl.exe's tar, gzip, command line and -l -v (ROADMAP CT).
+    run_cmd(cargo().args(["test", "--package", "wsl", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -4431,6 +4457,10 @@ fn make_iso_unchecked(
         if file.starts_with("target/prebuilt/") {
             fetch_prebuilt(file.trim_end_matches('/'))?;
         }
+        // The WSL scenarios' rootfs tarballs, made from busybox.
+        if file.starts_with("target/wsl/") {
+            make_wsl_rootfs()?;
+        }
         // A path ending in a slash is a directory tree, shipped as C:\<dir>
         // with its subdirectories: packed into one USTAR archive the kernel
         // unpacks (Limine runs out of memory-map entries with hundreds of
@@ -4501,6 +4531,22 @@ fn make_iso_unchecked(
         eprintln!("xtask: built {}", iso.display());
     }
     Ok(iso)
+}
+
+/// `target/wsl/bb-rootfs.tar[.gz]` (`wsl_rootfs`), once per xtask run
+/// (ISOs are built in parallel).
+fn make_wsl_rootfs() -> Result {
+    static MADE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    if *made {
+        return Ok(());
+    }
+    let busybox = "target/prebuilt/busybox-linux/busybox";
+    fetch_prebuilt(busybox)?;
+    let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
+    wsl_rootfs::make(&root(), &data)?;
+    *made = true;
+    Ok(())
 }
 
 /// Writes the files `files` (relative to `dir`) as a USTAR archive (the
@@ -5207,6 +5253,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "virtio_gpu_reset",
     "filezilla",
     "console_window",
+    "wsl_terminal",
     "start_menu",
     "tray_test",
     "d2d1_window",
@@ -10235,6 +10282,34 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/busybox", BOOT_OK_MARKER],
     },
     Scenario {
+        // ROADMAP CT step 2: gala's wsl.exe as Windows' WSL answers
+        // (user/wsl_test): --import of a busybox rootfs (tar and tar.gz),
+        // `-d bb -- echo hi`, two distributions with separate file
+        // systems, -l -v, --set-default, --terminate, --shutdown,
+        // --unregister.
+        name: "wsl",
+        cmdline: "qemu_exit run=wsl_test.exe events=wsl",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "wsl: bb: pid",
+            "wsl: bb: terminated",
+            "wsl: bb2: tree removed",
+            "wsl_test: ok",
+            "process wsl_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A distribution's terminal (ROADMAP CT step 2): wsl_test imports
+        // bb, then `wsl -d bb` runs its login shell in a console window;
+        // WSL_TERMINAL_SCREEN types a command and checks its output, then
+        // `exit` ends the shell and wsl.exe.
+        name: "wsl_terminal",
+        cmdline: "qemu_exit wallpaper=night run=wsl_test.exe,wsl.exe args=import,-d%20bb console=wsl.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wsl_test: imported bb", "wsl: bb: pid", "xtask: screen ok", "run: end wsl.exe"],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -10997,6 +11072,8 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("wsl", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
+    ("wsl_terminal", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_thread_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_import_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -12758,6 +12835,48 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
 /// bottom-right corner): Microsoft Office, FileZilla, .NET, Python;
 /// Chromium, Git, 7-Zip on the second row. The pointer starts in the
 /// middle (640, 400).
+/// Keys typing `text` (lowercase letters, digits, space, `-`, `/`) and
+/// Enter.
+macro_rules! typed {
+    ($($key:literal),*) => { &[$(concat!("sendkey ", $key)),*, "sendkey ret"] };
+}
+
+/// The distribution's terminal (`wsl_terminal`): wsl.exe's console
+/// window at (60, 60) (conhost's grid, lines 19 pixels apart from y 98)
+/// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
+/// their output in the window (light grey text, Campbell's 0xcccccc);
+/// the screendump of that step is the terminal's picture
+/// (`test-wsl_terminal.screen2.png`); then `exit` ends the shell and
+/// wsl.exe.
+const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "wsl: bb: pid",
+    steps: &[
+        ScreenStep {
+            // The prompt, from bb's /etc/profile.
+            after: "root@bb:/root# ",
+            input: typed!("u", "n", "a", "m", "e", "spc", "minus", "s", "r"),
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "Linux 6.18.0-gala",
+            input: typed!("l", "s", "spc", "slash"),
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "tmp",
+            input: &[],
+            pixels: &[
+                // The prompt, the commands and their output: text on
+                // the console's black.
+                PixelCheck::AnyIn(66, 98, 300, 20, 0xcccccc),
+                PixelCheck::AnyIn(66, 136, 300, 60, 0xcccccc),
+                PixelCheck::At(600, 300, 0x0c0c0c),
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
 const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
     marker: "start_menu_test: ready",
     steps: &[
@@ -13156,6 +13275,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ),
     ("gui_test", GUI_TEST_SCREEN),
     ("start_menu", START_MENU_SCREEN),
+    ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),

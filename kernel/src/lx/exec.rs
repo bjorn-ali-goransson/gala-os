@@ -124,10 +124,49 @@ impl ExecError {
     }
 }
 
-/// Starts the Linux program at `path` with `argv` and `envp`; returns its
-/// process (whose main thread is running).
+/// How `spawn_in` starts a program: where its `/` is, in which
+/// directory, as whom and on which fds 0-2.
+pub struct Start<'a> {
+    /// The program's Linux path (absolute, from `root`).
+    pub path: &'a str,
+    pub argv: &'a [&'a [u8]],
+    pub envp: &'a [&'a [u8]],
+    /// Its root directory (the shared tree's root, or a distribution's).
+    pub root: ramfs::NodeId,
+    /// Its current directory; None: the program's own directory.
+    pub cwd: Option<ramfs::NodeId>,
+    /// Its fds 0, 1 and 2; None: the console (the log).
+    pub stdio: Option<[state::Object; 3]>,
+    /// The token it gets a copy of; None: the boot user's.
+    pub token: Option<crate::nt::object::ObjectRef>,
+    /// Its console session, if any.
+    pub console: Option<KArc<crate::nt::conhost::Session>>,
+    /// The process starting it (0: the kernel).
+    pub parent_id: u64,
+}
+
+/// Starts the Linux program at `path` with `argv` and `envp` as the
+/// kernel's (`lxrun=`: the shared tree, the boot user, the console);
+/// returns its process (whose main thread is running).
 pub fn spawn(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>, ExecError> {
-    let started = spawn_inner(path, argv, envp);
+    spawn_in(Start {
+        path,
+        argv,
+        envp,
+        root: ramfs::ROOT,
+        cwd: None,
+        stdio: None,
+        token: None,
+        console: None,
+        parent_id: 0,
+    })
+}
+
+/// Starts a program as `start` says; returns its process (whose main
+/// thread is running).
+pub fn spawn_in(start: Start<'_>) -> Result<KArc<Process>, ExecError> {
+    let path = start.path;
+    let started = spawn_inner(start);
     if let Err(e) = &started {
         crate::warn!("lx: exec {path} failed: {e}");
         crate::events::emit(
@@ -368,16 +407,25 @@ fn start_regs(p: &Prepared) -> UserRegs {
     super::machine::start_regs(p.entry(), p.initial.sp)
 }
 
-fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>, ExecError> {
-    // It runs in its own directory, where a relative interpreter path
-    // starts too.
-    let cwd = super::file::directory_of(path);
+fn spawn_inner(start: Start<'_>) -> Result<KArc<Process>, ExecError> {
+    let Start { path, argv, envp, root, cwd, stdio, token, console, parent_id } = start;
+    // It runs in its own directory unless told otherwise; a relative
+    // interpreter path starts there.
+    let cwd = match cwd {
+        Some(c) => c,
+        None if root == ramfs::ROOT => super::file::directory_of(path),
+        None => root,
+    };
     let (exe, data) =
-        super::file::executable_at(ramfs::ROOT, path.as_bytes()).map_err(ExecError::File)?;
-    let read = |p: &[u8]| super::file::executable_at(cwd, p).map(|(_, d)| d);
-    // A program the kernel starts runs with the boot token (nt::token).
-    let ids = crate::nt::token::TokenData::boot()
-        .map_or(super::identity::boot_user(), |t| super::identity::of_token(&t));
+        super::file::executable_at(root, root, path.as_bytes()).map_err(ExecError::File)?;
+    let read = |p: &[u8]| super::file::executable_at(root, cwd, p).map(|(_, d)| d);
+    // A program the kernel starts runs with the boot token (nt::token),
+    // one an NT program starts with a copy of its token.
+    let ids = match &token {
+        Some(t) => super::identity::of_token_object(t),
+        None => crate::nt::token::TokenData::boot()
+            .map_or(super::identity::boot_user(), |t| super::identity::of_token(&t)),
+    };
     let p = prepare(path, data, &read, argv, envp, Machine::now(ids))?;
     p.log(path);
     let plan = &p.plan;
@@ -406,10 +454,12 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         vad,
         image: (plan.start, plan.end - plan.start),
         personality: Personality::Linux,
-        parent_id: 0,
+        parent_id,
+        token,
+        console,
     })
     .map_err(|_| ExecError::OutOfMemory)?;
-    let Ok(lx) = state::create(process.id, plan.brk, cwd, exe) else {
+    let Ok(lx) = state::create(process.id, plan.brk, cwd, exe, root, stdio) else {
         process::forget_bare(&process);
         return Err(ExecError::OutOfMemory);
     };

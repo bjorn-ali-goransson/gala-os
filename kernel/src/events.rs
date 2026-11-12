@@ -60,9 +60,14 @@ pub enum Category {
     /// (granted access or the failure), creations, deletions and state
     /// changes, each with the caller's pid.
     Service = 65536,
+    /// The WSL facade (`lx::distro`): a distribution's tree unpacked, its
+    /// processes started, terminated and its tree removed, each with the
+    /// distribution's name and the caller's pid.
+    Wsl = 131072,
 }
 
-const NAMES: [(&str, u32); 17] = [
+const NAMES: [(&str, u32); 18] = [
+    ("wsl", Category::Wsl as u32),
     ("service", Category::Service as u32),
     ("wayland", Category::Wayland as u32),
     ("sample", Category::Sample as u32),

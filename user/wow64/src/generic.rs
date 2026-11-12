@@ -462,6 +462,9 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7fd5, &[H, U, U, U]),       // GalaServiceControl
     (0x7fd7, &[H, U, U, U]),       // GalaServiceConfigure
     (0x7fd8, &[U, U, U, U, U]),    // GalaServiceDispatch
+    (0x7fe0, &[H, U, U]),          // GalaLxNode
+    (0x7fe1, &[U, U, Oh]),         // GalaLxSpawn
+    (0x7fe2, &[U, H, U, U, U]),    // GalaLxDistro
     (0x7f4d, &[U, U]),             // GalaRandom
     (0x7f90, &[H, H]),             // NtCompareObjects
     (0x7f91, &[H]),                // NtSuspendProcess

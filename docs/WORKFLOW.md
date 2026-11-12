@@ -235,7 +235,7 @@ written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
 process with that error mode does not report its fault to WER at all.
 Map the offset to a function with the build's PDB of that module. A
 program whose non-zero exit is the result rather than a failure (`crash`,
-`go_exit`, `busybox`, and gala's own `cmd`, `conhost` and `gala`, which
+`go_exit`, `busybox`, and gala's own `cmd`, `conhost`, `gala` and `wsl`, which
 real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
@@ -1647,6 +1647,31 @@ source).
   before its parent's wait4 returns, so whatever the parent does next
   (sealing a memfd against writing: EBUSY while a writable mapping is
   left) must not see the child's mappings (`lx::process_ended`).
+
+### The WSL facade's tests (user/wsl_test, ROADMAP CT)
+
+- `user/wsl_test` drives `%SystemRoot%\System32\wsl.exe` from outside
+  (pipes, exit codes, UTF-16 output, the registry), so it runs
+  unchanged on Windows; scenario `wsl` (`cargo xtask boot-test
+  'wsl$'`), and `wsl_terminal`, a screen scenario: `wsl_test import`
+  imports bb, then `wsl -d bb` runs in a console window where xtask
+  types `uname -sr`, `ls /` and `exit`; its `screen2.png` is the
+  terminal's picture. Host tests of wsl.exe's parts: `cargo test -p
+  wsl` (`--lib` for clippy on the host: the program itself links
+  Windows DLLs).
+- The distribution is `target/wsl/bb-rootfs.tar` and `.tar.gz`
+  (`xtask/src/wsl_rootfs.rs`, made from the busybox PREBUILT whenever a
+  scenario ships them, deterministic). On Windows: copy both beside
+  `wsl_test.exe`; without them, or with a `bb` or `bb2` distribution
+  already there, it prints a SKIP line and touches nothing. Its `info`
+  lines are what Windows answers where gala's answer is a guess
+  (ROADMAP CT step 2).
+- Pitfalls: `wsl --import` makes only the install directory itself (its
+  parent must exist: WSL's one CreateDirectoryW); a command line after
+  `--` reaches the shell as written (`;`, `>` and `$VAR` are the
+  shell's), `--exec`'s arguments are split as CommandLineToArgvW does;
+  ash's `\w` shows `/root`, not `~`, under this profile (the prompt
+  marker the screen check waits for).
 
 ## Program recipes
 

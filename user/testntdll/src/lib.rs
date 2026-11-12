@@ -327,6 +327,10 @@ syscall_stubs! {
     GalaServiceControl = 0x7fd5, fn(handle: usize, op: u32, code: u32, status: *mut u32);
     GalaServiceConfigure = 0x7fd7, fn(service: usize, level: u32, record: *const u8, length: u32);
     GalaServiceDispatch = 0x7fd8, fn(op: u32, value: u32, buffer: *mut u8, length: u32, needed: *mut u32);
+    // The WSL facade (gala's own; nt::wsl_calls), for wsl.exe.
+    GalaLxNode = 0x7fe0, fn(root: usize, record: *const u8, length: usize);
+    GalaLxSpawn = 0x7fe1, fn(record: *const u8, length: usize, process: *mut usize);
+    GalaLxDistro = 0x7fe2, fn(op: u32, root: usize, name: *const u8, length: usize, count: *mut u64);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
