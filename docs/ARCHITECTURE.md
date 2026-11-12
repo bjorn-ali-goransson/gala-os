@@ -1692,12 +1692,43 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   links remain moves the node to one of them (`promote`). Directories
   have exactly one name. Limit: an NT delete of a handle opened by a
   link name removes the node's first name.
-- **Symbolic links**: `Kind::Symlink` keeps the target bytes as Linux
-  gave them; `lx::file` follows them. NT sees one as a file with
-  FILE_ATTRIBUTE_REPARSE_POINT whose open fails with
-  STATUS_IO_REPARSE_TAG_NOT_HANDLED unless FILE_OPEN_REPARSE_POINT is
-  given (how Windows answers a WSL symlink); NT symbolic links
-  (CreateSymbolicLinkW, reparse data) are not built.
+- **Linux symbolic links**: `Kind::Symlink` keeps the target bytes as
+  Linux gave them; `lx::file` follows them. NT sees one as a file with
+  FILE_ATTRIBUTE_REPARSE_POINT and WSL's tag (IO_REPARSE_TAG_LX_SYMLINK)
+  whose open fails with STATUS_IO_REPARSE_TAG_NOT_HANDLED unless
+  FILE_OPEN_REPARSE_POINT is given (how Windows answers a WSL symlink).
+- **Reparse points and NT symbolic links** (`reparse_test`, as SYSTEM and
+  as the boot user; Wine's ntdll test_reparse_points, run on Windows, for
+  each status): a file or an empty directory carries a tag and its data
+  as given (`Node::reparse`; FSCTL_SET_REPARSE_POINT,
+  FSCTL_GET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT on an open of it,
+  with NTFS's statuses for a reserved tag, a malformed or oversized
+  buffer, another tag, a non-empty directory, a junction on a file, a
+  symbolic link on a file with contents); FILE_ATTRIBUTE_REPARSE_POINT
+  and the tag show in FileAttributeTagInformation and in a directory
+  entry's EaSize (FindFirstFileW's dwReserved0); kept on the disk
+  (`log::Op::SetReparse`). An IO_REPARSE_TAG_SYMLINK needs
+  SeCreateSymbolicLinkPrivilege enabled (STATUS_PRIVILEGE_NOT_HELD);
+  kernel32's CreateSymbolicLinkW enables it for the call when the token
+  holds it (an administrator, SYSTEM; a standard user does not:
+  ERROR_PRIVILEGE_NOT_HELD, developer mode being off), creates the link
+  with FILE_CREATE | FILE_OPEN_REPARSE_POINT and sets the reparse data
+  (a relative target as given with SYMLINK_FLAG_RELATIVE, another as its
+  NT path), deleting the file again if that fails. Opens follow links
+  (`file::resolve_links`, as the I/O manager reparses an open): a
+  symbolic link or junction met on the way is replaced by its target (a
+  relative one from the link's directory, `.` and `..` taken out; an NT
+  path through the object namespace, which must name the volume: another
+  device is recorded `reparse point` and STATUS_OBJECT_PATH_NOT_FOUND),
+  and at the end too unless FILE_OPEN_REPARSE_POINT is given or the open
+  is a FILE_CREATE (STATUS_OBJECT_NAME_COLLISION on the link); 63 at most
+  (STATUS_REPARSE_POINT_NOT_RESOLVED, a loop included); another tag is
+  STATUS_IO_REPARSE_TAG_NOT_HANDLED (no filter handles it). The access
+  check is the target's. NtQueryAttributesFile, rename targets and
+  kernel32's GetFileAttributesExW, DeleteFileW and RemoveDirectoryW act
+  on the link itself. Limits: the Linux personality sees an NT link as
+  the empty file or directory it is (WSL would follow it); a link to
+  another device (`\Device\NamedPipe\`) is not followed.
 - **Two ways to delete**: NT's (`set_delete_pending`, then the last
   close removes the node: the name stays taken until then) and Linux's
   (`unlink`, POSIX semantics: the name goes at once; a node still open
@@ -5976,13 +6007,15 @@ carries their data (Write records).
   and, from version 3, SetMode, Symlink (target, creation time) and
   Link (an existing path, the new name), and, from version 4, Clusters
   (a file's size, write time and the runs of pages now in clusters of the
-  data area: page, cluster, count; at most 4096 runs a record). Each
+  data area: page, cluster, count; at most 4096 runs a record), and,
+  from version 5, SetReparse (a reparse point's tag and data; tag 0: it
+  has none any more). Each
   record carries the log's generation, its format version and a CRC-32;
   the first record that does not check out, or is of a newer version,
   ends the log.
 - `RamFs` (`fs::ramfs`) records while `recording` is on: each mutator
   (create, write, set_size, set_basic, set_security, set_mode, symlink,
-  link, rename, unlink, and removal when the last handle of a
+  set_reparse, delete_reparse, link, rename, unlink, and removal when the last handle of a
   delete-pending node closes) pushes its record and marks the node
   *dirty*. A node unlinked while open (detached) records nothing more:
   its old path may name another file by then. Nodes the boot made are *boot*
@@ -5991,8 +6024,8 @@ carries their data (Write records).
   everything below it dirty. `apply` replays a record (not recording
   it; a missing path is skipped); `snapshot` describes the same state
   from scratch: Delete for each tombstone, then every dirty node in tree
-  order with its descriptor, mode, contents and times (a symbolic link
-  as Symlink), then a Link for every hard link. A record that cannot be
+  order with its descriptor, reparse point, mode, contents and times (a
+  Linux symbolic link as Symlink), then a Link for every hard link. A record that cannot be
   made (no memory) makes the next sync write a snapshot instead.
 - `fs::volume` (over a `Blocks` trait, so host tests run it on a disk
   in memory, crashes included): sector 0 is the superblock (magic,
@@ -7913,8 +7946,9 @@ portable):
 
 ### Command shims
 
-gala lacks file symbolic links (CreateSymbolicLinkW is
-ERROR_PRIVILEGE_NOT_HELD), so a command is `Links\<alias>.exe`, a copy of
+A standard user cannot make file symbolic links (CreateSymbolicLinkW is
+ERROR_PRIVILEGE_NOT_HELD without SeCreateSymbolicLinkPrivilege), so a
+command is `Links\<alias>.exe`, a copy of
 gala.exe, plus `Links\<alias>.shim` (`target = <path>`). gala.exe started
 under another name than `gala` looks for its `.shim` first
 (`pkg::shim_main`) and runs the target with the rest of its own command
@@ -10142,13 +10176,13 @@ Design rules:
    honours its flag); the POSIX mode per node, kept by the change log
    (record version 3; uid/gid and device numbers not yet: one user);
    symbolic links (followed by `lx::file`, a reparse point NT does not
-   follow); hard links; POSIX unlink of open files (the name goes at
-   once, the node lives on detached). Still planned, each testable on
-   real Windows: FileCaseSensitiveInformation to query and set the flag
-   from NT, FILE_DISPOSITION_POSIX_SEMANTICS and
+   follow); NT symbolic links and other reparse points ("Files"; not
+   followed by `lx::file` yet); hard links; POSIX unlink of open files
+   (the name goes at once, the node lives on detached). Still planned,
+   each testable on real Windows: FileCaseSensitiveInformation to query
+   and set the flag from NT, FILE_DISPOSITION_POSIX_SEMANTICS and
    FILE_RENAME_POSIX_SEMANTICS (NT's surface for the same unlink and
-   rename), CreateHardLinkW (FileLinkInformation) and NT symbolic links
-   (CreateSymbolicLinkW).
+   rename), CreateHardLinkW (FileLinkInformation).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
    The first is the AF_UNIX socket ("AF_UNIX sockets" below): the core

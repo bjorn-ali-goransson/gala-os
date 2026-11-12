@@ -378,6 +378,11 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::DiskFull => NtStatus::DISK_FULL,
         // A page that could not be read from the disk (`with_pages`).
         FsError::NotResident => NtStatus::IO_DEVICE_ERROR,
+        // FSCTL_SET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT (NTFS's
+        // answers).
+        FsError::ReparseHasData => NtStatus::IO_REPARSE_DATA_INVALID,
+        FsError::ReparseTagMismatch => NtStatus::IO_REPARSE_TAG_MISMATCH,
+        FsError::NotReparsePoint => NtStatus::NOT_A_REPARSE_POINT,
     }
 }
 
@@ -501,6 +506,131 @@ pub fn lookup_path(path: &FilePath) -> Result<(Option<NodeId>, Option<NodeId>), 
     })
 }
 
+/// How many reparse points one open may follow (as Windows: 63); more is
+/// STATUS_REPARSE_POINT_NOT_RESOLVED, a loop included.
+const MAX_REPARSE: usize = 63;
+
+/// SYMLINK_FLAG_RELATIVE: a symbolic link's target is relative to its
+/// directory.
+const SYMLINK_FLAG_RELATIVE: u32 = 1;
+
+/// Follows the NT symbolic links and junctions on `path` (and at its end
+/// if `follow_final`), as the I/O manager reparses an open that meets one
+/// (ARCHITECTURE "Files": reparse points): the path the open then names.
+/// A reparse point of another tag on the way, or at the end when followed,
+/// is STATUS_IO_REPARSE_TAG_NOT_HANDLED (no filter handles it here).
+pub fn resolve_links(path: FilePath, follow_final: bool) -> Result<FilePath, NtStatus> {
+    let mut path = path;
+    for _ in 0..MAX_REPARSE {
+        match follow_once(&path, follow_final)? {
+            Some(next) => path = next,
+            None => return Ok(path),
+        }
+    }
+    Err(NtStatus::REPARSE_POINT_NOT_RESOLVED)
+}
+
+/// The path after the first link on `path`, or None if it meets none
+/// (or a component is missing: the open reports that).
+fn follow_once(path: &FilePath, follow_final: bool) -> Result<Option<FilePath>, NtStatus> {
+    let parts = components(&path.name, path.start != ramfs::ROOT)?;
+    let found = with_fs(|fs| -> Result<Option<(Vec<u16>, ramfs::Reparse, usize)>, NtStatus> {
+        let mut dir = path.start;
+        for (i, part) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            let Ok(Some(node)) = fs.find(dir, part) else { return Ok(None) };
+            let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+            if let Some(r) = n.reparse() {
+                if last && !follow_final {
+                    return Ok(None);
+                }
+                if r.tag != ramfs::TAG_SYMLINK && r.tag != ramfs::TAG_MOUNT_POINT {
+                    return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
+                }
+                let base = fs.path_of(n.parent()).map_err(fs_status)?;
+                let copy = ramfs::Reparse {
+                    tag: r.tag,
+                    data: crate::mm::heap::try_to_vec(&r.data).map_err(|_| NtStatus::NO_MEMORY)?,
+                };
+                return Ok(Some((base, copy, i + 1)));
+            }
+            if !n.is_dir() {
+                return Ok(None);
+            }
+            dir = node;
+        }
+        Ok(None)
+    })?;
+    let Some((base, reparse, used)) = found else { return Ok(None) };
+    let (target, relative) = link_target(&reparse)?;
+    // What is left of the path goes after the target.
+    let mut rest: Vec<u16> = Vec::new();
+    for part in &parts[used..] {
+        rest.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+        rest.try_extend_from_slice(part).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    if relative {
+        // From the link's directory, `.` and `..` taken out.
+        let mut name = base;
+        for part in target.split(|&c| c == u16::from(b'\\')) {
+            match part {
+                [] => {}
+                [0x2e] => {}
+                [0x2e, 0x2e] => {
+                    let cut = name.iter().rposition(|&c| c == u16::from(b'\\')).unwrap_or(0);
+                    name.truncate(cut);
+                }
+                _ => {
+                    name.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+                    name.try_extend_from_slice(part).map_err(|_| NtStatus::NO_MEMORY)?;
+                }
+            }
+        }
+        name.try_extend_from_slice(&rest).map_err(|_| NtStatus::NO_MEMORY)?;
+        return Ok(Some(FilePath { start: ramfs::ROOT, name }));
+    }
+    // An NT path (`\??\C:\...`): through the object namespace to the volume.
+    let mut full = target;
+    while full.len() > 1 && full.last() == Some(&u16::from(b'\\')) {
+        full.pop();
+    }
+    full.try_extend_from_slice(&rest).map_err(|_| NtStatus::NO_MEMORY)?;
+    if full.first() != Some(&u16::from(b'\\')) {
+        return Err(NtStatus::OBJECT_NAME_INVALID);
+    }
+    let (device, name) = namespace::lookup_parse(None, &full, true)?;
+    if !matches!(device.body, ObjectBody::Volume) {
+        // A link to a device other than the volume (a pipe, ...).
+        super::ledger::record("reparse point", "target not on the volume", 0);
+        return Err(NtStatus::OBJECT_PATH_NOT_FOUND);
+    }
+    Ok(Some(FilePath { start: ramfs::ROOT, name }))
+}
+
+/// A symbolic link's or junction's substitute name and whether it is
+/// relative to the link's directory (REPARSE_DATA_BUFFER after its
+/// header: SubstituteNameOffset, SubstituteNameLength, PrintNameOffset,
+/// PrintNameLength, a symbolic link's Flags, then the names).
+pub fn link_target(r: &ramfs::Reparse) -> Result<(Vec<u16>, bool), NtStatus> {
+    let d = &r.data;
+    let u16_at = |at: usize| d.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let (names, relative) = if r.tag == ramfs::TAG_SYMLINK {
+        let flags = d.get(8..12).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        (12, flags.ok_or(NtStatus::IO_REPARSE_DATA_INVALID)? & SYMLINK_FLAG_RELATIVE != 0)
+    } else {
+        (8, false)
+    };
+    let (off, len) = (
+        u16_at(0).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?,
+        u16_at(2).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?,
+    );
+    let bytes = d.get(names + off..names + off + len).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?;
+    let mut name = Vec::new();
+    name.try_reserve_exact(bytes.len() / 2).map_err(|_| NtStatus::NO_MEMORY)?;
+    name.extend(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])));
+    Ok((name, relative))
+}
+
 /// The result of NtCreateFile.
 pub struct Created {
     pub object: ObjectRef,
@@ -556,8 +686,10 @@ pub fn create(
                 }
                 // A Linux symbolic link or socket is a reparse point
                 // nothing here follows (ARCHITECTURE "Files"): opened only
-                // as itself.
-                if (n.is_symlink() || n.is_socket()) && options & FILE_OPEN_REPARSE_POINT == 0 {
+                // as itself. An NT link's was followed before
+                // (`resolve_links`), unless it is the one to create.
+                let reparse = n.is_symlink() || n.is_socket() || n.reparse().is_some();
+                if reparse && options & FILE_OPEN_REPARSE_POINT == 0 {
                     return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
                 }
                 if want_dir && !n.is_dir() {
@@ -738,6 +870,12 @@ fn encode_entry(out: &mut [u8], class: u32, e: &Entry<'_>, name_at: usize) -> bo
         put(out, 48, &n.size().next_multiple_of(4096).to_le_bytes());
         put(out, 56, &n.attributes.to_le_bytes());
         put(out, 60, &(name_bytes as u32).to_le_bytes());
+        // EaSize: a reparse point's tag instead (what FindFirstFile puts
+        // in dwReserved0).
+        if class != FILE_DIRECTORY_INFORMATION && n.attributes & ramfs::ATTRIBUTE_REPARSE_POINT != 0
+        {
+            put(out, 64, &n.reparse_tag().to_le_bytes());
+        }
     }
     let room = (out.len() - name_at) / 2;
     for (i, c) in e.name.iter().take(room).enumerate() {

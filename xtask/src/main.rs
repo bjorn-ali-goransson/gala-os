@@ -1607,6 +1607,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_file_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
+    ("reparse_test", "ntdll.dll", "Windows/System32"),
+    ("reparse_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
     ("pipe_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "advapi32.dll", "Windows/System32"),
@@ -3678,6 +3680,7 @@ const USER_PROGRAMS: &[&str] = &[
     "runas_test",
     "combase_test",
     "consolerun",
+    "reparse_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -4956,6 +4959,11 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         &[r#"!"ev":"syscall","pid":4,"#, r#""ev":"syscall","pid":12,"#],
     ),
     (
+        // The mask set aside at boot is set again by the waiting thread.
+        "events_from",
+        &[r#""ev":"syscall","pid":4,"#],
+    ),
+    (
         // `events_pid=` limits system-call events to those processes:
         // process_test's own (pid 4), none of its children's; a wait
         // names the object it waits on.
@@ -5899,6 +5907,19 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=syscall,process events_pid=4 run=process_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["process_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // `events_from=` starts the stream late (here at once, after the
+        // kernel thread that waits for it has run; see EVENT_EXPECT).
+        name: "events_from",
+        cmdline: "qemu_exit events=syscall events_from=0 run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "events: the stream starts 0 s after boot (events_from=)",
+            "events: the stream starts now",
+            "process_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Smoke test only; `cargo xtask bench` collects the numbers.
@@ -6853,6 +6874,28 @@ const SCENARIOS: &[Scenario] = &[
             "wow64_runas_test: elevated (type 1): runas started an elevated child",
             "32-bit x86 (WOW64), elevated token",
             "wow64_runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // NT symbolic links and reparse points (user/reparse_test;
+        // ROADMAP OF: Click-to-Run's staging links its virtualization DLLs
+        // into the product's folder). As SYSTEM, which holds
+        // SeCreateSymbolicLinkPrivilege.
+        name: "reparse_test",
+        cmdline: "qemu_exit as=system run=reparse_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["reparse_test: links made", "reparse_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same by the boot user, a standard user: no privilege, no
+        // link (ERROR_PRIVILEGE_NOT_HELD), nothing left behind.
+        name: "reparse_test_user",
+        cmdline: "qemu_exit run=reparse_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "reparse_test: no symbolic link privilege",
+            "reparse_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -10202,6 +10245,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
+    ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
     ("pk_install_zip", "pk_install_test"),
@@ -10232,6 +10276,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
     ("runas_declined", "runas_test"),
+    ("reparse_test_user", "reparse_test"),
     ("handover_disk", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
@@ -10544,7 +10589,9 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         let disk = iso.with_extension("disk.img");
         if result.1.iter().all(|(_, v)| v.is_ok()) {
             let _ = fs::remove_file(&iso);
-            let _ = fs::remove_file(&disk);
+            if !reuse_disk() {
+                let _ = fs::remove_file(&disk);
+            }
         } else if let Some(used) = host_usage_mib(&disk) {
             eprintln!(
                 "xtask: kept {} ({used} MiB on the host; delete it when done)",
@@ -14041,6 +14088,10 @@ fn disk_test_check(image: &[u8]) -> Result {
     }
 }
 
+fn reuse_disk() -> bool {
+    env::var_os("XTASK_REUSE_DISK").is_some_and(|v| v == "1")
+}
+
 /// MiB a (sparse) file takes on the host.
 fn host_usage_mib(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
@@ -14051,8 +14102,19 @@ fn host_usage_mib(path: &Path) -> Option<u64> {
 /// The host must have room for what the image may grow to
 /// (`DiskScenario::host_mib`), unless `XTASK_LOW_DISK=1` starts it anyway
 /// (the guest then logs failed disk writes once the host's disk is full).
+/// `XTASK_REUSE_DISK=1`: the image a failed run kept is booted again as
+/// it is (a later stage of a long run without its earlier stages:
+/// office_install's staging after its download), and kept after a pass.
 fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
     let Some(d) = disk_scenario(name) else { return Ok(None) };
+    let kept = iso.with_extension("disk.img");
+    if reuse_disk() && kept.exists() {
+        eprintln!(
+            "xtask: {name} boots on its kept disk image {} (XTASK_REUSE_DISK)",
+            kept.display()
+        );
+        return Ok(Some(kept));
+    }
     let need = d.host_mib.unwrap_or(d.size as u64 >> 20);
     if env::var_os("XTASK_LOW_DISK").is_none() {
         check_disk_space(name, need + MIN_FREE_MIB).map_err(|e| {

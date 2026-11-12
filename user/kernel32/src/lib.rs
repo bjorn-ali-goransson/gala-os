@@ -1600,7 +1600,8 @@ pub extern "system" fn GetFileAttributesExW(path: *const u16, level: u32, info: 
         FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         SHARE_ALL,
         1, // FILE_OPEN
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT,
+        // A symbolic link's own attributes, as GetFileAttributesW's.
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
         0,
     ) {
         Ok(o) => o,
@@ -1646,8 +1647,9 @@ fn delete_path(path: *const u16, directory: bool) -> Bool {
     // DELETE | FILE_READ_ATTRIBUTES, not synchronous (no SYNCHRONIZE): a
     // file the caller has no ACE on can be deleted through its
     // directory's FILE_DELETE_CHILD and FILE_LIST_DIRECTORY.
+    // A symbolic link is deleted itself, not its target.
     let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
-    let options = kind | FILE_OPEN_FOR_BACKUP_INTENT;
+    let options = kind | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT;
     let (h, _) = match open_path(path, DELETE | FILE_READ_ATTRIBUTES, SHARE_ALL, 1, options, 0) {
         Ok(o) => o,
         Err(e) => return fail_with(e, FALSE),
@@ -1803,6 +1805,11 @@ fn fill_find_data(entry: &[u8], data: *mut u16) {
         let size = u64_at(entry, 40);
         *ints.add(7) = (size >> 32) as u32;
         *ints.add(8) = size as u32;
+        // dwReserved0: a reparse point's tag (the entry's EaSize then).
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if u32_at(entry, 56) & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            *ints.add(9) = u32_at(entry, 64);
+        }
         for i in 0..name_len {
             *data.add(22 + i) = u16::from_le_bytes([entry[68 + 2 * i], entry[69 + 2 * i]]);
         }

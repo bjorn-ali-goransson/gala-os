@@ -170,7 +170,7 @@ has a section under "Open items".
 | Waits, events, mutants, semaphores, keyed events, timers | `wait_test`, `sync_test`, `keyed_event_test`, `timer_test`, `smpsem_test`, `smprace_test` |
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
-| Files, directories, async I/O, APCs, IOCP, file locks, change notification | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test` |
+| Files, directories, async I/O, APCs, IOCP, file locks, change notification, reparse points and NT symbolic links | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test`, `reparse_test` |
 | User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `cxx_throw`, `fpu_test`, `safepoint_test` |
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
@@ -1777,18 +1777,40 @@ need gala's.
      record and its slot is reused under a new id (a slot's generation in
      the id; ARCHITECTURE "Threads and scheduling"; `sched::table`'s unit
      tests; `memload_test`: 2777 threads made, 10 slots).
-     Where the run ends now: the download completes in about 1650 s of
-     run time: 10701 of 10701 files (`CDownloadManager.RetryTelemetry`
+     The download completes in about 1650-2100 s of run time (it varies
+     with the host): 10701 of 10701 files (`CDownloadManager.RetryTelemetry`
      `completeSuccess`), 1.82 GB over HTTP, 4.41 GB under
      `Program Files\Microsoft Office\Updates\Download\PackageFiles`,
      memory flat (the thread table at 33 threads in 40 slots at the
-     end). Then staging fails: repoman's `repoleaves.cpp:1028` `call
-     failed` with hr 0xa0000058, `SetCurrentState failed for operation=...
-     currentState=1 state=2`, `Failed to stage working op`; the stream
-     task is left failed and hibernated, and the client retries it every
-     minute with the same result until the 3600 s limit (its service log,
-     `C:\Windows\Temp\GALA-*.log`, `cargo xtask disk-files`). Its log
-     also warns per file that kernel32's GetCachedSigningLevel and
+     end). Done: staging (`CRepoOperation.Stage` `CompleteStaging`,
+     4.41 GB written, `DownloadSucceeded` true, about 4 min after the
+     download). It links Click-to-Run's virtualization DLLs
+     (AppvIsvSubsystems32/64, C2R32/64) from `Common Files\Microsoft
+     Shared\ClickToRun` into the package's `root\client` and
+     `root\office16` with CreateSymbolicLinkW (16 links); kernel32's
+     stub answered ERROR_PRIVILEGE_NOT_HELD
+     (`VirtualizationHelper::EnsureVirtualizationDlls: Failed to create
+     SymLink`), which repoman reported as `repoleaves.cpp:1028` hr
+     0xa0000058 and `SetCurrentState failed ... currentState=1 state=2`,
+     retried every minute (the service's late system calls,
+     `events_from=`, showed the root\client open and the FormatMessage
+     of 1314 right before the error). Now NT symbolic links and reparse
+     points are there (ARCHITECTURE "Files", `reparse_test`), SYSTEM's
+     SeCreateSymbolicLinkPrivilege enabled for the call.
+     Where the run ends now (about 2640 s): the client's next task,
+     STAGEREGISTRY (`C2R::VirtualRegistry::MergeAndStageRegistry`),
+     fails with `RegistrationFailure (Failed to load OffReg.dll ,
+     Error:0x7f)`, and setup.exe exits 17004 (0x426c). OffReg.dll (the
+     offline registry library) imports what gala lacks (the ledger's
+     missing exports at that time): ntdll's RtlRunOnceBeginInitialize,
+     RtlRunOnceComplete, RtlInitializeSRWLock,
+     RtlAcquireSRWLockExclusive, RtlReleaseSRWLockExclusive,
+     RtlNumberOfSetBits, RtlFindNextForwardRunClear; msvcrt's wcsnlen,
+     wcsncpy_s, wcscat_s; advapi32's
+     CreatePrivateObjectSecurityWithMultipleInheritance,
+     SetPrivateObjectSecurityEx, DestroyPrivateObjectSecurity,
+     MakeSelfRelativeSD.
+     Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
      goes on); their answers for a file with no cached level need a
@@ -1809,11 +1831,11 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: what staging the
-     downloaded files needs (the 0xa0000058 above: which file-system
-     call repoman's staging makes and gets wrong; the events of the
-     client's file calls around the failure, `XTASK_EVENTS=syscall`),
-     then applying them; the stream download's speed under TCG (the
+     Next, in the order the run reaches them: OffReg.dll's imports above
+     (test first, `office_api_test` and its x86 twin for ntdll's and
+     msvcrt's, `security_test` for advapi32's private object security),
+     then what STAGEREGISTRY and the apply after it need; the stream
+     download's speed under TCG (the
      network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
      its AFD calls 4 ms each); GetCachedSigningLevel and
      SetCachedSigningLevel (a Windows measurement first); HKCU from the caller's token; the RPC calls the client's

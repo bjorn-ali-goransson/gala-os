@@ -174,7 +174,11 @@ Off by default and cheap when off (one relaxed atomic load of the
 category mask). `events=<categories>` or `events=all` on the kernel
 command line; `XTASK_EVENTS=all cargo xtask boot-test` for every
 scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
-`events`).
+`events`). `events_from=<seconds>` starts the stream that long after
+boot (a kernel thread sets the mask then and logs `events: the stream
+starts now`): a failure late in a long run without the run's whole
+stream (office_install's staging, half an hour in:
+`XTASK_CMDLINE=events_from=2100`).
 
 | Category | Events |
 |---|---|

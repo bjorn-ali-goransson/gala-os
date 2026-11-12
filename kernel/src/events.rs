@@ -163,6 +163,39 @@ pub fn set_mask(mask: u32) {
     MASK.store(mask, Ordering::Relaxed);
 }
 
+/// `events_from=<seconds>`: the mask set so far is put aside and set again
+/// that many seconds after boot by a kernel thread, which logs the start
+/// (`events: the stream starts now`). Events before then are not written,
+/// except those written whatever the mask (`emit_always`).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn start_later(secs: u64) {
+    let mask = MASK.swap(0, Ordering::Relaxed);
+    if mask == 0 {
+        return;
+    }
+    crate::info!("events: the stream starts {secs} s after boot (events_from=)");
+    let arg = ((secs.min(u32::MAX as u64)) << 32 | mask as u64) as usize;
+    if let Err(e) = crate::sched::spawn("eventsfrom", start_at, arg) {
+        MASK.store(mask, Ordering::Relaxed);
+        crate::warn!("events: cannot wait for events_from= ({e:?}): the stream starts now");
+    }
+}
+
+#[cfg(not(any(test, feature = "hosted")))]
+fn start_at(arg: usize) {
+    let (secs, mask) = ((arg as u64) >> 32, arg as u32);
+    let now_ms = crate::time::raw_monotonic_ns() / 1_000_000;
+    crate::sched::sleep_ms((secs * 1000).saturating_sub(now_ms));
+    MASK.store(mask, Ordering::Relaxed);
+    crate::info!(
+        "events: the stream starts now (uptime_ms={})",
+        crate::time::raw_monotonic_ns() / 1_000_000
+    );
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn start_later(_secs: u64) {}
+
 /// Whether events of `category` are wanted (one relaxed load).
 pub fn enabled(category: Category) -> bool {
     MASK.load(Ordering::Relaxed) & category as u32 != 0

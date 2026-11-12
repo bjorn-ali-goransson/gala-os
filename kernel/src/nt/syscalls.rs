@@ -5078,7 +5078,11 @@ impl Call<'_> {
             };
             (object, file::FILE_OPENED)
         } else {
-            let path = tri!(self.file_path(attrs_ptr));
+            // Links on the way are followed, and at the end unless the
+            // link itself is opened or created.
+            let follow_final =
+                options & file::FILE_OPEN_REPARSE_POINT == 0 && disposition != file::FILE_CREATE;
+            let path = tri!(file::resolve_links(tri!(self.file_path(attrs_ptr)), follow_final));
             // The access check (docs/SECURITY.md S3).
             granted = tri!(security_calls::file_access(self, &path, access, disposition, options));
             let created = tri!(file::create(&path, granted, share, disposition, options));
@@ -5183,6 +5187,142 @@ const FSCTL_PIPE_IMPERSONATE: u32 = 0x0011_001c;
 /// one message, one message read into the output buffer.
 const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_c017;
 
+/// FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT and
+/// FSCTL_DELETE_REPARSE_POINT: a file's or directory's reparse point
+/// (REPARSE_DATA_BUFFER; REPARSE_GUID_DATA_BUFFER for a tag not
+/// Microsoft's).
+const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00a4;
+const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00a8;
+const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00ac;
+/// MAXIMUM_REPARSE_DATA_BUFFER_SIZE.
+const MAX_REPARSE_BUFFER: usize = 16 * 1024;
+/// REPARSE_GUID_DATA_BUFFER_HEADER_SIZE: a GUID tag's header; also the
+/// exact size FSCTL_DELETE_REPARSE_POINT takes.
+const REPARSE_GUID_HEADER: usize = 24;
+/// sizeof(REPARSE_GUID_DATA_BUFFER): the least FSCTL_GET_REPARSE_POINT
+/// writes into.
+const REPARSE_GUID_BUFFER_SIZE: usize = 28;
+/// SeCreateSymbolicLinkPrivilege.
+const SE_CREATE_SYMBOLIC_LINK_PRIVILEGE: u64 = 35;
+
+/// The reparse point controls on an open file (`code`), as NTFS answers
+/// them (Wine's ntdll test_reparse_points, run on Windows: the statuses
+/// for each malformed buffer).
+fn reparse_fsctl(
+    call: &mut Call<'_>,
+    entry: &HandleEntry,
+    node: crate::fs::ramfs::NodeId,
+    code: u32,
+) -> NtStatus {
+    let (iosb, input, in_len) = (arg!(call, 4), arg!(call, 6), arg!(call, 7) as u32 as usize);
+    let (out, out_len) = (arg!(call, 8), arg!(call, 9) as u32 as usize);
+    let read_input = |call: &Call<'_>| -> Result<Vec<u8>, NtStatus> {
+        if input == 0 || in_len == 0 {
+            return Err(NtStatus::INVALID_BUFFER_SIZE);
+        }
+        if !(8..=MAX_REPARSE_BUFFER).contains(&in_len) {
+            return Err(NtStatus::IO_REPARSE_DATA_INVALID);
+        }
+        let mut b = Vec::new();
+        b.try_reserve_exact(in_len).map_err(|_| NtStatus::NO_MEMORY)?;
+        b.resize(in_len, 0);
+        call.process.read(input, &mut b).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        Ok(b)
+    };
+    let tag_of = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let data_len_of = |b: &[u8]| usize::from(u16::from_le_bytes([b[4], b[5]]));
+    let writable = entry.access & (file::FILE_WRITE_DATA | file::FILE_WRITE_ATTRIBUTES) != 0;
+    match code {
+        FSCTL_SET_REPARSE_POINT => {
+            if !writable {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let b = tri!(read_input(call));
+            let tag = tag_of(&b);
+            if tag <= 1 {
+                return NtStatus::IO_REPARSE_TAG_INVALID;
+            }
+            // A Microsoft tag (bit 31) has no GUID in its header.
+            let header = if tag & 0x8000_0000 != 0 { 8 } else { REPARSE_GUID_HEADER };
+            if b.len() < header || data_len_of(&b) + header != b.len() {
+                return NtStatus::IO_REPARSE_DATA_INVALID;
+            }
+            let reparse = crate::fs::ramfs::Reparse { tag, data: Vec::new() };
+            let is_dir = file::with_fs(|fs| fs.node(node).is_some_and(|n| n.is_dir()));
+            match tag {
+                crate::fs::ramfs::TAG_MOUNT_POINT if !is_dir => return NtStatus::NOT_A_DIRECTORY,
+                crate::fs::ramfs::TAG_SYMLINK | crate::fs::ramfs::TAG_MOUNT_POINT => {
+                    // Its names must lie in the buffer.
+                    let r = crate::fs::ramfs::Reparse { data: tri!(owned(&b[8..])), ..reparse };
+                    tri!(file::link_target(&r).map(drop));
+                }
+                _ => {}
+            }
+            if tag == crate::fs::ramfs::TAG_SYMLINK
+                && !security_calls::effective_privilege(call, SE_CREATE_SYMBOLIC_LINK_PRIVILEGE)
+            {
+                return NtStatus::PRIVILEGE_NOT_HELD;
+            }
+            let set = file::with_fs(|fs| fs.set_reparse(node, tag, &b[8..]));
+            tri!(set.map_err(file::fs_status));
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            NtStatus::SUCCESS
+        }
+        FSCTL_DELETE_REPARSE_POINT => {
+            if !writable {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let b = tri!(read_input(call));
+            if b.len() != REPARSE_GUID_HEADER || data_len_of(&b) != 0 {
+                return NtStatus::IO_REPARSE_DATA_INVALID;
+            }
+            let tag = tag_of(&b);
+            if tag <= 1 {
+                return NtStatus::IO_REPARSE_TAG_INVALID;
+            }
+            let deleted = file::with_fs(|fs| fs.delete_reparse(node, tag));
+            tri!(deleted.map_err(file::fs_status));
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            NtStatus::SUCCESS
+        }
+        _ => {
+            // FSCTL_GET_REPARSE_POINT.
+            if out == 0 || out_len == 0 {
+                return NtStatus::INVALID_USER_BUFFER;
+            }
+            let found = file::with_fs(|fs| {
+                fs.node(node).and_then(|n| n.reparse()).map(|r| (r.tag, owned(&r.data)))
+            });
+            let Some((tag, data)) = found else { return NtStatus::NOT_A_REPARSE_POINT };
+            let data = tri!(data);
+            if out_len < REPARSE_GUID_BUFFER_SIZE {
+                return NtStatus::BUFFER_TOO_SMALL;
+            }
+            let header_len = if tag & 0x8000_0000 != 0 { 0 } else { REPARSE_GUID_HEADER - 8 };
+            let data_len = (data.len() - header_len.min(data.len())) as u16;
+            let mut b = Vec::new();
+            let built = b
+                .try_extend_from_slice(&tag.to_le_bytes())
+                .and_then(|()| b.try_extend_from_slice(&data_len.to_le_bytes()))
+                .and_then(|()| b.try_extend_from_slice(&[0, 0]))
+                .and_then(|()| b.try_extend_from_slice(&data));
+            tri!(built.map_err(|_| NtStatus::NO_MEMORY));
+            let n = b.len().min(out_len);
+            if call.process.write(out, &b[..n]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let status = if n < b.len() { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+            tri!(call.write_iosb(iosb, status, n as u64));
+            status
+        }
+    }
+}
+
+/// A copy of `b`.
+fn owned(b: &[u8]) -> Result<Vec<u8>, NtStatus> {
+    crate::mm::heap::try_to_vec(b).map_err(|_| NtStatus::NO_MEMORY)
+}
+
 /// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
 ///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
 ///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN,
@@ -5191,6 +5331,19 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, code, out, out_len) =
         (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 8), arg!(call, 9) as u32 as usize);
+    if let ObjectBody::File(f) = &entry.object.body
+        && matches!(
+            code,
+            FSCTL_SET_REPARSE_POINT | FSCTL_GET_REPARSE_POINT | FSCTL_DELETE_REPARSE_POINT
+        )
+    {
+        let node = f.node;
+        return reparse_fsctl(call, &entry, node, code);
+    }
+    if matches!(entry.object.body, ObjectBody::VolumeFile(_)) && code == FSCTL_GET_REPARSE_POINT {
+        // A volume cannot be a reparse point.
+        return NtStatus::NOT_A_REPARSE_POINT;
+    }
     let ObjectBody::Pipe(end) = &entry.object.body else {
         super::ledger::record("NtFsControlFile", "file system control", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
@@ -5658,6 +5811,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
     let copy = tri!(crate::mm::heap::try_to_vec(&image).map_err(|_| NtStatus::NO_MEMORY));
     let path = tri!(call.resolve_file_name(0, copy, OBJ_CASE_INSENSITIVE));
+    let path = tri!(file::resolve_links(path, true));
     let opened = tri!(file::create(
         &path,
         file::FILE_READ_DATA,
@@ -6567,9 +6721,11 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
             8
         }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
-            // FileAttributes, ReparseTag (no reparse points on this volume).
+            // FileAttributes, ReparseTag.
             let basic = tri!(file::basic_information(file.node));
             out[..4].copy_from_slice(&basic[32..36]);
+            let tag = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.reparse_tag()));
+            out[4..8].copy_from_slice(&tag.to_le_bytes());
             8
         }
         FILE_POSITION_INFORMATION => {
@@ -6910,6 +7066,8 @@ fn rename_file(
         })
     } else {
         let path = tri!(call.resolve_file_name(root, name, OBJ_CASE_INSENSITIVE));
+        // A link at the end is replaced, not followed.
+        let path = tri!(file::resolve_links(path, false));
         let relative = path.start != crate::fs::ramfs::ROOT;
         let parts = tri!(file::components(&path.name, relative));
         let Some(last) = parts.last() else { return NtStatus::INVALID_PARAMETER };
@@ -7119,7 +7277,8 @@ fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
 /// NtQueryAttributesFile(ObjectAttributes, *FileInformation)
 fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
     let (attrs, out) = (arg!(call, 0), arg!(call, 1));
-    let path = tri!(call.file_path(attrs));
+    // A link's own attributes (FILE_ATTRIBUTE_REPARSE_POINT), as Windows.
+    let path = tri!(file::resolve_links(tri!(call.file_path(attrs)), false));
     let node = {
         let relative = path.start != crate::fs::ramfs::ROOT;
         let parts = tri!(file::components(&path.name, relative));

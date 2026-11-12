@@ -82,6 +82,17 @@ impl NtStatus {
     /// link opened without FILE_OPEN_REPARSE_POINT, as Windows answers a
     /// WSL symlink).
     pub const IO_REPARSE_TAG_NOT_HANDLED: NtStatus = NtStatus(0xc000_0279);
+    /// Reparse points (FSCTL_SET/GET/DELETE_REPARSE_POINT, following a
+    /// link): a reserved tag; a tag other than the one there; data that
+    /// does not fit its header or the node; no reparse point; a lookup
+    /// that met too many links (or a loop).
+    pub const IO_REPARSE_TAG_INVALID: NtStatus = NtStatus(0xc000_0276);
+    pub const IO_REPARSE_TAG_MISMATCH: NtStatus = NtStatus(0xc000_0277);
+    pub const IO_REPARSE_DATA_INVALID: NtStatus = NtStatus(0xc000_0278);
+    pub const NOT_A_REPARSE_POINT: NtStatus = NtStatus(0xc000_0275);
+    pub const REPARSE_POINT_NOT_RESOLVED: NtStatus = NtStatus(0xc000_0280);
+    /// FSCTL_GET_REPARSE_POINT without an output buffer.
+    pub const INVALID_USER_BUFFER: NtStatus = NtStatus(0xc000_00e8);
     pub const MAPPED_FILE_SIZE_ZERO: NtStatus = NtStatus(0xc000_011e);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
     pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);
