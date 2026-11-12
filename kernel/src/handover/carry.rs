@@ -1147,7 +1147,8 @@ impl Programs {
                     .write(w, &name_of(object)?)?;
             }
             (ObjectBody::File(f), tag::FILES) => {
-                let path = file::volume_path(f.node).map_err(|_| AllocError)?;
+                // The name it was opened by (a hard link's own).
+                let path = file::handle_path(f).map_err(|_| AllocError)?;
                 let shape = if f.directory {
                     file::FILE_DIRECTORY_FILE
                 } else {

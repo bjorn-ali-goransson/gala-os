@@ -804,15 +804,20 @@ impl Drop for SymlinkPrivilege {
     }
 }
 
-/// CreateHardLinkW: gala's file system has no hard links (reported).
+/// CreateHardLinkW(link, existing, security): `link` becomes another name
+/// of file `existing` (FileLinkInformation; Wine's kernel32 test_hard_link
+/// and ntdll test_file_link_information, `hardlink_test`). The security
+/// attributes are reserved (documented: NULL).
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateHardLinkW(
-    _link: *const u16,
-    _existing: *const u16,
+    link: *const u16,
+    existing: *const u16,
     _security: *mut c_void,
 ) -> Bool {
-    unsupported(b"kernel32.dll!CreateHardLinkW", 0);
-    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+    if link.is_null() || existing.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    super::mapping::hard_link(existing, link)
 }
 
 const ERROR_FILE_EXISTS: u32 = 80;

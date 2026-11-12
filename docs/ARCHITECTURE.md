@@ -1794,9 +1794,38 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   (CPython lists its Lib so: `encodings` has no dot) while NT's own
   `*.*` keeps its literal period (`ramfs::wildcard_match`, a set of mask
   positions, no backtracking).
-- **Rename and delete**: FileRenameInformation (DELETE access) moves the
-  node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
-  closes.
+- **Rename and delete**: FileRenameInformation(Ex) (DELETE access)
+  moves the name the handle was opened by; FILE_DELETE_ON_CLOSE needs
+  DELETE and takes effect when that open closes. FileDispositionInformation
+  and FileDispositionInformationEx (class 64; kernel32's
+  FileDispositionInfoEx, 21) mark that name for deletion at the node's
+  last close (a hard link's mark is its own, `Link::delete_pending`); a
+  read-only file is STATUS_CANNOT_DELETE unless the Ex flag
+  IGNORE_READONLY_ATTRIBUTE; POSIX_SEMANTICS removes the name when that
+  handle closes though others stay open (the node lives on, detached,
+  `ramfs::unlink`); ON_CLOSE sets or clears the handle's
+  FILE_DELETE_ON_CLOSE. NtCreateFile's FileAttributes (read-only,
+  hidden, system, temporary, not indexed) are a created file's
+  (`file::set_created_attributes`); an overwrite keeps the old ones (not
+  yet as Windows, which sets them then too).
+- **Hard links** (FileLinkInformation 11, FileLinkInformationEx 72;
+  kernel32's CreateHardLinkW/A; `hardlink_test`, `wow64_hardlink_test`,
+  from Wine's test_hard_link and test_file_link_information): a new name
+  for a file (`ramfs::link_replacing`), none for a directory
+  (STATUS_FILE_IS_A_DIRECTORY); no access to the file is needed. An
+  existing name is STATUS_OBJECT_NAME_COLLISION, or with
+  REPLACE_IF_EXISTS replaced unless it is a directory, open or read-only
+  (STATUS_ACCESS_DENIED; IGNORE_READONLY_ATTRIBUTE lifts the last); the
+  file's own name with the flag is a success that changes nothing. The
+  change log's Link record keeps it ("The disk"). A file object opened
+  by a hard link remembers it (`FileObject::via`): FileNameInformation
+  reports it, a delete or rename through the handle acts on it, a
+  handover carries it. Not yet: FindFirstFileNameW lists only the name it
+  was given (recorded when the file has more: kernel32 needs
+  FileHardLinkInformation, class 46, and a way from a parent's id to its
+  path); FILE_LINK/RENAME_POSIX_SEMANTICS (replacing an open target;
+  recorded, refused as without it); IGNORE_READONLY_ATTRIBUTE on a rename
+  (recorded, ignored).
 - **Volume**: reports itself as an NTFS disk (FileFs* classes) with RAM
   as its size.
 - **Completion**: file objects are waitable: NtReadFile/NtWriteFile reset

@@ -406,6 +406,9 @@ struct Link {
     parent: NodeId,
     name: Vec<u16>,
     node: NodeId,
+    /// NT's delete of this name (`set_entry_delete_pending`): it goes at
+    /// the node's last close, the node's other names stay.
+    delete_pending: bool,
 }
 
 /// Requested data access of an open, for share checks.
@@ -1322,7 +1325,11 @@ impl RamFs {
                 if let Some(node) = self.nodes[id].take() {
                     self.release(&node);
                 }
-            } else if node.delete_pending {
+                return;
+            }
+            self.remove_pending_links(id);
+            let Ok(node) = self.node_mut(id) else { return };
+            if node.delete_pending {
                 self.record_removal(id);
                 self.remove(id);
             }
@@ -1361,7 +1368,8 @@ impl RamFs {
         let old = core::mem::replace(&mut node.name, link.name);
         node.parent = link.parent;
         node.extra_links -= 1;
-        node.delete_pending = false;
+        // The name it moves to keeps its own pending delete.
+        node.delete_pending = link.delete_pending;
         let directory = node.is_dir();
         if let Kind::Directory(c) = &mut self.node_mut(from)?.kind {
             c.retain(|&x| x != id);
@@ -1633,7 +1641,7 @@ impl RamFs {
             None
         };
         self.links
-            .try_push(Link { parent, name: owned, node: id })
+            .try_push(Link { parent, name: owned, node: id, delete_pending: false })
             .map_err(|_| FsError::NoMemory)?;
         self.node_mut(id)?.extra_links += 1;
         self.note(parent, name, false, ACTION_ADDED);
@@ -1643,6 +1651,108 @@ impl RamFs {
             None => {}
         }
         Ok(())
+    }
+
+    /// NT's hard link (FileLinkInformation): `name` in directory `parent`
+    /// becomes another name of file `id`. An existing entry is replaced
+    /// only with `replace`, and only a file nobody has open that is not
+    /// read-only (unless `ignore_readonly`); an entry that already names
+    /// `id` is left as it is (Exists without `replace`).
+    pub fn link_replacing(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        name: &[u16],
+        replace: bool,
+        ignore_readonly: bool,
+    ) -> Result<(), FsError> {
+        if self.node(id).ok_or(FsError::NotFound)?.is_dir() {
+            return Err(FsError::IsADirectory);
+        }
+        if let Some(t) = self.find(parent, name)? {
+            if !replace {
+                return Err(FsError::Exists);
+            }
+            if t == id {
+                return Ok(());
+            }
+            let n = self.node(t).ok_or(FsError::NotFound)?;
+            let readonly = n.attributes & ATTRIBUTE_READONLY != 0 && !ignore_readonly;
+            if n.is_dir() || n.opens.handles != 0 || readonly {
+                return Err(FsError::AccessDenied);
+            }
+            self.unlink(parent, name)?;
+        }
+        self.link(id, parent, name)
+    }
+
+    /// `unlink` of node `id`'s first name (FILE_DISPOSITION_POSIX_SEMANTICS
+    /// through an open by it); a node already detached stays so.
+    pub fn unlink_node(&mut self, id: NodeId) -> Result<(), FsError> {
+        let n = self.node(id).ok_or(FsError::NotFound)?;
+        if n.detached {
+            return Ok(());
+        }
+        let parent = n.parent;
+        let name = copy(&n.name).ok_or(FsError::NoMemory)?;
+        self.unlink(parent, &name)
+    }
+
+    /// Whether entry `name` of directory `dir` is a hard link (not a
+    /// node's first name).
+    pub fn is_hard_link(&self, dir: NodeId, name: &[u16]) -> bool {
+        self.link_at(dir, name).is_some()
+    }
+
+    /// NT's delete of the name `name` of directory `dir`: a hard link is
+    /// marked alone (it goes at the node's last close, `close`), a first
+    /// name as `set_delete_pending`.
+    pub fn set_entry_delete_pending(
+        &mut self,
+        dir: NodeId,
+        name: &[u16],
+        pending: bool,
+    ) -> Result<(), FsError> {
+        match self.link_at(dir, name) {
+            Some(i) => {
+                self.links[i].delete_pending = pending;
+                Ok(())
+            }
+            None => {
+                let id = self.find(dir, name)?.ok_or(FsError::NotFound)?;
+                self.set_delete_pending(id, pending)
+            }
+        }
+    }
+
+    /// Whether NT's delete is pending for the name `name` of `dir`.
+    pub fn entry_delete_pending(&self, dir: NodeId, name: &[u16]) -> bool {
+        match self.link_at(dir, name) {
+            Some(i) => self.links[i].delete_pending,
+            None => self.find(dir, name).ok().flatten().is_some_and(|id| self.delete_pending(id)),
+        }
+    }
+
+    /// Removes (recording each) the hard links of `id` whose delete is
+    /// pending: its last open closed.
+    fn remove_pending_links(&mut self, id: NodeId) {
+        while let Some(i) = self.links.iter().position(|l| l.node == id && l.delete_pending) {
+            let path = if self.recording && self.logged(self.links[i].parent) {
+                Some(self.entry_path(self.links[i].parent, &self.links[i].name))
+            } else {
+                None
+            };
+            let link = self.links.remove(i);
+            if let Ok(n) = self.node_mut(id) {
+                n.extra_links -= 1;
+            }
+            self.note(link.parent, &link.name, false, ACTION_REMOVED);
+            match path {
+                Some(Ok(path)) => self.push_op(Op::Delete { path }),
+                Some(Err(_)) => self.ops_lost = true,
+                None => {}
+            }
+        }
     }
 
     /// Removes the name `name` of directory `dir` at once (Linux's unlink
@@ -4117,6 +4227,65 @@ mod tests {
         assert_eq!(f.is_empty_dir(a), Ok(true));
         let mut buf = [0u8; 4];
         f.read(x, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"data");
+    }
+
+    /// NT's hard links (FileLinkInformation): replacing only a closed,
+    /// writable file and only when asked; a name's delete takes only that
+    /// name, at the node's last close, recorded so a replay ends the same.
+    #[test]
+    fn nt_hard_links_and_their_deletes() {
+        let mut f = fs();
+        f.recording = true;
+        let d = f.create(ROOT, &w("d"), true, 1).unwrap();
+        let x = f.create(d, &w("x"), false, 1).unwrap();
+        f.write(x, 0, b"data", 2).unwrap();
+        let other = f.create(d, &w("other"), false, 1).unwrap();
+        assert_eq!(f.link_replacing(d, ROOT, &w("dl"), false, false), Err(FsError::IsADirectory));
+        assert_eq!(f.link_replacing(x, d, &w("other"), false, false), Err(FsError::Exists));
+        assert_eq!(f.link_replacing(x, d, &w("X"), false, false), Err(FsError::Exists));
+        assert_eq!(f.link_replacing(x, d, &w("X"), true, false), Ok(()));
+        assert_eq!(f.link_replacing(x, ROOT, &w("d"), true, false), Err(FsError::AccessDenied));
+        // An open target, a read-only one.
+        f.open(other, R, SHARE_R).unwrap();
+        assert_eq!(f.link_replacing(x, d, &w("other"), true, false), Err(FsError::AccessDenied));
+        f.close(other, R, SHARE_R);
+        f.set_basic(other, Times::default(), Some(ATTRIBUTE_READONLY)).unwrap();
+        assert_eq!(f.link_replacing(x, d, &w("other"), true, false), Err(FsError::AccessDenied));
+        f.link_replacing(x, d, &w("other"), true, true).unwrap();
+        assert_eq!(f.find(d, &w("other")), Ok(Some(x)));
+        assert!(f.node(other).is_none());
+        f.link_replacing(x, ROOT, &w("y"), false, false).unwrap();
+        assert_eq!(f.node(x).unwrap().nlink(), 3);
+        assert!(f.is_hard_link(ROOT, &w("y")) && !f.is_hard_link(d, &w("x")));
+        // The delete of a link opened by it: only that name, at the last
+        // close.
+        f.open(x, R, SHARE_R).unwrap();
+        f.set_entry_delete_pending(ROOT, &w("y"), true).unwrap();
+        assert!(f.entry_delete_pending(ROOT, &w("y")));
+        assert!(!f.entry_delete_pending(d, &w("x")));
+        f.close(x, R, SHARE_R);
+        assert_eq!(f.find(ROOT, &w("y")), Ok(None));
+        assert_eq!(f.path_of(x).unwrap(), w("\\d\\x"));
+        // The first name's delete: the node moves to its link.
+        f.open(x, R, SHARE_R).unwrap();
+        f.set_entry_delete_pending(d, &w("x"), true).unwrap();
+        f.close(x, R, SHARE_R);
+        assert_eq!(f.path_of(x).unwrap(), w("\\d\\other"));
+        assert_eq!(f.node(x).unwrap().nlink(), 1);
+        let (ops, lost) = f.take_ops();
+        assert!(!lost);
+        let mut g = fs();
+        for op in &ops {
+            g.apply(op).unwrap();
+        }
+        let gd = g.lookup(&w("\\d")).unwrap();
+        let gx = g.find(gd, &w("other")).unwrap().unwrap();
+        assert_eq!(g.find(gd, &w("x")), Ok(None));
+        assert_eq!(g.find(ROOT, &w("y")), Ok(None));
+        assert_eq!(g.node(gx).unwrap().nlink(), 1);
+        let mut buf = [0u8; 4];
+        g.read(gx, 0, &mut buf).unwrap();
         assert_eq!(&buf, b"data");
     }
 

@@ -1437,6 +1437,9 @@ a cache on the host:
   to a file in `/dev/shm` holds it in memory (then XTASK_LOW_DISK=1,
   since xtask checks the target disk's room). Delete that file when done
   (xtask removes only the link after a pass).
+- Its VM has 4 GiB (`OFFICE_LOCAL_MEMORY_MIB`, a stopgap: ROADMAP "Known
+  issues and stopgaps"): with the image in `/dev/shm` the host needs
+  both in RAM (about 12 GB).
 - Limits: the cache is one build of one product set; the download itself
   (`office_install`'s first half hour: the transport, ranges, the
   service's staging of what it fetched) is not exercised, so run

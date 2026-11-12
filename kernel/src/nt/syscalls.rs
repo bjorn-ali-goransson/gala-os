@@ -5073,7 +5073,17 @@ impl Call<'_> {
     }
 
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {
-        let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options, ea } = r;
+        let OpenRequest {
+            out,
+            access,
+            attrs_ptr,
+            iosb,
+            share,
+            disposition,
+            options,
+            ea,
+            file_attributes,
+        } = r;
         let mut granted = super::object::FILE_MAPPING.map(access);
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
@@ -5125,6 +5135,7 @@ impl Call<'_> {
             let created = tri!(file::create(&path, granted, share, disposition, options));
             if created.information == file::FILE_CREATED {
                 tri!(security_calls::assign_file(self, &created.object, attrs_ptr));
+                tri!(file::set_created_attributes(&created.object, file_attributes));
             }
             (created.object, created.information)
         };
@@ -5155,6 +5166,8 @@ struct OpenRequest {
     options: u32,
     /// EaBuffer and EaLength (NtCreateFile only; the AFD open packet).
     ea: (u64, u64),
+    /// NtCreateFile's FileAttributes: what a file it creates starts with.
+    file_attributes: u32,
 }
 
 /// NtCreateNamedPipeFile(*FileHandle, DesiredAccess, ObjectAttributes,
@@ -5490,6 +5503,7 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         disposition,
         options,
         ea,
+        file_attributes: arg!(call, 5) as u32,
     });
     emit_open(call, attrs, out, status);
     status
@@ -5543,6 +5557,7 @@ fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
         disposition: file::FILE_OPEN,
         options,
         ea: (0, 0),
+        file_attributes: 0,
     });
     emit_open(call, attrs, out, status);
     status
@@ -6655,7 +6670,15 @@ const FILE_ID_INFORMATION: u64 = 59;
 const FILE_NAME_INFORMATION: u64 = 9;
 const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
+/// FileRenameInformationEx: FILE_RENAME_INFORMATION with Flags for the
+/// BOOLEAN.
+const FILE_RENAME_INFORMATION_EX: u64 = 65;
+const FILE_LINK_INFORMATION: u64 = 11;
+/// FileLinkInformationEx: FILE_LINK_INFORMATION with Flags.
+const FILE_LINK_INFORMATION_EX: u64 = 72;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
+/// FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX { Flags }.
+const FILE_DISPOSITION_INFORMATION_EX: u64 = 64;
 const FILE_POSITION_INFORMATION: u64 = 14;
 const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_COMPLETION_INFORMATION: u64 = 30;
@@ -6762,7 +6785,7 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_NAME_INFORMATION {
-        let name = tri!(file::volume_path(file.node));
+        let name = tri!(file::handle_path(file));
         return return_file_name(call, &name, buffer, length, iosb);
     }
     if class == FILE_PROCESS_IDS_USING_FILE_INFORMATION {
@@ -7043,8 +7066,21 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
             Err(e) => file::fs_status(e),
         };
     }
-    if class == FILE_RENAME_INFORMATION {
-        let status = rename_file(call, &entry, file, buffer, length);
+    if matches!(
+        class,
+        FILE_RENAME_INFORMATION
+            | FILE_RENAME_INFORMATION_EX
+            | FILE_LINK_INFORMATION
+            | FILE_LINK_INFORMATION_EX
+    ) {
+        let status = name_file(call, &entry, file, buffer, length, class);
+        if status == NtStatus::SUCCESS {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        }
+        return status;
+    }
+    if class == FILE_DISPOSITION_INFORMATION_EX {
+        let status = dispose_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {
             tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
         }
@@ -7083,10 +7119,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
             if entry.access & file::DELETE == 0 {
                 return NtStatus::ACCESS_DENIED;
             }
-            match file::with_fs(|fs| fs.set_delete_pending(file.node, data[0] != 0)) {
-                Ok(()) => NtStatus::SUCCESS,
-                Err(e) => file::fs_status(e),
-            }
+            set_disposition(file, data[0] != 0, false)
         }
     };
     if status == NtStatus::SUCCESS {
@@ -7095,18 +7128,111 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
-/// FileRenameInformation: FILE_RENAME_INFORMATION { BOOLEAN ReplaceIfExists;
-/// HANDLE RootDirectory; ULONG FileNameLength; WCHAR FileName[]; } (24 bytes
-/// with padding). A bare name renames within the same directory.
-fn rename_file(
+/// NT's delete of `file`'s name (`delete`) or its reset: a read-only
+/// file is STATUS_CANNOT_DELETE unless `ignore_readonly`.
+fn set_disposition(file: &file::FileObject, delete: bool, ignore_readonly: bool) -> NtStatus {
+    let readonly = file::with_fs(|fs| {
+        fs.node(file.node).is_some_and(|n| n.attributes & crate::fs::ramfs::ATTRIBUTE_READONLY != 0)
+    });
+    if delete && readonly && !ignore_readonly {
+        return NtStatus::CANNOT_DELETE;
+    }
+    match file::set_delete_pending(file, delete) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => file::fs_status(e),
+    }
+}
+
+/// FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX { ULONG
+/// Flags; }: FILE_DISPOSITION_DELETE (0 resets), POSIX_SEMANTICS (the
+/// name goes when this handle closes: `FileObject::set_posix_delete`),
+/// ON_CLOSE (sets or clears FILE_DELETE_ON_CLOSE instead),
+/// IGNORE_READONLY_ATTRIBUTE; FORCE_IMAGE_SECTION_CHECK changes nothing
+/// here (a mapped image's file is not deleted under it either way).
+fn dispose_file(
     call: &Call<'_>,
     entry: &HandleEntry,
     file: &file::FileObject,
     buffer: u64,
     length: usize,
 ) -> NtStatus {
-    const HEADER: usize = 20;
+    const DELETE: u32 = 0x1;
+    const POSIX_SEMANTICS: u32 = 0x2;
+    const FORCE_IMAGE_SECTION_CHECK: u32 = 0x4;
+    const ON_CLOSE: u32 = 0x8;
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
+    const KNOWN: u32 =
+        DELETE | POSIX_SEMANTICS | FORCE_IMAGE_SECTION_CHECK | ON_CLOSE | IGNORE_READONLY_ATTRIBUTE;
+    if length < 4 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
     if entry.access & file::DELETE == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let mut raw = [0u8; 4];
+    if call.process.read(buffer, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let flags = u32::from_le_bytes(raw);
+    if flags & !KNOWN != 0 {
+        super::ledger::record(
+            "NtSetInformationFile",
+            "FileDispositionInformationEx flags",
+            flags.into(),
+        );
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let delete = flags & DELETE != 0;
+    if flags & ON_CLOSE != 0 {
+        if delete
+            && file::with_fs(|fs| fs.node(file.node).is_some_and(|n| n.is_dir()))
+            && !file::with_fs(|fs| fs.is_empty_dir(file.node)).unwrap_or(false)
+        {
+            return NtStatus::DIRECTORY_NOT_EMPTY;
+        }
+        file.set_delete_on_close(delete);
+        return NtStatus::SUCCESS;
+    }
+    let status = set_disposition(file, delete, flags & IGNORE_READONLY_ATTRIBUTE != 0);
+    if status == NtStatus::SUCCESS {
+        file.set_posix_delete(delete && flags & POSIX_SEMANTICS != 0);
+    }
+    status
+}
+
+/// FileRenameInformation(Ex) and FileLinkInformation(Ex): FILE_RENAME_INFORMATION
+/// and FILE_LINK_INFORMATION share a layout, { BOOLEAN ReplaceIfExists
+/// (the Ex classes: ULONG Flags); HANDLE RootDirectory; ULONG
+/// FileNameLength; WCHAR FileName[]; } (24 bytes with padding). A bare
+/// name without a RootDirectory is in the file's own directory. A rename
+/// moves the name the handle was opened by; a link adds a name to the
+/// file (none to a directory: STATUS_FILE_IS_A_DIRECTORY) and needs no
+/// access to it.
+fn name_file(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    buffer: u64,
+    length: usize,
+    class: u64,
+) -> NtStatus {
+    const HEADER: usize = 20;
+    /// FILE_RENAME_/FILE_LINK_REPLACE_IF_EXISTS.
+    const REPLACE_IF_EXISTS: u32 = 0x1;
+    /// FILE_RENAME_/FILE_LINK_POSIX_SEMANTICS: an open target may be
+    /// replaced.
+    const POSIX_SEMANTICS: u32 = 0x2;
+    /// FILE_RENAME_/FILE_LINK_IGNORE_READONLY_ATTRIBUTE.
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x40;
+    /// The storage-reserve and pin-state bits: about features gala has
+    /// not (no storage reserves, no cloud files), nothing to do.
+    const NO_EFFECT: u32 = 0x4 | 0x8 | 0x10 | 0x20 | 0x80 | 0x100;
+    let link = matches!(class, FILE_LINK_INFORMATION | FILE_LINK_INFORMATION_EX);
+    let ex = matches!(class, FILE_RENAME_INFORMATION_EX | FILE_LINK_INFORMATION_EX);
+    if link && file.directory {
+        return NtStatus::FILE_IS_A_DIRECTORY;
+    }
+    if !link && entry.access & file::DELETE == 0 {
         return NtStatus::ACCESS_DENIED;
     }
     if length < 24 {
@@ -7116,7 +7242,23 @@ fn rename_file(
     if call.process.read(buffer, &mut header).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let replace = header[0] != 0;
+    let flags = if ex {
+        u32::from_le_bytes(header[0..4].try_into().unwrap_or([0; 4]))
+    } else {
+        u32::from(header[0] != 0)
+    };
+    let known = REPLACE_IF_EXISTS | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE | NO_EFFECT;
+    if flags & !known != 0 {
+        super::ledger::record("NtSetInformationFile", "rename/link flags", flags.into());
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if flags & POSIX_SEMANTICS != 0 {
+        // Replacing a target others hold open is not there yet: such a
+        // target is refused as without the flag.
+        super::ledger::record("NtSetInformationFile", "rename/link POSIX_SEMANTICS", class);
+    }
+    let replace = flags & REPLACE_IF_EXISTS != 0;
+    let ignore_readonly = flags & IGNORE_READONLY_ATTRIBUTE != 0;
     let root = u64::from_le_bytes(header[8..16].try_into().unwrap_or([0; 8]));
     let name_len = u32::from_le_bytes(header[16..20].try_into().unwrap_or([0; 4])) as usize;
     if name_len == 0 || !name_len.is_multiple_of(2) || HEADER + name_len > length {
@@ -7138,11 +7280,15 @@ fn rename_file(
         let _ = name.try_push(u16::from_le_bytes([pair[0], pair[1]]));
     }
     let node = file.node;
-    let result = if root == 0 && !name.contains(&u16::from(b'\\')) {
-        file::with_fs(|fs| {
-            let parent = fs.node(node).ok_or(crate::fs::ramfs::FsError::NotFound)?.parent();
-            fs.rename(node, parent, &name, replace)
-        })
+    // The target's directory and last name.
+    let (parent, last) = if root == 0 && !name.contains(&u16::from(b'\\')) {
+        let parent = match file::with_fs(|fs| fs.node(node).map(|n| n.parent())) {
+            Some(p) => p,
+            None => return NtStatus::OBJECT_NAME_NOT_FOUND,
+        };
+        // The handle's own directory when opened by a hard link.
+        let parent = file.via.lock().as_ref().map_or(parent, |(d, _)| *d);
+        (parent, name)
     } else {
         let path = tri!(call.resolve_file_name(root, name, OBJ_CASE_INSENSITIVE));
         // A link at the end is replaced, not followed.
@@ -7150,10 +7296,27 @@ fn rename_file(
         let relative = path.start != crate::fs::ramfs::ROOT;
         let parts = tri!(file::components(&path.name, relative));
         let Some(last) = parts.last() else { return NtStatus::INVALID_PARAMETER };
-        file::with_fs(|fs| {
-            let parent = fs.parent_of(path.start, &parts)?;
-            fs.rename(node, parent, last, replace)
-        })
+        let parent = match file::with_fs(|fs| fs.parent_of(path.start, &parts)) {
+            Ok(p) => p,
+            Err(e) => return file::fs_status(e),
+        };
+        let mut owned = Vec::new();
+        if owned.try_extend_from_slice(last).is_err() {
+            return NtStatus::NO_MEMORY;
+        }
+        (parent, owned)
+    };
+    let result = if link {
+        file::with_fs(|fs| fs.link_replacing(node, parent, &last, replace, ignore_readonly))
+    } else {
+        if ignore_readonly {
+            super::ledger::record(
+                "NtSetInformationFile",
+                "rename IGNORE_READONLY_ATTRIBUTE",
+                class,
+            );
+        }
+        file::rename_open(file, parent, &last, replace)
     };
     match result {
         Ok(()) => NtStatus::SUCCESS,

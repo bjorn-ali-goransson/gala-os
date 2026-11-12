@@ -3760,6 +3760,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // File data written back lazily (user/writeback_test).
     ("writeback_test", "ntdll.dll", "Windows/System32"),
     ("writeback_test", "kernel32.dll", "Windows/System32"),
+    // Hard links and delete dispositions (user/hardlink_test).
+    ("hardlink_test", "ntdll.dll", "Windows/System32"),
+    ("hardlink_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_hardlink_test", "wow64.dll", "Windows/System32"),
+    ("wow64_hardlink_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_hardlink_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_hardlink_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wofutil_test", "ntdll.dll", "Windows/System32"),
     ("wofutil_test", "kernel32.dll", "Windows/System32"),
     ("wofutil_test", "wofutil.dll", "Windows/System32"),
@@ -4005,6 +4012,7 @@ const USER_PROGRAMS: &[&str] = &[
     "msi_test",
     "rstrtmgr_test",
     "wofutil_test",
+    "hardlink_test",
     "writeback_test",
     "gdiplus_test",
     "uisettings_test",
@@ -4045,6 +4053,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_cert_test",
     "wow64_msi_test",
     "wow64_rstrtmgr_test",
+    "wow64_hardlink_test",
     "wow64_wintrust_test",
     "wow64_setupcab_test",
     "wow64_svc_test",
@@ -4112,6 +4121,13 @@ const LINUX_MENU_TIMEOUT: Duration = Duration::from_secs(600);
 /// Memory for `linux_menu`'s VM: the image's Linux roots, the
 /// distribution's tree (a second copy, on C: in memory), its download.
 const LINUX_MENU_MEMORY_MIB: u64 = 1536;
+/// Memory for `office_install_local`'s VM. A NAMED STOPGAP (ROADMAP
+/// "Known issues and stopgaps"): at 512 MiB the install's publish ran out
+/// of frames (the kernel heap grown by Office's registry kept wholly in
+/// memory, the service's private memory with no page file, image
+/// sections copied from the file cache). Replaced by those fixes (ROADMAP
+/// OF, "the memory"); then the scenario goes back to the default.
+const OFFICE_LOCAL_MEMORY_MIB: u64 = 4096;
 /// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
 /// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
 /// gala guest under TCG fetched 512 MiB of the same CDN file with curl
@@ -5932,6 +5948,10 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("linux_menu")) {
         memory = memory.max(LINUX_MENU_MEMORY_MIB);
     }
+    // A stopgap to replace (OFFICE_LOCAL_MEMORY_MIB).
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("office_install_local")) {
+        memory = memory.max(OFFICE_LOCAL_MEMORY_MIB);
+    }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
@@ -7517,6 +7537,21 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist powercut run=writeback_test.exe args=lazy",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["writeback_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Hard links (CreateHardLinkW, FileLinkInformation(Ex)) and
+        // FileDispositionInformationEx (user/hardlink_test).
+        name: "hardlink_test",
+        cmdline: "qemu_exit run=hardlink_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["hardlink_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/hardlink_test built for x86).
+        name: "wow64_hardlink_test",
+        cmdline: "qemu_exit run=wow64_hardlink_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_hardlink_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The Windows Overlay Filter's API with no filter attached
@@ -11613,6 +11648,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_gdiplus_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_uisettings_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_rstrtmgr_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_hardlink_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

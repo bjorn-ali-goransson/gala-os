@@ -1940,17 +1940,21 @@ need gala's.
      most of it grown during the registry staging, Office's registry kept
      in memory; the service's 190 MiB of private memory; 63 MiB of
      section pages, the client's 30 MiB image laid out whole; the files'
-     pages only 2 MiB); setup.exe ends with 17004. Next: hard links
-     (NtSetInformationFile FileLinkInformation(Ex), CreateHardLinkW,
-     test first from Wine's kernel32 test_CreateHardLink run on Windows;
-     the change log's Link record keeps them), SetFileInformationByHandle's
-     FileDispositionInfoEx (class 21, 10 hits); then the memory: where
-     the kernel heap goes (a breakdown by user: the registry, the file
-     tree), a registry that need not live wholly in memory, image
-     sections sharing the file's cache pages instead of a copy, and no
-     page file for private memory (Windows needs 4 GB for Office: a
-     larger VM for this scenario is a stopgap to name and track, not the
-     answer).
+     pages only 2 MiB); setup.exe ends with 17004. Done: hard links
+     (CreateHardLinkW/A, NtSetInformationFile FileLinkInformation(Ex),
+     a handle opened by a link acting on its own name; the change log's
+     Link record keeps them) and FileDispositionInformationEx
+     (SetFileInformationByHandle's FileDispositionInfoEx, class 21, 10
+     hits), test first (`hardlink_test`, `wow64_hardlink_test`, from Wine's
+     test_hard_link, test_file_link_information and
+     test_file_disposition_information; ARCHITECTURE "Files"). The
+     scenario's VM has 4 GiB now, a named stopgap ("Known issues and
+     stopgaps"). Next: the memory: where the kernel heap goes (a
+     breakdown by user: the registry, the file tree), a registry that
+     need not live wholly in memory, image sections sharing the file's
+     cache pages instead of a copy, then a page file for private memory
+     (Windows needs 4 GB for Office); FindFirstFileNameW listing every
+     name of a file with hard links (FileHardLinkInformation).
      Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
      ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
@@ -4203,6 +4207,30 @@ builds on shell32's known folders and associations and CT's
 Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
+
+- **4 GiB for `office_install_local`** (`OFFICE_LOCAL_MEMORY_MIB` in
+  xtask; every other scenario keeps 512 MiB and the image's size): at
+  512 MiB the install's publish ran out of frames (the kernel heap
+  157 MiB, grown by Office's registry kept wholly in memory; the
+  Click-to-Run service's 190 MiB of private memory with no page file;
+  63 MiB of image section pages copied from the file cache). Structural
+  fix, in this order (item OF, "the memory"): a kernel-heap breakdown by
+  owner, then the largest owner's fix (a registry that need not live
+  wholly in memory, image sections sharing the file cache's pages), then
+  a page file for private memory; then the scenario goes back to the
+  default size.
+
+- **Program files are read-only**: the boot's program files (the image's
+  modules not marked writable) carry FILE_ATTRIBUTE_READONLY, which
+  Windows' System32 files do not (an ACL protects those). A copy keeps
+  the attribute (CopyFileW, as Windows), and a read-only file is not
+  deleted (STATUS_CANNOT_DELETE, as Windows), so a program that copies a
+  system DLL and deletes the copy fails where it works on Windows
+  (`kernel32_test` clears the attribute first). Structural fix: protect
+  the boot's files by their security descriptor alone (docs/SECURITY.md
+  "The access check") and give them Windows' attributes; the Linux
+  side's modes of them (`lx::file`, 0o555 from the attribute) then from
+  the descriptor. Item SEC (SECURITY "Status", leftovers).
 
 - **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
   `lx_httpd.txt`): every other Linux transcript is recorded on real

@@ -35,6 +35,7 @@ impl NtStatus {
     pub const INVALID_DEVICE_REQUEST: NtStatus = NtStatus(0xc000_0010);
     pub const SHARING_VIOLATION: NtStatus = NtStatus(0xc000_0043);
     pub const DELETE_PENDING: NtStatus = NtStatus(0xc000_0056);
+    pub const CANNOT_DELETE: NtStatus = NtStatus(0xc000_0121);
     pub const FILE_IS_A_DIRECTORY: NtStatus = NtStatus(0xc000_00ba);
     pub const DIRECTORY_NOT_EMPTY: NtStatus = NtStatus(0xc000_0101);
     pub const NOT_A_DIRECTORY: NtStatus = NtStatus(0xc000_0103);
