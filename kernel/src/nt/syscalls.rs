@@ -761,8 +761,9 @@ fn dispatch(frame: &mut SyscallFrame) {
     };
     thread::set_in_syscall(&me, None);
     crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
-    // What the call changed on C: is on the disk before it returns.
-    super::persist::sync();
+    // C:'s changes are written back lazily; a writer past the dirty limit
+    // writes back here (throttling).
+    super::persist::after_call();
     let name = service.map_or("?", |&(_, name, ..)| name);
     let counter =
         if super::stats::is_wait(name) { &super::stats::WAITS } else { &super::stats::SYSCALLS };
@@ -6165,16 +6166,39 @@ fn file_write(
     if entry.access & file::FILE_WRITE_DATA == 0 {
         offset = size; // append-only handles always write at the end
     }
+    tri!(unbuffered_check(file, offset, length));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), true));
     let done = tri!(write_range(call, file, buffer, length, offset));
     if file.synchronous {
         *file.position.lock() = offset + done;
+    }
+    // A write-through or unbuffered handle's data is on the disk before
+    // the call returns (CreateFile's FILE_FLAG_WRITE_THROUGH and
+    // FILE_FLAG_NO_BUFFERING).
+    if file.mode & (file::FILE_WRITE_THROUGH | file::FILE_NO_INTERMEDIATE_BUFFERING) != 0 {
+        super::persist::flush(super::persist::Cause::WriteThrough);
     }
     if super::logtee::active() {
         logtee_write(call, file, buffer, done);
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
     NtStatus::SUCCESS
+}
+
+/// A read or write on a handle opened without buffering
+/// (FILE_NO_INTERMEDIATE_BUFFERING) moves whole sectors at sector offsets
+/// (FILE_FLAG_NO_BUFFERING's documented rule, 512-byte logical sectors:
+/// FileFsSectorSizeInformation); anything else is
+/// STATUS_INVALID_PARAMETER (ERROR_INVALID_PARAMETER), as on Windows.
+/// (The buffer's alignment, also documented, is not checked.)
+fn unbuffered_check(file: &file::FileObject, offset: u64, length: u32) -> Result<(), NtStatus> {
+    const SECTOR: u64 = 512;
+    if file.mode & file::FILE_NO_INTERMEDIATE_BUFFERING != 0
+        && (!offset.is_multiple_of(SECTOR) || !u64::from(length).is_multiple_of(SECTOR))
+    {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    Ok(())
 }
 
 /// `logtee=`: a write to a file below the logged directory goes to the
@@ -6198,9 +6222,16 @@ fn write_range(
     offset: u64,
 ) -> Result<u64, NtStatus> {
     // On a disk-backed C: a write that cannot have all its clusters
-    // fails as a whole (STATUS_DISK_FULL), as on Windows.
-    file::with_fs(|fs| fs.room_for(file.node, offset, u64::from(length)))
-        .map_err(file::fs_status)?;
+    // fails as a whole (STATUS_DISK_FULL), as on Windows. Clusters given
+    // up and waiting for the write-back count as free (what free space
+    // reports): a write-back first makes them so.
+    let room = || file::with_fs(|fs| fs.room_for(file.node, offset, u64::from(length)));
+    if room() == Err(crate::fs::ramfs::FsError::DiskFull)
+        && file::with_fs(|fs| fs.area_reclaimable()) > 0
+    {
+        super::persist::flush(super::persist::Cause::Reclaim);
+    }
+    room().map_err(file::fs_status)?;
     let mut big = Vec::new();
     let mut small = [0u8; 512];
     let chunk = io_chunk(&mut big, &mut small, length);
@@ -6671,6 +6702,7 @@ fn file_read(
     }
     let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
     let offset = tri!(io_offset(call, file, offset_ptr, size));
+    tri!(unbuffered_check(file, offset, length));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), false));
     if offset >= size && length > 0 {
         tri!(call.write_iosb(iosb, NtStatus::END_OF_FILE, 0));
@@ -7372,18 +7404,21 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
-/// NtFlushBuffersFile(FileHandle, *IoStatusBlock): the volume is in memory,
-/// so only the access check remains.
+/// NtFlushBuffersFile(FileHandle, *IoStatusBlock): a file's or the
+/// volume's: what C: has pending is on the disk before it returns
+/// (everything pending, a superset of the file's own data and metadata:
+/// the change log is one sequence).
 fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     if entry.access & (file::FILE_WRITE_DATA | file::FILE_APPEND_DATA) == 0 {
         return NtStatus::ACCESS_DENIED;
     }
     match &entry.object.body {
-        ObjectBody::File(_) => {}
+        ObjectBody::File(_) | ObjectBody::VolumeFile(_) => {
+            super::persist::flush(super::persist::Cause::FlushBuffers);
+        }
         ObjectBody::Pipe(end) => tri!(end.flush()),
         ObjectBody::Disk(_) => tri!(platform::disk_flush().map_err(super::disk::status)),
-        ObjectBody::VolumeFile(_) => {}
         _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));

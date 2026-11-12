@@ -37,6 +37,17 @@ const RESERVED_KINDS: &[&str] = &[
 /// (substrings of the demangled names).
 const ALLOWED: &[(&str, &str, &str)] = &[
     (
+        // The dirty queue (a VecDeque: FIFO for the write-back's budget).
+        "kernel::fs::ramfs::RamFs>::page_dirty",
+        "VecDeque<(usize, usize)>>::push_back",
+        "after try_reserve(1) succeeded",
+    ),
+    (
+        "kernel::fs::ramfs::RamFs>::writeback",
+        "VecDeque<(usize, usize)>>::push_back",
+        "after try_reserve(1) succeeded (a pop just made room)",
+    ),
+    (
         "kernel::net::tcp::Stack",
         "SocketSet>::add",
         "the socket set's storage is reserved for MAX_SOCKETS when the stack is made",

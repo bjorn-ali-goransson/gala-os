@@ -1144,6 +1144,21 @@ pub extern "system" fn CreateFileW(
     if flags & FILE_FLAG_OPEN_REPARSE_POINT != 0 {
         options |= FILE_OPEN_REPARSE_POINT;
     }
+    // The caching flags, as CreateFile's documentation maps them to
+    // NtCreateFile's options (FileModeInformation reports them): data
+    // written through at once (FILE_WRITE_THROUGH), no buffering
+    // (FILE_NO_INTERMEDIATE_BUFFERING: whole sectors only), the access
+    // pattern hints (FILE_SEQUENTIAL_ONLY, FILE_RANDOM_ACCESS).
+    for (flag, option) in [
+        (0x8000_0000u32, 0x0002u32), // FILE_FLAG_WRITE_THROUGH
+        (0x2000_0000, 0x0008),       // FILE_FLAG_NO_BUFFERING
+        (0x0800_0000, 0x0004),       // FILE_FLAG_SEQUENTIAL_SCAN
+        (0x1000_0000, 0x0800),       // FILE_FLAG_RANDOM_ACCESS
+    ] {
+        if flags & flag != 0 {
+            options |= option;
+        }
+    }
     // As Windows' CreateFileW: FILE_READ_ATTRIBUTES always, SYNCHRONIZE
     // for synchronous handles.
     let synchronize = if flags & FILE_FLAG_OVERLAPPED == 0 { SYNCHRONIZE } else { 0 };

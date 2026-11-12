@@ -220,6 +220,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // replayed now, over the boot's files).
     if cmdline.flag("persist") {
         nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
+        // `writeback_ms=`: the lazy writer's cadence.
+        if let Some(ms) = cmdline.value("writeback_ms").and_then(|v| v.parse().ok()) {
+            nt::persist::set_cadence_ms(ms);
+        }
         nt::persist::mount();
         handover::check_volume(&info);
         // R8 step 6: a release below the disk's rollback floor does not run.
@@ -447,10 +451,20 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
                 );
                 sched::sleep_ms(1000);
             }
-            // What the program's end changed (delete-on-close at exit),
-            // the registry's changes too.
-            nt::persist::flush_registry();
-            nt::persist::sync();
+            // `powercut`: the machine stops here without writing what is
+            // pending, as a power failure would (the write-back's crash
+            // scenario, `writeback_crash`).
+            if cmdline.flag("powercut") {
+                info!(
+                    "powercut: the machine stops at the end of {name} without writing what is \
+                     pending ({})",
+                    nt::persist::WritebackStats
+                );
+                qemu::exit(QemuExitCode::Success);
+            }
+            // What the program changed is on the disk once it ends (its
+            // exit's delete-on-close too), the registry's changes too.
+            nt::persist::flush(nt::persist::Cause::ProgramEnd);
             nt::ledger::dump();
             info!("run: end {name}");
         }
@@ -581,6 +595,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 /// blocking" forever: the flight recorder's watchdog reported it every
 /// 20 s and its reports pushed every real event out of the ring.)
 fn stop(code: QemuExitCode) -> ! {
+    // What C: has pending goes to the disk before the machine stops.
+    nt::persist::flush(nt::persist::Cause::Shutdown);
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
     }

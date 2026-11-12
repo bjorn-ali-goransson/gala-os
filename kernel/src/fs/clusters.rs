@@ -25,6 +25,9 @@ pub struct Clusters {
     rover: u32,
     /// Given up, released after the next sync (see the module's doc).
     pending: Vec<u32>,
+    /// How many a sync has taken from `pending` and not yet released or
+    /// put back.
+    taken: u32,
     /// Given up while `pending` could not grow: used until the next mount.
     pub leaked: u32,
 }
@@ -36,7 +39,7 @@ impl Clusters {
         let mut bits = Vec::new();
         bits.try_reserve_exact(words).ok()?;
         bits.resize(words, 0);
-        Some(Self { bits, count, free: count, rover: 0, pending: Vec::new(), leaked: 0 })
+        Some(Self { bits, count, free: count, rover: 0, pending: Vec::new(), taken: 0, leaked: 0 })
     }
 
     pub fn count(&self) -> u32 {
@@ -127,13 +130,22 @@ impl Clusters {
         }
     }
 
+    /// Clusters given up whose records are not on the disk yet (pending,
+    /// or taken by the sync writing them): free at the next write-back.
+    pub fn reclaimable(&self) -> u32 {
+        self.pending.len() as u32 + self.taken
+    }
+
     /// The clusters given up so far (for `release` after the sync).
     pub fn take_pending(&mut self) -> Vec<u32> {
-        core::mem::take(&mut self.pending)
+        let list = core::mem::take(&mut self.pending);
+        self.taken += list.len() as u32;
+        list
     }
 
     /// Puts back clusters taken with `take_pending` whose sync failed.
     pub fn keep_pending(&mut self, list: Vec<u32>) {
+        self.taken = self.taken.saturating_sub(list.len() as u32);
         for c in list {
             self.give_up(c);
         }
@@ -142,6 +154,7 @@ impl Clusters {
     /// Frees clusters taken with `take_pending` once their records are on
     /// the disk.
     pub fn release(&mut self, list: &[u32]) {
+        self.taken = self.taken.saturating_sub(list.len() as u32);
         for &c in list {
             self.undo(c);
         }
@@ -174,13 +187,18 @@ mod tests {
         let c = a.alloc().unwrap();
         a.give_up(c);
         assert_eq!(a.free(), 9);
+        // Reclaimable (free space reports it) while pending or taken.
+        assert_eq!(a.reclaimable(), 1);
         let pending = a.take_pending();
         assert_eq!(pending, vec![c]);
+        assert_eq!(a.reclaimable(), 1);
         // A failed sync keeps them pending.
         a.keep_pending(pending);
+        assert_eq!(a.reclaimable(), 1);
         let pending = a.take_pending();
         a.release(&pending);
         assert_eq!(a.free(), 10);
+        assert_eq!(a.reclaimable(), 0);
     }
 
     #[test]
