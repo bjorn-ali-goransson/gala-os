@@ -430,21 +430,31 @@ pub fn relocate_page(
     let have = image.len().min(page_end).saturating_sub(page_rva);
     out[..have].copy_from_slice(&image[page_rva..page_rva + have]);
     out[have..].fill(0);
-    relocate_page_contents(image, reloc, delta, page_rva, out, index)
+    let value = |at: usize, b: &mut [u8]| {
+        b.copy_from_slice(image.get(at..at + b.len()).ok_or(PeError::BadRelocation)?);
+        Ok(())
+    };
+    relocate_page_contents(image, reloc, delta, page_rva, out, index, &value)
 }
+
+/// Reads the unrelocated image at an RVA into a buffer (relocations).
+pub type ImageReader<'a> = dyn Fn(usize, &mut [u8]) -> Result<(), PeError> + 'a;
 
 /// `relocate_page` of a page whose unrelocated contents are already in
 /// `out`, with the relocation table on its own (`table`: the directory's
-/// bytes, offsets in `index` relative to its start).
+/// bytes, offsets in `index` relative to its start) and `value(rva, buf)`
+/// reading the unrelocated image (an entry may straddle the page's
+/// edge: its value is read whole, then the page's part written).
 pub fn relocate_in_place(
     table: &[u8],
     delta: u64,
     page_rva: usize,
     out: &mut [u8; 4096],
     index: Option<&[u32]>,
+    value: &ImageReader<'_>,
 ) -> Result<(), PeError> {
     let reloc = DataDirectory { rva: 0, size: table.len() as u32 };
-    relocate_page_contents(table, reloc, delta, page_rva, out, index)
+    relocate_page_contents(table, reloc, delta, page_rva, out, index, value)
 }
 
 /// SizeOfHeaders of the image whose first bytes are `data` (None if they
@@ -463,6 +473,7 @@ fn relocate_page_contents(
     page_rva: usize,
     out: &mut [u8; 4096],
     index: Option<&[u32]>,
+    value: &ImageReader<'_>,
 ) -> Result<(), PeError> {
     if delta == 0 || reloc.size == 0 {
         return Ok(());
@@ -477,14 +488,14 @@ fn relocate_page_contents(
         let previous = page.checked_sub(1).and_then(|p| index.get(p));
         for &at in [previous, index.get(page)].into_iter().flatten() {
             if at != NO_BLOCK {
-                apply_block(image, start + at as usize, end, delta, page_rva, out)?;
+                apply_block(image, start + at as usize, end, delta, page_rva, out, value)?;
             }
         }
         return Ok(());
     }
     let mut block = start;
     while block + 8 <= end {
-        block = apply_block(image, block, end, delta, page_rva, out)?;
+        block = apply_block(image, block, end, delta, page_rva, out, value)?;
     }
     Ok(())
 }
@@ -524,6 +535,7 @@ fn apply_block(
     delta: u64,
     page_rva: usize,
     out: &mut [u8; 4096],
+    value: &ImageReader<'_>,
 ) -> Result<usize, PeError> {
     let page_end = page_rva + out.len();
     let page = u32_at(image, block).map_err(|_| PeError::BadRelocation)? as usize;
@@ -539,16 +551,18 @@ fn apply_block(
             let bytes: [u8; 8] = match kind {
                 IMAGE_REL_BASED_ABSOLUTE => continue,
                 IMAGE_REL_BASED_HIGHLOW => {
-                    let v = u32_at(image, at).map_err(|_| PeError::BadRelocation)?;
+                    let mut v = [0u8; 4];
+                    value(at, &mut v)?;
                     let mut b = [0u8; 8];
-                    b[..4].copy_from_slice(&v.wrapping_add(delta as u32).to_le_bytes());
+                    b[..4].copy_from_slice(
+                        &u32::from_le_bytes(v).wrapping_add(delta as u32).to_le_bytes(),
+                    );
                     b
                 }
                 IMAGE_REL_BASED_DIR64 => {
-                    let slot = image.get(at..at + 8).ok_or(PeError::BadRelocation)?;
-                    let v =
-                        u64::from_le_bytes(slot.try_into().map_err(|_| PeError::BadRelocation)?);
-                    v.wrapping_add(delta).to_le_bytes()
+                    let mut v = [0u8; 8];
+                    value(at, &mut v)?;
+                    u64::from_le_bytes(v).wrapping_add(delta).to_le_bytes()
                 }
                 _ => return Err(PeError::BadRelocation),
             };

@@ -309,13 +309,24 @@ impl ImageLayout {
         delta: u64,
         out: &mut [u8; PAGE_SIZE as usize],
     ) -> Option<()> {
+        const PAGE: usize = PAGE_SIZE as usize;
         out.copy_from_slice(&self.pages.get(index)?.0);
+        // The unrelocated image, across the pages' edges.
+        let value = |rva: usize, buf: &mut [u8]| {
+            for (k, b) in buf.iter_mut().enumerate() {
+                let at = rva + k;
+                let page = self.pages.get(at / PAGE).ok_or(super::pe::PeError::BadRelocation)?;
+                *b = page.0[at % PAGE];
+            }
+            Ok(())
+        };
         super::pe::relocate_in_place(
             &self.relocs,
             delta,
-            index * PAGE_SIZE as usize,
+            index * PAGE,
             out,
             Some(&self.reloc_index),
+            &value,
         )
         .ok()
     }
@@ -1106,5 +1117,32 @@ mod tests {
         drop((held, other, last));
         cache.remove(0);
         assert_eq!(evictable(&cache, 2), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// A layout's pages and relocations match the whole-image ones
+    /// (`pe::relocate_page` over a contiguous layout).
+    #[test]
+    fn layout_pages_relocate_as_the_whole_image() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../user/bin/testkernel32.dll");
+        let data = std::fs::read(path).unwrap();
+        let layout = ImageLayout::new(&data).unwrap();
+        let image = super::super::pe::PeImage::parse_image(&data).unwrap();
+        let mut whole = vec![0u8; layout.size];
+        image.lay_out(&mut whole);
+        let reloc = image.directory(super::super::pe::DIRECTORY_BASERELOC);
+        assert!(!layout.relocs.is_empty());
+        for i in 0..layout.pages.len() {
+            let mut want = [0u8; 4096];
+            super::super::pe::relocate_page(&whole, reloc, 0x10000, i * 4096, &mut want, None)
+                .unwrap();
+            let mut got = [0u8; 4096];
+            layout.relocated_page(i, 0x10000, &mut got).unwrap();
+            assert!(want == got, "page {i}");
+        }
     }
 }
