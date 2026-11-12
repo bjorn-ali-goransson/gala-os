@@ -3558,6 +3558,13 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **Every event a wait needs exists before the look it guards**: a
+  waiter that looks (at a queue, a flag) and only then makes or
+  registers the event its waker sets loses a wake that comes in
+  between. user32 registered its process's queue event with the kernel
+  (GalaWindowListen) on the first wait, after GetMessage's first look:
+  a message another process sent in that window had no listener to set,
+  and flaui_test's target never answered (about one boot in ten).
 - **A message's digest is not its content parameter**: a PKCS #7
   SignedData whose content is not `data` (Authenticode's
   SpcIndirectDataContent) is digested over the inner TLV's contents

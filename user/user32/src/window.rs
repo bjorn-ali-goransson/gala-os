@@ -3237,8 +3237,13 @@ fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32 {
-    // The thread's wake event exists before it looks at its queue: a wake
-    // between the look and the wait is kept.
+    // The thread's wake event and the process's (the kernel's listener)
+    // exist before it looks at its queue: a wake between the look and the
+    // wait is kept. A process whose listener was registered only on its
+    // first wait lost a message another process sent in between (the
+    // kernel had no event to set): flaui_test's target never answered
+    // UI Automation's WM_GETOBJECT, about one boot in ten.
+    event();
     own_event();
     loop {
         if let Some(m) = next(hwnd, min, max, true) {
@@ -3278,7 +3283,8 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         // SAFETY: the caller's array of `count` handles.
         return unsafe { WaitForMultipleObjects(count, handles, 1, ms) };
     }
-    // As in GetMessageW: the wake event before the first look.
+    // As in GetMessageW: the wake events before the first look.
+    event();
     own_event();
     let mut all = [0 as Handle; 63];
     for (i, h) in all.iter_mut().take(count as usize).enumerate() {

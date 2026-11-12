@@ -6389,7 +6389,11 @@ the program always sees WM_SIZE/WM_MOVE.
   (`Listener::Event`), a kernel server's thread woken
   (`Listener::Server`: the Wayland server for a Linux client's
   windows). user32 creates its queue event on first use and registers
-  it; `next` (GetMessage, PeekMessage) first moves input in with
+  it; GetMessage and MsgWaitForMultipleObjects make it (and the thread's
+  own wake event) before their first look at the queue, so a message
+  another process sends between that look and the wait finds a
+  listener to set (invariant: no waiter looks before its wake events
+  exist); `next` (GetMessage, PeekMessage) first moves input in with
   GalaWindowInput (24-byte records) to the window's thread.
 - **Two key states**, as Windows documents: GetAsyncKeyState's follows
   the input as it is moved in, GetKeyState's (and TranslateMessage's)
