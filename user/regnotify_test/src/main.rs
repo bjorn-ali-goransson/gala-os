@@ -22,8 +22,8 @@
 //!   outside REG_LEGAL_CHANGE_FILTER is ERROR_INVALID_PARAMETER; the
 //!   request ends with its thread (the event is signaled when the thread
 //!   that made it exits) unless made with REG_NOTIFY_THREAD_AGNOSTIC; a
-//!   synchronous one returns ERROR_SUCCESS once a change came (another
-//!   thread makes it).
+//!   synchronous one returns ERROR_SUCCESS once a change came (a new
+//!   value set while it waits).
 //! - A completion routine (ApcRoutine) runs, with its context, at the
 //!   thread's next alertable wait.
 //! - NtRenameKey: STATUS_ACCESS_VIOLATION for a NULL name,
@@ -42,9 +42,15 @@
 //! at once; a synchronous NtNotifyChangeKey's status; a deleted watched
 //! key firing its own watch; a rename firing the parent's and its own
 //! watch; another handle's name after a rename; a security change firing
-//! an ATTRIBUTES watch; NtNotifyChangeMultipleKeys with one subordinate
+//! an ATTRIBUTES watch; whether a value set again to the same data is a
+//! change; NtNotifyChangeMultipleKeys with one subordinate
 //! (whose change fires the master's request) and with two; an
 //! asynchronous RegNotifyChangeKeyValue without an event.
+//!
+//! No wait is unbounded: a synchronous request runs in a worker thread
+//! that is given 5 s after the change (then the key's close ends it and
+//! the check fails), so a request Windows never completes shows as a
+//! failing check, not a hang.
 //!
 //! The keys are volatile, under `HKCU\Software\Gala<name>`, deleted at
 //! the end. The same source builds `wow64_regnotify_test`, the 32-bit
@@ -249,7 +255,6 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
-const INFINITE: u32 = u32::MAX;
 /// What an IO_STATUS_BLOCK holds before the kernel writes it.
 const UNTOUCHED: usize = 0x5a5a_5a5a;
 
@@ -658,8 +663,13 @@ fn run_thread(start: extern "system" fn(usize) -> u32, param: usize) -> Result<(
         if t == 0 {
             return Err(9999);
         }
-        WaitForSingleObject(t, INFINITE);
+        // Bounded: a thread that does not end is a failure, not a hang.
+        let ended = WaitForSingleObject(t, 5000) == WAIT_OBJECT_0;
         CloseHandle(t);
+        if !ended {
+            info("a notifying thread did not end within 5 s", 0);
+            ExitProcess(9998);
+        }
     }
     Ok(())
 }
@@ -736,21 +746,67 @@ fn reg_notify(c: &mut Checks, base: Handle) -> Result<(), u32> {
     Ok(())
 }
 
-/// A key another thread changes after a moment.
-static CHANGE_KEY: AtomicUsize = AtomicUsize::new(0);
+/// A synchronous request, made by a worker thread (so a request that
+/// never completes is reported, not waited for): the key and how (0:
+/// NtNotifyChangeKey, 1: RegNotifyChangeKeyValue), then what it returned
+/// (u32::MAX while it waits).
+struct SyncRequest {
+    key: Handle,
+    how: u32,
+    result: AtomicUsize,
+}
 
-extern "system" fn change_later(_: usize) -> u32 {
-    // SAFETY: plain call.
-    unsafe { Sleep(100) };
-    let key = CHANGE_KEY.load(Ordering::SeqCst);
-    let _ = set_dword(key, "later", 1);
+extern "system" fn sync_request(param: usize) -> u32 {
+    // SAFETY: the caller's SyncRequest, alive until this thread is waited
+    // for (bounded; a request still waiting is ended by closing the key).
+    let r = unsafe { &*(param as *const SyncRequest) };
+    let mut io = [UNTOUCHED; 2];
+    // SAFETY: the caller's key; our IO_STATUS_BLOCK.
+    let s = unsafe {
+        if r.how == 0 {
+            NtNotifyChangeKey(
+                r.key,
+                0,
+                0,
+                0,
+                &mut io,
+                REG_NOTIFY_CHANGE_LAST_SET,
+                0,
+                null_mut(),
+                0,
+                0,
+            )
+        } else {
+            RegNotifyChangeKeyValue(r.key, 0, REG_NOTIFY_CHANGE_LAST_SET, 0, 0)
+        }
+    };
+    r.result.store(s as usize, Ordering::SeqCst);
     0
 }
 
-fn start_thread(start: extern "system" fn(usize) -> u32) -> Handle {
+/// Runs a synchronous request on `key` in a worker and sets a new value
+/// while it waits: what the request returned, or None if it was still
+/// waiting 5 s after the change (the key is then closed to end it).
+fn sync_change(key: Handle, how: u32, value: u32) -> Option<u32> {
+    let r = SyncRequest { key, how, result: AtomicUsize::new(u32::MAX as usize) };
     let mut id = 0;
-    // SAFETY: a thread with no parameter.
-    unsafe { CreateThread(0, 0, start, 0, 0, &mut id) }
+    // SAFETY: a thread over `r`, which outlives it (waited for below).
+    let t = unsafe { CreateThread(0, 0, sync_request, &raw const r as usize, 0, &mut id) };
+    if t == 0 {
+        return Some(u32::MAX - 1);
+    }
+    // SAFETY: plain calls; our thread handle.
+    unsafe { Sleep(300) };
+    let _ = set_dword(key, "later", value);
+    let done = unsafe { WaitForSingleObject(t, 5000) } == WAIT_OBJECT_0;
+    if !done {
+        // A close ends the request (STATUS_NOTIFY_CLEANUP); the worker
+        // then returns.
+        close(key);
+        unsafe { WaitForSingleObject(t, 5000) };
+    }
+    unsafe { CloseHandle(t) };
+    done.then(|| r.result.load(Ordering::SeqCst) as u32)
 }
 
 static APC_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -766,28 +822,23 @@ extern "system" fn apc(context: usize, iosb: usize, _reserved: u32) {
 /// Synchronous requests, completion routines, a subordinate key.
 fn completions(c: &mut Checks, base: Handle) -> Result<(), u32> {
     let key = create(base, "sync", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
-    // Synchronous: returns once another thread set a value.
-    CHANGE_KEY.store(key, Ordering::SeqCst);
-    let t = start_thread(change_later);
-    let mut io = [UNTOUCHED; 2];
-    // SAFETY: (throughout) our keys, events and IO_STATUS_BLOCKs.
-    let s = unsafe {
-        NtNotifyChangeKey(key, 0, 0, 0, &mut io, REG_NOTIFY_CHANGE_LAST_SET, 0, null_mut(), 0, 0)
-    };
-    c.ok(s != STATUS_PENDING && s < 0x8000_0000, s.into())?;
-    info("a synchronous NtNotifyChangeKey returns", s.into());
-    unsafe {
-        WaitForSingleObject(t, INFINITE);
-        CloseHandle(t);
-    }
-    let t = start_thread(change_later);
-    let r = unsafe { RegNotifyChangeKeyValue(key, 0, REG_NOTIFY_CHANGE_LAST_SET, 0, 0) };
-    c.eq(r, ERROR_SUCCESS)?;
-    unsafe {
-        WaitForSingleObject(t, INFINITE);
-        CloseHandle(t);
-    }
+    // Synchronous: returns once another thread set a value (a new value
+    // each time).
+    let s = sync_change(key, 0, 1);
+    info("a synchronous NtNotifyChangeKey returns", s.map_or(u64::MAX, u64::from));
+    c.ok(s.is_some_and(|s| s != STATUS_PENDING && s < 0x8000_0000), s.unwrap_or(0).into())?;
+    let r = sync_change(key, 1, 2);
+    c.eq(r.unwrap_or(u32::MAX), ERROR_SUCCESS)?;
+    // The same data set again: is that a change?
+    let e = event(true, false);
+    let mut io = [0usize; 2];
+    c.eq(notify(key, e, &mut io, REG_NOTIFY_CHANGE_LAST_SET, false), STATUS_PENDING)?;
+    c.eq(set_dword(key, "later", 2), ERROR_SUCCESS)?;
+    // SAFETY: our event.
+    info("the same value set again fires (0: yes)", unsafe { WaitForSingleObject(e, 500) }.into());
     close(key);
+    // SAFETY: our event.
+    unsafe { CloseHandle(e) };
     // A completion routine: runs at the next alertable wait.
     let key = open(base, "sync", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     let mut io = [UNTOUCHED; 2];
