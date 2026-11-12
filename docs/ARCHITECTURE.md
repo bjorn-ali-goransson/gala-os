@@ -6265,9 +6265,15 @@ rather than a format of their own.
   it (no tombstone under another). Replay sets only the times records
   carry: a replayed create or delete leaves the parent's LastWriteTime.
 - `persist::sync` first moves the registry's records into the file,
-  then writes the file system's records; past 1 MiB, or when records
-  were lost, the file is rewritten as a snapshot. **Lock order: the
-  registry's lock is never taken inside the file system's.**
+  then writes the file system's records; past 1 MiB and past twice the
+  last snapshot (`compact_reglog`), or when records were lost, the file
+  is rewritten as a snapshot (a `persist: the registry's log rewritten`
+  line). Invariant: a sync costs the changes it writes, amortized; a
+  snapshot is never taken per sync (with a fixed bound, a registry
+  whose changed keys alone passed it was snapshotted at every system
+  call: Office's registry staging spent 0.65 s per NtCreateKey and
+  NtSetValueKey). **Lock order: the registry's lock is never taken
+  inside the file system's.**
 - `persist::mount` replays the file after the file system's log, i.e.
   after `registry.seed` and the boot's `registry` modules. Replayed
   value changes keep the key's last-write time.
