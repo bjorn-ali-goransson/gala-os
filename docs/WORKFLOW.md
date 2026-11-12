@@ -1439,7 +1439,14 @@ a cache on the host:
   (xtask removes only the link after a pass).
 - Its VM has 4 GiB (`OFFICE_LOCAL_MEMORY_MIB`, a stopgap: ROADMAP "Known
   issues and stopgaps"): with the image in `/dev/shm` the host needs
-  both in RAM (about 12 GB).
+  both in RAM (about 12 GB; the guest's file cache fills its 4 GiB). On
+  a 15 GB host with other builds running, a full hour's run was killed
+  by the host's OOM killer near its end (QEMU "exited with None", no
+  state dump): bound the run to the stage under study with
+  `XTASK_TIMEOUT` (its timeout's state dump has `heap by owner`), and
+  read Click-to-Run's own logs from the kept image (`cargo xtask
+  disk-files <image> C:/Windows/Temp --out DIR`: `<MACHINE>-<date>.log`,
+  UTF-16).
 - Limits: the cache is one build of one product set; the download itself
   (`office_install`'s first half hour: the transport, ranges, the
   service's staging of what it fetched) is not exercised, so run
