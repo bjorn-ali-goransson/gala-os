@@ -12,6 +12,8 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+gala_heap = { path = "../gala_heap" }
+shellns = { path = "../shellns" }
 
 [target.'cfg(target_arch = "x86")'.dependencies]
 ntrt = { path = "../ntrt" }

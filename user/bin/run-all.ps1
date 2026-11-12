@@ -128,13 +128,15 @@ $expected = @{
     "unimplemented_test"  = 3           # 0x3 is Windows' own answer (gala: 0xc0000002)
     "missing_import_test" = 3221225785  # 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND, the point of it
     "consolerun"          = 2           # a tool (user/consolerun): no program named, its usage
-    # gala's own programs (user/cmd, user/conhost, user/gala, user/wsl), not tests:
+    # gala's own programs (user/cmd, user/conhost, user/gala, user/wsl,
+    # user/explorer), not tests:
     # they import ntdll!GalaRecordMissing, which the real ntdll has not, so
     # Windows refuses to load them. 0xc0000139.
     "cmd"                 = 3221225785
     "conhost"             = 3221225785
     "gala"                = 3221225785
     "wsl"                 = 3221225785  # gala's wsl.exe (user/wsl): ntdll!GalaLx*
+    "explorer"            = 3221225785  # gala's explorer.exe (user/explorer): ntdll!GalaRecordMissing
 }
 
 $results = @()

@@ -3007,9 +3007,26 @@ fn key_down(vk: usize) -> bool {
 }
 
 /// The character a key makes (US layout), with Shift, Caps Lock and Ctrl.
+/// With Ctrl, the US layout's control characters: a letter's (Ctrl+A is
+/// 1), Ctrl+[ ESC, Ctrl+\\ FS, Ctrl+] GS, Ctrl+Shift+2 NUL, Ctrl+Shift+6
+/// RS, Ctrl+Shift+- US; another digit or punctuation key makes none
+/// (Ctrl+Shift+2 is no `@`: Explorer's Ctrl+Shift+2 is a view, not a
+/// character).
 fn char_of(vk: usize) -> Option<u16> {
     let shift = key_down(VK_SHIFT);
     let ctrl = key_down(VK_CONTROL);
+    // The digit row and the punctuation keys (VK_OEM_*) with Ctrl.
+    if ctrl && matches!(vk, 0x30..=0x39 | 0xba..=0xc0 | 0xdb..=0xde) {
+        return match (vk, shift) {
+            (0xdb, false) => Some(0x1b),
+            (0xdc, false) => Some(0x1c),
+            (0xdd, false) => Some(0x1d),
+            (0x32, true) => Some(0x00),
+            (0x36, true) => Some(0x1e),
+            (0xbd, true) => Some(0x1f),
+            _ => None,
+        };
+    }
     let c = match vk {
         0x41..=0x5a => {
             if ctrl {

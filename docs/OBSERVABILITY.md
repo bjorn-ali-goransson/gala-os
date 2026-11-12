@@ -89,6 +89,18 @@ port. Lines that tools and agents rely on:
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
   personality nt)`); a thread whose personality has no dispatcher logs
   `syscall: no dispatcher for personality ..`.
+- gala's File Explorer (`explorer.exe`, ARCHITECTURE "The file
+  explorer"): `explorer: navigate <parsing name> (<n> items)`, `explorer:
+  open <path>: started|no association (<code>)`, `explorer: copy|paste|
+  move|delete|rename|new folder|terminal in ...`, `explorer: changed
+  <dir>: <n> items (+added) (-removed)` (a change its folder watch saw), `explorer: properties ...` (a
+  Linux file's permissions, uid and gid), `explorer: cannot watch ...`,
+  `explorer: closed`; with `desktop: Win+E: File Explorer` when Win+E
+  started it. What the namespace or the program cannot do is in the
+  ledger (`shell32.dll!IShellFolder::<method>`,
+  `shell32.dll!IShellItem::BindToHandler`,
+  `shell32.dll!ShellExecute(no association)`, `explorer.exe!<what>`);
+  `UNC path` is a UNC path to a server other than WSL's.
 - `session` lines for a session made after boot; `window: pid P
   (session S) ... not visible across sessions` (the first 32 times).
 - `winsta: pid P (x.exe, session S) is on WinSta0\Default (why)` at a

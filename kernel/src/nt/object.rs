@@ -516,6 +516,8 @@ pub enum ObjectBody {
     Pipe(super::pipe::PipeEnd),
     /// `\Device\Null` (`\??\NUL`, the DOS device NUL).
     NullDevice,
+    /// `\Device\Mup` (`\??\UNC`): UNC paths; WSL's servers (nt::wslfs).
+    MupDevice,
     /// `\Device\Harddisk0\DR0` (`\??\PhysicalDrive0`): the disk (nt::disk).
     DiskDevice,
     /// An open of the disk: raw sector access.
@@ -664,6 +666,7 @@ impl KObject {
             ObjectBody::NamedPipeDevice => "Device",
             ObjectBody::Pipe(_) => "File",
             ObjectBody::NullDevice => "Device",
+            ObjectBody::MupDevice => "Device",
             ObjectBody::Null(_) => "File",
             ObjectBody::DiskDevice => "Device",
             ObjectBody::Disk(_) => "File",
@@ -718,6 +721,7 @@ impl KObject {
             | ObjectBody::AfdDevice
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
+            | ObjectBody::MupDevice
             | ObjectBody::DiskDevice
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
@@ -748,6 +752,7 @@ impl KObject {
             | ObjectBody::NamedPipeDevice
             | ObjectBody::Pipe(_)
             | ObjectBody::NullDevice
+            | ObjectBody::MupDevice
             | ObjectBody::Null(_)
             | ObjectBody::DiskDevice
             | ObjectBody::Disk(_)
