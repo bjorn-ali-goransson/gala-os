@@ -94,6 +94,17 @@ syscall_stubs! {
     NtDeleteValueKey = 0x7f08, fn(h: usize, name: *const UnicodeString);
     NtFlushKey = 0x7f09, fn(h: usize);
     NtSetInformationKey = 0x7fd6, fn(h: usize, class: u32, buf: *const u8, len: u32);
+    // Change notification and rename (gala's numbers, unverified).
+    NtNotifyChangeKey = 0x7f25, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        filter: u32, tree: u8, buffer: *mut u8, length: u32, asynchronous: u8
+    );
+    NtNotifyChangeMultipleKeys = 0x7f26, fn(
+        h: usize, count: u32, subordinate: *const ObjectAttributes, event: usize, apc: usize,
+        apc_context: usize, iosb: *mut [usize; 2], filter: u32, tree: u8, buffer: *mut u8,
+        length: u32, asynchronous: u8
+    );
+    NtRenameKey = 0x7f27, fn(h: usize, name: *const UnicodeString);
     // Job objects (gala's numbers, unverified).
     NtCreateJobObject = 0x7f0a, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes

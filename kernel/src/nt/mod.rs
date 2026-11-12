@@ -31,6 +31,7 @@ pub mod process;
 pub mod quota;
 pub mod registry;
 pub mod reglog;
+pub mod regnotify;
 pub mod regview;
 pub mod scm;
 pub mod scm_config;

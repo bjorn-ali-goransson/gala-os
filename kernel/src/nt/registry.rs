@@ -11,11 +11,13 @@
 //! The tree starts from `registry.seed` (the keys real programs read). It
 //! lives in memory; with the boot option `persist` its changes are kept
 //! across boots (D3, nt::reglog), volatile keys excepted, and a volatile
-//! key's children must be volatile. There are no security descriptors yet (every caller may do
-//! everything its handle's access allows), no symbolic link keys (the seed
-//! has `CurrentControlSet` itself) and no change notifications. The
-//! 32-bit view (WOW64) is a choice of name, made per open or create
-//! (nt::regview). See docs/ARCHITECTURE.md, "Registry".
+//! key's children must be volatile. There are no symbolic link keys (the
+//! seed has `CurrentControlSet` itself). While a change notification is
+//! armed (nt::regnotify) every change is noted with the key it touched and
+//! that key's ancestors (`Change`), and `with` hands the notes to
+//! regnotify once the registry is released. The 32-bit view (WOW64) is a
+//! choice of name, made per open or create (nt::regview). See
+//! docs/ARCHITECTURE.md, "Registry".
 
 use alloc::vec::Vec;
 
@@ -49,6 +51,13 @@ pub const KEY_DELETED: NtStatus = NtStatus(0xc000_017c);
 pub const CANNOT_DELETE: NtStatus = NtStatus(0xc000_0121);
 /// STATUS_CHILD_MUST_BE_VOLATILE.
 pub const CHILD_MUST_BE_VOLATILE: NtStatus = NtStatus(0xc000_0181);
+
+/// REG_NOTIFY_CHANGE_* (winnt.h): what a change is, for the
+/// notifications that watch for it (nt::regnotify).
+pub const REG_NOTIFY_CHANGE_NAME: u32 = 0x1;
+pub const REG_NOTIFY_CHANGE_ATTRIBUTES: u32 = 0x2;
+pub const REG_NOTIFY_CHANGE_LAST_SET: u32 = 0x4;
+pub const REG_NOTIFY_CHANGE_SECURITY: u32 = 0x8;
 
 /// REG_OPTION_VOLATILE (CreateOptions of NtCreateKey).
 pub const REG_OPTION_VOLATILE: u32 = 1;
@@ -96,6 +105,16 @@ struct Node {
     dirty: bool,
 }
 
+/// One change, for the notifications (nt::regnotify): the key it touched,
+/// then that key's ancestors up to the root (a watch on the key sees it;
+/// one on an ancestor only if it watches the subtree), and what it was
+/// (REG_NOTIFY_CHANGE_*).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Change {
+    pub chain: Vec<KeyId>,
+    pub bits: u32,
+}
+
 /// The registry tree.
 pub struct Registry {
     nodes: Vec<Option<Node>>,
@@ -104,8 +123,15 @@ pub struct Registry {
     replaying: bool,
     ops: Vec<RegOp>,
     ops_lost: bool,
-    /// Full names of boot keys deleted since boot.
+    /// Full names of boot keys deleted (or renamed) since boot.
     tombstones: Vec<Vec<u16>>,
+    /// Changes are noted for the notifications while this is on
+    /// (nt::regnotify: some watch exists).
+    pub noting: bool,
+    changes: Vec<Change>,
+    /// A change could not be noted (no memory): every watch must hear of
+    /// something.
+    changes_lost: bool,
 }
 
 fn upcase(c: u16) -> u16 {
@@ -149,6 +175,9 @@ impl Registry {
             ops: Vec::new(),
             ops_lost: false,
             tombstones: Vec::new(),
+            noting: false,
+            changes: Vec::new(),
+            changes_lost: false,
         };
         r.nodes.try_push(Some(Node {
             name: copy(&wide::<8>("REGISTRY"))?,
@@ -179,6 +208,10 @@ impl Registry {
 
     pub fn set_security(&mut self, id: KeyId, sd: Vec<u8>) -> Result<(), NtStatus> {
         self.node_mut(id)?.security = Some(sd);
+        // The descriptor is one of the key's attributes too
+        // (RegNotifyChangeKeyValue's documentation of
+        // REG_NOTIFY_CHANGE_ATTRIBUTES).
+        self.note(id, REG_NOTIFY_CHANGE_SECURITY | REG_NOTIFY_CHANGE_ATTRIBUTES);
         self.record(id, |key, n| {
             let descriptor = copy_bytes(n.security.as_deref().unwrap_or(&[]))?;
             Some(RegOp::SetSecurity { key, descriptor })
@@ -297,9 +330,15 @@ impl Registry {
                 None => true,
             })
         };
+        let replaying = self.replaying;
         let p = self.node_mut(parent)?;
         let _ = p.children.try_insert(at, id);
-        p.last_write = now;
+        // A replayed change sets only the times its records carry (a
+        // snapshot's parent comes with its own).
+        if !replaying {
+            p.last_write = now;
+        }
+        self.note(parent, REG_NOTIFY_CHANGE_NAME);
         self.record(id, |key, n| {
             let class = copy(&n.class).ok()?;
             Some(RegOp::CreateKey { key, class, last_write: n.last_write, reset: false })
@@ -359,9 +398,18 @@ impl Registry {
         }
         let parent = node.parent;
         self.record_delete(id);
+        // The key's own watches hear that its name is gone, its parent's
+        // that a subkey went.
+        self.note(id, REG_NOTIFY_CHANGE_NAME);
+        self.note(parent, REG_NOTIFY_CHANGE_NAME);
+        let replaying = self.replaying;
         let p = self.node_mut(parent)?;
         p.children.retain(|&c| c != id);
-        p.last_write = now;
+        // A replayed deletion leaves the parent's time as its records
+        // have it.
+        if !replaying {
+            p.last_write = now;
+        }
         if let Some(Some(n)) = self.nodes.get_mut(id) {
             n.deleted = true;
             n.values = Vec::new();
@@ -408,6 +456,7 @@ impl Registry {
             let value = Value { name: copy(name).map_err(nomem)?, kind, data: bytes };
             node.values.try_push(value).map_err(nomem)?;
         }
+        self.note(id, REG_NOTIFY_CHANGE_LAST_SET);
         self.record(id, |key, _| {
             Some(RegOp::SetValue { key, name: copy(name).ok()?, kind, data: copy_bytes(data)? })
         });
@@ -418,6 +467,7 @@ impl Registry {
     /// LastWriteTime.
     pub fn set_write_time(&mut self, id: KeyId, time: u64) -> Result<(), NtStatus> {
         self.node_mut(id)?.last_write = time;
+        self.note(id, REG_NOTIFY_CHANGE_ATTRIBUTES);
         self.record(id, |key, n| {
             let class = copy(&n.class).ok()?;
             Some(RegOp::CreateKey { key, class, last_write: time, reset: false })
@@ -435,13 +485,98 @@ impl Registry {
             .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
         node.values.remove(at);
         node.last_write = now;
+        self.note(id, REG_NOTIFY_CHANGE_LAST_SET);
         self.record(id, |key, _| Some(RegOp::DeleteValue { key, name: copy(name).ok()? }));
+        Ok(())
+    }
+
+    /// NtRenameKey: key `id` takes the name `name` (one component) under
+    /// the same parent; its subkeys and values go with it. A name a
+    /// sibling has, or its own (in any case), is STATUS_CANNOT_DELETE, as
+    /// is a hive root; an empty name, a path or one over 255 characters
+    /// is STATUS_INVALID_PARAMETER (Wine's conformance tests, which pass
+    /// on Windows). The key's LastWriteTime becomes `now`.
+    pub fn rename(&mut self, id: KeyId, name: &[u16], now: u64) -> Result<(), NtStatus> {
+        if name.is_empty() || name.len() > MAX_KEY_NAME || name.contains(&BACKSLASH) {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let parent = self.node(id)?.parent;
+        if id == ROOT || parent == ROOT || self.child(parent, name)?.is_some() {
+            return Err(CANNOT_DELETE);
+        }
+        // What can fail first: the new name and the old full name the
+        // change log records.
+        let new_name = copy(name).map_err(nomem)?;
+        let logged = self.recording || self.replaying;
+        let old = if logged { Some(self.full_name(id)) } else { None };
+        let p = self.node_mut(parent)?;
+        let Some(at) = p.children.iter().position(|&c| c == id) else {
+            return Err(NtStatus::INVALID_HANDLE);
+        };
+        p.children.remove(at);
+        if let Some(Some(n)) = self.nodes.get_mut(id) {
+            n.name = new_name;
+            n.last_write = now;
+        }
+        let at = {
+            let p = self.node(parent)?;
+            p.children.partition_point(|&c| match &self.nodes[c] {
+                Some(n) => compare(&n.name, name).is_lt(),
+                None => true,
+            })
+        };
+        // Room is there: the key was just taken out.
+        let _ = self.node_mut(parent)?.children.try_insert(at, id);
+        self.note(id, REG_NOTIFY_CHANGE_NAME);
+        self.note(parent, REG_NOTIFY_CHANGE_NAME);
+        match old {
+            Some(Ok(old)) => self.record_rename(id, old, name),
+            Some(Err(_)) => self.ops_lost = true,
+            None => {}
+        }
         Ok(())
     }
 
     /// The `index`th subkey (in name order).
     pub fn subkey(&self, id: KeyId, index: usize) -> Result<KeyId, NtStatus> {
         self.node(id)?.children.get(index).copied().ok_or(NtStatus::NO_MORE_ENTRIES)
+    }
+
+    /// Notes a change of key `id` for the notifications (`Change`), while
+    /// some watch exists.
+    fn note(&mut self, id: KeyId, bits: u32) {
+        if !self.noting {
+            return;
+        }
+        let mut chain = Vec::new();
+        let mut at = id;
+        let complete = loop {
+            if chain.try_push(at).is_err() {
+                break false;
+            }
+            match self.nodes.get(at) {
+                Some(Some(n)) if at != ROOT => at = n.parent,
+                _ => break true,
+            }
+        };
+        if !complete || self.changes.try_push(Change { chain, bits }).is_err() {
+            self.changes_lost = true;
+        }
+    }
+
+    /// The changes noted since the last call, and whether some could not
+    /// be.
+    pub fn take_changes(&mut self) -> (Vec<Change>, bool) {
+        let lost = core::mem::take(&mut self.changes_lost);
+        (core::mem::take(&mut self.changes), lost)
+    }
+
+    /// Notes that something of key `id` changed that the registry does not
+    /// keep (NtSetInformationKey's flags): REG_NOTIFY_CHANGE_ATTRIBUTES.
+    pub fn touch_attributes(&mut self, id: KeyId) -> Result<(), NtStatus> {
+        self.node(id)?;
+        self.note(id, REG_NOTIFY_CHANGE_ATTRIBUTES);
+        Ok(())
     }
 
     /// The key's own name (its last component, as created).
@@ -638,14 +773,64 @@ impl Registry {
             self.ops_lost = true;
             return;
         };
-        if boot
-            && !self.tombstones.iter().any(|t| same(t, &key))
-            && copy(&key).ok().is_none_or(|k| self.tombstones.try_push(k).is_err())
-        {
-            self.ops_lost = true;
+        if boot {
+            self.tombstone(&key);
         }
         if self.recording {
             self.push_op(RegOp::DeleteKey { key });
+        }
+    }
+
+    /// Keeps the full name `key` of a boot key that is gone: a snapshot
+    /// deletes it (with everything below it) first. One a tombstone
+    /// already covers adds nothing; the ones below it go.
+    fn tombstone(&mut self, key: &[u16]) {
+        let under = |t: &[u16], k: &[u16]| {
+            t.len() > k.len() && t[k.len()] == BACKSLASH && same(&t[..k.len()], k)
+        };
+        if self.tombstones.iter().any(|t| same(t, key) || under(key, t)) {
+            return;
+        }
+        self.tombstones.retain(|t| !under(t, key));
+        if copy(key).ok().is_none_or(|k| self.tombstones.try_push(k).is_err()) {
+            self.ops_lost = true;
+        }
+    }
+
+    /// Records that key `id`, called `old` until now, was renamed to
+    /// `name`. Its old name is a tombstone if the boot made it, and it and
+    /// everything below it count as made since boot, so a snapshot
+    /// writes them again under the new name.
+    fn record_rename(&mut self, id: KeyId, old: Vec<u16>, name: &[u16]) {
+        let Ok(n) = self.node(id) else { return };
+        if n.volatile {
+            return;
+        }
+        if n.boot {
+            self.tombstone(&old);
+        }
+        let mut stack = Vec::new();
+        if stack.try_push(id).is_err() {
+            self.ops_lost = true;
+        }
+        while let Some(k) = stack.pop() {
+            let Some(Some(n)) = self.nodes.get_mut(k) else { continue };
+            n.boot = false;
+            if !n.volatile {
+                n.dirty = true;
+            }
+            for i in 0..n.children.len() {
+                let c = n.children[i];
+                if stack.try_push(c).is_err() {
+                    self.ops_lost = true;
+                }
+            }
+        }
+        if self.recording {
+            match copy(name) {
+                Ok(name) => self.push_op(RegOp::RenameKey { key: old, name }),
+                Err(_) => self.ops_lost = true,
+            }
         }
     }
 
@@ -740,6 +925,11 @@ impl Registry {
                 let id = self.by_name(key)?;
                 let sd = copy_bytes(descriptor).ok_or(NtStatus::NO_MEMORY)?;
                 self.set_security(id, sd)
+            }
+            RegOp::RenameKey { key, name } => {
+                let id = self.by_name(key)?;
+                let time = self.node(id)?.last_write;
+                self.rename(id, name, time)
             }
         }
     }
@@ -1063,17 +1253,21 @@ pub fn load_more(seed: &str, now: u64) -> Result<(), NtStatus> {
 }
 
 /// Runs `f` on the registry.
+/// The changes it made are handed to the notifications (nt::regnotify)
+/// after the registry is released.
 pub fn with<R>(f: impl FnOnce(&mut Registry) -> Result<R, NtStatus>) -> Result<R, NtStatus> {
-    match REGISTRY.lock().as_mut() {
-        Some(r) => {
-            let result = f(r);
-            if r.recording && r.has_ops() {
-                super::persist::note_pending();
-            }
-            result
+    let (result, changes) = {
+        let mut guard = REGISTRY.lock();
+        let Some(r) = guard.as_mut() else { return Err(NtStatus::OBJECT_PATH_NOT_FOUND) };
+        r.noting = super::regnotify::active();
+        let result = f(r);
+        if r.recording && r.has_ops() {
+            super::persist::note_pending();
         }
-        None => Err(NtStatus::OBJECT_PATH_NOT_FOUND),
-    }
+        (result, r.take_changes())
+    };
+    super::regnotify::deliver(changes);
+    result
 }
 
 /// The body of a key object: a reference to a node. Made after
@@ -1085,6 +1279,14 @@ pub struct KeyObject {
     /// Its full name as it was opened (display_name); empty: the stored
     /// names (full_name).
     pub name: Vec<u16>,
+}
+
+impl KeyObject {
+    /// What its change notification is known by (nt::regnotify): its
+    /// address, which is stable while the object lives.
+    pub fn owner(&self) -> usize {
+        self as *const Self as usize
+    }
 }
 
 /// A copy of a name.
@@ -1130,6 +1332,9 @@ pub fn name_information(name: &[u16]) -> Result<(Vec<u8>, usize), NtStatus> {
 
 impl Drop for KeyObject {
     fn drop(&mut self) {
+        // Its change notification ends first (waiting requests:
+        // STATUS_NOTIFY_CLEANUP).
+        super::regnotify::cleanup(self.owner());
         let id = self.id;
         let _ = with(|r| {
             r.release(id);
@@ -1176,7 +1381,9 @@ mod tests {
         let mut r = Registry::new().unwrap();
         r.load(
             "[\\Registry\\Machine\\SOFTWARE\\Microsoft]\n\"a\"=sz:x\n@=dword:0x10\n\
-             [\\REGISTRY\\MACHINE\\software\\Beta]\n",
+             [\\REGISTRY\\MACHINE\\software\\Beta]\n\
+             [\\REGISTRY\\USER\\Old]\n\"v\"=dword:5\n\
+             [\\REGISTRY\\USER\\Old\\Inner]\n\"w\"=dword:6\n",
             7,
         )
         .unwrap();
@@ -1350,6 +1557,12 @@ mod tests {
         r.set_value(ms, &w("a"), 1, &[b'y', 0], 9).unwrap();
         let beta = r.lookup(sw, &w("Beta")).unwrap();
         r.delete_key(beta, 9).unwrap();
+        // A boot key renamed, with its boot subkey; a new key renamed.
+        let old = r.lookup(ROOT, &w("USER\\Old")).unwrap();
+        r.rename(old, &w("New"), 9).unwrap();
+        let (t, _) = r.create(k, &w("Temp"), 0, &[], 9).unwrap();
+        r.set_value(t, &w("t"), 4, &[3, 0, 0, 0], 9).unwrap();
+        r.rename(t, &w("Kept"), 9).unwrap();
     }
 
     fn check(r: &Registry) {
@@ -1362,6 +1575,81 @@ mod tests {
         assert_eq!(r.value(ms, &w("a")).unwrap().data, [b'y', 0]);
         assert_eq!(r.value(ms, &[]).unwrap().data, [0x10, 0, 0, 0]);
         assert!(r.lookup(ROOT, &w("MACHINE\\SOFTWARE\\Beta")).is_err());
+        assert!(r.lookup(ROOT, &w("USER\\Old")).is_err(), "a renamed boot key is gone");
+        let new = r.lookup(ROOT, &w("USER\\New")).unwrap();
+        assert_eq!(r.value(new, &w("v")).unwrap().data, [5, 0, 0, 0]);
+        let inner = r.lookup(new, &w("Inner")).unwrap();
+        assert_eq!(r.value(inner, &w("w")).unwrap().data, [6, 0, 0, 0]);
+        assert!(r.lookup(k, &w("Temp")).is_err());
+        let kept = r.lookup(k, &w("Kept")).unwrap();
+        assert_eq!(r.value(kept, &w("t")).unwrap().data, [3, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rename_rules() {
+        let mut r = reg();
+        let sw = r.lookup(ROOT, &w("MACHINE\\SOFTWARE")).unwrap();
+        let beta = r.lookup(sw, &w("Beta")).unwrap();
+        // A sibling's name or its own, in any case; a hive root.
+        assert_eq!(r.rename(beta, &w("MICROSOFT"), 1), Err(CANNOT_DELETE));
+        assert_eq!(r.rename(beta, &w("beta"), 1), Err(CANNOT_DELETE));
+        let machine = r.lookup(ROOT, &w("MACHINE")).unwrap();
+        assert_eq!(r.rename(machine, &w("M2"), 1), Err(CANNOT_DELETE));
+        assert_eq!(r.rename(ROOT, &w("R"), 1), Err(CANNOT_DELETE));
+        for bad in ["", "a\\b"] {
+            assert_eq!(r.rename(beta, &w(bad), 1), Err(NtStatus::INVALID_PARAMETER));
+        }
+        let long: Vec<u16> = core::iter::repeat_n(u16::from(b'x'), 256).collect();
+        assert_eq!(r.rename(beta, &long, 1), Err(NtStatus::INVALID_PARAMETER));
+        // Renamed: found by its new name only, in name order, its time set.
+        r.rename(beta, &w("Zulu"), 5).unwrap();
+        assert_eq!(s(&r.full_name(beta).unwrap()), "\\REGISTRY\\MACHINE\\SOFTWARE\\Zulu");
+        assert_eq!(r.lookup(sw, &w("zulu")).unwrap(), beta);
+        assert!(r.lookup(sw, &w("Beta")).is_err());
+        assert_eq!(r.subkey(sw, 1).unwrap(), beta);
+        let (b, _) = r.key_information(beta, 0).unwrap();
+        assert_eq!(u64::from_le_bytes(b[..8].try_into().unwrap()), 5);
+        r.rename(beta, &w("Alpha"), 6).unwrap();
+        assert_eq!(r.subkey(sw, 0).unwrap(), beta);
+        // A deleted key cannot be renamed.
+        r.retain(beta);
+        r.delete_key(beta, 7).unwrap();
+        assert_eq!(r.rename(beta, &w("Again"), 8), Err(KEY_DELETED));
+    }
+
+    #[test]
+    fn changes_are_noted_with_the_key_and_its_ancestors() {
+        let mut r = reg();
+        let sw = r.lookup(ROOT, &w("MACHINE\\SOFTWARE")).unwrap();
+        let machine = r.lookup(ROOT, &w("MACHINE")).unwrap();
+        let ms = r.lookup(sw, &w("Microsoft")).unwrap();
+        // Nothing is noted while no watch exists.
+        r.set_value(ms, &w("x"), 4, &[0; 4], 1).unwrap();
+        assert_eq!(r.take_changes(), (vec![], false));
+        r.noting = true;
+        r.set_value(ms, &w("x"), 4, &[1; 4], 1).unwrap();
+        let (k, _) = r.create(ms, &w("Sub"), 0, &[], 1).unwrap();
+        r.rename(k, &w("Sub2"), 1).unwrap();
+        r.delete_value(ms, &w("x"), 1).unwrap();
+        r.set_security(ms, vec![1]).unwrap();
+        r.delete_key(k, 1).unwrap();
+        let chain = |ids: &[KeyId]| ids.to_vec();
+        let at_ms = chain(&[ms, sw, machine, ROOT]);
+        let at_k = chain(&[k, ms, sw, machine, ROOT]);
+        let (changes, lost) = r.take_changes();
+        assert!(!lost);
+        let want = [
+            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME),
+            (at_k.clone(), REG_NOTIFY_CHANGE_NAME),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_SECURITY | REG_NOTIFY_CHANGE_ATTRIBUTES),
+            (at_k, REG_NOTIFY_CHANGE_NAME),
+            (at_ms, REG_NOTIFY_CHANGE_NAME),
+        ];
+        let got: Vec<(Vec<KeyId>, u32)> = changes.into_iter().map(|c| (c.chain, c.bits)).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
