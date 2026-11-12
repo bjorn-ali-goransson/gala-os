@@ -55,6 +55,7 @@ pub mod winevent;
 pub mod winsta;
 pub mod winstate;
 pub mod wow64;
+pub mod wslfs;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

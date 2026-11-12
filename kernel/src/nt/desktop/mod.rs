@@ -193,6 +193,15 @@ pub const PROGRAMS: &[Program] = &[
         colors: (0x00_3b_9a_e1, 0x00_17_5c_b0),
         package: None,
     },
+    // gala's explorer.exe (user/explorer: ROADMAP EX), where Windows has
+    // it; also Win+E (`FILE_EXPLORER`). The shell itself (the taskbar,
+    // the start menu) stays the desktop's.
+    Program {
+        name: FILE_EXPLORER,
+        paths: &["%SystemRoot%\\explorer.exe"],
+        colors: (0x00_f8_c8_4a, 0x00_e0_9b_1a),
+        package: None,
+    },
     // The Office Deployment Tool's setup.exe (machine scope): Click-to-Run
     // puts Word under root\Office16 (ROADMAP OF).
     Program {
@@ -270,6 +279,13 @@ pub const TASK_MANAGER: &str = "Task Manager";
 /// Its index in PROGRAMS.
 fn task_manager() -> Option<usize> {
     PROGRAMS.iter().position(|p| p.name == TASK_MANAGER)
+}
+
+/// File Explorer's entry in PROGRAMS (Win+E starts it as the tile does).
+pub const FILE_EXPLORER: &str = "File Explorer";
+
+fn file_explorer() -> Option<usize> {
+    PROGRAMS.iter().position(|p| p.name == FILE_EXPLORER)
 }
 
 /// The taskbar's context menu: its width and its one item's height.
@@ -1041,6 +1057,16 @@ impl Desktop {
                 } else {
                     self.open_menu();
                 }
+                self.refresh();
+            }
+            return;
+        }
+        // Win+E: File Explorer (no program sees the E).
+        if self.win_key && vk == b'E' {
+            self.win_used = true;
+            if down {
+                self.close_menu();
+                self.launch = file_explorer();
                 self.refresh();
             }
             return;
@@ -3502,10 +3528,17 @@ pub fn distro_root_of(name: &[u8]) -> Option<crate::fs::ramfs::NodeId> {
 /// a Linux process belongs to the distribution its root is). Reads the
 /// registry and the file system: not under the desktop's lock.
 pub fn distro_roots() -> Vec<(linux::Name, crate::fs::ramfs::NodeId)> {
+    distro_roots_in(USER_HIVE)
+}
+
+/// The registered distributions (Lxss keys in State 1) of the user whose
+/// hive is `hive` below `\REGISTRY` (`USER\<SID>`), by name, each with
+/// its tree's node (`\\wsl.localhost\<distro>`: nt::wslfs).
+pub fn distro_roots_in(hive: &str) -> Vec<(linux::Name, crate::fs::ramfs::NodeId)> {
     use super::registry::{self, ROOT};
     let mut found: Vec<(linux::Name, linux::Text<260>)> = Vec::new();
     let _ = registry::with(|r| {
-        let path = reg_path(&[USER_HIVE, LXSS]).ok_or(NtStatus::NO_MEMORY)?;
+        let path = reg_path(&[hive, LXSS]).ok_or(NtStatus::NO_MEMORY)?;
         let lxss = r.lookup(ROOT, &path)?;
         let mut i = 0;
         while let Ok(sub) = r.subkey(lxss, i) {
@@ -3954,6 +3987,9 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option
     let launch = d.take_launch();
     if vk == 0x1b && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
         crate::info!("desktop: Ctrl+Shift+Esc: {TASK_MANAGER}");
+    }
+    if vk == b'E' && launch.and_then(Launch::program).is_some_and(|p| p.name == FILE_EXPLORER) {
+        crate::info!("desktop: Win+E: {FILE_EXPLORER}");
     }
     let wakes = d.take_wakes();
     let posts = d.take_tray_posts();

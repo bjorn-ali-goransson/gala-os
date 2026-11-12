@@ -840,6 +840,21 @@ fn is_sep(c: u16) -> bool {
     c == BACKSLASH || c == u16::from(b'/')
 }
 
+/// A UNC path's root (`\\server\share`, either separator): its length,
+/// or None when `path` is not a UNC path (`\\?\` and `\\.\` are not:
+/// the callers take them first) or names no server.
+fn unc_root_len(path: &[u16]) -> Option<usize> {
+    if path.len() < 3 || !is_sep(path[0]) || !is_sep(path[1]) || is_sep(path[2]) {
+        return None;
+    }
+    let server_end = path[2..].iter().position(|&c| is_sep(c)).map_or(path.len(), |i| i + 2);
+    if server_end >= path.len() {
+        return Some(path.len());
+    }
+    let share = server_end + 1;
+    Some(path[share..].iter().position(|&c| is_sep(c)).map_or(path.len(), |i| i + share))
+}
+
 /// The full Win32 path of `path` (GetFullPathNameW's rules): relative paths
 /// join the current directory, a leading separator takes the current drive,
 /// `/` becomes `\\`, and `.`/`..` components are resolved. `\\\\?\\` paths are
@@ -867,8 +882,15 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
     }
     let drive = path.len() >= 2 && path[1] == u16::from(b':');
     let mut base = PathBuf::new();
-    if drive && path.len() >= 3 && is_sep(path[2]) {
+    // The root (`X:` or a UNC path's `\\server\share`) is the first
+    // `root_len` characters of `base`; `..` never climbs above it.
+    let root_len;
+    if let Some(n) = unc_root_len(path) {
+        base.push(&path[..n])?;
+        root_len = n;
+    } else if drive && path.len() >= 3 && is_sep(path[2]) {
         base.push(&path[..2])?;
+        root_len = 2;
     } else {
         // The current directory (with its trailing backslash).
         let mut cwd = [0u16; MAX_PATH_CHARS];
@@ -876,14 +898,22 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
         if n == 0 || n >= MAX_PATH_CHARS {
             return Err(3);
         }
+        let cwd_root = if drive { 2 } else { unc_root_len(&cwd[..n]).unwrap_or(2) };
         if drive || (!path.is_empty() && is_sep(path[0])) {
-            base.push(&cwd[..2])?; // the current drive ("X:rel" keeps it simple)
+            base.push(&cwd[..cwd_root])?; // the current drive ("X:rel" keeps it simple)
         } else {
             base.push(&cwd[..n])?;
         }
+        root_len = cwd_root;
     }
-    let rest = if drive { &path[2..] } else { path };
-    // Components: the base's after the drive, then the path's.
+    let rest = if let Some(n) = unc_root_len(path) {
+        &path[n..]
+    } else if drive {
+        &path[2..]
+    } else {
+        path
+    };
+    // Components: the base's after the root, then the path's.
     let mut parts: [(usize, usize, bool); 128] = [(0, 0, false); 128]; // (start, len, from base)
     let mut count = 0;
     let add = |src: &[u16],
@@ -911,11 +941,17 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
             }
         }
     };
-    let base_rest = &base.as_slice()[2..];
+    let base_rest = &base.as_slice()[root_len..];
     add(base_rest, true, &mut parts, &mut count);
     add(rest, false, &mut parts, &mut count);
-    out.push(&base.as_slice()[..2])?;
-    out.push(&[BACKSLASH])?;
+    let unc = root_len > 2;
+    // The root with `\` separators (`//server/share` is `\\server\share`).
+    for &c in &base.as_slice()[..root_len] {
+        out.push(&[if c == u16::from(b'/') { BACKSLASH } else { c }])?;
+    }
+    if !unc || count > 0 || path.last().is_some_and(|&c| is_sep(c)) {
+        out.push(&[BACKSLASH])?;
+    }
     for (i, &(start, len, from_base)) in parts[..count].iter().enumerate() {
         if i > 0 {
             out.push(&[BACKSLASH])?;
@@ -952,6 +988,12 @@ fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
     if full.as_slice().starts_with(&verbatim) || full.as_slice().starts_with(&device) {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(&full.as_slice()[4..])?;
+    } else if unc_root_len(full.as_slice()).is_some() {
+        // `\\server\share\x` is `\??\UNC\server\share\x` (nt::wslfs serves
+        // WSL's servers below it).
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(&[u16::from(b'U'), u16::from(b'N'), u16::from(b'C')])?;
+        nt.push(&full.as_slice()[1..])?;
     } else {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(full.as_slice())?;

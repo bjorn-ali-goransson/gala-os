@@ -60,7 +60,7 @@ pub struct ShFileInfoW {
 /// `dll`'s function `name` (both NUL-terminated), resolved once per call
 /// site (shell32 does not import the GUI DLLs: programs without windows
 /// use it too).
-fn resolve(cache: &AtomicUsize, dll: &[u8], name: &[u8]) -> usize {
+pub(crate) fn resolve(cache: &AtomicUsize, dll: &[u8], name: &[u8]) -> usize {
     let f = cache.load(Ordering::Acquire);
     if f != 0 {
         return f;
@@ -80,8 +80,12 @@ fn resolve(cache: &AtomicUsize, dll: &[u8], name: &[u8]) -> usize {
 
 macro_rules! import {
     ($dll:literal, $name:literal, $ty:ty) => {{
-        static CACHE: AtomicUsize = AtomicUsize::new(0);
-        let f = resolve(&CACHE, concat!($dll, "\0").as_bytes(), concat!($name, "\0").as_bytes());
+        static CACHE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        let f = $crate::fileinfo::resolve(
+            &CACHE,
+            concat!($dll, "\0").as_bytes(),
+            concat!($name, "\0").as_bytes(),
+        );
         // SAFETY: that DLL's function of that name has this signature.
         (f != 0).then(|| unsafe { core::mem::transmute::<usize, $ty>(f) })
     }};
@@ -253,115 +257,7 @@ pub extern "system" fn SHGetFileInfoW(
     if flags & SHGFI_SYSICONINDEX != 0 { list } else { 1 }
 }
 
-// ---- Item ID lists ----
-//
-// gala's item IDs: one SHITEMID per list (cb, then b"gala", a kind and,
-// for a folder on disk, its path in UTF-16 without a NUL), then the
-// terminating zero cb. The desktop, the namespace's root, is the empty
-// list. Lists come from the process heap, as CoTaskMemAlloc's do.
-
-#[cfg_attr(
-    target_arch = "x86",
-    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
-)]
-#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
-unsafe extern "system" {
-    fn GetProcessHeap() -> usize;
-    fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
-}
-
-pub(crate) const KIND_PATH: u16 = 1;
-const KIND_DRIVES: u16 = 2;
-const CSIDL_DESKTOP: i32 = 0;
-const CSIDL_DRIVES: i32 = 0x11;
-const CSIDL_DESKTOPDIRECTORY: i32 = 0x10;
-
-/// A list of one item of `kind` with `path`, or the empty list.
-pub(crate) fn new_list(item: Option<(u16, &[u16])>) -> *mut u8 {
-    let body = item.map_or(0, |(_, p)| 2 + 4 + 2 + 2 * p.len());
-    // SAFETY: plain call.
-    let list = unsafe { HeapAlloc(GetProcessHeap(), 8, body + 2) }; // HEAP_ZERO_MEMORY
-    if list.is_null() {
-        return list;
-    }
-    if let Some((kind, path)) = item {
-        // SAFETY: `body + 2` bytes, zeroed (so the terminator is there).
-        unsafe {
-            list.cast::<u16>().write_unaligned(body as u16);
-            core::ptr::copy_nonoverlapping(b"gala".as_ptr(), list.add(2), 4);
-            list.add(6).cast::<u16>().write_unaligned(kind);
-            for (i, &c) in path.iter().enumerate() {
-                list.add(8 + 2 * i).cast::<u16>().write_unaligned(c);
-            }
-        }
-    }
-    list
-}
-
-/// SHGetSpecialFolderLocation(hwnd, csidl, &list): the folder's item ID
-/// list (free it with CoTaskMemFree): the desktop's is empty, My
-/// Computer (CSIDL_DRIVES) is virtual, the others are their paths.
-#[unsafe(no_mangle)]
-pub extern "system" fn SHGetSpecialFolderLocation(
-    _hwnd: usize,
-    csidl: i32,
-    out: *mut *mut u8,
-) -> i32 {
-    if out.is_null() {
-        return super::E_INVALIDARG;
-    }
-    let list = match csidl & 0xff {
-        CSIDL_DESKTOP => new_list(None),
-        CSIDL_DRIVES => new_list(Some((KIND_DRIVES, &[]))),
-        c => {
-            let mut path = [0u16; super::MAX_PATH];
-            if super::SHGetFolderPathW(0, c, 0, 0, path.as_mut_ptr()) != super::S_OK {
-                // SAFETY: the caller's pointer.
-                unsafe { *out = core::ptr::null_mut() };
-                return super::E_INVALIDARG;
-            }
-            let n = path.iter().position(|&ch| ch == 0).unwrap_or(0);
-            new_list(Some((KIND_PATH, &path[..n])))
-        }
-    };
-    // SAFETY: the caller's pointer.
-    unsafe { *out = list };
-    if list.is_null() { super::E_OUTOFMEMORY } else { super::S_OK }
-}
-
-/// SHGetPathFromIDListW(list, path[MAX_PATH]): the folder's path (the
-/// desktop's directory for the empty list); FALSE for a virtual folder or
-/// a list gala did not make.
-#[unsafe(no_mangle)]
-pub extern "system" fn SHGetPathFromIDListW(list: *const u8, path: *mut u16) -> i32 {
-    if list.is_null() || path.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's item ID list (cb first).
-    let cb = usize::from(unsafe { list.cast::<u16>().read_unaligned() });
-    if cb == 0 {
-        // SAFETY: the caller's MAX_PATH buffer.
-        unsafe { *path = 0 };
-        return i32::from(
-            super::SHGetFolderPathW(0, CSIDL_DESKTOPDIRECTORY, 0, 0, path) == super::S_OK,
-        );
-    }
-    // SAFETY: the item's `cb` bytes.
-    let item = unsafe { core::slice::from_raw_parts(list, cb) };
-    if cb < 8 || &item[2..6] != b"gala" || u16::from_le_bytes([item[6], item[7]]) != KIND_PATH {
-        // SAFETY: the caller's buffer.
-        unsafe { *path = 0 };
-        return 0;
-    }
-    let n = ((cb - 8) / 2).min(super::MAX_PATH - 1);
-    for i in 0..n {
-        // SAFETY: inside the item and the caller's MAX_PATH buffer.
-        unsafe { *path.add(i) = u16::from_le_bytes([item[8 + 2 * i], item[9 + 2 * i]]) };
-    }
-    // SAFETY: n < MAX_PATH.
-    unsafe { *path.add(n) = 0 };
-    1
-}
+// ---- The task allocator ----
 
 /// SHGetMalloc: the task allocator (ole32's CoGetMalloc).
 #[unsafe(no_mangle)]

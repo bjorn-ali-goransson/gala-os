@@ -11,10 +11,16 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
+use gala_heap as _;
+
 mod browser;
+#[macro_use]
 mod fileinfo;
 mod icons;
 mod link;
+mod namespace;
 mod shellops;
 mod tray;
 mod unimplemented;

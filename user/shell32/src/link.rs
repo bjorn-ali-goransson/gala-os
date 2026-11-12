@@ -646,9 +646,9 @@ extern "system" fn sl_get_id_list(this: *mut c_void, out: *mut *mut u8) -> HResu
         put(out, core::ptr::null_mut());
         return S_FALSE;
     }
-    let list = super::fileinfo::new_list(Some((super::fileinfo::KIND_PATH, link.path.as_slice())));
+    let list = super::namespace::simple_list(link.path.as_slice());
     put(out, list);
-    if list.is_null() { E_OUTOFMEMORY } else { S_OK }
+    if list.is_null() { S_FALSE } else { S_OK }
 }
 
 extern "system" fn sl_set_id_list(this: *mut c_void, list: *const u8) -> HResult {
@@ -656,7 +656,7 @@ extern "system" fn sl_set_id_list(this: *mut c_void, list: *const u8) -> HResult
         return E_INVALIDARG;
     }
     let mut path = [0u16; MAX_PATH];
-    if super::fileinfo::SHGetPathFromIDListW(list, path.as_mut_ptr()) == 0 {
+    if super::namespace::SHGetPathFromIDListW(list, path.as_mut_ptr()) == 0 {
         unsupported(b"shell32.dll!IShellLinkW::SetIDList(not a file system item)", 0);
         return E_INVALIDARG;
     }
@@ -2143,7 +2143,7 @@ pub extern "system" fn SHAddToRecentDocs(flags: u32, pv: *const c_void) {
             (n as usize).saturating_sub(1)
         }
         SHARD_PIDL => {
-            if super::fileinfo::SHGetPathFromIDListW(pv.cast(), target.as_mut_ptr()) == 0 {
+            if super::namespace::SHGetPathFromIDListW(pv.cast(), target.as_mut_ptr()) == 0 {
                 unsupported(b"shell32.dll!SHAddToRecentDocs(not a file system item)", 0);
                 return;
             }

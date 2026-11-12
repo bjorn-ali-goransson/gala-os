@@ -1403,3 +1403,20 @@ fn task_manager_is_listed_where_windows_has_it() {
         ]
     );
 }
+
+#[test]
+fn win_e_starts_file_explorer() {
+    let (mut d, _) = desktop_with_window();
+    d.key(0x5b, 0x5b, true, true);
+    d.key(b'E', 0x12, false, true);
+    d.key(b'E', 0x12, false, false);
+    d.key(0x5b, 0x5b, true, false);
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(FILE_EXPLORER));
+    // The Windows key used with E opens no start menu, and no window saw
+    // the E.
+    assert!(!d.menu_open());
+    assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == u64::from(b'E')));
+    // E alone is the window's.
+    d.key(b'E', 0x12, false, true);
+    assert!(d.take_launch().is_none());
+}

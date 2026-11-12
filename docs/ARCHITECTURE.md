@@ -6780,7 +6780,10 @@ the program always sees WM_SIZE/WM_MOVE.
   filtered by a child HWND does not see keys still addressed to its
   top-level window.
 - TranslateMessage posts WM_CHAR (WM_SYSCHAR) for a key down, US layout
-  with Shift, Caps Lock and Ctrl (Ctrl+letter: 1-26).
+  with Shift, Caps Lock and Ctrl (Ctrl+letter: 1-26; with Ctrl the digit
+  and punctuation keys make the layout's control characters, Ctrl+[ ESC,
+  Ctrl+\ FS, Ctrl+] GS, Ctrl+Shift+2 NUL, Ctrl+Shift+6 RS, Ctrl+Shift+-
+  US, and the others none: Ctrl+Shift+2 types no `@`).
 
 #### System calls
 
@@ -7763,9 +7766,8 @@ windows can use them too.
   to straight-alpha BGRA by `cargo xtask bake-icons`: document, folder,
   open folder, program, drive), type names ("File folder",
   "Application", "<EXT> File": no file-type registry yet), display
-  names, icons. Item ID lists are gala's own: one item (b"gala", a
-  kind, a path) or the empty list (the desktop); CSIDL_DRIVES is
-  virtual. ILCreateFromPathW makes the list of an existing path (NULL
+  names, icons. Item ID lists are the namespace's ("The file
+  explorer"): ILCreateFromPathW makes the list of an existing path (NULL
   otherwise), ILGetSize and ILFree work on any list.
 - **shell32's exports by ordinal** (`build.rs`, the numbers of Wine's
   shell32.spec): SHChangeNotifyRegister #2, SHChangeNotifyDeregister #4,
@@ -7785,7 +7787,8 @@ windows can use them too.
   distinct path and icon index, missing files included, as Windows hands
   them out; 32 paths, then -1, recorded). The shell namespace's objects (desktop folder,
   parsing names, property stores, association registration, stock
-  icons, the Open With dialog) are E_NOTIMPL, recorded. shell32 and
+  icons, the Open With dialog) are E_NOTIMPL, recorded (the namespace
+  itself is "The file explorer"'s). shell32 and
   shlwapi load advapi32, ole32 and user32 on first use, never as static
   imports (every program loading them would load those too).
 - **shell32's programs, drops and file operations**
@@ -7800,8 +7803,9 @@ windows can use them too.
   caller gets ERROR_CANCELLED with hInstApp (ShellExecuteW's result)
   SE_ERR_ACCESSDENIED, as a cancelled UAC prompt answers, recorded as
   `shell32.dll!ShellExecute(runas: elevation prompt)` (`runas_test`,
-  `wow64_runas_test`, `runas_declined`). Other verbs, documents and URLs
-  have no associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  `wow64_runas_test`, `runas_declined`). Documents run their
+  association's command ("The file explorer", Opening a file); other
+  verbs and URLs are SE_ERR_NOASSOC, recorded. DragQueryFileW/
   DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
   DragAcceptFiles sets WS_EX_ACCEPTFILES (nothing generates
   WM_DROPFILES yet). SHFileOperationW does FO_COPY/FO_MOVE/FO_RENAME/
@@ -12437,9 +12441,40 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special
   file`, `ntio`, `ntio ioctl` with the request); the state dump names
   an fd's Windows object (`lx: pid P fd N: windows Pipe`).
-- **Limits** (ROADMAP CT): no `/mnt/<drive>`, interop or
-  `\\wsl.localhost` yet (step 3: the current directory is the home, not
-  the Windows directory); DefaultUid is not applied (the processes run
+- **`\\wsl.localhost\<distro>` and `\\wsl$\<distro>`** (`nt::wslfs`; CT
+  step 3's file part, EX step 1; `explorer_test`): kernel32 makes a UNC
+  path `\??\UNC\server\share\...` (GetFullPathNameW keeps
+  `\\server\share` as the root: `..` stops there; a UNC current
+  directory works for relative names); `\??\UNC` links to `\Device\Mup`
+  (an object of its own, `ObjectBody::MupDevice`), and an open below it
+  is resolved for the caller's user: the server must be `wsl.localhost`
+  or `wsl$` (ASCII case ignored; another is STATUS_BAD_NETWORK_PATH,
+  ledgered `UNC path`: gala has no SMB client), the share a
+  distribution registered in that user's hive (Lxss, State 1; case
+  ignored as WSL does; none: STATUS_BAD_NETWORK_NAME,
+  ERROR_BAD_NET_NAME), and the rest a Linux path in its tree:
+  case-sensitive, walked as a process rooted there walks it
+  (`lx::file::resolve_in`: its symbolic links followed inside the
+  distribution, `..` of its root is itself), the last link only when
+  the open follows links (not with FILE_OPEN_REPARSE_POINT: deleting a
+  link deletes the link). `FilePath::linux` carries the distribution's
+  root to `file::resolve_links`, which hands such a path to
+  `wslfs::resolve`; what it resolves to is an ordinary node of the one
+  file system, so reads, writes, listings, renames, change
+  notifications and Linux's own view all agree (no 9P). A file or
+  directory Windows creates in a Linux tree (a directory with a POSIX
+  mode) gets the mode WSL's server gives one, 0644 (0755). Linux
+  metadata reaches Windows as WSL's: NtQueryInformationFile's
+  FileStatLxInformation (70) gives LxUid, LxGid, LxMode (with the type
+  bits) and the case-sensitive-directory flag for a node with a POSIX
+  mode (`lx::file::lx_metadata`; the owner is the caller's ids, as
+  `stat` shows it), LxFlags 0 for an NT file.
+- **Limits** (ROADMAP CT): no `/mnt/<drive>` or interop yet (step 3:
+  the current directory is the home, not the Windows directory); a
+  relative open below a handle to a directory in a distribution does
+  not follow Linux links; Linux names Windows cannot hold (`:`, `\`,
+  trailing dots) are shown as Linux has them, not mapped to WSL's
+  private-use characters; DefaultUid is not applied (the processes run
   as the Windows user's Linux ids, not root); no init process (WSL's
   `/init`), so a distribution stops with its last process; no ptys or
   process groups (job control is off: `TIOCGPGRP` is ENOTTY), Ctrl+C is
@@ -12591,6 +12626,151 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
   there; End task waits for a distribution's end on the window's
   thread (up to `lx::distro`'s 10 s).
+
+## The file explorer
+
+ROADMAP EX: an Explorer over every file system gala holds, as Windows'
+File Explorer, with the WSL distributions beside the drives. Code:
+`kernel/src/nt/wslfs.rs` (`\\wsl.localhost`: "The WSL facade"),
+`user/shellns` (the namespace's model, host-tested with `cargo test -p
+shellns`), `user/shell32/src/namespace.rs` (IShellFolder, IShellItem and
+the item ID list functions), `user/explorer` (gala's `explorer.exe`: the
+library is the view's model, `cargo test -p explorer`; `main.rs` the
+window), `nt::desktop` (Win+E, the start menu's tile). Test:
+`explorer_test`, scenario `explorer` (screen check `EXPLORER_SCREEN`).
+
+### The namespace (step 1)
+
+- **The tree**: the desktop (the empty list) holds This PC
+  (`::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`, the drives
+  GetLogicalDrives names, each "<label> (C:)" or "Local Disk (C:)") and
+  Linux (`::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6}`, WSL's folder: listed
+  when a distribution is registered), which holds each distribution
+  registered for the user (HKCU\...\Lxss, State 1) by name; below a
+  drive or a distribution, its files. gala's UI says "Linux"; the
+  parsing names keep WSL's (`\\wsl.localhost\<distro>\...`; `\\wsl$` is
+  parsed too).
+- **Item ID lists** are gala's own (Windows' formats are not
+  documented): one SHITEMID per level, `cb`, `b"gala"`, a kind (a root's
+  CLSID, a drive letter, a file-system item's attributes and name, a
+  distribution's name), a zero `cb` at the end; from the process heap
+  (CoTaskMemAlloc's). An earlier build's one-item lists (a whole path)
+  are still read. The byte-level functions (ILClone, ILCloneFirst,
+  ILCombine, ILFindLastID, ILRemoveLastID, ILIsEqual, ILGetNext,
+  ILIsParent, ILFindChild, ILAppendID, ILGetSize, ILFree) work on any
+  list; their ordinals are Wine's shell32.spec's (`build.rs`).
+- **Parsing** (ParseDisplayName, SHParseDisplayName,
+  SHCreateItemFromParsingName, ILCreateFromPathW): `::{CLSID}` (and
+  below it `\`-separated names), `X:\...`, `\\wsl.localhost\...`; every
+  level is checked (FindFirstFileW: each name as the file system stores
+  it, its attributes); a missing one is
+  HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), a missing directory on the
+  way ERROR_PATH_NOT_FOUND's, anything else E_INVALIDARG.
+  SHSimpleIDListFromPath does not look.
+- **Names**: SIGDN_NORMALDISPLAY (the display name; file name
+  extensions shown, as with "File name extensions" on),
+  PARENTRELATIVEPARSING (the name in its folder; `C:\` for a drive,
+  `::{CLSID}` for a root), DESKTOPABSOLUTEPARSING (the path, else
+  `::{CLSID}`; the desktop's is its directory), FILESYSPATH (none for a
+  virtual folder: E_INVALIDARG), the editing and relative forms as the
+  display name; IShellFolder::GetDisplayNameOf maps SHGDN flags to
+  those and answers STRRET_WSTR.
+- **Objects**: a folder (IShellFolder, IPersistFolder2: ParseDisplayName
+  relative to it, EnumObjects with SHCONTF_FOLDERS/NONFOLDERS/
+  INCLUDEHIDDEN, BindToObject, CompareIDs (roots in order, drives by
+  letter, folders first, names as StrCmpLogicalW), GetAttributesOf
+  (SFGAO_* from the item: FOLDER, FILESYSTEM, STREAM, HASSUBFOLDER,
+  HIDDEN, READONLY, LINK, the CAN* bits), GetDisplayNameOf, SetNameOf
+  (MoveFileW)); an item (IShellItem, IPersistIDList: BindToHandler with
+  BHID_SFObject and BHID_EnumItems, GetParent (MK_E_NOOBJECT for the
+  desktop), GetDisplayName, GetAttributes (S_FALSE when not every bit
+  asked is set), Compare); enumerators (IEnumIDList, IEnumShellItems).
+  Functions: SHGetDesktopFolder, SHCreateItemFromIDList,
+  SHCreateShellItem, SHCreateItemWithParent, SHGetIDListFromObject,
+  SHGetNameFromIDList, SHBindToParent, SHGetKnownFolderIDList and
+  SHGetKnownFolderItem (FOLDERID_Desktop: the empty list,
+  FOLDERID_ComputerFolder: This PC, the rest their paths'),
+  SHGetFolderLocation and SHGetSpecialFolderLocation (CSIDL_DESKTOP the
+  empty list, CSIDL_DRIVES This PC; a profile folder gala's profile
+  lacks still has its list, as SHGetFolderPathW gives its path),
+  SHGetPathFromIDListW.
+- **Opening a file** (ShellExecuteW/ExW, `shellops.rs`): a document runs
+  its association's command (AssocQueryStringW's ASSOCSTR_COMMAND for
+  the verb, "open" by default, from the user's classes then HKCR; `%1`
+  and `%L` the document, `%*` the parameters); an extension no class
+  claims would run Windows' OpenWith.exe, which gala has not:
+  SE_ERR_NOASSOC, ledgered `shell32.dll!ShellExecute(no association)`.
+  When the command's program is `wsl.exe` and the document is in a
+  distribution (`\\wsl.localhost\<d>\...`), `%1` is its Linux path: an
+  association can run a Linux program on a Linux file.
+- **Limits** (each ledgered where met): BindToStorage,
+  CreateViewObject and GetUIObjectOf (context menus, data objects,
+  icons, IShellView), handlers other than the folder and its items
+  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 and property
+  stores, the Recycle Bin, network locations and libraries; the desktop
+  does not list the files of the user's Desktop directory;
+  SHBrowseForFolderW and IFileDialog do not use it yet (step 2's rest).
+
+### The program (step 2)
+
+- **`explorer.exe`** (`user/explorer`), gala's own Windows program on
+  gala's user32, gdi32 and shell32, where Windows keeps it
+  (`%SystemRoot%\explorer.exe`); the shell process stays the desktop's
+  taskbar and start menu. One window per start (class `CabinetWClass`,
+  at (100, 40), 1080 x 700), titled by its folder; an argument names
+  the first folder (`explorer.exe <folder>`), else This PC. Everything
+  it shows comes from the namespace (SHCreateItemFromParsingName,
+  BHID_EnumItems, GetDisplayName, GetAttributes; sizes and times from
+  GetFileAttributesExW of FILESYSPATH); hidden items are not shown.
+- **Navigation pane**: This PC and its drives, Linux and its
+  distributions, and below the current folder's drive or distribution
+  the folders down to it. **Address bar**: the names from the root
+  (`This PC > Local Disk (C:) > Windows`); a click (or Ctrl+L) edits it
+  as a path or parsing name (typing replaces it; "This PC" and "Linux"
+  are understood), Enter goes there, a file is opened. Back
+  (Backspace, Alt+Left), Up (Alt+Up). **Views**: Details (Name, Date
+  modified, Type, Size; a header's click sorts by it, again the other
+  way; folders stay first; sizes in KB rounded up; times as en-US
+  Windows writes them, in UTC) and Icons (Ctrl+Shift+6, Ctrl+Shift+2,
+  or the buttons). **Search**: typing outside the address bar filters
+  the folder's items by name (Esc clears it).
+- **Opening**: Enter or a double click (the window class has
+  CS_DBLCLKS; two clicks on one row within 600 ms count too) opens a
+  folder in place and a file through ShellExecuteW.
+- **Operations** (step 3's start): Copy (Ctrl+C: the file as CF_HDROP on
+  the clipboard), Cut (Ctrl+X: as Copy, and the paste of exactly those
+  files moves them, FO_MOVE), Paste (Ctrl+V: SHFileOperationW's FO_COPY
+  into the folder), Rename (F2: the name typed, Enter; MoveFileW), Delete (SHFileOperationW's FO_DELETE: for good, as gala has
+  no Recycle Bin), New folder (Ctrl+Shift+N: "New folder", "New folder
+  (2)", ...), Open in Terminal (cmd.exe in a Windows folder; `wsl -d
+  <distro> -- cd <dir> && exec /bin/sh -l` in a Linux one, in a new
+  console), Properties (name, type, location, size, time; for a Linux
+  file its distribution, Linux path, permissions as `ls -l` writes them
+  and its uid and gid from FileStatLxInformation); a right click shows
+  them as a menu.
+- **Live updates**: the folder shown is watched with
+  ReadDirectoryChangesW (overlapped, its event in the message loop's
+  MsgWaitForMultipleObjects); a change made by anyone (a Windows
+  program, a Linux process in the distribution: both reach the one file
+  system's change journal, `nt::notify`) re-reads the folder.
+- **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
+  Explorer's PROGRAMS entry as the start menu's tile does (logged
+  `desktop: Win+E: File Explorer`); no program sees the E.
+- **Observability**: each navigation, open, operation, change and
+  Properties is a line on its standard output (`explorer: navigate
+  <parsing name> (<n> items)`, `explorer: open <path>: started`,
+  `explorer: copy ...`, `explorer: paste <n> item(s) into <dir>: ok`,
+  `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
+  rename ...`, `explorer: properties ...`, `explorer: closed`): a
+  program the desktop starts writes to the
+  serial line. What it cannot do goes to the ledger
+  (`explorer.exe!<what>`).
+- **Limits**: one selected item at a time; no drag and drop, progress
+  or conflict dialogs (SHFileOperationW proceeds without them: step 3;
+  Cut is not in the scenario yet); copies across file systems take the mode
+  WSL's server gives a new file (0644), not the source's; no
+  thumbnails (step 4); search is of the folder shown, not below it;
+  SHBrowseForFolderW and IFileDialog are not this window yet.
 
 ## Plan: graphics and GPU
 

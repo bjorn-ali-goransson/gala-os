@@ -2886,8 +2886,8 @@ kernel), the Hyper-V backends of both products, and Windows containers
    last command, as WSL's), DefaultUid applied (root inside the
    distribution), `-u`, `--cd`, `--export`, ptys and process groups
    for the terminal (LX "Next" 2-3: job control, Ctrl+C as SIGINT).
-3. The facade's plumbing: `/mnt/<drive>` inside the distribution and
-   `\\wsl.localhost\<distro>` outside (one file system, no 9P), interop
+3. The facade's plumbing: `/mnt/<drive>` inside the distribution
+   (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
    (Windows programs started from Linux and back), `wsl.conf`, hvsocket
    (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
    side as one core socket pair, localhost forwarding over one shared
@@ -4175,41 +4175,57 @@ one tree: the Windows drives, each WSL distribution's root (as Windows
 shows `\\wsl.localhost\<distro>`), the Linux personality's own root,
 and removable or network volumes as they come.
 
+**Done so far** (`explorer_test`, scenario `explorer` with its screen
+check; ARCHITECTURE "The file explorer"):
+- Step 1's core: `\\wsl.localhost\<distro>\...` and `\\wsl$\...` for
+  every Windows program, the distribution's own tree in the one file
+  system (`nt::wslfs`: UNC paths through `\Device\Mup`, Linux links
+  followed inside the distribution, names case-sensitive, Windows'
+  new files 0644), FileStatLxInformation with the Linux mode, uid and
+  gid; shell32's namespace (`user/shellns`, `namespace.rs`): the
+  desktop, This PC with the drives, Linux with each distribution,
+  IShellFolder, IShellItem, their enumerators, the item ID list
+  functions, known folders' lists and items, parsing and display names
+  as Windows gives them (Wine's shlfolder.c and shellpath.c and
+  Microsoft's documentation); ShellExecute opens documents with their
+  association (a Linux file's Linux path for `wsl.exe`).
+- Step 2's core: gala's `explorer.exe` (navigation pane, address bar
+  with paths and `\\wsl.localhost` names, Details and Icons views,
+  sorting, search by name, opening with the association, Back and Up),
+  Win+E and the start menu's tile.
+- Of steps 3-4: copy (and cut) and paste through the clipboard
+  (CF_HDROP, SHFileOperationW), rename (F2), delete, new folder, Open in Terminal (cmd, or `wsl
+  -d` in the Linux folder), Properties with the Linux permissions, and
+  live updates (ReadDirectoryChangesW: a Linux process's new file shows
+  without a refresh). The Done-when scenario runs: Explorer browses
+  from C: into `bb`'s root through the Linux node, pastes a file there,
+  opens it with its program and sees a Linux-made file appear.
+
 **Next** (each test first, checked on the screen, screenshots):
-1. The namespace: shell32's IShellFolder/IShellItem over gala's file
-   systems, the known folders (Desktop, Documents, Downloads, ...),
-   "This PC" with the drives, and a "Linux" node listing each
-   distribution by name; `\\wsl.localhost\<distro>\...` and
-   `\\wsl$\<distro>\...` paths open the distribution's tree for every
-   Windows program (CT step 3's plumbing, one file system, no 9P).
-   Linux files show their POSIX mode and owner in Properties; names a
-   Windows path cannot hold are shown as Linux has them.
-2. The program: gala's own `explorer.exe` window (SH's shell process
-   stays the taskbar and start menu): a navigation pane with the tree,
-   an address bar that takes paths and `\\wsl.localhost` names, details
-   and icon views, sorting, search by name, and opening a file with its
-   association (ShellExecute; Linux files with a Linux program through
-   `wsl -d` when the association says so). Win+E opens it; "Open
-   folder" in other programs and SHBrowseForFolder/IFileDialog use the
-   same namespace.
-3. Operations: copy, move, rename, delete to the Recycle Bin, new
-   folder, drag and drop between panes and to the desktop, with
-   progress and conflicts handled as Windows does; across file systems
-   (a Windows drive to a distribution and back) with Linux modes kept
-   where they can be.
-4. Changes appear live (ReadDirectoryChangesW for Windows trees,
-   inotify for Linux ones), thumbnails through WIC, a context menu with
-   "Open in Terminal" (cmd for Windows folders, `wsl -d` for Linux
-   ones) and "Properties".
+1. The namespace's rest: the files on the user's Desktop, the Recycle
+   Bin, IShellItem2 and property stores, GetUIObjectOf's context menus
+   and data objects (other programs' "Open folder" and drag sources);
+   Linux names Windows cannot hold mapped as WSL maps them; removable
+   and network volumes as they come.
+2. The program's rest: SHBrowseForFolderW and IFileDialog as dialogs
+   of this namespace (and "Open folder" in other programs), several
+   selected items, rename in place, a tree that expands any folder.
+3. Operations' rest: cut checked on the screen, delete to the Recycle Bin,
+   drag and drop between panes and to the desktop, with progress and
+   conflicts handled as Windows does; across file systems (a Windows
+   drive to a distribution and back) with the source's Linux modes kept
+   where they can be (a copy now takes a new file's 0644).
+4. Thumbnails through WIC; inotify for Linux programs watching what
+   Windows programs change (ReadDirectoryChangesW already sees Linux
+   changes); the rest of Properties (sizes of folders, attributes).
 
 **Done when**: a scenario opens Explorer, browses from C: into a WSL
 distribution's root through the Linux node, copies a file from one to
 the other, opens it with its program, and sees the copy appear without
 a refresh.
 
-**Design**: ARCHITECTURE gets "The file explorer" with step 1; it
-builds on shell32's known folders and associations and CT's
-`\\wsl.localhost` plumbing.
+**Design**: ARCHITECTURE "The file explorer" (and "The WSL facade" for
+`\\wsl.localhost`).
 
 ## Known issues and stopgaps
 

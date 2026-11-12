@@ -5011,7 +5011,7 @@ impl Call<'_> {
                     if !f.directory {
                         return Err(NtStatus::INVALID_PARAMETER);
                     }
-                    return Ok(file::FilePath { start: f.node, name });
+                    return Ok(file::FilePath { start: f.node, name, linux: None });
                 }
                 let object = entry.require(DIRECTORY_TRAVERSE)?.clone();
                 if object.as_directory().is_none() {
@@ -5028,10 +5028,32 @@ impl Call<'_> {
         // OBJ_CASE_INSENSITIVE; the object directory part follows the flag.
         let (device, rest) =
             namespace::lookup_parse(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        if matches!(device.body, ObjectBody::MupDevice) {
+            // `\\wsl.localhost\<distro>\...` (nt::wslfs), for the caller's user.
+            return super::wslfs::share_path(&self.user_sid_string()?, &rest);
+        }
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest })
+        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None })
+    }
+
+    /// The string form of the caller's token user's SID (`S-1-5-21-...`):
+    /// the thread's impersonation token's, else the process's.
+    fn user_sid_string(&self) -> Result<Vec<u8>, NtStatus> {
+        let impersonation = super::thread::current().and_then(|me| match &me.body {
+            ObjectBody::Thread(t) => t.impersonation.lock().clone(),
+            _ => None,
+        });
+        let token = impersonation.unwrap_or_else(|| self.process.token.lock().clone());
+        let ObjectBody::Token(t) = &token.body else { return Err(NtStatus::NO_TOKEN) };
+        let sid = t.data.lock().user.sid;
+        let mut binary = [0u8; 68];
+        sid.write(&mut binary);
+        let mut out = Vec::new();
+        super::tasks::sid_string(&binary[..sid.len()], &mut out)
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(out)
     }
 
     /// Whether OBJECT_ATTRIBUTES name something below `\Device\Afd`.
@@ -6726,6 +6748,9 @@ const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
 const FILE_POSITION_INFORMATION: u64 = 14;
+/// FileStatLxInformation (70): FILE_STAT_LX_INFORMATION, a file's Linux
+/// metadata as WSL's file systems give it (nt::file::stat_lx_information).
+const FILE_STAT_LX_INFORMATION: u64 = 70;
 const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_COMPLETION_INFORMATION: u64 = 30;
 /// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
@@ -6836,6 +6861,21 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     }
     if class == FILE_PROCESS_IDS_USING_FILE_INFORMATION {
         return return_processes_using(call, file.node, arg!(call, 0), buffer, length, iosb);
+    }
+    if class == FILE_STAT_LX_INFORMATION {
+        if entry.access & file::FILE_READ_ATTRIBUTES == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let ids = crate::lx::identity::of_process(&call.process);
+        let out = tri!(file::stat_lx_information(file.node, entry.access, (ids.uid, ids.gid)));
+        if length < out.len() {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &out).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, out.len() as u64));
+        return NtStatus::SUCCESS;
     }
     let mut out = [0u8; 40];
     let size = match class {

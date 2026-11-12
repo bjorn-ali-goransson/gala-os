@@ -627,7 +627,7 @@ fn open_directory(win32: &str) -> Option<ObjectRef> {
     for c in rest.encode_utf16() {
         name.try_push(c).ok()?;
     }
-    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name, linux: None };
     let share = file::FILE_SHARE_READ | file::FILE_SHARE_WRITE | file::FILE_SHARE_DELETE;
     let options = file::FILE_DIRECTORY_FILE | file::FILE_SYNCHRONOUS_IO_NONALERT;
     file::create(&path, CURDIR_ACCESS, share, file::FILE_OPEN, options).ok().map(|c| c.object)
@@ -1435,7 +1435,7 @@ pub(crate) fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
     for c in rest.encode_utf16() {
         name.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
     }
-    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name, linux: None };
     let opened = file::create(
         &path,
         file::FILE_READ_DATA,

@@ -2147,6 +2147,25 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("taskmgr", "user32.dll", "Windows/System32"),
     ("taskmgr", "gdi32.dll", "Windows/System32"),
     ("taskmgr", "target/wsl/bb-rootfs.tar", "gala"),
+    // The file explorer (ROADMAP EX): gala's explorer.exe where Windows
+    // has it (Win+E, the start menu's tile), shell32's namespace, wsl.exe
+    // and the busybox distribution explorer_test browses into.
+    ("explorer", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("explorer", "user/bin/explorer.exe", "Windows"),
+    ("explorer", "user/bin/wsl.exe", "Windows/System32"),
+    ("explorer", "user/bin/cmd.exe", "Windows/System32"),
+    ("explorer", "user/bin/conhost.exe", "Windows/System32"),
+    ("explorer", "ntdll.dll", "Windows/System32"),
+    ("explorer", "kernel32.dll", "Windows/System32"),
+    ("explorer", "advapi32.dll", "Windows/System32"),
+    ("explorer", "bcryptprimitives.dll", "Windows/System32"),
+    ("explorer", "user32.dll", "Windows/System32"),
+    ("explorer", "gdi32.dll", "Windows/System32"),
+    ("explorer", "shell32.dll", "Windows/System32"),
+    ("explorer", "shlwapi.dll", "Windows/System32"),
+    ("explorer", "ole32.dll", "Windows/System32"),
+    ("explorer", "comctl32.dll", "Windows/System32"),
+    ("explorer", "target/wsl/bb-rootfs.tar", "gala"),
     // The start menu's Linux distributions (LD step 7): wsl.exe, conhost.exe
     // for a distribution's terminal, winhttp for `gala linux-install`'s
     // download (the rootfs comes from the host: `linux_menu_rootfs`), and
@@ -3956,6 +3975,8 @@ const USER_PROGRAMS: &[&str] = &[
     "wsl_test",
     "taskmgr",
     "taskmgr_test",
+    "explorer",
+    "explorer_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -4094,6 +4115,7 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
     "taskmgr",
+    "explorer",
     "memload_test",
     "java_version",
     "java_hello",
@@ -4467,6 +4489,9 @@ fn unit_tests() -> Result {
     // gala's taskmgr.exe's model: the kernel's records, groups, sorting,
     // CPU shares (ROADMAP TM).
     run_cmd(cargo().args(["test", "--package", "taskmgr", "--lib"]))?;
+    // gala's shell namespace's model and explorer.exe's (ROADMAP EX).
+    run_cmd(cargo().args(["test", "--package", "shellns"]))?;
+    run_cmd(cargo().args(["test", "--package", "explorer", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -5620,6 +5645,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "wsl_terminal",
     "start_menu",
     "taskmgr",
+    "explorer",
     "linux_menu",
     "tray_test",
     "d2d1_window",
@@ -10864,6 +10890,38 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The file explorer (ROADMAP EX): explorer_test imports a busybox
+        // distribution and checks `\\wsl.localhost` paths and shell32's
+        // namespace over C: and the distribution.
+        name: "explorer",
+        cmdline: "qemu_exit wallpaper=night events=wsl,window run=explorer_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "explorer_test: plumbing ok",
+            "explorer_test: namespace ok",
+            "explorer_test: ready",
+            "desktop: Win+E: File Explorer",
+            "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            "explorer: navigate C:\\explorer.d\\files (1 items)",
+            "explorer: navigate ::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6} (",
+            "explorer: navigate \\\\wsl.localhost\\bb\\tmp (",
+            "explorer: paste 1 item(s) into \\\\wsl.localhost\\bb\\tmp: ok",
+            "explorer_test: copied",
+            "explorer: open \\\\wsl.localhost\\bb\\tmp\\notes.galatxt: started",
+            "explorer_test: opened",
+            "items (+live.txt)",
+            "explorer: properties notes.galatxt",
+            "Permissions: -rw-r--r--",
+            "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            "explorer: closed",
+            "explorer_test: explorer closed",
+            "xtask: screen ok",
+            "explorer_test: ok",
+            "process explorer_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -11652,6 +11710,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("taskmgr", "needs a screen (Task Manager's window) and Linux programs (no LX in gala-um yet)"),
+    ("explorer", "needs a screen (Explorer's window) and Linux programs (no LX in gala-um yet)"),
     ("wsl", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wsl_terminal", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -13730,6 +13789,198 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// File Explorer (scenario `explorer`, ROADMAP EX): its window at (100,
+/// 40), 1080 x 700, so its client area starts at (101, 73); in it the
+/// address bar (client y 6-38, from x 84), the navigation pane (rows 28
+/// apart from client y 88: This PC, C:, the folders down to the current
+/// one, Linux, the distributions) and the Details view's rows (24 apart
+/// from client y 112, the name column from x 233). The pointer starts at
+/// (640, 400). Win+E opens it on This PC (screen 1); the address bar
+/// takes `C:\explorer.d\files`, where the file is selected and copied
+/// (Ctrl+C, screen 3); the navigation pane's Linux node lists `bb` (screen 5),
+/// whose root (screen 7) leads to `tmp`, where Ctrl+V pastes the copy;
+/// the search finds it and Enter opens it with its association
+/// (explorer_test's `open` mode); a file a Linux process writes then
+/// shows without a refresh (screen 11); its context menu's Properties
+/// shows the Linux permissions (screen 13); F2 renames it; Ctrl+Shift+2
+/// is the icon view (screen 15); Alt+F4 closes it. Each step waits for explorer's
+/// own log line of the one before (`explorer: navigate ...`).
+const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "explorer_test: ready",
+    steps: &[
+        ScreenStep { after: "explorer_test: ready", input: &["sendkey meta_l-e"], pixels: &[] },
+        ScreenStep {
+            // 1: This PC: selected in the navigation pane, C: listed.
+            after: "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(201, 174, 0xe3e3e3),            // This PC, selected
+                PixelCheck::AnyIn(330, 185, 30, 24, 0x7a8694), // C:'s drive icon
+                PixelCheck::AnyIn(130, 76, 300, 30, 0x1b1b1b), // the caption's title
+            ],
+        },
+        ScreenStep {
+            // The address bar (401, 95) takes C:\explorer.d\files.
+            after: "",
+            input: &[
+                "mouse_move -239 -255",
+                "mouse_move 0 -50",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey shift-c",
+                "sendkey shift-semicolon",
+                "sendkey backslash",
+                "sendkey e",
+                "sendkey x",
+                "sendkey p",
+                "sendkey l",
+                "sendkey o",
+                "sendkey r",
+                "sendkey e",
+                "sendkey r",
+                "sendkey dot",
+                "sendkey d",
+                "sendkey backslash",
+                "sendkey f",
+                "sendkey i",
+                "sendkey l",
+                "sendkey e",
+                "sendkey s",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 3 (2 is the typing): the file at row 0 (501, 197), selected
+            // and copied.
+            after: "explorer: navigate C:\\explorer.d\\files (1 items)",
+            input: &["mouse_move 100 102", "mouse_button 1", "mouse_button 0", "sendkey ctrl-c"],
+            pixels: &[
+                PixelCheck::At(620, 205, 0xcce4f7),
+                PixelCheck::AnyIn(334, 189, 16, 16, 0x8a8a8a),
+            ],
+        },
+        ScreenStep {
+            // The navigation pane's Linux node (row 4: This PC, C:,
+            // explorer.d, files, Linux) at (201, 286).
+            after: "explorer: copy C:\\explorer.d\\files\\notes.galatxt",
+            input: &["mouse_move -255 89", "mouse_move -45 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 5: Linux lists bb (the pane: This PC, C:, Linux, bb); bb's
+            // row 0 (501, 197) selected, then Enter.
+            after: "explorer: navigate ::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6} (",
+            input: &["mouse_move 255 -89", "mouse_move 45 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(201, 230, 0xe3e3e3), // Linux (row 2 now), selected
+                PixelCheck::AnyIn(334, 189, 16, 16, 0xe95420), // bb's tile
+                PixelCheck::At(620, 205, 0xcce4f7), // bb selected
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
+        ScreenStep {
+            // 7: the distribution's root: bin, etc, mnt, root, tmp (row 4,
+            // (501, 293)), selected, Enter.
+            after: "explorer: navigate \\\\wsl.localhost\\bb (",
+            input: &["mouse_move 0 96", "mouse_button 1", "mouse_button 0", "sendkey ret"],
+            pixels: &[PixelCheck::AnyIn(334, 189, 16, 96, 0xf8c84a)], // folders
+        },
+        ScreenStep {
+            // Ctrl+V: the copy into the distribution.
+            after: "explorer: navigate \\\\wsl.localhost\\bb\\tmp (",
+            input: &["sendkey ctrl-v"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 9: the search finds the copy; row 0 (501, 197), Enter opens
+            // it.
+            after: "explorer_test: copied",
+            input: &[
+                "sendkey n",
+                "sendkey o",
+                "sendkey t",
+                "sendkey e",
+                "sendkey s",
+                "mouse_move 0 -96",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey ret",
+            ],
+            pixels: &[PixelCheck::At(620, 205, 0xcce4f7)],
+        },
+        ScreenStep {
+            // 10: opened; Esc clears the search.
+            after: "explorer_test: opened",
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::Varied(322, 185, 700, 150, 4)],
+        },
+        ScreenStep {
+            // 11: live.txt, written by a Linux process, listed.
+            after: "items (+live.txt)",
+            input: &[],
+            pixels: &[PixelCheck::Varied(322, 185, 700, 150, 4)],
+        },
+        ScreenStep {
+            // The copy found again; a right click on it (501, 197): its
+            // menu; Properties is its fourth item (551, 306).
+            after: "",
+            input: &[
+                "sendkey n",
+                "sendkey o",
+                "sendkey t",
+                "sendkey e",
+                "sendkey s",
+                "mouse_button 2",
+                "mouse_button 0",
+                "mouse_move 50 109",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 13: Properties with the Linux permissions; Esc.
+            after: "explorer: properties notes.galatxt",
+            input: &[],
+            pixels: &[PixelCheck::At(600, 268, 0x005fb8)],
+        },
+        ScreenStep {
+            // Esc closes Properties; F2 renames the copy (typing replaces
+            // the name), Enter.
+            after: "",
+            input: &[
+                "sendkey esc",
+                "sendkey f2",
+                "sendkey r",
+                "sendkey e",
+                "sendkey n",
+                "sendkey a",
+                "sendkey m",
+                "sendkey e",
+                "sendkey d",
+                "sendkey dot",
+                "sendkey t",
+                "sendkey x",
+                "sendkey t",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 15: Esc clears the search; the icon view (.X11-unix's folder
+            // first).
+            after: "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            input: &["sendkey esc", "sendkey ctrl-shift-2"],
+            pixels: &[
+                PixelCheck::At(1106, 120, 0xe3e3e3),           // Icons, chosen
+                PixelCheck::AnyIn(355, 170, 60, 60, 0xf8c84a), // a 48-pixel folder
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+    ],
+};
+
 /// Task Manager (scenario `taskmgr`, ROADMAP TM): its window at (120,
 /// 40), 1040 x 700, so its client area starts at (121, 73) (a 1-pixel
 /// outline and a 32-row caption); in it the navigation (Processes,
@@ -14335,6 +14586,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("gui_test", GUI_TEST_SCREEN),
     ("start_menu", START_MENU_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
+    ("explorer", EXPLORER_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),

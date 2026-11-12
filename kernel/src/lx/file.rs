@@ -954,6 +954,20 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId, me: (u32, u32)) -> core::result::Resul
     })
 }
 
+/// What NT's FileStatLxInformation shows of node `id` to a caller whose
+/// Linux ids are `me` (`nt::wslfs`, a distribution's files seen from
+/// Windows): its mode with the type bits, uid and gid as `stat` shows
+/// them; None for a node without POSIX metadata (an NT file: no `mode`).
+pub fn lx_metadata(id: NodeId, me: (u32, u32)) -> Option<(u32, u32, u32)> {
+    with_fs(|fs| {
+        let n = fs.node(id)?;
+        if n.mode.is_none() && !n.is_symlink() && !n.is_socket() {
+            return None;
+        }
+        stat_of(fs, id, me).ok().map(|s| (s.mode, s.uid, s.gid))
+    })
+}
+
 /// `struct stat` of what an fd that is not a file refers to: a pipe is a
 /// FIFO (mode 0600), an epoll an anonymous inode, the console a terminal (character device 136:0,
 /// mode 0620, as a pseudo-terminal's slave shows).

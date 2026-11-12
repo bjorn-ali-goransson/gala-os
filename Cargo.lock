@@ -769,6 +769,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "shellns",
+]
+
+[[package]]
+name = "explorer_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2242,9 +2257,15 @@ version = "0.1.0"
 name = "shell32"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
  "ntrt",
+ "shellns",
 ]
+
+[[package]]
+name = "shellns"
+version = "0.1.0"
 
 [[package]]
 name = "shfolder"
