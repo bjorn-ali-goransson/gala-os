@@ -240,6 +240,8 @@ has a section under "Open items".
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
+| TM | A task manager for Windows and Linux programs alike | planned | one list of every process, both personalities |
+| EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
@@ -3952,6 +3954,84 @@ session after the restart (steps 4-5); no scenario needs a reset.
 **Design**: ARCHITECTURE "Kernel handover", "Diagnostics of stuck and
 crashed programs"; the crash screen and the last-resort path get their
 own sections with step 4.
+
+### TM. A task manager for Windows and Linux programs alike
+
+**Goal** (the owner): one task manager on shasha's desktop that shows
+every process gala runs, Windows and Linux (LX, WSL distributions)
+together, and lets the user end or inspect any of them.
+
+**Next** (each test first, checked on the screen, screenshots):
+1. The data: one kernel query for every process of both personalities
+   (pid, parent, personality, image or command line, user, CPU time
+   and share, working set and commit, threads, handles or fds, start
+   time, window if any, WSL distribution if any). Windows programs see
+   Linux processes nowhere else (NtQuerySystemInformation keeps
+   Windows' contents); `/proc` inside LX shows its own as Linux does.
+2. The program: gala's own `taskmgr.exe` (Ctrl+Shift+Esc, the taskbar's
+   context menu, the start menu): a Processes view grouped as Windows
+   does (apps, background, Linux by distribution), sortable columns,
+   End task (TerminateProcess for Windows, SIGTERM then SIGKILL for
+   Linux, a distribution's whole tree on its group's row), a Details
+   view with the full columns, and a Performance view (CPU per core,
+   memory, disk, network graphs from the kernel's counters).
+3. Hung programs: windows not answering messages marked "Not
+   responding" as Windows does; Linux processes blocked in D-state
+   shown the same way.
+4. Inspection: open file location, a process's threads with their
+   stacks (the state dump's walker), its open handles or fds, and
+   "Create dump file" through the crash report's writer.
+
+**Done when**: a scenario with Windows programs and a WSL distribution
+running shows them all in one list, ends one of each from it, and its
+Performance graphs move under a load.
+
+**Design**: ARCHITECTURE gets "The task manager" with step 1;
+OBSERVABILITY's counters are its source.
+
+### EX. A file explorer over every file system
+
+**Goal** (the owner): an Explorer for opening folders and files, as
+Windows' File Explorer does, that lists every file system gala holds in
+one tree: the Windows drives, each WSL distribution's root (as Windows
+shows `\\wsl.localhost\<distro>`), the Linux personality's own root,
+and removable or network volumes as they come.
+
+**Next** (each test first, checked on the screen, screenshots):
+1. The namespace: shell32's IShellFolder/IShellItem over gala's file
+   systems, the known folders (Desktop, Documents, Downloads, ...),
+   "This PC" with the drives, and a "Linux" node listing each
+   distribution by name; `\\wsl.localhost\<distro>\...` and
+   `\\wsl$\<distro>\...` paths open the distribution's tree for every
+   Windows program (CT step 3's plumbing, one file system, no 9P).
+   Linux files show their POSIX mode and owner in Properties; names a
+   Windows path cannot hold are shown as Linux has them.
+2. The program: gala's own `explorer.exe` window (SH's shell process
+   stays the taskbar and start menu): a navigation pane with the tree,
+   an address bar that takes paths and `\\wsl.localhost` names, details
+   and icon views, sorting, search by name, and opening a file with its
+   association (ShellExecute; Linux files with a Linux program through
+   `wsl -d` when the association says so). Win+E opens it; "Open
+   folder" in other programs and SHBrowseForFolder/IFileDialog use the
+   same namespace.
+3. Operations: copy, move, rename, delete to the Recycle Bin, new
+   folder, drag and drop between panes and to the desktop, with
+   progress and conflicts handled as Windows does; across file systems
+   (a Windows drive to a distribution and back) with Linux modes kept
+   where they can be.
+4. Changes appear live (ReadDirectoryChangesW for Windows trees,
+   inotify for Linux ones), thumbnails through WIC, a context menu with
+   "Open in Terminal" (cmd for Windows folders, `wsl -d` for Linux
+   ones) and "Properties".
+
+**Done when**: a scenario opens Explorer, browses from C: into a WSL
+distribution's root through the Linux node, copies a file from one to
+the other, opens it with its program, and sees the copy appear without
+a refresh.
+
+**Design**: ARCHITECTURE gets "The file explorer" with step 1; it
+builds on shell32's known folders and associations and CT's
+`\\wsl.localhost` plumbing.
 
 ## Known issues and stopgaps
 
