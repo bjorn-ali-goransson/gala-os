@@ -37,7 +37,8 @@
 //! - **Metadata**: the type from the node; the permission bits are the
 //!   node's POSIX mode (`ramfs::Node::mode`, set when Linux creates it,
 //!   from the mode argument and the umask, or by chmod; kept across
-//!   reboots by the change log), else 0755 (0555 for a read-only file):
+//!   reboots by the change log), else 0755 (0555 for a read-only file
+//!   and the boot's program files, whose descriptor grants no write):
 //!   files the boot or NT programs made run and read as a Linux user's
 //!   own; a symbolic link 0777. Owner the caller's uid/gid
 //!   (`lx::identity`; root for the user database's files); inode
@@ -889,7 +890,13 @@ fn perm(n: &ramfs::Node) -> u32 {
     }
     match n.mode {
         Some(m) => u32::from(m),
-        None if n.attributes & ramfs::ATTRIBUTE_READONLY != 0 && !n.is_dir() => 0o555,
+        // A read-only file, or one of the boot's program files (its
+        // descriptor grants nobody but TrustedInstaller writing).
+        None if (n.attributes & ramfs::ATTRIBUTE_READONLY != 0 || n.is_program_file())
+            && !n.is_dir() =>
+        {
+            0o555
+        }
         None => 0o755,
     }
 }

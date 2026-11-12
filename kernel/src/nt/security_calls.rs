@@ -72,6 +72,34 @@ fn file_default(directory: bool) -> Result<Descriptor, NtStatus> {
     default_for(FILE_ALL_ACCESS, FILE_GENERIC_READ_EXECUTE, flags)
 }
 
+/// NT SERVICE\\TrustedInstaller, the owner of Windows' system files.
+const TRUSTED_INSTALLER: Sid =
+    Sid::new(5, &[80, 956_008_885, 3_418_522_649, 1_831_038_044, 1_853_292_631, 2_271_478_464]);
+
+/// What the boot's program files have (`ramfs::Node::is_program_file`)
+/// while no descriptor was set on them: a Windows system file's (as
+/// `icacls C:\Windows\System32\kernel32.dll` shows it): owner and full
+/// control TrustedInstaller; reading and executing for Administrators,
+/// SYSTEM and Users. Nobody else writes one; deleting one takes
+/// FILE_DELETE_CHILD on its directory, as on Windows. A copy is the
+/// copier's (its descriptor inherited from where it goes).
+fn program_file_default() -> Result<Descriptor, NtStatus> {
+    const FILE_GENERIC_READ_EXECUTE: u32 = 0x0012_00a9;
+    let dacl = security::allow_acl(&[
+        (FILE_ALL_ACCESS, TRUSTED_INSTALLER, 0),
+        (FILE_GENERIC_READ_EXECUTE, ADMINISTRATORS, 0),
+        (FILE_GENERIC_READ_EXECUTE, LOCAL_SYSTEM, 0),
+        (FILE_GENERIC_READ_EXECUTE, USERS, 0),
+    ])?;
+    Ok(Descriptor {
+        control: SE_DACL_PRESENT,
+        owner: Some(TRUSTED_INSTALLER),
+        group: Some(TRUSTED_INSTALLER),
+        dacl: Some(dacl),
+        sacl: None,
+    })
+}
+
 fn key_default() -> Result<Descriptor, NtStatus> {
     const KEY_READ: u32 = 0x0002_0019;
     default_for(KEY_ALL_ACCESS, KEY_READ, CONTAINER_INHERIT_ACE)
@@ -80,11 +108,14 @@ fn key_default() -> Result<Descriptor, NtStatus> {
 /// The descriptor of file system node `node` (its own or the default).
 fn node_descriptor(_token: &TokenData, node: NodeId) -> Result<Descriptor, NtStatus> {
     let stored = file::with_fs(|fs| {
-        fs.node(node).map(|n| (n.security.as_deref().map(Descriptor::parse), n.is_dir()))
+        fs.node(node).map(|n| {
+            (n.security.as_deref().map(Descriptor::parse), n.is_dir(), n.is_program_file())
+        })
     });
     match stored {
-        Some((Some(d), _)) => d,
-        Some((None, directory)) => file_default(directory),
+        Some((Some(d), _, _)) => d,
+        Some((None, _, true)) => program_file_default(),
+        Some((None, directory, false)) => file_default(directory),
         None => Err(NtStatus::FILE_DELETED),
     }
 }

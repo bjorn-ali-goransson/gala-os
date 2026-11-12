@@ -20,6 +20,8 @@ unsafe extern "system" {
     fn TlsAlloc() -> u32;
     fn TlsGetValue(index: u32) -> *mut c_void;
     fn TlsSetValue(index: u32, value: *mut c_void) -> i32;
+    fn GetLastError() -> u32;
+    fn SetLastError(error: u32);
     fn LockFile(h: *mut c_void, low: u32, high: u32, len_low: u32, len_high: u32) -> i32;
     fn UnlockFile(h: *mut c_void, low: u32, high: u32, len_low: u32, len_high: u32) -> i32;
     fn SetFilePointerEx(h: *mut c_void, distance: i64, new: *mut i64, method: u32) -> i32;
@@ -459,14 +461,22 @@ fn slot() -> Option<u32> {
     (s != u32::MAX).then_some(s - 1)
 }
 
-/// This thread's handler (0: none).
+/// This thread's handler (0: none). The thread's last error stays as it
+/// was (TlsGetValue clears it, as Windows' does; the UCRT's per-thread
+/// data does not touch it: CPython sets and restores the handler around
+/// a failing call and reads the error after).
 pub(crate) fn thread_handler() -> usize {
     let s = TLS_SLOT.load(Ordering::Acquire);
     if s == 0 || s == u32::MAX {
         return 0;
     }
-    // SAFETY: our slot.
-    unsafe { TlsGetValue(s - 1) as usize }
+    // SAFETY: our slot; plain calls.
+    unsafe {
+        let error = GetLastError();
+        let h = TlsGetValue(s - 1) as usize;
+        SetLastError(error);
+        h
+    }
 }
 
 /// `_set_thread_local_invalid_parameter_handler(h)`: this thread's
@@ -478,8 +488,12 @@ pub extern "C" fn _set_thread_local_invalid_parameter_handler(h: usize) -> usize
         return 0;
     };
     let old = thread_handler();
-    // SAFETY: our slot.
-    unsafe { TlsSetValue(s, h as *mut c_void) };
+    // SAFETY: our slot; plain calls (the last error kept, as above).
+    unsafe {
+        let error = GetLastError();
+        TlsSetValue(s, h as *mut c_void);
+        SetLastError(error);
+    }
     old
 }
 

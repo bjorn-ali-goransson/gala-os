@@ -181,6 +181,15 @@ and on disk with `persist`), registry keys, processes, threads, tokens.
   SetPrivateObjectSecurity*), the rules chosen by the caller's SEF_*
   flags and checked against the client token it names (ARCHITECTURE
   "Security descriptors").
+- Files and keys the boot made have no descriptor stored; they report
+  a fixed one (`security_calls::file_default`, `key_default`). The
+  boot's program files (modules not marked writable) report a Windows
+  system file's: owner and full control NT SERVICE\TrustedInstaller,
+  reading and executing for Administrators, SYSTEM and Users. So no
+  program writes one; a delete needs FILE_DELETE_CHILD on its
+  directory; a copy (whose descriptor is inherited where it goes) is
+  its copier's, as on Windows. Their attributes are Windows'
+  (FILE_ATTRIBUTE_ARCHIVE).
 - The disk keeps descriptors with their objects: the file system stores
   one per file or directory, the registry log each key's. A format that
   stores files stores their descriptor from the start (shared ones once

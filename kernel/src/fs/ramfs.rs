@@ -505,6 +505,10 @@ pub struct Node {
     volume: NodeId,
     /// Made by the boot (modules), not by a program or the change log.
     boot: bool,
+    /// One of the boot's program files (a module not marked writable):
+    /// protected by its descriptor, as Windows' system files are
+    /// (`Node::is_program_file`), not by an attribute.
+    program: bool,
     /// Created or changed since boot (or by the change log): part of a
     /// snapshot of the changes (`snapshot`).
     dirty: bool,
@@ -532,6 +536,13 @@ impl Node {
     /// every process maps it as an image).
     pub fn version(&self) -> Option<u64> {
         (self.write_maps == 0).then_some(self.version)
+    }
+
+    /// One of the boot's program files: without a descriptor of its own,
+    /// it has a system file's (no write or delete but through its
+    /// directory: `nt::security_calls`), and Linux sees it 0555.
+    pub fn is_program_file(&self) -> bool {
+        self.program
     }
 
     pub fn is_dir(&self) -> bool {
@@ -882,6 +893,7 @@ impl RamFs {
             detached: false,
             volume: ROOT,
             boot: true,
+            program: false,
             dirty: false,
             reparse: None,
             serial: next_version(),
@@ -1204,6 +1216,7 @@ impl RamFs {
             detached: false,
             volume: self.node(parent).map_or(ROOT, |n| n.volume),
             boot: !self.recording && !self.replaying,
+            program: false,
             dirty: self.recording || self.replaying,
             reparse: None,
             serial: next_version(),
@@ -1267,8 +1280,11 @@ impl RamFs {
     }
 
     /// Adds a file whose contents live elsewhere (copied into pages when
-    /// first written): read-only (program files) unless `writable` (data
-    /// a program changes, such as database files).
+    /// first written): a program file unless `writable` (data a program
+    /// changes, such as database files). Both have Windows' attributes
+    /// (FILE_ATTRIBUTE_ARCHIVE, not READONLY: a copy keeps a file's
+    /// attributes, and a read-only copy could not be deleted); a program
+    /// file is protected by its descriptor instead (`is_program_file`).
     pub fn add_static_file(
         &mut self,
         parent: NodeId,
@@ -1280,8 +1296,8 @@ impl RamFs {
         let id = self.create(parent, name, false, now)?;
         let node = self.node_mut(id)?;
         node.kind = Kind::File(Data::Static(data));
-        node.attributes =
-            if writable { ATTRIBUTE_ARCHIVE } else { ATTRIBUTE_READONLY | ATTRIBUTE_ARCHIVE };
+        node.attributes = ATTRIBUTE_ARCHIVE;
+        node.program = !writable;
         Ok(id)
     }
 
@@ -3751,7 +3767,9 @@ mod tests {
         static DATA: &[u8] = b"boot module";
         let mut f = fs();
         let id = f.add_static_file(ROOT, &w("m.exe"), DATA, false, 1).unwrap();
-        assert_eq!(f.node(id).unwrap().attributes & ATTRIBUTE_READONLY, ATTRIBUTE_READONLY);
+        // Windows' attributes; its descriptor protects it.
+        assert_eq!(f.node(id).unwrap().attributes, ATTRIBUTE_ARCHIVE);
+        assert!(f.node(id).unwrap().is_program_file());
         f.write(id, 0, b"B", 2).unwrap();
         let mut buf = [0u8; 11];
         f.read(id, 0, &mut buf).unwrap();

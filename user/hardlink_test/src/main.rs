@@ -694,6 +694,13 @@ fn dispositions(c: &mut Checks, base: &W) -> Result<(), u32> {
     c.eq(dispose(h, FILE_DISPOSITION_DELETE, ex), STATUS_CANNOT_DELETE)?;
     close(h);
     c.ok(!gone(&file), 0)?;
+    // DeleteFileW of it: ERROR_ACCESS_DENIED (STATUS_CANNOT_DELETE's
+    // Win32 error), the file still there.
+    // SAFETY: a NUL-terminated path; then the thread's last error.
+    let (deleted, error) = unsafe { (DeleteFileW(file.p()), GetLastError()) };
+    c.eq(deleted as u32, 0)?;
+    c.eq(error, 5)?;
+    c.ok(!gone(&file), 0)?;
     remove(&file);
     let h = open(&file, GENERIC_WRITE | DELETE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_READONLY);
     c.ok(h != INVALID_HANDLE_VALUE, 0)?;

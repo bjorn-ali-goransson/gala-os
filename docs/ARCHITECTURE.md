@@ -1775,9 +1775,14 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   before it); a rename or hard link from one tree into another is
   refused (`FsError::CrossVolume`: EXDEV, STATUS_NOT_SAME_DEVICE).
 
-- **Contents from boot modules**: modules appear read-only in `C:\gala`
-  (or the directory their module string names), copied to the heap on
-  first write. A module string `tar:<dir>` is a USTAR archive
+- **Contents from boot modules**: modules appear in `C:\gala` (or the
+  directory their module string names), copied to the heap on first
+  write. A module not marked writable is a program file
+  (`ramfs::Node::is_program_file`): Windows' attributes
+  (FILE_ATTRIBUTE_ARCHIVE, not READONLY: CopyFileW keeps a file's
+  attributes, and a read-only copy would refuse its delete), protected
+  as Windows' system files are, by its descriptor (docs/SECURITY.md
+  "Security descriptors on objects"); Linux sees it 0555. A module string `tar:<dir>` is a USTAR archive
   (`fs/tar.rs`) whose regular files are added under `C:\<dir>` in place,
   without copies, and whose directory entries (typeflag 5) are created,
   so empty directories survive (xtask writes one for every directory of

@@ -28,6 +28,8 @@
 //!   returns the previous one (NULL at first); `_invalid_parameter_noinfo`
 //!   and a failing `strcpy_s` call it with NULL expression, function and
 //!   file, line 0, and return to the caller.
+//!   `_set_thread_local_invalid_parameter_handler` returns the thread's
+//!   previous one and leaves the thread's last error as it was.
 //! - `__stdio_common_vsprintf` and its wide, `_s` and `snprintf_s`
 //!   companions with their option flags: legacy termination (1: -1 when
 //!   it does not fit, no terminator when it just fits), standard snprintf
@@ -105,6 +107,8 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> i32;
     fn CloseHandle(h: Handle) -> i32;
+    fn SetLastError(error: u32);
+    fn GetLastError() -> u32;
 }
 
 /// `_onexit_table_t` (corecrt_startup.h).
@@ -204,6 +208,7 @@ ucrt_imports! {
     fn _seh_filter_exe(code: u32, pointers: *mut c_void) -> i32;
     fn __setusermatherr(f: usize);
     fn _set_invalid_parameter_handler(h: Option<InvalidParameterHandler>) -> usize;
+    fn _set_thread_local_invalid_parameter_handler(h: Option<InvalidParameterHandler>) -> usize;
     fn _invalid_parameter_noinfo();
     fn _errno() -> *mut i32;
     fn exit(code: i32) -> !;
@@ -794,6 +799,16 @@ fn invalid_parameter(c: &mut Checks) -> Result<(), u32> {
         // functions' failures below call it).
         let previous = _set_invalid_parameter_handler(Some(on_invalid));
         c.eq(previous as i64, on_invalid as *const () as usize as i64)?;
+        // The thread's own handler, set and put back around a Win32 call
+        // as CPython's _Py_BEGIN/END_SUPPRESS_IPH does: the CRT keeps the
+        // thread's last error (os.unlink's failure read it afterwards).
+        SetLastError(5);
+        let old = _set_thread_local_invalid_parameter_handler(Some(on_invalid));
+        c.eq(old as i64, 0)?;
+        c.eq(GetLastError().into(), 5)?;
+        let mine = _set_thread_local_invalid_parameter_handler(None);
+        c.eq(mine as i64, on_invalid as *const () as usize as i64)?;
+        c.eq(GetLastError().into(), 5)?;
     }
     Ok(())
 }

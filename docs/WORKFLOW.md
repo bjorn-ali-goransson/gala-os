@@ -3870,6 +3870,15 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   (ODT's setup.exe, CPython's python.exe) come from their PREBUILT
   downloads, shipped to C:\gala by the scenario (`args=require` makes
   their absence a failure; on Windows they are skipped when absent).
+- **A DLL's own bookkeeping keeps the thread's last error**: TlsGetValue
+  clears it on success (as Windows' does), so code that reads its
+  per-thread data between a program's failing call and the program's
+  GetLastError must save and restore it. CPython sets and restores the
+  CRT's thread-local invalid-parameter handler around every os call
+  (`_Py_BEGIN/END_SUPPRESS_IPH`) and reads the error afterwards: gala's
+  `_set_thread_local_invalid_parameter_handler` over TlsGetValue turned
+  os.unlink's ERROR_ACCESS_DENIED into `[WinError 0]` (`ucrt_test`
+  checks it).
 - **COM methods that return a structure take a hidden pointer**: in the
   C++ ABI a method returning D2D1_SIZE_F, D2D1_PIXEL_FORMAT or
   D2D1_COLOR_F (even one that fits a register) gets the caller's result

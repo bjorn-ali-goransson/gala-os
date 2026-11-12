@@ -4276,18 +4276,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
   as extents, a page file for private memory, the registry; then the
   scenario goes back to the default size.
 
-- **Program files are read-only**: the boot's program files (the image's
-  modules not marked writable) carry FILE_ATTRIBUTE_READONLY, which
-  Windows' System32 files do not (an ACL protects those). A copy keeps
-  the attribute (CopyFileW, as Windows), and a read-only file is not
-  deleted (STATUS_CANNOT_DELETE, as Windows), so a program that copies a
-  system DLL and deletes the copy fails where it works on Windows
-  (`kernel32_test` clears the attribute first). Structural fix: protect
-  the boot's files by their security descriptor alone (docs/SECURITY.md
-  "The access check") and give them Windows' attributes; the Linux
-  side's modes of them (`lx::file`, 0o555 from the attribute) then from
-  the descriptor. Item SEC (SECURITY "Status", leftovers).
-
 - **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
   `lx_httpd.txt`): every other Linux transcript is recorded on real
   Linux (`cargo xtask lx-expect`); these were written from POSIX and

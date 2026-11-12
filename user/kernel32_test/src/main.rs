@@ -49,7 +49,7 @@ unsafe extern "system" {
     fn CreateDirectoryW(path: *const u16, attrs: *mut c_void) -> Bool;
     fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: Bool) -> Bool;
     fn DeleteFileW(path: *const u16) -> Bool;
-    fn SetFileAttributesW(path: *const u16, attributes: u32) -> Bool;
+    fn GetFileAttributesW(path: *const u16) -> u32;
     fn RemoveDirectoryW(path: *const u16) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
@@ -256,7 +256,6 @@ fn run() -> Result<(), u32> {
         // scenario ships it in <exe dir>\lib).
         let (lib, n) = join(&temp(), "gala-kernel32-test");
         let (dll_path, _) = join(&lib, "\\gala_k32_dll.dll");
-        SetFileAttributesW(dll_path.as_ptr(), 0x80);
         DeleteFileW(dll_path.as_ptr());
         CreateDirectoryW(lib.as_ptr(), core::ptr::null_mut());
         let (mut exe, mut exe_n) = ([0u16; 192], 0);
@@ -274,6 +273,11 @@ fn run() -> Result<(), u32> {
                 || CopyFileW(beside.as_ptr(), dll_path.as_ptr(), 0) != 0,
             GetLastError().into(),
         )?;
+        // A program file is not read-only (Windows' have
+        // FILE_ATTRIBUTE_ARCHIVE; their descriptor protects them), so
+        // the copy, which keeps the attributes, is deleted below.
+        let attributes = GetFileAttributesW(dll_path.as_ptr());
+        c.ok(attributes != u32::MAX && attributes & 1 == 0, attributes.into())?;
         let mut buf = [0u16; 192];
         c.eq(GetDllDirectoryW(192, buf.as_mut_ptr()).into(), 0)?;
         c.ok(LoadLibraryA(c"gala_k32_dll.dll".as_ptr().cast()).is_null(), 0)?;
@@ -288,11 +292,6 @@ fn run() -> Result<(), u32> {
         // NULL restores the default search.
         c.eq(SetDllDirectoryW(core::ptr::null()) as u64, 1)?;
         c.eq(GetDllDirectoryW(192, buf.as_mut_ptr()).into(), 0)?;
-        // CopyFileW copies the attributes, and a read-only file is not
-        // deleted (STATUS_CANNOT_DELETE): gala's program files are
-        // read-only (ROADMAP "Known issues and stopgaps"), Windows' are
-        // not; FILE_ATTRIBUTE_NORMAL first works on both.
-        c.ok(SetFileAttributesW(dll_path.as_ptr(), 0x80) != 0, GetLastError().into())?;
         c.ok(DeleteFileW(dll_path.as_ptr()) != 0, GetLastError().into())?;
         c.ok(RemoveDirectoryW(lib.as_ptr()) != 0, GetLastError().into())?;
     }
