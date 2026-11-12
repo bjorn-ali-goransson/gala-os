@@ -449,10 +449,13 @@ impl Call<'_> {
     }
 }
 
-/// The SEF_* flags the private-object calls act on; others are recorded
-/// (SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT only matters with object types,
-/// the mandatory-label and owner-restriction flags are not implemented).
-const SEF_KNOWN: u32 = security::SEF_DACL_AUTO_INHERIT
+/// The SEF_* flags the private-object calls act on (or need not: no
+/// OWNER RIGHTS restriction is applied to a creator's DACL, so
+/// SEF_AVOID_OWNER_RESTRICTION, 0x1000, changes nothing); others are
+/// recorded (SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT only matters with object
+/// types, the mandatory-label flags are not implemented).
+const SEF_KNOWN: u32 = 0x1000
+    | security::SEF_DACL_AUTO_INHERIT
     | security::SEF_SACL_AUTO_INHERIT
     | security::SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT
     | security::SEF_AVOID_PRIVILEGE_CHECK

@@ -2359,8 +2359,10 @@ SECURITY.md phase S2; rules in `kernel/src/nt/security.rs`, services in
   protected modification drops INHERITED_ACE. The result is
   self-relative in a process-heap block (DestroyPrivateObjectSecurity).
   Object types (WithMultipleInheritance's GUIDs: object ACEs) are not
-  told apart (recorded); the mandatory-label and owner-restriction
-  flags are recorded (`SEF flags` ledger lines).
+  told apart (recorded); the mandatory-label flags are recorded (`SEF
+  flags` ledger lines). SEF_AVOID_OWNER_RESTRICTION (OffReg.dll passes
+  it) changes nothing: gala applies no OWNER RIGHTS restriction to a
+  creator's DACL to begin with.
 - TODO: SetSecurityInfo of an unprotected DACL does not re-apply or
   propagate inheritance as Windows' advapi32 does; SACLs are kept but
   auditing does nothing.
@@ -3071,6 +3073,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   node's subtree height is kept in its first reserved byte, so a change
   rebalances along its path only. NumberGenericTableElements and the
   ordered-element cache are kept in the table.
+- **RtlValidRelativeSecurityDescriptor** (`rtl.rs`, `office_api_test`):
+  a self-relative descriptor whose SIDs and present ACLs lie whole
+  within the given length, with the parts the SECURITY_INFORMATION
+  asks for.
 - **Bitmaps** (`bitmap.rs`, `office_api_test`): RTL_BITMAP's
   initialize, set and clear (runs and all), check, the set and clear
   counts and the next forward set or clear run; the bits past
@@ -8887,8 +8893,12 @@ stations and desktops a program creates are refused until stage 3).
   dbghelp: MiniDumpWriteDump refused (recorded).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
   `dwmapi.dll` (no DWM: attributes accepted without effect or
-  E_NOTIMPL, recorded), `wtsapi32.dll` (the one console session,
-  active), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
+  E_NOTIMPL, recorded), `wtsapi32.dll` (the caller's session,
+  active; WTSEnumerateSessionsW/A over gala's NtQuerySystemInformation
+  class GALA_SESSIONS (0x67610002: id and console flag per session):
+  "Services" for session 0, disconnected, "Console" for the session the
+  console shows, active, other sessions an empty name, active;
+  `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
   NULL, and every call on a context fails as on an invalid one, FALSE
   with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.

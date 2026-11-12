@@ -121,7 +121,9 @@
 //!   screen's pixels per inch.
 //! - What OffReg.dll imports (ntdll's one-time initialization, SRW locks
 //!   and bitmaps, msvcrt's bounded strings, advapi32's private object
-//!   security): `offreg.rs`.
+//!   security): `offreg.rs`; what the Click-to-Run service's later
+//!   tasks call (wtsapi32's session list, ntdll's relative descriptor
+//!   check): `service.rs`.
 //!
 //! Prints `<name>: ok` and exits with 0, or prints `<name>: check N got X
 //! (line L)` and exits with N.
@@ -137,6 +139,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use ntrt as _;
 
 mod offreg;
+mod service;
 
 #[cfg(target_arch = "x86_64")]
 const NAME: &str = "office_api_test";
@@ -1346,6 +1349,7 @@ fn run() -> Result<(), u32> {
     c2r_client(&mut c)?;
     c2r_oleaut(&mut c)?;
     offreg::offreg_imports(&mut c)?;
+    service::c2r_service(&mut c)?;
     #[cfg(target_arch = "x86_64")]
     c2r_d3dcompiler(&mut c)?;
     Ok(())

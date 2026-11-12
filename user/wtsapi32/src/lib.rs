@@ -1,7 +1,9 @@
-//! gala's wtsapi32.dll (Remote Desktop Services, wtsapi32.h): the one
-//! session programs run in, console session 1, active, its user and
-//! machine; session notifications are accepted and never sent (gala's
-//! session never connects, disconnects or locks yet).
+//! gala's wtsapi32.dll (Remote Desktop Services, wtsapi32.h): the
+//! sessions (WTSEnumerateSessions, over the kernel's GALA_SESSIONS
+//! class: "Services" for session 0, "Console" for the one the console
+//! shows), the caller's session (its id, active, its user and machine);
+//! session notifications are accepted and never sent (gala's session
+//! never connects, disconnects or locks yet).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -37,6 +39,8 @@ unsafe extern "C" {
 #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn RtlNtStatusToDosError(status: u32) -> u32;
 }
 
 #[cfg_attr(
@@ -179,6 +183,125 @@ pub extern "system" fn WTSQuerySessionInformationW(
             fail(50)
         }
     }
+}
+
+/// WTS_SESSION_INFOW / WTS_SESSION_INFOA: SessionId, pWinStationName,
+/// State.
+#[repr(C)]
+struct SessionInfo {
+    id: u32,
+    name: usize,
+    state: u32,
+}
+
+const WTS_ACTIVE: u32 = 0;
+const WTS_DISCONNECTED: u32 = 4;
+const GALA_SESSIONS: u32 = 0x6761_0002;
+const MAX_SESSIONS: usize = 64;
+
+/// The sessions (id, shown by the console) into `out`; their count, or
+/// the Win32 error.
+fn sessions(out: &mut [(u32, bool); MAX_SESSIONS]) -> Result<usize, u32> {
+    let mut records = [0u8; MAX_SESSIONS * 8];
+    let mut n = 0u32;
+    // SAFETY: our buffer and its size.
+    let status = unsafe {
+        NtQuerySystemInformation(GALA_SESSIONS, records.as_mut_ptr(), records.len() as u32, &mut n)
+    };
+    if status != 0 {
+        // SAFETY: a plain conversion.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    let count = (n as usize / 8).min(MAX_SESSIONS);
+    for (i, r) in records.chunks_exact(8).take(count).enumerate() {
+        let id = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+        out[i] = (id, r[4] & 1 != 0);
+    }
+    Ok(count)
+}
+
+/// A session's station name and state: session 0 "Services",
+/// disconnected (it has no console, as on Windows); the one the console
+/// shows "Console", active; other sessions (gala's remote logons, ROADMAP
+/// RS B4) an empty name, active.
+fn station(id: u32, console: bool) -> (&'static [u8], u32) {
+    match (id, console) {
+        (_, true) => (b"Console", WTS_ACTIVE),
+        (0, false) => (b"Services", WTS_DISCONNECTED),
+        _ => (b"", WTS_ACTIVE),
+    }
+}
+
+/// WTSEnumerateSessionsW/A's work: one LocalAlloc'd block (WTSFreeMemory
+/// frees it) of WTS_SESSION_INFO records followed by their names
+/// (`wide`: UTF-16, else ANSI).
+fn enumerate(reserved: u32, version: u32, out: *mut *mut u8, count: *mut u32, wide: bool) -> i32 {
+    if reserved != 0 || version != 1 || out.is_null() || count.is_null() {
+        return fail(87); // ERROR_INVALID_PARAMETER
+    }
+    let mut list = [(0u32, false); MAX_SESSIONS];
+    let n = match sessions(&mut list) {
+        Ok(n) => n,
+        Err(e) => return fail(e),
+    };
+    let unit = if wide { 2 } else { 1 };
+    let names: usize = list[..n].iter().map(|&(id, c)| (station(id, c).0.len() + 1) * unit).sum();
+    let head = n * size_of::<SessionInfo>();
+    // SAFETY: a plain allocation (zeroed: LMEM_ZEROINIT).
+    let p = unsafe { LocalAlloc(0x40, head + names) };
+    if p.is_null() {
+        return fail(8);
+    }
+    let mut at = head;
+    for (i, &(id, console)) in list[..n].iter().enumerate() {
+        let (name, state) = station(id, console);
+        // SAFETY: inside the block: the records, then the names (ASCII,
+        // the same in both forms), each NUL-terminated by the zeroing.
+        unsafe {
+            for (k, &b) in name.iter().enumerate() {
+                *p.add(at + k * unit) = b;
+            }
+            p.cast::<SessionInfo>().add(i).write(SessionInfo {
+                id,
+                name: p.add(at) as usize,
+                state,
+            });
+        }
+        at += (name.len() + 1) * unit;
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        *out = p;
+        *count = n as u32;
+    }
+    1
+}
+
+/// WTSEnumerateSessionsW(hServer, Reserved, Version, *ppSessionInfo,
+/// *pCount): the sessions on this machine (any server handle names it:
+/// gala has no remote servers). Reserved 0 and Version 1, else
+/// ERROR_INVALID_PARAMETER (as documented).
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSEnumerateSessionsW(
+    _server: usize,
+    reserved: u32,
+    version: u32,
+    out: *mut *mut u8,
+    count: *mut u32,
+) -> i32 {
+    enumerate(reserved, version, out, count, true)
+}
+
+/// WTSEnumerateSessionsA: the same with ANSI names.
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSEnumerateSessionsA(
+    _server: usize,
+    reserved: u32,
+    version: u32,
+    out: *mut *mut u8,
+    count: *mut u32,
+) -> i32 {
+    enumerate(reserved, version, out, count, false)
 }
 
 /// The DLL entry point: nothing to set up.

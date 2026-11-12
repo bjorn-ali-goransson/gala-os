@@ -1859,6 +1859,17 @@ need gala's.
      files ones and [{SystemX86}]); done: those known folders
      (`win32_misc_test`). [{AppVPackageRoot}] is App-V's own token, not
      a Windows known folder.
+     STAGEREGISTRY then succeeds. The next task, UNINSTALLCENTENNIAL
+     (removing a Store-installed Office), runs
+     `InspectorOfficeGadget.exe deprovisionuninstall` (32-bit, .NET
+     Framework: it imports mscoree.dll alone, which gala lacks, so each
+     start ends 0xc0000135; the task goes on), and the service ended on
+     a delay-load failure of wtsapi32's WTSEnumerateSessionsW (crash
+     report `delay load of WTSAPI32.dll!WTSEnumerateSessionsW`, about
+     2520 s). Done: WTSEnumerateSessionsW/A over the kernel's session
+     list (Wine's wtsapi.c test on Windows); ntdll's
+     RtlValidRelativeSecurityDescriptor, whose import the service's
+     pieces resolve (`office_api_test`'s `service.rs`).
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
