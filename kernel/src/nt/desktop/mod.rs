@@ -184,6 +184,24 @@ pub const PROGRAMS: &[Program] = &[
         colors: (0x00_f0_a0_30, 0x00_c0_60_10),
         package: None,
     },
+    // gala's taskmgr.exe (user/taskmgr: ROADMAP TM), where Windows has
+    // its Task Manager; also Ctrl+Shift+Esc and the taskbar's context
+    // menu (`TASK_MANAGER`).
+    Program {
+        name: TASK_MANAGER,
+        paths: &["%SystemRoot%\\System32\\Taskmgr.exe"],
+        colors: (0x00_3b_9a_e1, 0x00_17_5c_b0),
+        package: None,
+    },
+    // gala's explorer.exe (user/explorer: ROADMAP EX), where Windows has
+    // it; also Win+E (`FILE_EXPLORER`). The shell itself (the taskbar,
+    // the start menu) stays the desktop's.
+    Program {
+        name: FILE_EXPLORER,
+        paths: &["%SystemRoot%\\explorer.exe"],
+        colors: (0x00_f8_c8_4a, 0x00_e0_9b_1a),
+        package: None,
+    },
     // The Office Deployment Tool's setup.exe (machine scope): Click-to-Run
     // puts Word under root\Office16 (ROADMAP OF).
     Program {
@@ -253,6 +271,26 @@ pub const PROGRAMS: &[Program] = &[
         package: Some("7zip.7zip"),
     },
 ];
+
+/// The Task Manager's entry in PROGRAMS (Ctrl+Shift+Esc and the
+/// taskbar's context menu start it as the start menu's tile does).
+pub const TASK_MANAGER: &str = "Task Manager";
+
+/// Its index in PROGRAMS.
+fn task_manager() -> Option<usize> {
+    PROGRAMS.iter().position(|p| p.name == TASK_MANAGER)
+}
+
+/// File Explorer's entry in PROGRAMS (Win+E starts it as the tile does).
+pub const FILE_EXPLORER: &str = "File Explorer";
+
+fn file_explorer() -> Option<usize> {
+    PROGRAMS.iter().position(|p| p.name == FILE_EXPLORER)
+}
+
+/// The taskbar's context menu: its width and its one item's height.
+const BAR_MENU_W: i64 = 220;
+const BAR_MENU_ITEM: i64 = 36;
 
 /// How many tiles the start menu's grid holds (four rows).
 pub const MAX_TILES: usize = GRID_COLUMNS * 4;
@@ -391,6 +429,10 @@ enum Hit {
     Tray(u64, u32),
     /// The balloon (NIF_INFO) on show.
     Balloon,
+    /// The taskbar's context menu's item ("Task Manager"), and the rest
+    /// of that menu.
+    BarMenuItem,
+    BarMenu,
     Caption(u32),
     Button(u32, CaptionButton),
     Client(u32),
@@ -604,8 +646,13 @@ pub struct Desktop {
     /// The programs started from the menu, most recent first (PROGRAMS
     /// indices; usize::MAX: none).
     recent: [usize; 4],
-    /// Alt is held (WM_SYSKEYDOWN).
+    /// Alt is held (WM_SYSKEYDOWN); Ctrl and Shift (Ctrl+Shift+Esc).
     alt: bool,
+    ctrl: bool,
+    shift: bool,
+    /// The taskbar's context menu is open, at this x (a right click on
+    /// the taskbar's free space): "Task Manager", drawn as the card.
+    bar_menu: Option<i64>,
     /// The Windows key is held, and whether a key went with it (then its
     /// release doesn't open the start menu).
     win_key: bool,
@@ -660,6 +707,9 @@ impl Desktop {
             search_len: 0,
             recent: [usize::MAX; 4],
             alt: false,
+            ctrl: false,
+            shift: false,
+            bar_menu: None,
             win_key: false,
             win_used: false,
             tray: tray::Tray::new(),
@@ -978,6 +1028,24 @@ impl Desktop {
         if vk == VK_MENU {
             self.alt = down;
         }
+        if vk == 0x11 {
+            self.ctrl = down;
+        }
+        if vk == 0x10 {
+            self.shift = down;
+        }
+        // Ctrl+Shift+Esc: Task Manager, whatever has the focus (no program
+        // sees the Esc).
+        if vk == 0x1b && self.ctrl && self.shift {
+            if down {
+                self.close_menu();
+                self.bar_menu = None;
+                self.card_dirty = true;
+                self.launch = task_manager();
+                self.refresh();
+            }
+            return;
+        }
         // The Windows key, pressed and released alone, opens and closes
         // the start menu; with the arrows it snaps the active window.
         if vk == 0x5b || vk == 0x5c {
@@ -989,6 +1057,16 @@ impl Desktop {
                 } else {
                     self.open_menu();
                 }
+                self.refresh();
+            }
+            return;
+        }
+        // Win+E: File Explorer (no program sees the E).
+        if self.win_key && vk == b'E' {
+            self.win_used = true;
+            if down {
+                self.close_menu();
+                self.launch = file_explorer();
                 self.refresh();
             }
             return;
@@ -1193,6 +1271,14 @@ impl Desktop {
         Rect { x: r.x + r.w - DISMISS, y: r.y, w: DISMISS, h: DISMISS }
     }
 
+    /// The taskbar's context menu's rectangle, when it is open: above
+    /// the taskbar at the click.
+    fn bar_menu_rect(&self) -> Option<Rect> {
+        let x = self.bar_menu?;
+        let at = Rect { x, y: self.s.screen.1 - i64::from(TASKBAR), w: 0, h: 0 };
+        Some(self.card_rect(BAR_MENU_W, BAR_MENU_ITEM + 8, Some(at)))
+    }
+
     /// The open context menu's rectangle on the screen.
     fn context_rect(&self) -> Option<Rect> {
         let c = self.context.as_ref()?;
@@ -1220,6 +1306,12 @@ impl Desktop {
     fn hit(&self, x: i64, y: i64) -> Hit {
         if self.s.screen.0 == 0 {
             return Hit::Nothing;
+        }
+        if let Some(r) = self.bar_menu_rect()
+            && r.contains(x, y)
+        {
+            let item = Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM };
+            return if item.contains(x, y) { Hit::BarMenuItem } else { Hit::BarMenu };
         }
         if self.menu.is_some()
             && let Some(r) = self.context_rect()
@@ -1389,6 +1481,22 @@ impl Desktop {
         let released = self.buttons & !buttons;
         self.buttons = buttons;
         let keys = u64::from(buttons & 1) | (u64::from(buttons & 2));
+        // The taskbar's context menu takes the next press: its item starts
+        // Task Manager, anywhere else only closes it.
+        if pressed != 0 && self.bar_menu.is_some() {
+            if hit == Hit::BarMenuItem && pressed & 1 != 0 {
+                self.launch = task_manager();
+            }
+            self.bar_menu = None;
+            self.card_dirty = true;
+            self.swallowed |= pressed;
+            self.refresh();
+            return core::mem::take(&mut self.s.damage);
+        }
+        if released & 2 != 0 && hit == Hit::Taskbar && self.menu.is_none() {
+            self.bar_menu = Some(x);
+            self.card_dirty = true;
+        }
         // Moves go to the window under the pointer, or to the one a button
         // went down in while it is held (capture).
         let target = match (self.pressed, hit) {
@@ -1467,6 +1575,7 @@ impl Desktop {
                     self.taskbar_dirty = true;
                     self.card_dirty = true;
                 }
+                Hit::BarMenuItem | Hit::BarMenu => self.card_dirty = true,
                 Hit::MenuItem(_)
                 | Hit::Menu
                 | Hit::LinuxHeading
@@ -1544,7 +1653,7 @@ impl Desktop {
             | Hit::LinuxDismiss(_)
             | Hit::ContextItem(_) => self.menu_dirty = true,
             Hit::Tray(h, u) => self.tray.button((h, u), tray::Button::Left, true, x, y),
-            Hit::Nothing | Hit::Taskbar | Hit::Balloon => {}
+            Hit::Nothing | Hit::Taskbar | Hit::Balloon | Hit::BarMenuItem | Hit::BarMenu => {}
         }
     }
 
@@ -2100,6 +2209,16 @@ impl Desktop {
     fn render_card(&self) -> Option<(Rect, Canvas)> {
         if self.s.screen.0 == 0 {
             return None;
+        }
+        if let Some(r) = self.bar_menu_rect() {
+            let mut c = Canvas::new(r.w, r.h, 0)?;
+            c.round_rect(0, 0, r.w, r.h, 8, MENU_COLOR, MENU_COLOR, 255);
+            c.round_outline(0, 0, r.w, r.h, 8, MENU_BORDER, 255);
+            if self.hover == Hit::BarMenuItem {
+                c.round_rect(4, 4, r.w - 8, BAR_MENU_ITEM, 4, 0x00_e0_e3_e8, 0x00_e0_e3_e8, 255);
+            }
+            c.text(16, 4 + 10, "Task Manager".chars(), TEXT, Font::Ui12, r.w - 16);
+            return Some((r, c));
         }
         if let Some(b) = &self.tray.balloon {
             let lines = wrap(&b.text, Font::Ui12, BALLOON_W - 32, 4);
@@ -3162,11 +3281,15 @@ fn pointer_on(
             d.set_linux(listing);
         }
     }
+    let bar_menu = d.bar_menu.is_some();
     let damage = go(&mut d);
     for r in damage {
         redraw(&mut d, r);
     }
     let launch = d.take_launch();
+    if bar_menu && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
+        crate::info!("desktop: taskbar menu: {TASK_MANAGER}");
+    }
     let prefs = d.take_prefs();
     let wakes = d.take_wakes();
     let posts = d.take_tray_posts();
@@ -3398,6 +3521,52 @@ pub fn distro_root_of(name: &[u8]) -> Option<crate::fs::ramfs::NodeId> {
         Ok(())
     });
     distro_root(base?.as_bytes())
+}
+
+/// The boot user's registered distributions (Lxss keys in State 1) by
+/// name, each with its tree's node (the task manager's "Linux" groups:
+/// a Linux process belongs to the distribution its root is). Reads the
+/// registry and the file system: not under the desktop's lock.
+pub fn distro_roots() -> Vec<(linux::Name, crate::fs::ramfs::NodeId)> {
+    distro_roots_in(USER_HIVE)
+}
+
+/// The registered distributions (Lxss keys in State 1) of the user whose
+/// hive is `hive` below `\REGISTRY` (`USER\<SID>`), by name, each with
+/// its tree's node (`\\wsl.localhost\<distro>`: nt::wslfs).
+pub fn distro_roots_in(hive: &str) -> Vec<(linux::Name, crate::fs::ramfs::NodeId)> {
+    use super::registry::{self, ROOT};
+    let mut found: Vec<(linux::Name, linux::Text<260>)> = Vec::new();
+    let _ = registry::with(|r| {
+        let path = reg_path(&[hive, LXSS]).ok_or(NtStatus::NO_MEMORY)?;
+        let lxss = r.lookup(ROOT, &path)?;
+        let mut i = 0;
+        while let Ok(sub) = r.subkey(lxss, i) {
+            i += 1;
+            let value = |name: &str| {
+                let (w, n) = wide_name::<32>(name);
+                r.value(sub, &w[..n]).ok()
+            };
+            let state = value("State").and_then(|v| v.data.first().copied());
+            let name = value("DistributionName").and_then(reg_text::<{ linux::NAME }>);
+            let base = value("BasePath").and_then(reg_text::<260>);
+            if let (Some(1), Some(name), Some(base)) = (state, name, base)
+                && found.try_push((name, base)).is_err()
+            {
+                break;
+            }
+        }
+        Ok(())
+    });
+    let mut out = Vec::new();
+    for (name, base) in found {
+        if let Some(root) = distro_root(base.as_bytes())
+            && out.try_push((name, root)).is_err()
+        {
+            break;
+        }
+    }
+    out
 }
 
 /// A distribution's tree (`<BasePath>\rootfs`, a C: path) as a node.
@@ -3816,6 +3985,12 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option
     d.key(vk, scan, extended, down);
     redraw_damage(&mut d);
     let launch = d.take_launch();
+    if vk == 0x1b && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
+        crate::info!("desktop: Ctrl+Shift+Esc: {TASK_MANAGER}");
+    }
+    if vk == b'E' && launch.and_then(Launch::program).is_some_and(|p| p.name == FILE_EXPLORER) {
+        crate::info!("desktop: Win+E: {FILE_EXPLORER}");
+    }
     let wakes = d.take_wakes();
     let posts = d.take_tray_posts();
     drop(d);
@@ -3899,6 +4074,13 @@ fn resize(d: &mut Desktop, w: u32, h: u32) {
     }
     d.s.damage.clear();
     redraw(d, Rect { x: 0, y: 0, w: w.into(), h: h.into() });
+}
+
+/// Whether `owner`'s windows are "Not responding" (input waiting
+/// untaken for `winstate::HUNG_NS`: the task manager's Status).
+pub fn not_responding(shell: &Shell, owner: u64) -> bool {
+    let now = platform::monotonic_ns();
+    shell.d.lock().s.not_responding(owner, now)
 }
 
 /// Takes input waiting for `owner`'s windows into `out`; how many.

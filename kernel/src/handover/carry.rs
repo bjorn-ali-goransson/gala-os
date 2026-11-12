@@ -850,6 +850,7 @@ fn check_object(
         | ObjectBody::DiskDevice
         | ObjectBody::Disk(_)
         | ObjectBody::NullDevice
+        | ObjectBody::MupDevice
         | ObjectBody::Null(_) => return Err(refuse("a device handle")),
     }
     Ok(())

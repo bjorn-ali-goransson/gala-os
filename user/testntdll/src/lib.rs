@@ -343,6 +343,9 @@ syscall_stubs! {
     GalaLxNode = 0x7fe0, fn(root: usize, record: *const u8, length: usize);
     GalaLxSpawn = 0x7fe1, fn(record: *const u8, length: usize, process: *mut usize);
     GalaLxDistro = 0x7fe2, fn(op: u32, root: usize, name: *const u8, length: usize, count: *mut u64);
+    // The task manager's data (nt::tasks): every process of both
+    // personalities, the machine's load, End task for Linux processes.
+    GalaTasks = 0x7fe8, fn(op: u32, arg: usize, buffer: *mut u8, length: u32, returned: *mut u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
@@ -2085,6 +2088,8 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_000d, 87),   // INVALID_PARAMETER
     (0xc000_0054, 33),   // FILE_LOCK_CONFLICT -> ERROR_LOCK_VIOLATION
     (0xc000_0055, 33),   // LOCK_NOT_GRANTED -> ERROR_LOCK_VIOLATION
+    (0xc000_00be, 53),   // BAD_NETWORK_PATH -> ERROR_BAD_NETPATH
+    (0xc000_00cc, 67),   // BAD_NETWORK_NAME -> ERROR_BAD_NET_NAME
     (0xc000_007e, 158),  // RANGE_NOT_LOCKED -> ERROR_NOT_LOCKED
     (0xc000_007f, 112),  // DISK_FULL -> ERROR_DISK_FULL
     (0xc000_0185, 1117), // IO_DEVICE_ERROR -> ERROR_IO_DEVICE

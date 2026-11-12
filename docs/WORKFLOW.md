@@ -1788,6 +1788,96 @@ source).
   session.sh prints Xwayland's and twm's output (`session: ... failed`,
   then the log) on the serial log.
 
+### The task manager (ROADMAP TM)
+
+- Scenario `taskmgr` (`cargo xtask boot-test 'taskmgr$'`): UEFI with
+  `user/taskmgr_test`, which imports the busybox distribution `bb`,
+  runs `sh -c "sleep 600 & trap '' TERM; cat; echo cat ended"` in it and its own `busy`
+  mode (a window and a spinning thread), checks GalaTasks' list and
+  load, NtQuerySystemInformation's Windows-only list and `gala ps`,
+  then prints `taskmgr_test: ready`; TASKMGR_SCREEN clicks its
+  `frozen` window (whose thread never takes its input: 5 s later the
+  test sees it "Not responding" and says so), opens Task Manager
+  with Ctrl+Shift+Esc, clicks Performance and Details, then searches
+  and ends `busy` (an app), `sleep` (SIGTERM), `sh` (ignores SIGTERM:
+  SIGKILL after 3 s) and the `bb` heading (its tree), each step waiting
+  for the program's line that the one before ended, and closes Task
+  Manager with Alt+F4 (the test waits for that, so the last screendump
+  comes before the guest ends). Screendumps:
+  `target/debug/test-taskmgr.screen<n>.png` (1 Processes with the
+  frozen window "Not responding", 2 Performance, 3 Details, 4 the app
+  found, 6 `sleep`, 8 `sh`, 10 the distribution's heading, 12 what is
+  left).
+- Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
+  `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
+  test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
+  formats, End task's targets). `cargo clippy -p taskmgr --lib --tests`
+  checks the library on the host (the program links Windows DLLs).
+- Reading a run: `desktop: Ctrl+Shift+Esc: Task Manager`, `desktop:
+  start menu starts Task Manager: ...`, `tasks: pid N (Taskmgr.exe)
+  lists the processes: ...`, `process: pid N (Taskmgr.exe) terminates
+  pid M (...)`, `tasks: pid N (Taskmgr.exe) ends linux process M with
+  signal 15: 0x00000000`, `... ends linux distribution (bb: 1
+  process(es)): 0x00000000` (the process's name is its path's: System32's
+  `Taskmgr.exe`); `events=process` has `tasks query`, `tasks end`,
+  `process terminate` and `lx signal`.
+- Pitfalls: Task Manager's window is at a fixed place (120, 40) so the
+  clicks land; each End task step's search leaves the victim at row 1
+  under its group's heading at row 0, so a new process whose name
+  holds the searched text moves it (choose a search only the victim
+  matches). With the target directory shared between worktrees, a
+  concurrent build elsewhere can replace the uplifted DLLs that
+  `export-tests` copies (`target/<triple>/release/<name>.dll`): check
+  `git diff --stat user/bin` names only what the change touched, and
+  build the changed programs into a scratch target (Disk space) to
+  export them.
+
+### The file explorer (ROADMAP EX)
+
+- Scenario `explorer` (`cargo xtask boot-test 'explorer$'`): UEFI with
+  `user/explorer_test`, which imports the busybox distribution `bb`,
+  checks `\\wsl.localhost` paths (part A) and shell32's namespace (part
+  B), registers `.galatxt` (HKCU\Software\Classes) to its own `open`
+  mode, writes `C:\explorer.d\files\notes.galatxt` and prints
+  `explorer_test: ready`; EXPLORER_SCREEN presses Win+E, types
+  `C:\explorer.d\files` in the address bar, copies the file (Ctrl+C),
+  clicks the navigation pane's Linux node, opens `bb` and its `tmp`
+  (row clicks, Enter), pastes (Ctrl+V), finds the copy with the search
+  and opens it (Enter: the association runs `explorer_test open
+  <path>`, which writes `C:\explorer.d\opened.txt`); the test then
+  writes `/tmp/live.txt` from Linux (`wsl -d bb -- ...`) and Explorer's
+  `explorer: changed ...` line shows it noticed; the screen check opens
+  the copy's Properties (Linux permissions), renames it (F2), shows the
+  icon view, and closes
+  Explorer with Alt+F4 (the test waits for the window class
+  `CabinetWClass` to go). Screendumps: `target/debug/test-explorer.screen<n>.png`
+  (1 This PC, 3 the C: folder with the file selected, 5 Linux with `bb`,
+  7 the distribution's root, 9 the copy found in `tmp`, 11 the Linux
+  file listed live, 13 Properties, 15 the icon view).
+- Host tests: `cargo test -p shellns` (lists, parsing and display
+  names, order), `cargo test -p explorer --lib` (rows, sorting, search,
+  formats), `cargo test -p kernel --lib nt::wslfs` and
+  `nt::desktop` (Win+E). `cargo clippy -p explorer --lib --tests` and
+  `-p shellns --tests` check them on the host.
+- Reading a run: `desktop: Win+E: File Explorer`, explorer.exe's
+  `explorer: navigate <parsing name> (<n> items)`, `explorer: copy
+  ...`, `explorer: paste ...: ok`, `explorer: open <path>: started`,
+  `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
+  rename ...`, `explorer: properties ...`,
+  `explorer: closed`; the ledger's `shell32.dll!IShellFolder::...` and
+  `explorer.exe!...` lines are what the namespace or the program could
+  not do; `UNC path` is a UNC path to a server other than WSL's.
+- Pitfalls: QEMU's monitor cannot double-click (each press comes 0.75 s
+  after the command before it): steps select with a click and open
+  with Enter. The steps' positions assume C: is the only drive (the
+  navigation pane's Linux node is row 4 with the C: folder's two
+  levels expanded) and the distribution's root holds bin, etc, mnt,
+  root, tmp (`mnt` exists once a Linux program has run: WSLg's runtime
+  directory). Explorer's window is at a fixed place (100, 40) so the
+  clicks land; each step waits for explorer's log line of the step
+  before. A path through `\\wsl.localhost` is case-sensitive below the
+  share (Linux names), as on Windows.
+
 ### X11 programs (Xwayland, ROADMAP LD step 5)
 
 - `xwayland=on` on the kernel command line gives display `:0`

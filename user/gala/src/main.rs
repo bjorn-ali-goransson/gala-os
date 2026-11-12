@@ -12,8 +12,8 @@
 //! gala snap left|right|up|down <window>
 //! gala move <window> <x> <y> <width> <height>
 //! gala wallpaper <name>              dunes, ribbons, najdi, night or drawn
-//! gala ps                            list the processes
-//! gala kill <pid|name>               end a process (all of that name)
+//! gala ps                            list the processes, Windows and Linux
+//! gala kill <pid|name>               end a process (all of that name; a Linux one: SIGTERM, then SIGKILL)
 //! gala attach <session>              the console (screen, keyboard, mouse) shows that session
 //! gala install <id> [--version v] [--source dir] [--location dir]
 //! gala search <text> [--source dir]
@@ -74,6 +74,7 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetCurrentProcessId() -> u32;
+    fn Sleep(ms: u32);
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -87,6 +88,7 @@ unsafe extern "system" {
     ) -> u32;
     fn GalaSession(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn GalaTasks(op: u32, arg: usize, buffer: *mut u8, length: u32, returned: *mut u32) -> u32;
 }
 
 #[allow(dead_code)]
@@ -126,8 +128,8 @@ const USAGE: &str = "usage: gala <command> [arguments]
   tray click <hwnd> <id> [right]
                                 click an icon (its program gets what a click
                                 with the mouse sends it)
-  ps                            list the processes
-  kill <pid|name>               end a process (every one of that name)
+  ps                            list the processes, Windows and Linux
+  kill <pid|name>               end a process (every one of that name; Linux: SIGTERM, then SIGKILL)
   attach <session>              the console shows that session (its desktop on the
                                 screen, the keyboard and mouse to it; SYSTEM only)
   install <id> [--version v] [--source dir] [--location dir]
@@ -189,6 +191,7 @@ const PROGRAM_ENTRY: usize = 8 + 2 * 32 + 2 * 128;
 const MAX_WINDOWS: usize = 64;
 
 const STATUS_SUCCESS: u32 = 0;
+const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
 const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
 const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xc000_0034;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -876,22 +879,79 @@ fn for_each_process(mut f: impl FnMut(u32, u32, u32, &[u16])) -> Result<(), u32>
     }
 }
 
-fn ps() -> u32 {
-    Line::new().s("PID").to(7).s("PARENT").to(15).s("THREADS").to(24).s("NAME").print();
-    let result = for_each_process(|pid, parent, threads, name| {
-        let mut l = Line::new();
-        l.dec(i64::from(pid)).to(7).dec(i64::from(parent)).to(15).dec(i64::from(threads)).to(24);
-        if name.is_empty() {
-            l.s(if pid == 0 { "System Idle Process" } else { "?" });
-        } else {
-            l.w(name);
+/// Every process of both personalities (GalaTasks op 0: ARCHITECTURE
+/// "The task manager"), or the error code once said.
+fn all_processes() -> Result<alloc::vec::Vec<taskmgr::Proc>, u32> {
+    let mut size = 64 * 1024;
+    loop {
+        let mut buf = alloc::vec![0u8; size];
+        let mut needed = 0u32;
+        // SAFETY: a buffer of its stated size and an out pointer.
+        let status = unsafe { GalaTasks(0, 0, buf.as_mut_ptr(), size as u32, &mut needed) };
+        if status == STATUS_BUFFER_TOO_SMALL && (needed as usize) >= size {
+            size = needed as usize + 4096;
+            continue;
         }
-        l.print();
-    });
-    match result {
-        Ok(()) => 0,
-        Err(code) => code,
+        if status != STATUS_SUCCESS {
+            return Err(status_error(status, "listed"));
+        }
+        buf.truncate(needed as usize);
+        return taskmgr::parse_processes(&buf)
+            .map(|(_, _, p)| p)
+            .ok_or_else(|| fail(EXIT_FAILED, &["the kernel's process list has another layout"]));
     }
+}
+
+/// `gala ps`: every process, Windows and Linux (a WSL distribution's
+/// named after its platform), as Task Manager's Details view lists them.
+fn ps() -> u32 {
+    let procs = match all_processes() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    Line::new()
+        .s("PID")
+        .to(7)
+        .s("PARENT")
+        .to(15)
+        .s("THREADS")
+        .to(24)
+        .s("PLATFORM")
+        .to(42)
+        .s("NAME")
+        .print();
+    for p in &procs {
+        let mut l = Line::new();
+        l.dec(p.pid as i64).to(7).dec(p.parent as i64).to(15).dec(i64::from(p.threads)).to(24);
+        l.s(&taskmgr::cell(p, 0, taskmgr::Column::Platform, false)).s(" ").to(42);
+        l.s(if p.image.is_empty() { "?" } else { &p.image });
+        l.print();
+    }
+    0
+}
+
+/// Ends Linux process `pid` as Task Manager does: SIGTERM, then SIGKILL
+/// if it is still there after the grace time.
+fn kill_linux(pid: u64) -> u32 {
+    let alive = || all_processes().is_ok_and(|v| v.iter().any(|p| p.pid == pid));
+    for sig in [15u32, 9] {
+        // SAFETY: no buffers.
+        let status = unsafe {
+            GalaTasks(2, pid as usize, core::ptr::null_mut(), sig, core::ptr::null_mut())
+        };
+        if status != STATUS_SUCCESS {
+            return status_error(status, "signalled");
+        }
+        for _ in 0..taskmgr::SIGTERM_GRACE_MS / 100 {
+            if !alive() {
+                Line::new().s("ended Linux process ").dec(pid as i64).print();
+                return 0;
+            }
+            // SAFETY: a plain call.
+            unsafe { Sleep(100) };
+        }
+    }
+    fail(EXIT_FAILED, &["the Linux process did not end"])
 }
 
 /// Whether process image `name` is `want` (any case; ".exe" optional).
@@ -917,6 +977,12 @@ fn kill(a: &Args) -> u32 {
     let mut pids = [0u32; 64];
     let mut n = 0;
     match number(target) {
+        Some(pid)
+            if all_processes()
+                .is_ok_and(|v| v.iter().any(|p| p.pid == pid as u64 && p.is_linux())) =>
+        {
+            return kill_linux(pid as u64);
+        }
         Some(pid) if pid > 0 && pid <= i64::from(u32::MAX) => {
             pids[0] = pid as u32;
             n = 1;

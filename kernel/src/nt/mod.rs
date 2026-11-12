@@ -43,6 +43,7 @@ pub mod stats;
 pub mod status;
 pub mod syscalls;
 pub mod sysinfo;
+pub mod tasks;
 pub mod thread;
 pub mod timer;
 pub mod token;
@@ -54,6 +55,7 @@ pub mod winevent;
 pub mod winsta;
 pub mod winstate;
 pub mod wow64;
+pub mod wslfs;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

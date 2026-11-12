@@ -730,6 +730,14 @@ pub fn execve(
     *call.lx.brk.lock() = state::Brk { start: p.plan.brk, current: p.plan.brk };
     *call.lx.exe.lock() = exe;
     call.lx.set_comm(call.tid, comm);
+    // The task manager's command line: the new argv.
+    let mut line: Vec<u8> = Vec::new();
+    for (i, a) in argv_refs.iter().enumerate() {
+        if (i > 0 && line.try_push(b' ').is_err()) || line.try_extend_from_slice(a).is_err() {
+            break;
+        }
+    }
+    process::set_command_line(&call.process, core::str::from_utf8(&line).unwrap_or(shown));
     call.lx.release_vfork();
     call.lx.close_on_exec();
     call.lx.signals.lock().exec();

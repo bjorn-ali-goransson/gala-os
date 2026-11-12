@@ -5,10 +5,11 @@
 //! SHGetIconOverlayIndexW; the notification area is `tray.rs`). As documented; see
 //! user/shell32_test.
 //!
-//! gala has no file associations: ShellExecute runs programs (.exe and
-//! .com, found as CreateProcess and the search path find them) for the
-//! verbs "open" (or none) and "runas", and answers SE_ERR_NOASSOC for
-//! documents, URLs and other verbs (recorded). "runas" (elevation, as UAC
+//! ShellExecute runs programs (.exe and .com, found as CreateProcess and
+//! the search path find them) for the verbs "open" (or none) and
+//! "runas", and documents with their association's command for "open"
+//! (`association`: the registry's classes through shlwapi); URLs, other
+//! verbs and extensions no class claims are SE_ERR_NOASSOC (recorded). "runas" (elevation, as UAC
 //! does it; docs/SECURITY.md "Elevation") starts the program with the
 //! caller's own token when that token is already elevated, which is what
 //! Windows does for an elevated administrator; a caller that is not
@@ -226,9 +227,11 @@ fn execute(
     };
     let extension = path.rsplit(|&c| c == u16::from(b'.')).next().unwrap_or(&[]);
     if !(ascii_eq(extension, b"exe") || ascii_eq(extension, b"com")) {
-        // A document or a URL: no file associations in gala yet.
-        record(b"shell32.dll!ShellExecute(association)", 0);
-        return Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION));
+        // A document: its association's command.
+        let mut line = [0u16; 2048];
+        let mut program = [0u16; 520];
+        association(verb, path, chars(params), &mut program, &mut line)?;
+        return start(&program, &mut line, dir, show);
     }
     // "path" params
     let mut line = [0u16; 2048];
@@ -252,6 +255,17 @@ fn execute(
     }
     let mut program = [0u16; 520];
     program[..path.len()].copy_from_slice(path);
+    start(&program, &mut line, dir, show)
+}
+
+/// Starts `program` (NUL-terminated) with command line `line` (NUL-
+/// terminated, writable) in `dir` (none: ours): the process handle.
+fn start(
+    program: &[u16],
+    line: &mut [u16],
+    dir: *const u16,
+    show: i32,
+) -> Result<usize, (usize, u32)> {
     let startup = StartupInfo {
         cb: core::mem::size_of::<StartupInfo>() as u32,
         reserved: core::ptr::null(),
@@ -301,6 +315,119 @@ fn execute(
     // SAFETY: the new thread's handle, ours to close.
     unsafe { CloseHandle(info.thread) };
     Ok(info.process)
+}
+
+/// The command line of document `path`'s association for `verb` ("open"
+/// when none) into `line`, its program into `program` (both NUL-
+/// terminated): shlwapi's AssocQueryStringW (the user's classes, then
+/// HKCR) for ASSOCSTR_COMMAND, with `%1`/`%L` the document's path and
+/// `%*` the parameters. An extension no class claims has no program
+/// (Windows' Unknown class runs OpenWith.exe, which gala has not):
+/// SE_ERR_NOASSOC, recorded. When the program is `wsl.exe` and the
+/// document is in that distribution's tree (`\\wsl.localhost\<d>\...`),
+/// `%1` is the document's Linux path (`/a/b`): the association runs a
+/// Linux program on it (ROADMAP EX step 2).
+fn association(
+    verb: &[u16],
+    path: &[u16],
+    params: &[u16],
+    program: &mut [u16; 520],
+    line: &mut [u16; 2048],
+) -> Result<(), (usize, u32)> {
+    type Query = extern "system" fn(u32, u32, *const u16, *const u16, *mut u16, *mut u32) -> i32;
+    // "shlwapi.dll".
+    const SHLWAPI: [u16; 12] = [115, 104, 108, 119, 97, 112, 105, 46, 100, 108, 108, 0];
+    const ASSOCSTR_COMMAND: u32 = 1;
+    const ASSOCSTR_EXECUTABLE: u32 = 2;
+    let no_assoc = || {
+        record(b"shell32.dll!ShellExecute(no association)", 0);
+        Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION))
+    };
+    // SAFETY: a NUL-terminated name; the documented signature.
+    let query: Query = unsafe {
+        let m = LoadLibraryW(SHLWAPI.as_ptr());
+        let f = if m == 0 {
+            core::ptr::null()
+        } else {
+            GetProcAddress(m, c"AssocQueryStringW".as_ptr().cast())
+        };
+        if f.is_null() {
+            return no_assoc();
+        }
+        core::mem::transmute::<*const c_void, Query>(f)
+    };
+    // The extension with its dot, NUL-terminated.
+    let dot = path.iter().rposition(|&c| c == u16::from(b'.')).unwrap_or(path.len());
+    let mut ext = [0u16; 64];
+    let e = &path[dot..];
+    if e.is_empty() || e.len() >= ext.len() {
+        return no_assoc();
+    }
+    ext[..e.len()].copy_from_slice(e);
+    let mut v = [0u16; 32];
+    let verb = if verb.is_empty() { &[111, 112, 101, 110][..] } else { verb };
+    if verb.len() >= v.len() {
+        return no_assoc();
+    }
+    v[..verb.len()].copy_from_slice(verb);
+    let mut n = 520u32;
+    if query(0, ASSOCSTR_EXECUTABLE, ext.as_ptr(), v.as_ptr(), program.as_mut_ptr(), &mut n) != 0 {
+        return no_assoc();
+    }
+    let mut command = [0u16; 1024];
+    let mut n = 1024u32;
+    if query(0, ASSOCSTR_COMMAND, ext.as_ptr(), v.as_ptr(), command.as_mut_ptr(), &mut n) != 0 {
+        return no_assoc();
+    }
+    let command = &command[..command.iter().position(|&c| c == 0).unwrap_or(0)];
+    let exe = &program[..program.iter().position(|&c| c == 0).unwrap_or(0)];
+    let exe_name = exe.rsplit(|&c| c == u16::from(b'\\')).next().unwrap_or(&[]);
+    // A document in a distribution, for wsl.exe: its Linux path.
+    let mut linux = [0u16; 520];
+    let mut document = path;
+    if ascii_eq(exe_name, b"wsl.exe") {
+        let prefix: [u16; 16] =
+            [92, 92, 119, 115, 108, 46, 108, 111, 99, 97, 108, 104, 111, 115, 116, 92];
+        if path.len() > prefix.len()
+            && path[..prefix.len()].iter().zip(&prefix).all(|(&a, &b)| a | 0x20 == b | 0x20)
+        {
+            let rest = &path[prefix.len()..];
+            let at = rest.iter().position(|&c| c == u16::from(b'\\')).unwrap_or(rest.len());
+            let tail = &rest[at..];
+            for (o, &c) in linux.iter_mut().zip(tail) {
+                *o = if c == u16::from(b'\\') { u16::from(b'/') } else { c };
+            }
+            document = &linux[..tail.len().min(linux.len())];
+        }
+    }
+    let mut len = 0;
+    let mut i = 0;
+    while i < command.len() {
+        let c = command[i];
+        let next = command.get(i + 1).copied();
+        let insert: Option<&[u16]> = match (c, next) {
+            (37, Some(49)) | (37, Some(76)) | (37, Some(108)) => Some(document), // %1 %L %l
+            (37, Some(42)) => Some(params),                                      // %*
+            _ => None,
+        };
+        let piece: &[u16] = match insert {
+            Some(p) => {
+                i += 2;
+                p
+            }
+            None => {
+                i += 1;
+                core::slice::from_ref(&command[i - 1])
+            }
+        };
+        if len + piece.len() + 1 > line.len() {
+            return Err((SE_ERR_FNF, 206)); // ERROR_FILENAME_EXCED_RANGE
+        }
+        line[len..len + piece.len()].copy_from_slice(piece);
+        len += piece.len();
+    }
+    line[len] = 0;
+    Ok(())
 }
 
 /// The calling process's token is elevated (TokenElevation, through

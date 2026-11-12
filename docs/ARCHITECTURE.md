@@ -847,8 +847,9 @@ current process, -2 = current thread.
   otherwise, and grants the access asked for (processes are not
   access-checked yet; "Access checks").
 - **NtQuerySystemInformation(SystemProcessInformation)** lists the idle
-  process (id 0, no image, as on Windows) and every running process
-  (exited ones are not listed) with its threads, in the public x64
+  process (id 0, no image, as on Windows) and every running NT process
+  (exited ones are not listed; Linux processes never: "The task
+  manager" lists both) with its threads, in the public x64
   layout (`sysinfo::push_process`: SYSTEM_PROCESS_INFORMATION of 0x100
   bytes, then SYSTEM_THREAD_INFORMATION entries of 0x50, then the image
   name; CreateTime, ImageName, UniqueProcessId,
@@ -6815,7 +6816,10 @@ the program always sees WM_SIZE/WM_MOVE.
   filtered by a child HWND does not see keys still addressed to its
   top-level window.
 - TranslateMessage posts WM_CHAR (WM_SYSCHAR) for a key down, US layout
-  with Shift, Caps Lock and Ctrl (Ctrl+letter: 1-26).
+  with Shift, Caps Lock and Ctrl (Ctrl+letter: 1-26; with Ctrl the digit
+  and punctuation keys make the layout's control characters, Ctrl+[ ESC,
+  Ctrl+\ FS, Ctrl+] GS, Ctrl+Shift+2 NUL, Ctrl+Shift+6 RS, Ctrl+Shift+-
+  US, and the others none: Ctrl+Shift+2 types no `@`).
 
 #### System calls
 
@@ -7798,9 +7802,8 @@ windows can use them too.
   to straight-alpha BGRA by `cargo xtask bake-icons`: document, folder,
   open folder, program, drive), type names ("File folder",
   "Application", "<EXT> File": no file-type registry yet), display
-  names, icons. Item ID lists are gala's own: one item (b"gala", a
-  kind, a path) or the empty list (the desktop); CSIDL_DRIVES is
-  virtual. ILCreateFromPathW makes the list of an existing path (NULL
+  names, icons. Item ID lists are the namespace's ("The file
+  explorer"): ILCreateFromPathW makes the list of an existing path (NULL
   otherwise), ILGetSize and ILFree work on any list.
 - **shell32's exports by ordinal** (`build.rs`, the numbers of Wine's
   shell32.spec): SHChangeNotifyRegister #2, SHChangeNotifyDeregister #4,
@@ -7820,7 +7823,8 @@ windows can use them too.
   distinct path and icon index, missing files included, as Windows hands
   them out; 32 paths, then -1, recorded). The shell namespace's objects (desktop folder,
   parsing names, property stores, association registration, stock
-  icons, the Open With dialog) are E_NOTIMPL, recorded. shell32 and
+  icons, the Open With dialog) are E_NOTIMPL, recorded (the namespace
+  itself is "The file explorer"'s). shell32 and
   shlwapi load advapi32, ole32 and user32 on first use, never as static
   imports (every program loading them would load those too).
 - **shell32's programs, drops and file operations**
@@ -7835,8 +7839,9 @@ windows can use them too.
   caller gets ERROR_CANCELLED with hInstApp (ShellExecuteW's result)
   SE_ERR_ACCESSDENIED, as a cancelled UAC prompt answers, recorded as
   `shell32.dll!ShellExecute(runas: elevation prompt)` (`runas_test`,
-  `wow64_runas_test`, `runas_declined`). Other verbs, documents and URLs
-  have no associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  `wow64_runas_test`, `runas_declined`). Documents run their
+  association's command ("The file explorer", Opening a file); other
+  verbs and URLs are SE_ERR_NOASSOC, recorded. DragQueryFileW/
   DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
   DragAcceptFiles sets WS_EX_ACCEPTFILES (nothing generates
   WM_DROPFILES yet). SHFileOperationW does FO_COPY/FO_MOVE/FO_RENAME/
@@ -12472,9 +12477,40 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special
   file`, `ntio`, `ntio ioctl` with the request); the state dump names
   an fd's Windows object (`lx: pid P fd N: windows Pipe`).
-- **Limits** (ROADMAP CT): no `/mnt/<drive>`, interop or
-  `\\wsl.localhost` yet (step 3: the current directory is the home, not
-  the Windows directory); DefaultUid is not applied (the processes run
+- **`\\wsl.localhost\<distro>` and `\\wsl$\<distro>`** (`nt::wslfs`; CT
+  step 3's file part, EX step 1; `explorer_test`): kernel32 makes a UNC
+  path `\??\UNC\server\share\...` (GetFullPathNameW keeps
+  `\\server\share` as the root: `..` stops there; a UNC current
+  directory works for relative names); `\??\UNC` links to `\Device\Mup`
+  (an object of its own, `ObjectBody::MupDevice`), and an open below it
+  is resolved for the caller's user: the server must be `wsl.localhost`
+  or `wsl$` (ASCII case ignored; another is STATUS_BAD_NETWORK_PATH,
+  ledgered `UNC path`: gala has no SMB client), the share a
+  distribution registered in that user's hive (Lxss, State 1; case
+  ignored as WSL does; none: STATUS_BAD_NETWORK_NAME,
+  ERROR_BAD_NET_NAME), and the rest a Linux path in its tree:
+  case-sensitive, walked as a process rooted there walks it
+  (`lx::file::resolve_in`: its symbolic links followed inside the
+  distribution, `..` of its root is itself), the last link only when
+  the open follows links (not with FILE_OPEN_REPARSE_POINT: deleting a
+  link deletes the link). `FilePath::linux` carries the distribution's
+  root to `file::resolve_links`, which hands such a path to
+  `wslfs::resolve`; what it resolves to is an ordinary node of the one
+  file system, so reads, writes, listings, renames, change
+  notifications and Linux's own view all agree (no 9P). A file or
+  directory Windows creates in a Linux tree (a directory with a POSIX
+  mode) gets the mode WSL's server gives one, 0644 (0755). Linux
+  metadata reaches Windows as WSL's: NtQueryInformationFile's
+  FileStatLxInformation (70) gives LxUid, LxGid, LxMode (with the type
+  bits) and the case-sensitive-directory flag for a node with a POSIX
+  mode (`lx::file::lx_metadata`; the owner is the caller's ids, as
+  `stat` shows it), LxFlags 0 for an NT file.
+- **Limits** (ROADMAP CT): no `/mnt/<drive>` or interop yet (step 3:
+  the current directory is the home, not the Windows directory); a
+  relative open below a handle to a directory in a distribution does
+  not follow Linux links; Linux names Windows cannot hold (`:`, `\`,
+  trailing dots) are shown as Linux has them, not mapped to WSL's
+  private-use characters; DefaultUid is not applied (the processes run
   as the Windows user's Linux ids, not root); no init process (WSL's
   `/init`), so a distribution stops with its last process; no ptys or
   process groups (job control is off: `TIOCGPGRP` is ENOTTY), Ctrl+C is
@@ -12482,6 +12518,295 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   wait queue) and an NT wait is not interrupted by a Linux signal;
   `--export`, `--install`, `--mount`, `-u` and the WSL service's COM
   API are not there.
+
+## The task manager
+
+ROADMAP TM: one task manager on shasha's desktop for every process gala
+runs, Windows and Linux together. Code: `kernel/src/nt/tasks.rs` (the
+query; host tests there), `user/taskmgr` (gala's `taskmgr.exe`: the
+library is the model, host-tested with `cargo test -p taskmgr`;
+`main.rs` the window), `nt::desktop` (Ctrl+Shift+Esc, the taskbar's
+context menu, the start menu's tile). Test: `taskmgr_test`, scenario
+`taskmgr` (screen check `TASKMGR_SCREEN`).
+
+### The data (step 1)
+
+- **One query for both personalities**: GalaTasks (0x7fe8, gala's own:
+  `GalaTasks(op, arg, buffer, length, *returned)`) op 0 lists every
+  running process of `process::PROCESSES`, NT and Linux, in one
+  versioned layout (the table in `nt/tasks.rs`): pid, parent, start
+  time, CPU time, working set (the committed bytes: committed pages stay
+  resident), commit charge, threads, handles (a Linux process's open
+  fds), session, flags (Linux, has a taskbar window, elevated, WOW64,
+  not responding, uninterruptible), the token's Linux uid, and texts:
+  the image (a Linux process's `comm`, what `ps` shows), the command
+  line, the user (the token user's account name: SYSTEM and the
+  services' names, a local account's, else the SID's string), the WSL
+  distribution, the taskbar window's title and HWND. Op 1 is the load:
+  per processor its busy and idle nanoseconds, physical memory and use,
+  the commit charge, disk and network bytes, the process, thread and
+  handle counts. Both answer STATUS_BUFFER_TOO_SMALL with the size
+  needed (the list changes between calls).
+- **Windows' contents stay Windows'**: NtQuerySystemInformation's
+  SystemProcessInformation (and so Toolhelp and psapi) lists NT
+  processes only; a Linux process is no Windows process. `/proc` inside
+  LX is unchanged. Only gala's own tools (`taskmgr.exe`, `gala ps`)
+  read GalaTasks.
+- **CPU time** is the scheduler's (`sched`): at every `schedule` a CPU's
+  span since its last one goes to the thread it ran and to the CPU's
+  busy or idle time (`Cpu::account`); `cpu_time_ns` and `cpu_load` add
+  the turn in progress. A process's time is its ended threads'
+  (`Core::cpu_ended_ns`, each adds its own at its exit) plus its live
+  ones'. gala-um reports 0 (the host schedules: the `Threads` trait's
+  defaults). ProcessTimes and GetSystemTimes do not use it yet (TODO).
+- **The command line** is kept on the core process when it starts
+  (`process::set_command_line` from `announce_start`) and replaced by
+  a Linux execve (its argv joined by spaces).
+- **Distributions**: a Linux process belongs to the distribution whose
+  tree is its root (`LxProcess::root`); the names come from the boot
+  user's Lxss keys (`desktop::distro_roots`: DistributionName and
+  `<BasePath>\rootfs` resolved to its node). A Linux process the kernel
+  started (`lxrun=`) has none.
+- **End task's Linux side**: op 2 sends Linux process `arg` signal
+  `length` as kill(2) from a program of the caller's token would (si_code
+  SI_USER, the caller's pid and uid; `lx::sigcalls::signal_from`),
+  allowed when the uids match, the caller's is root, or the caller is
+  elevated (STATUS_ACCESS_DENIED otherwise); a Windows pid is
+  STATUS_INVALID_PARAMETER (those end through TerminateProcess), none
+  STATUS_INVALID_CID. Op 3 ends a distribution's whole tree by name
+  (`lx::distro::terminate`, `wsl --terminate`'s SIGKILL; the same rule
+  for each of its processes), `*returned` how many.
+- **Disk and network counters**: `disk::READ_BYTES`/`WRITE_BYTES` (the
+  virtio-blk driver) and `net::virtio_net::RX_BYTES`/`TX_BYTES` (the
+  Ethernet frames); a machine without the device says so (`has_disk`,
+  `has_network`).
+- Observability: OBSERVABILITY `process` events (`tasks query`, `tasks
+  end`, `process terminate`), `tasks:` log lines (each caller's first
+  query, every end), and the ledger: `tasks`/`linux uninterruptible
+  wait` (no record carries a D-state: gala's Linux waits are all
+  interruptible) and taskmgr.exe's columns without a counter
+  (`taskmgr.exe!Processes(Disk)`, `(Network)`, `(GPU)`, `(Power usage)`).
+
+### Not responding (step 3)
+
+- **Windows' rule**: a window is "Not responding" when its thread has
+  neither taken its messages (PeekMessage, GetMessage) nor waited for
+  them for 5 seconds (IsHungAppWindow's documentation). gala's
+  equivalent is the desktop's input queue: `winstate::State` keeps, per
+  process with input waiting, since when it has not taken it
+  (`waiting`: set when input comes for a process that had none, moved
+  to now each time it takes some while more waits, gone when none
+  waits or its windows go); `not_responding(owner, now)` is input
+  waiting untaken for `HUNG_NS` (5 s). A program blocked in GetMessage
+  takes its input as it comes, so it never is; one whose thread sleeps
+  or spins with input queued is, until it takes it. The query sets
+  FLAG_HUNG from it (`desktop::not_responding`), logs each process's
+  first time (`tasks: pid P (x.exe) is not responding: ...`) and counts
+  them in `tasks query` (`hung`); Task Manager's Status says "Not
+  responding" in red.
+- **Limits**: messages sent or posted between programs (SendMessage,
+  PostMessage through the window registry) do not count, only the
+  desktop's input; a Wayland client's windows are served by the kernel's
+  Wayland server, which takes their input, so a hung Linux GUI program
+  is not seen; a Linux process in an uninterruptible wait (D state)
+  cannot be shown, as gala's Linux waits are all interruptible
+  (FLAG_UNINTERRUPTIBLE stays clear; ledger `tasks`/`linux
+  uninterruptible wait`). shasha does not yet add "(Not Responding)" to
+  a hung window's caption or ghost it.
+
+### The program (step 2)
+
+- **`taskmgr.exe`** (`user/taskmgr`), gala's own Windows program on
+  gala's user32 and gdi32, where Windows keeps it
+  (`%SystemRoot%\System32\Taskmgr.exe`; images ship it per scenario, as
+  `wsl.exe`): one window (class `TaskManagerWindow`, at (120, 40),
+  1040 x 700), one instance (a second start brings the first forward),
+  a navigation pane (Processes, Performance, Details), a search box
+  (typing anywhere goes there, Esc clears it: a process matches by its
+  shown name, its image or the start of its PID), refreshed every
+  second (SetTimer).
+- **Processes**: grouped as Windows groups them, Apps (a process with a
+  taskbar window, shown by its window's title) and Background
+  processes, then the Linux groups by distribution ("Linux: <name>";
+  the Linux personality's own processes under "Linux"; gala's UI says
+  Linux, never WSL); columns Name, PID, Status ("Not responding"),
+  User name, CPU (its share of all processors between two samples,
+  `taskmgr::Shares`; the cell tinted as Windows does), Memory; a click
+  on a header sorts each group by it (numbers largest first; again the
+  other way). A blue tile marks a Windows process, an orange one a
+  Linux process.
+- **End task** (the button, or Delete): a Windows process gets
+  OpenProcess and TerminateProcess(1), as Windows' Task Manager; a Linux
+  process SIGTERM, then SIGKILL if it is still listed after
+  `SIGTERM_GRACE_MS` (3 s; checked at each refresh); a distribution's
+  heading its whole tree (op 3).
+- **Performance**: a graph per processor (busy per mille between
+  samples), memory in use, disk and network throughput, a minute of
+  history each (`taskmgr::History`), the process, thread and handle
+  counts.
+- **Details**: every process in one flat list, sortable, with CPU time,
+  commit size, threads, handles or fds, platform (Windows, Windows
+  32-bit, Linux with the distribution) and the command line.
+- **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
+  (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
+  desktop tracks Ctrl and Shift; no program sees that Esc; logged
+  `desktop: Ctrl+Shift+Esc: Task Manager`) and the taskbar's context
+  menu (a right click on its free space: a card above the taskbar with
+  "Task Manager", drawn as the balloon's card is; any press closes it;
+  logged `desktop: taskbar menu: Task Manager`): each starts it as the
+  tile does (`action::start_from_menu`). `gala start "Task Manager"`
+  is the CLI's way; `gala ps` lists both personalities from the same
+  query and `gala kill <pid>` ends a Linux process as End task does.
+- **Limits**: no per-process disk, network, GPU or power columns (no
+  counters: ledgered); no process tree within a group; "Not responding"
+  is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
+  there; End task waits for a distribution's end on the window's
+  thread (up to `lx::distro`'s 10 s).
+
+## The file explorer
+
+ROADMAP EX: an Explorer over every file system gala holds, as Windows'
+File Explorer, with the WSL distributions beside the drives. Code:
+`kernel/src/nt/wslfs.rs` (`\\wsl.localhost`: "The WSL facade"),
+`user/shellns` (the namespace's model, host-tested with `cargo test -p
+shellns`), `user/shell32/src/namespace.rs` (IShellFolder, IShellItem and
+the item ID list functions), `user/explorer` (gala's `explorer.exe`: the
+library is the view's model, `cargo test -p explorer`; `main.rs` the
+window), `nt::desktop` (Win+E, the start menu's tile). Test:
+`explorer_test`, scenario `explorer` (screen check `EXPLORER_SCREEN`).
+
+### The namespace (step 1)
+
+- **The tree**: the desktop (the empty list) holds This PC
+  (`::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`, the drives
+  GetLogicalDrives names, each "<label> (C:)" or "Local Disk (C:)") and
+  Linux (`::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6}`, WSL's folder: listed
+  when a distribution is registered), which holds each distribution
+  registered for the user (HKCU\...\Lxss, State 1) by name; below a
+  drive or a distribution, its files. gala's UI says "Linux"; the
+  parsing names keep WSL's (`\\wsl.localhost\<distro>\...`; `\\wsl$` is
+  parsed too).
+- **Item ID lists** are gala's own (Windows' formats are not
+  documented): one SHITEMID per level, `cb`, `b"gala"`, a kind (a root's
+  CLSID, a drive letter, a file-system item's attributes and name, a
+  distribution's name), a zero `cb` at the end; from the process heap
+  (CoTaskMemAlloc's). An earlier build's one-item lists (a whole path)
+  are still read. The byte-level functions (ILClone, ILCloneFirst,
+  ILCombine, ILFindLastID, ILRemoveLastID, ILIsEqual, ILGetNext,
+  ILIsParent, ILFindChild, ILAppendID, ILGetSize, ILFree) work on any
+  list; their ordinals are Wine's shell32.spec's (`build.rs`).
+- **Parsing** (ParseDisplayName, SHParseDisplayName,
+  SHCreateItemFromParsingName, ILCreateFromPathW): `::{CLSID}` (and
+  below it `\`-separated names), `X:\...`, `\\wsl.localhost\...`; every
+  level is checked (FindFirstFileW: each name as the file system stores
+  it, its attributes); a missing one is
+  HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), a missing directory on the
+  way ERROR_PATH_NOT_FOUND's, anything else E_INVALIDARG.
+  SHSimpleIDListFromPath does not look.
+- **Names**: SIGDN_NORMALDISPLAY (the display name; file name
+  extensions shown, as with "File name extensions" on),
+  PARENTRELATIVEPARSING (the name in its folder; `C:\` for a drive,
+  `::{CLSID}` for a root), DESKTOPABSOLUTEPARSING (the path, else
+  `::{CLSID}`; the desktop's is its directory), FILESYSPATH (none for a
+  virtual folder: E_INVALIDARG), the editing and relative forms as the
+  display name; IShellFolder::GetDisplayNameOf maps SHGDN flags to
+  those and answers STRRET_WSTR.
+- **Objects**: a folder (IShellFolder, IPersistFolder2: ParseDisplayName
+  relative to it, EnumObjects with SHCONTF_FOLDERS/NONFOLDERS/
+  INCLUDEHIDDEN, BindToObject, CompareIDs (roots in order, drives by
+  letter, folders first, names as StrCmpLogicalW), GetAttributesOf
+  (SFGAO_* from the item: FOLDER, FILESYSTEM, STREAM, HASSUBFOLDER,
+  HIDDEN, READONLY, LINK, the CAN* bits), GetDisplayNameOf, SetNameOf
+  (MoveFileW)); an item (IShellItem, IPersistIDList: BindToHandler with
+  BHID_SFObject and BHID_EnumItems, GetParent (MK_E_NOOBJECT for the
+  desktop), GetDisplayName, GetAttributes (S_FALSE when not every bit
+  asked is set), Compare); enumerators (IEnumIDList, IEnumShellItems).
+  Functions: SHGetDesktopFolder, SHCreateItemFromIDList,
+  SHCreateShellItem, SHCreateItemWithParent, SHGetIDListFromObject,
+  SHGetNameFromIDList, SHBindToParent, SHGetKnownFolderIDList and
+  SHGetKnownFolderItem (FOLDERID_Desktop: the empty list,
+  FOLDERID_ComputerFolder: This PC, the rest their paths'),
+  SHGetFolderLocation and SHGetSpecialFolderLocation (CSIDL_DESKTOP the
+  empty list, CSIDL_DRIVES This PC; a profile folder gala's profile
+  lacks still has its list, as SHGetFolderPathW gives its path),
+  SHGetPathFromIDListW.
+- **Opening a file** (ShellExecuteW/ExW, `shellops.rs`): a document runs
+  its association's command (AssocQueryStringW's ASSOCSTR_COMMAND for
+  the verb, "open" by default, from the user's classes then HKCR; `%1`
+  and `%L` the document, `%*` the parameters); an extension no class
+  claims would run Windows' OpenWith.exe, which gala has not:
+  SE_ERR_NOASSOC, ledgered `shell32.dll!ShellExecute(no association)`.
+  When the command's program is `wsl.exe` and the document is in a
+  distribution (`\\wsl.localhost\<d>\...`), `%1` is its Linux path: an
+  association can run a Linux program on a Linux file.
+- **Limits** (each ledgered where met): BindToStorage,
+  CreateViewObject and GetUIObjectOf (context menus, data objects,
+  icons, IShellView), handlers other than the folder and its items
+  (`shell32.dll!IShellItem::BindToHandler`), IShellItem2 and property
+  stores, the Recycle Bin, network locations and libraries; the desktop
+  does not list the files of the user's Desktop directory;
+  SHBrowseForFolderW and IFileDialog do not use it yet (step 2's rest).
+
+### The program (step 2)
+
+- **`explorer.exe`** (`user/explorer`), gala's own Windows program on
+  gala's user32, gdi32 and shell32, where Windows keeps it
+  (`%SystemRoot%\explorer.exe`); the shell process stays the desktop's
+  taskbar and start menu. One window per start (class `CabinetWClass`,
+  at (100, 40), 1080 x 700), titled by its folder; an argument names
+  the first folder (`explorer.exe <folder>`), else This PC. Everything
+  it shows comes from the namespace (SHCreateItemFromParsingName,
+  BHID_EnumItems, GetDisplayName, GetAttributes; sizes and times from
+  GetFileAttributesExW of FILESYSPATH); hidden items are not shown.
+- **Navigation pane**: This PC and its drives, Linux and its
+  distributions, and below the current folder's drive or distribution
+  the folders down to it. **Address bar**: the names from the root
+  (`This PC > Local Disk (C:) > Windows`); a click (or Ctrl+L) edits it
+  as a path or parsing name (typing replaces it; "This PC" and "Linux"
+  are understood), Enter goes there, a file is opened. Back
+  (Backspace, Alt+Left), Up (Alt+Up). **Views**: Details (Name, Date
+  modified, Type, Size; a header's click sorts by it, again the other
+  way; folders stay first; sizes in KB rounded up; times as en-US
+  Windows writes them, in UTC) and Icons (Ctrl+Shift+6, Ctrl+Shift+2,
+  or the buttons). **Search**: typing outside the address bar filters
+  the folder's items by name (Esc clears it).
+- **Opening**: Enter or a double click (the window class has
+  CS_DBLCLKS; two clicks on one row within 600 ms count too) opens a
+  folder in place and a file through ShellExecuteW.
+- **Operations** (step 3's start): Copy (Ctrl+C: the file as CF_HDROP on
+  the clipboard), Cut (Ctrl+X: as Copy, and the paste of exactly those
+  files moves them, FO_MOVE), Paste (Ctrl+V: SHFileOperationW's FO_COPY
+  into the folder), Rename (F2: the name typed, Enter; MoveFileW), Delete (SHFileOperationW's FO_DELETE: for good, as gala has
+  no Recycle Bin), New folder (Ctrl+Shift+N: "New folder", "New folder
+  (2)", ...), Open in Terminal (cmd.exe in a Windows folder; `wsl -d
+  <distro> -- cd <dir> && exec /bin/sh -l` in a Linux one, in a new
+  console), Properties (name, type, location, size, time; for a Linux
+  file its distribution, Linux path, permissions as `ls -l` writes them
+  and its uid and gid from FileStatLxInformation); a right click shows
+  them as a menu.
+- **Live updates**: the folder shown is watched with
+  ReadDirectoryChangesW (overlapped, its event in the message loop's
+  MsgWaitForMultipleObjects); a change made by anyone (a Windows
+  program, a Linux process in the distribution: both reach the one file
+  system's change journal, `nt::notify`) re-reads the folder.
+- **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
+  Explorer's PROGRAMS entry as the start menu's tile does (logged
+  `desktop: Win+E: File Explorer`); no program sees the E.
+- **Observability**: each navigation, open, operation, change and
+  Properties is a line on its standard output (`explorer: navigate
+  <parsing name> (<n> items)`, `explorer: open <path>: started`,
+  `explorer: copy ...`, `explorer: paste <n> item(s) into <dir>: ok`,
+  `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
+  rename ...`, `explorer: properties ...`, `explorer: closed`): a
+  program the desktop starts writes to the
+  serial line. What it cannot do goes to the ledger
+  (`explorer.exe!<what>`).
+- **Limits**: one selected item at a time; no drag and drop, progress
+  or conflict dialogs (SHFileOperationW proceeds without them: step 3;
+  Cut is not in the scenario yet); copies across file systems take the mode
+  WSL's server gives a new file (0644), not the source's; no
+  thumbnails (step 4); search is of the folder shown, not below it;
+  SHBrowseForFolderW and IFileDialog are not this window yet.
 
 ## Plan: graphics and GPU
 

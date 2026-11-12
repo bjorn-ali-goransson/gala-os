@@ -28,6 +28,9 @@ const SLOTS: u16 = 32;
 pub static RX_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static TX_FULL: AtomicU64 = AtomicU64::new(0);
+/// Ethernet bytes received and sent (the task manager's network graph).
+pub static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TX_BYTES: AtomicU64 = AtomicU64::new(0);
 /// `netreset=<n>`: the device is reset under the driver after the n-th
 /// frame sent (the driver's recovery test; 0: never).
 pub static RESET_AT: AtomicU64 = AtomicU64::new(0);
@@ -153,6 +156,7 @@ impl phy::TxToken for TxToken<'_> {
         if sent {
             net.dev.notify(TX);
             let n = TX_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            TX_BYTES.fetch_add(len as u64, Ordering::Relaxed);
             if RESET_AT.load(Ordering::Relaxed) == n {
                 net.dev.reset_now();
             }
@@ -177,6 +181,7 @@ impl phy::Device for VirtioNet {
         rx.post(slot, SLOT);
         self.dev.notify(RX);
         RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+        RX_BYTES.fetch_add(token.len as u64, Ordering::Relaxed);
         Some((token, TxToken(self)))
     }
 

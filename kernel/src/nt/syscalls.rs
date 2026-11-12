@@ -188,6 +188,9 @@ pub const GALA_SERVICE_DISPATCH: u32 = 0x7fd8;
 pub const GALA_LX_NODE: u32 = 0x7fe0;
 pub const GALA_LX_SPAWN: u32 = 0x7fe1;
 pub const GALA_LX_DISTRO: u32 = 0x7fe2;
+/// The task manager's data (gala's own; nt::tasks): every process of
+/// both personalities, the machine's load, End task for Linux ones.
+pub const GALA_TASKS: u32 = 0x7fe8;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -493,6 +496,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_LX_NODE, "GalaLxNode", 3, wsl_calls::gala_lx_node),
     (GALA_LX_SPAWN, "GalaLxSpawn", 3, wsl_calls::gala_lx_spawn),
     (GALA_LX_DISTRO, "GalaLxDistro", 5, wsl_calls::gala_lx_distro),
+    (GALA_TASKS, "GalaTasks", 5, gala_tasks),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1215,6 +1219,23 @@ fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     let object = tri!(entry.require(PROCESS_TERMINATE));
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if p.id != call.process.id && p.exit_status().is_none() {
+        // Who ended whom (Task Manager's End task, `gala kill`, a job's
+        // owner): the ended process's own exit line does not say.
+        crate::info!(
+            "process: pid {} ({}) terminates pid {} ({}) with status {:#010x}",
+            call.process.id,
+            call.process.name,
+            p.id,
+            p.name,
+            status.0
+        );
+        crate::events::emit(
+            crate::events::Category::Process,
+            "process terminate",
+            format_args!(r#""by":{},"pid":{},"status":{}"#, call.process.id, p.id, status.0),
+        );
+    }
     // Includes the caller if it belongs to `p`; it exits on its way out.
     process::terminate(p, status, true);
     NtStatus::SUCCESS
@@ -4198,6 +4219,9 @@ const PROCESS_IMAGE_FILE_NAME_WIN32: u64 = 43;
 
 /// SystemProcessInformation for a buffer at user address `buffer`: the
 /// idle process (id 0), then each running process with its threads.
+/// Windows' contents only: a Linux process (a WSL distribution's, the
+/// Linux personality's) is no Windows process, and Windows programs see
+/// it nowhere (GalaTasks lists both: `nt::tasks`).
 fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     use super::sysinfo::{ProcessRecord, ThreadRecord, push_process};
     let no_memory = |_| NtStatus::NO_MEMORY;
@@ -4205,6 +4229,9 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     let idle = ProcessRecord { id: 0, parent_id: 0, create_time: 0, handle_count: 0, name: "" };
     push_process(&mut out, &idle, &[], buffer).map_err(no_memory)?;
     for p in process::running().map_err(no_memory)? {
+        if p.personality != platform::Personality::Nt {
+            continue;
+        }
         let mut threads = Vec::new();
         for t in p.threads().map_err(no_memory)? {
             if let ObjectBody::Thread(t) = &t.body {
@@ -4227,6 +4254,48 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
         push_process(&mut out, &record, &threads, buffer).map_err(no_memory)?;
     }
     Ok(out)
+}
+
+/// GalaTasks(op, arg, buffer, length, *returned) (`nt::tasks`): op 0
+/// lists every process of both personalities, op 1 the machine's load
+/// (each into `buffer`, `*returned` the size it takes:
+/// STATUS_BUFFER_TOO_SMALL when it does not fit, as the list changes
+/// between calls); op 2 signals Linux process `arg` with signal
+/// `length`; op 3 ends the WSL distribution named by the
+/// UTF-8 `buffer` (`*returned` how many processes ended).
+fn gala_tasks(call: &mut Call<'_>) -> NtStatus {
+    let (op, arg, buffer, length, returned) =
+        (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32, arg!(call, 4));
+    let data = match op {
+        0 => tri!(super::tasks::processes(&call.process)),
+        1 => tri!(super::tasks::perf()),
+        2 => return super::tasks::signal(&call.process, arg, length),
+        3 => {
+            let mut name = [0u8; 256];
+            let Some(name) = name.get_mut(..length as usize) else {
+                return NtStatus::INVALID_PARAMETER;
+            };
+            if call.process.read(buffer, name).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let n = tri!(super::tasks::end_distribution(&call.process, name));
+            if returned != 0 {
+                tri!(call.write_u32(returned, n as u32));
+            }
+            return NtStatus::SUCCESS;
+        }
+        _ => return NtStatus::INVALID_PARAMETER,
+    };
+    if returned != 0 {
+        tri!(call.write_u32(returned, data.len() as u32));
+    }
+    if (length as usize) < data.len() {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    match call.process.write(buffer, &data) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
 }
 
 /// NtQuerySystemInformation(Class, Buffer, Length, *ReturnLength)
@@ -4942,7 +5011,7 @@ impl Call<'_> {
                     if !f.directory {
                         return Err(NtStatus::INVALID_PARAMETER);
                     }
-                    return Ok(file::FilePath { start: f.node, name });
+                    return Ok(file::FilePath { start: f.node, name, linux: None });
                 }
                 let object = entry.require(DIRECTORY_TRAVERSE)?.clone();
                 if object.as_directory().is_none() {
@@ -4959,10 +5028,32 @@ impl Call<'_> {
         // OBJ_CASE_INSENSITIVE; the object directory part follows the flag.
         let (device, rest) =
             namespace::lookup_parse(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        if matches!(device.body, ObjectBody::MupDevice) {
+            // `\\wsl.localhost\<distro>\...` (nt::wslfs), for the caller's user.
+            return super::wslfs::share_path(&self.user_sid_string()?, &rest);
+        }
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest })
+        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None })
+    }
+
+    /// The string form of the caller's token user's SID (`S-1-5-21-...`):
+    /// the thread's impersonation token's, else the process's.
+    fn user_sid_string(&self) -> Result<Vec<u8>, NtStatus> {
+        let impersonation = super::thread::current().and_then(|me| match &me.body {
+            ObjectBody::Thread(t) => t.impersonation.lock().clone(),
+            _ => None,
+        });
+        let token = impersonation.unwrap_or_else(|| self.process.token.lock().clone());
+        let ObjectBody::Token(t) = &token.body else { return Err(NtStatus::NO_TOKEN) };
+        let sid = t.data.lock().user.sid;
+        let mut binary = [0u8; 68];
+        sid.write(&mut binary);
+        let mut out = Vec::new();
+        super::tasks::sid_string(&binary[..sid.len()], &mut out)
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(out)
     }
 
     /// Whether OBJECT_ATTRIBUTES name something below `\Device\Afd`.
@@ -6680,6 +6771,9 @@ const FILE_DISPOSITION_INFORMATION: u64 = 13;
 /// FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX { Flags }.
 const FILE_DISPOSITION_INFORMATION_EX: u64 = 64;
 const FILE_POSITION_INFORMATION: u64 = 14;
+/// FileStatLxInformation (70): FILE_STAT_LX_INFORMATION, a file's Linux
+/// metadata as WSL's file systems give it (nt::file::stat_lx_information).
+const FILE_STAT_LX_INFORMATION: u64 = 70;
 const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_COMPLETION_INFORMATION: u64 = 30;
 /// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
@@ -6790,6 +6884,21 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     }
     if class == FILE_PROCESS_IDS_USING_FILE_INFORMATION {
         return return_processes_using(call, file.node, arg!(call, 0), buffer, length, iosb);
+    }
+    if class == FILE_STAT_LX_INFORMATION {
+        if entry.access & file::FILE_READ_ATTRIBUTES == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let ids = crate::lx::identity::of_process(&call.process);
+        let out = tri!(file::stat_lx_information(file.node, entry.access, (ids.uid, ids.gid)));
+        if length < out.len() {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &out).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, out.len() as u64));
+        return NtStatus::SUCCESS;
     }
     let mut out = [0u8; 40];
     let size = match class {

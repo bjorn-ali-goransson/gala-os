@@ -92,6 +92,10 @@ impl NtStatus {
     pub const IO_REPARSE_DATA_INVALID: NtStatus = NtStatus(0xc000_0278);
     pub const NOT_A_REPARSE_POINT: NtStatus = NtStatus(0xc000_0275);
     pub const REPARSE_POINT_NOT_RESOLVED: NtStatus = NtStatus(0xc000_0280);
+    /// A UNC path's server is not reachable (ERROR_BAD_NETPATH).
+    pub const BAD_NETWORK_PATH: NtStatus = NtStatus(0xc000_00be);
+    /// A UNC path's share does not exist (ERROR_BAD_NET_NAME).
+    pub const BAD_NETWORK_NAME: NtStatus = NtStatus(0xc000_00cc);
     /// FSCTL_GET_REPARSE_POINT without an output buffer.
     pub const INVALID_USER_BUFFER: NtStatus = NtStatus(0xc000_00e8);
     pub const MAPPED_FILE_SIZE_ZERO: NtStatus = NtStatus(0xc000_011e);

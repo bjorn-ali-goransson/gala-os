@@ -12,4 +12,5 @@ bench = false
 
 [dependencies]
 galapkg = { path = "../galapkg" }
+taskmgr = { path = "../taskmgr" }
 gala_heap = { path = "../gala_heap" }

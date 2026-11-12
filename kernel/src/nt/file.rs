@@ -138,6 +138,13 @@ pub fn init() -> Result<(), NtStatus> {
     namespace::create(None, &wide("\\Device\\Null")?, null, false, false)?;
     let link = namespace::new_symbolic_link(&wide("\\Device\\Null")?)?;
     namespace::create(None, &wide("\\??\\NUL")?, link, false, false)?;
+    // UNC paths (`\??\UNC\server\share`) reach the multiple UNC
+    // provider's device; nt::wslfs serves WSL's servers below it.
+    let mup =
+        KObject::with_permanence(ObjectBody::MupDevice, true).map_err(|_| NtStatus::NO_MEMORY)?;
+    namespace::create(None, &wide(super::wslfs::MUP_DEVICE)?, mup, false, false)?;
+    let link = namespace::new_symbolic_link(&wide(super::wslfs::MUP_DEVICE)?)?;
+    namespace::create(None, &wide(super::wslfs::UNC_LINK)?, link, false, false)?;
     Ok(())
 }
 
@@ -179,7 +186,7 @@ pub fn reopen(
 ) -> Result<ObjectRef, NtStatus> {
     let mut name = Vec::new();
     name.try_extend_from_slice(path).map_err(|_| NtStatus::NO_MEMORY)?;
-    let path = FilePath { start: ramfs::ROOT, name };
+    let path = FilePath { start: ramfs::ROOT, name, linux: None };
     let created = create(&path, granted, share, FILE_OPEN, options)?;
     if let ObjectBody::File(f) = &created.object.body {
         *f.position.lock() = position;
@@ -562,6 +569,10 @@ impl Drop for FileObject {
 pub struct FilePath {
     pub start: NodeId,
     pub name: Vec<u16>,
+    /// A path through `\\wsl.localhost\<distro>` (nt::wslfs): that
+    /// distribution's root, inside which `name` (a path below it) is
+    /// walked as Linux walks it (`resolve_links`); None for NT paths.
+    pub linux: Option<NodeId>,
 }
 
 /// Splits a `\\a\\b\\c` path (relative to the volume root) or an `a\\b`
@@ -613,6 +624,10 @@ const SYMLINK_FLAG_RELATIVE: u32 = 1;
 /// A reparse point of another tag on the way, or at the end when followed,
 /// is STATUS_IO_REPARSE_TAG_NOT_HANDLED (no filter handles it here).
 pub fn resolve_links(path: FilePath, follow_final: bool) -> Result<FilePath, NtStatus> {
+    if path.linux.is_some() {
+        // A distribution's tree: its Linux links, inside it.
+        return super::wslfs::resolve(&path, follow_final);
+    }
     let mut path = path;
     for _ in 0..MAX_REPARSE {
         match follow_once(&path, follow_final)? {
@@ -680,7 +695,7 @@ fn follow_once(path: &FilePath, follow_final: bool) -> Result<Option<FilePath>, 
             }
         }
         name.try_extend_from_slice(&rest).map_err(|_| NtStatus::NO_MEMORY)?;
-        return Ok(Some(FilePath { start: ramfs::ROOT, name }));
+        return Ok(Some(FilePath { start: ramfs::ROOT, name, linux: None }));
     }
     // An NT path (`\??\C:\...`): through the object namespace to the volume.
     let mut full = target;
@@ -697,7 +712,7 @@ fn follow_once(path: &FilePath, follow_final: bool) -> Result<Option<FilePath>, 
         super::ledger::record("reparse point", "target not on the volume", 0);
         return Err(NtStatus::OBJECT_PATH_NOT_FOUND);
     }
-    Ok(Some(FilePath { start: ramfs::ROOT, name }))
+    Ok(Some(FilePath { start: ramfs::ROOT, name, linux: None }))
 }
 
 /// A symbolic link's or junction's substitute name and whether it is
@@ -829,6 +844,13 @@ pub fn create(
                 let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
                 let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
                 let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
+                // In a Linux tree (a WSL distribution's: its directories
+                // have POSIX modes), a file Windows makes gets the mode
+                // WSL's server gives one, 0644 (a directory 0755), so
+                // Linux sees it as it would a file it made.
+                if fs.node(parent).is_some_and(|p| p.mode.is_some()) {
+                    fs.set_mode(node, if want_dir { 0o755 } else { 0o644 }).map_err(fs_status)?;
+                }
                 fs.open(node, access, share).map_err(fs_status)?;
                 Ok((node, FILE_CREATED))
             }
@@ -914,6 +936,46 @@ pub fn standard_information(node: NodeId) -> Result<[u8; 24], NtStatus> {
         b[21] = u8::from(n.is_dir());
         Ok(b)
     })
+}
+
+/// FILE_STAT_LX_INFORMATION (96 bytes, learn.microsoft.com's layout) for
+/// `node` opened with `access` by a caller whose Linux ids are `me`:
+/// FileId, the four times, AllocationSize, EndOfFile, FileAttributes,
+/// ReparseTag, NumberOfLinks, EffectiveAccess, LxFlags, LxUid, LxGid,
+/// LxMode, LxDeviceIdMajor and Minor. The Lx fields are a Linux node's
+/// (a distribution's file: `lx::file::lx_metadata`); an NT file has none
+/// (LxFlags 0), as an NTFS file without WSL's metadata.
+pub fn stat_lx_information(
+    node: NodeId,
+    access: u32,
+    me: (u32, u32),
+) -> Result<[u8; 96], NtStatus> {
+    const LX_FILE_METADATA_HAS_UID: u32 = 0x1;
+    const LX_FILE_METADATA_HAS_GID: u32 = 0x2;
+    const LX_FILE_METADATA_HAS_MODE: u32 = 0x4;
+    const LX_FILE_CASE_SENSITIVE_DIR: u32 = 0x10;
+    let basic = basic_information(node)?;
+    let standard = standard_information(node)?;
+    let (tag, case_sensitive) = with_fs(|fs| {
+        fs.node(node).map_or((0, false), |n| (n.reparse_tag(), n.is_dir() && n.case_sensitive))
+    });
+    let mut b = [0u8; 96];
+    b[0..8].copy_from_slice(&index_number(node).to_le_bytes());
+    b[8..40].copy_from_slice(&basic[0..32]);
+    b[40..56].copy_from_slice(&standard[0..16]);
+    b[56..60].copy_from_slice(&basic[32..36]);
+    b[60..64].copy_from_slice(&tag.to_le_bytes());
+    b[64..68].copy_from_slice(&standard[16..20]);
+    b[68..72].copy_from_slice(&access.to_le_bytes());
+    let mut flags = if case_sensitive { LX_FILE_CASE_SENSITIVE_DIR } else { 0 };
+    if let Some((mode, uid, gid)) = crate::lx::file::lx_metadata(node, me) {
+        flags |= LX_FILE_METADATA_HAS_UID | LX_FILE_METADATA_HAS_GID | LX_FILE_METADATA_HAS_MODE;
+        b[76..80].copy_from_slice(&uid.to_le_bytes());
+        b[80..84].copy_from_slice(&gid.to_le_bytes());
+        b[84..88].copy_from_slice(&mode.to_le_bytes());
+    }
+    b[72..76].copy_from_slice(&flags.to_le_bytes());
+    Ok(b)
 }
 
 /// Where a directory enumeration stands.
