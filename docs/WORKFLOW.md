@@ -3223,9 +3223,12 @@ backtrace, and the program's own symptom (a status, a hang) follows:
   long run may be the machine out of memory: a user page fault that
   finds no free frame becomes an access violation (the commit charge
   covers private memory only; mapped and image pages and the kernel heap
-  are not charged). Look for "vm: out of memory" in the log and the free
-  frames on the `stats:` line; give the scenario more memory (`qemu()`
-  in xtask).
+  are not charged). Look for "vm: out of memory" in the log (it names
+  the frames by use and the heap) and the free frames on the `stats:`
+  line; `persist: free memory stays low` (again each time free memory
+  halves) names the files' pages and the scans letting them go; give
+  the scenario more memory (`qemu()` in xtask) once what holds it is
+  known.
 
 ### Deterministic simulation (reproducing a race from its seed)
 

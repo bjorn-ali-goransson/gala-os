@@ -830,19 +830,26 @@ fn evict() {
     // itself.
     let (after, _) = platform::frame_stats();
     if after < low {
-        if !SHORT.swap(true, Ordering::Relaxed) {
+        // Again when free memory has halved since the last warning: a
+        // machine running out shows what holds the memory near the end.
+        let last = SHORT_FREE.load(Ordering::Relaxed);
+        if !SHORT.swap(true, Ordering::Relaxed) || after < last / 2 {
+            SHORT_FREE.store(after.max(1), Ordering::Relaxed);
             let c = file::with_fs(|fs| fs.cache_stats());
             let heap = crate::mm::heap::stats();
             warn!(
                 "persist: free memory stays low after letting {gone} pages go: {after} of {total} \
                  frames free (want {low}); files' pages in memory {} ({} dirty, {} never \
-                 written, {} of mapped files), queued dirty {}; heap {} KiB in use, \
+                 written, {} of mapped files), queued dirty {}; {} scans letting pages go, {} \
+                 skipped after a futile one; heap {} KiB in use, \
                  {} slab and {} large pages; frames in use by {}",
                 c.resident,
                 c.dirty,
                 c.unstored,
                 c.mapped,
                 c.queued_dirty,
+                c.scans,
+                c.skipped,
                 heap.in_use / 1024,
                 heap.slab_pages,
                 heap.large_pages,
@@ -866,6 +873,8 @@ fn evict() {
 /// `evict` has warned that it could not bring free memory back (cleared
 /// once it is back).
 static SHORT: AtomicBool = AtomicBool::new(false);
+/// Free frames at its last warning.
+static SHORT_FREE: AtomicU64 = AtomicU64::new(0);
 
 /// Warns once each time more dirty pages found no cluster, or more
 /// clusters were lost (see `summary`).

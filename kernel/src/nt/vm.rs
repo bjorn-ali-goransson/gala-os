@@ -206,9 +206,15 @@ fn out_of_memory(process: &Process, addr: u64) {
     let (free, total) = platform::frame_stats();
     super::ledger::record("user page fault", "out of memory", free);
     if !process.oom_logged.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        // What holds the frames (atomics only: a fault may hold locks).
+        let heap = crate::mm::heap::stats();
         crate::warn!(
-            "vm: out of memory in pid {} at {addr:#x} ({free} of {total} frames free)",
-            process.id
+            "vm: out of memory in pid {} at {addr:#x} ({free} of {total} frames free; \
+             frames in use by {}; heap {} KiB in use, peak {} KiB)",
+            process.id,
+            platform::FrameUses(platform::frame_uses()),
+            heap.in_use / 1024,
+            heap.peak_in_use / 1024,
         );
     }
 }

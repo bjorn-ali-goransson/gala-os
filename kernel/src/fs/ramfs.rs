@@ -764,7 +764,24 @@ struct Area {
     hand: (NodeId, usize),
     /// Dirty pages left without a cluster (the area was full at a sync).
     pub unbacked: u64,
+    /// The last `evict` went round every file's pages and fell short:
+    /// nothing more could leave. The next one scans only once
+    /// EVICT_RESCAN pages could have become able to leave since
+    /// (`candidates`), so a machine whose memory is held by other uses
+    /// does not walk the whole tree at every page read.
+    futile: bool,
+    /// Pages that became clean and stored in memory, or lost a view,
+    /// since the last scan.
+    candidates: usize,
+    /// Scans `evict` made, and calls it skipped as futile.
+    scans: u64,
+    skipped: u64,
 }
+
+/// See `Area::futile`.
+const EVICT_RESCAN: usize = 256;
+/// Node slots below which a futile round is cheap and not skipped after.
+const EVICT_CHEAP: usize = 4096;
 
 /// A page to read from the disk (`RamFs::take_page_in`): cluster
 /// `cluster` of the data area, for page `index` of `node`.
@@ -791,6 +808,9 @@ pub struct CacheStats {
     pub mapped: u64,
     /// Entries of the dirty list.
     pub queued_dirty: u64,
+    /// Scans that let pages go, and calls skipped after a futile one.
+    pub scans: u64,
+    pub skipped: u64,
 }
 
 /// A dirty page to write to its cluster (`RamFs::writeback`; its copy is
@@ -2038,6 +2058,10 @@ impl RamFs {
         if writable {
             self.dirty_resident_in(id, pages.0..pages.1);
         }
+        // Its pages may leave now.
+        if let Some(a) = self.area.as_mut() {
+            a.candidates = a.candidates.saturating_add(pages.1.saturating_sub(pages.0));
+        }
     }
 
     /// Marks the pages of disk-backed `id` in `range` that are in memory
@@ -2750,6 +2774,9 @@ impl RamFs {
         {
             slot.recent = true;
         }
+        if let Some(a) = self.area.as_mut() {
+            a.candidates += 1;
+        }
     }
 
     /// Gives up clusters `freed` of `id` (truncated pages): free once the
@@ -2872,6 +2899,10 @@ impl RamFs {
             dirty_lost,
             hand: (0, 0),
             unbacked: 0,
+            futile: false,
+            candidates: 0,
+            scans: 0,
+            skipped: 0,
         });
         Ok((used, dropped))
     }
@@ -2973,6 +3004,9 @@ impl RamFs {
                 slot.recent = true;
             }
         }
+        if let Some(a) = self.area.as_mut() {
+            a.candidates += out.len();
+        }
         *budget > 0 || self.area.as_ref().is_some_and(|a| a.dirty_lost)
     }
 
@@ -3056,6 +3090,8 @@ impl RamFs {
         let mut st = CacheStats::default();
         let Some(area) = self.area.as_ref() else { return st };
         st.queued_dirty = area.dirty.len() as u64;
+        st.scans = area.scans;
+        st.skipped = area.skipped;
         for n in self.nodes.iter().flatten() {
             let Kind::File(Data::Paged { pages, disk, .. }) = &n.kind else { continue };
             for (i, p) in pages.iter().enumerate() {
@@ -3081,9 +3117,19 @@ impl RamFs {
     /// (pages of files a view shows stay). The hand goes round the
     /// files' pages from where it stopped: a page written or read back
     /// since it last passed gets a second chance (its mark cleared), so a
-    /// call goes round at most twice. Allocates nothing. How many went.
+    /// call goes round at most twice. A call that went round and fell
+    /// short leaves the next ones skipped (`Area::futile`) until
+    /// EVICT_RESCAN pages could have become able to leave: its work is in
+    /// proportion to what can leave, not to the tree. Allocates nothing.
+    /// How many went.
     pub fn evict(&mut self, max: usize) -> usize {
-        let Some(area) = self.area.as_ref() else { return 0 };
+        let Some(area) = self.area.as_mut() else { return 0 };
+        if area.futile && area.candidates < EVICT_RESCAN {
+            area.skipped += 1;
+            return 0;
+        }
+        area.scans += 1;
+        area.candidates = 0;
         let (mut id, mut i) = area.hand;
         let count = self.nodes.len();
         if count == 0 {
@@ -3132,6 +3178,9 @@ impl RamFs {
         }
         if let Some(a) = self.area.as_mut() {
             a.hand = (id, i);
+            // Round everything (twice) and still short: nothing else can
+            // go. (A small tree's rounds are cheap enough to repeat.)
+            a.futile = gone < max && count >= EVICT_CHEAP;
         }
         gone
     }
@@ -3294,6 +3343,43 @@ mod tests {
         assert!(f.dirty_queued() >= 3);
         sync(&mut f, &mut disk);
         assert_eq!(f.dirty_queued(), 0);
+    }
+
+    #[test]
+    fn a_futile_eviction_is_not_repeated_until_pages_could_leave() {
+        // Memory held by other uses: no file page can leave. Page reads
+        // ask to let pages go each time; after one futile round the tree
+        // is not walked again until enough pages could leave.
+        let (mut f, mut disk) = disk_fs(512);
+        // A tree large enough for a round to be costly (Office's has tens
+        // of thousands of files).
+        for k in 0..EVICT_CHEAP {
+            f.create(ROOT, &w(&alloc::format!("e{k}")), false, 1).unwrap();
+        }
+        let id = f.create(ROOT, &w("f"), false, 1).unwrap();
+        f.write(id, 0, &[3; 4 * PAGE], 2).unwrap();
+        // Dirty pages cannot leave.
+        assert_eq!(f.evict(10), 0);
+        assert_eq!(f.cache_stats().scans, 1);
+        for _ in 0..100 {
+            assert_eq!(f.evict(10), 0);
+        }
+        let st = f.cache_stats();
+        assert_eq!((st.scans, st.skipped), (1, 100));
+        // A write-back makes them clean but fewer than EVICT_RESCAN:
+        // still skipped.
+        sync(&mut f, &mut disk);
+        assert_eq!(f.evict(10), 0);
+        assert_eq!(f.cache_stats().scans, 1);
+        // Enough candidates: a scan, and the pages go.
+        let big = f.create(ROOT, &w("big"), false, 1).unwrap();
+        f.write(big, 0, &vec![4; EVICT_RESCAN * PAGE], 3).unwrap();
+        sync(&mut f, &mut disk);
+        assert_eq!(f.evict(10), 10);
+        assert_eq!(f.cache_stats().scans, 2);
+        // A scan that is not short leaves the next one free to run.
+        assert_eq!(f.evict(1), 1);
+        assert_eq!(f.cache_stats().scans, 3);
     }
 
     #[test]

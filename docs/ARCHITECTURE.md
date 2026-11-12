@@ -6233,7 +6233,15 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   clock hand (`RamFs::evict`) goes round the files' pages from where it
   stopped; a page written or read back since it last passed (`recent`)
   gets a second chance. It needs no memory (no queue to grow: a page
-  whose entry could not be queued would never have left). A call
+  whose entry could not be queued would never have left). **Its work
+  is in proportion to what can leave**: a call that went round a large
+  tree (4096 node slots or more) and fell short marks the cache futile,
+  and later calls return at once until 256 pages could have become able
+  to leave (written back, read back, a view ended): while other uses
+  hold the memory, a page read would otherwise walk every one of
+  Office's tens of thousands of files (the scans and skips are on the
+  `persist: free memory stays low` line; host test
+  `a_futile_eviction_is_not_repeated_until_pages_could_leave`). A call
   that needs a page on the disk only fails with `FsError::NotResident`
   and names it (`take_page_in`); `nt::file::with_pages` reads the
   cluster with the file system released and installs it (`fill`) only
