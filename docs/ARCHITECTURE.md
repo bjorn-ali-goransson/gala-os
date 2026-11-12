@@ -2335,6 +2335,32 @@ SECURITY.md phase S2; rules in `kernel/src/nt/security.rs`, services in
   RegCreateKeyEx's SECURITY_ATTRIBUTES; kernel32 passes
   SECURITY_ATTRIBUTES' descriptor for CreateFileW, CreateDirectoryW and
   the named-object functions.
+- **Private objects** (gala's services 0x7f28-0x7f29,
+  GalaNewSecurityObject and GalaSetSecurityObject, behind advapi32's
+  CreatePrivateObjectSecurity* and SetPrivateObjectSecurity*,
+  `private.rs`; `office_api_test`'s `offreg.rs`, kernel unit tests
+  `private_object_*`): Windows computes these in user mode; here
+  `security::new_private` and `set_private` apply the same inheritance
+  code as files and keys, chosen by the caller's SEF_* flags rather than
+  the object type: SEF_DACL/SACL_AUTO_INHERIT merge the creator's
+  explicit ACEs (first) with the parent's inheritable ones (marked
+  INHERITED_ACE; the ACL auto-inherited) unless the creator's ACL is
+  protected; without them the creator's ACL, else the inherited ACEs,
+  else the token's default DACL. A creator's (or modification's) ACE
+  with generic rights or CREATOR OWNER/GROUP becomes the mapped ACE plus
+  an inherit-only copy when it propagates. The owner and group come from
+  the creator, else the parent (SEF_DEFAULT_OWNER/GROUP_FROM_PARENT),
+  else the client token (a NULL token where one is needed:
+  STATUS_NO_TOKEN); the owner is checked against the token unless
+  SEF_AVOID_OWNER_CHECK (SEF_AVOID_PRIVILEGE_CHECK in Set, as
+  documented), a SACL needs SeSecurityPrivilege unless
+  SEF_AVOID_PRIVILEGE_CHECK. Set with automatic inheritance keeps the
+  object's inherited ACEs after the modification's explicit ones; a
+  protected modification drops INHERITED_ACE. The result is
+  self-relative in a process-heap block (DestroyPrivateObjectSecurity).
+  Object types (WithMultipleInheritance's GUIDs: object ACEs) are not
+  told apart (recorded); the mandatory-label and owner-restriction
+  flags are recorded (`SEF flags` ledger lines).
 - TODO: SetSecurityInfo of an unprotected DACL does not re-apply or
   propagate inheritance as Windows' advapi32 does; SACLs are kept but
   auditing does nothing.
@@ -2939,17 +2965,14 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   interrupt-time queries. MapUserPhysicalPagesScatter is kernel32's
   alone (absent from the spec too). Test: `kernel32_test` and
   `wow64_k32_test` (`export_split.rs`: presence read from each DLL's
-  export directory, absence as GetProcAddress NULL too). The address
-  waits are one source, `kernelbase/src/address_wait.rs`, built by two
-  DLLs: kernelbase exports it; kernel32 builds its own copy (`#[path]`,
-  not exported) for its SRW locks, condition variables and InitOnce.
-  Each copy has its own waiter list and keyed event, which is correct
-  because an address is always waited on and woken through the same
-  DLL (a kernel32 lock word only by kernel32's own code, a program's
-  address only through kernelbase's exports); that is the invariant
-  that keeps the two apart (neither DLL may export or forward the other's
-  copy). Calling kernelbase from kernel32 instead would make kernel32
-  import kernelbase, which it does not (below). A
+  export directory, absence as GetProcAddress NULL too). Every wait on a
+  word sleeps in ntdll (`testntdll/src/address_wait.rs`: RtlWaitOnAddress,
+  RtlWakeAddressSingle/All, one waiter list and keyed event per process):
+  kernelbase's WaitOnAddress calls it, ntdll's SRW locks and RtlRunOnce*
+  (`sync.rs`, which kernel32's SRW exports forward to and its InitOnce*
+  call) and kernel32's condition variables sleep there, so a word is
+  woken whichever DLL changed it (OffReg.dll takes its SRW lock and
+  one-time initialization from ntdll, programs from kernel32). A
   forwarder to a function gala lacks resolves to nothing: GetProcAddress
   is NULL and an import of it is a missing export in the ledger (under
   the API set's name), as an absent export would be; it works once the
@@ -3048,6 +3071,13 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   node's subtree height is kept in its first reserved byte, so a change
   rebalances along its path only. NumberGenericTableElements and the
   ordered-element cache are kept in the table.
+- **Bitmaps** (`bitmap.rs`, `office_api_test`): RTL_BITMAP's
+  initialize, set and clear (runs and all), check, the set and clear
+  counts and the next forward set or clear run; the bits past
+  SizeOfBitMap in the buffer's last ULONG are not part of it.
+- **SRW locks and one-time initialization** (`sync.rs`) and the address
+  waits they sleep on (`address_wait.rs`): kernel32 "Synchronization",
+  "API sets".
 - **RtlCaptureStackBackTrace** on x86 (`x86.rs`) walks the saved frame
   pointers inside the thread's stack (TEB32's limits); kernel32 forwards
   it on both architectures.
@@ -3075,8 +3105,10 @@ ntdll imports.
   multiple), semaphores, completion ports, waitable timers, SRW locks,
   condition variables, InitOnce and interlocked SLists. The lightweight
   ones are one word with no kernel object: a waiter spins 64 rounds,
-  then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
-  it changes; whoever changes it in a way waiters wait for wakes them
+  then sleeps on the word with ntdll's RtlWaitOnAddress until
+  it changes (the SRW locks and InitOnce are ntdll's: RtlAcquireSRWLock*
+  behind kernel32's forwarders, InitOnce* over RtlRunOnce*, with
+  INIT_ONCE_ASYNC; `office_api_test`'s `offreg.rs`); whoever changes it in a way waiters wait for wakes them
   (an SRW lock's release to free, the last shared release, InitOnce's
   end (its callback gets the caller's Context pointer as it is, NULL
   included, and what the callback left there is the data kept), a condition variable's wake: WakeConditionVariable wakes one
@@ -3367,8 +3399,8 @@ ntdll imports.
   HeapSetInformation/GetProcessHeaps/HeapLock, K32QueryWorkingSetEx
   (committed pages are valid), power requests, ProcessIdToSessionId,
   GetActive/MaximumProcessorCount, GetTempFileName, WaitOnAddress and
-  WakeByAddress* (`address_wait.rs`: waiters on a list, one keyed
-  event, a node's address as key), InitOnceBegin/Complete,
+  WakeByAddress* (over ntdll's `address_wait.rs`: waiters on a list,
+  one keyed event, a node's address as key), InitOnceBegin/Complete,
   FlsGetValue2/TlsGetValue2, GetSystemPowerStatus (AC, no battery), DPI
   and priority-boost queries, RegisterApplicationRestart (kept and read
   back by GetApplicationRestartSettings; no restart manager restarts
@@ -3498,7 +3530,11 @@ redistributable (the owner's decision).
   as the two runtimes do on Windows: a program that mixes them (a
   mingw DLL in an MSVC program) has two separate runtimes. What both
   need is written once, in msvcrt's modules; a UCRT-only helper in them
-  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`.
+  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`. The
+  bounds-checked string functions both export (`safe.rs`: the strcpy_s
+  family, memcpy_s/memmove_s, strtok_s/wcstok_s, strnlen/wcsnlen) call
+  the invalid-parameter handler in ucrtbase only; msvcrt.dll has none to
+  set and returns the error code.
 - **Start-up** (`ucrt/mod.rs`): what Visual C++'s static start-up code
   calls: `_configure_narrow_argv`/`_configure_wide_argv` and
   `_initialize_*_environment` (msvcrt's `__getmainargs`/`__wgetmainargs`

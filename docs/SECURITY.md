@@ -174,6 +174,13 @@ and on disk with `persist`), registry keys, processes, threads, tokens.
   ACCESS_SYSTEM_SECURITY for the SACL). advapi32's
   Get/SetFileSecurity, Get/SetSecurityInfo, Get/SetNamedSecurityInfo,
   Get/SetKernelObjectSecurity and Reg{Get,Set}KeySecurity use them.
+- Private objects (a resource manager's own: the offline registry
+  library's keys) get their descriptors from the same inheritance code
+  through gala's GalaNewSecurityObject and GalaSetSecurityObject
+  (0x7f28, 0x7f29; advapi32's CreatePrivateObjectSecurity* and
+  SetPrivateObjectSecurity*), the rules chosen by the caller's SEF_*
+  flags and checked against the client token it names (ARCHITECTURE
+  "Security descriptors").
 - The disk keeps descriptors with their objects: the file system stores
   one per file or directory, the registry log each key's. A format that
   stores files stores their descriptor from the start (shared ones once

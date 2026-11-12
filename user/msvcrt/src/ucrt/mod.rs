@@ -40,11 +40,7 @@ unsafe extern "system" {
     fn TerminateProcess(process: *mut c_void, code: u32) -> i32;
 }
 
-pub(crate) const EINVAL: i32 = 22;
-pub(crate) const ERANGE: i32 = 34;
-pub(crate) const STRUNCATE: i32 = 80;
-/// `_TRUNCATE` ((size_t)-1): copy what fits.
-pub(crate) const TRUNCATE: usize = usize::MAX;
+pub(crate) use crate::safe::{EINVAL, ERANGE, STRUNCATE, TRUNCATE};
 
 // ---- Arguments and environment ---------------------------------------------
 

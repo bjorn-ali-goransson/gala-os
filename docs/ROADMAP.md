@@ -1829,19 +1829,28 @@ need gala's.
      of 1314 right before the error). Now NT symbolic links and reparse
      points are there (ARCHITECTURE "Files", `reparse_test`), SYSTEM's
      SeCreateSymbolicLinkPrivilege enabled for the call.
-     Where the run ends now (about 2640 s): the client's next task,
-     STAGEREGISTRY (`C2R::VirtualRegistry::MergeAndStageRegistry`),
-     fails with `RegistrationFailure (Failed to load OffReg.dll ,
-     Error:0x7f)`, and setup.exe exits 17004 (0x426c). OffReg.dll (the
-     offline registry library) imports what gala lacks (the ledger's
-     missing exports at that time): ntdll's RtlRunOnceBeginInitialize,
-     RtlRunOnceComplete, RtlInitializeSRWLock,
-     RtlAcquireSRWLockExclusive, RtlReleaseSRWLockExclusive,
-     RtlNumberOfSetBits, RtlFindNextForwardRunClear; msvcrt's wcsnlen,
-     wcsncpy_s, wcscat_s; advapi32's
-     CreatePrivateObjectSecurityWithMultipleInheritance,
-     SetPrivateObjectSecurityEx, DestroyPrivateObjectSecurity,
-     MakeSelfRelativeSD.
+     The client's next task, STAGEREGISTRY
+     (`C2R::VirtualRegistry::MergeAndStageRegistry`), loads OffReg.dll
+     (the offline registry library: it reads and writes hive files
+     itself, with CreateFileW/ReadFile/WriteFile), which failed to load
+     (`RegistrationFailure (Failed to load OffReg.dll , Error:0x7f)`,
+     setup.exe exit 17004) for want of its imports. Done: ntdll's
+     RtlRunOnceBeginInitialize/Complete (and the rest of RtlRunOnce*,
+     with kernel32's InitOnce* over them), the SRW locks in ntdll
+     (kernel32's exports forward, as on Windows) and every word wait in
+     ntdll's RtlWaitOnAddress (kernelbase's WaitOnAddress and kernel32's
+     condition variables too: one waiter list, so a lock taken through
+     one DLL is woken through the other), the bitmap routines
+     (RtlNumberOfSetBits, RtlFindNextForwardRunClear and their
+     companions); msvcrt's bounded string functions (wcsnlen,
+     wcsncpy_s, wcscat_s and the rest of the strcpy_s family, shared
+     with ucrtbase); advapi32's private object security
+     (CreatePrivateObjectSecurity*, SetPrivateObjectSecurity(Ex),
+     DestroyPrivateObjectSecurity, MakeSelfRelativeSD) over the kernel's
+     inheritance rules (gala's GalaNewSecurityObject and
+     GalaSetSecurityObject; ARCHITECTURE "Security descriptors");
+     `office_api_test` and `wow64_office_api_test` (`offreg.rs`, Wine's
+     conformance tests run on Windows and the documentation).
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
@@ -1863,10 +1872,8 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: OffReg.dll's imports above
-     (test first, `office_api_test` and its x86 twin for ntdll's and
-     msvcrt's, `security_test` for advapi32's private object security),
-     then what STAGEREGISTRY and the apply after it need; the stream
+     Next, in the order the run reaches them: what STAGEREGISTRY and
+     the apply after it need; the stream
      download's speed under TCG (the
      network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
      its AFD calls 4 ms each); GetCachedSigningLevel and

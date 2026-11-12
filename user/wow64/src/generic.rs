@@ -393,6 +393,9 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f21, &[Us, Us, Us, U, Oh]), // GalaLogonUser
     (0x7f22, &[U]),                 // NtAllocateLocallyUniqueId
     (0x7f24, &[Oh, U, Oa]),         // NtCreateDirectoryObject
+    // GENERIC_MAPPING is four ULONGs; the result is self-relative.
+    (0x7f28, &[Sd, Sd, U, U, H, U, U, U, U]), // GalaNewSecurityObject
+    (0x7f29, &[U, Sd, Sd, U, H, U, U, U, U]), // GalaSetSecurityObject
     // Console: a mode and what to do with it; *Seen (a ULONG).
     (0x7f3f, &[U, U]), // GalaConsoleMode
     (0x7f40, &[U]),    // GalaConsoleCtrl
