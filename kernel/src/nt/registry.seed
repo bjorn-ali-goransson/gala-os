@@ -138,6 +138,39 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; The Windows Imaging Component (wincodec.h's CLSID_WICImagingFactory1
+; and 2, the PNG and BMP decoders, CLSID_WICDefaultFormatConverter;
+; user/windowscodecs). Both models: the factory is free-threaded.
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{cacaf262-9370-4615-a13b-9f5539da4c0a}]
+@=sz:WIC Imaging Factory
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{cacaf262-9370-4615-a13b-9f5539da4c0a}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{317d06e8-5f24-433d-bdf7-79ce68d8abc2}]
+@=sz:WIC Imaging Factory 2
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{317d06e8-5f24-433d-bdf7-79ce68d8abc2}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{389ea17b-5078-4cde-b6ef-25c15175c751}]
+@=sz:PNG Decoder
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{389ea17b-5078-4cde-b6ef-25c15175c751}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{e018945b-aa86-4008-9bd4-6777a1e40c11}]
+@=sz:PNG Decoder 2
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{e018945b-aa86-4008-9bd4-6777a1e40c11}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{6b462062-7cbf-400d-9fdb-813dd10f2778}]
+@=sz:BMP Decoder
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{6b462062-7cbf-400d-9fdb-813dd10f2778}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{1a3f11dc-b514-4b17-8c5f-2154513852f1}]
+@=sz:Default Format Converter
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{1a3f11dc-b514-4b17-8c5f-2154513852f1}\InprocServer32]
+@=expand:%SystemRoot%\System32\WindowsCodecs.dll
+"ThreadingModel"=sz:Both
 ; Windows Runtime classes (ole32's RoGetActivationFactory reads them):
 ; DllPath, ActivationType 0 (in-process), Threading 0 (both), TrustLevel
 ; 0 (base). PackageManager answers with no packages installed (the

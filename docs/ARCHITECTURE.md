@@ -8876,6 +8876,45 @@ stations and desktops a program creates are refused until stage 3).
   WindowFromAccessibleObject are real exports that fail as documented
   (E_NOTIMPL) and are recorded.
 
+### windowscodecs (the Windows Imaging Component)
+
+What Office decodes and prepares its images with (it imports
+WICCreateImagingFactory_Proxy and WICConvertBitmapSource; Direct2D draws
+WIC bitmaps). `user/windowscodecs`, x64 only (Office is x64);
+`windowscodecs_test`, whose expected values are those of Wine's
+windowscodecs tests (run on Windows) and Microsoft's documentation.
+
+- **Registration**: CLSID_WICImagingFactory1 and 2, the PNG decoders (1
+  and 2), the BMP decoder and CLSID_WICDefaultFormatConverter under
+  `HKLM\SOFTWARE\Classes\CLSID` (the registry seed), InprocServer32
+  `%SystemRoot%\System32\WindowsCodecs.dll`, ThreadingModel Both.
+- **Objects**: every object starts with a vtable and a reference count
+  (`Header`) and is freed at its last Release; mutable state sits behind
+  a small spin lock never held across a call into another object. The
+  factory is one static object (references not counted), answering
+  IWICImagingFactory and IWICImagingFactory2. A source is any
+  IWICBitmapSource, this DLL's or the caller's (`Source` calls slots 3
+  to 7); the converter, scaler and clipper hold a reference on theirs and
+  ask it for pixels on every CopyPixels, nothing cached.
+- **Decoding**: the decoders read the whole stream from its start and
+  decode at Initialize (Windows may defer errors to CopyPixels); one
+  frame each. PNG: gdiplus's `png.rs` (one source for gdiplus, user32 and
+  this DLL), its `decode_raw` keeping the samples in the PNG's layout so
+  the frame has WIC's native format (grey, indexed with the PLTE/tRNS
+  palette, 24bppBGR, 32bppBGRA, 48/64 bpp for 16-bit images). BMP: 1, 4,
+  8, 16, 24 and 32 bpp, core to V5 headers, bit fields. The factory picks
+  the decoder by the image's first bytes.
+- **Pixel formats** (`format.rs`): the ones read and written, converted
+  through straight 0xAARRGGBB; premultiplying rounds to nearest (Wine's
+  BGRA -> PBGRA data).
+- **Limits** (each recorded in the ledger, `windowscodecs.dll!...`):
+  JPEG, GIF, TIFF, ICO, DDS and WebP images (CreateDecoder...:
+  WINCODEC_ERR_COMPONENTNOTFOUND), encoders, metadata readers, colour
+  contexts (a PNG's iCCP), component information, flip-rotators, bitmaps
+  from HBITMAP and HICON, conversion to grey and indexed formats, the
+  halftone palettes, interlaced PNGs, RLE BMPs; the scaler's Cubic, Fant
+  and HighQualityCubic modes are done as Linear (a stopgap, ROADMAP OF).
+
 ### DirectWrite
 
 `user/dwrite`. Chromium CHECKs that a factory exists and that Skia's

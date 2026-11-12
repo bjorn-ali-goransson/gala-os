@@ -1,4 +1,4 @@
-//! PNG decoding for GdipLoadImageFromStream, from the PNG specification
+//! PNG decoding, from the PNG specification
 //! (W3C, Portable Network Graphics, Third Edition): the chunk layout,
 //! IHDR, PLTE, tRNS, the zlib stream of the IDAT chunks (inflated by
 //! miniz_oxide), the five filter types and the colour types at the bit
@@ -10,9 +10,11 @@
 //! colour-space conversion: gAMA, cHRM, sRGB and iCCP are not applied
 //! (an image whose gAMA is not the sRGB-like 1/2.2 is recorded,
 //! `<dll>!png(gAMA not applied)`). Not decoded (recorded): interlaced
-//! (Adam7) images. One source for two DLLs: gdiplus (PNG images) and
-//! user32 (PNG icons, `#[path]`); each names its ledger lines
-//! (`crate::PNG_GAMA`, `crate::PNG_INTERLACED`).
+//! (Adam7) images. One source for three DLLs: gdiplus (PNG images),
+//! user32 (PNG icons) and windowscodecs (WIC's PNG decoder, which keeps
+//! the samples in their native layout: `decode_raw`), the latter two
+//! through `#[path]`; each names its ledger lines (`crate::PNG_GAMA`,
+//! `crate::PNG_INTERLACED`).
 
 use alloc::vec::Vec;
 
@@ -38,7 +40,33 @@ fn be32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
-pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
+/// A PNG's unfiltered samples, before any conversion: what the header
+/// says, the PLTE and tRNS chunks, pHYs (pixels per unit, x and y, and
+/// the unit: 1 is the metre), and the rows (`row` bytes each, packed as
+/// the PNG has them: big-endian 16-bit samples, sub-byte pixels from the
+/// high bit) after their filter bytes are taken out.
+pub struct Raw<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u8,
+    pub color: u8,
+    pub palette: &'a [u8],
+    pub trns: &'a [u8],
+    #[allow(dead_code)]
+    pub phys: Option<(u32, u32, u8)>,
+    pub row: usize,
+    pub rows: Vec<u8>,
+}
+
+impl Raw<'_> {
+    /// The bytes of row `y`.
+    pub fn line(&self, y: usize) -> &[u8] {
+        &self.rows[y * self.row..(y + 1) * self.row]
+    }
+}
+
+/// Reads the chunks and inflates and unfilters the image data.
+pub fn decode_raw(data: &[u8]) -> Result<Raw<'_>, Error> {
     if !data.starts_with(SIGNATURE) {
         return Err(Error::NotPng);
     }
@@ -46,6 +74,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
     let mut header = None;
     let mut palette: &[u8] = &[];
     let mut trns: &[u8] = &[];
+    let mut phys = None;
     let mut idat = Vec::new();
     while at + 12 <= data.len() {
         let len = be32(&data[at..]) as usize;
@@ -55,6 +84,7 @@ pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
             b"IHDR" if body.len() >= 13 => header = Some(body),
             b"PLTE" => palette = body,
             b"tRNS" => trns = body,
+            b"pHYs" if body.len() >= 9 => phys = Some((be32(body), be32(&body[4..]), body[8])),
             b"IDAT" => {
                 idat.try_reserve(body.len()).map_err(|_| Error::OutOfMemory)?;
                 idat.extend_from_slice(body);
@@ -96,13 +126,32 @@ pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
         return Err(Error::Corrupt);
     }
     unfilter(&mut raw, row, bpp, height as usize)?;
+    // Drop the filter bytes: the rows end to end.
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row * height as usize).map_err(|_| Error::OutOfMemory)?;
+    for y in 0..height as usize {
+        rows.extend_from_slice(&raw[y * (row + 1) + 1..(y + 1) * (row + 1)]);
+    }
+    Ok(Raw { width, height, depth, color, palette, trns, phys, row, rows })
+}
+
+/// The image as straight 0xAARRGGBB pixels.
+pub fn decode(data: &[u8]) -> Result<Decoded, Error> {
+    let raw = decode_raw(data)?;
+    let Raw { width, height, depth, color, palette, trns, .. } = raw;
+    let channels = match color {
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => 1,
+    };
     let mut pixels = Vec::new();
     pixels.try_reserve_exact(width as usize * height as usize).map_err(|_| Error::OutOfMemory)?;
     // tRNS: the transparent grey level or RGB colour (16-bit values), or
     // the palette entries' alphas.
     let key = |i: usize| trns.get(2 * i..2 * i + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
     for y in 0..height as usize {
-        let line = &raw[y * (row + 1) + 1..(y + 1) * (row + 1)];
+        let line = raw.line(y);
         for x in 0..width as usize {
             // Sample k of pixel x (the high byte of a 16-bit one; small
             // depths scaled to 0-255) and its raw value (for tRNS).
