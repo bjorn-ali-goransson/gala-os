@@ -132,6 +132,10 @@ Rules for this file:
   scenarios (`C:\Windows\Web\Wallpaper`).
 - `kernel/assets/camel.png`: the project owner's earlier start-button
   drawing (2026-11-01), unused since the fortress replaced it.
+- `docs/images/crash-screen-layout.png` (the crash screen's mockup) and
+  `docs/images/crash-screen-art.png` (its illustration): the project
+  owner's artwork, supplied for gala on 2026-11-12 (ROADMAP CS step 5).
+  Not third-party.
 
 ## Rust crate dependencies of host tools (not in the kernel or images)
 
