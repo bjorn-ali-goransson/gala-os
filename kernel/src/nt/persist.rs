@@ -1,11 +1,18 @@
 //! C: kept on the disk (D2; boot option `persist`): mounting replays the
 //! change log (`fs::volume`, `fs::log`) over the boot's files, then the
-//! ramfs records what programs change, and `sync` (at the end of every
-//! system call, and after each program the kernel runs) appends it to the
-//! disk and flushes before the call returns to the program. The
-//! registry's changes are flushed lazily, as Windows' are: at the first
-//! sync REGISTRY_FLUSH_NS after the last flush, or at once after
-//! NtFlushKey, a program's end or before a kernel handover. A full log
+//! ramfs records what programs change, and `sync` writes it to the disk.
+//! Changes are written back lazily, as Windows' cache manager does: a
+//! write returns once the cache has it, and the lazy writer (a kernel
+//! thread, every `writeback_ms=`, default WRITEBACK_MS) writes what is
+//! pending; FlushFileBuffers (NtFlushBuffersFile), a write through a
+//! write-through or unbuffered handle, NtFlushKey, a program's end, the
+//! machine's stop and a kernel handover write everything at once
+//! (`flush`); a writer that finds more than the dirty limit queued writes
+//! back itself before its call returns (`after_call`: throttling). The
+//! records keep their order, so a crash leaves the tree of some moment
+//! (the last write-back's): only the last unflushed seconds are lost.
+//! The registry's changes are flushed at the first sync REGISTRY_FLUSH_NS
+//! after the last, or at once by a flush. A full log
 //! area, or changes that could not be recorded, make a snapshot instead.
 //! The registry's changes (D3) go to a file on C:, `REGLOG`, in the same
 //! sync (nt::reglog), so the disk keeps them like any file.
@@ -69,6 +76,81 @@ const WRITE_RUN: usize = 16;
 /// Pages a sync copies at a time while draining.
 const WRITEBACK_BATCH: usize = 256;
 
+/// The lazy writer's cadence (`writeback_ms=`): what a program writes
+/// reaches the disk within about this long (Windows' lazy writer scans
+/// once a second).
+const WRITEBACK_MS: u64 = 1000;
+static CADENCE_MS: AtomicU64 = AtomicU64::new(WRITEBACK_MS);
+
+/// Sets the lazy writer's cadence (`writeback_ms=`; at least 10 ms).
+pub fn set_cadence_ms(ms: u64) {
+    CADENCE_MS.store(ms.max(10), Ordering::Relaxed);
+}
+
+/// Pages queued dirty (`RamFs::dirty_queued`, noted at each `file::with_fs`).
+static DIRTY: AtomicU64 = AtomicU64::new(0);
+/// The most queued at once.
+static DIRTY_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// The dirty limit, in pages: an eighth of memory, at least 4 MiB. A
+/// writer that finds more queued writes back before its call returns
+/// (`after_call`), as Windows' cache manager holds writers back past its
+/// dirty page threshold, so dirty data (which cannot leave memory until
+/// written) stays bounded.
+fn dirty_limit() -> u64 {
+    (platform::frame_stats().1 / 8).max(1024)
+}
+
+/// Notes how many pages are queued dirty (`file::with_fs`).
+pub fn note_dirty(pages: usize) {
+    let pages = pages as u64;
+    DIRTY.store(pages, Ordering::Relaxed);
+    DIRTY_PEAK.fetch_max(pages, Ordering::Relaxed);
+}
+
+/// Why a sync wrote (counted per cause; the `writeback` event's `cause`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// The lazy writer's turn.
+    Lazy = 0,
+    /// FlushFileBuffers (NtFlushBuffersFile) or a volume's flush.
+    FlushBuffers = 1,
+    /// A write through a write-through or unbuffered handle.
+    WriteThrough = 2,
+    /// More than the dirty limit queued: the writer writes back.
+    Throttle = 3,
+    /// NtFlushKey (RegFlushKey).
+    FlushKey = 4,
+    /// A program the kernel ran ended.
+    ProgramEnd = 5,
+    /// The machine stops.
+    Shutdown = 6,
+    /// Before a kernel handover.
+    Handover = 7,
+    /// A volume without a data area (layout 1 or 2) syncs every call.
+    OldLayout = 8,
+    /// A write needs clusters given up whose records wait.
+    Reclaim = 9,
+}
+
+const CAUSES: [&str; 10] = [
+    "lazy",
+    "flush buffers",
+    "write-through",
+    "throttle",
+    "flush key",
+    "program end",
+    "shutdown",
+    "handover",
+    "old layout",
+    "reclaim",
+];
+
+/// Syncs that wrote something, by cause.
+static SYNCS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+/// Records appended (all syncs).
+static RECORDS: AtomicU64 = AtomicU64::new(0);
+
 /// Counts a page read back from the data area (`file::with_pages`).
 pub fn note_page_in() {
     PAGE_INS.fetch_add(1, Ordering::Relaxed);
@@ -100,12 +182,40 @@ impl core::fmt::Display for Summary {
         write!(
             out,
             "data area {} MiB, {} MiB free; {} pages written, {} read back, {} let go; \
-             {unbacked} dirty pages found no cluster, {leaked} clusters lost until the next mount",
+             {unbacked} dirty pages found no cluster, {leaked} clusters lost until the next mount; \
+             {}",
             u64::from(count) * 4 / 1024,
             u64::from(free) * 4 / 1024,
             PAGES_WRITTEN.load(Ordering::Relaxed),
             PAGE_INS.load(Ordering::Relaxed),
             EVICTED.load(Ordering::Relaxed),
+            WritebackStats,
+        )
+    }
+}
+
+/// The write-back's counters (the end-of-run `persist:` line, a state
+/// dump's): syncs by cause, records, dirty pages now and at most, the
+/// limit, writers throttled.
+pub struct WritebackStats;
+
+impl core::fmt::Display for WritebackStats {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(out, "write-back every {} ms: syncs", CADENCE_MS.load(Ordering::Relaxed))?;
+        for (name, n) in CAUSES.iter().zip(&SYNCS) {
+            let n = n.load(Ordering::Relaxed);
+            if n > 0 {
+                write!(out, " {name} {n},")?;
+            }
+        }
+        write!(
+            out,
+            " {} records; {} pages dirty now, at most {} (limit {}); {} calls throttled",
+            RECORDS.load(Ordering::Relaxed),
+            DIRTY.load(Ordering::Relaxed),
+            DIRTY_PEAK.load(Ordering::Relaxed),
+            dirty_limit(),
+            THROTTLED.load(Ordering::Relaxed),
         )
     }
 }
@@ -226,6 +336,7 @@ pub fn mount() {
         fs.recording = true;
     });
     mount_registry();
+    start_lazy_writer();
 }
 
 /// Where the mounted volume's log is (for a kernel handover's record and
@@ -490,12 +601,66 @@ fn reserve() -> Option<Buffers> {
     Some(Buffers { list, staging })
 }
 
+/// Writes everything pending to the disk before returning, the
+/// registry's changes too (see the module comment): `cause` says why.
+pub fn flush(cause: Cause) {
+    flush_registry();
+    sync(cause);
+}
+
+/// At the end of every system call: a writer that finds more than the
+/// dirty limit queued writes back before its call returns (throttling);
+/// on a volume without a data area (layout 1 or 2, whose records carry
+/// the data in memory) every call's changes are written as before.
+pub fn after_call() {
+    if !PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    if DATA_START.load(Ordering::Relaxed) == 0 {
+        sync(Cause::OldLayout);
+        return;
+    }
+    let dirty = DIRTY.load(Ordering::Relaxed);
+    if dirty > dirty_limit() {
+        THROTTLED.fetch_add(1, Ordering::Relaxed);
+        crate::events::emit(
+            crate::events::Category::File,
+            "writeback throttle",
+            format_args!(r#""dirty":{dirty},"limit":{}"#, dirty_limit()),
+        );
+        sync(Cause::Throttle);
+    }
+}
+
+/// Calls that wrote back for want of room under the dirty limit.
+static THROTTLED: AtomicU64 = AtomicU64::new(0);
+
+/// Starts the lazy writer (`mount`).
+fn start_lazy_writer() {
+    if let Err(e) = platform::spawn("lazywriter", lazy_writer, 0) {
+        // Changes then reach the disk at flushes and throttling only.
+        warn!("persist: cannot start the lazy writer ({e:?}); data waits for a flush");
+    }
+}
+
+/// The lazy writer: every cadence, what is pending goes to the disk (the
+/// registry's changes once REGISTRY_FLUSH_NS has passed).
+fn lazy_writer(_: usize) {
+    loop {
+        platform::sleep_ms(CADENCE_MS.load(Ordering::Relaxed));
+        if PENDING.load(Ordering::Acquire) || registry_due() {
+            sync(Cause::Lazy);
+        }
+    }
+}
+
 /// Writes the recorded changes to the disk (see the module comment).
-pub fn sync() {
+fn sync(cause: Cause) {
     if !PENDING.load(Ordering::Acquire) && !registry_due() {
         return;
     }
     let _turn = Turn::take();
+    let started = platform::monotonic_ns();
     // The registry's changes become changes of a file on C: first, when
     // its lazy flush is due.
     if registry_due() {
@@ -516,26 +681,25 @@ pub fn sync() {
         *VOLUME.lock() = Some(volume);
         return;
     };
-    // Pages to their clusters first, a batch per hold of the file system;
-    // the records are taken in the hold whose batch leaves no page dirty,
-    // so every record names clusters that hold their pages by the time it
-    // is appended.
+    // The records and the pages queued dirty now are taken in one hold of
+    // the file system: the pages are written to their clusters (a batch
+    // per hold), then the records, so every record names clusters that
+    // hold their pages by the time it is appended. Pages dirtied after
+    // the take wait for the next sync, so a sync ends however fast
+    // programs write meanwhile.
+    let (ops, lost, pending, mut budget) = file::with_fs(|fs| {
+        let (ops, lost) = fs.take_ops();
+        (ops, lost, fs.take_pending(), fs.dirty_queued())
+    });
+    let dirty_before = budget;
     let mut data_ok = true;
-    let mut wrote = false;
-    let mut taken = None;
+    let mut pages = 0usize;
     loop {
-        let (more, records) = file::with_fs(|fs| {
-            if fs.writeback(&mut bufs.list, &mut bufs.staging) {
-                return (true, None);
-            }
-            let (ops, lost) = fs.take_ops();
-            (false, Some((ops, lost, fs.take_pending())))
-        });
+        let more = file::with_fs(|fs| fs.writeback(&mut bufs.list, &mut bufs.staging, &mut budget));
         if !bufs.list.is_empty() {
-            wrote = true;
+            pages += bufs.list.len();
             data_ok = write_pages(&bufs.list, &bufs.staging);
         }
-        taken = taken.or(records);
         if !data_ok || !more {
             break;
         }
@@ -543,24 +707,25 @@ pub fn sync() {
     *BUFFERS.lock() = Some(bufs);
     if !data_ok {
         warn!("persist: pages not written to the data area; their records wait for the next sync");
-        if let Some((ops, lost, pending)) = taken {
-            file::with_fs(|fs| {
-                fs.restore_ops(ops, lost);
-                fs.release_pending(pending, false);
-            });
-        }
+        file::with_fs(|fs| {
+            fs.restore_ops(ops, lost);
+            fs.release_pending(pending, false);
+        });
         PENDING.store(true, Ordering::Release);
         *VOLUME.lock() = Some(volume);
         return;
     }
-    let Some((ops, lost, pending)) = taken else {
-        *VOLUME.lock() = Some(volume);
-        return;
-    };
-    if wrote && platform::disk_flush().is_err() {
+    if pages > 0 && platform::disk_flush().is_err() {
         warn!("persist: the disk failed a flush");
     }
-    let mut result = if lost { Err(VolumeError::Full) } else { volume.append(&ops) };
+    let records = ops.len();
+    let mut result = if lost {
+        Err(VolumeError::Full)
+    } else if ops.is_empty() {
+        Ok(())
+    } else {
+        volume.append(&ops)
+    };
     let mut ops = Some(ops);
     if result == Err(VolumeError::Full) {
         ops = None;
@@ -583,8 +748,23 @@ pub fn sync() {
         });
         PENDING.store(true, Ordering::Release);
     }
+    // (What was dirtied meanwhile is the next sync's: `file::with_fs`
+    // noted it pending.)
     file::with_fs(|fs| fs.release_pending(pending, written));
     *VOLUME.lock() = Some(volume);
+    if written && (pages > 0 || records > 0) {
+        SYNCS[cause as usize].fetch_add(1, Ordering::Relaxed);
+        RECORDS.fetch_add(records as u64, Ordering::Relaxed);
+        crate::events::emit(
+            crate::events::Category::File,
+            "writeback",
+            format_args!(
+                r#""cause":"{}","pages":{pages},"records":{records},"dirty":{dirty_before},"ms":{}"#,
+                CAUSES[cause as usize],
+                platform::monotonic_ns().saturating_sub(started) / 1_000_000
+            ),
+        );
+    }
     if DATA_START.load(Ordering::Relaxed) != 0 {
         evict();
         report_trouble();

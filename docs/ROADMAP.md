@@ -194,7 +194,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
-| D1-D4 | Disk: virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory) | done | `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk", "A disk-backed C:" |
+| D1-D4 | Disk: virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory), written back lazily as Windows' cache manager does (FlushFileBuffers, write-through and unbuffered handles at once; a dirty limit throttling writers) | done | `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`, `writeback_test`, `writeback_crash`, `writeback_lazy`; ARCHITECTURE "Disk", "A disk-backed C:" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
@@ -1915,18 +1915,16 @@ need gala's.
      With it the publish goes on and the service ended on the delay load
      of SHLWAPI.dll!PathBuildRootW (crash report, about 1835 s); done:
      PathBuildRootW and A (Wine's shlwapi path.c test on Windows).
-     Where the fast path ends now (3600 s): APPLYCONFIGURATION is
-     publishing the staged install into `Program Files\Microsoft
-     Office\root` and is cut off by the time limit, copying at about
-     0.13 MB/s: 4 KiB NtReadFile/NtWriteFile pairs of about 30 ms each
-     (25800 writes, 105 MB, from 1900 s on), every system call's sync
-     writing its page and the volume's record and flushing the disk
-     (the registry is flushed lazily now, files are not; Windows' cache
-     manager writes file data lazily unless the handle is write-through).
-     Next: the same lazy flush for files' data (a design change of D2/D4's
-     "on the disk before the call returns", for the owner to decide:
-     FlushFileBuffers, write-through handles and a program's end would
-     still flush at once). Also seen: the client's `OfficeC2RClient.exe
+     APPLYCONFIGURATION then published the staged install into
+     `Program Files\Microsoft Office\root` at about 0.13 MB/s (4 KiB
+     NtReadFile/NtWriteFile pairs of about 30 ms each, every call's sync
+     writing its page and the volume's record and flushing the disk) and
+     was cut off by the hour; done: file data is written back lazily, as
+     Windows' cache manager does (ARCHITECTURE "A disk-backed C:": the
+     lazy writer every second; FlushFileBuffers, write-through and
+     unbuffered handles and a program's end at once; a dirty limit;
+     `writeback_test`, `writeback_crash`, `writeback_lazy`).
+     Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
      ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
      Framework.

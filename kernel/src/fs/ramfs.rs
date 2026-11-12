@@ -48,6 +48,7 @@
 //!
 //! Pure data structure (host-tested); the NT layer maps it to file objects.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use alloc::boxed::Box;
@@ -751,8 +752,10 @@ pub struct RamFs {
 struct Area {
     clusters: Clusters,
     /// Pages changed since written (node, page; entries whose slot is no
-    /// longer dirty are skipped).
-    dirty: Vec<(NodeId, usize)>,
+    /// longer dirty are skipped), oldest first: a write-back takes those
+    /// queued when it began (`writeback`'s budget), so it ends however
+    /// fast programs dirty more.
+    dirty: VecDeque<(NodeId, usize)>,
     /// `dirty` could not grow: writebacks scan every file until a scan
     /// finds them all.
     dirty_lost: bool,
@@ -2727,7 +2730,9 @@ impl RamFs {
         };
         if !slot.dirty {
             slot.dirty = true;
-            if area.dirty.try_push((id, i)).is_err() {
+            if area.dirty.try_reserve(1).is_ok() {
+                area.dirty.push_back((id, i));
+            } else {
                 area.dirty_lost = true;
             }
         }
@@ -2861,8 +2866,20 @@ impl RamFs {
             }
         }
         let used = count - clusters.free();
-        self.area = Some(Area { clusters, dirty, dirty_lost, hand: (0, 0), unbacked: 0 });
+        self.area = Some(Area {
+            clusters,
+            dirty: VecDeque::from(dirty),
+            dirty_lost,
+            hand: (0, 0),
+            unbacked: 0,
+        });
         Ok((used, dropped))
+    }
+
+    /// Clusters given up whose records wait for the next write-back (free
+    /// then: `Clusters::reclaimable`).
+    pub fn area_reclaimable(&self) -> u32 {
+        self.area.as_ref().map_or(0, |a| a.clusters.reclaimable())
     }
 
     /// The data area's clusters and how many are free, once attached.
@@ -2876,35 +2893,50 @@ impl RamFs {
         self.area.as_ref().map_or((0, 0), |a| (a.unbacked, a.clusters.leaked))
     }
 
+    /// Pages queued dirty (what a write-back would take now; entries whose
+    /// page was cleaned otherwise count until taken): the dirty data a
+    /// sync owes the disk, and the measure writers are throttled by.
+    pub fn dirty_queued(&self) -> usize {
+        self.area.as_ref().map_or(0, |a| a.dirty.len())
+    }
+
     /// Dirty pages to write to their clusters, as many as `out`'s capacity
-    /// and `staging` (whole pages) take: listed in `out` by cluster, each
+    /// and `staging` (whole pages) take, from the queue's front and at
+    /// most `budget` entries of it (decremented: a write-back's budget is
+    /// the queue's length when it took its records, so it covers every
+    /// page those records name and ends however fast programs dirty more):
+    /// listed in `out` by cluster, each
     /// copied into `staging` at its place in the list, and marked clean
     /// and stored (it may leave memory once `evict` runs, which the sync
     /// does only after writing them). A dirty page without a cluster gets
     /// one here and its record (a page changed through a mapping, or
-    /// replayed); with none free it stays dirty in memory. Allocates
+    /// replayed); with none free it stays dirty in memory, queued again at
+    /// the back. Allocates
     /// nothing (the caller reserved both buffers): a sync short of memory
-    /// still writes what lets memory go. Whether dirty pages remain.
-    pub fn writeback(&mut self, out: &mut Vec<Writeback>, staging: &mut [u8]) -> bool {
+    /// still writes what lets memory go. Whether more of the budget (or a
+    /// scan for a lost queue) remains.
+    pub fn writeback(
+        &mut self,
+        out: &mut Vec<Writeback>,
+        staging: &mut [u8],
+        budget: &mut usize,
+    ) -> bool {
         out.clear();
         let cap = out.capacity().min(staging.len() / PAGE);
-        // Pages that found no cluster go back to the list's front; at most
-        // the list's length of them is looked at again.
-        let mut stuck = 0usize;
-        while out.len() < cap {
+        while out.len() < cap && *budget > 0 {
             let Some(area) = self.area.as_mut() else { break };
-            if stuck >= area.dirty.len() {
+            let Some((id, i)) = area.dirty.pop_front() else {
+                *budget = 0;
                 break;
-            }
-            let Some((id, i)) = area.dirty.pop() else { break };
+            };
+            *budget -= 1;
             if !self.collect(out, id, i)
                 && let Some(a) = self.area.as_mut()
             {
-                // To the list's front (the pop left room for it).
-                if a.dirty.try_push((id, i)).is_ok() {
-                    a.dirty.rotate_right(1);
+                // To the back (the pop left room for it: no allocation).
+                if a.dirty.try_reserve(1).is_ok() {
+                    a.dirty.push_back((id, i));
                 }
-                stuck += 1;
             }
         }
         if self.area.as_ref().is_some_and(|a| a.dirty_lost) && out.len() < cap {
@@ -2941,7 +2973,7 @@ impl RamFs {
                 slot.recent = true;
             }
         }
-        self.area.as_ref().is_some_and(|a| a.dirty.len() > stuck || a.dirty_lost)
+        *budget > 0 || self.area.as_ref().is_some_and(|a| a.dirty_lost)
     }
 
     /// Takes page `i` of `id` into `out` if it is dirty and in memory,
@@ -3150,8 +3182,9 @@ mod tests {
         let mut all = Vec::new();
         let mut out = Vec::with_capacity(3);
         let mut staging = vec![0u8; 3 * PAGE];
+        let mut budget = f.dirty_queued();
         loop {
-            let more = f.writeback(&mut out, &mut staging);
+            let more = f.writeback(&mut out, &mut staging, &mut budget);
             for (k, w) in out.iter().enumerate() {
                 all.push((*w, staging[k * PAGE..(k + 1) * PAGE].try_into().unwrap()));
             }
@@ -3214,6 +3247,53 @@ mod tests {
         assert_eq!(&got[..PAGE], &[1; PAGE]);
         assert_eq!(&got[PAGE..2 * PAGE], &[9; PAGE]);
         assert_eq!(&got[2 * PAGE..], &data[2 * PAGE..]);
+    }
+
+    #[test]
+    fn a_writeback_ends_while_writers_go_on_and_covers_its_records() {
+        // A lazy write-back runs while programs keep writing: it takes
+        // the records and the pages queued at its start, and ends after
+        // those however many pages are dirtied meanwhile; every cluster
+        // its records name has been written by then.
+        let (mut f, mut disk) = disk_fs(64);
+        let id = f.create(ROOT, &w("f"), false, 1).unwrap();
+        f.write(id, 0, &[7; 5 * PAGE], 2).unwrap();
+        let (ops, lost) = f.take_ops();
+        assert!(!lost);
+        let mut budget = f.dirty_queued();
+        assert_eq!(budget, 5);
+        let mut out = Vec::with_capacity(2);
+        let mut staging = vec![0u8; 2 * PAGE];
+        let mut rounds = 0;
+        loop {
+            let more = f.writeback(&mut out, &mut staging, &mut budget);
+            for (k, w) in out.iter().enumerate() {
+                disk[w.cluster as usize].copy_from_slice(&staging[k * PAGE..(k + 1) * PAGE]);
+            }
+            // A writer between batches: a new page and a rewritten one.
+            let at = (5 + rounds) * PAGE;
+            f.write(id, at as u64, &[8; PAGE], 3).unwrap();
+            f.write(id, 0, &[9; PAGE], 3).unwrap();
+            rounds += 1;
+            if !more {
+                break;
+            }
+            assert!(rounds < 10, "the write-back did not end");
+        }
+        assert_eq!(rounds, 3);
+        for op in &ops {
+            if let Op::Clusters { runs, .. } = op {
+                for r in runs {
+                    for c in r.cluster..r.cluster + r.count {
+                        assert_ne!(disk[c as usize], [0; PAGE], "cluster {c} named before written");
+                    }
+                }
+            }
+        }
+        // What the writer dirtied meanwhile waits for the next one.
+        assert!(f.dirty_queued() >= 3);
+        sync(&mut f, &mut disk);
+        assert_eq!(f.dirty_queued(), 0);
     }
 
     #[test]

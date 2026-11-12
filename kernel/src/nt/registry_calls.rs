@@ -479,8 +479,8 @@ pub(super) fn nt_set_information_key(call: &mut Call<'_>) -> NtStatus {
 pub(super) fn nt_flush_key(call: &mut Call<'_>) -> NtStatus {
     let (_object, id) = tri!(call.key(arg!(call, 0), 0));
     tri!(registry::with(|r| r.key_information(id, 7).map(|_| ())));
-    // On the disk before the call returns (the sync at its end).
-    crate::nt::persist::flush_registry();
+    // On the disk before the call returns.
+    crate::nt::persist::flush(crate::nt::persist::Cause::FlushKey);
     NtStatus::SUCCESS
 }
 
