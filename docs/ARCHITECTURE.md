@@ -12083,6 +12083,127 @@ real Linux does not print, or a ledger line):
   GDK's default keymap reads (rules evdev, model pc105, layout us)
   before the server's keymap arrives.
 
+### X11 programs through Xwayland
+
+ROADMAP LD step 5: X11-only programs (xterm, and GTK or Qt programs run
+with their X11 backend) reach the desktop through a distribution's
+Xwayland, rootless: each top-level X window is its own desktop window,
+as WSLg shows them. gala implements no X server; it starts Xwayland and
+is its window manager, as weston and mutter are. Sources: the X Window
+System protocol, ICCCM and EWMH specifications, Xwayland's manual and
+its `WL_SURFACE_ID` message, read as specifications; nothing of
+Xwayland or weston is copied. Code: `kernel/src/wayland/xwayland.rs`
+(the display, starting Xwayland), `kernel/src/wayland/xwm.rs` (the
+window manager, pure, host tests), the `x11` role in
+`kernel/src/wayland/client.rs`; the pty Xwayland's terminals need is
+`kernel/src/lx/pty.rs` with `lx/session.rs` ("Pseudo-terminals"
+below). Scenario `lx_xterm`.
+
+```
+  xterm ──X11──► /tmp/.X11-unix/X0 ──(handed over)──► Xwayland
+                                                         │ wl_surface per window,
+                 WL_SURFACE_ID          -wm fd           │ wl_shm buffers
+  wayland::xwm ◄──────────────────────── socket pair     ▼
+       │  Shell::show(surface, title, frame, place)   wayland server ─► shasha window
+       └───────────── X11Event (placed, activated, close) ◄──┘
+```
+
+- **The display** (`xwayland=on`): the Wayland server makes
+  `/tmp/.X11-unix` (1777) and listens for display `:0` on the socket
+  node `/tmp/.X11-unix/X0` and the abstract name `@/tmp/.X11-unix/X0`
+  (libxcb tries the abstract one first). The first connect starts
+  `/usr/bin/Xwayland :0 -rootless -shm -listenfd 3 -listenfd 4 -wm 5`
+  (the boot user's, its output in the log): both listeners are handed
+  over and Xwayland accepts the waiting client itself; fd 5 is a socket
+  pair to the window manager; fd 6 a socket pair to the Wayland server
+  named by `WAYLAND_SOCKET`, so the server knows which connection is
+  Xwayland's. `-shm`: no glamor, buffers through wl_shm. When
+  Xwayland's connection ends, the window manager goes with it and the
+  display is made again for the next X client. Started outside the
+  server's lock (its program is read from the file system).
+- **The window manager** (`xwm`): an X11 client on that socket pair,
+  in the server's thread (its round after the Wayland clients'). It
+  interns its atoms, takes SubstructureRedirect on the root, makes its
+  `_NET_SUPPORTING_WM_CHECK` window and owns `WM_S0`. A MapRequest
+  asks for the window's `WM_NAME`, `_NET_WM_NAME`, `WM_PROTOCOLS`,
+  `_MOTIF_WM_HINTS` and `WM_TRANSIENT_FOR`, sets `WM_STATE` Normal and
+  maps it; their replies come before Xwayland's `WL_SURFACE_ID`
+  ClientMessage (a request's reply precedes the events its later
+  requests cause), which names the wl_surface of the Xwayland
+  connection showing the window. ConfigureRequests are granted, but a
+  shown managed window keeps the place the desktop gave it. Override-
+  redirect windows (menus, tooltips) are never redirected: their
+  surface is shown where they are.
+- **The `x11` role**: `Client::x11_show` gives the surface the role
+  (refused for a surface with an xdg role or none of that id: asked
+  again each round, since the two connections race); its first buffer
+  makes the window: framed and titled for a managed window (frameless
+  if its Motif hint asks for no decorations), a popup (`popup_create`,
+  never active) at its root position for an override-redirect one. A
+  buffer committed before the role came (Xwayland draws before the
+  window manager hears of the surface) is kept in mind (`last`) and
+  shown at once. Unmapping hides it (`hide_x11`).
+- **Coordinates**: rootless Xwayland's root is the screen, so an X
+  window's root position is its client area's place on the desktop;
+  when the desktop places a managed window, `X11Event::Placed` moves
+  the X window there, and override-redirect menus open where their
+  parent's pointer is.
+- **Focus and close**: the desktop's activation (`X11Event::Activated`)
+  is SetInputFocus (RevertToPointerRoot), `WM_TAKE_FOCUS` for a window
+  that lists it and `_NET_ACTIVE_WINDOW`; Xwayland itself takes the
+  wl_keyboard focus and keys. The frame's close button
+  (`X11Event::Close`) sends `WM_DELETE_WINDOW`, or KillClient for a
+  window without it (ICCCM 4.2.8.1).
+- **Observability**: `events=wayland`'s `xwayland start` (pid, or why
+  not), `xwayland end`, and `xwm` events (connected, ready, map request,
+  surface, shown, close, an X error from Xwayland with its codes, what
+  was ignored), each also an `xwm:` or `xwayland:` log line; the
+  `wayland role` event's role `x11` with the X window; the state dump's
+  `xwayland display :0` line and one `xwm: window` line per X window
+  (geometry, override-redirect, mapped, surface, shown, title).
+- **Limits**: the X selections and the clipboard are not bridged; no
+  `_NET_WM_STATE` (maximize, full screen) requests are acted on (`xwm`
+  `ignored` event); `xwayland_shell_v1` is not offered (Xwayland falls
+  back to `WL_SURFACE_ID`, whose ids a client could reuse); one display
+  for the boot user; no Xauthority (the socket's permissions are the
+  only access check).
+
+### Pseudo-terminals
+
+`lx::pty` and `lx::session` (user/lx/pty_test, recorded on Linux, is
+the spec; scenarios `lx_pty`, `lx_pty_pie`; host tests of the line
+discipline):
+
+- `/dev/ptmx` makes a pty (the lowest free number, locked); TIOCGPTN
+  names it, TIOCSPTLCK unlocks it, `/dev/pts/<n>` or TIOCGPTPEER opens
+  its slave; the number is free once every master description is
+  closed. Device numbers and modes as Linux's (5:2 ptmx 0666, 136:n
+  slaves 0620; `/dev/tty` 5:0 opens the caller's controlling terminal,
+  ENXIO without one).
+- The line discipline (`Ldisc`, pure): c_iflag's ISTRIP, IGNCR, ICRNL,
+  INLCR on what the master writes; canonical lines edited with VERASE,
+  VKILL, VWERASE and VLNEXT (IEXTEN), ended by NL, VEOL, VEOL2 or VEOF,
+  one line per read; non-canonical bytes with VMIN and VTIME; ISIG's
+  VINTR, VQUIT, VSUSP raise SIGINT, SIGQUIT, SIGTSTP in the foreground
+  group and flush the input (unless NOFLSH); echo (ECHO, ECHOE, ECHOK,
+  ECHOKE, ECHOCTL `^X`, ECHONL) and the slave's output through c_oflag
+  (OPOST: ONLCR, OCRNL) to the master; TIOCSWINSZ's change raises
+  SIGWINCH in the foreground group.
+- Sessions and groups (`LxProcess::sid`, `pgid`; setsid, getsid,
+  setpgid, getpgid, getpgrp; kill of 0 and -pgid): a program the kernel
+  starts leads its own; a fork's child has its parent's. A session
+  leader opening a slave without O_NOCTTY (or TIOCSCTTY) takes it as its
+  controlling terminal; TIOCGPGRP, TIOCSPGRP, TIOCGSID, TIOCNOTTY.
+- Hang-up: every slave closed, the master's read is EIO (xterm's sign
+  that its shell ended); every master closed, the slave reads end of
+  file, its writes EIO, and the foreground group gets SIGHUP.
+- Waits on the pty's `Waiters` (poll, select, epoll through
+  `poll::Watch`). The state dump's `pty <n> master|slave` lines; the
+  ledger's `pty ioctl` (requests not kept) and `pty` (IXON's VSTOP and
+  VSTART, taken out of the input but never stopping output; SIGTSTP to
+  a group that is not orphaned: it is raised, but a stop is not
+  implemented).
+
 ## Plan: Linux containers through a WSL facade
 
 Docker Desktop and Podman for Windows run their Linux side (dockerd,
@@ -12143,6 +12264,12 @@ presents them, each with a file system of its own. Tests: `wsl_test`
 terminal), host tests in `user/wsl` (tar, gzip, the command line, the
 `-l -v` table) and `lx::file` (a root confining the walk), `lx::ntio`.
 
+- **Naming** (the owner's rule): the compatibility interface keeps
+  WSL's names exactly (`wsl.exe`, its options and output, the Lxss
+  registry keys, `\\wsl.localhost` and `\\wsl$` paths, the `WSL_*`
+  environment); gala's own UI says "Linux", never "WSL": the start
+  menu's "Linux" tile, the "Linux distributions" section, context
+  menus, window titles.
 - **`wsl.exe`** (`user/wsl`, gala's own program in System32, as
   Windows has it; written from WSL's documentation and its published
   source as spec: THIRD_PARTY.md): `--import <name> <dir>
@@ -12206,7 +12333,7 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   itself in raw mode. wsl.exe ignores Ctrl+C (the Linux side's key) and
   puts the console mode back when its program ends.
 - **A distribution's terminal**: `wsl -d <name>` (or the start menu's
-  WSL tile: `desktop::PROGRAMS`, the default distribution) in a console
+  Linux tile: `desktop::PROGRAMS`, the default distribution) in a console
   window (gala's conhost.exe) is its login shell's terminal.
 - **State** (GalaLxDistro): a distribution is Running while it has
   processes (WSL keeps its instance a few seconds longer: `info` in

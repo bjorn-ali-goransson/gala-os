@@ -143,6 +143,10 @@ pub struct Start<'a> {
     pub console: Option<KArc<crate::nt::conhost::Session>>,
     /// The process starting it (0: the kernel).
     pub parent_id: u64,
+    /// More open descriptions at the fds given (above 2; not
+    /// close-on-exec): the listening sockets and connections the kernel
+    /// hands Xwayland (`wayland::xwayland`).
+    pub fds: &'a [(u64, KArc<state::Fd>)],
 }
 
 /// Starts the Linux program at `path` with `argv` and `envp` as the
@@ -159,6 +163,7 @@ pub fn spawn(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>
         token: None,
         console: None,
         parent_id: 0,
+        fds: &[],
     })
 }
 
@@ -408,7 +413,7 @@ fn start_regs(p: &Prepared) -> UserRegs {
 }
 
 fn spawn_inner(start: Start<'_>) -> Result<KArc<Process>, ExecError> {
-    let Start { path, argv, envp, root, cwd, stdio, token, console, parent_id } = start;
+    let Start { path, argv, envp, root, cwd, stdio, token, console, parent_id, fds } = start;
     // It runs in its own directory unless told otherwise; a relative
     // interpreter path starts there.
     let cwd = match cwd {
@@ -463,6 +468,13 @@ fn spawn_inner(start: Start<'_>) -> Result<KArc<Process>, ExecError> {
         process::forget_bare(&process);
         return Err(ExecError::OutOfMemory);
     };
+    for (n, fd) in fds {
+        if lx.install_at(*n, fd.clone(), false).is_err() {
+            state::ended(process.id, crate::nt::status::NtStatus::NO_MEMORY);
+            process::forget_bare(&process);
+            return Err(ExecError::OutOfMemory);
+        }
+    }
     let regs = start_regs(&p);
     // Suspended until its Linux thread state is there.
     let object = match thread::create(

@@ -479,6 +479,44 @@ struct Surface {
     /// coordinates): a frameless window its window geometry, clamped to
     /// the buffer (`view_of`), a framed one all of it.
     view: View,
+    /// An X window's surface (Xwayland's, given by the X window manager:
+    /// `x11_show`), its role instead of an xdg_surface's.
+    x11: Option<X11Surface>,
+    /// The buffer of the last commit without a role (released): what an
+    /// X window shows at once when its surface gets the role after the
+    /// commit (Xwayland draws before the window manager hears of the
+    /// surface).
+    last: Option<u32>,
+}
+
+/// An X window shown through Xwayland's surface (ARCHITECTURE "X11
+/// programs through Xwayland").
+#[derive(Default)]
+struct X11Surface {
+    xid: u32,
+    /// Not managed: a frameless popup at `at`.
+    override_redirect: bool,
+    at: (i32, i32),
+    decorated: bool,
+    title: Vec<u8>,
+}
+
+/// What the X window manager hears from the desktop about a surface
+/// (`Client::x11_events`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum X11Event {
+    /// The window is at screen (x, y) (its client area).
+    Placed {
+        surface: u32,
+        x: i32,
+        y: i32,
+    },
+    Activated {
+        surface: u32,
+    },
+    Close {
+        surface: u32,
+    },
 }
 
 /// A window's part of its surface: x, y, width, height.
@@ -683,6 +721,9 @@ pub struct Client<F> {
     /// dump, the connection's summary).
     pub commits: u64,
     pub frames: u64,
+    /// For the X window manager, from an Xwayland connection (taken by
+    /// the server after each round).
+    pub x11_events: Vec<X11Event>,
 }
 
 /// Arguments as WAYLAND_DEBUG=1 shows them.
@@ -758,6 +799,7 @@ impl<F> Client<F> {
             requests: 0,
             commits: 0,
             frames: 0,
+            x11_events: Vec::new(),
         })
     }
 
@@ -844,12 +886,13 @@ impl<F> Client<F> {
             let (name, v) = (o.iface.name, o.version);
             match &o.kind {
                 Kind::Surface(s) => out(format_args!(
-                    "{name}#{id} v{v}: window {:?}, size {}x{}, view {:?}, xdg {:?}, {} frame callbacks pending",
+                    "{name}#{id} v{v}: window {:?}, size {}x{}, view {:?}, xdg {:?}, x11 window {:#x?}, {} frame callbacks pending",
                     s.window,
                     s.size.0,
                     s.size.1,
                     s.view,
                     s.xdg,
+                    s.x11.as_ref().map(|x| x.xid),
                     s.pending.frames.len()
                 )),
                 Kind::Pool(p) => out(format_args!("{name}#{id} v{v}: {} bytes", p.size)),
@@ -1740,10 +1783,25 @@ impl<F> Client<F> {
                     format_args!("commit of an xdg_surface without a role"),
                 ));
             }
-            (None, _, _) => {
-                // No role: nothing shows it; the buffer is free again.
-                if let Some(Some(b)) = attach {
+            (None, _, _) if self.surface(sid).is_some_and(|s| s.x11.is_some()) => match attach {
+                Some(Some(b)) => {
+                    shown = self.show_x11(host, sid, b, damage)?;
                     self.release(host, b)?;
+                }
+                Some(None) => self.hide_x11(host, sid, false)?,
+                None => {}
+            },
+            (None, _, _) => {
+                // No role: nothing shows it; the buffer is free again
+                // (kept in mind for an X window's surface given its role
+                // after).
+                if let Some(attach) = attach {
+                    if let Some(s) = self.surface(sid) {
+                        s.last = attach;
+                    }
+                    if let Some(b) = attach {
+                        self.release(host, b)?;
+                    }
                 }
             }
         }
@@ -2077,6 +2135,150 @@ impl<F> Client<F> {
             top.sizing = Sizing::default();
         }
         Ok(())
+    }
+
+    // ---- X windows (ARCHITECTURE "X11 programs through Xwayland") ---------
+
+    fn x11_event<H: Host<Fd = F>>(&mut self, host: &mut H, e: X11Event) -> Result {
+        if self.x11_events.try_push(e).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        Ok(())
+    }
+
+    /// The X window manager gives surface `sid` (of this, Xwayland's,
+    /// connection) the role of showing X window `info.window`: false if
+    /// there is no such surface, or it has a role already. A buffer
+    /// committed before is shown at once.
+    pub fn x11_show<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        info: &super::xwm::Info<'_>,
+    ) -> Result<bool> {
+        let mut title = Vec::new();
+        if title.try_extend_from_slice(&info.title[..info.title.len().min(TITLE_MAX)]).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        let Some(s) = self.surface(sid) else { return Ok(false) };
+        if s.xdg.is_some() || s.x11.is_some() {
+            return Ok(false);
+        }
+        s.x11 = Some(X11Surface {
+            xid: info.window,
+            override_redirect: info.override_redirect,
+            at: info.at,
+            decorated: info.decorated,
+            title,
+        });
+        let last = s.last.take();
+        host.note(Note::Role { surface: sid, role: "x11", object: info.window });
+        if let Some(b) = last
+            && matches!(self.object(b), Some(Object { kind: Kind::Buffer(_), .. }))
+            && self.show_x11(host, sid, b, None)?.is_some()
+        {
+            self.commits += 1;
+        }
+        Ok(true)
+    }
+
+    /// The X window's title changed.
+    pub fn x11_title<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, title: &[u8]) {
+        let title = &title[..title.len().min(TITLE_MAX)];
+        let Some(s) = self.surface(sid) else { return };
+        let window = s.window;
+        if let Some(x) = s.x11.as_mut() {
+            x.title.clear();
+            if x.title.try_extend_from_slice(title).is_err() {
+                return;
+            }
+            if let Some(w) = window {
+                host.window_title(w, title);
+            }
+        }
+    }
+
+    /// The X window is unmapped (or its surface showed a null buffer):
+    /// its window goes; `forget` also drops the role (the window manager
+    /// is done with the surface).
+    pub fn hide_x11<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, forget: bool) -> Result {
+        if self.seat.active == Some(sid) {
+            self.seat.active = None;
+        }
+        if self.seat.pointer == Some(sid) {
+            self.seat.buttons = 0;
+            self.pointer_leave(host)?;
+        }
+        if self.seat.keyboard == Some(sid) {
+            self.keyboard_leave(host)?;
+        }
+        if let Some(s) = self.surface(sid) {
+            s.size = (0, 0);
+            s.view = (0, 0, 0, 0);
+            if forget {
+                s.x11 = None;
+            }
+            if let Some(w) = s.window.take() {
+                host.window_destroy(w);
+            }
+        }
+        Ok(())
+    }
+
+    /// Shows buffer `b` in the X window's desktop window (made at the
+    /// first buffer: framed and titled for a managed window, a popup at
+    /// its root position for an override-redirect one).
+    fn show_x11<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        b: u32,
+        damage: Option<(i64, i64)>,
+    ) -> Result<Option<Shown>> {
+        let (width, height) = match self.object(b) {
+            Some(Object { kind: Kind::Buffer(buf), .. }) => (buf.width, buf.height),
+            _ => return Ok(None),
+        };
+        let Some(s) = self.surface(sid) else { return Ok(None) };
+        let Some(x) = s.x11.as_ref() else { return Ok(None) };
+        let (or, at, decorated) = (x.override_redirect, x.at, x.decorated);
+        let mut title = [0u8; TITLE_MAX];
+        let n = x.title.len().min(TITLE_MAX);
+        title[..n].copy_from_slice(&x.title[..n]);
+        let view = (0, 0, width, height);
+        let (had, resized) = (s.window, (s.view.2, s.view.3) != (width, height));
+        s.size = (width, height);
+        s.view = view;
+        let window = match had {
+            Some(w) => {
+                if resized {
+                    host.window_resize(w, width, height, s.decorated);
+                }
+                Some(w)
+            }
+            None => {
+                s.decorated = decorated && !or;
+                let w = if or {
+                    host.popup_create(at.0, at.1, width, height)
+                } else {
+                    host.window_create(&title[..n], width, height, decorated)
+                };
+                host.note(Note::Mapped { surface: sid, window: w });
+                w
+            }
+        };
+        if let Some(s) = self.surface(sid) {
+            s.window = window;
+        }
+        if had.is_none()
+            && !or
+            && let Some(w) = window
+            && let Some((x, y)) = host.client_origin(w)
+        {
+            self.x11_event(host, X11Event::Placed { surface: sid, x, y })?;
+        }
+        let rows = self.present(host, b, window, had.is_none() || resized, damage, view)?;
+        Ok(Some(((width, height), rows)))
     }
 
     // ---- Popups (ARCHITECTURE "Popups") -----------------------------------
@@ -3389,6 +3591,9 @@ impl<F> Client<F> {
                         }
                     }
                 }
+                if self.surface(sid).is_some_and(|s| s.x11.is_some()) {
+                    self.x11_event(host, X11Event::Activated { surface: sid })?;
+                }
             }
             // Another window is active: the client's popup grab ends (the
             // user went elsewhere), then its keyboard focus.
@@ -3486,6 +3691,9 @@ impl<F> Client<F> {
                     });
                 if let Some(t) = toplevel {
                     self.event(host, t, XDG_TOPLEVEL, 1, &[])?;
+                    host.note(note("close", 0, 0));
+                } else if self.surface(sid).is_some_and(|s| s.x11.is_some()) {
+                    self.x11_event(host, X11Event::Close { surface: sid })?;
                     host.note(note("close", 0, 0));
                 }
             }

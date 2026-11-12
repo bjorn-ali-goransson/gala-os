@@ -125,6 +125,21 @@ struct CopiedSpace {
 /// (vfork(2); the child's memory is a copy, not the parent's: ledgered
 /// as `linux clone flags missing` CLONE_VM).
 pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
+    fork_with(call, stack, vfork, Tids::default())
+}
+
+/// What a fork-like clone asks to be written or kept about the child's
+/// tid: CLONE_PARENT_SETTID's address in the parent, CLONE_CHILD_SETTID's
+/// in the child, CLONE_CHILD_CLEARTID's (glibc's fork passes the last two
+/// with its thread's tid field).
+#[derive(Default, Clone, Copy)]
+pub struct Tids {
+    pub parent_set: Option<u64>,
+    pub child_set: Option<u64>,
+    pub child_clear: Option<u64>,
+}
+
+fn fork_with(call: &Call<'_>, stack: Option<u64>, vfork: bool, tids: Tids) -> Result {
     let parent = &call.process;
     let mut regs = return_regs(call.frame);
     regs.set_syscall_result(0);
@@ -189,11 +204,25 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
     };
     // Its one thread, with the forking thread's mask, before it runs.
     let comm = call.lx.comm(call.tid);
-    if lx.add_thread(thread::id_of(&object), super::threads::mask_of(call), comm).is_err() {
+    let core_tid = thread::id_of(&object);
+    if lx.add_thread(core_tid, super::threads::mask_of(call), comm).is_err() {
         crate::warn!("lx: pid {} fork failed: no memory for the child's thread state", parent.id);
         process::terminate(&child, super::signal::killed_status(lx_abi::signal::SIGKILL), false);
         thread::resume(&object);
         return Err(ENOMEM);
+    }
+    // The child's tid (its pid) where clone's flags ask, before it runs:
+    // a bad address is not an error of the fork (as on Linux).
+    let tid = (child.id as u32).to_le_bytes();
+    if let Some(at) = tids.parent_set {
+        let _ = parent.write(at, &tid);
+        let _ = child.write(at, &tid);
+    }
+    if let Some(at) = tids.child_set {
+        let _ = child.write(at, &tid);
+    }
+    if let Some(at) = tids.child_clear {
+        lx.set_clear_tid(core_tid, at);
     }
     thread::resume(&object);
     crate::info!(
@@ -242,18 +271,25 @@ pub fn clone(call: &Call<'_>, flags: u64, stack: u64, ptid: u64, ctid: u64, tls:
     if flags & CLONE_THREAD != 0 {
         return clone_thread(call, flags, stack, ptid, ctid, tls);
     }
-    let vfork = flags & !CSIGNAL == CLONE_VM | CLONE_VFORK;
-    if flags & !CSIGNAL != 0 && !vfork {
+    use super::threads::{CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_PARENT_SETTID};
+    let tid_flags = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;
+    let vfork = flags & !(CSIGNAL | tid_flags) == CLONE_VM | CLONE_VFORK;
+    if flags & !(CSIGNAL | tid_flags) != 0 && !vfork {
         ledger::record("clone", "linux clone flags missing", flags);
         return Err(ENOSYS);
     }
+    let tids = Tids {
+        parent_set: (flags & CLONE_PARENT_SETTID != 0).then_some(ptid),
+        child_set: (flags & CLONE_CHILD_SETTID != 0).then_some(ctid),
+        child_clear: (flags & CLONE_CHILD_CLEARTID != 0).then_some(ctid),
+    };
     let exit_signal = (flags & CSIGNAL) as u32;
     if exit_signal != lx_abi::signal::SIGCHLD {
         // Another exit signal (or none) for the parent: not kept yet.
         ledger::record("clone", "linux clone flags missing", flags);
         return Err(ENOSYS);
     }
-    fork(call, (stack != 0).then_some(stack), vfork)
+    fork_with(call, (stack != 0).then_some(stack), vfork, tids)
 }
 
 /// wait4(pid, status, options, rusage): reaps an ended child (pid > 0:

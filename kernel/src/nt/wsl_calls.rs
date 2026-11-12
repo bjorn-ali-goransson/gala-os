@@ -221,6 +221,7 @@ pub(super) fn gala_lx_spawn(call: &mut Call<'_>) -> NtStatus {
         token: Some(token),
         console: call.process.console.clone(),
         parent_id: call.process.id,
+        fds: &[],
     });
     let process = match started {
         Ok(p) => p,

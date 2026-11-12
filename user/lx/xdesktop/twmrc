@@ -1,0 +1,39 @@
+# gala's twm configuration for a distribution's desktop (ROADMAP LD
+# step 6): X's built-in "fixed" font everywhere (the only core font
+# Xwayland has without font packages), windows placed where they ask,
+# a root menu on the left button with a terminal.
+TitleFont "fixed"
+ResizeFont "fixed"
+MenuFont "fixed"
+IconFont "fixed"
+IconManagerFont "fixed"
+RandomPlacement
+NoGrabServer
+DecorateTransients
+BorderWidth 2
+Color
+{
+	BorderColor "#3465a4"
+	DefaultBackground "#eeeeec"
+	DefaultForeground "#2e3436"
+	TitleBackground "#3465a4"
+	TitleForeground "#ffffff"
+	MenuBackground "#eeeeec"
+	MenuForeground "#2e3436"
+	MenuTitleBackground "#3465a4"
+	MenuTitleForeground "#ffffff"
+}
+
+Button1 = : root : f.menu "desktop"
+Button1 = : title : f.function "move-or-raise"
+Button1 = : frame : f.resize
+
+Function "move-or-raise" { f.move f.deltastop f.raise }
+
+menu "desktop"
+{
+	"Desktop"	f.title
+	"Terminal"	f.exec "xterm &"
+	"Refresh"	f.refresh
+	"Exit"		f.quit
+}

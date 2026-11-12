@@ -48,6 +48,10 @@ pub enum Stream {
     Stdin,
     Stdout,
     Stderr,
+    /// The output of a program the kernel runs for itself (Xwayland and
+    /// what it starts: `wayland::xwayland`), logged as `lx: pid N
+    /// service: <line>`, apart from a test program's transcript.
+    Service,
 }
 
 impl Stream {
@@ -56,6 +60,7 @@ impl Stream {
             Stream::Stdin => "stdin",
             Stream::Stdout => "stdout",
             Stream::Stderr => "stderr",
+            Stream::Service => "service",
         }
     }
 }
@@ -147,6 +152,8 @@ pub enum Object {
     /// A Windows-side object: a standard handle of the NT program that
     /// started the process (`lx::ntio`, `lx::distro`).
     Nt(KArc<super::ntio::NtFile>),
+    /// A pseudo-terminal's master or slave (`lx::pty`).
+    Pty(super::pty::End),
 }
 
 impl Drop for Fd {
@@ -182,6 +189,7 @@ impl Drop for Fd {
             | Object::Device(_)
             | Object::Socket(_)
             | Object::EventFd(_)
+            | Object::Pty(_)
             | Object::Nt(_) => {}
         }
     }
@@ -210,6 +218,7 @@ impl Fd {
             | Object::Unix(_)
             | Object::Epoll(_)
             | Object::EventFd(_)
+            | Object::Pty(_)
             | Object::Nt(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }
@@ -303,6 +312,10 @@ pub struct LxProcess {
     pub threads: IrqMutex<Vec<LxThread>>,
     /// The parent's pid; 0 for a process the kernel started (`lxrun=`).
     pub parent: u64,
+    /// Its session and process group (`lx::session`): its own for a
+    /// process the kernel started, its parent's for a fork's child.
+    pub sid: AtomicU64,
+    pub pgid: AtomicU64,
     /// The signal the parent gets when this process ends (SIGCHLD for a
     /// fork; clone's low byte).
     pub exit_signal: u32,
@@ -365,6 +378,8 @@ pub fn create(
         main_tid: AtomicU64::new(0),
         threads: IrqMutex::new(Vec::new()),
         parent: 0,
+        sid: AtomicU64::new(pid),
+        pgid: AtomicU64::new(pid),
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(Brk { start: brk, current: brk }),
         signals: IrqMutex::new(Signals::default()),
@@ -410,6 +425,8 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
         main_tid: AtomicU64::new(0),
         threads: IrqMutex::new(Vec::new()),
         parent: parent.pid,
+        sid: AtomicU64::new(parent.sid.load(Ordering::Relaxed)),
+        pgid: AtomicU64::new(parent.pgid.load(Ordering::Relaxed)),
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(brk),
         signals: IrqMutex::new(signals),
@@ -464,6 +481,14 @@ pub fn rooted_at(root: Option<NodeId>) -> Result<Vec<u64>, AllocError> {
 }
 
 /// The state of Linux process `pid`.
+/// Calls `f` for each Linux process (under the table's lock: `f` takes no
+/// other lock of theirs but their atomics).
+pub fn each(mut f: impl FnMut(&LxProcess)) {
+    for p in TABLE.lock().iter() {
+        f(p);
+    }
+}
+
 pub fn get(pid: u64) -> Option<KArc<LxProcess>> {
     TABLE.lock().iter().find(|p| p.pid == pid).cloned()
 }
@@ -501,6 +526,10 @@ pub fn ended(pid: u64, status: NtStatus) {
         i.map(|i| table.remove(i))
     };
     let Some(state) = state else { return };
+    // A session leader's end leaves its terminal without a session.
+    if state.sid.load(Ordering::Relaxed) == pid {
+        super::pty::session_ended(pid);
+    }
     {
         let mut lines = state.lines.lock();
         for (i, stream) in [Stream::Stdout, Stream::Stderr].into_iter().enumerate() {
@@ -661,7 +690,7 @@ impl LxProcess {
     /// Bytes written to the console stream `stream` (stdout or stderr):
     /// logged a line at a time.
     pub fn console_write(&self, stream: Stream, data: &[u8]) -> Result<(), AllocError> {
-        let i = if stream == Stream::Stderr { 1 } else { 0 };
+        let i = if matches!(stream, Stream::Stderr | Stream::Service) { 1 } else { 0 };
         let mut lines = self.lines.lock();
         let buf = &mut lines[i];
         for &b in data {
@@ -849,6 +878,7 @@ pub fn dump() {
                 Object::Nt(n) => {
                     crate::info!("lx: pid {} fd {i}: windows {:?}", p.pid, n.kind);
                 }
+                Object::Pty(end) => super::pty::describe(p.pid, i, end),
                 _ => {}
             }
         }

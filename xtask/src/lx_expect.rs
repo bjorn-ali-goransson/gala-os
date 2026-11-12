@@ -504,7 +504,10 @@ pub fn check_boot(scenario: &str, cmdline: &str, serial: &str) -> std::result::R
     };
     let binary = path.rsplit('/').next().unwrap_or(path);
     let test = binary.strip_suffix("-pie").unwrap_or(binary);
-    let expected_path = if test.ends_with("_test") {
+    // A test run where Linux answers otherwise (gtk_test under X11:
+    // `lx_gtk_x11`) has its own transcript beside expected.txt.
+    let own = root().join("user/lx").join(test).join(format!("{scenario}.txt"));
+    let expected_path = if test.ends_with("_test") && !own.exists() {
         root().join("user/lx").join(test).join("expected.txt")
     } else {
         root().join("user/lx").join(test).join(format!("{scenario}.txt"))

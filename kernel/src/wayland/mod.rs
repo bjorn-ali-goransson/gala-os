@@ -78,6 +78,8 @@
 pub mod client;
 pub mod input;
 pub mod popup;
+pub mod xwayland;
+pub mod xwm;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -128,6 +130,9 @@ struct Connection {
     rights: Vec<Right>,
     /// The tick of the refresh its due frame callbacks wait for.
     refresh_at: Option<u64>,
+    /// Why it ends, found outside its own round (the X window manager's
+    /// use of Xwayland's connection): it ends at its next one.
+    ended: Option<Why>,
 }
 
 struct Server {
@@ -135,6 +140,8 @@ struct Server {
     clients: Vec<Connection>,
     path: [u8; 64],
     path_len: usize,
+    /// The X display and its Xwayland (`xwayland=on`).
+    x: Option<xwayland::XServer>,
 }
 
 static SERVER: IrqMutex<Option<Server>> = IrqMutex::new(None);
@@ -223,8 +230,9 @@ fn make_node(uid: u64) -> Result<(NodeId, NodeId), FsError> {
 }
 
 /// `wayland=on|trace`: starts the server for the boot user (see the
-/// module's doc).
-pub fn start(mode: &str) -> Result<(), StartError> {
+/// module's doc); `xwayland`: with X display :0 served by Xwayland
+/// (`xwayland`).
+pub fn start(mode: &str, xwayland: bool) -> Result<(), StartError> {
     TRACE.store(mode == "trace", Ordering::Relaxed);
     if SERVER.lock().is_some() {
         return Err(StartError::AlreadyRunning);
@@ -270,8 +278,19 @@ pub fn start(mode: &str) -> Result<(), StartError> {
         close();
         return Err(StartError::Socket(e));
     }
+    let x = if xwayland {
+        match xwayland::prepare(cred) {
+            Ok(x) => Some(x),
+            Err(e) => {
+                crate::error!("xwayland: display :0 not made: {e:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     *SERVER.lock() =
-        Some(Server { listener: listener.clone(), clients: Vec::new(), path, path_len });
+        Some(Server { listener: listener.clone(), clients: Vec::new(), path, path_len, x });
     if runtime::spawn("wayland", serve, 0).is_err() {
         *SERVER.lock() = None;
         listener.release();
@@ -291,10 +310,21 @@ pub fn start(mode: &str) -> Result<(), StartError> {
 fn serve(_: usize) {
     let me = runtime::current();
     loop {
-        let (more, refresh) = match SERVER.lock().as_mut() {
-            Some(s) => (s.round(me), s.clients.iter().filter_map(|c| c.refresh_at).min()),
+        let (more, refresh, launch) = match SERVER.lock().as_mut() {
+            Some(s) => {
+                let more = s.round(me);
+                (more, s.clients.iter().filter_map(|c| c.refresh_at).min(), s.x_launch())
+            }
             None => return,
         };
+        // Xwayland is started outside the lock (its program is read).
+        if let Some(l) = launch {
+            let r = xwayland::launch(l);
+            if let Some(s) = SERVER.lock().as_mut() {
+                s.x_launched(r, me);
+            }
+            continue;
+        }
         if more {
             continue;
         }
@@ -325,6 +355,14 @@ impl Server {
                 crate::nt::process::by_id(c.pid)
                     .is_some_and(|p| desktop::has_input(&p.desk.shell, c.pid))
             })
+            || self.x_ready()
+    }
+
+    /// The runtime directory (the socket's path less its name).
+    fn runtime_dir(&self) -> &[u8] {
+        let path = &self.path[..self.path_len];
+        let end = path.iter().rposition(|&b| b == b'/').unwrap_or(path.len());
+        &path[..end]
     }
 
     /// Accepts, then serves each client once. True if a client had more
@@ -350,28 +388,36 @@ impl Server {
                     // Its process's windows stay served while it has
                     // another connection.
                     let last = !self.clients.iter().any(|o| o.pid == c.pid);
+                    let number = c.number;
                     c.close(me, why, last);
+                    self.x_connection_ended(number, me);
                 }
             }
         }
+        self.x_round(me);
         more
     }
 
     fn accept(&mut self, sock: KArc<Socket>, me: ThreadId) {
         let pid = sock.peer_cred().map_or(0, |c| c.pid);
+        self.accept_from(sock, pid, me);
+    }
+
+    /// Serves connection `sock` of process `pid`: its number.
+    fn accept_from(&mut self, sock: KArc<Socket>, pid: u64, me: ThreadId) -> u32 {
         let number = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
         let client = match Client::new() {
             Ok(c) => c,
             Err(_) => {
                 crate::warn!("wayland: no memory for pid {pid}'s connection; closed");
                 sock.release();
-                return;
+                return number;
             }
         };
         if sock.waiters.add(me).is_err() || self.clients.try_reserve(1).is_err() {
             crate::warn!("wayland: no memory for pid {pid}'s connection; closed");
             sock.release();
-            return;
+            return number;
         }
         // Its windows' input wakes this thread (a Linux process has no
         // other listener).
@@ -392,7 +438,9 @@ impl Server {
             client,
             rights: Vec::new(),
             refresh_at: None,
+            ended: None,
         });
+        number
     }
 }
 
@@ -437,6 +485,9 @@ impl Connection {
     /// Reads, handles and writes (see the module's doc): Ok(true) if
     /// there is more to read than the round took, Err when it ends.
     fn pump(&mut self) -> Result<bool, Why> {
+        if let Some(why) = self.ended {
+            return Err(why);
+        }
         let mut host = self.host();
         let mut taken = 0;
         let mut ended = None;
@@ -977,4 +1028,5 @@ pub fn dump() {
         );
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));
     }
+    s.x_dump();
 }

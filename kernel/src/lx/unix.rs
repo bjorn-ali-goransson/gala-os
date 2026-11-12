@@ -127,7 +127,7 @@ pub struct UnixSocket {
 }
 
 impl UnixSocket {
-    fn new(core: KArc<Socket>) -> core::result::Result<KArc<UnixSocket>, u16> {
+    pub fn new(core: KArc<Socket>) -> core::result::Result<KArc<UnixSocket>, u16> {
         KArc::try_new(UnixSocket { core, options: IrqMutex::new(Options::default()) })
             .map_err(|_| ENOMEM)
     }
