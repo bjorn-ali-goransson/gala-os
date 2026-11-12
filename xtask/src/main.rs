@@ -1022,7 +1022,9 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
             Deb {
                 pool: "universe/x/xterm/xterm_390-1ubuntu3_amd64.deb",
                 sha256: "3541b6956d6c4be71db7b66ec91985bd5eb128fb130e806f1c879f9d94a97c72",
-                files: &["usr/bin/xterm"],
+                // Its desktop entry: the start menu lists it as one of the
+                // distribution's applications (LD step 7, `linux_menu`).
+                files: &["usr/bin/xterm", "usr/share/applications/debian-xterm.desktop"],
             },
             Deb {
                 pool: "main/d/dash/dash_0.5.12-6ubuntu5_amd64.deb",
@@ -2132,6 +2134,29 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wsl_terminal", "gdi32.dll", "Windows/System32"),
     ("wsl_terminal", "target/wsl/bb-rootfs.tar", "gala"),
     ("wsl_terminal", "target/wsl/bb-rootfs.tar.gz", "gala"),
+    // The start menu's Linux distributions (LD step 7): wsl.exe, conhost.exe
+    // for a distribution's terminal, winhttp for `gala linux-install`'s
+    // download (the rootfs comes from the host: `linux_menu_rootfs`), and
+    // the Linux roots for X display :0 (an application from the context
+    // menu runs under the server's rootless Xwayland).
+    ("linux_menu", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("linux_menu", "user/bin/wsl.exe", "Windows/System32"),
+    ("linux_menu", "user/bin/conhost.exe", "Windows/System32"),
+    ("linux_menu", "ntdll.dll", "Windows/System32"),
+    ("linux_menu", "kernel32.dll", "Windows/System32"),
+    ("linux_menu", "advapi32.dll", "Windows/System32"),
+    ("linux_menu", "bcryptprimitives.dll", "Windows/System32"),
+    ("linux_menu", "user32.dll", "Windows/System32"),
+    ("linux_menu", "gdi32.dll", "Windows/System32"),
+    ("linux_menu", "msvcrt.dll", "Windows/System32"),
+    ("linux_menu", "winhttp.dll", "Windows/System32"),
+    ("linux_menu", "ws2_32.dll", "Windows/System32"),
+    ("linux_menu", "mswsock.dll", "Windows/System32"),
+    ("linux_menu", "secur32.dll", "Windows/System32"),
+    ("linux_menu", "schannel.dll", "Windows/System32"),
+    ("linux_menu", "crypt32.dll", "Windows/System32"),
+    ("linux_menu", "bcrypt.dll", "Windows/System32"),
+    ("linux_menu", "ncrypt.dll", "Windows/System32"),
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
@@ -3944,6 +3969,7 @@ const USER_PROGRAMS: &[&str] = &[
     "gala",
     "gala_cli_test",
     "start_menu_test",
+    "linux_menu_test",
     "pk_install_test",
     "profile_test",
     "registry_test",
@@ -4079,6 +4105,13 @@ const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 /// and a harness run under TCG (a report run, PENDING: not in the gate).
 const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+/// `linux_menu`: a distribution of ~45 MB fetched and imported, its
+/// desktop, a terminal and an application started, under TCG (about
+/// 110 s of run time measured).
+const LINUX_MENU_TIMEOUT: Duration = Duration::from_secs(600);
+/// Memory for `linux_menu`'s VM: the image's Linux roots, the
+/// distribution's tree (a second copy, on C: in memory), its download.
+const LINUX_MENU_MEMORY_MIB: u64 = 1536;
 /// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
 /// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
 /// gala guest under TCG fetched 512 MiB of the same CDN file with curl
@@ -4106,6 +4139,8 @@ fn scenario_timeout(name: &str) -> Duration {
         WPT_TIMEOUT
     } else if name.starts_with("office_install") {
         OFFICE_INSTALL_TIMEOUT
+    } else if name == "linux_menu" {
+        LINUX_MENU_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")
@@ -4793,6 +4828,52 @@ fn make_iso_unchecked(
     Ok(iso)
 }
 
+/// The module sets whose files make `linux_menu`'s Ubuntu stand-in: LD
+/// step 6's desktop (the session, Xwayland, twm, xterm and its desktop
+/// entry, their libraries, glibc).
+const LINUX_MENU_ROOT_SETS: &[&str] = &["xdesktop", "x11", "gtk3", "wayland_client", "glibc"];
+
+/// `linux_menu`'s distributions, served by `serve-page` from
+/// `target/linux-menu/` under the file names of the suggestions' URLs
+/// (kernel/src/nt/desktop/linux.rs; the guest's `linux_mirror=`): a
+/// stand-in for Ubuntu's WSL image made of LINUX_MENU_ROOT_SETS (Ubuntu
+/// 24.04's packages, as the ISO's Linux roots, with LD step 6's desktop
+/// session at /lx/xdesktop), and for Alpine's mini root the busybox
+/// root of the WSL scenarios. Made again each run (deterministic).
+fn linux_menu_rootfs() -> Result<PathBuf> {
+    let dir = root().join("target/linux-menu");
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (set, file, to) in EXTRA_MODULES.iter().filter(|m| LINUX_MENU_ROOT_SETS.contains(&m.0)) {
+        let _ = set;
+        if file.starts_with("target/prebuilt/") {
+            fetch_prebuilt(file.trim_end_matches('/'))?;
+        }
+        let source = root().join(file);
+        if file.ends_with('/') {
+            let mut rel = Vec::new();
+            tree_files(&source, Path::new(""), &mut rel)?;
+            for r in rel.iter().filter(|r| source.join(r).is_file()) {
+                let data = fs::read(source.join(r)).map_err(|e| format!("reading {r:?}: {e}"))?;
+                files.push((format!("{to}/{}", r.to_string_lossy()), data));
+            }
+        } else {
+            let name = file.rsplit('/').next().unwrap_or(file);
+            let data = fs::read(&source).map_err(|e| format!("reading {file}: {e}"))?;
+            files.push((format!("{to}/{name}"), data));
+        }
+    }
+    // One entry per path (two sets may ship one file).
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+    wsl_rootfs::make_tree(&files, &dir.join("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"))?;
+    make_wsl_rootfs()?;
+    let bb = root().join("target/wsl/bb-rootfs.tar.gz");
+    fs::copy(&bb, dir.join("alpine-minirootfs-3.20.3-x86_64.tar.gz"))
+        .map_err(|e| format!("copying {bb:?}: {e}"))?;
+    Ok(dir)
+}
+
 /// `target/wsl/bb-rootfs.tar[.gz]` (`wsl_rootfs`), once per xtask run
 /// (ISOs are built in parallel).
 fn make_wsl_rootfs() -> Result {
@@ -5458,8 +5539,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
-    // LD step 6, being brought up.
-    "lx_xdesktop",
     // BR's conformance report: a report run of hours, not a gate check.
     "chromium_wpt",
     "java_stress",
@@ -5521,6 +5600,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "console_window",
     "wsl_terminal",
     "start_menu",
+    "linux_menu",
     "tray_test",
     "d2d1_window",
 ];
@@ -5848,6 +5928,9 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     // scenarios' time (TCG's loopback HTTP moved about 1.4 MB/s).
     if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("memload")) {
         memory = MEMLOAD_MEMORY_MIB;
+    }
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("linux_menu")) {
+        memory = memory.max(LINUX_MENU_MEMORY_MIB);
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary());
@@ -10692,6 +10775,41 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wsl_test: imported bb", "wsl: bb: pid", "xtask: screen ok", "run: end wsl.exe"],
     },
     Scenario {
+        // The start menu's "Linux distributions" (LD step 7) on the screen
+        // (UEFI): LINUX_MENU_SCREEN collapses and expands the section,
+        // dismisses Alpine, installs Ubuntu from its tile (its rootfs a
+        // stand-in served by the host: `linux_menu_rootfs`; fetched by
+        // `gala linux-install`, imported by `wsl --import`, the progress
+        // on the tile), starts its desktop (LD step 6's session), opens a
+        // terminal and XTerm from its context menu, and hides the
+        // section; linux_menu_test follows the registry.
+        name: "linux_menu",
+        cmdline: "qemu_exit wayland=on xwayland=on events=wsl,window wallpaper=night linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "linux_menu_test: ready",
+            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
+            "linux_menu_test: Alpine dismissed",
+            "desktop: start menu: linux install Ubuntu: C:\\gala\\gala.exe linux-install Ubuntu http://10.0.2.100/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+            "gala: linux: Ubuntu: installed",
+            "linux_menu_test: Ubuntu installed",
+            "desktop: start menu: linux desktop Ubuntu",
+            "wayland: listening in a distribution's tree too",
+            "desktop: shown window 'Xwayland on :1'",
+            "desktop: start menu: linux terminal Ubuntu",
+            "desktop: shown window 'wsl.exe'",
+            "desktop: start menu: linux app Ubuntu",
+            "desktop: shown window 'xterm'",
+            "desktop: start menu: Linux distributions hidden, dismissed [Alpine]",
+            "linux_menu_test: section hidden",
+            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
+            "linux_menu_test: section shown again",
+            "xtask: screen ok",
+            "linux_menu_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -10906,6 +11024,11 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_simple_shm", "weston"),
     ("lx_simple_shm", "wayland_client"),
     ("lx_simple_shm", "glibc"),
+    ("linux_menu", "linux_menu"),
+    ("linux_menu", "x11"),
+    ("linux_menu", "gtk3"),
+    ("linux_menu", "wayland_client"),
+    ("linux_menu", "glibc"),
     ("lx_xdesktop", "xdesktop"),
     ("lx_xdesktop", "x11"),
     ("lx_xdesktop", "gtk3"),
@@ -11550,6 +11673,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
+    ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -13308,6 +13432,208 @@ const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// The start menu's Linux distributions (`linux_menu`, UEFI's screen of
+/// 1280 x 800, wallpaper "night"). The menu (600 x 640) at (340, 100):
+/// the pinned grid's two rows from y 216, the section's heading at (372,
+/// 388) ("Linux distributions" from x 392, "Hide" at 852..908), its
+/// tiles from (372, 416), 89 apart: an icon at tile + (26, 10), a
+/// download badge at icon + (20, 20), a suggestion's dismiss cross at its
+/// top right (tile + (67, 0), 18 x 18), the progress bar at tile + (12,
+/// 68). The start button at (640, 776) alone on the taskbar, (616, 776)
+/// beside one window. A context menu opens at the pointer, 32-pixel items
+/// from 4 below its top. The pointer starts at (640, 400); each move is
+/// from where the step before left it (few moves: QEMU's PS/2 queue drops
+/// what a busy guest has not read).
+const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "linux_menu_test: ready",
+    steps: &[
+        // The menu: the section shown, Ubuntu and Alpine not installed
+        // (each with a download badge). Its picture: "section shown".
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(392, 390, 140, 18, 0x1b1b1b), // "Linux distributions"
+                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),  // Ubuntu's badge
+                PixelCheck::AnyIn(507, 446, 16, 16, 0x005fb8),  // Alpine's badge
+            ],
+        },
+        // The heading: collapsed (no tiles). "section collapsed".
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -190 -255",
+                "mouse_move 0 -121",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(410, 440, 0xf2f4f8), PixelCheck::At(426, 454, 0xf2f4f8)],
+        },
+        // Expanded again.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 2 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8)],
+        },
+        // Alpine's dismiss cross: its tile goes.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 25", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(515, 454, 0xf2f4f8),
+                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),
+            ],
+        },
+        // Ubuntu's tile: it installs (the menu stays open).
+        ScreenStep {
+            after: "linux_menu_test: Alpine dismissed",
+            input: &["mouse_move -122 15", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // Its progress bar while it downloads (the host holds the rest of
+        // the file until this check passes: HELD_DOWNLOADS): "installing".
+        ScreenStep {
+            after: "Linux distribution Ubuntu: downloading (5",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(384, 484, 61, 4, 0x005fb8)],
+        },
+        // Installed: in full colour, no badge, no bar. "installed".
+        ScreenStep {
+            after: "linux_menu_test: Ubuntu installed",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(398, 426, 32, 32, 0xdc6034)],
+        },
+        // A click: its desktop (rootful Xwayland on :1, twm, an xterm).
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 1 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // "desktop started": the frame at (64, 48), the X root black,
+        // twm's title bar, the xterm.
+        ScreenStep {
+            after: "desktop: shown window 'Xwayland on :1'",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(800, 600, 0x000000),
+                PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4),
+                PixelCheck::At(300, 300, 0xffffff),
+            ],
+        },
+        // `exit` in its xterm ends the session.
+        ScreenStep {
+            after: "session: display :1 ready",
+            input: typed!("e", "x", "i", "t"),
+            pixels: &[],
+        },
+        // The menu again, Ubuntu's context menu: "Open terminal" and
+        // XTerm (from its .desktop file). "context menu".
+        ScreenStep {
+            after: "session: done",
+            input: &[
+                "mouse_move 224 255",
+                "mouse_move 0 81",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -225 -255",
+                "mouse_move 0 -81",
+                "mouse_button 2",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(430, 452, 100, 16, 0x1b1b1b), // "Open terminal"
+                PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b),  // "XTerm"
+                PixelCheck::At(620, 500, 0xffffff),
+            ],
+        },
+        // "Open terminal": `wsl -d Ubuntu` in a console window.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 20", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // dash's prompt, then `echo $SHELL$SHELL` (an output that is not
+        // its own echo: /bin/sh/bin/sh).
+        ScreenStep {
+            after: "desktop: shown window 'wsl.exe'",
+            input: typed!(
+                "e", "c", "h", "o", "spc", "shift-4", "shift-s", "shift-h", "shift-e", "shift-l",
+                "shift-l", "shift-4", "shift-s", "shift-h", "shift-e", "shift-l", "shift-l"
+            ),
+            pixels: &[],
+        },
+        // "terminal": the command and its output in the console.
+        ScreenStep {
+            after: "/bin/sh/bin/sh",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(66, 98, 300, 60, 0xcccccc)],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+        // The menu (beside the console window's button), the context menu,
+        // XTerm: an xterm under the desktop's rootless Xwayland.
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 116 255",
+                "mouse_move 0 61",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -201 -255",
+                "mouse_move 0 -81",
+                "mouse_button 2",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b)],
+        },
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 52", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // "application": its window (shasha's frame at (96, 80): the
+        // second Wayland window), white with dash's prompt.
+        ScreenStep {
+            after: "desktop: shown window 'xterm'",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(104, 90, 40, 16, 0x1b1b1b), // "xterm" in its caption
+                PixelCheck::At(300, 300, 0xffffff),
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+        // "Hide": the section goes. "section hidden".
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 116 255",
+                "mouse_move 0 29",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move 255 -255",
+                "mouse_move 9 -121",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(450, 440, 0xf2f4f8), PixelCheck::At(500, 398, 0xf2f4f8)],
+        },
+        // The menu's own context menu (a right click on its background,
+        // at (880, 400): the card kept inside the menu, at (712, 400))
+        // shows the section again; linux_menu_test waits for that before
+        // it ends (no pixels here: the guest is ending).
+        ScreenStep {
+            after: "linux_menu_test: section hidden",
+            input: &[
+                "mouse_button 2",
+                "mouse_button 0",
+                "mouse_move -80 20",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+    ],
+};
+
 /// The distribution's terminal (`wsl_terminal`): wsl.exe's console
 /// window at (60, 60) (conhost's grid, lines 19 pixels apart from y 98)
 /// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
@@ -13755,6 +14081,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("lx_gtk", GTK_SCREEN),
     ("lx_xterm", XTERM_SCREEN),
     ("lx_xdesktop", XDESKTOP_SCREEN),
+    ("linux_menu", LINUX_MENU_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
@@ -14232,9 +14559,13 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
     let log = iso.with_extension("serial.log");
+    let wait = SCREEN_STEP_WAITS
+        .iter()
+        .find(|(n, _)| *n == iso_scenario(iso))
+        .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
-            wait_for_line(&log, step.after).map_err(|e| format!("step {n}: {e}"))?;
+            wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
         }
         for command in step.input {
             // Each command, then time for the guest to read the device
@@ -14249,21 +14580,44 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
             thread::sleep(Duration::from_millis(250));
         }
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+        // A host-side wait this step's check ends (HELD_DOWNLOADS).
+        if HELD_DOWNLOADS.iter().any(|&(name, held)| name == iso_scenario(iso) && held == n) {
+            let release = iso.with_extension("serve.release");
+            fs::write(&release, b"").map_err(|e| format!("step {n}: writing {release:?}: {e}"))?;
+        }
     }
     Ok(())
 }
 
-/// Waits for `line` in the serial log `log`. A give-up only (the VM's
-/// own limit is not checked while a screen check runs): two minutes.
-fn wait_for_line(log: &Path, line: &str) -> Result {
+/// Downloads `serve-page` holds part-way until a screen step has seen
+/// them in progress: (scenario, the step whose pixels must pass first).
+/// `linux_menu`'s progress step checks the tile's bar while the rootfs
+/// is still downloading; without the hold a fast machine (KVM) finished
+/// the install before the screendump. serve-page sends HELD_FRACTION of
+/// the file, then waits for `<iso>.serve.release` (written once that
+/// step passes) before the rest.
+const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
+/// How much of a held download goes first, in percent.
+const HELD_PERCENT: usize = 60;
+
+/// How long a screen step waits for its `after` line: a give-up only
+/// (the VM's own limit is not checked while a screen check runs).
+const SCREEN_STEP_WAIT: Duration = Duration::from_secs(120);
+/// Scenarios whose steps wait on longer work: `linux_menu`'s install
+/// (17.7 MB fetched from the host and imported: about 40 s under TCG on
+/// an idle host, several times that beside other VMs) between two steps.
+const SCREEN_STEP_WAITS: &[(&str, Duration)] = &[("linux_menu", Duration::from_secs(300))];
+
+/// Waits at most `limit` for `line` in the serial log `log`.
+fn wait_for_line(log: &Path, line: &str, limit: Duration) -> Result {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(120) {
+    while start.elapsed() < limit {
         if fs::read(log).is_ok_and(|b| b.windows(line.len()).any(|w| w == line.as_bytes())) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("no {line:?} in the serial log within 120 s"))
+    Err(format!("no {line:?} in the serial log within {} s", limit.as_secs()))
 }
 
 fn check_screen_step(
@@ -14496,7 +14850,7 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
 
 /// Scenarios whose guest fetches `http://10.0.2.100/` from the host
 /// (`add_host_page_net`).
-const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt"];
+const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt", "linux_menu"];
 
 /// The page `serve-page` serves (user/hostnet_test checks it byte for
 /// byte).
@@ -14531,6 +14885,15 @@ fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     if log.to_string_lossy().contains("chromium_wpt") {
         return wpt::guestfwd();
     }
+    // linux_menu: the suggested distributions' stand-ins, by file name,
+    // held part-way until the screen check has seen the progress
+    // (HELD_DOWNLOADS).
+    if log.to_string_lossy().contains("linux_menu") {
+        cmd.env("XTASK_SERVE_DIR", linux_menu_rootfs()?);
+        let release = log.with_extension("release");
+        let _ = fs::remove_file(&release);
+        cmd.env("XTASK_SERVE_HOLD", release);
+    }
     Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
 
@@ -14558,11 +14921,44 @@ fn serve_page() -> Result {
     {
         let _ = writeln!(log, "xtask: serve-page: {first:?}");
     }
+    // A file of XTASK_SERVE_DIR named by the request's last component
+    // (linux_menu's rootfs tarballs), else the page.
+    let file = env::var_os("XTASK_SERVE_DIR").and_then(|dir| {
+        let target = first.split(' ').nth(1)?;
+        let name = target.rsplit('/').next()?;
+        let ok = !name.is_empty() && !name.starts_with('.') && !name.contains('\\');
+        ok.then(|| Path::new(&dir).join(name)).filter(|p| p.is_file())
+    });
+    let mut out = std::io::stdout().lock();
+    if let Some(path) = file {
+        let data = fs::read(&path).map_err(|e| format!("reading {path:?}: {e}"))?;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            data.len()
+        );
+        // XTASK_SERVE_HOLD: HELD_PERCENT of a large file, then the rest
+        // once that file exists (the screen check saw the progress), at
+        // most 10 minutes later (a give-up: the check failed).
+        let first = match env::var_os("XTASK_SERVE_HOLD") {
+            Some(_) if data.len() > 1 << 20 => data.len() * HELD_PERCENT / 100,
+            _ => data.len(),
+        };
+        out.write_all(head.as_bytes())
+            .and_then(|()| out.write_all(&data[..first]))
+            .and_then(|()| out.flush())
+            .map_err(|e| e.to_string())?;
+        if let Some(release) = env::var_os("XTASK_SERVE_HOLD").filter(|_| first < data.len()) {
+            let start = Instant::now();
+            while !Path::new(&release).exists() && start.elapsed() < Duration::from_secs(600) {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        return out.write_all(&data[first..]).and_then(|()| out.flush()).map_err(|e| e.to_string());
+    }
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HOST_PAGE}",
         HOST_PAGE.len()
     );
-    let mut out = std::io::stdout().lock();
     out.write_all(response.as_bytes()).and_then(|()| out.flush()).map_err(|e| e.to_string())
 }
 

@@ -1040,6 +1040,12 @@ fn launch(distro: Option<Distro>, command: Command) -> u32 {
     put("LOGNAME", &user);
     put("SHELL", &shell);
     put("WSL_DISTRO_NAME", d.name.as_bytes());
+    // WSLg's: the desktop's X display (:0, Xwayland's, through its
+    // abstract socket) and the Wayland server's socket, which the kernel
+    // puts in the distribution at /mnt/wslg/runtime-dir/wayland-0.
+    put("DISPLAY", b":0");
+    put("WAYLAND_DISPLAY", b"wayland-0");
+    put("XDG_RUNTIME_DIR", b"/mnt/wslg/runtime-dir");
     let mut argv_block: Vec<u8> = Vec::new();
     for a in &argv {
         argv_block.extend_from_slice(a);

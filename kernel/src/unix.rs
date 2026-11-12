@@ -457,6 +457,20 @@ impl Socket {
         Ok(())
     }
 
+    /// Gives a bound socket another node (`node`, a socket node the
+    /// caller made and holds): a connect to it reaches this socket, as a
+    /// connect to a socket file seen through a bind mount does. Its name
+    /// stays the first one; the node is dropped from the names when the
+    /// socket is released. Invalid if it is not bound by itself.
+    pub fn alias(this: &KArc<Socket>, node: NodeId) -> Result<(), Error> {
+        let st = this.state.lock();
+        if !st.bound || st.released || st.address.as_ref().is_none_or(Address::is_abstract) {
+            return Err(Error::Invalid);
+        }
+        BOUND.lock().try_push((Key::Node(node), this.clone()))?;
+        Ok(())
+    }
+
     /// Binds an unused abstract name of five hex digits (bind with only
     /// the family; Linux's autobind).
     pub fn autobind(this: &KArc<Socket>) -> Result<(), Error> {
@@ -1053,6 +1067,35 @@ mod tests {
         let name = auto.address().unwrap().unwrap();
         assert!(name.len() == 6 && name[0] == 0 && name[1..].iter().all(u8::is_ascii_hexdigit));
         auto.release();
+    }
+
+    /// A listener bound to a node reached through another node too (a
+    /// WSL distribution's view of the Wayland socket); the alias goes
+    /// with the listener.
+    #[test]
+    fn an_alias_reaches_the_listener_until_it_is_released() {
+        let (first, second) = (1_000_001, 1_000_002);
+        let l = Socket::new(Kind::Stream, ME).unwrap();
+        assert!(matches!(Socket::alias(&l, second), Err(Error::Invalid)));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"/run/x\0");
+        Socket::bind(&l, Address { bytes, node: Some(first) }).unwrap();
+        l.listen(4, ME).unwrap();
+        Socket::alias(&l, second).unwrap();
+        let c = Socket::new(Kind::Stream, OTHER).unwrap();
+        c.connect(Target::Node(second), OTHER).unwrap();
+        // Its name stays the first.
+        assert_eq!(c.peer_address().unwrap().unwrap(), b"/run/x\0");
+        let a = l.accept().unwrap();
+        c.send(b"hi", &mut Vec::new(), None).unwrap();
+        assert_eq!(recv(&a, 8).unwrap().0, b"hi");
+        assert_eq!(l.release(), Some(first));
+        let d = Socket::new(Kind::Stream, OTHER).unwrap();
+        assert!(matches!(d.connect(Target::Node(second), OTHER), Err(Error::Refused)));
+        let abs = Socket::new(Kind::Stream, ME).unwrap();
+        Socket::bind(&abs, abstract_name(b"unit-alias")).unwrap();
+        assert!(matches!(Socket::alias(&abs, second), Err(Error::Invalid)));
+        abs.release();
     }
 
     #[test]

@@ -252,6 +252,22 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
+    // `linux_mirror=<base URL>` (percent-encoded): the start menu's Linux
+    // distributions are fetched from there (ROADMAP LD step 7's scenario).
+    if let Some(url) = cmdline.value("linux_mirror") {
+        let mut decoded = alloc::vec::Vec::new();
+        let text = cmdline::percent_decode(url, &mut decoded)
+            .ok()
+            .and_then(|()| core::str::from_utf8(&decoded).ok())
+            .and_then(|t| nt::process::intern(t).ok());
+        match text {
+            Some(t) => {
+                nt::action::set_linux_mirror(t);
+                info!("desktop: Linux distributions are fetched from {t} (linux_mirror=)");
+            }
+            None => warn!("desktop: linux_mirror={url} is not a URL; ignored"),
+        }
+    }
     // `presenter=test|none` (ROADMAP RS B3a): a headless desktop, the
     // console session's shown by a frame in memory or by nothing.
     if let Some(name) = cmdline.value("presenter") {
