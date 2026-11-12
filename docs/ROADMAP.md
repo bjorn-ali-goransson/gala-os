@@ -1901,6 +1901,14 @@ need gala's.
      CreateEnvironmentBlock and DestroyEnvironmentBlock (Wine's userenv
      test on Windows), the boot writing the processor variables into
      `Session Manager\Environment` as Windows keeps them.
+     UNINSTALLCENTENNIAL then completes (InspectorOfficeGadget's starts
+     still fail without .NET Framework) and APPLYCONFIGURATION fails
+     publishing the staged install (`Failed to publish working op ,
+     Error:0x80070057`; repoman's DownloadManagers.hpp:575 E_INVALIDARG,
+     `SetCurrentState ... currentState=2 state=4`; setup.exe's client
+     ends 17004 at about 1850 s), the one ERROR_INVALID_PARAMETER of the
+     run's ledger being kernel32's GetFileInformationByHandleEx(FileIdInfo,
+     class 18); done: FileIdInformation (ARCHITECTURE "Files").
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
