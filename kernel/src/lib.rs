@@ -484,12 +484,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if events::written() > 0 {
         use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written to the debug console; profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long)",
+            "events: {} written to the debug console; profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long), {} of the writing of samples (not kept)",
             events::written(),
             time::SAMPLES_ASKED.load(Relaxed),
             time::SAMPLES_USER.load(Relaxed),
             time::SAMPLES_KERNEL.load(Relaxed),
-            time::SAMPLES_LOST.load(Relaxed)
+            time::SAMPLES_LOST.load(Relaxed),
+            time::SAMPLES_OF_WRITER.load(Relaxed)
         );
     }
     net::log_stats();

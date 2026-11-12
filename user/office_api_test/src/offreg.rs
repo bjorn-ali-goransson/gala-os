@@ -21,8 +21,9 @@
 //! - Bitmaps (Wine's dlls/ntdll/tests/rtlbitmap.c, run on Windows):
 //!   RtlInitializeBitMap writes only the header; RtlNumberOfSetBits
 //!   after RtlSetBits runs crossing bytes and ULONGs; in a 62-bit map
-//!   whose last byte alone is clear (set), RtlFindNextForwardRunClear
-//!   (Set) finds a run of 6 at 56.
+//!   whose last byte alone is clear, RtlFindNextForwardRunClear finds a
+//!   run of 6 at 56 (and Wine's RtlFindNextForwardRunSet a set run
+//!   likewise, looked up at run time: Windows' ntdll appears to lack it).
 //! - msvcrt: wcsnlen; wcsncpy_s (Wine's msvcrt tests string.c
 //!   test_wcscpy_s, run on Windows: EINVAL for a NULL destination or
 //!   source with the destination emptied, a NULL source with a count of
@@ -69,7 +70,6 @@ unsafe extern "system" {
     fn RtlSetBits(map: *mut Bitmap, start: u32, count: u32);
     fn RtlNumberOfSetBits(map: *mut Bitmap) -> u32;
     fn RtlFindNextForwardRunClear(map: *mut Bitmap, from: u32, pos: *mut u32) -> u32;
-    fn RtlFindNextForwardRunSet(map: *mut Bitmap, from: u32, pos: *mut u32) -> u32;
 }
 
 #[cfg_attr(
@@ -384,10 +384,24 @@ fn bitmaps(c: &mut Checks) -> Result<(), u32> {
         RtlInitializeBitMap(b, mask.as_mut_ptr(), 62);
         c.eq(RtlFindNextForwardRunClear(b, 0, &mut pos).into(), 6)?;
         c.eq(pos.into(), 56)?;
-        let mut mask = [0u8, 0, 0, 0, 0, 0, 0, 0xff];
-        RtlInitializeBitMap(b, mask.as_mut_ptr(), 62);
-        c.eq(RtlFindNextForwardRunSet(b, 0, &mut pos).into(), 6)?;
-        c.eq(pos.into(), 56)?;
+        // RtlFindNextForwardRunSet: Wine's, imported by none of Office's
+        // files; imported statically, the test did not load on Windows
+        // (STATUS_ENTRYPOINT_NOT_FOUND), so it is looked up (the info line
+        // records whether Windows' ntdll has it).
+        let ntdll: [u16; 10] = super::w("ntdll.dll");
+        let f = super::GetProcAddress(
+            super::LoadLibraryW(ntdll.as_ptr()),
+            b"RtlFindNextForwardRunSet\0".as_ptr(),
+        );
+        super::info("RtlFindNextForwardRunSet exported", u64::from(f != 0));
+        if f != 0 {
+            let find: unsafe extern "system" fn(*mut Bitmap, u32, *mut u32) -> u32 =
+                core::mem::transmute(f);
+            let mut mask = [0u8, 0, 0, 0, 0, 0, 0, 0xff];
+            RtlInitializeBitMap(b, mask.as_mut_ptr(), 62);
+            c.eq(find(b, 0, &mut pos).into(), 6)?;
+            c.eq(pos.into(), 56)?;
+        }
     }
     Ok(())
 }

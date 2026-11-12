@@ -4711,7 +4711,12 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
   takes the flag first (set: a sample, not a dump) and records rip, mode,
   client and the kernel backtrace into that CPU's ring (8 entries, one
   producer and one consumer on the same CPU); the CPU's own tick writes
-  the events. A CPU's idle state for the choice is read lock-free
+  the events. **Invariant: a tick's writing is bounded**: it writes the
+  samples waiting when it starts, and an NMI landing while it writes
+  keeps nothing (counted): a sample costs a VM exit per byte, which on a
+  loaded host can take longer than the sample period, and a writer that
+  chased its own samples never left the tick (`events_sample` timed out
+  with CPU 1 in `write_samples` for 20 s). A CPU's idle state for the choice is read lock-free
   (`sched::cpu_idle`, set at each switch). A QEMU dump NMI that arrives
   while a sample NMI is pending merges with it: that CPU misses the
   dump (the dump waits for it half a second). With one CPU the tick

@@ -268,6 +268,14 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     if frame.from_user_mode() {
         return true;
     }
+    // A sample of the profiler writing samples is not kept: writing one
+    // (port I/O a byte at a time, a VM exit each) can take longer than
+    // the sampling period on a loaded host, so samples of the writer would
+    // keep its loop going for ever (a CPU that never leaves its tick).
+    if WRITING[cpu].load(Ordering::Relaxed) {
+        SAMPLES_OF_WRITER.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
     let ring = &RINGS[cpu];
     let head = ring.head.load(Ordering::Relaxed);
     if head - ring.tail.load(Ordering::Acquire) >= RING as u64 {
@@ -295,17 +303,29 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     true
 }
 
-/// Writes CPU `cpu`'s waiting NMI samples (from its tick).
+/// Per CPU: its tick is writing its samples (`write_samples`); an NMI
+/// then keeps nothing.
+static WRITING: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+/// NMI samples that landed in the writing of samples (not kept; the
+/// `events:` line).
+pub static SAMPLES_OF_WRITER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes CPU `cpu`'s waiting NMI samples (from its tick): those waiting
+/// when it starts, at most the ring, so a tick's work is bounded whatever
+/// the host's speed.
 fn write_samples(cpu: usize) {
-    let Some(ring) = RINGS.get(cpu) else { return };
+    let (Some(ring), Some(writing)) = (RINGS.get(cpu), WRITING.get(cpu)) else { return };
     // Drops happen only while the ring is full, so after its newest
     // sample: they go with the last one written now (a drop needs a full
     // ring, so there is one).
     let mut lost = ring.lost.swap(0, Ordering::Relaxed);
+    let head = ring.head.load(Ordering::Acquire);
+    writing.store(true, Ordering::Relaxed);
     loop {
         let tail = ring.tail.load(Ordering::Relaxed);
-        let head = ring.head.load(Ordering::Acquire);
         if tail == head {
+            writing.store(false, Ordering::Relaxed);
             return;
         }
         let e = &ring.entries[tail as usize % RING];

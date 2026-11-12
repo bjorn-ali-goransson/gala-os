@@ -1122,6 +1122,15 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 - GetProcAddress returns NULL for stubs, so a test that checks a
   function is *exported* imports it statically (a call in a branch never
   taken).
+- A static import Windows lacks keeps the whole test from loading
+  there (exit 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND, in the windows
+  job): import statically only what a real program imports (the Office
+  survey's import lists) or a test already passing on Windows
+  (`user/windows/ci-passing.txt`) imports; look up the rest with
+  GetProcAddress and print an `info` line (`office_api_test`'s
+  RtlFindNextForwardRunSet). Comparing a test's import table
+  (`x86_64-w64-mingw32-objdump -p`) with those of the passing tests
+  names the candidates.
 - An export forwarder (`/EXPORT:f=kernel32.f`) to a stub fails to bind
   as a "missing export": implement the function where it is forwarded
   from instead (normaliz's IdnToUnicode).
