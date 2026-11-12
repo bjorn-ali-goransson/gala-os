@@ -3343,6 +3343,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "msvcrt.dll", "Windows/System32"),
     ("office_api_test", "advapi32.dll", "Windows/System32"),
     ("office_api_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("office_api_test", "wtsapi32.dll", "Windows/System32"),
     // The kernel32 functions Office imports once each (user/office_k32_test).
     ("office_k32_test", "ntdll.dll", "Windows/System32"),
     ("office_k32_test", "kernel32.dll", "Windows/System32"),
@@ -3364,6 +3365,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/wtsapi32.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
