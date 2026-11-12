@@ -3107,9 +3107,15 @@ the next breakthroughs).
    `xwayland_shell_v1` instead of `WL_SURFACE_ID`, a stop for SIGTSTP
    (job control), a recorded glibc fork test of the clone flags.
 6. A distribution's desktop (the owner; being brought up: `lx_xdesktop`,
-   PENDING, user/lx/xdesktop: rootful Xwayland on `:1` with twm and an
-   xterm, the lightest X desktop that shows the path; Xfce needs a D-Bus
-   session bus, xfconf and over a hundred packages, a later step): rootful Xwayland as one window
+   PENDING until its screen check has run once: user/lx/xdesktop's
+   session script runs rootful Xwayland on `:1` as one window "Xwayland
+   on :1" framed by shasha (`-decorate`: libdecor takes the server's
+   decorations), twm managing an xterm in it, typed into from the
+   desktop; `exit` ends the session; seen on a manual boot. twm is the
+   lightest X desktop that shows the path; Xfce needs a D-Bus session
+   bus, xfconf and over a hundred packages, a later step. Next:
+   maximise (the X screen following the window's size) and full screen
+   (xdg_toplevel.set_fullscreen, ignored today), then Xfce): rootful Xwayland as one window
    running a light desktop session (Xfce), which can be maximised or
    put full screen. Full screen is a choice of presentation, not of
    speed: both paths copy the session's damaged pixels in software.

@@ -10419,13 +10419,19 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // A distribution's desktop (LD step 6): rootful Xwayland on :1 as
         // one framed window (user/lx/xdesktop/session.sh), twm managing an
-        // xterm inside it. The screen check (XDESKTOP_SCREEN) maximizes the
-        // window (the X screen follows), types in the xterm, and `exit`
-        // ends the session. The script's transcript is lx_xdesktop.txt.
+        // xterm inside it. The screen check (XDESKTOP_SCREEN) sees the frame,
+        // the X root, twm's frame and the xterm, then types `exit`, which
+        // ends the session. The script's transcript is sh/lx_xdesktop.txt.
         name: "lx_xdesktop",
         cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/bin/sh lxargs=sh%20/lx/xdesktop/session.sh lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala%20SHELL=/bin/sh%20PATH=/usr/bin:/bin",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["personality linux", "desktop: shown window", "run: end /bin/sh", BOOT_OK_MARKER],
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'Xwayland on :1'",
+            "xtask: screen ok",
+            "run: end /bin/sh",
+            BOOT_OK_MARKER,
+        ],
     },
     Scenario {
         // user/lx/gtk_test under X11 (LD step 5): GDK's X11 backend on
@@ -13207,6 +13213,28 @@ const XTERM_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// A distribution's desktop in one window (`lx_xdesktop`): rootful
+/// Xwayland's 1024 x 640 window "Xwayland on :1", framed by shasha
+/// (libdecor takes the server's decorations) at (64, 48), its client area
+/// from (65, 81), the X root black; inside it twm's frame around the
+/// session's xterm (twm's title bar blue, #3465a4, from about (106,
+/// 122)), which has the keyboard: `exit` ends the xterm and the session.
+const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'Xwayland on :1'",
+    steps: &[
+        ScreenStep {
+            after: "session: display :1 ready",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(800, 600, 0x000000),            // the X root
+                PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4), // twm's title bar
+                PixelCheck::At(300, 300, 0xffffff),            // the xterm
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
 /// The distribution's terminal (`wsl_terminal`): wsl.exe's console
 /// window at (60, 60) (conhost's grid, lines 19 pixels apart from y 98)
 /// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
@@ -13653,6 +13681,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),
     ("lx_xterm", XTERM_SCREEN),
+    ("lx_xdesktop", XDESKTOP_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
