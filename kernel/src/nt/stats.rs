@@ -57,3 +57,66 @@ impl core::fmt::Display for Summary {
         )
     }
 }
+
+/// The kernel heap by owner (`heap by owner: ...`): what the registry and
+/// the file system hold, from their structures' capacities, and the rest
+/// of the heap in use (`in_use`, bytes) as "other" (processes, handles,
+/// sections' bookkeeping, buffers, allocator rounding). The lines that
+/// print it: the end of a run, the state dump, `persist`'s low-memory
+/// warning (OBSERVABILITY "Serial log").
+pub struct HeapOwners {
+    pub in_use: usize,
+    /// None: its lock was held (the state dump does not wait).
+    pub registry: Option<super::registry::HeapUse>,
+    pub files: Option<crate::fs::ramfs::HeapUse>,
+}
+
+impl HeapOwners {
+    /// Measures now (try-locks: safe from the state dump).
+    pub fn now(in_use: usize) -> Self {
+        Self {
+            in_use,
+            registry: super::registry::try_heap_use(),
+            files: super::file::try_heap_use(),
+        }
+    }
+}
+
+impl core::fmt::Display for HeapOwners {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut known = 0;
+        match self.registry {
+            Some(r) => {
+                known += r.bytes;
+                write!(
+                    out,
+                    "registry {} KiB ({} keys, {} values, {} KiB of value data)",
+                    r.bytes / 1024,
+                    r.keys,
+                    r.values,
+                    r.data / 1024
+                )?;
+            }
+            None => out.write_str("registry (lock held)")?,
+        }
+        match self.files {
+            Some(f) => {
+                known += f.tree + f.pages;
+                write!(
+                    out,
+                    ", file tree {} KiB ({} nodes), files' pages {} KiB",
+                    f.tree / 1024,
+                    f.nodes,
+                    f.pages / 1024
+                )?;
+            }
+            None => out.write_str(", files (lock held)")?,
+        }
+        write!(
+            out,
+            ", other {} KiB, of {} KiB in use",
+            self.in_use.saturating_sub(known) / 1024,
+            self.in_use / 1024
+        )
+    }
+}

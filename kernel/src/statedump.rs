@@ -60,7 +60,11 @@ pub fn full_dump() {
     crate::nt::session::dump();
     // gala-um: the host's allocator, no frame figures worth printing.
     #[cfg(not(feature = "hosted"))]
-    stats_line(Some(crate::mm::heap::stats()), crate::mm::try_frame_stats());
+    {
+        let heap = crate::mm::heap::stats();
+        stats_line(Some(heap), crate::mm::try_frame_stats());
+        info!("statedump: heap by owner: {}", crate::nt::stats::HeapOwners::now(heap.in_use));
+    }
     info!("statedump: end");
 }
 

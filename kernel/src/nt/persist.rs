@@ -855,6 +855,7 @@ fn evict() {
                 heap.large_pages,
                 super::platform::FrameUses(super::platform::frame_uses()),
             );
+            warn!("persist: heap by owner: {}", super::stats::HeapOwners::now(heap.in_use));
             let (threads, dead, slots) = super::platform::thread_counts();
             warn!(
                 "persist: {threads} kernel threads, {dead} dead not reaped yet (their stacks \

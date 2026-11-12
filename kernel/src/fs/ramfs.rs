@@ -723,6 +723,20 @@ pub fn has_wildcards(mask: &[u16]) -> bool {
     mask.iter().any(|&c| b"*?<>\"".iter().any(|&w| c == u16::from(w)))
 }
 
+/// What the file system holds on the kernel heap (`RamFs::heap_use`),
+/// from its structures' capacities (allocator rounding not counted).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapUse {
+    /// The tree: nodes, names, directory lists, files' page and cluster
+    /// tables, hard links, descriptors, reparse data, records not yet
+    /// written, the data area's bitmap and queues.
+    pub tree: usize,
+    /// Files' pages in memory.
+    pub pages: usize,
+    /// Nodes.
+    pub nodes: usize,
+}
+
 pub struct RamFs {
     nodes: Vec<Option<Node>>,
     /// Changes are recorded for the disk (fs::log) while this is on.
@@ -1696,6 +1710,41 @@ impl RamFs {
         let parent = n.parent;
         let name = copy(&n.name).ok_or(FsError::NoMemory)?;
         self.unlink(parent, &name)
+    }
+
+    /// What it holds on the kernel heap (statistics: the end-of-run
+    /// `heap by owner` line, the state dump, low-memory warnings).
+    pub fn heap_use(&self) -> HeapUse {
+        use core::mem::size_of;
+        let mut u = HeapUse {
+            tree: self.nodes.capacity() * size_of::<Option<Node>>(),
+            ..HeapUse::default()
+        };
+        for n in self.nodes.iter().flatten() {
+            u.nodes += 1;
+            u.tree += 2 * n.name.capacity() + n.views.capacity() * size_of::<(usize, usize)>();
+            u.tree += n.security.as_ref().map_or(0, Vec::capacity);
+            u.tree += n.reparse.as_ref().map_or(0, |r| r.data.capacity());
+            match &n.kind {
+                Kind::Directory(c) => u.tree += c.capacity() * size_of::<NodeId>(),
+                Kind::File(Data::Paged { pages, disk, .. }) => {
+                    u.tree += pages.capacity() * size_of::<Option<Box<Page>>>();
+                    u.tree += disk.capacity() * size_of::<Slot>();
+                    u.pages += pages.iter().flatten().count() * size_of::<Page>();
+                }
+                Kind::Symlink(t) => u.tree += t.capacity(),
+                Kind::File(Data::Static(_)) | Kind::Socket => {}
+            }
+        }
+        u.tree += self.links.capacity() * size_of::<Link>();
+        u.tree += self.links.iter().map(|l| 2 * l.name.capacity()).sum::<usize>();
+        u.tree += self.tombstones.iter().map(|t| 2 * t.capacity()).sum::<usize>();
+        u.tree += self.ops.capacity() * size_of::<Op>();
+        u.tree += self.changes.capacity() * size_of::<Change>();
+        if let Some(a) = &self.area {
+            u.tree += a.dirty.capacity() * size_of::<(NodeId, usize)>() + a.clusters.heap_bytes();
+        }
+        u
     }
 
     /// Whether entry `name` of directory `dir` is a hard link (not a
@@ -4287,6 +4336,19 @@ mod tests {
         let mut buf = [0u8; 4];
         g.read(gx, 0, &mut buf).unwrap();
         assert_eq!(&buf, b"data");
+    }
+
+    /// `heap_use` counts the nodes, their names and their pages.
+    #[test]
+    fn heap_use_counts_the_tree_and_the_pages() {
+        let mut f = fs();
+        let before = f.heap_use();
+        let id = f.create(ROOT, &w("a-rather-long-file-name"), false, 1).unwrap();
+        f.write(id, 0, &[7u8; 2 * PAGE], 2).unwrap();
+        let after = f.heap_use();
+        assert_eq!(after.nodes, before.nodes + 1);
+        assert_eq!(after.pages, before.pages + 2 * PAGE);
+        assert!(after.tree >= before.tree + 2 * w("a-rather-long-file-name").len());
     }
 
     /// Linux's unlink of an open file: the name is free at once, the node

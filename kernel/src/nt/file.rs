@@ -273,6 +273,12 @@ pub fn volume_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     with_fs(|fs| fs.path_of(node)).map_err(fs_status)
 }
 
+/// The file system's heap use, or None while its lock is held (the
+/// state dump must not wait).
+pub fn try_heap_use() -> Option<ramfs::HeapUse> {
+    FS.try_lock().map(|fs| fs.as_ref().map(RamFs::heap_use).unwrap_or_default())
+}
+
 /// The name of open file `file` from the volume root: the hard link it
 /// was opened by while that still names it, else its node's first name.
 pub fn handle_path(file: &FileObject) -> Result<Vec<u16>, NtStatus> {

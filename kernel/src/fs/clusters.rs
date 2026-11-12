@@ -33,6 +33,11 @@ pub struct Clusters {
 }
 
 impl Clusters {
+    /// Its bitmap and lists on the kernel heap, in bytes (statistics).
+    pub fn heap_bytes(&self) -> usize {
+        8 * self.bits.capacity() + 4 * self.pending.capacity()
+    }
+
     /// An allocator of `count` clusters, all free.
     pub fn new(count: u32) -> Option<Self> {
         let words = (count as usize).div_ceil(64);
