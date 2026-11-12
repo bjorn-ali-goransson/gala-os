@@ -1886,6 +1886,13 @@ need gala's.
      (`persist: registry changes not written (NoMemory)`, frames free
      reaching 0) and every sync after it tried again; done: snapshots
      are written as the registry is walked, a chunk at a time.
+     On the fast path (below) the registry staging then ran for the
+     rest of the hour at about 40 ms per NtCreateKey and NtSetValueKey
+     (19000 creates and 25000 values from 1300 s to 3600 s, every
+     system call's sync writing the change and flushing the disk; NtClose
+     20 ms); done: the registry is flushed lazily, as Windows' is (at the
+     first sync 5 s after the last, or at NtFlushKey, a program's end, a
+     handover; ARCHITECTURE "The registry kept").
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it

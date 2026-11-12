@@ -6264,7 +6264,16 @@ rather than a format of their own.
   old tree and writes the new one; a tombstone covers the names below
   it (no tombstone under another). Replay sets only the times records
   carry: a replayed create or delete leaves the parent's LastWriteTime.
-- `persist::sync` first moves the registry's records into the file,
+- The registry is flushed lazily, as Windows' hives are ("within a few
+  seconds", RegFlushKey's documentation): `persist::sync` moves the
+  registry's records into the file at the first sync 5 s after the last
+  flush (REGISTRY_FLUSH_NS), or at once after NtFlushKey (RegFlushKey), a
+  program's end or before a kernel handover; a crash loses at most those
+  seconds of registry changes, as on Windows. Synced at every system call
+  (two disk writes and a flush each), Office's registry staging took
+  about 40 ms per NtCreateKey and NtSetValueKey under TCG.
+- `persist::sync` first moves the registry's records into the file
+  (when due),
   then writes the file system's records; past 1 MiB and past twice the
   last snapshot (`compact_reglog`), or when records were lost, the file
   is rewritten as a snapshot (a `persist: the registry's log rewritten`

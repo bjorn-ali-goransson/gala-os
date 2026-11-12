@@ -2,7 +2,10 @@
 //! change log (`fs::volume`, `fs::log`) over the boot's files, then the
 //! ramfs records what programs change, and `sync` (at the end of every
 //! system call, and after each program the kernel runs) appends it to the
-//! disk and flushes before the call returns to the program. A full log
+//! disk and flushes before the call returns to the program. The
+//! registry's changes are flushed lazily, as Windows' are: at the first
+//! sync REGISTRY_FLUSH_NS after the last flush, or at once after
+//! NtFlushKey, a program's end or before a kernel handover. A full log
 //! area, or changes that could not be recorded, make a snapshot instead.
 //! The registry's changes (D3) go to a file on C:, `REGLOG`, in the same
 //! sync (nt::reglog), so the disk keeps them like any file.
@@ -110,6 +113,40 @@ impl core::fmt::Display for Summary {
 /// Notes that the file system has changes to write (see `file::with_fs`).
 pub fn note_pending() {
     PENDING.store(true, Ordering::Release);
+}
+
+/// The registry's changes since its last flush (`registry::with`).
+static REG_PENDING: AtomicBool = AtomicBool::new(false);
+/// A flush asked for: NtFlushKey (RegFlushKey), a program's end, a
+/// kernel handover.
+static REG_FORCE: AtomicBool = AtomicBool::new(false);
+/// When the registry was last flushed (monotonic ns).
+static REG_LAST: AtomicU64 = AtomicU64::new(0);
+/// The registry's lazy flush: its changes reach the disk at the first
+/// sync this long after the last flush, as Windows' registry writes its
+/// hives lazily ("within a few seconds", RegFlushKey's documentation),
+/// unless a flush is asked for. Syncing them at every system call cost
+/// each NtCreateKey and NtSetValueKey of Office's registry staging about
+/// 40 ms under TCG (two disk writes and a flush each).
+const REGISTRY_FLUSH_NS: u64 = 5_000_000_000;
+
+/// Notes that the registry has changes for its next flush.
+pub fn note_registry_pending() {
+    REG_PENDING.store(true, Ordering::Release);
+}
+
+/// Has the next sync flush the registry's changes (NtFlushKey, a
+/// program's end, a kernel handover).
+pub fn flush_registry() {
+    REG_FORCE.store(true, Ordering::Release);
+}
+
+/// Whether the registry's changes are due for the disk.
+fn registry_due() -> bool {
+    REG_PENDING.load(Ordering::Acquire)
+        && (REG_FORCE.load(Ordering::Acquire)
+            || platform::monotonic_ns().saturating_sub(REG_LAST.load(Ordering::Relaxed))
+                >= REGISTRY_FLUSH_NS)
 }
 
 /// Mounts the disk's volume over C: (formatting an empty disk) and starts
@@ -364,6 +401,9 @@ fn sync_registry() {
             r.lose_ops();
             Ok(())
         });
+        // Again at the next sync.
+        note_registry_pending();
+        flush_registry();
     }
 }
 
@@ -452,10 +492,18 @@ fn reserve() -> Option<Buffers> {
 
 /// Writes the recorded changes to the disk (see the module comment).
 pub fn sync() {
-    if !PENDING.load(Ordering::Acquire) {
+    if !PENDING.load(Ordering::Acquire) && !registry_due() {
         return;
     }
     let _turn = Turn::take();
+    // The registry's changes become changes of a file on C: first, when
+    // its lazy flush is due.
+    if registry_due() {
+        REG_PENDING.store(false, Ordering::Release);
+        REG_FORCE.store(false, Ordering::Release);
+        REG_LAST.store(platform::monotonic_ns(), Ordering::Relaxed);
+        sync_registry();
+    }
     if !PENDING.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -468,8 +516,6 @@ pub fn sync() {
         *VOLUME.lock() = Some(volume);
         return;
     };
-    // The registry's changes become changes of a file on C: first.
-    sync_registry();
     // Pages to their clusters first, a batch per hold of the file system;
     // the records are taken in the hold whose batch leaves no page dirty,
     // so every record names clusters that hold their pages by the time it
