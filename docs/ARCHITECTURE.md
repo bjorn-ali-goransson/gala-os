@@ -3150,7 +3150,10 @@ ntdll imports.
   and temporary directories, LoadLibrary(A/W/ExW)/GetProcAddress/
   FreeLibrary over the loader.
 - **Locale** (`locale.rs`, `calendar.rs`): one locale, en-US (0x409), also
-  for the defaults and LOCALE_INVARIANT; linguistic order compares
+  for the defaults and LOCALE_INVARIANT; IsValidLocaleName accepts any
+  well-formed `language[-Script][-REGION]` tag, as Windows 10 and later
+  do (an unknown language names a custom locale: "xx-QQ" is valid on
+  24H2), while LocaleNameToLCID knows en-US alone; linguistic order compares
   letters without case first, then puts lower case first; character
   types from Unicode properties. The en-US localized Gregorian calendar
   (calendar 1) for GetCalendarInfoEx/W and EnumCalendarInfoExEx (names,

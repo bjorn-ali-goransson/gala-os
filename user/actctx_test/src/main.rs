@@ -34,7 +34,8 @@
 //!   the name, one section per context: four classes of two assemblies);
 //!   COM classes (120-byte records, threading model, CLSID twice, type
 //!   library, ProgID after the record, the misc-status mask; the alias
-//!   GUID finds the same record; every ProgID points to the alias);
+//!   GUID finds a record with the same bytes, at an address of its own on
+//!   Windows; every ProgID points to the alias);
 //!   run levels (asInvoker, requireAdministrator with uiAccess);
 //!   compatibility lists in manifest order with maxversiontested
 //!   (10.0.18358 is 0x000a000047b60000).
@@ -481,6 +482,11 @@ fn guid(s: &str) -> [u8; 16] {
 fn rd32(p: usize) -> u32 {
     // SAFETY: inside a section the call returned.
     unsafe { (p as *const u32).read_unaligned() }
+}
+
+fn rd8(p: usize) -> u8 {
+    // SAFETY: as above.
+    unsafe { (p as *const u8).read_volatile() }
 }
 
 fn rd_guid(p: usize) -> [u8; 16] {
@@ -948,14 +954,18 @@ fn find_com(
     c.eq(d.global_length.into(), rd32(d.base + 36).into())?;
     c.eq(d.actctx as u64, 0)?;
     c.eq(d.roster.into(), roster.into())?;
-    // The alias finds the same record.
+    // The alias finds a record with the same bytes.
     let alias = rd_guid(r + 28);
     let mut d2 = KeyedData::new();
     // SAFETY: valid arguments.
     unsafe {
         c.ok(FindActCtxSectionGuid(0, null(), COM_SERVER, &alias, &mut d2) != 0, 0)?;
     }
-    c.eq(d2.data as u64, r as u64)?;
+    // Windows keeps a record of its own for the alias (another address):
+    // Wine's test_find_com_redirection compares the records' bytes.
+    let size = rd32(r) as usize;
+    let same = (0..size).all(|i| rd8(d2.data + i) == rd8(r + i));
+    c.ok(same && rd32(d2.data) as usize == size, d2.data as u64)?;
     Ok(d)
 }
 

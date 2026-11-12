@@ -1311,9 +1311,38 @@ pub extern "system" fn LocaleNameToLCID(name: *const u16, _flags: u32) -> u32 {
     fail_with(ERROR_INVALID_PARAMETER, 0)
 }
 
+/// IsValidLocaleName: the invariant locale ("") and any well-formed
+/// `language[-Script][-REGION]` tag. Windows 10 and later accept a tag of a
+/// language they do not know too (it names a custom locale: "xx-QQ" is
+/// valid on 24H2), so the test is the tag's shape, not gala's one locale.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsValidLocaleName(name: *const u16) -> Bool {
-    Bool::from(!name.is_null() && (wide_slice(name).is_empty() || is_en_us(wide_slice(name))))
+    Bool::from(!name.is_null() && well_formed_tag(wide_slice(name)))
+}
+
+/// `language[-Script][-REGION]`: a 2-3 letter language, a 4-letter script,
+/// a 2-letter or 3-digit region; "" (the invariant locale) too.
+fn well_formed_tag(name: &[u16]) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    let letters = |s: &[u16]| s.iter().all(|&c| c < 0x80 && (c as u8).is_ascii_alphabetic());
+    let digits = |s: &[u16]| s.iter().all(|&c| c < 0x80 && (c as u8).is_ascii_digit());
+    let mut parts = name.split(|&c| c == u16::from(b'-'));
+    let Some(language) = parts.next() else { return false };
+    if !(2..=3).contains(&language.len()) || !letters(language) {
+        return false;
+    }
+    let mut stage = 0; // 0: script or region next, 1: region next, 2: done
+    for part in parts {
+        stage = match (stage, part.len()) {
+            (0, 4) if letters(part) => 1,
+            (0 | 1, 2) if letters(part) => 2,
+            (0 | 1, 3) if digits(part) => 2,
+            _ => return false,
+        };
+    }
+    true
 }
 
 type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
