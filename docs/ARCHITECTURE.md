@@ -4484,9 +4484,12 @@ of their own, clients of it) is the yardstick.
   folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
   the profile's, the Start menu's and Programs under it, per user in
   %APPDATA% and for all in %ProgramData%, FOLDERID_UserProgramFiles in
-  %LOCALAPPDATA%\Programs, CSIDL_SYSTEMX86 `%windir%\SysWOW64` and
-  the x86 and common program files from their variables
-  (`win32_misc_test`); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
+  %LOCALAPPDATA%\Programs, CSIDL_SYSTEMX86 and FOLDERID_SystemX86
+  `%windir%\SysWOW64`, FOLDERID_Fonts, and the program files and common
+  files folders (their X86 forms and, in a 64-bit process only, X64
+  from ProgramW6432 and CommonProgramW6432) from their variables
+  (`win32_misc_test`; the Click-to-Run service's registry staging maps
+  its tokens through them, and an unknown one stopped it); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
   folder Windows makes with one; `shell32_test`),
