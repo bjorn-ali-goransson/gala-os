@@ -1389,9 +1389,8 @@ need gala's.
   WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
   used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
   and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
-  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Some are
-  stubs today (CreateMutexExW, GetShortPathNameA, GetThreadIOPendingFlag,
-  GetVolumePathNamesForVolumeNameW): they must work, not only exist.
+  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Each must
+  work, not only exist.
 - **Then, as the apps draw and work** (delay imports, files needing
   each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
   (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
@@ -1451,12 +1450,35 @@ need gala's.
      `persist_test`; ARCHITECTURE "Registry"); to measure on Windows
      before `ci-passing.txt` lists them: the completion statuses, a
      change kept for the next request, what a rename and a deleted
-     watched key fire, a subordinate key (the tests' `info` lines). Left:
-     the manifests' sections
-     (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
-     classes), GetThreadIOPendingFlag's count of a thread's pending
-     socket, pipe and watch requests (a recorded stopgap answering
-     FALSE), and the ten functions used once. `office_api_test` and
+     watched key fire, a subordinate key (the tests' `info` lines).
+     Activation contexts from real manifests (`actctx_test`,
+     `wow64_actctx_test`; ARCHITECTURE "Activation contexts"): the
+     manifest read (embedded RT_MANIFEST and .manifest files, UTF-8 and
+     UTF-16, refused as Windows refuses), dependencies found beside the
+     application or the manifest (Microsoft's as system assemblies), the
+     DLL redirection, window class, COM server and ProgID sections in
+     Windows' layouts, FindActCtxSectionStringW/A and
+     FindActCtxSectionGuid through the active then the process default
+     context (the executable's own manifest), QueryActCtxW's classes 2-6
+     and a DLL's own context (RT_MANIFEST 2); GetThreadIOPendingFlag is
+     ThreadIsIoPending, the kernel's count of a thread's outstanding
+     socket, pipe and directory-watch requests (`office_api_test`;
+     ARCHITECTURE "I/O requests and their thread"). To measure on Windows
+     before `ci-passing.txt` lists `actctx_test` (the `info` lines): the
+     process default's root manifest path for an embedded manifest,
+     what RETURN_HACTCTX gives for it, the executable's
+     QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE context, a dependency's
+     directory name, ulFlags and ulFileCount; and for GetThreadIOPendingFlag
+     a request on a file with a completion port (gala: not counted) and a
+     waiting registry watch (gala: not counted; `regnotify_test`).
+     Left: the sections gala reads but does not build (typelibs,
+     interface proxy/stubs, CLR classes and surrogates, WinRT
+     activatable classes, loadFrom; recorded), QueryActCtxSettingsW,
+     and the functions used once, stubs today (`import_survey.py ...
+     --roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE --static`): kernel32's
+     CompareStringA, FoldStringW, GetStringTypeExA, IsBadReadPtr,
+     IsBadWritePtr, OfferVirtualMemory, ResolveLocaleName,
+     SetThreadIdealProcessor, WinExec. `office_api_test` and
      `wow64_office_api_test` pass on CI's Windows (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
      the Office Deployment Tool's `setup.exe /configure` in gala
@@ -1485,7 +1507,7 @@ need gala's.
      `wow64_msi_test`; ARCHITECTURE "Other DLLs"). Past msi it disables
      its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
      `office_api_test`), queries its activation context (QueryActCtxW's
-     module context and the manifest sections, recorded unsupported),
+     module context and the manifest sections: done, `actctx_test`),
      asks COM for a class not registered, and loads normaliz and powrprof
      (done: both built for i686 too; `office_api_test` and
      `wow64_office_api_test` check IdnToAscii/IdnToUnicode and

@@ -1449,20 +1449,23 @@ pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
 }
 
 /// GetThreadIOPendingFlag(thread, &pending): whether the thread has I/O
-/// requests outstanding. gala's file I/O completes inside its call; the
-/// requests that stay pending (sockets, pipes, directory watches) are not
-/// counted per thread yet, so the answer is FALSE (a stopgap, recorded:
-/// ROADMAP OF).
+/// requests outstanding: NtQueryInformationThread's ThreadIsIoPending
+/// (its socket, pipe and directory-watch requests not yet complete; file
+/// I/O completes inside its call).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadIOPendingFlag(thread: Handle, pending: *mut Bool) -> Bool {
     if pending.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    if GetThreadId(thread) == 0 {
-        return FALSE;
+    let mut value = 0u32;
+    // SAFETY: a ULONG buffer; ThreadIsIoPending (16).
+    let status = unsafe {
+        NtQueryInformationThread(thread, 16, (&raw mut value).cast(), 4, core::ptr::null_mut())
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
     }
-    unsupported(b"kernel32.dll!GetThreadIOPendingFlag(pending socket, pipe or watch I/O)", 0);
     // SAFETY: the caller's BOOL.
-    unsafe { *pending = FALSE };
+    unsafe { *pending = Bool::from(value != 0) };
     TRUE
 }

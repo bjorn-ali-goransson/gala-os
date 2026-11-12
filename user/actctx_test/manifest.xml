@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- actctx_test's own manifest (RT_MANIFEST 1): the process's default
+     activation context. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="Gala.ActCtxTest" version="1.2.3.4"/>
+  <file name="galaactctx.dll">
+    <windowClass>GalaActCtxClass</windowClass>
+    <comClass clsid="{6a4b2c10-1d2e-4f3a-9b8c-7d6e5f4a3b2c}" threadingModel="Apartment" progid="Gala.ActCtx.1"/>
+  </file>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>

@@ -3137,19 +3137,86 @@ ntdll imports.
   (BeginUpdateResourceW, UpdateResourceW, EndUpdateResourceW: rewriting
   a PE's resource section) is not there: they are stubs, which Inno
   Setup's compiler imports and calls when it makes a Setup.
-- **Activation contexts** (`actctx.rs`): CreateActCtxW checks that the
-  manifest exists (an RT_MANIFEST resource of the module or PE file, or
-  a manifest file) and returns a reference-counted handle;
-  ActivateActCtx/DeactivateActCtx keep a per-thread stack (16 deep, 64
-  threads) with unique cookies. Nothing is read from the manifests (no
-  side-by-side redirection). QueryActCtxW answers
-  ActivationContextBasicInformation (the active context with
-  QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX; NULL when none is: a program
-  without a manifest); other classes are recorded and refused.
-  FindActCtxSectionStringW checks its arguments (ERROR_INVALID_PARAMETER
-  for no name, no data or a cbSize below ulAssemblyRosterIndex) and finds
-  nothing (ERROR_SXS_KEY_NOT_FOUND; recorded when a context is active,
-  whose manifest might have had the key). `office_api_test`.
+- **Activation contexts** (`actctx.rs`, `actctx/manifest.rs`,
+  `actctx/sections.rs`; `actctx_test`, `wow64_actctx_test`,
+  `manifest_test`, `office_api_test`): a context is its manifest read
+  into a model and the sections built from it once, at CreateActCtxW;
+  a handle is the context's address (a magic tells it from anything
+  else), reference-counted; ActivateActCtx/DeactivateActCtx keep a
+  per-thread stack (16 deep, 64 threads) with unique cookies.
+  - Sources: RT_MANIFEST `lpResourceName` (default 1) of hModule or of
+    the PE file lpSource (mapped as an image), else
+    `<file>[.<id>].manifest` beside it; or the manifest file lpSource
+    (inside lpAssemblyDirectory when relative). UTF-8, or UTF-16 with a
+    byte-order mark (either order). Each ACTCTXW field a flag names must
+    lie within cbSize (else ERROR_INVALID_PARAMETER); the application
+    directory is lpApplicationName or the module's directory.
+  - The reader (`manifest.rs`) knows elements, attributes, default and
+    prefixed namespaces (asm.v2 and v3 stand for v1), text, comments and
+    the XML declaration. It refuses, with ERROR_SXS_CANT_GEN_ACTCTX and
+    the reason in the ledger (`kernel32.dll!CreateActCtxW: <reason>`,
+    "other", the character offset as detail): a root that is not asm.v1
+    `<assembly>`, no manifestVersion="1.0", an unknown attribute of
+    `<assembly>`, an unknown assembly-namespace element under
+    `<assembly>` or `<file>` (other namespaces are skipped), a `<file>`
+    without a name or with a hash that is not 40 hex digits, a second
+    requestedExecutionLevel, content after the root (Windows' answers in
+    Wine's actctx tests).
+  - The model: assemblies (the root, then dependencies in the order
+    found, each with its identity, manifest path and, for a dependency,
+    a WinSxS-style directory name `<arch>_<name>_<key>_<version>_<lang>_<hash>`),
+    files, window classes, COM classes with their ProgIDs, the root's
+    run level, uiAccess and compatibility list (supportedOS and
+    maxversiontested in manifest order). A dependency is one already in
+    the context, else a private assembly (`<dir>\<name>.dll` with
+    manifest resource 1, `<dir>\<name>.manifest`, then the same in
+    `<dir>\<name>\`, for the application directory, then the root
+    manifest's), its version exactly the one asked; else, with
+    Microsoft's public key token (6595b64144ccf1df: Common-Controls,
+    GdiPlus, ...), a system assembly with that identity and no files
+    (its manifest path `%SystemRoot%\WinSxS\Manifests\<directory>.manifest`;
+    gala provides those DLLs itself); else ERROR_SXS_CANT_GEN_ACTCTX
+    with `CreateActCtxW: no assembly <name>` in the ledger, unless
+    optional="yes" or allowDelayedBinding="true".
+  - Sections (`sections.rs`, Windows' undocumented layouts as Wine's
+    tests check them): DLL redirection (every file; 20-byte records,
+    PATH_OMITS_ASSEMBLY_ROOT), window classes (`<version>!<class>`
+    unless versioned="no", the module after it), COM servers (120-byte
+    records indexed by CLSID and by a generated alias GUID) and ProgIDs
+    (each pointing to its class's alias in the section's global area).
+    Keys are found by RtlHashUnicodeString's X65599 hash of the
+    upper-cased key, then compared case-insensitively. typelib,
+    comInterface(External)ProxyStub, clrClass/clrSurrogate,
+    activatableClass and loadFrom are read but build no section yet
+    (recorded at creation, and when such a section is searched).
+  - The process default context is the executable's RT_MANIFEST 1, else
+    `<exe>.manifest`, made on first use and never freed; a refused one
+    is recorded (`process default activation context refused`) and the
+    process has none (Windows would not have started it). It is not on
+    the stack: GetCurrentActCtx is NULL without an activation.
+    FindActCtxSectionStringW/A (DLL redirection 2, window classes 3,
+    ProgIDs 7; other documented sections 1-13 ERROR_SXS_KEY_NOT_FOUND,
+    others ERROR_SXS_SECTION_NOT_FOUND) and FindActCtxSectionGuid (COM
+    servers 4; 5, 6, 9 find nothing) search the active context, then
+    the process default; FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX returns
+    the context found in, referenced.
+  - QueryActCtxW: a NULL context is the process default (except for
+    ActivationContextBasicInformation, which answers NULL);
+    USE_ACTIVE_ACTCTX the innermost active one (with a context given:
+    ERROR_INVALID_PARAMETER); ACTCTX_IS_HMODULE/IS_ADDRESS a DLL's own
+    context (its RT_MANIFEST 2, made on first use, kept in a 64-module
+    table) or, for the executable or a DLL without one, the process
+    default. Classes 2-6 as documented (detailed information, an
+    assembly's (1-based) with its encoded identity
+    `name,processorArchitecture="..",publicKeyToken="..",type="..",version=".."`,
+    a file's (0-based index pair; 0 bytes written on success, as
+    Windows), the run level, the compatibility list of 32-byte
+    elements); a buffer too small is ERROR_INSUFFICIENT_BUFFER with the
+    size in `written`. A context without a manifest answers zeros.
+  - Not there: redirection itself (gala's loader and user32 do not
+    consult contexts: programs that ask see what Windows would tell
+    them), ACTCTX_FLAG_SET_PROCESS_DEFAULT (recorded),
+    QueryActCtxSettingsW, ZombifyActCtx, publisher policy.
 - **What Office imports** (`office_api_test`, `wow64_office_api_test`):
   CreateFile2 (CreateFileW with the parameters' attributes, flags and
   QoS flags; an empty name is ERROR_PATH_NOT_FOUND, in CreateFileW too),
@@ -3170,9 +3237,9 @@ ntdll imports.
   AttachConsole/AllocConsole (every gala process has a console:
   ERROR_ACCESS_DENIED, as Windows answers a process that has one;
   FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
-  is a stopgap: gala does not count a thread's pending socket, pipe and
-  directory-watch requests, so it answers FALSE and records it (ROADMAP
-  OF).
+  is NtQueryInformationThread's ThreadIsIoPending (the kernel's count of
+  the thread's outstanding I/O, "I/O requests and their thread" under
+  AFD).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA
@@ -5473,6 +5540,19 @@ endpoint's I/O completion port.
   dropped. A port associated after the request started gets an ordinary
   post, which may fail: logged (`io: a completion packet (context ...)
   was lost: no memory`), as is a lost completion routine.
+- **I/O requests and their thread** (ThreadIsIoPending,
+  GetThreadIOPendingFlag): a socket, pipe or directory-watch request
+  counts as one of its thread's outstanding requests
+  (`thread::IoPending`, held by its `notify::Reserved`) from its start
+  to its completion or cancellation; `Reserved::retire` drops it before
+  the status block, event, packet or routine tell anyone, so a thread
+  woken by them never sees it still pending. A pipe call also counts
+  while it runs and while a synchronous end's caller waits in it. Not
+  counted: requests on a file with a completion port (thread-agnostic
+  I/O, as Windows Internals describes it; `office_api_test` prints
+  Windows' answer as an `info` line), registry watches (not I/O
+  requests), and AFD requests carried across a kernel handover (their
+  thread is not carried).
 - **APCs**: an ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is
   queued as a user APC to the calling thread when the request
   completes, at once or later, with (ApcContext, IoStatusBlock); such a

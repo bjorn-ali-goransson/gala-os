@@ -128,3 +128,5 @@ wow64_sock_test
 wow64_svc_test
 wow64_test
 wow64_ucrt_test
+regnotify_test
+wow64_regnotify_test

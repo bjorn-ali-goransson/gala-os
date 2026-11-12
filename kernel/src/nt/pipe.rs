@@ -725,6 +725,9 @@ impl PipeEnd {
     /// Runs `op` now, waits for it (a synchronous end) or leaves `request`
     /// pending (an asynchronous one).
     fn run(&self, op: Op, request: Option<Request>) -> Result<Outcome, NtStatus> {
+        // The caller's request while it runs (and while a synchronous
+        // end's caller waits for it): ThreadIsIoPending.
+        let _pending = super::thread::IoPending::current();
         let mut s = self.pipe.state.lock();
         if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
             // The room a read made lets pending writes go on.
@@ -929,6 +932,7 @@ impl PipeEnd {
 
     /// Writes all of `data`, waiting while the pipe is full.
     pub fn write(&self, mut data: &[u8]) -> Result<(), NtStatus> {
+        let _pending = super::thread::IoPending::current();
         let peer = self.peer();
         let mut first = true;
         loop {

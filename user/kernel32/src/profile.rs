@@ -16,71 +16,10 @@
 //! read in (new files: ANSI). win.ini's sections are not mapped to the
 //! registry (IniFileMapping): they live in the file.
 
+use super::buf::Buf;
 use super::*;
 
 type Units = Buf<u16>;
-
-/// A growable buffer on the process heap (kernel32 has no allocator).
-struct Buf<T: Copy> {
-    p: *mut T,
-    len: usize,
-    cap: usize,
-}
-
-impl<T: Copy> Buf<T> {
-    fn new() -> Self {
-        Buf { p: core::ptr::null_mut(), len: 0, cap: 0 }
-    }
-
-    fn reserve(&mut self, more: usize) -> bool {
-        let need = self.len + more;
-        if need <= self.cap {
-            return true;
-        }
-        let cap = need.max(self.cap * 2).max(64);
-        let bytes = cap * size_of::<T>();
-        let heap = heap::GetProcessHeap();
-        let p = if self.p.is_null() {
-            heap::HeapAlloc(heap, 0, bytes)
-        } else {
-            heap::HeapReAlloc(heap, 0, self.p.cast(), bytes)
-        };
-        if p.is_null() {
-            return false;
-        }
-        self.p = p.cast();
-        self.cap = cap;
-        true
-    }
-
-    fn push_all(&mut self, items: &[T]) -> bool {
-        if !self.reserve(items.len()) {
-            return false;
-        }
-        // SAFETY: room for `items` after `len`.
-        unsafe {
-            core::ptr::copy_nonoverlapping(items.as_ptr(), self.p.add(self.len), items.len())
-        };
-        self.len += items.len();
-        true
-    }
-
-    fn as_slice(&self) -> &[T] {
-        if self.p.is_null() {
-            return &[];
-        }
-        // SAFETY: `len` initialized items.
-        unsafe { core::slice::from_raw_parts(self.p, self.len) }
-    }
-}
-
-impl<T: Copy> Drop for Buf<T> {
-    fn drop(&mut self) {
-        if !self.p.is_null() {
-            heap::HeapFree(heap::GetProcessHeap(), 0, self.p.cast());
-        }
-    }
-}
 
 /// The caller's NUL-terminated string (None for NULL).
 fn arg<'a>(s: *const u16) -> Option<&'a [u16]> {

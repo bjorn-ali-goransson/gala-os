@@ -349,6 +349,17 @@ hit (scenario `ledger_test`).
   with RPC_X_BAD_STUB_DATA); `rpcrt4.dll!protocol sequence(<name>)` and
   `rpcrt4.dll!endpoint mapper (binding without endpoint)` for what local
   RPC does not reach.
+  Activation contexts (kernel32's `actctx.rs`), "other": every manifest
+  CreateActCtxW refuses, `kernel32.dll!CreateActCtxW: <reason>` (`root is
+  not asm.v1 <assembly>`, `unknown element in <file>`, `<file> hash is
+  not 40 hex digits`, `dependency's version differs`, ...) with the
+  character offset as detail; `kernel32.dll!CreateActCtxW: no assembly
+  <name>` for a dependency found nowhere; `kernel32.dll!process default
+  activation context refused` and `a DLL's activation context refused`
+  (the error as detail). "unsupported": `CreateActCtxW(manifest sections
+  not built)` (detail: which: 1 typelib, 2 proxy/stub, 4 CLR, 8 WinRT,
+  16 loadFrom) and `FindActCtxSection(section not built)` (the section)
+  when a lookup could have found such content.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall

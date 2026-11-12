@@ -375,8 +375,9 @@ fn query_thread(a: &Args) -> Res<NtStatus> {
             }
             reply(buffer, length, ret, &out[..8 + bytes])
         }
-        // KERNEL_USER_TIMES, ULONGs.
-        1 | 12 | 20 => pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U]),
+        // KERNEL_USER_TIMES, ULONGs (ThreadAmILastThread, ThreadIsIoPending,
+        // ThreadIsTerminated).
+        1 | 12 | 16 | 20 => pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U]),
         _ => no_class(b"wow64.dll!NtQueryInformationThread(class)", class),
     }
 }

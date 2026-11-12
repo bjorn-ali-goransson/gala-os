@@ -14,6 +14,13 @@ name = "access_test"
 version = "0.1.0"
 
 [[package]]
+name = "actctx_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +2958,13 @@ dependencies = [
 [[package]]
 name = "wow64"
 version = "0.1.0"
+
+[[package]]
+name = "wow64_actctx_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "wow64_adv_test"
