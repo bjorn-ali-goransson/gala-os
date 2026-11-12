@@ -1684,7 +1684,9 @@ source).
   the registry (the choices in HKCU\Software\gala\StartMenu, Ubuntu's
   Lxss registration, the tarball gone); LINUX_MENU_SCREEN clicks:
   collapse, expand, dismiss Alpine, install Ubuntu, its desktop, `exit`,
-  its context menu's terminal and XTerm, Hide. The screendumps are the
+  its context menu's terminal and XTerm, Hide, and the menu's own context
+  menu's "Show Linux distributions" (the test ends only after that, so
+  the hidden section's screendump is taken before the guest ends). The screendumps are the
   states' pictures (`target/debug/test-linux_menu.screen<n>.png`,
   numbered from 0: 0 shown, 1 collapsed, 2 expanded, 3 Alpine dismissed,
   5 installing, 6 installed, 8 desktop started, 10 context menu, 13
@@ -1711,7 +1713,11 @@ source).
   `session: display :1 ready`; `events=window` has the `start menu`
   events (`linux install`, `linux progress`, `linux prefs`, ...).
 - Pitfalls: the menu stays open during an install (a click elsewhere
-  would close it: the progress step checks the bar while it imports);
+  would close it); the progress step's check races nothing: serve-page
+  sends 60% of the Ubuntu stand-in, then holds the rest until that
+  step's pixels have passed (xtask writes `<iso>.serve.release`:
+  HELD_DOWNLOADS), so the bar is seen mid-download under KVM as under
+  TCG;
   the start button moves left by 24 pixels per window on the taskbar
   (the console window of the terminal stays after `exit`); each move is
   relative to where the step before left the pointer, a few moves per

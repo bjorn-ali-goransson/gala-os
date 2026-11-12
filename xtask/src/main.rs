@@ -10736,6 +10736,8 @@ const SCENARIOS: &[Scenario] = &[
             "desktop: shown window 'xterm'",
             "desktop: start menu: Linux distributions hidden, dismissed [Alpine]",
             "linux_menu_test: section hidden",
+            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
+            "linux_menu_test: section shown again",
             "xtask: screen ok",
             "linux_menu_test: ok",
             "exited with status 0x00000000",
@@ -13415,9 +13417,10 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
             input: &["mouse_move -122 15", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },
-        // Its progress bar while it is imported: "installing".
+        // Its progress bar while it downloads (the host holds the rest of
+        // the file until this check passes: HELD_DOWNLOADS): "installing".
         ScreenStep {
-            after: "Linux distribution Ubuntu: importing",
+            after: "Linux distribution Ubuntu: downloading (5",
             input: &[],
             pixels: &[PixelCheck::AnyIn(384, 484, 61, 4, 0x005fb8)],
         },
@@ -13539,6 +13542,21 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
                 "mouse_button 0",
             ],
             pixels: &[PixelCheck::At(450, 440, 0xf2f4f8), PixelCheck::At(500, 398, 0xf2f4f8)],
+        },
+        // The menu's own context menu (a right click on its background,
+        // at (880, 400): the card kept inside the menu, at (712, 400))
+        // shows the section again; linux_menu_test waits for that before
+        // it ends (no pixels here: the guest is ending).
+        ScreenStep {
+            after: "linux_menu_test: section hidden",
+            input: &[
+                "mouse_button 2",
+                "mouse_button 0",
+                "mouse_move -80 20",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
         },
     ],
 };
@@ -14489,9 +14507,25 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
             thread::sleep(Duration::from_millis(250));
         }
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+        // A host-side wait this step's check ends (HELD_DOWNLOADS).
+        if HELD_DOWNLOADS.iter().any(|&(name, held)| name == iso_scenario(iso) && held == n) {
+            let release = iso.with_extension("serve.release");
+            fs::write(&release, b"").map_err(|e| format!("step {n}: writing {release:?}: {e}"))?;
+        }
     }
     Ok(())
 }
+
+/// Downloads `serve-page` holds part-way until a screen step has seen
+/// them in progress: (scenario, the step whose pixels must pass first).
+/// `linux_menu`'s progress step checks the tile's bar while the rootfs
+/// is still downloading; without the hold a fast machine (KVM) finished
+/// the install before the screendump. serve-page sends HELD_FRACTION of
+/// the file, then waits for `<iso>.serve.release` (written once that
+/// step passes) before the rest.
+const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
+/// How much of a held download goes first, in percent.
+const HELD_PERCENT: usize = 60;
 
 /// How long a screen step waits for its `after` line: a give-up only
 /// (the VM's own limit is not checked while a screen check runs).
@@ -14778,9 +14812,14 @@ fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     if log.to_string_lossy().contains("chromium_wpt") {
         return wpt::guestfwd();
     }
-    // linux_menu: the suggested distributions' stand-ins, by file name.
+    // linux_menu: the suggested distributions' stand-ins, by file name,
+    // held part-way until the screen check has seen the progress
+    // (HELD_DOWNLOADS).
     if log.to_string_lossy().contains("linux_menu") {
         cmd.env("XTASK_SERVE_DIR", linux_menu_rootfs()?);
+        let release = log.with_extension("release");
+        let _ = fs::remove_file(&release);
+        cmd.env("XTASK_SERVE_HOLD", release);
     }
     Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
@@ -14824,11 +14863,24 @@ fn serve_page() -> Result {
             "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             data.len()
         );
-        return out
-            .write_all(head.as_bytes())
-            .and_then(|()| out.write_all(&data))
+        // XTASK_SERVE_HOLD: HELD_PERCENT of a large file, then the rest
+        // once that file exists (the screen check saw the progress), at
+        // most 10 minutes later (a give-up: the check failed).
+        let first = match env::var_os("XTASK_SERVE_HOLD") {
+            Some(_) if data.len() > 1 << 20 => data.len() * HELD_PERCENT / 100,
+            _ => data.len(),
+        };
+        out.write_all(head.as_bytes())
+            .and_then(|()| out.write_all(&data[..first]))
             .and_then(|()| out.flush())
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())?;
+        if let Some(release) = env::var_os("XTASK_SERVE_HOLD").filter(|_| first < data.len()) {
+            let start = Instant::now();
+            while !Path::new(&release).exists() && start.elapsed() < Duration::from_secs(600) {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        return out.write_all(&data[first..]).and_then(|()| out.flush()).map_err(|e| e.to_string());
     }
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HOST_PAGE}",

@@ -16,7 +16,8 @@
 //!   %LOCALAPPDATA%\Linux\Ubuntu, whose rootfs has the desktop session;
 //!   the downloaded tarball is gone.
 //! - The section hidden ("Hide"): LinuxHidden 1, LinuxCollapsed 0 (it
-//!   was collapsed and expanded again), Alpine still dismissed.
+//!   was collapsed and expanded again), Alpine still dismissed; then
+//!   shown again from the menu's context menu: LinuxHidden 0.
 //!
 //! Prints `linux_menu_test: ok` or exits with the number of the failing
 //! check.
@@ -352,6 +353,11 @@ pub extern "C" fn mainCRTStartup() -> ! {
         _ => fail(10, "the choices after hiding"),
     }
     out("linux_menu_test: section hidden\r\n");
+    // 12: shown again from the menu's context menu (the screen check's
+    // last input: this program ends only after the hidden section's
+    // picture was taken).
+    wait_for(12, "the section shown again", || choices().is_some_and(|(_, h, _)| h == 0));
+    out("linux_menu_test: section shown again\r\n");
     out("linux_menu_test: ok\r\n");
     // SAFETY: ends the process.
     unsafe { ExitProcess(0) }
