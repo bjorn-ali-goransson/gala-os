@@ -76,7 +76,7 @@ Rules for this file:
 | winget-pkgs manifest corpus | 400 package version directories (1366 files, about 1.4 MB) from commit `8ceed9e2703efd78e7e7e5707141e0097ad730d6` (2026-11-03) of the master branch, one version directory per package, picked by the SHA-1 of the directory path (directories of at most six files) | github.com/microsoft/winget-pkgs | MIT (`user/galapkg/testdata/winget-corpus/LICENSE`, the repository's) | Test data, unmodified (CRLF and BOMs kept: `.gitattributes`): `user/galapkg/testdata/winget-corpus/manifests/`, read by galapkg's corpus test (`src/winget/corpus_tests.rs`), which also writes `selected.txt` (gala's own output). How to refresh it: docs/WORKFLOW.md "Installing software". |
 | miniz_oxide (Rust crate, with `adler2`) | 0.8.9 (default features off, `with-alloc`) | crates.io/crates/miniz_oxide (github.com/Frommi/miniz_oxide) | MIT OR Zlib OR Apache-2.0 (`adler2`: 0BSD OR MIT OR Apache-2.0) | Linked into `gala.exe` through `user/galapkg` (`src/zip.rs`): inflating deflated zip entries (RFC 1951) of `gala install`'s zip packages; the zip container reading, CRC-32 and path checks are gala's own. Used without modification, `no_std` with `alloc`. Its deflate side builds the test archives of galapkg's host tests only. |
 | winget-pkgs manifests | `BurntSushi.ripgrep.MSVC` 15.2.0 and `jqlang.jq` 1.8.2 (three files each, fetched 2026-11-03 from the master branch) | github.com/microsoft/winget-pkgs | MIT | Test data, unmodified: `user/pk_install_test/source/manifests/b/...` and `.../j/...` (galapkg's manifest tests; `gala search` in the `pk_install_zip` scenario). gala's own test packages beside them (`GalaTest.*`, with zips of `hello.exe`, the NSIS installers above, and `hello.exe` itself as an Inno Setup stand-in) are made by `user/pk_install_test/make_source.py`. Also `JRSoftware.InnoSetup.7` 7.1.1 (three files, fetched 2026-11-06 from the master branch): `.../j/JRSoftware/InnoSetup/7/7.1.1/`, unmodified, the `pk_install_inno` scenario's package and galapkg's host test of its switches; and `JRSoftware.InnoSetup` 6.5.4 (three files, fetched 2026-11-06): `.../j/JRSoftware/InnoSetup/6.5.4/`, unmodified, the `pk_install_inno32` scenario's package (x86 installers) and galapkg's host test beside the `7` subpackage. |
-| libm (Rust crate) | 0.2.16 | crates.io/crates/libm (rust-lang/compiler-builtins; a port of musl's libm) | MIT | Linked into gala's `msvcrt.dll` (`user/msvcrt/src/math.rs`) for the C math functions (sin, pow, floor, ...). |
+| libm (Rust crate) | 0.2.16 | crates.io/crates/libm (rust-lang/compiler-builtins; a port of musl's libm) | MIT | Linked into gala's `msvcrt.dll` (`user/msvcrt/src/math.rs`) for the C math functions (sin, pow, floor, ...), and into gala's `d2d1.dll` (`user/d2d1`: the matrix helpers' sine, cosine and tangent, square roots and floors of the rasterizer). |
 | Nginx start page | 1.30.6 (`html/index.html` of the release) | nginx.org | BSD-2-Clause | `user/nginx/html/index.html`, unmodified: the page the Nginx scenarios serve and check. |
 | Test certificate | `user/nginx/conf/gala-test.crt/.key` | generated with `openssl req -x509` (ECDSA P-256, self-signed, CN "gala test") | test data, not secret | The `nginx_tls` scenario's server certificate. |
 | rustls (Rust crate) | 0.23.46 (default features off: `tls12` only; no `std`) | crates.io/crates/rustls (github.com/rustls/rustls) | Apache-2.0 OR ISC OR MIT | Linked into gala's `schannel.dll` through `user/schannel_tls`: the TLS 1.2 and 1.3 protocol (handshake, record layer, alerts, ALPN, SNI), used through its unbuffered connection API (`no_std` with `alloc`, the process heap). Schannel's automatic certificate validation is crypt32's chain engine (gala's own); rustls' `webpki` verifier stands in for it only in the host tests. The SSPI token and buffer rules around it (`user/schannel_tls/src/lib.rs`) and the SSPI functions (`user/schannel`) are gala's own. Used without modification. |
@@ -271,6 +271,18 @@ Rules for this file:
   testbmp_24bpp, testbmp_1bpp and testbmp_bitfields_abgr and converter.c's
   32bppBGRA80 data reused as test data, no code copied) and Microsoft's
   WIC documentation (the PNG decoder's native formats).
+- gala's d2d1.dll (`user/d2d1`) and `user/d2d1_test`: interfaces (their
+  method order), GUIDs, structures, enums and the export ordinals from
+  Wine's `include/d2d1.idl`, `include/d2d1_1.idl`, `include/d2derr.h` and
+  `dlls/d2d1/d2d1.spec`, and behaviour and expected results from Wine's
+  `dlls/d2d1/tests/d2d1.c` (test_mt_factory, test_desktop_dpi,
+  test_invert_matrix and test_skew_matrix's tables, test_wic_target_format,
+  test_clip's DPI rules, test_path_geometry's states and counts,
+  test_dc_target, test_hwnd_target; master, fetched 2026-11-12;
+  LGPL-2.1, run on Windows: facts and expected values, no code copied);
+  Microsoft's Direct2D documentation. The elliptical arc conversion
+  (AddArc) follows the W3C SVG 1.1 specification's implementation notes
+  (F.6.5); the rasterizer is gala's own.
 - gala's wofutil.dll (`user/wofutil`): the export list and the answers
   of WofIsExternalFile and WofShouldCompressBinaries as Wine's
   `dlls/wofutil/main.c` and `wofutil.spec` give them (master, fetched

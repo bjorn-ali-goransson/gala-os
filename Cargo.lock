@@ -516,6 +516,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "d2d1"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "libm",
+]
+
+[[package]]
+name = "d2d1_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "d3d11"
 version = "0.1.0"
 

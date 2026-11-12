@@ -1,0 +1,16 @@
+[package]
+name = "d2d1"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+[dependencies]
+gala_heap = { path = "../gala_heap" }
+# sin, cos, tan and sqrt for the matrix helpers, ellipses and gradients.
+libm = { version = "0.2.16", default-features = false }

@@ -3150,7 +3150,10 @@ ntdll imports.
   and temporary directories, LoadLibrary(A/W/ExW)/GetProcAddress/
   FreeLibrary over the loader.
 - **Locale** (`locale.rs`, `calendar.rs`): one locale, en-US (0x409), also
-  for the defaults and LOCALE_INVARIANT; linguistic order compares
+  for the defaults and LOCALE_INVARIANT; IsValidLocaleName accepts any
+  well-formed `language[-Script][-REGION]` tag, as Windows 10 and later
+  do (an unknown language names a custom locale: "xx-QQ" is valid on
+  24H2), while LocaleNameToLCID knows en-US alone; linguistic order compares
   letters without case first, then puts lower case first; character
   types from Unicode properties. The en-US localized Gregorian calendar
   (calendar 1) for GetCalendarInfoEx/W and EnumCalendarInfoExEx (names,
@@ -8915,6 +8918,85 @@ windowscodecs tests (run on Windows) and Microsoft's documentation.
   halftone palettes, interlaced PNGs, RLE BMPs; the scaler's Cubic, Fant
   and HighQualityCubic modes are done as Linear (a stopgap, ROADMAP OF).
 
+### Direct2D
+
+What Office draws its documents and user interface with (seven of the
+files Word, Excel and PowerPoint load import `d2d1.dll`, by ordinal #1 to
+#5: D2D1CreateFactory, D2D1MakeRotateMatrix, D2D1MakeSkewMatrix,
+D2D1IsMatrixInvertible, D2D1InvertMatrix; `build.rs` exports them at
+those ordinals). `user/d2d1`, x64 only; `d2d1_test`, whose expected
+values are those of Wine's d2d1 tests (run on Windows) and Microsoft's
+documentation, and the `d2d1_window` screen scenario (a window drawn
+through a window render target; `d2d1_test window`).
+
+- **Objects**: every object starts with a vtable and a reference count
+  (as windowscodecs's); every resource (brush, bitmap, geometry, stroke
+  style, stop collection, render target) also holds a reference to its
+  factory (`Res`, GetFactory). Mutable state sits behind a spin lock
+  never held across a call into another DLL's object (a WIC bitmap's
+  Lock); a draw takes a snapshot of its brush first. Objects not made by
+  this DLL (a caller's brush or geometry) draw nothing and are recorded.
+- **The factory**: each D2D1CreateFactory is a new object; it answers
+  ID2D1Factory and ID2D1Multithread (on both kinds, as Windows 10's
+  does; Enter/Leave hold a critical section on a multi-threaded factory,
+  nothing on a single-threaded one). ID2D1Factory1 and later are not
+  answered (recorded).
+- **Render targets** (`target.rs`): one object, three backings. A WIC
+  bitmap target keeps a buffer of its own, read from the bitmap at
+  BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
+  IWICBitmap: gala's windowscodecs or the caller's); its format is the
+  bitmap's (32bppPBGRA/BGR as B8G8R8A8, 32bppPRGBA/RGB as R8G8B8A8,
+  premultiplied or alpha ignored), another one asked for is E_INVALIDARG.
+  A DC target draws into a 32 bpp DIB section of the bound rectangle's
+  size: BeginDraw copies the DC's pixels in, EndDraw copies them back
+  only when something was drawn (GDI's drawing between them survives an
+  empty frame). A window target keeps its DIB section between frames
+  and copies it to the window's DC at EndDraw. The transform then the
+  DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs.
+  Drawing outside BeginDraw/EndDraw draws nothing and fails the next
+  EndDraw with D2DERR_WRONG_STATE; clips or layers left pushed fail it
+  with D2DERR_PUSH_POP_UNBALANCED.
+- **No GPU**: every target draws in software, also when
+  D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's
+  d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives
+  on a machine whose only adapter is the Basic Render Driver (a CPU
+  device). D3D11-backed targets come with GPU G2.
+- **The rasterizer** (`raster.rs`): figures flattened to polygons (a
+  Bézier subdivided to within 0.1 pixel), coverage on a 4 x 4 sample grid
+  per pixel (aliased mode: the pixel's centre), the fill rule (alternate
+  or winding). Strokes are polygons, one per segment plus the joins
+  (miter up to the limit, bevel, round) and caps (flat, square, round,
+  triangle), each turned clockwise so the winding rule unites them; the
+  width scales by the transform's larger axis. Axis-aligned clips are
+  the bounding box of the rectangle through the transform when pushed:
+  aliased ones rounded to whole pixels, antialiased ones scale the cut
+  pixels' coverage; Clear honours them. Paint: a premultiplied colour,
+  linear and radial (focal) gradients over sorted premultiplied stops
+  with clamp, wrap and mirror, bitmaps (nearest or bilinear, through
+  the bitmap's DPI), each sampled at the pixel's centre through the
+  inverse of brush transform x target transform; source-over into 8-bit
+  premultiplied pixels, rounded to nearest.
+- **Geometries** (`geometry.rs`): rectangles, rounded rectangles,
+  ellipses (four Béziers) and path geometries, kept as figures of lines
+  and cubics; quadratics become cubics, arcs become quarter-turn cubics
+  (SVG's endpoint-to-centre conversion). A path geometry is empty, open
+  (one sink), then closed; an out-of-order sink call puts it in error,
+  and its queries and Close answer D2DERR_WRONG_STATE (Wine's
+  test_path_geometry); a closed figure counts its closing line as a
+  segment. GetBounds, GetWidenedBounds, FillContainsPoint,
+  StrokeContainsPoint, ComputeArea and ComputeLength work on the
+  flattened figures.
+- **Limits** (each recorded in the ledger, `d2d1.dll!...`): text
+  (DrawText, DrawTextLayout, DrawGlyphRun: DirectWrite has no text
+  layout yet), layers (PushLayer is counted, its mask not applied),
+  opacity masks and FillGeometry's opacity brush, meshes, drawing state
+  blocks, compatible render targets, shared bitmaps, DXGI surface
+  targets, geometry groups and transformed geometries, Simplify,
+  Tessellate, Widen, Outline, CombineWithGeometry, dashes (drawn
+  solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
+  interface, ID2D1Factory1 and device contexts, bitmaps from WIC formats
+  other than 32bppPBGRA and 32bppBGR (D2DERR_UNSUPPORTED_PIXEL_FORMAT).
+
 ### DirectWrite
 
 `user/dwrite`. Chromium CHECKs that a factory exists and that Skia's
@@ -8959,6 +9041,8 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 
 ### Known limits
 
+- Direct2D: software only, no text, layers, compatible targets or
+  Factory1 device contexts yet ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
   rotation, skew or sideways runs; no text layout, IDWriteFactory1+.

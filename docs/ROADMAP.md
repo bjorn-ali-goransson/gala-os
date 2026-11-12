@@ -1416,9 +1416,23 @@ need gala's.
     The `info` lines of `windowscodecs_test` (a PNG's resolution
     without pHYs, PBGRA -> BGRA rounding, nearest-neighbour sampling when
     halving, Linear's weights) wait for a Windows run.
-  - Direct2D (`d2d1`): next on the drawing path, its software render
-    targets over WIC bitmaps (CreateWicBitmapRenderTarget) and device
-    contexts (CreateDCRenderTarget) first, then D3D11's.
+  - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, and
+    the `d2d1_window` screen scenario): done for the factory (both
+    kinds, ID2D1Multithread; the ordinals Office imports), the matrix
+    helpers, software render targets over WIC bitmaps, device contexts
+    (BindDC) and windows (hardware requests drawn in software), solid,
+    linear, radial and bitmap brushes, bitmaps (from memory and WIC),
+    rectangles, rounded rectangles, ellipses, lines and path geometries
+    (lines, Béziers, arcs, fill modes) filled and stroked with widths,
+    caps and joins, antialiased or aliased, transforms and axis-aligned
+    clips, DrawBitmap. Next, as Office's use shows it (the ledger names
+    each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
+    layout first), layers, compatible render targets, drawing state
+    blocks, the GDI interop interface, dashes, ID2D1Factory1 and device
+    contexts, then D3D11-backed targets with GPU G2. The `info` lines of
+    `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
+    of 32bppBGRA, antialiased edge values) and its expectations wait for
+    a Windows run.
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
