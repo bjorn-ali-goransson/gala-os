@@ -332,6 +332,19 @@ hit (scenario `ledger_test`).
   `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
   PackageManager query answered with no packages (what a program looked
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
+  Direct2D (d2d1): `d2d1.dll!<interface>::<method>`, "not
+  implemented", for each method not built (CreateLayer,
+  CreateCompatibleRenderTarget, ...); "unsupported" with the case in the
+  name for a drawing call it skips or simplifies (`ID2D1RenderTarget::
+  DrawText(no text layout)` with the text's length, `PushLayer(content
+  not masked)`, `ID2D1StrokeStyle(dashes, drawn solid)`, `render
+  target(hardware asked, drawn in software)`, `CreateBitmapFromWicBitmap(
+  pixel format)` with the format GUID's first dword, `draw(a brush not
+  made by gala's d2d1)`), and `<interface> QueryInterface` with the IID's
+  first dword for an interface it does not answer (ID2D1Factory1's
+  0xbb12d362, the GDI interop interface's 0xe0db51c3). A failed WIC
+  bitmap lock at BeginDraw or EndDraw is `BeginDraw(WIC bitmap lock)` or
+  `EndDraw(...)` with the HRESULT, and EndDraw returns it.
   NtSetInformationKey's flags classes, "NtSetInformationKey" with
   `control flags: no registry virtualization` (or `wow64 flags`), the
   flags as detail: what a program asked of the virtualization gala has

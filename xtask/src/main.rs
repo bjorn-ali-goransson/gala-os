@@ -1111,6 +1111,9 @@ const USER_DLLS: &[Dll] = &[
         file: "windowscodecs.dll",
         exported_as: "testwindowscodecs.dll",
     },
+    // d2d1.dll: Direct2D in software, render targets over WIC bitmaps,
+    // DCs and windows (d2d1_test; Office draws with it).
+    Dll { package: "d2d1", file: "d2d1.dll", exported_as: "testd2d1.dll" },
     // combase.dll: forwarders to ole32's COM and Windows Runtime base;
     // appxdeploymentclient.dll: Windows.Management.Deployment.PackageManager
     // with no packages (combase_test).
@@ -3510,6 +3513,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("windowscodecs_test", "oleaut32.dll", "Windows/System32"),
     ("windowscodecs_test", "shlwapi.dll", "Windows/System32"),
     ("windowscodecs_test", "windowscodecs.dll", "Windows/System32"),
+    // Direct2D (user/d2d1_test): WIC bitmaps, DCs and windows; its window
+    // scenario (d2d1_window) takes the same set and a wallpaper.
+    ("d2d1_test", "ntdll.dll", "Windows/System32"),
+    ("d2d1_test", "kernel32.dll", "Windows/System32"),
+    ("d2d1_test", "advapi32.dll", "Windows/System32"),
+    ("d2d1_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d2d1_test", "ole32.dll", "Windows/System32"),
+    ("d2d1_test", "oleaut32.dll", "Windows/System32"),
+    ("d2d1_test", "shlwapi.dll", "Windows/System32"),
+    ("d2d1_test", "user32.dll", "Windows/System32"),
+    ("d2d1_test", "gdi32.dll", "Windows/System32"),
+    ("d2d1_test", "windowscodecs.dll", "Windows/System32"),
+    ("d2d1_test", "d2d1.dll", "Windows/System32"),
+    ("d2d1_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
     ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msxml_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3694,6 +3711,7 @@ const USER_PROGRAMS: &[&str] = &[
     "svcrun_test",
     "msxml_test",
     "windowscodecs_test",
+    "d2d1_test",
     "winhttp_cb_test",
     "runas_test",
     "combase_test",
@@ -5191,6 +5209,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "console_window",
     "start_menu",
     "tray_test",
+    "d2d1_window",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -7180,6 +7199,23 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=windowscodecs_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["windowscodecs_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Direct2D (user/d2d1_test): the factory, matrices, WIC bitmap,
+        // DC and window render targets, brushes, geometries, drawing.
+        name: "d2d1_test",
+        cmdline: "qemu_exit run=d2d1_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["d2d1_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A window drawn with Direct2D through a window render target
+        // (d2d1_test window; D2D1_WINDOW_SCREEN checks its pixels, then
+        // q ends it). UEFI: a screen.
+        name: "d2d1_window",
+        cmdline: "qemu_exit wallpaper=night run=d2d1_test.exe args=window",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["d2d1_test: window drawn", "xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/msxml_test built for x86).
@@ -10267,6 +10303,8 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("d2d1_window", "d2d1_test"),
+    ("d2d1_window", "d2d1_window"),
     ("office_install_gui", "office_install"),
     ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
@@ -11033,6 +11071,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
+    ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
 ];
 
@@ -12845,6 +12884,28 @@ const TRAY_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// user/d2d1_test's window (`args=window`): at (100, 100), its client
+/// area from (101, 133) as gui_test's; Direct2D drew a blue gradient, a
+/// red rounded rectangle at client (20, 20) - (140, 100), a green circle
+/// about (220, 70) with a black outline and a gold star about (220, 200).
+/// Then q ends the program.
+const D2D1_WINDOW_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "d2d1_test: window drawn",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(101 + 80, 133 + 60, 0xdb143d), // the rounded rectangle
+                PixelCheck::At(101 + 220, 133 + 70, 0x218c21), // the circle
+                PixelCheck::AnyIn(101 + 214, 133 + 194, 12, 12, 0xffd600), // the star
+                PixelCheck::Varied(101, 133, 380, 250, 6),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey q"], pixels: &[] },
+    ],
+};
+
 const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
     marker: "gui_test: painted",
     steps: &[
@@ -13096,6 +13157,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("gui_test", GUI_TEST_SCREEN),
     ("start_menu", START_MENU_SCREEN),
     ("tray_test", TRAY_SCREEN),
+    ("d2d1_window", D2D1_WINDOW_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),

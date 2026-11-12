@@ -3600,6 +3600,16 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   (ODT's setup.exe, CPython's python.exe) come from their PREBUILT
   downloads, shipped to C:\gala by the scenario (`args=require` makes
   their absence a failure; on Windows they are skipped when absent).
+- **COM methods that return a structure take a hidden pointer**: in the
+  C++ ABI a method returning D2D1_SIZE_F, D2D1_PIXEL_FORMAT or
+  D2D1_COLOR_F (even one that fits a register) gets the caller's result
+  buffer as its second argument, after `this`, and returns that pointer
+  (d2d1's GetSize, GetPixelFormat, GetColor: `extern "system" fn(Obj,
+  *mut T) -> *mut T`, on both sides). Arguments are positional: a float
+  is passed in the slot its position gives, and a call through a
+  transmuted vtable slot must pass every argument (a missing trailing
+  stroke style or opacity brush is garbage to the callee), and never a
+  `()` argument (it shifts the rest).
 - **Small integer LPCSTRs**: a store provider or structure type passed
   as `1 as *const u8` trips clippy's `manual_dangling_ptr`; write
   `core::ptr::without_provenance(1)`.
