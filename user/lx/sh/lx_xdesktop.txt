@@ -1,0 +1,4 @@
+session: display :1 ready
+session: xterm ended
+session: done
+-- exit status 0

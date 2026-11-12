@@ -174,10 +174,11 @@ pub const PROGRAMS: &[Program] = &[
         colors: (0x00_5b_9b_ff, 0x00_2f_5f_d8),
         package: None,
     },
-    // gala's wsl.exe (user/wsl), as Windows' "WSL" tile: the default
+    // gala's wsl.exe (user/wsl) as the "Linux" tile (gala's UI says
+    // Linux, never WSL: ARCHITECTURE "The WSL facade"): the default
     // distribution's login shell in a console window (ROADMAP CT).
     Program {
-        name: "WSL",
+        name: "Linux",
         paths: &["%SystemRoot%\\System32\\wsl.exe"],
         colors: (0x00_f0_a0_30, 0x00_c0_60_10),
         package: None,

@@ -200,7 +200,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); next: a distribution's GTK application, a socket per session, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); next: a distribution's desktop in one window (`lx_xdesktop`), Linux distributions in the start menu |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -2747,7 +2747,7 @@ kernel), the Hyper-V backends of both products, and Windows containers
   (`<BasePath>\rootfs`, made by the kernel: GalaLxNode) in which its LX
   processes are rooted (a file written in one is absent from another);
   the starter's console and pipes as their fds (`lx::ntio`), so `wsl -d
-  bb` in a console window (and the start menu's WSL tile) is the
+  bb` in a console window (and the start menu's Linux tile) is the
   distribution's terminal: busybox's shell prompts, edits and runs
   commands there; `events=wsl`. wsl_test's uncertain answers (version
   lines, error-code lines, BasePath's form, the state right after a
@@ -2984,6 +2984,28 @@ the next breakthroughs).
   Windows' enumeration order, the sequence number, the format listeners
   (WM_CLIPBOARDUPDATE posted across processes), `events=ipc` and the
   state dump's clipboard line.
+- Step 5, X11 programs through rootless Xwayland (`lx_xterm`;
+  ARCHITECTURE "X11 programs through Xwayland"): `xwayland=on` gives
+  display `:0`, held by the Wayland server, whose first client starts
+  Ubuntu 24.04's Xwayland (the Linux root "x11": Xwayland, xkbcomp,
+  xterm, dash as /bin/sh and their libraries; `-rootless -shm`, the
+  listeners and the window manager's connection handed over), and the
+  server's own X window manager (`wayland::xwm`, host tests: Composite
+  redirection, MapRequest, titles, `WL_SURFACE_ID`, focus, close) gives
+  each top-level X window's surface the `x11` role: xterm is a framed,
+  titled window of the desktop running dash on a pty; the screen check
+  types `echo hi` and sees its output, drags over it with the mouse
+  (xterm's selection) and types `exit`, which ends it. A GTK program
+  under X11 (`lx_gtk_x11`: gtk_test with GDK_BACKEND=x11, its
+  transcript Xvfb's on Linux) shows its window, clicks its button and
+  closes it through the window manager. Built for it:
+  pseudo-terminals, sessions and process groups (`lx::pty`,
+  `lx::session`; user/lx/pty_test's transcript, recorded on Linux, now
+  matches: `lx_pty`, `lx_pty_pie`), glibc's fork (clone with
+  CLONE_CHILD_SETTID, CLONE_CHILD_CLEARTID, CLONE_PARENT_SETTID),
+  setresuid and setresgid, Xwayland's output kept out of the program's
+  transcript (`lx: pid N service:`), and two Linux roots shipped to one
+  directory.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -3077,15 +3099,25 @@ the next breakthroughs).
    scenarios pass them today; who the program is comes from its token,
    `lx::identity`) and has no D-Bus session bus yet (GTK goes
    without it: accessibility and portals are skipped).
-5. X11 programs through Xwayland, once the Wayland server holds (the
-   owner's next for this item, after CT step 2's WSL facade): rootless
-   Xwayland first, each X client (`xterm`, then a distribution's GTK
-   application) its own window on shasha's desktop, as WSLg shows them.
-   Expected blockers, each a Linux test program recorded on real Linux
-   first: abstract AF_UNIX sockets, SysV and POSIX shared memory,
-   `/proc` files Xwayland reads; the ledger names the rest by
-   distribution.
-6. A distribution's desktop (the owner): rootful Xwayland as one window
+5. X11 programs through Xwayland: rootless Xwayland, xterm and a GTK
+   program under X11 are done (above); next, a distribution's GTK
+   application under X11. Open, each test first: SysV and
+   POSIX shared memory (MIT-SHM; nothing has reached it yet),
+   `/proc/<pid>/cmdline` (Xwayland names its clients by it), the X
+   selections and the clipboard bridged to the desktop's,
+   `_NET_WM_STATE` (maximize, full screen) for X windows,
+   `xwayland_shell_v1` instead of `WL_SURFACE_ID`, a stop for SIGTSTP
+   (job control), a recorded glibc fork test of the clone flags.
+6. A distribution's desktop (the owner; being brought up: `lx_xdesktop`,
+   PENDING until its screen check has run once: user/lx/xdesktop's
+   session script runs rootful Xwayland on `:1` as one window "Xwayland
+   on :1" framed by shasha (`-decorate`: libdecor takes the server's
+   decorations), twm managing an xterm in it, typed into from the
+   desktop; `exit` ends the session; seen on a manual boot. twm is the
+   lightest X desktop that shows the path; Xfce needs a D-Bus session
+   bus, xfconf and over a hundred packages, a later step. Next:
+   maximise (the X screen following the window's size) and full screen
+   (xdg_toplevel.set_fullscreen, ignored today), then Xfce): rootful Xwayland as one window
    running a light desktop session (Xfce), which can be maximised or
    put full screen. Full screen is a choice of presentation, not of
    speed: both paths copy the session's damaged pixels in software.

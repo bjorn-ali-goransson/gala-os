@@ -2013,3 +2013,82 @@ fn the_desktop_s_grab_notice_translates() {
         Some(Input::PopupDone { window: 4 })
     );
 }
+
+/// The surface (8) of a bound client with a 64x64 buffer (7), as
+/// Xwayland's: no xdg role.
+fn xwayland_surface() -> T {
+    let mut t = T::toplevel();
+    // Only the surface: no xdg_surface for it (the toplevel's objects
+    // were made on 8; make a fresh surface 11 instead).
+    t.ok(3, "create_surface", &[Arg::NewId(11)]);
+    t.events();
+    t
+}
+
+#[test]
+fn an_x_window_surface_shows_its_buffer_committed_before_the_role() {
+    let mut t = xwayland_surface();
+    // Xwayland draws before the window manager hears of the surface.
+    t.ok(11, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(11, "damage_buffer", &[Arg::Int(0), Arg::Int(0), Arg::Int(64), Arg::Int(64)]);
+    t.ok(11, "commit", &[]);
+    assert_eq!(t.events(), ["wl_buffer#7.release()"]);
+    assert!(t.h.windows.is_empty());
+    let info = crate::wayland::xwm::Info {
+        window: 0x200001,
+        override_redirect: false,
+        at: (0, 0),
+        title: b"xterm",
+        decorated: true,
+    };
+    // An xdg surface or an unknown id is not given the role.
+    assert_eq!(t.c.x11_show(&mut t.h, 8, &info), Ok(false));
+    assert_eq!(t.c.x11_show(&mut t.h, 99, &info), Ok(false));
+    assert_eq!(t.c.x11_show(&mut t.h, 11, &info), Ok(true));
+    let w = &t.h.windows[0];
+    assert_eq!(
+        (w.title.as_slice(), w.size, w.decorated, w.popup),
+        (&b"xterm"[..], (64, 64), true, false)
+    );
+    assert_eq!(w.pixels[0], 0x0033_6699);
+    // The window manager hears where the window is (its client area).
+    assert_eq!(
+        core::mem::take(&mut t.c.x11_events),
+        [X11Event::Placed { surface: 11, x: 11, y: 53 }]
+    );
+    // Activation and the close button go to the window manager.
+    t.input(Input::Focus { window: 0, active: true });
+    t.input(Input::Close { window: 0 });
+    assert_eq!(
+        core::mem::take(&mut t.c.x11_events),
+        [X11Event::Activated { surface: 11 }, X11Event::Close { surface: 11 }]
+    );
+    // A title change follows; a hide takes the window away.
+    t.c.x11_title(&mut t.h, 11, b"renamed");
+    assert_eq!(t.h.windows[0].title, b"renamed");
+    assert_eq!(t.c.hide_x11(&mut t.h, 11, true), Ok(()));
+    assert!(!t.h.windows[0].alive);
+}
+
+#[test]
+fn an_override_redirect_x_window_is_a_popup_where_it_is() {
+    let mut t = xwayland_surface();
+    let info = crate::wayland::xwm::Info {
+        window: 0x200005,
+        override_redirect: true,
+        at: (40, 50),
+        title: b"",
+        decorated: false,
+    };
+    assert_eq!(t.c.x11_show(&mut t.h, 11, &info), Ok(true));
+    assert!(t.h.windows.is_empty());
+    t.ok(11, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(11, "commit", &[]);
+    let w = &t.h.windows[0];
+    assert_eq!((w.at, w.popup, w.decorated), ((40, 50), true, false));
+    assert!(t.c.x11_events.is_empty());
+    // A null buffer hides it.
+    t.ok(11, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    t.ok(11, "commit", &[]);
+    assert!(!t.h.windows[0].alive);
+}

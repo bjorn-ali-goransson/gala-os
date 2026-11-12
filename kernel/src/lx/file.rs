@@ -305,6 +305,16 @@ pub fn run_volume(fs: &mut ramfs::RamFs) -> core::result::Result<NodeId, FsError
     RUN.store(run, Ordering::Relaxed);
     Ok(run)
 }
+/// The shared tree's `/tmp` (1777, made if missing): Linux programs
+/// expect it (X servers' lock files and sockets, mktemp). Its node.
+pub fn tmp_dir(fs: &mut ramfs::RamFs) -> core::result::Result<NodeId, FsError> {
+    let name: [u16; 3] = [b't' as u16, b'm' as u16, b'p' as u16];
+    match fs.find(ramfs::ROOT, &name)? {
+        Some(d) => Ok(d),
+        None => fs.create_posix(ramfs::ROOT, &name, true, 0o1777, platform::system_time()),
+    }
+}
+
 /// Linux's block size for stat (st_blksize).
 const BLKSIZE: i64 = 4096;
 /// The most bytes one read or write moves through the kernel at a time.
@@ -381,6 +391,11 @@ pub enum DeviceKind {
     Full,
     Random,
     Urandom,
+    /// The pty multiplexer, a pty's slave by number, the controlling
+    /// terminal (`lx::pty`): opened as ptys, never as `Object::Device`.
+    Ptmx,
+    Pts(u32),
+    Tty,
 }
 
 /// An open character device and the access it was opened with.
@@ -400,28 +415,43 @@ const DEVICES: [(&[u8], DeviceKind); 5] = [
 ];
 
 fn device_at(path: &[u8]) -> Option<DeviceKind> {
+    match path {
+        b"/dev/ptmx" | b"/dev/pts/ptmx" => return Some(DeviceKind::Ptmx),
+        b"/dev/tty" => return Some(DeviceKind::Tty),
+        _ => {}
+    }
+    if let Some(n) = super::pty::pts_number(path) {
+        return Some(DeviceKind::Pts(n));
+    }
     DEVICES.iter().find(|(p, _)| *p == path).map(|&(_, k)| k)
 }
 
 impl DeviceKind {
     /// Its device number (devices(7): major 1, the "mem" devices).
+    /// Its device number (devices(7): major 1, the "mem" devices; 5:0
+    /// /dev/tty, 5:2 /dev/ptmx; 136 the Unix98 pty slaves), as
+    /// new_encode_dev lays it out.
     fn rdev(self) -> u64 {
-        let minor = match self {
-            DeviceKind::Null => 3,
-            DeviceKind::Zero => 5,
-            DeviceKind::Full => 7,
-            DeviceKind::Random => 8,
-            DeviceKind::Urandom => 9,
+        let (major, minor) = match self {
+            DeviceKind::Null => (1, 3),
+            DeviceKind::Zero => (1, 5),
+            DeviceKind::Full => (1, 7),
+            DeviceKind::Random => (1, 8),
+            DeviceKind::Urandom => (1, 9),
+            DeviceKind::Tty => (5, 0),
+            DeviceKind::Ptmx => (5, 2),
+            DeviceKind::Pts(n) => (136, u64::from(n)),
         };
-        (1 << 8) | minor
+        (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)
     }
 
     fn stat(self) -> Stat {
+        let perm = if matches!(self, DeviceKind::Pts(_)) { 0o620 } else { 0o666 };
         Stat {
             dev: 5,
             ino: self.rdev(),
             nlink: 1,
-            mode: abi::S_IFCHR | 0o666,
+            mode: abi::S_IFCHR | perm,
             rdev: self.rdev(),
             blksize: BLKSIZE,
             ..Stat::default()
@@ -935,6 +965,8 @@ fn stat_other(object: &Object, me: (u32, u32)) -> Stat {
         Object::Epoll(_) | Object::EventFd(_) => (0o600, 0),
         Object::Nt(n) if n.kind == super::ntio::Kind::Pipe => (abi::S_IFIFO | 0o600, 0),
         Object::Nt(n) if n.kind == super::ntio::Kind::File => (abi::S_IFREG | 0o644, 0),
+        Object::Pty(end) if end.master => return DeviceKind::Ptmx.stat(),
+        Object::Pty(end) => return DeviceKind::Pts(end.pty.number).stat(),
         _ => (abi::S_IFCHR | 0o620, 136 << 8),
     };
     Stat {
@@ -995,7 +1027,11 @@ pub fn statfs(call: &Call<'_>, path: u64, buf: u64) -> Result {
 pub fn fstatfs(call: &Call<'_>, fd: u64, buf: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     let magic = match &f.object {
-        Object::File(_) | Object::Device(_) | Object::Console(_) | Object::Nt(_) => TMPFS_MAGIC,
+        Object::File(_)
+        | Object::Device(_)
+        | Object::Console(_)
+        | Object::Nt(_)
+        | Object::Pty(_) => TMPFS_MAGIC,
         Object::PipeRead(_) | Object::PipeWrite(_) => PIPEFS_MAGIC,
         Object::Socket(_) | Object::Unix(_) => SOCKFS_MAGIC,
         Object::Epoll(_) | Object::EventFd(_) => ANON_INODE_FS_MAGIC,
@@ -1157,8 +1193,18 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
     }
     let bytes = read_path(&call.process, path)?;
     let (readable, writable) = (!path_only && acc != O_WRONLY, !path_only && acc != 0);
-    if bytes == b"/dev/tty" {
-        return Err(ENXIO);
+    let (nonblock, cloexec) = (flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0);
+    match device_at(&bytes) {
+        Some(DeviceKind::Ptmx) if !path_only => {
+            return super::pty::open_master(call, nonblock, cloexec);
+        }
+        Some(DeviceKind::Pts(n)) if !path_only => {
+            return super::pty::open_slave(call, n, flags & O_NOCTTY != 0, nonblock, cloexec);
+        }
+        Some(DeviceKind::Tty) if !path_only => {
+            return super::pty::open_tty(call, nonblock, cloexec);
+        }
+        _ => {}
     }
     if let Some(kind) = device_at(&bytes) {
         if flags & O_DIRECTORY != 0 {
