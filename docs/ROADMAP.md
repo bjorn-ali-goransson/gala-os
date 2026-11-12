@@ -1893,6 +1893,12 @@ need gala's.
      20 ms); done: the registry is flushed lazily, as Windows' is (at the
      first sync 5 s after the last, or at NtFlushKey, a program's end, a
      handover; ARCHITECTURE "The registry kept").
+     With that STAGEREGISTRY ends in minutes and UNINSTALLCENTENNIAL
+     runs at about 1700 s on the fast path; the service then ended on
+     the delay load of WTSAPI32.dll!WTSQueryUserToken (crash report);
+     done: WTSQueryUserToken (the console user's token for a
+     SeTcbPrivilege holder, as documented; GalaSession's
+     SESSION_USER_TOKEN, wow64.dll converts GalaSession now).
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it

@@ -8919,7 +8919,10 @@ stations and desktops a program creates are refused until stage 3).
   class GALA_SESSIONS (0x67610002: id and console flag per session):
   "Services" for session 0, disconnected, "Console" for the session the
   console shows, active, other sessions an empty name, active;
-  `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
+  WTSQueryUserToken over GalaSession's SESSION_USER_TOKEN (SeTcbPrivilege:
+  a new primary token of the console session's user, the boot user;
+  session 0 ERROR_NO_TOKEN; other sessions' users are not recorded yet,
+  so ERROR_NO_TOKEN too, recorded); `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
   NULL, and every call on a context fails as on an invalid one, FALSE
   with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
