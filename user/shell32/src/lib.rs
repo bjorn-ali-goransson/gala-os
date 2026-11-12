@@ -196,6 +196,52 @@ const KNOWN: &[([u8; 16], Folder)] = &[
         guid(0x4c5c32ff, 0xbb9d, 0x43b0, [0xb5, 0xb4, 0x2d, 0x72, 0xe5, 0x4e, 0xaa, 0xa4]),
         Folder::Env("USERPROFILE", "\\Saved Games"),
     ),
+    // FOLDERID_Fonts {FD228CB7-AE11-4AE3-864C-16F3910AB8FE}
+    (
+        guid(0xfd228cb7, 0xae11, 0x4ae3, [0x86, 0x4c, 0x16, 0xf3, 0x91, 0x0a, 0xb8, 0xfe]),
+        Folder::Env("windir", "\\Fonts"),
+    ),
+    // FOLDERID_ProgramFiles {905E63B6-C1BF-494E-B29C-65B732D3D21A}: the
+    // process's own (the x86 one in a 32-bit process).
+    (
+        guid(0x905e63b6, 0xc1bf, 0x494e, [0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a]),
+        Folder::Env("ProgramFiles", ""),
+    ),
+    // FOLDERID_ProgramFilesX86 {7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}
+    (
+        guid(0x7c5a40ef, 0xa0fb, 0x4bfc, [0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e]),
+        Folder::Env("ProgramFiles(x86)", ""),
+    ),
+    // FOLDERID_ProgramFilesCommon {F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}
+    (
+        guid(0xf7f1ed05, 0x9f6d, 0x47a2, [0xaa, 0xae, 0x29, 0xd3, 0x17, 0xc6, 0xf0, 0x66]),
+        Folder::Env("CommonProgramFiles", ""),
+    ),
+    // FOLDERID_ProgramFilesCommonX86 {DE974D24-D9C6-4D3E-BF91-F4455120B917}
+    (
+        guid(0xde974d24, 0xd9c6, 0x4d3e, [0xbf, 0x91, 0xf4, 0x45, 0x51, 0x20, 0xb9, 0x17]),
+        Folder::Env("CommonProgramFiles(x86)", ""),
+    ),
+    // FOLDERID_SystemX86 {D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}: SysWOW64
+    // on 64-bit Windows.
+    (
+        guid(0xd65231b0, 0xb2f1, 0x4857, [0xa4, 0xce, 0xa8, 0xe7, 0xc6, 0xea, 0x7d, 0x27]),
+        Folder::Env("windir", "\\SysWOW64"),
+    ),
+    // The X64 folders only for 64-bit processes (the documentation: not
+    // supported for 32-bit applications on 64-bit systems).
+    // FOLDERID_ProgramFilesX64 {6D809377-6AF0-444B-8957-A3773F02200E}
+    #[cfg(target_arch = "x86_64")]
+    (
+        guid(0x6d809377, 0x6af0, 0x444b, [0x89, 0x57, 0xa3, 0x77, 0x3f, 0x02, 0x20, 0x0e]),
+        Folder::Env("ProgramW6432", ""),
+    ),
+    // FOLDERID_ProgramFilesCommonX64 {6365D5A7-0F0D-45E5-87F6-0DA56B6A4F7D}
+    #[cfg(target_arch = "x86_64")]
+    (
+        guid(0x6365d5a7, 0x0f0d, 0x45e5, [0x87, 0xf6, 0x0d, 0xa5, 0x6b, 0x6a, 0x4f, 0x7d]),
+        Folder::Env("CommonProgramW6432", ""),
+    ),
 ];
 
 /// Creates the directory `path` (its first `n` units) and the ones above

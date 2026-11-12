@@ -12,7 +12,9 @@
 //!   folders the environment names (USERPROFILE, APPDATA, LOCALAPPDATA)
 //!   and the Windows directory, CSIDL_SYSTEMX86 SysWOW64 and
 //!   CSIDL_PROGRAM_FILESX86 ProgramFiles(x86); an unknown CSIDL is
-//!   E_INVALIDARG.
+//!   E_INVALIDARG. The fixed known folders the Click-to-Run service maps
+//!   (Fonts, the Program Files and Common Files folders, their X86 and
+//!   X64 forms, SystemX86) at their documented default places.
 //!   ShellExecuteW of a missing file: ERROR_FILE_NOT_FOUND (2).
 //! - version: GetFileVersionInfo(Size)(Ex)W of this program's own version
 //!   resource (build.rs); VerQueryValueW finds VS_FIXEDFILEINFO ("\") and
@@ -308,6 +310,31 @@ const CSIDL_WINDOWS: i32 = 0x24;
 const FOLDERID_PROFILE: [u8; 16] = [
     0x8f, 0x85, 0x6c, 0x5e, 0x22, 0x0e, 0x60, 0x47, 0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73,
 ];
+
+/// A GUID's in-memory bytes from its u128 form.
+const fn guid(v: u128) -> [u8; 16] {
+    let b = v.to_be_bytes();
+    [
+        b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12], b[13],
+        b[14], b[15],
+    ]
+}
+
+/// Known folders with fixed places (knownfolders.h's GUIDs) and the
+/// environment variable plus suffix of the path Microsoft's KNOWNFOLDERID
+/// documentation gives each by default (what the Click-to-Run service's
+/// registry staging maps its tokens through).
+const KNOWN_FIXED: [(u128, &str, &str); 7] = [
+    (0xfd228cb7_ae11_4ae3_864c_16f3910ab8fe, "windir", "\\Fonts"), // Fonts
+    (0x905e63b6_c1bf_494e_b29c_65b732d3d21a, "ProgramFiles", ""),  // ProgramFiles
+    (0x7c5a40ef_a0fb_4bfc_874a_c0f2e0b9fa8e, "ProgramFiles(x86)", ""), // ProgramFilesX86
+    (0x6d809377_6af0_444b_8957_a3773f02200e, "ProgramW6432", ""),  // ProgramFilesX64
+    (0xf7f1ed05_9f6d_47a2_aaae_29d317c6f066, "CommonProgramFiles", ""), // ProgramFilesCommon
+    (0xde974d24_d9c6_4d3e_bf91_f4455120b917, "CommonProgramFiles(x86)", ""), // ProgramFilesCommonX86
+    (0x6365d5a7_0f0d_45e5_87f6_0da56b6a4f7d, "CommonProgramW6432", ""), // ProgramFilesCommonX64
+];
+/// FOLDERID_SystemX86: %windir%\SysWOW64 on 64-bit Windows.
+const FOLDERID_SYSTEMX86: u128 = 0xd65231b0_b2f1_4857_a4ce_a8e7c6ea7d27;
 
 /// Whether this runs on gala: no ntdll is loaded, or the loaded one is
 /// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
@@ -678,6 +705,27 @@ fn shell(c: &mut Checks) -> Result<(), u32> {
         )?;
         env("USERPROFILE", &mut want);
         c.ok(!known.is_null() && same(known, want.as_ptr()), 0)?;
+        let mut sys = [0u16; 260];
+        for (i, (id, var, suffix)) in KNOWN_FIXED.iter().enumerate() {
+            let mut known = core::ptr::null_mut();
+            let id = guid(*id);
+            c.eq(SHGetKnownFolderPath(&id, 0, core::ptr::null_mut(), &mut known) as u64, 0)?;
+            let n = env(var, &mut want) as usize;
+            for (k, ch) in suffix.encode_utf16().enumerate() {
+                want[n + k] = ch;
+            }
+            want[n + suffix.len()] = 0;
+            c.ok(n > 0 && !known.is_null() && same_ci(known, want.as_ptr()), i as u64)?;
+        }
+        let mut known = core::ptr::null_mut();
+        let id = guid(FOLDERID_SYSTEMX86);
+        c.eq(SHGetKnownFolderPath(&id, 0, core::ptr::null_mut(), &mut known) as u64, 0)?;
+        let n = env("windir", &mut sys) as usize;
+        for (k, ch) in "\\SysWOW64".encode_utf16().enumerate() {
+            sys[n + k] = ch;
+        }
+        sys[n + 9] = 0;
+        c.ok(!known.is_null() && same_ci(known, sys.as_ptr()), 0)?;
     }
     Ok(())
 }

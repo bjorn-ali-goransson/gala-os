@@ -1849,12 +1849,19 @@ need gala's.
      wcsncpy_s, wcscat_s and the rest of the strcpy_s family, shared
      with ucrtbase); advapi32's private object security
      (CreatePrivateObjectSecurity*, SetPrivateObjectSecurity(Ex),
-     DestroyPrivateObjectSecurity, MakeSelfRelativeSD, and
-     GetSidLengthRequired, which it calls once loaded) over the kernel's
+     DestroyPrivateObjectSecurity, MakeSelfRelativeSD) over the kernel's
      inheritance rules (gala's GalaNewSecurityObject and
-     GalaSetSecurityObject; ARCHITECTURE "Security descriptors");
+     GalaSetSecurityObject; ARCHITECTURE "Security descriptors"), and
+     GetSidLengthRequired, which it calls once loaded;
      `office_api_test` and `wow64_office_api_test` (`offreg.rs`, Wine's
      conformance tests run on Windows and the documentation).
+     Then MergeAndStageRegistry detokenizes the package's registry
+     through known folders and stopped at those shell32 lacked
+     (`Failed to get known folder mapping.`, 0x80070002 for
+     [{Fonts}], [{ProgramFilesX86}], [{ProgramFilesX64}], the common
+     files ones and [{SystemX86}]); done: those known folders
+     (`win32_misc_test`). [{AppVPackageRoot}] is App-V's own token, not
+     a Windows known folder.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
