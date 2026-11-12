@@ -420,7 +420,9 @@ fn prepare_and_go(
         };
     marker.write(0, &marker_bytes(value, next));
 
-    // The disk: what is pending written, so the log position is final.
+    // The disk: what is pending written (the registry's too), so the log
+    // position is final.
+    crate::nt::persist::flush_registry();
     crate::nt::persist::sync();
     let volume = crate::nt::persist::position();
 

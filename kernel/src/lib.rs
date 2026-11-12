@@ -428,7 +428,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
                 );
                 sched::sleep_ms(1000);
             }
-            // What the program's end changed (delete-on-close at exit).
+            // What the program's end changed (delete-on-close at exit),
+            // the registry's changes too.
+            nt::persist::flush_registry();
             nt::persist::sync();
             nt::ledger::dump();
             info!("run: end {name}");

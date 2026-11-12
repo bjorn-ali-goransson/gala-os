@@ -1272,7 +1272,7 @@ pub fn with<R>(f: impl FnOnce(&mut Registry) -> Result<R, NtStatus>) -> Result<R
         r.noting = super::regnotify::active();
         let result = f(r);
         if r.recording && r.has_ops() {
-            super::persist::note_pending();
+            super::persist::note_registry_pending();
         }
         (result, r.take_changes())
     };
