@@ -1849,7 +1849,8 @@ need gala's.
      wcsncpy_s, wcscat_s and the rest of the strcpy_s family, shared
      with ucrtbase); advapi32's private object security
      (CreatePrivateObjectSecurity*, SetPrivateObjectSecurity(Ex),
-     DestroyPrivateObjectSecurity, MakeSelfRelativeSD) over the kernel's
+     DestroyPrivateObjectSecurity, MakeSelfRelativeSD, and
+     GetSidLengthRequired, which it calls once loaded) over the kernel's
      inheritance rules (gala's GalaNewSecurityObject and
      GalaSetSecurityObject; ARCHITECTURE "Security descriptors");
      `office_api_test` and `wow64_office_api_test` (`offreg.rs`, Wine's

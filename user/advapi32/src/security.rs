@@ -89,6 +89,14 @@ pub extern "system" fn GetLengthSid(sid: *const u8) -> u32 {
     read_sid(sid).map_or(0, |(_, _, n)| sid_len(n) as u32)
 }
 
+/// GetSidLengthRequired(nSubAuthorityCount): the bytes a SID with that
+/// many subauthorities takes (8 + 4 per subauthority; any count, as
+/// documented, without checking it against SID_MAX_SUB_AUTHORITIES).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSidLengthRequired(count: u8) -> u32 {
+    8 + 4 * u32::from(count)
+}
+
 /// AllocateAndInitializeSid: a SID in local memory (freed by FreeSid).
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]

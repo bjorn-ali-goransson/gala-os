@@ -44,7 +44,8 @@
 //!   test_security_descriptor, run on Windows): too small a length is
 //!   ERROR_INSUFFICIENT_BUFFER with the size, a self-relative input
 //!   ERROR_BAD_DESCRIPTOR_FORMAT, and a larger buffer leaves the length
-//!   as it was.
+//!   as it was. GetSidLengthRequired is 8 bytes plus 4 per subauthority
+//!   (the SID layout Microsoft documents).
 
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
@@ -169,6 +170,7 @@ unsafe extern "system" {
     ) -> i32;
     fn DestroyPrivateObjectSecurity(sd: *mut *mut u8) -> i32;
     fn MakeSelfRelativeSD(abs: *const u8, rel: *mut u8, len: *mut u32) -> i32;
+    fn GetSidLengthRequired(count: u8) -> u32;
 }
 
 const ERROR_GEN_FAILURE: u32 = 31;
@@ -482,6 +484,9 @@ fn private_security(c: &mut Checks) -> Result<(), u32> {
     let mut owner_buf = [0usize; 16];
     // SAFETY: our own descriptor, ACL, token and buffers throughout.
     unsafe {
+        c.eq(GetSidLengthRequired(0).into(), 8)?;
+        c.eq(GetSidLengthRequired(2).into(), 16)?;
+        c.eq(GetSidLengthRequired(15).into(), 68)?;
         c.eq(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) as u64, 1)?;
         let mut n = 0u32;
         // TokenOwner (4): a TOKEN_OWNER, the SID's pointer first.
