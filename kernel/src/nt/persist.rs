@@ -17,6 +17,7 @@
 //! Design: docs/ARCHITECTURE.md, "Disk".
 
 use super::reglog::{self, RegOp};
+use super::status::NtStatus;
 use super::{file, platform, registry};
 use crate::fs::ramfs::{FsError, NodeId, ROOT, RamFs, Writeback};
 use crate::fs::volume::{Blocks, IoError, Mounted, Volume, VolumeError};
@@ -311,6 +312,10 @@ fn mount_registry() {
     }
 }
 
+/// The registry's snapshot is written in pieces of about this many bytes
+/// (`write_reglog_snapshot`).
+const REGLOG_CHUNK: usize = 64 << 10;
+
 /// Moves the registry's recorded changes into its log file (a snapshot
 /// when some were lost or the file has grown past its bound,
 /// `compact_reglog`).
@@ -333,36 +338,26 @@ fn sync_registry() {
         reglog_node(fs, true).map(|id| id.and_then(|id| fs.node(id)).map_or(0, |n| n.size()))
     });
     let appended = if lost { None } else { encode(&ops) };
-    let (bytes, rewrite) = match (size, appended) {
-        (Ok(size), Some(b))
-            if !compact_reglog(size, b.len() as u64, REGLOG_BASE.load(Ordering::Relaxed)) =>
+    drop(ops);
+    let written = match (size, appended) {
+        (Ok(size), Some(bytes))
+            if !compact_reglog(size, bytes.len() as u64, REGLOG_BASE.load(Ordering::Relaxed)) =>
         {
-            (Some(b), false)
-        }
-        _ => (registry::with(|r| r.snapshot()).ok().and_then(|s| encode(&s)), true),
-    };
-    if rewrite && let Some(b) = &bytes {
-        // Rare by design (`compact_reglog`): many of these lines in a run
-        // mean the registry's syncs have become a snapshot each.
-        info!("persist: the registry's log rewritten as a snapshot of {} bytes", b.len());
-        REGLOG_BASE.store(b.len() as u64, Ordering::Relaxed);
-    }
-    // Appended (the last page read in first if it is on the disk only).
-    let written = bytes.ok_or(FsError::NoMemory).and_then(|bytes| {
-        file::with_pages(|fs| {
-            let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
-            if rewrite {
-                fs.set_size(id, 0, now)?;
-            }
-            Ok(id)
-        })
-        .and_then(|id| {
+            // Appended (the last page read in first if it is on the disk
+            // only).
             file::with_pages(|fs| {
+                let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
                 let at = fs.node(id).map_or(0, |n| n.size());
                 fs.write(id, at, &bytes, now).map(drop)
             })
-        })
-    });
+        }
+        _ => write_reglog_snapshot(now).map(|total| {
+            // Rare by design (`compact_reglog`): many of these lines in a
+            // run mean the registry's syncs have become a snapshot each.
+            info!("persist: the registry's log rewritten as a snapshot of {total} bytes");
+            REGLOG_BASE.store(total, Ordering::Relaxed);
+        }),
+    };
     if let Err(e) = written {
         warn!("persist: registry changes not written ({e:?})");
         let _ = registry::with(|r| {
@@ -370,6 +365,51 @@ fn sync_registry() {
             Ok(())
         });
     }
+}
+
+/// Rewrites the registry's log as a snapshot of the registry, encoded and
+/// written a REGLOG_CHUNK at a time while the registry is walked (its
+/// lock, then the file system's: the order the module keeps), so a
+/// snapshot needs a chunk of memory beyond the file's pages, however
+/// large the registry: a whole one encoded at once (Office's registry,
+/// over 16 MiB) failed for want of memory in a 512 MiB machine, and every
+/// sync after it tried again. Its size. The file is cut to nothing
+/// first, so the writes under the registry's lock (interrupts off) only
+/// make new pages: none is read from the disk there.
+fn write_reglog_snapshot(now: u64) -> Result<u64, FsError> {
+    let id = file::with_pages(|fs| {
+        let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
+        fs.set_size(id, 0, now)?;
+        Ok(id)
+    })?;
+    let mut chunk = Vec::new();
+    chunk.try_reserve_exact(2 * REGLOG_CHUNK).map_err(|_| FsError::NoMemory)?;
+    let mut at = 0u64;
+    let mut failed = None;
+    let flush = |chunk: &mut Vec<u8>, at: &mut u64| -> Result<(), FsError> {
+        file::with_pages(|fs| fs.write(id, *at, chunk, now).map(drop))?;
+        *at += chunk.len() as u64;
+        chunk.clear();
+        Ok(())
+    };
+    let walked = registry::with(|r| {
+        r.snapshot_each(|op| {
+            op.encode(&mut chunk).map_err(|_| NtStatus::NO_MEMORY)?;
+            if chunk.len() >= REGLOG_CHUNK
+                && let Err(e) = flush(&mut chunk, &mut at)
+            {
+                failed = Some(e);
+                return Err(NtStatus::UNSUCCESSFUL);
+            }
+            Ok(())
+        })
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    walked.map_err(|_| FsError::NoMemory)?;
+    flush(&mut chunk, &mut at)?;
+    Ok(at)
 }
 
 struct Turn;
