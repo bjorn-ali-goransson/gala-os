@@ -1096,9 +1096,9 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
 }
 
 /// A process of another personality than NT (`lx::exec`): its address
-/// space laid out by its loader, no PEB, no ntdll, no handles; the boot
-/// user's token. Its threads are created with `thread::create` (which
-/// gives a non-NT thread no TEB).
+/// space laid out by its loader, no PEB, no ntdll, no handles. Its
+/// threads are created with `thread::create` (which gives a non-NT thread
+/// no TEB).
 pub struct Bare {
     pub name: &'static str,
     /// Its path (a Linux program's, as it was executed).
@@ -1108,14 +1108,21 @@ pub struct Bare {
     /// The executable's span: (base, size).
     pub image: (u64, u64),
     pub personality: Personality,
-    /// The process that created it (a Linux fork's parent); 0: none.
+    /// The process that created it (a Linux fork's parent, the NT
+    /// program that started it: `lx::distro`); 0: none.
     pub parent_id: u64,
+    /// The primary token it gets a copy of (its creator's, as
+    /// CreateProcess gives); None: the boot user's.
+    pub token: Option<ObjectRef>,
+    /// Its console session (its creator's), if any.
+    pub console: Option<KArc<super::conhost::Session>>,
 }
 
 /// Creates the process record for `bare` and lists it (no thread yet).
 pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let id = thread::next_id();
-    let token = super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?;
+    let token =
+        super::token::for_new_process(bare.token.as_ref()).map_err(|_| LoadError::OutOfMemory)?;
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
@@ -1153,7 +1160,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         job: IrqMutex::new(None),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
-        console: None,
+        console: bare.console,
         last_exception: IrqMutex::new(None),
         unhandled_exception: IrqMutex::new(None),
         ui: super::winsta::Connection::new(),

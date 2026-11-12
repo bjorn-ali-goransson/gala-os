@@ -156,9 +156,14 @@ static GROUP: AtomicUsize = AtomicUsize::new(NO_VOLUME);
 /// A name mounted in a directory: (name, node, d_type).
 type Mounted = (&'static [u8], NodeId, u8);
 
-/// What the Linux view mounts on the shared tree (see the module's doc).
+/// What the Linux view mounts on the shared tree (see the module's doc),
+/// and where a process's `/` is.
 #[derive(Clone, Copy)]
 struct Mounts {
+    /// The process's root directory: the shared tree's root, or a WSL
+    /// distribution's (`lx::distro`), out of which no walk goes (`..` of
+    /// it is itself, an absolute path or link target starts there).
+    root: NodeId,
     /// `/run`'s volume root.
     run: NodeId,
     /// `/etc`, and the files bound over its `passwd` and `group`.
@@ -168,9 +173,14 @@ struct Mounts {
 }
 
 impl Mounts {
-    #[cfg(test)]
-    const NONE: Mounts =
-        Mounts { run: NO_VOLUME, etc: NO_VOLUME, passwd: NO_VOLUME, group: NO_VOLUME };
+    /// Nothing mounted (a distribution's tree: `mounts`).
+    const EMPTY: Mounts = Mounts {
+        root: ramfs::ROOT,
+        run: NO_VOLUME,
+        etc: NO_VOLUME,
+        passwd: NO_VOLUME,
+        group: NO_VOLUME,
+    };
 
     /// The file bound over `name` in `/etc`, if any.
     fn etc_file(&self, name: &[u16]) -> Option<NodeId> {
@@ -207,9 +217,15 @@ impl Mounts {
     }
 }
 
-/// The mounts, `/run` made if it was not.
-fn mounts(fs: &mut ramfs::RamFs) -> core::result::Result<Mounts, FsError> {
+/// The mounts of a process whose root is `root`: the shared tree's with
+/// `/run` (made if it was not) and the user database; a distribution's
+/// tree has none (its `/run` and `/etc` are its own directories).
+fn mounts(fs: &mut ramfs::RamFs, root: NodeId) -> core::result::Result<Mounts, FsError> {
+    if root != ramfs::ROOT {
+        return Ok(Mounts { root, ..Mounts::EMPTY });
+    }
     Ok(Mounts {
+        root,
         run: run_volume(fs)?,
         etc: ETC.load(Ordering::Relaxed),
         passwd: PASSWD.load(Ordering::Relaxed),
@@ -448,7 +464,7 @@ pub fn device_write(dev: &Device, count: u64) -> Result {
 }
 
 /// The errno for a file-system error.
-fn errno_of(e: FsError) -> u16 {
+pub fn errno_of(e: FsError) -> u16 {
     match e {
         FsError::NotFound | FsError::PathNotFound | FsError::DeletePending => ENOENT,
         FsError::Exists => EEXIST,
@@ -678,18 +694,29 @@ pub fn resolve(
         return Err(ENOENT);
     }
     let parsed = parse(path)?;
-    let start = if parsed.absolute { ramfs::ROOT } else { start_dir(call, dirfd)? };
-    with_fs(|fs| walk_mounted(fs, start, &parsed, follow))
+    let root = call.lx.root;
+    let start = if parsed.absolute { root } else { start_dir(call, dirfd)? };
+    with_fs(|fs| walk_mounted(fs, root, start, &parsed, follow))
 }
 
-/// `walk` with the mounts (`/run`, `/etc/passwd`, `/etc/group`).
+/// Resolves `path` from directory `root` as a process rooted there would
+/// (an absolute path from it too), following a link at its end if
+/// `follow` (`lx::distro`'s unpacking).
+pub fn resolve_in(root: NodeId, path: &[u8], follow: bool) -> core::result::Result<Found, u16> {
+    let parsed = parse(path)?;
+    with_fs(|fs| walk_mounted(fs, root, root, &parsed, follow))
+}
+
+/// `walk` with the mounts of a process rooted at `root` (`/run`,
+/// `/etc/passwd`, `/etc/group` on the shared tree).
 fn walk_mounted(
     fs: &mut ramfs::RamFs,
+    root: NodeId,
     start: NodeId,
     p: &Parsed,
     follow: bool,
 ) -> core::result::Result<Found, u16> {
-    let m = mounts(fs).map_err(errno_of)?;
+    let m = mounts(fs, root).map_err(errno_of)?;
     walk(fs, &m, start, p, follow)
 }
 
@@ -699,8 +726,8 @@ fn is_symlink(fs: &ramfs::RamFs, n: NodeId) -> bool {
 
 /// Walks `p` from directory `start` (see the module's doc): the components
 /// left are a stack (last first) into which a followed link's target is
-/// spliced. `m`: what is mounted (`/run`'s volume, the files bound over
-/// `/etc/passwd` and `/etc/group`).
+/// spliced. `m`: the root and what is mounted (`/run`'s volume, the
+/// files bound over `/etc/passwd` and `/etc/group`).
 fn walk(
     fs: &ramfs::RamFs,
     m: &Mounts,
@@ -735,7 +762,7 @@ fn walk(
                 });
             }
             Part::DotDot if last => {
-                let up = parent(fs, dir);
+                let up = if dir == m.root { dir } else { parent(fs, dir) };
                 return Ok(Found {
                     dir: parent(fs, up),
                     name: None,
@@ -745,7 +772,9 @@ fn walk(
             }
             Part::Dot => continue,
             Part::DotDot => {
-                dir = parent(fs, dir);
+                if dir != m.root {
+                    dir = parent(fs, dir);
+                }
                 continue;
             }
             Part::Name(name) => name,
@@ -782,7 +811,7 @@ fn walk(
                 }
                 let t = parse(target)?;
                 if t.absolute {
-                    dir = ramfs::ROOT;
+                    dir = m.root;
                 }
                 if last {
                     slash |= t.trailing_slash;
@@ -904,6 +933,8 @@ fn stat_other(object: &Object, me: (u32, u32)) -> Stat {
         Object::Socket(_) | Object::Unix(_) => (abi::S_IFSOCK | 0o777, 0),
         // An anonymous inode: no file type, 0600.
         Object::Epoll(_) | Object::EventFd(_) => (0o600, 0),
+        Object::Nt(n) if n.kind == super::ntio::Kind::Pipe => (abi::S_IFIFO | 0o600, 0),
+        Object::Nt(n) if n.kind == super::ntio::Kind::File => (abi::S_IFREG | 0o644, 0),
         _ => (abi::S_IFCHR | 0o620, 136 << 8),
     };
     Stat {
@@ -964,7 +995,7 @@ pub fn statfs(call: &Call<'_>, path: u64, buf: u64) -> Result {
 pub fn fstatfs(call: &Call<'_>, fd: u64, buf: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     let magic = match &f.object {
-        Object::File(_) | Object::Device(_) | Object::Console(_) => TMPFS_MAGIC,
+        Object::File(_) | Object::Device(_) | Object::Console(_) | Object::Nt(_) => TMPFS_MAGIC,
         Object::PipeRead(_) | Object::PipeWrite(_) => PIPEFS_MAGIC,
         Object::Socket(_) | Object::Unix(_) => SOCKFS_MAGIC,
         Object::Epoll(_) | Object::EventFd(_) => ANON_INODE_FS_MAGIC,
@@ -1453,7 +1484,7 @@ pub fn getdents64(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     let (used, full) = {
         let mut cursor = file.cursor.lock();
         with_fs(|fs| {
-            let m = mounts(fs).map_err(errno_of)?;
+            let m = mounts(fs, call.lx.root).map_err(errno_of)?;
             let (mounted, n) = m.in_dir(file.node);
             fill_dirents(fs, file.node, &mounted[..n], &mut cursor, &mut out)
         })?
@@ -1582,7 +1613,7 @@ pub fn mkdirat(call: &Call<'_>, dirfd: u64, path: u64, mode: u64) -> Result {
 /// rename replaces) at once, Linux's way (`ramfs::RamFs::unlink`). An NT
 /// open of the node that does not share delete access refuses it (EBUSY,
 /// ledgered), as Windows' POSIX delete does.
-fn remove(fs: &mut ramfs::RamFs, dir: NodeId, name: &[u16]) -> core::result::Result<(), u16> {
+pub fn remove(fs: &mut ramfs::RamFs, dir: NodeId, name: &[u16]) -> core::result::Result<(), u16> {
     let n = fs.find(dir, name).map_err(errno_of)?.ok_or(ENOENT)?;
     if n == ramfs::ROOT {
         return Err(EBUSY);
@@ -1809,15 +1840,25 @@ pub fn fchdir(call: &Call<'_>, fd: u64) -> Result {
     }
 }
 
-/// The Linux path of node `n` (`/a/b`; `/` for the root).
-pub fn path_of(n: NodeId) -> core::result::Result<Vec<u8>, u16> {
-    let (wide, mounted) =
-        with_fs(|fs| Ok((fs.path_of(n)?, volume(fs, n) != ramfs::ROOT))).map_err(errno_of)?;
+/// The Linux path of node `n` (`/a/b`; `/` for the root) as a process
+/// rooted at `root` sees it: from its root (a node outside a
+/// distribution's tree keeps its whole path).
+pub fn path_of(root: NodeId, n: NodeId) -> core::result::Result<Vec<u8>, u16> {
+    let (wide, mounted, base) = with_fs(|fs| {
+        let base = if root == ramfs::ROOT { Vec::new() } else { fs.path_of(root)? };
+        Ok((fs.path_of(n)?, volume(fs, n) != ramfs::ROOT, base))
+    })
+    .map_err(errno_of)?;
     let mut out = Vec::new();
     if mounted {
         out.try_extend_from_slice(b"/run").map_err(|_| ENOMEM)?;
     }
-    for part in wide.split(|&c| c == u16::from(b'\\')).filter(|p| !p.is_empty()) {
+    let below = |c: u16| c == u16::from(b'\\');
+    let rest = match wide.strip_prefix(&base[..]) {
+        Some(r) if base.is_empty() || r.is_empty() || below(r[0]) => r,
+        _ => &wide[..],
+    };
+    for part in rest.split(|&c| below(c)).filter(|p| !p.is_empty()) {
         out.try_push(b'/').map_err(|_| ENOMEM)?;
         utf8_name(part, &mut out).map_err(|_| ENOMEM)?;
     }
@@ -1830,7 +1871,7 @@ pub fn path_of(n: NodeId) -> core::result::Result<Vec<u8>, u16> {
 /// getcwd: the path with its NUL; its length counts the NUL.
 pub fn getcwd(call: &Call<'_>, buf: u64, size: u64) -> Result {
     let cwd = *call.lx.cwd.lock();
-    let mut path = path_of(cwd)?;
+    let mut path = path_of(call.lx.root, cwd)?;
     path.try_push(0).map_err(|_| ENOMEM)?;
     if (path.len() as u64) > size {
         return Err(ERANGE);
@@ -1847,7 +1888,7 @@ pub fn readlinkat(call: &Call<'_>, dirfd: u64, path: u64, buf: u64, size: u64) -
     }
     let bytes = read_path(&call.process, path)?;
     if bytes == PROC_SELF_EXE {
-        let exe = path_of(*call.lx.exe.lock())?;
+        let exe = path_of(call.lx.root, *call.lx.exe.lock())?;
         let n = exe.len().min(size as usize);
         call.process.write(buf, &exe[..n]).map_err(|_| EFAULT)?;
         return Ok(n as u64);
@@ -2097,20 +2138,24 @@ pub fn umask(call: &Call<'_>, mask: u64) -> Result {
 /// ENOTDIR as for any path; EACCES for a directory or a file without
 /// its owner's execute bit.
 pub fn executable(call: &Call<'_>, path: &[u8]) -> core::result::Result<(NodeId, Vec<u8>), u16> {
-    executable_at(*call.lx.cwd.lock(), path)
+    executable_at(call.lx.root, *call.lx.cwd.lock(), path)
 }
 
 /// `executable` for a path taken from directory `cwd` (an absolute path
-/// from the root): the node (symbolic links followed) and its bytes.
-/// Also how a program's interpreter (PT_INTERP) is read, and a program
-/// `lxrun=` starts.
-pub fn executable_at(cwd: NodeId, path: &[u8]) -> core::result::Result<(NodeId, Vec<u8>), u16> {
+/// from `root`): the node (symbolic links followed) and its bytes. Also
+/// how a program's interpreter (PT_INTERP) is read, and a program
+/// `lxrun=` or a distribution (`lx::distro`) starts.
+pub fn executable_at(
+    root: NodeId,
+    cwd: NodeId,
+    path: &[u8],
+) -> core::result::Result<(NodeId, Vec<u8>), u16> {
     if path.is_empty() {
         return Err(ENOENT);
     }
     let parsed = parse(path)?;
-    let start = if parsed.absolute { ramfs::ROOT } else { cwd };
-    let n = with_fs(|fs| walk_mounted(fs, start, &parsed, true))?.existing()?;
+    let start = if parsed.absolute { root } else { cwd };
+    let n = with_fs(|fs| walk_mounted(fs, root, start, &parsed, true))?.existing()?;
     let ok = with_fs(|fs| fs.node(n).is_some_and(|node| !node.is_dir() && perm(node) & 0o100 != 0));
     if !ok {
         return Err(EACCES);
@@ -2132,7 +2177,7 @@ const PROC_SELF_EXE: &[u8] = b"/proc/self/exe";
 pub fn directory_of(path: &str) -> NodeId {
     let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
     let Ok(parsed) = parse(dir.as_bytes()) else { return ramfs::ROOT };
-    with_fs(|fs| walk_mounted(fs, ramfs::ROOT, &parsed, true))
+    with_fs(|fs| walk_mounted(fs, ramfs::ROOT, ramfs::ROOT, &parsed, true))
         .ok()
         .and_then(|f| f.node)
         .unwrap_or(ramfs::ROOT)
@@ -2162,7 +2207,7 @@ mod tests {
     }
 
     fn walk_str(fs: &RamFs, start: NodeId, path: &str) -> core::result::Result<Found, u16> {
-        walk(fs, &Mounts::NONE, start, &parse(path.as_bytes())?, true)
+        walk(fs, &Mounts::EMPTY, start, &parse(path.as_bytes())?, true)
     }
 
     /// run_test on Linux: `/run` is the mounted volume's root, `..` out
@@ -2174,7 +2219,7 @@ mod tests {
         let hidden = fs.create(ROOT, &w("run"), true, 1).unwrap();
         let run = fs.create_volume(0o755, 1).unwrap();
         let user = fs.create_posix(run, &w("user"), true, 0o755, 1).unwrap();
-        let m = Mounts { run, ..Mounts::NONE };
+        let m = Mounts { run, ..Mounts::EMPTY };
         let at = |path: &str| walk(&fs, &m, ROOT, &parse(path.as_bytes()).unwrap(), true);
         let mount = at("/run").unwrap();
         assert_eq!((mount.node, mount.name, mount.dir), (Some(run), None, ROOT));
@@ -2229,6 +2274,28 @@ mod tests {
         assert_eq!(parse(&[b'x'; 256]).err(), Some(ENAMETOOLONG));
     }
 
+    /// A WSL distribution's processes are rooted in its tree
+    /// (`lx::distro`): `/`, `..` of the root and an absolute link target
+    /// stay inside it, `/run` is no mount there, and paths read from it.
+    #[test]
+    fn a_distribution_root_confines_the_walk() {
+        let (mut fs, lx, d, inner) = tree();
+        let run = fs.create_volume(0o755, 1).unwrap();
+        fs.symlink(d, &w("abs"), b"/inner", 1).unwrap();
+        fs.symlink(d, &w("out"), b"../../lx", 1).unwrap();
+        let m = Mounts { root: d, ..Mounts::EMPTY };
+        let at = |start: NodeId, path: &str| {
+            walk(&fs, &m, start, &parse(path.as_bytes()).unwrap(), true).unwrap().node
+        };
+        assert_eq!(at(d, "/"), Some(d));
+        assert_eq!(at(d, "/.."), Some(d));
+        assert_eq!(at(d, "/sub/../../inner"), Some(inner));
+        assert_eq!(at(d, "/abs"), Some(inner), "an absolute target starts at the root");
+        assert_eq!(at(d, "/out"), None, "`..` stops at the root: /lx inside it");
+        assert_ne!(at(d, "/run"), Some(run));
+        assert_ne!(at(d, "/.."), Some(lx));
+    }
+
     /// fs_test on Linux: links are followed in the middle of a path and
     /// (if asked, or before a trailing slash) at its end, relative to the
     /// link's directory or from the root; 40 links resolve, 41 are ELOOP.
@@ -2242,7 +2309,8 @@ mod tests {
         fs.symlink(lx, &w("dangling"), b"d/new", 1).unwrap();
         assert_eq!(walk_str(&fs, lx, "dl/inner").unwrap().node, Some(inner));
         assert_eq!(walk_str(&fs, lx, "dl/up/dl/abs").unwrap().node, Some(inner));
-        let no = |path: &str| walk(&fs, &Mounts::NONE, lx, &parse(path.as_bytes()).unwrap(), false);
+        let no =
+            |path: &str| walk(&fs, &Mounts::EMPTY, lx, &parse(path.as_bytes()).unwrap(), false);
         assert_eq!(no("fl").unwrap().node, Some(file_link));
         assert_eq!(no("dl/").unwrap().node, Some(d), "a trailing slash follows");
         assert_eq!(no("fl/").err(), Some(ENOTDIR));

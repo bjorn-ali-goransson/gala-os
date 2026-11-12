@@ -180,6 +180,10 @@ pub const GALA_SERVICE_CONTROL: u32 = 0x7fd5;
 pub const GALA_SERVICE_CONFIGURE: u32 = 0x7fd7;
 /// A service process's control dispatcher and SetServiceStatus.
 pub const GALA_SERVICE_DISPATCH: u32 = 0x7fd8;
+/// The WSL facade (gala's own; nt::wsl_calls), for gala's wsl.exe.
+pub const GALA_LX_NODE: u32 = 0x7fe0;
+pub const GALA_LX_SPAWN: u32 = 0x7fe1;
+pub const GALA_LX_DISTRO: u32 = 0x7fe2;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -482,6 +486,9 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_SERVICE_CONTROL, "GalaServiceControl", 4, scm_calls::gala_service_control),
     (GALA_SERVICE_CONFIGURE, "GalaServiceConfigure", 4, scm_calls::gala_service_configure),
     (GALA_SERVICE_DISPATCH, "GalaServiceDispatch", 5, scm_calls::gala_service_dispatch),
+    (GALA_LX_NODE, "GalaLxNode", 3, wsl_calls::gala_lx_node),
+    (GALA_LX_SPAWN, "GalaLxSpawn", 3, wsl_calls::gala_lx_spawn),
+    (GALA_LX_DISTRO, "GalaLxDistro", 5, wsl_calls::gala_lx_distro),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -7440,3 +7447,6 @@ mod clipboard_calls;
 
 #[path = "scm_calls.rs"]
 mod scm_calls;
+
+#[path = "wsl_calls.rs"]
+mod wsl_calls;

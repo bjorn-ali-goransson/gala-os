@@ -144,6 +144,9 @@ pub enum Object {
     Unix(KArc<super::unix::UnixSocket>),
     /// An eventfd's counter (`lx::eventfd`).
     EventFd(KArc<super::eventfd::EventFd>),
+    /// A Windows-side object: a standard handle of the NT program that
+    /// started the process (`lx::ntio`, `lx::distro`).
+    Nt(KArc<super::ntio::NtFile>),
 }
 
 impl Drop for Fd {
@@ -178,7 +181,8 @@ impl Drop for Fd {
             | Object::File(_)
             | Object::Device(_)
             | Object::Socket(_)
-            | Object::EventFd(_) => {}
+            | Object::EventFd(_)
+            | Object::Nt(_) => {}
         }
     }
 }
@@ -205,7 +209,8 @@ impl Fd {
             | Object::Socket(_)
             | Object::Unix(_)
             | Object::Epoll(_)
-            | Object::EventFd(_) => {}
+            | Object::EventFd(_)
+            | Object::Nt(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }
     }
@@ -309,6 +314,10 @@ pub struct LxProcess {
     /// The current directory (chdir; a forked child's starts as its
     /// parent's).
     pub cwd: IrqMutex<NodeId>,
+    /// Its root directory: the shared tree's root, or a WSL
+    /// distribution's (`lx::distro`); a fork's child has its parent's,
+    /// execve keeps it (no chroot yet).
+    pub root: NodeId,
     /// The file-mode creation mask (umask(2); 022 at the start).
     pub umask: IrqMutex<u32>,
     /// The program it runs (its node: `/proc/self/exe`; execve changes
@@ -331,11 +340,24 @@ pub struct LxProcess {
 static TABLE: IrqMutex<Vec<KArc<LxProcess>>> = IrqMutex::new(Vec::new());
 
 /// Creates the state of a new Linux process `pid` running the program at
-/// node `exe`, with fds 0, 1 and 2 on the console, in directory `cwd`.
-pub fn create(pid: u64, brk: u64, cwd: NodeId, exe: NodeId) -> Result<KArc<LxProcess>, AllocError> {
+/// node `exe`, in directory `cwd` under root directory `root`, with fds
+/// 0, 1 and 2 on `stdio` (None: the console, which is the log).
+pub fn create(
+    pid: u64,
+    brk: u64,
+    cwd: NodeId,
+    exe: NodeId,
+    root: NodeId,
+    stdio: Option<[Object; 3]>,
+) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
-    for stream in [Stream::Stdin, Stream::Stdout, Stream::Stderr] {
-        let fd = KArc::try_new(Fd::new(Object::Console(stream), false))?;
+    let objects = stdio.unwrap_or([
+        Object::Console(Stream::Stdin),
+        Object::Console(Stream::Stdout),
+        Object::Console(Stream::Stderr),
+    ]);
+    for object in objects {
+        let fd = KArc::try_new(Fd::new(object, false))?;
         fds.try_push(Some(Slot { fd, cloexec: false }))?;
     }
     let state = KArc::try_new(LxProcess {
@@ -349,6 +371,7 @@ pub fn create(pid: u64, brk: u64, cwd: NodeId, exe: NodeId) -> Result<KArc<LxPro
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
+        root,
         umask: IrqMutex::new(0o022),
         exe: IrqMutex::new(exe),
         rlimits: IrqMutex::new(super::resource::Limits::default()),
@@ -393,6 +416,7 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
+        root: parent.root,
         umask: IrqMutex::new(umask),
         exe: IrqMutex::new(exe),
         rlimits: IrqMutex::new(rlimits),
@@ -419,6 +443,24 @@ pub fn discard(child: &LxProcess) {
     }
     let fds = core::mem::take(&mut *child.fds.lock());
     drop(fds);
+}
+
+/// The pids of the Linux processes whose root directory is `root` (a
+/// WSL distribution's processes: `lx::distro`); with `root` None, of
+/// every process not rooted at the shared tree's root.
+pub fn rooted_at(root: Option<NodeId>) -> Result<Vec<u64>, AllocError> {
+    let table = TABLE.lock();
+    let mut out = Vec::new();
+    for p in table.iter() {
+        let wanted = match root {
+            Some(r) => p.root == r,
+            None => p.root != crate::fs::ramfs::ROOT,
+        };
+        if wanted {
+            out.try_push(p.pid)?;
+        }
+    }
+    Ok(out)
 }
 
 /// The state of Linux process `pid`.
@@ -803,6 +845,9 @@ pub fn dump() {
                         if semaphore { ", semaphore" } else { "" },
                         e.waiters.len()
                     );
+                }
+                Object::Nt(n) => {
+                    crate::info!("lx: pid {} fd {i}: windows {:?}", p.pid, n.kind);
                 }
                 _ => {}
             }

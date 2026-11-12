@@ -3199,6 +3199,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wsl"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "wsl_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
+
+[[package]]
 name = "wsock32"
 version = "0.1.0"
 

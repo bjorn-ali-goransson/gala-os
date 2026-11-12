@@ -149,6 +149,9 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         image: parent.image,
         personality: Personality::Linux,
         parent_id: parent.id,
+        // Its parent's identity (a copy of its token) and console.
+        token: Some(parent.token.lock().clone()),
+        console: parent.console.clone(),
     }) {
         Ok(c) => c,
         Err(_) => return failed("no memory for the process", ENOMEM),

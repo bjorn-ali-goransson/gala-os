@@ -2733,6 +2733,25 @@ distribution on the Linux personality (LX), with no virtual machine.
 kernel), the Hyper-V backends of both products, and Windows containers
 (Docker Desktop's "Windows containers" mode: HCS, server silos).
 
+**Done so far**:
+- Step 2's core (`wsl` with user/wsl_test, the screen scenario
+  `wsl_terminal`; ARCHITECTURE "The WSL facade"): gala's `wsl.exe` in
+  System32 with `--import` of a rootfs tarball (tar or tar.gz),
+  `-l`/`-l -v`, `-d <distro> [--exec] <cmd>` and `-- <command line>`,
+  the default distribution's login shell, `--terminate`, `--shutdown`,
+  `--unregister`, `--set-default`, `--version`, with WSL's messages,
+  UTF-16 output and exit codes; the per-user registry under
+  HKCU\...\Lxss as Windows keeps it; each distribution's own tree
+  (`<BasePath>\rootfs`, made by the kernel: GalaLxNode) in which its LX
+  processes are rooted (a file written in one is absent from another);
+  the starter's console and pipes as their fds (`lx::ntio`), so `wsl -d
+  bb` in a console window (and the start menu's WSL tile) is the
+  distribution's terminal: busybox's shell prompts, edits and runs
+  commands there; `events=wsl`. wsl_test's uncertain answers (version
+  lines, error-code lines, BasePath's form, the state right after a
+  command, a terminated wsl.exe's exit code) are `info` lines to record
+  on Windows; real WSL's transcripts (step 1) are still to be recorded.
+
 **Next** (each step test first; the recordings of step 1 are the spec):
 1. Spec: on real Windows 11 24H2, record what each product does to set
    up and to run `hello-world`: every `wsl.exe` command line and its
@@ -2743,13 +2762,13 @@ kernel), the Hyper-V backends of both products, and Windows containers
    init, dockerd/containerd/runc and podman/conmon/crun. The ranked
    result (Windows side, facade, Linux system calls) goes in this
    section, like AG's blocker list.
-2. The facade's core, test first against recorded `wsl.exe`
-   transcripts: gala's `wsl.exe` and WSL service with `--import` of a
-   rootfs tarball, `-d <distro> [--exec] <cmd>`, `-l -v`,
-   `--terminate`, `--shutdown`, `--unregister`, `--version`, the
-   per-user distribution registry, and a distribution's init as an LX
-   process. Scenario: `wsl --import` of a busybox rootfs, then
-   `wsl -d bb -- echo hi`.
+2. The facade's core's rest: wsl_test checked on Windows (its `info`
+   lines become checks); the WSL service (the COM interface Docker
+   Desktop and Podman call, the registry's one writer), a
+   distribution's init as an LX process (an instance that outlives its
+   last command, as WSL's), DefaultUid applied (root inside the
+   distribution), `-u`, `--cd`, `--export`, ptys and process groups
+   for the terminal (LX "Next" 2-3: job control, Ctrl+C as SIGINT).
 3. The facade's plumbing: `/mnt/<drive>` inside the distribution and
    `\\wsl.localhost\<distro>` outside (one file system, no 9P), interop
    (Windows programs started from Linux and back), `wsl.conf`, hvsocket
