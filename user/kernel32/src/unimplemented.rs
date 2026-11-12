@@ -12,7 +12,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     UpdateResourceW
     CancelSynchronousIo
     CheckTokenMembershipEx
-    CompareStringA
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
@@ -20,13 +19,9 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
-    GetCurrencyFormatEx
-    GetCurrencyFormatW
     GetNamedPipeHandleStateA
     GetNamedPipeInfo
     GetNumaNodeProcessorMaskEx
-    GetNumberFormatEx
-    GetNumberFormatW
     GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
@@ -38,7 +33,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PrepareTape
     ReadConsoleOutputA
     RemoveDirectoryA
-    ResolveLocaleName
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
     SetFileValidData
@@ -59,7 +53,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateTapePartition
     EraseTape
     EscapeCommFunction
-    FoldStringW
     GetBinaryTypeW
     GetCommModemStatus
     GetCommState
@@ -68,7 +61,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNamedPipeClientProcessId
     GetNumberOfConsoleMouseButtons
     IdnToUnicode
-    IsBadStringPtrA
     PurgeComm
     ReadConsoleOutputW
     ScrollConsoleScreenBufferW
@@ -82,7 +74,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleInputW
     WriteConsoleOutputW
     EnumResourceNamesW
-    IsBadReadPtr
     ReadConsoleOutputCharacterA
     // Inno Setup's Setup (Delphi's VCL) imports these.
 );

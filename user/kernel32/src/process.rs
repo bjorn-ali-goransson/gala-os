@@ -1469,3 +1469,69 @@ pub extern "system" fn GetThreadIOPendingFlag(thread: Handle, pending: *mut Bool
     unsafe { *pending = Bool::from(value != 0) };
     TRUE
 }
+
+/// WinExec(lpCmdLine, uCmdShow): CreateProcessA of the command line with
+/// uCmdShow as the window's show state; then, as Microsoft documents, it
+/// waits (up to 30 s) for the program's first GetMessage through
+/// user32's WaitForInputIdle when user32 is loaded and has it. Above 31
+/// on success; else the error when it is below 32 (ERROR_FILE_NOT_FOUND,
+/// ERROR_PATH_NOT_FOUND, ...), ERROR_BAD_FORMAT for the others, 0 out of
+/// memory.
+#[unsafe(no_mangle)]
+pub extern "system" fn WinExec(command_line: *const u8, show: u32) -> u32 {
+    const STARTF_USESHOWWINDOW: u32 = 1;
+    const ERROR_BAD_FORMAT: u32 = 11;
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    if command_line.is_null() {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    // CreateProcessA may write to the command line: a copy.
+    let mut line = [0u8; 2048];
+    // SAFETY: the caller's NUL-terminated command line.
+    let n = unsafe { super::strlen(command_line) };
+    if n >= line.len() {
+        unsupported(b"kernel32.dll!WinExec(command line length)", n as u64);
+        return ERROR_BAD_FORMAT;
+    }
+    // SAFETY: n bytes of the caller's string into our larger buffer.
+    unsafe { core::ptr::copy_nonoverlapping(command_line, line.as_mut_ptr(), n) };
+    // SAFETY: an all-zero STARTUPINFO is a valid bit pattern.
+    let mut startup: StartupInfoEx = unsafe { core::mem::zeroed() };
+    startup.cb = STARTUPINFO_SIZE as u32;
+    startup.flags = STARTF_USESHOWWINDOW;
+    startup.show_window = show as u16;
+    // PROCESS_INFORMATION: hProcess, hThread, dwProcessId, dwThreadId.
+    let mut info = [0usize; 4];
+    let created = CreateProcessA(
+        core::ptr::null(),
+        line.as_mut_ptr(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        FALSE,
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null(),
+        (&raw const startup).cast(),
+        info.as_mut_ptr(),
+    );
+    if created == FALSE {
+        return match GetLastError() {
+            ERROR_NOT_ENOUGH_MEMORY => 0,
+            e if e < 32 => e,
+            _ => ERROR_BAD_FORMAT,
+        };
+    }
+    let (process, thread) = (info[0] as Handle, info[1] as Handle);
+    type WaitForInputIdle = unsafe extern "system" fn(Handle, u32) -> u32;
+    let user32 = super::mapping::GetModuleHandleA(c"user32.dll".as_ptr().cast());
+    if !user32.is_null() {
+        let wait = super::GetProcAddress(user32, c"WaitForInputIdle".as_ptr().cast());
+        if !wait.is_null() {
+            // SAFETY: user32's WaitForInputIdle, by its documented type.
+            unsafe { core::mem::transmute::<*mut c_void, WaitForInputIdle>(wait)(process, 30_000) };
+        }
+    }
+    CloseHandle(thread);
+    CloseHandle(process);
+    33
+}

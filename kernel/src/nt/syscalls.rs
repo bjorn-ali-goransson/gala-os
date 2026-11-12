@@ -3586,6 +3586,12 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
             let last = u32::from(t.process.thread_count() == 1);
             return call.return_info(&last.to_le_bytes(), buffer, length, ret_ptr);
         }
+        THREAD_IDEAL_PROCESSOR_EX => {
+            // PROCESSOR_NUMBER { Group, Number, Reserved }: gala has one
+            // group.
+            let cpu = t.ideal_processor() as u8;
+            return call.return_info(&[0, 0, cpu, 0], buffer, length, ret_ptr);
+        }
         THREAD_IS_TERMINATED => {
             let done = u32::from(t.has_exited());
             return call.return_info(&done.to_le_bytes(), buffer, length, ret_ptr);
@@ -3651,6 +3657,10 @@ const THREAD_AFFINITY_MASK: u64 = 4;
 const THREAD_IMPERSONATION_TOKEN: u64 = 5;
 const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
+const THREAD_IDEAL_PROCESSOR: u64 = 13;
+const THREAD_IDEAL_PROCESSOR_EX: u64 = 33;
+/// MAXIMUM_PROCESSORS (64-bit): ThreadIdealProcessor's "only ask".
+const MAXIMUM_PROCESSORS: u32 = 64;
 const THREAD_IS_IO_PENDING: u64 = 16;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
 const THREAD_IS_TERMINATED: u64 = 20;
@@ -3708,7 +3718,8 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     let need = match class {
         THREAD_HIDE_FROM_DEBUGGER => 0,
-        THREAD_PRIORITY | THREAD_BASE_PRIORITY => 4,
+        THREAD_PRIORITY | THREAD_BASE_PRIORITY | THREAD_IDEAL_PROCESSOR => 4,
+        THREAD_IDEAL_PROCESSOR_EX => 4,
         THREAD_AFFINITY_MASK => 8,
         _ => return NtStatus::INVALID_INFO_CLASS,
     };
@@ -3717,6 +3728,9 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     if class == THREAD_HIDE_FROM_DEBUGGER {
         return NtStatus::SUCCESS; // there is no debugger to hide from
+    }
+    if class == THREAD_IDEAL_PROCESSOR || class == THREAD_IDEAL_PROCESSOR_EX {
+        return set_ideal_processor(call, t, class, buffer);
     }
     if class == THREAD_AFFINITY_MASK {
         let mut v = [0u8; 8];
@@ -3752,6 +3766,36 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
             p.1 = base;
             p.0 = p.0.max(base);
         }
+    }
+    NtStatus::SUCCESS
+}
+
+/// ThreadIdealProcessor (a ULONG: the previous ideal processor is the
+/// returned status, as Windows returns it; MAXIMUM_PROCESSORS only asks)
+/// and ThreadIdealProcessorEx (a PROCESSOR_NUMBER, the previous one
+/// written back). A processor number up to 63 is kept whether or not it
+/// is online (Windows accepts them: Wine's thread.c, a WOW64 process's
+/// 33); above, or another group, STATUS_INVALID_PARAMETER.
+fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer: u64) -> NtStatus {
+    let mut v = [0u8; 4];
+    if call.process.read(buffer, &mut v).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if class == THREAD_IDEAL_PROCESSOR {
+        let cpu = u32::from_le_bytes(v);
+        return match cpu {
+            MAXIMUM_PROCESSORS => NtStatus(t.ideal_processor()),
+            c if c < MAXIMUM_PROCESSORS => NtStatus(t.set_ideal_processor(c)),
+            _ => NtStatus::INVALID_PARAMETER,
+        };
+    }
+    let (group, cpu) = (u16::from_le_bytes([v[0], v[1]]), u32::from(v[2]));
+    if group != 0 || cpu >= MAXIMUM_PROCESSORS {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let previous = t.set_ideal_processor(cpu) as u8;
+    if call.process.write(buffer, &[0, 0, previous, 0]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
 }

@@ -102,6 +102,24 @@ pub struct NtThread {
     restart_deadline: IrqMutex<Option<Option<u64>>>,
     /// Its I/O requests outstanding (`IoPending`): ThreadIsIoPending.
     io_pending: AtomicU32,
+    /// ThreadIdealProcessor: the processor it would rather run on, a hint
+    /// kept and reported (the scheduler does not take it yet). It starts
+    /// at the process's next processor in turn (`default_ideal`); not
+    /// carried across a kernel handover (it starts there again).
+    ideal: AtomicU32,
+}
+
+/// A new thread's ideal processor: its process's threads take the online
+/// processors in turn, as Windows Internals describes Windows' per-process
+/// seed.
+fn default_ideal(ordinal: u32) -> u32 {
+    let online = platform::online_mask();
+    let count = online.count_ones().max(1);
+    // The (ordinal mod count)-th online processor.
+    (0..64u32)
+        .filter(|&cpu| online & (1u64 << cpu) != 0)
+        .nth((ordinal % count) as usize)
+        .unwrap_or(0)
 }
 
 /// One I/O request of a thread, counted while it is outstanding (an IRP
@@ -236,6 +254,16 @@ impl NtThread {
     /// ThreadIsIoPending: it has I/O requests outstanding (`IoPending`).
     pub fn io_pending(&self) -> bool {
         self.io_pending.load(Ordering::Acquire) != 0
+    }
+
+    /// ThreadIdealProcessor.
+    pub fn ideal_processor(&self) -> u32 {
+        self.ideal.load(Ordering::Relaxed)
+    }
+
+    /// Sets ThreadIdealProcessor (validated by the caller); the previous one.
+    pub fn set_ideal_processor(&self, cpu: u32) -> u32 {
+        self.ideal.swap(cpu, Ordering::Relaxed)
     }
 }
 
@@ -487,6 +515,7 @@ fn create_inner(
         (None, super::platform::Personality::Nt) => stack.2,
         _ => 0,
     };
+    let ordinal = process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let thread = NtThread {
         id,
         teb: teb_addr,
@@ -513,13 +542,14 @@ fn create_inner(
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
-        ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        ordinal,
         start_bases: resume.as_ref().map(|r| r.1),
         resume: IrqMutex::new(resume.map(|r| r.0)),
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
         io_pending: AtomicU32::new(0),
+        ideal: AtomicU32::new(default_ideal(ordinal)),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -1097,6 +1127,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
         io_pending: AtomicU32::new(0),
+        ideal: AtomicU32::new(default_ideal(a.ordinal)),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;

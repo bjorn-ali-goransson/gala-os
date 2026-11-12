@@ -18,11 +18,11 @@ const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
 const LOCALE_RETURN_GENITIVE_NAMES: u32 = 0x1000_0000;
 const LOCALE_ALLOW_NEUTRAL_NAMES: u32 = 0x0800_0000;
 
-const LANG_EN_US: u32 = 0x409;
+pub(crate) const LANG_EN_US: u32 = 0x409;
 
 /// Whether `lcid` names gala's locale: en-US, the user and system
 /// defaults (0x400, 0x800), LOCALE_NEUTRAL (0) and LOCALE_INVARIANT (0x7f).
-fn known_lcid(lcid: u32) -> bool {
+pub(crate) fn known_lcid(lcid: u32) -> bool {
     matches!(lcid, LANG_EN_US | 0x400 | 0x800 | 0 | 0x7f)
 }
 
@@ -118,6 +118,7 @@ fn locale_value(kind: u32) -> Option<&'static str> {
         // which may list CAL_GREGORIAN_US, 2, as en-US's optional one).
         0x100b => "1",     // LOCALE_IOPTIONALCALENDAR
         0x100c => "6",     // LOCALE_IFIRSTDAYOFWEEK (Sunday)
+        0x1010 => "1",     // LOCALE_INEGNUMBER (-1.1)
         0x100d => "0",     // LOCALE_IFIRSTWEEKOFYEAR
         0x1011 => "10000", // LOCALE_IDEFAULTMACCODEPAGE
         0x1012 => "037",   // LOCALE_IDEFAULTEBCDICCODEPAGE
@@ -161,7 +162,7 @@ fn decimal(mut v: u32, buf: &mut [u8; 10]) -> &str {
 /// Writes `text` and a NUL into `buf` of `size` characters: the count
 /// with the NUL; with size 0, the count needed; ERROR_INSUFFICIENT_BUFFER
 /// if it does not fit.
-fn put<T: Copy + From<u8>>(text: &[T], buf: *mut T, size: i32) -> i32 {
+pub(crate) fn put<T: Copy + From<u8>>(text: &[T], buf: *mut T, size: i32) -> i32 {
     let need = text.len() + 1;
     if size == 0 {
         return need as i32;
@@ -370,7 +371,7 @@ const LCMAP_LINGUISTIC_CASING: u32 = 0x0100_0000;
 
 /// One UTF-16 unit mapped to upper or lower case, where the mapping is a
 /// single BMP character (others are kept).
-fn map_case(c: u16, upper: bool) -> u16 {
+pub(crate) fn map_case(c: u16, upper: bool) -> u16 {
     let Some(ch) = char::from_u32(c.into()) else { return c };
     let mapped = if upper { single(ch.to_uppercase()) } else { single(ch.to_lowercase()) };
     mapped.and_then(|m| u16::try_from(u32::from(m)).ok()).unwrap_or(c)
@@ -384,7 +385,7 @@ fn single(mut it: impl Iterator<Item = char>) -> Option<char> {
 
 /// The units of a (string, length) argument: length -1 means
 /// NUL-terminated.
-fn units(s: *const u16, n: i32) -> &'static [u16] {
+pub(crate) fn units(s: *const u16, n: i32) -> &'static [u16] {
     if s.is_null() {
         return &[];
     }
@@ -465,23 +466,45 @@ fn order(o: core::cmp::Ordering) -> i32 {
     }
 }
 
+/// A character's place in the linguistic order before its case: the
+/// other characters (punctuation, symbols, spaces) sort first, then
+/// digits, then letters (case folded); within each, by code.
+fn sort_key(c: u16) -> (u8, u16) {
+    let folded = map_case(c, false);
+    let class = match char::from_u32(c.into()) {
+        Some(ch) if ch.is_alphabetic() => 2,
+        Some(ch) if ch.is_numeric() => 1,
+        _ => 0,
+    };
+    (class, folded)
+}
+
 /// The linguistic comparison: letters without case first (a shorter
 /// string that is a prefix sorts first), then, unless case is ignored,
-/// the first difference in case, lower case first.
-fn compare(a: &[u16], b: &[u16], flags: u32) -> i32 {
-    let fold = |c: u16| map_case(c, false);
-    let primary = a.iter().map(|&c| fold(c)).cmp(b.iter().map(|&c| fold(c)));
+/// the first difference in case, lower case first. NULs have no weight
+/// (Windows: a counted string's trailing or embedded NUL compares as
+/// nothing).
+pub(crate) fn compare_units<I>(a: I, b: I, flags: u32) -> i32
+where
+    I: Iterator<Item = u16> + Clone,
+{
+    let (a, b) = (a.filter(|&c| c != 0), b.filter(|&c| c != 0));
+    let primary = a.clone().map(sort_key).cmp(b.clone().map(sort_key));
     if primary != core::cmp::Ordering::Equal || flags & NORM_IGNORECASE != 0 {
         return order(primary);
     }
-    for (&x, &y) in a.iter().zip(b) {
+    for (x, y) in a.zip(b) {
         if x != y {
             // Same letter, different case: lower case sorts first.
-            let x_lower = fold(x) == x;
+            let x_lower = map_case(x, false) == x;
             return if x_lower { CSTR_LESS_THAN } else { CSTR_GREATER_THAN };
         }
     }
     CSTR_EQUAL
+}
+
+fn compare(a: &[u16], b: &[u16], flags: u32) -> i32 {
+    compare_units(a.iter().copied(), b.iter().copied(), flags)
 }
 
 /// CompareStringW: 0 on failure, else CSTR_LESS_THAN/EQUAL/GREATER_THAN.
@@ -776,7 +799,7 @@ const CT_CTYPE3: u32 = 4;
 /// The CT_CTYPE1 bits of a character: C1_UPPER 1, C1_LOWER 2, C1_DIGIT 4,
 /// C1_SPACE 8, C1_PUNCT 0x10, C1_CNTRL 0x20, C1_BLANK 0x40, C1_XDIGIT
 /// 0x80, C1_ALPHA 0x100, C1_DEFINED 0x200.
-fn ctype1(c: u16) -> u16 {
+pub(crate) fn ctype1(c: u16) -> u16 {
     let Some(ch) = char::from_u32(c.into()) else { return 0x200 };
     let mut t = 0x200;
     if ch.is_uppercase() {
