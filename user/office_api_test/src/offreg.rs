@@ -609,9 +609,15 @@ fn private_security(c: &mut Checks) -> Result<(), u32> {
 
 /// The checks of this module, in the order OffReg.dll's load needs them.
 pub fn offreg_imports(c: &mut Checks) -> Result<(), u32> {
+    // Each part announced, so a crash on Windows names the part it was in.
+    super::info("part run_once", 0);
     run_once(c)?;
+    super::info("part srw_locks", 0);
     srw_locks(c)?;
+    super::info("part bitmaps", 0);
     bitmaps(c)?;
+    super::info("part safe_strings", 0);
     safe_strings(c)?;
+    super::info("part private_security", 0);
     private_security(c)
 }

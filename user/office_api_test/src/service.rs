@@ -36,9 +36,11 @@
 //!   documentation): a self-relative descriptor MakeSelfRelativeSD made
 //!   with an owner and a DACL is valid for those parts, not when a group
 //!   is required; too short a length, a header that is not
-//!   self-relative and an owner offset past the length are not.
+//!   self-relative and an owner offset past the length are not (a NULL
+//!   descriptor is not tried: Windows' ntdll reads it, an access
+//!   violation).
 
-use core::ptr::{null, null_mut};
+use core::ptr::null_mut;
 
 use super::Checks;
 
@@ -186,7 +188,6 @@ fn relative_descriptor(c: &mut Checks) -> Result<(), u32> {
         c.eq(RtlValidRelativeSecurityDescriptor(r, size - 1, 0).into(), 0)?;
         c.eq(RtlValidRelativeSecurityDescriptor(r, 19, 0).into(), 0)?;
         c.eq(RtlValidRelativeSecurityDescriptor(p, 20, 0).into(), 0)?;
-        c.eq(RtlValidRelativeSecurityDescriptor(null(), 20, 0).into(), 0)?;
         // An owner offset past the length.
         *r.add(4).cast::<u32>() = 200;
         c.eq(RtlValidRelativeSecurityDescriptor(r, size, 0).into(), 0)?;
@@ -383,10 +384,18 @@ fn build_root(c: &mut Checks) -> Result<(), u32> {
 }
 
 pub fn c2r_service(c: &mut Checks) -> Result<(), u32> {
+    // Each part announced, so a crash on Windows names the part it was in.
+    super::info("part sessions", 0);
     sessions(c)?;
+    super::info("part build_root", 0);
     build_root(c)?;
+    super::info("part file_id", 0);
     file_id(c)?;
     #[cfg(target_arch = "x86_64")]
-    environment_blocks(c)?;
+    {
+        super::info("part environment_blocks", 0);
+        environment_blocks(c)?;
+    }
+    super::info("part relative_descriptor", 0);
     relative_descriptor(c)
 }
