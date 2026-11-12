@@ -24,13 +24,12 @@
 //!   whose last byte alone is clear, RtlFindNextForwardRunClear finds a
 //!   run of 6 at 56 (and Wine's RtlFindNextForwardRunSet a set run
 //!   likewise, looked up at run time: Windows' ntdll appears to lack it).
-//! - msvcrt: wcsnlen; wcsncpy_s (Wine's msvcrt tests string.c
-//!   test_wcscpy_s, run on Windows: EINVAL for a NULL destination or
-//!   source with the destination emptied, a NULL source with a count of
-//!   0 is an empty copy, ERANGE or EINVAL for too small a buffer,
-//!   `_TRUNCATE` STRUNCATE with what fits); wcscat_s as documented
-//!   (appends; ERANGE emptying the destination when it does not fit;
-//!   EINVAL for a NULL source).
+//! - msvcrt: wcsnlen, wcsncpy_s and wcscat_s with valid arguments, as
+//!   OffReg calls them (copies and appends that fit, a count shorter
+//!   than the source). Their invalid-parameter answers are not checked:
+//!   on Windows Server 2025 a NULL source crashed in ntdll (a read of
+//!   0) instead of returning EINVAL, where Wine's msvcrt tests (which
+//!   load msvcr80 and later) expect EINVAL.
 //! - advapi32's private object security, as Microsoft documents
 //!   CreatePrivateObjectSecurityWithMultipleInheritance and
 //!   SetPrivateObjectSecurityEx: a child of a key-like parent with
@@ -406,45 +405,23 @@ fn bitmaps(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
-const EINVAL: i32 = 22;
-const ERANGE: i32 = 34;
-const STRUNCATE: i32 = 80;
-
 fn safe_strings(c: &mut Checks) -> Result<(), u32> {
     let long: [u16; 18] = super::w("ThisIsAVeryLongWo");
     let mut dest = [0u16; 18];
-    let mut short = [0u16; 8];
-    // SAFETY: our own buffers of the sizes given (or NULL as tested).
+    // SAFETY: our buffers of the sizes given.
     unsafe {
         c.eq(wcsnlen(long.as_ptr(), 4) as u64, 4)?;
         c.eq(wcsnlen(long.as_ptr(), 100) as u64, 17)?;
-        c.eq(wcsncpy_s(null_mut(), 18, long.as_ptr(), 18) as u64, EINVAL as u64)?;
-        dest[0] = u16::from(b'A');
-        c.eq(wcsncpy_s(dest.as_mut_ptr(), 18, null(), 1) as u64, EINVAL as u64)?;
-        c.eq(dest[0].into(), 0)?;
-        dest[0] = u16::from(b'A');
-        c.eq(wcsncpy_s(dest.as_mut_ptr(), 18, null(), 0) as u64, 0)?;
-        c.eq(dest[0].into(), 0)?;
-        let r = wcsncpy_s(dest.as_mut_ptr(), 0, long.as_ptr(), 18);
-        c.ok(r == ERANGE || r == EINVAL, r as u64)?;
         c.eq(wcsncpy_s(dest.as_mut_ptr(), 18, long.as_ptr(), 18) as u64, 0)?;
         c.ok(dest == long, dest[0].into())?;
-        let r = wcsncpy_s(short.as_mut_ptr(), 8, long.as_ptr(), 18);
-        c.ok((r == ERANGE || r == EINVAL) && short[0] == 0, r as u64)?;
-        c.eq(wcsncpy_s(dest.as_mut_ptr(), 5, long.as_ptr(), usize::MAX) as u64, STRUNCATE as u64)?;
+        c.eq(wcsncpy_s(dest.as_mut_ptr(), 18, long.as_ptr(), 4) as u64, 0)?;
         c.ok(dest[4] == 0 && dest[..4] == long[..4], dest[4].into())?;
-        c.eq(wcsncpy_s(null_mut(), 0, 0xdead_beef as *const u16, 0) as u64, 0)?;
         // wcscat_s.
         let mut cat: [u16; 10] = super::w("ab");
         let cd: [u16; 3] = super::w("cd");
         c.eq(wcscat_s(cat.as_mut_ptr(), 10, cd.as_ptr()) as u64, 0)?;
         let want: [u16; 10] = super::w("abcd");
         c.ok(cat == want, cat[2].into())?;
-        c.eq(wcscat_s(cat.as_mut_ptr(), 5, cd.as_ptr()) as u64, ERANGE as u64)?;
-        c.eq(cat[0].into(), 0)?;
-        cat[0] = u16::from(b'x');
-        c.eq(wcscat_s(cat.as_mut_ptr(), 10, null()) as u64, EINVAL as u64)?;
-        c.eq(cat[0].into(), 0)?;
     }
     Ok(())
 }
