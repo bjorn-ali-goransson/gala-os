@@ -883,7 +883,14 @@ current process, -2 = current thread.
   No processor time is accounted (TODO, in the scheduler): thread times
   are zero and kernel32's GetSystemTimes reports every processor idle
   since boot. ThreadBasicInformation's TebBaseAddress is NULL once the
-  thread has ended.
+  thread has ended. The ideal processor (ThreadIdealProcessor, a ULONG
+  whose previous value is the returned status, 64 only asking;
+  ThreadIdealProcessorEx, a PROCESSOR_NUMBER, the previous one written
+  back and queried) is kept and reported but not scheduled on: a new
+  thread's is its process's next online processor in turn, any number
+  below 64 is accepted (Windows takes a WOW64 process's 33 on any
+  machine), and a kernel handover does not carry it (the default
+  again).
 - **What an ended thread leaves**: when a thread ends and its process
   goes on, the kernel frees its TEB (and a WOW64 thread's 64-bit stack
   and TEB32), and, if the thread ended itself and its creator gave it its
@@ -3120,7 +3127,23 @@ ntdll imports.
   date format lists (EnumTimeFormatsEx, EnumDateFormatsExEx),
   FindNLSStringEx (prefix, suffix, first and last occurrence, compared
   code unit by code unit with simple case folding; linguistic
-  equivalences are recorded). One geographic region, the United States
+  equivalences are recorded). Linguistic comparison puts punctuation,
+  symbols and spaces before digits and digits before letters, and gives
+  NULs no weight (CompareStringA compares the UTF-8 strings as UTF-16).
+  `nls.rs`: FoldStringW is Unicode normalization from tables
+  `tools/nls_tables.py` writes from Python's unicodedata
+  (`nls/tables.rs`, the Basic Multilingual Plane; Hangul by arithmetic):
+  MAP_FOLDCZONE is NFKC, MAP_COMPOSITE the full canonical decomposition,
+  MAP_PRECOMPOSED canonical composition alone (no decomposition first),
+  in runs of a starter and up to 32 marks (longer runs pass uncomposed,
+  recorded); MAP_FOLDDIGITS and MAP_EXPAND_LIGATURES use the tables
+  Windows' answers give (Wine's test_FoldStringW). GetNumberFormat and
+  GetCurrencyFormat (W, A, Ex) parse `-?digits(.digits)?`, round half up
+  on the digit string, and group by NUMBERFMT's Grouping digits (a last
+  0 stops, another repeats) or LOCALE_SGROUPING's string (a trailing
+  `;0` repeats); the Ex forms know "en-US", "" and NULL.
+  ResolveLocaleName resolves English names to en-US and other languages
+  to "" (recorded: Windows may know them). One geographic region, the United States
   (GetUserGeoID 244, GetGeoInfoA/W's values, GetUserDefaultGeoName
   "US": its GEO_ISO2).
 - **Time**: Sleep, tick counts, the performance counter, UTC local time.
@@ -3239,7 +3262,20 @@ ntdll imports.
   FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
   is NtQueryInformationThread's ThreadIsIoPending (the kernel's count of
   the thread's outstanding I/O, "I/O requests and their thread" under
-  AFD).
+  AFD). The functions Office imports once each (`office_k32_test`):
+  IsBadReadPtr, IsBadWritePtr, IsBadCodePtr, IsBadStringPtrA/W and the
+  Huge twins (`probe.rs`) ask the memory manager rather than touch the
+  memory under a handler as Windows does: a range is good when each of
+  its regions is committed, not PAGE_GUARD, and allows the access
+  (copy-on-write counts as writable); the one difference is a guard
+  page, which Windows' probe uses up and gala's leaves. OfferVirtualMemory
+  takes private, committed read-write pages to PAGE_NOACCESS and
+  ReclaimVirtualMemory back to read-write; gala never discards offered
+  memory (ERROR_SUCCESS, never ERROR_BUSY); other memory is refused and
+  recorded. SetThreadIdealProcessor(Ex) is the kernel's
+  ThreadIdealProcessor ("Threads"); WinExec is CreateProcessA with the
+  show state, waiting for input idle only when user32 is loaded and has
+  WaitForInputIdle (gala's has not yet).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA

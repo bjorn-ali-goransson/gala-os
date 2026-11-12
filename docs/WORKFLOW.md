@@ -1102,6 +1102,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    scenarios need not list it. `exports.txt` is regenerated with
    `python3 -I tools/kernelbase_exports.py <dir of Wine's .spec files>
    <commit>` (record the commit in THIRD_PARTY.md).
+7. kernel32's Unicode normalization tables (FoldStringW) are generated,
+   not edited: `python3 -I tools/nls_tables.py >
+   user/kernel32/src/nls/tables.rs`. The Unicode version is that of the
+   host's Python (written into the file's header); a new one goes into
+   THIRD_PARTY.md's row.
 
 ### Programs that import functions gala lacks
 

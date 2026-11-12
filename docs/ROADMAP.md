@@ -1471,15 +1471,29 @@ need gala's.
      directory name, ulFlags and ulFileCount; and for GetThreadIOPendingFlag
      a request on a file with a completion port (gala: not counted) and a
      waiting registry watch (gala: not counted; `regnotify_test`).
+     The kernel32 functions the apps and OfficeC2RClient.exe use once
+     (`import_survey.py ... --roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE
+     --static`), in `office_k32_test`/`wow64_office_k32_test`
+     (ARCHITECTURE "kernel32"): CompareStringA (and punctuation before
+     digits before letters, NULs without weight, in every linguistic
+     comparison), FoldStringW (Unicode normalization tables from
+     `tools/nls_tables.py`), GetStringTypeA/ExA, IsBadReadPtr,
+     IsBadWritePtr, IsBadCodePtr, IsBadStringPtrA/W, Offer/Reclaim/
+     DiscardVirtualMemory, ResolveLocaleName, SetThreadIdealProcessor(Ex)
+     (the kernel's ThreadIdealProcessor and ThreadIdealProcessorEx),
+     WinExec, GetNumberFormatW/A/Ex and GetCurrencyFormatW/A/Ex. To
+     measure on Windows before `ci-passing.txt` lists them (the tests'
+     `info` lines): whether IsBadReadPtr used up the guard page,
+     OfferVirtualMemory of an unaligned address, CompareStringA with
+     SORT_DIGITSASNUMBERS, GetNumberFormatA's rounding of 9.995; and
+     whether Windows' kernelbase exports OfferVirtualMemory and
+     ReclaimVirtualMemory (`api-ms-win-core-memory-l1-1-2`; Wine's
+     kernelbase.spec, which `exports.txt` follows, lacks them).
      Left: the sections gala reads but does not build (typelibs,
      interface proxy/stubs, CLR classes and surrogates, WinRT
-     activatable classes, loadFrom; recorded), QueryActCtxSettingsW,
-     and the functions used once, stubs today (`import_survey.py ...
-     --roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE --static`): kernel32's
-     CompareStringA, FoldStringW, GetStringTypeExA, IsBadReadPtr,
-     IsBadWritePtr, OfferVirtualMemory, ResolveLocaleName,
-     SetThreadIdealProcessor, WinExec. `office_api_test` and
-     `wow64_office_api_test` pass on CI's Windows (`ci-passing.txt`).
+     activatable classes, loadFrom; recorded), QueryActCtxSettingsW.
+     `office_api_test` and `wow64_office_api_test` pass on CI's Windows
+     (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
      the Office Deployment Tool's `setup.exe /configure` in gala
      (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,

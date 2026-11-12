@@ -376,8 +376,10 @@ fn query_thread(a: &Args) -> Res<NtStatus> {
             reply(buffer, length, ret, &out[..8 + bytes])
         }
         // KERNEL_USER_TIMES, ULONGs (ThreadAmILastThread, ThreadIsIoPending,
-        // ThreadIsTerminated).
-        1 | 12 | 16 | 20 => pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U]),
+        // ThreadIsTerminated), PROCESSOR_NUMBER (ThreadIdealProcessorEx).
+        1 | 12 | 16 | 20 | 33 => {
+            pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U])
+        }
         _ => no_class(b"wow64.dll!NtQueryInformationThread(class)", class),
     }
 }
@@ -406,9 +408,13 @@ fn set_thread(a: &Args) -> Res<NtStatus> {
             let args = [thread, class.into(), &raw const us as u64, 16];
             Ok(syscall(NT_SET_INFORMATION_THREAD, &args))
         }
-        // KPRIORITY, ULONGs, ThreadHideFromDebugger and gala's
+        // KPRIORITY, ULONGs (ThreadIdealProcessor: the previous one is the
+        // status, passed back as it is), PROCESSOR_NUMBER
+        // (ThreadIdealProcessorEx), ThreadHideFromDebugger and gala's
         // GALA_THREAD_FREE_STACK (no data).
-        2 | 3 | 17 | 0x4761_0001 => pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U]),
+        2 | 3 | 13 | 17 | 33 | 0x4761_0001 => {
+            pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U])
+        }
         _ => no_class(b"wow64.dll!NtSetInformationThread(class)", class),
     }
 }

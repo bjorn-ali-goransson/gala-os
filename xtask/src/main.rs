@@ -3304,6 +3304,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "user32.dll", "Windows/System32"),
     ("office_api_test", "gdi32.dll", "Windows/System32"),
     ("office_api_test", "d3dcompiler_47.dll", "Windows/System32"),
+    // The kernel32 functions Office imports once each (user/office_k32_test).
+    ("office_k32_test", "ntdll.dll", "Windows/System32"),
+    ("office_k32_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_office_k32_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3655,6 +3661,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lock_test",
     "ucrt_test",
     "office_api_test",
+    "office_k32_test",
     "msi_test",
     "rstrtmgr_test",
     "wofutil_test",
@@ -3690,6 +3697,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_actctx_test",
     "wow64_ucrt_test",
     "wow64_office_api_test",
+    "wow64_office_k32_test",
     "wow64_cert_test",
     "wow64_msi_test",
     "wow64_rstrtmgr_test",
@@ -6801,6 +6809,25 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=office_api_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The kernel32 functions Office's apps and its Click-to-Run client
+        // import once each (user/office_k32_test): CompareStringA,
+        // FoldStringW, GetStringTypeExA, IsBad*Ptr, Offer/Reclaim/
+        // DiscardVirtualMemory, ResolveLocaleName, SetThreadIdealProcessor
+        // (the kernel's ThreadIdealProcessor), GetNumberFormat* and
+        // GetCurrencyFormat*, WinExec.
+        name: "office_k32_test",
+        cmdline: "qemu_exit run=office_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_k32_test built for x86).
+        name: "wow64_office_k32_test",
+        cmdline: "qemu_exit run=wow64_office_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_k32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // ShellExecute's "runas" by an elevated caller (SYSTEM): no
@@ -10866,6 +10893,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gdiplus_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -10895,6 +10923,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("office_k32_test", "WinExec starts a child process (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
