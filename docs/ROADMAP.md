@@ -1907,6 +1907,13 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
+     Done: a development fast path, `office_install_local` (MANUAL):
+     the pinned build's files from the CDN cached on the host once
+     (`cargo xtask office-source`, 3.2 GB) and put on the fresh disk as
+     C:\OfficeSource in seconds (`diskimage::inject`), with ODT's
+     SourcePath pointing there; the Click-to-Run client starts about as
+     before but nothing is downloaded (WORKFLOW "Office's fast path").
+     `office_install` stays the whole path's check.
      Next, in the order the run reaches them: what STAGEREGISTRY and
      the apply after it need; the stream
      download's speed under TCG (the
