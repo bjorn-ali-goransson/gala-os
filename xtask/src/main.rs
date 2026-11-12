@@ -2134,6 +2134,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wsl_terminal", "gdi32.dll", "Windows/System32"),
     ("wsl_terminal", "target/wsl/bb-rootfs.tar", "gala"),
     ("wsl_terminal", "target/wsl/bb-rootfs.tar.gz", "gala"),
+    // The task manager (ROADMAP TM): gala's taskmgr.exe where Windows has
+    // it (the start menu's tile, Ctrl+Shift+Esc), wsl.exe and the busybox
+    // distribution taskmgr_test runs, the DLLs both find in System32.
+    ("taskmgr", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("taskmgr", "user/bin/taskmgr.exe", "Windows/System32"),
+    ("taskmgr", "user/bin/wsl.exe", "Windows/System32"),
+    ("taskmgr", "ntdll.dll", "Windows/System32"),
+    ("taskmgr", "kernel32.dll", "Windows/System32"),
+    ("taskmgr", "advapi32.dll", "Windows/System32"),
+    ("taskmgr", "bcryptprimitives.dll", "Windows/System32"),
+    ("taskmgr", "user32.dll", "Windows/System32"),
+    ("taskmgr", "gdi32.dll", "Windows/System32"),
+    ("taskmgr", "target/wsl/bb-rootfs.tar", "gala"),
     // The start menu's Linux distributions (LD step 7): wsl.exe, conhost.exe
     // for a distribution's terminal, winhttp for `gala linux-install`'s
     // download (the rootfs comes from the host: `linux_menu_rootfs`), and
@@ -3941,6 +3954,8 @@ const USER_PROGRAMS: &[&str] = &[
     "console_window_test",
     "wsl",
     "wsl_test",
+    "taskmgr",
+    "taskmgr_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -4078,6 +4093,7 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// took ~45 s alone and hit 120 s there). They get this much instead of
 /// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
+    "taskmgr",
     "memload_test",
     "java_version",
     "java_hello",
@@ -4448,6 +4464,9 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
     // gala's wsl.exe's tar, gzip, command line and -l -v (ROADMAP CT).
     run_cmd(cargo().args(["test", "--package", "wsl", "--lib"]))?;
+    // gala's taskmgr.exe's model: the kernel's records, groups, sorting,
+    // CPU shares (ROADMAP TM).
+    run_cmd(cargo().args(["test", "--package", "taskmgr", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -5600,6 +5619,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "console_window",
     "wsl_terminal",
     "start_menu",
+    "taskmgr",
     "linux_menu",
     "tray_test",
     "d2d1_window",
@@ -10810,6 +10830,40 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The task manager (ROADMAP TM steps 1-2): taskmgr_test runs a
+        // Windows program with a window and a busybox distribution's
+        // processes, checks the kernel's one list of both (GalaTasks) and
+        // NtQuerySystemInformation's Windows-only one; TASKMGR_SCREEN
+        // opens Task Manager with Ctrl+Shift+Esc, shows each view, and
+        // ends from it the window's program, a Linux process (SIGTERM),
+        // one that ignores SIGTERM (SIGKILL after the grace time) and
+        // the distribution's whole tree.
+        name: "taskmgr",
+        cmdline: "qemu_exit wallpaper=night events=process,wsl,window run=taskmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "taskmgr_test: ready",
+            "(taskmgr_test.exe) is not responding: its input has waited untaken",
+            "taskmgr_test: frozen window not responding",
+            "desktop: Ctrl+Shift+Esc: Task Manager",
+            "(Taskmgr.exe) lists the processes",
+            "(Taskmgr.exe) terminates pid",
+            "taskmgr_test: busy window ended, exit code 1",
+            "(Taskmgr.exe) ends linux process",
+            "with signal 15: 0x00000000",
+            "taskmgr_test: sleep ended",
+            "with signal 9: 0x00000000",
+            "taskmgr_test: sh ended",
+            "(Taskmgr.exe) ends linux distribution (bb: 1 process(es)): 0x00000000",
+            "taskmgr_test: distribution ended",
+            "taskmgr_test: task manager closed",
+            "xtask: screen ok",
+            "taskmgr_test: ok",
+            "process taskmgr_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -11597,6 +11651,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("taskmgr", "needs a screen (Task Manager's window) and Linux programs (no LX in gala-um yet)"),
     ("wsl", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wsl_terminal", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -13675,6 +13730,212 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// Task Manager (scenario `taskmgr`, ROADMAP TM): its window at (120,
+/// 40), 1040 x 700, so its client area starts at (121, 73) (a 1-pixel
+/// outline and a 32-row caption); in it the navigation (Processes,
+/// Performance, Details at client y 76, 116, 156), the rows from client y
+/// 128, 24 apart (row 0 at screen y 213, row 1 at 237) and End task at
+/// screen (1079, 145). The pointer starts at (640, 400). First a click
+/// on the frozen window, which then is "Not responding" (red in the
+/// Status column); Ctrl+Shift+Esc opens Task Manager; each view is a
+/// screendump (`test-taskmgr.screen<n>.png`: 1 Processes, 2
+/// Performance, 3 Details, 4 the busy window found and selected, 6
+/// `sleep`, 8 `sh`, 10 the distribution's heading, 12 after the ends); the search finds each victim (row 0 its group's heading,
+/// row 1 the process), End task ends it, and taskmgr_test says so before
+/// the next step; Alt+F4 closes Task Manager last.
+const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "taskmgr_test: ready",
+    steps: &[
+        ScreenStep {
+            after: "",
+            // A click on the frozen window (its client area at (1190,
+            // 400), right of where Task Manager will be), back to the
+            // middle: its input waits untaken.
+            input: &[
+                "mouse_move 255 0",
+                "mouse_move 255 0",
+                "mouse_move 40 0",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -255 0",
+                "mouse_move -255 0",
+                "mouse_move -40 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: frozen window not responding",
+            input: &["sendkey ctrl-shift-esc"],
+            pixels: &[
+                PixelCheck::AnyIn(675, 201, 120, 300, 0xc42b1c), // "Not responding"
+                PixelCheck::AnyIn(137, 87, 120, 20, 0x1b1b1b),   // "Task Manager"
+                PixelCheck::At(271, 133, 0xe3e3e3),              // Processes, selected
+                PixelCheck::AnyIn(127, 139, 3, 16, 0x005fb8),    // its accent bar
+                PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8),  // "Apps (2)"
+                PixelCheck::AnyIn(121, 201, 400, 460, 0xe95420), // a Linux group
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Performance (201, 189): a graph per processor, one busy.
+            input: &[
+                "mouse_move -220 -211",
+                "mouse_move -219 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(317, 217, 800, 200, 0x117dbb), // CPU graphs
+                PixelCheck::AnyIn(317, 217, 800, 200, 0x9fcbe3), // load under a line
+                PixelCheck::AnyIn(317, 450, 800, 250, 0x8b12ae), // memory's graph
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Details (201, 229): Windows and Linux processes in one list.
+            input: &["mouse_move 0 40", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(300, 175, 700, 22, 0x5d5d5d), // the column headers
+                PixelCheck::AnyIn(305, 201, 30, 460, 0xe95420), // Linux tiles
+                PixelCheck::AnyIn(305, 201, 30, 460, 0x0078d4), // Windows tiles
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Processes (201, 149), "busy" searched, row 1 (521, 237)
+            // selected: End task lights up.
+            input: &[
+                "mouse_move 0 -80",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey b",
+                "sendkey u",
+                "sendkey s",
+                "sendkey y",
+                "mouse_move 255 88",
+                "mouse_move 65 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::At(700, 240, 0xcce4f7),  // the selection (row 1)
+                PixelCheck::At(1030, 135, 0x005fb8), // End task enabled
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // End task (1079, 145).
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: busy window ended",
+            // "sleep" searched, its row selected.
+            input: &[
+                "sendkey esc",
+                "sendkey s",
+                "sendkey l",
+                "sendkey e",
+                "sendkey e",
+                "sendkey p",
+                "mouse_move -255 92",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+                PixelCheck::At(700, 240, 0xcce4f7),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: sleep ended",
+            // "sh", which ignores SIGTERM: SIGKILL after the grace time.
+            input: &[
+                "sendkey esc",
+                "sendkey s",
+                "sendkey h",
+                "mouse_move -255 92",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::At(700, 240, 0xcce4f7),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: sh ended",
+            // "cat" searched, the distribution's heading (row 0, 521,
+            // 213) selected: End task ends its whole tree.
+            input: &[
+                "sendkey esc",
+                "sendkey c",
+                "sendkey a",
+                "sendkey t",
+                "mouse_move -255 68",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::At(700, 212, 0xcce4f7), // the heading selected
+                PixelCheck::At(1030, 135, 0x005fb8),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -68",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: distribution ended",
+            // The search cleared: what is left.
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8)],
+        },
+        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+    ],
+};
+
 const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
     marker: "start_menu_test: ready",
     steps: &[
@@ -14073,6 +14334,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ),
     ("gui_test", GUI_TEST_SCREEN),
     ("start_menu", START_MENU_SCREEN),
+    ("taskmgr", TASKMGR_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),

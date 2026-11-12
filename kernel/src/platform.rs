@@ -87,6 +87,12 @@ impl Threads for Kernel {
     fn context_switches(id: ThreadId) -> u32 {
         sched::context_switches(id)
     }
+    fn cpu_time_ns(id: ThreadId) -> u64 {
+        sched::cpu_time_ns(id)
+    }
+    fn cpu_load(cpu: usize) -> Option<(u64, u64)> {
+        sched::cpu_load(cpu)
+    }
     fn current_cpu() -> u32 {
         sched::current_cpu()
     }

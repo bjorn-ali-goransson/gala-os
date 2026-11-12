@@ -242,6 +242,13 @@ impl NtThread {
         tid.map_or(0, platform::context_switches)
     }
 
+    /// Nanoseconds it has run on a processor (0 once its scheduler
+    /// record is gone, or kept from before a handover).
+    pub fn cpu_time_ns(&self) -> u64 {
+        let tid = *self.sched_id.lock();
+        tid.map_or(0, platform::cpu_time_ns)
+    }
+
     /// ExitStatus as reported by NtQueryInformationThread.
     pub fn exit_status(&self) -> NtStatus {
         self.exit_status.lock().unwrap_or(NtStatus::PENDING)
@@ -1436,6 +1443,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // A desktop handle it was set to (SetThreadDesktop) may be closed.
         t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
+        // Its CPU time stays with the process (the task manager's).
+        t.process.cpu_ended_ns.fetch_add(t.cpu_time_ns(), core::sync::atomic::Ordering::Relaxed);
         if let Some(id) = *t.sched_id.lock() {
             unbind_sched(id, &object);
         }

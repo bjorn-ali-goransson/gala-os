@@ -43,6 +43,7 @@ pub mod stats;
 pub mod status;
 pub mod syscalls;
 pub mod sysinfo;
+pub mod tasks;
 pub mod thread;
 pub mod timer;
 pub mod token;

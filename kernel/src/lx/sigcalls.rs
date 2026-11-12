@@ -277,6 +277,28 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
     Ok(0)
 }
 
+/// Signal `sig` (1 to NSIG) for Linux process `target` from `sender`, a
+/// process of either personality (the task manager's End task, ROADMAP
+/// TM): as kill(2) from a program of the sender's token (si_code
+/// SI_USER, the sender's pid and uid). ESRCH when `target` has no Linux
+/// state (not a Linux process, or already ended). The caller checks the
+/// permission.
+pub fn signal_from(sender: &Process, target: &KArc<Process>, sig: u32) -> Result {
+    let lx = super::state::get(target.id).ok_or(errno::ESRCH)?;
+    let info = Siginfo::from_process(
+        sig as i32,
+        abi::SI_USER,
+        sender.id as i32,
+        super::identity::of_process(sender).uid,
+    );
+    if sig == abi::SIGKILL {
+        kill(target, 0, sig, &info);
+    } else {
+        raise_for(&lx, target.id, 0, info, Target::Process);
+    }
+    Ok(0)
+}
+
 /// tgkill(tgid, tid, sig) and tkill(tid, sig) (`tgid` None): a signal for
 /// one thread (si_code SI_TKILL, the sender's pid and uid). EINVAL for a
 /// tid or tgid not above 0 or a bad signal; ESRCH when no thread `tid`

@@ -65,6 +65,13 @@ pub struct Core {
     /// The most it was charged (PeakPagefileUsage).
     pub commit_peak: core::sync::atomic::AtomicU64,
     pub commit_ended: core::sync::atomic::AtomicBool,
+    /// Nanoseconds its ended threads ran (each adds its own at its exit;
+    /// the live ones' are the scheduler's: `cpu_time_ns`).
+    pub cpu_ended_ns: core::sync::atomic::AtomicU64,
+    /// Its command line as it was started (UTF-8; a Linux program's argv
+    /// joined by spaces, replaced by execve), for the task manager
+    /// (`nt::tasks`); empty if there was no memory to keep it.
+    pub command_line: IrqMutex<Vec<u8>>,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
     /// Its session (nt::session): its primary token's TokenSessionId when
@@ -975,6 +982,8 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             commit: core::sync::atomic::AtomicU64::new(0),
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1072,6 +1081,7 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         p => (p, crate::events::current_client()),
     };
     crate::events::note_process(id, command_line);
+    set_command_line(process, command_line);
     let (machine, wow64) =
         if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
     // An elevated primary token (an administrator's full token: SYSTEM's,
@@ -1093,6 +1103,35 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
             crate::events::Str(command_line)
         ),
     );
+}
+
+/// Keeps `process`'s command line (the task manager's; execve's new one
+/// replaces it). Without the memory it stays as it was (logged).
+pub fn set_command_line(process: &Process, command_line: &str) {
+    let mut copy = Vec::new();
+    if copy.try_extend_from_slice(command_line.as_bytes()).is_err() {
+        crate::warn!("process: pid {}: no memory to keep its command line", process.id);
+        return;
+    }
+    *process.command_line.lock() = copy;
+}
+
+impl Core {
+    /// Nanoseconds its threads have run, ended and live.
+    pub fn cpu_time_ns(&self) -> u64 {
+        let mut ns = self.cpu_ended_ns.load(core::sync::atomic::Ordering::Relaxed);
+        for t in self.threads.lock().iter() {
+            if let ObjectBody::Thread(t) = &t.body {
+                ns += t.cpu_time_ns();
+            }
+        }
+        ns
+    }
+
+    /// How many live threads it has.
+    pub fn thread_count(&self) -> usize {
+        self.threads.lock().len()
+    }
 }
 
 /// A process of another personality than NT (`lx::exec`): its address
@@ -1148,6 +1187,8 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
             commit: core::sync::atomic::AtomicU64::new(0),
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1464,6 +1505,8 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
             commit: AtomicU64::new(0),
             commit_peak: AtomicU64::new(0),
             commit_ended: AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,

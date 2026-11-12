@@ -152,6 +152,14 @@ impl core::fmt::Display for Ip {
     }
 }
 
+/// The machine has a network card (the task manager's network graph).
+static CARD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether a network card was found.
+pub fn has_card() -> bool {
+    CARD.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 const ECHO_PORT: u16 = 7;
 const ECHO_TIMEOUT_NS: u64 = 60_000_000_000;
 
@@ -173,6 +181,7 @@ pub fn init() {
         }
     };
     let has_card = card.is_some();
+    CARD.store(has_card, core::sync::atomic::Ordering::Relaxed);
     match tcp::start(card) {
         Ok(()) if has_card => info!("net: link up, {ADDRESS}/{PREFIX}, gateway {GATEWAY}"),
         Ok(()) => {}
