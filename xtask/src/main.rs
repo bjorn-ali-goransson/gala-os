@@ -5438,8 +5438,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
-    // LD step 6, being brought up.
-    "lx_xdesktop",
     // BR's conformance report: a report run of hours, not a gate check.
     "chromium_wpt",
     "java_stress",

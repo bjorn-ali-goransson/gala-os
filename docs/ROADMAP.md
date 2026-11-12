@@ -3106,8 +3106,8 @@ the next breakthroughs).
    `_NET_WM_STATE` (maximize, full screen) for X windows,
    `xwayland_shell_v1` instead of `WL_SURFACE_ID`, a stop for SIGTSTP
    (job control), a recorded glibc fork test of the clone flags.
-6. A distribution's desktop (the owner; being brought up: `lx_xdesktop`,
-   PENDING until its screen check has run once: user/lx/xdesktop's
+6. A distribution's desktop (the owner; its first part done: `lx_xdesktop`,
+   its screen check passing: user/lx/xdesktop's
    session script runs rootful Xwayland on `:1` as one window "Xwayland
    on :1" framed by shasha (`-decorate`: libdecor takes the server's
    decorations), twm managing an xterm in it, typed into from the
