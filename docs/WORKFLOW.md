@@ -1093,7 +1093,7 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    kernelbase has (its documentation says "DLL: Kernelbase.dll", Wine's
    kernel32.spec lacks it, or GetProcAddress on Windows says so: add it
    to `export_split.rs`) goes in `user/kernelbase/src/` (`lib.rs`,
-   `path.rs`, `address_wait.rs`), named in its build.rs's `OWN`. A name
+   `path.rs`), named in its build.rs's `OWN`. A name
    Windows' kernelbase has that Wine's spec lacks goes in
    `tools/kernelbase_exports.py`'s MEASURED. Programs reach either through the core
    API sets: kernelbase forwards every name of Windows' list
@@ -3644,11 +3644,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   names a DLL exports reads the export directory for presence
   (`kernel32_test`'s `export_split.rs`) and GetProcAddress only for
   absence and addresses.
-- **kernel32 builds kernelbase's `address_wait.rs` for itself**: its
-  locks wait on their words through a private copy with its own waiter
-  list. Keep it unexported in kernel32 and keep its users there to
-  kernel32's own words; a WakeByAddress* from one DLL never wakes a
-  waiter of the other.
+- **Every wait on a word goes through ntdll's RtlWaitOnAddress**: one
+  waiter list per process, so a word may be changed and woken through
+  any DLL (kernel32's SRW exports forward to ntdll's and a program may
+  mix them). A second waiter list in another DLL would lose wakes.
 - **Which DLL exports a name is measured, not guessed**: Wine's specs
   are the list's starting point, but Windows' kernel32 and kernelbase
   split differently in places (`tools/kernelbase_exports.py`'s

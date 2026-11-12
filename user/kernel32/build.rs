@@ -1,4 +1,5 @@
-//! Export forwarders: these kernel32 exports name ntdll's functions, as on
+//! Export forwarders: these kernel32 exports name ntdll's functions (some
+//! under ntdll's Rtl names: the SRW locks, InitOnceInitialize), as on
 //! Windows (the loader follows them; defining them here would shadow the
 //! ntdll imports of the same name). Those of the architecture built.
 //!
@@ -128,6 +129,20 @@ fn main() {
     };
     for name in forwarders {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
+    }
+    // Renamed forwarders (both architectures): the SRW locks and
+    // InitOnceInitialize are ntdll's, as on Windows.
+    for (name, target) in [
+        ("InitializeSRWLock", "RtlInitializeSRWLock"),
+        ("AcquireSRWLockExclusive", "RtlAcquireSRWLockExclusive"),
+        ("AcquireSRWLockShared", "RtlAcquireSRWLockShared"),
+        ("ReleaseSRWLockExclusive", "RtlReleaseSRWLockExclusive"),
+        ("ReleaseSRWLockShared", "RtlReleaseSRWLockShared"),
+        ("TryAcquireSRWLockExclusive", "RtlTryAcquireSRWLockExclusive"),
+        ("TryAcquireSRWLockShared", "RtlTryAcquireSRWLockShared"),
+        ("InitOnceInitialize", "RtlRunOnceInitialize"),
+    ] {
+        println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{target}");
     }
 
     let mut res = Vec::new();

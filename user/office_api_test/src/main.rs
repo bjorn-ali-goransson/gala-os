@@ -119,6 +119,9 @@
 //!   550), italic and weight; put_Bold(FALSE) is weight 400; its HFONT
 //!   has that face, weight and italic at the size in points at the
 //!   screen's pixels per inch.
+//! - What OffReg.dll imports (ntdll's one-time initialization, SRW locks
+//!   and bitmaps, msvcrt's bounded strings, advapi32's private object
+//!   security): `offreg.rs`.
 //!
 //! Prints `<name>: ok` and exits with 0, or prints `<name>: check N got X
 //! (line L)` and exits with N.
@@ -132,6 +135,8 @@ use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ntrt as _;
+
+mod offreg;
 
 #[cfg(target_arch = "x86_64")]
 const NAME: &str = "office_api_test";
@@ -1340,6 +1345,7 @@ fn run() -> Result<(), u32> {
     adapters(&mut c)?;
     c2r_client(&mut c)?;
     c2r_oleaut(&mut c)?;
+    offreg::offreg_imports(&mut c)?;
     #[cfg(target_arch = "x86_64")]
     c2r_d3dcompiler(&mut c)?;
     Ok(())

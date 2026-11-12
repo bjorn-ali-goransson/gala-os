@@ -1031,7 +1031,10 @@ pub extern "system" fn RtlAbsoluteToSelfRelativeSD(
             rel.add(4 + 4 * i).cast::<u32>().write_unaligned(at as u32);
             at += sizes[i];
         }
-        *len = total as u32;
+        // On success the length is the caller's buffer's, unchanged (Wine's
+        // advapi32 security.c test_security_descriptor, run on Windows:
+        // MakeSelfRelativeSD into 188 bytes leaves 188 for a 184-byte
+        // descriptor).
     }
     STATUS_SUCCESS
 }

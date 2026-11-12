@@ -69,6 +69,10 @@ pub const NT_SET_INFORMATION_KEY: u32 = 0x7fd6;
 pub const NT_NOTIFY_CHANGE_KEY: u32 = 0x7f25;
 pub const NT_NOTIFY_CHANGE_MULTIPLE_KEYS: u32 = 0x7f26;
 pub const NT_RENAME_KEY: u32 = 0x7f27;
+// gala's own: the private-object descriptor rules (advapi32's
+// CreatePrivateObjectSecurity* and SetPrivateObjectSecurity*).
+pub const GALA_NEW_SECURITY_OBJECT: u32 = 0x7f28;
+pub const GALA_SET_SECURITY_OBJECT: u32 = 0x7f29;
 // Job objects: gala's numbers until verified (reached through ntdll).
 pub const NT_CREATE_JOB_OBJECT: u32 = 0x7f0a;
 pub const NT_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x7f0b;
@@ -557,6 +561,18 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (NT_SET_SECURITY_OBJECT, "NtSetSecurityObject", 3, security_calls::nt_set_security_object),
     (GALA_LOGON_USER, "GalaLogonUser", 5, token_calls::gala_logon_user),
+    (
+        GALA_NEW_SECURITY_OBJECT,
+        "GalaNewSecurityObject",
+        9,
+        security_calls::gala_new_security_object,
+    ),
+    (
+        GALA_SET_SECURITY_OBJECT,
+        "GalaSetSecurityObject",
+        9,
+        security_calls::gala_set_security_object,
+    ),
     (
         NT_ALLOCATE_LOCALLY_UNIQUE_ID,
         "NtAllocateLocallyUniqueId",
