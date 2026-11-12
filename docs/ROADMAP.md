@@ -1924,6 +1924,33 @@ need gala's.
      lazy writer every second; FlushFileBuffers, write-through and
      unbuffered handles and a program's end at once; a dirty limit;
      `writeback_test`, `writeback_crash`, `writeback_lazy`).
+     With it STAGEREGISTRY and UNINSTALLCENTENNIAL end and
+     APPLYCONFIGURATION starts at about 1350 s (550 s earlier); its first
+     step launched OfficeC2RClient.exe, whose 30 MiB image took 400 s to
+     lay out from the disk because every page read walked the whole tree
+     to let pages go while other uses held the memory; done: a futile
+     eviction is not repeated until pages could leave (ARCHITECTURE "A
+     disk-backed C:"). Where the fast path ends now (about 1600 s):
+     APPLYCONFIGURATION publishes the staged files with hard links
+     (`fileops::HardlinkOperation`), which fail (kernel32's CreateHardLinkW
+     is unsupported, ERROR_NOT_SUPPORTED; NtSetInformationFile has no
+     FileLinkInformation), falls back to copying, and the copy fails with
+     ERROR_NOT_ENOUGH_MEMORY: the 512 MiB VM has no free frame (the
+     `persist: free memory stays low` lines: the kernel heap 157 MiB,
+     most of it grown during the registry staging, Office's registry kept
+     in memory; the service's 190 MiB of private memory; 63 MiB of
+     section pages, the client's 30 MiB image laid out whole; the files'
+     pages only 2 MiB); setup.exe ends with 17004. Next: hard links
+     (NtSetInformationFile FileLinkInformation(Ex), CreateHardLinkW,
+     test first from Wine's kernel32 test_CreateHardLink run on Windows;
+     the change log's Link record keeps them), SetFileInformationByHandle's
+     FileDispositionInfoEx (class 21, 10 hits); then the memory: where
+     the kernel heap goes (a breakdown by user: the registry, the file
+     tree), a registry that need not live wholly in memory, image
+     sections sharing the file's cache pages instead of a copy, and no
+     page file for private memory (Windows needs 4 GB for Office: a
+     larger VM for this scenario is a stopgap to name and track, not the
+     answer).
      Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
      ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
