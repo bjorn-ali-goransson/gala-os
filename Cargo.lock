@@ -2867,6 +2867,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
+name = "windowscodecs"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "windowscodecs_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "winhttp"
 version = "0.1.0"
 dependencies = [

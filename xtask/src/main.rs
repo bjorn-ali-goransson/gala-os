@@ -1103,6 +1103,14 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
+    // WindowsCodecs.dll: the Windows Imaging Component, its factory,
+    // bitmaps, PNG and BMP decoders, converter, scaler and clipper
+    // (windowscodecs_test; Office decodes its images through it).
+    Dll {
+        package: "windowscodecs",
+        file: "windowscodecs.dll",
+        exported_as: "testwindowscodecs.dll",
+    },
     // combase.dll: forwarders to ole32's COM and Windows Runtime base;
     // appxdeploymentclient.dll: Windows.Management.Deployment.PackageManager
     // with no packages (combase_test).
@@ -3493,6 +3501,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
+    // The Windows Imaging Component through COM (user/windowscodecs_test).
+    ("windowscodecs_test", "ntdll.dll", "Windows/System32"),
+    ("windowscodecs_test", "kernel32.dll", "Windows/System32"),
+    ("windowscodecs_test", "advapi32.dll", "Windows/System32"),
+    ("windowscodecs_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("windowscodecs_test", "ole32.dll", "Windows/System32"),
+    ("windowscodecs_test", "oleaut32.dll", "Windows/System32"),
+    ("windowscodecs_test", "shlwapi.dll", "Windows/System32"),
+    ("windowscodecs_test", "windowscodecs.dll", "Windows/System32"),
     ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
     ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msxml_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3676,6 +3693,7 @@ const USER_PROGRAMS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "windowscodecs_test",
     "winhttp_cb_test",
     "runas_test",
     "combase_test",
@@ -7153,6 +7171,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=msxml_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Windows Imaging Component (user/windowscodecs_test): the
+        // factory through COM, bitmaps, palettes, streams, the PNG and
+        // BMP decoders, conversion, scaling, clipping.
+        name: "windowscodecs_test",
+        cmdline: "qemu_exit run=windowscodecs_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["windowscodecs_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/msxml_test built for x86).

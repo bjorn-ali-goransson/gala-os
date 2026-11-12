@@ -1401,6 +1401,24 @@ need gala's.
   the survey's output. Direct2D and WIC lead the drawing path (Office
   draws through Direct2D/DirectWrite, falling back to GDI+), with GPU
   G2's Direct3D 11 under Direct2D.
+  - WIC (`windowscodecs`, ARCHITECTURE "windowscodecs"; `windowscodecs_test`,
+    x64): done for the factory (both Office imports,
+    WICCreateImagingFactory_Proxy and WICConvertBitmapSource, and COM),
+    bitmaps and locks, palettes, streams, the PNG and BMP decoders in
+    their native formats, the format converter, the scaler and the
+    clipper. Next: a JPEG decoder (Office's documents carry JPEG
+    pictures), CreateBitmapFromHBITMAP/HICON, the ICO and GIF decoders,
+    conversion to grey and indexed formats, the PNG metadata reader and
+    the PNG encoder, each as Office's use shows it (the ledger names what
+    it asks for). A stopgap to replace: the scaler's Cubic, Fant and
+    HighQualityCubic modes interpolate as Linear (recorded each time);
+    their filters, measured against Windows, come with the JPEG work.
+    The `info` lines of `windowscodecs_test` (a PNG's resolution
+    without pHYs, PBGRA -> BGRA rounding, nearest-neighbour sampling when
+    halving, Linear's weights) wait for a Windows run.
+  - Direct2D (`d2d1`): next on the drawing path, its software render
+    targets over WIC bitmaps (CreateWicBitmapRenderTarget) and device
+    contexts (CreateDCRenderTarget) first, then D3D11's.
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
