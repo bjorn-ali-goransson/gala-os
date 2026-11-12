@@ -2470,7 +2470,17 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   GetUserProfileDirectoryW: the caller's own user's is %USERPROFILE%,
   another local user's the path in its ProfileList entry
   (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\<SID>\
-  ProfileImagePath`), else `C:\Users\<name>`. LoadUserProfileW (callers
+  ProfileImagePath`), else `C:\Users\<name>`. CreateEnvironmentBlock (`env.rs`;
+  office_api_test's `service.rs`, Wine's userenv test run on Windows)
+  builds a user's environment as Windows does: the caller's variables
+  when inheriting, SystemRoot and SystemDrive as the caller has them, the
+  system's (`Session Manager\Environment`, where the boot also writes
+  NUMBER_OF_PROCESSORS and the PROCESSOR_* variables), ProgramData and
+  ALLUSERSPROFILE from ProfileList, COMPUTERNAME, the program files
+  directories, then USERNAME, USERPROFILE (ProfileImagePath; the service
+  accounts' own; no token: Default), APPDATA, LOCALAPPDATA and the
+  user's `Environment` and `Volatile Environment` keys, in name order in
+  a process-heap block. LoadUserProfileW (callers
   holding SeBackup and SeRestore, as services do; else
   ERROR_PRIVILEGE_NOT_HELD) creates the profile directory
   `C:\Users\<lpUserName>` (full control for the user, SYSTEM and
@@ -8029,7 +8039,7 @@ PATH.
   way), then shims only as the fallback.
 - TODO: programs see PATH as their parent gave it. winget broadcasts
   WM_SETTINGCHANGE; gala's logon environment does not read
-  `HKCU\Environment` yet (with userenv's CreateEnvironmentBlock), so the
+  `HKCU\Environment` yet (userenv's CreateEnvironmentBlock does), so the
   test takes the new value from `HKCU\Environment` as a new shell
   would.
 

@@ -1899,6 +1899,11 @@ need gala's.
      done: WTSQueryUserToken (the console user's token for a
      SeTcbPrivilege holder, as documented; GalaSession's
      SESSION_USER_TOKEN, wow64.dll converts GalaSession now).
+     The next delay load the task needed was USERENV.dll!
+     CreateEnvironmentBlock (crash report, about 1360 s in); done:
+     CreateEnvironmentBlock and DestroyEnvironmentBlock (Wine's userenv
+     test on Windows), the boot writing the processor variables into
+     `Session Manager\Environment` as Windows keeps them.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
