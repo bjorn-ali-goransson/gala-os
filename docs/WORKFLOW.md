@@ -1655,10 +1655,10 @@ source).
   unchanged on Windows; scenario `wsl` (`cargo xtask boot-test
   'wsl$'`), and `wsl_terminal`, a screen scenario: `wsl_test import`
   imports bb, then `wsl -d bb` runs in a console window where xtask
-  types `uname -sr`, `ls /` and `exit`; its `screen2.png` is the
-  terminal's picture. Host tests of wsl.exe's parts: `cargo test -p
-  wsl` (`--lib` for clippy on the host: the program itself links
-  Windows DLLs).
+  types `uname -sr`, `ls /` and `exit` once the window is shown (keys
+  before that are lost); its `screen3.png` is the terminal's picture.
+  Host tests of wsl.exe's parts: `cargo test -p wsl` (`--lib` for
+  clippy on the host: the program itself links Windows DLLs).
 - The distribution is `target/wsl/bb-rootfs.tar` and `.tar.gz`
   (`xtask/src/wsl_rootfs.rs`, made from the busybox PREBUILT whenever a
   scenario ships them, deterministic). On Windows: copy both beside

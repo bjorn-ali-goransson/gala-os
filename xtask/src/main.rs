@@ -12846,14 +12846,16 @@ macro_rules! typed {
 /// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
 /// their output in the window (light grey text, Campbell's 0xcccccc);
 /// the screendump of that step is the terminal's picture
-/// (`test-wsl_terminal.screen2.png`); then `exit` ends the shell and
+/// (`test-wsl_terminal.screen3.png`); then `exit` ends the shell and
 /// wsl.exe.
 const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
     marker: "wsl: bb: pid",
     steps: &[
+        // The prompt, from bb's /etc/profile, and the window shown (keys
+        // before that go nowhere: the first ones of a command were lost).
+        ScreenStep { after: "root@bb:/root# ", input: &[], pixels: &[] },
         ScreenStep {
-            // The prompt, from bb's /etc/profile.
-            after: "root@bb:/root# ",
+            after: "desktop: shown window 'wsl.exe'",
             input: typed!("u", "n", "a", "m", "e", "spc", "minus", "s", "r"),
             pixels: &[],
         },
@@ -12870,6 +12872,9 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
                 // the console's black.
                 PixelCheck::AnyIn(66, 98, 300, 20, 0xcccccc),
                 PixelCheck::AnyIn(66, 136, 300, 60, 0xcccccc),
+                // `ls /` on the fifth line: the directories in ls's bold
+                // blue (Campbell's bright blue).
+                PixelCheck::AnyIn(66, 174, 300, 16, 0x3b78ff),
                 PixelCheck::At(600, 300, 0x0c0c0c),
             ],
         },
