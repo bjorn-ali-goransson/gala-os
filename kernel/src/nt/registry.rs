@@ -1162,6 +1162,7 @@ pub fn init(now: u64) -> Result<(), NtStatus> {
     for index in 0..super::platform::online_count() {
         registry.add_processor(index, &cpu, now)?;
     }
+    registry.add_processor_environment(super::platform::online_count(), &cpu, now)?;
     *REGISTRY.lock() = Some(registry);
     Ok(())
 }
@@ -1233,25 +1234,65 @@ impl Registry {
         push_decimal(&mut path, index)?;
         let wide_path = utf16(core::str::from_utf8(&path).unwrap_or(""))?;
         let key = self.ensure(&wide_path, now)?;
-        // "Intel64 Family 6 Model 85 Stepping 7", "AMD64 Family 25 ...".
-        let mut identifier = Vec::new();
-        let arch: &[u8] = if &cpu.vendor == b"GenuineIntel" { b"Intel64" } else { b"AMD64" };
-        for (part, v) in [
-            (b" Family " as &[u8], cpu.family),
-            (b" Model ", cpu.model),
-            (b" Stepping ", cpu.stepping),
-        ] {
-            if identifier.is_empty() {
-                identifier.try_extend_from_slice(arch).map_err(nomem)?;
-            }
-            identifier.try_extend_from_slice(part).map_err(nomem)?;
-            push_decimal(&mut identifier, v)?;
-        }
+        let identifier = cpu.identifier()?;
         let name = |s: &str| utf16(s);
         self.set_value(key, &name("ProcessorNameString")?, 1, &ascii_sz(trim(&cpu.name))?, now)?;
         self.set_value(key, &name("VendorIdentifier")?, 1, &ascii_sz(trim(&cpu.vendor))?, now)?;
         self.set_value(key, &name("Identifier")?, 1, &ascii_sz(&identifier)?, now)?;
         self.set_value(key, &name("~MHz")?, 4, &cpu.mhz.to_le_bytes(), now)
+    }
+
+    /// The processor variables Windows keeps with the system's environment
+    /// (`Session Manager\Environment`, which CreateEnvironmentBlock reads):
+    /// NUMBER_OF_PROCESSORS, PROCESSOR_IDENTIFIER ("Intel64 Family 6 Model
+    /// 85 Stepping 7, GenuineIntel"), PROCESSOR_LEVEL (the family) and
+    /// PROCESSOR_REVISION (model and stepping, four hex digits).
+    pub fn add_processor_environment(
+        &mut self,
+        cpus: u32,
+        cpu: &Processor,
+        now: u64,
+    ) -> Result<(), NtStatus> {
+        let path =
+            utf16("MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")?;
+        let key = self.ensure(&path, now)?;
+        let mut identifier = cpu.identifier()?;
+        identifier.try_extend_from_slice(b", ").map_err(nomem)?;
+        identifier.try_extend_from_slice(trim(&cpu.vendor)).map_err(nomem)?;
+        let mut count = Vec::new();
+        push_decimal(&mut count, cpus)?;
+        let mut level = Vec::new();
+        push_decimal(&mut level, cpu.family)?;
+        let revision = (cpu.model & 0xff) << 8 | (cpu.stepping & 0xff);
+        let hex = b"0123456789abcdef";
+        let digits = [12, 8, 4, 0].map(|s| hex[(revision >> s & 0xf) as usize]);
+        for (name, value) in [
+            ("NUMBER_OF_PROCESSORS", &count[..]),
+            ("PROCESSOR_IDENTIFIER", &identifier[..]),
+            ("PROCESSOR_LEVEL", &level[..]),
+            ("PROCESSOR_REVISION", &digits[..]),
+        ] {
+            self.set_value(key, &utf16(name)?, 1, &ascii_sz(value)?, now)?;
+        }
+        Ok(())
+    }
+}
+
+impl Processor {
+    /// "Intel64 Family 6 Model 85 Stepping 7", "AMD64 Family 25 ...".
+    fn identifier(&self) -> Result<Vec<u8>, NtStatus> {
+        let mut identifier = Vec::new();
+        let arch: &[u8] = if &self.vendor == b"GenuineIntel" { b"Intel64" } else { b"AMD64" };
+        identifier.try_extend_from_slice(arch).map_err(nomem)?;
+        for (part, v) in [
+            (b" Family " as &[u8], self.family),
+            (b" Model ", self.model),
+            (b" Stepping ", self.stepping),
+        ] {
+            identifier.try_extend_from_slice(part).map_err(nomem)?;
+            push_decimal(&mut identifier, v)?;
+        }
+        Ok(identifier)
     }
 }
 

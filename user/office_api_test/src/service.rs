@@ -10,6 +10,18 @@
 //!   documentation); WTSFreeMemory frees the lists. WTSQueryUserToken
 //!   (the same task asks for the console user's token) without
 //!   SeTcbPrivilege: ERROR_PRIVILEGE_NOT_HELD, as documented.
+//! - userenv's CreateEnvironmentBlock and DestroyEnvironmentBlock (the
+//!   same task builds the console user's environment; 64-bit; Wine's
+//!   dlls/userenv/tests/userenv.c test_create_env, run on Windows): with
+//!   and without a token, inheriting or not, every block has SystemRoot
+//!   as the process has it (even overwritten), ProgramData from the
+//!   profile list (not the process's overwritten one; ALLUSERSPROFILE and
+//!   ProgramData the process's original ALLUSERSPROFILE), ComSpec,
+//!   COMPUTERNAME, NUMBER_OF_PROCESSORS, OS, PROCESSOR_ARCHITECTURE,
+//!   PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
+//!   SystemDrive, windir, TEMP, TMP, CommonProgramFiles, ProgramFiles,
+//!   PATH, USERPROFILE and the four x86/x64 program files variables; a
+//!   variable of the process's own only when inheriting.
 //! - ntdll's RtlValidRelativeSecurityDescriptor (the WDK's
 //!   documentation): a self-relative descriptor MakeSelfRelativeSD made
 //!   with an owner and a DACL is valid for those parts, not when a group
@@ -172,7 +184,118 @@ fn relative_descriptor(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
+#[link(name = "userenv", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CreateEnvironmentBlock(env: *mut *mut u16, token: usize, inherit: i32) -> i32;
+    fn DestroyEnvironmentBlock(env: *mut u16) -> i32;
+}
+
+#[cfg(target_arch = "x86_64")]
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> i32;
+    fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
+    fn GetCurrentProcess() -> usize;
+}
+
+#[cfg(target_arch = "x86_64")]
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn OpenProcessToken(process: usize, access: u32, token: *mut usize) -> i32;
+}
+
+/// `name`'s value in environment block `env` (case-insensitive name).
+#[cfg(target_arch = "x86_64")]
+fn block_value(env: *const u16, name: &str) -> Option<&'static [u16]> {
+    let up = |c: u16| if (97..=122).contains(&c) { c - 32 } else { c };
+    let mut p = env;
+    // SAFETY: a double-NUL-terminated block.
+    unsafe {
+        while *p != 0 {
+            let n = (0..).position(|i| *p.add(i) == 0).unwrap_or(0);
+            let entry = core::slice::from_raw_parts(p, n);
+            let w: [u16; 64] = super::w(name);
+            let l = name.len();
+            if n > l
+                && entry[l] == u16::from(b'=')
+                && entry[..l].iter().zip(&w[..l]).all(|(&a, &b)| up(a) == up(b))
+            {
+                return Some(&entry[l + 1..]);
+            }
+            p = p.add(n + 1);
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn environment_blocks(c: &mut Checks) -> Result<(), u32> {
+    let wz = |s: &str| -> [u16; 64] { super::w(s) };
+    let mut root = [0u16; 260];
+    let mut data = [0u16; 260];
+    let mut all_users = [0u16; 260];
+    let mut token = 0usize;
+    // SAFETY: our buffers and outputs; the blocks are read within their
+    // NULs and freed by DestroyEnvironmentBlock.
+    unsafe {
+        c.eq(SetEnvironmentVariableW(wz("WINE_XYZZY").as_ptr(), wz("ZZYZX").as_ptr()) as u64, 1)?;
+        let rn = GetEnvironmentVariableW(wz("SystemRoot").as_ptr(), root.as_mut_ptr(), 260);
+        let dn = GetEnvironmentVariableW(wz("ProgramData").as_ptr(), data.as_mut_ptr(), 260);
+        let an =
+            GetEnvironmentVariableW(wz("ALLUSERSPROFILE").as_ptr(), all_users.as_mut_ptr(), 260);
+        c.ok(rn > 0 && dn > 0 && an > 0, 0)?;
+        SetEnvironmentVariableW(wz("SystemRoot").as_ptr(), wz("overwrite").as_ptr());
+        SetEnvironmentVariableW(wz("ProgramData").as_ptr(), wz("overwrite").as_ptr());
+        c.eq(OpenProcessToken(GetCurrentProcess(), 8 | 2, &mut token) as u64, 1)?;
+        let mut env = [core::ptr::null_mut(); 4];
+        for (i, (t, inherit)) in [(0, 0), (token, 0), (0, 1), (token, 1)].into_iter().enumerate() {
+            c.eq(CreateEnvironmentBlock(&mut env[i], t, inherit) as u64, 1)?;
+        }
+        SetEnvironmentVariableW(wz("SystemRoot").as_ptr(), root.as_ptr());
+        SetEnvironmentVariableW(wz("ProgramData").as_ptr(), data.as_ptr());
+        let overwrite = wz("overwrite");
+        for (i, &e) in env.iter().enumerate() {
+            c.ok(block_value(e, "SystemRoot") == Some(&overwrite[..9]), i as u64)?;
+            let pd = block_value(e, "ProgramData");
+            c.ok(
+                pd.is_some_and(|v| v != &overwrite[..9] && v == &all_users[..an as usize]),
+                i as u64,
+            )?;
+            c.ok(block_value(e, "ALLUSERSPROFILE") == Some(&all_users[..an as usize]), i as u64)?;
+            for name in [
+                "ComSpec",
+                "COMPUTERNAME",
+                "NUMBER_OF_PROCESSORS",
+                "OS",
+                "PROCESSOR_ARCHITECTURE",
+                "SystemDrive",
+                "windir",
+                "TEMP",
+                "TMP",
+                "CommonProgramFiles",
+                "ProgramFiles",
+                "PATH",
+                "USERPROFILE",
+                "ProgramFiles(x86)",
+                "CommonProgramFiles(x86)",
+                "ProgramW6432",
+                "CommonProgramW6432",
+            ] {
+                c.ok(block_value(e, name).is_some(), (i as u64) << 8 | name.len() as u64)?;
+            }
+            c.eq(u64::from(block_value(e, "WINE_XYZZY").is_some()), u64::from(i >= 2))?;
+        }
+        for e in env {
+            c.eq(DestroyEnvironmentBlock(e) as u64, 1)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn c2r_service(c: &mut Checks) -> Result<(), u32> {
     sessions(c)?;
+    #[cfg(target_arch = "x86_64")]
+    environment_blocks(c)?;
     relative_descriptor(c)
 }

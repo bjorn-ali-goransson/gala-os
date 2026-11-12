@@ -3325,6 +3325,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "advapi32.dll", "Windows/System32"),
     ("office_api_test", "bcryptprimitives.dll", "Windows/System32"),
     ("office_api_test", "wtsapi32.dll", "Windows/System32"),
+    ("office_api_test", "userenv.dll", "Windows/System32"),
     // The kernel32 functions Office imports once each (user/office_k32_test).
     ("office_k32_test", "ntdll.dll", "Windows/System32"),
     ("office_k32_test", "kernel32.dll", "Windows/System32"),
