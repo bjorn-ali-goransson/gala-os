@@ -137,6 +137,9 @@ struct Connection {
 
 struct Server {
     listener: KArc<Socket>,
+    /// The socket nodes in WSL distributions' trees that reach the
+    /// listener too (`publish_in`).
+    aliases: Vec<NodeId>,
     clients: Vec<Connection>,
     path: [u8; 64],
     path_len: usize,
@@ -229,6 +232,78 @@ fn make_node(uid: u64) -> Result<(NodeId, NodeId), FsError> {
     })
 }
 
+/// Where a WSL distribution's programs find the server, as WSLg puts
+/// it: XDG_RUNTIME_DIR `/mnt/wslg/runtime-dir`, WAYLAND_DISPLAY
+/// `wayland-0` (wsl.exe sets both).
+pub const WSLG_RUNTIME_DIR: [&str; 3] = ["mnt", "wslg", "runtime-dir"];
+
+/// Makes the server's socket reachable from WSL distribution tree `root`
+/// (`lx::distro`; its processes see only that tree), and X's socket
+/// directory `/tmp/.X11-unix` (1777) there as WSL's init makes it: the
+/// socket node
+/// `/mnt/wslg/runtime-dir/wayland-0` in it (directories made as needed,
+/// an old node of that name replaced), an alias of the listener's name
+/// (`unix::Socket::alias`). Once per tree (a node made for it before
+/// stays); nothing when the server does not run. Logged.
+pub fn publish_in(root: NodeId) -> Result<(), StartError> {
+    let Some((listener, aliases)) = SERVER.lock().as_ref().map(|s| {
+        let mut a = Vec::new();
+        let _ = a.try_extend_from_slice(&s.aliases);
+        (s.listener.clone(), a)
+    }) else {
+        return Ok(());
+    };
+    let now = crate::nt::platform::system_time();
+    let mut name = [0u16; 32];
+    let len = wide(DISPLAY, &mut name);
+    let node = with_fs(|fs| {
+        // X's socket directory, as WSL's init makes it (a program that
+        // is not root cannot: Xwayland's displays need it).
+        let mut dir = root;
+        for (part, mode) in [("tmp", 0o1777), (".X11-unix", 0o1777)] {
+            let mut n = [0u16; 32];
+            let l = wide(part, &mut n);
+            dir = match fs.find(dir, &n[..l])? {
+                Some(d) => d,
+                None => fs.create_posix(dir, &n[..l], true, mode, now)?,
+            };
+        }
+        let mut dir = root;
+        for (part, mode) in WSLG_RUNTIME_DIR.iter().zip([0o755, 0o755, 0o700]) {
+            let mut n = [0u16; 32];
+            let l = wide(part, &mut n);
+            dir = match fs.find(dir, &n[..l])? {
+                Some(d) => d,
+                None => fs.create_posix(dir, &n[..l], true, mode, now)?,
+            };
+        }
+        if let Some(old) = fs.find(dir, &name[..len])? {
+            if aliases.contains(&old) {
+                return Ok(None);
+            }
+            fs.unlink(dir, &name[..len])?;
+        }
+        let node = fs.create_socket(dir, &name[..len], 0o755, now)?;
+        fs.open(node, Access::default(), Share::default())?;
+        Ok(Some(node))
+    })
+    .map_err(StartError::Fs)?;
+    let Some(node) = node else { return Ok(()) };
+    let close = || with_fs(|fs| fs.close(node, Access::default(), Share::default()));
+    if let Err(e) = Socket::alias(&listener, node) {
+        close();
+        return Err(StartError::Socket(e));
+    }
+    match SERVER.lock().as_mut() {
+        Some(s) => s.aliases.try_push(node).map_err(|_| StartError::NoMemory)?,
+        None => return Ok(()),
+    }
+    crate::info!(
+        "wayland: listening in a distribution's tree too (node {root}): /mnt/wslg/runtime-dir/{DISPLAY}"
+    );
+    Ok(())
+}
+
 /// `wayland=on|trace`: starts the server for the boot user (see the
 /// module's doc); `xwayland`: with X display :0 served by Xwayland
 /// (`xwayland`).
@@ -289,8 +364,14 @@ pub fn start(mode: &str, xwayland: bool) -> Result<(), StartError> {
     } else {
         None
     };
-    *SERVER.lock() =
-        Some(Server { listener: listener.clone(), clients: Vec::new(), path, path_len, x });
+    *SERVER.lock() = Some(Server {
+        listener: listener.clone(),
+        aliases: Vec::new(),
+        clients: Vec::new(),
+        path,
+        path_len,
+        x,
+    });
     if runtime::spawn("wayland", serve, 0).is_err() {
         *SERVER.lock() = None;
         listener.release();

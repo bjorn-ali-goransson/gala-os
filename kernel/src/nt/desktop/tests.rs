@@ -90,7 +90,7 @@ fn the_start_button_opens_and_closes_the_start_menu() {
     let item = d.menu_item_rect(0);
     click(&mut d, item.x + 20, item.y + 10);
     assert!(!d.menu_open());
-    assert_eq!(d.take_launch().map(|p| p.name), Some(PROGRAMS[0].name));
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(PROGRAMS[0].name));
     assert!(d.take_launch().is_none());
     assert_eq!(d.recent[0], 0);
     // The Windows key opens it; typing filters; Escape closes.
@@ -214,7 +214,7 @@ fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
     // A click hands the program to the caller, which installs it.
     click(&mut d, r.x + 20, r.y + 10);
     assert!(!d.menu_open());
-    assert_eq!(d.take_launch().map(|p| p.name), Some("Microsoft Office"));
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn enter_in_the_start_menu_starts_the_first_tile_at_once() {
     assert!(d.menu_open());
     d.key(0x0d, 0x1c, false, true);
     assert!(!d.menu_open());
-    assert_eq!(d.take_launch().map(|p| p.name), Some("Command Prompt"));
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Command Prompt"));
 }
 
 #[test]
@@ -1175,4 +1175,166 @@ fn notification_area_icons_are_drawn_clicked_and_dropped() {
     d.destroy_owned(7);
     assert_eq!(d.tray_rect(key), None);
     assert_ne!(d.pixel(cx, cy), 0x00ff_0000);
+}
+
+/// The start menu open on a desktop with one window, listing the Command
+/// Prompt and `listing`'s Linux section.
+fn menu_with_linux(listing: linux::Listing) -> Desktop {
+    let (mut d, _) = desktop_with_window();
+    d.set_programs(&[Entry { program: 0, installed: true }]);
+    d.set_linux(listing);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    assert!(d.menu_open());
+    d
+}
+
+fn installed(name: &str, apps: &[(&str, &str)]) -> linux::Distro {
+    let mut d = linux::Distro::new(linux::Name::new(name.as_bytes()).unwrap(), true);
+    for (i, (n, e)) in apps.iter().enumerate() {
+        d.apps[i] = Some(linux::App {
+            name: linux::Text::cut(n),
+            exec: linux::Text::new(e.as_bytes()).unwrap(),
+        });
+    }
+    d
+}
+
+fn centre(r: Rect) -> (i64, i64) {
+    (r.x + r.w / 2, r.y + r.h / 2)
+}
+
+fn right_click(d: &mut Desktop, x: i64, y: i64) {
+    go(d, x, y, 0);
+    go(d, x, y, 2);
+    go(d, x, y, 0);
+}
+
+#[test]
+fn the_linux_section_collapses_hides_and_dismisses_its_suggestions() {
+    let mut d = menu_with_linux(linux::Listing::default());
+    // Two suggestions, not installed: dimmed, each with a download badge
+    // and a dismiss button; the heading below the pinned row.
+    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Ubuntu", "Alpine"]);
+    let heading = d.linux_heading_rect();
+    assert!(heading.y > d.menu_item_rect(0).y + TILE_H - 4);
+    let tile = d.linux_tile_rect(0);
+    let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
+    assert_eq!(d.pixel(ix + 23, iy + 28), ACCENT);
+    // The heading collapses the tiles away, and back.
+    let (hx, hy) = (heading.x + 40, heading.y + 10);
+    click(&mut d, hx, hy);
+    assert!(d.linux.prefs.collapsed);
+    assert_eq!(d.hit(ix + 5, iy + 5), Hit::Menu);
+    assert_eq!(d.take_prefs(), Some(linux::Prefs { collapsed: true, ..Default::default() }));
+    click(&mut d, hx, hy);
+    assert!(!d.linux.prefs.collapsed);
+    assert_eq!(d.hit(ix + 5, iy + 5), Hit::LinuxEntry(0));
+    // Alpine's dismiss button: it is not suggested again; the menu stays.
+    let (x, y) = centre(d.linux_dismiss_rect(1));
+    click(&mut d, x, y);
+    assert!(d.menu_open());
+    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Ubuntu"]);
+    assert_eq!(d.take_prefs().map(|p| p.dismissed), Some(0b10));
+    // A listing read while the choices wait to be saved keeps them.
+    d.prefs_changed = true;
+    d.set_linux(linux::Listing::default());
+    assert_eq!(d.linux.prefs.dismissed, 0b10);
+    d.take_prefs();
+    // "Hide": the section goes; the menu's context menu brings it back.
+    let (x, y) = centre(d.linux_hide_rect());
+    click(&mut d, x, y);
+    assert!(d.linux.prefs.hidden);
+    assert_eq!(d.take_prefs().map(|p| p.hidden), Some(true));
+    let (bx, by) = (d.menu_rect().x + 300, d.menu_rect().y + 400);
+    assert_eq!(d.hit(bx, by), Hit::Menu);
+    right_click(&mut d, bx, by);
+    let c = d.context.unwrap();
+    assert_eq!(c.items[0], Some(linux::Item::ShowSection));
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(!d.linux.prefs.hidden && d.context.is_none() && d.menu_open());
+    assert_eq!(d.take_prefs().map(|p| (p.hidden, p.dismissed)), Some((false, 0b10)));
+}
+
+#[test]
+fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
+    let mut d = menu_with_linux(linux::Listing::default());
+    let tile = d.linux_tile_rect(0);
+    click(&mut d, tile.x + 20, tile.y + 20);
+    // The menu stays open, the tile shows its progress.
+    assert!(d.menu_open());
+    let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
+    match d.take_launch() {
+        Some(Launch::Linux(linux::Request::Install(n, 0))) => assert_eq!(n, ubuntu),
+        _ => panic!("no install"),
+    }
+    // A second click while it installs asks for nothing.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(d.take_launch().is_none());
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
+    let (bx, by) = (tile.x + 13, tile.y + 69);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    d.linux_progress(ubuntu, Some(linux::Progress::Failed));
+    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
+    // A failed install may be tried again.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
+    // Registered: its progress goes, it is drawn in full colour.
+    let mut listing = linux::Listing::default();
+    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm")]));
+    d.set_linux(listing);
+    assert!(d.progress.is_empty());
+    assert_ne!(d.pixel(bx, by), ACCENT);
+    assert!(d.linux_tiles()[0].installed);
+    // A click starts its desktop; the menu closes.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(!d.menu_open());
+    assert!(
+        matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Desktop(n))) if n == ubuntu)
+    );
+}
+
+#[test]
+fn an_installed_distributions_context_menu_opens_a_terminal_or_an_application() {
+    let mut listing = linux::Listing::default();
+    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm"), ("Editor", "ed -s")]));
+    let mut d = menu_with_linux(listing);
+    let tile = d.linux_tile_rect(0);
+    // A suggestion's tile has no context menu; an installed one has.
+    let second = d.linux_tile_rect(1);
+    right_click(&mut d, second.x + 20, second.y + 20);
+    assert!(d.context.is_none());
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let c = d.context.unwrap();
+    assert_eq!(
+        c.items[..4],
+        [Some(linux::Item::Terminal), Some(linux::Item::App(0)), Some(linux::Item::App(1)), None]
+    );
+    let r = d.context_rect().unwrap();
+    assert!(d.menu_rect().contains(r.x, r.y) && d.menu_rect().contains(r.x + r.w, r.y + r.h));
+    // A click beside it closes it and does nothing else.
+    let m = d.menu_rect();
+    click(&mut d, m.x + 300, m.y + 30);
+    assert!(d.context.is_none() && d.menu_open() && d.take_launch().is_none());
+    // The second application.
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 4 + 2 * linux::ITEM_H + 10);
+    assert!(!d.menu_open());
+    match d.take_launch() {
+        Some(Launch::Linux(linux::Request::App(n, app))) => {
+            assert_eq!((n.as_str(), app.exec.as_str()), ("Ubuntu", "ed -s"));
+        }
+        _ => panic!("no application"),
+    }
+    // "Open terminal".
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 14);
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Terminal(_)))));
 }

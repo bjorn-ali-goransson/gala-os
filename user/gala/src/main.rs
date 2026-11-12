@@ -20,6 +20,7 @@
 //! gala list [<text>]
 //! gala upgrade [<id>|--all] [--version v] [--source dir]
 //! gala uninstall <id>|--product-code <key>
+//! gala linux-install <name> <url>    fetch a Linux distribution and import it (the start menu's)
 //! gala help
 //! ```
 //!
@@ -53,6 +54,7 @@ extern crate alloc;
 use gala_heap as _;
 
 mod fetch;
+mod linux;
 mod pkg;
 
 use core::ffi::c_void;
@@ -137,6 +139,8 @@ const USAGE: &str = "usage: gala <command> [arguments]
                                 list or install newer versions
   uninstall <id>                remove a package (its files, commands, record;
                                 or run its uninstaller silently)
+  linux-install <name> <url>    fetch a Linux distribution's rootfs and import it
+                                (wsl --import), its progress on the start menu
   help                          this text
 
 Packages come from a winget-pkgs tree: --source <dir> (a local snapshot,
@@ -174,6 +178,7 @@ const ACTION_WALLPAPER: u32 = 10;
 const ACTION_PROGRAMS: u32 = 11;
 const ACTION_TRAY: u32 = 12;
 const ACTION_TRAY_CLICK: u32 = 13;
+const ACTION_LINUX_PROGRESS: u32 = 14;
 /// A notification-area icon's entry (kernel/src/nt/action.rs TRAY_ENTRY).
 const TRAY_ENTRY: usize = 44 + 2 * 128;
 const MAX_TRAY: usize = 64;
@@ -1095,6 +1100,13 @@ fn run() -> u32 {
         0
     } else if PACKAGE_COMMANDS.iter().any(|w| a.is(1, w)) {
         pkg::run(&a)
+    } else if a.is(1, "linux-install") {
+        if a.count != 4 {
+            return fail(EXIT_USAGE, &["gala linux-install <name> <url>"]);
+        }
+        let name = alloc::string::String::from_utf16_lossy(a.get(2));
+        let url = alloc::string::String::from_utf16_lossy(a.get(3));
+        linux::install(&name, &url)
     } else if a.is(1, "ps") {
         ps()
     } else if a.is(1, "kill") {

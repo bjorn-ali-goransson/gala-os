@@ -210,6 +210,11 @@ pub(super) fn gala_lx_spawn(call: &mut Call<'_>) -> NtStatus {
         *slot = Some(Object::Nt(tri!(KArc::try_new(file).map_err(|_| NtStatus::NO_MEMORY))));
     }
     let [Some(a), Some(b), Some(c)] = stdio else { return NtStatus::INVALID_PARAMETER };
+    // The Wayland server's socket where WSLg has it in the distribution
+    // (XDG_RUNTIME_DIR /mnt/wslg/runtime-dir: wsl.exe sets it).
+    if let Err(e) = crate::wayland::publish_in(root) {
+        crate::warn!("wsl: {}: no Wayland socket in its tree: {e:?}", Text(&name));
+    }
     let token = call.process.token.lock().clone();
     let started = crate::lx::exec::spawn_in(crate::lx::exec::Start {
         path: path_text,

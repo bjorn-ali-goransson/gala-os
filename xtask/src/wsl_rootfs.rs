@@ -97,3 +97,65 @@ pub fn make(root: &std::path::Path, busybox: &[u8]) -> Result<PathBuf, String> {
     fs::write(&gz_path, gz).map_err(|e| format!("writing {gz_path:?}: {e}"))?;
     Ok(dir)
 }
+
+/// A rootfs tarball (`.tar.gz`, deterministic as `make`'s) of `files`:
+/// (path in the root, its bytes), with every parent directory (0755)
+/// before its entries, plus what a distribution has: /etc/passwd (root,
+/// shell /bin/sh, home /root; the user `gala`, uid 1000, home
+/// /home/gala), /etc/group, /root (0700), /tmp (1777).
+/// Programs (`usr/bin`, `bin`, ld.so) are 0755, the rest 0644.
+pub fn make_tree(files: &[(String, Vec<u8>)], out: &std::path::Path) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let mut dirs = BTreeSet::new();
+    for (path, _) in files {
+        let mut at = path.as_str();
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            dirs.insert(parent.to_string());
+            at = parent;
+        }
+    }
+    for d in ["etc", "home", "home/gala", "root", "tmp"] {
+        dirs.insert(d.to_string());
+    }
+    let mut tar = Vec::new();
+    member(&mut tar, ".", &Member::Dir(0o755));
+    for d in &dirs {
+        let mode = match d.as_str() {
+            "root" => 0o700,
+            "tmp" => 0o1777,
+            _ => 0o755,
+        };
+        member(&mut tar, &format!("./{d}"), &Member::Dir(mode));
+    }
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, data) in sorted {
+        let program = path.starts_with("usr/bin/")
+            || path.starts_with("bin/")
+            || path.ends_with("ld-linux-x86-64.so.2")
+            || path.ends_with(".sh");
+        let mode = if program { 0o755 } else { 0o644 };
+        member(&mut tar, &format!("./{path}"), &Member::File(mode, data));
+    }
+    // The user a WSL distribution's setup adds (uid 1000), as whom gala
+    // runs its processes (the Windows boot user's Linux ids): programs
+    // that look their user up (Xwayland's local access) find it.
+    member(
+        &mut tar,
+        "./etc/passwd",
+        &Member::File(
+            0o644,
+            b"root:x:0:0:root:/root:/bin/sh\ngala:x:1000:1000:gala:/home/gala:/bin/sh\n",
+        ),
+    );
+    member(&mut tar, "./etc/group", &Member::File(0o644, b"root:x:0:\ngala:x:1000:\n"));
+    tar.extend_from_slice(&[0u8; 1024]);
+    let gz = {
+        use flate2::Compression;
+        use flate2::GzBuilder;
+        use std::io::Write;
+        let mut z = GzBuilder::new().mtime(0).write(Vec::new(), Compression::default());
+        z.write_all(&tar).and_then(|()| z.finish()).map_err(|e| format!("gzip: {e}"))?
+    };
+    fs::write(out, gz).map_err(|e| format!("writing {out:?}: {e}"))
+}
