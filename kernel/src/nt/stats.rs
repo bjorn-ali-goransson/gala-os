@@ -58,8 +58,9 @@ impl core::fmt::Display for Summary {
     }
 }
 
-/// The kernel heap by owner (`heap by owner: ...`): what the registry and
-/// the file system hold, from their structures' capacities, and the rest
+/// The kernel heap by owner (`heap by owner: ...`): what the registry, the
+/// file system and the image cache's layouts hold, from their
+/// structures' capacities, and the rest
 /// of the heap in use (`in_use`, bytes) as "other" (processes, handles,
 /// sections' bookkeeping, buffers, allocator rounding). The lines that
 /// print it: the end of a run, the state dump, `persist`'s low-memory
@@ -69,6 +70,8 @@ pub struct HeapOwners {
     /// None: its lock was held (the state dump does not wait).
     pub registry: Option<super::registry::HeapUse>,
     pub files: Option<crate::fs::ramfs::HeapUse>,
+    /// The image cache's layouts: bytes, count.
+    pub images: Option<(usize, usize)>,
 }
 
 impl HeapOwners {
@@ -78,6 +81,7 @@ impl HeapOwners {
             in_use,
             registry: super::registry::try_heap_use(),
             files: super::file::try_heap_use(),
+            images: super::section::try_image_heap(),
         }
     }
 }
@@ -111,6 +115,13 @@ impl core::fmt::Display for HeapOwners {
                 )?;
             }
             None => out.write_str(", files (lock held)")?,
+        }
+        match self.images {
+            Some((bytes, count)) => {
+                known += bytes;
+                write!(out, ", image layouts {} KiB ({count} images)", bytes / 1024)?;
+            }
+            None => out.write_str(", image layouts (lock held)")?,
         }
         write!(
             out,

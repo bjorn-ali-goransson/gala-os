@@ -377,6 +377,21 @@ fn evictable<K, T>(cache: &[(K, KArc<T>)], keep: usize) -> Option<usize> {
 /// Image layouts this large or larger are logged when made.
 const LOGGED_LAYOUT: u64 = 8 << 20;
 
+/// The image layouts the cache holds on the kernel heap: their laid-out
+/// bytes and tables (the shared frames made from them are section pages,
+/// counted apart), and how many; None while its lock is held (the state
+/// dump must not wait).
+pub fn try_image_heap() -> Option<(usize, usize)> {
+    let cache = IMAGE_CACHE.try_lock()?;
+    let bytes = cache
+        .iter()
+        .map(|(_, l)| {
+            l.bytes.capacity() + 4 * (l.page_protect.capacity() + l.reloc_index.capacity())
+        })
+        .sum();
+    Some((bytes, cache.len()))
+}
+
 pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>, NtStatus> {
     let version = super::file::with_fs(|fs| fs.node(node).and_then(|n| n.version()));
     if let Some(v) = version {
