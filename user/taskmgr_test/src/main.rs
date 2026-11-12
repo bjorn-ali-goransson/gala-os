@@ -27,6 +27,14 @@
 //!   end through TerminateProcess), for no process STATUS_INVALID_CID;
 //! - `gala ps` lists the Linux processes with their distribution.
 //!
+//! Step 3, "Not responding" as Windows defines it: a third program
+//! (`frozen` mode: "Frozen window", whose thread sleeps for good once
+//! it is shown) is not hung while nothing waits for it; after the
+//! screen check clicks it, its input waits untaken and 5 s later the
+//! query flags it (`taskmgr_test: frozen window not responding`), while
+//! the busy window, which takes its messages, is never flagged; Task
+//! Manager's Status says "Not responding" in red.
+//!
 //! Then it prints `taskmgr_test: ready` and the screen check (scenario
 //! `taskmgr`) opens Task Manager with Ctrl+Shift+Esc and ends, from it:
 //! the busy window (TerminateProcess: exit code 1, as Windows' Task
@@ -53,7 +61,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::fmt::Write;
 
-use taskmgr::{FLAG_LINUX, FLAG_WINDOW, Proc};
+use taskmgr::{FLAG_HUNG, FLAG_LINUX, FLAG_WINDOW, Proc};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -91,6 +99,7 @@ unsafe extern "system" {
     fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> Bool;
     fn Sleep(ms: u32);
     fn GetTickCount() -> u32;
+    fn TerminateProcess(h: Handle, code: u32) -> Bool;
     fn CreateThread(
         sa: *mut c_void,
         stack: usize,
@@ -502,6 +511,52 @@ extern "system" fn spin(_: *mut c_void) -> u32 {
     }
 }
 
+/// `frozen`: a window whose thread never takes its messages again (it
+/// sleeps for good once the window shows): input for it waits, and 5 s
+/// later it is "Not responding", as Windows says of such a window.
+fn frozen() -> u32 {
+    let class = wide("TaskmgrTestFrozen");
+    let title = wide("Frozen window");
+    let wc = WndClassW {
+        style: 0,
+        proc_: busy_proc,
+        class_extra: 0,
+        window_extra: 0,
+        instance: core::ptr::null_mut(),
+        icon: core::ptr::null_mut(),
+        cursor: core::ptr::null_mut(),
+        background: 6usize as Handle,
+        menu_name: core::ptr::null(),
+        class_name: class.as_ptr(),
+    };
+    let null = core::ptr::null_mut();
+    // SAFETY: valid class and strings; plain calls.
+    unsafe {
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            title.as_ptr(),
+            0x00cf_0000,
+            860,
+            300,
+            360,
+            180,
+            null,
+            null,
+            null,
+            null,
+        );
+        if hwnd.is_null() {
+            return 2;
+        }
+        ShowWindow(hwnd, 5);
+        loop {
+            Sleep(u32::MAX);
+        }
+    }
+}
+
 /// `busy`: a window and a thread that keeps one processor busy, until
 /// it is ended.
 fn busy() -> u32 {
@@ -588,11 +643,21 @@ fn test(tasks: &Tasks) -> Result<(), u32> {
     let busy = start(&me(), "busy", None);
     c.ok(busy.is_some(), "the busy program started")?;
     let busy = busy.unwrap_or(core::ptr::null_mut());
+    // The frozen one.
+    let frozen = start(&me(), "frozen", None);
+    c.ok(frozen.is_some(), "the frozen program started")?;
+    let frozen = frozen.unwrap_or(core::ptr::null_mut());
 
     let listed = wait_for(tasks, 60_000, 3, |p| p.distro == "bb");
     c.ok(listed.len() >= 3, "sh, sleep and cat listed in bb")?;
     let apps = wait_for(tasks, 60_000, 1, |p| p.title == "Busy window");
     c.ok(apps.len() == 1, "the busy window listed")?;
+    let ice = wait_for(tasks, 60_000, 1, |p| p.title == "Frozen window");
+    c.ok(ice.len() == 1, "the frozen window listed")?;
+    // Nothing waits for it yet: it responds (as on Windows, a window
+    // nobody sends anything to is not hung).
+    c.ok(ice[0].flags & FLAG_HUNG == 0, "the frozen window responding before any input")?;
+    let ice_pid = ice[0].pid;
     let first = tasks.processes();
     // SAFETY: plain call.
     unsafe { Sleep(1000) };
@@ -666,8 +731,19 @@ fn test(tasks: &Tasks) -> Result<(), u32> {
         text.lines().any(|l| l.contains("sleep") && l.contains("Linux") && l.contains("bb"));
     c.ok(code == 0 && has_sleep, "gala ps lists sleep in bb")?;
 
-    let (sh_pid, sleep_pid, cat_pid) = (sh.pid, sleep.pid, cat.pid);
+    let (sh_pid, sleep_pid, cat_pid, busy_pid) = (sh.pid, sleep.pid, cat.pid, b1.pid);
     line("ready");
+
+    // The screen check clicks the frozen window: 5 s later it is "Not
+    // responding"; the busy one, which takes its messages, never is.
+    let hung = wait_for(tasks, 120_000, 1, |p| p.pid == ice_pid && p.flags & FLAG_HUNG != 0);
+    c.ok(hung.len() == 1, "the frozen window not responding")?;
+    let busy_now = tasks.processes();
+    c.ok(
+        busy_now.iter().any(|p| p.pid == busy_pid && p.flags & FLAG_HUNG == 0),
+        "the busy window responding",
+    )?;
+    line("frozen window not responding");
 
     // What the screen check ends from Task Manager.
     let mut code = 0;
@@ -696,6 +772,12 @@ fn test(tasks: &Tasks) -> Result<(), u32> {
     c.ok(tm.len() == 1, "Task Manager listed (one instance)")?;
     c.ok(wait_gone(tasks, tm[0].pid, END_WAIT_MS), "Task Manager closed")?;
     line("task manager closed");
+    // SAFETY: a handle this program holds.
+    unsafe {
+        TerminateProcess(frozen, 1);
+        WaitForSingleObject(frozen, 10_000);
+        CloseHandle(frozen);
+    }
     Ok(())
 }
 
@@ -713,6 +795,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     if cmd.trim_end().ends_with(" busy") {
         // SAFETY: ends the process.
         unsafe { ExitProcess(busy()) };
+    }
+    if cmd.trim_end().ends_with(" frozen") {
+        // SAFETY: ends the process.
+        unsafe { ExitProcess(frozen()) };
     }
     let Some(tasks) = Tasks::find() else {
         line("not gala (no GalaTasks in ntdll): skipped");

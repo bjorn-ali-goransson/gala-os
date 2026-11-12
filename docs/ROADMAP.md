@@ -240,7 +240,7 @@ has a section under "Open items".
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-2 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each); "Not responding" next |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
@@ -4120,16 +4120,18 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
   the full columns, Performance graphs per processor, memory, disk and
   network. The scenario ends one of each from it and its graphs move
   under a busy thread; its screendumps are the views' pictures.
+- Step 3, hung programs: a window whose input waits untaken for 5 s is
+  "Not responding" (Windows' rule; the desktop's input queue), in the
+  query and red in the Status column; the scenario's frozen window is,
+  its busy one never. Not covered: messages between programs, Wayland
+  clients, Linux D state (gala's Linux waits are all interruptible:
+  ledgered); no "(Not Responding)" caption or ghost window yet.
 
 **Next** (each test first, checked on the screen, screenshots):
-1. Hung programs: windows not answering messages marked "Not
-   responding" as Windows does; Linux processes blocked in D-state
-   shown the same way (the query's FLAG_HUNG and FLAG_UNINTERRUPTIBLE
-   and the Status column wait for it).
-2. Inspection: open file location, a process's threads with their
+1. Inspection: open file location, a process's threads with their
    stacks (the state dump's walker), its open handles or fds, and
    "Create dump file" through the crash report's writer.
-3. Images: `taskmgr.exe` in System32 of every desktop image (it ships
+2. Images: `taskmgr.exe` in System32 of every desktop image (it ships
    per scenario now, as `wsl.exe`), and ProcessTimes/GetSystemTimes
    from the same CPU accounting.
 

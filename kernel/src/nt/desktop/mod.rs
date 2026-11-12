@@ -4040,6 +4040,13 @@ fn resize(d: &mut Desktop, w: u32, h: u32) {
     redraw(d, Rect { x: 0, y: 0, w: w.into(), h: h.into() });
 }
 
+/// Whether `owner`'s windows are "Not responding" (input waiting
+/// untaken for `winstate::HUNG_NS`: the task manager's Status).
+pub fn not_responding(shell: &Shell, owner: u64) -> bool {
+    let now = platform::monotonic_ns();
+    shell.d.lock().s.not_responding(owner, now)
+}
+
 /// Takes input waiting for `owner`'s windows into `out`; how many.
 pub fn take_input(shell: &Shell, owner: u64, out: &mut [InputEvent]) -> usize {
     shell.d.lock().take_input(owner, out)

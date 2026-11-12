@@ -10814,6 +10814,8 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "wsl: bb: imported",
             "taskmgr_test: ready",
+            "(taskmgr_test.exe) is not responding: its input has waited untaken",
+            "taskmgr_test: frozen window not responding",
             "desktop: Ctrl+Shift+Esc: Task Manager",
             "(Taskmgr.exe) lists the processes",
             "(Taskmgr.exe) terminates pid",
@@ -13701,11 +13703,12 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// outline and a 32-row caption); in it the navigation (Processes,
 /// Performance, Details at client y 76, 116, 156), the rows from client y
 /// 128, 24 apart (row 0 at screen y 213, row 1 at 237) and End task at
-/// screen (1079, 145). The pointer starts at (640, 400). Ctrl+Shift+Esc
-/// opens it; each view is a screendump (`test-taskmgr.screen<n>.png`: 0
-/// Processes, 1 Performance, 2 Details, 3 the busy window found and
-/// selected, 5 `sleep`, 7 `sh`, 9 the distribution's heading, 11 after
-/// the ends); the search finds each victim (row 0 its group's heading,
+/// screen (1079, 145). The pointer starts at (640, 400). First a click
+/// on the frozen window, which then is "Not responding" (red in the
+/// Status column); Ctrl+Shift+Esc opens Task Manager; each view is a
+/// screendump (`test-taskmgr.screen<n>.png`: 1 Processes, 2
+/// Performance, 3 Details, 4 the busy window found and selected, 6
+/// `sleep`, 8 `sh`, 10 the distribution's heading, 12 after the ends); the search finds each victim (row 0 its group's heading,
 /// row 1 the process), End task ends it, and taskmgr_test says so before
 /// the next step; Alt+F4 closes Task Manager last.
 const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
@@ -13713,12 +13716,30 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
     steps: &[
         ScreenStep {
             after: "",
+            // A click on the frozen window (its client area at (1190,
+            // 400), right of where Task Manager will be), back to the
+            // middle: its input waits untaken.
+            input: &[
+                "mouse_move 255 0",
+                "mouse_move 255 0",
+                "mouse_move 40 0",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -255 0",
+                "mouse_move -255 0",
+                "mouse_move -40 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: frozen window not responding",
             input: &["sendkey ctrl-shift-esc"],
             pixels: &[
-                PixelCheck::AnyIn(137, 87, 120, 20, 0x1b1b1b), // "Task Manager"
-                PixelCheck::At(271, 133, 0xe3e3e3),            // Processes, selected
-                PixelCheck::AnyIn(127, 139, 3, 16, 0x005fb8),  // its accent bar
-                PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8), // "Apps (2)"
+                PixelCheck::AnyIn(675, 201, 120, 300, 0xc42b1c), // "Not responding"
+                PixelCheck::AnyIn(137, 87, 120, 20, 0x1b1b1b),   // "Task Manager"
+                PixelCheck::At(271, 133, 0xe3e3e3),              // Processes, selected
+                PixelCheck::AnyIn(127, 139, 3, 16, 0x005fb8),    // its accent bar
+                PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8),  // "Apps (2)"
                 PixelCheck::AnyIn(121, 201, 400, 460, 0xe95420), // a Linux group
             ],
         },

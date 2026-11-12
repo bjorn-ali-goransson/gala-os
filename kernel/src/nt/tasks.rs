@@ -76,9 +76,11 @@ pub const FLAG_WINDOW: u32 = 2;
 pub const FLAG_ELEVATED: u32 = 4;
 /// A 32-bit (WOW64) process.
 pub const FLAG_WOW64: u32 = 8;
-/// Its window does not answer ("Not responding": ROADMAP TM step 3).
+/// "Not responding" (ROADMAP TM step 3): input has waited for its
+/// windows, untaken, for 5 s (`winstate::HUNG_NS`, Windows' rule).
 pub const FLAG_HUNG: u32 = 16;
-/// A Linux process in an uninterruptible wait (never set yet).
+/// A Linux process in an uninterruptible wait (never set: gala's Linux
+/// waits are all interruptible; ledgered).
 pub const FLAG_UNINTERRUPTIBLE: u32 = 32;
 
 /// The texts of a record, in the order of their slots (80 to 112).
@@ -249,14 +251,29 @@ mod live {
     static LOGGED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    /// Whether `pid`'s query is its first (and notes it).
-    fn first_query(pid: u64) -> bool {
-        if LOGGED.iter().any(|p| p.load(Ordering::Relaxed) == pid) {
+    /// The processes whose "Not responding" was logged (once each).
+    static HUNG: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+    static NEXT_HUNG: AtomicU64 = AtomicU64::new(0);
+
+    /// Whether `pid` is not yet in `seen` (and notes it, `next` the slot
+    /// to reuse).
+    fn first_in(seen: &[AtomicU64], next: &AtomicU64, pid: u64) -> bool {
+        if seen.iter().any(|p| p.load(Ordering::Relaxed) == pid) {
             return false;
         }
-        let slot = NEXT.fetch_add(1, Ordering::Relaxed) as usize % LOGGED.len();
-        LOGGED[slot].store(pid, Ordering::Relaxed);
+        let slot = next.fetch_add(1, Ordering::Relaxed) as usize % seen.len();
+        seen[slot].store(pid, Ordering::Relaxed);
         true
+    }
+
+    /// Whether `pid`'s query is its first (and notes it).
+    fn first_query(pid: u64) -> bool {
+        first_in(&LOGGED, &NEXT, pid)
+    }
+
+    /// Whether `pid` is seen not responding for the first time.
+    fn first_hung(pid: u64) -> bool {
+        first_in(&HUNG, &NEXT_HUNG, pid)
     }
 
     fn no_memory(_: AllocError) -> NtStatus {
@@ -305,7 +322,7 @@ mod live {
         }
         let mut tasks: Vec<Task> = Vec::new();
         tasks.try_reserve_exact(list.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-        let (mut nt, mut linux) = (0usize, 0usize);
+        let (mut nt, mut linux, mut hung) = (0usize, 0usize, 0usize);
         for p in &list {
             let mut t = Task {
                 pid: p.id,
@@ -336,6 +353,18 @@ mod live {
                 t.handles = p.handles.lock().iter().count() as u32;
                 t.texts[0].try_extend_from_slice(p.name.as_bytes()).map_err(no_memory)?;
             }
+            if crate::nt::desktop::not_responding(&p.desk.shell, p.id) {
+                t.flags |= FLAG_HUNG;
+                hung += 1;
+                if first_hung(p.id) {
+                    crate::info!(
+                        "tasks: pid {} ({}) is not responding: its input has waited untaken \
+                         for 5 s or more",
+                        p.id,
+                        p.name
+                    );
+                }
+            }
             let listed = windows.iter().find(|(s, _)| *s == p.session);
             if let Some(w) = listed.and_then(|(_, l)| l.iter().find(|w| w.owner == p.id)) {
                 t.flags |= FLAG_WINDOW;
@@ -360,7 +389,7 @@ mod live {
         crate::events::emit(
             crate::events::Category::Process,
             "tasks query",
-            format_args!(r#""by":{},"nt":{nt},"linux":{linux}"#, caller.id),
+            format_args!(r#""by":{},"nt":{nt},"linux":{linux},"hung":{hung}"#, caller.id),
         );
         Ok(out)
     }

@@ -423,7 +423,17 @@ pub struct State<X> {
     input_at: usize,
     /// Input dropped because the queue was full (MAX_INPUT).
     pub input_dropped: u64,
+    /// Per process with input waiting: since when (monotonic ns) it has
+    /// not taken its input (set when input comes for a process that had
+    /// none, moved on each time it takes some and more waits; gone when
+    /// none waits). "Not responding" (`not_responding`).
+    waiting: Vec<(u64, u64)>,
 }
+
+/// How long input may wait untaken before its program is "Not
+/// responding": Windows' 5 seconds (IsHungAppWindow: not called
+/// PeekMessage or GetMessage within them, not waiting for input).
+pub const HUNG_NS: u64 = 5_000_000_000;
 
 /// How many deliveries `recent_input` keeps.
 pub const RECENT_INPUT: usize = 16;
@@ -473,6 +483,7 @@ impl<X: Default> State<X> {
             }; RECENT_INPUT],
             input_at: 0,
             input_dropped: 0,
+            waiting: Vec::new(),
         }
     }
 
@@ -844,6 +855,7 @@ impl<X: Default> State<X> {
     /// A process's end: allocates nothing, so nothing is left behind
     /// (a capture or activation of a window that is gone).
     pub fn destroy_owned(&mut self, owner: u64) {
+        self.waiting.retain(|(o, _)| *o != owner);
         let mut i = 0;
         while i < self.windows.len() {
             if self.windows[i].owner != owner {
@@ -895,6 +907,15 @@ impl<X: Default> State<X> {
                 true
             }
         });
+        // Its input is taken: what still waits waits from now.
+        let now = crate::nt::platform::monotonic_ns();
+        let still = self.has_input(owner);
+        self.waiting.retain_mut(|(o, since)| {
+            if *o == owner {
+                *since = now;
+            }
+            *o != owner || still
+        });
         for e in &out[..n] {
             if is_noted(e.message) {
                 self.settle_note(e.window, e.message, false);
@@ -912,6 +933,14 @@ impl<X: Default> State<X> {
             }
         }
         n
+    }
+
+    /// Whether `owner` is "Not responding" at `now`: input has waited for
+    /// it, untaken, for HUNG_NS or more (Windows' rule for a window's
+    /// thread that neither takes its messages nor waits for them).
+    pub fn not_responding(&self, owner: u64, now: u64) -> bool {
+        self.waiting.iter().any(|&(o, since)| o == owner && now.saturating_sub(since) >= HUNG_NS)
+            && self.has_input(owner)
     }
 
     pub fn has_input(&self, owner: u64) -> bool {
@@ -940,6 +969,11 @@ impl<X: Default> State<X> {
             }
         }
         let _ = self.input.try_push(InputEvent { owner, window, message, wparam, lparam });
+        if !self.waiting.iter().any(|(o, _)| *o == owner) {
+            // Without the memory to note it, it is never "Not responding"
+            // (never the other way round).
+            let _ = self.waiting.try_push((owner, crate::nt::platform::monotonic_ns()));
+        }
         if !self.woken.contains(&owner) {
             let _ = self.woken.try_push(owner);
         }

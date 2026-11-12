@@ -12445,6 +12445,33 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   interruptible) and taskmgr.exe's columns without a counter
   (`taskmgr.exe!Processes(Disk)`, `(Network)`, `(GPU)`, `(Power usage)`).
 
+### Not responding (step 3)
+
+- **Windows' rule**: a window is "Not responding" when its thread has
+  neither taken its messages (PeekMessage, GetMessage) nor waited for
+  them for 5 seconds (IsHungAppWindow's documentation). gala's
+  equivalent is the desktop's input queue: `winstate::State` keeps, per
+  process with input waiting, since when it has not taken it
+  (`waiting`: set when input comes for a process that had none, moved
+  to now each time it takes some while more waits, gone when none
+  waits or its windows go); `not_responding(owner, now)` is input
+  waiting untaken for `HUNG_NS` (5 s). A program blocked in GetMessage
+  takes its input as it comes, so it never is; one whose thread sleeps
+  or spins with input queued is, until it takes it. The query sets
+  FLAG_HUNG from it (`desktop::not_responding`), logs each process's
+  first time (`tasks: pid P (x.exe) is not responding: ...`) and counts
+  them in `tasks query` (`hung`); Task Manager's Status says "Not
+  responding" in red.
+- **Limits**: messages sent or posted between programs (SendMessage,
+  PostMessage through the window registry) do not count, only the
+  desktop's input; a Wayland client's windows are served by the kernel's
+  Wayland server, which takes their input, so a hung Linux GUI program
+  is not seen; a Linux process in an uninterruptible wait (D state)
+  cannot be shown, as gala's Linux waits are all interruptible
+  (FLAG_UNINTERRUPTIBLE stays clear; ledger `tasks`/`linux
+  uninterruptible wait`). shasha does not yet add "(Not Responding)" to
+  a hung window's caption or ghost it.
+
 ### The program (step 2)
 
 - **`taskmgr.exe`** (`user/taskmgr`), gala's own Windows program on
@@ -12490,8 +12517,7 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   query and `gala kill <pid>` ends a Linux process as End task does.
 - **Limits**: no per-process disk, network, GPU or power columns (no
   counters: ledgered); no process tree within a group; "Not responding"
-  is not decided yet (ROADMAP TM step 3: the flags exist, nothing sets
-  them); the Users, Services, Startup and App history pages are not
+  is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
   there; End task waits for a distribution's end on the window's
   thread (up to `lx::distro`'s 10 s).
 

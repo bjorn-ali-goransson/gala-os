@@ -1784,16 +1784,19 @@ source).
   runs `sh -c "sleep 600 & trap '' TERM; cat; echo cat ended"` in it and its own `busy`
   mode (a window and a spinning thread), checks GalaTasks' list and
   load, NtQuerySystemInformation's Windows-only list and `gala ps`,
-  then prints `taskmgr_test: ready`; TASKMGR_SCREEN opens Task Manager
+  then prints `taskmgr_test: ready`; TASKMGR_SCREEN clicks its
+  `frozen` window (whose thread never takes its input: 5 s later the
+  test sees it "Not responding" and says so), opens Task Manager
   with Ctrl+Shift+Esc, clicks Performance and Details, then searches
   and ends `busy` (an app), `sleep` (SIGTERM), `sh` (ignores SIGTERM:
   SIGKILL after 3 s) and the `bb` heading (its tree), each step waiting
   for the program's line that the one before ended, and closes Task
   Manager with Alt+F4 (the test waits for that, so the last screendump
   comes before the guest ends). Screendumps:
-  `target/debug/test-taskmgr.screen<n>.png` (0 Processes, 1
-  Performance, 2 Details, 3 the app found, 5 `sleep`, 7 `sh`, 9 the
-  distribution's heading, 11 what is left).
+  `target/debug/test-taskmgr.screen<n>.png` (1 Processes with the
+  frozen window "Not responding", 2 Performance, 3 Details, 4 the app
+  found, 6 `sleep`, 8 `sh`, 10 the distribution's heading, 12 what is
+  left).
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
   `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
   test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
