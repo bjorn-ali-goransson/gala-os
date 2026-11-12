@@ -1385,7 +1385,9 @@ fn c2r_d3dcompiler(c: &mut Checks) -> Result<(), u32> {
         let ptr: extern "system" fn(usize) -> *const u8 = core::mem::transmute(slot(blob, 3));
         c.eq(size(blob) as u64, 16)?;
         let p = ptr(blob);
-        c.ok(!p.is_null() && core::slice::from_raw_parts(p, 16).iter().all(|&b| b == 0), 0)?;
+        // Windows does not zero a new blob's bytes (CI's run read non-zero
+        // ones), so only the pointer is checked.
+        c.ok(!p.is_null(), 0)?;
         let release: extern "system" fn(usize) -> u32 = core::mem::transmute(slot(blob, 2));
         c.eq(release(blob).into(), 0)?;
         let src = b"float4 main() : SV_Target { return float4(1, 0, 0, 1); }";
