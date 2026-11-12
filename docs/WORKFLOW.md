@@ -1720,6 +1720,63 @@ source).
   ash's `\w` shows `/root`, not `~`, under this profile (the prompt
   marker the screen check waits for).
 
+### The start menu's Linux distributions (ROADMAP LD step 7)
+
+- Scenario `linux_menu` (`cargo xtask boot-test 'linux_menu$'`, about
+  two minutes of run time under TCG): UEFI (the screen: on a headless
+  desktop the test frame exists only once something brings the desktop
+  up) with `wayland=on xwayland=on`, `linux_mirror=http://10.0.2.100`
+  and `user/linux_menu_test`, which asks for the start menu's programs
+  (bringing the desktop up), prints `linux_menu_test: ready` and follows
+  the registry (the choices in HKCU\Software\gala\StartMenu, Ubuntu's
+  Lxss registration, the tarball gone); LINUX_MENU_SCREEN clicks:
+  collapse, expand, dismiss Alpine, install Ubuntu, its desktop, `exit`,
+  its context menu's terminal and XTerm, Hide, and the menu's own context
+  menu's "Show Linux distributions" (the test ends only after that, so
+  the hidden section's screendump is taken before the guest ends). The screendumps are the
+  states' pictures (`target/debug/test-linux_menu.screen<n>.png`,
+  numbered from 0: 0 shown, 1 collapsed, 2 expanded, 3 Alpine dismissed,
+  5 installing, 6 installed, 8 desktop started, 10 context menu, 13
+  terminal, 17 application, 19 hidden). Its steps wait up to 300 s for
+  their line (SCREEN_STEP_WAITS: the install).
+- **The host serves the rootfs**: `linux_menu` is a HOST_PAGE_SCENARIO:
+  10.0.2.100:80 is `cargo xtask serve-page` (QEMU's guestfwd runs it per
+  connection), which answers a request whose last path component names
+  a file of `XTASK_SERVE_DIR` with that file (the page otherwise).
+  `linux_menu_rootfs` sets it to `target/linux-menu/` and makes there,
+  each run, the suggestions' files by their URLs' names:
+  `ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz`, a stand-in of
+  LINUX_MENU_ROOT_SETS (the Linux roots "x11", "gtk3", glibc,
+  libwayland-client and `user/lx/xdesktop` at /lx/xdesktop, with
+  /etc/passwd, /root, /tmp: `wsl_rootfs::make_tree`), and
+  `alpine-minirootfs-3.20.3-x86_64.tar.gz`, the busybox root. Each
+  request is in `<iso>.serve.log` (added to the serial log). No real
+  download: the kernel turns the suggestions' URLs into
+  `<linux_mirror>/<file name>`.
+- Reading a run: `desktop: start menu: linux <op> <name>: <command>`,
+  `desktop: start menu: Linux distribution Ubuntu: downloading (n%)`,
+  gala.exe's `gala: linux: Ubuntu: ...`, `wsl: Ubuntu: imported`,
+  `wayland: listening in a distribution's tree too`, the session's
+  `session: display :1 ready`; `events=window` has the `start menu`
+  events (`linux install`, `linux progress`, `linux prefs`, ...).
+- Pitfalls: the menu stays open during an install (a click elsewhere
+  would close it); the progress step's check races nothing: serve-page
+  sends 60% of the Ubuntu stand-in, then holds the rest until that
+  step's pixels have passed (xtask writes `<iso>.serve.release`:
+  HELD_DOWNLOADS), so the bar is seen mid-download under KVM as under
+  TCG;
+  the start button moves left by 24 pixels per window on the taskbar
+  (the console window of the terminal stays after `exit`); each move is
+  relative to where the step before left the pointer, a few moves per
+  click (a reset to (0, 0) with six large moves lost a move under load:
+  QEMU's PS/2 queue is short). A distribution's processes run as the
+  Windows user's Linux ids (uid 1000), so its `/etc/passwd` must name
+  uid 1000: Xwayland refuses its own local clients ("Authorization
+  required") when the user of the peer is unknown; the stand-in has the
+  user `gala` as WSL's setup would add one. When the session fails,
+  session.sh prints Xwayland's and twm's output (`session: ... failed`,
+  then the log) on the serial log.
+
 ### X11 programs (Xwayland, ROADMAP LD step 5)
 
 - `xwayland=on` on the kernel command line gives display `:0`

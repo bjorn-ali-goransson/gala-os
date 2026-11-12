@@ -28,6 +28,7 @@
 //! Design: docs/ARCHITECTURE.md, "Windows on the screen", "Server and
 //! desktop workloads" and "Presenters (B3a)".
 
+pub mod linux;
 mod paint;
 mod present;
 pub mod tray;
@@ -256,6 +257,33 @@ pub const PROGRAMS: &[Program] = &[
 /// How many tiles the start menu's grid holds (four rows).
 pub const MAX_TILES: usize = GRID_COLUMNS * 4;
 
+/// What the start menu asks to be started (`take_launch`): a program
+/// of PROGRAMS, or something for a Linux distribution.
+#[allow(clippy::large_enum_variant)] // one at a time, handed on at once
+#[derive(Clone, Copy)]
+pub enum Launch {
+    Program(&'static Program),
+    Linux(linux::Request),
+}
+
+impl Launch {
+    /// The program, for a program's launch.
+    pub fn program(self) -> Option<&'static Program> {
+        match self {
+            Launch::Program(p) => Some(p),
+            Launch::Linux(_) => None,
+        }
+    }
+}
+
+/// The "Linux distributions" section's rows: its heading, then a row of
+/// tiles (TILE_H) when expanded.
+const LINUX_HEADING: i64 = 28;
+/// The pinned grid's rows while the section shows (it sits below them).
+const PINNED_ROWS_WITH_LINUX: usize = 2;
+/// A suggestion's dismiss button (top right of its tile).
+const DISMISS: i64 = 18;
+
 /// A start menu tile: a program (an index into its table) and whether it
 /// is installed (one of its paths exists).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +378,15 @@ enum Hit {
     Task(u32),
     Menu,
     MenuItem(usize),
+    /// The "Linux distributions" heading (collapses and expands).
+    LinuxHeading,
+    /// Its "Hide" button.
+    LinuxHide,
+    /// A distribution's tile, and a suggestion's dismiss button.
+    LinuxEntry(usize),
+    LinuxDismiss(usize),
+    /// An item of the start menu's context menu.
+    ContextItem(usize),
     /// A notification-area icon (its window and id).
     Tray(u64, u32),
     /// The balloon (NIF_INFO) on show.
@@ -358,6 +395,22 @@ enum Hit {
     Button(u32, CaptionButton),
     Client(u32),
     Frame(u32),
+}
+
+impl Hit {
+    /// A part of the open start menu.
+    fn in_menu(self) -> bool {
+        matches!(
+            self,
+            Hit::Menu
+                | Hit::MenuItem(_)
+                | Hit::LinuxHeading
+                | Hit::LinuxHide
+                | Hit::LinuxEntry(_)
+                | Hit::LinuxDismiss(_)
+                | Hit::ContextItem(_)
+        )
+    }
 }
 
 /// The compositor's own per-window data (`Window::chrome`): its caption
@@ -535,6 +588,16 @@ pub struct Desktop {
     minute: u64,
     /// A program the start menu asked to start (index into PROGRAMS).
     launch: Option<usize>,
+    /// What the "Linux distributions" section lists (registered
+    /// distributions and the user's choices), its tiles, the installs
+    /// under way, the context menu open in the start menu, what it asked
+    /// for, and whether the choices changed since they were saved.
+    linux: linux::Listing,
+    linux_tiles: Vec<linux::Distro>,
+    progress: Vec<(linux::Name, linux::Progress)>,
+    context: Option<linux::Context>,
+    linux_launch: Option<linux::Request>,
+    prefs_changed: bool,
     /// What was typed in the start menu (ASCII, filters the programs).
     search: [u8; 32],
     search_len: usize,
@@ -561,6 +624,8 @@ impl Default for Desktop {
     }
 }
 
+const EMPTY_PREFS: linux::Prefs = linux::Prefs { collapsed: false, hidden: false, dismissed: 0 };
+
 /// What the compositor draws outside a window: its soft shadow.
 const SHADOW: Shadow = Shadow { reach: SHADOW_REACH, drop: SHADOW_DROP };
 
@@ -585,6 +650,12 @@ impl Desktop {
             resize: None,
             minute: 0,
             launch: None,
+            linux: linux::Listing { installed: Vec::new(), prefs: EMPTY_PREFS },
+            linux_tiles: Vec::new(),
+            progress: Vec::new(),
+            context: None,
+            linux_launch: None,
+            prefs_changed: false,
             search: [0; 32],
             search_len: 0,
             recent: [usize::MAX; 4],
@@ -1082,6 +1153,53 @@ impl Desktop {
         }
     }
 
+    /// Whether the "Linux distributions" section shows (not hidden; not
+    /// while searching: the search lists programs only).
+    fn linux_shown(&self) -> bool {
+        !self.linux.prefs.hidden && self.search_len == 0
+    }
+
+    /// The pinned grid's rows: as many as its tiles take, at most two
+    /// while the Linux section shows below them, else as many as fit.
+    fn pinned_rows(&self) -> usize {
+        let n = self.listed().len().max(1);
+        let rows = n.div_ceil(GRID_COLUMNS);
+        if self.linux_shown() { rows.min(PINNED_ROWS_WITH_LINUX) } else { rows }
+    }
+
+    /// The Linux section's heading (the whole row: a click on its left
+    /// collapses or expands, "Hide" at its right).
+    fn linux_heading_rect(&self) -> Rect {
+        let m = self.menu_rect();
+        let y = m.y + GRID_Y + self.pinned_rows() as i64 * TILE_H + 4;
+        Rect { x: m.x + GRID_X, y, w: m.w - 2 * GRID_X, h: LINUX_HEADING - 4 }
+    }
+
+    /// Its "Hide" button, at the heading's right.
+    fn linux_hide_rect(&self) -> Rect {
+        let h = self.linux_heading_rect();
+        Rect { x: h.x + h.w - 56, y: h.y, w: 56, h: h.h }
+    }
+
+    /// Distribution tile `k` (one row below the heading).
+    fn linux_tile_rect(&self, k: usize) -> Rect {
+        let h = self.linux_heading_rect();
+        Rect { x: h.x + k as i64 * TILE_W, y: h.y + LINUX_HEADING, w: TILE_W - 4, h: TILE_H - 4 }
+    }
+
+    /// A suggestion's dismiss button on tile `k`.
+    fn linux_dismiss_rect(&self, k: usize) -> Rect {
+        let r = self.linux_tile_rect(k);
+        Rect { x: r.x + r.w - DISMISS, y: r.y, w: DISMISS, h: DISMISS }
+    }
+
+    /// The open context menu's rectangle on the screen.
+    fn context_rect(&self) -> Option<Rect> {
+        let c = self.context.as_ref()?;
+        let m = self.menu_rect();
+        Some(Rect { x: m.x + c.x, y: m.y + c.y, w: linux::CONTEXT_W, h: c.height() })
+    }
+
     fn cursor_rect(&self) -> Rect {
         Rect { x: self.pointer.0, y: self.pointer.1, w: 14, h: CURSOR.len() as i64 + 2 }
     }
@@ -1103,10 +1221,40 @@ impl Desktop {
         if self.s.screen.0 == 0 {
             return Hit::Nothing;
         }
+        if self.menu.is_some()
+            && let Some(r) = self.context_rect()
+            && r.contains(x, y)
+        {
+            let i = (y - r.y - 4).div_euclid(linux::ITEM_H);
+            let count = self.context.map_or(0, |c| c.count()) as i64;
+            return if (0..count).contains(&i) { Hit::ContextItem(i as usize) } else { Hit::Menu };
+        }
         if self.menu.is_some() && self.menu_rect().contains(x, y) {
-            for (k, _) in self.listed().iter().enumerate() {
+            let shown = self.pinned_rows() * GRID_COLUMNS;
+            for (k, _) in self.listed().iter().enumerate().take(shown) {
                 if self.menu_item_rect(k).contains(x, y) {
                     return Hit::MenuItem(k);
+                }
+            }
+            if self.linux_shown() {
+                if self.linux_hide_rect().contains(x, y) {
+                    return Hit::LinuxHide;
+                }
+                if self.linux_heading_rect().contains(x, y) {
+                    return Hit::LinuxHeading;
+                }
+                if !self.linux.prefs.collapsed {
+                    for (k, d) in self.linux_tiles.iter().enumerate() {
+                        if !d.installed
+                            && d.suggestion.is_some()
+                            && self.linux_dismiss_rect(k).contains(x, y)
+                        {
+                            return Hit::LinuxDismiss(k);
+                        }
+                        if self.linux_tile_rect(k).contains(x, y) {
+                            return Hit::LinuxEntry(k);
+                        }
+                    }
                 }
             }
             return Hit::Menu;
@@ -1281,6 +1429,9 @@ impl Desktop {
                 self.tray.button((h, u), tray::Button::Right, false, x, y);
             }
         }
+        if released & 2 != 0 && self.menu.is_some() && hit.in_menu() {
+            self.right_click(hit, x, y);
+        }
         if pressed & 2 != 0
             && let Hit::Client(id) = hit
         {
@@ -1316,7 +1467,13 @@ impl Desktop {
                     self.taskbar_dirty = true;
                     self.card_dirty = true;
                 }
-                Hit::MenuItem(_) | Hit::Menu => self.menu_dirty = true,
+                Hit::MenuItem(_)
+                | Hit::Menu
+                | Hit::LinuxHeading
+                | Hit::LinuxHide
+                | Hit::LinuxEntry(_)
+                | Hit::LinuxDismiss(_)
+                | Hit::ContextItem(_) => self.menu_dirty = true,
                 _ => {}
             }
         }
@@ -1325,8 +1482,16 @@ impl Desktop {
     fn left_down(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         self.pressed = hit;
         // A click outside the open menu closes it (and does nothing else).
-        if self.menu.is_some() && !matches!(hit, Hit::Menu | Hit::MenuItem(_) | Hit::Start) {
+        if self.menu.is_some() && !hit.in_menu() && hit != Hit::Start {
             self.close_menu();
+            self.pressed = Hit::Nothing;
+            return;
+        }
+        // A click beside the open context menu closes it (and does nothing
+        // else).
+        if self.context.is_some() && !matches!(hit, Hit::ContextItem(_)) {
+            self.context = None;
+            self.menu_dirty = true;
             self.pressed = Hit::Nothing;
             return;
         }
@@ -1371,7 +1536,13 @@ impl Desktop {
                 self.s.note_button(id, WM_LBUTTONDOWN, x, y, false);
                 self.s.send(id, WM_LBUTTONDOWN, keys, lp);
             }
-            Hit::Menu | Hit::MenuItem(_) => self.menu_dirty = true,
+            Hit::Menu
+            | Hit::MenuItem(_)
+            | Hit::LinuxHeading
+            | Hit::LinuxHide
+            | Hit::LinuxEntry(_)
+            | Hit::LinuxDismiss(_)
+            | Hit::ContextItem(_) => self.menu_dirty = true,
             Hit::Tray(h, u) => self.tray.button((h, u), tray::Button::Left, true, x, y),
             Hit::Nothing | Hit::Taskbar | Hit::Balloon => {}
         }
@@ -1501,6 +1672,19 @@ impl Desktop {
                 self.launch = self.listed().get(a).map(|e| e.program);
                 self.close_menu();
             }
+            (Hit::LinuxHeading, Hit::LinuxHeading) => {
+                self.linux.prefs.collapsed = !self.linux.prefs.collapsed;
+                self.prefs_changed = true;
+                self.menu_dirty = true;
+            }
+            (Hit::LinuxHide, Hit::LinuxHide) => {
+                self.linux.prefs.hidden = true;
+                self.prefs_changed = true;
+                self.menu_dirty = true;
+            }
+            (Hit::LinuxDismiss(a), Hit::LinuxDismiss(b)) if a == b => self.dismiss(a),
+            (Hit::LinuxEntry(a), Hit::LinuxEntry(b)) if a == b => self.linux_click(a),
+            (Hit::ContextItem(a), Hit::ContextItem(b)) if a == b => self.context_item(a),
             (Hit::Client(id), _) => {
                 let lp = self.s.client_lparam(id, x, y);
                 self.s.note_button(id, WM_LBUTTONUP, x, y, false);
@@ -1513,13 +1697,146 @@ impl Desktop {
                 self.tray.balloon_clicked();
                 self.card_dirty = true;
             }
-            (Hit::Menu | Hit::MenuItem(_), _) => self.menu_dirty = true,
+            (h, _) if h.in_menu() => self.menu_dirty = true,
             _ => {}
         }
     }
 
+    /// A right click (its release) at `hit`: an installed distribution's
+    /// tile opens its context menu (a terminal, its applications); the
+    /// menu's background, while the Linux section is hidden, one that
+    /// shows it again.
+    fn right_click(&mut self, hit: Hit, x: i64, y: i64) {
+        let m = self.menu_rect();
+        let mut items = [None; linux::MAX_APPS + 1];
+        let distro = match hit {
+            Hit::LinuxEntry(k) => {
+                let Some(d) = self.linux_tiles.get(k).filter(|d| d.installed) else { return };
+                items[0] = Some(linux::Item::Terminal);
+                for (i, _) in d.apps().enumerate() {
+                    items[i + 1] = Some(linux::Item::App(i));
+                }
+                Some(k)
+            }
+            Hit::Menu | Hit::MenuItem(_) if self.linux.prefs.hidden && self.search_len == 0 => {
+                items[0] = Some(linux::Item::ShowSection);
+                None
+            }
+            _ => return,
+        };
+        let mut c = linux::Context { distro, x: 0, y: 0, items };
+        // At the pointer, kept inside the menu.
+        c.x = (x - m.x).clamp(8, (m.w - linux::CONTEXT_W - 8).max(8));
+        c.y = (y - m.y).clamp(8, (m.h - c.height() - 8).max(8));
+        self.context = Some(c);
+        self.menu_dirty = true;
+    }
+
+    /// Context menu item `i` clicked.
+    fn context_item(&mut self, i: usize) {
+        let Some(c) = self.context.take() else { return };
+        self.menu_dirty = true;
+        let Some(item) = c.items.iter().flatten().nth(i).copied() else { return };
+        let distro = c.distro.and_then(|k| self.linux_tiles.get(k)).copied();
+        match (item, distro) {
+            (linux::Item::ShowSection, _) => {
+                self.linux.prefs.hidden = false;
+                self.prefs_changed = true;
+            }
+            (linux::Item::Terminal, Some(d)) => {
+                self.linux_launch = Some(linux::Request::Terminal(d.name));
+                self.close_menu();
+            }
+            (linux::Item::App(a), Some(d)) => {
+                if let Some(app) = d.apps().nth(a) {
+                    self.linux_launch = Some(linux::Request::App(d.name, *app));
+                    self.close_menu();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Distribution tile `k` clicked: an installed one starts its desktop
+    /// (the menu closes); a suggestion installs (the menu stays, the
+    /// tile shows the progress); one installing does nothing more.
+    fn linux_click(&mut self, k: usize) {
+        let Some(d) = self.linux_tiles.get(k).copied() else { return };
+        if d.installed {
+            self.linux_launch = Some(linux::Request::Desktop(d.name));
+            self.close_menu();
+            return;
+        }
+        let busy = self
+            .progress
+            .iter()
+            .any(|(n, p)| *n == d.name && !matches!(p, linux::Progress::Failed));
+        if busy {
+            return;
+        }
+        let Some(s) = d.suggestion else { return };
+        self.progress.retain(|(n, _)| *n != d.name);
+        if self.progress.try_push((d.name, linux::Progress::Downloading(0))).is_ok() {
+            self.linux_launch = Some(linux::Request::Install(d.name, s));
+        }
+        self.menu_dirty = true;
+    }
+
+    /// Suggestion tile `k`'s dismiss button clicked: it is not suggested
+    /// again (kept in the user's choices).
+    fn dismiss(&mut self, k: usize) {
+        let Some(s) = self.linux_tiles.get(k).and_then(|d| d.suggestion) else { return };
+        if s < 32 {
+            self.linux.prefs.dismissed |= 1 << s;
+        }
+        self.prefs_changed = true;
+        self.linux_tiles = linux::entries(&self.linux);
+        self.menu_dirty = true;
+    }
+
+    /// What the Linux section lists now (read outside the lock); installs
+    /// whose distribution is registered now are over. The menu's choices
+    /// stay the desktop's while they wait to be saved.
+    pub fn set_linux(&mut self, mut listing: linux::Listing) {
+        if self.prefs_changed {
+            listing.prefs = self.linux.prefs;
+        }
+        self.linux = listing;
+        let installed = &self.linux.installed;
+        self.progress.retain(|(n, _)| !installed.iter().any(|d| d.name == *n));
+        let tiles = linux::entries(&self.linux);
+        if tiles != self.linux_tiles {
+            self.linux_tiles = tiles;
+            self.menu_dirty = true;
+        }
+    }
+
+    /// An install's progress (`gala linux-install` through
+    /// GalaDesktopAction): None when it is over (the listing that follows
+    /// shows the distribution installed).
+    pub fn linux_progress(&mut self, name: linux::Name, progress: Option<linux::Progress>) {
+        self.progress.retain(|(n, _)| *n != name);
+        if let Some(p) = progress {
+            let _ = self.progress.try_push((name, p));
+        }
+        self.menu_dirty = true;
+        self.refresh();
+    }
+
+    /// The user's choices once they changed (to be saved in the
+    /// registry, outside the lock).
+    pub fn take_prefs(&mut self) -> Option<linux::Prefs> {
+        core::mem::take(&mut self.prefs_changed).then_some(self.linux.prefs)
+    }
+
+    /// The Linux section's tiles (host tests, the state dump).
+    pub fn linux_tiles(&self) -> &[linux::Distro] {
+        &self.linux_tiles
+    }
+
     fn close_menu(&mut self) {
         self.search_len = 0;
+        self.context = None;
         if self.menu.take().is_some() {
             let b = self.menu_bounds();
             self.s.add_damage(b);
@@ -1527,9 +1844,12 @@ impl Desktop {
         }
     }
 
-    /// The program the start menu asked to start, once (it becomes the
+    /// What the start menu asked to start, once (a program becomes the
     /// most recent).
-    pub fn take_launch(&mut self) -> Option<&'static Program> {
+    pub fn take_launch(&mut self) -> Option<Launch> {
+        if let Some(r) = self.linux_launch.take() {
+            return Some(Launch::Linux(r));
+        }
         let i = self.launch.take()?;
         if let Some(at) = self.recent.iter().position(|&r| r == i) {
             self.recent.copy_within(0..at, 1);
@@ -1537,11 +1857,12 @@ impl Desktop {
             self.recent.copy_within(0..3, 1);
         }
         self.recent[0] = i;
-        PROGRAMS.get(i)
+        PROGRAMS.get(i).map(Launch::Program)
     }
 
     fn open_menu(&mut self) {
         self.search_len = 0;
+        self.context = None;
         self.menu_dirty = true;
         self.menu = Canvas::new(1, 1, 0); // rendered by refresh
         let b = self.menu_bounds();
@@ -1864,7 +2185,8 @@ impl Desktop {
         // Pinned programs.
         c.text(52, 84, "Pinned".chars(), TEXT, Font::Ui14Semibold, w);
         let listed = self.listed();
-        for (k, &e) in listed.iter().enumerate() {
+        let shown = self.pinned_rows() * GRID_COLUMNS;
+        for (k, &e) in listed.iter().enumerate().take(shown) {
             let Some(program) = PROGRAMS.get(e.program) else { continue };
             let r = self.menu_item_rect(k).offset(-m.x, -m.y);
             if r.y + r.h > foot - 120 {
@@ -1902,6 +2224,9 @@ impl Desktop {
                 if self.search_len == 0 { "No programs installed" } else { "No programs match" };
             c.text(52, GRID_Y + 10, text.chars(), TEXT_DIM, Font::Ui12, w - 32);
         }
+        if self.linux_shown() {
+            self.render_linux(&mut c);
+        }
         // Recently started programs.
         let rec_y = foot - 112;
         c.text(52, rec_y, "Recommended".chars(), TEXT, Font::Ui14Semibold, w);
@@ -1929,7 +2254,155 @@ impl Desktop {
         c.round_rect(52, foot + 16, 32, 32, 16, LOGO_TOP, LOGO_BOTTOM, 255);
         c.mask(56, foot + 20, paint::FORTRESS24, 24, 0x00ff_ffff, 0x00ff_ffff, 255);
         c.text(96, foot + 24, "gala".chars(), TEXT, Font::Ui12, w - 40);
+        self.render_context(&mut c);
         Some(c)
+    }
+
+    /// How lit a part of the menu is under the pointer (pressed: more).
+    fn lit(&self, part: Hit) -> u32 {
+        match (self.hover, self.pressed) {
+            (a, b) if a == part && b == part => 210,
+            (a, _) if a == part => 170,
+            _ => 0,
+        }
+    }
+
+    /// The "Linux distributions" section: its heading (a chevron down
+    /// when expanded, right when collapsed; "Hide" at the right), then
+    /// its tiles: dimmed with a download badge and a dismiss cross while
+    /// not installed, a progress bar while installing (red when it
+    /// failed).
+    fn render_linux(&self, c: &mut Canvas) {
+        let m = self.menu_rect();
+        let hr = self.linux_heading_rect().offset(-m.x, -m.y);
+        let lit = self.lit(Hit::LinuxHeading);
+        if lit > 0 {
+            c.round_rect(hr.x, hr.y, hr.w - 60, hr.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
+        }
+        let end = c.text(
+            hr.x + 20,
+            hr.y + 2,
+            "Linux distributions".chars(),
+            TEXT,
+            Font::Ui14Semibold,
+            hr.x + hr.w,
+        );
+        let (cx, cy) = (end + 10, hr.y + 8);
+        for t in 0..5 {
+            if self.linux.prefs.collapsed {
+                c.put(cx + 2 + t, cy - 1 + t, TEXT, 255);
+                c.put(cx + 2 + t, cy + 7 - t, TEXT, 255);
+            } else {
+                c.put(cx + t, cy + 1 + t, TEXT, 255);
+                c.put(cx + 8 - t, cy + 1 + t, TEXT, 255);
+            }
+        }
+        let hide = self.linux_hide_rect().offset(-m.x, -m.y);
+        let lit = self.lit(Hit::LinuxHide);
+        if lit > 0 {
+            c.round_rect(hide.x, hide.y, hide.w, hide.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
+        }
+        let hw = Font::Ui12.measure("Hide".chars());
+        c.text(
+            hide.x + (hide.w - hw) / 2,
+            hide.y + 4,
+            "Hide".chars(),
+            TEXT_DIM,
+            Font::Ui12,
+            hide.x + hide.w,
+        );
+        if self.linux.prefs.collapsed {
+            return;
+        }
+        if self.linux_tiles.is_empty() {
+            let r = self.linux_tile_rect(0).offset(-m.x, -m.y);
+            c.text(
+                r.x + 20,
+                r.y + 10,
+                "No distributions suggested".chars(),
+                TEXT_DIM,
+                Font::Ui12,
+                m.w - 32,
+            );
+            return;
+        }
+        for (k, d) in self.linux_tiles.iter().enumerate() {
+            let r = self.linux_tile_rect(k).offset(-m.x, -m.y);
+            let lit = self.lit(Hit::LinuxEntry(k));
+            if lit > 0 {
+                c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
+            }
+            let progress = self.progress.iter().find(|(n, _)| *n == d.name).map(|&(_, p)| p);
+            let alpha = if d.installed { 255 } else { 120 };
+            let (colors_top, colors_bottom) = d.colors();
+            let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
+            c.round_rect(ix, iy, 32, 32, 6, colors_top, colors_bottom, alpha);
+            let letter = d.name.as_str().chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
+            let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
+            c.text(
+                ix + 16 - lw / 2,
+                iy + 7,
+                core::iter::once(letter),
+                0x00ff_ffff,
+                Font::Ui14Semibold,
+                ix + 32,
+            );
+            tile_name(c, r, d.name.as_str());
+            match progress {
+                Some(p) => {
+                    // The bar under the name.
+                    let (bx, by, bw) = (r.x + 12, r.y + 68, r.w - 24);
+                    c.round_rect(bx, by, bw, 4, 2, 0x00_d0_d5_dc, 0x00_d0_d5_dc, 255);
+                    let fill = bw * i64::from(p.percent()) / 100;
+                    let color = if p == linux::Progress::Failed { CLOSE_HOVER } else { ACCENT };
+                    if fill > 0 {
+                        c.round_rect(bx, by, fill.max(4), 4, 2, color, color, 255);
+                    }
+                }
+                None if !d.installed => download_badge(c, ix + 20, iy + 20),
+                None => {}
+            }
+            if !d.installed && d.suggestion.is_some() && progress.is_none() {
+                let x = self.linux_dismiss_rect(k).offset(-m.x, -m.y);
+                let lit = self.lit(Hit::LinuxDismiss(k));
+                if lit > 0 {
+                    c.round_rect(x.x, x.y, x.w, x.h, 9, 0x00_d0_d5_dc, 0x00_d0_d5_dc, lit);
+                }
+                let (ox, oy) = (x.x + 5, x.y + 5);
+                for t in 0..8 {
+                    c.put(ox + t, oy + t, TEXT_DIM, 230);
+                    c.put(ox + 7 - t, oy + t, TEXT_DIM, 230);
+                }
+            }
+        }
+    }
+
+    /// The context menu open in the start menu: a white card with its
+    /// items (the one under the pointer lit).
+    fn render_context(&self, c: &mut Canvas) {
+        let Some(ctx) = &self.context else { return };
+        let (x, y, w, h) = (ctx.x, ctx.y, linux::CONTEXT_W, ctx.height());
+        for d in 1..4 {
+            c.round_outline(x - d, y - d + 1, w + 2 * d, h + 2 * d, 8 + d, 0, 18);
+        }
+        c.round_rect(x, y, w, h, 8, 0x00ff_ffff, 0x00ff_ffff, 255);
+        c.round_outline(x, y, w, h, 8, MENU_BORDER, 255);
+        let distro = ctx.distro.and_then(|k| self.linux_tiles.get(k));
+        for (i, item) in ctx.items.iter().flatten().enumerate() {
+            let iy = y + 4 + i as i64 * linux::ITEM_H;
+            let lit = self.lit(Hit::ContextItem(i));
+            if lit > 0 {
+                c.round_rect(x + 4, iy, w - 8, linux::ITEM_H, 4, 0x00_e6_ea_f0, 0x00_e6_ea_f0, lit);
+            }
+            let label = match item {
+                linux::Item::Terminal => "Open terminal",
+                linux::Item::ShowSection => "Show Linux distributions",
+                linux::Item::App(a) => {
+                    distro.and_then(|d| d.apps().nth(*a)).map_or("?", |app| app.name.as_str())
+                }
+            };
+            c.text(x + 16, iy + 8, label.chars(), TEXT, Font::Ui12, x + w - 12);
+        }
     }
 
     /// The colour of screen point (x, y), all layers composed.
@@ -2656,7 +3129,7 @@ pub fn process_ended(shell: &Shell, owner: u64) {
 /// before that desktop is live, nor during a console switch.
 /// Returns the session and the program its start menu asked to start, if
 /// any.
-pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<(u32, &'static Program)> {
+pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<(u32, Launch)> {
     let desk = console()?;
     pointer_on(&desk.shell, buttons, |d| d.pointer(dx, dy, buttons))
         .map(|p| (desk.shell.session, p))
@@ -2669,27 +3142,40 @@ fn pointer_on(
     shell: &Shell,
     buttons: u8,
     go: impl FnOnce(&mut Desktop) -> Vec<Rect>,
-) -> Option<&'static Program> {
-    // Which programs exist (outside the desktop's lock: the file system).
-    let (available, n) = if buttons & 1 != 0 { available_programs() } else { NO_TILES };
+) -> Option<Launch> {
+    // Which programs exist and what the Linux section lists (outside the
+    // desktop's lock: the file system, the registry), when a press may
+    // open the menu.
+    let opens = buttons & 1 != 0 && !shell.d.lock().menu_open();
+    let (available, n) = if opens { available_programs() } else { NO_TILES };
+    let listing = if opens { Some(linux_listing()) } else { None };
     let mut d = shell.d.lock();
     // No pointer moves on a bare desktop.
     if !d.s.live || d.bare.is_some() {
         return None;
     }
-    if buttons & 1 != 0 && !d.menu_open() {
-        d.set_programs(&available[..n]);
+    if !d.menu_open() {
+        if opens {
+            d.set_programs(&available[..n]);
+        }
+        if let Some(listing) = listing {
+            d.set_linux(listing);
+        }
     }
     let damage = go(&mut d);
     for r in damage {
         redraw(&mut d, r);
     }
     let launch = d.take_launch();
+    let prefs = d.take_prefs();
     let wakes = d.take_wakes();
     let posts = d.take_tray_posts();
     drop(d);
     signal(wakes);
     tell_tray(shell, posts);
+    if let Some(p) = prefs {
+        save_prefs(p);
+    }
     launch
 }
 
@@ -2709,7 +3195,7 @@ pub enum Injected {
 /// when a Test presenter shows it: STATUS_INVALID_DEVICE_STATE otherwise
 /// (the console's desktop gets the PS/2 devices, one shown by nothing
 /// gets nothing). Returns the program its start menu asked to start.
-pub fn inject(shell: &Shell, input: Injected) -> Result<Option<&'static Program>, NtStatus> {
+pub fn inject(shell: &Shell, input: Injected) -> Result<Option<Launch>, NtStatus> {
     {
         let d = shell.d.lock();
         if !d.s.live || d.presenter.kind() != Kind::Test {
@@ -2775,6 +3261,293 @@ fn download_badge(c: &mut Canvas, x: i64, y: i64) {
 /// system: not under the desktop's lock.
 fn available_programs() -> ([Entry; MAX_TILES], usize) {
     list_programs(PROGRAMS, &mut |path| super::process::program_exists(path))
+}
+
+/// The boot user's hive below `\REGISTRY` (the start menu's user:
+/// `token::USER`, whose HKCU this is).
+const USER_HIVE: &str = "USER\\S-1-5-21-1000000001-1000000002-1000000003-1001";
+/// WSL's registrations (ARCHITECTURE "The WSL facade") and the start
+/// menu's choices, in that hive.
+const LXSS: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss";
+const START_MENU_KEY: &str = "Software\\gala\\StartMenu";
+const REG_SZ: u32 = 1;
+const REG_DWORD: u32 = 4;
+const REG_MULTI_SZ: u32 = 7;
+
+/// `parts` joined by backslashes, as UTF-16 (a registry path).
+fn reg_path(parts: &[&str]) -> Option<Vec<u16>> {
+    let mut out = Vec::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.try_push(u16::from(b'\\')).ok()?;
+        }
+        for u in p.encode_utf16() {
+            out.try_push(u).ok()?;
+        }
+    }
+    Some(out)
+}
+
+fn wide_name<const N: usize>(name: &str) -> ([u16; N], usize) {
+    let mut w = [0u16; N];
+    let mut n = 0;
+    for u in name.encode_utf16().take(N) {
+        w[n] = u;
+        n += 1;
+    }
+    (w, n)
+}
+
+/// A REG_SZ's text (UTF-16, up to its NUL) as ASCII in `out`; None for
+/// anything else.
+fn reg_text<const N: usize>(v: &super::registry::Value) -> Option<linux::Text<N>> {
+    if v.kind != REG_SZ {
+        return None;
+    }
+    let mut b = [0u8; N];
+    let mut n = 0;
+    for c in v.data.chunks_exact(2) {
+        let u = u16::from_le_bytes([c[0], c[1]]);
+        if u == 0 {
+            break;
+        }
+        *b.get_mut(n)? = u8::try_from(u).ok().filter(u8::is_ascii)?;
+        n += 1;
+    }
+    linux::Text::new(&b[..n])
+}
+
+/// What the start menu's "Linux distributions" section lists: the
+/// boot user's registered distributions (Lxss keys in State 1, each with
+/// its applications) and their choices. Reads the registry and the
+/// distributions' files: never under the desktop's lock.
+fn linux_listing() -> linux::Listing {
+    use super::registry::{self, ROOT};
+    let mut listing = linux::Listing::default();
+    // (name, base path) of each registration.
+    let mut found: Vec<(linux::Name, linux::Text<260>)> = Vec::new();
+    let _ = registry::with(|r| {
+        let path = reg_path(&[USER_HIVE, START_MENU_KEY]).ok_or(NtStatus::NO_MEMORY)?;
+        if let Ok(key) = r.lookup(ROOT, &path) {
+            let dword = |r: &registry::Registry, name: &str| {
+                let (w, n) = wide_name::<32>(name);
+                r.value(key, &w[..n]).ok().and_then(|v| {
+                    (v.kind == REG_DWORD && v.data.len() >= 4)
+                        .then(|| u32::from_le_bytes([v.data[0], v.data[1], v.data[2], v.data[3]]))
+                })
+            };
+            listing.prefs.collapsed = dword(r, "LinuxCollapsed").unwrap_or(0) != 0;
+            listing.prefs.hidden = dword(r, "LinuxHidden").unwrap_or(0) != 0;
+            let (w, n) = wide_name::<32>("LinuxDismissed");
+            if let Ok(v) = r.value(key, &w[..n])
+                && v.kind == REG_MULTI_SZ
+            {
+                listing.prefs.dismissed = linux::Prefs::read_dismissed(&v.data);
+            }
+        }
+        let path = reg_path(&[USER_HIVE, LXSS]).ok_or(NtStatus::NO_MEMORY)?;
+        let lxss = r.lookup(ROOT, &path)?;
+        let mut i = 0;
+        while let Ok(sub) = r.subkey(lxss, i) {
+            i += 1;
+            let value = |name: &str| {
+                let (w, n) = wide_name::<32>(name);
+                r.value(sub, &w[..n]).ok()
+            };
+            let state = value("State").and_then(|v| v.data.first().copied());
+            let name = value("DistributionName").and_then(reg_text::<{ linux::NAME }>);
+            let base = value("BasePath").and_then(reg_text::<260>);
+            if let (Some(1), Some(name), Some(base)) = (state, name, base)
+                && found.try_push((name, base)).is_err()
+            {
+                break;
+            }
+        }
+        Ok(())
+    });
+    for (name, base) in found {
+        let mut d = linux::Distro::new(name, true);
+        distro_apps(base.as_bytes(), &mut d);
+        if listing.installed.try_push(d).is_err() {
+            break;
+        }
+    }
+    listing
+}
+
+/// Registered distribution `name`'s tree (its Lxss key's BasePath).
+pub fn distro_root_of(name: &[u8]) -> Option<crate::fs::ramfs::NodeId> {
+    use super::registry::{self, ROOT};
+    let mut base = None;
+    let _ = registry::with(|r| {
+        let path = reg_path(&[USER_HIVE, LXSS]).ok_or(NtStatus::NO_MEMORY)?;
+        let lxss = r.lookup(ROOT, &path)?;
+        let mut i = 0;
+        while let Ok(sub) = r.subkey(lxss, i) {
+            i += 1;
+            let value = |name: &str| {
+                let (w, n) = wide_name::<32>(name);
+                r.value(sub, &w[..n]).ok()
+            };
+            let this = value("DistributionName").and_then(reg_text::<{ linux::NAME }>);
+            if this.is_some_and(|t| t.as_bytes() == name) {
+                base = value("BasePath").and_then(reg_text::<260>);
+                break;
+            }
+        }
+        Ok(())
+    });
+    distro_root(base?.as_bytes())
+}
+
+/// A distribution's tree (`<BasePath>\rootfs`, a C: path) as a node.
+fn distro_root(base: &[u8]) -> Option<crate::fs::ramfs::NodeId> {
+    let rest = match base {
+        [d, b':', rest @ ..] if d.eq_ignore_ascii_case(&b'c') => rest,
+        _ => return None,
+    };
+    let mut path = Vec::new();
+    for &b in rest.iter().chain(b"\\rootfs") {
+        path.try_push(if b == b'\\' { b'/' } else { b }).ok()?;
+    }
+    crate::lx::file::resolve_in(crate::fs::ramfs::ROOT, &path, true).and_then(|f| f.existing()).ok()
+}
+
+/// A distribution's applications: its `/usr/share/applications/*.desktop`
+/// files (in name order, as the file system lists them), those that
+/// describe one (`linux::parse_desktop`), at most MAX_APPS.
+fn distro_apps(base: &[u8], d: &mut linux::Distro) {
+    const DIR: &[u8] = b"/usr/share/applications";
+    let Some(root) = distro_root(base) else { return };
+    let Ok(dir) = crate::lx::file::resolve_in(root, DIR, true).and_then(|f| f.existing()) else {
+        return;
+    };
+    let mut names: Vec<linux::Text<128>> = Vec::new();
+    super::file::with_fs(|fs| {
+        let Ok(entries) = fs.entries(dir) else { return };
+        for (_, name) in entries {
+            let mut b = [0u8; 128];
+            let ascii = name.len() <= b.len()
+                && name.iter().zip(b.iter_mut()).all(|(&u, o)| {
+                    *o = u as u8;
+                    u < 0x80
+                });
+            let text = &b[..name.len().min(128)];
+            if ascii
+                && text.ends_with(b".desktop")
+                && let Some(t) = linux::Text::new(text)
+                && names.try_push(t).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut n = 0;
+    for name in names.iter().take(64) {
+        let mut path = [0u8; 160];
+        let len = DIR.len() + 1 + name.as_bytes().len();
+        let Some(slot) = path.get_mut(..len) else { continue };
+        slot[..DIR.len()].copy_from_slice(DIR);
+        slot[DIR.len()] = b'/';
+        slot[DIR.len() + 1..].copy_from_slice(name.as_bytes());
+        let Ok(node) =
+            crate::lx::file::resolve_in(root, &path[..len], true).and_then(|f| f.existing())
+        else {
+            continue;
+        };
+        let mut text = [0u8; 8192];
+        let read = super::file::with_fs(|fs| fs.read(node, 0, &mut text).unwrap_or(0));
+        if let Some(app) = linux::parse_desktop(&text[..read]) {
+            d.apps[n] = Some(app);
+            n += 1;
+            if n == linux::MAX_APPS {
+                break;
+            }
+        }
+    }
+}
+
+/// Saves the start menu's Linux choices in the boot user's hive
+/// (HKCU\Software\gala\StartMenu), kept across reboots as every key is
+/// (`persist`); logged, with a `window` event.
+fn save_prefs(p: linux::Prefs) {
+    use super::registry::{self, ROOT};
+    let now = platform::system_time();
+    let saved = registry::with(|r| {
+        let mut at = ROOT;
+        for part in USER_HIVE.split('\\').chain(START_MENU_KEY.split('\\')) {
+            let (w, n) = wide_name::<64>(part);
+            at = r.create(at, &w[..n], 0, &[], now)?.0;
+        }
+        for (name, on) in [("LinuxCollapsed", p.collapsed), ("LinuxHidden", p.hidden)] {
+            let (w, n) = wide_name::<32>(name);
+            r.set_value(at, &w[..n], REG_DWORD, &u32::from(on).to_le_bytes(), now)?;
+        }
+        let data = p.write_dismissed().ok_or(NtStatus::NO_MEMORY)?;
+        let (w, n) = wide_name::<32>("LinuxDismissed");
+        r.set_value(at, &w[..n], REG_MULTI_SZ, &data, now)
+    });
+    let mut names = [0u8; 64];
+    let mut len = 0;
+    for (i, s) in linux::SUGGESTIONS.iter().enumerate() {
+        if p.is_dismissed(i) && len + s.name.len() < names.len() {
+            if len > 0 {
+                names[len] = b',';
+                len += 1;
+            }
+            names[len..len + s.name.len()].copy_from_slice(s.name.as_bytes());
+            len += s.name.len();
+        }
+    }
+    let dismissed = core::str::from_utf8(&names[..len]).unwrap_or("");
+    match saved {
+        Ok(()) => crate::info!(
+            "desktop: start menu: Linux distributions {}{}, dismissed [{dismissed}] (saved in HKCU\\{START_MENU_KEY})",
+            if p.hidden { "hidden" } else { "shown" },
+            if p.collapsed { ", collapsed" } else { "" },
+        ),
+        Err(e) => crate::warn!("desktop: start menu: Linux choices not saved: {e:?}"),
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"linux prefs","hidden":{},"collapsed":{},"dismissed":"{}","status":{}"#,
+            p.hidden,
+            p.collapsed,
+            crate::events::Str(dismissed),
+            saved.err().map_or(0, |e| e.0)
+        ),
+    );
+}
+
+/// An install's progress for `shell`'s start menu (GalaDesktopAction's
+/// LinuxProgress from `gala linux-install`): `state` 0 downloading
+/// (`percent`), 1 importing, 2 done (the section lists again: the
+/// distribution is registered), 3 failed.
+pub fn linux_progress(
+    shell: &Shell,
+    name: &[u8],
+    state: i32,
+    percent: i32,
+) -> Result<(), NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let name = linux::Name::new(name).filter(|n| linux::valid_name(n.as_bytes()));
+    let name = name.ok_or(NtStatus::INVALID_PARAMETER)?;
+    let progress = match state {
+        2 => None,
+        _ => Some(linux::Progress::from_state(state, percent).ok_or(NtStatus::INVALID_PARAMETER)?),
+    };
+    let listing = if progress.is_none() { Some(linux_listing()) } else { None };
+    let mut d = shell.d.lock();
+    if let Some(listing) = listing {
+        d.set_linux(listing);
+    }
+    d.linux_progress(name, progress);
+    redraw_damage(&mut d);
+    Ok(())
 }
 
 /// The start menu's installed programs, each with the path that starts it
@@ -3014,7 +3787,7 @@ fn wheel_on(shell: &Shell, notches: i64) {
 
 /// A key to the desktop the console shows. Returns the session and the
 /// program its start menu asked to start (Enter in the menu), if any.
-pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, &'static Program)> {
+pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, Launch)> {
     let desk = console()?;
     key_on(&desk.shell, vk, scan, extended, down).map(|p| (desk.shell.session, p))
 }
@@ -3023,17 +3796,22 @@ pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, &
 const NO_TILES: ([Entry; MAX_TILES], usize) =
     ([Entry { program: 0, installed: false }; MAX_TILES], 0);
 
-fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option<&'static Program> {
+fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option<Launch> {
     // The Windows key's release may open the start menu: which programs
-    // exist (outside the desktop's lock: the file system).
+    // exist and what the Linux section lists (outside the desktop's lock:
+    // the file system, the registry).
     let opens = (vk == 0x5b || vk == 0x5c) && !down;
     let (available, n) = if opens { available_programs() } else { NO_TILES };
+    let listing = if opens { Some(linux_listing()) } else { None };
     let mut d = shell.d.lock();
     if !d.s.live || d.bare.is_some() {
         return None;
     }
     if opens && !d.menu_open() {
         d.set_programs(&available[..n]);
+        if let Some(listing) = listing {
+            d.set_linux(listing);
+        }
     }
     d.key(vk, scan, extended, down);
     redraw_damage(&mut d);

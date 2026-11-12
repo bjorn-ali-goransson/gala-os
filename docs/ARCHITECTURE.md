@@ -6478,6 +6478,69 @@ session's is shown by nothing unless GalaSession attaches a presenter
   a console window`) and a `window` event `start menu` (op start,
   install or missing; session, name, target, pid, status). Scenario
   `start_menu` (start_menu_test, screen check).
+- **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
+  model and `.desktop` parsing, host tests there and in
+  `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned
+  grid (which then shows at most two rows; not while searching): a
+  heading "Linux distributions" with a chevron (a click collapses or
+  expands it) and "Hide" at its right, then one row of tiles: the
+  suggestions (`linux::SUGGESTIONS`: Ubuntu and Alpine, each the URL of
+  the rootfs its distribution publishes for WSL) in order, installed or
+  not dismissed, then the other registered distributions. A suggestion
+  not installed is dimmed with the download badge and a dismiss cross at
+  its top right. What it lists is read outside the desktop's lock when a
+  press may open the menu (`linux_listing`): the boot user's Lxss keys in
+  State 1 (DistributionName, BasePath) and, for each, its applications:
+  `<BasePath>\rootfs\usr\share\applications\*.desktop` walked inside
+  its tree (`lx::file::resolve_in`), the Desktop Entry Specification's
+  Type=Application entries with Name and Exec, not NoDisplay, Hidden or
+  Terminal, Exec's field codes taken out (at most MAX_APPS).
+  - The user's choices (`linux::Prefs`) are kept in their hive,
+    `HKCU\Software\gala\StartMenu`: LinuxCollapsed, LinuxHidden
+    (REG_DWORD) and LinuxDismissed (REG_MULTI_SZ of names, so the table
+    may change); written outside the lock after the click that changed
+    them (`save_prefs`), so `persist` keeps them across reboots as any
+    key; a listing read while a change waits keeps the menu's. A hidden
+    section comes back from the menu's own context menu (a right click
+    on its background: "Show Linux distributions").
+  - A click on a suggestion installs it and the menu stays open: the
+    tile gets a progress bar, and the system runs `C:\gala\gala.exe
+    linux-install <name> <url>` with no window (`nt::action::start_linux`;
+    the URL is the suggestion's, or `<linux_mirror>/<its file name>`
+    with the boot option `linux_mirror=`). gala.exe fetches it over
+    winhttp, writes `%LOCALAPPDATA%\Linux\<name>.rootfs.tar.gz`, runs
+    `wsl --import <name> %LOCALAPPDATA%\Linux\<name> <tarball>`, deletes
+    the tarball and tells the menu through GalaDesktopAction's
+    LinuxProgress (ACTION 14: downloading with a percent, importing,
+    done, failed); the bar fills to 80% over the download, 90% while
+    importing, red on failure (a click then tries again); "done" lists
+    again, so the tile shows the registered distribution.
+  - A click on an installed distribution starts its desktop: `wsl.exe -d
+    <name> --exec /bin/sh /lx/xdesktop/session.sh` (LD step 6's session:
+    rootful Xwayland on :1 as one window, twm, an xterm; it waits for
+    Xwayland's `-displayfd` and prints Xwayland's output when the session
+    fails) with no window of its own; a distribution without that script starts nothing
+    (logged, ledger `start menu`/`linux desktop session missing`). Its
+    context menu (a right click; drawn inside the menu, at the pointer)
+    has "Open terminal" (`wsl.exe -d <name>` in a console window, as
+    the Linux tile) and its applications (`wsl.exe -d <name> --exec
+    <Exec's words, quoted>`, no window: an X program reaches the
+    desktop's display :0 through Xwayland's abstract socket, a Wayland
+    one the server through WSLg's runtime directory: "The WSL facade").
+  - Observability: `desktop: start menu: <op> <name>: <program> <args>`
+    and a `window` event `start menu` per request (op `linux install`,
+    `linux desktop`, `linux terminal`, `linux app`; pid, status);
+    `desktop: start menu: Linux distribution <name>: <state> (<n>%)` and
+    an event `linux progress` at each state and each tenth of a
+    download; `desktop: start menu: Linux distributions shown|hidden[,
+    collapsed], dismissed [...] (saved in HKCU\...)` and an event `linux
+    prefs` for each change of the choices; gala.exe's `gala: linux:
+    <name>: ...` lines on the serial log.
+  - Limits: the desktop session is gala's script, which only the
+    scenario's stand-in carries (Canonical's image has neither it nor
+    Xwayland: its desktop is refused, its terminal and applications
+    work); one row of tiles (six); an install cannot be cancelled; the
+    progress of `wsl --import` itself is not reported (a fixed 90%).
 
 #### The notification area
 
@@ -12257,7 +12320,8 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   as fds 0-2 (`lx::ntio`); a program name without a slash is looked up
   on PATH (execvp's rule). The environment is WSL's default
   (HOSTTYPE, LANG, PATH, TERM) with HOME, USER, LOGNAME, SHELL from the
-  distribution's `/etc/passwd` entry of DefaultUid and WSL_DISTRO_NAME;
+  distribution's `/etc/passwd` entry of DefaultUid, WSL_DISTRO_NAME and
+  WSLg's DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR (below);
   the current directory is that home.
 - **Linux fds on NT objects** (`lx::ntio`): a pipe end, console input
   or output (the session's, or the serial line), a file (at its
@@ -12270,8 +12334,23 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   itself in raw mode. wsl.exe ignores Ctrl+C (the Linux side's key) and
   puts the console mode back when its program ends.
 - **A distribution's terminal**: `wsl -d <name>` (or the start menu's
-  Linux tile: `desktop::PROGRAMS`, the default distribution) in a console
-  window (gala's conhost.exe) is its login shell's terminal.
+  Linux tile: `desktop::PROGRAMS`, the default distribution; or a
+  distribution's "Open terminal" in its "Linux distributions" section)
+  in a console window (gala's conhost.exe) is its login shell's
+  terminal.
+- **Graphical programs** (WSLg's interface): wsl.exe gives every
+  program DISPLAY `:0`, WAYLAND_DISPLAY `wayland-0` and XDG_RUNTIME_DIR
+  `/mnt/wslg/runtime-dir`, as WSLg does. GalaLxSpawn makes, once per
+  tree, the socket node `/mnt/wslg/runtime-dir/wayland-0` in the
+  distribution (`wayland::publish_in`) as another name of the Wayland
+  server's listener (`unix::Socket::alias`: a connect to either node
+  reaches it, as a bind mount shows one socket at two paths), logged
+  `wayland: listening in a distribution's tree too`, and `/tmp/.X11-unix`
+  (1777) as WSL's init makes it (Xwayland, not root, cannot); X display :0 is
+  reached through its abstract name (`@/tmp/.X11-unix/X0`), which no
+  root confines. Unlike WSLg's tmpfs, the directory is on the
+  distribution's tree (kept; the node is made again at the next boot's
+  first start).
 - **State** (GalaLxDistro): a distribution is Running while it has
   processes (WSL keeps its instance a few seconds longer: `info` in
   wsl_test); `--terminate` ends them (SIGKILL) and waits up to 10 s

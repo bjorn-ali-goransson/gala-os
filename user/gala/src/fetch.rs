@@ -203,6 +203,16 @@ fn request_url(w: &WinHttp, request: usize) -> String {
 
 /// GETs `url` (http or https) and returns the body of a 200 response.
 pub fn get(url: &str, log: &mut dyn FnMut(&str)) -> Result<Vec<u8>, HostError> {
+    get_with_progress(url, log, &mut |_, _| {})
+}
+
+/// `get`, telling `progress` the bytes read so far and the length the
+/// response announced (Content-Length) after each read.
+pub fn get_with_progress(
+    url: &str,
+    log: &mut dyn FnMut(&str),
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, HostError> {
     let w = WinHttp::load().map_err(|code| {
         log(&format!("fetch error step=load-winhttp.dll code={code}"));
         HostError { code }
@@ -289,7 +299,9 @@ pub fn get(url: &str, log: &mut dyn FnMut(&str)) -> Result<Vec<u8>, HostError> {
             return Err(HostError { code: HTTP_STATUS_ERROR | status });
         }
         let mut data: Vec<u8> = Vec::new();
-        if let Some(n) = number(&w, request.0, WINHTTP_QUERY_CONTENT_LENGTH, true)
+        let length = number(&w, request.0, WINHTTP_QUERY_CONTENT_LENGTH, true);
+        progress(0, length);
+        if let Some(n) = length
             && data.try_reserve(n as usize).is_err()
         {
             log(&format!("fetch error step=memory bytes={n}"));
@@ -315,6 +327,7 @@ pub fn get(url: &str, log: &mut dyn FnMut(&str)) -> Result<Vec<u8>, HostError> {
                 return Err(fail(log, "WinHttpReadData"));
             }
             data.set_len(at + read as usize);
+            progress(data.len() as u64, length);
         }
         log(&format!("fetch status={status} url={final_url}{moved} bytes={}", data.len()));
         Ok(data)

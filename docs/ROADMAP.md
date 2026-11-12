@@ -200,7 +200,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); next: a distribution's desktop in one window (`lx_xdesktop`), Linux distributions in the start menu |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`) |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -3198,8 +3198,8 @@ the next breakthroughs).
    `_NET_WM_STATE` (maximize, full screen) for X windows,
    `xwayland_shell_v1` instead of `WL_SURFACE_ID`, a stop for SIGTSTP
    (job control), a recorded glibc fork test of the clone flags.
-6. A distribution's desktop (the owner; being brought up: `lx_xdesktop`,
-   PENDING until its screen check has run once: user/lx/xdesktop's
+6. A distribution's desktop (the owner; its first part done: `lx_xdesktop`,
+   its screen check passing: user/lx/xdesktop's
    session script runs rootful Xwayland on `:1` as one window "Xwayland
    on :1" framed by shasha (`-decorate`: libdecor takes the server's
    decorations), twm managing an xterm in it, typed into from the
@@ -3212,18 +3212,26 @@ the next breakthroughs).
    put full screen. Full screen is a choice of presentation, not of
    speed: both paths copy the session's damaged pixels in software.
    Screenshots at each step.
-7. Linux distributions in shasha's start menu (the owner): a "Linux
-   distributions" section of suggested distributions, collapsible, each
-   suggestion dismissable and the whole section hideable (kept per
-   user). An entry not yet installed installs on click (its rootfs
-   fetched and imported through CT's `wsl --import`, with progress on
-   the entry); an installed entry starts the distribution's desktop
-   (step 6) on click, and its context menu opens a terminal for the
-   distribution (`wsl -d <name>` in a console window) or starts one of
-   its applications (listed from the distribution's `.desktop` files).
-   Test first: a start-menu scenario installing a small distribution,
-   then a terminal and an application from the context menu, checked
-   on the screen.
+7. Linux distributions in shasha's start menu (the owner; built:
+   `linux_menu`, ARCHITECTURE "Start menu"): a "Linux distributions"
+   section of suggested distributions (Ubuntu, Alpine), collapsible,
+   each suggestion dismissable and the whole section hideable, the
+   choices kept in the user's hive; a suggestion installs on click
+   (`gala linux-install`: its rootfs fetched over winhttp and imported
+   through `wsl --import`, the progress on its tile); an installed one
+   starts step 6's desktop; its context menu opens a terminal (`wsl -d
+   <name>` in a console window) or one of its applications (its
+   `.desktop` files), X and Wayland programs reaching the desktop
+   through WSLg's environment and a socket node in the distribution's
+   tree. The scenario's distributions are stand-ins served by the host.
+   Open: the desktop session is gala's script, which a real
+   distribution lacks (it should come from gala, through `/mnt/c` or
+   WSLg's `/mnt/wslg`, once CT step 3 mounts them, with Xwayland
+   installed in it or provided), the persistence across a reboot checked
+   by a two-boot scenario (today by `persist_test`'s registry part and
+   linux_menu_test's reading of the keys), import progress (`wsl
+   --import` reports none), cancelling an install, icons from the
+   `.desktop` files' `Icon=`.
 8. Linux Chromium beside Windows Chromium (BR's): a distribution's
    Chromium (or Google's Linux build) with `--ozone-platform=wayland
    --no-sandbox` in a boot scenario, its window on the same desktop as

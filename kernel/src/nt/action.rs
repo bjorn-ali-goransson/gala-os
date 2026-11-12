@@ -13,10 +13,10 @@
 //! | 0..4   | version (1) |
 //! | 4..8   | action (ACTION_*) |
 //! | 8..16  | the window's HWND (the registry's) |
-//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height; TrayClick's icon id and button (0 left, 1 right) |
+//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height; TrayClick's icon id and button (0 left, 1 right); LinuxProgress's state and percent |
 //! | 32..36 | the text's length in UTF-16 units (at most MAX_TEXT) |
 //! | 36..40 | zero |
-//! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name |
+//! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name, LinuxProgress's distribution |
 //!
 //! The output: Start writes the new process id (u64). Windows, Programs
 //! and Tray write a header (u32 version 1, u32 how many there are), then
@@ -49,6 +49,11 @@ pub const ACTION_TRAY: u32 = 12;
 /// A click on a notification-area icon: the request's HWND and its icon
 /// id (args[0]), the button in args[1] (0 left, 1 right).
 pub const ACTION_TRAY_CLICK: u32 = 13;
+/// An install's progress for the start menu's Linux section (`gala
+/// linux-install`): the text the distribution's name, args[0] the state
+/// (0 downloading, 1 importing, 2 done, 3 failed), args[1] the percent
+/// downloaded.
+pub const ACTION_LINUX_PROGRESS: u32 = 14;
 
 /// The list outputs' version and header size.
 pub const LIST_VERSION: u32 = 1;
@@ -229,6 +234,13 @@ pub fn run(
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
             desktop::set_wallpaper(&caller.desk.shell, name)?;
         }
+        ACTION_LINUX_PROGRESS => {
+            let mut name = [0u8; desktop::linux::NAME];
+            let name = ascii(&r.text, &mut name).ok_or(NtStatus::INVALID_PARAMETER)?;
+            let [state, percent, ..] = r.args;
+            linux_progress_noted(name, state, percent);
+            desktop::linux_progress(&caller.desk.shell, name.as_bytes(), state, percent)?;
+        }
         _ => return Err(NtStatus::INVALID_PARAMETER),
     }
     Ok(out)
@@ -406,7 +418,22 @@ fn first_existing(paths: &'static [&'static str]) -> Option<&'static str> {
 /// Another session's start menu starts nothing yet: a session has no
 /// user of its own until B4's session manager (ROADMAP RS), so a program
 /// started for it would land in session 1.
-pub fn start_from_menu(session: u32, program: &desktop::Program) {
+pub fn start_from_menu(session: u32, launch: desktop::Launch) {
+    let program = match launch {
+        desktop::Launch::Program(p) => p,
+        desktop::Launch::Linux(r) => {
+            if session == super::session::CONSOLE {
+                start_linux(session, r);
+            } else {
+                crate::warn!(
+                    "desktop: session {session}'s start menu asked for {r:?}: not started (a session other than {} has no user to start it as yet)",
+                    super::session::CONSOLE
+                );
+                super::ledger::record("start menu", "session without a user", session.into());
+            }
+            return;
+        }
+    };
     if session != super::session::CONSOLE {
         crate::warn!(
             "desktop: session {session}'s start menu asked for {}: not started (a session other than {} has no user to start it as yet)",
@@ -472,6 +499,171 @@ pub fn start_from_menu(session: u32, program: &desktop::Program) {
             r#""op":"{op}","session":{session},"name":"{}","target":"{}","pid":{pid},"status":{status}"#,
             crate::events::Str(program.name),
             crate::events::Str(target)
+        ),
+    );
+}
+
+/// wsl.exe, where Windows has it.
+const WSL_EXE: &[&str] = &["%SystemRoot%\\System32\\wsl.exe"];
+/// LD step 6's desktop session, in the distribution (rootful Xwayland on
+/// display :1 as one window, twm and an xterm: user/lx/xdesktop).
+const DESKTOP_SESSION: &str = "/lx/xdesktop/session.sh";
+
+/// The `linux_mirror=` boot option: suggestions are fetched from
+/// `<mirror>/<file name>` (the scenario's host).
+static MIRROR: crate::sync::IrqMutex<Option<&'static str>> = crate::sync::IrqMutex::new(None);
+
+/// `linux_mirror=<base URL>` (percent-decoded by the caller, interned).
+pub fn set_linux_mirror(url: &'static str) {
+    *MIRROR.lock() = Some(url);
+}
+
+/// LinuxProgress logged when its state changes (and each tenth of a
+/// download), with a `window` event.
+fn linux_progress_noted(name: &str, state: i32, percent: i32) {
+    use core::sync::atomic::{AtomicI32, Ordering};
+    static LAST: AtomicI32 = AtomicI32::new(-1);
+    let key = state * 1000 + if state == 0 { percent / 10 } else { 0 };
+    if LAST.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+    let what = match state {
+        0 => "downloading",
+        1 => "importing",
+        2 => "installed",
+        3 => "failed",
+        _ => "unknown state",
+    };
+    crate::info!("desktop: start menu: Linux distribution {name}: {what} ({percent}%)");
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"linux progress","name":"{}","state":"{what}","percent":{percent}"#,
+            crate::events::Str(name)
+        ),
+    );
+}
+
+/// What the start menu's Linux section asked for: an install (`gala
+/// linux-install <name> <url>`, no window: its progress is on the tile),
+/// a distribution's desktop (wsl.exe running LD step 6's session, no
+/// window of its own), a terminal (`wsl -d <name>` in a console window)
+/// or an application (`wsl -d <name> --exec <its Exec>`). Logged, with a
+/// `window` event `start menu` (op `linux install`, `linux desktop`,
+/// `linux terminal`, `linux app`).
+pub fn start_linux(session: u32, r: desktop::linux::Request) {
+    use desktop::linux::{Request, SUGGESTIONS, exec_words, source_url, valid_name};
+    let name = match r {
+        Request::Install(n, _)
+        | Request::Desktop(n)
+        | Request::Terminal(n)
+        | Request::App(n, _) => n,
+    };
+    let name_text = name.as_str();
+    if !valid_name(name.as_bytes()) {
+        crate::warn!("desktop: start menu: {name_text:?} is not a distribution's name");
+        return;
+    }
+    let mut args = [0u8; 512];
+    let (op, program, args, window): (&str, Option<&'static str>, Option<&str>, bool) = match r {
+        Request::Install(_, s) => {
+            let mirror = *MIRROR.lock();
+            let mut url = [0u8; 300];
+            let url = SUGGESTIONS.get(s).and_then(|s| source_url(s, mirror, &mut url));
+            let args = url.and_then(|u| {
+                join(&mut args, &[b"linux-install ", name.as_bytes(), b" ", u.as_bytes()])
+            });
+            ("linux install", first_existing(GALA_EXE), args, false)
+        }
+        Request::Desktop(_) => {
+            // The session is gala's script in the distribution (the
+            // stand-in rootfs carries it); without it nothing starts.
+            let has = desktop::distro_root_of(name.as_bytes()).is_some_and(|root| {
+                crate::lx::file::resolve_in(root, DESKTOP_SESSION.as_bytes(), true)
+                    .is_ok_and(|f| f.node.is_some())
+            });
+            if !has {
+                crate::warn!(
+                    "desktop: start menu: {name_text} has no desktop session ({DESKTOP_SESSION} is not in it): not started"
+                );
+                super::ledger::record("start menu", "linux desktop session missing", 0);
+                crate::events::emit(
+                    crate::events::Category::Window,
+                    "start menu",
+                    format_args!(
+                        r#""op":"linux desktop","session":{session},"name":"{}","target":"{DESKTOP_SESSION}","pid":0,"status":{}"#,
+                        crate::events::Str(name_text),
+                        NtStatus::OBJECT_NAME_NOT_FOUND.0
+                    ),
+                );
+                return;
+            }
+            let args = join(
+                &mut args,
+                &[b"-d ", name.as_bytes(), b" --exec /bin/sh ", DESKTOP_SESSION.as_bytes()],
+            );
+            ("linux desktop", first_existing(WSL_EXE), args, false)
+        }
+        Request::Terminal(_) => (
+            "linux terminal",
+            first_existing(WSL_EXE),
+            join(&mut args, &[b"-d ", name.as_bytes()]),
+            true,
+        ),
+        Request::App(_, app) => {
+            // --exec's words, each quoted (CommandLineToArgvW's rules; a
+            // word with a quote of its own is left out).
+            let mut n = 0;
+            let mut ok = true;
+            let mut put = |part: &[u8]| {
+                ok &= args.get_mut(n..n + part.len()).map(|s| s.copy_from_slice(part)).is_some();
+                n += part.len();
+            };
+            put(b"-d ");
+            put(name.as_bytes());
+            put(b" --exec");
+            for word in exec_words(app.exec.as_bytes()).iter().filter(|w| !w.contains(&b'"')) {
+                put(b" \"");
+                put(word);
+                put(b"\"");
+            }
+            let a = if ok { core::str::from_utf8(&args[..n]).ok() } else { None };
+            ("linux app", first_existing(WSL_EXE), a, false)
+        }
+    };
+    let target = match r {
+        Request::App(_, app) => app.name,
+        _ => desktop::linux::Text::cut(op),
+    };
+    let started = match (program, args) {
+        (Some(program), Some(args)) => {
+            crate::info!("desktop: start menu: {op} {name_text}: {program} {args}");
+            if window { start_in_window(program, args) } else { start_path(program, args, None) }
+        }
+        (None, _) => {
+            crate::warn!(
+                "desktop: start menu: {op} {name_text}: no {}",
+                if matches!(r, Request::Install(..)) { GALA_EXE[0] } else { WSL_EXE[0] }
+            );
+            Err(NtStatus::OBJECT_NAME_NOT_FOUND)
+        }
+        (Some(_), None) => {
+            crate::warn!("desktop: start menu: {op} {name_text}: its command line does not fit");
+            Err(NtStatus::BUFFER_TOO_SMALL)
+        }
+    };
+    let (pid, status) = match started {
+        Ok(pid) => (pid, 0),
+        Err(e) => (0, e.0),
+    };
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"{op}","session":{session},"name":"{}","target":"{}","pid":{pid},"status":{status}"#,
+            crate::events::Str(name_text),
+            crate::events::Str(target.as_str())
         ),
     );
 }
