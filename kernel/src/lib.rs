@@ -350,10 +350,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // on where the desktop has a shell (not bare: the server profile, or
     // no screen and no `presenter=`), unless `wayland=off`; `wayland=on`
     // starts it anyway, `trace` also logs every request and event.
+    // `xwayland=on`: X display :0 too, served by a distribution's
+    // Xwayland started at the first X client (wayland::xwayland).
     let wayland_mode =
         cmdline.value("wayland").unwrap_or(if nt::desktop::is_bare() { "off" } else { "on" });
+    let xwayland = cmdline.value("xwayland") == Some("on");
     if wayland_mode != "off"
-        && let Err(e) = wayland::start(wayland_mode)
+        && let Err(e) = wayland::start(wayland_mode, xwayland)
     {
         error!("wayland: cannot start the server: {e:?}");
     }

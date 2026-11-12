@@ -236,9 +236,25 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
     if sig > u64::from(abi::NSIG) {
         return Err(EINVAL);
     }
-    if pid <= 0 {
+    if pid == -1 {
         ledger::record("kill", "linux option missing", pid as u64);
         return Err(errno::ESRCH);
+    }
+    if pid <= 0 {
+        // A process group: the caller's (0) or -pid's (lx::session).
+        let pgid = if pid == 0 {
+            call.lx.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        } else {
+            u64::from(pid.unsigned_abs())
+        };
+        let pids = super::session::group_pids(pgid);
+        if pids.is_empty() {
+            return Err(errno::ESRCH);
+        }
+        for p in pids {
+            kill_call(call, p, sig)?;
+        }
+        return Ok(0);
     }
     let target = super::state::get(pid as u64).ok_or(errno::ESRCH)?;
     if sig == 0 {

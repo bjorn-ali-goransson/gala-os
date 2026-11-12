@@ -1673,6 +1673,32 @@ source).
   ash's `\w` shows `/root`, not `~`, under this profile (the prompt
   marker the screen check waits for).
 
+### X11 programs (Xwayland, ROADMAP LD step 5)
+
+- `xwayland=on` on the kernel command line gives display `:0`
+  (ARCHITECTURE "X11 programs through Xwayland"); a scenario ships the
+  Linux roots "x11" and "gtk3" with "wayland_client" and "glibc"
+  (MODULE_SETS) and passes `DISPLAY=:0` in `lxenv=` (xterm also
+  `SHELL=/bin/sh` and `PATH=/usr/bin:/bin`). Scenario `lx_xterm`.
+- Xwayland's output and its children's (xkbcomp's warnings) are logged
+  as `lx: pid N service: ...`, outside the test program's transcript;
+  the program's transcript is `user/lx/<program>/<scenario>.txt`
+  (xterm prints nothing and exits 0 when its shell does: checked with
+  the host's Xvfb and `xterm -e sh -c 'exit 3'`).
+- Bring-up: on the host, `weston --backend=headless --socket=wl-x`
+  and `WAYLAND_DEBUG=1 Xwayland :5 -rootless -shm` show what Xwayland
+  binds; `strace -f` of it the files and calls (xkbcomp through
+  `/bin/sh -c`, `/tmp/.X5-lock` by link(2), the keymap in
+  `$XDG_RUNTIME_DIR/server-N.xkm`). In gala read the `xwm:` and
+  `xwayland:` lines, `events=wayland`, and the state dump's `xwm:
+  window` lines (a window mapped with a surface but not shown waits for
+  that surface on Xwayland's Wayland connection).
+- Exploratory boots without xtask's screen checks:
+  `cargo xtask iso --name N --scenario S qemu_exit <cmdline...>` builds
+  the image outside the QEMU lock, then boot it under the lock with QEMU's
+  monitor for `screendump` and `sendkey` (the lock is held only while it
+  runs).
+
 ## Program recipes
 
 Third-party programs are either built reproducibly by a checked-in
