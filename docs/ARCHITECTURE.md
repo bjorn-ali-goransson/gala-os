@@ -847,8 +847,9 @@ current process, -2 = current thread.
   otherwise, and grants the access asked for (processes are not
   access-checked yet; "Access checks").
 - **NtQuerySystemInformation(SystemProcessInformation)** lists the idle
-  process (id 0, no image, as on Windows) and every running process
-  (exited ones are not listed) with its threads, in the public x64
+  process (id 0, no image, as on Windows) and every running NT process
+  (exited ones are not listed; Linux processes never: "The task
+  manager" lists both) with its threads, in the public x64
   layout (`sysinfo::push_process`: SYSTEM_PROCESS_INFORMATION of 0x100
   bytes, then SYSTEM_THREAD_INFORMATION entries of 0x50, then the image
   name; CreateTime, ImageName, UniqueProcessId,
@@ -12375,6 +12376,124 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   wait queue) and an NT wait is not interrupted by a Linux signal;
   `--export`, `--install`, `--mount`, `-u` and the WSL service's COM
   API are not there.
+
+## The task manager
+
+ROADMAP TM: one task manager on shasha's desktop for every process gala
+runs, Windows and Linux together. Code: `kernel/src/nt/tasks.rs` (the
+query; host tests there), `user/taskmgr` (gala's `taskmgr.exe`: the
+library is the model, host-tested with `cargo test -p taskmgr`;
+`main.rs` the window), `nt::desktop` (Ctrl+Shift+Esc, the taskbar's
+context menu, the start menu's tile). Test: `taskmgr_test`, scenario
+`taskmgr` (screen check `TASKMGR_SCREEN`).
+
+### The data (step 1)
+
+- **One query for both personalities**: GalaTasks (0x7fe8, gala's own:
+  `GalaTasks(op, arg, buffer, length, *returned)`) op 0 lists every
+  running process of `process::PROCESSES`, NT and Linux, in one
+  versioned layout (the table in `nt/tasks.rs`): pid, parent, start
+  time, CPU time, working set (the committed bytes: committed pages stay
+  resident), commit charge, threads, handles (a Linux process's open
+  fds), session, flags (Linux, has a taskbar window, elevated, WOW64,
+  not responding, uninterruptible), the token's Linux uid, and texts:
+  the image (a Linux process's `comm`, what `ps` shows), the command
+  line, the user (the token user's account name: SYSTEM and the
+  services' names, a local account's, else the SID's string), the WSL
+  distribution, the taskbar window's title and HWND. Op 1 is the load:
+  per processor its busy and idle nanoseconds, physical memory and use,
+  the commit charge, disk and network bytes, the process, thread and
+  handle counts. Both answer STATUS_BUFFER_TOO_SMALL with the size
+  needed (the list changes between calls).
+- **Windows' contents stay Windows'**: NtQuerySystemInformation's
+  SystemProcessInformation (and so Toolhelp and psapi) lists NT
+  processes only; a Linux process is no Windows process. `/proc` inside
+  LX is unchanged. Only gala's own tools (`taskmgr.exe`, `gala ps`)
+  read GalaTasks.
+- **CPU time** is the scheduler's (`sched`): at every `schedule` a CPU's
+  span since its last one goes to the thread it ran and to the CPU's
+  busy or idle time (`Cpu::account`); `cpu_time_ns` and `cpu_load` add
+  the turn in progress. A process's time is its ended threads'
+  (`Core::cpu_ended_ns`, each adds its own at its exit) plus its live
+  ones'. gala-um reports 0 (the host schedules: the `Threads` trait's
+  defaults). ProcessTimes and GetSystemTimes do not use it yet (TODO).
+- **The command line** is kept on the core process when it starts
+  (`process::set_command_line` from `announce_start`) and replaced by
+  a Linux execve (its argv joined by spaces).
+- **Distributions**: a Linux process belongs to the distribution whose
+  tree is its root (`LxProcess::root`); the names come from the boot
+  user's Lxss keys (`desktop::distro_roots`: DistributionName and
+  `<BasePath>\rootfs` resolved to its node). A Linux process the kernel
+  started (`lxrun=`) has none.
+- **End task's Linux side**: op 2 sends Linux process `arg` signal
+  `length` as kill(2) from a program of the caller's token would (si_code
+  SI_USER, the caller's pid and uid; `lx::sigcalls::signal_from`),
+  allowed when the uids match, the caller's is root, or the caller is
+  elevated (STATUS_ACCESS_DENIED otherwise); a Windows pid is
+  STATUS_INVALID_PARAMETER (those end through TerminateProcess), none
+  STATUS_INVALID_CID. Op 3 ends a distribution's whole tree by name
+  (`lx::distro::terminate`, `wsl --terminate`'s SIGKILL; the same rule
+  for each of its processes), `*returned` how many.
+- **Disk and network counters**: `disk::READ_BYTES`/`WRITE_BYTES` (the
+  virtio-blk driver) and `net::virtio_net::RX_BYTES`/`TX_BYTES` (the
+  Ethernet frames); a machine without the device says so (`has_disk`,
+  `has_network`).
+- Observability: OBSERVABILITY `process` events (`tasks query`, `tasks
+  end`, `process terminate`), `tasks:` log lines (each caller's first
+  query, every end), and the ledger: `tasks`/`linux uninterruptible
+  wait` (no record carries a D-state: gala's Linux waits are all
+  interruptible) and taskmgr.exe's columns without a counter
+  (`taskmgr.exe!Processes(Disk)`, `(Network)`, `(GPU)`, `(Power usage)`).
+
+### The program (step 2)
+
+- **`taskmgr.exe`** (`user/taskmgr`), gala's own Windows program on
+  gala's user32 and gdi32, where Windows keeps it
+  (`%SystemRoot%\System32\Taskmgr.exe`; images ship it per scenario, as
+  `wsl.exe`): one window (class `TaskManagerWindow`, at (120, 40),
+  1040 x 700), one instance (a second start brings the first forward),
+  a navigation pane (Processes, Performance, Details), a search box
+  (typing anywhere goes there, Esc clears it: a process matches by its
+  shown name, its image or the start of its PID), refreshed every
+  second (SetTimer).
+- **Processes**: grouped as Windows groups them, Apps (a process with a
+  taskbar window, shown by its window's title) and Background
+  processes, then the Linux groups by distribution ("Linux: <name>";
+  the Linux personality's own processes under "Linux"; gala's UI says
+  Linux, never WSL); columns Name, PID, Status ("Not responding"),
+  User name, CPU (its share of all processors between two samples,
+  `taskmgr::Shares`; the cell tinted as Windows does), Memory; a click
+  on a header sorts each group by it (numbers largest first; again the
+  other way). A blue tile marks a Windows process, an orange one a
+  Linux process.
+- **End task** (the button, or Delete): a Windows process gets
+  OpenProcess and TerminateProcess(1), as Windows' Task Manager; a Linux
+  process SIGTERM, then SIGKILL if it is still listed after
+  `SIGTERM_GRACE_MS` (3 s; checked at each refresh); a distribution's
+  heading its whole tree (op 3).
+- **Performance**: a graph per processor (busy per mille between
+  samples), memory in use, disk and network throughput, a minute of
+  history each (`taskmgr::History`), the process, thread and handle
+  counts.
+- **Details**: every process in one flat list, sortable, with CPU time,
+  commit size, threads, handles or fds, platform (Windows, Windows
+  32-bit, Linux with the distribution) and the command line.
+- **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
+  (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
+  desktop tracks Ctrl and Shift; no program sees that Esc; logged
+  `desktop: Ctrl+Shift+Esc: Task Manager`) and the taskbar's context
+  menu (a right click on its free space: a card above the taskbar with
+  "Task Manager", drawn as the balloon's card is; any press closes it;
+  logged `desktop: taskbar menu: Task Manager`): each starts it as the
+  tile does (`action::start_from_menu`). `gala start "Task Manager"`
+  is the CLI's way; `gala ps` lists both personalities from the same
+  query and `gala kill <pid>` ends a Linux process as End task does.
+- **Limits**: no per-process disk, network, GPU or power columns (no
+  counters: ledgered); no process tree within a group; "Not responding"
+  is not decided yet (ROADMAP TM step 3: the flags exist, nothing sets
+  them); the Users, Services, Startup and App history pages are not
+  there; End task waits for a distribution's end on the window's
+  thread (up to `lx::distro`'s 10 s).
 
 ## Plan: graphics and GPU
 

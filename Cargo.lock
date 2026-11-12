@@ -859,6 +859,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "galapkg",
+ "taskmgr",
 ]
 
 [[package]]
@@ -2509,6 +2510,21 @@ dependencies = [
 [[package]]
 name = "system_test"
 version = "0.1.0"
+
+[[package]]
+name = "taskmgr"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
+
+[[package]]
+name = "taskmgr_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "taskmgr",
+]
 
 [[package]]
 name = "tds_test"

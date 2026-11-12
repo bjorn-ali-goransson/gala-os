@@ -135,6 +135,9 @@ struct Thread {
     /// Times a CPU switched to this thread (SYSTEM_THREAD_INFORMATION's
     /// ContextSwitches; wraps).
     switches: u32,
+    /// Nanoseconds it ran on a CPU before its current turn (the task
+    /// manager's CPU time: `cpu_time_ns`).
+    run_ns: u64,
 }
 
 /// Why a `prepare_wait`/`wait` ended.
@@ -182,6 +185,12 @@ struct Cpu {
     /// The idle thread is reaping: not preempted until done (see
     /// `idle_loop`).
     reaping: bool,
+    /// When `current`'s turn began (`time::raw_monotonic_ns`), and the
+    /// time this CPU ran its idle thread and anything else before it
+    /// (`cpu_load`: the task manager's per-processor graphs).
+    since: u64,
+    idle_ns: u64,
+    busy_ns: u64,
 }
 
 const OFFLINE: Cpu = Cpu {
@@ -192,6 +201,9 @@ const OFFLINE: Cpu = Cpu {
     need_resched: false,
     prev: None,
     reaping: false,
+    since: 0,
+    idle_ns: 0,
+    busy_ns: 0,
 };
 
 struct Scheduler {
@@ -239,6 +251,23 @@ impl Scheduler {
     /// A thread known to be in the table (the current one, a queued one).
     fn thread(&mut self, id: ThreadId) -> &mut Thread {
         self.threads.get_mut(id).expect("a live thread's record")
+    }
+
+    /// CPU `cpu`'s span since its last account, at `now`, goes to the
+    /// thread it ran (its CPU time) and to the CPU's busy or idle time.
+    fn account(&mut self, cpu: usize, now: u64) {
+        let c = &mut self.cpus[cpu];
+        let span = now.saturating_sub(c.since);
+        c.since = now;
+        let (cur, idle) = (c.current, c.idle == Some(c.current));
+        if idle {
+            c.idle_ns += span;
+        } else {
+            c.busy_ns += span;
+        }
+        if let Some(t) = self.threads.get_mut(cur) {
+            t.run_ns += span;
+        }
     }
 
     /// The thread running on this CPU.
@@ -319,6 +348,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         is_idle,
         pending_continue: None,
         switches: 0,
+        run_ns: 0,
     })
 }
 
@@ -354,7 +384,13 @@ pub fn run_ap(index: u32) -> ! {
     let record = adopted("idle", true, 1 << cpu);
     let added = with(|s| {
         let id = s.add(record?)?;
-        s.cpus[cpu] = Cpu { online: true, current: id, idle: Some(id), ..OFFLINE };
+        s.cpus[cpu] = Cpu {
+            online: true,
+            current: id,
+            idle: Some(id),
+            since: time::raw_monotonic_ns(),
+            ..OFFLINE
+        };
         Ok::<_, SpawnError>(())
     });
     if let Err(e) = added {
@@ -426,6 +462,7 @@ fn spawn_inner(
         is_idle: false,
         pending_continue: None,
         switches: 0,
+        run_ns: 0,
     };
     let thread = try_box(thread)?;
     let added = {
@@ -617,6 +654,33 @@ pub fn context_switches(id: ThreadId) -> u32 {
     with(|s| s.threads.get(id).map_or(0, |t| t.switches))
 }
 
+/// Nanoseconds thread `id` has run on a CPU, its current turn included
+/// (0 for an unknown id). Counted at every `schedule` of a CPU: the
+/// span since that CPU's last one goes to the thread it ran.
+pub fn cpu_time_ns(id: ThreadId) -> u64 {
+    let now = time::raw_monotonic_ns();
+    with(|s| {
+        let Some(t) = s.threads.get(id) else { return 0 };
+        let running = s.cpus.iter().find(|c| c.online && c.current == id);
+        t.run_ns + running.map_or(0, |c| now.saturating_sub(c.since))
+    })
+}
+
+/// CPU `cpu`'s time so far: (busy, idle) nanoseconds, its current turn
+/// included; None for a CPU that does not schedule.
+pub fn cpu_load(cpu: usize) -> Option<(u64, u64)> {
+    let now = time::raw_monotonic_ns();
+    with(|s| {
+        let c = s.cpus.get(cpu).filter(|c| c.online)?;
+        let turn = now.saturating_sub(c.since);
+        if c.idle == Some(c.current) {
+            Some((c.busy_ns, c.idle_ns + turn))
+        } else {
+            Some((c.busy_ns + turn, c.idle_ns))
+        }
+    })
+}
+
 /// The CPU the caller runs on (it may move right after).
 pub fn current_cpu() -> u32 {
     percpu::cpu_index()
@@ -667,6 +731,7 @@ fn schedule() {
         let s = guard.as_mut().expect("scheduler not initialized");
         let here = me();
         let cur = s.cpus[here].current;
+        s.account(here, time::raw_monotonic_ns());
         if s.thread(cur).state == State::Running {
             s.make_ready(cur);
         } else {

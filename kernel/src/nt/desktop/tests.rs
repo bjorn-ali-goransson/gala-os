@@ -1338,3 +1338,68 @@ fn an_installed_distributions_context_menu_opens_a_terminal_or_an_application() 
     click(&mut d, r.x + 20, r.y + 14);
     assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Terminal(_)))));
 }
+
+#[test]
+fn ctrl_shift_esc_starts_task_manager_and_no_program_sees_the_esc() {
+    let (mut d, _) = desktop_with_window();
+    let _ = sent(&mut d);
+    // Esc alone goes to the active window.
+    d.key(0x1b, 1, false, true);
+    d.key(0x1b, 1, false, false);
+    assert!(d.take_launch().is_none());
+    assert!(sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == 0x1b));
+    // With Ctrl and Shift held: Task Manager, and the window gets the
+    // modifiers only.
+    d.key(0x11, 0x1d, false, true);
+    d.key(0x10, 0x2a, false, true);
+    d.key(0x1b, 1, false, true);
+    d.key(0x1b, 1, false, false);
+    d.key(0x10, 0x2a, false, false);
+    d.key(0x11, 0x1d, false, false);
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
+    assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == 0x1b));
+    // Once only, and not again with the modifiers released.
+    d.key(0x1b, 1, false, true);
+    assert!(d.take_launch().is_none());
+}
+
+#[test]
+fn the_taskbars_context_menu_starts_task_manager() {
+    let (mut d, _) = desktop_with_window();
+    // A right click on the taskbar's free space (left of the centred
+    // buttons) opens the menu above it; a press elsewhere closes it.
+    let bar_y = 768 - i64::from(TASKBAR) / 2;
+    right_click(&mut d, 100, bar_y);
+    let r = d.bar_menu_rect().expect("the taskbar's menu is open");
+    assert!(r.y + r.h <= 768 - i64::from(TASKBAR));
+    click(&mut d, 600, 300);
+    assert!(d.bar_menu_rect().is_none());
+    assert!(d.take_launch().is_none());
+    // Its item: Task Manager; the menu closes.
+    right_click(&mut d, 100, bar_y);
+    let r = d.bar_menu_rect().expect("open again");
+    let (x, y) = centre(Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM });
+    go(&mut d, x, y, 0);
+    assert!(d.render_card().is_some());
+    click(&mut d, x, y);
+    assert!(d.bar_menu_rect().is_none());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
+}
+
+#[test]
+fn task_manager_is_listed_where_windows_has_it() {
+    let tiles = list_programs(PROGRAMS, &mut on_disk(&["C:\\Windows\\System32\\Taskmgr.exe"]));
+    assert_eq!(
+        names(PROGRAMS, tiles),
+        [
+            (TASK_MANAGER, true),
+            ("Microsoft Office", false),
+            ("FileZilla", false),
+            (".NET", false),
+            ("Python", false),
+            ("Chromium", false),
+            ("Git", false),
+            ("7-Zip", false)
+        ]
+    );
+}

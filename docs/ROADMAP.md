@@ -240,7 +240,7 @@ has a section under "Open items".
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | planned | one list of every process, both personalities |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-2 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each); "Not responding" next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
@@ -4101,33 +4101,44 @@ own sections with step 4.
 every process gala runs, Windows and Linux (LX, WSL distributions)
 together, and lets the user end or inspect any of them.
 
+**Done so far** (scenario `taskmgr`, test `user/taskmgr_test`, host
+tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
+- Step 1, the data: GalaTasks lists every process of both
+  personalities in one layout (pid, parent, platform, image or `comm`,
+  command line, user, CPU time from the scheduler's new per-thread
+  accounting, working set, commit, threads, handles or fds, start time,
+  taskbar window, WSL distribution) and the machine's load (busy and
+  idle time per processor, memory, disk and network bytes);
+  NtQuerySystemInformation keeps Windows' contents (NT processes only);
+  `gala ps` lists both, `gala kill` ends a Linux process as End task
+  does.
+- Step 2, the program: gala's `taskmgr.exe` (Ctrl+Shift+Esc, the
+  taskbar's context menu, the start menu's tile when System32 has it):
+  Processes grouped as Windows does with Linux by distribution,
+  sortable columns, search, End task (TerminateProcess; SIGTERM then
+  SIGKILL; a distribution's whole tree from its heading), Details with
+  the full columns, Performance graphs per processor, memory, disk and
+  network. The scenario ends one of each from it and its graphs move
+  under a busy thread; its screendumps are the views' pictures.
+
 **Next** (each test first, checked on the screen, screenshots):
-1. The data: one kernel query for every process of both personalities
-   (pid, parent, personality, image or command line, user, CPU time
-   and share, working set and commit, threads, handles or fds, start
-   time, window if any, WSL distribution if any). Windows programs see
-   Linux processes nowhere else (NtQuerySystemInformation keeps
-   Windows' contents); `/proc` inside LX shows its own as Linux does.
-2. The program: gala's own `taskmgr.exe` (Ctrl+Shift+Esc, the taskbar's
-   context menu, the start menu): a Processes view grouped as Windows
-   does (apps, background, Linux by distribution), sortable columns,
-   End task (TerminateProcess for Windows, SIGTERM then SIGKILL for
-   Linux, a distribution's whole tree on its group's row), a Details
-   view with the full columns, and a Performance view (CPU per core,
-   memory, disk, network graphs from the kernel's counters).
-3. Hung programs: windows not answering messages marked "Not
+1. Hung programs: windows not answering messages marked "Not
    responding" as Windows does; Linux processes blocked in D-state
-   shown the same way.
-4. Inspection: open file location, a process's threads with their
+   shown the same way (the query's FLAG_HUNG and FLAG_UNINTERRUPTIBLE
+   and the Status column wait for it).
+2. Inspection: open file location, a process's threads with their
    stacks (the state dump's walker), its open handles or fds, and
    "Create dump file" through the crash report's writer.
+3. Images: `taskmgr.exe` in System32 of every desktop image (it ships
+   per scenario now, as `wsl.exe`), and ProcessTimes/GetSystemTimes
+   from the same CPU accounting.
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its
-Performance graphs move under a load.
+Performance graphs move under a load (met by `taskmgr`; the item stays
+open for the steps above).
 
-**Design**: ARCHITECTURE gets "The task manager" with step 1;
-OBSERVABILITY's counters are its source.
+**Design**: ARCHITECTURE "The task manager".
 
 ### EX. A file explorer over every file system
 

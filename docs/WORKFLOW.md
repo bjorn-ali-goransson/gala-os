@@ -1777,6 +1777,47 @@ source).
   session.sh prints Xwayland's and twm's output (`session: ... failed`,
   then the log) on the serial log.
 
+### The task manager (ROADMAP TM)
+
+- Scenario `taskmgr` (`cargo xtask boot-test 'taskmgr$'`): UEFI with
+  `user/taskmgr_test`, which imports the busybox distribution `bb`,
+  runs `sh -c "sleep 600 & trap '' TERM; cat; echo cat ended"` in it and its own `busy`
+  mode (a window and a spinning thread), checks GalaTasks' list and
+  load, NtQuerySystemInformation's Windows-only list and `gala ps`,
+  then prints `taskmgr_test: ready`; TASKMGR_SCREEN opens Task Manager
+  with Ctrl+Shift+Esc, clicks Performance and Details, then searches
+  and ends `busy` (an app), `sleep` (SIGTERM), `sh` (ignores SIGTERM:
+  SIGKILL after 3 s) and the `bb` heading (its tree), each step waiting
+  for the program's line that the one before ended, and closes Task
+  Manager with Alt+F4 (the test waits for that, so the last screendump
+  comes before the guest ends). Screendumps:
+  `target/debug/test-taskmgr.screen<n>.png` (0 Processes, 1
+  Performance, 2 Details, 3 the app found, 5 `sleep`, 7 `sh`, 9 the
+  distribution's heading, 11 what is left).
+- Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
+  `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
+  test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
+  formats, End task's targets). `cargo clippy -p taskmgr --lib --tests`
+  checks the library on the host (the program links Windows DLLs).
+- Reading a run: `desktop: Ctrl+Shift+Esc: Task Manager`, `desktop:
+  start menu starts Task Manager: ...`, `tasks: pid N (Taskmgr.exe)
+  lists the processes: ...`, `process: pid N (Taskmgr.exe) terminates
+  pid M (...)`, `tasks: pid N (Taskmgr.exe) ends linux process M with
+  signal 15: 0x00000000`, `... ends linux distribution (bb: 1
+  process(es)): 0x00000000` (the process's name is its path's: System32's
+  `Taskmgr.exe`); `events=process` has `tasks query`, `tasks end`,
+  `process terminate` and `lx signal`.
+- Pitfalls: Task Manager's window is at a fixed place (120, 40) so the
+  clicks land; each End task step's search leaves the victim at row 1
+  under its group's heading at row 0, so a new process whose name
+  holds the searched text moves it (choose a search only the victim
+  matches). With the target directory shared between worktrees, a
+  concurrent build elsewhere can replace the uplifted DLLs that
+  `export-tests` copies (`target/<triple>/release/<name>.dll`): check
+  `git diff --stat user/bin` names only what the change touched, and
+  build the changed programs into a scratch target (Disk space) to
+  export them.
+
 ### X11 programs (Xwayland, ROADMAP LD step 5)
 
 - `xwayland=on` on the kernel command line gives display `:0`

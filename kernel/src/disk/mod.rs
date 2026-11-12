@@ -33,6 +33,9 @@ static SECTORS: AtomicU64 = AtomicU64::new(0);
 
 pub static READS: AtomicU64 = AtomicU64::new(0);
 pub static WRITES: AtomicU64 = AtomicU64::new(0);
+/// Bytes read and written (the task manager's disk graph).
+pub static READ_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Finds the disk, if the machine has one.
 pub fn init() {
@@ -162,6 +165,7 @@ pub fn read(first: u64, buf: &mut [u8]) -> Result<(), DiskError> {
         done += n;
     }
     READS.fetch_add(1, Ordering::Relaxed);
+    READ_BYTES.fetch_add(buf.len() as u64, Ordering::Relaxed);
     Ok(())
 }
 
@@ -177,6 +181,7 @@ pub fn write(first: u64, data: &[u8]) -> Result<(), DiskError> {
         done += n;
     }
     WRITES.fetch_add(1, Ordering::Relaxed);
+    WRITE_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
     Ok(())
 }
 
