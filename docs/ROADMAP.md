@@ -3909,9 +3909,19 @@ gains kernel panic, hang and corruption points):
    Repeated failures within minutes start the previous kernel image
    kept beside the current one (A/B), then a minimal safe mode.
 5. The crash screen (the owner: as kind as possible, thinking outside
-   the box), drawn by the last-resort path itself:
-   - the user's own desktop as it was, frozen and dimmed behind the
-     message, not a different world;
+   the box), drawn by the last-resort path itself. The layout is the
+   owner's mockup, `docs/images/crash-screen-layout.png`, with its
+   illustration `docs/images/crash-screen-art.png` (the camel being
+   revived) built into the kernel image so nothing has to load: the
+   gala logo top left; the illustration on the left; on the right the
+   headline ("Gala has crashed."), the reassurance ("This was a
+   problem in Gala, not in your programs or your files.") and the
+   saving checklist (emergency path, resilient memory, disk with a
+   percentage, firmware backup, each Done, in progress or Pending);
+   below, "What happens next" on the left and the QR code with "Crash
+   details" on the right; at the bottom the countdown and three keys,
+   R (restart now), S (stay on this screen), D (technical details).
+   Text and figures scale with the screen's resolution. Its contents:
    - plain words: what happened, that it was gala's fault and not
      theirs, what is safe (files saved up to when, which programs were
      open and will come back) and what happens next, with a countdown
