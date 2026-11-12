@@ -3055,8 +3055,32 @@ the next breakthroughs).
    scenarios pass them today; who the program is comes from its token,
    `lx::identity`) and has no D-Bus session bus yet (GTK goes
    without it: accessibility and portals are skipped).
-5. X11 programs through Xwayland, once the Wayland server holds.
-6. Linux Chromium beside Windows Chromium (BR's): a distribution's
+5. X11 programs through Xwayland, once the Wayland server holds (the
+   owner's next for this item, after CT step 2's WSL facade): rootless
+   Xwayland first, each X client (`xterm`, then a distribution's GTK
+   application) its own window on shasha's desktop, as WSLg shows them.
+   Expected blockers, each a Linux test program recorded on real Linux
+   first: abstract AF_UNIX sockets, SysV and POSIX shared memory,
+   `/proc` files Xwayland reads; the ledger names the rest by
+   distribution.
+6. A distribution's desktop (the owner): rootful Xwayland as one window
+   running a light desktop session (Xfce), which can be maximised or
+   put full screen. Full screen is a choice of presentation, not of
+   speed: both paths copy the session's damaged pixels in software.
+   Screenshots at each step.
+7. Linux distributions in shasha's start menu (the owner): a "Linux
+   distributions" section of suggested distributions, collapsible, each
+   suggestion dismissable and the whole section hideable (kept per
+   user). An entry not yet installed installs on click (its rootfs
+   fetched and imported through CT's `wsl --import`, with progress on
+   the entry); an installed entry starts the distribution's desktop
+   (step 6) on click, and its context menu opens a terminal for the
+   distribution (`wsl -d <name>` in a console window) or starts one of
+   its applications (listed from the distribution's `.desktop` files).
+   Test first: a start-menu scenario installing a small distribution,
+   then a terminal and an application from the context menu, checked
+   on the screen.
+8. Linux Chromium beside Windows Chromium (BR's): a distribution's
    Chromium (or Google's Linux build) with `--ozone-platform=wayland
    --no-sandbox` in a boot scenario, its window on the same desktop as
    `chromium_window`'s, both browsers running at once and loading a page
