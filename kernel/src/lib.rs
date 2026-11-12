@@ -1417,6 +1417,10 @@ fn run_linux_programs(
         error!("lxrun: lxenv is not a list of words (an unclosed quote, or out of memory)");
         return;
     }
+    // The /tmp Linux programs expect (1777).
+    if let Err(e) = nt::file::with_fs(lx::file::tmp_dir) {
+        warn!("lxrun: no /tmp: {e:?}");
+    }
     let mut args = cmdline.value("lxargs").unwrap_or("").split(',');
     for path in paths.split(',').filter(|p| !p.is_empty()) {
         info!("run: begin {path}");

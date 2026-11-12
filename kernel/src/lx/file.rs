@@ -305,6 +305,16 @@ pub fn run_volume(fs: &mut ramfs::RamFs) -> core::result::Result<NodeId, FsError
     RUN.store(run, Ordering::Relaxed);
     Ok(run)
 }
+/// The shared tree's `/tmp` (1777, made if missing): Linux programs
+/// expect it (X servers' lock files and sockets, mktemp). Its node.
+pub fn tmp_dir(fs: &mut ramfs::RamFs) -> core::result::Result<NodeId, FsError> {
+    let name: [u16; 3] = [b't' as u16, b'm' as u16, b'p' as u16];
+    match fs.find(ramfs::ROOT, &name)? {
+        Some(d) => Ok(d),
+        None => fs.create_posix(ramfs::ROOT, &name, true, 0o1777, platform::system_time()),
+    }
+}
+
 /// Linux's block size for stat (st_blksize).
 const BLKSIZE: i64 = 4096;
 /// The most bytes one read or write moves through the kernel at a time.

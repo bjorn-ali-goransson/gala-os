@@ -99,7 +99,7 @@ fn directory(fs: &mut ramfs::RamFs, dir: NodeId, name: &str, mode: u16) -> Resul
 pub fn prepare(cred: Cred) -> Result<XServer, StartError> {
     let name = "X0";
     let node = with_fs(|fs| {
-        let tmp = directory(fs, ramfs::ROOT, "tmp", 0o1777)?;
+        let tmp = crate::lx::file::tmp_dir(fs)?;
         let dir = directory(fs, tmp, ".X11-unix", 0o1777)?;
         let mut n = [0u16; 32];
         let len = wide(name, &mut n);
