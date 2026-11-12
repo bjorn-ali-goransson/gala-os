@@ -76,17 +76,23 @@ pub struct ImageLayout {
     pub base: u64,
     /// Header fields a new process needs (`process::spawn`).
     pub info: ImageInfo,
-    bytes: Vec<u8>,
+    /// The laid-out image, a page each (SizeOfImage bytes; the last
+    /// page's tail zero). Heap pages are frames (`frame_of_heap_page`):
+    /// every view at the preferred base maps these very pages, so an
+    /// image is in memory once, not as a copy plus the frames made from
+    /// it.
+    pages: Vec<alloc::boxed::Box<crate::fs::ramfs::Page>>,
+    /// SizeOfImage.
+    size: usize,
     page_protect: Vec<u32>,
-    relocations: super::pe::DataDirectory,
+    /// The relocation table's bytes (the base relocation directory),
+    /// what relocating a page reads beside the page itself.
+    relocs: Vec<u8>,
     /// Per page, the offset of its relocation block in the table
     /// (`pe::NO_BLOCK` for none): relocating a page reads two blocks, not
     /// the whole table.
     reloc_index: Vec<u32>,
     relocatable: bool,
-    /// Frames of read-only pages, shared by every view at the preferred
-    /// base (made on first use, freed with the section).
-    shared: IrqMutex<Vec<Option<Frame>>>,
     /// The image's system-wide alternative base (as Windows' ASLR gives
     /// each image one), taken on first need when its preferred base is in
     /// use, and the frames relocated for it, shared by every view there.
@@ -123,9 +129,8 @@ pub struct ImageInfo {
 
 impl Drop for ImageLayout {
     fn drop(&mut self) {
-        for frame in self.shared.lock().iter().flatten() {
-            platform::free_frame(*frame);
-        }
+        // `pages` go back to the heap with the layout: every view holds
+        // the layout while it maps them.
         for frame in self.relocated.lock().iter().flatten() {
             platform::free_frame(*frame);
         }
@@ -150,41 +155,115 @@ pub fn image_section_protect(characteristics: u32) -> u32 {
 impl ImageLayout {
     /// Lays out the PE image in `data`.
     pub fn new(data: &[u8]) -> Result<Self, NtStatus> {
+        Self::build(data.len(), |offset, buf| {
+            let src = data.get(offset..offset + buf.len()).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
+            buf.copy_from_slice(src);
+            Ok(())
+        })
+    }
+
+    /// Lays out the image in file `node`, read a page at a time into the
+    /// layout's pages (never a copy of the whole file).
+    pub fn from_file(node: crate::fs::ramfs::NodeId) -> Result<Self, NtStatus> {
+        let len = super::file::with_fs(|fs| fs.node(node).map(crate::fs::ramfs::Node::size))
+            .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+        let len = usize::try_from(len).map_err(|_| NtStatus::INVALID_IMAGE_FORMAT)?;
+        Self::build(len, |offset, buf| {
+            let n = super::file::read(node, offset as u64, buf).map_err(super::file::fs_status)?;
+            // The file shrank meanwhile.
+            if n < buf.len() {
+                return Err(NtStatus::INVALID_IMAGE_FORMAT);
+            }
+            Ok(())
+        })
+    }
+
+    /// Lays out the image of `file_len` bytes that `read(offset, buf)`
+    /// reads (exactly `buf.len()` bytes).
+    fn build(
+        file_len: usize,
+        mut read: impl FnMut(usize, &mut [u8]) -> Result<(), NtStatus>,
+    ) -> Result<Self, NtStatus> {
         use super::pe::{PeError, PeImage};
-        let image = PeImage::parse_image(data).map_err(|e| match e {
+        use crate::fs::ramfs::Page;
+        const PAGE: usize = PAGE_SIZE as usize;
+        // The headers: the first page, or SizeOfHeaders if more.
+        let mut head = Vec::new();
+        let mut want = file_len.min(PAGE);
+        loop {
+            head.try_reserve_exact(want.saturating_sub(head.len()))
+                .map_err(|_| NtStatus::NO_MEMORY)?;
+            head.resize(want, 0);
+            read(0, &mut head)?;
+            match super::pe::size_of_headers(&head) {
+                Some(n) if n > head.len() && n <= file_len => want = n,
+                _ => break,
+            }
+        }
+        let image = PeImage::parse_headers(&head, file_len).map_err(|e| match e {
             PeError::BadDosSignature => NtStatus::INVALID_IMAGE_NOT_MZ,
             _ => NtStatus::INVALID_IMAGE_FORMAT,
         })?;
         let size = image.size_of_image as usize;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(size).map_err(|_| NtStatus::NO_MEMORY)?;
-        bytes.resize(size, 0);
-        image.lay_out(&mut bytes);
-        let pages = size.div_ceil(PAGE_SIZE as usize);
-        let mut page_protect = Vec::new();
-        page_protect.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
-        // Headers and gaps are read-only; sections get their own protection.
-        page_protect.resize(pages, vad::PAGE_READONLY);
+        let count = size.div_ceil(PAGE);
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
+        for _ in 0..count {
+            let page =
+                crate::mm::heap::try_box(Page([0; PAGE])).map_err(|_| NtStatus::NO_MEMORY)?;
+            let _ = pages.try_push(page);
+        }
+        // Copies file bytes [offset, offset + len) to RVA `rva`, a page at
+        // a time.
+        let mut place = |pages: &mut [alloc::boxed::Box<Page>], rva: usize, offset: usize, len| {
+            let mut done = 0;
+            while done < len {
+                let at = rva + done;
+                let (page, within) = (at / PAGE, at % PAGE);
+                let n = (len - done).min(PAGE - within);
+                let dst = pages.get_mut(page).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
+                read(offset + done, &mut dst.0[within..within + n])?;
+                done += n;
+            }
+            Ok::<(), NtStatus>(())
+        };
+        place(&mut pages, 0, 0, image.size_of_headers as usize)?;
         for s in image.sections() {
-            let first = s.virtual_address as usize / PAGE_SIZE as usize;
-            let count = (s.memory_size() as usize).div_ceil(PAGE_SIZE as usize);
-            for p in page_protect.iter_mut().skip(first).take(count) {
+            let len = s.raw_size.min(s.memory_size()) as usize;
+            place(&mut pages, s.virtual_address as usize, s.raw_offset as usize, len)?;
+        }
+        let mut page_protect = Vec::new();
+        page_protect.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
+        // Headers and gaps are read-only; sections get their own protection.
+        page_protect.resize(count, vad::PAGE_READONLY);
+        for s in image.sections() {
+            let first = s.virtual_address as usize / PAGE;
+            let n = (s.memory_size() as usize).div_ceil(PAGE);
+            for p in page_protect.iter_mut().skip(first).take(n) {
                 *p = image_section_protect(s.characteristics);
             }
         }
-        let mut shared = Vec::new();
-        shared.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
-        shared.resize(pages, None);
         let mut relocated = Vec::new();
-        relocated.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
-        relocated.resize(pages, None);
-        let relocations = image.directory(super::pe::DIRECTORY_BASERELOC);
+        relocated.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
+        relocated.resize(count, None);
+        // The relocation table, copied out of the laid-out image.
+        let directory = image.directory(super::pe::DIRECTORY_BASERELOC);
+        let mut relocs = Vec::new();
         let mut reloc_index = Vec::new();
-        reloc_index.try_reserve_exact(pages).map_err(|_| NtStatus::NO_MEMORY)?;
-        reloc_index.resize(pages, super::pe::NO_BLOCK);
-        if image.relocatable && relocations.size != 0 {
-            super::pe::relocation_blocks(&bytes, relocations, |page, at| {
-                if let Some(slot) = reloc_index.get_mut(page / PAGE_SIZE as usize) {
+        reloc_index.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
+        reloc_index.resize(count, super::pe::NO_BLOCK);
+        if image.relocatable && directory.size != 0 {
+            let (rva, len) = (directory.rva as usize, directory.size as usize);
+            if rva.checked_add(len).is_none_or(|end| end > count * PAGE) {
+                return Err(NtStatus::INVALID_IMAGE_FORMAT);
+            }
+            relocs.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
+            for at in rva..rva + len {
+                let _ = relocs.try_push(pages[at / PAGE].0[at % PAGE]);
+            }
+            let table = super::pe::DataDirectory { rva: 0, size: directory.size };
+            super::pe::relocation_blocks(&relocs, table, |page, at| {
+                if let Some(slot) = reloc_index.get_mut(page / PAGE) {
                     *slot = at;
                 }
             })
@@ -205,27 +284,40 @@ impl ImageLayout {
         Ok(ImageLayout {
             base: image.image_base,
             info,
-            bytes,
+            pages,
+            size,
             page_protect,
-            relocations,
+            relocs,
             reloc_index,
             relocatable: image.relocatable,
-            shared: IrqMutex::new(shared),
             dynamic: IrqMutex::new(None),
             relocated: IrqMutex::new(relocated),
         })
     }
 
-    /// The shared frame of page `index` (unrelocated contents).
+    /// The shared frame of page `index` (unrelocated contents): the
+    /// layout's own page.
     pub fn shared_frame(&self, index: usize) -> Option<Frame> {
-        let mut shared = self.shared.lock();
-        let slot = shared.get_mut(index)?;
-        if slot.is_none() {
-            let start = index * PAGE_SIZE as usize;
-            let end = (start + PAGE_SIZE as usize).min(self.bytes.len());
-            *slot = Some(UserSpace::frame_with(&self.bytes[start..end])?);
-        }
-        *slot
+        let page: &crate::fs::ramfs::Page = self.pages.get(index)?;
+        Some(platform::frame_of_heap_page(page as *const _ as usize))
+    }
+
+    /// Page `index` relocated by `delta` into `out` (a copy).
+    fn relocated_page(
+        &self,
+        index: usize,
+        delta: u64,
+        out: &mut [u8; PAGE_SIZE as usize],
+    ) -> Option<()> {
+        out.copy_from_slice(&self.pages.get(index)?.0);
+        super::pe::relocate_in_place(
+            &self.relocs,
+            delta,
+            index * PAGE_SIZE as usize,
+            out,
+            Some(&self.reloc_index),
+        )
+        .ok()
     }
 
     /// The image's alternative base, taken now if it has none (None when
@@ -253,16 +345,7 @@ impl ImageLayout {
         // Made without the lock (interrupts stay on): two threads may make
         // the same page; the second one's frame is freed.
         let mut page = [0u8; PAGE_SIZE as usize];
-        let delta = base.wrapping_sub(self.base);
-        super::pe::relocate_page(
-            &self.bytes,
-            self.relocations,
-            delta,
-            index * PAGE_SIZE as usize,
-            &mut page,
-            Some(&self.reloc_index),
-        )
-        .ok()?;
+        self.relocated_page(index, base.wrapping_sub(self.base), &mut page)?;
         let frame = UserSpace::frame_with(&page)?;
         let mut relocated = self.relocated.lock();
         let slot = relocated.get_mut(index)?;
@@ -280,7 +363,7 @@ impl ImageLayout {
     }
 
     pub fn size(&self) -> u64 {
-        self.bytes.len() as u64
+        self.size as u64
     }
 
     /// A digest of the laid-out image (FNV-1a, 64 bits): a kernel handover
@@ -288,7 +371,7 @@ impl ImageLayout {
     /// before it maps them into a carried process.
     pub fn digest(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in &self.bytes {
+        for &b in self.pages.iter().flat_map(|p| p.0.iter()).take(self.size) {
             h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
         }
         h ^ self.base.rotate_left(17)
@@ -321,10 +404,7 @@ impl ImageLayout {
     /// (its pages are private).
     pub fn view_frame(&self, index: usize, view_base: u64, make: bool) -> Option<Frame> {
         if view_base == self.base {
-            if make {
-                return self.shared_frame(index);
-            }
-            return *self.shared.lock().get(index)?;
+            return self.shared_frame(index);
         }
         if self.dynamic() != Some(view_base) {
             return None;
@@ -340,9 +420,16 @@ impl ImageLayout {
         &self.page_protect
     }
 
-    /// The RVA of export `name`.
+    /// The RVA of export `name` (from a contiguous copy of the image:
+    /// asked of ntdll's layouts at boot only).
     pub fn export(&self, name: &[u8]) -> Option<u32> {
-        super::pe::find_export(&self.bytes, name)
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(self.size).ok()?;
+        for page in &self.pages {
+            let _ = bytes.try_extend_from_slice(&page.0);
+        }
+        bytes.truncate(self.size);
+        super::pe::find_export(&bytes, name)
     }
 }
 
@@ -377,16 +464,18 @@ fn evictable<K, T>(cache: &[(K, KArc<T>)], keep: usize) -> Option<usize> {
 /// Image layouts this large or larger are logged when made.
 const LOGGED_LAYOUT: u64 = 8 << 20;
 
-/// The image layouts the cache holds on the kernel heap: their laid-out
-/// bytes and tables (the shared frames made from them are section pages,
-/// counted apart), and how many; None while its lock is held (the state
-/// dump must not wait).
+/// The image layouts the cache holds on the kernel heap: their pages
+/// (which views at the preferred base map) and tables (frames relocated
+/// for an alternative base are section pages, counted apart), and how
+/// many; None while its lock is held (the state dump must not wait).
 pub fn try_image_heap() -> Option<(usize, usize)> {
     let cache = IMAGE_CACHE.try_lock()?;
     let bytes = cache
         .iter()
         .map(|(_, l)| {
-            l.bytes.capacity() + 4 * (l.page_protect.capacity() + l.reloc_index.capacity())
+            l.pages.len() * PAGE_SIZE as usize
+                + l.relocs.capacity()
+                + 4 * (l.page_protect.capacity() + l.reloc_index.capacity())
         })
         .sum();
     Some((bytes, cache.len()))
@@ -405,8 +494,8 @@ pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>,
             return Ok(layout);
         }
     }
-    let built = super::file::read_all(node)
-        .and_then(|data| KArc::try_new(ImageLayout::new(&data)?).map_err(|_| NtStatus::NO_MEMORY));
+    let built = ImageLayout::from_file(node)
+        .and_then(|layout| KArc::try_new(layout).map_err(|_| NtStatus::NO_MEMORY));
     // Large layouts (each holds its own frames) and failures are logged:
     // what explains a kernel short of memory, or an image that does not
     // load.
@@ -864,20 +953,8 @@ fn map_image_view(
             let _ = vad.release(view_base, 0);
             status
         };
-        if delta != 0 && !at_dynamic {
-            let rva = i * PAGE_SIZE as usize;
-            if super::pe::relocate_page(
-                &image.bytes,
-                image.relocations,
-                delta,
-                rva,
-                &mut page_buf,
-                Some(&image.reloc_index),
-            )
-            .is_err()
-            {
-                return Err(fail(&mut vad, &mut space, NtStatus::INVALID_IMAGE_FORMAT));
-            }
+        if delta != 0 && !at_dynamic && image.relocated_page(i, delta, &mut page_buf).is_none() {
+            return Err(fail(&mut vad, &mut space, NtStatus::INVALID_IMAGE_FORMAT));
         }
         let page = &page_buf[..];
         if vad.commit(va, PAGE_SIZE, protect).is_err() {

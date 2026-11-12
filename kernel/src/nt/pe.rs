@@ -127,6 +127,16 @@ impl<'a> PeImage<'a> {
 
     /// Parses any image (executable or DLL), as for SEC_IMAGE sections.
     pub fn parse_image(data: &'a [u8]) -> Result<Self, PeError> {
+        Self::parse_headers(data, data.len())
+    }
+
+    /// Parses an image from its headers alone (`data` holds at least
+    /// SizeOfHeaders bytes) in a file of `file_len` bytes, which bound the
+    /// sections' raw data: what an image layout built from the file a
+    /// page at a time needs (`section::ImageLayout`). Its sections' data
+    /// is then not in `data` (`section_data`, `lay_out` are for whole
+    /// files).
+    pub fn parse_headers(data: &'a [u8], file_len: usize) -> Result<Self, PeError> {
         if data.get(0..2) != Some(b"MZ") {
             return Err(PeError::BadDosSignature);
         }
@@ -220,7 +230,7 @@ impl<'a> PeImage<'a> {
             if !s.virtual_address.is_multiple_of(section_alignment)
                 || s.virtual_address < prev_end
                 || end > size_of_image
-                || raw_end as usize > data.len()
+                || raw_end as usize > file_len
             {
                 return Err(PeError::SectionOutOfBounds);
             }
@@ -420,6 +430,40 @@ pub fn relocate_page(
     let have = image.len().min(page_end).saturating_sub(page_rva);
     out[..have].copy_from_slice(&image[page_rva..page_rva + have]);
     out[have..].fill(0);
+    relocate_page_contents(image, reloc, delta, page_rva, out, index)
+}
+
+/// `relocate_page` of a page whose unrelocated contents are already in
+/// `out`, with the relocation table on its own (`table`: the directory's
+/// bytes, offsets in `index` relative to its start).
+pub fn relocate_in_place(
+    table: &[u8],
+    delta: u64,
+    page_rva: usize,
+    out: &mut [u8; 4096],
+    index: Option<&[u32]>,
+) -> Result<(), PeError> {
+    let reloc = DataDirectory { rva: 0, size: table.len() as u32 };
+    relocate_page_contents(table, reloc, delta, page_rva, out, index)
+}
+
+/// SizeOfHeaders of the image whose first bytes are `data` (None if they
+/// do not reach it).
+pub fn size_of_headers(data: &[u8]) -> Option<usize> {
+    let pe = u32_at(data, 0x3c).ok()? as usize;
+    Some(u32_at(data, pe + 4 + 20 + 60).ok()? as usize)
+}
+
+/// The relocations of page `page_rva` applied to `out` (the table at
+/// `reloc` in `image`).
+fn relocate_page_contents(
+    image: &[u8],
+    reloc: DataDirectory,
+    delta: u64,
+    page_rva: usize,
+    out: &mut [u8; 4096],
+    index: Option<&[u32]>,
+) -> Result<(), PeError> {
     if delta == 0 || reloc.size == 0 {
         return Ok(());
     }

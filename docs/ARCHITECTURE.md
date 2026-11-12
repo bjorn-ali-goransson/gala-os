@@ -1399,10 +1399,15 @@ address-space teardown never free.
   read-only data section leaves the version alone. A layout of 8 MB or
   more, and a failed one, is logged ("section: laid out ...").
   NtCreateSection(SEC_IMAGE) and process creation both use it. A layout
-  owns the shared frames of its pages (made on first use); views and
-  executables borrow them, so processes of one program share its code,
-  and the frames live as long as the layout (held by the cache, sections
-  and each process).
+  is the image once: its pages are page-sized heap allocations
+  (`ramfs::Page`, frames by `frame_of_heap_page`, as a file's pages are)
+  that views at the preferred base map borrowed, so processes of one
+  program share its code, and the pages live as long as the layout (held
+  by the cache, sections and each process). It is built from the file a
+  page at a time (`ImageLayout::from_file`: the headers, then each
+  section's raw data read into the pages it lands in), never through a
+  copy of the whole file; only the relocation table is kept apart
+  (`relocs`, what relocating a page reads beside the page).
 - **Image bases**: an image view goes to the image's preferred base, or,
   when that is taken (every x64 DLL MSVC links prefers 0x180000000), to
   the image's system-wide alternative base, given once per image layout
@@ -1431,9 +1436,11 @@ address-space teardown never free.
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
   not the whole table. A relocated frame is made at the page's first
-  touch, outside the layout's lock. Laying the file out is still one
-  copy of the whole image in the kernel heap (chrome.dll: 340 MB, about
-  0.3 s per 33 MB under TCG), done once per file version.
+  touch, outside the layout's lock. Laying the file out still makes the
+  whole image resident (chrome.dll: 340 MB, about 0.3 s per 33 MB under
+  TCG), once per file version: pages are not yet built at their first
+  touch nor dropped under memory pressure (they are clean, the file
+  holds them; ROADMAP OF, the memory).
 - **Copy-on-write**: PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY pages are
   mapped read-only (`vm::flags_for`). A write fault gives the page a
   private frame (a copy of the borrowed shared frame, or the frame it
