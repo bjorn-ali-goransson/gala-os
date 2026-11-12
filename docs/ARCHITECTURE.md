@@ -11989,6 +11989,12 @@ presents them, each with a file system of its own. Tests: `wsl_test`
 terminal), host tests in `user/wsl` (tar, gzip, the command line, the
 `-l -v` table) and `lx::file` (a root confining the walk), `lx::ntio`.
 
+- **Naming** (the owner's rule): the compatibility interface keeps
+  WSL's names exactly (`wsl.exe`, its options and output, the Lxss
+  registry keys, `\\wsl.localhost` and `\\wsl$` paths, the `WSL_*`
+  environment); gala's own UI says "Linux", never "WSL": the start
+  menu's "Linux" tile, the "Linux distributions" section, context
+  menus, window titles.
 - **`wsl.exe`** (`user/wsl`, gala's own program in System32, as
   Windows has it; written from WSL's documentation and its published
   source as spec: THIRD_PARTY.md): `--import <name> <dir>
@@ -12052,7 +12058,7 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   itself in raw mode. wsl.exe ignores Ctrl+C (the Linux side's key) and
   puts the console mode back when its program ends.
 - **A distribution's terminal**: `wsl -d <name>` (or the start menu's
-  WSL tile: `desktop::PROGRAMS`, the default distribution) in a console
+  Linux tile: `desktop::PROGRAMS`, the default distribution) in a console
   window (gala's conhost.exe) is its login shell's terminal.
 - **State** (GalaLxDistro): a distribution is Running while it has
   processes (WSL keeps its instance a few seconds longer: `info` in

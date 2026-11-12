@@ -2745,7 +2745,7 @@ kernel), the Hyper-V backends of both products, and Windows containers
   (`<BasePath>\rootfs`, made by the kernel: GalaLxNode) in which its LX
   processes are rooted (a file written in one is absent from another);
   the starter's console and pipes as their fds (`lx::ntio`), so `wsl -d
-  bb` in a console window (and the start menu's WSL tile) is the
+  bb` in a console window (and the start menu's Linux tile) is the
   distribution's terminal: busybox's shell prompts, edits and runs
   commands there; `events=wsl`. wsl_test's uncertain answers (version
   lines, error-code lines, BasePath's form, the state right after a
