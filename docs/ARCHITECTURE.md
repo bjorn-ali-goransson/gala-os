@@ -6112,12 +6112,19 @@ carries their data (Write records).
   leaves one of the two logs complete.** An empty or foreign disk is
   formatted when mounted.
 - `nt::persist`: `mount` (after the boot's files and profiles, before
-  programs run) replays the log and turns recording on;
-  `file::with_fs` notes pending records, and `sync` runs at the end of
-  every system call (and after each program the kernel runs).
-  **Invariant: a change is on the disk when the call that made it
-  returns**, as if every file were opened write-through. One sync writes
-  at a time (a turn flag; it yields while the disk works).
+  programs run) replays the log, turns recording on and starts the lazy
+  writer; `file::with_fs` notes pending records. **Durability is
+  Windows'**: a change reaches the disk lazily, within about a second
+  (the lazy writer), or at once when a program asks (FlushFileBuffers,
+  a write-through or unbuffered handle, NtFlushKey) and when a program
+  the kernel ran ends, the machine stops or the kernel hands over (the
+  write-back, "A disk-backed C:" below). **Invariant: the records reach
+  the disk in the order they were made**, so a crash leaves C: as it was
+  at some moment (the last write-back's): never a torn tree, at most the
+  last unflushed second or so of changes lost, as on Windows. On a
+  layout 1 or 2 volume (no data area; records carry the data) every
+  system call's changes are still written as it returns. One sync
+  writes at a time (a turn flag; it yields while the disk works).
 - Tests: `persist_test`, booted twice on one disk (xtask's
   `DiskScenario::earlier_boots`): the first boot makes files and
   directories (a descriptor, attributes, a time, a 200,000-byte file, a
@@ -6174,13 +6181,34 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   record SetSize and Delete as before. A snapshot names stored, clean
   pages by their runs and carries the others (a module's bytes, a page
   changed since its last write) as Write records.
-- **Sync** (`persist::sync`, at the end of every system call): dirty
-  pages are written to their clusters a batch (256 pages) per hold of
-  the file system's lock: `RamFs::writeback` lists them by cluster and
-  copies them into a staging buffer in that order, the sync writes the
-  copies (consecutive clusters in one request, at most 64 KiB); the
-  records are taken in the hold whose batch leaves no page dirty; then
-  they are appended; then the clusters those records gave up are freed.
+- **Write-back** (`persist::sync`), lazily as Windows' cache manager
+  writes: a write changes the cache and returns; a sync writes what is
+  pending, run by
+  - the lazy writer, a kernel thread, every `writeback_ms=` (default
+    1000 ms: Windows' lazy writer scans once a second), when anything
+    is pending (the registry's changes once 5 s have passed);
+  - `persist::flush` at once, before the call returns: NtFlushBuffersFile
+    on a file or the volume (FlushFileBuffers), NtWriteFile on a handle
+    opened FILE_WRITE_THROUGH or FILE_NO_INTERMEDIATE_BUFFERING
+    (CreateFile's FILE_FLAG_WRITE_THROUGH, FILE_FLAG_NO_BUFFERING),
+    NtFlushKey, the end of a program the kernel ran (`run=`), the
+    machine's stop (`stop`) and a kernel handover. A flush writes
+    everything pending, a superset of the one file's data and metadata
+    (the change log is one sequence);
+  - a writer itself when more than the dirty limit (an eighth of
+    memory, at least 4 MiB) is queued at the end of its call
+    (`persist::after_call`: throttling, as Windows holds writers back
+    past its dirty threshold): dirty pages cannot leave memory until
+    written, so this bounds them.
+  A sync takes the records and the length of the dirty queue in one hold
+  of the file system's lock, then writes the pages queued then to their
+  clusters a batch (256 pages) per hold (`RamFs::writeback`, FIFO, its
+  budget that length: it lists them by cluster and copies them into a
+  staging buffer in that order; the sync writes the copies, consecutive
+  clusters in one request, at most 64 KiB), flushes the disk, appends
+  the records, then frees the clusters those records gave up. Pages
+  dirtied meanwhile wait for the next sync, so a sync ends however fast
+  programs write (`a_writeback_ends_while_writers_go_on_and_covers_its_records`).
   **Writing back needs no memory**: the list, the staging buffer and
   the log's encoding buffer (`Volume::reserve`, records streamed to the
   disk 64 KiB at a time) are reserved at mount, so a sync short of
@@ -6188,9 +6216,15 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   disk (a failed write of their pages, a failed append) are put back
   (`RamFs::restore_ops`) for the next sync; only lost records (no memory
   to record them) or a full log area make a snapshot. **Invariants**: a record that names a cluster is on the disk
-  only after the cluster holds the page's data; a cluster given up is
+  only after the cluster holds the page's data (a page whose cluster a
+  taken record names is dirty at the take, so in the sync's budget); a
+  cluster given up is
   reused only after the record giving it up is on the disk (until then
   it is `pending`): a crash replays either the old owner or nothing.
+  A page rewritten after a sync took it may reach the disk before the
+  records of the changes made with it: after a crash an unflushed file
+  can hold a mix of older and newer pages (as on Windows, unflushed
+  data is not ordered); flushed data and the tree are whole.
 - **Leaving memory and coming back**: while free memory is below a
   quarter (at least 64 MiB) the sync, and a page read about to allocate
   (`persist::relieve`, only when no sync runs: a sync's copies must be
@@ -6199,7 +6233,15 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   clock hand (`RamFs::evict`) goes round the files' pages from where it
   stopped; a page written or read back since it last passed (`recent`)
   gets a second chance. It needs no memory (no queue to grow: a page
-  whose entry could not be queued would never have left). A call
+  whose entry could not be queued would never have left). **Its work
+  is in proportion to what can leave**: a call that went round a large
+  tree (4096 node slots or more) and fell short marks the cache futile,
+  and later calls return at once until 256 pages could have become able
+  to leave (written back, read back, a view ended): while other uses
+  hold the memory, a page read would otherwise walk every one of
+  Office's tens of thousands of files (the scans and skips are on the
+  `persist: free memory stays low` line; host test
+  `a_futile_eviction_is_not_repeated_until_pages_could_leave`). A call
   that needs a page on the disk only fails with `FsError::NotResident`
   and names it (`take_page_in`); `nt::file::with_pages` reads the
   cluster with the file system released and installs it (`fill`) only
@@ -6223,7 +6265,15 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   32-bit caller): the area's clusters and free ones (4 KiB clusters, 8
   sectors of 512 bytes); without a data area, the machine's memory as
   before.
-- **Observability**: `persist: data area of N MiB at sector S, K KiB in
+- **Observability**: `writeback` events (`events=file`: `cause` lazy,
+  flush buffers, write-through, throttle, flush key, program end,
+  shutdown, handover; `pages` written, `records` appended, `dirty`
+  queued at the start, `ms`) and `writeback throttle` (the queue and the
+  limit) for each throttled call; the end-of-run `persist:` line's
+  write-back part (the cadence, syncs by cause, records, dirty pages now
+  and at most, the limit, calls throttled), also in the `powercut:`
+  line; `persist: cannot start the lazy writer` if its thread cannot be
+  made. `persist: data area of N MiB at sector S, K KiB in
   use` at mount (and a warning naming clusters the log named twice or out
   of range: those pages read as zeros); at the end of a run `persist:
   data area ..., N MiB free; pages written, read back, let go; dirty
@@ -6241,6 +6291,18 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   sockets, and each process's commit (`process: pid ...` lines). xtask attaches
   the disk with `werror=report`: a host whose disk fills under the sparse
   image fails the guest's writes (logged) instead of pausing the VM.
+- Tests of the write-back: `writeback_test` (what programs see, also
+  on Windows: data and sizes visible through other handles at once,
+  FlushFileBuffers and its access check, FileModeInformation of
+  write-through and unbuffered handles, unbuffered transfers in whole
+  sectors), `writeback_crash` (the boot option `powercut` stops the
+  machine at the program's end without writing what is pending; with
+  `writeback_ms=600000` the second boot finds a flushed file, a
+  write-through one and a rename made before them, and nothing of what
+  came after: a new file, a page rewritten, a rename) and
+  `writeback_lazy` (data never flushed is on the disk after a power cut
+  4 s later); host test
+  `a_writeback_ends_while_writers_go_on_and_covers_its_records`.
 - Tests: `memload_test` (2000 threads made and ended, then 768 MiB
   downloaded from Nginx in 256 KiB ranges, a thread each, onto a 2 GiB
   disk in the 512 MiB VM and read back through 16 MiB views: the
@@ -6254,7 +6316,15 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   leaving memory, a full area, a shrink and a later growth, a snapshot
   replayed onto a new boot, a log of appends and a truncation replayed,
   pages changed through a writable mapping.
-- Limits and TODO: extension allocates nothing (above); no quotas (what
+- **Unbuffered handles** (FILE_NO_INTERMEDIATE_BUFFERING): a read or
+  write must be whole 512-byte sectors at a sector offset, else
+  STATUS_INVALID_PARAMETER, as Windows documents for
+  FILE_FLAG_NO_BUFFERING (the buffer's alignment is not checked).
+- Limits and TODO: a flush writes everything pending, not the one
+  file's pages (correct, sometimes more than asked); FlushViewOfFile is
+  a no-op and a live writable view's pages count as dirty only when the
+  view ends (as before); no per-file write-behind order;
+  extension allocates nothing (above); no quotas (what
   the caller may use is what is free); the cache's policy is a clock
   with one second chance, nothing smarter; recording a change (an `Op`)
   and the dirty list still allocate in the system call that makes the
@@ -6286,8 +6356,9 @@ rather than a format of their own.
 - The registry is flushed lazily, as Windows' hives are ("within a few
   seconds", RegFlushKey's documentation): `persist::sync` moves the
   registry's records into the file at the first sync 5 s after the last
-  flush (REGISTRY_FLUSH_NS), or at once after NtFlushKey (RegFlushKey), a
-  program's end or before a kernel handover; a crash loses at most those
+  flush (REGISTRY_FLUSH_NS: the lazy writer's), or at once in a flush
+  (NtFlushKey (RegFlushKey), a program's end, the machine's stop, a
+  kernel handover); a crash loses at most those
   seconds of registry changes, as on Windows. Synced at every system call
   (two disk writes and a flush each), Office's registry staging took
   about 40 ms per NtCreateKey and NtSetValueKey under TCG.

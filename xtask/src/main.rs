@@ -3757,6 +3757,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_gdiplus_test", "x86/ole32.dll", "Windows/SysWOW64"),
     ("wow64_gdiplus_test", "x86/gdiplus.dll", "Windows/SysWOW64"),
     // The Windows Overlay Filter's API (user/wofutil_test).
+    // File data written back lazily (user/writeback_test).
+    ("writeback_test", "ntdll.dll", "Windows/System32"),
+    ("writeback_test", "kernel32.dll", "Windows/System32"),
     ("wofutil_test", "ntdll.dll", "Windows/System32"),
     ("wofutil_test", "kernel32.dll", "Windows/System32"),
     ("wofutil_test", "wofutil.dll", "Windows/System32"),
@@ -4002,6 +4005,7 @@ const USER_PROGRAMS: &[&str] = &[
     "msi_test",
     "rstrtmgr_test",
     "wofutil_test",
+    "writeback_test",
     "gdiplus_test",
     "uisettings_test",
     "tray_test",
@@ -7489,6 +7493,32 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_uisettings_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // File data written back lazily, as Windows' cache manager does:
+        // what programs see (FlushFileBuffers, write-through and
+        // unbuffered handles; user/writeback_test).
+        name: "writeback_test",
+        cmdline: "qemu_exit run=writeback_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A power cut after unflushed writes (`powercut`; no write-back
+        // by time): the second boot finds what was flushed and nothing
+        // of what was not (DISK_SCENARIOS).
+        name: "writeback_crash",
+        cmdline: "qemu_exit persist powercut writeback_ms=600000 run=writeback_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000", "powercut:"],
+    },
+    Scenario {
+        // Data not flushed reaches the disk by itself within seconds: a
+        // power cut 4 s after the write loses none of it.
+        name: "writeback_lazy",
+        cmdline: "qemu_exit persist powercut run=writeback_test.exe args=lazy",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // The Windows Overlay Filter's API with no filter attached
         // (user/wofutil_test).
         name: "wofutil_test",
@@ -10902,6 +10932,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("handover_upgrade_uefi", "handover_k32_test"),
     ("handover_downgrade_refused", "handover_k32_test"),
     ("crash_record", "hello"),
+    ("writeback_crash", "writeback_test"),
+    ("writeback_lazy", "writeback_test"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
@@ -15104,6 +15136,24 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["persist_test: first boot", "exited with status 0x00000000"]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "writeback_crash",
+        size: 32 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["writeback_test: crash written", "powercut:"]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "writeback_lazy",
+        size: 32 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["writeback_test: lazy written", "powercut:"]],
         earlier_fail: false,
     },
     DiskScenario {

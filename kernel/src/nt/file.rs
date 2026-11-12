@@ -23,8 +23,11 @@ pub fn with_fs<R>(f: impl FnOnce(&mut RamFs) -> R) -> R {
         let mut guard = FS.lock();
         let fs = guard.as_mut().expect("file system initialized");
         let r = f(fs);
-        if fs.recording && fs.has_ops() {
-            super::persist::note_pending();
+        if fs.recording {
+            if fs.has_ops() {
+                super::persist::note_pending();
+            }
+            super::persist::note_dirty(fs.dirty_queued());
         }
         (r, super::notify::collect(fs))
     };
@@ -57,6 +60,8 @@ pub const FILE_OVERWRITTEN: u64 = 3;
 
 // CreateOptions.
 pub const FILE_DIRECTORY_FILE: u32 = 0x0001;
+pub const FILE_WRITE_THROUGH: u32 = 0x0002;
+pub const FILE_NO_INTERMEDIATE_BUFFERING: u32 = 0x0008;
 pub const FILE_SYNCHRONOUS_IO_ALERT: u32 = 0x0010;
 pub const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
 pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
@@ -412,9 +417,9 @@ pub struct FileObject {
 }
 
 /// CreateOptions reported by FileModeInformation.
-const MODE_OPTIONS: u32 = 0x0002 // FILE_WRITE_THROUGH
+const MODE_OPTIONS: u32 = FILE_WRITE_THROUGH
     | 0x0004 // FILE_SEQUENTIAL_ONLY
-    | 0x0008 // FILE_NO_INTERMEDIATE_BUFFERING
+    | FILE_NO_INTERMEDIATE_BUFFERING
     | FILE_SYNCHRONOUS_IO_ALERT
     | FILE_SYNCHRONOUS_IO_NONALERT
     | FILE_DELETE_ON_CLOSE;
@@ -1005,8 +1010,12 @@ const FS_NAME: &[u8] = b"NTFS";
 /// are in 4 KiB clusters: the data area's on a disk-backed C: (D4), else
 /// free and total RAM (the volume lives in memory).
 pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
-    let (free, total) = match with_fs(|fs| fs.area_size()) {
-        Some((count, free)) => (u64::from(free), u64::from(count)),
+    // Clusters a deleted or truncated file gave up count as free at once,
+    // as Windows reports a deleted file's space: they are free from the
+    // next write-back (a write that needs them sooner has one run first,
+    // `syscalls::write_range`).
+    let (free, total) = match with_fs(|fs| fs.area_size().map(|a| (a, fs.area_reclaimable()))) {
+        Some(((count, free), soon)) => (u64::from(free) + u64::from(soon), u64::from(count)),
         None => platform::frame_stats(),
     };
     let mut b = Vec::new();

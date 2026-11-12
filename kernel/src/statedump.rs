@@ -46,6 +46,10 @@ pub fn full_dump() {
     crate::nt::ledger::dump();
     // Armed registry change notifications and who waits on them.
     crate::nt::regnotify::dump();
+    // C:'s write-back: what is dirty, the syncs by cause, throttling.
+    if crate::nt::persist::has_area() {
+        info!("statedump: persist: {}", crate::nt::persist::WritebackStats);
+    }
     // Linux threads (masks, pending signals, blocked or not), epoll sets
     // and futex waiters (ROADMAP LX).
     crate::lx::dump();

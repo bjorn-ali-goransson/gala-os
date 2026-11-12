@@ -537,6 +537,14 @@ image, what the image must hold afterwards).
   write ...` in the serial log), where QEMU's default would pause the VM
   until the scenario timed out.
 - A slow disk: `failpoint=disk_io:delay:<ms>` (with `persist`).
+- Data is written back lazily (ARCHITECTURE "A disk-backed C:"): what a
+  program wrote reaches the disk about a second later, or at its flush,
+  write-through handle or end. A test of what survives a crash stops the
+  machine with `powercut` (at the end of a `run=` program, nothing
+  pending written) and, to make what is lost deterministic, slows the
+  lazy writer (`writeback_ms=600000`; `writeback_crash`). A hung run's
+  image may lack the last second of data; the `writeback` events
+  (`events=file`) say what each sync wrote and why.
 - Memory that does not come back: the `persist: free memory stays low
   ...` line (and `stats: frames in use by ...` at the end, `statedump:
   frames in use by ...` in a dump) says which use holds the frames:
@@ -3272,9 +3280,12 @@ backtrace, and the program's own symptom (a status, a hang) follows:
   long run may be the machine out of memory: a user page fault that
   finds no free frame becomes an access violation (the commit charge
   covers private memory only; mapped and image pages and the kernel heap
-  are not charged). Look for "vm: out of memory" in the log and the free
-  frames on the `stats:` line; give the scenario more memory (`qemu()`
-  in xtask).
+  are not charged). Look for "vm: out of memory" in the log (it names
+  the frames by use and the heap) and the free frames on the `stats:`
+  line; `persist: free memory stays low` (again each time free memory
+  halves) names the files' pages and the scans letting them go; give
+  the scenario more memory (`qemu()` in xtask) once what holds it is
+  known.
 
 ### Deterministic simulation (reproducing a race from its seed)
 
@@ -3903,6 +3914,12 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### Windows behaviour gala must copy
 
+- **A write is not on the disk when it returns** (lazy write-back, as
+  Windows): kernel code that needs C:'s state on the disk (a handover,
+  a check after a program) calls `persist::flush(cause)`, never relies
+  on a system call having synced; a test that checks durability flushes
+  (FlushFileBuffers, a write-through handle) or stops the machine with
+  `powercut` and expects only what was flushed.
 - **A thread's windows go when it ends**: a test or gala DLL that
   creates a window on a worker thread which then returns loses the
   window (IsWindow FALSE, sends fail with ERROR_INVALID_WINDOW_HANDLE).
