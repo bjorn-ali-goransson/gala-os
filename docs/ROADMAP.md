@@ -1915,6 +1915,21 @@ need gala's.
      With it the publish goes on and the service ended on the delay load
      of SHLWAPI.dll!PathBuildRootW (crash report, about 1835 s); done:
      PathBuildRootW and A (Wine's shlwapi path.c test on Windows).
+     Where the fast path ends now (3600 s): APPLYCONFIGURATION is
+     publishing the staged install into `Program Files\Microsoft
+     Office\root` and is cut off by the time limit, copying at about
+     0.13 MB/s: 4 KiB NtReadFile/NtWriteFile pairs of about 30 ms each
+     (25800 writes, 105 MB, from 1900 s on), every system call's sync
+     writing its page and the volume's record and flushing the disk
+     (the registry is flushed lazily now, files are not; Windows' cache
+     manager writes file data lazily unless the handle is write-through).
+     Next: the same lazy flush for files' data (a design change of D2/D4's
+     "on the disk before the call returns", for the owner to decide:
+     FlushFileBuffers, write-through handles and a program's end would
+     still flush at once). Also seen: the client's `OfficeC2RClient.exe
+     /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
+     ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
+     Framework.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
