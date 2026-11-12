@@ -449,6 +449,18 @@ pub fn fill_entropy(buf: &mut [u8]) -> bool {
     <P as Entropy>::fill_entropy(buf)
 }
 
+/// The disk's traffic since boot, (bytes read, bytes written), and whether
+/// the machine has a disk: the task manager's Performance view.
+#[inline]
+pub fn disk_traffic() -> (u64, u64, bool) {
+    use core::sync::atomic::Ordering;
+    (
+        crate::disk::READ_BYTES.load(Ordering::Relaxed),
+        crate::disk::WRITE_BYTES.load(Ordering::Relaxed),
+        crate::disk::present(),
+    )
+}
+
 #[inline]
 pub fn disk_sectors() -> u64 {
     <P as Storage>::disk_sectors()

@@ -418,16 +418,17 @@ mod live {
     /// The machine's load (GalaTasks op 1).
     pub fn perf() -> Result<Vec<u8>, NtStatus> {
         let (free, total) = platform::frame_stats();
+        let (disk_read, disk_written, has_disk) = platform::disk_traffic();
         let mut p = Perf {
             now_ns: platform::monotonic_ns(),
             memory_total: total * platform::PAGE_SIZE,
             memory_used: total.saturating_sub(free) * platform::PAGE_SIZE,
             commit: crate::nt::charge::committed().0 * platform::PAGE_SIZE,
-            disk_read: crate::disk::READ_BYTES.load(Ordering::Relaxed),
-            disk_written: crate::disk::WRITE_BYTES.load(Ordering::Relaxed),
+            disk_read,
+            disk_written,
             net_received: crate::net::virtio_net::RX_BYTES.load(Ordering::Relaxed),
             net_sent: crate::net::virtio_net::TX_BYTES.load(Ordering::Relaxed),
-            has_disk: crate::disk::present(),
+            has_disk,
             has_network: crate::net::has_card(),
             ..Perf::default()
         };
