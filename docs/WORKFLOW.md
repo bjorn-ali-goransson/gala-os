@@ -1696,8 +1696,12 @@ source).
 - Exploratory boots without xtask's screen checks:
   `cargo xtask iso --name N --scenario S qemu_exit <cmdline...>` builds
   the image outside the QEMU lock, then boot it under the lock with QEMU's
-  monitor for `screendump` and `sendkey` (the lock is held only while it
-  runs).
+  monitor for `sendkey` (the lock is held only while it runs). A
+  headless desktop (`presenter=test`) is not on QEMU's screen (a
+  screendump shows the boot splash): read its frame with the monitor's
+  `memsave <address> 4096000 "<file>"` at the address of the log's
+  `presenter: test frame for session 1:` line (0x00RRGGBB rows, 1280 x
+  800; the file name quoted, or the monitor refuses it).
 
 ## Program recipes
 

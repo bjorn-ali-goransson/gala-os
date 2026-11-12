@@ -989,6 +989,21 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
             // A distribution's desktop in one window (LD step 6, `lx_xdesktop`):
             // twm, X.Org's window manager (its libraries are xterm's), and
             // coreutils' sleep for the session script.
+            // Xlib's locale database, the C locale's part: without it Xlib
+            // warns that the locale is not supported and xterm finds no
+            // input method (stderr lines real Linux does not print).
+            Deb {
+                pool: "main/libx/libx11/libx11-data_1.8.7-1build1_all.deb",
+                sha256: "9ae01f7747e7f479394c697c55acf11d3baf139e8e54b7c4adfb55ef9c50de08",
+                files: &[
+                    "usr/share/X11/locale/locale.alias",
+                    "usr/share/X11/locale/locale.dir",
+                    "usr/share/X11/locale/compose.dir",
+                    "usr/share/X11/locale/C/XLC_LOCALE",
+                    "usr/share/X11/locale/C/XI18N_OBJS",
+                    "usr/share/X11/locale/C/Compose",
+                ],
+            },
             Deb {
                 pool: "universe/t/twm/twm_1.0.10-1build2_amd64.deb",
                 sha256: "29517224de67d2dcd27be2e4cde9394e9aad5d3507491b053c2b3b4f895af9c2",
@@ -5423,9 +5438,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
-    // LD step 5: rootless Xwayland and xterm, being brought up.
-    "lx_xterm",
-    "lx_gtk_x11",
+    // LD step 6, being brought up.
     "lx_xdesktop",
     // BR's conformance report: a report run of hours, not a gate check.
     "chromium_wpt",
@@ -13152,6 +13165,48 @@ macro_rules! typed {
     ($($key:literal),*) => { &[$(concat!("sendkey ", $key)),*, "sendkey ret"] };
 }
 
+/// xterm through rootless Xwayland (`lx_xterm`): the first window of the
+/// Wayland server, framed at (64, 48), its client area (484 x 316: 80 x
+/// 24 cells of X's built-in 6 x 13 "fixed" font, one pixel of border
+/// first) from (65, 81); the text black on white, lines 13 pixels apart
+/// from y 84, columns 6 apart from x 67. dash's prompt `$ `, then
+/// `echo hi` typed and its output on the second line; a drag over that
+/// output (PS/2: the pointer starts at (640, 400)) selects it, which
+/// xterm shows reversed (black where the cell was white); `exit` ends
+/// the shell and xterm.
+const XTERM_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'xterm'",
+    steps: &[
+        ScreenStep {
+            after: "desktop: shown window 'xterm'",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(300, 300, 0xffffff),          // xterm's background
+                PixelCheck::AnyIn(66, 84, 12, 12, 0x000000), // the prompt "$"
+                PixelCheck::Varied(70, 56, 40, 16, 4),       // "xterm" in the caption
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: typed!("e", "c", "h", "o", "spc", "h", "i"),
+            pixels: &[PixelCheck::AnyIn(68, 99, 10, 9, 0x000000)], // "hi"
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -255",
+                "mouse_move -255 -42",
+                "mouse_move -62 0",
+                "mouse_button 1",
+                "mouse_move 10 0",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(70, 98, 0x000000)], // "hi" selected
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
 /// The distribution's terminal (`wsl_terminal`): wsl.exe's console
 /// window at (60, 60) (conhost's grid, lines 19 pixels apart from y 98)
 /// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
@@ -13597,6 +13652,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),
+    ("lx_xterm", XTERM_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows

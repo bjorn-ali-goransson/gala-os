@@ -987,10 +987,14 @@ mod tests {
     use std::string::String;
     use std::vec;
 
+    /// What the server was asked to show: surface, window, override-redirect,
+    /// decorated, place, title.
+    type Shown = (u32, u32, bool, bool, (i32, i32), Vec<u8>);
+
     #[derive(Default)]
     struct Fake {
         surfaces: Vec<u32>,
-        shown: Vec<(u32, u32, bool, bool, (i32, i32), Vec<u8>)>,
+        shown: Vec<Shown>,
         titles: Vec<(u32, Vec<u8>)>,
         hidden: Vec<u32>,
         notes: Vec<String>,
