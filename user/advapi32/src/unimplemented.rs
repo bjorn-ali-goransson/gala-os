@@ -16,7 +16,6 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     EnableTrace
     EnumDependentServicesW
     EnumerateTraceGuids
-    GetSidLengthRequired
     LockServiceDatabase
     LogonUserExW
     LookupAccountSidA
