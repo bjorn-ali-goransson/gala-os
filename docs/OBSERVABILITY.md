@@ -61,7 +61,14 @@ port. Lines that tools and agents rely on:
   state dump has the same as `statedump: frames in use by ...`; `stats:
   threads: N made since boot, M in the scheduler's table (D dead not
   reaped yet), S slots`, whose table must stay at what runs, not grow
-  with N: ARCHITECTURE "Threads and scheduling") and `nt:` (`nt::stats`: system calls, waits,
+  with N: ARCHITECTURE "Threads and scheduling"; `stats: heap by owner:
+  registry N KiB (K keys, V values, D KiB of value data), file tree N KiB
+  (M nodes), files' pages N KiB, image layouts N KiB (I images), other N
+  KiB, of T KiB in use` (`nt::stats::HeapOwners`: the registry's, the
+  file system's and the image cache's structures by their capacities,
+  the rest of the heap as "other"; the
+  state dump prints it as `statedump: heap by owner:`, and `persist`'s
+  low-memory warning as `persist: heap by owner:`) and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`

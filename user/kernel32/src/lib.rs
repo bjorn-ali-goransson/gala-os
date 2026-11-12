@@ -2051,6 +2051,16 @@ pub extern "system" fn FindFirstFileNameW(
     if h == INVALID_HANDLE_VALUE {
         return INVALID_HANDLE_VALUE;
     }
+    // FILE_STANDARD_INFORMATION's NumberOfLinks: the other names of a
+    // file with hard links are not listed yet (reported).
+    let mut standard = [0u8; 24];
+    let mut iosb = [0usize; 2];
+    // SAFETY: a 24-byte FILE_STANDARD_INFORMATION.
+    let status = unsafe { NtQueryInformationFile(h, &mut iosb, standard.as_mut_ptr(), 24, 5) };
+    let links = u32::from_le_bytes([standard[16], standard[17], standard[18], standard[19]]);
+    if status == STATUS_SUCCESS && links > 1 {
+        unsupported(b"kernel32.dll!FindFirstFileNameW(hard links)", links.into());
+    }
     let mut path = [0u16; 1100];
     let n = files::GetFinalPathNameByHandleW(h, path.as_mut_ptr(), path.len() as u32, 4);
     CloseHandle(h);

@@ -1400,10 +1400,15 @@ address-space teardown never free.
   read-only data section leaves the version alone. A layout of 8 MB or
   more, and a failed one, is logged ("section: laid out ...").
   NtCreateSection(SEC_IMAGE) and process creation both use it. A layout
-  owns the shared frames of its pages (made on first use); views and
-  executables borrow them, so processes of one program share its code,
-  and the frames live as long as the layout (held by the cache, sections
-  and each process).
+  is the image once: its pages are page-sized heap allocations
+  (`ramfs::Page`, frames by `frame_of_heap_page`, as a file's pages are)
+  that views at the preferred base map borrowed, so processes of one
+  program share its code, and the pages live as long as the layout (held
+  by the cache, sections and each process). It is built from the file a
+  page at a time (`ImageLayout::from_file`: the headers, then each
+  section's raw data read into the pages it lands in), never through a
+  copy of the whole file; only the relocation table is kept apart
+  (`relocs`, what relocating a page reads beside the page).
 - **Image bases**: an image view goes to the image's preferred base, or,
   when that is taken (every x64 DLL MSVC links prefers 0x180000000), to
   the image's system-wide alternative base, given once per image layout
@@ -1432,9 +1437,11 @@ address-space teardown never free.
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
   not the whole table. A relocated frame is made at the page's first
-  touch, outside the layout's lock. Laying the file out is still one
-  copy of the whole image in the kernel heap (chrome.dll: 340 MB, about
-  0.3 s per 33 MB under TCG), done once per file version.
+  touch, outside the layout's lock. Laying the file out still makes the
+  whole image resident (chrome.dll: 340 MB, about 0.3 s per 33 MB under
+  TCG), once per file version: pages are not yet built at their first
+  touch nor dropped under memory pressure (they are clean, the file
+  holds them; ROADMAP OF, the memory).
 - **Copy-on-write**: PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY pages are
   mapped read-only (`vm::flags_for`). A write fault gives the page a
   private frame (a copy of the borrowed shared frame, or the frame it
@@ -1768,9 +1775,14 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   before it); a rename or hard link from one tree into another is
   refused (`FsError::CrossVolume`: EXDEV, STATUS_NOT_SAME_DEVICE).
 
-- **Contents from boot modules**: modules appear read-only in `C:\gala`
-  (or the directory their module string names), copied to the heap on
-  first write. A module string `tar:<dir>` is a USTAR archive
+- **Contents from boot modules**: modules appear in `C:\gala` (or the
+  directory their module string names), copied to the heap on first
+  write. A module not marked writable is a program file
+  (`ramfs::Node::is_program_file`): Windows' attributes
+  (FILE_ATTRIBUTE_ARCHIVE, not READONLY: CopyFileW keeps a file's
+  attributes, and a read-only copy would refuse its delete), protected
+  as Windows' system files are, by its descriptor (docs/SECURITY.md
+  "Security descriptors on objects"); Linux sees it 0555. A module string `tar:<dir>` is a USTAR archive
   (`fs/tar.rs`) whose regular files are added under `C:\<dir>` in place,
   without copies, and whose directory entries (typeflag 5) are created,
   so empty directories survive (xtask writes one for every directory of
@@ -1795,9 +1807,38 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   (CPython lists its Lib so: `encodings` has no dot) while NT's own
   `*.*` keeps its literal period (`ramfs::wildcard_match`, a set of mask
   positions, no backtracking).
-- **Rename and delete**: FileRenameInformation (DELETE access) moves the
-  node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
-  closes.
+- **Rename and delete**: FileRenameInformation(Ex) (DELETE access)
+  moves the name the handle was opened by; FILE_DELETE_ON_CLOSE needs
+  DELETE and takes effect when that open closes. FileDispositionInformation
+  and FileDispositionInformationEx (class 64; kernel32's
+  FileDispositionInfoEx, 21) mark that name for deletion at the node's
+  last close (a hard link's mark is its own, `Link::delete_pending`); a
+  read-only file is STATUS_CANNOT_DELETE unless the Ex flag
+  IGNORE_READONLY_ATTRIBUTE; POSIX_SEMANTICS removes the name when that
+  handle closes though others stay open (the node lives on, detached,
+  `ramfs::unlink`); ON_CLOSE sets or clears the handle's
+  FILE_DELETE_ON_CLOSE. NtCreateFile's FileAttributes (read-only,
+  hidden, system, temporary, not indexed) are a created file's
+  (`file::set_created_attributes`); an overwrite keeps the old ones (not
+  yet as Windows, which sets them then too).
+- **Hard links** (FileLinkInformation 11, FileLinkInformationEx 72;
+  kernel32's CreateHardLinkW/A; `hardlink_test`, `wow64_hardlink_test`,
+  from Wine's test_hard_link and test_file_link_information): a new name
+  for a file (`ramfs::link_replacing`), none for a directory
+  (STATUS_FILE_IS_A_DIRECTORY); no access to the file is needed. An
+  existing name is STATUS_OBJECT_NAME_COLLISION, or with
+  REPLACE_IF_EXISTS replaced unless it is a directory, open or read-only
+  (STATUS_ACCESS_DENIED; IGNORE_READONLY_ATTRIBUTE lifts the last); the
+  file's own name with the flag is a success that changes nothing. The
+  change log's Link record keeps it ("The disk"). A file object opened
+  by a hard link remembers it (`FileObject::via`): FileNameInformation
+  reports it, a delete or rename through the handle acts on it, a
+  handover carries it. Not yet: FindFirstFileNameW lists only the name it
+  was given (recorded when the file has more: kernel32 needs
+  FileHardLinkInformation, class 46, and a way from a parent's id to its
+  path); FILE_LINK/RENAME_POSIX_SEMANTICS (replacing an open target;
+  recorded, refused as without it); IGNORE_READONLY_ATTRIBUTE on a rename
+  (recorded, ignored).
 - **Volume**: reports itself as an NTFS disk (FileFs* classes) with RAM
   as its size.
 - **Completion**: file objects are waitable: NtReadFile/NtWriteFile reset

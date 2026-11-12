@@ -12,6 +12,7 @@ use super::status::NtStatus;
 use crate::fs::ramfs::{self, Access, FsError, NodeId, RamFs, Share};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 static FS: IrqMutex<Option<RamFs>> = IrqMutex::new(None);
 
@@ -279,6 +280,61 @@ pub fn volume_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     with_fs(|fs| fs.path_of(node)).map_err(fs_status)
 }
 
+/// The file system's heap use, or None while its lock is held (the
+/// state dump must not wait).
+pub fn try_heap_use() -> Option<ramfs::HeapUse> {
+    FS.try_lock().map(|fs| fs.as_ref().map(RamFs::heap_use).unwrap_or_default())
+}
+
+/// The name of open file `file` from the volume root: the hard link it
+/// was opened by while that still names it, else its node's first name.
+pub fn handle_path(file: &FileObject) -> Result<Vec<u16>, NtStatus> {
+    with_fs(|fs| {
+        let via = file.via.lock();
+        match &*via {
+            Some((d, n)) if fs.find(*d, n) == Ok(Some(file.node)) => fs.entry_path(*d, n),
+            _ => fs.path_of(file.node),
+        }
+    })
+    .map_err(fs_status)
+}
+
+/// NT's delete of open file `file`'s name (FileDispositionInformation):
+/// the hard link it was opened by, else its node's first name.
+pub fn set_delete_pending(file: &FileObject, pending: bool) -> Result<(), FsError> {
+    with_fs(|fs| {
+        let via = file.via.lock();
+        match &*via {
+            Some((d, n)) if fs.find(*d, n) == Ok(Some(file.node)) => {
+                fs.set_entry_delete_pending(*d, n, pending)
+            }
+            _ => fs.set_delete_pending(file.node, pending),
+        }
+    })
+}
+
+/// Renames the name of open file `file` (the hard link it was opened by,
+/// else its first name) to `name` in directory `parent`.
+pub fn rename_open(
+    file: &FileObject,
+    parent: NodeId,
+    name: &[u16],
+    replace: bool,
+) -> Result<(), FsError> {
+    let mut owned = Vec::new();
+    owned.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+    with_fs(|fs| {
+        let mut via = file.via.lock();
+        let live = via.as_ref().is_some_and(|(d, n)| fs.find(*d, n) == Ok(Some(file.node)));
+        let Some((d, n)) = via.as_ref().filter(|_| live) else {
+            return fs.rename(file.node, parent, name, replace);
+        };
+        fs.rename_entry(*d, n, parent, name, replace)?;
+        *via = if fs.is_hard_link(parent, name) { Some((parent, owned)) } else { None };
+        Ok(())
+    })
+}
+
 /// The node at `path` (`\\`-separated, from the volume root).
 pub fn lookup(path: &str) -> Result<NodeId, NtStatus> {
     let wide_path = wide(path)?;
@@ -409,8 +465,19 @@ pub struct FileObject {
     /// Opened for synchronous I/O: the file position is maintained.
     pub synchronous: bool,
     pub position: IrqMutex<u64>,
-    /// FILE_DELETE_ON_CLOSE: delete pending once this open closes.
-    delete_on_close: bool,
+    /// FILE_DELETE_ON_CLOSE: delete pending once this open closes
+    /// (FileDispositionInformationEx's FILE_DISPOSITION_ON_CLOSE sets or
+    /// clears it).
+    delete_on_close: AtomicBool,
+    /// FileDispositionInformationEx's FILE_DISPOSITION_POSIX_SEMANTICS: its
+    /// name goes when this open closes, though others stay open (the node
+    /// lives on, detached, until they close).
+    posix_delete: AtomicBool,
+    /// The hard link it was opened by (directory, name) when that is not
+    /// the node's first name: the name it reports, the one a delete or a
+    /// rename through it acts on (`handle_path`, `entry_of`). None: the
+    /// node's first name.
+    pub via: IrqMutex<Option<(NodeId, Vec<u16>)>>,
     /// Directory enumeration state (NtQueryDirectoryFile).
     pub scan: IrqMutex<Option<DirScan>>,
     /// FileModeInformation: the mode options it was opened with.
@@ -444,9 +511,20 @@ impl FileObject {
             | (u32::from(self.share.delete) * FILE_SHARE_DELETE)
     }
 
-    /// FILE_DELETE_ON_CLOSE was given.
+    /// Its close deletes a name: FILE_DELETE_ON_CLOSE, or a POSIX delete
+    /// set through it.
     pub fn deletes_on_close(&self) -> bool {
-        self.delete_on_close
+        self.delete_on_close.load(Ordering::Relaxed) || self.posix_delete.load(Ordering::Relaxed)
+    }
+
+    /// Sets or clears FILE_DELETE_ON_CLOSE (FILE_DISPOSITION_ON_CLOSE).
+    pub fn set_delete_on_close(&self, on: bool) {
+        self.delete_on_close.store(on, Ordering::Relaxed);
+    }
+
+    /// Removes its name when it closes (FILE_DISPOSITION_POSIX_SEMANTICS).
+    pub fn set_posix_delete(&self, on: bool) {
+        self.posix_delete.store(on, Ordering::Relaxed);
     }
 
     /// The owner of its byte-range locks (`locks`): its address.
@@ -463,10 +541,20 @@ impl Drop for FileObject {
             super::notify::cleanup(self.lock_owner());
         }
         let (node, access, share) = (self.node, self.access, self.share);
+        let via = self.via.lock().take();
         let events = FS.lock().as_mut().map(|fs| {
-            if self.delete_on_close {
-                // Fails for a non-empty directory, which then stays.
-                let _ = fs.set_delete_pending(node, true);
+            let link = via.as_ref().filter(|(d, n)| fs.find(*d, n) == Ok(Some(node)));
+            // Each fails for a non-empty directory, which then stays.
+            if self.posix_delete.load(Ordering::Relaxed) {
+                let _ = match link {
+                    Some((d, n)) => fs.unlink(*d, n),
+                    None => fs.unlink_node(node),
+                };
+            } else if self.delete_on_close.load(Ordering::Relaxed) {
+                let _ = match link {
+                    Some((d, n)) => fs.set_entry_delete_pending(*d, n, true),
+                    None => fs.set_delete_pending(node, true),
+                };
             }
             fs.close(node, access, share);
             super::notify::collect(fs)
@@ -690,12 +778,23 @@ pub fn create(
         delete: share_mask & FILE_SHARE_DELETE != 0,
     };
     let now = platform::system_time();
+    let mut via = None;
     let (node, information) = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
         let existing = match parts.last() {
             None => Some(start),
             Some(last) => {
                 let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
-                fs.find(parent, last).map_err(fs_status)?
+                let found = fs.find(parent, last).map_err(fs_status)?;
+                if found.is_some() && fs.is_hard_link(parent, last) {
+                    // Opened by a hard link: its own name (`FileObject::via`).
+                    if fs.entry_delete_pending(parent, last) {
+                        return Err(NtStatus::DELETE_PENDING);
+                    }
+                    let mut name = Vec::new();
+                    name.try_extend_from_slice(last).map_err(|_| NtStatus::NO_MEMORY)?;
+                    via = Some((parent, name));
+                }
+                found
             }
         };
         match existing {
@@ -766,7 +865,9 @@ pub fn create(
         share,
         synchronous: options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) != 0,
         position: IrqMutex::named("file.position", 0),
-        delete_on_close,
+        delete_on_close: AtomicBool::new(delete_on_close),
+        posix_delete: AtomicBool::new(false),
+        via: IrqMutex::named("file.via", via),
         scan: IrqMutex::new(None),
         mode: mode_of(options),
         dispatcher: crate::mm::heap::KArc::try_new(super::wait::Dispatcher::new(0)).map_err(
@@ -783,6 +884,24 @@ pub fn create(
         Err(_) => return Err(NtStatus::NO_MEMORY),
     };
     Ok(Created { object, information })
+}
+
+/// The FileAttributes NtCreateFile gave for a file it created: the
+/// settable ones (read-only, hidden, system, temporary, not indexed; a
+/// file is also FILE_ATTRIBUTE_ARCHIVE, which it has from its creation).
+pub fn set_created_attributes(object: &ObjectRef, attributes: u32) -> Result<(), NtStatus> {
+    // READONLY, HIDDEN, SYSTEM, TEMPORARY, NOT_CONTENT_INDEXED.
+    const GIVEN: u32 = 0x01 | 0x02 | 0x04 | 0x100 | 0x2000;
+    let ObjectBody::File(file) = &object.body else { return Ok(()) };
+    if attributes & GIVEN == 0 {
+        return Ok(());
+    }
+    with_fs(|fs| {
+        let have = fs.node(file.node).map_or(0, |n| n.attributes);
+        let times = ramfs::Times::default();
+        fs.set_basic(file.node, times, Some(have | (attributes & GIVEN)))
+    })
+    .map_err(fs_status)
 }
 
 /// FILE_BASIC_INFORMATION (40 bytes) for `node`.

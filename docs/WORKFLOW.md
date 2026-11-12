@@ -1437,6 +1437,16 @@ a cache on the host:
   to a file in `/dev/shm` holds it in memory (then XTASK_LOW_DISK=1,
   since xtask checks the target disk's room). Delete that file when done
   (xtask removes only the link after a pass).
+- Its VM has 4 GiB (`OFFICE_LOCAL_MEMORY_MIB`, a stopgap: ROADMAP "Known
+  issues and stopgaps"): with the image in `/dev/shm` the host needs
+  both in RAM (about 12 GB; the guest's file cache fills its 4 GiB). On
+  a 15 GB host with other builds running, a full hour's run was killed
+  by the host's OOM killer near its end (QEMU "exited with None", no
+  state dump): bound the run to the stage under study with
+  `XTASK_TIMEOUT` (its timeout's state dump has `heap by owner`), and
+  read Click-to-Run's own logs from the kept image (`cargo xtask
+  disk-files <image> C:/Windows/Temp --out DIR`: `<MACHINE>-<date>.log`,
+  UTF-16).
 - Limits: the cache is one build of one product set; the download itself
   (`office_install`'s first half hour: the transport, ranges, the
   service's staging of what it fetched) is not exercised, so run
@@ -3860,6 +3870,15 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   (ODT's setup.exe, CPython's python.exe) come from their PREBUILT
   downloads, shipped to C:\gala by the scenario (`args=require` makes
   their absence a failure; on Windows they are skipped when absent).
+- **A DLL's own bookkeeping keeps the thread's last error**: TlsGetValue
+  clears it on success (as Windows' does), so code that reads its
+  per-thread data between a program's failing call and the program's
+  GetLastError must save and restore it. CPython sets and restores the
+  CRT's thread-local invalid-parameter handler around every os call
+  (`_Py_BEGIN/END_SUPPRESS_IPH`) and reads the error afterwards: gala's
+  `_set_thread_local_invalid_parameter_handler` over TlsGetValue turned
+  os.unlink's ERROR_ACCESS_DENIED into `[WinError 0]` (`ucrt_test`
+  checks it).
 - **COM methods that return a structure take a hidden pointer**: in the
   C++ ABI a method returning D2D1_SIZE_F, D2D1_PIXEL_FORMAT or
   D2D1_COLOR_F (even one that fits a register) gets the caller's result

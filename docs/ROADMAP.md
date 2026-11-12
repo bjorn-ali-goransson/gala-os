@@ -1940,17 +1940,48 @@ need gala's.
      most of it grown during the registry staging, Office's registry kept
      in memory; the service's 190 MiB of private memory; 63 MiB of
      section pages, the client's 30 MiB image laid out whole; the files'
-     pages only 2 MiB); setup.exe ends with 17004. Next: hard links
-     (NtSetInformationFile FileLinkInformation(Ex), CreateHardLinkW,
-     test first from Wine's kernel32 test_CreateHardLink run on Windows;
-     the change log's Link record keeps them), SetFileInformationByHandle's
-     FileDispositionInfoEx (class 21, 10 hits); then the memory: where
-     the kernel heap goes (a breakdown by user: the registry, the file
-     tree), a registry that need not live wholly in memory, image
-     sections sharing the file's cache pages instead of a copy, and no
-     page file for private memory (Windows needs 4 GB for Office: a
-     larger VM for this scenario is a stopgap to name and track, not the
-     answer).
+     pages only 2 MiB); setup.exe ends with 17004. Done: hard links
+     (CreateHardLinkW/A, NtSetInformationFile FileLinkInformation(Ex),
+     a handle opened by a link acting on its own name; the change log's
+     Link record keeps them) and FileDispositionInformationEx
+     (SetFileInformationByHandle's FileDispositionInfoEx, class 21, 10
+     hits), test first (`hardlink_test`, `wow64_hardlink_test`, from Wine's
+     test_hard_link, test_file_link_information and
+     test_file_disposition_information; ARCHITECTURE "Files"). The
+     scenario's VM has 4 GiB now, a named stopgap ("Known issues and
+     stopgaps"). With these APPLYCONFIGURATION publishes the staged
+     install with hard links (`CRepoOperation.Publish` in 5.5 min),
+     publishes its registry, runs `integrator.exe /U ...` (it returns
+     0), and then the service (OfficeClickToRun.exe) ends with an access
+     violation at about 1595 s (deterministic; crash report:
+     OfficeClickToRun.exe+0x2da027 reading 0, rax E_NOINTERFACE):
+     it loads gala's appxdeploymentclient.dll (PackageManager) and asks
+     one of its objects for interface
+     {1aa79035-cc71-4b2e-80a6-c7041d8579a7}, which it lacks, and goes on
+     without checking (the ledger's `appxdeploymentclient.dll!QI ...`,
+     recorded since). Next: that interface. It is not in Wine's
+     windows.management.deployment.idl (only IPackageManager and
+     IPackageManager2) nor in mingw-w64's headers, and Microsoft's
+     documentation pages do not show IIDs; naming it and its methods
+     needs a source the owner accepts (the Windows SDK's metadata, as
+     microsoft/windows-rs publishes it, is not on CLEAN_ROOM's list).
+     The memory, measured (`heap by owner`, the state dump at 1800 s
+     with 4 GiB): the registry 16 MiB (22 000 keys, 31 000 values), the
+     file tree 47 MiB (12 000 nodes: mostly each file's page and cluster
+     tables, 16 bytes per 4 KiB page), image layouts 80 MiB (89 images)
+     plus 69 MiB of section pages copied from them, other 20 MiB; the
+     files' pages (2.5 GiB) are the cache, given back under pressure.
+     So the 512 MiB run's 157 MiB heap was the image layouts, the file
+     tree and the registry, in that order, not mostly the registry.
+     Done: an image layout is the image once (its heap pages are what
+     views map; built from the file a page at a time, no whole-file copy;
+     ARCHITECTURE "Sections"). Next, in order: image pages built at
+     their first touch and dropped under pressure (they are clean; the
+     file has them); the file tree's per-page tables as extents (runs of
+     clusters, resident pages in a sparse map); a page file for private
+     memory (the service's 190-200 MiB); the registry last (16 MiB).
+     Then the 4 GiB stopgap goes. Also: FindFirstFileNameW listing every
+     name of a file with hard links (FileHardLinkInformation).
      Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
      ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
@@ -4232,6 +4263,18 @@ a refresh.
 Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
+
+- **4 GiB for `office_install_local`** (`OFFICE_LOCAL_MEMORY_MIB` in
+  xtask; every other scenario keeps 512 MiB and the image's size): at
+  512 MiB the install's publish ran out of frames (the kernel heap
+  157 MiB: image layouts, the file tree's tables, the registry; the
+  Click-to-Run service's 190 MiB of private memory with no page file;
+  63 MiB of image section pages copied from the file cache). Structural
+  fix, in the order the measurement (`heap by owner`) gives (item OF,
+  "the memory"): image layouts held once (done), image pages made at
+  first touch and dropped under pressure, the file tree's per-page tables
+  as extents, a page file for private memory, the registry; then the
+  scenario goes back to the default size.
 
 - **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
   `lx_httpd.txt`): every other Linux transcript is recorded on real

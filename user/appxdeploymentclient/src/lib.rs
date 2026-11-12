@@ -193,6 +193,29 @@ fn record(parts: &[&[u8]], what: u32) {
     unsafe { GalaRecordMissing(line.as_ptr(), n, what, 0) };
 }
 
+/// Reports an interface asked of `object` that it does not have
+/// (ledger "other", `appxdeploymentclient.dll!QI <iid> <object>`, the
+/// object past the ledger's 64 characters often cut off): a
+/// caller that goes on without checking crashes there, and the IID
+/// names what to implement.
+fn record_no_interface(object: &[u8], iid: &Guid) {
+    let hex = b"0123456789abcdef";
+    let mut text = [0u8; 36];
+    let mut n = 0;
+    // Data1, Data2 and Data3 little-endian; Data4 in order.
+    let order: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+    for (k, &i) in order.iter().enumerate() {
+        if matches!(k, 4 | 6 | 8 | 10) {
+            text[n] = b'-';
+            n += 1;
+        }
+        text[n] = hex[usize::from(iid[i] >> 4)];
+        text[n + 1] = hex[usize::from(iid[i] & 15)];
+        n += 2;
+    }
+    record(&[b"appxdeploymentclient.dll!QI ", &text[..n], b" ", object], 5);
+}
+
 /// An HSTRING's text as ASCII (others '?'), at most 96 characters.
 fn ascii(s: HString) -> ([u8; 96], usize) {
     let mut out = [0u8; 96];
@@ -242,6 +265,7 @@ extern "system" fn s_query(this: usize, iid: *const Guid, out: *mut usize) -> HR
         put(out, this);
         return S_OK;
     }
+    record_no_interface(static_of(this).name.as_bytes(), &iid);
     E_NOINTERFACE
 }
 extern "system" fn s_add_ref(_this: usize) -> u32 {
@@ -391,6 +415,7 @@ fn m_query(m: &Manager, iid: *const Guid, out: *mut usize) -> HResult {
         } else if iid == IID_IPACKAGEMANAGER2 {
             base + PTR
         } else {
+            record_no_interface(b"PackageManager", &iid);
             return E_NOINTERFACE;
         };
     m.refs.fetch_add(1, Ordering::Relaxed);

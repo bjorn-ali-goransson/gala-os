@@ -15,7 +15,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
-    CreateHardLinkA
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification

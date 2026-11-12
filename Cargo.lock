@@ -1002,6 +1002,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hardlink_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3081,6 +3088,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_gdiplus_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_hardlink_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

@@ -279,6 +279,20 @@ pub extern "system" fn DeleteFileA(path: *const u8) -> Bool {
     }
 }
 
+/// CreateHardLinkA: CreateHardLinkW with both names widened.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateHardLinkA(
+    link: *const u8,
+    existing: *const u8,
+    security: *mut c_void,
+) -> Bool {
+    let (mut a, mut b) = ([0u16; MAX], [0u16; MAX]);
+    match (wide(link, &mut a), wide(existing, &mut b)) {
+        (Ok(l), Ok(e)) => crate::pool::CreateHardLinkW(l, e, security),
+        (Err(e), _) | (_, Err(e)) => fail_with(e, FALSE),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateDirectoryA(path: *const u8, security: *mut c_void) -> Bool {
     let mut buf = [0u16; MAX];

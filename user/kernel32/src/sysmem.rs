@@ -585,7 +585,8 @@ fn set_basic_attributes(h: Handle, attributes: u32) -> Bool {
 
 /// SetFileInformationByHandle: the FILE_INFO_BY_HANDLE_CLASS values whose
 /// structures are the NT ones (basic, rename, disposition, allocation,
-/// end of file) go to NtSetInformationFile; others are reported.
+/// end of file, and the disposition and rename Ex forms) go to
+/// NtSetInformationFile; others are reported.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetFileInformationByHandle(
     h: Handle,
@@ -600,6 +601,11 @@ pub extern "system" fn SetFileInformationByHandle(
         4 => (13, 1), // FileDispositionInfo -> FileDispositionInformation
         5 => (19, 8), // FileAllocationInfo -> FileAllocationInformation
         6 => (20, 8), // FileEndOfFileInfo -> FileEndOfFileInformation
+        // FileDispositionInfoEx -> FileDispositionInformationEx (Flags)
+        21 => (64, 4),
+        // FileRenameInfoEx -> FileRenameInformationEx (Flags for the
+        // BOOLEAN)
+        22 => (65, super::mapping::RENAME_HEADER as u32),
         _ => {
             unsupported(b"kernel32.dll!SetFileInformationByHandle(class)", class.into());
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);

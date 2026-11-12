@@ -966,13 +966,28 @@ pub(crate) const RENAME_HEADER: usize = 2 * size_of::<usize>() + 4;
 /// Renames `from` to `to` in one step (FileRenameInformation); `replace`:
 /// an existing `to` is replaced atomically (ReplaceIfExists).
 pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
+    // DELETE | SYNCHRONIZE
+    name_file(from, to, replace, 0x0001_0000 | 0x0010_0000, 10)
+}
+
+/// CreateHardLinkW's work: `to` becomes another name of file `from`
+/// (FileLinkInformation; an existing `to` is an error). The file is
+/// opened for SYNCHRONIZE only: a link needs no access to it.
+pub(crate) fn hard_link(from: *const u16, to: *const u16) -> Bool {
+    name_file(from, to, false, 0x0010_0000, 11)
+}
+
+/// Gives file `from` the name `to` through FILE_RENAME_INFORMATION or
+/// FILE_LINK_INFORMATION (the same layout): NT class `class`, the file
+/// opened with `access`.
+fn name_file(from: *const u16, to: *const u16, replace: bool, access: u32, class: u32) -> Bool {
     let target = match nt_path(to) {
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
     };
     let h = match open_path(
         from,
-        0x0001_0000 | 0x0010_0000,
+        access,
         SHARE_ALL,
         1,
         FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
@@ -995,7 +1010,7 @@ pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
     let mut iosb = [0usize; 2];
     let len = RENAME_HEADER + 2 * name.len();
     // SAFETY: a buffer of `len` bytes.
-    let status = unsafe { NtSetInformationFile(h, &mut iosb, info.as_ptr(), len as u32, 10) };
+    let status = unsafe { NtSetInformationFile(h, &mut iosb, info.as_ptr(), len as u32, class) };
     CloseHandle(h);
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }

@@ -134,6 +134,54 @@ pub struct Registry {
     changes_lost: bool,
 }
 
+/// What the registry holds on the kernel heap (`Registry::heap_use`),
+/// from its structures' capacities (allocator rounding not counted).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapUse {
+    /// Everything: keys, names, values, descriptors, records not yet
+    /// written, notifications.
+    pub bytes: usize,
+    /// Of `bytes`, the values' data.
+    pub data: usize,
+    pub keys: usize,
+    pub values: usize,
+}
+
+impl Registry {
+    /// What it holds on the kernel heap (statistics: the end-of-run
+    /// `heap by owner` line, the state dump, low-memory warnings).
+    pub fn heap_use(&self) -> HeapUse {
+        use core::mem::size_of;
+        let mut u = HeapUse {
+            bytes: self.nodes.capacity() * size_of::<Option<Node>>(),
+            ..HeapUse::default()
+        };
+        for n in self.nodes.iter().flatten() {
+            u.keys += 1;
+            u.values += n.values.len();
+            u.bytes += 2 * (n.name.capacity() + n.class.capacity());
+            u.bytes += n.children.capacity() * size_of::<KeyId>();
+            u.bytes += n.values.capacity() * size_of::<Value>();
+            u.bytes += n.security.as_ref().map_or(0, Vec::capacity);
+            for v in &n.values {
+                u.bytes += 2 * v.name.capacity() + v.data.capacity();
+                u.data += v.data.capacity();
+            }
+        }
+        u.bytes += self.tombstones.iter().map(|t| 2 * t.capacity()).sum::<usize>();
+        u.bytes += self.ops.capacity() * size_of::<RegOp>();
+        u.bytes +=
+            self.changes.iter().map(|c| c.chain.capacity() * size_of::<KeyId>()).sum::<usize>();
+        u
+    }
+}
+
+/// The registry's heap use, or None while its lock is held (the state
+/// dump must not wait).
+pub fn try_heap_use() -> Option<HeapUse> {
+    REGISTRY.try_lock().map(|r| r.as_ref().map(Registry::heap_use).unwrap_or_default())
+}
+
 fn upcase(c: u16) -> u16 {
     // TODO: the full Unicode upcase table, as the configuration manager uses.
     if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
@@ -1439,6 +1487,20 @@ mod tests {
         )
         .unwrap();
         r
+    }
+
+    /// `heap_use` counts every key and value, and the values' data.
+    #[test]
+    fn heap_use_counts_keys_values_and_data() {
+        let r = reg();
+        let u = r.heap_use();
+        // ROOT, REGISTRY's MACHINE and USER, SOFTWARE, Microsoft, Beta,
+        // Old, Inner: whatever the arena holds, every key at least once.
+        assert!(u.keys >= 6, "{u:?}");
+        assert_eq!(u.values, 4);
+        // "x" (UTF-16 with its NUL) and three DWORDs.
+        assert!(u.data >= 4 + 3 * 4, "{u:?}");
+        assert!(u.bytes > u.data);
     }
 
     #[test]
