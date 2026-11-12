@@ -32,11 +32,6 @@ mod arch;
 use arch::*;
 
 mod actctx;
-// kernel32's own address waits, for its SRW locks, condition variables
-// and InitOnce: kernelbase's source, built here with a list of its own and
-// not exported (WaitOnAddress and WakeByAddress* are kernelbase's alone).
-#[path = "../../kernelbase/src/address_wait.rs"]
-mod address_wait;
 mod ansi;
 mod appmodel;
 mod atom;
@@ -1743,14 +1738,15 @@ pub extern "system" fn GetFileInformationByHandleEx(
 ) -> Bool {
     // FILE_INFO_BY_HANDLE_CLASS -> (NT class, directory listing, restart).
     let (nt_class, listing, restart) = match class {
-        0 => (4, false, false),  // FileBasicInfo
-        1 => (5, false, false),  // FileStandardInfo
-        2 => (9, false, false),  // FileNameInfo
-        9 => (35, false, false), // FileAttributeTagInfo
-        10 => (37, true, false), // FileIdBothDirectoryInfo
-        11 => (37, true, true),  // FileIdBothDirectoryRestartInfo
-        14 => (2, true, false),  // FileFullDirectoryInfo
-        15 => (2, true, true),   // FileFullDirectoryRestartInfo
+        0 => (4, false, false),   // FileBasicInfo
+        1 => (5, false, false),   // FileStandardInfo
+        2 => (9, false, false),   // FileNameInfo
+        9 => (35, false, false),  // FileAttributeTagInfo
+        10 => (37, true, false),  // FileIdBothDirectoryInfo
+        11 => (37, true, true),   // FileIdBothDirectoryRestartInfo
+        14 => (2, true, false),   // FileFullDirectoryInfo
+        15 => (2, true, true),    // FileFullDirectoryRestartInfo
+        18 => (59, false, false), // FileIdInfo
         _ => {
             unsupported(b"kernel32.dll!GetFileInformationByHandleEx(class)", u64::from(class));
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);

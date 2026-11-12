@@ -516,11 +516,56 @@ pub extern "system" fn InitializeCriticalSectionEx(
 // --- Waiting without a kernel object -------------------------------------
 //
 // SRW locks, condition variables and InitOnce are one pointer-sized word
-// with no kernel object. A waiter spins briefly, then sleeps on the word
-// on its address (`address_wait`, kernel32's own copy of kernelbase's
-// WaitOnAddress: a keyed event) until it changes; whoever changes it in a
-// way a waiter waits for wakes them (a wake costs no system call when
-// nobody waits).
+// with no kernel object. The SRW locks are ntdll's (the exports forward,
+// build.rs), InitOnce calls ntdll's RtlRunOnce*, and a condition variable's
+// sleeper waits on its word through ntdll's RtlWaitOnAddress, where every
+// wait on a word sleeps (so a word is woken whichever DLL changed it).
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn RtlAcquireSRWLockExclusive(lock: *mut usize);
+    fn RtlReleaseSRWLockExclusive(lock: *mut usize);
+    fn RtlAcquireSRWLockShared(lock: *mut usize);
+    fn RtlReleaseSRWLockShared(lock: *mut usize);
+    fn RtlWaitOnAddress(
+        address: *const c_void,
+        compare: *const c_void,
+        size: usize,
+        timeout: *const i64,
+    ) -> u32;
+    fn RtlWakeAddressSingle(address: *const c_void);
+    fn RtlWakeAddressAll(address: *const c_void);
+    fn RtlRunOnceBeginInitialize(once: *mut usize, flags: u32, context: *mut *mut c_void) -> u32;
+    fn RtlRunOnceComplete(once: *mut usize, flags: u32, context: *mut c_void) -> u32;
+    fn RtlRunOnceExecuteOnce(
+        once: *mut usize,
+        f: InitOnceFn,
+        param: *mut c_void,
+        context: *mut *mut c_void,
+    ) -> u32;
+}
+
+/// kernel32's own uses of SRW locks (the thread pool): ntdll's.
+#[allow(non_snake_case)]
+pub(crate) fn AcquireSRWLockExclusive(lock: *mut usize) {
+    // SAFETY: the caller's lock word.
+    unsafe { RtlAcquireSRWLockExclusive(lock) }
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn ReleaseSRWLockExclusive(lock: *mut usize) {
+    // SAFETY: the caller's lock word, held.
+    unsafe { RtlReleaseSRWLockExclusive(lock) }
+}
+
+fn srw(lock: *mut usize) -> &'static AtomicUsize {
+    // SAFETY: the caller's pointer-sized, aligned word.
+    unsafe { AtomicUsize::from_ptr(lock) }
+}
 
 /// Spins a few rounds while the word may change soon.
 const SPINS: u32 = 64;
@@ -529,96 +574,31 @@ const SPINS: u32 = 64;
 /// steps, then a sleep until the word is woken (or `ms` milliseconds);
 /// false if that sleep timed out.
 fn wait_step(word: *mut usize, seen: usize, spins: &mut u32, ms: u32) -> bool {
+    const STATUS_TIMEOUT: u32 = 0x102;
     if *spins < SPINS {
         *spins += 1;
         core::hint::spin_loop();
         return true;
     }
     let compare = seen;
-    super::address_wait::wait(
-        word.cast_const().cast(),
-        (&raw const compare).cast(),
-        core::mem::size_of::<usize>(),
-        ms,
-    )
-    .is_ok()
+    let relative = -(i64::from(ms) * 10_000);
+    let timeout = if ms == INFINITE { core::ptr::null() } else { &raw const relative };
+    // SAFETY: the word and the compare value are pointer-sized; the
+    // timeout lives through the call.
+    let status = unsafe {
+        RtlWaitOnAddress(
+            word.cast_const().cast(),
+            (&raw const compare).cast(),
+            size_of::<usize>(),
+            timeout,
+        )
+    };
+    status != STATUS_TIMEOUT
 }
 
 fn wake_all(word: *mut usize) {
-    super::address_wait::wake(word.cast_const().cast(), true);
-}
-
-// --- Slim reader/writer locks --------------------------------------------
-//
-// SRWLOCK is one pointer: 0 when free, EXCLUSIVE when held exclusively,
-// otherwise the number of shared holders.
-
-const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
-
-fn srw(lock: *mut usize) -> &'static AtomicUsize {
-    // SAFETY: the caller's pointer-sized, aligned SRWLOCK.
-    unsafe { AtomicUsize::from_ptr(lock) }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn InitializeSRWLock(lock: *mut usize) {
-    srw(lock).store(0, Ordering::Release);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn TryAcquireSRWLockExclusive(lock: *mut usize) -> u8 {
-    u8::from(srw(lock).compare_exchange(0, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed).is_ok())
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn AcquireSRWLockExclusive(lock: *mut usize) {
-    let mut spins = 0;
-    while TryAcquireSRWLockExclusive(lock) == 0 {
-        let held = srw(lock).load(Ordering::Relaxed);
-        if held != 0 {
-            wait_step(lock, held, &mut spins, INFINITE);
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn ReleaseSRWLockExclusive(lock: *mut usize) {
-    srw(lock).store(0, Ordering::Release);
-    wake_all(lock);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn TryAcquireSRWLockShared(lock: *mut usize) -> u8 {
-    let l = srw(lock);
-    let mut v = l.load(Ordering::Relaxed);
-    loop {
-        if v & EXCLUSIVE != 0 {
-            return 0;
-        }
-        match l.compare_exchange_weak(v, v + 1, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => return 1,
-            Err(now) => v = now,
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn AcquireSRWLockShared(lock: *mut usize) {
-    let mut spins = 0;
-    while TryAcquireSRWLockShared(lock) == 0 {
-        let held = srw(lock).load(Ordering::Relaxed);
-        if held & EXCLUSIVE != 0 {
-            wait_step(lock, held, &mut spins, INFINITE);
-        }
-    }
-}
-
-/// The last shared holder wakes the waiters (exclusive ones wait for 0).
-#[unsafe(no_mangle)]
-pub extern "system" fn ReleaseSRWLockShared(lock: *mut usize) {
-    if srw(lock).fetch_sub(1, Ordering::Release) == 1 {
-        wake_all(lock);
-    }
+    // SAFETY: only the address's value is used.
+    unsafe { RtlWakeAddressAll(word.cast_const().cast()) };
 }
 
 // --- Condition variables -------------------------------------------------
@@ -639,7 +619,8 @@ pub extern "system" fn InitializeConditionVariable(cv: *mut usize) {
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
-    super::address_wait::wake(cv.cast_const().cast(), false);
+    // SAFETY: only the address's value is used.
+    unsafe { RtlWakeAddressSingle(cv.cast_const().cast()) };
 }
 
 #[unsafe(no_mangle)]
@@ -703,39 +684,25 @@ pub extern "system" fn SleepConditionVariableSRW(
 ) -> Bool {
     let shared = flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0;
     let seen = srw(cv).load(Ordering::Acquire);
-    if shared {
-        ReleaseSRWLockShared(lock)
-    } else {
-        ReleaseSRWLockExclusive(lock)
-    }
+    // SAFETY: the caller's lock, held in the mode the flags say.
+    unsafe { if shared { RtlReleaseSRWLockShared(lock) } else { RtlReleaseSRWLockExclusive(lock) } }
     let woken = wait_wake(cv, seen, ms);
-    if shared {
-        AcquireSRWLockShared(lock)
-    } else {
-        AcquireSRWLockExclusive(lock)
-    }
+    // SAFETY: as above.
+    unsafe { if shared { RtlAcquireSRWLockShared(lock) } else { RtlAcquireSRWLockExclusive(lock) } }
     if woken { TRUE } else { fail_with(ERROR_TIMEOUT, FALSE) }
 }
 
 // --- One-time initialization ---------------------------------------------
 //
-// INIT_ONCE is one pointer: 0 before, 1 while a callback runs, and once
-// done the context with its low two bits (INIT_ONCE_CTX_RESERVED_BITS)
-// replaced by 2.
+// INIT_ONCE is RTL_RUN_ONCE: InitOnceInitialize forwards to ntdll
+// (build.rs); the others call ntdll's RtlRunOnce* and give a failing
+// status as the last error (STATUS_UNSUCCESSFUL is ERROR_GEN_FAILURE).
 
 type InitOnceFn = extern "system" fn(*mut usize, *mut c_void, *mut *mut c_void) -> Bool;
 
-const ONCE_RUNNING: usize = 1;
-const ONCE_DONE: usize = 2;
-
-#[unsafe(no_mangle)]
-pub extern "system" fn InitOnceInitialize(once: *mut usize) {
-    srw(once).store(0, Ordering::Release);
-}
-
 /// InitOnceExecuteOnce: runs `f` once; other callers wait for it. A
-/// callback returning FALSE leaves the once uninitialized (and the call
-/// returns FALSE).
+/// callback returning FALSE leaves the once uninitialized and the call
+/// returns FALSE without setting the last error (as on Windows).
 #[unsafe(no_mangle)]
 pub extern "system" fn InitOnceExecuteOnce(
     once: *mut usize,
@@ -743,46 +710,11 @@ pub extern "system" fn InitOnceExecuteOnce(
     param: *mut c_void,
     context: *mut *mut c_void,
 ) -> Bool {
-    let state = srw(once);
-    let mut spins = 0;
-    loop {
-        let v = state.load(Ordering::Acquire);
-        if v & 3 == ONCE_DONE {
-            if !context.is_null() {
-                // SAFETY: the caller's output pointer.
-                unsafe { *context = (v & !3) as *mut c_void };
-            }
-            return TRUE;
-        }
-        if v == 0
-            && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
-        {
-            // The callback gets the caller's Context as it is, NULL
-            // included (as on Windows, where a callback that writes
-            // through a NULL Context faults); what it left there is the
-            // data kept with the once.
-            if f(once, param, context) == 0 {
-                state.store(0, Ordering::Release);
-                wake_all(once);
-                return FALSE;
-            }
-            let ctx = if context.is_null() {
-                0
-            } else {
-                // SAFETY: the caller's output pointer, set by the callback.
-                unsafe { *context as usize & !3 }
-            };
-            state.store(ctx | ONCE_DONE, Ordering::Release);
-            wake_all(once);
-            if !context.is_null() {
-                // SAFETY: as above.
-                unsafe { *context = ctx as *mut c_void };
-            }
-            return TRUE;
-        }
-        if v == ONCE_RUNNING {
-            wait_step(once, v, &mut spins, INFINITE);
-        }
+    // SAFETY: the caller's once, function and context.
+    if unsafe { RtlRunOnceExecuteOnce(once, f, param, context) } == STATUS_SUCCESS {
+        TRUE
+    } else {
+        FALSE
     }
 }
 
@@ -861,12 +793,10 @@ pub extern "system" fn InterlockedFlushSList(head: *mut SListHeader) -> *mut SLi
     }
 }
 
-/// InitOnceBeginInitialize(lpInitOnce, dwFlags, fPending, lpContext): the
-/// asynchronous-free form of one-time initialization. Without flags the
-/// first caller gets *fPending TRUE and must call InitOnceComplete; others
-/// wait until it has. INIT_ONCE_CHECK_ONLY (1) only reports: TRUE with
-/// *fPending FALSE when done, else FALSE (ERROR_GEN_FAILURE).
-/// INIT_ONCE_ASYNC (2) is not supported (reported).
+/// InitOnceBeginInitialize(lpInitOnce, dwFlags, fPending, lpContext):
+/// *fPending TRUE for the caller that is to initialize (and must call
+/// InitOnceComplete), FALSE with the context once done; others wait (or,
+/// INIT_ONCE_ASYNC, initialize too). INIT_ONCE_CHECK_ONLY only reports.
 #[unsafe(no_mangle)]
 pub extern "system" fn InitOnceBeginInitialize(
     once: *mut usize,
@@ -874,67 +804,36 @@ pub extern "system" fn InitOnceBeginInitialize(
     pending: *mut Bool,
     context: *mut *mut c_void,
 ) -> Bool {
-    const INIT_ONCE_CHECK_ONLY: u32 = 1;
-    const INIT_ONCE_ASYNC: u32 = 2;
-    if once.is_null() || pending.is_null() || flags & !INIT_ONCE_CHECK_ONLY != 0 {
-        if flags & INIT_ONCE_ASYNC != 0 {
-            unsupported(b"kernel32.dll!InitOnceBeginInitialize(INIT_ONCE_ASYNC)", flags.into());
+    const STATUS_PENDING: u32 = 0x103;
+    // SAFETY: the caller's once and context.
+    match unsafe { RtlRunOnceBeginInitialize(once, flags, context) } {
+        STATUS_SUCCESS => {
+            // SAFETY: the caller's output.
+            unsafe { *pending = FALSE };
+            TRUE
         }
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
-    }
-    let state = srw(once);
-    let mut spins = 0;
-    loop {
-        let v = state.load(Ordering::Acquire);
-        if v & 3 == ONCE_DONE {
-            // SAFETY: the caller's outputs.
-            unsafe {
-                *pending = FALSE;
-                if !context.is_null() {
-                    *context = (v & !3) as *mut c_void;
-                }
-            }
-            return TRUE;
-        }
-        if flags & INIT_ONCE_CHECK_ONLY != 0 {
-            return fail_with(31, FALSE); // ERROR_GEN_FAILURE
-        }
-        if v == 0
-            && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
-        {
+        STATUS_PENDING => {
             // SAFETY: the caller's output.
             unsafe { *pending = TRUE };
-            return TRUE;
+            TRUE
         }
-        if v == ONCE_RUNNING {
-            wait_step(once, v, &mut spins, INFINITE);
-        }
+        status => fail(status, FALSE),
     }
 }
 
 /// InitOnceComplete(lpInitOnce, dwFlags, lpContext): ends the
 /// initialization InitOnceBeginInitialize began: done with the context
-/// (its low two bits must be clear), or with INIT_ONCE_INIT_FAILED (4)
-/// back to uninitialized so another caller tries.
+/// (its low two bits clear), or with INIT_ONCE_INIT_FAILED back to
+/// uninitialized so another caller tries.
 #[unsafe(no_mangle)]
 pub extern "system" fn InitOnceComplete(
     once: *mut usize,
     flags: u32,
     context: *mut c_void,
 ) -> Bool {
-    const INIT_ONCE_INIT_FAILED: u32 = 4;
-    if once.is_null() || flags & !INIT_ONCE_INIT_FAILED != 0 || context as usize & 3 != 0 {
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    // SAFETY: the caller's once.
+    match unsafe { RtlRunOnceComplete(once, flags, context) } {
+        STATUS_SUCCESS => TRUE,
+        status => fail(status, FALSE),
     }
-    let state = srw(once);
-    if state.load(Ordering::Acquire) != ONCE_RUNNING {
-        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
-    }
-    if flags & INIT_ONCE_INIT_FAILED != 0 {
-        state.store(0, Ordering::Release);
-    } else {
-        state.store(context as usize | ONCE_DONE, Ordering::Release);
-    }
-    wake_all(once);
-    TRUE
 }

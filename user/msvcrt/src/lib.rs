@@ -43,6 +43,7 @@ mod heap;
 mod math;
 mod misc;
 mod posix;
+mod safe;
 mod scan;
 mod stdio;
 mod time;

@@ -70,6 +70,9 @@ pub const CONTAINER_INHERIT_ACE: u8 = 0x02;
 pub const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
 pub const INHERIT_ONLY_ACE: u8 = 0x08;
 pub const INHERITED_ACE: u8 = 0x10;
+/// SUCCESSFUL_ACCESS_ACE_FLAG and FAILED_ACCESS_ACE_FLAG (audit ACEs):
+/// kept by inheritance.
+const AUDIT_FLAGS: u8 = 0xc0;
 
 const ACL_REVISION: u8 = 2;
 
@@ -220,6 +223,7 @@ pub fn inherited_aces(
             continue;
         }
         let inheritable = flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        let audit = flags & AUDIT_FLAGS;
         // The effective ACE: generic rights mapped, creator SIDs replaced.
         let (changed, mask, sid) = if simple(kind) && ace.len() >= 8 {
             let mask = u32_at(ace, 4).unwrap_or(0);
@@ -237,21 +241,21 @@ pub fn inherited_aces(
         if effective {
             match sid {
                 Some(sid) if changed => {
-                    push_ace(&mut out, kind, marked, mask, &sid)?;
+                    push_ace(&mut out, kind, marked | audit, mask, &sid)?;
                     count += 1;
                     if propagate {
-                        push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked)?;
+                        push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked | audit)?;
                         count += 1;
                     }
                 }
                 _ => {
                     let keep = if propagate { inheritable } else { 0 };
-                    push_copy(&mut out, ace, keep | marked)?;
+                    push_copy(&mut out, ace, keep | marked | audit)?;
                     count += 1;
                 }
             }
         } else {
-            push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked)?;
+            push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked | audit)?;
             count += 1;
         }
     }
@@ -428,6 +432,366 @@ pub fn set(
         }
     }
     Ok(())
+}
+
+// --- Private objects' descriptors ----------------------------------------
+//
+// CreatePrivateObjectSecurityWithMultipleInheritance and
+// SetPrivateObjectSecurityEx (advapi32, for resource managers that keep
+// objects of their own: the offline registry library's keys), as their
+// documentation describes them: the same inheritance rules as the
+// kernel's objects, with the caller choosing them by the SEF_* flags
+// rather than the object type.
+
+pub const SEF_DACL_AUTO_INHERIT: u32 = 0x01;
+pub const SEF_SACL_AUTO_INHERIT: u32 = 0x02;
+pub const SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT: u32 = 0x04;
+pub const SEF_AVOID_PRIVILEGE_CHECK: u32 = 0x08;
+pub const SEF_AVOID_OWNER_CHECK: u32 = 0x10;
+pub const SEF_DEFAULT_OWNER_FROM_PARENT: u32 = 0x20;
+pub const SEF_DEFAULT_GROUP_FROM_PARENT: u32 = 0x40;
+
+/// Whether an ACE has a mappable element: generic rights, or CREATOR
+/// OWNER / CREATOR GROUP as its SID.
+fn mappable(kind: u8, ace: &[u8]) -> bool {
+    if !simple(kind) || ace.len() < 8 {
+        return false;
+    }
+    let generic = u32_at(ace, 4).unwrap_or(0) & GENERIC_BITS != 0;
+    generic || Sid::parse(&ace[8..]).is_some_and(|s| s == CREATOR_OWNER || s == CREATOR_GROUP)
+}
+
+/// A caller's explicit ACEs (those not marked INHERITED_ACE when
+/// `explicit_only`) as the new descriptor keeps them: an effective ACE
+/// with a mappable element becomes the mapped ACE (CREATOR OWNER/GROUP
+/// replaced) and, when it is inheritable and `container` and it
+/// propagates, an inherit-only copy of the original; others as they are.
+fn explicit_aces(
+    acl: &[u8],
+    explicit_only: bool,
+    container: bool,
+    owner: &Sid,
+    group: &Sid,
+    mapping: &GenericMapping,
+) -> Result<(Vec<u8>, usize), NtStatus> {
+    let (mut out, mut count) = (Vec::new(), 0);
+    for (kind, flags, ace) in aces(acl) {
+        if explicit_only && flags & INHERITED_ACE != 0 {
+            continue;
+        }
+        if flags & INHERIT_ONLY_ACE != 0 || !mappable(kind, ace) {
+            out.try_extend_from_slice(ace).map_err(nomem)?;
+            count += 1;
+            continue;
+        }
+        let mask = map_mask(u32_at(ace, 4).unwrap_or(0), mapping);
+        let sid = match Sid::parse(&ace[8..]) {
+            Some(s) if s == CREATOR_OWNER => *owner,
+            Some(s) if s == CREATOR_GROUP => *group,
+            Some(s) => s,
+            None => return Err(NtStatus::INVALID_ACL),
+        };
+        let inheritable = flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        push_ace(&mut out, kind, flags & AUDIT_FLAGS, mask, &sid)?;
+        count += 1;
+        if container && inheritable != 0 && flags & NO_PROPAGATE_INHERIT_ACE == 0 {
+            push_copy(&mut out, ace, flags | INHERIT_ONLY_ACE)?;
+            count += 1;
+        }
+    }
+    Ok((out, count))
+}
+
+/// The ACEs of `acl` marked INHERITED_ACE.
+fn inherited_only(acl: &[u8]) -> Result<(Vec<u8>, usize), NtStatus> {
+    let (mut out, mut count) = (Vec::new(), 0);
+    for (_, flags, ace) in aces(acl) {
+        if flags & INHERITED_ACE != 0 {
+            out.try_extend_from_slice(ace).map_err(nomem)?;
+            count += 1;
+        }
+    }
+    Ok((out, count))
+}
+
+/// An ACL of two runs of ACE bytes (explicit first: the canonical order).
+fn join_acl(
+    revision: u8,
+    first: (Vec<u8>, usize),
+    second: (Vec<u8>, usize),
+) -> Result<Vec<u8>, NtStatus> {
+    let (mut b, n) = first;
+    b.try_extend_from_slice(&second.0).map_err(nomem)?;
+    build_acl(revision, &b, n + second.1)
+}
+
+/// Which ACL a rule works on: its control bits and the descriptor's.
+#[derive(Clone, Copy)]
+struct AclKind {
+    present: u16,
+    defaulted: u16,
+    protected: u16,
+    auto_inherited: u16,
+    bits: u16,
+}
+
+const DACL_KIND: AclKind = AclKind {
+    present: SE_DACL_PRESENT,
+    defaulted: SE_DACL_DEFAULTED,
+    protected: SE_DACL_PROTECTED,
+    auto_inherited: SE_DACL_AUTO_INHERITED,
+    bits: DACL_BITS,
+};
+const SACL_KIND: AclKind = AclKind {
+    present: SE_SACL_PRESENT,
+    defaulted: SE_SACL_DEFAULTED,
+    protected: SE_SACL_PROTECTED,
+    auto_inherited: SE_SACL_AUTO_INHERITED,
+    bits: SACL_BITS,
+};
+
+/// A new private object's DACL or SACL and its control bits: with
+/// automatic inheritance, the creator's explicit ACEs (unless protected:
+/// its ACL as given) then the parent's inheritable ones, marked
+/// INHERITED_ACE, and the auto-inherited bit; without, the creator's ACL,
+/// else the parent's inheritable ACEs; else `default` (the token's
+/// default DACL for a DACL).
+#[allow(clippy::too_many_arguments)]
+fn private_acl(
+    kind: AclKind,
+    parent: Option<&[u8]>,
+    creator: Option<(u16, Option<Vec<u8>>)>,
+    auto: bool,
+    container: bool,
+    owner: &Sid,
+    group: &Sid,
+    mapping: &GenericMapping,
+    default: impl FnOnce() -> Result<Option<Vec<u8>>, NtStatus>,
+) -> Result<(u16, Option<Vec<u8>>), NtStatus> {
+    let inherited = match parent {
+        Some(acl) => inherited_aces(acl, container, owner, group, mapping, true)?,
+        None => (Vec::new(), 0),
+    };
+    let auto_bit = if auto { kind.auto_inherited } else { 0 };
+    match creator {
+        Some((control, acl)) => {
+            let protected = control & kind.protected;
+            let Some(acl) = acl else {
+                // A NULL ACL: no ACEs to inherit or map.
+                return Ok((kind.present | protected | auto_bit, None));
+            };
+            let merge = auto && protected == 0;
+            let explicit = explicit_aces(&acl, merge, container, owner, group, mapping)?;
+            let acl = if merge {
+                join_acl(acl[0], explicit, inherited)?
+            } else {
+                build_acl(acl[0], &explicit.0, explicit.1)?
+            };
+            let kept = control & (kind.defaulted | kind.protected | kind.auto_inherited);
+            Ok((kind.present | kept | auto_bit, Some(acl)))
+        }
+        None if inherited.1 > 0 => {
+            Ok((kind.present | auto_bit, Some(build_acl(ACL_REVISION, &inherited.0, inherited.1)?)))
+        }
+        None => match default()? {
+            Some(acl) => Ok((kind.present | kind.defaulted, Some(acl))),
+            None => Ok((0, None)),
+        },
+    }
+}
+
+/// Whether `token` may name `owner`, as the owner checks need (no token:
+/// STATUS_NO_TOKEN; not its user or an owner group: STATUS_INVALID_OWNER).
+fn check_owner(token: Option<&TokenData>, owner: &Sid) -> Result<(), NtStatus> {
+    let token = token.ok_or(NtStatus::NO_TOKEN)?;
+    if valid_owner(token, owner) { Ok(()) } else { Err(NtStatus::INVALID_OWNER) }
+}
+
+/// Whether `token` has SeSecurityPrivilege enabled, as setting a SACL
+/// needs (STATUS_NO_TOKEN, STATUS_PRIVILEGE_NOT_HELD).
+fn check_security_privilege(token: Option<&TokenData>) -> Result<(), NtStatus> {
+    let token = token.ok_or(NtStatus::NO_TOKEN)?;
+    if enabled(token, SE_SECURITY) { Ok(()) } else { Err(NtStatus::PRIVILEGE_NOT_HELD) }
+}
+
+/// CreatePrivateObjectSecurityWithMultipleInheritance's descriptor for a
+/// new object under `parent` from `creator`'s, by the SEF_* `flags`
+/// (`token`: the client's, None when the caller passed none).
+pub fn new_private(
+    parent: Option<&Descriptor>,
+    creator: Option<Descriptor>,
+    container: bool,
+    flags: u32,
+    token: Option<&TokenData>,
+    mapping: &GenericMapping,
+) -> Result<Descriptor, NtStatus> {
+    let from_parent = |pick: fn(&Descriptor) -> Option<Sid>| parent.and_then(pick);
+    let (owner, owner_defaulted) = match creator.as_ref().and_then(|c| c.owner) {
+        Some(o) => (o, creator.as_ref().map_or(0, |c| c.control & SE_OWNER_DEFAULTED)),
+        None => {
+            match from_parent(|p| p.owner).filter(|_| flags & SEF_DEFAULT_OWNER_FROM_PARENT != 0) {
+                Some(o) => (o, SE_OWNER_DEFAULTED),
+                None => (token.ok_or(NtStatus::NO_TOKEN)?.owner, SE_OWNER_DEFAULTED),
+            }
+        }
+    };
+    let (group, group_defaulted) = match creator.as_ref().and_then(|c| c.group) {
+        Some(g) => (g, creator.as_ref().map_or(0, |c| c.control & SE_GROUP_DEFAULTED)),
+        None => {
+            match from_parent(|p| p.group).filter(|_| flags & SEF_DEFAULT_GROUP_FROM_PARENT != 0) {
+                Some(g) => (g, SE_GROUP_DEFAULTED),
+                None => (token.ok_or(NtStatus::NO_TOKEN)?.primary_group, SE_GROUP_DEFAULTED),
+            }
+        }
+    };
+    if flags & SEF_AVOID_OWNER_CHECK == 0 {
+        check_owner(token, &owner)?;
+    }
+    let (creator_control, creator_dacl, creator_sacl) = match creator {
+        Some(c) => (c.control, c.dacl, c.sacl),
+        None => (0, None, None),
+    };
+    let given = |kind: AclKind, acl: Option<Vec<u8>>| {
+        (creator_control & kind.present != 0).then_some((creator_control, acl))
+    };
+    let creator_sacl = given(SACL_KIND, creator_sacl);
+    if creator_sacl.is_some() && flags & SEF_AVOID_PRIVILEGE_CHECK == 0 {
+        check_security_privilege(token)?;
+    }
+    let (dacl_control, dacl) = private_acl(
+        DACL_KIND,
+        parent.and_then(|p| p.dacl.as_deref()),
+        given(DACL_KIND, creator_dacl),
+        flags & SEF_DACL_AUTO_INHERIT != 0,
+        container,
+        &owner,
+        &group,
+        mapping,
+        || match token {
+            Some(t) => default_dacl(t, mapping),
+            None => Ok(None),
+        },
+    )?;
+    let (sacl_control, sacl) = private_acl(
+        SACL_KIND,
+        parent.and_then(|p| p.sacl.as_deref()),
+        creator_sacl,
+        flags & SEF_SACL_AUTO_INHERIT != 0,
+        container,
+        &owner,
+        &group,
+        mapping,
+        || Ok(None),
+    )?;
+    Ok(Descriptor {
+        control: owner_defaulted | group_defaulted | dacl_control | sacl_control,
+        owner: Some(owner),
+        group: Some(group),
+        dacl,
+        sacl,
+    })
+}
+
+/// SetPrivateObjectSecurityEx's ACL of `kind`: the modification's, and
+/// with automatic inheritance (neither descriptor protected) its explicit
+/// ACEs then the current descriptor's inherited ones; a protected
+/// modification's ACEs lose INHERITED_ACE.
+fn set_private_acl(
+    kind: AclKind,
+    current: (u16, Option<Vec<u8>>),
+    new: (u16, Option<Vec<u8>>),
+    auto: bool,
+    owner: &Sid,
+    group: &Sid,
+    mapping: &GenericMapping,
+) -> Result<(u16, Option<Vec<u8>>), NtStatus> {
+    let (control, acl) = new;
+    let present = control & kind.present;
+    let protected = control & kind.protected;
+    let Some(acl) = acl.filter(|_| present != 0) else {
+        return Ok((present | protected, None));
+    };
+    if !auto {
+        let explicit = explicit_aces(&acl, false, true, owner, group, mapping)?;
+        let kept = control & (kind.bits & !kind.present);
+        return Ok((kind.present | kept, Some(build_acl(acl[0], &explicit.0, explicit.1)?)));
+    }
+    if protected != 0 {
+        let (mut b, n) = explicit_aces(&acl, false, true, owner, group, mapping)?;
+        let mut at = 0;
+        for _ in 0..n {
+            b[at + 1] &= !INHERITED_ACE;
+            at += usize::from(u16_at(&b, at + 2).unwrap_or(4));
+        }
+        let acl = build_acl(acl[0], &b, n)?;
+        return Ok((kind.present | kind.protected | kind.auto_inherited, Some(acl)));
+    }
+    if current.0 & kind.protected != 0 {
+        let explicit = explicit_aces(&acl, false, true, owner, group, mapping)?;
+        let acl = build_acl(acl[0], &explicit.0, explicit.1)?;
+        return Ok((kind.present | kind.auto_inherited, Some(acl)));
+    }
+    let explicit = explicit_aces(&acl, true, true, owner, group, mapping)?;
+    let inherited = match current.1.as_deref() {
+        Some(c) => inherited_only(c)?,
+        None => (Vec::new(), 0),
+    };
+    Ok((kind.present | kind.auto_inherited, Some(join_acl(acl[0], explicit, inherited)?)))
+}
+
+/// SetPrivateObjectSecurityEx's merge of `info`'s parts of `new` into
+/// the private object's `current` descriptor, by the SEF_* `flags`
+/// (SEF_AVOID_PRIVILEGE_CHECK skips the owner check, as documented).
+pub fn set_private(
+    current: Descriptor,
+    info: u32,
+    new: Descriptor,
+    flags: u32,
+    token: Option<&TokenData>,
+    mapping: &GenericMapping,
+) -> Result<Descriptor, NtStatus> {
+    let mut d = current;
+    if info & OWNER_SECURITY_INFORMATION != 0 {
+        let owner = new.owner.ok_or(NtStatus::INVALID_OWNER)?;
+        if flags & SEF_AVOID_PRIVILEGE_CHECK == 0 {
+            check_owner(token, &owner)?;
+        }
+        d.owner = Some(owner);
+        d.control = (d.control & !SE_OWNER_DEFAULTED) | (new.control & SE_OWNER_DEFAULTED);
+    }
+    if info & GROUP_SECURITY_INFORMATION != 0 {
+        d.group = Some(new.group.ok_or(NtStatus::INVALID_PRIMARY_GROUP)?);
+        d.control = (d.control & !SE_GROUP_DEFAULTED) | (new.control & SE_GROUP_DEFAULTED);
+    }
+    let owner = d.owner.ok_or(NtStatus::INVALID_OWNER)?;
+    let group = d.group.ok_or(NtStatus::INVALID_PRIMARY_GROUP)?;
+    if info & DACL_SECURITY_INFORMATION != 0 {
+        let (control, acl) = set_private_acl(
+            DACL_KIND,
+            (d.control, d.dacl.take()),
+            (new.control, new.dacl),
+            flags & SEF_DACL_AUTO_INHERIT != 0,
+            &owner,
+            &group,
+            mapping,
+        )?;
+        d.control = (d.control & !DACL_BITS) | control;
+        d.dacl = acl;
+    }
+    if info & SACL_SECURITY_INFORMATION != 0 {
+        let (control, acl) = set_private_acl(
+            SACL_KIND,
+            (d.control, d.sacl.take()),
+            (new.control, new.sacl),
+            flags & SEF_SACL_AUTO_INHERIT != 0,
+            &owner,
+            &group,
+            mapping,
+        )?;
+        d.control = (d.control & !SACL_BITS) | control;
+        d.sacl = acl;
+    }
+    Ok(d)
 }
 
 impl Descriptor {
@@ -787,6 +1151,147 @@ mod tests {
             group: Some(USER),
             dacl: Some(allow_acl(list).unwrap()),
             sacl: None,
+        }
+    }
+
+    const KEY_MAPPING: GenericMapping = GenericMapping {
+        read: 0x0002_0019,
+        write: 0x0002_0006,
+        execute: 0x0002_0019,
+        all: 0x000f_003f,
+    };
+    const CI: u8 = CONTAINER_INHERIT_ACE;
+
+    #[test]
+    fn private_object_inherits_with_auto_inheritance() {
+        let token = TokenData::boot_user().unwrap();
+        // A key's parent: everyone reads (inheritable), SYSTEM all
+        // (inheritable, generic), the owner of each child all.
+        let p = parent(&[
+            (0x0002_0019, EVERYONE, CI),
+            (0x1000_0000, SYSTEM, CI),
+            (0x1000_0000, CREATOR_OWNER, CI | INHERIT_ONLY_ACE),
+            (0x000f_003f, USER, 0),
+        ]);
+        let flags = SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT;
+        let d = new_private(Some(&p), None, true, flags, Some(&token), &KEY_MAPPING).unwrap();
+        assert_eq!(d.owner, Some(token.owner));
+        assert_eq!(
+            d.control,
+            SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_OWNER_DEFAULTED | SE_GROUP_DEFAULTED
+        );
+        let i = INHERITED_ACE;
+        assert_eq!(
+            ace_list(d.dacl.as_ref().unwrap()),
+            [
+                (0, CI | i, 0x0002_0019, EVERYONE),
+                // Mapped effective ACE, then the inherit-only original.
+                (0, i, 0x000f_003f, SYSTEM),
+                (0, CI | INHERIT_ONLY_ACE | i, 0x1000_0000, SYSTEM),
+                (0, i, 0x000f_003f, token.owner),
+                (0, CI | INHERIT_ONLY_ACE | i, 0x1000_0000, CREATOR_OWNER),
+            ]
+        );
+        // A creator's explicit ACEs come first; its inherited ones are
+        // dropped; a protected creator DACL is kept alone.
+        let mut creator = parent(&[(0x0002_0006, USER, 0), (0x0002_0019, SYSTEM, INHERITED_ACE)]);
+        creator.control = SE_DACL_PRESENT;
+        creator.owner = None;
+        creator.group = None;
+        let d =
+            new_private(Some(&p), Some(creator), true, flags, Some(&token), &KEY_MAPPING).unwrap();
+        let list = ace_list(d.dacl.as_ref().unwrap());
+        assert_eq!(list[0], (0, 0, 0x0002_0006, USER));
+        assert_eq!(list[1], (0, CI | i, 0x0002_0019, EVERYONE));
+        assert_eq!(list.len(), 6);
+        // A non-container inherits only object-inheritable ACEs: none.
+        let mut creator = parent(&[(0x0002_0006, USER, 0)]);
+        creator.control = SE_DACL_PRESENT;
+        let d =
+            new_private(Some(&p), Some(creator), false, flags, Some(&token), &KEY_MAPPING).unwrap();
+        assert_eq!(ace_list(d.dacl.as_ref().unwrap()), [(0, 0, 0x0002_0006, USER)]);
+        let mut creator = parent(&[(0x0002_0006, USER, 0)]);
+        creator.control = SE_DACL_PRESENT | SE_DACL_PROTECTED;
+        let d =
+            new_private(Some(&p), Some(creator), true, flags, Some(&token), &KEY_MAPPING).unwrap();
+        assert_eq!(ace_list(d.dacl.as_ref().unwrap()), [(0, 0, 0x0002_0006, USER)]);
+        assert_ne!(d.control & SE_DACL_PROTECTED, 0);
+    }
+
+    #[test]
+    fn private_object_owner_and_token_rules() {
+        let token = TokenData::boot_user().unwrap();
+        let p = parent(&[(0x0002_0019, EVERYONE, CI)]);
+        // No token: the owner and group come from the parent when asked,
+        // else STATUS_NO_TOKEN; the owner check needs a token unless
+        // avoided.
+        let flags = SEF_DEFAULT_OWNER_FROM_PARENT | SEF_DEFAULT_GROUP_FROM_PARENT;
+        assert_eq!(
+            new_private(Some(&p), None, true, flags, None, &KEY_MAPPING),
+            Err(NtStatus::NO_TOKEN)
+        );
+        let flags = flags | SEF_AVOID_OWNER_CHECK | SEF_AVOID_PRIVILEGE_CHECK;
+        let d = new_private(Some(&p), None, true, flags, None, &KEY_MAPPING).unwrap();
+        assert_eq!((d.owner, d.group), (Some(USER), Some(USER)));
+        assert_eq!(new_private(None, None, true, 0, None, &KEY_MAPPING), Err(NtStatus::NO_TOKEN));
+        // An owner the token may not name.
+        let mut creator = parent(&[]);
+        creator.owner = Some(SYSTEM);
+        assert_eq!(
+            new_private(None, Some(creator), true, 0, Some(&token), &KEY_MAPPING),
+            Err(NtStatus::INVALID_OWNER)
+        );
+        // No parent, no creator: the token's default DACL.
+        let d = new_private(None, None, true, 0, Some(&token), &KEY_MAPPING).unwrap();
+        assert_eq!(
+            d.control & (SE_DACL_PRESENT | SE_DACL_DEFAULTED),
+            SE_DACL_PRESENT | SE_DACL_DEFAULTED
+        );
+    }
+
+    #[test]
+    fn private_object_set_keeps_inherited_aces() {
+        let token = TokenData::boot_user().unwrap();
+        let p = parent(&[(0x0002_0019, EVERYONE, CI)]);
+        let flags = SEF_DACL_AUTO_INHERIT;
+        let d = new_private(Some(&p), None, true, flags, Some(&token), &KEY_MAPPING).unwrap();
+        let mut m = parent(&[(0x1000_0000, USER, 0)]);
+        m.control = SE_DACL_PRESENT;
+        let set = |d: Descriptor, m: Descriptor, flags| {
+            set_private(d, DACL_SECURITY_INFORMATION, m, flags, Some(&token), &KEY_MAPPING)
+        };
+        let d2 = set(Descriptor { ..clone(&d) }, clone(&m), flags).unwrap();
+        // The new explicit ACE (mapped), then the inherited one kept.
+        assert_eq!(
+            ace_list(d2.dacl.as_ref().unwrap()),
+            [(0, 0, 0x000f_003f, USER), (0, CI | INHERITED_ACE, 0x0002_0019, EVERYONE)]
+        );
+        assert_ne!(d2.control & SE_DACL_AUTO_INHERITED, 0);
+        // Without auto-inheritance the modification replaces the DACL.
+        let d3 = set(clone(&d), clone(&m), 0).unwrap();
+        assert_eq!(ace_list(d3.dacl.as_ref().unwrap()), [(0, 0, 0x000f_003f, USER)]);
+        // A protected modification: its ACEs lose INHERITED_ACE.
+        let mut m = parent(&[(0x0002_0019, EVERYONE, CI | INHERITED_ACE)]);
+        m.control = SE_DACL_PRESENT | SE_DACL_PROTECTED;
+        let d4 = set(clone(&d), m, flags).unwrap();
+        assert_eq!(ace_list(d4.dacl.as_ref().unwrap()), [(0, CI, 0x0002_0019, EVERYONE)]);
+        // An owner the token may not name, unless the check is avoided.
+        let mut m = parent(&[]);
+        m.owner = Some(SYSTEM);
+        let owner = |m: Descriptor, flags| {
+            set_private(clone(&d), OWNER_SECURITY_INFORMATION, m, flags, Some(&token), &KEY_MAPPING)
+        };
+        assert_eq!(owner(clone(&m), 0), Err(NtStatus::INVALID_OWNER));
+        assert_eq!(owner(m, SEF_AVOID_PRIVILEGE_CHECK).unwrap().owner, Some(SYSTEM));
+    }
+
+    fn clone(d: &Descriptor) -> Descriptor {
+        Descriptor {
+            control: d.control,
+            owner: d.owner,
+            group: d.group,
+            dacl: d.dacl.as_ref().map(|a| copy(a).unwrap()),
+            sacl: d.sacl.as_ref().map(|a| copy(a).unwrap()),
         }
     }
 

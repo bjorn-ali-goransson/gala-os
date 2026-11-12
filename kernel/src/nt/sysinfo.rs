@@ -2,6 +2,7 @@
 //! results (public x64 layouts: winternl.h / mingw-w64), kept pure so they
 //! can be host-tested.
 
+use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 
 pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
@@ -29,6 +30,26 @@ pub fn query_performance_counter_information() -> [u8; 12] {
 /// 0.0.0.0: none).
 pub const GALA_NETWORK_INTERFACES: u32 = 0x6761_0001;
 pub const INTERFACE_RECORD: usize = 40;
+
+/// gala's own class (not Windows'): the sessions that exist, for gala's
+/// wtsapi32.dll (Windows' asks its Remote Desktop service over RPC).
+/// Records of `SESSION_RECORD` bytes, in the order the sessions were
+/// made: the id and flags (bit 0: the console shows it), u32 each.
+pub const GALA_SESSIONS: u32 = 0x6761_0002;
+pub const SESSION_RECORD: usize = 8;
+
+/// GALA_SESSIONS' records.
+pub fn sessions() -> Result<alloc::vec::Vec<u8>, super::status::NtStatus> {
+    let ids = super::session::ids()?;
+    let console = super::session::active_console();
+    let nomem = |_| super::status::NtStatus::NO_MEMORY;
+    let mut out = alloc::vec::Vec::new();
+    for id in ids {
+        out.try_extend_from_slice(&id.to_le_bytes()).map_err(nomem)?;
+        out.try_extend_from_slice(&u32::from(id == console).to_le_bytes()).map_err(nomem)?;
+    }
+    Ok(out)
+}
 
 /// One interface for GALA_NETWORK_INTERFACES.
 pub struct Interface {

@@ -522,8 +522,8 @@ fn query_system(a: &Args) -> Res<NtStatus> {
             convert_processes,
         ),
         // Laid out alike: performance, time of day, the performance
-        // counter's flags, gala's network interfaces.
-        2 | 3 | 124 | 0x6761_0001 => {
+        // counter's flags, gala's network interfaces and sessions.
+        2 | 3 | 124 | 0x6761_0001 | 0x6761_0002 => {
             pass(NT_QUERY_SYSTEM_INFORMATION, a, &[K::U, K::U, K::U, K::U])
         }
         _ => no_class(b"wow64.dll!NtQuerySystemInformation(class)", class),

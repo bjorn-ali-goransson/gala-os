@@ -1832,19 +1832,104 @@ need gala's.
      of 1314 right before the error). Now NT symbolic links and reparse
      points are there (ARCHITECTURE "Files", `reparse_test`), SYSTEM's
      SeCreateSymbolicLinkPrivilege enabled for the call.
-     Where the run ends now (about 2640 s): the client's next task,
-     STAGEREGISTRY (`C2R::VirtualRegistry::MergeAndStageRegistry`),
-     fails with `RegistrationFailure (Failed to load OffReg.dll ,
-     Error:0x7f)`, and setup.exe exits 17004 (0x426c). OffReg.dll (the
-     offline registry library) imports what gala lacks (the ledger's
-     missing exports at that time): ntdll's RtlRunOnceBeginInitialize,
-     RtlRunOnceComplete, RtlInitializeSRWLock,
-     RtlAcquireSRWLockExclusive, RtlReleaseSRWLockExclusive,
-     RtlNumberOfSetBits, RtlFindNextForwardRunClear; msvcrt's wcsnlen,
-     wcsncpy_s, wcscat_s; advapi32's
-     CreatePrivateObjectSecurityWithMultipleInheritance,
-     SetPrivateObjectSecurityEx, DestroyPrivateObjectSecurity,
-     MakeSelfRelativeSD.
+     The client's next task, STAGEREGISTRY
+     (`C2R::VirtualRegistry::MergeAndStageRegistry`), loads OffReg.dll
+     (the offline registry library: it reads and writes hive files
+     itself, with CreateFileW/ReadFile/WriteFile), which failed to load
+     (`RegistrationFailure (Failed to load OffReg.dll , Error:0x7f)`,
+     setup.exe exit 17004) for want of its imports. Done: ntdll's
+     RtlRunOnceBeginInitialize/Complete (and the rest of RtlRunOnce*,
+     with kernel32's InitOnce* over them), the SRW locks in ntdll
+     (kernel32's exports forward, as on Windows) and every word wait in
+     ntdll's RtlWaitOnAddress (kernelbase's WaitOnAddress and kernel32's
+     condition variables too: one waiter list, so a lock taken through
+     one DLL is woken through the other), the bitmap routines
+     (RtlNumberOfSetBits, RtlFindNextForwardRunClear and their
+     companions); msvcrt's bounded string functions (wcsnlen,
+     wcsncpy_s, wcscat_s and the rest of the strcpy_s family, shared
+     with ucrtbase); advapi32's private object security
+     (CreatePrivateObjectSecurity*, SetPrivateObjectSecurity(Ex),
+     DestroyPrivateObjectSecurity, MakeSelfRelativeSD) over the kernel's
+     inheritance rules (gala's GalaNewSecurityObject and
+     GalaSetSecurityObject; ARCHITECTURE "Security descriptors"), and
+     GetSidLengthRequired, which it calls once loaded;
+     `office_api_test` and `wow64_office_api_test` (`offreg.rs`, Wine's
+     conformance tests run on Windows and the documentation).
+     Then MergeAndStageRegistry detokenizes the package's registry
+     through known folders and stopped at those shell32 lacked
+     (`Failed to get known folder mapping.`, 0x80070002 for
+     [{Fonts}], [{ProgramFilesX86}], [{ProgramFilesX64}], the common
+     files ones and [{SystemX86}]); done: those known folders
+     (`win32_misc_test`). [{AppVPackageRoot}] is App-V's own token, not
+     a Windows known folder.
+     STAGEREGISTRY then succeeds. The next task, UNINSTALLCENTENNIAL
+     (removing a Store-installed Office), runs
+     `InspectorOfficeGadget.exe deprovisionuninstall` (32-bit, .NET
+     Framework: it imports mscoree.dll alone, which gala lacks, so each
+     start ends 0xc0000135; the task goes on), and the service ended on
+     a delay-load failure of wtsapi32's WTSEnumerateSessionsW (crash
+     report `delay load of WTSAPI32.dll!WTSEnumerateSessionsW`, about
+     2520 s). Done: WTSEnumerateSessionsW/A over the kernel's session
+     list (Wine's wtsapi.c test on Windows); ntdll's
+     RtlValidRelativeSecurityDescriptor, whose import the service's
+     pieces resolve (`office_api_test`'s `service.rs`).
+     The service then writes Office's registry (NtCreateKey and
+     NtSetValueKey, one after another), and each took 0.65 s: with
+     `persist`, every system call's sync rewrote the registry's log as a
+     whole snapshot once the changed keys alone passed the log's 1 MiB
+     bound (the NMI dump caught `persist::sync_registry` encoding a
+     snapshot; 1016 creates in 1290 s). Done: the bound is also twice
+     the last snapshot, so syncs cost their own changes, amortized
+     (ARCHITECTURE "The registry kept"; `persist`'s unit test). With
+     that the service wrote 17000 keys and 25000 values in 1200 s, until
+     the 16 MiB snapshot, encoded whole, failed for want of memory
+     (`persist: registry changes not written (NoMemory)`, frames free
+     reaching 0) and every sync after it tried again; done: snapshots
+     are written as the registry is walked, a chunk at a time.
+     On the fast path (below) the registry staging then ran for the
+     rest of the hour at about 40 ms per NtCreateKey and NtSetValueKey
+     (19000 creates and 25000 values from 1300 s to 3600 s, every
+     system call's sync writing the change and flushing the disk; NtClose
+     20 ms); done: the registry is flushed lazily, as Windows' is (at the
+     first sync 5 s after the last, or at NtFlushKey, a program's end, a
+     handover; ARCHITECTURE "The registry kept").
+     With that STAGEREGISTRY ends in minutes and UNINSTALLCENTENNIAL
+     runs at about 1700 s on the fast path; the service then ended on
+     the delay load of WTSAPI32.dll!WTSQueryUserToken (crash report);
+     done: WTSQueryUserToken (the console user's token for a
+     SeTcbPrivilege holder, as documented; GalaSession's
+     SESSION_USER_TOKEN, wow64.dll converts GalaSession now).
+     The next delay load the task needed was USERENV.dll!
+     CreateEnvironmentBlock (crash report, about 1360 s in); done:
+     CreateEnvironmentBlock and DestroyEnvironmentBlock (Wine's userenv
+     test on Windows), the boot writing the processor variables into
+     `Session Manager\Environment` as Windows keeps them.
+     UNINSTALLCENTENNIAL then completes (InspectorOfficeGadget's starts
+     still fail without .NET Framework) and APPLYCONFIGURATION fails
+     publishing the staged install (`Failed to publish working op ,
+     Error:0x80070057`; repoman's DownloadManagers.hpp:575 E_INVALIDARG,
+     `SetCurrentState ... currentState=2 state=4`; setup.exe's client
+     ends 17004 at about 1850 s), the one ERROR_INVALID_PARAMETER of the
+     run's ledger being kernel32's GetFileInformationByHandleEx(FileIdInfo,
+     class 18); done: FileIdInformation (ARCHITECTURE "Files").
+     With it the publish goes on and the service ended on the delay load
+     of SHLWAPI.dll!PathBuildRootW (crash report, about 1835 s); done:
+     PathBuildRootW and A (Wine's shlwapi path.c test on Windows).
+     Where the fast path ends now (3600 s): APPLYCONFIGURATION is
+     publishing the staged install into `Program Files\Microsoft
+     Office\root` and is cut off by the time limit, copying at about
+     0.13 MB/s: 4 KiB NtReadFile/NtWriteFile pairs of about 30 ms each
+     (25800 writes, 105 MB, from 1900 s on), every system call's sync
+     writing its page and the volume's record and flushing the disk
+     (the registry is flushed lazily now, files are not; Windows' cache
+     manager writes file data lazily unless the handle is write-through).
+     Next: the same lazy flush for files' data (a design change of D2/D4's
+     "on the disk before the call returns", for the owner to decide:
+     FlushFileBuffers, write-through handles and a program's end would
+     still flush at once). Also seen: the client's `OfficeC2RClient.exe
+     /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
+     ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
+     Framework.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
@@ -1866,10 +1951,15 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: OffReg.dll's imports above
-     (test first, `office_api_test` and its x86 twin for ntdll's and
-     msvcrt's, `security_test` for advapi32's private object security),
-     then what STAGEREGISTRY and the apply after it need; the stream
+     Done: a development fast path, `office_install_local` (MANUAL):
+     the pinned build's files from the CDN cached on the host once
+     (`cargo xtask office-source`, 3.2 GB) and put on the fresh disk as
+     C:\OfficeSource in seconds (`diskimage::inject`), with ODT's
+     SourcePath pointing there; the Click-to-Run client starts about as
+     before but nothing is downloaded (WORKFLOW "Office's fast path").
+     `office_install` stays the whole path's check.
+     Next, in the order the run reaches them: what STAGEREGISTRY and
+     the apply after it need; the stream
      download's speed under TCG (the
      network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
      its AFD calls 4 ms each); GetCachedSigningLevel and

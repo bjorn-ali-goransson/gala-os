@@ -1676,6 +1676,10 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   in a directory without the flag the second name is a collision for
   both personalities. Not yet: FileCaseSensitiveInformation (query and
   set from NT; Windows sets it only on an empty directory).
+- **File ids**: FileInternalInformation's IndexNumber is the node
+  (GetFileInformationByHandle's nFileIndex); FileIdInformation (class 59,
+  GetFileInformationByHandleEx's FileIdInfo) is the volume's serial and
+  that index in a 128-bit id, as an NTFS file's (`office_api_test`).
 - **Who uses a file** (FileProcessIdsUsingFileInformation, class 47,
   what the Restart Manager asks): `file::processes_using` walks the
   running processes and lists each that has a handle open on the node,
@@ -2336,6 +2340,34 @@ SECURITY.md phase S2; rules in `kernel/src/nt/security.rs`, services in
   RegCreateKeyEx's SECURITY_ATTRIBUTES; kernel32 passes
   SECURITY_ATTRIBUTES' descriptor for CreateFileW, CreateDirectoryW and
   the named-object functions.
+- **Private objects** (gala's services 0x7f28-0x7f29,
+  GalaNewSecurityObject and GalaSetSecurityObject, behind advapi32's
+  CreatePrivateObjectSecurity* and SetPrivateObjectSecurity*,
+  `private.rs`; `office_api_test`'s `offreg.rs`, kernel unit tests
+  `private_object_*`): Windows computes these in user mode; here
+  `security::new_private` and `set_private` apply the same inheritance
+  code as files and keys, chosen by the caller's SEF_* flags rather than
+  the object type: SEF_DACL/SACL_AUTO_INHERIT merge the creator's
+  explicit ACEs (first) with the parent's inheritable ones (marked
+  INHERITED_ACE; the ACL auto-inherited) unless the creator's ACL is
+  protected; without them the creator's ACL, else the inherited ACEs,
+  else the token's default DACL. A creator's (or modification's) ACE
+  with generic rights or CREATOR OWNER/GROUP becomes the mapped ACE plus
+  an inherit-only copy when it propagates. The owner and group come from
+  the creator, else the parent (SEF_DEFAULT_OWNER/GROUP_FROM_PARENT),
+  else the client token (a NULL token where one is needed:
+  STATUS_NO_TOKEN); the owner is checked against the token unless
+  SEF_AVOID_OWNER_CHECK (SEF_AVOID_PRIVILEGE_CHECK in Set, as
+  documented), a SACL needs SeSecurityPrivilege unless
+  SEF_AVOID_PRIVILEGE_CHECK. Set with automatic inheritance keeps the
+  object's inherited ACEs after the modification's explicit ones; a
+  protected modification drops INHERITED_ACE. The result is
+  self-relative in a process-heap block (DestroyPrivateObjectSecurity).
+  Object types (WithMultipleInheritance's GUIDs: object ACEs) are not
+  told apart (recorded); the mandatory-label flags are recorded (`SEF
+  flags` ledger lines). SEF_AVOID_OWNER_RESTRICTION (OffReg.dll passes
+  it) changes nothing: gala applies no OWNER RIGHTS restriction to a
+  creator's DACL to begin with.
 - TODO: SetSecurityInfo of an unprotected DACL does not re-apply or
   propagate inheritance as Windows' advapi32 does; SACLs are kept but
   auditing does nothing.
@@ -2442,7 +2474,17 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   GetUserProfileDirectoryW: the caller's own user's is %USERPROFILE%,
   another local user's the path in its ProfileList entry
   (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\<SID>\
-  ProfileImagePath`), else `C:\Users\<name>`. LoadUserProfileW (callers
+  ProfileImagePath`), else `C:\Users\<name>`. CreateEnvironmentBlock (`env.rs`;
+  office_api_test's `service.rs`, Wine's userenv test run on Windows)
+  builds a user's environment as Windows does: the caller's variables
+  when inheriting, SystemRoot and SystemDrive as the caller has them, the
+  system's (`Session Manager\Environment`, where the boot also writes
+  NUMBER_OF_PROCESSORS and the PROCESSOR_* variables), ProgramData and
+  ALLUSERSPROFILE from ProfileList, COMPUTERNAME, the program files
+  directories, then USERNAME, USERPROFILE (ProfileImagePath; the service
+  accounts' own; no token: Default), APPDATA, LOCALAPPDATA and the
+  user's `Environment` and `Volatile Environment` keys, in name order in
+  a process-heap block. LoadUserProfileW (callers
   holding SeBackup and SeRestore, as services do; else
   ERROR_PRIVILEGE_NOT_HELD) creates the profile directory
   `C:\Users\<lpUserName>` (full control for the user, SYSTEM and
@@ -2940,17 +2982,14 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   interrupt-time queries. MapUserPhysicalPagesScatter is kernel32's
   alone (absent from the spec too). Test: `kernel32_test` and
   `wow64_k32_test` (`export_split.rs`: presence read from each DLL's
-  export directory, absence as GetProcAddress NULL too). The address
-  waits are one source, `kernelbase/src/address_wait.rs`, built by two
-  DLLs: kernelbase exports it; kernel32 builds its own copy (`#[path]`,
-  not exported) for its SRW locks, condition variables and InitOnce.
-  Each copy has its own waiter list and keyed event, which is correct
-  because an address is always waited on and woken through the same
-  DLL (a kernel32 lock word only by kernel32's own code, a program's
-  address only through kernelbase's exports); that is the invariant
-  that keeps the two apart (neither DLL may export or forward the other's
-  copy). Calling kernelbase from kernel32 instead would make kernel32
-  import kernelbase, which it does not (below). A
+  export directory, absence as GetProcAddress NULL too). Every wait on a
+  word sleeps in ntdll (`testntdll/src/address_wait.rs`: RtlWaitOnAddress,
+  RtlWakeAddressSingle/All, one waiter list and keyed event per process):
+  kernelbase's WaitOnAddress calls it, ntdll's SRW locks and RtlRunOnce*
+  (`sync.rs`, which kernel32's SRW exports forward to and its InitOnce*
+  call) and kernel32's condition variables sleep there, so a word is
+  woken whichever DLL changed it (OffReg.dll takes its SRW lock and
+  one-time initialization from ntdll, programs from kernel32). A
   forwarder to a function gala lacks resolves to nothing: GetProcAddress
   is NULL and an import of it is a missing export in the ledger (under
   the API set's name), as an absent export would be; it works once the
@@ -3049,6 +3088,17 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   node's subtree height is kept in its first reserved byte, so a change
   rebalances along its path only. NumberGenericTableElements and the
   ordered-element cache are kept in the table.
+- **RtlValidRelativeSecurityDescriptor** (`rtl.rs`, `office_api_test`):
+  a self-relative descriptor whose SIDs and present ACLs lie whole
+  within the given length, with the parts the SECURITY_INFORMATION
+  asks for.
+- **Bitmaps** (`bitmap.rs`, `office_api_test`): RTL_BITMAP's
+  initialize, set and clear (runs and all), check, the set and clear
+  counts and the next forward set or clear run; the bits past
+  SizeOfBitMap in the buffer's last ULONG are not part of it.
+- **SRW locks and one-time initialization** (`sync.rs`) and the address
+  waits they sleep on (`address_wait.rs`): kernel32 "Synchronization",
+  "API sets".
 - **RtlCaptureStackBackTrace** on x86 (`x86.rs`) walks the saved frame
   pointers inside the thread's stack (TEB32's limits); kernel32 forwards
   it on both architectures.
@@ -3076,8 +3126,10 @@ ntdll imports.
   multiple), semaphores, completion ports, waitable timers, SRW locks,
   condition variables, InitOnce and interlocked SLists. The lightweight
   ones are one word with no kernel object: a waiter spins 64 rounds,
-  then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
-  it changes; whoever changes it in a way waiters wait for wakes them
+  then sleeps on the word with ntdll's RtlWaitOnAddress until
+  it changes (the SRW locks and InitOnce are ntdll's: RtlAcquireSRWLock*
+  behind kernel32's forwarders, InitOnce* over RtlRunOnce*, with
+  INIT_ONCE_ASYNC; `office_api_test`'s `offreg.rs`); whoever changes it in a way waiters wait for wakes them
   (an SRW lock's release to free, the last shared release, InitOnce's
   end (its callback gets the caller's Context pointer as it is, NULL
   included, and what the callback left there is the data kept), a condition variable's wake: WakeConditionVariable wakes one
@@ -3368,8 +3420,8 @@ ntdll imports.
   HeapSetInformation/GetProcessHeaps/HeapLock, K32QueryWorkingSetEx
   (committed pages are valid), power requests, ProcessIdToSessionId,
   GetActive/MaximumProcessorCount, GetTempFileName, WaitOnAddress and
-  WakeByAddress* (`address_wait.rs`: waiters on a list, one keyed
-  event, a node's address as key), InitOnceBegin/Complete,
+  WakeByAddress* (over ntdll's `address_wait.rs`: waiters on a list,
+  one keyed event, a node's address as key), InitOnceBegin/Complete,
   FlsGetValue2/TlsGetValue2, GetSystemPowerStatus (AC, no battery), DPI
   and priority-boost queries, RegisterApplicationRestart (kept and read
   back by GetApplicationRestartSettings; no restart manager restarts
@@ -3499,7 +3551,11 @@ redistributable (the owner's decision).
   as the two runtimes do on Windows: a program that mixes them (a
   mingw DLL in an MSVC program) has two separate runtimes. What both
   need is written once, in msvcrt's modules; a UCRT-only helper in them
-  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`.
+  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`. The
+  bounds-checked string functions both export (`safe.rs`: the strcpy_s
+  family, memcpy_s/memmove_s, strtok_s/wcstok_s, strnlen/wcsnlen) call
+  the invalid-parameter handler in ucrtbase only; msvcrt.dll has none to
+  set and returns the error code.
 - **Start-up** (`ucrt/mod.rs`): what Visual C++'s static start-up code
   calls: `_configure_narrow_argv`/`_configure_wide_argv` and
   `_initialize_*_environment` (msvcrt's `__getmainargs`/`__wgetmainargs`
@@ -4449,9 +4505,12 @@ of their own, clients of it) is the yardstick.
   folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
   the profile's, the Start menu's and Programs under it, per user in
   %APPDATA% and for all in %ProgramData%, FOLDERID_UserProgramFiles in
-  %LOCALAPPDATA%\Programs, CSIDL_SYSTEMX86 `%windir%\SysWOW64` and
-  the x86 and common program files from their variables
-  (`win32_misc_test`); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
+  %LOCALAPPDATA%\Programs, CSIDL_SYSTEMX86 and FOLDERID_SystemX86
+  `%windir%\SysWOW64`, FOLDERID_Fonts, and the program files and common
+  files folders (their X86 forms and, in a 64-bit process only, X64
+  from ProgramW6432 and CommonProgramW6432) from their variables
+  (`win32_misc_test`; the Click-to-Run service's registry staging maps
+  its tokens through them, and an unknown one stopped it); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
   folder Windows makes with one; `shell32_test`),
@@ -4652,7 +4711,12 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
   takes the flag first (set: a sample, not a dump) and records rip, mode,
   client and the kernel backtrace into that CPU's ring (8 entries, one
   producer and one consumer on the same CPU); the CPU's own tick writes
-  the events. A CPU's idle state for the choice is read lock-free
+  the events. **Invariant: a tick's writing is bounded**: it writes the
+  samples waiting when it starts, and an NMI landing while it writes
+  keeps nothing (counted): a sample costs a VM exit per byte, which on a
+  loaded host can take longer than the sample period, and a writer that
+  chased its own samples never left the tick (`events_sample` timed out
+  with CPU 1 in `write_samples` for 20 s). A CPU's idle state for the choice is read lock-free
   (`sched::cpu_idle`, set at each switch). A QEMU dump NMI that arrives
   while a sample NMI is pending merges with it: that CPU misses the
   dump (the dump waits for it half a second). With one CPU the tick
@@ -6219,10 +6283,30 @@ rather than a format of their own.
   old tree and writes the new one; a tombstone covers the names below
   it (no tombstone under another). Replay sets only the times records
   carry: a replayed create or delete leaves the parent's LastWriteTime.
-- `persist::sync` first moves the registry's records into the file,
-  then writes the file system's records; past 1 MiB, or when records
-  were lost, the file is rewritten as a snapshot. **Lock order: the
-  registry's lock is never taken inside the file system's.**
+- The registry is flushed lazily, as Windows' hives are ("within a few
+  seconds", RegFlushKey's documentation): `persist::sync` moves the
+  registry's records into the file at the first sync 5 s after the last
+  flush (REGISTRY_FLUSH_NS), or at once after NtFlushKey (RegFlushKey), a
+  program's end or before a kernel handover; a crash loses at most those
+  seconds of registry changes, as on Windows. Synced at every system call
+  (two disk writes and a flush each), Office's registry staging took
+  about 40 ms per NtCreateKey and NtSetValueKey under TCG.
+- `persist::sync` first moves the registry's records into the file
+  (when due),
+  then writes the file system's records; past 1 MiB and past twice the
+  last snapshot (`compact_reglog`), or when records were lost, the file
+  is rewritten as a snapshot (a `persist: the registry's log rewritten`
+  line), written 64 KiB at a time as the registry is walked
+  (`Registry::snapshot_each`, the registry's lock then the file
+  system's; the file is cut to nothing first, so nothing is read from
+  the disk under the registry's lock): a snapshot needs no memory in
+  proportion to the registry (a whole one encoded at once, Office's
+  16 MiB, failed for want of memory in a 512 MiB machine). Invariant: a sync costs the changes it writes, amortized; a
+  snapshot is never taken per sync (with a fixed bound, a registry
+  whose changed keys alone passed it was snapshotted at every system
+  call: Office's registry staging spent 0.65 s per NtCreateKey and
+  NtSetValueKey). **Lock order: the registry's lock is never taken
+  inside the file system's.**
 - `persist::mount` replays the file after the file system's log, i.e.
   after `registry.seed` and the boot's `registry` modules. Replayed
   value changes keep the key's last-write time.
@@ -7964,7 +8048,7 @@ PATH.
   way), then shims only as the fallback.
 - TODO: programs see PATH as their parent gave it. winget broadcasts
   WM_SETTINGCHANGE; gala's logon environment does not read
-  `HKCU\Environment` yet (with userenv's CreateEnvironmentBlock), so the
+  `HKCU\Environment` yet (userenv's CreateEnvironmentBlock does), so the
   test takes the new value from `HKCU\Environment` as a new shell
   would.
 
@@ -8849,8 +8933,15 @@ stations and desktops a program creates are refused until stage 3).
   dbghelp: MiniDumpWriteDump refused (recorded).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
   `dwmapi.dll` (no DWM: attributes accepted without effect or
-  E_NOTIMPL, recorded), `wtsapi32.dll` (the one console session,
-  active), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
+  E_NOTIMPL, recorded), `wtsapi32.dll` (the caller's session,
+  active; WTSEnumerateSessionsW/A over gala's NtQuerySystemInformation
+  class GALA_SESSIONS (0x67610002: id and console flag per session):
+  "Services" for session 0, disconnected, "Console" for the session the
+  console shows, active, other sessions an empty name, active;
+  WTSQueryUserToken over GalaSession's SESSION_USER_TOKEN (SeTcbPrivilege:
+  a new primary token of the console session's user, the boot user;
+  session 0 ERROR_NO_TOKEN; other sessions' users are not recorded yet,
+  so ERROR_NO_TOKEN too, recorded); `office_api_test`'s `service.rs`), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
   NULL, and every call on a context fails as on an invalid one, FALSE
   with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.

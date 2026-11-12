@@ -207,6 +207,7 @@ alone prints the usage.
 | `symbolize <log> [--release]` | resolve kernel backtraces in a serial log |
 | `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
 | `events <events.jsonl>` | summarize an event stream |
+| `office-source [--pin]` | fetch the pinned Office build's files from Microsoft's CDN into the host's cache, for `office_install_local` ("Office's fast path"); `--pin` prints their checksums |
 | `disk-files <image> [C:/path] [--out DIR]` | what a disk image holds on C: (the files programs wrote, read with the kernel's own volume, log and file-system code); `--out` copies them ("Disk tests") |
 | `otel <log\|events.jsonl\|scenario> [events.jsonl] [--out P] [--endpoint URL]` | OTLP/JSON ("OpenTelemetry") |
 | `profile <events.jsonl\|scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` | the sampling profiler's report (OBSERVABILITY `sample`) |
@@ -389,10 +390,10 @@ xtask that change how a scenario boots:
 | `USER_PROGRAMS`, `USER_DLLS`, `GO_PROGRAMS` | what is built and exported |
 | `EXTRA_MODULES` | extra files for a scenario: `(scenario, file, directory on C:)`; repository paths and `target/prebuilt/...` paths work too |
 | `MODULE_SETS` | a named set of modules shared by scenarios (and so a VM); a scenario listed twice gets the union |
-| `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`, `office_install_gui`) |
+| `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`, `office_install_gui`, `office_install_local`) |
 | `WRITABLE_TREES` | directory modules programs may write to (`sql/data`, `fzs`, `ftp`) |
 | `PENDING` | still being brought up: `boot-test <name>` runs it, `test` and CI do not |
-| `MANUAL` | run by hand only, by design (too long or too large for every change's gate: `office_install`, `office_install_gui`): `boot-test <name>` runs it, `test` and CI never do |
+| `MANUAL` | run by hand only, by design (too long or too large for every change's gate: `office_install`, `office_install_gui`, `office_install_local`): `boot-test <name>` runs it, `test` and CI never do |
 | `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
 | `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
@@ -1093,7 +1094,7 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    kernelbase has (its documentation says "DLL: Kernelbase.dll", Wine's
    kernel32.spec lacks it, or GetProcAddress on Windows says so: add it
    to `export_split.rs`) goes in `user/kernelbase/src/` (`lib.rs`,
-   `path.rs`, `address_wait.rs`), named in its build.rs's `OWN`. A name
+   `path.rs`), named in its build.rs's `OWN`. A name
    Windows' kernelbase has that Wine's spec lacks goes in
    `tools/kernelbase_exports.py`'s MEASURED. Programs reach either through the core
    API sets: kernelbase forwards every name of Windows' list
@@ -1121,6 +1122,15 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 - GetProcAddress returns NULL for stubs, so a test that checks a
   function is *exported* imports it statically (a call in a branch never
   taken).
+- A static import Windows lacks keeps the whole test from loading
+  there (exit 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND, in the windows
+  job): import statically only what a real program imports (the Office
+  survey's import lists) or a test already passing on Windows
+  (`user/windows/ci-passing.txt`) imports; look up the rest with
+  GetProcAddress and print an `info` line (`office_api_test`'s
+  RtlFindNextForwardRunSet). Comparing a test's import table
+  (`x86_64-w64-mingw32-objdump -p`) with those of the passing tests
+  names the candidates.
 - An export forwarder (`/EXPORT:f=kernel32.f`) to a stub fails to bind
   as a "missing export": implement the function where it is forwarded
   from instead (normaliz's IdnToUnicode).
@@ -1386,6 +1396,43 @@ target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
 <artifact>/exports`; `--roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE` keeps only
 what those programs load (static imports through Office's own DLLs,
 then delay imports), `--static` after it only what loading needs.
+
+### Office's fast path (ROADMAP OF)
+
+`office_install` downloads Office from the CDN inside gala: half an
+hour under TCG before the install's later stages. For iterating on
+those, `office_install_local` (MANUAL) installs the same products from
+a cache on the host:
+
+- `cargo xtask office-source` fills the cache once:
+  `target/prebuilt/office-source/<OFFICE_SOURCE_VERSION>/OfficeSource`,
+  the files the Click-to-Run client fetches for these products (64-bit,
+  English, Current channel; the client's log names them), in the layout
+  of ODT's `setup.exe /download` (`Office\Data\v64*.cab`,
+  `Office\Data\<version>\...`), about 3.2 GB, each checked against
+  its pinned SHA-256 (`OFFICE_SOURCE` in xtask). A new build: change
+  OFFICE_SOURCE_VERSION, run `cargo xtask office-source --pin` and paste
+  the table it prints. The CDN serves the plain files over HTTP; ODT's
+  own `/download` inside gala fails in the agent sandbox (its HTTPS
+  configuration requests meet the sandbox's TLS interception, whose CA
+  the guest does not trust: `crypt32.dll!SSL: CERT_E_UNTRUSTEDROOT`).
+- `XTASK_LOW_DISK=1 cargo xtask boot-test office_install_local$` makes a
+  fresh disk and puts the cache on it as `C:\OfficeSource` before the
+  boot (`diskimage::inject`: the volume formatted by the kernel's own
+  code, each file's data streamed into consecutive clusters of the data
+  area, then the Create and Clusters records a guest would have written;
+  seconds, and nothing but the image itself on the host; unit test
+  `injected_files_read_back`). `config_local.xml` names it as
+  `SourcePath`, so nothing is downloaded. The image grows to the cache
+  plus the install (about 8 GB): with less free on the host's disk, a
+  symbolic link from `target/debug/test-office_install_local.disk.img`
+  to a file in `/dev/shm` holds it in memory (then XTASK_LOW_DISK=1,
+  since xtask checks the target disk's room). Delete that file when done
+  (xtask removes only the link after a pass).
+- Limits: the cache is one build of one product set; the download itself
+  (`office_install`'s first half hour: the transport, ranges, the
+  service's staging of what it fetched) is not exercised, so run
+  `office_install` now and then for the whole path.
 
 ### Linux test programs (user/lx, ROADMAP LX)
 
@@ -3674,11 +3721,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   names a DLL exports reads the export directory for presence
   (`kernel32_test`'s `export_split.rs`) and GetProcAddress only for
   absence and addresses.
-- **kernel32 builds kernelbase's `address_wait.rs` for itself**: its
-  locks wait on their words through a private copy with its own waiter
-  list. Keep it unexported in kernel32 and keep its users there to
-  kernel32's own words; a WakeByAddress* from one DLL never wakes a
-  waiter of the other.
+- **Every wait on a word goes through ntdll's RtlWaitOnAddress**: one
+  waiter list per process, so a word may be changed and woken through
+  any DLL (kernel32's SRW exports forward to ntdll's and a program may
+  mix them). A second waiter list in another DLL would lose wakes.
 - **Which DLL exports a name is measured, not guessed**: Wine's specs
   are the list's starting point, but Windows' kernel32 and kernelbase
   split differently in places (`tools/kernelbase_exports.py`'s

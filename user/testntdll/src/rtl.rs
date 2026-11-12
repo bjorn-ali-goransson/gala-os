@@ -984,6 +984,77 @@ pub extern "system" fn RtlSetControlSecurityDescriptor(sd: *mut u8, mask: u16, b
     STATUS_SUCCESS
 }
 
+/// RtlValidRelativeSecurityDescriptor(SecurityDescriptorInput,
+/// SecurityDescriptorLength, RequiredInformation): whether the `length`
+/// bytes hold a valid self-relative descriptor (revision 1,
+/// SE_SELF_RELATIVE, its owner and group SIDs and present ACLs whole
+/// inside the length, revision 1 SIDs of at most 15 subauthorities,
+/// ACLs of revision 2 to 4 whose ACEs fit their size) with the parts
+/// RequiredInformation names (OWNER, GROUP: the SID; DACL, SACL:
+/// present), as the WDK documents it.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlValidRelativeSecurityDescriptor(
+    sd: *const u8,
+    length: u32,
+    required: u32,
+) -> u8 {
+    const SE_SELF_RELATIVE: u16 = 0x8000;
+    if sd.is_null() || length < 20 {
+        return 0;
+    }
+    // SAFETY: the caller's `length` bytes.
+    let b = unsafe { core::slice::from_raw_parts(sd, length as usize) };
+    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize;
+    let control = u16::from_le_bytes([b[2], b[3]]);
+    if b[0] != 1 || control & SE_SELF_RELATIVE == 0 {
+        return 0;
+    }
+    let sid_ok = |at: usize| {
+        at >= 20
+            && at + 8 <= b.len()
+            && b[at] == 1
+            && b[at + 1] <= 15
+            && at + 8 + 4 * usize::from(b[at + 1]) <= b.len()
+    };
+    let acl_ok = |at: usize| {
+        if at < 20 || at + 8 > b.len() || !(2..=4).contains(&b[at]) {
+            return false;
+        }
+        let size = usize::from(u16::from_le_bytes([b[at + 2], b[at + 3]]));
+        let count = u16::from_le_bytes([b[at + 4], b[at + 5]]);
+        if size < 8 || at + size > b.len() {
+            return false;
+        }
+        let mut ace = at + 8;
+        for _ in 0..count {
+            if ace + 4 > at + size {
+                return false;
+            }
+            let len = usize::from(u16::from_le_bytes([b[ace + 2], b[ace + 3]]));
+            if len < 4 || ace + len > at + size {
+                return false;
+            }
+            ace += len;
+        }
+        true
+    };
+    let (owner, group, sacl, dacl) = (u32_at(4), u32_at(8), u32_at(12), u32_at(16));
+    let present = |bit: u16| control & bit != 0;
+    if (owner != 0 && !sid_ok(owner))
+        || (group != 0 && !sid_ok(group))
+        || (present(0x10) && sacl != 0 && !acl_ok(sacl))
+        || (present(0x04) && dacl != 0 && !acl_ok(dacl))
+    {
+        return 0;
+    }
+    let needs = |bit: u32| required & bit != 0;
+    let ok = !(needs(1) && owner == 0
+        || needs(2) && group == 0
+        || needs(4) && !present(0x04)
+        || needs(8) && !present(0x10));
+    u8::from(ok)
+}
+
 /// RtlAbsoluteToSelfRelativeSD(abs, rel, &len): header, owner, group,
 /// SACL, DACL in that order (STATUS_BUFFER_TOO_SMALL and the size needed if
 /// `len` is too small).
@@ -1031,7 +1102,10 @@ pub extern "system" fn RtlAbsoluteToSelfRelativeSD(
             rel.add(4 + 4 * i).cast::<u32>().write_unaligned(at as u32);
             at += sizes[i];
         }
-        *len = total as u32;
+        // On success the length is the caller's buffer's, unchanged (Wine's
+        // advapi32 security.c test_security_descriptor, run on Windows:
+        // MakeSelfRelativeSD into 188 bytes leaves 188 for a 184-byte
+        // descriptor).
     }
     STATUS_SUCCESS
 }

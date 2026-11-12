@@ -53,6 +53,7 @@ mod layout;
 mod objsec;
 mod perf;
 mod policy;
+mod private;
 mod registry;
 mod security;
 mod service;

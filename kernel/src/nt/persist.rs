@@ -2,7 +2,10 @@
 //! change log (`fs::volume`, `fs::log`) over the boot's files, then the
 //! ramfs records what programs change, and `sync` (at the end of every
 //! system call, and after each program the kernel runs) appends it to the
-//! disk and flushes before the call returns to the program. A full log
+//! disk and flushes before the call returns to the program. The
+//! registry's changes are flushed lazily, as Windows' are: at the first
+//! sync REGISTRY_FLUSH_NS after the last flush, or at once after
+//! NtFlushKey, a program's end or before a kernel handover. A full log
 //! area, or changes that could not be recorded, make a snapshot instead.
 //! The registry's changes (D3) go to a file on C:, `REGLOG`, in the same
 //! sync (nt::reglog), so the disk keeps them like any file.
@@ -17,6 +20,7 @@
 //! Design: docs/ARCHITECTURE.md, "Disk".
 
 use super::reglog::{self, RegOp};
+use super::status::NtStatus;
 use super::{file, platform, registry};
 use crate::fs::ramfs::{FsError, NodeId, ROOT, RamFs, Writeback};
 use crate::fs::volume::{Blocks, IoError, Mounted, Volume, VolumeError};
@@ -109,6 +113,40 @@ impl core::fmt::Display for Summary {
 /// Notes that the file system has changes to write (see `file::with_fs`).
 pub fn note_pending() {
     PENDING.store(true, Ordering::Release);
+}
+
+/// The registry's changes since its last flush (`registry::with`).
+static REG_PENDING: AtomicBool = AtomicBool::new(false);
+/// A flush asked for: NtFlushKey (RegFlushKey), a program's end, a
+/// kernel handover.
+static REG_FORCE: AtomicBool = AtomicBool::new(false);
+/// When the registry was last flushed (monotonic ns).
+static REG_LAST: AtomicU64 = AtomicU64::new(0);
+/// The registry's lazy flush: its changes reach the disk at the first
+/// sync this long after the last flush, as Windows' registry writes its
+/// hives lazily ("within a few seconds", RegFlushKey's documentation),
+/// unless a flush is asked for. Syncing them at every system call cost
+/// each NtCreateKey and NtSetValueKey of Office's registry staging about
+/// 40 ms under TCG (two disk writes and a flush each).
+const REGISTRY_FLUSH_NS: u64 = 5_000_000_000;
+
+/// Notes that the registry has changes for its next flush.
+pub fn note_registry_pending() {
+    REG_PENDING.store(true, Ordering::Release);
+}
+
+/// Has the next sync flush the registry's changes (NtFlushKey, a
+/// program's end, a kernel handover).
+pub fn flush_registry() {
+    REG_FORCE.store(true, Ordering::Release);
+}
+
+/// Whether the registry's changes are due for the disk.
+fn registry_due() -> bool {
+    REG_PENDING.load(Ordering::Acquire)
+        && (REG_FORCE.load(Ordering::Acquire)
+            || platform::monotonic_ns().saturating_sub(REG_LAST.load(Ordering::Relaxed))
+                >= REGISTRY_FLUSH_NS)
 }
 
 /// Mounts the disk's volume over C: (formatting an empty disk) and starts
@@ -220,8 +258,24 @@ pub fn raise_floor(
 
 /// The registry's change log on C:.
 const REGLOG: [&str; 4] = ["Windows", "System32", "config", "gala.reglog"];
-/// Past this size the registry's log is rewritten as a snapshot.
+/// The registry's log is rewritten as a snapshot once it would pass this
+/// size, or twice the last snapshot's (`compact_reglog`).
 const REGLOG_COMPACT: u64 = 1 << 20;
+/// The size of the last snapshot written to the registry's log (0: none
+/// since boot).
+static REGLOG_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the registry's log of `size` bytes, given `appended` more,
+/// is rewritten as a snapshot: past REGLOG_COMPACT and past twice the
+/// last snapshot (`base`). The second bound keeps the rewrites
+/// amortized: a registry whose changed keys alone take more than
+/// REGLOG_COMPACT (Office's thousands of keys) is not snapshotted again
+/// at every sync, each of which would cost the whole registry (a
+/// snapshot per NtSetValueKey made Office's registry staging take 0.65 s
+/// a call).
+fn compact_reglog(size: u64, appended: u64, base: u64) -> bool {
+    size + appended > REGLOG_COMPACT.max(base.saturating_mul(2))
+}
 
 fn wide(s: &str) -> Result<Vec<u16>, FsError> {
     let mut v = Vec::new();
@@ -295,8 +349,13 @@ fn mount_registry() {
     }
 }
 
+/// The registry's snapshot is written in pieces of about this many bytes
+/// (`write_reglog_snapshot`).
+const REGLOG_CHUNK: usize = 64 << 10;
+
 /// Moves the registry's recorded changes into its log file (a snapshot
-/// when some were lost or the file has grown past REGLOG_COMPACT).
+/// when some were lost or the file has grown past its bound,
+/// `compact_reglog`).
 fn sync_registry() {
     let Ok((ops, lost)) = registry::with(|r| Ok(r.take_ops())) else { return };
     if ops.is_empty() && !lost {
@@ -316,33 +375,81 @@ fn sync_registry() {
         reglog_node(fs, true).map(|id| id.and_then(|id| fs.node(id)).map_or(0, |n| n.size()))
     });
     let appended = if lost { None } else { encode(&ops) };
-    let (bytes, rewrite) = match (size, appended) {
-        (Ok(size), Some(b)) if size + b.len() as u64 <= REGLOG_COMPACT => (Some(b), false),
-        _ => (registry::with(|r| r.snapshot()).ok().and_then(|s| encode(&s)), true),
-    };
-    // Appended (the last page read in first if it is on the disk only).
-    let written = bytes.ok_or(FsError::NoMemory).and_then(|bytes| {
-        file::with_pages(|fs| {
-            let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
-            if rewrite {
-                fs.set_size(id, 0, now)?;
-            }
-            Ok(id)
-        })
-        .and_then(|id| {
+    drop(ops);
+    let written = match (size, appended) {
+        (Ok(size), Some(bytes))
+            if !compact_reglog(size, bytes.len() as u64, REGLOG_BASE.load(Ordering::Relaxed)) =>
+        {
+            // Appended (the last page read in first if it is on the disk
+            // only).
             file::with_pages(|fs| {
+                let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
                 let at = fs.node(id).map_or(0, |n| n.size());
                 fs.write(id, at, &bytes, now).map(drop)
             })
-        })
-    });
+        }
+        _ => write_reglog_snapshot(now).map(|total| {
+            // Rare by design (`compact_reglog`): many of these lines in a
+            // run mean the registry's syncs have become a snapshot each.
+            info!("persist: the registry's log rewritten as a snapshot of {total} bytes");
+            REGLOG_BASE.store(total, Ordering::Relaxed);
+        }),
+    };
     if let Err(e) = written {
         warn!("persist: registry changes not written ({e:?})");
         let _ = registry::with(|r| {
             r.lose_ops();
             Ok(())
         });
+        // Again at the next sync.
+        note_registry_pending();
+        flush_registry();
     }
+}
+
+/// Rewrites the registry's log as a snapshot of the registry, encoded and
+/// written a REGLOG_CHUNK at a time while the registry is walked (its
+/// lock, then the file system's: the order the module keeps), so a
+/// snapshot needs a chunk of memory beyond the file's pages, however
+/// large the registry: a whole one encoded at once (Office's registry,
+/// over 16 MiB) failed for want of memory in a 512 MiB machine, and every
+/// sync after it tried again. Its size. The file is cut to nothing
+/// first, so the writes under the registry's lock (interrupts off) only
+/// make new pages: none is read from the disk there.
+fn write_reglog_snapshot(now: u64) -> Result<u64, FsError> {
+    let id = file::with_pages(|fs| {
+        let id = reglog_node(fs, true)?.ok_or(FsError::NotFound)?;
+        fs.set_size(id, 0, now)?;
+        Ok(id)
+    })?;
+    let mut chunk = Vec::new();
+    chunk.try_reserve_exact(2 * REGLOG_CHUNK).map_err(|_| FsError::NoMemory)?;
+    let mut at = 0u64;
+    let mut failed = None;
+    let flush = |chunk: &mut Vec<u8>, at: &mut u64| -> Result<(), FsError> {
+        file::with_pages(|fs| fs.write(id, *at, chunk, now).map(drop))?;
+        *at += chunk.len() as u64;
+        chunk.clear();
+        Ok(())
+    };
+    let walked = registry::with(|r| {
+        r.snapshot_each(|op| {
+            op.encode(&mut chunk).map_err(|_| NtStatus::NO_MEMORY)?;
+            if chunk.len() >= REGLOG_CHUNK
+                && let Err(e) = flush(&mut chunk, &mut at)
+            {
+                failed = Some(e);
+                return Err(NtStatus::UNSUCCESSFUL);
+            }
+            Ok(())
+        })
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    walked.map_err(|_| FsError::NoMemory)?;
+    flush(&mut chunk, &mut at)?;
+    Ok(at)
 }
 
 struct Turn;
@@ -385,10 +492,18 @@ fn reserve() -> Option<Buffers> {
 
 /// Writes the recorded changes to the disk (see the module comment).
 pub fn sync() {
-    if !PENDING.load(Ordering::Acquire) {
+    if !PENDING.load(Ordering::Acquire) && !registry_due() {
         return;
     }
     let _turn = Turn::take();
+    // The registry's changes become changes of a file on C: first, when
+    // its lazy flush is due.
+    if registry_due() {
+        REG_PENDING.store(false, Ordering::Release);
+        REG_FORCE.store(false, Ordering::Release);
+        REG_LAST.store(platform::monotonic_ns(), Ordering::Relaxed);
+        sync_registry();
+    }
     if !PENDING.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -401,8 +516,6 @@ pub fn sync() {
         *VOLUME.lock() = Some(volume);
         return;
     };
-    // The registry's changes become changes of a file on C: first.
-    sync_registry();
     // Pages to their clusters first, a batch per hold of the file system;
     // the records are taken in the hold whose batch leaves no page dirty,
     // so every record names clusters that hold their pages by the time it
@@ -584,5 +697,35 @@ fn report_trouble() {
             "persist: {unbacked} dirty pages found no free cluster (they stay in memory), \
              {leaked} clusters lost until the next mount"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_log_compaction_is_amortized() {
+        // Small logs grow to REGLOG_COMPACT before a snapshot.
+        assert!(!compact_reglog(1000, 100, 0));
+        assert!(compact_reglog(REGLOG_COMPACT, 1, 0));
+        // After a 5 MiB snapshot the log may grow to 10 MiB first, so a
+        // change costs its own bytes, not the whole registry.
+        let base = 5 << 20;
+        assert!(!compact_reglog(base, 4096, base));
+        assert!(!compact_reglog(2 * base - 4096, 4096, base));
+        assert!(compact_reglog(2 * base, 1, base));
+        // Counting appended bytes: a rewrite per doubling, not per sync.
+        let (mut size, mut base, mut rewrites) = (0u64, 0u64, 0);
+        for _ in 0..100_000 {
+            if compact_reglog(size, 256, base) {
+                // A snapshot as large as the log (every change a new key).
+                base = size;
+                rewrites += 1;
+            } else {
+                size += 256;
+            }
+        }
+        assert!(rewrites < 20, "{rewrites}");
     }
 }

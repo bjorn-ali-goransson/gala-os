@@ -474,10 +474,13 @@ pub(super) fn nt_set_information_key(call: &mut Call<'_>) -> NtStatus {
     }
 }
 
-/// NtFlushKey(KeyHandle): the registry is in memory; nothing to write.
+/// NtFlushKey(KeyHandle): the registry's changes reach the disk before
+/// the call returns (`persist`'s lazy flush, at once).
 pub(super) fn nt_flush_key(call: &mut Call<'_>) -> NtStatus {
     let (_object, id) = tri!(call.key(arg!(call, 0), 0));
     tri!(registry::with(|r| r.key_information(id, 7).map(|_| ())));
+    // On the disk before the call returns (the sync at its end).
+    crate::nt::persist::flush_registry();
     NtStatus::SUCCESS
 }
 

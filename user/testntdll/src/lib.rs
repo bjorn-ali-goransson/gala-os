@@ -27,7 +27,9 @@ mod arch;
 #[path = "x86.rs"]
 mod arch;
 
+mod address_wait;
 mod avl;
+mod bitmap;
 mod heap;
 mod rtl;
 #[cfg(target_arch = "x86_64")]
@@ -35,6 +37,7 @@ mod seh;
 #[cfg(target_arch = "x86")]
 #[path = "seh_x86.rs"]
 mod seh;
+mod sync;
 mod tls;
 mod unimplemented;
 
@@ -168,6 +171,15 @@ syscall_stubs! {
         h: usize, info: u32, sd: *mut u8, length: u32, needed: *mut u32
     );
     NtSetSecurityObject = 0x7f20, fn(h: usize, info: u32, sd: *const u8);
+    // gala's own: advapi32's private-object descriptors (see the kernel).
+    GalaNewSecurityObject = 0x7f28, fn(
+        parent: *const u8, creator: *const u8, container: u32, flags: u32, token: usize,
+        mapping: *const u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaSetSecurityObject = 0x7f29, fn(
+        info: u32, modification: *const u8, object: *const u8, flags: u32, token: usize,
+        mapping: *const u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
     // gala's logon service (LogonUserW).
     GalaLogonUser = 0x7f21, fn(
         user: *const UnicodeString, domain: *const UnicodeString,
@@ -2113,6 +2125,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_005b, 1308), // INVALID_PRIMARY_GROUP -> ERROR_INVALID_PRIMARY_GROUP
     (0xc000_0077, 1336), // INVALID_ACL -> ERROR_INVALID_ACL
     (0xc000_0079, 1338), // INVALID_SECURITY_DESCR -> ERROR_INVALID_SECURITY_DESCR
+    (0xc000_00e7, 1361), // BAD_DESCRIPTOR_FORMAT -> ERROR_BAD_DESCRIPTOR_FORMAT
     (0xc000_006d, 1326), // LOGON_FAILURE -> ERROR_LOGON_FAILURE
     (0xc000_015b, 1385), // LOGON_TYPE_NOT_GRANTED -> ERROR_LOGON_TYPE_NOT_GRANTED
     (0xc000_00fe, 1364), // NO_SUCH_PACKAGE -> ERROR_NO_SUCH_PACKAGE
