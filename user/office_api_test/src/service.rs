@@ -28,6 +28,10 @@
 //!   file id's low 64 bits its nFileIndexHigh/Low (an NTFS file's
 //!   128-bit id is its 64-bit index; Microsoft's FILE_ID_INFO and
 //!   BY_HANDLE_FILE_INFORMATION documentation).
+//! - shlwapi's PathBuildRootW and A (APPLYCONFIGURATION delay-loads
+//!   them; Wine's shlwapi path.c test_PathBuildRootA, run on Windows):
+//!   drives 0 to 25 are `A:\` to `Z:\` in the caller's buffer, which is
+//!   returned; -1 and 26 leave it unchanged or empty; NULL is NULL.
 //! - ntdll's RtlValidRelativeSecurityDescriptor (the WDK's
 //!   documentation): a self-relative descriptor MakeSelfRelativeSD made
 //!   with an owner and a DACL is valid for those parts, not when a group
@@ -343,8 +347,44 @@ fn file_id(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "shlwapi", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "shlwapi", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn PathBuildRootW(root: *mut u16, drive: i32) -> *mut u16;
+    fn PathBuildRootA(root: *mut u8, drive: i32) -> *mut u8;
+}
+
+fn build_root(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: our buffers of ten characters.
+    unsafe {
+        for d in 0..26 {
+            let mut a = *b"aaaaaaaaa\0";
+            c.ok(PathBuildRootA(a.as_mut_ptr(), d) == a.as_mut_ptr(), d as u64)?;
+            c.ok(a[..4] == [b'A' + d as u8, b':', b'\\', 0], d as u64)?;
+            let mut w = [u16::from(b'a'); 10];
+            w[9] = 0;
+            c.ok(PathBuildRootW(w.as_mut_ptr(), d) == w.as_mut_ptr(), d as u64)?;
+            c.ok(w[..4] == [u16::from(b'A') + d as u16, 58, 92, 0], d as u64)?;
+        }
+        for d in [-1, 26] {
+            let mut a = *b"aaaaaaaaa\0";
+            c.ok(PathBuildRootA(a.as_mut_ptr(), d) == a.as_mut_ptr(), 0)?;
+            c.ok(&a == b"aaaaaaaaa\0" || a[0] == 0, a[0].into())?;
+        }
+        let mut short = *b"aa\0\0";
+        PathBuildRootA(short.as_mut_ptr(), 0);
+        c.ok(short == *b"A:\\\0", short[0].into())?;
+        c.ok(PathBuildRootA(core::ptr::null_mut(), 0).is_null(), 0)?;
+    }
+    Ok(())
+}
+
 pub fn c2r_service(c: &mut Checks) -> Result<(), u32> {
     sessions(c)?;
+    build_root(c)?;
     file_id(c)?;
     #[cfg(target_arch = "x86_64")]
     environment_blocks(c)?;
