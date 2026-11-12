@@ -41,6 +41,7 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
+    fn GalaSession(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> u32;
 }
 
 #[cfg_attr(
@@ -302,6 +303,36 @@ pub extern "system" fn WTSEnumerateSessionsA(
     count: *mut u32,
 ) -> i32 {
     enumerate(reserved, version, out, count, false)
+}
+
+/// WTSQueryUserToken(SessionId, *phToken): a primary token of the user
+/// logged on to the session (gala's GalaSession SESSION_USER_TOKEN): only
+/// for a caller with SeTcbPrivilege (LocalSystem), else
+/// ERROR_PRIVILEGE_NOT_HELD; ERROR_NO_TOKEN for a session without a
+/// logged-on user (session 0), ERROR_FILE_NOT_FOUND for one that does not
+/// exist, as documented.
+#[unsafe(no_mangle)]
+pub extern "system" fn WTSQueryUserToken(session: u32, token: *mut usize) -> i32 {
+    const SESSION_USER_TOKEN: u64 = 4;
+    const STATUS_NOT_FOUND: u32 = 0xc000_0225;
+    if token.is_null() {
+        return fail(87);
+    }
+    // The kernel writes the handle as a ULONG64 (in a 32-bit process too).
+    let mut h = 0u64;
+    // SAFETY: our output for the handle.
+    let status =
+        unsafe { GalaSession(SESSION_USER_TOKEN, session, (&raw mut h) as usize as u64, 0, 0) };
+    match status {
+        0 => {
+            // SAFETY: the caller's output.
+            unsafe { *token = h as usize };
+            1
+        }
+        STATUS_NOT_FOUND => fail(2),
+        // SAFETY: a plain conversion.
+        s => fail(unsafe { RtlNtStatusToDosError(s) }),
+    }
 }
 
 /// The DLL entry point: nothing to set up.

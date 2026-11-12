@@ -18,6 +18,7 @@ pub const SESSION_QUERY: u64 = 0;
 pub const SESSION_PRESENT: u64 = 1;
 pub const SESSION_FRAME: u64 = 2;
 pub const SESSION_INPUT: u64 = 3;
+pub const SESSION_USER_TOKEN: u64 = 4;
 
 /// SESSION_INPUT's record kinds.
 const INPUT_POINTER: u32 = 0;
@@ -55,6 +56,14 @@ const MAX_PIXELS: u64 = 4096 * 4096;
 ///   gets it as from the keyboard and mouse. STATUS_INVALID_DEVICE_STATE
 ///   unless a Test presenter shows the desktop; STATUS_INVALID_PARAMETER
 ///   for another kind.
+///
+/// - SESSION_USER_TOKEN: a new primary token of the user logged on to the
+///   session (TOKEN_ALL_ACCESS, its TokenSessionId the session) to the
+///   handle (a ULONG64, also for a 32-bit caller) Argument points to:
+///   wtsapi32's WTSQueryUserToken. The
+///   console session's user is the boot user (the desktop's); session 0
+///   has none (STATUS_NO_TOKEN), and nor, so far, do the other sessions
+///   (gala's remote logons do not record their user yet: recorded).
 ///
 /// STATUS_PRIVILEGE_NOT_HELD without SeTcbPrivilege, STATUS_NOT_FOUND for
 /// a session that does not exist. Where nothing shows desktops (the server
@@ -202,6 +211,22 @@ pub(super) fn gala_session(call: &mut Call<'_>) -> NtStatus {
                     e
                 }
             }
+        }
+        SESSION_USER_TOKEN => {
+            if id != super::super::session::CONSOLE {
+                if id != 0 {
+                    super::super::ledger::record(
+                        "GalaSession",
+                        "user token of a session other than the console's",
+                        id.into(),
+                    );
+                }
+                return NtStatus::NO_TOKEN;
+            }
+            let mut data = tri!(super::super::token::TokenData::boot_user());
+            data.session = id;
+            let object = tri!(super::super::token::object(data));
+            call.return_handle(arg, object, super::super::token::TOKEN_ALL_ACCESS, 0)
         }
         _ => NtStatus::INVALID_PARAMETER,
     }

@@ -7,7 +7,9 @@
 //!   (WTSActive) and is the active console session
 //!   (WTSGetActiveConsoleSessionId), "Services" is session 0,
 //!   disconnected; a Version other than 1 is ERROR_INVALID_PARAMETER (the
-//!   documentation); WTSFreeMemory frees the lists.
+//!   documentation); WTSFreeMemory frees the lists. WTSQueryUserToken
+//!   (the same task asks for the console user's token) without
+//!   SeTcbPrivilege: ERROR_PRIVILEGE_NOT_HELD, as documented.
 //! - ntdll's RtlValidRelativeSecurityDescriptor (the WDK's
 //!   documentation): a self-relative descriptor MakeSelfRelativeSD made
 //!   with an owner and a DACL is valid for those parts, not when a group
@@ -39,6 +41,7 @@ unsafe extern "system" {
         count: *mut u32,
     ) -> i32;
     fn WTSFreeMemory(p: *mut SessionInfo);
+    fn WTSQueryUserToken(session: u32, token: *mut usize) -> i32;
 }
 
 #[cfg_attr(
@@ -129,6 +132,10 @@ fn sessions(c: &mut Checks) -> Result<(), u32> {
         WTSFreeMemory(a);
         let ok = WTSEnumerateSessionsW(0, 0, 2, &mut w, &mut n) != 0;
         c.fails(ok, 87)?;
+        // Not LocalSystem: no SeTcbPrivilege.
+        let mut token = 0usize;
+        let ok = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token) != 0;
+        c.fails(ok, 1314)?; // ERROR_PRIVILEGE_NOT_HELD
     }
     Ok(())
 }
