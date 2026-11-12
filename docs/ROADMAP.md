@@ -1870,6 +1870,14 @@ need gala's.
      list (Wine's wtsapi.c test on Windows); ntdll's
      RtlValidRelativeSecurityDescriptor, whose import the service's
      pieces resolve (`office_api_test`'s `service.rs`).
+     The service then writes Office's registry (NtCreateKey and
+     NtSetValueKey, one after another), and each took 0.65 s: with
+     `persist`, every system call's sync rewrote the registry's log as a
+     whole snapshot once the changed keys alone passed the log's 1 MiB
+     bound (the NMI dump caught `persist::sync_registry` encoding a
+     snapshot; 1016 creates in 1290 s). Done: the bound is also twice
+     the last snapshot, so syncs cost their own changes, amortized
+     (ARCHITECTURE "The registry kept"; `persist`'s unit test).
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it

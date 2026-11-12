@@ -220,8 +220,24 @@ pub fn raise_floor(
 
 /// The registry's change log on C:.
 const REGLOG: [&str; 4] = ["Windows", "System32", "config", "gala.reglog"];
-/// Past this size the registry's log is rewritten as a snapshot.
+/// The registry's log is rewritten as a snapshot once it would pass this
+/// size, or twice the last snapshot's (`compact_reglog`).
 const REGLOG_COMPACT: u64 = 1 << 20;
+/// The size of the last snapshot written to the registry's log (0: none
+/// since boot).
+static REGLOG_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the registry's log of `size` bytes, given `appended` more,
+/// is rewritten as a snapshot: past REGLOG_COMPACT and past twice the
+/// last snapshot (`base`). The second bound keeps the rewrites
+/// amortized: a registry whose changed keys alone take more than
+/// REGLOG_COMPACT (Office's thousands of keys) is not snapshotted again
+/// at every sync, each of which would cost the whole registry (a
+/// snapshot per NtSetValueKey made Office's registry staging take 0.65 s
+/// a call).
+fn compact_reglog(size: u64, appended: u64, base: u64) -> bool {
+    size + appended > REGLOG_COMPACT.max(base.saturating_mul(2))
+}
 
 fn wide(s: &str) -> Result<Vec<u16>, FsError> {
     let mut v = Vec::new();
@@ -296,7 +312,8 @@ fn mount_registry() {
 }
 
 /// Moves the registry's recorded changes into its log file (a snapshot
-/// when some were lost or the file has grown past REGLOG_COMPACT).
+/// when some were lost or the file has grown past its bound,
+/// `compact_reglog`).
 fn sync_registry() {
     let Ok((ops, lost)) = registry::with(|r| Ok(r.take_ops())) else { return };
     if ops.is_empty() && !lost {
@@ -317,9 +334,19 @@ fn sync_registry() {
     });
     let appended = if lost { None } else { encode(&ops) };
     let (bytes, rewrite) = match (size, appended) {
-        (Ok(size), Some(b)) if size + b.len() as u64 <= REGLOG_COMPACT => (Some(b), false),
+        (Ok(size), Some(b))
+            if !compact_reglog(size, b.len() as u64, REGLOG_BASE.load(Ordering::Relaxed)) =>
+        {
+            (Some(b), false)
+        }
         _ => (registry::with(|r| r.snapshot()).ok().and_then(|s| encode(&s)), true),
     };
+    if rewrite && let Some(b) = &bytes {
+        // Rare by design (`compact_reglog`): many of these lines in a run
+        // mean the registry's syncs have become a snapshot each.
+        info!("persist: the registry's log rewritten as a snapshot of {} bytes", b.len());
+        REGLOG_BASE.store(b.len() as u64, Ordering::Relaxed);
+    }
     // Appended (the last page read in first if it is on the disk only).
     let written = bytes.ok_or(FsError::NoMemory).and_then(|bytes| {
         file::with_pages(|fs| {
@@ -584,5 +611,35 @@ fn report_trouble() {
             "persist: {unbacked} dirty pages found no free cluster (they stay in memory), \
              {leaked} clusters lost until the next mount"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_log_compaction_is_amortized() {
+        // Small logs grow to REGLOG_COMPACT before a snapshot.
+        assert!(!compact_reglog(1000, 100, 0));
+        assert!(compact_reglog(REGLOG_COMPACT, 1, 0));
+        // After a 5 MiB snapshot the log may grow to 10 MiB first, so a
+        // change costs its own bytes, not the whole registry.
+        let base = 5 << 20;
+        assert!(!compact_reglog(base, 4096, base));
+        assert!(!compact_reglog(2 * base - 4096, 4096, base));
+        assert!(compact_reglog(2 * base, 1, base));
+        // Counting appended bytes: a rewrite per doubling, not per sync.
+        let (mut size, mut base, mut rewrites) = (0u64, 0u64, 0);
+        for _ in 0..100_000 {
+            if compact_reglog(size, 256, base) {
+                // A snapshot as large as the log (every change a new key).
+                base = size;
+                rewrites += 1;
+            } else {
+                size += 256;
+            }
+        }
+        assert!(rewrites < 20, "{rewrites}");
     }
 }
