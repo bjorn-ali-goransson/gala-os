@@ -6268,7 +6268,12 @@ rather than a format of their own.
   then writes the file system's records; past 1 MiB and past twice the
   last snapshot (`compact_reglog`), or when records were lost, the file
   is rewritten as a snapshot (a `persist: the registry's log rewritten`
-  line). Invariant: a sync costs the changes it writes, amortized; a
+  line), written 64 KiB at a time as the registry is walked
+  (`Registry::snapshot_each`, the registry's lock then the file
+  system's; the file is cut to nothing first, so nothing is read from
+  the disk under the registry's lock): a snapshot needs no memory in
+  proportion to the registry (a whole one encoded at once, Office's
+  16 MiB, failed for want of memory in a 512 MiB machine). Invariant: a sync costs the changes it writes, amortized; a
   snapshot is never taken per sync (with a fixed bound, a registry
   whose changed keys alone passed it was snapshotted at every system
   call: Office's registry staging spent 0.65 s per NtCreateKey and

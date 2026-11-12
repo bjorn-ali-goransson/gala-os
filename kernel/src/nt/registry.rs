@@ -938,8 +938,19 @@ impl Registry {
     /// then every dirty key (parents first) with its descriptor and values.
     pub fn snapshot(&self) -> Result<Vec<RegOp>, NtStatus> {
         let mut ops = Vec::new();
+        self.snapshot_each(|op| ops.try_push(op).map_err(nomem))?;
+        Ok(ops)
+    }
+
+    /// `snapshot`'s records one at a time to `f` (which may stop the walk
+    /// with an error), so that a large registry's snapshot is never held
+    /// whole (persist writes it as it comes).
+    pub fn snapshot_each(
+        &self,
+        mut f: impl FnMut(RegOp) -> Result<(), NtStatus>,
+    ) -> Result<(), NtStatus> {
         for t in &self.tombstones {
-            ops.try_push(RegOp::DeleteKey { key: copy(t).map_err(nomem)? }).map_err(nomem)?;
+            f(RegOp::DeleteKey { key: copy(t).map_err(nomem)? })?;
         }
         let mut stack = Vec::new();
         stack.try_push(ROOT).map_err(nomem)?;
@@ -952,23 +963,22 @@ impl Registry {
                 let key = self.full_name(id)?;
                 let k = || copy(&key).map_err(nomem);
                 let class = copy(&n.class).map_err(nomem)?;
-                let mut push = |op| ops.try_push(op).map_err(nomem);
-                push(RegOp::CreateKey { key: k()?, class, last_write: n.last_write, reset: true })?;
+                f(RegOp::CreateKey { key: k()?, class, last_write: n.last_write, reset: true })?;
                 if let Some(sd) = &n.security {
                     let descriptor = copy_bytes(sd).ok_or(NtStatus::NO_MEMORY)?;
-                    push(RegOp::SetSecurity { key: k()?, descriptor })?;
+                    f(RegOp::SetSecurity { key: k()?, descriptor })?;
                 }
                 for v in &n.values {
                     let (name, data) = (copy(&v.name).map_err(nomem)?, copy_bytes(&v.data));
                     let data = data.ok_or(NtStatus::NO_MEMORY)?;
-                    push(RegOp::SetValue { key: k()?, name, kind: v.kind, data })?;
+                    f(RegOp::SetValue { key: k()?, name, kind: v.kind, data })?;
                 }
             }
             for &c in n.children.iter().rev() {
                 stack.try_push(c).map_err(nomem)?;
             }
         }
-        Ok(ops)
+        Ok(())
     }
 }
 

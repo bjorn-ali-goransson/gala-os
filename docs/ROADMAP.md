@@ -1880,7 +1880,12 @@ need gala's.
      bound (the NMI dump caught `persist::sync_registry` encoding a
      snapshot; 1016 creates in 1290 s). Done: the bound is also twice
      the last snapshot, so syncs cost their own changes, amortized
-     (ARCHITECTURE "The registry kept"; `persist`'s unit test).
+     (ARCHITECTURE "The registry kept"; `persist`'s unit test). With
+     that the service wrote 17000 keys and 25000 values in 1200 s, until
+     the 16 MiB snapshot, encoded whole, failed for want of memory
+     (`persist: registry changes not written (NoMemory)`, frames free
+     reaching 0) and every sync after it tried again; done: snapshots
+     are written as the registry is walked, a chunk at a time.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
