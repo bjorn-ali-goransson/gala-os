@@ -992,7 +992,7 @@ const FILE_DEVICE_DISK: u32 = 7;
 const FILE_DEVICE_IS_MOUNTED: u32 = 0x20;
 const FILE_CASE_PRESERVED_NAMES: u32 = 0x2;
 const FILE_UNICODE_ON_DISK: u32 = 0x4;
-const VOLUME_SERIAL: u32 = 0x6a1a_0001;
+pub const VOLUME_SERIAL: u32 = 0x6a1a_0001;
 const SECTORS_PER_CLUSTER: u32 = 8;
 const BYTES_PER_SECTOR: u32 = 512;
 /// What FileFsSectorSizeInformation reports as the physical sector (a

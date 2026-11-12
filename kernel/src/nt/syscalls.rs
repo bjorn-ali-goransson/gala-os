@@ -6618,6 +6618,8 @@ fn file_read(
 const FILE_BASIC_INFORMATION: u64 = 4;
 const FILE_STANDARD_INFORMATION: u64 = 5;
 const FILE_INTERNAL_INFORMATION: u64 = 6;
+/// FILE_ID_INFORMATION (GetFileInformationByHandleEx's FileIdInfo).
+const FILE_ID_INFORMATION: u64 = 59;
 const FILE_NAME_INFORMATION: u64 = 9;
 const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
@@ -6755,6 +6757,15 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
             // IndexNumber: the file's node, unique on the volume.
             out[..8].copy_from_slice(&file::index_number(file.node).to_le_bytes());
             8
+        }
+        FILE_ID_INFORMATION => {
+            // VolumeSerialNumber (the volume's serial, as
+            // FileFsVolumeInformation gives it), FileId: the 64-bit index
+            // number in a 128-bit id (as an NTFS file's).
+            out[..8].copy_from_slice(&u64::from(file::VOLUME_SERIAL).to_le_bytes());
+            out[8..16].copy_from_slice(&file::index_number(file.node).to_le_bytes());
+            out[16..24].fill(0);
+            24
         }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
             // FileAttributes, ReparseTag.

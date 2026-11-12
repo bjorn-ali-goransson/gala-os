@@ -1676,6 +1676,10 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   in a directory without the flag the second name is a collision for
   both personalities. Not yet: FileCaseSensitiveInformation (query and
   set from NT; Windows sets it only on an empty directory).
+- **File ids**: FileInternalInformation's IndexNumber is the node
+  (GetFileInformationByHandle's nFileIndex); FileIdInformation (class 59,
+  GetFileInformationByHandleEx's FileIdInfo) is the volume's serial and
+  that index in a 128-bit id, as an NTFS file's (`office_api_test`).
 - **Who uses a file** (FileProcessIdsUsingFileInformation, class 47,
   what the Restart Manager asks): `file::processes_using` walks the
   running processes and lists each that has a handle open on the node,

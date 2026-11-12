@@ -22,6 +22,12 @@
 //!   SystemDrive, windir, TEMP, TMP, CommonProgramFiles, ProgramFiles,
 //!   PATH, USERPROFILE and the four x86/x64 program files variables; a
 //!   variable of the process's own only when inheriting.
+//! - kernel32's GetFileInformationByHandleEx(FileIdInfo) (repoman
+//!   publishing an install compares files by id): TRUE, the volume's
+//!   serial as GetFileInformationByHandle's dwVolumeSerialNumber, the
+//!   file id's low 64 bits its nFileIndexHigh/Low (an NTFS file's
+//!   128-bit id is its 64-bit index; Microsoft's FILE_ID_INFO and
+//!   BY_HANDLE_FILE_INFORMATION documentation).
 //! - ntdll's RtlValidRelativeSecurityDescriptor (the WDK's
 //!   documentation): a self-relative descriptor MakeSelfRelativeSD made
 //!   with an owner and a DACL is valid for those parts, not when a group
@@ -293,8 +299,53 @@ fn environment_blocks(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GetModuleFileNameW(module: usize, buf: *mut u16, len: u32) -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: usize,
+        disposition: u32,
+        flags: u32,
+        template: usize,
+    ) -> usize;
+    fn GetFileInformationByHandle(h: usize, info: *mut u32) -> i32;
+    fn GetFileInformationByHandleEx(h: usize, class: u32, buf: *mut u8, size: u32) -> i32;
+    fn CloseHandle(h: usize) -> i32;
+}
+
+fn file_id(c: &mut Checks) -> Result<(), u32> {
+    let mut path = [0u16; 260];
+    // SAFETY: our buffers; the handle is ours.
+    unsafe {
+        c.ok(GetModuleFileNameW(0, path.as_mut_ptr(), 260) > 0, 0)?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        let h = CreateFileW(path.as_ptr(), 0x8000_0000, 1, 0, 3, 0, 0);
+        c.ok(h != usize::MAX, 0)?;
+        // BY_HANDLE_FILE_INFORMATION: attributes, three FILETIMEs,
+        // dwVolumeSerialNumber (word 7), sizes, links, nFileIndexHigh (11),
+        // nFileIndexLow (12).
+        let mut info = [0u32; 13];
+        c.eq(GetFileInformationByHandle(h, info.as_mut_ptr()) as u64, 1)?;
+        let mut id = [0u64; 3];
+        c.eq(GetFileInformationByHandleEx(h, 18, id.as_mut_ptr().cast(), 24) as u64, 1)?;
+        CloseHandle(h);
+        c.eq(id[0] & 0xffff_ffff, info[7].into())?;
+        c.eq(id[1], u64::from(info[11]) << 32 | u64::from(info[12]))?;
+        c.eq(id[2], 0)?;
+    }
+    Ok(())
+}
+
 pub fn c2r_service(c: &mut Checks) -> Result<(), u32> {
     sessions(c)?;
+    file_id(c)?;
     #[cfg(target_arch = "x86_64")]
     environment_blocks(c)?;
     relative_descriptor(c)
