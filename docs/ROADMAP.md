@@ -3897,14 +3897,32 @@ gains kernel panic, hang and corruption points):
      to the automatic restart and a key to restart now or to stay;
    - progress of the saving, step by step;
    - the program that was running when it happened, if one was;
-   - a QR code to a prefilled report, and an offer at the next start
-     to send it (nothing leaves the machine without consent);
+   - a QR code that carries the crash itself (the owner), not only a
+     link: a URL to galaos.com whose fragment (after `#`, so nothing
+     reaches a server until the user opens it) holds the build
+     (version and git commit), the stop reason, and the backtrace as
+     code offsets in the kernel image, compressed to fit a QR code
+     readable from a phone at arm's length. No user data goes in it:
+     no file names, no memory contents. The page resolves the offsets
+     against the debug information published for that exact build
+     (CI uploads each release's symbols) into function names and lines
+     linked to the source on GitHub at that commit; it hashes the top
+     frames into a crash signature, shows the GitHub issue already
+     open for that signature or a prefilled new one, and what changed
+     since in those files (fixed in a later build, with the commit).
+     The same link sits in the recovery notification (step 3) and the
+     saved report; at the next start gala offers to send the full
+     record (nothing leaves the machine without consent);
    - large text, high contrast, keyboard alone (no mouse driver is
      trusted), localised strings built in;
    - a details view for developers: message, backtrace, flight
      recorder, the record's identifier.
    Screenshots of each state; a design review against Windows' and
    macOS' screens first.
+6. The crash page on galaos.com (with step 5's QR code): the symbol
+   store per build, the decoder of the fragment, signatures matched to
+   GitHub issues, and a test that a crash injected in a scenario
+   decodes to the right function and line at the right commit.
 
 **Done when**: injected panics, hangs and corruptions in each
 subsystem (scheduler, memory, network, disk, display, input) end in a
