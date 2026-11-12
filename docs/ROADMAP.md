@@ -239,6 +239,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
@@ -3827,6 +3828,93 @@ among the slowest hand-offs.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
 "OpenTelemetry".
+
+### CS. Crash-safe: no hard resets, a kind crash screen
+
+**Goal** (the owner): the user never has to reset the machine, and when
+the worst happens the screen they see is calm, clear and useful: no
+blue screen. A kernel failure costs at most the thread or program that
+was in the kernel when it happened.
+
+**Today**: a program's fault ends that program (crash report, the rest
+runs on); a kernel panic prints the message, a backtrace and the flight
+recorder to the console and serial log, then halts. gala loads no
+third-party kernel drivers (the usual cause of Windows' bugchecks); its
+own drivers are Rust, `unsafe` confined, allocation fallible.
+
+**How Windows does it** (public documentation, for comparison): a
+bugcheck stops every processor, paints the stop screen (stop code, a QR
+code to its documentation, "% complete"; Windows 11 24H2 made it
+black and shorter), writes a crash dump through a separate, preloaded
+copy of the boot disk's driver run in polled mode (the normal stack is
+not trusted after a crash) into the page file or a dedicated dump
+file, and restarts; at the next boot the dump becomes MEMORY.DMP or a
+minidump and "Windows recovered from an unexpected shutdown" is
+offered. Repeated failed boots go to the recovery environment (24H2:
+Quick Machine Recovery fetches fixes from there). Watchdog bugchecks
+catch hangs; live kernel dumps record some failures without stopping.
+
+**Next** (each test first, with fault injection: R2's `failpoint=`
+gains kernel panic, hang and corruption points):
+1. Restart on panic: instead of halting, the panic path writes its
+   crash record and hands the machine to a fresh copy of the running
+   kernel through R9's handover, carrying programs, windows and
+   sockets; the thread that was in the kernel gets an error from its
+   system call, or its program ends if its state cannot be trusted.
+   The record is validated section by section (CRC, versions) and a
+   section that fails is dropped, never trusted; if carrying fails,
+   the fresh kernel starts clean without the firmware (R9's
+   "same build" path), the session restored from the disk (registry
+   and file log are already crash-consistent). Scenario: a panic
+   injected under a desktop workload; the programs still answer after.
+2. Hangs: a watchdog (NMI per CPU, the scheduler's heartbeat) takes the
+   same path when the kernel stops making progress.
+3. Telling the user after a recovery: a notification on shasha's
+   desktop ("gala recovered from a problem; your programs kept
+   running"), what was affected, a link to the report.
+4. The last resort, when no handover is possible: a self-contained
+   panic path (its own stack, no heap, no locks, the framebuffer
+   already mapped, the other CPUs stopped) that
+   - paints the crash screen (step 5);
+   - saves the crash record where it survives: a reserved RAM region
+     kept across a warm reset (as Linux's pstore/ramoops), a reserved
+     area of the boot disk written by a polled driver of its own (as
+     Windows' dump stack), and a small UEFI variable as the fallback;
+   - restarts, by handover when the image is intact, else by reset;
+     at the next start the record becomes a report and the session is
+     restored: programs that registered for restart
+     (RegisterApplicationRestart) come back with their own recovery
+     data, the rest are offered to reopen.
+   Repeated failures within minutes start the previous kernel image
+   kept beside the current one (A/B), then a minimal safe mode.
+5. The crash screen (the owner: as kind as possible, thinking outside
+   the box), drawn by the last-resort path itself:
+   - the user's own desktop as it was, frozen and dimmed behind the
+     message, not a different world;
+   - plain words: what happened, that it was gala's fault and not
+     theirs, what is safe (files saved up to when, which programs were
+     open and will come back) and what happens next, with a countdown
+     to the automatic restart and a key to restart now or to stay;
+   - progress of the saving, step by step;
+   - the program that was running when it happened, if one was;
+   - a QR code to a prefilled report, and an offer at the next start
+     to send it (nothing leaves the machine without consent);
+   - large text, high contrast, keyboard alone (no mouse driver is
+     trusted), localised strings built in;
+   - a details view for developers: message, backtrace, flight
+     recorder, the record's identifier.
+   Screenshots of each state; a design review against Windows' and
+   macOS' screens first.
+
+**Done when**: injected panics, hangs and corruptions in each
+subsystem (scheduler, memory, network, disk, display, input) end in a
+recovered desktop with its programs (steps 1-3) or, for corruption the
+handover refuses, in the crash screen, a saved record and a restored
+session after the restart (steps 4-5); no scenario needs a reset.
+
+**Design**: ARCHITECTURE "Kernel handover", "Diagnostics of stuck and
+crashed programs"; the crash screen and the last-resort path get their
+own sections with step 4.
 
 ## Known issues and stopgaps
 
