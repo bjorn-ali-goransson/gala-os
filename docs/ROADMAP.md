@@ -1909,6 +1909,9 @@ need gala's.
      ends 17004 at about 1850 s), the one ERROR_INVALID_PARAMETER of the
      run's ledger being kernel32's GetFileInformationByHandleEx(FileIdInfo,
      class 18); done: FileIdInformation (ARCHITECTURE "Files").
+     With it the publish goes on and the service ended on the delay load
+     of SHLWAPI.dll!PathBuildRootW (crash report, about 1835 s); done:
+     PathBuildRootW and A (Wine's shlwapi path.c test on Windows).
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
      getting proc addr for get/set cached signing level`, a warning; it
