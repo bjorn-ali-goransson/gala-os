@@ -61,6 +61,7 @@ mod wpt;
 mod wsl_rootfs;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
+mod hotswap;
 #[path = "../../kernel/src/trust/manifest.rs"]
 #[allow(dead_code)]
 mod manifest;
@@ -1217,6 +1218,9 @@ const USER_DLLS: &[Dll] = &[
     // imagetrim_test's DLL of known contents.
     Dll { package: "imagetrim_dll", file: "imagetrim_dll.dll", exported_as: "imagetrim_dll.dll" },
     Dll { package: "tlsdll", file: "tlsdll.dll", exported_as: "tlsdll.dll" },
+    // The DLL the hot swap scenarios patch (its first build; the others
+    // are `hotswap_variant`'s).
+    Dll { package: "hotswap_dll", file: "hotswap_dll.dll", exported_as: "hotswap_dll.dll" },
     // gala's kernel32.dll, exported under another name like ntdll.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
     Dll {
@@ -1383,6 +1387,8 @@ const USER_DLLS: &[Dll] = &[
 const USER_DLLS_X86: &[Dll] = &[
     // The 32-bit ntdll: testntdll built for i686.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
+    // The DLL the WOW64 hot swap scenario patches (hotswap_dll's source).
+    Dll { package: "hotswap_dll32", file: "hotswap_dll32.dll", exported_as: "hotswap_dll32.dll" },
     // A 32-bit test DLL (wow64_import_test).
     Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
     // The 32-bit kernel32: gala's kernel32 built for i686, and the
@@ -1547,6 +1553,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
     ("snapshot_machine", "ntdll.dll", "Windows/System32"),
+    ("hotswap_machine", "ntdll.dll", "Windows/System32"),
+    ("hotswap_machine", "hotswap_dll.dll", "gala"),
+    ("hotswap_stack", "ntdll.dll", "Windows/System32"),
+    ("hotswap_stack", "hotswap_dll.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -3434,6 +3444,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_crash", "wow64.dll", "Windows/System32"),
     ("wow64_thread_test", "wow64.dll", "Windows/System32"),
     // A 32-bit program with imports: the 32-bit ntdll's loader.
+    ("hotswap_wow64", "wow64.dll", "Windows/System32"),
+    ("hotswap_wow64", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("hotswap_wow64", "x86/hotswap_dll32.dll", "gala"),
     ("wow64_import_test", "wow64.dll", "Windows/System32"),
     ("wow64_import_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_import_test", "x86/testdll32.dll", "gala"),
@@ -3970,6 +3983,7 @@ const USER_PROGRAMS: &[&str] = &[
     "straddle_test",
     "statedump_test",
     "snapshot_test",
+    "hotswap_test",
     "clockcal_test",
     "safepoint_test",
     "shootdown_test",
@@ -4101,6 +4115,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_test",
     "wow64_thread_test",
     "wow64_import_test",
+    "wow64_hotswap_test",
     "wow64_seh_test",
     "wow64_fs_test",
     "wow64_k32_test",
@@ -4254,9 +4269,14 @@ commands:
                serial log: --snapshot-at <text> --snapshot-name <name>
                [--snapshot-stop: end the run there]; a run resumed from one:
                --from-snapshot <name> [scenario] (only on the build it was taken
-               from; docs/WORKFLOW.md, Machine snapshots)
+               from; docs/WORKFLOW.md, Machine snapshots); AT YOUR OWN RISK,
+               never a real run: --from-snapshot <name> --hot-swap-unsafe
+               <dll>[,<dll>...] splices the named DLLs' new build into the
+               resumed programs (docs/WORKFLOW.md, Hot swapping DLLs)
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
+  hotswap-diff what a hot swap would patch: hotswap-diff <old.dll> <old.map>
+               <new.dll> <new.map> (lld maps: target/<target>/release/deps)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -4364,6 +4384,7 @@ fn main() -> ExitCode {
                 }),
             Some("boot-test") => boot_test_command(release, &args),
             Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
+            Some("hotswap-diff") => hotswap_diff(&args[1..]),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
             Some("docker-test") => docker_test(&args[1..]),
@@ -4457,11 +4478,44 @@ fn main() -> ExitCode {
         };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // A hot-swapped run whose scenario printed what it expects: its own
+        // status, never success.
+        Err(e) if e.starts_with(hotswap::NOT_A_REAL_RUN) => {
+            eprintln!("xtask: {e}");
+            ExitCode::from(hotswap::EXIT_HOT_SWAPPED)
+        }
         Err(e) => {
             eprintln!("xtask: error: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// `cargo xtask hotswap-diff <old.dll> <old.map> <new.dll> <new.map>`:
+/// what `--hot-swap-unsafe` would patch, or why it would refuse
+/// (hotswap.rs).
+fn hotswap_diff(args: &[String]) -> Result {
+    let [old, old_map, new, new_map] = args else {
+        return Err(
+            "usage: cargo xtask hotswap-diff <old.dll> <old.map> <new.dll> <new.map>".into()
+        );
+    };
+    let read = |p: &String| fs::read(p).map_err(|e| format!("{p}: {e}"));
+    let text = |p: &String| fs::read_to_string(p).map_err(|e| format!("{p}: {e}"));
+    let old_image = hotswap::Image::read(&read(old)?, &text(old_map)?)?;
+    let new_file = read(new)?;
+    let new_image = hotswap::Image::read(&new_file, &text(new_map)?)?;
+    let name =
+        Path::new(new).file_name().map_or("dll".into(), |n| n.to_string_lossy().into_owned());
+    let patch = hotswap::diff(&old_image, &new_image, &name, &new_file)?;
+    print!("{}", patch.summary.describe(&name));
+    println!(
+        "xtask: hot swap {name}: blob {} bytes ({} fixups), {} entries patched",
+        patch.blob.len(),
+        patch.fixups.len(),
+        patch.entries.len()
+    );
+    Ok(())
 }
 
 /// `cargo xtask boot-test [filter] [snapshot options]` (snapshot.rs).
@@ -4470,15 +4524,44 @@ fn boot_test_command(release: bool, args: &[String]) -> Result {
     let filter = args.get(1).filter(|a| !a.starts_with("--")).cloned();
     // A resumed run's scenario is its snapshot's.
     let filter = match (&request, filter) {
-        (Some(snapshot::Request::Restore { name }), None) => Some(format!(
+        (Some(snapshot::Request::Restore { name, .. }), None) => Some(format!(
             "{}$",
             snapshot::Manifest::read(&snapshot::root(&target_dir()).join(name))?.scenario
         )),
         (_, filter) => filter,
     };
+    let hotswap = match &request {
+        Some(snapshot::Request::Restore { hotswap: Some(dlls), .. }) => Some(dlls.clone()),
+        _ => None,
+    };
+    if let Some(dlls) = &hotswap {
+        eprint!("{}", hotswap::banner(dlls));
+    }
     snapshot::set_request(request);
-    boot_tests(release, filter.as_ref())
+    let result = boot_tests(release, filter.as_ref());
+    match hotswap {
+        None => result,
+        // Never a pass: what the scenario printed is told apart from a
+        // failure by the exit status (EXIT_HOT_SWAPPED).
+        Some(dlls) => {
+            eprint!("{}", hotswap::banner(&dlls));
+            match (result, HOTSWAP_EXPECTED.load(std::sync::atomic::Ordering::Relaxed)) {
+                (Err(_), true) | (Ok(()), _) => Err(format!(
+                    "{}: the scenario printed what it expects with {} swapped in; this is no \
+                     pass (exit status {}): run it from boot before a pull request",
+                    hotswap::NOT_A_REAL_RUN,
+                    dlls.join(","),
+                    hotswap::EXIT_HOT_SWAPPED
+                )),
+                (Err(e), false) => Err(format!("{e} (a hot-swapped run: not a real run)")),
+            }
+        }
+    }
 }
+
+/// Set when a hot-swapped scenario printed what it expects (hotswap.rs:
+/// still no pass).
+static HOTSWAP_EXPECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
@@ -4510,12 +4593,15 @@ fn user_build_for(target: &str) -> Command {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    // Cargo merges this array with the target's rustflags in
+    // .cargo/config.toml. lld's map of each image (`deps/<name>.map`: every
+    // input section with its address, size and symbols; not part of the
+    // image) is what `--hot-swap-unsafe` diffs builds with (hotswap.rs).
+    let mut flags = vec!["-Clink-arg=/lldmap".to_string()];
     if let Some(home) = cargo_home {
-        // Cargo merges this array with the target's rustflags in
-        // .cargo/config.toml.
-        let flag = format!("--remap-path-prefix={}=/cargo", home.display());
-        cmd.arg("--config").arg(format!("target.{target}.rustflags=[{flag:?}]"));
+        flags.push(format!("--remap-path-prefix={}=/cargo", home.display()));
     }
+    cmd.arg("--config").arg(format!("target.{target}.rustflags={flags:?}"));
     cmd
 }
 
@@ -4835,6 +4921,9 @@ fn make_iso_unchecked(
     }
     copy_kernel(&kernel, &boot.join("kernel"))?;
     let mut modules = String::new();
+    // DLL modules (path in the tree, the build output): kept with their
+    // linker maps beside a snapshot's image (`snapshot::keep_modules`).
+    let mut dlls: Vec<(String, PathBuf)> = Vec::new();
     if let Some((module, path)) = &other_kernel {
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
@@ -4876,12 +4965,27 @@ fn make_iso_unchecked(
             );
             continue;
         }
+        // `x86=<path>`: a 32-bit DLL built elsewhere (a hot swap
+        // scenario's variant, `hotswap_variant`), under boot/x86 as a
+        // USER_DLLS_X86 one would be.
+        if let Some(path) = file.strip_prefix("x86=") {
+            let path = Path::new(path);
+            let name = path.file_name().and_then(|n| n.to_str()).ok_or("x86= needs a file")?;
+            let x86 = boot.join("x86");
+            fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
+            copy(path, &x86.join(name))?;
+            dlls.push((format!("boot/x86/{name}"), path.to_path_buf()));
+            modules +=
+                &format!("    module_path: boot():/boot/x86/{name}\n    module_string: {dir}\n");
+            continue;
+        }
         // A 32-bit DLL: under boot/x86 (its name is often a 64-bit one's;
         // the kernel names the file after the path's last part).
         if let Some(dll) = x86_dll(file) {
             let x86 = boot.join("x86");
             fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
             copy(&built_dll_x86(dll.file), &x86.join(dll.file))?;
+            dlls.push((format!("boot/x86/{}", dll.file), built_dll_x86(dll.file)));
             modules += &format!(
                 "    module_path: boot():/boot/x86/{}\n    module_string: {dir}\n",
                 dll.file
@@ -4893,6 +4997,9 @@ fn make_iso_unchecked(
             None => (built_dll(file), *file),
         };
         copy(&source, &boot.join(name))?;
+        if name.ends_with(".dll") {
+            dlls.push((format!("boot/{name}"), source.clone()));
+        }
         modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
@@ -4926,8 +5033,10 @@ fn make_iso_unchecked(
     run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso))?;
     // What a machine snapshot of it must match (snapshot.rs).
     let _ = fs::remove_file(snapshot::digests_path(&iso));
+    let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
     if snapshot::digests_wanted() {
         snapshot::write_boot_digests(&iso, &snapshot::boot_digests(&iso_root)?)?;
+        snapshot::keep_modules(&iso, &iso_root, &dlls)?;
     }
     // The tree is in the image now (it can be as large: disk space).
     let _ = fs::remove_dir_all(&iso_root);
@@ -6350,6 +6459,47 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist run=snapshot_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["snapshot_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SN step 1d: hot swapping a DLL into a resumed machine
+        // (hotswap.rs, HOTSWAP_SCENARIOS). The run itself, on the DLL's
+        // first build, is saved at `hotswap_test: marker` and goes on to
+        // these lines; then resumed runs with the DLL's `v2` build
+        // swapped in (applied: the new values) and its `layout` build
+        // (refused by xtask: a static changed size).
+        name: "hotswap_machine",
+        cmdline: "qemu_exit run=hotswap_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1d: the snapshot is taken inside a callback the DLL's
+        // changed `hs_call_back` made: the swap is refused by the guest's
+        // stack check (HOTSWAP_SCENARIOS) and the program goes on with
+        // the first build.
+        name: "hotswap_stack",
+        cmdline: "qemu_exit run=hotswap_test.exe args=stack",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["hotswap_test: callback 11", "hotswap_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SN step 1d in a WOW64 process: the 32-bit hotswap_test on
+        // hotswap_dll32 (hotswap_dll's source for x86), saved at its marker; a resume with
+        // the `v2` build swapped in (HOTSWAP_SCENARIOS): the 32-bit stack,
+        // a blob below 2 GiB, absolute (HIGHLOW) fixups.
+        name: "hotswap_wow64",
+        cmdline: "qemu_exit run=wow64_hotswap_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // A semaphore released and waited on from two processors at once.
@@ -11335,6 +11485,12 @@ const MODULE_SETS: &[(&str, &str)] = &[
 const FULL_SYSTEM_SCENARIOS: &[&str] =
     &["office_install", "office_install_gui", "office_install_local"];
 
+/// A scenario's kernel command line as its image has it.
+fn scenario_cmdline(s: &Scenario) -> String {
+    let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+    format!("{}{screen}{}", s.cmdline, events_flag())
+}
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
@@ -11487,15 +11643,11 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
-    let screen = |s: &Scenario| {
-        let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
-        format!("{screen}{}", events_flag())
-    };
     let make = |vm: &Vm| match vm {
         Vm::Single(s) => make_iso(
             release,
             &format!("test-{}", s.name),
-            &format!("{}{}", s.cmdline, screen(s)),
+            &scenario_cmdline(s),
             &extra_modules(s.name),
         ),
         Vm::Batch(group) => {
@@ -11537,6 +11689,10 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         // look at: it says what it takes on the host).
         let disk = iso.with_extension("disk.img");
         let _ = fs::remove_file(snapshot::digests_path(&iso));
+        // A snapshot took its own copy of the DLLs and maps; a hot swap's
+        // plan was for this run only.
+        let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
+        let _ = fs::remove_file(iso.with_extension("hotswap.plan"));
         if result.1.iter().all(|(_, v)| v.is_ok()) {
             let _ = fs::remove_file(&iso);
             if !reuse_disk() {
@@ -18232,8 +18388,9 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         },
     };
     let restore = match (snapshot::request(), &machine) {
-        (Some(snapshot::Request::Restore { name }), Some(m)) => {
-            match snapshot::prepare_restore(&target_dir(), name, m, &qemu_img()) {
+        (Some(snapshot::Request::Restore { name, hotswap }), Some(m)) => {
+            let hotswap = hotswap.as_deref().map(|d| (d, iso));
+            match snapshot::prepare_restore(&target_dir(), name, m, &qemu_img(), hotswap) {
                 Ok(r) => Some(r),
                 Err(e) => return fail(e),
             }
@@ -18283,6 +18440,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                 stop: *stop,
                 scenario,
                 machine: m,
+                modules: Some(snapshot::modules_dir(iso)),
             }))
         }
         _ => None,
@@ -18393,13 +18551,28 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                         _ => verdict,
                     };
                     match pair {
+                        Some(p) if !p.hotswap.is_empty() => {
+                            verdict.and_then(|()| hotswap_cases(s, p, boot, timeout))
+                        }
                         Some(p) => verdict.and_then(|()| restore_pair(s, p, iso, boot, timeout)),
                         None => verdict,
                     }
                 }
                 (None, Some(r)) => {
+                    let scenario_ok = verdict.is_ok();
+                    // A hot-swapped run never passes (hotswap.rs).
+                    let verdict = match &r.hotswap {
+                        Some(h) => {
+                            let (v, expected) = hotswap::verdict(&serial, &h.dlls, verdict);
+                            if expected {
+                                HOTSWAP_EXPECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            v
+                        }
+                        None => verdict,
+                    };
                     if let Some(layer) = &r.layer {
-                        if verdict.is_ok() {
+                        if scenario_ok {
                             let _ = fs::remove_file(layer);
                         } else if let Some(used) = host_usage_mib(layer) {
                             eprintln!(
@@ -18492,13 +18665,233 @@ struct SnapshotScenario {
     name: &'static str,
     at: &'static str,
     absent: &'static [&'static str],
+    /// Instead of the two plain resumes: hot swaps (SN step 1d,
+    /// `hotswap_cases`).
+    hotswap: &'static [HotswapCase],
 }
 
-const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[SnapshotScenario {
-    name: "snapshot_machine",
-    at: "snapshot_test: phase 1 done",
-    absent: &["snapshot_test: phase 1 done", KERNEL_BANNER, "run: begin"],
-}];
+/// A resume of a hot swap scenario: hotswap_dll's build `variant` swapped
+/// in (`hotswap_variant`), and what must come of it.
+struct HotswapCase {
+    variant: &'static str,
+    outcome: HotswapOutcome,
+}
+
+enum HotswapOutcome {
+    /// Applied: the lines the resumed run prints.
+    Applied(&'static [&'static str]),
+    /// xtask refuses before the resume, with this in its reason.
+    RefusedByXtask(&'static str),
+    /// The guest refuses (this in its `hotswap: refused:` line) and the
+    /// programs go on unpatched (these lines).
+    RefusedByGuest(&'static str, &'static [&'static str]),
+}
+
+const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
+    SnapshotScenario {
+        name: "snapshot_machine",
+        at: "snapshot_test: phase 1 done",
+        absent: &["snapshot_test: phase 1 done", KERNEL_BANNER, "run: begin"],
+        hotswap: &[],
+    },
+    SnapshotScenario {
+        name: "hotswap_machine",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[
+            HotswapCase {
+                variant: "v2",
+                outcome: HotswapOutcome::Applied(&[
+                    "hotswap: NOT A REAL RUN",
+                    "hotswap: \\gala\\hotswap_dll.dll: the file is the new build now",
+                    "hotswap: applied: hotswap_dll.dll in 1 process(es), 5 function(s) patched",
+                    "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                    "hotswap_test: ok",
+                    "exited with status 0x00000000",
+                ]),
+            },
+            HotswapCase {
+                variant: "layout",
+                outcome: HotswapOutcome::RefusedByXtask(
+                    "static hotswap_dll::TABLE changed size (32 -> 64 bytes)",
+                ),
+            },
+        ],
+    },
+    SnapshotScenario {
+        name: "hotswap_wow64",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            variant: "v2",
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: hotswap_dll32.dll (x86):",
+                "hotswap: applied: hotswap_dll32.dll in 1 process(es), 5 function(s) patched",
+                "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
+    },
+    SnapshotScenario {
+        name: "hotswap_stack",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            variant: "v2",
+            outcome: HotswapOutcome::RefusedByGuest(
+                "hotswap_dll.dll!hs_call_back (changed) is on the stack of thread",
+                &["hotswap_test: callback 11", "hotswap_test: ok"],
+            ),
+        }],
+    },
+];
+
+/// Builds hotswap_dll with `feature` in a profile of its own
+/// (`hotswap-<feature>`, Cargo.toml): its DLL, with its map beside it in
+/// `deps/`.
+fn hotswap_variant(feature: &str, target: &str, package: &str) -> Result<PathBuf> {
+    let profile = format!("hotswap-{feature}");
+    let cmd = user_build_for(target);
+    // user_build_for asks for --release; this build has its own profile.
+    let args: Vec<std::ffi::OsString> =
+        cmd.get_args().filter(|a| *a != "--release").map(|a| a.to_os_string()).collect();
+    let mut cmd = cargo();
+    cmd.args(args).args(["--profile", &profile, "-p", package, "--features", feature]);
+    run_quiet(&mut cmd)?;
+    Ok(target_dir().join(target).join(&profile).join(format!("{package}.dll")))
+}
+
+/// The resumes of a hot swap scenario (`p.hotswap`), from its snapshot
+/// `test-<name>` (deleted after them).
+fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Duration) -> Result {
+    let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+    let name = format!("test-{}", s.name);
+    // The 32-bit DLL in a WOW64 scenario, the 64-bit one otherwise.
+    let x86 = extra_modules(s.name).iter().any(|(f, _)| *f == "x86/hotswap_dll32.dll");
+    let (package, target) =
+        if x86 { ("hotswap_dll32", USER_TARGET_X86) } else { ("hotswap_dll", USER_TARGET) };
+    let dll = format!("{package}.dll");
+    for case in p.hotswap {
+        let built = hotswap_variant(case.variant, target, package)?;
+        let built = built.to_string_lossy().into_owned();
+        let x86_built = format!("x86={built}");
+        let extras: Vec<(&str, &str)> = extra_modules(s.name)
+            .into_iter()
+            .map(|(f, d)| match f {
+                "hotswap_dll.dll" => (built.as_str(), d),
+                "x86/hotswap_dll32.dll" => (x86_built.as_str(), d),
+                _ => (f, d),
+            })
+            .collect();
+        let image = format!("{name}-{}", case.variant);
+        let iso = make_iso(release, &image, &scenario_cmdline(s), &extras)?;
+        let machine = machine_now(s.name, &iso, boot)?;
+        let swap = [dll.clone()];
+        let prepared = snapshot::prepare_restore(
+            &target_dir(),
+            &name,
+            &machine,
+            &qemu_img(),
+            Some((&swap, &iso)),
+        );
+        let label = format!("hot swap of the {} build", case.variant);
+        let result = match (&case.outcome, prepared) {
+            (HotswapOutcome::RefusedByXtask(want), Err(e)) if e.contains(want) => {
+                eprintln!("xtask: {}: {label}: refused as it must be: {e}", s.name);
+                Ok(())
+            }
+            (HotswapOutcome::RefusedByXtask(want), r) => Err(format!(
+                "{label}: xtask must refuse it with {want:?}, but: {}",
+                r.err().unwrap_or_else(|| "it was not refused".into())
+            )),
+            (_, Err(e)) => Err(format!("{label}: {e}")),
+            (outcome, Ok(r)) => {
+                let (_, serial, _) = run_vm(
+                    &iso,
+                    boot,
+                    timeout,
+                    None,
+                    false,
+                    r.layer.as_deref(),
+                    None,
+                    Some(&Snap::Restore(&r)),
+                )?;
+                let kept = iso.with_extension("serial.log");
+                let _ = fs::write(&kept, &serial);
+                let guest: String = serial
+                    .lines()
+                    .filter(|l| !l.starts_with("xtask:"))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                let missing = |lines: &[&str]| -> Result {
+                    match lines.iter().find(|l| !guest.contains(*l)) {
+                        Some(l) => Err(format!(
+                            "{label}: the resumed run lacks {l:?} ({})",
+                            kept.display()
+                        )),
+                        None => Ok(()),
+                    }
+                };
+                // The event stream says it too.
+                let events =
+                    fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
+                let event = match outcome {
+                    HotswapOutcome::Applied(_) => {
+                        format!(r#""ev":"hotswap","result":"applied","dll":"{dll}""#)
+                    }
+                    _ => r#""ev":"hotswap","result":"refused""#.to_string(),
+                };
+                if !events.contains(&event) {
+                    return Err(format!("{label}: the event stream lacks {event}"));
+                }
+                let result = match outcome {
+                    HotswapOutcome::Applied(lines) => {
+                        let (v, expected) =
+                            hotswap::verdict(&serial, std::slice::from_ref(&dll), missing(lines));
+                        match (expected, v) {
+                            (true, Err(e)) if e.starts_with(hotswap::NOT_A_REAL_RUN) => Ok(()),
+                            (_, Err(e)) => Err(format!("{label}: {e}")),
+                            (_, Ok(())) => Err(format!("{label}: a hot-swapped run passed")),
+                        }
+                    }
+                    HotswapOutcome::RefusedByGuest(why, lines) => {
+                        let (v, _) = hotswap::verdict(&serial, std::slice::from_ref(&dll), Ok(()));
+                        match v {
+                            Err(e) if e.contains("refused the hot swap") && e.contains(why) => {
+                                missing(lines)
+                            }
+                            other => Err(format!(
+                                "{label}: the guest must refuse it with {why:?}, but: {other:?} ({})",
+                                kept.display()
+                            )),
+                        }
+                    }
+                    HotswapOutcome::RefusedByXtask(_) => Ok(()),
+                };
+                if let Some(a) = p.absent.iter().find(|a| guest.contains(*a)) {
+                    return Err(format!(
+                        "{label}: the resumed run printed {a:?}, from before the snapshot"
+                    ));
+                }
+                if let Some(layer) = &r.layer {
+                    let _ = fs::remove_file(layer);
+                }
+                if result.is_ok() {
+                    eprintln!("xtask: {}: {label}: as it must be (log {})", s.name, kept.display());
+                }
+                result
+            }
+        };
+        result?;
+        for ext in ["iso", "boot.sha256", "hotswap.plan"] {
+            let _ = fs::remove_file(iso.with_extension(ext));
+        }
+        let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
+    }
+    let dir = snapshot::root(&target_dir()).join(&name);
+    fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
 
 /// The two resumed runs of a SNAPSHOT_SCENARIOS entry (its snapshot is
 /// `test-<name>`, deleted after they pass).
@@ -18522,7 +18915,7 @@ fn restore_pair(
     let machine = machine_now(s.name, iso, boot)?;
     let mut layers = Vec::new();
     for i in 1..=2 {
-        let r = snapshot::prepare_restore(&target_dir(), &name, &machine, &qemu_img())?;
+        let r = snapshot::prepare_restore(&target_dir(), &name, &machine, &qemu_img(), None)?;
         let (status, serial, time) = run_vm(
             iso,
             boot,

@@ -203,6 +203,7 @@ alone prints the usage.
 | `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` or `MANUAL` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
 | `export-tests` | copy the built test programs and DLLs to `user/bin/`, then remake derived test data |
+| `hotswap-diff <old.dll> <old.map> <new.dll> <new.map>` | what `--hot-swap-unsafe` would patch in a DLL, or why it refuses ("Hot swapping DLLs into a snapshot") |
 | `iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]` | a bootable image ("Bootable images and USB sticks") |
 | `screenshot [--uefi] [--at 1,3,5] [--name N] [--scenario S] [cmdline...]` | PNGs of the screen ("Screenshots") |
 | `serve <scenario> [port]` | boot a network scenario and keep it running ("Serving to a browser", "SSH into a running gala") |
@@ -619,8 +620,9 @@ cargo xtask snapshots rm office-merge
   (the command line) and `XTASK_QEMU_ARGS` that change memory or
   processors. Every image carries all the test programs, so changing any
   of them (`user/bin` included) refuses every snapshot too. A module
-  that a process mapped before the save cannot change anyway (the
-  Office service maps msxml6.dll in its first minute), so a snapshot
+  that a process mapped before the save cannot change (the Office
+  service maps msxml6.dll in its first minute) but through a hot swap
+  ("Hot swapping DLLs into a snapshot", at your own risk), so a snapshot
   helps with what happens after the save on one build: re-running a late
   stage, watching it with the monitor, resuming twice to compare. Resume
   with the same `XTASK_EVENTS` the snapshot was taken with.
@@ -653,12 +655,109 @@ cargo xtask snapshots rm office-merge
   resumed run is not a replay: threads may interleave differently.
   The kept layer of a failed resumed run is qcow2, which `disk-files`
   does not read (`qemu-img convert -O raw` it first, or use `dump=`).
+- **Hot swaps**: a snapshot also keeps its image's DLL modules with
+  their linker maps (`modules/`: 37 MB for the Office image; the image
+  keeps them as `<image>.modules/`), which `--hot-swap-unsafe` diffs a
+  new build against ("Hot swapping DLLs into a snapshot").
 - **Test**: `snapshot_machine` (in `cargo xtask test`, about 20 s under
   TCG): snapshot_test saved at `phase 1 done`, the run goes on, then
   two resumed runs must print `snapshot_test: ok` and none of phase 1's
   lines, the kernel's banner or `run: begin`, and the frozen disk's
   digest must not change; host tests `snapshot::tests` (manifest, the
   build check's reasons, arguments).
+
+### Hot swapping DLLs into a snapshot (at your own risk)
+
+> **A hot-swapped run is not a real run, and its results are at your own
+> risk.** It splices code of another build into programs that are
+> running with the state the old build made. It never counts as a pass:
+> xtask marks it `hot-swapped (not a real run)` and exits with status 3,
+> CI refuses the flag, and **every fix still gets a full run from boot
+> before its pull request.**
+
+It is for trying a fix to one of gala's DLLs in seconds from a snapshot
+taken just before the failure (msxml6.dll during the Office install)
+instead of a 30-minute run from boot (ROADMAP SN step 1d; ARCHITECTURE
+"Hot swapping DLLs into a resumed machine"):
+
+```sh
+cargo xtask boot-test 'office_install_local$' \
+    --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge --snapshot-stop
+# edit user/msxml6, then, as often as wanted:
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
+# what it would patch, without a run (maps: target/<target>/release/deps):
+cargo xtask hotswap-diff old/msxml6.dll old/msxml6.map new/msxml6.dll new/msxml6.map
+```
+
+- **What happens**: xtask prints the banner, then per DLL (and its
+  32-bit twin, if that changed too) the functions it patches, the new
+  functions and the data it copies; the guest, at the resumed machine's
+  first instruction, stops every program thread, checks, maps the new
+  code beside the image in every process that has it, makes each
+  changed function's old entry jump to its new version, replaces the
+  DLL's file for later loads, and lets the programs go on. Its log has
+  `hotswap: NOT A REAL RUN ...`, a line per process and per patched
+  function, then `hotswap: applied: <dll> ...` or `hotswap: refused:
+  <why>` (the programs then go on unpatched; xtask fails the run with
+  that reason).
+- **What the checks cover** (each refusal names the symbol): the rest of
+  the build is the snapshot's (kernel, every other module, the command
+  line, the machine); a changed function on any thread's stack (its
+  instruction pointer in one, or a return address into one: a
+  conservative scan of every word of the stack, so a stale value also
+  refuses); a writable static whose size changed; anonymous writable
+  data the new code needs; a new import; a changed thread-local
+  template; code that does not decode or relocate; a function too short
+  for the jump; identical code folding that changed. A function reading
+  read-only data that changed is patched with it.
+- **What they cannot cover**: logic that depends on state the old code
+  built and the new code reads differently (a cache filled the old way,
+  a flag that now means something else); changed invariants of data
+  whose layout did not change (same size, other meaning or field
+  order); stored pointers to the old copy of a constant that changed; a
+  function the CPU ran between the snapshot and the resume (none: no
+  user instruction runs before the swap) but whose effects the old code
+  already left. New code has no unwind data registered (an exception
+  through it is not unwound), and new exports are not visible to
+  GetProcAddress.
+- **Marks**: the banner (before and after), the verdict and exit status
+  3, the guest's `hotswap:` lines, the `hotswap` ledger entry and event,
+  `this run was hot-swapped (...)` in every crash report and state
+  dump, triage's `HOT-SWAPPED, NOT A REAL RUN` line. A snapshot whose
+  manifest says `hot_swapped:` is refused for a normal resume.
+- **Needs**: a snapshot taken by this version of xtask (it keeps its
+  DLLs and their linker maps in `modules/`; an older one is refused
+  with that reason), DLLs gala's build made (the map: every user build
+  writes `deps/<name>.map`), a `run=` scenario (the swap runs from the
+  boot thread's wait), x64 or x86 DLLs.
+- **Pitfalls**: the snapshot pins everything but the named DLLs, so
+  while a long snapshot run goes on, change nothing else that goes into
+  its image (the kernel, any test program, any other DLL) if you mean
+  to resume it with a swap. A 4-byte function cannot take the jump
+  (refused: make the old build's function longer, or swap its callers).
+  `target/snapshots` linked into `/dev/shm` for Office breaks
+  `snapshot_machine` (its disk is on `/`): link it back after. xtask
+  removes the Office disk image's link after a pass, so make it again
+  before the next Office run, or the 8 GB image lands on `/`.
+- **Tests**: `hotswap_machine` (in `cargo xtask test`): hotswap_test on
+  hotswap_dll's first build is saved at `hotswap_test: marker`; a resume
+  with the `v2` build swapped in must print `version 2, calls 2, object
+  107, global 1042, callback 12` (new code, a new static, an old
+  object's vtable reaching new code, an old static kept), with
+  `hotswap: applied` and the event; one with the `layout` build must be
+  refused by xtask (`static hotswap_dll::TABLE changed size`).
+  `hotswap_stack`: the snapshot is taken inside a callback of the
+  changed `hs_call_back`, and the guest must refuse (`is on the stack`).
+  `hotswap_wow64`: `hotswap_machine`'s `v2` case in a WOW64 process
+  (wow64_hotswap_test on hotswap_dll32, hotswap_dll's source built for
+  x86 under its own name: the 32-bit stack,
+  a blob below 2 GiB, absolute fixups).
+  The variants are built in profiles of their own (`hotswap-v2`,
+  `hotswap-layout`: `target/<triple>/hotswap-*/`); a variant image takes
+  its 32-bit DLL as `x86=<path>`. Host tests:
+  `hotswap::tests` in xtask (diff, normalization, jump tables, imports,
+  refusals, the plan) and the kernel (the plan, binding, the stack
+  check's ranges).
 
 ### GPU tests
 

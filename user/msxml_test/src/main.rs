@@ -127,6 +127,20 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn GetProcessHeaps(count: u32, heaps: *mut Handle) -> u32;
+    fn HeapValidate(heap: Handle, flags: u32, block: *const c_void) -> i32;
+}
+
+/// Whether every heap of the process is valid (HeapValidate on each), so
+/// a corruption is placed by the first section that ends with one.
+fn heaps_valid() -> bool {
+    let mut heaps = [0 as Handle; 64];
+    // SAFETY: a buffer of 64 handles.
+    let n = unsafe { GetProcessHeaps(heaps.len() as u32, heaps.as_mut_ptr()) } as usize;
+    heaps[..n.min(heaps.len())]
+        .iter()
+        // SAFETY: a heap handle GetProcessHeaps returned; NULL block checks it all.
+        .all(|&h| unsafe { HeapValidate(h, 0, core::ptr::null()) } != 0)
 }
 
 #[cfg_attr(
@@ -197,6 +211,7 @@ const IID_IXMLDOMDOCUMENT3: Guid = guid(0x2933_bf96, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMELEMENT: Guid = guid(0x2933_bf86, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMATTRIBUTE: Guid = guid(0x2933_bf85, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMTEXT: Guid = guid(0x2933_bf87, 0x7b36, 0x11d2, DOM_D4);
+const IID_IXMLDOMCOMMENT: Guid = guid(0x2933_bf88, 0x7b36, 0x11d2, DOM_D4);
 
 /// A VARIANT (24 bytes on x64, 16 on x86).
 #[repr(C)]
@@ -375,7 +390,10 @@ impl Line {
     }
 }
 
-struct Checks(u32);
+/// The check counter, and the first check that `code` found wrong (0
+/// when none): an error-code check records its mismatch and goes on, so
+/// one run on Windows reports every code that differs.
+struct Checks(u32, u32);
 
 impl Checks {
     #[track_caller]
@@ -400,6 +418,44 @@ impl Checks {
     #[track_caller]
     fn hr(&mut self, got: HResult, want: HResult) -> Result<(), u32> {
         self.ok(got == want, got as u32 as u64)
+    }
+
+    /// An error code whose mismatch does not stop the test: it is
+    /// printed with the code expected, and the test fails at its end
+    /// with the first such check's number.
+    #[track_caller]
+    fn code(&mut self, got: HResult, want: HResult) -> Result<(), u32> {
+        self.later(got == want, got as u32 as u64, Some(want as u32 as u64))
+    }
+
+    /// A condition whose failure does not stop the test, as `code`.
+    #[track_caller]
+    fn note(&mut self, cond: bool, got: u64) -> Result<(), u32> {
+        self.later(cond, got, None)
+    }
+
+    #[track_caller]
+    fn later(&mut self, cond: bool, got: u64, want: Option<u64>) -> Result<(), u32> {
+        self.0 += 1;
+        if !cond {
+            let mut line = Line::new()
+                .s(NAME.as_bytes())
+                .s(b": check ")
+                .dec(u64::from(self.0))
+                .s(b" got ")
+                .hex(got);
+            if let Some(w) = want {
+                line = line.s(b" want ").hex(w);
+            }
+            line.s(b" (line ")
+                .dec(u64::from(core::panic::Location::caller().line()))
+                .s(b", continuing)\r\n")
+                .print();
+            if self.1 == 0 {
+                self.1 = self.0;
+            }
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -1260,7 +1316,7 @@ fn inherited_namespaces(c: &mut Checks, doc: Obj) -> Result<(), u32> {
 }
 
 fn run() -> Result<(), u32> {
-    let mut c = Checks(0);
+    let mut c = Checks(0, 0);
     // SAFETY: plain call.
     c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) }, S_OK)?;
     let mut doc: Obj = null_mut();
@@ -1285,12 +1341,18 @@ fn run() -> Result<(), u32> {
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
     mutation::mutation(&mut c, doc)?;
+    mutation::section("schema");
     schema::schema(&mut c)?;
+    mutation::section("free-threaded");
     free_threaded(&mut c)?;
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };
-    implicit_mta(&mut c)
+    implicit_mta(&mut c)?;
+    match c.1 {
+        0 => Ok(()),
+        first => Err(first),
+    }
 }
 
 /// FreeThreadedDOMDocument60 (msxml6.h's CLSID; Click-to-Run's App-V

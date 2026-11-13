@@ -97,21 +97,23 @@ fn adopt(d: *mut Doc, p: Obj) -> u32 {
 }
 
 /// Puts `new` under `this` before child `before` (None: at the end),
-/// in place of child `old` when one is given. The checks are MSXML's:
-/// a document is E_INVALIDARG (measured on Windows); a node that is
-/// `this` or its ancestor, or a kind `this` cannot hold is E_FAIL, and
-/// so is a document's second element.
+/// in place of child `old` when one is given. The checks and their
+/// order are MSXML 6's, measured on Windows (Wine's msxml3 tests expect
+/// E_FAIL for each kind refusal): a node that is `this` or its ancestor
+/// is E_FAIL (a document under itself too), then a document anywhere
+/// and a kind `this` cannot hold are E_INVALIDARG; a document's second
+/// element is E_FAIL.
 fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult {
     let Some(nn) = ours(new) else { return E_INVALIDARG };
     let d_ptr = node(this).doc;
     let p = idx(this);
     let pk = doc(this).tree.node(p).kind;
     let nk = kind_of(nn);
-    if nk == Kind::Document {
-        return E_INVALIDARG;
-    }
     if nn.doc == d_ptr && doc(this).tree.contains(nn.idx, p) {
         return E_FAIL;
+    }
+    if nk == Kind::Document {
+        return E_INVALIDARG;
     }
     // The kinds that arrive: a fragment's children, or the node.
     let src = tree_of(nn);
@@ -122,7 +124,7 @@ fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult 
         kinds.push(nk);
     }
     if !kinds.iter().all(|&k| may_contain(pk, k)) {
-        return E_FAIL;
+        return E_INVALIDARG;
     }
     if pk == Kind::Document {
         let t = &doc(this).tree;
@@ -319,13 +321,14 @@ pub(super) extern "system" fn put_text(this: Obj, s: Bstr) -> HResult {
     }
 }
 
-/// IXMLDOMNode::put_nodeValue: E_FAIL for elements, documents and
-/// fragments (they have none); strings and numbers otherwise.
+/// IXMLDOMNode::put_nodeValue: documents, elements and fragments (they
+/// have no value) are E_INVALIDARG (MSXML 6 measured on Windows; Wine's
+/// msxml3 tests expect E_FAIL); strings and numbers otherwise.
 pub(super) extern "system" fn put_node_value(this: Obj, v: Variant) -> HResult {
     let d = doc(this);
     let i = idx(this);
     if matches!(d.tree.node(i).kind, Kind::Element | Kind::Document | Kind::Fragment) {
-        return E_FAIL;
+        return E_INVALIDARG;
     }
     match variant_text(&v) {
         Some(value) => set_value(d, i, value),
@@ -372,10 +375,15 @@ fn name_arg(s: Bstr) -> Result<String, HResult> {
     }
 }
 
+/// IXMLDOMDocument::createElement: a refused name sets the output to
+/// NULL (MSXML 6 measured on Windows; Wine's msxml3 tests expect it left
+/// alone).
 pub(super) extern "system" fn create_element(this: Obj, name: Bstr, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_INVALIDARG;
     }
+    // SAFETY: checked non-NULL above; the caller's out pointer.
+    unsafe { *out = core::ptr::null_mut() };
     match name_arg(name) {
         Ok(n) => create(this, Kind::Element, &n, "", "", out),
         Err(hr) => hr,
@@ -456,8 +464,9 @@ fn type_by_name(name: &str) -> Option<i64> {
 
 /// IXMLDOMDocument::createNode(type, name, namespaceURI, out): the type
 /// a number (any integer variant) or its name; the document, document
-/// types, entities and notations are E_INVALIDARG, the output left
-/// alone (Wine's test_create on Windows); entity references are not
+/// types, entities and notations are E_INVALIDARG; a refusal sets the
+/// output to NULL first, as createElement's does on Windows (Wine's
+/// msxml3 tests expect it left alone); entity references are not
 /// supported (recorded, E_NOTIMPL).
 pub(super) extern "system" fn create_node(
     this: Obj,
@@ -469,6 +478,8 @@ pub(super) extern "system" fn create_node(
     if out.is_null() {
         return E_INVALIDARG;
     }
+    // SAFETY: checked non-NULL above; the caller's out pointer.
+    unsafe { *out = core::ptr::null_mut() };
     let kind = match ty.vt {
         VT_BSTR => text(ty.value[0] as *const u16).as_deref().and_then(type_by_name),
         // VT_I1 and VT_UI1 (a byte), the wider integers.

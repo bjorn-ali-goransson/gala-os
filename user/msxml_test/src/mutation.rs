@@ -224,10 +224,10 @@ fn remove_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     let (hr, ba) = get_obj(fo, GET_FIRST_CHILD);
     c.hr(hr, S_OK)?;
     let (hr, out) = remove(root, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = remove(root, ba);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     c.hr(has_children(fo), S_OK)?;
     let (hr, out) = remove(root, fo);
@@ -235,7 +235,7 @@ fn remove_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     c.ok(out == fo, out as u64)?;
     release(out);
     let (hr, out) = remove(root, fo);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, parent) = get_obj(fo, GET_PARENT_NODE);
     c.hr(hr, S_FALSE)?;
@@ -270,16 +270,16 @@ fn replace_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     let (hr, ba) = get_obj(fo, GET_FIRST_CHILD);
     c.hr(hr, S_OK)?;
     let (hr, out) = replace(root, ba, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = replace(root, null_mut(), fo);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = replace(root, bs, ba);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = replace(fo, fo, ba);
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_FAIL)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = replace(root, ba, fo);
     c.hr(hr, S_OK)?;
@@ -305,48 +305,43 @@ fn replace_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     Ok(())
 }
 
-/// insertBefore (Wine's test_insertBefore, Windows' answers where they
-/// differ): a document is E_INVALIDARG; what each parent takes
-/// (E_FAIL otherwise, the output NULL), a reference node that is not a
-/// child (E_INVALIDARG), a node moved from another parent, a node
+/// insertBefore (Wine's test_insertBefore, MSXML 6's answers measured
+/// on Windows where they differ): a document under itself is E_FAIL,
+/// under anything else E_INVALIDARG; what each parent takes
+/// (E_INVALIDARG otherwise, where Wine's msxml3 tests expect E_FAIL;
+/// the output NULL), a reference node that is not a child
+/// (E_INVALIDARG), a node moved from another parent, a node
 /// from another document, and the namespaces the moved nodes' xml
 /// declares.
 fn insert(c: &mut Checks) -> Result<(), u32> {
     let doc = new_doc(c)?;
     let doc3 = new_doc(c)?;
     let (hr, out) = insert_before(doc, null_mut(), null_variant());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
-    // A document under a document: E_INVALIDARG on Windows (Server
-    // 2025's msxml6, issue-free CI run); the output and a document under
-    // itself are not measured yet.
     let (hr, out) = insert_before(doc, doc3, null_variant());
-    c.hr(hr, E_INVALIDARG)?;
-    info_hr("insertBefore(document) output is NULL", u32::from(out.is_null()) as HResult);
-    release(out);
+    c.code(hr, E_INVALIDARG)?;
+    c.ok(out.is_null(), out as u64)?;
     let (hr, out) = insert_before(doc, doc, null_variant());
-    info_hr("insertBefore(the document itself)", hr);
-    release(out);
+    c.code(hr, E_FAIL)?;
+    c.ok(out.is_null(), out as u64)?;
 
     let (hr, attr) = create_node(doc, NODE_ATTRIBUTE, Some("attr"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(doc3, attr, null_variant());
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, cdata) = create_node(doc3, NODE_CDATA_SECTION, Some("cdata"), None);
     c.hr(hr, S_OK)?;
     c.hr(has_children(cdata), S_FALSE)?;
     for (parent, new) in [(cdata, attr), (doc3, cdata)] {
         let (hr, out) = insert_before(parent, new, null_variant());
-        c.hr(hr, E_FAIL)?;
+        c.code(hr, E_INVALIDARG)?;
         c.ok(out.is_null(), out as u64)?;
     }
-    // A document under a CDATA section: which check Windows makes first
-    // (the document's E_INVALIDARG or the parent's E_FAIL) is not
-    // measured yet.
     let (hr, out) = insert_before(cdata, doc, null_variant());
-    info_hr("insertBefore(document under a CDATA section)", hr);
-    release(out);
+    c.code(hr, E_INVALIDARG)?;
+    c.ok(out.is_null(), out as u64)?;
     release(cdata);
     release(doc3);
 
@@ -354,10 +349,10 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, attr2) = create_node(doc, NODE_ATTRIBUTE, Some("attr2"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(attr, attr2, null_variant());
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = insert_before(attr, attr2, Variant { vt: VT_UNKNOWN, ..dispatch(attr) });
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     release(attr2);
     let text = create(c, doc, CREATE_TEXT_NODE, "text")?;
@@ -378,7 +373,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         let (hr, node) = create_node(doc, kind, Some("cdata"), None);
         c.hr(hr, S_OK)?;
         let (hr, out) = insert_before(attr, node, null_variant());
-        c.hr(hr, E_FAIL)?;
+        c.code(hr, E_INVALIDARG)?;
         c.ok(out.is_null(), out as u64)?;
         release(node);
     }
@@ -391,7 +386,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let elem4 = create(c, doc, CREATE_ELEMENT, "elem4")?;
     c.hr(has_children(elem1), S_FALSE)?;
     let (hr, out) = insert_before(elem1, null_mut(), null_variant());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let hr = call!(
         elem1,
@@ -401,9 +396,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         dispatch(null_mut()),
         null_mut()
     );
-    // A document under an element: gala answers E_INVALIDARG, as Windows
-    // does under a document; under an element not measured yet.
-    info_hr("insertBefore(document under an element)", hr);
+    c.code(hr, E_INVALIDARG)?;
     let (hr, out) = insert_before(elem1, elem4, dispatch(null_mut()));
     c.hr(hr, S_OK)?;
     c.ok(out == elem4, out as u64)?;
@@ -526,7 +519,7 @@ fn append_child(c: &mut Checks) -> Result<(), u32> {
     let elem = create(c, doc, CREATE_ELEMENT, "elem")?;
     let elem2 = create(c, doc, CREATE_ELEMENT, "elem2")?;
     c.hr(append_only(doc, elem), S_OK)?;
-    c.hr(append_only(doc, elem2), E_FAIL)?;
+    c.code(append_only(doc, elem2), E_FAIL)?;
     let comment1 = create(c, doc, CREATE_COMMENT, "Comment1")?;
     let comment2 = create(c, doc, CREATE_COMMENT, "Comment2")?;
     c.hr(append_only(doc, comment1), S_OK)?;
@@ -625,8 +618,9 @@ fn append_child(c: &mut Checks) -> Result<(), u32> {
 
 /// createElement, createNode and the other create methods (Wine's
 /// test_createElement, test_createNode, test_create, test_doc_fragment):
-/// a NULL name is E_INVALIDARG and an empty one E_FAIL, the output left
-/// alone; createNode refuses the document, entities (E_INVALIDARG); a
+/// a NULL name is E_INVALIDARG and an empty one E_FAIL, the output
+/// NULL; createNode refuses the document, entities (E_INVALIDARG, the
+/// output NULL); a
 /// prefix without a namespace stays undeclared; a namespace given to
 /// createNode is declared by the node's xml and is not an attribute.
 fn creation(c: &mut Checks) -> Result<(), u32> {
@@ -642,13 +636,16 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
             &mut out
         );
         c.hr(hr, want)?;
-        c.ok(out == UNTOUCHED, out as u64)?;
+        // The output is NULL (MSXML 6 on Windows for a NULL name; Wine's
+        // msxml3 tests expect it left alone).
+        c.note(out.is_null(), out as u64)?;
     }
     for kind in [NODE_DOCUMENT, NODE_ENTITY] {
         let (hr, out) = create_node(doc, kind, Some("name"), None);
-        c.hr(hr, E_INVALIDARG)?;
-        c.ok(out == UNTOUCHED, out as u64)?;
+        c.code(hr, E_INVALIDARG)?;
+        c.note(out.is_null(), out as u64)?;
     }
+    section("creation: a prefixed element");
     let el = create(c, doc, CREATE_ELEMENT, "prefix:name")?;
     xml_is(c, el, "<prefix:name/>")?;
     let mut s: Bstr = null_mut();
@@ -657,6 +654,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     xml_is(c, doc, "<prefix:name/>\r\n")?;
     release(el);
 
+    section("creation: createNode with a namespace");
     let (hr, node) = create_node(doc, NODE_ELEMENT, Some("ns1:test"), Some("http://winehq.org"));
     c.hr(hr, S_OK)?;
     get_bstr(c, node, GET_PREFIX, "ns1")?;
@@ -679,11 +677,17 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     get_bstr(c, el, GET_NAMESPACE_URI, "http://winehq.org/default")?;
     release(el);
 
+    section("creation: comment and fragment");
     let (hr, comment) = create_node(doc, NODE_COMMENT, None, None);
     c.hr(hr, S_OK)?;
     c.eq(u64::from(node_type(comment)), NODE_COMMENT as u64)?;
-    get_bstr(c, comment, TEXT_GET_DATA, "")?;
+    // get_data is IXMLDOMComment's (createNode gives an IXMLDOMNode,
+    // whose table has a different method in that slot on Windows).
+    let (hr, data) = query(comment, &IID_IXMLDOMCOMMENT);
     release(comment);
+    c.hr(hr, S_OK)?;
+    get_bstr(c, data, TEXT_GET_DATA, "")?;
+    release(data);
     let (hr, fragment) = create_node(doc, NODE_DOCUMENT_FRAGMENT, Some("p:text"), Some("uri"));
     c.hr(hr, S_OK)?;
     for slot in [GET_NAMESPACE_URI, GET_BASE_NAME, GET_PREFIX] {
@@ -692,6 +696,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
         c.ok(s.is_null(), s as u64)?;
     }
     release(fragment);
+    section("creation: text");
     let text = create(c, doc, CREATE_TEXT_NODE, "a < b")?;
     get_bstr(c, text, GET_NODE_NAME, "#text")?;
     xml_is(c, text, "a &lt; b")?;
@@ -715,12 +720,12 @@ fn attributes(c: &mut Checks) -> Result<(), u32> {
     let mut s: Bstr = null_mut();
     c.hr(call!(el, GET_NAMESPACE_URI, fn(*mut Bstr) -> HResult, &mut s), S_FALSE)?;
     xml_is(c, el, "<prefix:name xmlns:prefix=\"uri\"/>")?;
-    c.hr(set_attribute(el, "xmlns:prefix", "uri2"), E_FAIL)?;
+    c.code(set_attribute(el, "xmlns:prefix", "uri2"), E_FAIL)?;
     xml_is(c, el, "<prefix:name xmlns:prefix=\"uri\"/>")?;
     let name = Wide::new("xmlns:prefix");
     let mut attr: Obj = null_mut();
     c.hr(call!(el, GET_ATTRIBUTE_NODE, fn(Bstr, *mut Obj) -> HResult, name.0, &mut attr), S_OK)?;
-    c.hr(put_text(attr, "uri3"), E_FAIL)?;
+    c.code(put_text(attr, "uri3"), E_FAIL)?;
     release(attr);
     c.hr(set_attribute(el, "attr1", "value"), S_OK)?;
     let name = Wide::new("attr1");
@@ -788,13 +793,15 @@ fn attributes(c: &mut Checks) -> Result<(), u32> {
     release(el);
 
     // put_nodeValue.
-    c.hr(put_node_value(doc, "one two three"), E_FAIL)?;
+    // A document, a fragment, an element: E_INVALIDARG (MSXML 6 on
+    // Windows; Wine's msxml3 tests expect E_FAIL).
+    c.code(put_node_value(doc, "one two three"), E_INVALIDARG)?;
     let (hr, fragment) = create_node(doc, NODE_DOCUMENT_FRAGMENT, Some("test"), None);
     c.hr(hr, S_OK)?;
-    c.hr(put_node_value(fragment, "one two three"), E_FAIL)?;
+    c.code(put_node_value(fragment, "one two three"), E_INVALIDARG)?;
     release(fragment);
     let el = create(c, doc, CREATE_ELEMENT, "test")?;
-    c.hr(put_node_value(el, "one two three"), E_FAIL)?;
+    c.code(put_node_value(el, "one two three"), E_INVALIDARG)?;
     release(el);
     let text = create(c, doc, CREATE_TEXT_NODE, "")?;
     c.hr(put_node_value(text, "Jeeves & Wooster"), S_OK)?;
@@ -827,7 +834,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     c.hr(hr, S_OK)?;
     let mut out = UNTOUCHED;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, null_mut(), &mut out);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let attr = create(c, doc, CREATE_ATTRIBUTE, "attr")?;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, &mut out);
@@ -839,15 +846,31 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     release(attr2);
     out = UNTOUCHED;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, &mut out);
-    c.hr(hr, E_FAIL)?;
-    c.ok(out == UNTOUCHED, out as u64)?;
+    c.code(hr, E_FAIL)?;
+    // Windows writes a pointer here though it fails (Wine's msxml3 tests
+    // expect the output left alone); which object it is is not measured
+    // yet, so it is not released.
+    info_hr(
+        "setAttributeNode(attribute already set) output written",
+        u32::from(out != UNTOUCHED) as HResult,
+    );
+    if out != UNTOUCHED && !out.is_null() {
+        info_hr(
+            "setAttributeNode(attribute already set) output is the attribute",
+            u32::from(out == attr) as HResult,
+        );
+        info_hr(
+            "setAttributeNode(attribute already set) output is the attribute's object",
+            u32::from(identity(out) == identity(attr)) as HResult,
+        );
+    }
     release(el);
     let doc2 = new_doc(c)?;
     let (hr, _) = load_xml(doc2, COMPLETE4);
     c.hr(hr, S_OK)?;
     let (hr, el2) = get_obj(doc2, GET_DOCUMENT_ELEMENT);
     c.hr(hr, S_OK)?;
-    c.hr(call!(el2, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, null_mut()), E_FAIL)?;
+    c.code(call!(el2, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, null_mut()), E_FAIL)?;
     release(el2);
     release(doc2);
     release(attr);
@@ -879,7 +902,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     let hr = call!(el, REMOVE_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, other, null_mut());
     info_hr("removeAttributeNode(not the element's)", hr);
     let hr = call!(el, REMOVE_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, null_mut(), null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     release(other);
     release(attr);
     release(el);
@@ -923,7 +946,7 @@ fn named_map(c: &mut Checks) -> Result<(), u32> {
         call!(map, MAP_REMOVE_NAMED_ITEM, fn(Bstr, *mut Obj) -> HResult, n, out)
     };
     let mut out = UNTOUCHED;
-    c.hr(remove_named(None, &mut out), E_INVALIDARG)?;
+    c.code(remove_named(None, &mut out), E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let vr = Wide::new("vr");
     let mut removed: Obj = null_mut();
@@ -951,9 +974,9 @@ fn named_map(c: &mut Checks) -> Result<(), u32> {
             out
         )
     };
-    c.hr(remove_qualified(None, null_mut()), E_INVALIDARG)?;
+    c.code(remove_qualified(None, null_mut()), E_INVALIDARG)?;
     out = UNTOUCHED;
-    c.hr(remove_qualified(None, &mut out), E_INVALIDARG)?;
+    c.code(remove_qualified(None, &mut out), E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     c.hr(remove_qualified(Some("id"), null_mut()), S_OK)?;
     c.hr(remove_qualified(Some("id"), null_mut()), S_FALSE)?;
@@ -1069,10 +1092,10 @@ fn more(c: &mut Checks) -> Result<(), u32> {
         null_mut(),
         &mut list
     );
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     let hr =
         call!(doc, DOC_GET_ELEMENTS_BY_TAG_NAME, fn(Bstr, *mut Obj) -> HResult, star.0, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     for (name, want) in [("*", 6), ("bs", 1), ("ba", 1), ("x", 0)] {
         let n = Wide::new(name);
         let hr =
@@ -1240,14 +1263,32 @@ fn save(c: &mut Checks) -> Result<(), u32> {
 }
 
 pub fn mutation(c: &mut Checks, doc: Obj) -> Result<(), u32> {
+    section("removeChild");
     remove_child(c, doc)?;
+    section("replaceChild");
     replace_child(c, doc)?;
+    section("insertBefore");
     insert(c)?;
+    section("appendChild");
     append_child(c)?;
+    section("creation");
     creation(c)?;
+    section("attributes");
     attributes(c)?;
+    section("attribute nodes");
     attribute_nodes(c)?;
+    section("named map");
     named_map(c)?;
+    section("more");
     more(c)?;
+    section("save");
     save(c)
+}
+
+/// Names the part of the test that starts and whether the process's
+/// heaps are still valid, so a heap corruption (Windows' heap reports it
+/// later, at some free) is placed by the first part that ends with one.
+pub fn section(name: &str) {
+    let state: &[u8] = if heaps_valid() { b" (heaps valid)" } else { b" (heaps CORRUPT)" };
+    Line::new().s(NAME.as_bytes()).s(b": section ").s(name.as_bytes()).s(state).s(b"\r\n").print();
 }

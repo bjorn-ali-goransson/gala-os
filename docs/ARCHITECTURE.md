@@ -39,6 +39,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/mm/vmap.rs        the mapped-allocation window for multi-page allocations
   src/mm/mod.rs         global frame allocator instance
   src/handover/         kernel handover (R9): record format, ELF loading, what is carried
+  src/hotswap.rs        hot swap of DLLs into a resumed snapshot (SN 1d; never a real run)
   src/trust/            chain of trust (R8): manifest, SHA-256
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/fs/               ramfs (C:), USTAR boot modules, the persistence log
@@ -4762,7 +4763,9 @@ built for x64 and x86.
   orchestration changes the AppX manifests it merges): the create
   methods and createNode (a type by number or name; the document,
   document types, entities and notations E_INVALIDARG; a NULL name
-  E_INVALIDARG, an empty one E_FAIL), document fragments (node type 11),
+  E_INVALIDARG, an empty one E_FAIL; a refusal sets the output to NULL,
+  measured for createElement's NULL name, where Wine's msxml3 tests
+  expect it left alone), document fragments (node type 11),
   insertBefore, appendChild, removeChild, replaceChild,
   putref_documentElement, setAttribute, removeAttribute,
   setAttributeNode, removeAttributeNode, the attribute map's
@@ -4772,13 +4775,17 @@ built for x64 and x86.
   (UTF-8, or UTF-16 LE with a BOM when the declaration names UTF-16;
   streams recorded, E_NOTIMPL). The rules: a NULL node is E_INVALIDARG
   with the output left alone; a reference or old node that is not a
-  child E_INVALIDARG with the output NULL; a document node
-  E_INVALIDARG (measured on Windows Server 2025; Wine's tests expect
-  E_FAIL); the parent or its ancestor, a kind the parent cannot hold (a document takes one
-  element, comments and processing instructions; an attribute text
-  only; text, comments and processing instructions nothing) E_FAIL; an
-  attribute on an element already E_FAIL; a namespace declaration
-  cannot be changed in place (E_FAIL). The node returned is the object
+  child E_INVALIDARG with the output NULL; the parent or its ancestor
+  E_FAIL (checked first: a document under itself too); a document
+  node anywhere else and a kind the parent cannot hold (a document
+  takes elements, comments and processing instructions; an attribute
+  text only; text, comments and processing instructions nothing)
+  E_INVALIDARG, the output NULL (MSXML 6 measured on Windows Server
+  2025; Wine's msxml3 tests expect E_FAIL); a document's second element
+  E_FAIL; an attribute on an element already E_FAIL; a namespace declaration
+  cannot be changed in place (E_FAIL); put_nodeValue on a document, an
+  element or a fragment is E_INVALIDARG (MSXML 6 measured on Windows;
+  Wine's msxml3 tests expect E_FAIL). The node returned is the object
   passed (the same pointer). A fragment inserted gives its children and
   is left empty. Text inserted into an attribute adds to its value (an
   attribute has no child nodes in gala's tree: replaceChild and
@@ -14836,8 +14843,149 @@ programs kept running (ROADMAP R8, R9; PROJECT_BRIEF).
   handover" below.
 - **A chain of trust for updates** ("Chain of trust" below): the
   running kernel takes only a next kernel listed in the signed manifest.
-- Function-level live patching (as Microsoft's Hotpatch) is not planned
-  unless a concrete need appears.
+- Function-level live patching (as Microsoft's Hotpatch) is not part of
+  live update. Its one form, the hot swap of gala's DLLs into a machine
+  resumed from a test snapshot ("Hot swapping DLLs into a resumed
+  machine" below), is a development tool whose runs are never real.
+
+### Hot swapping DLLs into a resumed machine (SN step 1d)
+
+A fix to one of gala's DLLs is tried in seconds from a machine snapshot
+taken before the failure, instead of a run from boot
+(`boot-test --from-snapshot <name> --hot-swap-unsafe <dll>[,<dll>...]`;
+WORKFLOW "Hot swapping DLLs into a snapshot (at your own risk)"). **It is
+never a real run**: the programs keep the state the old build made and
+run code of another build; every result is marked and none counts as a
+pass. Code: `xtask/src/hotswap.rs` (diff and plan, host side),
+`kernel/src/hotswap.rs` (applying it),
+`kernel/src/arch/x86_64/fwcfg.rs` (the channel).
+
+**Why not replace the image.** The resumed programs hold addresses into
+the DLL: vtables of COM objects point into its `.rdata`, callbacks and
+function pointers are stored, the import address table is bound, its
+statics hold state. The old image stays where it is; changed functions
+are redirected, new code reaches the old image's statics and imports.
+
+**Host side (xtask).**
+- Every user build writes lld's map beside the image (`/lldmap`:
+  `deps/<name>.map`, every input section with address, size and
+  symbols; the image itself is unchanged). An image made for a snapshot
+  keeps its DLL modules with their maps and Limine's config
+  (`<image>.modules/`, `snapshot::keep_modules`), and a snapshot takes
+  them along (`modules/`): the old build is what the snapshot's memory
+  holds, read from there.
+- **Chunks**: each input section is a chunk (a function: LLVM puts each
+  in a section of its own; a constant; a static), kinds from the output
+  section (code, read-only, writable, thread-local template, other:
+  unwind data and the linker's tables, ignored). A chunk is known by its
+  demangled name qualified by its object's crate (LLVM's `(.llvm.<n>)`
+  and a 32-bit build's `.llvm.<n>` suffixes dropped; a v0 name lld
+  leaves mangled, as a 32-bit build's `@n` decoration makes it, loses
+  its crate disambiguator, which features and profiles change; equal
+  names numbered), or, anonymous (`anon.*`, `_anon.*`: string literals,
+  vtables, jump tables), by a hash of its contents with references by
+  what they name.
+- **References normalized**: code is decoded (iced-x86, gala's own
+  builds only, never a Microsoft binary): rip-relative operands and
+  rel32 branches leaving the function are references; base relocations
+  are the absolute ones; a 64-bit build's jump tables (anonymous
+  `.rdata` of 32-bit entries relative to the table, every entry inside
+  the one function using it) are attached to their function; a 32-bit
+  build's jump tables sit after its function's code, found through the
+  relocated displacement that reads them (decoding stops there).
+  Comparison is of the bytes with every reference zeroed plus the
+  references by name: a function that moved is the same; one that
+  changed, or into which a changed function was inlined, differs.
+- **What changes**: changed and new functions are copied into a blob;
+  a function reading read-only data whose contents changed changes with
+  it (transitively); what the blob reaches that the old image has as it
+  is (unchanged functions, equal constants, statics by name, imports by
+  name, the headers) is bound to the old image, the rest is copied
+  (constants, new statics with their initial values, after a page
+  boundary).
+- **Refusals** (the plan is not made, the reason names the symbol): a
+  writable static whose size changed; anonymous writable data the new
+  code needs; a new import (the import table cannot grow); a changed
+  `.tls` template (offsets into it are immediates); code that does not
+  decode, or has a short branch out of its function; an old function
+  shorter than the 5-byte jump; identical code folding that differs
+  between the builds (one old function for names that now differ, or
+  the reverse); a reference into no chunk. The build check
+  (`snapshot::check_build_except`) still refuses any other difference:
+  only the named DLLs (64- and 32-bit), Limine's config (only those
+  lines' hashes may differ) and the signed manifest may change.
+
+**The plan** (xtask's `hotswap::encode`, the kernel's `hotswap::Plan`), little-endian: a
+32-byte header (`GALAHSWP`, version 1, image count, a nonce, total
+length, CRC-32 of the whole with that field 0), then per DLL a record:
+its length, machine (1 x64, 2 x86), the old build's TimeDateStamp and
+SizeOfImage (`/Brepro` makes the stamp a content hash), the guest path,
+the blob, its fixups (24 bytes: blob offset, anchor or none, target as
+an RVA of the old image or an offset in the blob, width, space), the
+entries (old RVA, old size, blob offset, name), the names, and the new
+build's file.
+
+**The channel.** The resumed QEMU gets the plan as fw_cfg file
+`opt/gala/hotswap` (device configuration, not migrated state) and, while
+still paused, an NMI to every CPU (`inject-nmi`), so the first thing the
+machine does is the NMI. `hotswap::on_nmi` (before the state dump's
+handler; port I/O and atomics only; fw_cfg read one CPU at a time, and
+probed only on a hypervisor with its "QEMU" signature) finds a plan
+whose nonce was not acted on, stops every thread on its way back to user
+mode (`thread::hold_from_nmi`: the handover's HOLD flag), and a CPU it
+took from user mode sends itself an interrupt, whose return path holds
+the thread before its next user instruction. From the resume on no user
+code runs until the swap is done or refused. The boot thread's
+once-a-second wait (as the state dump's second part) then runs
+`hotswap::run`.
+
+**Applying** (`run`): the plan is read and checked; threads are waited
+for (3 s) until each is held, blocked in a system call, suspended or not
+started (none runs user code, and none is busy in the kernel, so none
+holds a lock the swap needs), then the scheduler keeps user threads off
+the CPUs (a new thread's first entry to user mode does not pass the
+hold). Per
+DLL: the processes mapping the old build (image views by file name and
+machine, their headers' TimeDateStamp and SizeOfImage); **the stack
+check** (no thread of them has its instruction pointer inside a changed
+function past its entry, nor a value inside one from its stack pointer
+to the top of its stack region, 8 MiB at most: a conservative scan of
+every word, the 32-bit stack and CPU area for a 32-bit DLL); the file
+replaced by the new build (`file::write`; in-use layouts are built
+whole first, so later loads get the new build and running views keep
+theirs); per process the blob allocated within rel32 reach of the image
+(x64; for x86 below 2 GiB, at a 64 KiB boundary: the allocation
+granularity), bound (`bind`: a rel32 out of reach or a 32-bit address
+above 4 GiB fails), written, its code made
+PAGE_EXECUTE_READ; each old entry made `jmp rel32` to its copy, written
+copy-on-write (`vm::protect` to execute-read-write, which an image page
+takes as copy-on-write, then back), so the image's shared pages never
+change. Any failure undoes all of it (entries restored, blobs freed, the
+file put back). Then the threads are let go.
+
+**Invariants**: no user instruction runs between the resume and the end
+of `run`; an old entry is a jump only in a process whose blob is mapped
+and bound; the shared pages of an image layout are never written; a
+plan is acted on once (its nonce).
+
+**Marked**: `hotswap:` log lines (`NOT A REAL RUN`, per process and
+function, `applied:` or `refused:`), the event `"ev":"hotswap"` whatever
+the mask, the ledger entry `hotswap`, a line in every later crash report
+and state dump (`hotswap::Mark`), triage's second line; xtask's
+banner, verdict `hot-swapped (not a real run)` and exit status 3.
+
+**Not checked** (the user's risk, WORKFLOW says so): logic that depends
+on state the old code built and the new code reads differently;
+invariants of data whose layout did not change (a field's meaning, an
+order of fields of the same size); stored pointers to the old copy of
+changed read-only data; RVAs that new code adds to the image base as
+plain numbers (no relocation shows them; the summary notes every copied
+function that takes `__ImageBase`). **Limits**: no unwind data is registered for the
+blob (an exception unwinding through new code, or a stack walk, does
+not see it); new exports are not in the running image's export table;
+`.tls` cannot change; a scenario needs the boot thread's wait (`run=`);
+a state dump asked for while a swap runs is not made; x64 and x86 only
+(fw_cfg is not mapped on aarch64).
 
 ### Kernel handover
 
