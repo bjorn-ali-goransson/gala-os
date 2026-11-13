@@ -1321,6 +1321,7 @@ fn run() -> Result<(), u32> {
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
     mutation::mutation(&mut c, doc)?;
+    Line::new().s(NAME.as_bytes()).s(b": section free-threaded\r\n").print();
     free_threaded(&mut c)?;
     release(doc);
     // SAFETY: plain call.

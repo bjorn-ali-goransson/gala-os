@@ -1236,14 +1236,30 @@ fn save(c: &mut Checks) -> Result<(), u32> {
 }
 
 pub fn mutation(c: &mut Checks, doc: Obj) -> Result<(), u32> {
+    section("removeChild");
     remove_child(c, doc)?;
+    section("replaceChild");
     replace_child(c, doc)?;
+    section("insertBefore");
     insert(c)?;
+    section("appendChild");
     append_child(c)?;
+    section("creation");
     creation(c)?;
+    section("attributes");
     attributes(c)?;
+    section("attribute nodes");
     attribute_nodes(c)?;
+    section("named map");
     named_map(c)?;
+    section("more");
     more(c)?;
+    section("save");
     save(c)
+}
+
+/// Names the part of the test that starts, so a crash in it (a heap
+/// corruption reported by Windows' heap, say) is placed by the last line.
+fn section(name: &str) {
+    Line::new().s(NAME.as_bytes()).s(b": section ").s(name.as_bytes()).s(b"\r\n").print();
 }
