@@ -698,6 +698,11 @@ cargo xtask hotswap-diff old/kernel old/kernel.map new/kernel new/kernel.map
 XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as changed
 ```
 
+- **Measured**: on `office_install_local` saved at `process
+  integrator.exe (pid` (1755 s in), a one-line change to a kernel
+  function is diffed, swapped (the other CPU stopped for 14 ms) and
+  reaches the install's end in 19 s of run time (about a minute with
+  the build and the resume).
 - **What happens**: xtask prints the banner, then per DLL (and its
   32-bit twin, if that changed too) and for the kernel the functions it
   patches, the new functions and the data it copies; the guest, at the

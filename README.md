@@ -311,6 +311,10 @@ cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxm
 cargo xtask hotswap-diff old.dll old.map new.dll new.map
 ```
 
+On the Office install, a kernel fix tried this way reaches the
+install's end in about 20 seconds of run time after the resume, where
+the run from boot needs half an hour.
+
 xtask compares the snapshot's build with the new one function by
 function and patches only what changed: the old code stays where it is
 (running programs and the kernel's own data hold addresses into it), the

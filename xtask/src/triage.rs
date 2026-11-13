@@ -215,8 +215,8 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
     if !swapped.is_empty() {
         writeln!(
             o,
-            "triage: HOT-SWAPPED, NOT A REAL RUN (DLLs of another build spliced into running \
-             programs; at your own risk): {}",
+            "triage: HOT-SWAPPED, NOT A REAL RUN (code of another build, DLLs or the kernel, \
+             spliced into the running machine; at your own risk): {}",
             swapped.join("; ")
         )
         .ok();

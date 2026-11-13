@@ -4293,6 +4293,14 @@ heap whose layout changed (only statics' sizes are compared), state the
 old code built that the new code reads differently. Limits: no symbols
 for new kernel code, one kernel swap per boot, the dev build (a release
 kernel's 16 codegen units see unrelated changes), `run=` scenarios.
+Shown on the Office install (`office_install_local`, TCG): saved at
+`process integrator.exe (pid` (1755 s in; 116 MiB of state, the 7.7 GB
+disk), resumed with `nt::process::finish`'s exit line changed: xtask
+patched that one function (and its new string); the guest scanned 35
+kernel stacks and 6 interrupt stacks with the other CPU stopped for 14
+ms, and every later exit line came from the new code, the install
+reaching its end (msxml6's replaceChild, ROADMAP OF) in 19 s of run
+time, where the run from boot needs 29 minutes to get there.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private
