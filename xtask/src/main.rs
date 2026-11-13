@@ -3810,6 +3810,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_hardlink_test", "ntdll.dll", "Windows/System32"),
     ("wow64_hardlink_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_hardlink_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // The thread pool's family (user/threadpool_test).
+    ("threadpool_test", "ntdll.dll", "Windows/System32"),
+    ("threadpool_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "wow64.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_threadpool_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wofutil_test", "ntdll.dll", "Windows/System32"),
     ("wofutil_test", "kernel32.dll", "Windows/System32"),
     ("wofutil_test", "wofutil.dll", "Windows/System32"),
@@ -4061,6 +4068,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "hardlink_test",
+    "threadpool_test",
     "imagetrim_test",
     "writeback_test",
     "gdiplus_test",
@@ -4103,6 +4111,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_msi_test",
     "wow64_rstrtmgr_test",
     "wow64_hardlink_test",
+    "wow64_threadpool_test",
     "wow64_wintrust_test",
     "wow64_setupcab_test",
     "wow64_svc_test",
@@ -7650,6 +7659,22 @@ const SCENARIOS: &[Scenario] = &[
             "imagetrim_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // The thread pool's whole family as Click-to-Run's DLLs use it
+        // (ROADMAP OF; user/threadpool_test): private pools, callback
+        // environments, cleanup groups, work, timer, wait and I/O objects.
+        name: "threadpool_test",
+        cmdline: "qemu_exit run=threadpool_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["threadpool_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/threadpool_test built for x86).
+        name: "wow64_threadpool_test",
+        cmdline: "qemu_exit run=wow64_threadpool_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_threadpool_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/hardlink_test built for x86).
@@ -11823,6 +11848,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_uisettings_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_rstrtmgr_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_hardlink_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_threadpool_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

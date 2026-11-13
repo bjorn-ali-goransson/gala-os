@@ -243,6 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
+| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -1466,7 +1467,8 @@ need gala's.
      `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
      `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
      `_Gettnames` (recorded, NULL); the `_s` path, date and case
-     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     functions (`_splitpath_s`, `_strdate_s`, ...; the wide `_wcsupr_s`,
+     `_wcslwr_s`, `_wsplitpath_s` and `_wmakepath_s` are done); the
      multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
      `tools/import_survey.py` on their directories lists them), then those
      scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
@@ -1983,9 +1985,51 @@ need gala's.
      CloseThreadpoolCleanupGroup(Members); the ledger's missing exports,
      9 hits each). APPLYCONFIGURATION then fails ("Encountered fatal
      exception", ErrorCodeOnly 127), the service ends with 17002 at
-     1872 s and setup.exe with 17002 at 1913 s. Next: those thread pool
-     functions (test first, Wine's kernel32 and ntdll threadpool tests),
-     then what AppVIsvApi.dll does at registration.
+     1872 s and setup.exe with 17002 at 1913 s. Done: the thread pool's
+     whole family Click-to-Run's DLLs import (`tools/import_survey.py`
+     over the ClickToRun files of `i640.cab`, x64 and x86: private pools
+     and their limits, cleanup groups, and callback environments for
+     the work, timer and wait objects that 18, 13 and 14 of the files
+     use), with
+     I/O objects, the instance functions and the stack information
+     (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
+     threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
+     Next: the values the tests print as `info` until Windows' answer is
+     read from the `windows` job's report: 32-bit
+     SetThreadpoolStackInformation's refusal of sizes of 1 (its error and
+     rule), whether a version 9999 environment's priority is read, a
+     wait's handles once it fired, and `_wmakepath_s`'s buffer after
+     ERANGE (gala writes "\0:d\\" and leaves the rest).
+     With it AppVIsvApi.dll loads and OISVAPI::Initialize fails
+     instead in the orchestration's component loader (`componentloader.h
+     : 216`, 0x7f; ErrorCode 30175, APPLYCONFIGURATION 127, the service
+     17002 at about 1845 s): the App-V DLLs it loads import, statically,
+     the 64-bit kernel32's Wow64Disable/RevertWow64FsRedirection (the
+     ledger's missing exports), DosDateTimeToFileTime,
+     PathCchCanonicalize and the UCRT's `_wcsupr_s`, `_wcslwr_s`,
+     `_wsplitpath_s`, `_wmakepath_s`, `_resetstkoflw` and
+     `_get_heap_handle` (`tools/import_survey.py` on them). Done, test
+     first (`office_api_test`'s `appv.rs`, `ucrt_test`, x64 and x86):
+     every static import of the App-V DLLs now resolves (NtOpenJobObject
+     only as a stub). With them the orchestration initializes and
+     `Orchestration::UpdateAppV` merges Office's AppX manifests
+     (`C:\Program Files\Microsoft Office\PackageManifests`): loading
+     `AppXManifest.common.16.xml` (2.1 MB, UTF-16 LE with a BOM) fails
+     (`TryRefreshMergedManifest`: `XmlDocument loadXML failed , Error:0x1`,
+     msxml's S_FALSE), and APPLYCONFIGURATION ends with 30088 (the
+     service 17002 at about 1816 s). gala_xml parses that file as read
+     from the disk (a host check), so the string the service hands
+     loadXML differs; msxml6 now records each parse error's reason and
+     place in the ledger (ARCHITECTURE "msxml6"): the string fails at
+     line 1, column 18 with `undeclared namespace prefix 'appv'` (the
+     service 17002 at about 1874 s). A one-line string using `appv:`
+     without declaring it is what reloading a node's `xml` gives: gala's
+     msxml6 serializes an element subtree with its own attributes only,
+     not the namespace declarations it inherits (`dom.rs` `Tree::xml`).
+     Next: what MSXML 6's `xml` property emits for a subtree whose
+     prefixes are declared on an ancestor (Wine's msxml3 domdoc tests,
+     or measured on Windows), test first in `msxml_test`, then the
+     merge again.
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
@@ -4055,6 +4099,82 @@ system image and its kernel and every connection and session goes on.
 handover", "Versions and negotiation", "Sockets across a handover";
 WORKFLOW "Debugging a kernel handover (R9)".
 
+### SN. Snapshots: whole machines, then single programs
+
+**Goal**: save a running state and start from it again, as often as
+wanted. For testing, a long scenario is reached once (the Office
+install's 30 minutes to App-V's manifest merge), and each try at a fix
+starts from there in seconds; one snapshot can be restored several
+times to branch (try two fixes from the same state). For users,
+`gala snapshot` saves a program and `gala restore` brings it back,
+on the same machine or, exported, on another.
+
+**Step 1: whole-machine snapshots in xtask.** QEMU saves and restores a
+whole VM (memory, devices, a copy-on-write disk layer); no kernel
+change. xtask saves when a given ledger or serial line appears
+(`--snapshot-at <pattern> --snapshot-name <name>`) and starts later
+runs from it (`--from-snapshot <name>`), each run on its own disk
+layer so branches do not see each other. Limits: the guest clock jumps
+on restore (the kernel re-reads time as after a host stall), and
+connections to the host and the internet are gone (local sources are
+fine). A restored run is not a replay: threads may interleave
+differently (R5 is the deterministic tool). Snapshots speed up
+iteration and never replace a full run: CI keeps running every
+scenario from boot. Snapshots of the Office install hold several GB,
+kept under `target/snapshots`, with their size and the build they came
+from (a snapshot of another build is refused with the reason).
+
+**Step 2: single programs, inside gala.** A program snapshot is R9's
+handover state cut down to one process tree: its address space (private
+pages, page-file slots read back, image and file views by name and
+digest), threads with their contexts and the calls they are blocked in
+(reissued on restore, as after a handover), handles and the objects
+behind them, its token, windows, console, registry views and sockets.
+What cannot be carried makes the snapshot refuse with the reason, as a
+handover does; R9's list of what is not carried yet is the list to
+work through here too. A program's files are captured as references
+plus digests: restore refuses, naming the file, if an image or mapped
+file differs, and a snapshot can include the files it has open for
+writing.
+
+**Step 3: the command line.**
+- `gala snapshot <pid|name> [--name <n>] [--stop]`: freezes the
+  process tree at a quiescent point, writes the snapshot, then lets it
+  run on (or ends it with `--stop`).
+- `gala snapshots`: lists them (program, time, size, build).
+- `gala restore <name>`: starts the program from the snapshot as a new
+  process tree (new process and thread ids; handles and window handles
+  are remapped as a handover remaps them).
+- `gala snapshot delete <name>`.
+- Restoring the same snapshot twice runs two independent copies (the
+  branch).
+
+**Step 4: export to another machine.**
+- `gala snapshot export <name> <file>`: one file, versioned like R9's
+  state format, holding the snapshot, the images and files it needs (or
+  only their names and digests with `--refs`), and a manifest naming
+  the gala build, the program's identity and what it held (sockets,
+  windows) that the target must reconnect.
+- `gala snapshot import <file>`: checks the format version, the
+  digests and a signature (R8's keys).
+- On the new machine, connections to the outside are closed with the
+  error a lost network gives, and the program sees its windows on the
+  new desktop.
+- Snapshots hold secrets (a program's memory, its token's identity), so
+  an export is encrypted to its target and restoring as another user
+  is refused (SECURITY).
+
+**Tests**: scenarios `snapshot_machine` (save at a line, restore twice,
+both runs reach the end), `snapshot_program` (a test program counts,
+is snapshotted, killed, restored, goes on counting; a second restore
+runs beside it), `snapshot_refused` (a program holding what cannot be
+carried) and `snapshot_export` (export, import on a fresh boot,
+restore).
+
+**Design**: builds on ARCHITECTURE "Kernel handover", "Programs across
+a handover" and "Versions and negotiation"; the design goes in its own
+ARCHITECTURE section when step 2 starts.
+
 ### OT. OpenTelemetry as the telemetry model
 
 **Goal**: one data model (traces, spans, logs, metrics sharing trace
@@ -4562,8 +4682,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     the XSTATE area; SEH's nested exceptions and collided unwinds.
   - Waits: wait-all satisfied only when all objects are signaled at its
     re-check; an atomic SignalObjectAndWait; the thread pool's
-    WaitFor*Callbacks polls (Sleep(1)), its callback environments and
-    freeing of closed objects.
+    persistent callbacks (TP_CALLBACK_ENVIRON's Persistent, recorded)
+    and ntdll's Tp* exports (gala's pool is kernel32's).
   - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
     security, asynchronous writes that pend.
   - Access checks for processes, threads, pipes, devices and traversal;

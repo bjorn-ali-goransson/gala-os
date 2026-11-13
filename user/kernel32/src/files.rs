@@ -885,6 +885,27 @@ pub extern "system" fn Wow64EnableWow64FsRedirection(enable: u8) -> u8 {
     if status != 0 { fail(status, 0) } else { 1 }
 }
 
+/// Wow64DisableWow64FsRedirection in a 64-bit process: there is no
+/// redirector; FALSE with ERROR_INVALID_FUNCTION, as ntdll's
+/// RtlWow64EnableFsRedirectionEx answers outside WOW64
+/// (STATUS_NOT_IMPLEMENTED; Wine's contract, `office_api_test`'s info
+/// line records Windows'). App-V's DLLs import it in both builds.
+#[cfg(not(target_arch = "x86"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64DisableWow64FsRedirection(_old: *mut usize) -> Bool {
+    fail_with(ERROR_INVALID_FUNCTION, FALSE)
+}
+
+/// Wow64RevertWow64FsRedirection in a 64-bit process: as Disable.
+#[cfg(not(target_arch = "x86"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64RevertWow64FsRedirection(_old: usize) -> Bool {
+    fail_with(ERROR_INVALID_FUNCTION, FALSE)
+}
+
+#[cfg(not(target_arch = "x86"))]
+const ERROR_INVALID_FUNCTION: u32 = 1;
+
 #[cfg_attr(
     target_arch = "x86",
     link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")

@@ -349,6 +349,29 @@ ucrt_imports! {
         count: usize,
     ) -> i32;
     fn strerror_s(buf: *mut u8, size: usize, errnum: i32) -> i32;
+    fn _wcsupr_s(s: *mut u16, size: usize) -> i32;
+    fn _wcslwr_s(s: *mut u16, size: usize) -> i32;
+    fn _wsplitpath_s(
+        path: *const u16,
+        drive: *mut u16,
+        drive_size: usize,
+        dir: *mut u16,
+        dir_size: usize,
+        fname: *mut u16,
+        fname_size: usize,
+        ext: *mut u16,
+        ext_size: usize,
+    ) -> i32;
+    fn _wmakepath_s(
+        path: *mut u16,
+        size: usize,
+        drive: *const u16,
+        dir: *const u16,
+        fname: *const u16,
+        ext: *const u16,
+    ) -> i32;
+    fn _resetstkoflw() -> i32;
+    fn _get_heap_handle() -> usize;
 
     // Locale.
     fn setlocale(category: i32, locale: *const u8) -> *const u8;
@@ -477,6 +500,19 @@ impl Line {
     fn print(self) {
         print(&self.buf[..self.n]);
     }
+}
+
+/// A value printed, not checked (`<name>: info <what> <hex>`): one not
+/// measured on Windows yet.
+fn info(what: &str, v: u64) {
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": info ")
+        .s(what.as_bytes())
+        .s(b" ")
+        .hex(v)
+        .s(b"\r\n")
+        .print();
 }
 
 struct Checks(u32);
@@ -1180,6 +1216,158 @@ fn strings(c: &mut Checks) -> Result<(), u32> {
         let mut msg = [0u8; 64];
         c.eq(strerror_s(msg.as_mut_ptr(), 64, ENOENT).into(), 0)?;
         c.str(msg.as_ptr(), b"No such file or directory")?;
+    }
+    case_and_paths(c)
+}
+
+/// `_wcsupr_s`/`_wcslwr_s` (Wine's msvcrt string.c test__wcsupr_s and
+/// test__wcslwr_s), `_wmakepath_s` (dir.c test_makepath_s: the drive's
+/// letter and a colon, a backslash after the directory, a dot before the
+/// extension; ERANGE, the buffer's contents then printed, not checked:
+/// Windows' differ from Wine's test), `_wsplitpath_s` (documented: the drive with
+/// its colon, the directory with its last separator, the extension from
+/// the last dot; a buffer too small empties every one, ERANGE),
+/// `_resetstkoflw` (nonzero) and `_get_heap_handle` (a heap handle).
+fn case_and_paths(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: valid arguments throughout (the invalid ones are what the
+    // functions check, with our handler installed).
+    unsafe {
+        let mixed = w::<16>("MiXeDlowerUPPER");
+        let mut buf = [0u16; 32];
+        let b = buf.as_mut_ptr();
+        *_errno() = 0;
+        c.eq(_wcsupr_s(null_mut(), 0).into(), EINVAL.into())?;
+        c.eq((*_errno()).into(), EINVAL.into())?;
+        buf[0] = u16::from(b'x');
+        c.eq(_wcsupr_s(b, 0).into(), EINVAL.into())?;
+        c.eq(buf[0].into(), 0)?;
+        c.eq(_wcsupr_s(b, 1).into(), 0)?;
+        buf[0] = u16::from(b'x');
+        c.eq(_wcsupr_s(b, 1).into(), EINVAL.into())?;
+        c.eq(buf[0].into(), 0)?;
+        buf[..16].copy_from_slice(&mixed);
+        c.eq(_wcsupr_s(b, 16).into(), 0)?;
+        c.wstr(b, b"MIXEDLOWERUPPER")?;
+        buf[..16].copy_from_slice(&mixed);
+        c.eq(_wcsupr_s(b, 15).into(), EINVAL.into())?;
+        c.eq(buf[0].into(), 0)?;
+        buf[..16].copy_from_slice(&mixed);
+        c.eq(_wcslwr_s(b, 32).into(), 0)?;
+        c.wstr(b, b"mixedlowerupper")?;
+        c.eq(_wcslwr_s(null_mut(), 32).into(), EINVAL.into())?;
+
+        // _wmakepath_s.
+        let (drive, dir, file, ext) =
+            (w::<4>("c:\\"), w::<4>("dir"), w::<8>("file"), w::<4>("ext"));
+        c.eq(
+            _wmakepath_s(b, 32, drive.as_ptr(), dir.as_ptr(), file.as_ptr(), ext.as_ptr()).into(),
+            0,
+        )?;
+        c.wstr(b, b"c:dir\\file.ext")?;
+        let (dir2, ext2) = (w::<8>("\\dir\\"), w::<8>(".ext"));
+        c.eq(_wmakepath_s(b, 32, null(), dir2.as_ptr(), null(), ext2.as_ptr()).into(), 0)?;
+        c.wstr(b, b"\\dir\\.ext")?;
+        c.eq(_wmakepath_s(b, 32, null(), null(), null(), null()).into(), 0)?;
+        c.wstr(b, b"")?;
+        c.eq(_wmakepath_s(null_mut(), 0, null(), null(), null(), null()).into(), EINVAL.into())?;
+        c.eq(_wmakepath_s(b, 0, null(), null(), null(), null()).into(), EINVAL.into())?;
+        // "c:", "d\\", "file", "ext" into 5 characters: ERANGE. Not
+        // measured: what the buffer holds then (Wine's test_makepath_s
+        // expects "\0:d\\" and the rest untouched; Windows differs, and its
+        // check reported only the second character, ':'): printed.
+        buf = [u16::from(b'X'); 32];
+        let d = w::<4>("d\\");
+        c.eq(
+            _wmakepath_s(b, 5, drive.as_ptr(), d.as_ptr(), file.as_ptr(), ext.as_ptr()).into(),
+            ERANGE.into(),
+        )?;
+        c.eq((*_errno()).into(), ERANGE.into())?;
+        let units =
+            |at: usize| buf[at..at + 4].iter().rev().fold(0u64, |v, &u| v << 16 | u64::from(u));
+        info("_wmakepath_s ERANGE buffer[0..4]", units(0));
+        info("_wmakepath_s ERANGE buffer[4..8]", units(4));
+
+        // _wsplitpath_s.
+        let path = w::<32>("c:\\dir\\sub/file.name.ext");
+        let (mut dr, mut di, mut fname, mut ex) = ([7u16; 4], [7u16; 32], [7u16; 32], [7u16; 8]);
+        c.eq(
+            _wsplitpath_s(
+                path.as_ptr(),
+                dr.as_mut_ptr(),
+                4,
+                di.as_mut_ptr(),
+                32,
+                fname.as_mut_ptr(),
+                32,
+                ex.as_mut_ptr(),
+                8,
+            )
+            .into(),
+            0,
+        )?;
+        c.wstr(dr.as_ptr(), b"c:")?;
+        c.wstr(di.as_ptr(), b"\\dir\\sub/")?;
+        c.wstr(fname.as_ptr(), b"file.name")?;
+        c.wstr(ex.as_ptr(), b".ext")?;
+        let plain = w::<8>("file");
+        c.eq(
+            _wsplitpath_s(
+                plain.as_ptr(),
+                dr.as_mut_ptr(),
+                4,
+                null_mut(),
+                0,
+                fname.as_mut_ptr(),
+                32,
+                ex.as_mut_ptr(),
+                8,
+            )
+            .into(),
+            0,
+        )?;
+        c.wstr(dr.as_ptr(), b"")?;
+        c.wstr(fname.as_ptr(), b"file")?;
+        c.wstr(ex.as_ptr(), b"")?;
+        // An extension too long for its buffer: every buffer emptied.
+        c.eq(
+            _wsplitpath_s(
+                path.as_ptr(),
+                dr.as_mut_ptr(),
+                4,
+                di.as_mut_ptr(),
+                32,
+                fname.as_mut_ptr(),
+                32,
+                ex.as_mut_ptr(),
+                4,
+            )
+            .into(),
+            ERANGE.into(),
+        )?;
+        c.ok(dr[0] == 0 && di[0] == 0 && fname[0] == 0 && ex[0] == 0, u64::from(di[0]))?;
+        c.eq(
+            _wsplitpath_s(null(), dr.as_mut_ptr(), 4, null_mut(), 0, null_mut(), 0, null_mut(), 0)
+                .into(),
+            EINVAL.into(),
+        )?;
+        c.eq(
+            _wsplitpath_s(
+                path.as_ptr(),
+                dr.as_mut_ptr(),
+                0,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+            )
+            .into(),
+            EINVAL.into(),
+        )?;
+
+        c.ok(_resetstkoflw() != 0, 0)?;
+        c.ok(_get_heap_handle() != 0, 0)?;
     }
     Ok(())
 }
