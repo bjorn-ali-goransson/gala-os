@@ -1280,7 +1280,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 - **A resource** (a manifest: `manifest_test`): the test's build.rs
   writes a .res file (the documented compiled resource format) and
   passes it to the linker; lld-link converts it itself (its
-  /MANIFEST:EMBED would need Microsoft's mt.exe).
+  /MANIFEST:EMBED would need Microsoft's mt.exe). A WOW64 twin built
+  from the same source names the same script (`build =
+  "../<feature>_test/build.rs"` in its Cargo.toml: `wow64_msxml_test`'s
+  RT_HTML schema, read through a `res:` URL).
 
 ### Adding a function to gala's ntdll or kernel32
 

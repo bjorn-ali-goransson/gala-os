@@ -409,7 +409,25 @@ hit (scenario `ledger_test`).
   MSXML (msxml6): `msxml6.dll!parse error: <reason>` and
   `msxml6.dll!parse error at: <text>` (40 characters of the line around
   the error), "other", the line << 32 | the column as detail, for each
-  load or loadXML that fails (the program sees only S_FALSE).
+  load or loadXML that fails (the program sees only S_FALSE). Schemas
+  and validation ("other" unless named): `XMLSchemaCache60::add <ns>`
+  (the variant type as detail), `add(from URL) <url>`, each refusal
+  with its cause (`add(XSD not supported: <construct>`, unsupported;
+  `add(schema invalid: ...`, `add(unresolved: <what>`, `add(declared
+  twice: <name>`, `add(namespace is not the targetNamespace)`, `add(an
+  XDR schema ...)`), `validateOnLoad`, the collection's `validate`;
+  `IXMLDOMDocument2::putref_schemas`, `validate` and
+  `IXMLDOMDocument3::validateNode` (the error code as detail, 0 when
+  valid), `load: validated against the schema cache`; for each invalid
+  document `validation failed: <reason>` and `validation failed at:
+  <the node's path>` (the code as detail); `validation: not supported:
+  <what>` (unsupported: xsi:type, xsi:nil, a name no schema declares)
+  and `validation: schema default attribute values not added to the
+  tree` (unsupported; detail: how many); `load(res: URL)` for each
+  resource loaded. A value too long for the ledger's 64 characters keeps
+  its end after `..` (a namespace's last part). Each QueryInterface
+  msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache>
+  {<the whole IID>}`, "other", its first dword as detail.
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);
