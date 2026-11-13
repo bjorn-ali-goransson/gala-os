@@ -4827,8 +4827,25 @@ fn next_target_dir() -> PathBuf {
     target_dir().join("next")
 }
 
-/// Builds the `handover_next` kernel (R9 (d)) and returns its path.
+/// Builds the `handover_next` kernel (R9 (d)) and returns its path. The
+/// handover scenarios' images are made in parallel and share this one
+/// output, which `drop_debug_relocations` rewrites in place: the build
+/// runs once per profile and process, under a lock, and the others wait
+/// for it and take its path (two `objcopy`s on the same file at once
+/// failed the handover scenarios).
 fn build_next_kernel(release: bool) -> Result<PathBuf> {
+    static BUILT: std::sync::Mutex<[Option<PathBuf>; 2]> = std::sync::Mutex::new([None, None]);
+    let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let slot = &mut built[usize::from(release)];
+    if let Some(kernel) = slot {
+        return Ok(kernel.clone());
+    }
+    let kernel = build_next_kernel_unlocked(release)?;
+    *slot = Some(kernel.clone());
+    Ok(kernel)
+}
+
+fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
         .args(["--features", "handover_next", "--target-dir"])
