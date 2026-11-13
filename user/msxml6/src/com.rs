@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::dom::{Kind, NONE, Tree};
 
 mod mutate;
+mod xslt;
 use crate::{
     Bstr, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_IUNKNOWN, LEDGER_OTHER, LEDGER_UNSUPPORTED, S_FALSE, S_OK, VARIANT_FALSE, VARIANT_TRUE,
@@ -29,6 +30,7 @@ use crate::{
     VT_UNKNOWN, Variant, bstr, free_box, guid, not_implemented, put, record, text, try_box, xpath,
 };
 use mutate::*;
+use xslt::{transform_node, transform_node_to_object};
 
 type Obj = *mut c_void;
 
@@ -111,6 +113,9 @@ struct Doc {
     error: ParseError,
     /// The schema cache set (`schemas`; a reference held), or NULL.
     schemas: Obj,
+    /// Made as FreeThreadedDOMDocument60 (served as the rental document,
+    /// ROADMAP OF; an XSLT template takes only such a stylesheet).
+    free_threaded: bool,
 }
 
 impl Drop for Doc {
@@ -149,8 +154,9 @@ fn idx(this: Obj) -> u32 {
     node(this).idx
 }
 
-/// Makes a document (the class factory's CreateInstance).
-pub fn new_document(riid: *const Guid, out: *mut *mut c_void) -> HResult {
+/// Makes a document (the class factory's CreateInstance); `free_threaded`
+/// for FreeThreadedDOMDocument60.
+pub fn new_document(riid: *const Guid, out: *mut *mut c_void, free_threaded: bool) -> HResult {
     let d = Doc {
         obj: NodeObj {
             vtable: &DOC_VTABLE as *const VTable<84> as *const (),
@@ -170,6 +176,7 @@ pub fn new_document(riid: *const Guid, out: *mut *mut c_void) -> HResult {
         props: Vec::new(),
         error: ParseError::default(),
         schemas: core::ptr::null_mut(),
+        free_threaded,
     };
     give_document(d, riid, out)
 }
@@ -218,6 +225,7 @@ extern "system" fn clone_node(this: Obj, deep: i16, out: *mut Obj) -> HResult {
         props: d.props.clone(),
         error: ParseError::default(),
         schemas: core::ptr::null_mut(),
+        free_threaded: d.free_threaded,
     };
     give_document(copy, &IID_IXMLDOMNODE, out.cast())
 }
@@ -425,9 +433,7 @@ not_implemented! {
     put_node_typed_value(Variant) = b"IXMLDOMNode::put_nodeTypedValue";
     get_data_type(*mut Variant) = b"IXMLDOMNode::get_dataType";
     put_data_type(Bstr) = b"IXMLDOMNode::put_dataType";
-    transform_node(Obj, *mut Bstr) = b"IXMLDOMNode::transformNode";
     get_parsed(*mut i16) = b"IXMLDOMNode::get_parsed";
-    transform_node_to_object(Obj, Variant) = b"IXMLDOMNode::transformNodeToObject";
     get_doctype(*mut Obj) = b"IXMLDOMDocument::get_doctype";
     get_implementation(*mut Obj) = b"IXMLDOMDocument::get_implementation";
     create_entity_reference(Bstr, *mut Obj) = b"IXMLDOMDocument::createEntityReference";
@@ -1850,3 +1856,4 @@ static ERROR_VTABLE: VTable<14> = VTable([
 
 mod schema;
 pub use schema::new_cache;
+pub use xslt::new_template;

@@ -2077,10 +2077,8 @@ need gala's.
      groups; AppVFileSystemMetadata.dll): all of them compile and resolve
      with gala's subset (checked on the host against the files taken
      from Office's i640.cab), and what the subset lacks fails the add
-     loudly. Those DLLs also carry XSLT transforms (a namespace clean-up
-     run before validation, with a parameter, and an appv namespace
-     normalization using `msxsl:node-set` and the namespace axis): XSLT
-     (XSLTemplate60, transformNode) is not implemented yet.
+     loudly. Those DLLs also carry the XSLT transforms App-V runs before
+     validating (below).
      With the cache registered, ConfigurePackage failed at the same
      place with E_NOINTERFACE (17002 at about 1768 s): it creates the
      cache asking for an IID whose first dword is CLSID_XMLSchemaCache60's
@@ -2100,16 +2098,42 @@ need gala's.
      (no validate, validateNode or load-time validation in the ledger):
      the transform comes first, as the comment of App-V's clean-up XSLT
      says ("prior to using XSD for validation").
-     Next: XSLT, as far as App-V's transforms need it (XSLTemplate60,
-     IXSLTemplate::putref_stylesheet and createProcessor, IXSLProcessor's
-     input, addParameter, transform and output; the transforms' subset:
-     `xsl:template` match patterns and modes of apply-templates,
-     `choose`/`when`/`otherwise`, `copy`, `copy-of`, `element` and
-     `attribute` with attribute value templates, `value-of`, `param` and
-     `variable` (result tree fragments, `msxsl:node-set`), `output`;
-     XPath variables, and the namespace axis gala's XPath refuses), test
-     first in `msxml_test`, then the run shows whether the validation
-     passes on the transformed manifest. To measure on Windows
+     Done: XSLTemplate60 registered in both views and served
+     (IXSLTemplate, IXSLProcessor: input, output to a string, a
+     document or a stream, addParameter, setStartMode, transform) with
+     IXMLDOMNode's transformNode and transformNodeToObject, test first
+     (`msxml_test`'s `xslt`, x64 and x86: Wine's msxml3 XSLT tests and
+     transforms of this test's own shaped like App-V's; ARCHITECTURE
+     "msxml6"). The XSLT 1.0 subset is sized from App-V's own stylesheets
+     (RT_HTML resources: AppVManifest.dll's clean-up that keeps the
+     namespaces a parameter lists, the normalization of older appv
+     namespaces into the newest, shared with AppVPolicy.dll and
+     AppVFileSystemMetadata.dll, which reads IgnorableNamespaces'
+     prefixes through the namespace axis, and the alias step that
+     declares `appv` through `msxsl:node-set()`); what it lacks fails the
+     stylesheet with `XSLT not supported: <what>` in the ledger. With it
+     ConfigurePackage transforms the manifest three times (each into a
+     document, with 2 and 4 parameters), validates it against the
+     cache (valid), and then fails at `knownfolder.cpp : 64` with
+     0x80040154: it asks COM for CLSID_KnownFolderManager
+     ({4DF0C730-DF9D-4AE3-9153-AA6B82E9795A},
+     `ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x4df0c730), shell32's IKnownFolderManager, which gala neither
+     registers nor implements; APPLYCONFIGURATION (OfficeVirtRegistration)
+     ends with 30175, the service and setup.exe with 17002 at about 1820
+     s. The loop: snapshot at `process integrator.exe (pid`, a resume to
+     the failure in 37 s against about 1820 s from boot, the service's
+     log read from the resume's kept layer (`disk-files` reads it now).
+     Next: the Known Folder Manager, as far as App-V asks it
+     (CLSID_KnownFolderManager registered for shell32,
+     IKnownFolderManager: GetFolder, GetFolderByName and FindFolderFromPath
+     are the likely calls; IKnownFolder's GetPath and GetId), test first
+     against Windows' answers; then the run shows ConfigurePackage's next
+     step. Seen too, not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
+     and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
+     on Windows (`msxml_test`'s `info` lines): a string output's
+     declaration, the prefixes and declarations of the App-V-shaped
+     results, the prefix the alias step's elements get. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
