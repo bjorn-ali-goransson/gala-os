@@ -338,7 +338,7 @@ extern "system" fn node_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HR
         };
     if !ok {
         put(out, core::ptr::null_mut());
-        crate::record_iid("QueryInterface: no", &iid);
+        crate::record_iid("QI? node", &iid);
         return E_NOINTERFACE;
     }
     node(this).refs.fetch_add(1, Ordering::Relaxed);
@@ -1499,7 +1499,7 @@ extern "system" fn list_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HR
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    crate::record_iid("IXMLDOMNodeList::QueryInterface: no", &iid);
+    crate::record_iid("QI? list", &iid);
     E_NOINTERFACE
 }
 
@@ -1632,7 +1632,7 @@ extern "system" fn map_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HRe
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    crate::record_iid("IXMLDOMNamedNodeMap::QueryInterface: no", &iid);
+    crate::record_iid("QI? map", &iid);
     E_NOINTERFACE
 }
 
@@ -1769,7 +1769,7 @@ extern "system" fn error_query(this: Obj, riid: *const Guid, out: *mut Obj) -> H
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    crate::record_iid("IXMLDOMParseError::QueryInterface: no", &iid);
+    crate::record_iid("QI? error", &iid);
     E_NOINTERFACE
 }
 

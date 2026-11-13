@@ -117,7 +117,7 @@ extern "system" fn cache_query(this: Obj, riid: *const Guid, out: *mut Obj) -> H
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    crate::record_iid("XMLSchemaCache60::QueryInterface: no", &iid);
+    crate::record_iid("QI? cache", &iid);
     E_NOINTERFACE
 }
 
@@ -140,11 +140,20 @@ fn namespace(uri: Bstr) -> String {
     xsd::collapse(&text(uri).unwrap_or_default())
 }
 
-/// Records `<what> <namespace>` (as much as the ledger keeps).
+/// Records `<what> <value>`: the ledger keeps 64 characters of a
+/// name (`msxml6.dll!` included), so a long value keeps its end (where
+/// namespaces and paths differ), after `..`.
 fn record_ns(what: &str, ns: &str, kind: u32, detail: u64) {
     let mut s = String::from(what);
     s.push(' ');
-    s.push_str(ns);
+    let room = 64usize.saturating_sub(11 + s.len());
+    let n = ns.chars().count();
+    if n > room && room > 2 {
+        s.push_str("..");
+        s.extend(ns.chars().skip(n - (room - 2)));
+    } else {
+        s.push_str(ns);
+    }
     record(s.as_bytes(), kind, detail);
 }
 

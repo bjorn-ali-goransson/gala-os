@@ -423,7 +423,10 @@ hit (scenario `ledger_test`).
   <what>` (unsupported: xsi:type, xsi:nil, a name no schema declares)
   and `validation: schema default attribute values not added to the
   tree` (unsupported; detail: how many); `load(res: URL)` for each
-  resource loaded.
+  resource loaded. A value too long for the ledger's 64 characters keeps
+  its end after `..` (a namespace's last part). Each QueryInterface
+  msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache>
+  {<the whole IID>}`, "other", its first dword as detail.
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);

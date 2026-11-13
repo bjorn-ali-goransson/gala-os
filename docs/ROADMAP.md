@@ -2088,7 +2088,28 @@ need gala's.
      cache answers QueryInterface(CLSID_XMLSchemaCache60) with itself
      (App-V's code works on Windows, so MSXML answers it; probe issue
      #125 asks what Windows gives), and every QueryInterface miss of
-     msxml6 now records the whole IID. To measure on Windows
+     msxml6 now records the whole IID. With it ConfigurePackage creates
+     the cache, adds one schema (a document, not a URL; namespace
+     `http://schemas.microsoft.com/ap...`, cut by the ledger: the
+     ledger now keeps a long value's end) and sets it as a document's
+     `schemas`, then fails at `xmlutils.cpp : 672` with 0x80040154: it
+     asks COM for XSLTemplate60 ({88D96A08-...},
+     `ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a08); APPLYCONFIGURATION ends with 30175, the service and
+     setup.exe with 17002 at about 1678 s. No validation ran before it
+     (no validate, validateNode or load-time validation in the ledger):
+     the transform comes first, as the comment of App-V's clean-up XSLT
+     says ("prior to using XSD for validation").
+     Next: XSLT, as far as App-V's transforms need it (XSLTemplate60,
+     IXSLTemplate::putref_stylesheet and createProcessor, IXSLProcessor's
+     input, addParameter, transform and output; the transforms' subset:
+     `xsl:template` match patterns and modes of apply-templates,
+     `choose`/`when`/`otherwise`, `copy`, `copy-of`, `element` and
+     `attribute` with attribute value templates, `value-of`, `param` and
+     `variable` (result tree fragments, `msxsl:node-set`), `output`;
+     XPath variables, and the namespace axis gala's XPath refuses), test
+     first in `msxml_test`, then the run shows whether the validation
+     passes on the transformed manifest. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
