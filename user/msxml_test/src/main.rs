@@ -55,7 +55,11 @@
 //! - load of a file (with async off): S_OK and VARIANT_TRUE and the same
 //!   tree; a file that does not exist is S_FALSE and VARIANT_FALSE;
 //! - cloneNode (`clone`: Wine's test_cloneNode and MSXML's documentation;
-//!   setup.exe clones from its version descriptor).
+//!   setup.exe clones from its version descriptor);
+//! - the xml of an element whose prefixes or default namespace are
+//!   declared on its ancestors loads again, its names in their
+//!   namespaces (`inherited_namespaces`: Wine's namespace tests; the
+//!   exact texts are `info` lines).
 //!
 //! The same source builds `wow64_msxml_test`, the 32-bit (x86) program.
 //! Prints `msxml_test: ok` (`wow64_msxml_test: ok`), or `<name>: check N
@@ -1120,6 +1124,123 @@ fn clone(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     c.hr(hr, S_OK)
 }
 
+/// An `info` line with a string: what Windows answers, for the record
+/// (not checked; non-ASCII as `?`).
+fn info_text(what: &str, s: Bstr) {
+    let mut line = Line::new().s(NAME.as_bytes()).s(b": info ").s(what.as_bytes()).s(b" ");
+    let mut i = 0;
+    while !s.is_null() {
+        // SAFETY: a NUL-terminated string, read up to its NUL.
+        let u = unsafe { *s.add(i) };
+        if u == 0 {
+            break;
+        }
+        line = line.s(&[if (0x20..0x7f).contains(&u) { u as u8 } else { b'?' }]);
+        i += 1;
+    }
+    line.s(b"\r\n").print();
+}
+
+const NS_DOC: &str = "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:u=\"urn:u\">\
+<a:p a:k=\"v\"><a:c/></a:p><q/><t v=\"u:n\"/></r>";
+
+/// The xml of `node`.
+fn xml_of(c: &mut Checks, node: Obj) -> Result<Bstr, u32> {
+    let mut s: Bstr = null_mut();
+    c.hr(call!(node, GET_XML, fn(*mut Bstr) -> HResult, &mut s), S_OK)?;
+    c.ok(!s.is_null(), 0)?;
+    Ok(s)
+}
+
+/// `xml` (freed) loaded again: it should parse, its document element
+/// named `local` in namespace `ns`, with an attribute `attr` in `ns`
+/// when one is given.
+fn reload(
+    c: &mut Checks,
+    doc: Obj,
+    xml: Bstr,
+    local: &str,
+    ns: &str,
+    attr: Option<&str>,
+) -> Result<(), u32> {
+    let mut ok: i16 = 0x55;
+    let hr = call!(doc, LOAD_XML, fn(Bstr, *mut i16) -> HResult, xml, &mut ok);
+    // SAFETY: our BSTR.
+    unsafe { SysFreeString(xml) };
+    c.hr(hr, S_OK)?;
+    c.eq(ok as u16 as u64, VARIANT_TRUE as u16 as u64)?;
+    let (hr, el) = get_obj(doc, GET_DOCUMENT_ELEMENT);
+    c.hr(hr, S_OK)?;
+    get_bstr(c, el, GET_BASE_NAME, local)?;
+    get_bstr(c, el, GET_NAMESPACE_URI, ns)?;
+    if let Some(attr) = attr {
+        let (hr, map) = get_obj(el, GET_ATTRIBUTES);
+        c.hr(hr, S_OK)?;
+        let (name, uri) = (Wide::new(attr), Wide::new(ns));
+        let mut node: Obj = null_mut();
+        let hr = call!(
+            map,
+            MAP_GET_QUALIFIED_ITEM,
+            fn(Bstr, Bstr, *mut Obj) -> HResult,
+            name.0,
+            uri.0,
+            &mut node
+        );
+        release(map);
+        c.hr(hr, S_OK)?;
+        release(node);
+    }
+    release(el);
+    Ok(())
+}
+
+/// The xml of an element whose prefixes (or default namespace) are
+/// declared on its ancestors. MSXML serializes so that the text is
+/// well formed with its namespaces (Wine's domdoc.c, run on Windows: an
+/// element in a namespace no declaration in the text binds gets one on
+/// itself, `<elem2 xmlns="http://winehq.org/default"/>` for a child
+/// asked alone, and `<a><ns:b xmlns:ns="uri" .../></a>` once a's
+/// declaration is gone, while declarations already in the text are kept
+/// as they are; Click-to-Run's App-V orchestration loads such a node's
+/// xml again). Checked: the document element's xml is the source as is,
+/// and each subtree's xml loads again with its names in their
+/// namespaces. The exact text of each (whether declarations the subtree
+/// does not use come along: `u` for `<t v="u:n"/>`) is an `info` line
+/// until Windows' run settles it.
+fn inherited_namespaces(c: &mut Checks, doc: Obj) -> Result<(), u32> {
+    let (hr, ok) = load_xml(doc, NS_DOC);
+    c.hr(hr, S_OK)?;
+    c.eq(ok as u16 as u64, VARIANT_TRUE as u16 as u64)?;
+    let (hr, root) = get_obj(doc, GET_DOCUMENT_ELEMENT);
+    c.hr(hr, S_OK)?;
+    get_bstr(c, root, GET_XML, NS_DOC)?;
+    let (hr, p) = get_obj(root, GET_FIRST_CHILD);
+    c.hr(hr, S_OK)?;
+    release(root);
+    let (hr, inner) = get_obj(p, GET_FIRST_CHILD);
+    c.hr(hr, S_OK)?;
+    let (hr, q) = get_obj(p, GET_NEXT_SIBLING);
+    c.hr(hr, S_OK)?;
+    let (hr, t) = get_obj(q, GET_NEXT_SIBLING);
+    c.hr(hr, S_OK)?;
+    let p_xml = xml_of(c, p)?;
+    let inner_xml = xml_of(c, inner)?;
+    let q_xml = xml_of(c, q)?;
+    let t_xml = xml_of(c, t)?;
+    for node in [p, inner, q, t] {
+        release(node);
+    }
+    for (what, s) in
+        [("a:p xml", p_xml), ("a:c xml", inner_xml), ("q xml", q_xml), ("t xml", t_xml)]
+    {
+        info_text(what, s);
+    }
+    reload(c, doc, p_xml, "p", "urn:a", Some("k"))?;
+    reload(c, doc, inner_xml, "c", "urn:a", None)?;
+    reload(c, doc, q_xml, "q", "urn:d", None)?;
+    reload(c, doc, t_xml, "t", "urn:d", None)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     // SAFETY: plain call.
@@ -1144,6 +1265,7 @@ fn run() -> Result<(), u32> {
     white_space(&mut c, doc)?;
     file(&mut c, doc)?;
     clone(&mut c, doc)?;
+    inherited_namespaces(&mut c, doc)?;
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };

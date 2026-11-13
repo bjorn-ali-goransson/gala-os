@@ -727,6 +727,20 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
                     u64::from(e.line) << 32 | u64::from(e.column),
                 );
             }
+            // And the text there (the ledger keeps 64 characters of a
+            // name: 40 of the line, up to a few past the error), so the
+            // input a program built is seen without a debugger.
+            let mut near = String::new();
+            if near.try_reserve(16 + 4 * 40).is_ok() {
+                near.push_str("parse error at: ");
+                let from = (e.column as usize).saturating_sub(33);
+                near.extend(line_text.chars().skip(from).take(40));
+                crate::record(
+                    near.as_bytes(),
+                    crate::LEDGER_OTHER,
+                    u64::from(e.line) << 32 | u64::from(e.column),
+                );
+            }
             let mut reason = e.msg.clone();
             reason.push_str(".\r\n");
             d.error = ParseError {

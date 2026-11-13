@@ -2023,13 +2023,20 @@ need gala's.
      place in the ledger (ARCHITECTURE "msxml6"): the string fails at
      line 1, column 18 with `undeclared namespace prefix 'appv'` (the
      service 17002 at about 1874 s). A one-line string using `appv:`
-     without declaring it is what reloading a node's `xml` gives: gala's
-     msxml6 serializes an element subtree with its own attributes only,
-     not the namespace declarations it inherits (`dom.rs` `Tree::xml`).
-     Next: what MSXML 6's `xml` property emits for a subtree whose
-     prefixes are declared on an ancestor (Wine's msxml3 domdoc tests,
-     or measured on Windows), test first in `msxml_test`, then the
-     merge again.
+     without declaring it is what reloading a node's `xml` gave: gala's
+     msxml6 serialized an element subtree with its own attributes only,
+     not the namespace declarations it inherits. Done: `xml` declares
+     a prefix or default namespace an ancestor left out bound on the
+     element that uses it (Wine's msxml3 tests; `msxml_test`'s
+     `inherited_namespaces`, x64 and x86: each subtree's xml loads
+     again with its names in their namespaces), and the ledger has the
+     text at a parse error (`parse error at: ...`). Next: the merge
+     again, with the install resumed from a machine snapshot (ROADMAP
+     SN) rather than a 30-minute run; if it still fails, the ledger's
+     `parse error at:` shows the service's input. To measure on Windows
+     (the test's `info` lines, probe issue #116): the exact text of each subtree, in
+     particular whether declarations it does not use come along (an
+     attribute value `u:n` names a prefix only its ancestor declares).
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a

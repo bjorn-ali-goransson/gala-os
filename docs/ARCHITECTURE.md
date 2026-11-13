@@ -4694,7 +4694,13 @@ x64 and x86.
   (getNamedItem, getQualifiedItem, item, nextNode), text (an element's
   text nodes and CDATA in order, trimmed at the ends unless
   preserveWhiteSpace), xml (empty elements as `<a/>`, the document's
-  top-level nodes ending with CR LF), getAttribute (S_FALSE and VT_NULL
+  top-level nodes ending with CR LF; a subtree's text is well formed
+  with its namespaces: a prefix or default namespace bound only by an
+  ancestor left out is declared on the element that uses it, before its
+  attributes, and the declarations the nodes carry are written as they
+  are, as Wine's tests show MSXML doing; whether MSXML also brings the
+  ancestors' unused declarations is `msxml_test`'s `info` lines until
+  Windows' run, issue #116), getAttribute (S_FALSE and VT_NULL
   when absent), getAttributeNode, character data and processing
   instruction getters; the properties async, validateOnParse,
   resolveExternals (turning it on is recorded), preserveWhiteSpace,
@@ -4726,9 +4732,11 @@ x64 and x86.
   carries over) and, deep, a copy of its tree. A NULL output is
   E_INVALIDARG.
 - **Parse errors** go to the ledger too (`msxml6.dll!parse error:
-  <reason>`, "other", the line and column in its detail): a program's
-  load or loadXML that fails tells only S_FALSE (Click-to-Run's log:
-  `XmlDocument loadXML failed , Error:0x1`).
+  <reason>` and `msxml6.dll!parse error at: <text>`, 40 characters of
+  the line up to a few past the error; "other", the line << 32 and
+  column in the detail): a program's load or loadXML that fails tells
+  only S_FALSE (Click-to-Run's log: `XmlDocument loadXML failed ,
+  Error:0x1`), and the input it built is seen nowhere else.
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
   tree (create*, appendChild, insertBefore, removeChild, replaceChild,
