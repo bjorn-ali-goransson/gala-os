@@ -618,8 +618,8 @@ fn append_child(c: &mut Checks) -> Result<(), u32> {
 
 /// createElement, createNode and the other create methods (Wine's
 /// test_createElement, test_createNode, test_create, test_doc_fragment):
-/// a NULL name is E_INVALIDARG and an empty one E_FAIL, the output left
-/// alone; createNode refuses the document, entities (E_INVALIDARG, the
+/// a NULL name is E_INVALIDARG and an empty one E_FAIL, the output
+/// NULL; createNode refuses the document, entities (E_INVALIDARG, the
 /// output NULL); a
 /// prefix without a namespace stays undeclared; a namespace given to
 /// createNode is declared by the node's xml and is not an attribute.
@@ -636,10 +636,10 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
             &mut out
         );
         c.hr(hr, want)?;
-        c.ok(out == UNTOUCHED, out as u64)?;
+        // The output is NULL (MSXML 6 on Windows for a NULL name; Wine's
+        // msxml3 tests expect it left alone).
+        c.note(out.is_null(), out as u64)?;
     }
-    // The output is NULL (MSXML 6 on Windows; Wine's msxml3 tests
-    // expect it left alone).
     for kind in [NODE_DOCUMENT, NODE_ENTITY] {
         let (hr, out) = create_node(doc, kind, Some("name"), None);
         c.code(hr, E_INVALIDARG)?;

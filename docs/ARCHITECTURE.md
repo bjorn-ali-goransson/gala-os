@@ -4755,9 +4755,10 @@ built for x64 and x86.
   from Wine's msxml3 tests run on Windows; Click-to-Run's App-V
   orchestration changes the AppX manifests it merges): the create
   methods and createNode (a type by number or name; the document,
-  document types, entities and notations E_INVALIDARG with the output
-  NULL; a NULL name
-  E_INVALIDARG, an empty one E_FAIL), document fragments (node type 11),
+  document types, entities and notations E_INVALIDARG; a NULL name
+  E_INVALIDARG, an empty one E_FAIL; a refusal sets the output to NULL,
+  measured for createElement's NULL name, where Wine's msxml3 tests
+  expect it left alone), document fragments (node type 11),
   insertBefore, appendChild, removeChild, replaceChild,
   putref_documentElement, setAttribute, removeAttribute,
   setAttributeNode, removeAttributeNode, the attribute map's

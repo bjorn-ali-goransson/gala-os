@@ -374,10 +374,15 @@ fn name_arg(s: Bstr) -> Result<String, HResult> {
     }
 }
 
+/// IXMLDOMDocument::createElement: a refused name sets the output to
+/// NULL (MSXML 6 measured on Windows; Wine's msxml3 tests expect it left
+/// alone).
 pub(super) extern "system" fn create_element(this: Obj, name: Bstr, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_INVALIDARG;
     }
+    // SAFETY: checked non-NULL above; the caller's out pointer.
+    unsafe { *out = core::ptr::null_mut() };
     match name_arg(name) {
         Ok(n) => create(this, Kind::Element, &n, "", "", out),
         Err(hr) => hr,
@@ -458,9 +463,10 @@ fn type_by_name(name: &str) -> Option<i64> {
 
 /// IXMLDOMDocument::createNode(type, name, namespaceURI, out): the type
 /// a number (any integer variant) or its name; the document, document
-/// types, entities and notations are E_INVALIDARG with the output NULL
-/// (MSXML 6 on Windows; Wine's msxml3 tests expect it left alone);
-/// entity references are not supported (recorded, E_NOTIMPL).
+/// types, entities and notations are E_INVALIDARG; a refusal sets the
+/// output to NULL first, as createElement's does on Windows (Wine's
+/// msxml3 tests expect it left alone); entity references are not
+/// supported (recorded, E_NOTIMPL).
 pub(super) extern "system" fn create_node(
     this: Obj,
     ty: Variant,
@@ -471,6 +477,8 @@ pub(super) extern "system" fn create_node(
     if out.is_null() {
         return E_INVALIDARG;
     }
+    // SAFETY: checked non-NULL above; the caller's out pointer.
+    unsafe { *out = core::ptr::null_mut() };
     let kind = match ty.vt {
         VT_BSTR => text(ty.value[0] as *const u16).as_deref().and_then(type_by_name),
         // VT_I1 and VT_UI1 (a byte), the wider integers.
@@ -502,11 +510,7 @@ pub(super) extern "system" fn create_node(
             record(b"IXMLDOMDocument::createNode(entity reference)", LEDGER_UNSUPPORTED, 5);
             crate::E_NOTIMPL
         }
-        _ => {
-            // SAFETY: checked non-NULL above; the caller's out pointer.
-            unsafe { *out = core::ptr::null_mut() };
-            E_INVALIDARG
-        }
+        _ => E_INVALIDARG,
     }
 }
 
