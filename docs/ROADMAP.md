@@ -2058,7 +2058,17 @@ need gala's.
      x86). A stopgap to replace: it is the rental document, which locks
      nothing (recorded at each creation); a free-threaded document needs
      its calls serialized (a lock per document around every method)
-     before a program uses one from two threads at once. To measure on Windows
+     before a program uses one from two threads at once. With it
+     ConfigurePackage gets further and fails at `xmlutils.cpp : 592`,
+     0x80040154 again: it asks COM for XMLSchemaCache60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a07), MSXML 6's XSD schema cache; APPLYCONFIGURATION ends
+     with 30175, the service and setup.exe with 17002 at about 1570 s.
+     Next: the schema cache (IXMLDOMSchemaCollection2: add, the
+     document's `schemas` property, validate and validateOnParse
+     against XSD), as far as App-V's use of it shows (what it adds and
+     whether it validates or only loads schemas; the ledger names each
+     method it reaches). To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
