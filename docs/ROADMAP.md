@@ -1958,12 +1958,24 @@ need gala's.
      one of its objects for interface
      {1aa79035-cc71-4b2e-80a6-c7041d8579a7}, which it lacks, and goes on
      without checking (the ledger's `appxdeploymentclient.dll!QI ...`,
-     recorded since). Next: that interface. It is not in Wine's
-     windows.management.deployment.idl (only IPackageManager and
-     IPackageManager2) nor in mingw-w64's headers, and Microsoft's
-     documentation pages do not show IIDs; naming it and its methods
-     needs a source the owner accepts (the Windows SDK's metadata, as
-     microsoft/windows-rs publishes it, is not on CLEAN_ROOM's list).
+     recorded since). Done: that interface, IPackageManager9 (probe issue
+     #108 measured its IID and method order on Windows; ARCHITECTURE
+     "Windows Runtime classes"; `combase_test`): the service calls its
+     FindProvisionedPackages (an empty IVector<Package>) and goes on
+     (`PackageManager::GetSortedProvisionedMsixPackages`, MSIX cleanup)
+     to the virtualization's registration (`OfficeVirtRegistration`),
+     where loading `ClickToRun\AppVIsvApi.dll` fails with 0x7f nine times
+     (`OISVAPI::LoadDll`): gala's kernel32 lacks the thread pool
+     functions it imports (CreateThreadpool, CloseThreadpool,
+     SetThreadpoolThreadMaximum/Minimum, CreateThreadpoolCleanupGroup,
+     CloseThreadpoolCleanupGroup(Members); the ledger's missing exports,
+     9 hits each). APPLYCONFIGURATION then fails ("Encountered fatal
+     exception", ErrorCodeOnly 127), the service ends with 17002 at
+     1872 s and setup.exe with 17002 at 1913 s. Next: those thread pool
+     functions (test first, Wine's kernel32 and ntdll threadpool tests),
+     then what AppVIsvApi.dll does at registration.
+     Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
+     30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
      run bounded at 1800 s with 4 GiB; the files' pages, 2.5-2.7 GiB
      there, are the cache, given back under pressure): before the layout
@@ -1976,9 +1988,9 @@ need gala's.
      Done: image pages built at their first touch and dropped under
      memory pressure (built again from their files; `imagetrim_test`),
      and a file's page tables as extents (pages in memory in chunks,
-     clusters as runs: `fs::pagetable`). At 512 MiB the run now reaches
+     clusters as runs: `fs::pagetable`). At 512 MiB the run then reached
      the same point (the publish, `integrator.exe` returning 0, then the
-     service's PackageManager crash above; 1630 s of the service against
+     service's IPackageManager9 crash, fixed since; 1630 s of the service against
      1550 s with 4 GiB), the kernel heap 84 MiB at 2400 s: registry 16
      MiB, file tree 20 MiB, image layouts 23 MiB (5 200 of 20 400 pages
      in memory; 3 000 dropped, 320 built again), files' pages 7 MiB,
@@ -1990,9 +2002,9 @@ need gala's.
      NT processes' private pages not touched since the clock last passed
      written there when the file cache's pages cannot bring free memory
      back to the mark (before image pages go), read back at their next
-     touch. At 512 MiB the run reaches the same point (the publish,
-     `integrator.exe` returning 0, the service's PackageManager crash at
-     1810 s); at 2400 s the kernel heap is 82 MiB (registry 16 MiB, file
+     touch. At 512 MiB the run reached the same point (the publish,
+     `integrator.exe` returning 0, then, before IPackageManager9, the
+     service's crash at 1810 s); at 2400 s the kernel heap is 82 MiB (registry 16 MiB, file
      tree 19 MiB, image layouts 23 MiB with 5 250 of 20 400 pages in
      memory, files' pages 4 MiB, other 18 MiB), user pages 205 MiB, free
      memory 118 MiB, never below 93 MiB: nothing needed paging out. At
