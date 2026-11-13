@@ -237,7 +237,12 @@ impl Tree {
     }
 
     /// The node in XML (MSXML's `xml` property): the document's
-    /// top-level nodes end with CR LF.
+    /// top-level nodes end with CR LF. An element's text is well formed
+    /// with its namespaces: a prefix (or the default namespace) that no
+    /// declaration in the text binds, because its declaration is on an
+    /// ancestor left out, is declared on the element that uses it,
+    /// before its attributes (MSXML's output in Wine's tests); the
+    /// declarations the nodes carry are written as they are.
     pub fn xml(&self, i: u32, out: &mut String) {
         let n = self.node(i);
         match n.kind {
@@ -248,33 +253,70 @@ impl Tree {
                 }
             }
             Kind::Element => {
-                // (node, whether its end tag is due)
-                let mut stack: Vec<(u32, bool)> = Vec::new();
-                stack.push((i, false));
-                while let Some((e, close)) = stack.pop() {
+                // The bindings the text written so far has in scope
+                // (prefix, URI; "" the default namespace), innermost last.
+                let mut scope: Vec<(&str, &str)> = Vec::new();
+                // (node, whether its end tag is due, the scope's length
+                // before it)
+                let mut stack: Vec<(u32, bool, usize)> = Vec::new();
+                stack.push((i, false, 0));
+                while let Some((e, close, frame)) = stack.pop() {
                     let en = self.node(e);
                     if close {
                         out.push_str("</");
                         out.push_str(&en.name);
                         out.push('>');
+                        scope.truncate(frame);
                         continue;
                     }
                     if en.kind != Kind::Element {
                         self.xml(e, out);
                         continue;
                     }
+                    let frame = scope.len();
+                    for &a in &en.attrs {
+                        let an = self.node(a);
+                        if an.is_xmlns() {
+                            let prefix = if an.name == "xmlns" { "" } else { an.local() };
+                            scope.push((prefix, &an.value));
+                        }
+                    }
                     out.push('<');
                     out.push_str(&en.name);
+                    // The element's own name, then its prefixed attributes.
+                    let names = core::iter::once(e)
+                        .chain(en.attrs.iter().copied().filter(|&a| !self.node(a).is_xmlns()));
+                    for (k, x) in names.enumerate() {
+                        let xn = self.node(x);
+                        let prefix = xn.prefix();
+                        let missing = if prefix == "xml" {
+                            false
+                        } else if prefix.is_empty() {
+                            // Unprefixed attributes are in no namespace.
+                            k == 0 && bound(&scope, "").unwrap_or("") != xn.ns
+                        } else {
+                            bound(&scope, prefix).is_none()
+                        };
+                        if missing {
+                            out.push_str(if prefix.is_empty() { " xmlns" } else { " xmlns:" });
+                            out.push_str(prefix);
+                            out.push_str("=\"");
+                            escape(&xn.ns, true, out);
+                            out.push('"');
+                            scope.push((prefix, &xn.ns));
+                        }
+                    }
                     for &a in &en.attrs {
                         out.push(' ');
                         self.xml(a, out);
                     }
                     if en.children.is_empty() {
                         out.push_str("/>");
+                        scope.truncate(frame);
                     } else {
                         out.push('>');
-                        stack.push((e, true));
-                        stack.extend(en.children.iter().rev().map(|&c| (c, false)));
+                        stack.push((e, true, frame));
+                        stack.extend(en.children.iter().rev().map(|&c| (c, false, 0)));
                     }
                 }
             }
@@ -306,6 +348,11 @@ impl Tree {
             }
         }
     }
+}
+
+/// The URI `prefix` is bound to in `scope` (innermost last).
+fn bound<'a>(scope: &[(&str, &'a str)], prefix: &str) -> Option<&'a str> {
+    scope.iter().rev().find(|(p, _)| *p == prefix).map(|&(_, uri)| uri)
 }
 
 /// Markup characters as references (in an attribute value, quotes too).

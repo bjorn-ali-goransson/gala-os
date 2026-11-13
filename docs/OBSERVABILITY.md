@@ -405,6 +405,10 @@ hit (scenario `ledger_test`).
   signed`, `cabinet hash differs`, `signer's signature`, `timestamp`,
   `Authenticode policy`, ...), with crypt32's
   `crypt32.dll!AUTHENTICODE: <error>` naming the chain's error bits.
+  MSXML (msxml6): `msxml6.dll!parse error: <reason>` and
+  `msxml6.dll!parse error at: <text>` (40 characters of the line around
+  the error), "other", the line << 32 | the column as detail, for each
+  load or loadXML that fails (the program sees only S_FALSE).
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);
