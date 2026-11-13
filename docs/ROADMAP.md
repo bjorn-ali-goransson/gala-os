@@ -4250,17 +4250,17 @@ code built that the new code reads differently, invariants of data
 whose layout did not change. Limits: no unwind data for the new code,
 new exports invisible to GetProcAddress, `run=` scenarios only.
 Shown on the Office install (`office_install_local`, TCG): saved at
-`process integrator.exe (pid` (1787 s in), resumed with msxml6.dll's
-`replaceChild` changed (a new ledger name), xtask patched that one
-function in the 64- and the 32-bit build; the guest stopped 29 threads,
-patched both OfficeClickToRun.exe processes that map the 64-bit DLL,
-and the service then reached the new code (`msxml6.dll!IXMLDOMNode::
-replaceChild (hot-swapped build)` in the ledger) 20 s into the resumed
-run, where the run from boot needs 30 minutes to get there. That run
-also found two faults, fixed since: the 32-bit blob's reservation was
-not at a 64 KiB boundary (setup.exe's WOW64 copy was refused;
-`hotswap_wow64` covers it now), and a later DLL's refusal left an
-earlier one swapped (now all or nothing).
+`process integrator.exe (pid` (1827 s in; 118 MiB of state, the 7.6 GB
+disk), resumed with msxml6.dll's `replaceChild` changed (a new ledger
+name): xtask patched that one function in the 64- and the 32-bit build;
+the guest stopped 29 threads, patched both OfficeClickToRun.exe
+processes (64-bit) and setup.exe (WOW64, the blob below 2 GiB), and the
+service reached the new code (`msxml6.dll!IXMLDOMNode::replaceChild
+(hot-swapped build)` in the ledger) in a resumed run of 22 s, where the
+run from boot needs 30 minutes to get there. A first try found two
+faults, fixed with `hotswap_wow64` and the all-or-nothing rule: the
+32-bit blob's reservation was not at a 64 KiB boundary, and a later
+DLL's refusal left an earlier one swapped.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private
