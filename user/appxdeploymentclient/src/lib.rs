@@ -9,7 +9,13 @@
 //!
 //! - The factory (IActivationFactory) makes PackageManager objects with
 //!   IPackageManager and IPackageManager2 (the interfaces' method order
-//!   from Wine's include/windows.management.deployment.idl). The factory,
+//!   from Wine's include/windows.management.deployment.idl) and
+//!   IPackageManager9 (its IID and method order measured on Windows,
+//!   probe issue #108; the methods from Microsoft Learn's PackageManager
+//!   pages): FindProvisionedPackages answers an empty IVector<Package>,
+//!   the by-URI deployments are E_NOTIMPL, SetPackageStubPreference
+//!   succeeds and GetPackageStubPreference answers Full (0); each
+//!   recorded. The factory,
 //!   the collections and their iterators hold no state: they are static
 //!   objects whose reference counts are nominal. Every object is agile
 //!   (IAgileObject), as PackageManager is (marshaling_behavior(agile)).
@@ -134,6 +140,15 @@ const IID_IPACKAGEMANAGER: Guid =
 /// {F7AAD08D-0840-46F2-B5D8-CAD47693A095}
 const IID_IPACKAGEMANAGER2: Guid =
     guid(0xf7aad08d, 0x0840, 0x46f2, [0xb5, 0xd8, 0xca, 0xd4, 0x76, 0x93, 0xa0, 0x95]);
+/// IPackageManager9 (probe issue #108: the IID and the method order
+/// measured on Windows; the methods from Microsoft Learn's PackageManager
+/// pages): {1AA79035-CC71-4B2E-80A6-C7041D8579A7}
+const IID_IPACKAGEMANAGER9: Guid =
+    guid(0x1aa79035, 0xcc71, 0x4b2e, [0x80, 0xa6, 0xc7, 0x04, 0x1d, 0x85, 0x79, 0xa7]);
+/// IVector<Windows.ApplicationModel.Package>:
+/// {D1BB509E-6989-5C69-B1FF-D1702FE8ACA3}
+const IID_IVECTOR_PACKAGE: Guid =
+    guid(0xd1bb509e, 0x6989, 0x5c69, [0xb1, 0xff, 0xd1, 0x70, 0x2f, 0xe8, 0xac, 0xa3]);
 /// IIterable<Windows.ApplicationModel.Package>:
 /// {69AD6AA7-0C49-5F27-A5EB-EF4D59467B6D}
 const IID_IITERABLE_PACKAGE: Guid =
@@ -382,13 +397,109 @@ static USER_ITERATOR: Static = Static {
     name: "Windows.Foundation.Collections.IIterator`1<Windows.Management.Deployment.PackageUserInformation>",
 };
 
+/// The empty IVector<Package> (FindProvisionedPackages): IIterable<Package>
+/// is `PACKAGES` (QueryInterface hands it out).
+extern "system" fn v_query(this: usize, iid: *const Guid, out: *mut usize) -> HResult {
+    // SAFETY: the caller's IID (checked non-null first).
+    if !out.is_null() && !iid.is_null() && unsafe { *iid } == IID_IITERABLE_PACKAGE {
+        put(out, &PACKAGES as *const Static as usize);
+        return S_OK;
+    }
+    s_query(this, iid, out)
+}
+/// IVector<T>::GetAt: no item.
+extern "system" fn v_get_at(_this: usize, _index: u32, out: *mut usize) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, 0);
+    E_BOUNDS
+}
+/// IVector<T>::get_Size: 0.
+extern "system" fn v_size(_this: usize, out: *mut u32) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, 0);
+    S_OK
+}
+/// IVector<T>::IndexOf: not found.
+extern "system" fn v_index_of(
+    _this: usize,
+    _item: usize,
+    index: *mut u32,
+    found: *mut u8,
+) -> HResult {
+    if index.is_null() || found.is_null() {
+        return E_POINTER;
+    }
+    put(index, 0);
+    put(found, 0);
+    S_OK
+}
+/// IVector<T>::GetMany: none.
+extern "system" fn v_get_many(
+    _this: usize,
+    _start: u32,
+    _capacity: u32,
+    _items: *mut usize,
+    got: *mut u32,
+) -> HResult {
+    if got.is_null() {
+        return E_POINTER;
+    }
+    put(got, 0);
+    S_OK
+}
+/// GetView and the changes: recorded, E_NOTIMPL (gala's collection is
+/// a constant).
+extern "system" fn v_get_view(_this: usize, out: *mut usize) -> HResult {
+    not_implemented(b"IVector<Package>::GetView", out)
+}
+extern "system" fn v_change2(_this: usize, _a: usize, _b: usize) -> HResult {
+    not_implemented(b"IVector<Package> change", core::ptr::null_mut())
+}
+extern "system" fn v_change1(_this: usize, _a: usize) -> HResult {
+    not_implemented(b"IVector<Package> change", core::ptr::null_mut())
+}
+extern "system" fn v_change0(_this: usize) -> HResult {
+    not_implemented(b"IVector<Package> change", core::ptr::null_mut())
+}
+
+static VECTOR_VTABLE: VTable<18> = VTable([
+    v_query as *const (),
+    s_add_ref as *const (),
+    s_release as *const (),
+    get_iids as *const (),
+    s_class_name as *const (),
+    get_trust_level as *const (),
+    v_get_at as *const (),
+    v_size as *const (),
+    v_get_view as *const (),
+    v_index_of as *const (),
+    v_change2 as *const (), // SetAt(index, item)
+    v_change2 as *const (), // InsertAt(index, item)
+    v_change1 as *const (), // RemoveAt(index)
+    v_change1 as *const (), // Append(item)
+    v_change0 as *const (), // RemoveAtEnd
+    v_change0 as *const (), // Clear
+    v_get_many as *const (),
+    v_change2 as *const (), // ReplaceAll(count, items)
+]);
+static PROVISIONED: Static = Static {
+    vtable: &VECTOR_VTABLE as *const VTable<18> as *const (),
+    iids: &[IID_IVECTOR_PACKAGE],
+    name: "Windows.Foundation.Collections.IVector`1<Windows.ApplicationModel.Package>",
+};
+
 // ---- PackageManager ----
 
-/// A PackageManager: IPackageManager, then IPackageManager2.
+/// A PackageManager: IPackageManager, IPackageManager2, IPackageManager9.
 #[repr(C)]
 struct Manager {
     v1: *const (),
     v2: *const (),
+    v9: *const (),
     refs: AtomicU32,
 }
 
@@ -414,6 +525,8 @@ fn m_query(m: &Manager, iid: *const Guid, out: *mut usize) -> HResult {
             base
         } else if iid == IID_IPACKAGEMANAGER2 {
             base + PTR
+        } else if iid == IID_IPACKAGEMANAGER9 {
+            base + 2 * PTR
         } else {
             record_no_interface(b"PackageManager", &iid);
             return E_NOINTERFACE;
@@ -447,6 +560,15 @@ extern "system" fn m2_add_ref(this: usize) -> u32 {
 }
 extern "system" fn m2_release(this: usize) -> u32 {
     m_release(manager(this, 1))
+}
+extern "system" fn m9_query(this: usize, iid: *const Guid, out: *mut usize) -> HResult {
+    m_query(manager(this, 2), iid, out)
+}
+extern "system" fn m9_add_ref(this: usize) -> u32 {
+    manager(this, 2).refs.fetch_add(1, Ordering::Relaxed) + 1
+}
+extern "system" fn m9_release(this: usize) -> u32 {
+    m_release(manager(this, 2))
 }
 extern "system" fn m_class_name(_this: usize, out: *mut HString) -> HResult {
     if out.is_null() {
@@ -702,6 +824,65 @@ static MANAGER2_VTABLE: VTable<16> = VTable([
     stage_user_data as *const (),
 ]);
 
+// IPackageManager9.
+extern "system" fn find_provisioned(_t: usize, out: *mut usize) -> HResult {
+    answer(b"FindProvisionedPackages", NO_STRING, &PROVISIONED, out)
+}
+extern "system" fn add_by_uri(_t: usize, _u: usize, _o: usize, out: *mut usize) -> HResult {
+    not_implemented(b"AddPackageByUriAsync", out)
+}
+extern "system" fn stage_by_uri(_t: usize, _u: usize, _o: usize, out: *mut usize) -> HResult {
+    not_implemented(b"StagePackageByUriAsync", out)
+}
+extern "system" fn register_by_uri(_t: usize, _u: usize, _o: usize, out: *mut usize) -> HResult {
+    not_implemented(b"RegisterPackageByUriAsync", out)
+}
+extern "system" fn register_by_full_names(
+    _t: usize,
+    _names: usize,
+    _o: usize,
+    out: *mut usize,
+) -> HResult {
+    not_implemented(b"RegisterPackagesByFullNameAsync", out)
+}
+/// SetPackageStubPreference: recorded, S_OK (nothing to keep it for: no
+/// packages).
+extern "system" fn set_stub_preference(_t: usize, family: HString, preference: i32) -> HResult {
+    let (text, n) = ascii(family);
+    let value: &[u8] = if preference == 1 { b"Stub" } else { b"Full" };
+    record(
+        &[b"appxdeploymentclient.dll!SetPackageStubPreference(", &text[..n], b", ", value, b")"],
+        5,
+    );
+    S_OK
+}
+/// GetPackageStubPreference: Full (0), recorded.
+extern "system" fn get_stub_preference(_t: usize, family: HString, out: *mut i32) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    let (text, n) = ascii(family);
+    record(&[b"appxdeploymentclient.dll!GetPackageStubPreference(", &text[..n], b")"], 5);
+    put(out, 0);
+    S_OK
+}
+
+static MANAGER9_VTABLE: VTable<13> = VTable([
+    m9_query as *const (),
+    m9_add_ref as *const (),
+    m9_release as *const (),
+    get_iids as *const (),
+    m_class_name as *const (),
+    get_trust_level as *const (),
+    find_provisioned as *const (),
+    add_by_uri as *const (),
+    stage_by_uri as *const (),
+    register_by_uri as *const (),
+    register_by_full_names as *const (),
+    set_stub_preference as *const (),
+    get_stub_preference as *const (),
+]);
+
 // ---- The factory ----
 
 /// IActivationFactory::ActivateInstance: a new PackageManager.
@@ -721,6 +902,7 @@ extern "system" fn activate_instance(_this: usize, out: *mut usize) -> HResult {
         p.write(Manager {
             v1: MANAGER_VTABLE.0.as_ptr().cast(),
             v2: MANAGER2_VTABLE.0.as_ptr().cast(),
+            v9: MANAGER9_VTABLE.0.as_ptr().cast(),
             refs: AtomicU32::new(1),
         })
     };

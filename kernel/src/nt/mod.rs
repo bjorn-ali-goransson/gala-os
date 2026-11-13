@@ -22,6 +22,7 @@ pub mod namespace;
 pub mod notify;
 pub mod ntdll;
 pub mod object;
+pub mod pagefile;
 pub mod params;
 pub mod pe;
 pub mod persist;

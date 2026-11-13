@@ -22,6 +22,13 @@ const GLOBAL: u64 = 1 << 8;
 /// Software-available bit: the leaf maps a frame this address space does
 /// not own (a section page, a shared kernel page); never free it.
 const BORROWED: u64 = 1 << 9;
+/// Set by the processor at an access through the leaf, and at a write.
+const ACCESSED: u64 = 1 << 5;
+const DIRTY: u64 = 1 << 6;
+/// Software bit of a *not present* 4 KiB leaf: the page is in the page
+/// file (`mm::swap`); the rest of the entry is the caller's token (its
+/// slot and generation), never a frame.
+const SWAPPED: u64 = 1 << 10;
 /// PAT bit in 2 MiB / 1 GiB entries.
 const PAT_LARGE: u64 = 1 << 12;
 const NO_EXECUTE: u64 = 1 << 63;
@@ -68,6 +75,20 @@ pub enum ForkedPage {
     /// An owned frame that could not be shared, copied into one of the
     /// child's own.
     Copied,
+}
+
+/// What the page file's clock finds at a page (`UserSpace::age_page`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Age {
+    /// Nothing present.
+    Absent,
+    /// Not a candidate: borrowed, shared or large.
+    Kept,
+    /// Accessed since the last look (its bit now cleared).
+    Recent,
+    /// Not accessed since the last look: a candidate (its dirty bit now
+    /// cleared), with its frame.
+    Old(Frame),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +182,11 @@ impl Entry {
 
     fn is_huge(self) -> bool {
         self.0 & HUGE != 0
+    }
+
+    /// A not-present leaf holding a page file token (`SWAPPED`).
+    fn is_swapped(self) -> bool {
+        !self.is_present() && self.0 & SWAPPED != 0
     }
 
     fn addr(self) -> u64 {
@@ -394,9 +420,11 @@ impl<M: TableMemory> Mapper<M> {
         if !slot.is_present() {
             return Err(MapError::BadAddress);
         }
-        // Ownership is a property of the mapping, not of the protection.
-        let borrowed = slot.0 & BORROWED;
-        *slot = Entry(slot.addr() | flags.leaf_bits(false) | borrowed);
+        // Ownership is a property of the mapping, not of the protection;
+        // so are the accessed and dirty bits (the page-out's tests of a
+        // page written since it was copied: `UserSpace::page_out`).
+        let kept = slot.0 & (BORROWED | ACCESSED | DIRTY);
+        *slot = Entry(slot.addr() | flags.leaf_bits(false) | kept);
         Ok(())
     }
 
@@ -427,8 +455,8 @@ impl<M: TableMemory> Mapper<M> {
         Some((frame, owned))
     }
 
-    /// The first mapped page (or large page) at or after `virt` and below
-    /// `end`: absent tables are skipped whole, so a range is walked in
+    /// The first mapped page (or large page), or page in the page file
+    /// (a `SWAPPED` leaf), at or after `virt` and below `end`: absent tables are skipped whole, so a range is walked in
     /// time of its mappings, not of its size (unmapping a 340 MB view of
     /// which a few pages were touched).
     pub fn next_mapped(&mut self, mut virt: u64, end: u64) -> Option<u64> {
@@ -439,6 +467,9 @@ impl<M: TableMemory> Mapper<M> {
             let mut table = self.root;
             for level in (1..=4).rev() {
                 let entry = self.mem.table(table).0[index(virt, level)];
+                if level == 1 && entry.is_swapped() {
+                    return Some(virt);
+                }
                 if !entry.is_present() {
                     // Past what this entry would map.
                     let span = 1u64 << (12 + 9 * (level - 1));
@@ -452,6 +483,86 @@ impl<M: TableMemory> Mapper<M> {
             }
         }
         None
+    }
+
+    /// The 4 KiB leaf entry for `virt`, if the tables down to it exist
+    /// (and no large page is in the way).
+    fn leaf_4k(&mut self, virt: u64) -> Option<&mut Entry> {
+        if !is_canonical(virt) {
+            return None;
+        }
+        let mut table = self.root;
+        for level in (2..=4).rev() {
+            let entry = self.mem.table(table).0[index(virt, level)];
+            if !entry.is_present() || entry.is_huge() {
+                return None;
+            }
+            table = Frame::containing(entry.addr());
+        }
+        Some(&mut self.mem.table(table).0[index(virt, 1)])
+    }
+
+    /// The page file token of the page at `virt`, if it is in the page
+    /// file (a `SWAPPED` leaf).
+    pub fn swapped_4k(&mut self, virt: u64) -> Option<u64> {
+        let e = *self.leaf_4k(virt)?;
+        e.is_swapped().then_some(e.0 & !SWAPPED)
+    }
+
+    /// Replaces the present 4 KiB leaf at `virt` by a page file `token`
+    /// (bit 0 clear, bit 10 free for `SWAPPED`), returning the frame it
+    /// mapped and whether it was owned. The caller must flush the TLB.
+    pub fn swap_out_4k(&mut self, virt: u64, token: u64) -> Option<(Frame, bool)> {
+        debug_assert!(token & (PRESENT | SWAPPED) == 0);
+        let slot = self.leaf_4k(virt)?;
+        if !slot.is_present() {
+            return None;
+        }
+        let frame = Frame::containing(slot.addr());
+        let owned = slot.0 & BORROWED == 0;
+        *slot = Entry(token | SWAPPED);
+        Some((frame, owned))
+    }
+
+    /// Removes the page file token at `virt`, returning it.
+    pub fn clear_swapped_4k(&mut self, virt: u64) -> Option<u64> {
+        let slot = self.leaf_4k(virt)?;
+        if !slot.is_swapped() {
+            return None;
+        }
+        let token = slot.0 & !SWAPPED;
+        *slot = Entry::EMPTY;
+        Some(token)
+    }
+
+    /// Clears the accessed bit of the present 4 KiB leaf at `virt`,
+    /// returning whether it was set (None: nothing present). The caller
+    /// must flush the TLB.
+    pub fn take_accessed_4k(&mut self, virt: u64) -> Option<bool> {
+        let slot = self.leaf_4k(virt)?;
+        if !slot.is_present() {
+            return None;
+        }
+        let was = slot.0 & ACCESSED != 0;
+        slot.0 &= !ACCESSED;
+        Some(was)
+    }
+
+    /// Sets (`dirty`) or clears the dirty bit of the present 4 KiB leaf at
+    /// `virt`, returning whether it was set (None: nothing present). The
+    /// caller must flush the TLB after clearing it.
+    pub fn set_dirty_4k(&mut self, virt: u64, dirty: bool) -> Option<bool> {
+        let slot = self.leaf_4k(virt)?;
+        if !slot.is_present() {
+            return None;
+        }
+        let was = slot.0 & DIRTY != 0;
+        if dirty {
+            slot.0 |= DIRTY | ACCESSED;
+        } else {
+            slot.0 &= !DIRTY;
+        }
+        Some(was)
     }
 
     pub fn translate(&mut self, virt: u64) -> Option<Translation> {
@@ -565,14 +676,16 @@ impl<M: TableMemory> Mapper<M> {
     }
 
     /// Frees every user-half page table (not the mapped frames) through
-    /// `free`, then the root. Leaf frames are reported to `free_leaf`.
+    /// `free`, then the root. Leaf frames are reported to `free_leaf`,
+    /// page file tokens (`SWAPPED` leaves) to `free_swapped`.
     pub fn destroy(
         mut self,
         free_table: &mut impl FnMut(Frame),
         free_leaf: &mut impl FnMut(Frame),
+        free_swapped: &mut impl FnMut(u64),
     ) {
         let root = self.root;
-        self.free_level(root, 4, KERNEL_HALF_START, free_table, free_leaf);
+        self.free_level(root, 4, KERNEL_HALF_START, free_table, free_leaf, free_swapped);
         free_table(root);
     }
 
@@ -583,9 +696,14 @@ impl<M: TableMemory> Mapper<M> {
         limit: usize,
         free_table: &mut impl FnMut(Frame),
         free_leaf: &mut impl FnMut(Frame),
+        free_swapped: &mut impl FnMut(u64),
     ) {
         for i in 0..limit {
             let entry = self.mem.table(table).0[i];
+            if level == 1 && entry.is_swapped() {
+                free_swapped(entry.0 & !SWAPPED);
+                continue;
+            }
             if !entry.is_present() {
                 continue;
             }
@@ -595,7 +713,7 @@ impl<M: TableMemory> Mapper<M> {
                 }
             } else {
                 let child = Frame::containing(entry.addr());
-                self.free_level(child, level - 1, ENTRIES, free_table, free_leaf);
+                self.free_level(child, level - 1, ENTRIES, free_table, free_leaf, free_swapped);
                 free_table(child);
             }
         }
@@ -644,6 +762,49 @@ mod tests {
         // After an unmap the page is skipped.
         m.unmap_4k(0x40_3000);
         assert_eq!(m.next_mapped(0x40_1000, USER_END), Some(0x80_0000_0000));
+    }
+
+    #[test]
+    fn a_page_in_the_page_file_is_a_token_not_a_frame() {
+        let (mut m, mut alloc) = setup();
+        let user = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        m.map(0x40_0000, 0x5000, PageSize::Size4K, user, &mut alloc).unwrap();
+        m.map(0x40_1000, 0x6000, PageSize::Size4K, user, &mut alloc).unwrap();
+        // The processor's bits: a write sets both; a flags change keeps them.
+        assert_eq!(m.set_dirty_4k(0x40_0000, true), Some(false));
+        m.update_flags_4k(0x40_0000, PageFlags { writable: false, ..user }).unwrap();
+        assert_eq!(m.take_accessed_4k(0x40_0000), Some(true));
+        assert_eq!(m.take_accessed_4k(0x40_0000), Some(false));
+        assert_eq!(m.set_dirty_4k(0x40_0000, false), Some(true));
+        assert_eq!(m.set_dirty_4k(0x40_0000, false), Some(false));
+        // Out: the leaf holds the token, nothing translates, the walk and
+        // the teardown still see it.
+        assert_eq!(
+            m.swap_out_4k(0x40_0000, 7 << 12 | 3 << 1),
+            Some((Frame::containing(0x5000), true))
+        );
+        assert_eq!(m.translate(0x40_0000), None);
+        assert_eq!(m.unmap_4k_owned(0x40_0000), None);
+        assert_eq!(m.swapped_4k(0x40_0000), Some(7 << 12 | 3 << 1));
+        assert_eq!(m.swapped_4k(0x40_1000), None);
+        assert_eq!(m.next_mapped(0, USER_END), Some(0x40_0000));
+        let mut listed = 0;
+        m.for_each_user_leaf(&mut |_, _| listed += 1);
+        assert_eq!(listed, 1, "only the present page is a leaf with a frame");
+        // A teardown reports the token, not a frame.
+        let (mut leaves, mut tokens) = (Vec::new(), Vec::new());
+        m.destroy(&mut |_| {}, &mut |f| leaves.push(f.number()), &mut |t| tokens.push(t));
+        assert_eq!(leaves, [6]);
+        assert_eq!(tokens, [7 << 12 | 3 << 1]);
+        // Back in: the token goes, a map takes the place.
+        let (mut m, mut alloc) = setup();
+        m.map(0x40_0000, 0x5000, PageSize::Size4K, user, &mut alloc).unwrap();
+        m.swap_out_4k(0x40_0000, 9 << 12);
+        assert_eq!(m.clear_swapped_4k(0x40_0000), Some(9 << 12));
+        assert_eq!(m.clear_swapped_4k(0x40_0000), None);
+        assert_eq!(m.next_mapped(0, USER_END), None);
+        m.map(0x40_0000, 0x8000, PageSize::Size4K, user, &mut alloc).unwrap();
+        assert_eq!(m.translate(0x40_0000).map(|t| t.phys), Some(0x8000));
     }
 
     #[test]
@@ -801,7 +962,7 @@ mod tests {
         user.map(0x40_0000, 0x5000, PageSize::Size4K, flags, &mut alloc).unwrap();
         user.map(0x7fff_0000_0000, 0x6000, PageSize::Size4K, flags, &mut alloc).unwrap();
         let (mut tables_freed, mut leaves) = (0, Vec::new());
-        user.destroy(&mut |_| tables_freed += 1, &mut |f| leaves.push(f.number()));
+        user.destroy(&mut |_| tables_freed += 1, &mut |f| leaves.push(f.number()), &mut |_| {});
         leaves.sort();
         assert_eq!(leaves, [5, 6]);
         // Two PDPT+PD+PT chains plus the root; kernel tables untouched.
@@ -821,7 +982,7 @@ mod tests {
         assert_eq!(m.unmap_4k_owned(0x40_1000), Some((Frame::from_number(6), false)));
         m.map(0x40_1000, 0x6000, PageSize::Size4K, borrowed, &mut alloc).unwrap();
         let mut leaves = Vec::new();
-        m.destroy(&mut |_| {}, &mut |f| leaves.push(f.number()));
+        m.destroy(&mut |_| {}, &mut |f| leaves.push(f.number()), &mut |_| {});
         assert_eq!(leaves, [5]);
     }
 }

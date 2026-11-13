@@ -65,6 +65,7 @@ pub fn full_dump() {
         stats_line(Some(heap), crate::mm::try_frame_stats());
         info!("statedump: heap by owner: {}", crate::nt::stats::HeapOwners::now(heap.in_use));
         info!("statedump: image pages: {}", crate::nt::section::PageStats);
+        info!("statedump: pagefile: {}", crate::nt::pagefile::Summary);
     }
     info!("statedump: end");
 }

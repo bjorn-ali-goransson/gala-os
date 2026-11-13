@@ -206,6 +206,37 @@ impl UserSpace {
 
     pub fn for_each_page(&mut self, _f: impl FnMut(u64, Frame, PageFlags)) {}
 
+    /// The page file (`nt::pagefile`) needs a disk: not ported yet. Nothing ages.
+    pub fn age_page(&mut self, _virt: u64) -> crate::mm::paging::Age {
+        crate::mm::paging::Age::Absent
+    }
+
+    pub fn copy_page(&mut self, _virt: u64, _frame: Frame, _buf: &mut [u8]) -> bool {
+        false
+    }
+
+    pub fn reserve_frees(&mut self, _n: usize) -> bool {
+        false
+    }
+
+    pub fn page_out(&mut self, _virt: u64, _frame: Frame, _token: u64) -> bool {
+        false
+    }
+
+    pub fn swapped(&mut self, _virt: u64) -> Option<u64> {
+        None
+    }
+
+    pub fn page_in(
+        &mut self,
+        _virt: u64,
+        _token: u64,
+        _data: &[u8],
+        _flags: PageFlags,
+    ) -> Result<bool, PagingError> {
+        Ok(false)
+    }
+
     pub fn mapping(&mut self, _virt: u64) -> Option<(Frame, bool)> {
         None
     }

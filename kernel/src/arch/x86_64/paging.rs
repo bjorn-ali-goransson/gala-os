@@ -495,7 +495,14 @@ impl UserSpace {
     ) -> Result<crate::mm::paging::ForkedPage, PagingError> {
         use crate::mm::paging::{ForkedPage, PageSize};
         let virt = virt / PAGE_SIZE * PAGE_SIZE;
-        let Some(t) = self.mapper.translate(virt) else { return Ok(ForkedPage::Absent) };
+        let Some(t) = self.mapper.translate(virt) else {
+            // Only NT processes' pages go to the page file; a fork's parent
+            // is a Linux process. Refused rather than lost.
+            if self.mapper.swapped_4k(virt).is_some() {
+                return Err(PagingError::Map(MapError::AlreadyMapped));
+            }
+            return Ok(ForkedPage::Absent);
+        };
         let frame = Frame::containing(t.phys);
         if t.flags.borrowed {
             child.map_borrowed(virt, frame, t.flags)?;
@@ -522,9 +529,14 @@ impl UserSpace {
         Ok(ForkedPage::CopyOnWrite)
     }
 
-    /// Unmaps a page and frees its frame. Returns whether it was mapped.
+    /// Unmaps a page and frees its frame (a page in the page file: gives
+    /// its slot back). Returns whether a frame was mapped.
     pub fn unmap_page(&mut self, virt: u64) -> bool {
         let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        if let Some(token) = self.mapper.clear_swapped_4k(virt) {
+            crate::mm::swap::release(token);
+            return false;
+        }
         match self.mapper.unmap_4k_owned(virt) {
             Some((frame, owned)) => {
                 crate::mm::note_user_map(frame, false);
@@ -649,7 +661,16 @@ impl UserSpace {
         self.for_each_piece(virt, data.len(), check_writable, |phys, n, off| {
             // SAFETY: as in `read`, with source and destination swapped.
             unsafe { core::ptr::copy_nonoverlapping(src.add(off), hhdm_ptr(phys), n) }
-        })
+        })?;
+        // Written through the HHDM, not the user mapping: the processor
+        // set no dirty bit, which a page out in progress tests
+        // (`page_out`).
+        let mut page = virt / PAGE_SIZE * PAGE_SIZE;
+        while page < virt + data.len() as u64 {
+            self.mapper.set_dirty_4k(page, true);
+            page += PAGE_SIZE;
+        }
+        Ok(())
     }
 }
 
@@ -779,6 +800,129 @@ impl UserSpace {
         Ok(())
     }
 
+    /// The page file's look at the page at `virt` (`nt::pagefile`'s
+    /// clock): a present page of this space's own, shared with no other,
+    /// that was accessed since the last look loses its accessed bit
+    /// (`Recent`: a second chance); one that was not is `Old` and loses
+    /// its dirty bit, so that a write from now on shows (`page_out`).
+    pub fn age_page(&mut self, virt: u64) -> crate::mm::paging::Age {
+        use crate::mm::paging::Age;
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        let Some(t) = self.mapper.translate(virt) else { return Age::Absent };
+        let frame = Frame::containing(t.phys);
+        if t.flags.borrowed || t.size != crate::mm::paging::PageSize::Size4K {
+            return Age::Kept;
+        }
+        if crate::mm::frame_shared(frame) {
+            return Age::Kept;
+        }
+        let recent = self.mapper.take_accessed_4k(virt) == Some(true);
+        if !recent {
+            self.mapper.set_dirty_4k(virt, false);
+        }
+        self.invalidate(virt);
+        if recent { Age::Recent } else { Age::Old(frame) }
+    }
+
+    /// Copies the page at `virt` into `buf` (4 KiB) if it still maps
+    /// `frame` as its own (the page out's copy, taken after the flush
+    /// that `age_page`'s change asked for).
+    pub fn copy_page(&mut self, virt: u64, frame: Frame, buf: &mut [u8]) -> bool {
+        match self.mapping(virt) {
+            Some((f, false)) if f == frame && buf.len() >= PAGE_SIZE as usize => {
+                // SAFETY: `frame` is a user frame this space owns and maps
+                // (HHDM-mapped), `buf` holds a page. A raw copy: user
+                // threads may write it meanwhile (the dirty bit tells).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        hhdm_ptr(frame.start()),
+                        buf.as_mut_ptr(),
+                        PAGE_SIZE as usize,
+                    )
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Room to free `n` frames under this lock without allocating
+    /// (`page_out`'s); false without the memory for it.
+    pub fn reserve_frees(&mut self, n: usize) -> bool {
+        self.freed.try_reserve(n).is_ok()
+    }
+
+    /// Puts the page at `virt` in the page file: if it still maps `frame`
+    /// as its own and was not written since `age_page` (its dirty bit),
+    /// the leaf becomes `token` and the frame is freed (after the TLB
+    /// flush). False (nothing changed) otherwise: the caller gives the
+    /// slot back. Needs `reserve_frees` first.
+    pub fn page_out(&mut self, virt: u64, frame: Frame, token: u64) -> bool {
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        if self.mapping(virt) != Some((frame, false))
+            || self.mapper.set_dirty_4k(virt, false) != Some(false)
+            || crate::mm::frame_shared(frame)
+            || self.freed.len() == self.freed.capacity()
+        {
+            return false;
+        }
+        self.mapper.swap_out_4k(virt, token);
+        crate::mm::note_user_map(frame, false);
+        self.invalidate(virt);
+        let _ = self.freed.try_push(frame);
+        true
+    }
+
+    /// The page file token of the page at `virt`, if it is in the page
+    /// file.
+    pub fn swapped(&mut self, virt: u64) -> Option<u64> {
+        self.mapper.swapped_4k(virt / PAGE_SIZE * PAGE_SIZE)
+    }
+
+    /// Brings the page at `virt` back from the page file: if its leaf
+    /// still holds `token`, a new frame of this space's own holding
+    /// `data` (4 KiB) is mapped there with `flags`, accessed and dirty
+    /// (its slot goes back: the caller releases it). Ok(false) if the
+    /// leaf changed meanwhile.
+    pub fn page_in(
+        &mut self,
+        virt: u64,
+        token: u64,
+        data: &[u8],
+        mut flags: PageFlags,
+    ) -> Result<bool, PagingError> {
+        use crate::mm::paging::PageSize;
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        if self.mapper.swapped_4k(virt) != Some(token) || data.len() < PAGE_SIZE as usize {
+            return Ok(false);
+        }
+        let frame =
+            crate::mm::allocate_frame(crate::mm::Use::UserPage).ok_or(MapError::OutOfMemory)?;
+        // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us;
+        // `data` holds a page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                hhdm_ptr(frame.start()),
+                PAGE_SIZE as usize,
+            )
+        };
+        flags.global = false;
+        flags.borrowed = false;
+        // The map replaces the token (a SWAPPED leaf is not present); on
+        // an error the token stays.
+        if let Err(e) =
+            self.mapper.map(virt, frame.start(), PageSize::Size4K, flags, &mut alloc_table)
+        {
+            let _ = crate::mm::free_frame(frame);
+            return Err(e.into());
+        }
+        // The slot is given back: the page exists only here now.
+        self.mapper.set_dirty_4k(virt, true);
+        crate::mm::note_user_map(frame, true);
+        Ok(true)
+    }
+
     /// Allocates a frame holding `data` (at most a page), zero-filled.
     pub fn frame_with(data: &[u8]) -> Option<Frame> {
         let frame = Self::zeroed_frame()?;
@@ -811,6 +955,6 @@ impl Drop for UserSpace {
         let free = &mut |f: Frame| {
             let _ = crate::mm::free_frame(f);
         };
-        mapper.destroy(&mut |f| free(f), &mut |f| free(f));
+        mapper.destroy(&mut |f| free(f), &mut |f| free(f), &mut crate::mm::swap::release);
     }
 }

@@ -3130,6 +3130,96 @@ impl RamFs {
         self.area.as_ref().map_or(0, |a| a.clusters.reclaimable())
     }
 
+    /// Takes `count` free clusters of the data area for the page file
+    /// (`nt::pagefile`), outside every file: appended to `runs` as
+    /// (first cluster, count) runs of consecutive clusters. Nothing
+    /// records them, so the next mount finds them free (the page file's
+    /// contents do not outlive a boot). All or nothing: without the
+    /// clusters, or the memory for the runs, nothing is taken.
+    pub fn claim_clusters(
+        &mut self,
+        count: u32,
+        runs: &mut Vec<(u32, u32)>,
+    ) -> Result<(), FsError> {
+        let area = self.area.as_mut().ok_or(FsError::NotFound)?;
+        if area.clusters.free() < count {
+            return Err(FsError::DiskFull);
+        }
+        let before = runs.len();
+        let mut failed = false;
+        for _ in 0..count {
+            let Some(c) = area.clusters.alloc() else {
+                failed = true;
+                break;
+            };
+            let fresh = runs.len() == before;
+            match runs.last_mut() {
+                Some((first, n)) if !fresh && *first + *n == c => *n += 1,
+                _ => {
+                    if runs.try_push((c, 1)).is_err() {
+                        area.clusters.undo(c);
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if failed {
+            for &(first, n) in &runs[before..] {
+                for c in first..first + n {
+                    area.clusters.undo(c);
+                }
+            }
+            runs.truncate(before);
+            return Err(FsError::NoMemory);
+        }
+        Ok(())
+    }
+
+    /// Gives back clusters `claim_clusters` took (the page file could not
+    /// be made or grown after all).
+    pub fn unclaim_clusters(&mut self, runs: &[(u32, u32)]) {
+        if let Some(area) = self.area.as_mut() {
+            for &(first, n) in runs {
+                for c in first..first + n {
+                    area.clusters.undo(c);
+                }
+            }
+        }
+    }
+
+    /// Makes `name` in `parent` a system file of `size` bytes, hidden and
+    /// system, held open by the system for all access without sharing (a
+    /// program's open of its data is a sharing violation) and never
+    /// recorded: the page file's node (`nt::pagefile`), whose data is not
+    /// the file system's (its clusters are `claim_clusters`').
+    pub fn system_file(
+        &mut self,
+        parent: NodeId,
+        name: &[u16],
+        size: u64,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        let was = core::mem::replace(&mut self.recording, false);
+        let made = self.create(parent, name, false, now).and_then(|id| {
+            self.set_size(id, size, now)?;
+            self.set_basic(id, Times::default(), Some(0x02 | 0x04 | ATTRIBUTE_ARCHIVE))?;
+            let all = Access { read: true, write: true, delete: true };
+            self.open(id, all, Share::default())?;
+            Ok(id)
+        });
+        self.recording = was;
+        made
+    }
+
+    /// Sets a system file's size (the page file grew), not recorded.
+    pub fn set_system_file_size(&mut self, id: NodeId, size: u64) {
+        let was = core::mem::replace(&mut self.recording, false);
+        let now = self.node(id).map_or(0, |n| n.written);
+        let _ = self.set_size(id, size, now);
+        self.recording = was;
+    }
+
     /// The data area's clusters and how many are free, once attached.
     pub fn area_size(&self) -> Option<(u32, u32)> {
         self.area.as_ref().map(|a| (a.clusters.count(), a.clusters.free()))
@@ -3621,6 +3711,37 @@ mod tests {
         assert_eq!(f.area_size(), Some((4, 2)));
         sync(&mut f, &mut disk);
         assert_eq!(f.area_size(), Some((4, 4)));
+    }
+
+    #[test]
+    fn the_page_file_s_clusters_are_taken_outside_every_file_and_never_recorded() {
+        let (mut f, mut disk) = disk_fs(8);
+        let id = f.create(ROOT, &w("f"), false, 1).unwrap();
+        f.write(id, 0, &[1; PAGE], 2).unwrap();
+        let mut runs = Vec::new();
+        // More than is free: nothing taken.
+        assert_eq!(f.claim_clusters(8, &mut runs), Err(FsError::DiskFull));
+        assert!(runs.is_empty());
+        f.claim_clusters(5, &mut runs).unwrap();
+        assert_eq!(runs.iter().map(|r| r.1).sum::<u32>(), 5);
+        assert_eq!(f.area_size(), Some((8, 2)));
+        // A write finds the room the page file left.
+        assert_eq!(f.write(id, PAGE as u64, &[2; 3 * PAGE], 3), Err(FsError::DiskFull));
+        let ops = sync(&mut f, &mut disk);
+        // No record names them: the next mount finds them free.
+        let named: Vec<u32> = ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Clusters { runs, .. } => Some(
+                    runs.iter().flat_map(|r| r.cluster..r.cluster + r.count).collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        for &(first, n) in &runs {
+            assert!(named.iter().all(|c| !(first..first + n).contains(c)), "{named:?}");
+        }
     }
 
     #[test]

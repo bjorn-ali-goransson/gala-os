@@ -28,7 +28,10 @@
 //!   RoGetActivationFactory and RoActivateInstance succeed, the instance
 //!   is an IPackageManager named by GetRuntimeClassName, and
 //!   FindPackagesForUser("", the Store Office's family name) is an empty
-//!   collection (no Store Office on CI's runner);
+//!   collection (no Store Office on CI's runner); it is also an
+//!   IPackageManager9 (`info` lines: FindProvisionedPackages and
+//!   GetPackageStubPreference of the Store Office's family, Windows'
+//!   answers not measured yet);
 //! - errors: RoGetErrorReportingFlags E_POINTER without an output and
 //!   RO_ERROR_REPORTING_USESETERRORINFO at start; RoOriginateErrorW FALSE
 //!   for S_OK, TRUE for a failure, whose restricted error object
@@ -181,6 +184,10 @@ const IID_IACTIVATIONFACTORY: Guid = guid(0x35, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0
 /// {9A7D4B65-5E8F-4FC7-A2E5-7F6925CB8B53}
 const IID_IPACKAGEMANAGER: Guid =
     guid(0x9a7d4b65, 0x5e8f, 0x4fc7, [0xa2, 0xe5, 0x7f, 0x69, 0x25, 0xcb, 0x8b, 0x53]);
+/// Windows.Management.Deployment.IPackageManager9:
+/// {1AA79035-CC71-4B2E-80A6-C7041D8579A7}
+const IID_IPACKAGEMANAGER9: Guid =
+    guid(0x1aa79035, 0xcc71, 0x4b2e, [0x80, 0xa6, 0xc7, 0x04, 0x1d, 0x85, 0x79, 0xa7]);
 /// {82BA7092-4C88-427D-A7BC-16DD93FEB67E}
 const IID_IRESTRICTEDERRORINFO: Guid =
     guid(0x82ba7092, 0x4c88, 0x427d, [0xa7, 0xbc, 0x16, 0xdd, 0x93, 0xfe, 0xb6, 0x7e]);
@@ -733,6 +740,51 @@ fn package_manager(c: &mut Checks) -> Result<(), u32> {
         c.ok(has == 0, u64::from(has))?;
         release(iterator);
         release(packages);
+        // IPackageManager9 (OfficeClickToRun asks for it and uses it
+        // without checking).
+        let mut manager9: *mut c_void = null_mut();
+        c.hr(
+            com_call!(
+                manager,
+                0,
+                fn(*const Guid, *mut *mut c_void) -> HResult,
+                &IID_IPACKAGEMANAGER9,
+                &mut manager9
+            ),
+            S_OK,
+        )?;
+        c.ok(!manager9.is_null(), 0)?;
+        // FindProvisionedPackages (documented as needing an
+        // administrator; CI's runner answer unknown): an IVector<Package>,
+        // get_Size.
+        let mut provisioned: *mut c_void = null_mut();
+        let hr = com_call!(manager9, 6, fn(*mut *mut c_void) -> HResult, &mut provisioned);
+        let mut size = u32::MAX;
+        if hr == S_OK && !provisioned.is_null() {
+            let _ = com_call!(provisioned, 7, fn(*mut u32) -> HResult, &mut size);
+            release(provisioned);
+        }
+        Line::new()
+            .s(NAME.as_bytes())
+            .s(b": info FindProvisionedPackages ")
+            .hex(hr as u32 as u64)
+            .s(b" size ")
+            .dec(u64::from(size))
+            .s(b"\r\n")
+            .print();
+        // GetPackageStubPreference of a family with no package: unknown
+        // on Windows (Full = 0, Stub = 1).
+        let mut preference = -1i32;
+        let hr = com_call!(manager9, 12, fn(HString, *mut i32) -> HResult, family, &mut preference);
+        Line::new()
+            .s(NAME.as_bytes())
+            .s(b": info GetPackageStubPreference ")
+            .hex(hr as u32 as u64)
+            .s(b" preference ")
+            .hex(preference as u32 as u64)
+            .s(b"\r\n")
+            .print();
+        release(manager9);
         release(manager);
 
         let mut instance: *mut c_void = null_mut();

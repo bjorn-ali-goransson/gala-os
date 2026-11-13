@@ -26,7 +26,8 @@ pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
-pub use crate::mm::paging::{CacheMode, PageFlags};
+/// A page's age for the page file's clock, and the end of user space.
+pub use crate::mm::paging::{Age, CacheMode, PageFlags, USER_END};
 /// Frames in use by kind and the scheduler's thread counts, for
 /// persist's low-memory line.
 pub use crate::mm::{FrameUses, frame_uses};
