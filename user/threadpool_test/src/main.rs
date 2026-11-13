@@ -11,11 +11,12 @@
 //!   (SetThreadpoolThreadMaximum) runs one callback at a time and its
 //!   CallbackMayRunLong is FALSE while that thread is busy;
 //!   SetThreadpoolThreadMinimum is TRUE; Query/SetThreadpoolStackInformation
-//!   (the image's stack sizes at first; not validated).
+//!   (the image's stack sizes at first; 64-bit Windows takes sizes of 1,
+//!   32-bit Windows refuses them: printed, not checked).
 //! - Environments (TP_CALLBACK_ENVIRON, versions 1 and 3): the pool, the
 //!   cleanup group and its cancel callback, the finalization callback;
-//!   version 3's priorities 0-2; priority 10 and version 9999 are
-//!   ERROR_INVALID_PARAMETER.
+//!   version 3's priorities 0-2; priority 10 is ERROR_INVALID_PARAMETER;
+//!   version 9999 is accepted (Windows, unlike Wine's ntdll test).
 //! - Work: five posts run five times, one at a time on a one-thread pool;
 //!   WaitForThreadpoolWorkCallbacks(TRUE) drops queued ones.
 //! - Cleanup groups (test_tp_group_wait, test_tp_group_cancel):
@@ -97,6 +98,9 @@ unsafe extern "system" {
     fn CreateSemaphoreW(attrs: usize, initial: i32, max: i32, name: *const u16) -> Handle;
     fn ReleaseSemaphore(h: Handle, count: i32, previous: *mut i32) -> i32;
     fn CreateEventW(attrs: usize, manual: i32, initial: i32, name: *const u16) -> Handle;
+    fn GetCurrentProcess() -> Handle;
+    fn SetEvent(h: Handle) -> i32;
+    fn GetProcessHandleCount(process: Handle, count: *mut u32) -> i32;
     fn CreateWaitableTimerW(attrs: usize, manual: i32, name: *const u16) -> Handle;
     fn SetWaitableTimer(h: Handle, due: *const i64, period: i32, f: usize, a: usize, r: i32)
     -> i32;
@@ -393,9 +397,23 @@ fn pools(c: &mut Checks) -> Result<(), u32> {
         let mut stack = [0usize; 2];
         c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
         c.ok(stack == [reserve, commit], stack[0] as u64)?;
-        c.eq(SetThreadpoolStackInformation(pool, &[1, 1]) as u32, 1)?;
-        c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
-        c.ok(stack == [1, 1], stack[0] as u64)?;
+        if cfg!(target_arch = "x86_64") {
+            c.eq(SetThreadpoolStackInformation(pool, &[1, 1]) as u32, 1)?;
+            c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
+            c.ok(stack == [1, 1], stack[0] as u64)?;
+        } else {
+            // Not measured: 32-bit Windows refuses these sizes (FALSE),
+            // with an error and a rule not known yet: printed.
+            SetLastError(0);
+            let r = SetThreadpoolStackInformation(pool, &[1, 1]);
+            info(
+                "SetThreadpoolStackInformation(1, 1) result, error",
+                (r as u32 as u64) << 32 | u64::from(GetLastError()),
+            );
+            c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
+            info("then the reserve", stack[0] as u64);
+            info("then the commit", stack[1] as u64);
+        }
         CloseThreadpool(pool);
     }
     Ok(())
@@ -426,13 +444,23 @@ fn environments(c: &mut Checks) -> Result<(), u32> {
             TrySubmitThreadpoolCallback(release_cb, sem as Ptr, &env) as usize,
             ERROR_INVALID_PARAMETER,
         )?;
-        let env = Env { version: 9999, ..Env::v1(pool) };
-        SetLastError(0);
-        c.fails(
-            TrySubmitThreadpoolCallback(release_cb, sem as Ptr, &env) as usize,
-            ERROR_INVALID_PARAMETER,
-        )?;
         c.wait(sem, 50, WAIT_TIMEOUT)?;
+        // An unknown version is accepted (Windows; Wine's test_tp_simple
+        // expects ntdll's TpSimpleTryPost to refuse it).
+        let env = Env { version: 9999, ..Env::v1(pool) };
+        c.eq(TrySubmitThreadpoolCallback(release_cb, sem as Ptr, &env) as u32, 1)?;
+        c.wait(sem, 1000, WAIT_OBJECT_0)?;
+        // Not measured: whether such a version's priority is read.
+        let env = Env { version: 9999, priority: 10, ..Env::v1(pool) };
+        SetLastError(0);
+        let r = TrySubmitThreadpoolCallback(release_cb, sem as Ptr, &env);
+        info(
+            "TrySubmitThreadpoolCallback(version 9999, priority 10) result, error",
+            (r as u32 as u64) << 32 | u64::from(GetLastError()),
+        );
+        if r != 0 {
+            c.wait(sem, 1000, WAIT_OBJECT_0)?;
+        }
         // Not measured: an object made with such an environment.
         SetLastError(0);
         let work = CreateThreadpoolWork(busy_cb, core::ptr::null_mut(), &env);
@@ -952,6 +980,32 @@ fn waits(c: &mut Checks) -> Result<(), u32> {
         release(sem, 1);
         c.wait(done, 100, WAIT_OBJECT_0)?;
         c.eq(COUNT.load(Ordering::SeqCst), 2)?;
+        // A wait goes on while another wait's settings change many times
+        // (each change ends the wait the last one began).
+        let event = CreateEventW(0, 1, 0, core::ptr::null());
+        COUNT.store(0, Ordering::SeqCst);
+        SetThreadpoolWait(wait2, sem, core::ptr::null());
+        for _ in 0..2000 {
+            SetThreadpoolWait(wait1, event, core::ptr::null());
+            SetThreadpoolWait(wait1, 0, core::ptr::null());
+        }
+        release(sem, 1);
+        c.wait(done, 1000, WAIT_OBJECT_0)?;
+        c.eq(COUNT.load(Ordering::SeqCst), 1)?;
+        // Not measured: whether a wait that is over holds a handle.
+        let mut before = 0u32;
+        GetProcessHandleCount(GetCurrentProcess(), &mut before);
+        SetThreadpoolWait(wait1, event, core::ptr::null());
+        SetEvent(event);
+        c.wait(done, 1000, WAIT_OBJECT_0)?;
+        WaitForThreadpoolWaitCallbacks(wait1, 0);
+        let mut after = 0u32;
+        GetProcessHandleCount(GetCurrentProcess(), &mut after);
+        info(
+            "handles after a wait fired, less before it was set",
+            u64::from(after.wrapping_sub(before)),
+        );
+        CloseHandle(event);
         // test_tp_wait_early_closure: a handle closed after
         // SetThreadpoolWait is still waited on.
         let timer = CreateWaitableTimerW(0, 1, core::ptr::null());

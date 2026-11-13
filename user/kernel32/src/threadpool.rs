@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
+const WAIT_ABANDONED_0: u32 = 0x80;
 const STATUS_TOO_MANY_THREADS: u32 = 0xc000_0129;
 const ERROR_IO_PENDING: u32 = 997;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
@@ -461,7 +462,6 @@ struct Object {
     /// Waits (the waits' lock): the duplicated handle, the deadline,
     /// waiting, a count of settings, the wait thread and its list.
     handle: Handle,
-    owned: bool,
     timeout: Option<u64>,
     waiting: bool,
     generation: u32,
@@ -499,9 +499,9 @@ fn create(
     if !env.is_null() {
         // SAFETY: the caller's environment (version 3 read only as such).
         let e = unsafe { &*env };
-        if e.version != 1 && e.version != 3 {
-            return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
-        }
+        // Any other version is read as version 1 (Windows accepts version
+        // 9999, threadpool_test; whether it reads its priority is not
+        // measured).
         if e.version == 3 {
             if e.priority as usize >= PRIORITIES {
                 return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
@@ -556,7 +556,6 @@ fn create(
         armed: false,
         tnext: core::ptr::null_mut(),
         handle: core::ptr::null_mut(),
-        owned: false,
         timeout: None,
         waiting: false,
         generation: 0,
@@ -1410,13 +1409,28 @@ pub extern "system" fn CloseThreadpoolTimer(timer: *mut c_void) {
 
 // ---- Waits: threads of up to 63 ----
 
-/// A wait thread: its event (settings changed) and its wait objects
-/// (`wnext`/`wprev`).
+/// A wait thread: its event (settings changed), its wait objects
+/// (`wnext`/`wprev`) and the handles of its current wait.
+///
+/// **Invariant: a handle the wait thread is waiting on stays open until
+/// that wait returns.** The thread takes its handles under the waits'
+/// lock and waits after letting it go; a setting changed meanwhile must
+/// not close one of them under it (the wait would fail with
+/// ERROR_INVALID_HANDLE, or wait on whatever object the value names
+/// next). `drop_handle` marks such a handle `retired` instead, and the
+/// thread closes it when its wait returns.
 struct Bucket {
     next: *mut Bucket,
     event: Handle,
     count: u32,
     head: *mut Object,
+    /// While the thread waits: the handles it waits on (`handles[1..n]`,
+    /// `handles[0]` is `event`) and which of them are to be closed when
+    /// the wait returns.
+    in_wait: bool,
+    n: usize,
+    handles: [Handle; 64],
+    retired: [bool; 64],
 }
 
 static WAITS_LOCK: AtomicUsize = AtomicUsize::new(0);
@@ -1457,8 +1471,16 @@ fn new_bucket() -> *mut Bucket {
     if event.is_null() {
         return core::ptr::null_mut();
     }
-    let b =
-        alloc(Bucket { next: core::ptr::null_mut(), event, count: 0, head: core::ptr::null_mut() });
+    let b = alloc(Bucket {
+        next: core::ptr::null_mut(),
+        event,
+        count: 0,
+        head: core::ptr::null_mut(),
+        in_wait: false,
+        n: 0,
+        handles: [core::ptr::null_mut(); 64],
+        retired: [false; 64],
+    });
     if b.is_null() {
         CloseHandle(event);
         return fail_with(ERROR_NOT_ENOUGH_MEMORY, b);
@@ -1480,15 +1502,26 @@ fn new_bucket() -> *mut Bucket {
     b
 }
 
-/// Drops `o`'s handle (the waits' lock held).
+/// Drops `o`'s handle (the waits' lock held): closed now, or, if its wait
+/// thread is waiting on it, when that wait returns (`Bucket`'s invariant).
 fn drop_handle(o: *mut Object) {
-    // SAFETY: a live wait under the waits' lock.
+    // SAFETY: a live wait and its bucket under the waits' lock.
     unsafe {
-        if (*o).owned {
-            CloseHandle((*o).handle);
+        let (h, b) = ((*o).handle, (*o).bucket);
+        if !h.is_null() {
+            let waited = if !b.is_null() && (*b).in_wait {
+                (1..(*b).n).find(|&i| (*b).handles[i] == h)
+            } else {
+                None
+            };
+            match waited {
+                Some(i) => (*b).retired[i] = true,
+                None => {
+                    CloseHandle(h);
+                }
+            }
         }
         (*o).handle = core::ptr::null_mut();
-        (*o).owned = false;
     }
 }
 
@@ -1508,9 +1541,10 @@ fn leave_bucket(o: *mut Object) {
                 (*(*o).wnext).wprev = (*o).wprev;
             }
             (*b).count -= 1;
+            // While `bucket` still names the thread that may wait on it.
+            drop_handle(o);
             (*o).bucket = core::ptr::null_mut();
             (*o).waiting = false;
-            drop_handle(o);
             SetEvent((*b).event);
         }
     }
@@ -1520,7 +1554,6 @@ fn leave_bucket(o: *mut Object) {
 extern "system" fn wait_thread(param: *mut c_void) -> u32 {
     let b = param.cast::<Bucket>();
     name_thread(b"threadpool waits", None);
-    let mut handles = [core::ptr::null_mut::<c_void>(); 64];
     let mut objects = [core::ptr::null_mut::<Object>(); 64];
     let mut generations = [0u32; 64];
     loop {
@@ -1541,13 +1574,14 @@ extern "system" fn wait_thread(param: *mut c_void) -> u32 {
                 free(b);
                 return 0;
             }
-            handles[0] = (*b).event;
+            (*b).handles[0] = (*b).event;
             let mut n = 1;
             let mut first: Option<u64> = None;
             let mut o = (*b).head;
             while !o.is_null() {
                 if (*o).waiting {
-                    handles[n] = (*o).handle;
+                    (*b).handles[n] = (*o).handle;
+                    (*b).retired[n] = false;
                     objects[n] = o;
                     generations[n] = (*o).generation;
                     n += 1;
@@ -1557,45 +1591,74 @@ extern "system" fn wait_thread(param: *mut c_void) -> u32 {
                 }
                 o = (*o).wnext;
             }
+            (*b).n = n;
+            (*b).in_wait = true;
             (n, first.map_or(INFINITE, |f| ms_until(f, now())))
         };
         unlock(WAITS_LOCK.as_ptr());
-        let r = WaitForMultipleObjects(n as u32, handles.as_ptr(), FALSE, wait);
+        // SAFETY: the bucket's handles, which no other thread changes (or
+        // closes) while `in_wait` is set.
+        let r = WaitForMultipleObjects(n as u32, unsafe { (*b).handles.as_ptr() }, FALSE, wait);
+        let error = GetLastError();
         lock(WAITS_LOCK.as_ptr());
         let i = r as usize;
         // SAFETY: as above; an object is used only if it is still ours and
         // set as it was when the wait began.
         unsafe {
+            (*b).in_wait = false;
+            // WAIT_ABANDONED_0 + i (a mutex its owner left) satisfies the
+            // wait too.
+            let i = if (WAIT_ABANDONED_0 as usize..WAIT_ABANDONED_0 as usize + n).contains(&i) {
+                i - WAIT_ABANDONED_0 as usize
+            } else {
+                i
+            };
             if (1..n).contains(&i) {
                 let o = objects[i];
                 if o_is_current(b, o, generations[i]) {
-                    (*o).waiting = false;
-                    submit(o, true, true);
+                    fired(o, true);
                 }
             } else if r == WAIT_FAILED {
-                // A handle that cannot be waited on: its waits stop.
-                note(
-                    b"kernel32.dll!SetThreadpoolWait(handle not waitable)",
-                    u64::from(GetLastError()),
-                );
+                // Cannot happen: every handle is our own duplicate, found
+                // waitable when it was set, and open until this wait
+                // returned. Should it, the thread's waits stop rather
+                // than fail again at once, and the ledger says so.
+                note(b"kernel32.dll!thread pool(wait thread's wait failed)", u64::from(error));
                 for k in 1..n {
                     if o_is_current(b, objects[k], generations[k]) {
                         (*objects[k]).waiting = false;
+                        drop_handle(objects[k]);
                     }
+                }
+            }
+            for k in 1..n {
+                if (*b).retired[k] {
+                    (*b).retired[k] = false;
+                    CloseHandle((*b).handles[k]);
                 }
             }
             let t = now();
             let mut o = (*b).head;
             while !o.is_null() {
+                let next = (*o).wnext;
                 if (*o).waiting && (*o).timeout.is_some_and(|d| d <= t) {
-                    (*o).waiting = false;
-                    submit(o, false, true);
+                    fired(o, false);
                 }
-                o = (*o).wnext;
+                o = next;
             }
         }
         unlock(WAITS_LOCK.as_ptr());
     }
+}
+
+/// `o`'s wait ended (`signaled`, or timed out): its callback queued and
+/// its handle closed, as Windows keeps no reference to the object once a
+/// wait is over (the waits' lock held; the thread is not waiting).
+fn fired(o: *mut Object, signaled: bool) {
+    // SAFETY: a live wait under the waits' lock.
+    unsafe { (*o).waiting = false };
+    drop_handle(o);
+    submit(o, signaled, true);
 }
 
 /// `o` still waits on bucket `b` with the setting of `generation` (the
@@ -1652,7 +1715,7 @@ fn set_wait(o: *mut Object, handle: Handle, timeout: *const i64) -> bool {
                 // A duplicate: the caller may close its handle meanwhile.
                 let mut dup = core::ptr::null_mut();
                 let process = GetCurrentProcess();
-                if DuplicateHandle(
+                let duplicated = DuplicateHandle(
                     process,
                     handle,
                     process,
@@ -1660,16 +1723,33 @@ fn set_wait(o: *mut Object, handle: Handle, timeout: *const i64) -> bool {
                     0,
                     FALSE,
                     DUPLICATE_SAME_ACCESS,
-                ) != FALSE
-                {
-                    (*o).handle = dup;
-                    (*o).owned = true;
+                ) != FALSE;
+                // Whether it can be waited on, before the wait thread
+                // waits on it with the others (one handle that cannot
+                // would fail all their waits): a poll, which is the wait
+                // itself when the object is signaled already.
+                let poll = if duplicated { WaitForSingleObject(dup, 0) } else { WAIT_FAILED };
+                if poll == WAIT_FAILED {
+                    note(
+                        b"kernel32.dll!SetThreadpoolWait(handle not waitable)",
+                        u64::from(GetLastError()),
+                    );
+                    if duplicated {
+                        CloseHandle(dup);
+                    }
                 } else {
-                    (*o).handle = handle;
+                    (*o).handle = dup;
+                    (*o).timeout = if timeout.is_null() {
+                        None
+                    } else {
+                        Some(deadline(timeout.read_unaligned()))
+                    };
+                    (*o).waiting = true;
+                    if poll != WAIT_TIMEOUT {
+                        // WAIT_OBJECT_0 or WAIT_ABANDONED: satisfied now.
+                        fired(o, true);
+                    }
                 }
-                (*o).timeout =
-                    if timeout.is_null() { None } else { Some(deadline(timeout.read_unaligned())) };
-                (*o).waiting = true;
             }
             SetEvent((*b).event);
         }

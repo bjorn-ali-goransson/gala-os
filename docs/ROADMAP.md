@@ -1981,6 +1981,12 @@ need gala's.
      I/O objects, the instance functions and the stack information
      (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
      threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
+     Next: the values the tests print as `info` until Windows' answer is
+     read from the `windows` job's report: 32-bit
+     SetThreadpoolStackInformation's refusal of sizes of 1 (its error and
+     rule), whether a version 9999 environment's priority is read, a
+     wait's handles once it fired, and `_wmakepath_s`'s buffer after
+     ERANGE (gala writes "\0:d\\" and leaves the rest).
      With it AppVIsvApi.dll loads and OISVAPI::Initialize fails
      instead in the orchestration's component loader (`componentloader.h
      : 216`, 0x7f; ErrorCode 30175, APPLYCONFIGURATION 127, the service

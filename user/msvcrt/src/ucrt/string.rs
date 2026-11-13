@@ -557,7 +557,8 @@ fn put(path: *mut u16, size: usize, at: &mut usize, c: u16) -> bool {
 /// one, the name, the extension with a dot before it unless it has one;
 /// EINVAL for no buffer or a size of 0; ERANGE when it does not fit, what
 /// fit before the terminator's place written and the first element
-/// emptied (Wine's msvcrt dir.c test_makepath_s).
+/// emptied (Wine's msvcrt dir.c test_makepath_s; Windows leaves other
+/// contents, not measured yet: ucrt_test prints them).
 #[unsafe(no_mangle)]
 pub extern "C" fn _wmakepath_s(
     path: *mut u16,

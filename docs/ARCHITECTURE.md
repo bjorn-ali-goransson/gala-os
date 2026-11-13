@@ -835,7 +835,10 @@ current process, -2 = current thread.
   goes restarts the second); the message is preceded by who holds the
   space (`sched::dump_space_holders`: unreaped threads with state and
   CPU; `sched::held_by_reaps`: references a reap in progress holds;
-  `process::describe_holders`: the process's own references).
+  `process::describe_holders`: the process's own references, and each
+  handle in any listed process's table that names the process or one
+  of its threads: pid, name, whether that process exited, handle value,
+  access, Process or Thread tid; up to 8).
 - **Process list**: a process stays in `process::PROCESSES` after it
   exits for as long as anything else refers to it (a handle from
   CreateProcess, a thread object), so `NtOpenProcess` (0x26) finds it by
@@ -1603,7 +1606,7 @@ address-space teardown never free.
   held). A view costs its committed ranges, not its pages; unmapping and
   `vm::sync_range` visit only the mapped pages (`next_mapped` skips absent
   page tables), so a 32 MiB view no page of which was touched costs what
-  an 87 KiB one does (bench `image_load_32m_untouched`).
+  a small one does (bench `image_load_32m_untouched`).
   Only when that range is taken in a process is the view placed
   anywhere, with private pages relocated a page at a time (never a
   whole-image copy). A view not at the preferred base returns
@@ -3398,7 +3401,8 @@ ntdll imports.
     Windows'; at least 1) and a minimum (started at once:
     SetThreadpoolThreadMinimum is FALSE if a worker cannot start), the
     stack (Query/SetThreadpoolStackInformation; the image's sizes, not
-    validated). A queued callback goes on one of three priority lists
+    validated: 32-bit Windows refuses sizes of 1, its rule not measured
+    yet). A queued callback goes on one of three priority lists
     (TP_CALLBACK_PRIORITY) and posts a token packet; a worker taking a
     token runs the first queued callback, round robin among objects. A
     worker starts when work is queued and no worker is idle (or
@@ -3410,7 +3414,8 @@ ntdll imports.
     worker is idle or one can start, else FALSE with
     ERROR_TOO_MANY_THREADS.
   - Callback environments (TP_CALLBACK_ENVIRON versions 1 and 3; another
-    version or a priority above 2 is ERROR_INVALID_PARAMETER): pool,
+    version is read as version 1, as Windows accepts version 9999; a
+    version 3 priority above 2 is ERROR_INVALID_PARAMETER): pool,
     cleanup group and its cancel callback, the RaceDll kept loaded while
     the object lives, the activation context (active around the
     callback), the finalization callback (after the callback, before
@@ -3439,8 +3444,20 @@ ntdll imports.
     WAIT_OBJECT_0 (the wait took the object's count) or WAIT_TIMEOUT
     (a 0 timeout at once); a setting count tells a stale wake from the
     current setting. SetThreadpoolWaitEx returns whether a wait was
-    pending. A handle that cannot be waited on stops the thread's waits
-    (`SetThreadpoolWait(handle not waitable)` in the ledger).
+    pending. The duplicate is polled when set (signaled already: the
+    wait is over at once); one that cannot be waited on (or that cannot
+    be duplicated) is not waited on (`SetThreadpoolWait(handle not
+    waitable)` in the ledger), so it never fails the others' wait. A
+    wait that is over closes its duplicate (Windows keeps no reference
+    to the object then: a process's handle held on would keep that
+    process from being freed).
+    **Invariant: a handle the wait thread waits on stays open until that
+    wait returns**: a setting changed or a wait closed meanwhile marks
+    the old duplicate retired, and the wait thread closes it after its
+    wait (closed at once, the wait failed with ERROR_INVALID_HANDLE and
+    stopped all the thread's waits, among them Crashpad's on the
+    browser, which then kept the browser's process: `threadpool_test`
+    changes one wait 2000 times while another must still fire).
   - I/O: CreateThreadpoolIo binds the handle to the pool's port with the
     object as key; a completion runs the callback with the OVERLAPPED,
     the Win32 error of its status and the byte count, if a
