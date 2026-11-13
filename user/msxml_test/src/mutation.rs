@@ -793,15 +793,15 @@ fn attributes(c: &mut Checks) -> Result<(), u32> {
     release(el);
 
     // put_nodeValue.
-    // A document: E_INVALIDARG (MSXML 6 on Windows; Wine's msxml3
-    // tests expect E_FAIL).
+    // A document, a fragment, an element: E_INVALIDARG (MSXML 6 on
+    // Windows; Wine's msxml3 tests expect E_FAIL).
     c.code(put_node_value(doc, "one two three"), E_INVALIDARG)?;
     let (hr, fragment) = create_node(doc, NODE_DOCUMENT_FRAGMENT, Some("test"), None);
     c.hr(hr, S_OK)?;
-    c.code(put_node_value(fragment, "one two three"), E_FAIL)?;
+    c.code(put_node_value(fragment, "one two three"), E_INVALIDARG)?;
     release(fragment);
     let el = create(c, doc, CREATE_ELEMENT, "test")?;
-    c.code(put_node_value(el, "one two three"), E_FAIL)?;
+    c.code(put_node_value(el, "one two three"), E_INVALIDARG)?;
     release(el);
     let text = create(c, doc, CREATE_TEXT_NODE, "")?;
     c.hr(put_node_value(text, "Jeeves & Wooster"), S_OK)?;
@@ -847,7 +847,23 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     out = UNTOUCHED;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, &mut out);
     c.code(hr, E_FAIL)?;
-    c.ok(out == UNTOUCHED, out as u64)?;
+    // Windows writes a pointer here though it fails (Wine's msxml3 tests
+    // expect the output left alone); which object it is is not measured
+    // yet, so it is not released.
+    info_hr(
+        "setAttributeNode(attribute already set) output written",
+        u32::from(out != UNTOUCHED) as HResult,
+    );
+    if out != UNTOUCHED && !out.is_null() {
+        info_hr(
+            "setAttributeNode(attribute already set) output is the attribute",
+            u32::from(out == attr) as HResult,
+        );
+        info_hr(
+            "setAttributeNode(attribute already set) output is the attribute's object",
+            u32::from(identity(out) == identity(attr)) as HResult,
+        );
+    }
     release(el);
     let doc2 = new_doc(c)?;
     let (hr, _) = load_xml(doc2, COMPLETE4);
