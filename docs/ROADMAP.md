@@ -2130,7 +2130,13 @@ need gala's.
      user32 strings"). To measure on Windows (its `info` lines):
      FindFolderFromPath's code for no match, the codes for an unknown
      id, and the folders whose path differs from SHGetFolderPathW's.
-     Next: the run with it shows ConfigurePackage's next step. Seen too,
+     With it ConfigurePackage goes on to read typed values: the next
+     blocker is `msxml6.dll!IXMLDOMNode::get_nodeTypedValue` (not
+     implemented, E_NOTIMPL in the ledger), which fails ConfigurePackage
+     at `xmlutils.cpp : 1024` (`0x3e508025-0x80004001`, publishScope 1);
+     OfficeVirtRegistration ends with 30175 and setup with 17002, at 66 %.
+     Next: get_nodeTypedValue (and put_nodeTypedValue) over the node's
+     `dt:dt` data type, test first in `msxml_test`. Seen too,
      not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
      and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
      on Windows (`msxml_test`'s `info` lines): a string output's
