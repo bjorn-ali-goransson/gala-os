@@ -177,6 +177,9 @@ mod nmi {
     }
 
     pub fn on_nmi(frame: &TrapFrame) {
+        // Another CPU writing a hot swap's kernel entries (SN step 1e):
+        // nothing runs here until they are whole.
+        crate::hotswap::wait_while_patching();
         // A profiler sample (asked by another CPU's tick) is no dump
         // request. (A dump NMI that arrives while one is pending merges
         // with it: that CPU then misses the dump, which waits for it at

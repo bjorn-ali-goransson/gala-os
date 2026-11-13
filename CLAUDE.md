@@ -32,6 +32,19 @@
   whose expected results are those of real Windows. Write it first, add its
   boot scenario in `xtask/src/main.rs`, see it fail, then implement until it
   passes. Kernel-internal pieces also get host unit tests.
+- **Long runs: iterate from a snapshot, never count it.** When iterating
+  on a failure that a long scenario reaches late (the Office install and
+  the like), do not rerun it from boot for every try: take a snapshot just
+  before the failure (`boot-test '<scenario>$' --snapshot-at <line>
+  --snapshot-name <name> --snapshot-stop`) and try each change with
+  `boot-test --from-snapshot <name> --hot-swap-unsafe
+  <dll>[,<dll>...][,kernel]`. When the swap is refused, take a fresh
+  snapshot (earlier or later, as the reason says) rather than working
+  around the refusal. A hot-swapped run is never a pass (exit status 3,
+  `hot-swapped (not a real run)`): report it as such, and run the scenario
+  from boot before the PR. README "Long runs: snapshots and hot swap";
+  WORKFLOW "Machine snapshots" and "Hot swapping DLLs and the kernel into
+  a snapshot (at your own risk)".
 - Test program sources are checked in, and so are their binaries in
   `user/bin/` (run `cargo xtask export-tests` and commit the result; CI
   checks they match the sources).

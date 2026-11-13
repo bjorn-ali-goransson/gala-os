@@ -14765,10 +14765,12 @@ are redirected, new code reaches the old image's statics and imports.
   demangled name qualified by its object's crate (LLVM's `(.llvm.<n>)`
   and a 32-bit build's `.llvm.<n>` suffixes dropped; a v0 name lld
   leaves mangled, as a 32-bit build's `@n` decoration makes it, loses
-  its crate disambiguator, which features and profiles change; equal
-  names numbered), or, anonymous (`anon.*`, `_anon.*`: string literals,
-  vtables, jump tables), by a hash of its contents with references by
-  what they name.
+  its crate disambiguator, which features and profiles change), or,
+  anonymous (`anon.*`, `_anon.*`: string literals, vtables, jump tables),
+  by a hash of its contents with references by what they name; a name
+  several chunks have (an `#[inline]` function copied into several
+  codegen units) is known by that name and the hash of its contents, so
+  an order of chunks that changes between builds changes nothing.
 - **References normalized**: code is decoded (iced-x86, gala's own
   builds only, never a Microsoft binary): rip-relative operands and
   rel32 branches leaving the function are references; base relocations
@@ -14802,10 +14804,12 @@ are redirected, new code reaches the old image's statics and imports.
 **The plan** (xtask's `hotswap::encode`, the kernel's `hotswap::Plan`), little-endian: a
 32-byte header (`GALAHSWP`, version 1, image count, a nonce, total
 length, CRC-32 of the whole with that field 0), then per DLL a record:
-its length, machine (1 x64, 2 x86), the old build's TimeDateStamp and
-SizeOfImage (`/Brepro` makes the stamp a content hash), the guest path,
+its length, machine (1 x64, 2 x86, 3 the kernel), the old build's
+TimeDateStamp and SizeOfImage (`/Brepro` makes the stamp a content hash;
+for the kernel the CRC-32 and size of its `.text`), the guest path,
 the blob, its fixups (24 bytes: blob offset, anchor or none, target as
-an RVA of the old image or an offset in the blob, width, space), the
+an RVA of the old image or an offset in the blob, width, space, whether
+a 32-bit absolute address is sign-extended), the
 entries (old RVA, old size, blob offset, name), the names, and the new
 build's file.
 
@@ -14870,6 +14874,137 @@ not see it); new exports are not in the running image's export table;
 `.tls` cannot change; a scenario needs the boot thread's wait (`run=`);
 a state dump asked for while a swap runs is not made; x64 and x86 only
 (fw_cfg is not mapped on aarch64).
+
+### Hot swapping the kernel into a resumed machine (SN step 1e)
+
+A fix to the kernel is tried from a machine snapshot as a DLL's is
+(`--hot-swap-unsafe kernel`, alone or with DLLs in one plan; WORKFLOW
+"Hot swapping DLLs and the kernel into a snapshot (at your own risk)"),
+with the same rule: **never a real run**. Code: the DLL swap's
+(`xtask/src/hotswap.rs`, `kernel/src/hotswap.rs`) with the kernel's
+pieces: `Image::from_elf`, the kernel record in `apply_plan`
+(`KernelPatch`), `kernel/src/arch/x86_64/hotpatch.rs` (the window, text
+writes, reads of kernel memory), `smp::stop_others`,
+`sched::kernel_stacks`.
+
+**Function by function, never a new image.** The old kernel's code and
+read-only data are referenced from everywhere in memory: the IDT, the
+system call entry MSR, threads' start addresses and return addresses on
+every stack, vtables of `Box<dyn>` objects on the heap, function
+pointers in statics. So the old image stays; the new functions, the
+read-only data they need that changed, and new statics (with their
+initial values; zero for `.bss`) go into a window beside it
+(`hotpatch::WINDOW`, 0xffffffffe0000000, 256 MiB: in the top 2 GiB with
+the image, so rel32 calls and the kernel code model's sign-extended
+32-bit absolute addresses reach both ways, and above everything else
+the kernel maps there); each changed function's old entry becomes a
+`jmp rel32` to its copy.
+
+**Where the patch is applied: in the guest.** Applying it from the host
+(rewriting guest memory before the resumed machine runs) was weighed and
+not chosen: QEMU has no way to write guest memory before `cont` but its
+gdb stub or rewriting the migration stream; the new code needs memory
+the guest's frame allocator and page tables must agree on, which only
+the guest can allocate and map; the stack check needs every thread's
+saved stack pointer and stack bounds, which the host would have to read
+out of the guest's scheduler with its own copy of the kernel's data
+layouts; and the CPUs stop wherever the snapshot caught them, maybe in
+the middle of a changed function, with nothing on the host to make them
+stop elsewhere. The guest knows its threads, allocates and maps, and
+can stop its CPUs at a point of its choosing. So the kernel applies its
+own record, from the boot thread as it applies DLLs (`run`), and the
+moment of the patch is one where no other CPU runs anything:
+
+1. **Ready, nothing jumps there yet** (`KernelPatch::prepare`): the
+   record's identity is the running kernel's (the CRC-32 of its `.text`
+   and its size; xtask's `Image::from_elf` puts them where a DLL's
+   TimeDateStamp and SizeOfImage are); each entry is in the kernel's
+   code and its jump reaches; the blob is bound (`bind`: the old image's
+   addresses from the kernel's base, the window's for the blob's own;
+   sign-extended 32-bit absolutes checked to stay in the top 2 GiB);
+   its frames are written, then mapped (`hotpatch::map_area`: code pages
+   read-only and executable, data pages writable and not executable:
+   W^X kept); room is made for every thread's stack bounds.
+2. **The DLLs** of the plan, as SN step 1d does them.
+3. **Every other CPU stopped** (`smp::stop_others`: an IPI on its own
+   vector, `STOP_VECTOR`; each CPU records its stack pointer and spins
+   with interrupts off; a CPU takes it only with interrupts on, so none
+   is stopped holding an `IrqMutex`, and the patching CPU may take the
+   scheduler's lock; a CPU that does not come within 1 s refuses the
+   swap). Then, with nothing else running: the patching code itself is
+   not a changed function (its instruction pointer); every kernel stack
+   in use is scanned (`sched::kernel_stacks`: every live thread's from
+   its saved stack pointer, or its CPU's, to its top: a kernel stack's,
+   the boot thread's (`hotpatch::note_boot_stack`), an AP's idle
+   thread's (`smp::ap_stack_top`); a stack whose bounds are not known
+   refuses) and every CPU's double-fault, NMI and machine-check stacks
+   are scanned whole (`smp::interrupt_stacks`; a stale value counts):
+   no word may lie inside a changed function past its entry. Only then
+   are the entries written, each through the direct map's alias of its
+   frame (`hotpatch::write_text`: the code's mapping stays read-only),
+   and serialized (`cpuid`) by this CPU and by each stopped CPU before
+   it goes on. An NMI on another CPU meanwhile waits until the entries
+   are whole (`hotswap::wait_while_patching`, first in the NMI handler).
+
+Any refusal undoes what was done (the DLLs swapped before it are put
+back, the window unmapped and its frames freed). The stopped time is
+logged (`hotswap: kernel: stack check: ... the CPUs were stopped for N
+us`: about 10 ms under TCG with seven threads).
+
+**Invariants**: no CPU runs kernel code but the patch's own while the
+entries are written; the patch's code is on the scanned stacks, so it
+is never itself changed; an entry is a jump only once its copy is
+mapped and bound; the window is mapped once per boot (a second plan
+finds it mapped and refuses).
+
+**Reading the kernel's builds** (xtask, `Image::from_elf`): the kernel
+is linked with `--emit-relocs` (every relocation kept in `.rela.*`
+sections, not loaded) and lld writes its map beside it (`kernel.map`;
+`kernel/build.rs`); an image's kernel and map are kept with its modules
+for a snapshot. Chunks are the map's input sections, as for a DLL, with
+the linker's merged constants (`.rodata.str*`, `.rodata.cst<n>`) and its
+GOT split into their entries, each known by its contents; code that is
+not a compiled function of its own (`global_asm!`: in plain `.text` or a
+`.text.<x>` section no symbol of it is named after) is assembly and is
+never copied. References: the decoder's, as for a DLL; the absolute
+ones from the relocations (`R_X86_64_64`, `32`, `32S`: sign-extended);
+a relocation that names a symbol makes its reference one to that
+symbol's chunk at whatever offset (one past a 1-byte string's end is
+that string, not the next one); one that names a linker script's symbol
+(`__text_start`) is compared and bound by that name. A table of 64-bit
+absolute addresses into one function (the kernel's jump tables) goes
+with a copy of it, as a DLL's relative jump tables do.
+
+**What the build must keep stable.** The diff compares two builds, so
+it sees every difference the compiler made, not only the edit's. Two
+causes of differences that are not the edit's are removed at the root:
+the kernel's dev profile has a codegen unit per module
+(`codegen-units = 1024`: with rustc's default of 256 for an incremental
+build, it merges its ~400 modules by size, and an edit to one moves
+others between units, changing their inlining); and the scenarios'
+variants are chosen by a cfg (`GALA_KERNEL_VARIANT`), not a cargo
+feature, which would change the crate's metadata and with it every
+TypeId. A release kernel keeps rustc's 16 units: its swaps see
+unrelated changes, and the loop uses the dev build.
+
+**Marked** as the DLL swap is (`hotswap:` lines, `applied: kernel`, the
+event `"ev":"hotswap","result":"applied","image":"kernel"`, the ledger,
+`Mark` in crash reports and state dumps naming `kernel`).
+
+**Not checked** (the user's risk; WORKFLOW says so): a type whose layout
+changed is seen only for statics (their sizes): a structure on the heap
+whose fields moved is read by the new code with the new layout; state
+the old code built that the new code reads differently; stored pointers
+to old copies of changed read-only data (an old vtable whose functions
+are not the changed ones). **Limits**: new kernel code has no symbols (a
+backtrace shows addresses in the window); `.text` assembly cannot change;
+one kernel swap per boot; a `run=` scenario (the boot thread's wait);
+x86-64 only.
+
+**The probe** (`nt::hotswap_probe`, GalaHotswapProbe 0x7ff0, gala's own
+service): the kernel's side of the scenarios. `hotswap_v2` (a cfg) changes
+its functions and adds a static; `hotswap_layout` also changes a static's
+size; op 3 waits inside a changed function (the stack check's refusal).
 
 ### Kernel handover
 

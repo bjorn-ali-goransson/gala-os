@@ -11,6 +11,7 @@ pub mod crashreport;
 pub mod desktop;
 pub mod disk;
 pub mod file;
+pub mod hotswap_probe;
 pub mod job;
 pub mod keyed_event;
 pub mod kuser;

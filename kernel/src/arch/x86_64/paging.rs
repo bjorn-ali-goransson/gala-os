@@ -219,6 +219,13 @@ pub fn kernel_image() -> Range<u64> {
     unsafe { sym(&__kernel_start)..sym(&__kernel_end) }
 }
 
+/// The kernel's code `[start, end)` (`.text`; a hot swap checks that it is
+/// the build its plan was made for).
+pub fn kernel_text() -> Range<u64> {
+    // SAFETY: linker-script symbols; only their addresses are used.
+    unsafe { sym(&__text_start)..sym(&__text_end) }
+}
+
 /// Maps `len` bytes of device memory at physical `phys` uncached and returns
 /// the virtual address corresponding to `phys`.
 pub fn map_mmio(phys: u64, len: u64) -> Result<u64, PagingError> {

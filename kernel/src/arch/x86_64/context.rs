@@ -141,6 +141,13 @@ impl Context {
         Ok(Context { rsp: AtomicU64::new(rsp), area })
     }
 
+    /// The stack pointer the last switch away from this context saved (0
+    /// before the first): where a switched-out thread's kernel stack is
+    /// in use from, for a hot swap's stack scan.
+    pub fn saved_sp(&self) -> u64 {
+        self.rsp.load(core::sync::atomic::Ordering::Acquire)
+    }
+
     /// The x87/SSE/AVX state saved by the last switch away from this
     /// context (a kernel handover carries a blocked thread's user state).
     /// The one accessor for the save area (its size: `xstate::size()`).

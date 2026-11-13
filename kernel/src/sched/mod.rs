@@ -1181,3 +1181,53 @@ pub fn for_each_thread(mut f: impl FnMut(ThreadId, &'static str, &'static str)) 
         }
     });
 }
+
+/// A thread's kernel stack in use (`kernel_stacks`): from `sp` up to
+/// `top`; `top` 0 when its end is not known.
+#[derive(Clone, Copy, Debug)]
+pub struct StackInUse {
+    pub thread: ThreadId,
+    pub name: &'static str,
+    pub sp: u64,
+    pub top: u64,
+}
+
+/// `kernel_stacks`' `out` had no room for every thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoRoom;
+
+/// Every live thread's kernel stack in use, into `out` (within its
+/// capacity: nothing is allocated; `NoRoom` when it is too small): a thread on
+/// a CPU from that CPU's stack pointer in `cpu_sp`, a switched-out one
+/// from the one it was saved with, to its stack's top (a kernel stack's,
+/// the boot thread's, an AP's own). Dead threads never run again and are
+/// left out. For a hot swap of the kernel (SN step 1e), while every other
+/// CPU is stopped (`smp::stop_others`).
+pub fn kernel_stacks(cpu_sp: &[u64], out: &mut Vec<StackInUse>) -> Result<(), NoRoom> {
+    with(|s| {
+        for (id, t) in s.threads.iter() {
+            if matches!(t.state, State::Dead) {
+                continue;
+            }
+            let Some(context) = &t.context else { continue };
+            let on = s.cpus.iter().position(|c| c.online && c.current == id);
+            let sp = match on {
+                Some(c) => cpu_sp.get(c).copied().unwrap_or(0),
+                None => context.saved_sp(),
+            };
+            let top = match &t.stack {
+                Some(stack) => stack.top(),
+                None => match s.cpus.iter().position(|c| c.idle == Some(id)) {
+                    Some(c) if c > 0 => smp::ap_stack_top(c),
+                    _ if t.name == "boot" => crate::arch::hotpatch::boot_stack_top(),
+                    _ => 0,
+                },
+            };
+            if out.len() == out.capacity() {
+                return Err(NoRoom);
+            }
+            out.try_push(StackInUse { thread: id, name: t.name, sp, top }).map_err(|_| NoRoom)?;
+        }
+        Ok(())
+    })
+}

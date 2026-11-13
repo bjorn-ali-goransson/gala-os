@@ -133,6 +133,16 @@ pub fn init_bsp() {
     unsafe { load(BSP_TABLES.get(), tops) };
 }
 
+/// The boot CPU's interrupt stacks (double fault, NMI, machine check) as
+/// `(lowest address, top)`.
+pub fn bsp_interrupt_stacks() -> [(u64, u64); 3] {
+    let base = IST_STACKS.get().cast::<u8>() as u64;
+    core::array::from_fn(|i| {
+        let low = base + (i * IST_STACK_SIZE) as u64;
+        (low, low + IST_STACK_SIZE as u64)
+    })
+}
+
 /// Fills `tables` (with IST stacks for double fault, NMI and machine
 /// check at `ist_tops`), loads them on this CPU and returns its TSS.
 ///

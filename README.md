@@ -275,6 +275,59 @@ To compare with Windows, copy `user/bin` to a Windows 11 machine, run
 `powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
 there, then `cargo xtask compare windows.json` here.
 
+### Long runs: snapshots and hot swap
+
+> **A hot-swapped run is not a real run.** It splices code of another
+> build into a machine running on the state the old build made. Its
+> results are at your own risk and never count as a pass: xtask marks it
+> `hot-swapped (not a real run)` and exits with status 3, CI refuses it,
+> and **every fix still gets a full run from boot before its pull
+> request.**
+
+Some scenarios reach their interesting part late: the Office install
+(`office_install_local`) needs about 30 minutes before App-V's manifest
+merge. Instead of a run from boot for every try at a fix, the machine is
+saved once just before the failure and each try starts from there in
+seconds:
+
+```sh
+# once: save the machine when the line comes (--snapshot-stop ends the run there)
+cargo xtask boot-test 'office_install_local$' \
+    --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge --snapshot-stop
+cargo xtask snapshots                                # list them (rm <name> deletes one)
+cargo xtask boot-test --from-snapshot office-merge   # resume, as often as wanted
+```
+
+A snapshot resumes only on the build it was taken from. To try a fix,
+edit the DLL or the kernel (boot-test builds them) and swap the changed
+functions into the resumed machine:
+
+```sh
+# fixed msxml6.dll's replaceChild, or a kernel function, or both:
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxml6.dll
+# what would be patched, without a run:
+cargo xtask hotswap-diff old.dll old.map new.dll new.map
+```
+
+xtask compares the snapshot's build with the new one function by
+function and patches only what changed: the old code stays where it is
+(running programs and the kernel's own data hold addresses into it), the
+new functions go beside it, and each changed function's entry jumps to
+its new version. It is refused, with the reason and the symbol named,
+when it cannot be done safely: a changed function that some thread is
+in (its stack), a static that changed size, assembly (the kernel's entry
+stubs), a function too short for the jump, a new import, any change to
+the build beyond the kernel and the named DLLs. A refusal of one part
+refuses all of it. Take a fresh snapshot when a change is refused. What
+the checks cannot see (state the old code built that the new code reads
+differently) is why the run is never a real one.
+
+The details, pitfalls and limits are in
+[`docs/WORKFLOW.md`](docs/WORKFLOW.md) ("Machine snapshots", "Hot
+swapping DLLs and the kernel into a snapshot (at your own risk)").
+
 ## Running your own programs
 
 ### A bootable image

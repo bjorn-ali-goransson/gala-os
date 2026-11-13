@@ -11,6 +11,7 @@ pub mod debugcon;
 pub mod fwcfg;
 pub mod gdt;
 pub mod handover;
+pub mod hotpatch;
 pub mod interrupts;
 pub mod paging;
 pub mod pci_config;

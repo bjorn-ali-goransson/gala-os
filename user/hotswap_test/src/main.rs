@@ -19,6 +19,22 @@
 //! refused, and the program goes on with the first build (`hotswap_test:
 //! callback 11`).
 //!
+//! With `kernel`, `kstack` or `both` (x64 only; ROADMAP SN step 1e:
+//! scenarios `khotswap_machine`, `khotswap_stack`, `khotswap_both`), the
+//! kernel's probe (GalaHotswapProbe, gala's own service: its static set
+//! to 42, its object made with 7) is read before and after
+//! (`hotswap_test: kernel before/after: version V, calls C, object O,
+//! global G`): `version 1, calls 0, object 7, global 42` on the default
+//! kernel, `version 2, calls 2, object 107, global 1042` with its
+//! `hotswap_v2` build swapped in. `kernel`: the probe alone, saved at the
+//! marker. `both`: the DLL's lines and the probe's, saved at the marker
+//! (a kernel and a DLL swapped in one plan). `kstack`: the DLL and the
+//! probe set up, then two seconds inside the kernel's probe (the kernel
+//! prints `hotswap probe: waiting in the kernel`, where the machine is
+//! saved: that changed kernel function is on the thread's kernel stack,
+//! so the swap is refused, the DLL's with it), then both read (the first
+//! builds' values).
+//!
 //! Prints `hotswap_test: ok` and exits with 0 (the scenarios judge the
 //! values). Built for x86 too (`wow64_hotswap_test`, on hotswap_dll32.dll:
 //! hotswap_dll's source built for x86 under its own name): the same lines
@@ -108,27 +124,55 @@ extern "C" fn inside() -> u32 {
     10
 }
 
-fn main() -> u32 {
-    let key: &[u16] = &wide!("stack");
-    if command_line().windows(key.len()).any(|w| w == key) {
-        // SAFETY: the DLL's exports as declared.
-        let r = unsafe {
-            hs_set_global(42);
-            hs_call_back(inside)
-        };
-        print("hotswap_test: callback ");
-        print_num(r.into());
-        print("\r\nhotswap_test: ok\r\n");
-        return 0;
+/// The command line has `word`.
+fn has_arg(word: &str) -> bool {
+    let line = command_line();
+    let w = word.as_bytes();
+    line.windows(w.len()).any(|c| c.iter().zip(w).all(|(&a, &b)| a == u16::from(b)))
+}
+
+/// The kernel's probe: set up (`object 7, global 42`).
+#[cfg(not(target_arch = "x86"))]
+fn kernel_setup() {
+    let (st, _) = gala_hotswap_probe(0, 42);
+    let (st2, _) = gala_hotswap_probe(1, 7);
+    if st != STATUS_SUCCESS || st2 != STATUS_SUCCESS {
+        print("hotswap_test: the kernel's probe is not there (not gala)\r\n");
     }
+}
+
+/// Prints `hotswap_test: kernel <when>: version V, calls C, object O,
+/// global G`.
+#[cfg(not(target_arch = "x86"))]
+fn kernel_line(when: &str) {
+    let (_, [version, calls, object, global]) = gala_hotswap_probe(2, 0);
+    print("hotswap_test: kernel ");
+    print(when);
+    for (label, value) in
+        [(": version ", version), (", calls ", calls), (", object ", object), (", global ", global)]
+    {
+        print(label);
+        print_num(value);
+    }
+    print("\r\n");
+}
+
+/// The DLL's object and static set up (`object 7, global 42`): the
+/// object.
+fn dll_setup() -> Obj {
     let mut obj = Obj { vtbl: core::ptr::null(), value: 0 };
     // SAFETY: the DLL's exports as declared; `obj` is ours.
     unsafe {
         hs_create(&mut obj, 7);
         hs_set_global(42);
     }
-    // SAFETY: `hs_create` set the vtable.
-    let object = unsafe { ((*obj.vtbl).get)(&obj) };
+    obj
+}
+
+/// Prints `hotswap_test: before: version V, object O, global G`.
+fn dll_before(obj: &Obj) {
+    // SAFETY: `hs_create` set the vtable; the DLL's exports as declared.
+    let object = unsafe { ((*obj.vtbl).get)(obj) };
     // SAFETY: as above.
     let (version, global) = unsafe { (hs_version(), hs_get_global()) };
     print("hotswap_test: before: version ");
@@ -137,15 +181,19 @@ fn main() -> u32 {
     print_num(object.into());
     print(", global ");
     print_num(global);
-    print("\r\nhotswap_test: marker\r\n");
-    wait_two_seconds();
-    // SAFETY: as above.
+    print("\r\n");
+}
+
+/// Prints `hotswap_test: after: version V, calls C, object O, global G,
+/// callback B`.
+fn dll_after(obj: &Obj) {
+    // SAFETY: as in `dll_before`.
     let (version, _, calls, object, global, callback) = unsafe {
         (
             hs_version(),
             hs_version(),
             hs_calls(),
-            ((*obj.vtbl).get)(&obj),
+            ((*obj.vtbl).get)(obj),
             hs_get_global(),
             hs_call_back(plain),
         )
@@ -160,7 +208,52 @@ fn main() -> u32 {
         print(label);
         print_num(value);
     }
-    print("\r\nhotswap_test: ok\r\n");
+    print("\r\n");
+}
+
+fn main() -> u32 {
+    #[cfg(not(target_arch = "x86"))]
+    {
+        let (kernel, both, kstack) = (has_arg("kernel"), has_arg("both"), has_arg("kstack"));
+        if kernel || both || kstack {
+            let obj = (both || kstack).then(dll_setup);
+            kernel_setup();
+            if let Some(obj) = &obj {
+                dll_before(obj);
+            }
+            kernel_line("before");
+            if kstack {
+                print("hotswap_test: kstack\r\n");
+                let _ = gala_hotswap_probe(3, 0);
+            } else {
+                print("hotswap_test: marker\r\n");
+                wait_two_seconds();
+            }
+            if let Some(obj) = &obj {
+                dll_after(obj);
+            }
+            kernel_line("after");
+            print("hotswap_test: ok\r\n");
+            return 0;
+        }
+    }
+    if has_arg("stack") {
+        // SAFETY: the DLL's exports as declared.
+        let r = unsafe {
+            hs_set_global(42);
+            hs_call_back(inside)
+        };
+        print("hotswap_test: callback ");
+        print_num(r.into());
+        print("\r\nhotswap_test: ok\r\n");
+        return 0;
+    }
+    let obj = dll_setup();
+    dll_before(&obj);
+    print("hotswap_test: marker\r\n");
+    wait_two_seconds();
+    dll_after(&obj);
+    print("hotswap_test: ok\r\n");
     0
 }
 
