@@ -654,8 +654,13 @@ cargo xtask snapshots rm office-merge
   the host (a network client, a forwarded port) do not survive; a net
   client waiting for a line printed before the save never starts. A
   resumed run is not a replay: threads may interleave differently.
-  The kept layer of a failed resumed run is qcow2, which `disk-files`
-  does not read (`qemu-img convert -O raw` it first, or use `dump=`).
+  The kept layer of a failed resumed run (`runs/<pid>-<n>.qcow2`) is
+  read by `disk-files` as it is, over the snapshot's `disk.img`
+  (uncompressed qcow2 over a raw backing file: nothing is copied):
+  `cargo xtask disk-files target/snapshots/<name>/runs/<pid>-0.qcow2
+  C:/Windows/Temp --out DIR` gives a resumed Office run's Click-to-Run
+  service log (the saving run's own layer is deleted when it ends: read
+  a failure from a resume).
 - **Hot swaps**: a snapshot also keeps its image's DLL modules with
   their linker maps, and its kernel (without debug sections) with lld's
   map of its build (`modules/`: 37 MB of DLLs for the Office image and
@@ -781,7 +786,14 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   `XTASK_HOTSWAP_WHY=1` shows why a function counts as changed. A
   release kernel (16 units) has the same problem: iterate on the dev
   build. `target/snapshots` linked into `/dev/shm` for Office breaks
-  `snapshot_machine` (its disk is on `/`): link it back after. xtask
+  `snapshot_machine` (its disk is on `/`): link it back after. A COM
+  class a fix registers in `kernel/src/nt/registry.seed` is in the
+  kernel's image and in the registry the snapshot's machine already
+  built at boot: neither a DLL swap nor a kernel swap adds it, so take
+  the snapshot with the seed entry in place (and the DLL's first version
+  of the class) and swap only the DLL after. The same holds for a test
+  program: settle its source (fmt, clippy, `export-tests`) before the
+  snapshot, since any change to it refuses the snapshot. xtask
   removes the Office disk image's link after a pass, so make it again
   before the next Office run, or the 8 GB image lands on `/`.
 - **Tests**: `hotswap_machine` (in `cargo xtask test`): hotswap_test on

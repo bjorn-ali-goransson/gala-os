@@ -156,6 +156,15 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A07-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; XSLTemplate60 (CLSID_XSLTemplate60; App-V's ConfigurePackage asks for
+; it): MSXML 6's XSLT.
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}]
+@=sz:XSL Template 6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.XSLTemplate.6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
 ; The Windows Imaging Component (wincodec.h's CLSID_WICImagingFactory1
 ; and 2, the PNG and BMP decoders, CLSID_WICDefaultFormatConverter;
 ; user/windowscodecs). Both models: the factory is free-threaded.
@@ -273,6 +282,15 @@
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A07-F192-11D4-A65F-0040963251E5}\ProgID]
 @=sz:Msxml2.XMLSchemaCache.6.0
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A07-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
+; XSLTemplate60 (CLSID_XSLTemplate60; App-V's ConfigurePackage asks for
+; it): MSXML 6's XSLT.
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}]
+@=sz:XSL Template 6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.XSLTemplate.6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A08-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
 ; Windows Runtime classes (ole32's RoGetActivationFactory reads them):

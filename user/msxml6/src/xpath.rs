@@ -1,20 +1,79 @@
 //! XPath 1.0 (W3C, 1999) over the document tree: what selectNodes and
-//! selectSingleNode evaluate (MSXML 6's only selection language).
+//! selectSingleNode evaluate (MSXML 6's only selection language), and
+//! the expressions and patterns of XSLT (`xslt.rs`).
 //!
-//! The whole expression language: location paths on every axis but
-//! `namespace` (refused: recorded), node tests by name, `*`, `prefix:*`,
-//! node(), text(), comment(), processing-instruction(); predicates;
-//! unions; the boolean, comparison and arithmetic operators with
-//! XPath's conversions; the core function library but `id()` and
-//! `lang()` (refused). Prefixes come from the SelectionNamespaces
-//! property only (an undeclared one is an error, as in MSXML 6); an
-//! unprefixed name is in no namespace. No variables (MSXML has none).
+//! The whole expression language: location paths on every axis,
+//! node tests by name, `*`, `prefix:*`, node(), text(), comment(),
+//! processing-instruction(); predicates; unions; the boolean, comparison
+//! and arithmetic operators with XPath's conversions; the core function
+//! library but `id()` and `lang()` (refused). Prefixes come from the
+//! SelectionNamespaces property only (an undeclared one is an error, as
+//! in MSXML 6); an unprefixed name is in no namespace. The DOM's
+//! selections have no variables (MSXML has none) and refuse the
+//! namespace axis (recorded); XSLT's expressions (`compile_xslt`) have
+//! both, the functions current() and `msxsl:node-set()`, and result tree
+//! fragments as values. Namespace nodes are not in the tree: they are
+//! numbered on demand in an `NsNodes` table (ids with `NS_BIT` set).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use crate::dom::{Kind, NONE, Tree};
+
+/// The namespace of MSXML's XSLT extension functions (`msxsl:`).
+pub const MSXSL_NS: &str = "urn:schemas-microsoft-com:xslt";
+/// The `xml` prefix's namespace (every element has its namespace node).
+pub const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// The bit that marks a namespace node's id (tree indices stay below it).
+pub const NS_BIT: u32 = 0x8000_0000;
+
+/// The namespace nodes met so far: (element, prefix, URI), numbered by
+/// their place here (an id is `NS_BIT | place`); one id per element and
+/// prefix, so a node met twice is the same node.
+#[derive(Default)]
+pub struct NsNodes {
+    list: Vec<(u32, String, String)>,
+    ids: BTreeMap<(u32, String), u32>,
+}
+
+impl NsNodes {
+    /// The namespace node `id`: its element, prefix and URI.
+    pub fn get(&self, id: u32) -> (u32, &str, &str) {
+        let (e, p, u) = &self.list[(id & !NS_BIT) as usize];
+        (*e, p, u)
+    }
+
+    /// The namespace nodes of element `el` (its in-scope bindings, `xml`
+    /// last), numbered.
+    fn of(&mut self, t: &Tree, el: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut scope = t.in_scope(el);
+        scope.push((String::from("xml"), String::from(XML_NS)));
+        for (prefix, uri) in scope {
+            let key = (el, prefix);
+            let id = match self.ids.get(&key) {
+                Some(&id) => id,
+                None => {
+                    let id = NS_BIT | self.list.len() as u32;
+                    self.list.push((el, key.1.clone(), uri));
+                    self.ids.insert(key, id);
+                    id
+                }
+            };
+            out.push(id);
+        }
+        out
+    }
+}
+
+/// Whether `id` names a namespace node.
+pub fn is_ns(id: u32) -> bool {
+    id & NS_BIT != 0
+}
 
 pub type Error = &'static str;
 
@@ -31,6 +90,7 @@ enum Axis {
     Following,
     Preceding,
     Attribute,
+    Namespace,
     Current,
 }
 
@@ -81,15 +141,20 @@ enum Expr {
     Path(bool, Vec<Step>),
     /// A filter expression, its predicates, then a relative path.
     Filter(Box<Expr>, Vec<Expr>, Vec<Step>),
+    /// A variable reference (XSLT's).
+    Var(String),
 }
 
 /// A value: a node-set (in document order), a string, a number, a
-/// boolean.
+/// boolean, or (XSLT) a result tree fragment: the root of a fragment
+/// in the tree, which only `msxsl:node-set()` makes a node-set of.
+#[derive(Clone)]
 pub enum Value {
     Nodes(Vec<u32>),
     Str(String),
     Num(f64),
     Bool(bool),
+    Rtf(u32),
 }
 
 // ---- Tokens ----
@@ -127,6 +192,8 @@ enum Tok {
     Axis(String),
     /// A name before `(`: a function or a node type.
     Func(String),
+    /// `$name`.
+    Var(String),
 }
 
 fn is_name_start(c: char) -> bool {
@@ -160,6 +227,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, Error> {
                     | Tok::Star
                     | Tok::Dot
                     | Tok::DDot
+                    | Tok::Var(_)
             )
         );
         let next = b.get(i + 1).copied();
@@ -175,6 +243,19 @@ fn lex(s: &str) -> Result<Vec<Tok>, Error> {
             }
             '.' if !next.is_some_and(|n| n.is_ascii_digit()) => Tok::Dot,
             '@' => Tok::At,
+            '$' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && (is_name_char(b[j]) || b[j] == ':') {
+                    j += 1;
+                }
+                if j == start || !is_name_start(b[start]) {
+                    return Err("a variable without a name");
+                }
+                out.push(Tok::Var(b[start..j].iter().collect()));
+                i = j;
+                continue;
+            }
             ',' => Tok::Comma,
             '(' => Tok::LParen,
             ')' => Tok::RParen,
@@ -272,8 +353,12 @@ fn lex(s: &str) -> Result<Vec<Tok>, Error> {
 struct Parser<'a> {
     toks: Vec<Tok>,
     pos: usize,
-    /// (prefix, namespace URI) from SelectionNamespaces.
+    /// (prefix, namespace URI) from SelectionNamespaces (XSLT: the
+    /// stylesheet's declarations in scope).
     ns: &'a [(String, String)],
+    /// An XSLT expression: variables, the namespace axis, XSLT's and
+    /// MSXML's extension functions.
+    xslt: bool,
 }
 
 impl Parser<'_> {
@@ -434,6 +519,7 @@ impl Parser<'_> {
                 "preceding" => Axis::Preceding,
                 "attribute" => Axis::Attribute,
                 "self" => Axis::Current,
+                "namespace" if self.xslt => Axis::Namespace,
                 "namespace" => return Err("the namespace axis"),
                 _ => return Err("an unknown axis"),
             };
@@ -502,6 +588,11 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(Expr::Num(n))
             }
+            Some(Tok::Var(v)) if self.xslt => {
+                self.pos += 1;
+                Ok(Expr::Var(v))
+            }
+            Some(Tok::Var(_)) => Err("a variable (selections have none)"),
             Some(Tok::LParen) => {
                 self.pos += 1;
                 let e = self.or()?;
@@ -510,6 +601,7 @@ impl Parser<'_> {
             }
             Some(Tok::Func(f)) => {
                 self.pos += 1;
+                let f = self.function_name(f)?;
                 self.expect(&Tok::LParen)?;
                 let mut args = Vec::new();
                 if !self.eat(&Tok::RParen) {
@@ -521,10 +613,27 @@ impl Parser<'_> {
                         self.expect(&Tok::Comma)?;
                     }
                 }
-                check_call(&f, args.len())?;
+                check_call(&f, args.len(), self.xslt)?;
                 Ok(Expr::Call(f, args))
             }
             _ => Err("an expression expected"),
+        }
+    }
+
+    /// A function's name: a prefixed one resolved through the
+    /// declarations, MSXML's `node-set` as `msxsl:node-set` whatever its
+    /// prefix.
+    fn function_name(&self, f: String) -> Result<String, Error> {
+        let Some((p, local)) = f.split_once(':') else { return Ok(f) };
+        if !self.xslt {
+            return Err("an unknown function");
+        }
+        let uri = self.ns.iter().find(|(q, _)| q == p).map(|(_, u)| u.as_str());
+        match (uri, local) {
+            (None, _) => Err("an undeclared prefix"),
+            (Some(MSXSL_NS), "node-set") => Ok(String::from("msxsl:node-set")),
+            (Some(MSXSL_NS), _) => Err("msxsl: functions but node-set() are not supported"),
+            _ => Err("extension functions are not supported"),
         }
     }
 }
@@ -533,9 +642,21 @@ fn any_node(axis: Axis) -> Step {
     Step { axis, test: Test::Node, preds: Vec::new() }
 }
 
-/// Whether `name` is a core function taking `n` arguments.
-fn check_call(name: &str, n: usize) -> Result<(), Error> {
+/// Whether `name` is a core function (or, `xslt`, one of XSLT's that
+/// gala has) taking `n` arguments.
+fn check_call(name: &str, n: usize, xslt: bool) -> Result<(), Error> {
     let (lo, hi) = match name {
+        "current" if xslt => (0, 0),
+        "msxsl:node-set" if xslt => (1, 1),
+        "key" if xslt => return Err("key() is not supported"),
+        "document" if xslt => return Err("document() is not supported"),
+        "format-number" if xslt => return Err("format-number() is not supported"),
+        "generate-id" if xslt => return Err("generate-id() is not supported"),
+        "system-property" if xslt => return Err("system-property() is not supported"),
+        "unparsed-entity-uri" if xslt => return Err("unparsed-entity-uri() is not supported"),
+        "element-available" | "function-available" if xslt => {
+            return Err("*-available() is not supported");
+        }
         "last" | "position" | "true" | "false" => (0, 0),
         "count" | "not" | "boolean" | "sum" | "floor" | "ceiling" | "round" => (1, 1),
         "local-name" | "name" | "namespace-uri" | "string" | "string-length"
@@ -550,12 +671,28 @@ fn check_call(name: &str, n: usize) -> Result<(), Error> {
     if n < lo || n > hi { Err("a function given the wrong number of arguments") } else { Ok(()) }
 }
 
-/// A compiled expression.
-pub struct Query(Expr);
+/// A compiled expression, and its text (for what a failure records).
+pub struct Query(Expr, String);
+
+impl Query {
+    pub fn text(&self) -> &str {
+        &self.1
+    }
+}
 
 /// Compiles `text` with the prefixes `ns` (prefix, URI) declares.
 pub fn compile(text: &str, ns: &[(String, String)]) -> Result<Query, Error> {
-    let mut p = Parser { toks: lex(text)?, pos: 0, ns };
+    compile_as(text, ns, false)
+}
+
+/// Compiles an XSLT expression (variables, the namespace axis,
+/// current() and `msxsl:node-set()`).
+pub fn compile_xslt(text: &str, ns: &[(String, String)]) -> Result<Query, Error> {
+    compile_as(text, ns, true)
+}
+
+fn compile_as(text: &str, ns: &[(String, String)], xslt: bool) -> Result<Query, Error> {
+    let mut p = Parser { toks: lex(text)?, pos: 0, ns, xslt };
     if p.toks.is_empty() {
         return Err("an empty expression");
     }
@@ -563,16 +700,36 @@ pub fn compile(text: &str, ns: &[(String, String)]) -> Result<Query, Error> {
     if p.pos != p.toks.len() {
         return Err("text after the expression");
     }
-    Ok(Query(e))
+    Ok(Query(e, text.into()))
 }
 
 // ---- Evaluation ----
 
+/// The variables in scope: a variable's value by name.
+pub type Vars<'a> = dyn Fn(&str) -> Option<Value> + 'a;
+
+/// What an XSLT evaluation sees beyond the tree: each node's place in
+/// document order (`rank`: nodes past its end, made after it was
+/// computed, come after every ranked node, in the order they were made),
+/// the namespace nodes, the variables in scope and XSLT's current node.
+pub struct Env<'a> {
+    pub tree: &'a Tree,
+    pub rank: &'a [u32],
+    pub ns_nodes: &'a RefCell<NsNodes>,
+    pub vars: &'a Vars<'a>,
+    pub current: u32,
+}
+
 struct Eval<'t> {
     t: &'t Tree,
     /// Each node's place in document order (attributes after their
-    /// element, before its children).
-    rank: Vec<u32>,
+    /// element, before its children); u32::MAX or past the end: unranked.
+    rank: &'t [u32],
+    /// The namespace nodes (None: a DOM selection, which has no
+    /// namespace axis).
+    ns: Option<&'t RefCell<NsNodes>>,
+    vars: Option<&'t Vars<'t>>,
+    current: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -582,43 +739,198 @@ struct Ctx {
     size: usize,
 }
 
+/// Each node's place in document order, from the tops of the trees in
+/// the arena (the document and every node of no parent), in their order.
+pub fn rank_all(t: &Tree) -> Vec<u32> {
+    let mut rank = alloc::vec![u32::MAX; t.nodes.len()];
+    let mut n = 0;
+    for top in 0..t.nodes.len() as u32 {
+        if t.node(top).parent == NONE {
+            rank_from(t, top, &mut rank, &mut n);
+        }
+    }
+    rank
+}
+
+fn rank_from(t: &Tree, top: u32, rank: &mut [u32], n: &mut u32) {
+    let mut stack = alloc::vec![top];
+    while let Some(i) = stack.pop() {
+        rank[i as usize] = *n;
+        *n += 1;
+        let nd = t.node(i);
+        for &a in &nd.attrs {
+            rank[a as usize] = *n;
+            *n += 1;
+        }
+        stack.extend(nd.children.iter().rev());
+    }
+}
+
 impl Query {
-    /// Evaluates against context node `node`.
+    /// Evaluates against context node `node` (a DOM selection).
     pub fn eval(&self, t: &Tree, node: u32) -> Result<Value, Error> {
         let mut rank = alloc::vec![u32::MAX; t.nodes.len()];
-        let mut n = 0;
         // The root of the context node's tree (a detached node's own).
         let mut top = node;
         while t.node(top).parent != NONE {
             top = t.node(top).parent;
         }
-        let mut stack = alloc::vec![top];
-        while let Some(i) = stack.pop() {
-            rank[i as usize] = n;
-            n += 1;
-            let nd = t.node(i);
-            for &a in &nd.attrs {
-                rank[a as usize] = n;
-                n += 1;
-            }
-            stack.extend(nd.children.iter().rev());
-        }
-        let ev = Eval { t, rank };
+        rank_from(t, top, &mut rank, &mut 0);
+        let ev = Eval { t, rank: &rank, ns: None, vars: None, current: node };
         ev.expr(&self.0, Ctx { node, pos: 1, size: 1 })
+    }
+
+    /// Evaluates in an XSLT environment with context node `node` at
+    /// position `pos` of `size`.
+    pub fn eval_in(&self, env: &Env, node: u32, pos: usize, size: usize) -> Result<Value, Error> {
+        let ev = Eval {
+            t: env.tree,
+            rank: env.rank,
+            ns: Some(env.ns_nodes),
+            vars: Some(env.vars),
+            current: env.current,
+        };
+        ev.expr(&self.0, Ctx { node, pos, size })
+    }
+}
+
+/// An XSLT match pattern's alternative (a location path pattern of
+/// child, attribute and `//` steps).
+pub struct Pattern(Expr);
+
+/// Compiles an XSLT pattern: its alternatives (a union's parts), each
+/// with its default priority (XSLT 5.5).
+pub fn compile_pattern(text: &str, ns: &[(String, String)]) -> Result<Vec<(Pattern, f64)>, Error> {
+    let Query(e, _) = compile_xslt(text, ns)?;
+    let mut alts = Vec::new();
+    let mut stack = alloc::vec![e];
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Binary(Op::Union, a, b) => {
+                stack.push(*b);
+                stack.push(*a);
+            }
+            Expr::Path(absolute, steps) => {
+                for (k, s) in steps.iter().enumerate() {
+                    let filler = s.axis == Axis::DescendantOrSelf
+                        && matches!(s.test, Test::Node)
+                        && s.preds.is_empty()
+                        && k + 1 < steps.len();
+                    if !(matches!(s.axis, Axis::Child | Axis::Attribute) || filler) {
+                        return Err("pattern axes but child and attribute are not supported");
+                    }
+                }
+                let priority = match steps.as_slice() {
+                    [s] if !absolute && s.preds.is_empty() => match &s.test {
+                        Test::Name(Some(_), Some(_)) | Test::Pi(Some(_)) => 0.0,
+                        Test::Name(Some(_), None) => -0.25,
+                        _ => -0.5,
+                    },
+                    _ => 0.5,
+                };
+                alts.push((Pattern(Expr::Path(absolute, steps)), priority));
+            }
+            _ => return Err("id() and key() patterns are not supported"),
+        }
+    }
+    Ok(alts)
+}
+
+impl Pattern {
+    /// Whether node `n` matches.
+    pub fn matches(&self, env: &Env, n: u32) -> Result<bool, Error> {
+        let Expr::Path(absolute, steps) = &self.0 else { return Ok(false) };
+        let ev = Eval {
+            t: env.tree,
+            rank: env.rank,
+            ns: Some(env.ns_nodes),
+            vars: Some(env.vars),
+            current: env.current,
+        };
+        ev.match_steps(*absolute, steps, n)
     }
 }
 
 impl Eval<'_> {
+    /// A node's place in document order: its element's then 1 + its
+    /// number for a namespace node (before the attributes), the rank
+    /// for a ranked node, after them all in arena order for the others.
+    fn rank(&self, n: u32) -> u64 {
+        let base = |m: u32| -> u64 {
+            match self.rank.get(m as usize) {
+                Some(&r) if r != u32::MAX => u64::from(r),
+                _ => (1u64 << 32) + u64::from(m),
+            }
+        };
+        if is_ns(n) {
+            let el = self.ns.map_or(0, |t| t.borrow().get(n).0);
+            (base(el) << 20) | (1 + u64::from(n & 0x7_ffff))
+        } else {
+            base(n) << 20
+        }
+    }
+
     fn sort(&self, nodes: &mut Vec<u32>) {
-        nodes.sort_by_key(|&n| (self.rank[n as usize], n));
+        nodes.sort_by_key(|&n| (self.rank(n), n));
         nodes.dedup();
     }
 
+    /// A node's parent (a namespace node's is its element).
+    fn parent(&self, n: u32) -> u32 {
+        if is_ns(n) { self.ns.map_or(NONE, |t| t.borrow().get(n).0) } else { self.t.node(n).parent }
+    }
+
     fn root_of(&self, mut n: u32) -> u32 {
-        while self.t.node(n).parent != NONE {
-            n = self.t.node(n).parent;
+        while self.parent(n) != NONE {
+            n = self.parent(n);
         }
         n
+    }
+
+    /// Whether `n` is a root: the document or a fragment, of no parent.
+    fn is_root(&self, n: u32) -> bool {
+        !is_ns(n)
+            && self.t.node(n).parent == NONE
+            && matches!(self.t.node(n).kind, Kind::Document | Kind::Fragment)
+    }
+
+    fn match_steps(&self, absolute: bool, steps: &[Step], n: u32) -> Result<bool, Error> {
+        let Some((last, rest)) = steps.split_last() else {
+            return Ok(!absolute || self.is_root(n));
+        };
+        if last.axis == Axis::DescendantOrSelf {
+            // `//`: an ancestor or the node itself matches the rest.
+            let mut a = n;
+            while a != NONE {
+                if self.match_steps(absolute, rest, a)? {
+                    return Ok(true);
+                }
+                a = self.parent(a);
+            }
+            return Ok(false);
+        }
+        if is_ns(n) {
+            return Ok(false);
+        }
+        let node = self.t.node(n);
+        let is_attr = node.kind == Kind::Attribute;
+        if node.parent == NONE || is_attr != (last.axis == Axis::Attribute) || node.is_xmlns() {
+            return Ok(false);
+        }
+        if !self.matches(last, n) {
+            return Ok(false);
+        }
+        if !last.preds.is_empty() {
+            let mut found = self.axis(last.axis, node.parent);
+            found.retain(|&m| self.matches(last, m));
+            for p in &last.preds {
+                found = self.filter(found, p)?;
+            }
+            if !found.contains(&n) {
+                return Ok(false);
+            }
+        }
+        self.match_steps(absolute, rest, node.parent)
     }
 
     fn expr(&self, e: &Expr, c: Ctx) -> Result<Value, Error> {
@@ -626,14 +938,24 @@ impl Eval<'_> {
             Expr::Lit(s) => Value::Str(s.clone()),
             Expr::Num(n) => Value::Num(*n),
             Expr::Neg(e) => Value::Num(-self.number(self.expr(e, c)?)),
+            Expr::Var(name) => match self.vars.and_then(|v| v(name)) {
+                Some(v) => v,
+                None => return Err("a variable that is not defined"),
+            },
             Expr::Path(absolute, steps) => {
                 let start = if *absolute { self.root_of(c.node) } else { c.node };
                 Value::Nodes(self.steps(alloc::vec![start], steps)?)
             }
             Expr::Filter(primary, preds, steps) => {
-                let Value::Nodes(mut nodes) = self.expr(primary, c)? else {
-                    return Err("a filter on a value that is not a node-set");
+                let nodes = match self.expr(primary, c)? {
+                    Value::Nodes(n) => n,
+                    Value::Rtf(_) => {
+                        return Err("a result tree fragment used as a node-set (without \\
+                                    msxsl:node-set())");
+                    }
+                    _ => return Err("a filter on a value that is not a node-set"),
                 };
+                let mut nodes = nodes;
                 for p in preds {
                     nodes = self.filter(nodes, p)?;
                 }
@@ -676,8 +998,14 @@ impl Eval<'_> {
         })
     }
 
-    /// XPath 3.4's comparisons.
+    /// XPath 3.4's comparisons (a result tree fragment compares as a
+    /// node-set of its root).
     fn compare(&self, op: Op, a: Value, b: Value) -> bool {
+        let as_nodes = |v: Value| match v {
+            Value::Rtf(f) => Value::Nodes(alloc::vec![f]),
+            v => v,
+        };
+        let (a, b) = (as_nodes(a), as_nodes(b));
         let num = |x: f64, y: f64| match op {
             Op::Eq => x == y,
             Op::Ne => x != y,
@@ -760,7 +1088,7 @@ impl Eval<'_> {
                     num(f64::from(u8::from(b)), f64::from(u8::from(*v)))
                 }
             }
-            Value::Nodes(_) => false,
+            Value::Nodes(_) | Value::Rtf(_) => false,
         }
     }
 
@@ -802,9 +1130,31 @@ impl Eval<'_> {
     /// first).
     fn axis(&self, axis: Axis, n: u32) -> Vec<u32> {
         let t = self.t;
+        let mut out = Vec::new();
+        if is_ns(n) {
+            // A namespace node has its element as parent and nothing
+            // below or beside it.
+            match axis {
+                Axis::Current | Axis::DescendantOrSelf => out.push(n),
+                Axis::Parent | Axis::Ancestor | Axis::AncestorOrSelf => {
+                    if axis == Axis::AncestorOrSelf {
+                        out.push(n);
+                    }
+                    let mut p = self.parent(n);
+                    while p != NONE {
+                        out.push(p);
+                        if axis == Axis::Parent {
+                            break;
+                        }
+                        p = t.node(p).parent;
+                    }
+                }
+                _ => {}
+            }
+            return out;
+        }
         let node = t.node(n);
         let is_attr = node.kind == Kind::Attribute;
-        let mut out = Vec::new();
         let descendants = |from: u32, out: &mut Vec<u32>| {
             let mut stack: Vec<u32> = t.node(from).children.iter().rev().copied().collect();
             while let Some(c) = stack.pop() {
@@ -817,6 +1167,11 @@ impl Eval<'_> {
             Axis::Child if !is_attr => out.extend(&node.children),
             Axis::Attribute if !is_attr => {
                 out.extend(node.attrs.iter().copied().filter(|&a| !t.node(a).is_xmlns()))
+            }
+            Axis::Namespace if node.kind == Kind::Element => {
+                if let Some(table) = self.ns {
+                    out.extend(table.borrow_mut().of(t, n));
+                }
             }
             Axis::Descendant if !is_attr => descendants(n, &mut out),
             Axis::DescendantOrSelf => {
@@ -858,7 +1213,7 @@ impl Eval<'_> {
                 // attributes.
                 let mut all = Vec::new();
                 descendants(self.root_of(n), &mut all);
-                let r = self.rank[n as usize];
+                let r = self.rank(n);
                 let mut ancestors = Vec::new();
                 let mut p = node.parent;
                 while p != NONE {
@@ -871,14 +1226,13 @@ impl Eval<'_> {
                         descendants(n, &mut inside);
                     }
                     out.extend(
-                        all.into_iter()
-                            .filter(|&m| self.rank[m as usize] > r && !inside.contains(&m)),
+                        all.into_iter().filter(|&m| self.rank(m) > r && !inside.contains(&m)),
                     );
                 } else {
                     out.extend(
                         all.into_iter()
                             .rev()
-                            .filter(|&m| self.rank[m as usize] < r && !ancestors.contains(&m)),
+                            .filter(|&m| self.rank(m) < r && !ancestors.contains(&m)),
                     );
                 }
             }
@@ -888,6 +1242,22 @@ impl Eval<'_> {
     }
 
     fn matches(&self, s: &Step, m: u32) -> bool {
+        if is_ns(m) {
+            // The namespace axis' principal node type: a name test names
+            // the prefix.
+            let Some(table) = self.ns else { return false };
+            let table = table.borrow();
+            let prefix = table.get(m).1;
+            return match &s.test {
+                Test::Node => true,
+                Test::Name(ns, local) => {
+                    s.axis == Axis::Namespace
+                        && ns.as_ref().is_none_or(|u| u.is_empty())
+                        && local.as_ref().is_none_or(|l| l == prefix)
+                }
+                _ => false,
+            };
+        }
         let node = self.t.node(m);
         match &s.test {
             Test::Node => true,
@@ -928,6 +1298,14 @@ impl Eval<'_> {
             },
             "local-name" | "name" | "namespace-uri" => {
                 let s = first(c)?.map_or(String::new(), |n| {
+                    if is_ns(n) {
+                        // A namespace node's name is its prefix; it is in
+                        // no namespace.
+                        return match (name, self.ns) {
+                            ("namespace-uri", _) | (_, None) => String::new(),
+                            (_, Some(t)) => t.borrow().get(n).1.into(),
+                        };
+                    }
                     let node = self.t.node(n);
                     match (name, node.kind) {
                         ("namespace-uri", _) => node.ns.clone(),
@@ -1025,11 +1403,20 @@ impl Eval<'_> {
             "floor" => Value::Num(floor(self.number(arg(0)?))),
             "ceiling" => Value::Num(-floor(-self.number(arg(0)?))),
             "round" => Value::Num(round(self.number(arg(0)?))),
+            "current" => Value::Nodes(alloc::vec![self.current]),
+            "msxsl:node-set" => match arg(0)? {
+                Value::Rtf(f) => Value::Nodes(alloc::vec![f]),
+                Value::Nodes(n) => Value::Nodes(n),
+                _ => return Err("node-set() of a string, number or boolean is not supported"),
+            },
             _ => return Err("an unknown function"),
         })
     }
 
     fn string_of(&self, n: u32) -> String {
+        if is_ns(n) {
+            return self.ns.map_or(String::new(), |t| t.borrow().get(n).2.into());
+        }
         let mut s = String::new();
         self.t.text(n, &mut s);
         s
@@ -1042,6 +1429,7 @@ impl Eval<'_> {
     fn string_ref(&self, v: &Value) -> String {
         match v {
             Value::Nodes(n) => n.first().map_or(String::new(), |&m| self.string_of(m)),
+            Value::Rtf(f) => self.string_of(*f),
             Value::Str(s) => s.clone(),
             Value::Num(x) => number_text(*x),
             Value::Bool(b) => (if *b { "true" } else { "false" }).into(),
@@ -1067,6 +1455,7 @@ impl Eval<'_> {
     fn boolean_ref(&self, v: &Value) -> bool {
         match v {
             Value::Nodes(n) => !n.is_empty(),
+            Value::Rtf(_) => true,
             Value::Str(s) => !s.is_empty(),
             Value::Num(x) => *x != 0.0 && !x.is_nan(),
             Value::Bool(b) => *b,
@@ -1090,7 +1479,7 @@ fn to_number(s: &str) -> f64 {
 }
 
 /// A number as XPath's string() writes it.
-fn number_text(x: f64) -> String {
+pub fn number_text(x: f64) -> String {
     if x.is_nan() {
         "NaN".into()
     } else if x.is_infinite() {
