@@ -17,10 +17,14 @@
 //!   pages that went to the page file come back), and charged as
 //!   PrivateUsage; freeing it gives the charge back;
 //! - a commit past the commit limit grows a system-managed page file:
-//!   the commit succeeds and the limit is higher after it.
+//!   the commit succeeds and the limit is higher after it (a fixed-size
+//!   page file refuses it: an `info` line).
+//!
+//! The page file is gala's `C:\pagefile.sys`; on Windows the one
+//! SystemPageFileInformation names (CI's is on D:).
 //!
 //! The argument is the private memory to commit, in MiB (default: one and
-//! a quarter times physical memory). Prints `pagefile_test: ok` or exits
+//! a quarter times physical memory, 1 GiB on a machine of more). Prints `pagefile_test: ok` or exits
 //! with the number of the failing check.
 
 #![no_std]
@@ -235,7 +239,7 @@ fn page_intact(base: *mut u8, i: usize) -> bool {
             return false;
         }
     }
-    if i % 64 == 0 {
+    if i.is_multiple_of(64) {
         for (o, &b) in page.iter().enumerate() {
             let ours = OFFSETS.iter().any(|&p| (p..p + 8).contains(&o));
             if !ours && b != 0 {
@@ -246,8 +250,8 @@ fn page_intact(base: *mut u8, i: usize) -> bool {
     true
 }
 
-fn wide(s: &str, buf: &mut [u16]) -> *const u16 {
-    for (i, c) in s.bytes().enumerate() {
+fn wide(s: &[u8], buf: &mut [u16]) -> *const u16 {
+    for (i, &c) in s.iter().enumerate() {
         buf[i] = c.into();
     }
     buf[s.len()] = 0;
@@ -284,14 +288,22 @@ fn run() -> Result<(), u32> {
     let mut ptr = [0u8; 8];
     ptr.copy_from_slice(&info[24..32]);
     let name = u64::from_le_bytes(ptr) as *const u16;
+    // `\??\X:\pagefile.sys` (gala's on C:; a Windows machine may keep it
+    // on another volume, as CI's on D:).
     let expected = "\\??\\C:\\pagefile.sys";
     // SAFETY: the name the call returned, in `info`.
-    let same = expected.bytes().enumerate().all(|(i, b)| unsafe { *name.add(i) } == b.into());
+    let same =
+        expected.bytes().enumerate().all(|(i, b)| i == 4 || unsafe { *name.add(i) } == b.into());
     c.ok(same, 0)?;
+    // SAFETY: as above.
+    let drive = unsafe { *name.add(4) } as u8;
+    c.ok(drive.is_ascii_uppercase(), drive.into())?;
 
-    // C:\pagefile.sys: hidden, system, of that size, and held.
+    // X:\pagefile.sys: hidden, system, of that size, and held.
+    let mut text = *b"C:\\pagefile.sys";
+    text[0] = drive;
     let mut buf = [0u16; 64];
-    let path = wide("C:\\pagefile.sys", &mut buf);
+    let path = wide(&text, &mut buf);
     // SAFETY: a NUL-terminated name.
     let attributes = unsafe { GetFileAttributesW(path) };
     let hs = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM;
@@ -325,7 +337,10 @@ fn run() -> Result<(), u32> {
 
     // More private memory than the machine has: committed, written, read
     // back (twice, both ways), charged.
-    let mib = argument().unwrap_or(s.total_phys / MIB + s.total_phys / MIB / 4);
+    // (A machine of more than 1 GiB commits 1 GiB unless told: CI's
+    // Windows has 16.)
+    let memory = s.total_phys / MIB;
+    let mib = argument().unwrap_or(if memory <= 1024 { memory + memory / 4 } else { 1024 });
     let bytes = (mib * MIB) as usize;
     let pages = bytes / PAGE;
     let before = private_usage();
@@ -364,7 +379,13 @@ fn run() -> Result<(), u32> {
     let p = unsafe {
         VirtualAlloc(core::ptr::null_mut(), past, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
     };
-    c.ok(!p.is_null(), unsafe { GetLastError() }.into())?;
+    if p.is_null() {
+        // A page file of a fixed size (Windows' setting) does not grow.
+        out(b"pagefile_test: info: a commit past the limit was refused (error ");
+        dec(unsafe { GetLastError() }.into());
+        out(b"): the page file is not system-managed\r\n");
+        return Ok(());
+    }
     let grown = status();
     c.ok(grown.total_page_file > s.total_page_file, grown.total_page_file)?;
     // SAFETY: the region allocated above.
