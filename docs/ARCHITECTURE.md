@@ -4755,8 +4755,10 @@ built for x64 and x86.
 - **XSLT** (`xslt.rs`, `com/xslt.rs`; `msxml_test`'s `xslt`, from
   Wine's msxml3 tests run on Windows and transforms shaped like App-V's;
   ROADMAP OF). XSLTemplate60 (IXSLTemplate: putref_stylesheet compiles
-  the stylesheet and holds it; a rental document, a document that is
-  not a stylesheet or one that does not compile are E_FAIL; NULL
+  the stylesheet and holds it, from a free-threaded or a rental
+  document (MSXML 6 takes both; msxml3 refuses a rental one); a
+  document that is not a stylesheet or one that does not compile is
+  E_FAIL; NULL
   resets; createProcessor) and its processor (IXSLProcessor: input, a
   node of ours; output, a string (VT_EMPTY or NULL), a document of ours
   whose tree the result replaces, or an IStream/ISequentialStream;
