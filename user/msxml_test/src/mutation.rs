@@ -681,8 +681,13 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     let (hr, comment) = create_node(doc, NODE_COMMENT, None, None);
     c.hr(hr, S_OK)?;
     c.eq(u64::from(node_type(comment)), NODE_COMMENT as u64)?;
-    get_bstr(c, comment, TEXT_GET_DATA, "")?;
+    // get_data is IXMLDOMComment's (createNode gives an IXMLDOMNode,
+    // whose table has a different method in that slot on Windows).
+    let (hr, data) = query(comment, &IID_IXMLDOMCOMMENT);
     release(comment);
+    c.hr(hr, S_OK)?;
+    get_bstr(c, data, TEXT_GET_DATA, "")?;
+    release(data);
     let (hr, fragment) = create_node(doc, NODE_DOCUMENT_FRAGMENT, Some("p:text"), Some("uri"));
     c.hr(hr, S_OK)?;
     for slot in [GET_NAMESPACE_URI, GET_BASE_NAME, GET_PREFIX] {

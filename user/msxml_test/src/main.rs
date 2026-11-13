@@ -207,6 +207,7 @@ const IID_IXMLDOMDOCUMENT3: Guid = guid(0x2933_bf96, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMELEMENT: Guid = guid(0x2933_bf86, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMATTRIBUTE: Guid = guid(0x2933_bf85, 0x7b36, 0x11d2, DOM_D4);
 const IID_IXMLDOMTEXT: Guid = guid(0x2933_bf87, 0x7b36, 0x11d2, DOM_D4);
+const IID_IXMLDOMCOMMENT: Guid = guid(0x2933_bf88, 0x7b36, 0x11d2, DOM_D4);
 
 /// A VARIANT (24 bytes on x64, 16 on x86).
 #[repr(C)]
