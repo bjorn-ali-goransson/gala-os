@@ -715,6 +715,18 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
                 .take(e.line.saturating_sub(1) as usize)
                 .map(|l| l.chars().count() + 1)
                 .sum();
+            // In the ledger with where it is (a program's load or loadXML
+            // that fails says no more than S_FALSE).
+            let mut what = String::new();
+            if what.try_reserve(14 + e.msg.len()).is_ok() {
+                what.push_str("parse error: ");
+                what.push_str(&e.msg);
+                crate::record(
+                    what.as_bytes(),
+                    crate::LEDGER_OTHER,
+                    u64::from(e.line) << 32 | u64::from(e.column),
+                );
+            }
             let mut reason = e.msg.clone();
             reason.push_str(".\r\n");
             d.error = ParseError {

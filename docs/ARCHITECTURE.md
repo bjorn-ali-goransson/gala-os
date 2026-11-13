@@ -4690,6 +4690,10 @@ x64 and x86.
   original's settings and properties (Wine's test: SelectionLanguage
   carries over) and, deep, a copy of its tree. A NULL output is
   E_INVALIDARG.
+- **Parse errors** go to the ledger too (`msxml6.dll!parse error:
+  <reason>`, "other", the line and column in its detail): a program's
+  load or loadXML that fails tells only S_FALSE (Click-to-Run's log:
+  `XmlDocument loadXML failed , Error:0x1`).
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
   tree (create*, appendChild, insertBefore, removeChild, replaceChild,

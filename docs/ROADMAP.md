@@ -1992,7 +1992,17 @@ need gala's.
      `_get_heap_handle` (`tools/import_survey.py` on them). Done, test
      first (`office_api_test`'s `appv.rs`, `ucrt_test`, x64 and x86):
      every static import of the App-V DLLs now resolves (NtOpenJobObject
-     only as a stub).
+     only as a stub). With them the orchestration initializes and
+     `Orchestration::UpdateAppV` merges Office's AppX manifests
+     (`C:\Program Files\Microsoft Office\PackageManifests`): loading
+     `AppXManifest.common.16.xml` (2.1 MB, UTF-16 LE with a BOM) fails
+     (`TryRefreshMergedManifest`: `XmlDocument loadXML failed , Error:0x1`,
+     msxml's S_FALSE), and APPLYCONFIGURATION ends with 30088 (the
+     service 17002 at about 1816 s). gala_xml parses that file as read
+     from the disk (a host check), so the string the service hands
+     loadXML differs; msxml6 now records each parse error's reason and
+     place in the ledger (ARCHITECTURE "msxml6"). Next: the next run's
+     `msxml6.dll!parse error` line, then what loadXML was given.
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
