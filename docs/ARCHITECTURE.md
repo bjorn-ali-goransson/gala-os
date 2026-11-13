@@ -3692,7 +3692,9 @@ ntdll imports.
   PathCchSkipRoot and PathCchCombineEx (the `api-ms-win-core-path` set:
   roots `X:\`, `\\server\share\`, `\\?\`; joined and canonicalized,
   an absolute second path replaces the first, a rooted one keeps its
-  drive), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
+  drive; PathCchCanonicalize(Ex), adapted from Wine's kernelbase, whose
+  path tests pin Windows' rules for `.`, `..`, trailing dots and the
+  `\\?\` prefixes), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
   flags, an HRESULT), SetWaitableTimerEx (no wake context or coalescing),
   GetNamedPipeHandleStateW (modes and instance count; no client user
   name), VerifyVersionInfoA (OSVERSIONINFOEXA translated to the W
@@ -3901,6 +3903,12 @@ redistributable (the owner's decision).
   double forms and the complex functions on `_Dcomplex`/`_Fcomplex`
   (textbook identities; Annex G's special cases for infinite and NaN parts
   not all followed), `fetestexcept`/`feclearexcept`; local time is UTC.
+  App-V's imports (`string.rs`): `_wcsupr_s`/`_wcslwr_s` (towupper's
+  mapping), `_wmakepath_s` and `_wsplitpath_s` (ERANGE as Windows: what
+  fit written and the buffer emptied; every output emptied),
+  `_resetstkoflw` (nonzero; a guard page used up by an overflow is not
+  put back, recorded) and `_get_heap_handle` (the process heap, which
+  gala's malloc does not allocate from: the handle serves heap queries).
 - **Aliases** (build.rs `UCRT_ALIASES`): api-ms-win-crt-private's `_o_`
   names are the same functions, and the `_l` forms (a locale as the last
   argument) are the plain ones: one locale, and an extra last argument is
@@ -10027,7 +10035,9 @@ under their own names: `testdll32.dll`).
   same range, GetSystemDirectory System32 (redirected below it),
   GetSystemWow64Directory SysWOW64; Wow64DisableWow64FsRedirection,
   Wow64RevertWow64FsRedirection and Wow64EnableWow64FsRedirection call
-  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex).
+  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex). The 64-bit
+  kernel32's Disable and Revert (App-V's DLLs import them) fail with
+  ERROR_INVALID_FUNCTION: no redirector outside WOW64.
 - **Exceptions** (`dispatch.rs`, `seh_x86.rs`): an exception in 32-bit
   code (a CS 0x23 trap frame) goes to wow64.dll's dispatcher in 64-bit
   code: `deliver_to_user` pushes the x64 CONTEXT (marked CS 0x23, the

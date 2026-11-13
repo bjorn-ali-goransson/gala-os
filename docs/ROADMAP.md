@@ -1461,7 +1461,8 @@ need gala's.
      `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
      `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
      `_Gettnames` (recorded, NULL); the `_s` path, date and case
-     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     functions (`_splitpath_s`, `_strdate_s`, ...; the wide `_wcsupr_s`,
+     `_wcslwr_s`, `_wsplitpath_s` and `_wmakepath_s` are done); the
      multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
      `tools/import_survey.py` on their directories lists them), then those
      scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
@@ -1980,6 +1981,18 @@ need gala's.
      I/O objects, the instance functions and the stack information
      (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
      threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
+     With it AppVIsvApi.dll loads and OISVAPI::Initialize fails
+     instead in the orchestration's component loader (`componentloader.h
+     : 216`, 0x7f; ErrorCode 30175, APPLYCONFIGURATION 127, the service
+     17002 at about 1845 s): the App-V DLLs it loads import, statically,
+     the 64-bit kernel32's Wow64Disable/RevertWow64FsRedirection (the
+     ledger's missing exports), DosDateTimeToFileTime,
+     PathCchCanonicalize and the UCRT's `_wcsupr_s`, `_wcslwr_s`,
+     `_wsplitpath_s`, `_wmakepath_s`, `_resetstkoflw` and
+     `_get_heap_handle` (`tools/import_survey.py` on them). Done, test
+     first (`office_api_test`'s `appv.rs`, `ucrt_test`, x64 and x86):
+     every static import of the App-V DLLs now resolves (NtOpenJobObject
+     only as a stub).
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a

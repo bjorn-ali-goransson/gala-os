@@ -221,7 +221,7 @@ Rules for this file:
   on Windows for altered copies.
 - Reparse points and NT symbolic links (`kernel/src/nt/syscalls.rs`'s
   `reparse_fsctl`, `kernel/src/nt/file.rs`'s `resolve_links`,
-  kernel32's CreateSymbolicLinkW in `user/kernel32/src/pool.rs`,
+  kernel32's CreateSymbolicLinkW in `user/kernel32/src/msvcp.rs`,
   `user/reparse_test`): the statuses for each malformed
   FSCTL_SET/GET/DELETE_REPARSE_POINT buffer, the follow rules (relative
   targets, loops, other tags) and the reparse data CreateSymbolicLinkW
@@ -232,6 +232,15 @@ Rules for this file:
   NTSTATUS to Win32 error pairs from Wine's `dlls/ntdll/make_errors`;
   the structures from Microsoft's REPARSE_DATA_BUFFER and
   FSCTL documentation (no code copied).
+- kernelbase's PathCchCanonicalize and PathCchCanonicalizeEx
+  (`user/kernelbase/src/path.rs`, `canonicalize` and its helpers): adapted
+  from Wine's `PathAllocCanonicalize`, `PathCchCanonicalizeEx`,
+  `get_root_end`, `is_prefixed_volume` and `PathCchStripPrefix`
+  (`dlls/kernelbase/path.c`, github.com/wine-mirror/wine master as of
+  2026-11-13, LGPL-2.1+), rewritten in Rust over index arithmetic; the
+  expected results in `office_api_test` from Wine's
+  `dlls/kernelbase/tests/path.c` (`alloccanonicalize_tests`, a record of
+  Windows' answers).
 - The C runtime's file-descriptor inheritance block (STARTUPINFO
   cbReserved2/lpReserved2: a count, a flags byte and a HANDLE per
   descriptor) in gala's msvcrt (`user/msvcrt/src/stdio.rs`), from its
