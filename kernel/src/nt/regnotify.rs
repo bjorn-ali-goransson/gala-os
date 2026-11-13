@@ -8,19 +8,25 @@
 //! test `test_notify`, which passes on Windows: a second request's filter
 //! changes nothing). NtNotifyChangeMultipleKeys adds a subordinate key,
 //! opened by the kernel and kept with the watch, whose changes count as
-//! the master's.
+//! the master's; one in the master's hive is STATUS_INVALID_PARAMETER
+//! (Windows; nt::registry_calls).
 //!
 //! The registry notes every change while some watch exists
 //! (`registry::Change`: the key touched and its ancestors) and hands the
 //! notes over once it is released (`deliver`). A matching change completes
 //! every waiting request of the watch, once each (a request is one arm);
 //! one that comes while none waits is remembered, and the next request
-//! completes at once. A request completes like an I/O: its
-//! IO_STATUS_BLOCK (STATUS_NOTIFY_ENUM_DIR: the change, with no data),
-//! its event, its APC (PIO_APC_ROUTINE with the ApcContext and the
-//! IO_STATUS_BLOCK); a synchronous caller waits for it. Key handles have
-//! no completion port. The key object's end completes waiting requests
-//! with STATUS_NOTIFY_CLEANUP; a request made without
+//! completes at once, returning STATUS_SUCCESS (Windows). A request
+//! completes like an I/O: its IO_STATUS_BLOCK (STATUS_NOTIFY_ENUM_DIR:
+//! the change, with no data; STATUS_NOTIFY_CLEANUP when the change is
+//! the deletion of the watched key itself, as on Windows), its event,
+//! its APC (PIO_APC_ROUTINE with the ApcContext and the IO_STATUS_BLOCK);
+//! a synchronous caller waits for it. A value set again to its own type
+//! and data is no change (`registry::Registry::set_value`). Key handles
+//! have no completion port, so a waiting request is not the thread's
+//! pending I/O (GetThreadIOPendingFlag 0, as on Windows). The key
+//! object's end completes waiting requests with STATUS_NOTIFY_CLEANUP; a
+//! request made without
 //! REG_NOTIFY_THREAD_AGNOSTIC belongs to its thread, and ends with
 //! STATUS_CANCELLED when the thread does (RegNotifyChangeKeyValue's
 //! documentation: the event is signaled when the thread exits).
@@ -130,6 +136,26 @@ pub fn matches(keys: &[Option<KeyId>; 2], filter: u32, tree: bool, change: &Chan
     })
 }
 
+/// How `changes` complete a watch of `keys` with `filter` (and the
+/// subtree, with `tree`): None when none concerns it;
+/// STATUS_NOTIFY_CLEANUP when one is the deletion of the master key
+/// itself; else STATUS_NOTIFY_ENUM_DIR.
+pub fn completion(
+    keys: &[Option<KeyId>; 2],
+    filter: u32,
+    tree: bool,
+    changes: &[Change],
+) -> Option<NtStatus> {
+    let mut status = None;
+    for c in changes.iter().filter(|c| matches(keys, filter, tree, c)) {
+        if c.deleted && keys[0].is_some() && c.chain.first() == keys[0].as_ref() {
+            return Some(NOTIFY_CLEANUP);
+        }
+        status = Some(NOTIFY_ENUM_DIR);
+    }
+    status
+}
+
 /// The full name of `key` for events and the state dump (empty if gone).
 fn name_of(key: KeyId) -> Vec<u16> {
     registry::with(|r| r.full_name(key)).unwrap_or_default()
@@ -228,10 +254,13 @@ pub fn arm(
             (None, s.pending.len())
         }
     };
-    let status = if now.is_some() { NOTIFY_ENUM_DIR } else { NtStatus::PENDING };
+    // A change kept for this request completes it at once: STATUS_SUCCESS,
+    // returned and in its IO_STATUS_BLOCK (Windows returns it; the block
+    // has the status the call returns, as for any I/O done at once).
+    let status = if now.is_some() { NtStatus::SUCCESS } else { NtStatus::PENDING };
     emit("arm", &watch, n, status, format_args!(r#","tid":{},"agnostic":{}"#, thread, agnostic));
     if let Some(r) = now {
-        r.complete(NOTIFY_ENUM_DIR);
+        r.complete(NtStatus::SUCCESS);
     }
     status
 }
@@ -244,14 +273,16 @@ pub fn deliver((changes, lost): (Vec<Change>, bool)) {
         return;
     }
     // Each watch fires once however many changes concern it.
-    let mut fired: Vec<(KArc<Watch>, Vec<Request>)> = Vec::new();
+    let mut fired: Vec<(KArc<Watch>, Vec<Request>, NtStatus)> = Vec::new();
     {
         let watches = WATCHES.lock();
         let room = fired.try_reserve(watches.len()).is_ok();
         for w in watches.iter() {
-            if !lost && !changes.iter().any(|c| matches(&w.keys, w.filter, w.tree, c)) {
-                continue;
-            }
+            let status = match completion(&w.keys, w.filter, w.tree, &changes) {
+                Some(status) => status,
+                None if lost => NOTIFY_ENUM_DIR,
+                None => continue,
+            };
             let mut s = w.state.lock();
             if s.pending.is_empty() || !room {
                 // Kept for the next request (or, without memory to
@@ -263,20 +294,20 @@ pub fn deliver((changes, lost): (Vec<Change>, bool)) {
                 continue;
             }
             let requests = core::mem::take(&mut s.pending);
-            let _ = fired.try_push((w.clone(), requests));
+            let _ = fired.try_push((w.clone(), requests, status));
         }
     }
-    for (w, requests) in fired {
+    for (w, requests, status) in fired {
         let bits = changes.iter().fold(0, |b, c| b | c.bits);
         emit(
             "fire",
             &w,
             requests.len(),
-            NOTIFY_ENUM_DIR,
+            status,
             format_args!(r#","changes":{},"lost":{}"#, bits, lost),
         );
         for r in requests {
-            r.complete(NOTIFY_ENUM_DIR);
+            r.complete(status);
         }
     }
 }
@@ -393,7 +424,25 @@ mod tests {
     use super::*;
 
     fn change(chain: &[KeyId], bits: u32) -> Change {
-        Change { chain: chain.to_vec(), bits }
+        Change { chain: chain.to_vec(), bits, deleted: false }
+    }
+
+    #[test]
+    fn the_watched_key_deleted_ends_its_watch_with_cleanup() {
+        let name = registry::REG_NOTIFY_CHANGE_NAME;
+        let gone = Change { deleted: true, ..change(&[5, 3, 0], name) };
+        let parent = change(&[3, 0], name);
+        // The key's own watch: STATUS_NOTIFY_CLEANUP, even with another
+        // change in the same delivery.
+        let both = [change(&[5, 3, 0], name), gone];
+        assert_eq!(completion(&[Some(5), None], name, false, &both), Some(NOTIFY_CLEANUP));
+        // The parent's watch, and a subtree watch above: a change.
+        let all = [Change { deleted: true, ..change(&[5, 3, 0], name) }, parent];
+        assert_eq!(completion(&[Some(3), None], name, false, &all), Some(NOTIFY_ENUM_DIR));
+        assert_eq!(completion(&[Some(0), None], name, true, &all), Some(NOTIFY_ENUM_DIR));
+        // Another filter: nothing.
+        let last_set = registry::REG_NOTIFY_CHANGE_LAST_SET;
+        assert_eq!(completion(&[Some(5), None], last_set, false, &all), None);
     }
 
     #[test]

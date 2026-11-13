@@ -157,7 +157,16 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   agreed with it). With mingw-w64 installed (`apt install
   mingw-w64-common`, or the cross compiler), `cargo test -p xtask`
   compares every NTSTATUS in `kernel/src/nt/status.rs` with
-  `ntstatus.h`; check other constants the same way when you add them.
+  `ntstatus.h`; check other constants the same way when you add them:
+  error codes against `winerror.h`, IIDs and CLSIDs against the SDK
+  header that declares them (`DEFINE_GUID`/`__CRT_UUID_DECL` in
+  `/usr/share/mingw-w64/include`). A DLL and its test typed from the
+  same wrong source agree with each other and pass on gala: d2d1's
+  IID_ID2D1Factory and kernel32's ERROR_SXS_SECTION_NOT_FOUND were
+  wrong in both until Windows refused them. Likewise read a probe
+  report's raw value, not the name it gives (`0x88982f0b` is
+  WINCODEC_ERR_UNSUPPORTEDVERSION, which one report called
+  NOTINITIALIZED).
 - **System call numbers** live in `kernel/src/nt/syscalls.rs` and
   `user/ntrt/src/lib.rs` and must match ("Test programs").
 - **Architecture-specific code only under `kernel/src/arch`**
@@ -1145,8 +1154,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   job): import statically only what a real program imports (the Office
   survey's import lists) or a test already passing on Windows
   (`user/windows/ci-passing.txt`) imports; look up the rest with
-  GetProcAddress and print an `info` line (`office_api_test`'s
-  RtlFindNextForwardRunSet). Comparing a test's import table
+  GetProcAddress and print an `info` line until a run on Windows
+  answers, then check that answer (`office_api_test`'s
+  RtlFindNextForwardRunSet: Wine has it, Windows' ntdll does not, so
+  gala's does not export it either and the test checks it is absent).
+  Wine's export lists are no evidence of Windows'. Comparing a test's import table
   (`x86_64-w64-mingw32-objdump -p`) with those of the passing tests
   names the candidates.
 - An export forwarder (`/EXPORT:f=kernel32.f`) to a stub fails to bind

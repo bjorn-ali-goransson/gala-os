@@ -18,7 +18,8 @@
 //!   with NORM_IGNORECASE; a length of 0 is the empty string; NULs take
 //!   no part (`a\0b` with -1 is `a`, a counted trailing NUL is equal);
 //!   punctuation sorts before letters; a NULL string
-//!   ERROR_INVALID_PARAMETER.
+//!   ERROR_INVALID_PARAMETER; SORT_DIGITSASNUMBERS ERROR_INVALID_FLAGS
+//!   (Windows: the flag is the W form's only).
 //! - FoldStringW: the invalid flag sets ERROR_INVALID_FLAGS; src == dst,
 //!   NULL src, length 0, dstlen < 0 ERROR_INVALID_PARAMETER; -1 counts and
 //!   writes the NUL, a counted string writes none; MAP_FOLDDIGITS maps
@@ -33,17 +34,20 @@
 //!   0 is never bad; NULL, 0xdeadbeef and the stack's reserved part are;
 //!   a stack variable and a static are not; a read-only page reads but is
 //!   bad to write (the program's code too); a no-access page, a range
-//!   running into one and a guard page are bad (`info`: whether probing
-//!   the guard page cleared it); a string's NUL before such a page ends
-//!   it, a string without one runs into it.
-//! - OfferVirtualMemory: priorities 1-4, others ERROR_INVALID_PARAMETER;
+//!   running into one and a guard page are bad, and probing the guard
+//!   page uses up its guard (PAGE_READWRITE afterwards, Windows); a
+//!   string's NUL before such a page ends it, a string without one runs
+//!   into it.
+//! - OfferVirtualMemory: priorities 1-4, others ERROR_INVALID_PARAMETER,
+//!   as is an address not page-aligned (Windows);
 //!   offered pages cannot be read; ReclaimVirtualMemory makes them
 //!   readable again, ERROR_SUCCESS with the contents kept or ERROR_BUSY
 //!   (discarded); DiscardVirtualMemory ERROR_SUCCESS.
 //! - ResolveLocaleName: Wine's table for the names gala knows (en-US,
-//!   en, en-RR, EN-zz, zz, zzz-ZZZ, zz+XX, the invariant ""), NULL is
-//!   the system default (GetSystemDefaultLocaleName), a buffer of 0 the
-//!   size, too small ERROR_INSUFFICIENT_BUFFER.
+//!   en, en-RR, EN-zz, zz, zzz-ZZZ, zz+XX, the invariant ""), NULL a
+//!   name (`info`: the system's default or the user's; on Windows not
+//!   always the system's), a buffer of 0 the size, too small
+//!   ERROR_INSUFFICIENT_BUFFER.
 //! - SetThreadIdealProcessor: MAXIMUM_PROCESSORS (64, 32 for x86) asks
 //!   without changing; a processor sets it and returns the previous one;
 //!   above the native MAXIMUM_PROCESSORS (65) -1 with
@@ -155,6 +159,7 @@ unsafe extern "system" {
     fn VirtualProtect(base: *mut c_void, size: usize, protect: u32, old: *mut u32) -> i32;
     fn VirtualQuery(base: *const c_void, info: *mut MemoryBasic, len: usize) -> usize;
     fn GetSystemDefaultLocaleName(buf: *mut u16, size: i32) -> i32;
+    fn GetUserDefaultLocaleName(buf: *mut u16, size: i32) -> i32;
 
     // The functions under test.
     fn CompareStringA(lcid: u32, flags: u32, a: *const u8, n: i32, b: *const u8, m: i32) -> i32;
@@ -446,14 +451,10 @@ fn compare_a(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: a NULL string, which Windows refuses.
     let r = unsafe { CompareStringA(EN_US, 0, null(), -1, b"a\0".as_ptr(), -1) };
     c.fails(r.into(), ERROR_INVALID_PARAMETER)?;
-    // SORT_DIGITSASNUMBERS: Wine refuses it in the A form.
+    // SORT_DIGITSASNUMBERS: the A form refuses it (Windows).
     // SAFETY: as above.
     let r = unsafe { CompareStringA(EN_US, 8, b"a2\0".as_ptr(), -1, b"a10\0".as_ptr(), -1) };
-    // SAFETY: plain call.
-    info(
-        "CompareStringA SORT_DIGITSASNUMBERS a2/a10 (ret, error)",
-        (r as u64) << 32 | u64::from(unsafe { GetLastError() }),
-    );
+    c.fails(r.into(), ERROR_INVALID_FLAGS)?;
     Ok(())
 }
 
@@ -759,12 +760,12 @@ fn bad_ptr(c: &mut Checks) -> Result<(), u32> {
         let wend = end.cast::<u16>();
         c.eq(IsBadStringPtrW(wend, 100) as u64, 1)?;
         c.eq(IsBadStringPtrW(w::<4>("ab").as_ptr(), 10) as u64, 0)?;
-        // A guard page is bad; whether probing it used up the guard is
-        // Windows' to say (gala's probe does not touch it).
+        // A guard page is bad, and probing it uses up the guard: the page
+        // is plain read-write afterwards (Windows).
         c.eq(IsBadReadPtr(p.add(3 * page).cast(), 1) as u64, 1)?;
         let mut mbi = MemoryBasic::default();
         VirtualQuery(p.add(3 * page).cast(), &mut mbi, size_of::<MemoryBasic>());
-        info("guard page's protection after IsBadReadPtr", mbi.protect.into());
+        c.eq(mbi.protect.into(), PAGE_READWRITE.into())?;
         c.eq(VirtualFree(p.cast(), 0, MEM_RELEASE) as u64, 1)?;
     }
     Ok(())
@@ -800,8 +801,9 @@ fn offer(c: &mut Checks) -> Result<(), u32> {
         let r = ReclaimVirtualMemory(p.add(page).cast(), page);
         c.ok(r == 0 || r == ERROR_BUSY, r.into())?;
         c.eq(DiscardVirtualMemory(p.cast(), 2 * page).into(), 0)?;
-        // Not page-aligned: for the record.
-        info("OfferVirtualMemory unaligned", OfferVirtualMemory(p.add(1).cast(), page, 4).into());
+        // Not page-aligned (Windows).
+        let r = OfferVirtualMemory(p.add(1).cast(), page, 4);
+        c.eq(r.into(), ERROR_INVALID_PARAMETER.into())?;
         c.eq(VirtualFree(p.cast(), 0, MEM_RELEASE) as u64, 1)?;
     }
     Ok(())
@@ -835,13 +837,22 @@ fn resolve(c: &mut Checks) -> Result<(), u32> {
             None => c.fails(r.into(), ERROR_INVALID_PARAMETER)?,
         }
     }
-    // NULL: the system default.
+    // NULL: a name. Whether it is the system's default or the user's is
+    // Windows' to say (a machine whose two differ resolved NULL to a name
+    // other than the system's): bit 0 the system's, bit 1 the user's.
     let mut system = [0u16; 85];
+    let mut user = [0u16; 85];
     // SAFETY: plain calls with their buffers' sizes.
     unsafe {
         let s = GetSystemDefaultLocaleName(system.as_mut_ptr(), 85);
+        let u = GetUserDefaultLocaleName(user.as_mut_ptr(), 85);
         let r = ResolveLocaleName(null(), buf.as_mut_ptr(), 85);
-        c.ok(r == s && r > 0 && buf[..r as usize] == system[..r as usize], r as u64)?;
+        c.ok(r > 0, r as u64)?;
+        let same = |n: i32, name: &[u16]| n == r && buf[..r as usize] == name[..r as usize];
+        info(
+            "ResolveLocaleName(NULL) is the system's (1) or user's (2) default",
+            u64::from(same(s, &system)) | u64::from(same(u, &user)) << 1,
+        );
         let n = w::<8>("en");
         c.eq(ResolveLocaleName(n.as_ptr(), null_mut(), 0) as u64, 6)?;
         let r = ResolveLocaleName(n.as_ptr(), buf.as_mut_ptr(), 3);

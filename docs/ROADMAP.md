@@ -1418,7 +1418,10 @@ need gala's.
     their filters, measured against Windows, come with the JPEG work.
     The `info` lines of `windowscodecs_test` (a PNG's resolution
     without pHYs, PBGRA -> BGRA rounding, nearest-neighbour sampling when
-    halving, Linear's weights) wait for a Windows run.
+    halving, Linear's weights, a PNG's GetFrame(1)) wait for a Windows
+    run; its first run (issue #91) settled WICCreateImagingFactory_Proxy(0)
+    (WINCODEC_ERR_UNSUPPORTEDVERSION) and a BMP's GetFrame(1)
+    (WINCODEC_ERR_FRAMEMISSING).
   - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, and
     the `d2d1_window` screen scenario): done for the factory (both
     kinds, ID2D1Multithread; the ordinals Office imports), the matrix
@@ -1435,7 +1438,9 @@ need gala's.
     contexts, then D3D11-backed targets with GPU G2. The `info` lines of
     `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
     of 32bppBGRA, antialiased edge values) and its expectations wait for
-    a Windows run.
+    a Windows run: the first (issue #94) stopped at D2D1CreateFactory,
+    E_NOINTERFACE for an IID_ID2D1Factory with two bytes wrong in both
+    the test and the DLL (now d2d1.h's value).
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
@@ -1482,10 +1487,12 @@ need gala's.
      NtNotifyChangeMultipleKeys, RegNotifyChangeKeyValue with
      REG_NOTIFY_THREAD_AGNOSTIC) and NtRenameKey/RegRenameKey with its
      change-log record (`regnotify_test`, `wow64_regnotify_test`,
-     `persist_test`; ARCHITECTURE "Registry"); to measure on Windows
-     before `ci-passing.txt` lists them: the completion statuses, a
-     change kept for the next request, what a rename and a deleted
-     watched key fire, a subordinate key (the tests' `info` lines).
+     `persist_test`; ARCHITECTURE "Registry"); the completion statuses,
+     a kept change, a deleted watched key and a subordinate in the
+     master's hive are Windows' (issue #83); to measure before
+     `ci-passing.txt` lists them (the tests' `info` lines): a kept
+     change's IOSB, a subordinate in another hive and two, what a rename
+     fires and the renaming handle's own name.
      Activation contexts from real manifests (`actctx_test`,
      `wow64_actctx_test`; ARCHITECTURE "Activation contexts"): the
      manifest read (embedded RT_MANIFEST and .manifest files, UTF-8 and
@@ -1498,14 +1505,17 @@ need gala's.
      and a DLL's own context (RT_MANIFEST 2); GetThreadIOPendingFlag is
      ThreadIsIoPending, the kernel's count of a thread's outstanding
      socket, pipe and directory-watch requests (`office_api_test`;
-     ARCHITECTURE "I/O requests and their thread"). To measure on Windows
-     before `ci-passing.txt` lists `actctx_test` (the `info` lines): the
-     process default's root manifest path for an embedded manifest,
-     what RETURN_HACTCTX gives for it, the executable's
+     ARCHITECTURE "I/O requests and their thread"). The process
+     default's root manifest path (the executable's) and a waiting
+     registry watch's GetThreadIOPendingFlag (0) are Windows' (issues
+     #85, #83). To measure before `ci-passing.txt` lists `actctx_test`
+     (the `info` lines): the handle RETURN_HACTCTX gives for the process
+     default (25H2 printed "not NULL: 0", i.e. NULL, while its report
+     read it as not NULL), the executable's
      QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE context, a dependency's
-     directory name, ulFlags and ulFileCount; and for GetThreadIOPendingFlag
-     a request on a file with a completion port (gala: not counted) and a
-     waiting registry watch (gala: not counted; `regnotify_test`).
+     directory name, ulFlags and ulFileCount; and for
+     GetThreadIOPendingFlag a request on a file with a completion port
+     (gala: not counted; `office_api_test`).
      The kernel32 functions the apps and OfficeC2RClient.exe use once
      (`import_survey.py ... --roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE
      --static`), in `office_k32_test`/`wow64_office_k32_test`
@@ -1517,10 +1527,12 @@ need gala's.
      DiscardVirtualMemory, ResolveLocaleName, SetThreadIdealProcessor(Ex)
      (the kernel's ThreadIdealProcessor and ThreadIdealProcessorEx),
      WinExec, GetNumberFormatW/A/Ex and GetCurrencyFormatW/A/Ex. To
-     measure on Windows before `ci-passing.txt` lists them (the tests'
-     `info` lines): whether IsBadReadPtr used up the guard page,
-     OfferVirtualMemory of an unaligned address, CompareStringA with
-     SORT_DIGITSASNUMBERS, GetNumberFormatA's rounding of 9.995; and
+     IsBadReadPtr using up a guard page, OfferVirtualMemory of an
+     unaligned address (ERROR_INVALID_PARAMETER) and CompareStringA's
+     ERROR_INVALID_FLAGS for SORT_DIGITSASNUMBERS are Windows' (issue
+     #88). To measure before `ci-passing.txt` lists them (the tests'
+     `info` lines): which default ResolveLocaleName(NULL) names (25H2's
+     was not the system's), GetNumberFormatA's rounding of 9.995; and
      whether Windows' kernelbase exports OfferVirtualMemory and
      ReclaimVirtualMemory (`api-ms-win-core-memory-l1-1-2`; Wine's
      kernelbase.spec, which `exports.txt` follows, lacks them).
@@ -2673,9 +2685,52 @@ WM_ACTIVATE, before WM_WINDOWPOSCHANGED), the next one does not
 (user32_test, when the process may set the foreground; it prints the
 sequence when that check fails).
 
+Done (issues #67-#94, Windows' answers on 25H2 build 26200, a standard
+user): d2d1's and d2d1_test's IID_ID2D1Factory had two bytes wrong (the
+factory was E_NOINTERFACE on Windows), and actctx_test's and kernel32's
+ERROR_SXS_SECTION_NOT_FOUND was 14004 for 14000: both now the headers'
+values (a scan of every `ERROR_*` constant against winerror.h finds no
+other). WICCreateImagingFactory_Proxy(0) is
+WINCODEC_ERR_UNSUPPORTEDVERSION and a BMP's GetFrame(1)
+WINCODEC_ERR_FRAMEMISSING (windowscodecs_test). IsBadReadPtr uses up a
+guard page (PAGE_READWRITE afterwards), OfferVirtualMemory of an
+unaligned address is ERROR_INVALID_PARAMETER, CompareStringA refuses
+SORT_DIGITSASNUMBERS with ERROR_INVALID_FLAGS (office_k32_test). The
+process default's root manifest path is the executable's, type 2, and
+its assembly's manifest type 2 (actctx_test). Registry notification
+(regnotify_test): STATUS_NOTIFY_ENUM_DIR and Information 0 after a
+change, STATUS_NOTIFY_CLEANUP after a close and for the watched key's
+own deletion, a kept change returns STATUS_SUCCESS at once, a
+synchronous request STATUS_NOTIFY_ENUM_DIR, the same value set again is
+no change, a security change fires ATTRIBUTES, asynchronous
+RegNotifyChangeKeyValue without an event is ERROR_INVALID_PARAMETER, a
+subordinate in the master's hive STATUS_INVALID_PARAMETER, a waiting
+watch is no pending I/O. ntdll has no RtlFindNextForwardRunSet (Wine's
+only), so gala's does not export it and office_api_test checks it is
+absent. tray_test passes as it is (its unknown icon's HRESULT is now an
+`info` line); volume_test passes, its disk-full part skipped on a C: with
+2 GiB free or more.
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
+   - from issues #67-#94: reparse_test as a standard user made a link
+     with SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (developer mode
+     unknown; the result and AllowDevelopmentWithoutDevLicense are now
+     `info` lines) and its elevated half; regnotify_test's renaming
+     handle, whose KeyNameInformation is not the new name on Windows
+     (its query status and name are `info` lines: the handle lacks
+     KEY_QUERY_VALUE); ResolveLocaleName(NULL), not the system default
+     on 25H2 (system or user default is an `info` line); actctx_test's
+     RETURN_HACTCTX handle for the process default (the report's value
+     0 means NULL, its text says not NULL; the handle itself is printed
+     now); d2d1_test past the factory and windowscodecs_test past the
+     factory (their `info` lines); memload_test's thread-stack totals
+     (unchanged when sampled: they need a wait before the sample to say
+     whether Windows frees the stack); winhttp_test 14's connection reuse
+     (needs the elevated Nginx setup); volume_test's disk-full part on a
+     volume under 2 GiB free (TEMP on a small VHD: the program writes in
+     %TEMP%);
    - SetPriorityClass's REALTIME from a token that holds
      SeIncreaseBasePriorityPrivilege disabled (an elevated prompt):
      REALTIME or HIGH (gala: REALTIME);

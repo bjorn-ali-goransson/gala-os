@@ -547,7 +547,9 @@ pub(super) fn nt_notify_change_key(call: &mut Call<'_>) -> NtStatus {
 /// WatchTree, Buffer, BufferSize, Asynchronous): as NtNotifyChangeKey,
 /// with at most one subordinate key (OBJECT_ATTRIBUTES, opened for
 /// KEY_NOTIFY in the caller's registry view) whose changes count as the
-/// master's; a Count over 1 is STATUS_INVALID_PARAMETER.
+/// master's; a Count over 1 is STATUS_INVALID_PARAMETER, as is a
+/// subordinate in the master's hive (`registry::Registry::hive`; Windows
+/// refuses a sibling key of the master, regnotify_test).
 pub(super) fn nt_notify_change_multiple_keys(call: &mut Call<'_>) -> NtStatus {
     let count = arg!(call, 1) as u32;
     if count > 1 {
@@ -618,6 +620,12 @@ fn notify_change(
     }
     // A key deleted since it was opened: STATUS_KEY_DELETED.
     tri!(registry::with(|r| r.key_name(id).map(drop)));
+    if let Some((_, sub)) = &subordinate {
+        let same = tri!(registry::with(|r| Ok(r.hive(id)? == r.hive(*sub)?)));
+        if same {
+            return NtStatus::INVALID_PARAMETER;
+        }
+    }
     let event = match a.event {
         0 => None,
         e => Some(tri!(super::event_object(call, Handle(e), super::EVENT_MODIFY_STATE))),

@@ -5,10 +5,13 @@
 //! Windows' IsBad*Ptr touch the memory under an exception handler; gala's
 //! ask the memory manager instead (NtQueryVirtualMemory): a range is good
 //! when every page of it is committed with a protection that allows the
-//! access and no PAGE_GUARD. The answers are the same; the difference is
-//! a guard page, which Windows' probe uses up (its one-shot exception is
-//! taken by the probe, so a thread's stack can no longer grow through it)
-//! and gala's leaves in place. Neither sets the last error.
+//! access and no PAGE_GUARD. A guard page the walk reaches is bad and is
+//! used up as Windows' touch uses it up (its one-shot exception is taken
+//! by the probe): the walk clears PAGE_GUARD on the page it would have
+//! touched, so VirtualQuery then shows the plain protection (Windows,
+//! office_k32_test) and a thread's stack can no longer grow through it.
+//! The walk stops at the first bad page, as the touch does, so a guard
+//! page after a bad one keeps its guard. Neither sets the last error.
 //!
 //! An offer makes the pages inaccessible (PAGE_NOACCESS, as Microsoft
 //! documents) and a reclaim makes them read-write again. gala never
@@ -63,25 +66,63 @@ fn region(address: usize) -> Option<MemoryBasic> {
     (status == STATUS_SUCCESS).then_some(mbi)
 }
 
+/// Walks `[address, address + size)` region by region: Ok when `good`
+/// accepts every one (size 0: always), else the address where the walk
+/// stopped and its region (None: no region there, or the range wraps).
+fn walk(
+    address: usize,
+    size: usize,
+    good: impl Fn(&MemoryBasic) -> bool,
+) -> Result<(), Option<(usize, MemoryBasic)>> {
+    if size == 0 {
+        return Ok(());
+    }
+    let Some(last) = address.checked_add(size - 1) else { return Err(None) };
+    let mut at = address;
+    loop {
+        let Some(mbi) = region(at) else { return Err(None) };
+        if !good(&mbi) {
+            return Err(Some((at, mbi)));
+        }
+        match mbi.base.checked_add(mbi.region_size) {
+            Some(end) if end > last => return Ok(()),
+            Some(end) if end > at => at = end,
+            _ => return Err(None),
+        }
+    }
+}
+
 /// Whether every page of `[address, address + size)` is in a region
 /// `good` accepts (size 0: always).
 fn every_region(address: usize, size: usize, good: impl Fn(&MemoryBasic) -> bool) -> bool {
-    if size == 0 {
-        return true;
-    }
-    let Some(last) = address.checked_add(size - 1) else { return false };
-    let mut at = address;
-    loop {
-        let Some(mbi) = region(at) else { return false };
-        if !good(&mbi) {
-            return false;
+    walk(address, size, good).is_ok()
+}
+
+/// `every_region` for a probe that touches the memory: the first bad
+/// page, when it is a guard page, has its guard used up, as Windows'
+/// touch does.
+fn probe(address: usize, size: usize, good: impl Fn(&MemoryBasic) -> bool) -> bool {
+    match walk(address, size, good) {
+        Ok(()) => true,
+        Err(stop) => {
+            if let Some((at, mbi)) = stop {
+                use_guard(at, &mbi);
+            }
+            false
         }
-        match mbi.base.checked_add(mbi.region_size) {
-            Some(end) if end > last => return true,
-            Some(end) if end > at => at = end,
-            _ => return false,
-        }
     }
+}
+
+/// Clears PAGE_GUARD on the page holding `at` when `mbi` (its region) is
+/// a committed guard page: the touch that found the page bad took its
+/// one-shot exception.
+fn use_guard(at: usize, mbi: &MemoryBasic) {
+    if mbi.state != MEM_COMMIT || mbi.protect & PAGE_GUARD == 0 {
+        return;
+    }
+    let page = at & !(PAGE_SIZE - 1);
+    // A failure leaves the guard in place: the answer (bad) is the same.
+    let _ = protect(page, PAGE_SIZE, mbi.protect & !PAGE_GUARD);
 }
 
 /// Committed, not a guard page, and readable (every protection but
@@ -101,13 +142,13 @@ fn writable(mbi: &MemoryBasic) -> bool {
 /// FALSE for a size of 0.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsBadReadPtr(p: *const c_void, size: usize) -> Bool {
-    Bool::from(!every_region(p as usize, size, readable))
+    Bool::from(!probe(p as usize, size, readable))
 }
 
 /// IsBadWritePtr(lp, ucb): whether any byte of the range cannot be written.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsBadWritePtr(p: *mut c_void, size: usize) -> Bool {
-    Bool::from(!every_region(p as usize, size, writable))
+    Bool::from(!probe(p as usize, size, writable))
 }
 
 /// IsBadHugeReadPtr: IsBadReadPtr (the same on every Win32).
@@ -139,7 +180,11 @@ fn bad_string<T: Copy + PartialEq + Default>(p: *const T, max: usize) -> Bool {
     let mut at = p as usize;
     let mut left = max;
     loop {
-        let Some(mbi) = region(at).filter(readable) else { return TRUE };
+        let Some(mbi) = region(at) else { return TRUE };
+        if !readable(&mbi) {
+            use_guard(at, &mbi);
+            return TRUE;
+        }
         let Some(end) = mbi.base.checked_add(mbi.region_size).filter(|&e| e > at) else {
             return TRUE;
         };
@@ -155,7 +200,7 @@ fn bad_string<T: Copy + PartialEq + Default>(p: *const T, max: usize) -> Bool {
         if at < end {
             // A character straddling into the next region: its first part
             // is readable; the next region decides.
-            if !every_region(end, at + width - end, readable) {
+            if !probe(end, at + width - end, readable) {
                 return TRUE;
             }
             // SAFETY: both parts are readable.

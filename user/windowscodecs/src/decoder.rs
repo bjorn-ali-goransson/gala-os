@@ -9,7 +9,9 @@
 //!   for an image of the decoder's format, leaving the stream where it
 //!   was. Before Initialize, GetFrameCount and GetFrame are
 //!   WINCODEC_ERR_NOTINITIALIZED.
-//! - One frame: GetFrame(0); another index is E_INVALIDARG.
+//! - One frame: GetFrame(0); another index is WINCODEC_ERR_FRAMEMISSING
+//!   for a BMP (Windows) and E_INVALIDARG for a PNG (not yet measured on
+//!   Windows: windowscodecs_test prints it).
 //! - The decoder has no palette, preview, thumbnail, metadata or colour
 //!   contexts (WINCODEC_ERR_PALETTEUNAVAILABLE, ..._UNSUPPORTEDOPERATION,
 //!   ..._CODECNOTHUMBNAIL); GetDecoderInfo is not implemented
@@ -37,7 +39,7 @@ use crate::format::{self, Fmt};
 use crate::png;
 use crate::{
     E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, Header, IID_IWICBITMAPSOURCE, Obj, Rect, S_OK,
-    Spin, VTable, WINCODEC_ERR_BADIMAGE, WINCODEC_ERR_CODECNOTHUMBNAIL,
+    Spin, VTable, WINCODEC_ERR_BADIMAGE, WINCODEC_ERR_CODECNOTHUMBNAIL, WINCODEC_ERR_FRAMEMISSING,
     WINCODEC_ERR_NOTINITIALIZED, WINCODEC_ERR_PALETTEUNAVAILABLE, WINCODEC_ERR_UNKNOWNIMAGEFORMAT,
     WINCODEC_ERR_UNSUPPORTEDOPERATION, WINCODEC_ERR_WRONGSTATE, add_ref, bmp, copy_from_memory,
     gap, guid, not_implemented, palette, put, query, release_object, row_bytes, stream, try_box,
@@ -317,7 +319,10 @@ extern "system" fn get_frame(this_: Obj, index: u32, out: *mut Obj) -> HResult {
         return WINCODEC_ERR_NOTINITIALIZED;
     }
     if index != 0 {
-        return E_INVALIDARG;
+        return match this(this_).container {
+            Container::Bmp => WINCODEC_ERR_FRAMEMISSING,
+            Container::Png => E_INVALIDARG,
+        };
     }
     add_ref(this_);
     match try_box(Frame { h: Header::new(FRAME_VTBL.addr()), decoder: this_ }) {

@@ -1850,6 +1850,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
     ("reparse_test", "ntdll.dll", "Windows/System32"),
     ("reparse_test", "kernel32.dll", "Windows/System32"),
+    ("reparse_test", "advapi32.dll", "Windows/System32"),
+    ("reparse_test", "bcryptprimitives.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
     ("pipe_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "advapi32.dll", "Windows/System32"),

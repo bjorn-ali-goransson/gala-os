@@ -14,6 +14,7 @@ mod tables;
 
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_FLAGS: u32 = 1004;
+const SORT_DIGITSASNUMBERS: u32 = 0x8;
 
 // ---- UTF-8 (the ANSI code page) -------------------------------------------
 
@@ -68,7 +69,9 @@ fn put_ansi(text: &[u16], buf: *mut u8, size: i32) -> i32 {
 // ---- CompareStringA, GetStringTypeA ---------------------------------------
 
 /// CompareStringA: CompareStringW's comparison of the strings as UTF-16
-/// (-1: up to the NUL; 0: the empty string).
+/// (-1: up to the NUL; 0: the empty string). SORT_DIGITSASNUMBERS is the
+/// W form's only: the A form refuses it with ERROR_INVALID_FLAGS
+/// (Windows, office_k32_test).
 #[unsafe(no_mangle)]
 pub extern "system" fn CompareStringA(
     lcid: u32,
@@ -80,6 +83,9 @@ pub extern "system" fn CompareStringA(
 ) -> i32 {
     if !known_lcid(lcid) || a.is_null() || b.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    if flags & SORT_DIGITSASNUMBERS != 0 {
+        return fail_with(ERROR_INVALID_FLAGS, 0);
     }
     let (a, b) = (ansi_bytes(a, n, false), ansi_bytes(b, m, false));
     compare_units(utf16_of(a), utf16_of(b), flags)

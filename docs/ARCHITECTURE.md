@@ -2758,13 +2758,19 @@ shutdown.
   ancestors; NAME on the parent for a subkey created, deleted or
   renamed and on the key itself for its deletion or rename, LAST_SET for
   a value set or deleted, SECURITY | ATTRIBUTES for a descriptor set,
-  ATTRIBUTES for NtSetInformationKey) and `registry::with` hands the
-  notes to `regnotify::deliver` after releasing the registry. A matching
-  change completes every waiting request of the watch once (IOSB
-  STATUS_NOTIFY_ENUM_DIR, the event, the APC with ApcContext and the
-  IOSB, as `notify`'s I/O completion: the APC slot is reserved at the
-  request); one that comes while none waits is kept and the next request
-  completes at once. Asynchronous=FALSE waits in the kernel. A request
+  ATTRIBUTES for NtSetInformationKey; a value set again to its own type
+  and data is no change) and `registry::with` hands the notes to
+  `regnotify::deliver` after releasing the registry. A matching change
+  completes every waiting request of the watch once (IOSB
+  STATUS_NOTIFY_ENUM_DIR with Information 0, the event, the APC with
+  ApcContext and the IOSB, as `notify`'s I/O completion: the APC slot is
+  reserved at the request); the deletion of the watched key itself
+  completes its watch with STATUS_NOTIFY_CLEANUP (`Change::deleted`).
+  One that comes while none waits is kept and the next request completes
+  at once, returning STATUS_SUCCESS (its IOSB the same).
+  Asynchronous=FALSE waits in the kernel and returns
+  STATUS_NOTIFY_ENUM_DIR. A waiting request is no I/O of its thread
+  (GetThreadIOPendingFlag 0). A request
   without REG_NOTIFY_THREAD_AGNOSTIC (a filter bit at the NT level, in
   REG_LEGAL_CHANGE_FILTER) belongs to its thread and ends with
   STATUS_CANCELLED when the thread exits (`thread::exit_current`); the key
@@ -2772,11 +2778,14 @@ shutdown.
   NtNotifyChangeMultipleKeys takes at most one subordinate
   OBJECT_ATTRIBUTES (in the caller's view, KEY_NOTIFY checked), opened
   by the kernel and kept by the watch; its changes count as the master's.
+  A subordinate in the master's hive is STATUS_INVALID_PARAMETER
+  (`Registry::hive`: the key two levels under `\REGISTRY`, where Windows
+  mounts its hives). These statuses are Windows' (measured on 25H2);
+  still open (`regnotify_test`'s `info` lines): a kept change's IOSB, a
+  thread's end, a subordinate in another hive, two subordinates, what a
+  rename fires and the renaming handle's own name.
   Invariant: lock order WATCHES, then a watch's state; no completion, no
-  key object dropped and no registry call under either. Which statuses
-  Windows writes (after a change, a thread's end) and whether it keeps a
-  change for the next request are not measured (`regnotify_test`'s
-  `info` lines; ROADMAP OF).
+  key object dropped and no registry call under either.
 - **Information classes**: KEY_BASIC/NODE/FULL/NAME/CACHED_INFORMATION
   (flags and handle tags as zeros), KEY_VALUE_BASIC/FULL/
   PARTIAL_INFORMATION and the ALIGN64 forms; a buffer shorter than the
@@ -3434,7 +3443,9 @@ ntdll imports.
   code unit by code unit with simple case folding; linguistic
   equivalences are recorded). Linguistic comparison puts punctuation,
   symbols and spaces before digits and digits before letters, and gives
-  NULs no weight (CompareStringA compares the UTF-8 strings as UTF-16).
+  NULs no weight (CompareStringA compares the UTF-8 strings as UTF-16;
+  SORT_DIGITSASNUMBERS is the W form's only, ERROR_INVALID_FLAGS in the
+  A form, as on Windows).
   `nls.rs`: FoldStringW is Unicode normalization from tables
   `tools/nls_tables.py` writes from Python's unicodedata
   (`nls/tables.rs`, the Basic Multilingual Plane; Hangul by arithmetic):
@@ -3527,7 +3538,12 @@ ntdll imports.
     others ERROR_SXS_SECTION_NOT_FOUND) and FindActCtxSectionGuid (COM
     servers 4; 5, 6, 9 find nothing) search the active context, then
     the process default; FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX returns
-    the context found in, referenced.
+    the context found in, referenced (for the process default Windows
+    may give NULL: `actctx_test` prints the handle until a run says).
+    ERROR_SXS_SECTION_NOT_FOUND is 14000 (winerror.h).
+  - The process default's detailed information names the executable
+    itself as the root manifest (PATH_WIN32_FILE, its full path) and
+    its assembly's manifest as a file too (Windows).
   - QueryActCtxW: a NULL context is the process default (except for
     ActivationContextBasicInformation, which answers NULL);
     USE_ACTIVE_ACTCTX the innermost active one (with a context given:
@@ -3572,8 +3588,10 @@ ntdll imports.
   Huge twins (`probe.rs`) ask the memory manager rather than touch the
   memory under a handler as Windows does: a range is good when each of
   its regions is committed, not PAGE_GUARD, and allows the access
-  (copy-on-write counts as writable); the one difference is a guard
-  page, which Windows' probe uses up and gala's leaves. OfferVirtualMemory
+  (copy-on-write counts as writable). A guard page the walk reaches is
+  used up as Windows' touch uses it (PAGE_GUARD cleared on that page:
+  VirtualQuery then shows the plain protection); the walk stops at the
+  first bad page, as the touch does. OfferVirtualMemory
   takes private, committed read-write pages to PAGE_NOACCESS and
   ReclaimVirtualMemory back to read-write; gala never discards offered
   memory (ERROR_SUCCESS, never ERROR_BUSY); other memory is refused and
@@ -9367,13 +9385,17 @@ windowscodecs tests (run on Windows) and Microsoft's documentation.
   (`Header`) and is freed at its last Release; mutable state sits behind
   a small spin lock never held across a call into another object. The
   factory is one static object (references not counted), answering
-  IWICImagingFactory and IWICImagingFactory2. A source is any
+  IWICImagingFactory and IWICImagingFactory2;
+  WICCreateImagingFactory_Proxy hands it out for the two SDK versions,
+  version 0 is WINCODEC_ERR_UNSUPPORTEDVERSION (Windows). A source is any
   IWICBitmapSource, this DLL's or the caller's (`Source` calls slots 3
   to 7); the converter, scaler and clipper hold a reference on theirs and
   ask it for pixels on every CopyPixels, nothing cached.
 - **Decoding**: the decoders read the whole stream from its start and
   decode at Initialize (Windows may defer errors to CopyPixels); one
-  frame each. PNG: gdiplus's `png.rs` (one source for gdiplus, user32 and
+  frame each (a BMP's GetFrame of another index is
+  WINCODEC_ERR_FRAMEMISSING, as on Windows; a PNG's E_INVALIDARG, not
+  yet measured). PNG: gdiplus's `png.rs` (one source for gdiplus, user32 and
   this DLL), its `decode_raw` keeping the samples in the PNG's layout so
   the frame has WIC's native format (grey, indexed with the PLTE/tRNS
   palette, 24bppBGR, 32bppBGRA, 48/64 bpp for 16-bit images). BMP: 1, 4,

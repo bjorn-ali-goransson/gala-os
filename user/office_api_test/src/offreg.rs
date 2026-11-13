@@ -22,8 +22,8 @@
 //!   RtlInitializeBitMap writes only the header; RtlNumberOfSetBits
 //!   after RtlSetBits runs crossing bytes and ULONGs; in a 62-bit map
 //!   whose last byte alone is clear, RtlFindNextForwardRunClear finds a
-//!   run of 6 at 56 (and Wine's RtlFindNextForwardRunSet a set run
-//!   likewise, looked up at run time: Windows' ntdll appears to lack it).
+//!   run of 6 at 56; RtlFindNextForwardRunSet (Wine's) is not exported
+//!   (Windows).
 //! - msvcrt: wcsnlen, wcsncpy_s and wcscat_s with valid arguments, as
 //!   OffReg calls them (copies and appends that fit, a count shorter
 //!   than the source). Their invalid-parameter answers are not checked:
@@ -383,24 +383,15 @@ fn bitmaps(c: &mut Checks) -> Result<(), u32> {
         RtlInitializeBitMap(b, mask.as_mut_ptr(), 62);
         c.eq(RtlFindNextForwardRunClear(b, 0, &mut pos).into(), 6)?;
         c.eq(pos.into(), 56)?;
-        // RtlFindNextForwardRunSet: Wine's, imported by none of Office's
-        // files; imported statically, the test did not load on Windows
-        // (STATUS_ENTRYPOINT_NOT_FOUND), so it is looked up (the info line
-        // records whether Windows' ntdll has it).
+        // RtlFindNextForwardRunSet: Wine's, not Windows' (Windows' ntdll
+        // does not export it; imported statically, the test would not
+        // load there).
         let ntdll: [u16; 10] = super::w("ntdll.dll");
         let f = super::GetProcAddress(
             super::LoadLibraryW(ntdll.as_ptr()),
             b"RtlFindNextForwardRunSet\0".as_ptr(),
         );
-        super::info("RtlFindNextForwardRunSet exported", u64::from(f != 0));
-        if f != 0 {
-            let find: unsafe extern "system" fn(*mut Bitmap, u32, *mut u32) -> u32 =
-                core::mem::transmute(f);
-            let mut mask = [0u8, 0, 0, 0, 0, 0, 0, 0xff];
-            RtlInitializeBitMap(b, mask.as_mut_ptr(), 62);
-            c.eq(find(b, 0, &mut pos).into(), 6)?;
-            c.eq(pos.into(), 56)?;
-        }
+        c.eq(f as u64, 0)?;
     }
     Ok(())
 }

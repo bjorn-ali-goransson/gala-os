@@ -107,12 +107,14 @@ struct Node {
 
 /// One change, for the notifications (nt::regnotify): the key it touched,
 /// then that key's ancestors up to the root (a watch on the key sees it;
-/// one on an ancestor only if it watches the subtree), and what it was
-/// (REG_NOTIFY_CHANGE_*).
+/// one on an ancestor only if it watches the subtree), what it was
+/// (REG_NOTIFY_CHANGE_*), and whether it was that key's deletion (its own
+/// watch then ends with STATUS_NOTIFY_CLEANUP).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Change {
     pub chain: Vec<KeyId>,
     pub bits: u32,
+    pub deleted: bool,
 }
 
 /// The registry tree.
@@ -446,9 +448,9 @@ impl Registry {
         }
         let parent = node.parent;
         self.record_delete(id);
-        // The key's own watches hear that its name is gone, its parent's
-        // that a subkey went.
-        self.note(id, REG_NOTIFY_CHANGE_NAME);
+        // The key's own watches hear that it is gone, its parent's that a
+        // subkey went.
+        self.note_change(id, REG_NOTIFY_CHANGE_NAME, true);
         self.note(parent, REG_NOTIFY_CHANGE_NAME);
         let replaying = self.replaying;
         let p = self.node_mut(parent)?;
@@ -497,14 +499,20 @@ impl Registry {
         let _ = bytes.try_extend_from_slice(data);
         let node = self.node_mut(id)?;
         node.last_write = now;
+        // A value set again to its own type and data is no change to
+        // watch (Windows: the watch does not fire; regnotify_test).
+        let mut changed = true;
         if let Some(v) = node.values.iter_mut().find(|v| same(&v.name, name)) {
+            changed = v.kind != kind || v.data != bytes;
             v.kind = kind;
             v.data = bytes;
         } else {
             let value = Value { name: copy(name).map_err(nomem)?, kind, data: bytes };
             node.values.try_push(value).map_err(nomem)?;
         }
-        self.note(id, REG_NOTIFY_CHANGE_LAST_SET);
+        if changed {
+            self.note(id, REG_NOTIFY_CHANGE_LAST_SET);
+        }
         self.record(id, |key, _| {
             Some(RegOp::SetValue { key, name: copy(name).ok()?, kind, data: copy_bytes(data)? })
         });
@@ -593,6 +601,11 @@ impl Registry {
     /// Notes a change of key `id` for the notifications (`Change`), while
     /// some watch exists.
     fn note(&mut self, id: KeyId, bits: u32) {
+        self.note_change(id, bits, false);
+    }
+
+    /// `note`, saying whether the change is the key's deletion.
+    fn note_change(&mut self, id: KeyId, bits: u32, deleted: bool) {
         if !self.noting {
             return;
         }
@@ -607,7 +620,7 @@ impl Registry {
                 _ => break true,
             }
         };
-        if !complete || self.changes.try_push(Change { chain, bits }).is_err() {
+        if !complete || self.changes.try_push(Change { chain, bits, deleted }).is_err() {
             self.changes_lost = true;
         }
     }
@@ -630,6 +643,22 @@ impl Registry {
     /// The key's own name (its last component, as created).
     pub fn key_name(&self, id: KeyId) -> Result<&[u16], NtStatus> {
         Ok(&self.node(id)?.name)
+    }
+
+    /// The hive key `id` is in, named by its root: the key two levels
+    /// under `\REGISTRY` that `id` is or is under
+    /// (`\REGISTRY\MACHINE\SOFTWARE`, `\REGISTRY\USER\<SID>`: where
+    /// Windows mounts its hives). `\REGISTRY` and the keys right under it
+    /// are their own.
+    pub fn hive(&self, id: KeyId) -> Result<KeyId, NtStatus> {
+        let mut at = id;
+        loop {
+            let parent = self.node(at)?.parent;
+            if at == ROOT || parent == ROOT || self.node(parent)?.parent == ROOT {
+                return Ok(at);
+            }
+            at = parent;
+        }
     }
 
     /// The full name, `\REGISTRY\...`.
@@ -1731,6 +1760,18 @@ mod tests {
     }
 
     #[test]
+    fn a_key_s_hive_is_named_by_the_key_two_levels_under_the_root() {
+        let r = reg();
+        let machine = r.lookup(ROOT, &w("MACHINE")).unwrap();
+        let sw = r.lookup(ROOT, &w("MACHINE\\SOFTWARE")).unwrap();
+        let ms = r.lookup(sw, &w("Microsoft")).unwrap();
+        assert_eq!(r.hive(ms), Ok(sw));
+        assert_eq!(r.hive(sw), Ok(sw));
+        assert_eq!(r.hive(machine), Ok(machine));
+        assert_eq!(r.hive(ROOT), Ok(ROOT));
+    }
+
+    #[test]
     fn changes_are_noted_with_the_key_and_its_ancestors() {
         let mut r = reg();
         let sw = r.lookup(ROOT, &w("MACHINE\\SOFTWARE")).unwrap();
@@ -1740,6 +1781,8 @@ mod tests {
         r.set_value(ms, &w("x"), 4, &[0; 4], 1).unwrap();
         assert_eq!(r.take_changes(), (vec![], false));
         r.noting = true;
+        r.set_value(ms, &w("x"), 4, &[1; 4], 1).unwrap();
+        // The same type and data again: no change.
         r.set_value(ms, &w("x"), 4, &[1; 4], 1).unwrap();
         let (k, _) = r.create(ms, &w("Sub"), 0, &[], 1).unwrap();
         r.rename(k, &w("Sub2"), 1).unwrap();
@@ -1751,17 +1794,19 @@ mod tests {
         let at_k = chain(&[k, ms, sw, machine, ROOT]);
         let (changes, lost) = r.take_changes();
         assert!(!lost);
+        // The key's deletion is marked as such on its own change only.
         let want = [
-            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET),
-            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME),
-            (at_k.clone(), REG_NOTIFY_CHANGE_NAME),
-            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME),
-            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET),
-            (at_ms.clone(), REG_NOTIFY_CHANGE_SECURITY | REG_NOTIFY_CHANGE_ATTRIBUTES),
-            (at_k, REG_NOTIFY_CHANGE_NAME),
-            (at_ms, REG_NOTIFY_CHANGE_NAME),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET, false),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME, false),
+            (at_k.clone(), REG_NOTIFY_CHANGE_NAME, false),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_NAME, false),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_LAST_SET, false),
+            (at_ms.clone(), REG_NOTIFY_CHANGE_SECURITY | REG_NOTIFY_CHANGE_ATTRIBUTES, false),
+            (at_k, REG_NOTIFY_CHANGE_NAME, true),
+            (at_ms, REG_NOTIFY_CHANGE_NAME, false),
         ];
-        let got: Vec<(Vec<KeyId>, u32)> = changes.into_iter().map(|c| (c.chain, c.bits)).collect();
+        let got: Vec<(Vec<KeyId>, u32, bool)> =
+            changes.into_iter().map(|c| (c.chain, c.bits, c.deleted)).collect();
         assert_eq!(got, want);
     }
 

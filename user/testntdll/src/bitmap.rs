@@ -2,7 +2,9 @@
 //! bit n % 32 of ULONG n / 32), as the WDK documents the Rtl*Bit*
 //! routines; bits past SizeOfBitMap in the buffer's last ULONG are not
 //! part of the bitmap (Wine's dlls/ntdll/tests/rtlbitmap.c, run on
-//! Windows: a 62-bit map whose last byte is 0xff has a run of 6).
+//! Windows: a 62-bit map whose last byte is 0xff has a run of 6). Only
+//! the clear-run search is exported: Windows' ntdll has no
+//! RtlFindNextForwardRunSet (office_api_test), so gala's has none either.
 
 #[repr(C)]
 pub struct RtlBitmap {
@@ -145,14 +147,4 @@ pub extern "system" fn RtlFindNextForwardRunClear(
     pos: *mut u32,
 ) -> u32 {
     next_run(m, from, pos, false)
-}
-
-/// RtlFindNextForwardRunSet(Header, FromIndex, StartingRunIndex).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlFindNextForwardRunSet(
-    m: *const RtlBitmap,
-    from: u32,
-    pos: *mut u32,
-) -> u32 {
-    next_run(m, from, pos, true)
 }

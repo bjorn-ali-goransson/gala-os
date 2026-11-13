@@ -10,42 +10,48 @@
 //!   fixes what it watches (a later one's filter changes nothing, a
 //!   filter of 0 never fires); a subkey created or deleted completes
 //!   every waiting request of a NAME watch on the parent, once (a request
-//!   is one arm; its event is reset when it is made); closing the handle
-//!   completes them too; NtNotifyChangeMultipleKeys without subordinates
-//!   is the same. A handle without KEY_NOTIFY is STATUS_ACCESS_DENIED; a
-//!   handle to a deleted key STATUS_KEY_DELETED.
+//!   is one arm; its event is reset when it is made), with
+//!   STATUS_NOTIFY_ENUM_DIR and Information 0; closing the handle
+//!   completes them with STATUS_NOTIFY_CLEANUP; NtNotifyChangeMultipleKeys
+//!   without subordinates is the same. A handle without KEY_NOTIFY is
+//!   STATUS_ACCESS_DENIED; a handle to a deleted key STATUS_KEY_DELETED.
 //! - What fires what: REG_NOTIFY_CHANGE_LAST_SET a value set on the key
-//!   (not a NAME-only watch), REG_NOTIFY_CHANGE_SECURITY the key's
+//!   (not a NAME-only watch; the same type and data set again is no
+//!   change), REG_NOTIFY_CHANGE_SECURITY and ..._ATTRIBUTES the key's
 //!   descriptor set; a watch of the subtree sees subkeys' subkeys and
-//!   values, one without it does not.
-//! - RegNotifyChangeKeyValue: asynchronous with an event; a filter bit
-//!   outside REG_LEGAL_CHANGE_FILTER is ERROR_INVALID_PARAMETER; the
-//!   request ends with its thread (the event is signaled when the thread
-//!   that made it exits) unless made with REG_NOTIFY_THREAD_AGNOSTIC; a
-//!   synchronous one returns ERROR_SUCCESS once a change came (a new
-//!   value set while it waits).
+//!   values, one without it does not. A change while no request waits is
+//!   kept: the next request returns STATUS_SUCCESS at once, its event
+//!   signaled. Deleting the watched key completes its own watch with
+//!   STATUS_NOTIFY_CLEANUP.
+//! - RegNotifyChangeKeyValue: asynchronous with an event; without one,
+//!   or with a filter bit outside REG_LEGAL_CHANGE_FILTER,
+//!   ERROR_INVALID_PARAMETER; the request ends with its thread (the event
+//!   is signaled when the thread that made it exits) unless made with
+//!   REG_NOTIFY_THREAD_AGNOSTIC; a synchronous one returns ERROR_SUCCESS
+//!   once a change came (a new value set while it waits). A waiting watch
+//!   is not the thread's pending I/O (GetThreadIOPendingFlag 0).
+//! - A synchronous NtNotifyChangeKey returns STATUS_NOTIFY_ENUM_DIR.
 //! - A completion routine (ApcRoutine) runs, with its context, at the
-//!   thread's next alertable wait.
+//!   thread's next alertable wait; its IO_STATUS_BLOCK has
+//!   STATUS_NOTIFY_ENUM_DIR.
+//! - NtNotifyChangeMultipleKeys with a subordinate in the master's hive
+//!   (its sibling): STATUS_INVALID_PARAMETER.
 //! - NtRenameKey: STATUS_ACCESS_VIOLATION for a NULL name,
 //!   STATUS_INVALID_PARAMETER for an empty one, STATUS_INVALID_HANDLE for
 //!   a NULL handle, STATUS_ACCESS_DENIED without KEY_WRITE,
-//!   STATUS_CANNOT_DELETE to its own name; renamed, the handle's
-//!   KeyNameInformation has the new name and enumeration the new names.
-//!   RegRenameKey: ERROR_INVALID_PARAMETER (no names), ERROR_INVALID_HANDLE
-//!   (no key), ERROR_ACCESS_DENIED (KEY_READ), ERROR_FILE_NOT_FOUND (no
-//!   such subkey), a subkey renamed by name.
+//!   STATUS_CANNOT_DELETE to its own name; renamed, enumeration has the
+//!   new names. RegRenameKey: ERROR_INVALID_PARAMETER (no names),
+//!   ERROR_INVALID_HANDLE (no key), ERROR_ACCESS_DENIED (KEY_READ),
+//!   ERROR_FILE_NOT_FOUND (no such subkey), a subkey renamed by name.
 //!
-//! What the tests and the documentation leave open is printed as
+//! The expectations marked above as Windows' come from a run there (they
+//! were `info` lines first). What is still open is printed as
 //! `<name>: info ...` lines for a run on Windows to show, not checked:
-//! the IO_STATUS_BLOCK's status after a change, a close and a thread's
-//! end; whether a change while no request waits completes the next one
-//! at once; a synchronous NtNotifyChangeKey's status; a deleted watched
-//! key firing its own watch; a rename firing the parent's and its own
-//! watch; another handle's name after a rename; a security change firing
-//! an ATTRIBUTES watch; whether a value set again to the same data is a
-//! change; NtNotifyChangeMultipleKeys with one subordinate
-//! (whose change fires the master's request) and with two; an
-//! asynchronous RegNotifyChangeKeyValue without an event.
+//! the IO_STATUS_BLOCK's status of a request completed at once;
+//! NtNotifyChangeMultipleKeys with
+//! a subordinate in another hive and with two; the renaming handle's
+//! KeyNameInformation (on Windows not the new name) and another
+//! handle's; a rename firing the parent's and its own watch.
 //!
 //! No wait is unbounded: a synchronous request runs in a worker thread
 //! that is given 5 s after the change (then the key's close ends it and
@@ -241,6 +247,8 @@ const REG_NOTIFY_THREAD_AGNOSTIC: u32 = 0x1000_0000;
 
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_PENDING: u32 = 0x103;
+const STATUS_NOTIFY_CLEANUP: u32 = 0x10b;
+const STATUS_NOTIFY_ENUM_DIR: u32 = 0x10c;
 const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
 const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
@@ -499,8 +507,8 @@ fn nt_notify(c: &mut Checks, base: Handle) -> Result<(), u32> {
     c.eq(wait(e[1]), WAIT_OBJECT_0)?;
     c.eq(wait(e[2]), WAIT_TIMEOUT)?;
     c.eq(wait(e[3]), WAIT_TIMEOUT)?;
-    info("IO_STATUS_BLOCK status after a change", io[0][0] as u64);
-    info("IO_STATUS_BLOCK information after a change", io[0][1] as u64);
+    c.eq(io[0][0] as u32, STATUS_NOTIFY_ENUM_DIR)?;
+    c.eq(io[0][1] as u32, 0)?;
     let [io0, io1, ..] = &mut io;
     c.eq(notify(key, e[0], io0, 0, false), STATUS_PENDING)?;
     c.eq(wait(e[0]), WAIT_TIMEOUT)?;
@@ -527,7 +535,7 @@ fn nt_notify(c: &mut Checks, base: Handle) -> Result<(), u32> {
     c.eq(wait(e[1]), WAIT_OBJECT_0)?;
     c.eq(wait(e[2]), WAIT_TIMEOUT)?;
     c.eq(wait(e[3]), WAIT_TIMEOUT)?;
-    info("IO_STATUS_BLOCK status after the handle's close", io[0][0] as u64);
+    c.eq(io[0][0] as u32, STATUS_NOTIFY_CLEANUP)?;
     // NtNotifyChangeMultipleKeys without subordinates.
     let key = open(base, "notify", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     let mut iom = [UNTOUCHED; 2];
@@ -598,7 +606,8 @@ fn filters(c: &mut Checks, base: Handle) -> Result<(), u32> {
     // SAFETY: the descriptor just read.
     c.eq(unsafe { RegSetKeySecurity(key, DACL_SECURITY_INFORMATION, sd.as_ptr()) }, ERROR_SUCCESS)?;
     c.eq(wait(e3), WAIT_OBJECT_0)?;
-    info("a security change fires an ATTRIBUTES watch (0: yes)", wait(e4).into());
+    // An ATTRIBUTES watch fires too (Windows).
+    c.eq(wait(e4), WAIT_OBJECT_0)?;
     close(sec);
     close(attr);
     // Without KEY_NOTIFY: refused.
@@ -611,25 +620,28 @@ fn filters(c: &mut Checks, base: Handle) -> Result<(), u32> {
     // SAFETY: our key and event.
     let r = unsafe { RegNotifyChangeKeyValue(only_notify, 0, 0x20, e, 1) };
     c.eq(r, ERROR_INVALID_PARAMETER)?;
-    // SAFETY: as above; no event.
+    // SAFETY: as above; no event (Windows: refused).
     let r = unsafe { RegNotifyChangeKeyValue(only_notify, 0, REG_NOTIFY_CHANGE_NAME, 0, 1) };
-    info("asynchronous RegNotifyChangeKeyValue without an event", r.into());
+    c.eq(r, ERROR_INVALID_PARAMETER)?;
     close(only_notify);
-    // A change while no request waits: does the next one complete at once?
+    // A change while no request waits is kept: the next request completes
+    // at once with STATUS_SUCCESS and signals its event (Windows).
     c.eq(notify(key, e, &mut io, REG_NOTIFY_CHANGE_LAST_SET, false), STATUS_PENDING)?;
     c.eq(set_dword(key, "v", 2), ERROR_SUCCESS)?;
     c.eq(wait(e), WAIT_OBJECT_0)?;
     c.eq(set_dword(key, "v", 3), ERROR_SUCCESS)?;
-    let s = notify(key, e, &mut io, REG_NOTIFY_CHANGE_LAST_SET, false);
-    info("a request after an unwatched change returns", s.into());
-    info("its event (0: signaled)", wait(e).into());
-    // Deleting the watched key: does its own watch fire?
+    io = [UNTOUCHED; 2];
+    c.eq(notify(key, e, &mut io, REG_NOTIFY_CHANGE_LAST_SET, false), STATUS_SUCCESS)?;
+    c.eq(wait(e), WAIT_OBJECT_0)?;
+    info("its IO_STATUS_BLOCK status", io[0] as u64);
+    // Deleting the watched key fires its own watch, with
+    // STATUS_NOTIFY_CLEANUP (Windows).
     let doomed = create(key, "doomed", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     let (e5, mut io5) = (event(true, false), [0usize; 2]);
     c.eq(notify(doomed, e5, &mut io5, REG_NOTIFY_CHANGE_NAME, false), STATUS_PENDING)?;
     c.eq(delete(key, "doomed"), ERROR_SUCCESS)?;
-    info("deleting the watched key fires its watch (0: yes)", wait(e5).into());
-    info("its IO_STATUS_BLOCK status", io5[0] as u64);
+    c.eq(wait(e5), WAIT_OBJECT_0)?;
+    c.eq(io5[0] as u32, STATUS_NOTIFY_CLEANUP)?;
     close(doomed);
     close(key);
     for h in [e, e2, e3, e4, e5] {
@@ -684,12 +696,11 @@ fn reg_notify(c: &mut Checks, base: Handle) -> Result<(), u32> {
     // SAFETY: (throughout) our keys and event.
     c.eq(unsafe { RegNotifyChangeKeyValue(key, 1, FILTER, e, 1) }, ERROR_SUCCESS)?;
     c.eq(wait(e), WAIT_TIMEOUT)?;
-    // Whether a waiting registry watch counts as the thread's pending I/O
-    // (gala: no, a watch is not an I/O request).
+    // A waiting registry watch is not the thread's pending I/O (Windows).
     let mut pending = -1;
     // SAFETY: plain call.
     unsafe { GetThreadIOPendingFlag(GetCurrentThread(), &mut pending) };
-    info("GetThreadIOPendingFlag with a registry watch waiting", pending as u64);
+    c.eq(pending as u32, 0)?;
     let sub = create(key, "SubKey", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     c.eq(wait(e), WAIT_OBJECT_0)?;
     // Watching deeper keys.
@@ -832,18 +843,18 @@ fn completions(c: &mut Checks, base: Handle) -> Result<(), u32> {
     let key = create(base, "sync", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
     // Synchronous: returns once another thread set a value (a new value
     // each time).
+    // STATUS_NOTIFY_ENUM_DIR (Windows).
     let s = sync_change(key, 0, 1);
-    info("a synchronous NtNotifyChangeKey returns", s.map_or(u64::MAX, u64::from));
-    c.ok(s.is_some_and(|s| s != STATUS_PENDING && s < 0x8000_0000), s.unwrap_or(0).into())?;
+    c.eq(s.unwrap_or(u32::MAX), STATUS_NOTIFY_ENUM_DIR)?;
     let r = sync_change(key, 1, 2);
     c.eq(r.unwrap_or(u32::MAX), ERROR_SUCCESS)?;
-    // The same data set again: is that a change?
+    // The same data set again is no change (Windows).
     let e = event(true, false);
     let mut io = [0usize; 2];
     c.eq(notify(key, e, &mut io, REG_NOTIFY_CHANGE_LAST_SET, false), STATUS_PENDING)?;
     c.eq(set_dword(key, "later", 2), ERROR_SUCCESS)?;
     // SAFETY: our event.
-    info("the same value set again fires (0: yes)", unsafe { WaitForSingleObject(e, 500) }.into());
+    c.eq(unsafe { WaitForSingleObject(e, 500) }, WAIT_TIMEOUT)?;
     close(key);
     // SAFETY: our event.
     unsafe { CloseHandle(e) };
@@ -871,7 +882,7 @@ fn completions(c: &mut Checks, base: Handle) -> Result<(), u32> {
     c.eq(APC_CALLS.load(Ordering::SeqCst) as u32, 1)?;
     c.eq(APC_CONTEXT.load(Ordering::SeqCst) as u32, 0x1234)?;
     c.ok(APC_IOSB.load(Ordering::SeqCst) == &raw const io as usize, 0)?;
-    info("the completion routine's IO_STATUS_BLOCK status", io[0] as u64);
+    c.eq(io[0] as u32, STATUS_NOTIFY_ENUM_DIR)?;
     close(key);
     // One subordinate: a change to it completes the master's request.
     let master = create(base, "master", KEY_ALL_ACCESS).map_err(|_| c.0 + 1000)?;
@@ -897,9 +908,32 @@ fn completions(c: &mut Checks, base: Handle) -> Result<(), u32> {
             1,
         )
     };
-    info("NtNotifyChangeMultipleKeys with one subordinate", s.into());
-    c.eq(set_dword(other, "v", 1), ERROR_SUCCESS)?;
-    info("a change to the subordinate fires (0: yes)", wait(e).into());
+    // A subordinate in the master's hive (here its sibling) is refused
+    // (Windows).
+    c.eq(s, STATUS_INVALID_PARAMETER)?;
+    // One in another hive: what Windows answers is for a run there to
+    // show (HKLM\SOFTWARE, which a standard user can watch).
+    let machine = w("\\Registry\\Machine\\Software");
+    let machine_us = unicode(&machine);
+    let other_hive = attributes(0, &machine_us);
+    let mut io3 = [UNTOUCHED; 2];
+    let s = unsafe {
+        NtNotifyChangeMultipleKeys(
+            master,
+            1,
+            &other_hive,
+            e,
+            0,
+            0,
+            &mut io3,
+            REG_NOTIFY_CHANGE_LAST_SET,
+            0,
+            null_mut(),
+            0,
+            1,
+        )
+    };
+    info("NtNotifyChangeMultipleKeys with a subordinate in another hive", s.into());
     let two = [attributes(base, &us), attributes(base, &us)];
     let mut io2 = [UNTOUCHED; 2];
     let s = unsafe {
@@ -957,6 +991,14 @@ fn same(got: &[u16], want: &str) -> bool {
 }
 
 /// Whether `key`'s KeyNameInformation ends with `\<tail>`.
+/// NtQueryKey(KeyNameInformation)'s status for `key`.
+fn query_name_status(key: Handle) -> u32 {
+    let mut buf = [0u8; 600];
+    let mut ret = 0;
+    // SAFETY: our buffer; KeyNameInformation.
+    unsafe { NtQueryKey(key, 3, buf.as_mut_ptr(), 600, &mut ret) }
+}
+
 fn name_ends(key: Handle, tail: &str) -> bool {
     let mut buf = [0u8; 600];
     let mut ret = 0;
@@ -999,7 +1041,11 @@ fn rename(c: &mut Checks, base: Handle) -> Result<(), u32> {
     // Its own name.
     c.eq(unsafe { NtRenameKey(sub, &old_us) }, STATUS_CANNOT_DELETE)?;
     c.eq(unsafe { NtRenameKey(sub, &new_us) }, STATUS_SUCCESS)?;
-    c.ok(name_ends(sub, "renamed_subkey"), 0)?;
+    // The renaming handle's own KeyNameInformation: on Windows not the
+    // new name, and whether its query fails (the handle has no
+    // KEY_QUERY_VALUE) or shows the old name is for a run there to show.
+    info("the renaming handle's KeyNameInformation status", query_name_status(sub).into());
+    info("its name is the new one (1: yes)", name_ends(sub, "renamed_subkey").into());
     info(
         "another handle's name is the new one (1: yes)",
         name_ends(other, "renamed_subkey").into(),
