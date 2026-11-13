@@ -2001,8 +2001,16 @@ need gala's.
      service 17002 at about 1816 s). gala_xml parses that file as read
      from the disk (a host check), so the string the service hands
      loadXML differs; msxml6 now records each parse error's reason and
-     place in the ledger (ARCHITECTURE "msxml6"). Next: the next run's
-     `msxml6.dll!parse error` line, then what loadXML was given.
+     place in the ledger (ARCHITECTURE "msxml6"): the string fails at
+     line 1, column 18 with `undeclared namespace prefix 'appv'` (the
+     service 17002 at about 1874 s). A one-line string using `appv:`
+     without declaring it is what reloading a node's `xml` gives: gala's
+     msxml6 serializes an element subtree with its own attributes only,
+     not the namespace declarations it inherits (`dom.rs` `Tree::xml`).
+     Next: what MSXML 6's `xml` property emits for a subtree whose
+     prefixes are declared on an ancestor (Wine's msxml3 domdoc tests,
+     or measured on Windows), test first in `msxml_test`, then the
+     merge again.
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
