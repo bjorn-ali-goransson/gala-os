@@ -21,7 +21,8 @@
 //! Points: `heap` (the kernel heap's global allocator: every fallible
 //! allocation path goes through it), `frame` (the physical frame
 //! allocator), `disk_io` (each virtio-blk request), `net_tx` (each packet
-//! sent: it is dropped, as a lost packet).
+//! sent: it is dropped, as a lost packet), `pageout` (each write of a
+//! batch of pages to the page file: the disk fails it, `nt::pagefile`).
 //!
 //! The rules apply only while armed (`arm`/`disarm`): the kernel arms them
 //! while the `start=`/`run=` programs run, gala-um while its program runs,
@@ -48,12 +49,14 @@ pub enum Point {
     Frame = 1,
     DiskIo = 2,
     NetTx = 3,
+    PageOut = 4,
 }
 
-const POINTS: usize = 4;
+const POINTS: usize = 5;
 
 impl Point {
-    pub const ALL: [Point; POINTS] = [Point::Heap, Point::Frame, Point::DiskIo, Point::NetTx];
+    pub const ALL: [Point; POINTS] =
+        [Point::Heap, Point::Frame, Point::DiskIo, Point::NetTx, Point::PageOut];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -61,6 +64,7 @@ impl Point {
             Point::Frame => "frame",
             Point::DiskIo => "disk_io",
             Point::NetTx => "net_tx",
+            Point::PageOut => "pageout",
         }
     }
 

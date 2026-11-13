@@ -13,8 +13,8 @@
 //! itself for stacks and TEBs, which are charged without a limit); `ended`
 //! gives a finished process's charge back.
 //!
-//! Limits: the system's commit limit is the machine's memory (no page
-//! file), a job's per-process limit (JOB_OBJECT_LIMIT_PROCESS_MEMORY) and
+//! Limits: the system's commit limit is the machine's memory plus the
+//! page file (which grows when a commit would pass it, `vm::allocate`), a job's per-process limit (JOB_OBJECT_LIMIT_PROCESS_MEMORY) and
 //! its job-wide one (JOB_OBJECT_LIMIT_JOB_MEMORY). Lock order: the VAD,
 //! then the process's job pointer, then the job's state.
 
@@ -31,9 +31,10 @@ const PAGE: u64 = 4096;
 static COMMITTED: AtomicU64 = AtomicU64::new(0);
 static PEAK: AtomicU64 = AtomicU64::new(0);
 
-/// The system's commit limit, in pages.
+/// The system's commit limit, in pages: memory plus the page file
+/// (`nt::pagefile`; none: memory).
 pub fn limit() -> u64 {
-    platform::frame_stats().1
+    platform::frame_stats().1 + super::pagefile::pages()
 }
 
 /// Pages charged now, and the most ever.

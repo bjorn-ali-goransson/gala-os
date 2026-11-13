@@ -166,6 +166,13 @@ pub fn read_cluster(cluster: u32, buf: &mut [u8]) -> Result<(), IoError> {
     platform::disk_read(sector, buf).map_err(|_| IoError)
 }
 
+/// The first sector of cluster `cluster` of the data area (None: no data
+/// area): the page file's slots (`nt::pagefile`).
+pub fn cluster_sector(cluster: u32) -> Option<u64> {
+    let start = DATA_START.load(Ordering::Acquire);
+    (start != 0).then(|| start + u64::from(cluster) * crate::fs::volume::CLUSTER_SECTORS)
+}
+
 /// One line for the end of a run (`info!("persist: {}", Summary)`): the
 /// data area's size, free space and traffic, when there is one.
 pub struct Summary;
@@ -331,6 +338,10 @@ pub fn mount() {
     }
     *VOLUME.lock() = Some(volume);
     file::with_fs(|fs| {
+        // The page file (`nt::pagefile`): on the data area, never recorded.
+        if DATA_START.load(Ordering::Relaxed) != 0 {
+            super::pagefile::create(fs);
+        }
         // What the boot did is not recorded; replay records nothing.
         let _ = fs.take_ops();
         fs.recording = true;
@@ -833,6 +844,11 @@ fn evict() {
     EVICTED.fetch_add(gone as u64, Ordering::Relaxed);
     // Then image pages (built again from their files when touched).
     let images = super::section::relieve();
+    // Then processes' private pages, to the page file (written first: the
+    // dearest to let go, so the last).
+    let (free, _) = platform::frame_stats();
+    let paged =
+        if free < low { super::pagefile::page_out((low + 16 * 256 - free) as usize) } else { 0 };
     // Short of the mark: say once (until free memory is back above it)
     // what holds the memory, so a run that ends out of memory explains
     // itself.
@@ -846,8 +862,8 @@ fn evict() {
             let c = file::with_fs(|fs| fs.cache_stats());
             let heap = crate::mm::heap::stats();
             warn!(
-                "persist: free memory stays low after letting {gone} pages and {images} image \
-                 frames go: {after} of {total} frames free (want {low}); files' pages in \
+                "persist: free memory stays low after letting {gone} pages, {images} image \
+                 frames and {paged} private pages go: {after} of {total} frames free (want {low}); files' pages in \
                  memory {} ({} dirty, {} never \
                  written, {} of mapped files), queued dirty {}; {} scans letting pages go, {} \
                  skipped after a futile one; heap {} KiB in use, \
@@ -866,6 +882,7 @@ fn evict() {
             );
             warn!("persist: heap by owner: {}", super::stats::HeapOwners::now(heap.in_use));
             warn!("persist: image pages: {}", super::section::PageStats);
+            warn!("persist: pagefile: {}", super::pagefile::Summary);
             let (threads, dead, slots) = super::platform::thread_counts();
             warn!(
                 "persist: {threads} kernel threads, {dead} dead not reaped yet (their stacks \

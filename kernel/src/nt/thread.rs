@@ -369,6 +369,24 @@ pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
     (bottom != 0 && bottom < base).then_some((t.teb, bottom, base))
 }
 
+/// The pages of `process`'s live threads' TEBs (and WOW64 TEB32s), into
+/// `out` (as far as it has room without growing: the page file's clock
+/// keeps them in memory, since the kernel reads them under the VAD's
+/// lock, `current_stack`, where no fault can be resolved).
+pub fn teb_pages(process: &Process, out: &mut Vec<u64>) {
+    process.for_each_thread(|object| {
+        let t = as_thread(object);
+        for page in 0..teb::PAGES {
+            if out.len() < out.capacity() {
+                let _ = out.try_push(t.teb + page * PAGE_SIZE);
+            }
+        }
+        if t.teb32 != 0 && out.len() < out.capacity() {
+            let _ = out.try_push(t.teb32 / PAGE_SIZE * PAGE_SIZE);
+        }
+    });
+}
+
 /// The current WOW64 thread's TEB32 and its 32-bit stack reservation
 /// `[bottom, base)` (the TEB32's DeallocationStack and StackBase), if it
 /// is a WOW64 thread of `process`: the stack its 32-bit code grows

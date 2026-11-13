@@ -190,6 +190,7 @@ impl Programs {
 
 /// Lets the programs run again (a refused or failed handover).
 pub fn release() {
+    crate::nt::pagefile::hold(false);
     tcp::restart();
     sched::freeze_users(false);
     thread::hold_for_handover(false);
@@ -207,6 +208,8 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
     if crate::clockctl::armed() {
         return Err(Refusal::Kernel("clock control is on (its state is not carried)"));
     }
+    // Nothing goes to the page file while the programs are carried.
+    crate::nt::pagefile::hold(true);
     let collected = wait_quiet().and_then(|threads| collect_stopped(&processes, threads));
     if collected.is_err() {
         release();
@@ -670,7 +673,10 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
             _ => None,
         }
     };
-    // The pages, as the page tables have them.
+    // The pages, as the page tables have them: those in the page file
+    // first brought back (the record carries memory only).
+    crate::nt::pagefile::bring_back(process)
+        .map_err(|_| refuse("pages in the page file that do not fit in memory"))?;
     let mut raw: Vec<(u64, Frame, crate::mm::paging::PageFlags)> = Vec::new();
     let mut full = false;
     process.space.lock().for_each_page(|va, frame, flags| {

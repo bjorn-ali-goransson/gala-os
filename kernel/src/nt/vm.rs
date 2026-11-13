@@ -82,6 +82,8 @@ pub enum Fault {
     Denied,
     /// No memory to resolve it now (`resolve_fault` retries).
     OutOfMemory,
+    /// The page is in the page file (`resolve_fault` reads it back).
+    PagedOut,
 }
 
 /// How often `resolve_fault` retries a fault that found no memory, 1 ms
@@ -103,12 +105,25 @@ pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     // Short of memory, image pages go first (they are built again from
     // their files when touched): the file cache's pages, then images'.
     super::persist::relieve();
-    for _ in 0..OOM_RETRIES {
-        match resolve_once(process, addr, kind) {
+    let mut tries = 0;
+    while tries < OOM_RETRIES {
+        let fault = match resolve_once(process, addr, kind) {
+            // Read back with no lock held, then the fault again (a write to
+            // a copy-on-write page, a guard page: as for any mapped page).
+            Fault::PagedOut => match super::pagefile::page_in(process, addr) {
+                Fault::Resolved => continue,
+                other => other,
+            },
+            other => other,
+        };
+        match fault {
             Fault::OutOfMemory => {
-                // Whatever image pages can go (none if none can).
+                // Whatever image pages can go (none if none can), then
+                // private pages to the page file.
                 super::section::trim(256);
+                super::persist::relieve();
                 platform::sleep_ms(1);
+                tries += 1;
             }
             other => return other,
         }
@@ -149,6 +164,11 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     };
     if !allowed {
         return Fault::Denied;
+    }
+    // In the page file: read back first (`resolve_fault`), with no lock
+    // held; nothing below may map over its token.
+    if process.space.lock().swapped(addr).is_some() {
+        return Fault::PagedOut;
     }
     if protect & vad::PAGE_GUARD != 0 {
         return guard_hit(process, &mut vad, addr, protect & !vad::PAGE_GUARD);
@@ -357,6 +377,7 @@ fn map_now(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
             && !is_write_copy(protect)
             && vad::access_of(protect).is_ok_and(|a| a.read || a.write)
             && !space.is_mapped(addr)
+            && space.swapped(addr).is_none()
             && space.map_zero_page(addr, flags_for(protect)).is_err()
         {
             return;
@@ -372,13 +393,38 @@ pub const MEM_TOP_DOWN: u32 = 0x10_0000;
 pub const MEM_DECOMMIT: u32 = 0x4000;
 pub const MEM_RELEASE: u32 = 0x8000;
 
-/// NtAllocateVirtualMemory core: returns the final (base, size).
+/// NtAllocateVirtualMemory core: returns the final (base, size). A commit
+/// that would pass the commit limit grows the page file first (with no
+/// lock held), as Windows grows a system-managed one, and is tried again.
 pub fn allocate(
     process: &Process,
     base: u64,
     size: u64,
     kind: u32,
     protect: u32,
+) -> Result<(u64, u64), NtStatus> {
+    let mut need = 0;
+    match allocate_once(process, base, size, kind, protect, &mut need) {
+        Err(NtStatus::COMMITMENT_LIMIT) if need > 0 => {
+            let (committed, _) = charge::committed();
+            let short = (committed + need).saturating_sub(charge::limit());
+            if short > 0 && super::pagefile::grow(short) {
+                allocate_once(process, base, size, kind, protect, &mut need)
+            } else {
+                Err(NtStatus::COMMITMENT_LIMIT)
+            }
+        }
+        other => other,
+    }
+}
+
+fn allocate_once(
+    process: &Process,
+    base: u64,
+    size: u64,
+    kind: u32,
+    protect: u32,
+    need: &mut u64,
 ) -> Result<(u64, u64), NtStatus> {
     let known = vad::MEM_COMMIT | vad::MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN;
     // MEM_RESET_UNDO goes alone.
@@ -404,7 +450,8 @@ pub fn allocate(
     };
     if kind & vad::MEM_COMMIT != 0 {
         // Charged before the VAD takes it; a failed commit is given back.
-        let charged = charge::try_charge(process, vad.commit_cost(base, size));
+        *need = vad.commit_cost(base, size);
+        let charged = charge::try_charge(process, *need);
         let result = charged.and_then(|()| vad.commit(base, size, protect));
         charge::sync(process, vad.private_commit());
         match result {

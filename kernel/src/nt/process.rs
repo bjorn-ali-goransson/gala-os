@@ -1401,7 +1401,7 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
                 }
                 return;
             }
-            vm::Fault::Denied | vm::Fault::OutOfMemory => {}
+            vm::Fault::Denied | vm::Fault::OutOfMemory | vm::Fault::PagedOut => {}
         }
     }
     let status = match frame.kind() {
