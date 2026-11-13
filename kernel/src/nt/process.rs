@@ -342,32 +342,100 @@ pub fn prune() {
     }
 }
 
-/// For a leaked address space: whether its process is still known and
-/// what refers to it (its references besides PROCESSES' own: thread
-/// objects, handles in other processes; its live threads).
+/// For a leaked address space: whether its process is still known, what
+/// refers to it (its references besides PROCESSES' own: thread objects,
+/// handles in other processes; its live threads), and the handles that
+/// name it or one of its threads in any listed process's handle table
+/// (an exited process's table is closed at its exit, so one there was
+/// put in after it).
 pub fn describe_holders(space: &SharedUserSpace) -> impl core::fmt::Display {
-    // One lock at a time (the list's, then the process's own).
+    // One lock at a time (the list's, then each process's own).
     let found = PROCESSES.lock().iter().find(|p| KArc::ptr_eq(&p.space, space)).cloned();
-    DescribeHolders(found.map(|p| {
-        // Besides the list's and `found`'s own.
-        let refs = KArc::strong_count(&p) - 2;
-        let exited = *p.exit_time.lock() != 0;
-        (p.id, refs, p.thread_count(), exited)
-    }))
+    let Some(p) = found else { return DescribeHolders(None, Vec::new()) };
+    // Besides the list's and `found`'s own.
+    let refs = KArc::strong_count(&p) - 2;
+    let exited = *p.exit_time.lock() != 0;
+    let mut handles = Vec::new();
+    for holder in listed().unwrap_or_default().iter() {
+        let holder_exited = *holder.exit_time.lock() != 0;
+        for (h, entry) in holder.handles.lock().iter() {
+            let tid = match &entry.object.body {
+                ObjectBody::Process(q) if KArc::ptr_eq(q, &p) => None,
+                ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, &p) => Some(t.id),
+                _ => continue,
+            };
+            let held = Holder {
+                pid: holder.id,
+                name: holder.name,
+                exited: holder_exited,
+                handle: h.0,
+                access: entry.access,
+                tid,
+            };
+            if handles.len() >= MAX_HOLDERS || handles.try_push(held).is_err() {
+                break;
+            }
+        }
+    }
+    DescribeHolders(Some((p.id, refs, p.thread_count(), exited)), handles)
 }
 
-struct DescribeHolders(Option<(u64, usize, usize, bool)>);
+/// The most holding handles `describe_holders` names.
+const MAX_HOLDERS: usize = 8;
+
+/// Every listed process (exited ones too).
+fn listed() -> Result<Vec<KArc<Process>>, AllocError> {
+    let list = PROCESSES.lock();
+    let mut out = Vec::new();
+    out.try_reserve(list.len()).map_err(|_| AllocError)?;
+    for p in list.iter() {
+        out.try_push(p.clone())?;
+    }
+    Ok(out)
+}
+
+/// A handle that names the leaked process (`tid` None) or a thread of it.
+struct Holder {
+    pid: u64,
+    name: &'static str,
+    exited: bool,
+    handle: u64,
+    access: u32,
+    tid: Option<u64>,
+}
+
+struct DescribeHolders(Option<(u64, usize, usize, bool)>, Vec<Holder>);
 
 impl core::fmt::Display for DescribeHolders {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.0 {
-            None => write!(f, "forgotten (not in the process list)"),
-            Some((id, refs, threads, exited)) => write!(
-                f,
-                "pid {id} still listed: {refs} other references, {threads} live threads, \
-                 exited {exited}"
-            ),
+        let Some((id, refs, threads, exited)) = self.0 else {
+            return write!(f, "forgotten (not in the process list)");
+        };
+        write!(
+            f,
+            "pid {id} still listed: {refs} other references, {threads} live threads, \
+             exited {exited}; "
+        )?;
+        if self.1.is_empty() {
+            return write!(f, "no handle in a listed process names it or its threads");
         }
+        write!(f, "handles naming it:")?;
+        for h in &self.1 {
+            write!(
+                f,
+                " pid {} ({}{}) handle {:#x} access {:#x} ",
+                h.pid,
+                h.name,
+                if h.exited { ", exited" } else { "" },
+                h.handle,
+                h.access
+            )?;
+            match h.tid {
+                None => write!(f, "Process;")?,
+                Some(tid) => write!(f, "Thread tid {tid};")?,
+            }
+        }
+        Ok(())
     }
 }
 

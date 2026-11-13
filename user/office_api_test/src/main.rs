@@ -138,6 +138,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ntrt as _;
 
+mod appv;
 mod offreg;
 mod service;
 
@@ -1350,6 +1351,7 @@ fn run() -> Result<(), u32> {
     c2r_oleaut(&mut c)?;
     offreg::offreg_imports(&mut c)?;
     service::c2r_service(&mut c)?;
+    appv::appv(&mut c)?;
     #[cfg(target_arch = "x86_64")]
     c2r_d3dcompiler(&mut c)?;
     Ok(())

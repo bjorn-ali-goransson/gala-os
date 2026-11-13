@@ -835,7 +835,10 @@ current process, -2 = current thread.
   goes restarts the second); the message is preceded by who holds the
   space (`sched::dump_space_holders`: unreaped threads with state and
   CPU; `sched::held_by_reaps`: references a reap in progress holds;
-  `process::describe_holders`: the process's own references).
+  `process::describe_holders`: the process's own references, and each
+  handle in any listed process's table that names the process or one
+  of its threads: pid, name, whether that process exited, handle value,
+  access, Process or Thread tid; up to 8).
 - **Process list**: a process stays in `process::PROCESSES` after it
   exits for as long as anything else refers to it (a handle from
   CreateProcess, a thread object), so `NtOpenProcess` (0x26) finds it by
@@ -1603,7 +1606,7 @@ address-space teardown never free.
   held). A view costs its committed ranges, not its pages; unmapping and
   `vm::sync_range` visit only the mapped pages (`next_mapped` skips absent
   page tables), so a 32 MiB view no page of which was touched costs what
-  an 87 KiB one does (bench `image_load_32m_untouched`).
+  a small one does (bench `image_load_32m_untouched`).
   Only when that range is taken in a process is the view placed
   anywhere, with private pages relocated a page at a time (never a
   whole-image copy). A view not at the preferred base returns
@@ -3354,9 +3357,9 @@ ntdll imports.
   sleeper, and a waiter not yet asleep sees the counter moved and
   returns, a spurious wake the API allows). A wake with nobody waiting
   costs no system call (the waiter list is in the process). Invariant:
-  a blocked thread sleeps (see the critical sections in ntdll); the
-  thread pool's WaitFor*Callbacks still polls (Sleep(1)) until the
-  callbacks finish.
+  a blocked thread sleeps (see the critical sections in ntdll; the
+  thread pool's WaitFor*Callbacks sleeps on its object's condition
+  variable).
 - **Global and local memory** (`global.rs`; `kernel32_misc_test`):
   GMEM_FIXED/LMEM_FIXED memory is a process-heap block (at least one
   byte) and its pointer is the handle. Moveable memory is a handle to a
@@ -3385,19 +3388,103 @@ ntdll imports.
   resource notifications that never report low memory, WER registration
   as a no-op, GetSystemTimes (every processor idle), the process
   settings Go sets at startup.
-- **Thread pool** (`pool.rs`): worker threads (up to 8, started as
-  needed) take callbacks from one completion port; each timer and wait
-  object has a helper thread that sleeps until its due time or handle.
-  Objects count queued and running callbacks; WaitFor*Callbacks can
-  cancel the queued ones. Callback environments are ignored and closed
-  objects are not freed (TODO). Timer queues on the pool's timers:
-  CreateTimerQueue(Timer), ChangeTimerQueueTimer, DeleteTimerQueueTimer,
-  DeleteTimerQueue(Ex) (the WAITORTIMERCALLBACK gets its parameter and
-  TRUE; WT_EXECUTEONLYONCE makes it one-shot, other WT_ flags only choose
-  threads on Windows and are ignored; NULL is the default queue).
-  Deleting with INVALID_HANDLE_VALUE waits for a running callback;
-  otherwise a running callback makes it fail with ERROR_IO_PENDING and
-  the completion event is set by a helper thread when it returns.
+- **Thread pool** (`threadpool.rs`; `threadpool_test`,
+  `wow64_threadpool_test`, `kernel32_pool_test`): Windows' whole
+  family as kernel32 exports it (Windows has it in ntdll's Tp*, with
+  kernel32/kernelbase over them; gala's ntdll has no Tp* exports and
+  kernelbase forwards to kernel32). Expected results from Wine's
+  ntdll threadpool and kernel32 thread tests.
+  - Pools (TP_POOL, CreateThreadpool; the default pool is made at first
+    use and never goes): a completion port, worker threads (named
+    `threadpool worker (pool N)`, the default pool 0: the `thread name`
+    event and the state dump show them), a maximum (500 by default, as
+    Windows'; at least 1) and a minimum (started at once:
+    SetThreadpoolThreadMinimum is FALSE if a worker cannot start), the
+    stack (Query/SetThreadpoolStackInformation; the image's sizes, not
+    validated: 32-bit Windows refuses sizes of 1, its rule not measured
+    yet). A queued callback goes on one of three priority lists
+    (TP_CALLBACK_PRIORITY) and posts a token packet; a worker taking a
+    token runs the first queued callback, round robin among objects. A
+    worker starts when work is queued and no worker is idle (or
+    starting), and again whenever a worker takes a token with more
+    waiting and none idle, up to the maximum (`thread pool(callbacks
+    wait at the maximum)` in the ledger the first time it is reached);
+    a worker idle 20 s leaves while more than the minimum remain (one
+    stays while an I/O is started). CallbackMayRunLong is TRUE if a
+    worker is idle or one can start, else FALSE with
+    ERROR_TOO_MANY_THREADS.
+  - Callback environments (TP_CALLBACK_ENVIRON versions 1 and 3; another
+    version is read as version 1, as Windows accepts version 9999; a
+    version 3 priority above 2 is ERROR_INVALID_PARAMETER): pool,
+    cleanup group and its cancel callback, the RaceDll kept loaded while
+    the object lives, the activation context (active around the
+    callback), the finalization callback (after the callback, before
+    the instance's actions), LongFunction. Persistent is recorded
+    (`thread pool(persistent callback)`) and runs on ordinary workers.
+  - Objects (work, timer, wait, I/O, simple callbacks) count queued,
+    running and associated callbacks (and started and dropped I/O)
+    under their pool's lock and are freed with their last reference:
+    the creator's until Close*, one per queued callback and per started
+    I/O, a cleanup group's while it closes them. Queued callbacks still
+    run after Close*. WaitFor*Callbacks (TRUE: queued ones dropped
+    first) sleeps on the object's condition variable until no callback
+    is queued or associated; DisassociateCurrentThreadFromCallback
+    takes a running one out of that count.
+  - Timers: one thread (`threadpool timers`) for all pools, a list
+    sorted by due time (the interrupt time; absolute FILETIMEs converted
+    against the system time when set). A due time 0 fires at once; a
+    period re-arms it; IsThreadpoolTimerSet is TRUE from a non-NULL due
+    time until a NULL one (also after a one-shot fired, as Windows);
+    SetThreadpoolTimerEx returns whether it was set. The window is not
+    used (firing at the due time is within it).
+  - Waits: threads (`threadpool waits`) of up to 63 wait objects each
+    (WaitForMultipleObjects with the thread's event), a wait object
+    joining one at creation. SetThreadpoolWait waits on a duplicate of
+    the handle (the caller may close its own, as Windows allows), once:
+    WAIT_OBJECT_0 (the wait took the object's count) or WAIT_TIMEOUT
+    (a 0 timeout at once); a setting count tells a stale wake from the
+    current setting. SetThreadpoolWaitEx returns whether a wait was
+    pending. The duplicate is polled when set (signaled already: the
+    wait is over at once); one that cannot be waited on (or that cannot
+    be duplicated) is not waited on (`SetThreadpoolWait(handle not
+    waitable)` in the ledger), so it never fails the others' wait. A
+    wait that is over closes its duplicate (Windows keeps no reference
+    to the object then: a process's handle held on would keep that
+    process from being freed).
+    **Invariant: a handle the wait thread waits on stays open until that
+    wait returns**: a setting changed or a wait closed meanwhile marks
+    the old duplicate retired, and the wait thread closes it after its
+    wait (closed at once, the wait failed with ERROR_INVALID_HANDLE and
+    stopped all the thread's waits, among them Crashpad's on the
+    browser, which then kept the browser's process: `threadpool_test`
+    changes one wait 2000 times while another must still fire).
+  - I/O: CreateThreadpoolIo binds the handle to the pool's port with the
+    object as key; a completion runs the callback with the OVERLAPPED,
+    the Win32 error of its status and the byte count, if a
+    StartThreadpoolIo announced it (CancelThreadpoolIo takes one back;
+    WaitForThreadpoolIoCallbacks(TRUE) makes the announced ones'
+    completions dropped). One that no StartThreadpoolIo announced runs
+    anyway and is recorded.
+  - Cleanup groups: CloseThreadpoolCleanupGroupMembers takes the
+    members, stops their timers and waits, drops their queued
+    callbacks if asked, waits for their running ones (disassociated
+    included), then calls each member's cancel callback (with
+    cancellation, on the calling thread, object context then cleanup
+    context; not for one already closed, nor a simple callback that ran)
+    and closes it.
+  - Instance actions after the callback: leave a critical section,
+    release a mutex, release a semaphore, set an event, free a library.
+  - Timer queues on the pool's timers: CreateTimerQueue(Timer),
+    ChangeTimerQueueTimer, DeleteTimerQueueTimer, DeleteTimerQueue(Ex)
+    (the WAITORTIMERCALLBACK gets its parameter and TRUE;
+    WT_EXECUTEONLYONCE makes it one-shot, other WT_ flags only choose
+    threads on Windows and are ignored; NULL is the default queue).
+    Deleting with INVALID_HANDLE_VALUE waits for a running callback;
+    otherwise a running callback makes it fail with ERROR_IO_PENDING and
+    the completion event is set by a helper thread when it returns.
+    RegisterWaitForSingleObject is a pool wait re-armed after each
+    callback (unless WT_EXECUTEONLYONCE); QueueUserWorkItem a simple
+    callback on the default pool.
 - **System** (`sysmem.rs`, `processor.rs`): memory status, VirtualAlloc/
   Free/Query, working set sizes (kept, not applied), system information,
   processor groups and topology (one group, one NUMA node, one package, a
@@ -3622,7 +3709,9 @@ ntdll imports.
   PathCchSkipRoot and PathCchCombineEx (the `api-ms-win-core-path` set:
   roots `X:\`, `\\server\share\`, `\\?\`; joined and canonicalized,
   an absolute second path replaces the first, a rooted one keeps its
-  drive), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
+  drive; PathCchCanonicalize(Ex), adapted from Wine's kernelbase, whose
+  path tests pin Windows' rules for `.`, `..`, trailing dots and the
+  `\\?\` prefixes), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
   flags, an HRESULT), SetWaitableTimerEx (no wake context or coalescing),
   GetNamedPipeHandleStateW (modes and instance count; no client user
   name), VerifyVersionInfoA (OSVERSIONINFOEXA translated to the W
@@ -3831,6 +3920,12 @@ redistributable (the owner's decision).
   double forms and the complex functions on `_Dcomplex`/`_Fcomplex`
   (textbook identities; Annex G's special cases for infinite and NaN parts
   not all followed), `fetestexcept`/`feclearexcept`; local time is UTC.
+  App-V's imports (`string.rs`): `_wcsupr_s`/`_wcslwr_s` (towupper's
+  mapping), `_wmakepath_s` and `_wsplitpath_s` (ERANGE as Windows: what
+  fit written and the buffer emptied; every output emptied),
+  `_resetstkoflw` (nonzero; a guard page used up by an overflow is not
+  put back, recorded) and `_get_heap_handle` (the process heap, which
+  gala's malloc does not allocate from: the handle serves heap queries).
 - **Aliases** (build.rs `UCRT_ALIASES`): api-ms-win-crt-private's `_o_`
   names are the same functions, and the `_l` forms (a locale as the last
   argument) are the plain ones: one locale, and an extra last argument is
@@ -4612,6 +4707,10 @@ x64 and x86.
   original's settings and properties (Wine's test: SelectionLanguage
   carries over) and, deep, a copy of its tree. A NULL output is
   E_INVALIDARG.
+- **Parse errors** go to the ledger too (`msxml6.dll!parse error:
+  <reason>`, "other", the line and column in its detail): a program's
+  load or loadXML that fails tells only S_FALSE (Click-to-Run's log:
+  `XmlDocument loadXML failed , Error:0x1`).
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
   tree (create*, appendChild, insertBefore, removeChild, replaceChild,
@@ -9957,7 +10056,9 @@ under their own names: `testdll32.dll`).
   same range, GetSystemDirectory System32 (redirected below it),
   GetSystemWow64Directory SysWOW64; Wow64DisableWow64FsRedirection,
   Wow64RevertWow64FsRedirection and Wow64EnableWow64FsRedirection call
-  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex).
+  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex). The 64-bit
+  kernel32's Disable and Revert (App-V's DLLs import them) fail with
+  ERROR_INVALID_FUNCTION: no redirector outside WOW64.
 - **Exceptions** (`dispatch.rs`, `seh_x86.rs`): an exception in 32-bit
   code (a CS 0x23 trap frame) goes to wow64.dll's dispatcher in 64-bit
   code: `deliver_to_user` pushes the x64 CONTEXT (marked CS 0x23, the

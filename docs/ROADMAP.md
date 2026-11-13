@@ -1462,7 +1462,8 @@ need gala's.
      `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
      `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
      `_Gettnames` (recorded, NULL); the `_s` path, date and case
-     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     functions (`_splitpath_s`, `_strdate_s`, ...; the wide `_wcsupr_s`,
+     `_wcslwr_s`, `_wsplitpath_s` and `_wmakepath_s` are done); the
      multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
      `tools/import_survey.py` on their directories lists them), then those
      scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
@@ -1972,9 +1973,51 @@ need gala's.
      CloseThreadpoolCleanupGroup(Members); the ledger's missing exports,
      9 hits each). APPLYCONFIGURATION then fails ("Encountered fatal
      exception", ErrorCodeOnly 127), the service ends with 17002 at
-     1872 s and setup.exe with 17002 at 1913 s. Next: those thread pool
-     functions (test first, Wine's kernel32 and ntdll threadpool tests),
-     then what AppVIsvApi.dll does at registration.
+     1872 s and setup.exe with 17002 at 1913 s. Done: the thread pool's
+     whole family Click-to-Run's DLLs import (`tools/import_survey.py`
+     over the ClickToRun files of `i640.cab`, x64 and x86: private pools
+     and their limits, cleanup groups, and callback environments for
+     the work, timer and wait objects that 18, 13 and 14 of the files
+     use), with
+     I/O objects, the instance functions and the stack information
+     (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
+     threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
+     Next: the values the tests print as `info` until Windows' answer is
+     read from the `windows` job's report: 32-bit
+     SetThreadpoolStackInformation's refusal of sizes of 1 (its error and
+     rule), whether a version 9999 environment's priority is read, a
+     wait's handles once it fired, and `_wmakepath_s`'s buffer after
+     ERANGE (gala writes "\0:d\\" and leaves the rest).
+     With it AppVIsvApi.dll loads and OISVAPI::Initialize fails
+     instead in the orchestration's component loader (`componentloader.h
+     : 216`, 0x7f; ErrorCode 30175, APPLYCONFIGURATION 127, the service
+     17002 at about 1845 s): the App-V DLLs it loads import, statically,
+     the 64-bit kernel32's Wow64Disable/RevertWow64FsRedirection (the
+     ledger's missing exports), DosDateTimeToFileTime,
+     PathCchCanonicalize and the UCRT's `_wcsupr_s`, `_wcslwr_s`,
+     `_wsplitpath_s`, `_wmakepath_s`, `_resetstkoflw` and
+     `_get_heap_handle` (`tools/import_survey.py` on them). Done, test
+     first (`office_api_test`'s `appv.rs`, `ucrt_test`, x64 and x86):
+     every static import of the App-V DLLs now resolves (NtOpenJobObject
+     only as a stub). With them the orchestration initializes and
+     `Orchestration::UpdateAppV` merges Office's AppX manifests
+     (`C:\Program Files\Microsoft Office\PackageManifests`): loading
+     `AppXManifest.common.16.xml` (2.1 MB, UTF-16 LE with a BOM) fails
+     (`TryRefreshMergedManifest`: `XmlDocument loadXML failed , Error:0x1`,
+     msxml's S_FALSE), and APPLYCONFIGURATION ends with 30088 (the
+     service 17002 at about 1816 s). gala_xml parses that file as read
+     from the disk (a host check), so the string the service hands
+     loadXML differs; msxml6 now records each parse error's reason and
+     place in the ledger (ARCHITECTURE "msxml6"): the string fails at
+     line 1, column 18 with `undeclared namespace prefix 'appv'` (the
+     service 17002 at about 1874 s). A one-line string using `appv:`
+     without declaring it is what reloading a node's `xml` gives: gala's
+     msxml6 serializes an element subtree with its own attributes only,
+     not the namespace declarations it inherits (`dom.rs` `Tree::xml`).
+     Next: what MSXML 6's `xml` property emits for a subtree whose
+     prefixes are declared on an ancestor (Wine's msxml3 domdoc tests,
+     or measured on Windows), test first in `msxml_test`, then the
+     merge again.
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
@@ -4584,8 +4627,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     the XSTATE area; SEH's nested exceptions and collided unwinds.
   - Waits: wait-all satisfied only when all objects are signaled at its
     re-check; an atomic SignalObjectAndWait; the thread pool's
-    WaitFor*Callbacks polls (Sleep(1)), its callback environments and
-    freeing of closed objects.
+    persistent callbacks (TP_CALLBACK_ENVIRON's Persistent, recorded)
+    and ntdll's Tp* exports (gala's pool is kernel32's).
   - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
     security, asynchronous writes that pend.
   - Access checks for processes, threads, pipes, devices and traversal;

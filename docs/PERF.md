@@ -35,7 +35,7 @@ machine. Each measurement below keeps its date and how it was taken.
   of one split into 4096 runs: the cost must not grow with the runs;
   about 23 and 76 us under TCG, the latter 2.6 ms when each change
   rebuilt the run list), `demand_zero_fault`, `section_map_unmap_64k`,
-  `image_load`, `image_load_32m_untouched` (both after one untimed load
+  `image_load` (a 580 KiB DLL bench makes itself), `image_load_32m_untouched` (both after one untimed load
   that lays the file out; the second must cost what the first does),
   `thread_create_exit`, `event_pingpong_same_cpu`,
   `event_pingpong_cross_cpu` (with two CPUs). `cargo xtask bench

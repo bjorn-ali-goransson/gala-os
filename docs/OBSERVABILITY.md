@@ -540,7 +540,9 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    routine (`start 0x...`, its Win32 start address: which thread it is,
    a pool worker or the program's own; also in triage's thread lines)
    and its name if the program gave it one (` name "CrBrowserMain"`,
-   SetThreadDescription; also in triage and, from the `thread name`
+   SetThreadDescription; kernel32's thread pool names its own:
+   `threadpool worker (pool N)`, `threadpool timers`, `threadpool
+   waits`; also in triage and, from the `thread name`
    event, in `cargo xtask profile`'s threads),
    system call and wait object (with `session N personality nt (name)`; for a WOW64
    thread also the 32-bit code that made the call, from its CPU area:

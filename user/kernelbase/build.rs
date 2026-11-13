@@ -12,6 +12,8 @@
 const OWN: &[&str] = &[
     "CompareObjectHandles",
     "PathCchAppend",
+    "PathCchCanonicalize",
+    "PathCchCanonicalizeEx",
     "PathCchCombine",
     "PathCchCombineEx",
     "PathCchRemoveBackslash",

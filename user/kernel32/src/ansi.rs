@@ -288,7 +288,7 @@ pub extern "system" fn CreateHardLinkA(
 ) -> Bool {
     let (mut a, mut b) = ([0u16; MAX], [0u16; MAX]);
     match (wide(link, &mut a), wide(existing, &mut b)) {
-        (Ok(l), Ok(e)) => crate::pool::CreateHardLinkW(l, e, security),
+        (Ok(l), Ok(e)) => crate::msvcp::CreateHardLinkW(l, e, security),
         (Err(e), _) | (_, Err(e)) => fail_with(e, FALSE),
     }
 }

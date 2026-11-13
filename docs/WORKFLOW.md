@@ -1245,6 +1245,12 @@ numbers, 0x7f.., fail there).
   32-bit kernel32 takes `memcpy`, MSVC's 64-bit division helpers,
   `__chkstk` and `strlen` from it; its no_mangle ones become extra
   exports).
+- wow64.dll's query conversions: a class whose result has a variable
+  size (a name, a list) takes any buffer that holds the converted
+  result (and STATUS_BUFFER_TOO_SMALL with the length otherwise), not
+  `reply`'s exact length, which fits only fixed-size structures
+  (ThreadNameInformation's exact-length check made every 32-bit
+  GetThreadDescription fail).
 - A cdecl (`extern "C"`) import on x86 with `import_name_type =
   "undecorated"` loses one leading underscore (rustc takes it for the C
   decoration: `__acrt_iob_func` is imported as `_acrt_iob_func`): give
@@ -1399,6 +1405,11 @@ hash. Inputs' file times count too: export-tests rewrites `user/bin`, so
 a packer that stores them (NSIS's `File` without `SetDateSave off`)
 gives a new binary on every run. Check a generated binary by building it
 twice with a `touch` of its inputs in between.
+A program must not embed another build output (`include_bytes!` of
+something under `target/`): its bytes then change with that output, on
+every branch that changes it, and with whatever an earlier build left
+there (bench.exe embedded kernel32.dll; it now makes its test DLL
+itself).
 
 ### The Office survey (ROADMAP OF)
 
@@ -3275,10 +3286,14 @@ before blaming CI:
   `target/x86_64-pc-windows-msvc/release/`).
 - **"run: address space still referenced N times after exit"** is
   preceded by the holders: the threads not reaped (state, CPU), the
-  references reaps in progress hold, and the process's own references
-  (thread objects, handles in other processes). Count them against N:
-  what is left over is held by something else (a clone of
-  `Process::space`).
+  references reaps in progress hold, the process's own references
+  (thread objects, handles in other processes), and the handles that
+  name it or its threads (`handles naming it: pid P (name) handle H
+  access A Process;`). A live process holding a handle to the exited
+  one is usually a wait it never saw end (Crashpad's handler holds the
+  browser's process handle until its pool wait on it fires). Count
+  them against N: what is left over is held by something else (a clone
+  of `Process::space`, a thread object kept by a kernel queue).
 
 ### Programs that spin or fail silently (probes)
 

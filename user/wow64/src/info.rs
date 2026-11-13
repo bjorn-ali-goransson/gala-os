@@ -373,7 +373,17 @@ fn query_thread(a: &Args) -> Res<NtStatus> {
             for (i, byte) in out[8..8 + bytes].iter_mut().enumerate() {
                 *byte = (b[2 + i / 8] >> (8 * (i % 8))) as u8;
             }
-            reply(buffer, length, ret, &out[..8 + bytes])
+            // A buffer of any size that holds it (the caller's is usually
+            // larger: GetThreadDescription's 528 bytes).
+            let data = &out[..8 + bytes];
+            if ret != 0 {
+                mem::put32(ret, data.len() as u32)?;
+            }
+            if (length as usize) < data.len() {
+                return Ok(STATUS_BUFFER_TOO_SMALL);
+            }
+            mem::write(buffer, data)?;
+            Ok(STATUS_SUCCESS)
         }
         // KERNEL_USER_TIMES, ULONGs (ThreadAmILastThread, ThreadIsIoPending,
         // ThreadIsTerminated), PROCESSOR_NUMBER (ThreadIdealProcessorEx).

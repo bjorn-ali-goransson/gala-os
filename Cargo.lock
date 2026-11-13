@@ -2624,6 +2624,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadpool_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "timer_test"
 version = "0.1.0"
 dependencies = [
@@ -3222,6 +3229,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_thread_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_threadpool_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
