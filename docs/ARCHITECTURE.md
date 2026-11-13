@@ -4652,8 +4652,9 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
 ### msxml6 (MSXML 6's DOM)
 
 What the Office Deployment Tool's setup.exe reads its configuration with
-(`msxml_test`, `wow64_msxml_test`; ROADMAP OF). `user/msxml6`, built for
-x64 and x86.
+and Click-to-Run's App-V orchestration merges Office's AppX manifests
+with (`msxml_test`, `wow64_msxml_test`; ROADMAP OF). `user/msxml6`,
+built for x64 and x86.
 
 - **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
   ProgID Msxml2.DOMDocument.6.0) under `HKLM\SOFTWARE\Classes\CLSID`
@@ -4737,14 +4738,54 @@ x64 and x86.
   column in the detail): a program's load or loadXML that fails tells
   only S_FALSE (Click-to-Run's log: `XmlDocument loadXML failed ,
   Error:0x1`), and the input it built is seen nowhere else.
+- **Changing the tree** (`com/mutate.rs`; `msxml_test`'s `mutation`,
+  from Wine's msxml3 tests run on Windows; Click-to-Run's App-V
+  orchestration changes the AppX manifests it merges): the create
+  methods and createNode (a type by number or name; the document,
+  document types, entities and notations E_INVALIDARG; a NULL name
+  E_INVALIDARG, an empty one E_FAIL), document fragments (node type 11),
+  insertBefore, appendChild, removeChild, replaceChild,
+  putref_documentElement, setAttribute, removeAttribute,
+  setAttributeNode, removeAttributeNode, the attribute map's
+  setNamedItem, removeNamedItem and removeQualifiedItem, put_text,
+  put_nodeValue and put_value, normalize, getElementsByTagName (a list
+  made when asked; MSXML's is live), importNode and save to a file
+  (UTF-8, or UTF-16 LE with a BOM when the declaration names UTF-16;
+  streams recorded, E_NOTIMPL). The rules: a NULL node is E_INVALIDARG
+  with the output left alone; a reference or old node that is not a
+  child E_INVALIDARG with the output NULL; the document, the parent or
+  its ancestor, a kind the parent cannot hold (a document takes one
+  element, comments and processing instructions; an attribute text
+  only; text, comments and processing instructions nothing) E_FAIL; an
+  attribute on an element already E_FAIL; a namespace declaration
+  cannot be changed in place (E_FAIL). The node returned is the object
+  passed (the same pointer). A fragment inserted gives its children and
+  is left empty. Text inserted into an attribute adds to its value (an
+  attribute has no child nodes in gala's tree: replaceChild and
+  removeChild on one find none). A node of another document that is
+  inserted moves: it is copied into this tree, taken from its old
+  parent, and the caller's object is pointed at the copy (it then holds
+  this document); other objects held for the node still show the old
+  copy. Detached and replaced nodes stay in the arena until the document
+  goes (or is loaded again). A new element's namespace is what
+  createNode gave (createElement: none, "p:name" stays undeclared); a
+  new attribute's prefix resolves through the declarations in scope.
+  `xml` declares a namespace only for a node that has one.
 - **Not implemented** (E_NOTIMPL, each recorded as
-  `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
-  tree (create*, appendChild, insertBefore, removeChild, replaceChild,
-  setAttribute, put_text, put_nodeValue, importNode, the
-  character data editors), save, getElementsByTagName, transforms, schemas
-  and validation, typed values, the event handlers, abort, nodeFromID,
-  the selection's own methods and the enumerators (`get__newEnum`).
-  Implement them when a program's run reaches one.
+  `msxml6.dll!<interface>::<method>`, "not implemented"): the character
+  data editors (put_data, substringData, appendData, insertData,
+  deleteData, replaceData, splitText, the processing instruction's
+  put_data), createEntityReference, save to a stream, transforms,
+  schemas and validation, typed values, the event handlers, abort,
+  nodeFromID, the selection's own methods and the enumerators
+  (`get__newEnum`). Implement them when a program's run reaches one.
+- **To measure on Windows** (`msxml_test`'s `info` lines): what
+  removeAttributeNode answers for an attribute the element lacks (gala
+  E_INVALIDARG) and removeAttribute for a name it lacks (gala S_FALSE),
+  whether normalize drops empty text nodes (gala does, as the W3C DOM),
+  importNode(NULL) (gala E_INVALIDARG), and the bytes save writes for a
+  document whose declaration names no encoding (gala: UTF-8, no BOM, the
+  declaration as it is).
 
 ### RPC: rpcrt4
 

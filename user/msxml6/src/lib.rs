@@ -77,6 +77,7 @@ pub const VT_NULL: u16 = 1;
 pub const VT_I2: u16 = 2;
 pub const VT_I4: u16 = 3;
 pub const VT_BSTR: u16 = 8;
+pub const VT_DISPATCH: u16 = 9;
 pub const VT_BOOL: u16 = 11;
 pub const VT_UNKNOWN: u16 = 13;
 pub const VT_UI4: u16 = 19;

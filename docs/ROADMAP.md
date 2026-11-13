@@ -2030,10 +2030,21 @@ need gala's.
      element that uses it (Wine's msxml3 tests; `msxml_test`'s
      `inherited_namespaces`, x64 and x86: each subtree's xml loads
      again with its names in their namespaces), and the ledger has the
-     text at a parse error (`parse error at: ...`). Next: the merge
-     again, with the install resumed from a machine snapshot (ROADMAP
-     SN) rather than a 30-minute run; if it still fails, the ledger's
-     `parse error at:` shows the service's input. To measure on Windows
+     text at a parse error (`parse error at: ...`). With it the
+     manifest loads, and the merge then ended the service at
+     `msxml6.dll!IXMLDOMNode::replaceChild` (not implemented, 17002 at
+     about 1650 s). Done: the DOM's mutation family as a whole (the
+     create methods and createNode, document fragments, insertBefore,
+     appendChild, removeChild, replaceChild, putref_documentElement,
+     setAttribute, removeAttribute, setAttributeNode,
+     removeAttributeNode, the attribute map's setNamedItem,
+     removeNamedItem and removeQualifiedItem, put_text, put_nodeValue,
+     normalize, getElementsByTagName, importNode, save to a file),
+     test first (`msxml_test`'s `mutation`, x64 and x86, from Wine's
+     msxml3 tests run on Windows; ARCHITECTURE "msxml6"). To measure on
+     Windows (its `info` lines): removeAttributeNode and removeAttribute
+     of what the element lacks, normalize's empty text, importNode(NULL),
+     the bytes save writes. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).

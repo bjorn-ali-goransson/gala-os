@@ -59,7 +59,14 @@
 //! - the xml of an element whose prefixes or default namespace are
 //!   declared on its ancestors loads again, its names in their
 //!   namespaces (`inherited_namespaces`: Wine's namespace tests; the
-//!   exact texts are `info` lines).
+//!   exact texts are `info` lines);
+//! - changing the tree (`mutation`: removeChild, replaceChild,
+//!   insertBefore, appendChild with fragments and nodes of another
+//!   document, the create methods, setAttribute, setAttributeNode,
+//!   removeAttribute(Node), the attribute map's changes, put_text,
+//!   put_nodeValue, normalize, getElementsByTagName, importNode, save;
+//!   Click-to-Run's App-V orchestration changes the AppX manifests it
+//!   merges).
 //!
 //! The same source builds `wow64_msxml_test`, the 32-bit (x86) program.
 //! Prints `msxml_test: ok` (`wow64_msxml_test: ok`), or `<name>: check N
@@ -104,6 +111,7 @@ unsafe extern "system" {
         template: usize,
     ) -> Handle;
     fn CloseHandle(h: Handle) -> i32;
+    fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, overlapped: usize) -> i32;
     fn DeleteFileW(path: *const u16) -> i32;
     fn CreateThread(
         attributes: *mut c_void,
@@ -284,6 +292,8 @@ macro_rules! call {
         }
     }};
 }
+
+mod mutation;
 
 fn release(obj: Obj) {
     if !obj.is_null() {
@@ -1266,6 +1276,7 @@ fn run() -> Result<(), u32> {
     file(&mut c, doc)?;
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
+    mutation::mutation(&mut c, doc)?;
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };

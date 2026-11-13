@@ -21,6 +21,7 @@ pub enum Kind {
     Pi = 7,
     Comment = 8,
     Document = 9,
+    Fragment = 11,
 }
 
 #[derive(Clone)]
@@ -108,6 +109,125 @@ impl Tree {
             self.copy(c, true, copy);
         }
         copy
+    }
+
+    /// A copy of node `i` of another tree (`src`), of no parent, made as
+    /// `copy` makes one (iteratively: a tree made by programs has no
+    /// depth bound). Returns the copy's index.
+    pub fn import(&mut self, src: &Tree, i: u32, deep: bool) -> u32 {
+        let n = src.node(i);
+        let top = self.add(Node::new(n.kind, &n.name, &n.ns, &n.value, NONE));
+        // (node of `src`, the parent of its copy)
+        let mut stack: Vec<(u32, u32)> = Vec::new();
+        let push = |stack: &mut Vec<(u32, u32)>, n: &Node, to: u32, children: bool| {
+            if children {
+                stack.extend(n.children.iter().rev().map(|&c| (c, to)));
+            }
+            stack.extend(n.attrs.iter().rev().map(|&a| (a, to)));
+        };
+        push(&mut stack, n, top, deep);
+        while let Some((s, to)) = stack.pop() {
+            let n = src.node(s);
+            let copy = self.add(Node::new(n.kind, &n.name, &n.ns, &n.value, to));
+            push(&mut stack, n, copy, true);
+        }
+        top
+    }
+
+    /// A new node of no parent (the create methods).
+    pub fn create(&mut self, kind: Kind, name: &str, ns: &str, value: &str) -> u32 {
+        self.add(Node::new(kind, name, ns, value, NONE))
+    }
+
+    /// Takes node `i` from its parent's children (or its element's
+    /// attributes): a node of no parent after.
+    pub fn detach(&mut self, i: u32) {
+        let (p, attr) = {
+            let n = self.node(i);
+            (n.parent, n.kind == Kind::Attribute)
+        };
+        if p == NONE {
+            return;
+        }
+        let pn = &mut self.nodes[p as usize];
+        let list = if attr { &mut pn.attrs } else { &mut pn.children };
+        list.retain(|&c| c != i);
+        self.nodes[i as usize].parent = NONE;
+    }
+
+    /// Puts node `i` (of no parent) under `parent`: an attribute among its
+    /// attributes, at the end; another node among its children, before
+    /// `before` (one of them) or at the end.
+    pub fn insert(&mut self, parent: u32, i: u32, before: Option<u32>) {
+        let attr = self.node(i).kind == Kind::Attribute;
+        let pn = &mut self.nodes[parent as usize];
+        let list = if attr { &mut pn.attrs } else { &mut pn.children };
+        let at = before.and_then(|b| list.iter().position(|&c| c == b)).unwrap_or(list.len());
+        list.insert(at, i);
+        self.nodes[i as usize].parent = parent;
+    }
+
+    /// Whether `a` is `b` or one of its ancestors.
+    pub fn contains(&self, a: u32, b: u32) -> bool {
+        let mut x = b;
+        while x != NONE {
+            if x == a {
+                return true;
+            }
+            x = self.node(x).parent;
+        }
+        false
+    }
+
+    /// The URI `prefix` is bound to at element `el` (its declarations and
+    /// its ancestors'); "" for none.
+    pub fn lookup(&self, el: u32, prefix: &str) -> &str {
+        let mut x = el;
+        while x != NONE {
+            let n = self.node(x);
+            for &a in &n.attrs {
+                let an = self.node(a);
+                let declares = if an.name == "xmlns" { "" } else { an.local() };
+                if an.is_xmlns() && declares == prefix {
+                    return &an.value;
+                }
+            }
+            if n.kind == Kind::Element && n.prefix() == prefix && !n.ns.is_empty() {
+                return &n.ns;
+            }
+            x = n.parent;
+        }
+        ""
+    }
+
+    /// Joins adjacent text nodes in the subtree of `i` and drops empty
+    /// ones (IXMLDOMElement::normalize).
+    pub fn normalize(&mut self, i: u32) {
+        let mut stack: Vec<u32> = alloc::vec![i];
+        while let Some(e) = stack.pop() {
+            let kids = self.node(e).children.clone();
+            let mut last_text: Option<u32> = None;
+            for k in kids {
+                match self.node(k).kind {
+                    Kind::Text => {
+                        if self.node(k).value.is_empty() {
+                            self.detach(k);
+                        } else if let Some(t) = last_text {
+                            let v = core::mem::take(&mut self.nodes[k as usize].value);
+                            self.nodes[t as usize].value.push_str(&v);
+                            self.detach(k);
+                        } else {
+                            last_text = Some(k);
+                        }
+                    }
+                    Kind::Element => {
+                        stack.push(k);
+                        last_text = None;
+                    }
+                    _ => last_text = None,
+                }
+            }
+        }
     }
 
     fn add(&mut self, node: Node) -> u32 {
@@ -221,7 +341,7 @@ impl Tree {
     pub fn text(&self, i: u32, out: &mut String) {
         let n = self.node(i);
         match n.kind {
-            Kind::Element | Kind::Document => {
+            Kind::Element | Kind::Document | Kind::Fragment => {
                 let mut stack: Vec<u32> = n.children.iter().rev().copied().collect();
                 while let Some(c) = stack.pop() {
                     let cn = self.node(c);
@@ -250,6 +370,11 @@ impl Tree {
                 for &c in &n.children {
                     self.xml(c, out);
                     out.push_str("\r\n");
+                }
+            }
+            Kind::Fragment => {
+                for &c in &n.children {
+                    self.xml(c, out);
                 }
             }
             Kind::Element => {
@@ -295,7 +420,9 @@ impl Tree {
                             // Unprefixed attributes are in no namespace.
                             k == 0 && bound(&scope, "").unwrap_or("") != xn.ns
                         } else {
-                            bound(&scope, prefix).is_none()
+                            // A prefix in no namespace (createElement's
+                            // "p:name") is written undeclared.
+                            !xn.ns.is_empty() && bound(&scope, prefix) != Some(xn.ns.as_str())
                         };
                         if missing {
                             out.push_str(if prefix.is_empty() { " xmlns" } else { " xmlns:" });
