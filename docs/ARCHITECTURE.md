@@ -4470,7 +4470,14 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   registers it from; registered in both registry views by the seed),
   answering as a machine with no MSIX packages: IPackageManager and
   IPackageManager2 (method order from Wine's
-  windows.management.deployment.idl); every Find query an empty
+  windows.management.deployment.idl) and IPackageManager9 (IID
+  {1AA79035-CC71-4B2E-80A6-C7041D8579A7} and method order measured on
+  Windows, probe issue #108; the methods from Microsoft Learn's
+  PackageManager pages): FindProvisionedPackages an empty
+  IVector<Package> (its QueryInterface hands out the empty
+  IIterable<Package>; GetView and the changes E_NOTIMPL, recorded), the
+  by-URI deployments E_NOTIMPL, SetPackageStubPreference S_OK and
+  GetPackageStubPreference Full (0), each recorded; every Find query an empty
   IIterable<Package> (IIterable<PackageUserInformation> for FindUsers)
   whose iterator has no current item (HasCurrent false, Current
   E_BOUNDS), FindPackage NULL; the all-users queries answer so for any
