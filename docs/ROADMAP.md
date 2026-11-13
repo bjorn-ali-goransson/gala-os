@@ -4937,7 +4937,14 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   building itself, make, Lua and SQLite built on gala); what is left is
   a Windows-hosted toolchain (llvm-mingw, or the MSVC Rust target)
   running on gala, cargo spawning compilers, and a larger writable file
-  system on the disk.
+  system on the disk. Then Rust and its build tools (rustup's
+  toolchain: cargo, rustc, lld, clippy, rustfmt; llvm-objcopy; git)
+  on gala, by the Windows route or the Linux one (LX runs glibc's
+  dynamic programs; rustc needs many threads, gigabytes mapped and a
+  jobserver over pipes), so gala builds its own kernel and DLLs; the
+  new kernel is then taken over by R9's handover (signed with a key the
+  running kernel trusts, R8), or a small change patched in place as SN
+  step 1e's hot swap does. Tests that boot QEMU stay on a host.
 - **DR, Windows drivers, staged and isolated**: Windows keeps a stable
   binary driver ABI, so vendor drivers are a realistic catalogue (Linux
   drivers are not: no stable in-kernel API, GPL-2.0; LX is a user-space
