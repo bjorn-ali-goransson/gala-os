@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -4095,7 +4095,9 @@ pointer, old processes restarted one at a time), then the kernel
 handover: the running kernel stops every thread at a quiescent point,
 writes its state as versioned data, and a new kernel rebuilds it and
 reissues blocked calls, so programs carry on. Live patching of single
-functions only if a need appears.
+functions is not part of live update; its one form is SN step 1d's hot
+swap of gala's DLLs into a resumed test snapshot, a development tool
+whose runs are never real.
 
 **Done so far** (milestones, each with its scenarios): (a) handover to
 the same build with no programs (`handover_same`, `handover_uefi`,
@@ -4185,9 +4187,10 @@ manifest merge) in 5.2 s, 117 MiB of state and the 7.6 GB disk (in
 service's IXMLDOMNode::replaceChild, ROADMAP OF) in 21 s of run time,
 where the run from boot took 1706 s. The service had loaded
 `System32\msxml6.dll` at about 42 s (`events=image`), so no snapshot
-past the first minute can take a changed msxml6.dll, even once DLLs
-are files on the disk: a resumed run can only take a module no process
-has mapped yet.
+past the first minute can take a changed msxml6.dll as a module, even
+once DLLs are files on the disk: a resumed run can only take a module no
+process has mapped yet, or patch one into the running programs (step
+1d, at the user's risk).
 Next (step 1c): resuming with other DLLs. Since they are boot
 modules, a snapshot cannot take a fixed DLL today; for fixes in DLLs
 the Office install has not loaded yet at the save, the boot modules
@@ -4215,6 +4218,49 @@ guest holds test data only, and must stay so: artifacts are as visible
 as the repository. From step 2 on, a faulting program is snapshotted at
 the fault, before it ends (a minidump that can be resumed), which is
 much smaller than the machine.
+
+**Step 1d: hot swapping gala's DLLs into a resumed snapshot (at your
+own risk).** Done (`xtask/src/hotswap.rs`, `kernel/src/hotswap.rs`,
+`kernel/src/arch/x86_64/fwcfg.rs`; WORKFLOW "Hot swapping DLLs into a
+snapshot (at your own risk)", ARCHITECTURE "Hot swapping DLLs into a
+resumed machine"; scenarios `hotswap_machine`, `hotswap_stack` and
+`hotswap_wow64` on `hotswap_test` (and its 32-bit build) and
+`hotswap_dll`; host tests `hotswap::tests` in xtask and the kernel). A fix to a DLL is tried in seconds from a snapshot
+taken just before the failure: `boot-test --from-snapshot <name>
+--hot-swap-unsafe <dll>[,<dll>...]`. xtask compares the snapshot's build
+of each DLL (the snapshot keeps its DLLs and lld's maps) with the new
+one function by function, references normalized (decoded code,
+relocations, jump tables), and makes a plan; the resumed machine gets it
+through fw_cfg with an NMI before its first instruction, stops every
+program thread, checks that no changed function is on any thread's
+stack, maps the new code beside the image in every process that has
+it, bound to the old image's statics, functions and import table, and
+makes each changed function's old entry jump to its new version (old
+vtables and stored pointers land in new code), then replaces the file
+for later loads. Refused with the reason: a changed function on a
+stack, a static that changed size, anonymous writable data, a new
+import, changed thread-local data, code that does not decode or
+relocate, a function too short for the jump, changed identical-code
+folding, any other change to the build. Never a real run: a banner,
+`hotswap:` lines, a ledger entry and an event, marked crash reports,
+state dumps and triage, the verdict `hot-swapped (not a real run)` with
+exit status 3, refused in CI; every fix still gets a full run from boot
+before its pull request. Not checked (the user's risk): state the old
+code built that the new code reads differently, invariants of data
+whose layout did not change. Limits: no unwind data for the new code,
+new exports invisible to GetProcAddress, `run=` scenarios only.
+Shown on the Office install (`office_install_local`, TCG): saved at
+`process integrator.exe (pid` (1827 s in; 118 MiB of state, the 7.6 GB
+disk), resumed with msxml6.dll's `replaceChild` changed (a new ledger
+name): xtask patched that one function in the 64- and the 32-bit build;
+the guest stopped 29 threads, patched both OfficeClickToRun.exe
+processes (64-bit) and setup.exe (WOW64, the blob below 2 GiB), and the
+service reached the new code (`msxml6.dll!IXMLDOMNode::replaceChild
+(hot-swapped build)` in the ledger) in a resumed run of 22 s, where the
+run from boot needs 30 minutes to get there. A first try found two
+faults, fixed with `hotswap_wow64` and the all-or-nothing rule: the
+32-bit blob's reservation was not at a 64 KiB boundary, and a later
+DLL's refusal left an earlier one swapped.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private

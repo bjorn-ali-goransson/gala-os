@@ -1,0 +1,19 @@
+[package]
+name = "hotswap_dll32"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# hotswap_dll's source under its own name, for the 32-bit build
+# (wow64_hotswap_test imports hotswap_dll32.dll: in user/bin beside the
+# 64-bit hotswap_dll.dll, as testdll32 is beside testdll).
+[lib]
+crate-type = ["cdylib"]
+path = "../hotswap_dll/src/lib.rs"
+test = false
+bench = false
+
+[features]
+v2 = []
+layout = ["v2"]

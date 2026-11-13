@@ -1068,8 +1068,32 @@ name = "hostnet_test"
 version = "0.1.0"
 
 [[package]]
+name = "hotswap_dll"
+version = "0.1.0"
+
+[[package]]
+name = "hotswap_dll32"
+version = "0.1.0"
+
+[[package]]
+name = "hotswap_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "http_client"
 version = "0.1.0"
+
+[[package]]
+name = "iced-x86"
+version = "1.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
+dependencies = [
+ "lazy_static",
+]
 
 [[package]]
 name = "image_test"
@@ -3130,6 +3154,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_hotswap_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_import_test"
 version = "0.1.0"
 dependencies = [
@@ -3367,6 +3398,7 @@ dependencies = [
  "ed25519-compact",
  "flate2",
  "fontdue",
+ "iced-x86",
  "libc",
  "proc-macro2",
  "resvg",

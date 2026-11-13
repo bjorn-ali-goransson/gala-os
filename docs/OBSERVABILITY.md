@@ -39,6 +39,7 @@ rather than free text.
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
+| Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines, `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
 | Early boot (QEMU side, phases) | `xtask/src/telemetry.rs`, `arch::bootphase` | `.qemu.log`, `.bios.log`, `.phases.log`, `xtask:` lines |
 | Screen | kernel screen console; Test presenter frames (`presenter=test`, GalaSession) | `cargo xtask screenshot`; `test-<scenario>.screen<n>.png`; ARCHITECTURE "Presenters (B3a)" |
@@ -709,6 +710,37 @@ xtask's whole-machine snapshots (`xtask/src/snapshot.rs`; WORKFLOW
   resume that fails says why with QEMU's standard error, a refused one
   names every difference from the build it needs;
 - a failed resumed run keeps its disk layer and says where.
+
+### Hot swaps (not a real run)
+
+A run resumed with `--hot-swap-unsafe` (WORKFLOW "Hot swapping DLLs into
+a snapshot (at your own risk)") says so everywhere a result is read:
+
+- xtask: a banner on standard error before and after the run; per DLL
+  `xtask: hot swap <dll>: N patched function(s), ...` with a line per
+  patched function (sizes, and why when it changed only through data it
+  reads), new function and copied data, and notes (a static's initial
+  value that differs, new exports); a refusal before the boot names the
+  symbol; the resume's line names the plan; the verdict is `hot-swapped
+  (not a real run): ...` and the exit status 3, never a pass.
+- the guest's log: `hotswap: NOT A REAL RUN: ...`, how many threads were
+  stopped, per DLL the processes, blob and fixups, the file replaced,
+  per process where the image and the blob are, per function its RVA,
+  size and blob offset, then `hotswap: applied: <dll> ...`; or
+  `hotswap: refused: <why>` (a changed function on a stack names the
+  thread, the process, the stack slot and the value; a mapping that is
+  not the snapshot's build names its headers; a failed step names the
+  process and what failed, then everything done is undone) and `the
+  programs go on unpatched`.
+- the event `{"ev":"hotswap","result":"applied","dll":..,"processes":..,
+  "patched":..,"blob":..}` or `"result":"refused"`, whatever the mask;
+- the ledger entry `hotswap` ("DLL hot-swapped into running programs
+  (not a real run)", detail: functions patched), so `target/report/`
+  shows it;
+- `this run was hot-swapped (<dlls>): not a real run` in every crash
+  report and state dump after the swap;
+- triage's second line: `HOT-SWAPPED, NOT A REAL RUN ...` (or `hot swap
+  asked for and refused`).
 
 ### Crash record across reboots
 

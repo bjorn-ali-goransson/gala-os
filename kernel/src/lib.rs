@@ -36,6 +36,8 @@ pub mod handover;
 #[cfg(feature = "hosted")]
 #[allow(unsafe_code)]
 pub mod hosted;
+#[cfg(not(feature = "hosted"))]
+pub mod hotswap;
 #[cfg(all(feature = "hosted", not(target_arch = "x86_64")))]
 compile_error!("gala-um (the `hosted` feature) runs on Linux x86_64 hosts only");
 #[cfg(not(feature = "hosted"))]
@@ -652,6 +654,12 @@ fn wait_real_secs_any(objects: &[nt::object::ObjectRef], secs: u64) -> Option<us
         let status = nt::wait::wait_for(objects, false, timeout);
         if status != nt::status::NtStatus::TIMEOUT {
             return (status.0 < objects.len() as u32).then_some(status.0 as usize).or(Some(0));
+        }
+        // A hot swap the NMI found (ROADMAP SN step 1d), from a thread
+        // that may wait and take locks.
+        #[cfg(not(feature = "hosted"))]
+        if hotswap::requested() {
+            hotswap::run();
         }
         if statedump::take_request() {
             statedump::full_dump();

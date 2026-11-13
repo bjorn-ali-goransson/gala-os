@@ -548,6 +548,10 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             process.name, process.id, status.0, note.tid
         );
     }
+    #[cfg(not(feature = "hosted"))]
+    if crate::hotswap::swapped() {
+        info!("crash report:   {}", crate::hotswap::Mark);
+    }
     let machine = if note.wow64 { ", 32-bit x86 (WOW64)" } else { "" };
     info!(
         "crash report:   personality {}{machine}, session {}",
