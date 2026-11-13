@@ -4755,7 +4755,8 @@ built for x64 and x86.
   from Wine's msxml3 tests run on Windows; Click-to-Run's App-V
   orchestration changes the AppX manifests it merges): the create
   methods and createNode (a type by number or name; the document,
-  document types, entities and notations E_INVALIDARG; a NULL name
+  document types, entities and notations E_INVALIDARG with the output
+  NULL; a NULL name
   E_INVALIDARG, an empty one E_FAIL), document fragments (node type 11),
   insertBefore, appendChild, removeChild, replaceChild,
   putref_documentElement, setAttribute, removeAttribute,
@@ -4766,12 +4767,14 @@ built for x64 and x86.
   (UTF-8, or UTF-16 LE with a BOM when the declaration names UTF-16;
   streams recorded, E_NOTIMPL). The rules: a NULL node is E_INVALIDARG
   with the output left alone; a reference or old node that is not a
-  child E_INVALIDARG with the output NULL; a document node
-  E_INVALIDARG (measured on Windows Server 2025; Wine's tests expect
-  E_FAIL); the parent or its ancestor, a kind the parent cannot hold (a document takes one
-  element, comments and processing instructions; an attribute text
-  only; text, comments and processing instructions nothing) E_FAIL; an
-  attribute on an element already E_FAIL; a namespace declaration
+  child E_INVALIDARG with the output NULL; the parent or its ancestor
+  E_FAIL (checked first: a document under itself too); a document
+  node anywhere else and a kind the parent cannot hold (a document
+  takes elements, comments and processing instructions; an attribute
+  text only; text, comments and processing instructions nothing)
+  E_INVALIDARG, the output NULL (MSXML 6 measured on Windows Server
+  2025; Wine's msxml3 tests expect E_FAIL); a document's second element
+  E_FAIL; an attribute on an element already E_FAIL; a namespace declaration
   cannot be changed in place (E_FAIL). The node returned is the object
   passed (the same pointer). A fragment inserted gives its children and
   is left empty. Text inserted into an attribute adds to its value (an

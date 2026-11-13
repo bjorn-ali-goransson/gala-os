@@ -97,21 +97,23 @@ fn adopt(d: *mut Doc, p: Obj) -> u32 {
 }
 
 /// Puts `new` under `this` before child `before` (None: at the end),
-/// in place of child `old` when one is given. The checks are MSXML's:
-/// a document is E_INVALIDARG (measured on Windows); a node that is
-/// `this` or its ancestor, or a kind `this` cannot hold is E_FAIL, and
-/// so is a document's second element.
+/// in place of child `old` when one is given. The checks and their
+/// order are MSXML 6's, measured on Windows (Wine's msxml3 tests expect
+/// E_FAIL for each kind refusal): a node that is `this` or its ancestor
+/// is E_FAIL (a document under itself too), then a document anywhere
+/// and a kind `this` cannot hold are E_INVALIDARG; a document's second
+/// element is E_FAIL.
 fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult {
     let Some(nn) = ours(new) else { return E_INVALIDARG };
     let d_ptr = node(this).doc;
     let p = idx(this);
     let pk = doc(this).tree.node(p).kind;
     let nk = kind_of(nn);
-    if nk == Kind::Document {
-        return E_INVALIDARG;
-    }
     if nn.doc == d_ptr && doc(this).tree.contains(nn.idx, p) {
         return E_FAIL;
+    }
+    if nk == Kind::Document {
+        return E_INVALIDARG;
     }
     // The kinds that arrive: a fragment's children, or the node.
     let src = tree_of(nn);
@@ -122,7 +124,7 @@ fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult 
         kinds.push(nk);
     }
     if !kinds.iter().all(|&k| may_contain(pk, k)) {
-        return E_FAIL;
+        return E_INVALIDARG;
     }
     if pk == Kind::Document {
         let t = &doc(this).tree;
@@ -456,9 +458,9 @@ fn type_by_name(name: &str) -> Option<i64> {
 
 /// IXMLDOMDocument::createNode(type, name, namespaceURI, out): the type
 /// a number (any integer variant) or its name; the document, document
-/// types, entities and notations are E_INVALIDARG, the output left
-/// alone (Wine's test_create on Windows); entity references are not
-/// supported (recorded, E_NOTIMPL).
+/// types, entities and notations are E_INVALIDARG with the output NULL
+/// (MSXML 6 on Windows; Wine's msxml3 tests expect it left alone);
+/// entity references are not supported (recorded, E_NOTIMPL).
 pub(super) extern "system" fn create_node(
     this: Obj,
     ty: Variant,
@@ -500,7 +502,11 @@ pub(super) extern "system" fn create_node(
             record(b"IXMLDOMDocument::createNode(entity reference)", LEDGER_UNSUPPORTED, 5);
             crate::E_NOTIMPL
         }
-        _ => E_INVALIDARG,
+        _ => {
+            // SAFETY: checked non-NULL above; the caller's out pointer.
+            unsafe { *out = core::ptr::null_mut() };
+            E_INVALIDARG
+        }
     }
 }
 

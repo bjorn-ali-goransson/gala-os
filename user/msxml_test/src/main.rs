@@ -405,17 +405,29 @@ impl Checks {
     /// with the first such check's number.
     #[track_caller]
     fn code(&mut self, got: HResult, want: HResult) -> Result<(), u32> {
+        self.later(got == want, got as u32 as u64, Some(want as u32 as u64))
+    }
+
+    /// A condition whose failure does not stop the test, as `code`.
+    #[track_caller]
+    fn note(&mut self, cond: bool, got: u64) -> Result<(), u32> {
+        self.later(cond, got, None)
+    }
+
+    #[track_caller]
+    fn later(&mut self, cond: bool, got: u64, want: Option<u64>) -> Result<(), u32> {
         self.0 += 1;
-        if got != want {
-            Line::new()
+        if !cond {
+            let mut line = Line::new()
                 .s(NAME.as_bytes())
                 .s(b": check ")
                 .dec(u64::from(self.0))
                 .s(b" got ")
-                .hex(got as u32 as u64)
-                .s(b" want ")
-                .hex(want as u32 as u64)
-                .s(b" (line ")
+                .hex(got);
+            if let Some(w) = want {
+                line = line.s(b" want ").hex(w);
+            }
+            line.s(b" (line ")
                 .dec(u64::from(core::panic::Location::caller().line()))
                 .s(b", continuing)\r\n")
                 .print();

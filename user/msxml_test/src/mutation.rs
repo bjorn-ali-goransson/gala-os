@@ -305,10 +305,12 @@ fn replace_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     Ok(())
 }
 
-/// insertBefore (Wine's test_insertBefore, Windows' answers where they
-/// differ): a document is E_INVALIDARG; what each parent takes
-/// (E_FAIL otherwise, the output NULL), a reference node that is not a
-/// child (E_INVALIDARG), a node moved from another parent, a node
+/// insertBefore (Wine's test_insertBefore, MSXML 6's answers measured
+/// on Windows where they differ): a document under itself is E_FAIL,
+/// under anything else E_INVALIDARG; what each parent takes
+/// (E_INVALIDARG otherwise, where Wine's msxml3 tests expect E_FAIL;
+/// the output NULL), a reference node that is not a child
+/// (E_INVALIDARG), a node moved from another parent, a node
 /// from another document, and the namespaces the moved nodes' xml
 /// declares.
 fn insert(c: &mut Checks) -> Result<(), u32> {
@@ -317,36 +319,29 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, out) = insert_before(doc, null_mut(), null_variant());
     c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
-    // A document under a document: E_INVALIDARG on Windows (Server
-    // 2025's msxml6, issue-free CI run); the output and a document under
-    // itself are not measured yet.
     let (hr, out) = insert_before(doc, doc3, null_variant());
     c.code(hr, E_INVALIDARG)?;
-    info_hr("insertBefore(document) output is NULL", u32::from(out.is_null()) as HResult);
-    release(out);
+    c.ok(out.is_null(), out as u64)?;
     let (hr, out) = insert_before(doc, doc, null_variant());
-    info_hr("insertBefore(the document itself)", hr);
-    release(out);
+    c.code(hr, E_FAIL)?;
+    c.ok(out.is_null(), out as u64)?;
 
     let (hr, attr) = create_node(doc, NODE_ATTRIBUTE, Some("attr"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(doc3, attr, null_variant());
-    c.code(hr, E_FAIL)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, cdata) = create_node(doc3, NODE_CDATA_SECTION, Some("cdata"), None);
     c.hr(hr, S_OK)?;
     c.hr(has_children(cdata), S_FALSE)?;
     for (parent, new) in [(cdata, attr), (doc3, cdata)] {
         let (hr, out) = insert_before(parent, new, null_variant());
-        c.code(hr, E_FAIL)?;
+        c.code(hr, E_INVALIDARG)?;
         c.ok(out.is_null(), out as u64)?;
     }
-    // A document under a CDATA section: which check Windows makes first
-    // (the document's E_INVALIDARG or the parent's E_FAIL) is not
-    // measured yet.
     let (hr, out) = insert_before(cdata, doc, null_variant());
-    info_hr("insertBefore(document under a CDATA section)", hr);
-    release(out);
+    c.code(hr, E_INVALIDARG)?;
+    c.ok(out.is_null(), out as u64)?;
     release(cdata);
     release(doc3);
 
@@ -354,7 +349,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, attr2) = create_node(doc, NODE_ATTRIBUTE, Some("attr2"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(attr, attr2, null_variant());
-    c.code(hr, E_FAIL)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = insert_before(attr, attr2, Variant { vt: VT_UNKNOWN, ..dispatch(attr) });
     c.code(hr, E_INVALIDARG)?;
@@ -378,7 +373,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         let (hr, node) = create_node(doc, kind, Some("cdata"), None);
         c.hr(hr, S_OK)?;
         let (hr, out) = insert_before(attr, node, null_variant());
-        c.code(hr, E_FAIL)?;
+        c.code(hr, E_INVALIDARG)?;
         c.ok(out.is_null(), out as u64)?;
         release(node);
     }
@@ -401,9 +396,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         dispatch(null_mut()),
         null_mut()
     );
-    // A document under an element: gala answers E_INVALIDARG, as Windows
-    // does under a document; under an element not measured yet.
-    info_hr("insertBefore(document under an element)", hr);
+    c.code(hr, E_INVALIDARG)?;
     let (hr, out) = insert_before(elem1, elem4, dispatch(null_mut()));
     c.hr(hr, S_OK)?;
     c.ok(out == elem4, out as u64)?;
@@ -626,7 +619,8 @@ fn append_child(c: &mut Checks) -> Result<(), u32> {
 /// createElement, createNode and the other create methods (Wine's
 /// test_createElement, test_createNode, test_create, test_doc_fragment):
 /// a NULL name is E_INVALIDARG and an empty one E_FAIL, the output left
-/// alone; createNode refuses the document, entities (E_INVALIDARG); a
+/// alone; createNode refuses the document, entities (E_INVALIDARG, the
+/// output NULL); a
 /// prefix without a namespace stays undeclared; a namespace given to
 /// createNode is declared by the node's xml and is not an attribute.
 fn creation(c: &mut Checks) -> Result<(), u32> {
@@ -644,10 +638,12 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
         c.hr(hr, want)?;
         c.ok(out == UNTOUCHED, out as u64)?;
     }
+    // The output is NULL (MSXML 6 on Windows; Wine's msxml3 tests
+    // expect it left alone).
     for kind in [NODE_DOCUMENT, NODE_ENTITY] {
         let (hr, out) = create_node(doc, kind, Some("name"), None);
         c.code(hr, E_INVALIDARG)?;
-        c.ok(out == UNTOUCHED, out as u64)?;
+        c.note(out.is_null(), out as u64)?;
     }
     let el = create(c, doc, CREATE_ELEMENT, "prefix:name")?;
     xml_is(c, el, "<prefix:name/>")?;
