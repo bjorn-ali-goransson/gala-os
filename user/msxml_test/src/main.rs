@@ -123,6 +123,20 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn GetProcessHeaps(count: u32, heaps: *mut Handle) -> u32;
+    fn HeapValidate(heap: Handle, flags: u32, block: *const c_void) -> i32;
+}
+
+/// Whether every heap of the process is valid (HeapValidate on each), so
+/// a corruption is placed by the first section that ends with one.
+fn heaps_valid() -> bool {
+    let mut heaps = [0 as Handle; 64];
+    // SAFETY: a buffer of 64 handles.
+    let n = unsafe { GetProcessHeaps(heaps.len() as u32, heaps.as_mut_ptr()) } as usize;
+    heaps[..n.min(heaps.len())]
+        .iter()
+        // SAFETY: a heap handle GetProcessHeaps returned; NULL block checks it all.
+        .all(|&h| unsafe { HeapValidate(h, 0, core::ptr::null()) } != 0)
 }
 
 #[cfg_attr(
@@ -1321,7 +1335,7 @@ fn run() -> Result<(), u32> {
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
     mutation::mutation(&mut c, doc)?;
-    Line::new().s(NAME.as_bytes()).s(b": section free-threaded\r\n").print();
+    mutation::section("free-threaded");
     free_threaded(&mut c)?;
     release(doc);
     // SAFETY: plain call.

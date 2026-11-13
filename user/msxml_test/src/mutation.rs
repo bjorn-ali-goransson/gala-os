@@ -645,6 +645,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
         c.code(hr, E_INVALIDARG)?;
         c.note(out.is_null(), out as u64)?;
     }
+    section("creation: a prefixed element");
     let el = create(c, doc, CREATE_ELEMENT, "prefix:name")?;
     xml_is(c, el, "<prefix:name/>")?;
     let mut s: Bstr = null_mut();
@@ -653,6 +654,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     xml_is(c, doc, "<prefix:name/>\r\n")?;
     release(el);
 
+    section("creation: createNode with a namespace");
     let (hr, node) = create_node(doc, NODE_ELEMENT, Some("ns1:test"), Some("http://winehq.org"));
     c.hr(hr, S_OK)?;
     get_bstr(c, node, GET_PREFIX, "ns1")?;
@@ -675,6 +677,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     get_bstr(c, el, GET_NAMESPACE_URI, "http://winehq.org/default")?;
     release(el);
 
+    section("creation: comment and fragment");
     let (hr, comment) = create_node(doc, NODE_COMMENT, None, None);
     c.hr(hr, S_OK)?;
     c.eq(u64::from(node_type(comment)), NODE_COMMENT as u64)?;
@@ -688,6 +691,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
         c.ok(s.is_null(), s as u64)?;
     }
     release(fragment);
+    section("creation: text");
     let text = create(c, doc, CREATE_TEXT_NODE, "a < b")?;
     get_bstr(c, text, GET_NODE_NAME, "#text")?;
     xml_is(c, text, "a &lt; b")?;
@@ -1258,8 +1262,10 @@ pub fn mutation(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     save(c)
 }
 
-/// Names the part of the test that starts, so a crash in it (a heap
-/// corruption reported by Windows' heap, say) is placed by the last line.
-fn section(name: &str) {
-    Line::new().s(NAME.as_bytes()).s(b": section ").s(name.as_bytes()).s(b"\r\n").print();
+/// Names the part of the test that starts and whether the process's
+/// heaps are still valid, so a heap corruption (Windows' heap reports it
+/// later, at some free) is placed by the first part that ends with one.
+pub fn section(name: &str) {
+    let state: &[u8] = if heaps_valid() { b" (heaps valid)" } else { b" (heaps CORRUPT)" };
+    Line::new().s(NAME.as_bytes()).s(b": section ").s(name.as_bytes()).s(state).s(b"\r\n").print();
 }
