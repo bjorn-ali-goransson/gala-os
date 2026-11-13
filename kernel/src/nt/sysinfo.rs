@@ -9,6 +9,7 @@ pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
 pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+pub const SYSTEM_PAGEFILE_INFORMATION: u32 = 18;
 pub const SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: u32 = 124;
 
 /// SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: Version 1; Flags and
@@ -184,6 +185,26 @@ pub fn unicode_string_in_place(name: &[u16], buffer: u64) -> Option<Vec<u8>> {
     for (i, c) in name.iter().enumerate() {
         out[16 + 2 * i..18 + 2 * i].copy_from_slice(&c.to_le_bytes());
     }
+    Some(out)
+}
+
+/// SYSTEM_PAGEFILE_INFORMATION for one page file at user address
+/// `buffer`: NextEntryOffset 0 (the last), TotalSize, TotalInUse and
+/// PeakUsage in pages, then PageFileName (a UNICODE_STRING whose
+/// characters follow the entry, NUL-terminated). None without memory.
+pub fn pagefile_information(
+    (total, in_use, peak): (u32, u32, u32),
+    name: &[u16],
+    buffer: u64,
+) -> Option<Vec<u8>> {
+    let string = unicode_string_in_place(name, buffer + 16)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(16 + string.len()).ok()?;
+    out.resize(16, 0u8);
+    out[4..8].copy_from_slice(&total.to_le_bytes());
+    out[8..12].copy_from_slice(&in_use.to_le_bytes());
+    out[12..16].copy_from_slice(&peak.to_le_bytes());
+    out.try_extend_from_slice(&string).ok()?;
     Some(out)
 }
 

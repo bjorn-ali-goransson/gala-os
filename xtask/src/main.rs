@@ -1882,6 +1882,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("pagefile_test", "ntdll.dll", "Windows/System32"),
+    ("pagefile_test", "kernel32.dll", "Windows/System32"),
+    ("pagefile_fail", "ntdll.dll", "Windows/System32"),
+    ("pagefile_fail", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ntdll.dll", "Windows/System32"),
     ("quota_test", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ws2_32.dll", "Windows/System32"),
@@ -4043,6 +4047,7 @@ const USER_PROGRAMS: &[&str] = &[
     "udp_test",
     "process_test",
     "commit_test",
+    "pagefile_test",
     "quota_test",
     "kernel32_file_test",
     "pipe_test",
@@ -4150,6 +4155,8 @@ const SLOW_SCENARIOS: &[&str] = &[
 /// Memory for memload_test's VM (its file cache holds less than the
 /// 192 MiB it downloads).
 const MEMLOAD_MEMORY_MIB: u64 = 256;
+/// Memory for the page file's scenarios (`pagefile_test`).
+const PAGEFILE_MEMORY_MIB: u64 = 256;
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
@@ -5990,6 +5997,11 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("memload")) {
         memory = MEMLOAD_MEMORY_MIB;
     }
+    // The page file's scenarios: more private memory than the machine
+    // has, written and read back, within the scenario's time.
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("pagefile")) {
+        memory = PAGEFILE_MEMORY_MIB;
+    }
     if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("linux_menu")) {
         memory = memory.max(LINUX_MENU_MEMORY_MIB);
     }
@@ -7234,6 +7246,40 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist run=volume_test.exe args=640",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["volume_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The page file (ROADMAP OF, the memory): a 256 MiB VM
+        // (`PAGEFILE_MEMORY_MIB`) with C: on a 1 GiB disk (`persist`,
+        // DISK_SCENARIOS) commits, writes and reads back 1.25 times its
+        // memory; the commit limit is memory plus \pagefile.sys, which
+        // grows past it.
+        name: "pagefile_test",
+        cmdline: "qemu_exit persist run=pagefile_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pagefile: created \\pagefile.sys of ",
+            "pagefile: grown to ",
+            "pagefile_test: ok",
+            "exited with status 0x00000000",
+            // Every slot back with its process's end.
+            "0 MiB in use (most ",
+            "; 0 stray tokens",
+        ],
+    },
+    Scenario {
+        // The page file when the disk fails a page out: the first batch's
+        // write fails (`failpoint=pageout:nth:1`); its pages stay in
+        // memory, their slots free again, and the program's memory is
+        // intact (the next batches go out).
+        name: "pagefile_fail",
+        cmdline: "qemu_exit persist run=pagefile_test.exe failpoint=pageout:nth:1",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pagefile: the disk failed a write of ",
+            "pagefile_test: ok",
+            "exited with status 0x00000000",
+            "pages failed to write",
+        ],
     },
     Scenario {
         // D2: files kept across a reboot (`persist`: C: is kept on the
@@ -15676,6 +15722,25 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         name: "volume_test",
         size: 1 << 30,
         host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // The page file's room: a quarter of the data area at most.
+        name: "pagefile_test",
+        size: 1 << 30,
+        host_mib: Some(768),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "pagefile_fail",
+        size: 1 << 30,
+        host_mib: Some(768),
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],

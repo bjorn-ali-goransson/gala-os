@@ -115,8 +115,8 @@ fn memory_pages() -> (u64, u64, u64, u64) {
 }
 
 /// GlobalMemoryStatusEx: physical memory from the kernel; the "page file"
-/// figures are the commit limit and what is left of it (there is no page
-/// file: the limit is physical memory); the user address space.
+/// figures are the commit limit (memory plus the page file, as on
+/// Windows) and what is left of it; the user address space.
 #[unsafe(no_mangle)]
 pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool {
     // SAFETY: the caller's MEMORYSTATUSEX.

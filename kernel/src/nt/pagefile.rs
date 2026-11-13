@@ -105,6 +105,18 @@ static GROWN: AtomicU64 = AtomicU64::new(0);
 /// The page file was full (logged once until slots come free).
 static FULL: AtomicBool = AtomicBool::new(false);
 
+/// Its NT name, as SystemPageFileInformation reports it.
+pub const NT_NAME: [u16; 19] = {
+    let s = b"\\??\\C:\\pagefile.sys";
+    let mut out = [0u16; 19];
+    let mut i = 0;
+    while i < 19 {
+        out[i] = s[i] as u16;
+        i += 1;
+    }
+    out
+};
+
 /// Its size in pages (0: none): what the commit limit adds to memory.
 pub fn pages() -> u64 {
     SIZE.load(Ordering::Relaxed)
@@ -125,29 +137,49 @@ pub fn sizes(memory_pages: u64, free_clusters: u32) -> (u32, u32) {
     (initial as u32, max as u32)
 }
 
+/// What `create` did (logged by `report`, outside the file system's lock:
+/// the console's lock is never taken inside it).
+pub enum Created {
+    /// Too little room: the free data area, in clusters.
+    None(u32),
+    /// Made: its size and maximum (pages), its runs of clusters.
+    Made(u32, u32, usize),
+    Failed(FsError),
+}
+
 /// Makes the page file at mount (`persist::mount`, with the data area
-/// attached and nothing recorded yet). Logged; none when the data area is
-/// too small.
-pub fn create(fs: &mut RamFs) {
-    let Some((_, free)) = fs.area_size() else { return };
+/// attached and nothing recorded yet); none when the data area is too
+/// small.
+pub fn create(fs: &mut RamFs) -> Option<Created> {
+    let (_, free) = fs.area_size()?;
     let (_, memory) = platform::frame_stats();
     let (initial, max) = sizes(memory, free);
     if initial < MIN_PAGES {
-        info!(
+        return Some(Created::None(free));
+    }
+    Some(match make(fs, initial, max) {
+        Ok(runs) => Created::Made(initial, max, runs),
+        Err(e) => Created::Failed(e),
+    })
+}
+
+/// Logs what `create` did.
+pub fn report(created: Created) {
+    match created {
+        Created::None(free) => crate::info!(
             "pagefile: none (the data area has {} MiB free; the commit limit is memory)",
             u64::from(free) * 4 / 1024
-        );
-        return;
-    }
-    match make(fs, initial, max) {
-        Ok(runs) => info!(
-            "pagefile: created \\pagefile.sys of {} MiB (up to {} MiB) in {runs} runs of clusters; \
-             commit limit {} MiB",
+        ),
+        Created::Made(initial, max, runs) => crate::info!(
+            "pagefile: created \\pagefile.sys of {} MiB (up to {} MiB) in {runs} runs of \
+             clusters; commit limit {} MiB",
             u64::from(initial) * 4 / 1024,
             u64::from(max) * 4 / 1024,
             super::charge::limit() * 4 / 1024
         ),
-        Err(e) => warn!("pagefile: cannot make \\pagefile.sys ({e:?}); the commit limit is memory"),
+        Created::Failed(e) => {
+            crate::warn!("pagefile: cannot make \\pagefile.sys ({e:?}); the commit limit is memory")
+        }
     }
 }
 

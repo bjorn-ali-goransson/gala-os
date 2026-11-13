@@ -337,15 +337,21 @@ pub fn mount() {
         }
     }
     *VOLUME.lock() = Some(volume);
-    file::with_fs(|fs| {
+    let pagefile = file::with_fs(|fs| {
         // The page file (`nt::pagefile`): on the data area, never recorded.
-        if DATA_START.load(Ordering::Relaxed) != 0 {
-            super::pagefile::create(fs);
-        }
+        let made = if DATA_START.load(Ordering::Relaxed) != 0 {
+            super::pagefile::create(fs)
+        } else {
+            None
+        };
         // What the boot did is not recorded; replay records nothing.
         let _ = fs.take_ops();
         fs.recording = true;
+        made
     });
+    if let Some(made) = pagefile {
+        super::pagefile::report(made);
+    }
     mount_registry();
     start_lazy_writer();
 }

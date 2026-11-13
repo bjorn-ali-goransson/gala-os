@@ -76,6 +76,20 @@ port. Lines that tools and agents rely on:
   `persist: image pages:`) and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
+- `pagefile:` lines (ARCHITECTURE "The page file"): `pagefile: created
+  \pagefile.sys of N MiB (up to M MiB) ...; commit limit L MiB` at
+  mount (or `pagefile: none ...` with too little room), `pagefile: grown
+  to N MiB` when a commit passed the limit, `pagefile: at its maximum
+  ...` and `pagefile: full ...` (once each until room comes back),
+  `pagefile: the disk failed a write of N pages at slot S (pid ...)`
+  (the pages stay in memory) and `... failed a read of slot S ...:
+  STATUS_IN_PAGE_ERROR`; at the end of a run `stats: pagefile: ...`
+  (size, most, in use and most used, pages out in writes and kept
+  because written meanwhile, pages in, failures, growths, stray tokens:
+  a nonzero count is a bug), also `statedump: pagefile:` and `persist:
+  pagefile:` in the low-memory warning; events `page out` (`pid`,
+  `pages`, `kept`, `slot`), `page in` (`pid`, `address`, `slot`), `page
+  out failed`, `page in failed` (`events=fault`).
 - `section: dropped N image frames (F of T frames free; image pages
   ...): <image> P pages, ...` when memory is short and image pages went
   (at most a line a second, N since the last line; ARCHITECTURE

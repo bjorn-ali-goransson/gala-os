@@ -518,6 +518,15 @@ image, what the image must hold afterwards).
   writes more than the VM's memory (`volume_test`, `memload_test`,
   `office_install`)
   needs it; without it a disk is left alone (the raw disk tests).
+- With `persist` on a disk whose data area has room (a quarter of its
+  free space at least 16 MiB) the kernel makes `C:\pagefile.sys`
+  (ARCHITECTURE "The page file"): free space drops by its size, and
+  directory listings of `C:\` show it. `pagefile_test` (a 256 MiB VM,
+  `PAGEFILE_MEMORY_MIB`, on a 1 GiB disk) commits 1.25 times memory;
+  `pagefile_fail` runs it with the first page-out write failing.
+  `events=fault` adds a `page out` event per batch and a `page in`
+  event per page read back (many: bound the run, or read the end-of-run
+  `stats: pagefile:` line instead).
 - The image is sparse (`set_len`): only what the guest writes takes room
   on the host. xtask refuses to start the scenario with less free than
   `host_mib` (the image's size when None) plus 300 MiB, naming the
@@ -3323,7 +3332,8 @@ each packet; a filter picks programs (`cargo xtask fault-test pipe_test
 --sweep`; a full heap sweep is about 14,800 runs in four minutes, a frame
 sweep about 3,500). A failed run's whole log is in
 `target/failed/fault-<program>-<rule>-<seed>.log`. In QEMU: the
-`failpoint_*` boot scenarios, or `failpoint=heap:every:97 failseed=7` on
+`failpoint_*` boot scenarios and `pagefile_fail` (`pageout:nth:1`: the
+page file's first write fails), or `failpoint=heap:every:97 failseed=7` on
 any command line (debug builds). Add a program to `FAULT_PROGRAMS` once
 its sweep passes.
 

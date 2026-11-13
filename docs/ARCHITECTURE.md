@@ -246,7 +246,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `framecheck` | user mappings of each frame are counted; freeing a frame a user space still maps panics |
 | `eagercommit` | committed private pages get their frames at once instead of at the first touch (no demand-zero faults in user code) |
 | `calwrong`, `calstall` | clock-calibration tests: the first TSC calibration 20x low (the RTC check must catch it), or the boot CPU stalled inside the calibration (scenarios `clockcal_*`; "Interrupts and time") |
-| `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection"). Points `heap`, `frame`, `disk_io`, `net_tx`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
+| `failpoint=<point>:<mode>:<n>[,...]` | fault injection while the `start=`/`run=` programs run (debug builds; "Fault injection"). Points `heap`, `frame`, `disk_io`, `net_tx`, `pageout`; modes `every:<n>` (the n-th, 2n-th, ... occurrence fails), `nth:<n>` (only the n-th), `random:<per-mille>` (from `failseed=`). Example: `failpoint=heap:every:97,net_tx:random:50` |
 | `failpoint=disk_io:delay:<ms>` | added latency: each disk request waits that long first, nothing fails (debug builds; R7) |
 | `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
 | `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
@@ -1113,6 +1113,8 @@ unless the runs grow, then only the shift of the runs after it (bench
   `vm::resolve_fault` (returns Resolved / Raise / Denied), which maps a
   zeroed frame if the VAD allows the access. `eagercommit` gives
   committed private pages their frames at once instead.
+- **A page in the page file** (a token leaf, "The page file") is read
+  back at its fault before anything else is done for it.
 - **No frame for a committed page**: the fault is retried
   (`OOM_RETRIES` = 100, 1 ms apart) before the program gets an access
   violation: on Windows a committed access does not fail for lack of
@@ -1201,9 +1203,11 @@ fails, not whichever one faults next on an empty frame pool.
   (stacks, TEBs, stack growth). `charge::ended` returns a finished
   process's charge; `charge::joined` adds a process's charge to the job
   it joins.
-- Limits: the system commit limit is physical memory (no page file:
-  `GlobalMemoryStatusEx`'s page-file figures are the limit and what is
-  left of it); a job's JOB_OBJECT_LIMIT_PROCESS_MEMORY and
+- Limits: the system commit limit is physical memory plus the page file
+  ("The page file"; without one, memory alone): `GlobalMemoryStatusEx`'s
+  page-file figures are the limit and what is left of it; a commit that
+  would pass it first grows the page file (`vm::allocate`, with no lock
+  held) and is tried again; a job's JOB_OBJECT_LIMIT_PROCESS_MEMORY and
   JOB_OBJECT_LIMIT_JOB_MEMORY (JobObjectExtendedLimitInformation, which
   reports PeakProcessMemoryUsed and PeakJobMemoryUsed).
 - `NtQuerySystemInformation(SystemPerformanceInformation)` (class 2,
@@ -1219,6 +1223,135 @@ fails, not whichever one faults next on an empty frame pool.
 - Not done: the job's completion-port message when a limit is hit,
   charging copy-on-write views of sections, and limits on what the
   kernel commits itself (a thread's stack is charged but never refused).
+
+### The page file
+
+`nt::pagefile` and `mm::swap` (ROADMAP OF, the memory; `pagefile_test`
+checks the Windows behaviour): with `persist` and a data area ("A
+disk-backed C:"), private memory of NT processes leaves memory for
+`\pagefile.sys` when memory is short and comes back at its next touch,
+so a machine commits more than its memory, as Windows does.
+
+- **The file**: made at mount, after the replay and before the file
+  system records (`pagefile::create`): memory's size, at most a quarter
+  of the free data area; growing up to three times memory or 4 GiB,
+  whichever is larger (Windows' system-managed bounds), at most half the
+  free data area; none under 16 MiB (a small disk: the commit limit is
+  memory, as before). Its clusters are taken from the data area outside
+  every file and never recorded (`RamFs::claim_clusters`): free space
+  drops by its size, and the next mount finds them free (a page file
+  holds nothing across a boot). Its node `C:\pagefile.sys` (hidden,
+  system, of its size; `RamFs::system_file`, not recorded) is held open
+  by the system for all access without sharing, so a program's open of
+  its data is a sharing violation and it cannot be deleted or renamed,
+  as on Windows; directory listings and attribute queries show it.
+- **Commit**: the limit is memory plus the page file (`charge::limit`).
+  A commit that would pass it grows the page file by what it needs, at
+  least 64 MiB, up to the maximum (`pagefile::grow`: clusters claimed,
+  the slots' bitmap grown, the node's size set; logged); past the
+  maximum it fails with STATUS_COMMITMENT_LIMIT as before.
+- **A page in the page file** is a not-present leaf of the process's
+  page table holding a *token*: its slot and the slot's generation
+  (`mm::paging`'s `SWAPPED` bit 10 with the present bit clear;
+  `Mapper::swap_out_4k`, `swapped_4k`, `clear_swapped_4k`). Paging out
+  needs no memory beyond the slot (`mm::swap::Slots`: a bit and a
+  generation byte per slot, on the heap). `next_mapped` visits token
+  leaves, so a decommit, release, view unmap or protect walks them: an
+  unmap gives the slot back (`UserSpace::unmap_page`), and so does an
+  address space's teardown (`Mapper::destroy`'s third callback);
+  `for_each_page` and `translate` see no frame there.
+- **What goes**: pages a process owns and no other shares: its private
+  memory, copy-on-write copies, relocated image pages; not borrowed
+  frames (sections' and images' pages, which go back to their files or
+  stay), not a fork's shared frames (Linux processes are never paged:
+  only NT processes are looked at), not the PEB's page and not TEBs
+  (the kernel reads a TEB under the VAD's lock, `thread::current_stack`,
+  where no fault can be resolved).
+- **When**: `persist::evict`, after the file cache's pages and image
+  pages (`section::relieve`) could not bring free memory back to the
+  mark (a quarter of memory, at least 64 MiB), pages out what is still
+  missing, at most 1024 pages (4 MiB) per call: so before each user
+  fault while memory is short, from the lazy writer each second, after
+  every sync, and from a fault that found no memory (`resolve_fault`'s
+  retries call `persist::relieve`).
+- **How a page goes** (`page_out`, one at a time, with no lock held at
+  entry): a clock over the NT processes (from the hand's process and
+  address, at most 16384 leaves looked at per call). Under the space's
+  lock a page accessed since the hand last passed loses its accessed bit
+  (a second chance); one that was not loses its dirty bit and joins a
+  batch of 16 (`UserSpace::age_page`). The lock's release flushes every
+  CPU's TLB, so a write from then on sets the dirty bit again. The batch
+  gets slots (consecutive: one disk request), is copied into a staging
+  buffer reserved with the page file (`copy_page`, again under the
+  space's lock), and written to the disk with no lock held. Then, under
+  the process's views, VAD and space locks (the fault path's), each page
+  that still maps the same frame and is still clean becomes its token
+  and its frame is freed after the flush (`UserSpace::page_out`, frees
+  reserved first: `reserve_frees`); a page written meanwhile stays and
+  its slot goes back. **Invariant**: a write the disk copy does not
+  hold leaves the dirty bit set: the processor's writes set it, and so
+  do the kernel's writes into user memory, which go through the HHDM
+  (`UserSpace::copy_in` sets it on every page it wrote), and
+  `update_flags_4k` keeps the accessed and dirty bits.
+- **How it comes back** (`page_in`, from `vm::resolve_fault`):
+  `resolve_once` finds the token under the locks before anything else
+  (nothing may map over it: a zero page there would lose the data) and
+  returns `PagedOut`; the slot is read into a reserved buffer with no
+  lock held, then under the views, VAD and space locks the page is
+  mapped in a new frame with the VAD's protection, accessed and dirty,
+  only if the VAD still has it committed and the leaf still holds the
+  same token (the generation tells a later use of the slot apart); the
+  slot goes back (no clean copy is kept: the page is written again when
+  it next goes). The fault is then resolved as for any mapped page (a
+  write to a copy-on-write page, a guard page). Kernel accesses to user
+  memory (`Process::read`/`write`) resolve their faults the same way.
+  A read the disk fails raises STATUS_IN_PAGE_ERROR in the program, the
+  token kept.
+- **Copy-on-write**: a page a fork shares is never paged out (it is not
+  the space's alone); a copy-on-write image page comes back with its
+  VAD protection (WRITECOPY: read-only) and a write copies it as before.
+- **The lazy writer**: page-out writes go to the data area directly, not
+  through the file cache, between syncs (one disk request at a time,
+  `disk`'s turn); the page file is never in the change log, so the
+  write-back and a crash never see it. A sync that ends short of memory
+  calls `evict`, which pages out.
+- **A kernel handover** carries pages in memory only: `carry::collect`
+  holds the page file (`pagefile::hold`: nothing pages out) and brings
+  every page of a carried process back first (`bring_back`; refused,
+  the programs run on, if one cannot come back); `release` lets it go.
+- **No disk, no data area, too little room** (gala-um, raw disk tests,
+  small disks): no page file; the commit limit is memory, `page_out`
+  returns at once, and nothing in the fault path changes.
+- **Failures**: a write the disk fails leaves the batch in memory, its
+  slots free again (`pagefile: the disk failed a write of N pages at
+  slot S ...`, a `page out failed` event, counted); the failure point
+  `pageout` fails a batch's write on purpose (`pagefile_fail`). A full
+  page file says so once (`pagefile: full ...`) and pages stay in memory.
+- **Exposed**: SystemPageFileInformation (NtQuerySystemInformation
+  class 18: one SYSTEM_PAGEFILE_INFORMATION, `\??\C:\pagefile.sys`,
+  TotalSize, TotalInUse and PeakUsage in pages; a short buffer
+  STATUS_INFO_LENGTH_MISMATCH with the length; none: nothing returned),
+  SystemPerformanceInformation's CommitLimit, GlobalMemoryStatusEx's
+  page-file figures.
+- **Observability** (OBSERVABILITY "Serial log"): `pagefile: created
+  ...`, `pagefile: grown to ...`, `pagefile: at its maximum ...`,
+  `pagefile: full ...`; the `stats: pagefile:` line at the end of a run
+  (size and maximum, in use and most, pages out in how many writes and
+  kept because written meanwhile, pages in, failures, growths, stray
+  tokens), also `statedump: pagefile:` and `persist: pagefile:` in the
+  low-memory warning (whose first line counts the private pages let go);
+  `page out` (pid, pages, kept, first slot), `page in` (pid, address,
+  slot), `page out failed` and `page in failed` events (`events=fault`).
+- Host tests: `mm::paging`'s
+  `a_page_in_the_page_file_is_a_token_not_a_frame`, `mm::swap`'s slots
+  and generations, `fs::ramfs`'s
+  `the_page_file_s_clusters_are_taken_outside_every_file_and_never_recorded`,
+  `nt::pagefile`'s sizes.
+- Limits: a page read back gives its slot up (a clean page goes out
+  with a write again); one page read per fault (no read-around); the
+  clock's only policy is one second chance; working sets are not kept
+  per process (no quota on what one process keeps in memory); a page
+  file never shrinks during a boot.
 
 ### Pool and handle quotas
 
@@ -14028,6 +14161,7 @@ the caller then fails as it would for real.
 | `frame` | `mm::allocate_frame`, `mm::allocate_frames` | no frame (user pages, page tables, heap pages, sections) |
 | `disk_io` | `disk::request` (each virtio-blk request) | `DiskError::Device` (or a delay: `delay` mode) |
 | `net_tx` | the transmit tokens of virtio-net and the loopback device | the packet is dropped (TCP retransmits) |
+| `pageout` | each write of a batch of pages to the page file (`nt::pagefile`) | the write fails as the disk's would: the batch stays in memory, its slots free again (`pagefile_fail`) |
 
 - **Syntax**: kernel command line `failpoint=<point>:<mode>:<n>[,...]`,
   `failseed=<n>`, `failtrace`; gala-um takes `um --failpoint=...

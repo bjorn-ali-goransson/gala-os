@@ -4319,6 +4319,31 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
                 sysinfo::performance_information(free, committed, super::charge::limit(), peak);
             call.return_info(&info, buffer, length, ret_ptr)
         }
+        sysinfo::SYSTEM_PAGEFILE_INFORMATION => {
+            // One entry per page file; none: nothing returned.
+            let (total, used, peak) = crate::mm::swap::stats();
+            if total == 0 {
+                if ret_ptr != 0 {
+                    tri!(call.write_u32(ret_ptr, 0));
+                }
+                return NtStatus::SUCCESS;
+            }
+            let name: [u16; 19] = super::pagefile::NT_NAME;
+            let Some(info) = sysinfo::pagefile_information((total, used, peak), &name, buffer)
+            else {
+                return NtStatus::NO_MEMORY;
+            };
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, info.len() as u32));
+            }
+            if (length as usize) < info.len() {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            match call.process.write(buffer, &info) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
+        }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
             let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
             call.return_info(&info, buffer, length, ret_ptr)
