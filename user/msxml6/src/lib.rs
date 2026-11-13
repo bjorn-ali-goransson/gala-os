@@ -31,6 +31,7 @@ use ntrt as _;
 mod com;
 mod dom;
 mod xpath;
+mod xsd;
 
 // The x64 build's memory routines come from gala's ntdll (as other
 // DLLs on `alloc` take them).
@@ -221,8 +222,43 @@ pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
 const MSXML6_D4: [u8; 8] = [0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5];
 const CLSID_DOMDOCUMENT60: Guid = guid(0x88d9_6a05, 0xf192, 0x11d4, MSXML6_D4);
 const CLSID_FREETHREADEDDOMDOCUMENT60: Guid = guid(0x88d9_6a06, 0xf192, 0x11d4, MSXML6_D4);
+pub const CLSID_XMLSCHEMACACHE60: Guid = guid(0x88d9_6a07, 0xf192, 0x11d4, MSXML6_D4);
 pub const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+
+/// Records an interface a QueryInterface did not answer:
+/// `QI? <object> {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}` (the whole IID:
+/// its first dword alone does not name it; short, as the ledger keeps 64
+/// characters of a name), the first dword as detail.
+pub fn record_iid(what: &str, g: &Guid) {
+    let mut s = String::from(what);
+    s.push_str(" {");
+    let hex = |s: &mut String, b: u8| {
+        for n in [b >> 4, b & 15] {
+            s.push(char::from(b"0123456789ABCDEF"[usize::from(n)]));
+        }
+    };
+    for i in [3, 2, 1, 0] {
+        hex(&mut s, g[i]);
+    }
+    s.push('-');
+    for i in [5, 4] {
+        hex(&mut s, g[i]);
+    }
+    s.push('-');
+    for i in [7, 6] {
+        hex(&mut s, g[i]);
+    }
+    s.push('-');
+    for (i, &b) in g[8..].iter().enumerate() {
+        if i == 2 {
+            s.push('-');
+        }
+        hex(&mut s, b);
+    }
+    s.push('}');
+    record(s.as_bytes(), LEDGER_OTHER, data1(g));
+}
 
 /// The first dword of a GUID (a ledger detail).
 pub fn data1(g: &Guid) -> u64 {
@@ -305,6 +341,31 @@ static FREE_THREADED_VTABLE: VTable<5> = VTable([
     factory_lock as *const (),
 ]);
 
+/// XMLSchemaCache60's CreateInstance (`com/schema.rs`).
+extern "system" fn cache_create(
+    _this: *mut c_void,
+    outer: *mut c_void,
+    riid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if !outer.is_null() {
+        return CLASS_E_NOAGGREGATION;
+    }
+    com::new_cache(riid, out)
+}
+
+static CACHE_FACTORY_VTABLE: VTable<5> = VTable([
+    factory_query as *const (),
+    factory_add_ref as *const (),
+    factory_release as *const (),
+    cache_create as *const (),
+    factory_lock as *const (),
+]);
+
 static FACTORY_VTABLE: VTable<5> = VTable([
     factory_query as *const (),
     factory_add_ref as *const (),
@@ -321,9 +382,11 @@ struct Factory {
 unsafe impl Sync for Factory {}
 static FACTORY: Factory = Factory { vtable: &FACTORY_VTABLE };
 static FREE_THREADED_FACTORY: Factory = Factory { vtable: &FREE_THREADED_VTABLE };
+static CACHE_FACTORY: Factory = Factory { vtable: &CACHE_FACTORY_VTABLE };
 
-/// DllGetClassObject: the class objects of DOMDocument60 and
-/// FreeThreadedDOMDocument60; another class is recorded,
+/// DllGetClassObject: the class objects of DOMDocument60,
+/// FreeThreadedDOMDocument60 and XMLSchemaCache60; another class is
+/// recorded,
 /// CLASS_E_CLASSNOTAVAILABLE.
 #[unsafe(no_mangle)]
 pub extern "system" fn DllGetClassObject(
@@ -341,6 +404,8 @@ pub extern "system" fn DllGetClassObject(
         &FACTORY
     } else if c == CLSID_FREETHREADEDDOMDOCUMENT60 {
         &FREE_THREADED_FACTORY
+    } else if c == CLSID_XMLSCHEMACACHE60 {
+        &CACHE_FACTORY
     } else {
         record(b"DllGetClassObject(class)", LEDGER_UNSUPPORTED, data1(&c));
         return CLASS_E_CLASSNOTAVAILABLE;

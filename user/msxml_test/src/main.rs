@@ -67,7 +67,11 @@
 //!   removeAttribute(Node), the attribute map's changes, put_text,
 //!   put_nodeValue, normalize, getElementsByTagName, importNode, save;
 //!   Click-to-Run's App-V orchestration changes the AppX manifests it
-//!   merges).
+//!   merges);
+//! - XSD schemas and validation (`schema`: XMLSchemaCache60, the
+//!   document's `schemas`, validate, validateNode, validateOnParse, a
+//!   schema from a `res:` URL; Click-to-Run's App-V pieces configure
+//!   Office's package with them).
 //!
 //! The same source builds `wow64_msxml_test`, the 32-bit (x86) program.
 //! Prints `msxml_test: ok` (`wow64_msxml_test: ok`), or `<name>: check N
@@ -312,6 +316,7 @@ macro_rules! call {
 }
 
 mod mutation;
+mod schema;
 
 fn release(obj: Obj) {
     if !obj.is_null() {
@@ -526,7 +531,7 @@ struct Wide(Bstr);
 
 impl Wide {
     fn new(text: &str) -> Self {
-        let mut buf = [0u16; 1024];
+        let mut buf = [0u16; 4096];
         for (slot, u) in buf.iter_mut().zip(text.encode_utf16()) {
             *slot = u;
         }
@@ -1336,6 +1341,8 @@ fn run() -> Result<(), u32> {
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
     mutation::mutation(&mut c, doc)?;
+    mutation::section("schema");
+    schema::schema(&mut c)?;
     mutation::section("free-threaded");
     free_threaded(&mut c)?;
     release(doc);
