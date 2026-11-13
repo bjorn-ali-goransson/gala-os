@@ -15,7 +15,7 @@
 //!   element or attribute no schema in the cache declares; a namespace
 //!   added again merges ("partial schemas"); an add is atomic;
 //! - get is E_NOTIMPL in MSXML 6 (getSchema replaces it); remove of a
-//!   namespace not there is S_OK; length and namespaceURI (an index
+//!   namespace not there is E_NOTIMPL (measured on Windows); length and namespaceURI (an index
 //!   past the end E_FAIL, the output untouched; NULL outputs E_POINTER);
 //!   addCollection merges another cache's schemas; validate checks that
 //!   every name resolves (what validateOnLoad false postponed).
@@ -312,10 +312,17 @@ extern "system" fn cache_get(_this: Obj, _uri: Bstr, out: *mut Obj) -> HResult {
     crate::E_NOTIMPL
 }
 
+/// remove: a namespace in the cache goes; one not there is E_NOTIMPL
+/// (MSXML 6 measured on Windows).
 extern "system" fn cache_remove(this: Obj, uri: Bstr) -> HResult {
     let ns = namespace(uri);
     record_ns("XMLSchemaCache60::remove", &ns, LEDGER_OTHER, 0);
-    cache(this).entries.retain(|e| e.ns != ns);
+    let entries = &mut cache(this).entries;
+    let before = entries.len();
+    entries.retain(|e| e.ns != ns);
+    if entries.len() == before {
+        return crate::E_NOTIMPL;
+    }
     S_OK
 }
 

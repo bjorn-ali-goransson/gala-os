@@ -4812,7 +4812,8 @@ built for x64 and x86.
   validateOnLoad is on (the default), a name no schema in the cache
   declares; imports have no location and resolve in the cache ("lax").
   An add is atomic (made on a copy). get is E_NOTIMPL (as in MSXML 6),
-  remove of an absent namespace S_OK, namespaceURI past the end E_FAIL
+  remove of an absent namespace E_NOTIMPL (MSXML 6
+  measured on Windows), namespaceURI past the end E_FAIL
   with the output untouched, addCollection merges another cache of
   ours, the collection's validate checks that every name resolves. The
   document's `schemas` holds a cache of ours (a reference; VT_NULL,

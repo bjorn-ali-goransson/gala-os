@@ -229,7 +229,7 @@ fn expect_len(c: &mut Checks, cache: Obj, want: u64) -> Result<(), u32> {
 
 fn expect_add(c: &mut Checks, cache: Obj, ns: &str, xsd: &str, want: HResult) -> Result<(), u32> {
     let hr = add_text(c, cache, ns, xsd)?;
-    c.hr(hr, want)
+    c.code(hr, want)
 }
 
 fn length(c: &mut Checks, cache: Obj) -> Result<u64, u32> {
@@ -296,10 +296,12 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     info_hr("QueryInterface(CLSID_XMLSchemaCache60)", hr);
     info_hr("its pointer is the collection's", i32::from(o == cache));
     release(o);
-    c.hr(call!(cache, SC_GET_LENGTH, fn(*mut i32) -> HResult, null_mut()), E_POINTER)?;
+    c.code(call!(cache, SC_GET_LENGTH, fn(*mut i32) -> HResult, null_mut()), E_POINTER)?;
     expect_len(c, cache, 0)?;
     let none = Wide::new("urn:none");
-    c.hr(call!(cache, SC_REMOVE, fn(Bstr) -> HResult, none.0), S_OK)?;
+    // remove of a namespace not in the cache: E_NOTIMPL (MSXML 6 on
+    // Windows).
+    c.code(call!(cache, SC_REMOVE, fn(Bstr) -> HResult, none.0), E_NOTIMPL)?;
     get_bool(c, cache, SC_GET_VALIDATE_ON_LOAD, VARIANT_TRUE)?;
     // XDR is gone from MSXML 6; a document that is no schema is refused.
     expect_add(c, cache, "", XDR, E_FAIL)?;
@@ -309,7 +311,8 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     let hr = add_text(c, cache, "urn:other", EXT_XSD)?;
     info_hr("add under another namespace", hr);
     let other = Wide::new("urn:other");
-    c.hr(call!(cache, SC_REMOVE, fn(Bstr) -> HResult, other.0), S_OK)?;
+    // Whether it is there to remove depends on the add (an info line).
+    info_hr("remove of that namespace", call!(cache, SC_REMOVE, fn(Bstr) -> HResult, other.0));
     // The other namespace first, then the schema that refers to it.
     expect_add(c, cache, EXT_NS, EXT_XSD, S_OK)?;
     expect_len(c, cache, 1)?;
@@ -331,7 +334,7 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     }
     c.ok(seen[0] && seen[1], 0)?;
     let mut s: Bstr = 0x1 as Bstr;
-    c.hr(call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 2, &mut s), E_FAIL)?;
+    c.code(call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 2, &mut s), E_FAIL)?;
     c.ok(s == 0x1 as Bstr, s as u64)?;
     c.hr(
         call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 0, null_mut()),
@@ -344,7 +347,7 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     // get is not implemented in MSXML 6.
     let ns = Wide::new(CFG_NS);
     let mut node: Obj = null_mut();
-    c.hr(call!(cache, SC_GET, fn(Bstr, *mut Obj) -> HResult, ns.0, &mut node), E_NOTIMPL)?;
+    c.code(call!(cache, SC_GET, fn(Bstr, *mut Obj) -> HResult, ns.0, &mut node), E_NOTIMPL)?;
     // A namespace added again merges: a second document declaring the
     // same element is a conflict.
     expect_add(c, cache, EXT_NS, EXT_XSD, E_FAIL)?;
@@ -367,7 +370,7 @@ fn documents(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     let mut v = Variant::i4(7);
     c.hr(call!(doc, GET_SCHEMAS, fn(*mut Variant) -> HResult, &mut v), S_FALSE)?;
     c.eq(v.vt.into(), VT_NULL.into())?;
-    c.hr(call!(doc, PUTREF_SCHEMAS, fn(Variant) -> HResult, Variant::i4(1)), E_FAIL)?;
+    c.code(call!(doc, PUTREF_SCHEMAS, fn(Variant) -> HResult, Variant::i4(1)), E_FAIL)?;
     c.hr(call!(doc, PUTREF_SCHEMAS, fn(Variant) -> HResult, dispatch(cache)), S_OK)?;
     let mut v = Variant::empty();
     c.hr(call!(doc, GET_SCHEMAS, fn(*mut Variant) -> HResult, &mut v), S_OK)?;
@@ -525,7 +528,7 @@ fn deferred(c: &mut Checks) -> Result<(), u32> {
 /// addCollection: NULL is E_POINTER; another cache's schemas join.
 fn other_collections(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     let other = new_cache(c)?;
-    c.hr(call!(other, SC_ADD_COLLECTION, fn(Obj) -> HResult, null_mut()), E_POINTER)?;
+    c.code(call!(other, SC_ADD_COLLECTION, fn(Obj) -> HResult, null_mut()), E_POINTER)?;
     c.hr(call!(other, SC_ADD_COLLECTION, fn(Obj) -> HResult, cache), S_OK)?;
     expect_len(c, other, 2)?;
     let doc = with_document(VALID[1], |x| loaded(c, x))?;
