@@ -25,8 +25,8 @@ mod mutate;
 use crate::{
     Bstr, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_IUNKNOWN, LEDGER_OTHER, LEDGER_UNSUPPORTED, S_FALSE, S_OK, VARIANT_FALSE, VARIANT_TRUE,
-    VT_BOOL, VT_BSTR, VT_BYREF, VT_I2, VT_I4, VT_INT, VT_NULL, VT_UI4, VT_UNKNOWN, Variant, bstr,
-    data1, free_box, guid, not_implemented, put, record, text, try_box, xpath,
+    VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_I2, VT_I4, VT_INT, VT_NULL, VT_UI4,
+    VT_UNKNOWN, Variant, bstr, free_box, guid, not_implemented, put, record, text, try_box, xpath,
 };
 use mutate::*;
 
@@ -109,6 +109,16 @@ struct Doc {
     /// The other properties set (name, value).
     props: Vec<(String, Prop)>,
     error: ParseError,
+    /// The schema cache set (`schemas`; a reference held), or NULL.
+    schemas: Obj,
+}
+
+impl Drop for Doc {
+    fn drop(&mut self) {
+        if !self.schemas.is_null() {
+            schema::cache_release(self.schemas);
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -159,6 +169,7 @@ pub fn new_document(riid: *const Guid, out: *mut *mut c_void) -> HResult {
         ns: Some(Vec::new()),
         props: Vec::new(),
         error: ParseError::default(),
+        schemas: core::ptr::null_mut(),
     };
     give_document(d, riid, out)
 }
@@ -206,6 +217,7 @@ extern "system" fn clone_node(this: Obj, deep: i16, out: *mut Obj) -> HResult {
         ns: d.ns.clone(),
         props: d.props.clone(),
         error: ParseError::default(),
+        schemas: core::ptr::null_mut(),
     };
     give_document(copy, &IID_IXMLDOMNODE, out.cast())
 }
@@ -326,7 +338,7 @@ extern "system" fn node_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HR
         };
     if !ok {
         put(out, core::ptr::null_mut());
-        record(b"QueryInterface(no such interface)", LEDGER_OTHER, data1(&iid));
+        crate::record_iid("QueryInterface: no", &iid);
         return E_NOINTERFACE;
     }
     node(this).refs.fetch_add(1, Ordering::Relaxed);
@@ -425,10 +437,6 @@ not_implemented! {
     put_ondataavailable(Variant) = b"IXMLDOMDocument::put_ondataavailable";
     put_ontransformnode(Variant) = b"IXMLDOMDocument::put_ontransformnode";
     get_namespaces(*mut Obj) = b"IXMLDOMDocument2::get_namespaces";
-    get_schemas(*mut Variant) = b"IXMLDOMDocument2::get_schemas";
-    putref_schemas(Variant) = b"IXMLDOMDocument2::putref_schemas";
-    validate(*mut Obj) = b"IXMLDOMDocument2::validate";
-    validate_node(Obj, *mut Obj) = b"IXMLDOMDocument3::validateNode";
     put_data(Bstr) = b"IXMLDOMCharacterData::put_data";
     substring_data(i32, i32, *mut Bstr) = b"IXMLDOMCharacterData::substringData";
     append_data(Bstr) = b"IXMLDOMCharacterData::appendData";
@@ -682,6 +690,14 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
         Ok(parsed) => {
             d.tree = Tree::from_document(&parsed, d.preserve);
             d.error = ParseError::default();
+            // validateOnParse with a schema cache: an invalid document
+            // fails to load and leaves an empty one.
+            if let Some(mut e) = schema::on_load(d) {
+                e.url = url.into();
+                d.tree = Tree::new();
+                d.error = e;
+                return false;
+            }
             true
         }
         Err(e) => {
@@ -770,6 +786,116 @@ unsafe extern "system" {
     fn GetFileSizeEx(h: usize, size: *mut i64) -> i32;
     fn ReadFile(h: usize, buf: *mut u8, len: u32, read: *mut u32, overlapped: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
+    fn GetModuleHandleW(name: *const u16) -> usize;
+    fn LoadLibraryExW(name: *const u16, file: usize, flags: u32) -> usize;
+    fn FindResourceW(module: usize, name: *const u16, kind: *const u16) -> usize;
+    fn LoadResource(module: usize, res: usize) -> *const u8;
+    fn SizeofResource(module: usize, res: usize) -> u32;
+}
+
+/// A source's text: a `res:` URL (a module's resource) or a local file.
+fn read_source(url: &str) -> Result<String, ParseError> {
+    if url.len() > 6 && url[..6].eq_ignore_ascii_case("res://") {
+        read_resource(url)
+    } else {
+        read_file(url)
+    }
+}
+
+/// `s` with its %XX escapes decoded (as a URL's path).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.into())
+}
+
+/// A NUL-terminated wide copy of `s`.
+fn wide(s: &str) -> Vec<u16> {
+    let mut w: Vec<u16> = s.encode_utf16().collect();
+    w.push(0);
+    w
+}
+
+/// A `res:` URL's text (urlmon's res protocol, as MSXML loads one):
+/// `res://<module>[/<type>]/<name>`, the type RT_HTML (23) when not
+/// given, `#<number>` naming an integer type or name (FindResource's
+/// rule). The module is the one loaded under that name, else the file
+/// mapped as data. Each load is recorded ("other": what a program loads
+/// from where).
+fn read_resource(url: &str) -> Result<String, ParseError> {
+    let not_found = || ParseError {
+        code: INET_E_OBJECT_NOT_FOUND,
+        reason: "The system cannot locate the resource specified.\r\n".into(),
+        url: url.into(),
+        ..ParseError::default()
+    };
+    record(b"load(res: URL)", LEDGER_OTHER, 0);
+    let rest = percent_decode(&url[6..]);
+    // The module ends at the last ".dll/", ".exe/", ".ocx/" or ".mui/".
+    let lower = rest.to_ascii_lowercase();
+    let end = [".dll/", ".exe/", ".ocx/", ".mui/"]
+        .iter()
+        .filter_map(|ext| lower.rfind(ext).map(|i| i + ext.len() - 1))
+        .max();
+    let Some(end) = end else {
+        record(b"load(res: URL without a module)", LEDGER_UNSUPPORTED, 0);
+        return Err(not_found());
+    };
+    let (module, path) = (&rest[..end], &rest[end + 1..]);
+    let (kind, name) = match path.split_once('/') {
+        Some((k, n)) => (Some(k), n),
+        None => (None, path),
+    };
+    let wmodule = wide(module);
+    // SAFETY: a NUL-terminated name.
+    let mut h = unsafe { GetModuleHandleW(wmodule.as_ptr()) };
+    if h == 0 {
+        // SAFETY: as above; LOAD_LIBRARY_AS_DATAFILE | AS_IMAGE_RESOURCE.
+        h = unsafe { LoadLibraryExW(wmodule.as_ptr(), 0, 0x22) };
+    }
+    if h == 0 {
+        return Err(not_found());
+    }
+    let wname = wide(name);
+    let wkind = kind.map(wide);
+    let kind_ptr = match &wkind {
+        Some(k) => k.as_ptr(),
+        None => 23 as *const u16,
+    };
+    // SAFETY: a module handle and NUL-terminated (or integer) names.
+    let res = unsafe { FindResourceW(h, wname.as_ptr(), kind_ptr) };
+    if res == 0 {
+        return Err(not_found());
+    }
+    // SAFETY: a resource of that module.
+    let (data, size) = unsafe { (LoadResource(h, res), SizeofResource(h, res)) };
+    if data.is_null() {
+        return Err(not_found());
+    }
+    // SAFETY: the resource's bytes, mapped with its module.
+    let bytes = unsafe { core::slice::from_raw_parts(data, size as usize) };
+    gala_xml::decode(bytes).map_err(|e| ParseError {
+        code: XML_E_INVALIDATROOTLEVEL,
+        reason: e.msg,
+        url: url.into(),
+        line: 1,
+        linepos: 1,
+        ..ParseError::default()
+    })
 }
 
 /// A local file's text: `path` is a path or a `file:` URL.
@@ -865,7 +991,7 @@ extern "system" fn load(this: Obj, source: Variant, ok: *mut i16) -> HResult {
     if d.async_load {
         record(b"IXMLDOMDocument::load(async: loaded before returning)", LEDGER_OTHER, 0);
     }
-    let src = read_file(&path);
+    let src = read_source(&path);
     let loaded = parse_into(d, src, &path);
     put(ok, if loaded { VARIANT_TRUE } else { VARIANT_FALSE });
     if loaded { S_OK } else { S_FALSE }
@@ -1227,12 +1353,12 @@ static DOC_VTABLE: VTable<84> = with::<84, 41>([
     put_ondataavailable as *const (),
     put_ontransformnode as *const (),
     get_namespaces as *const (),
-    get_schemas as *const (),
-    putref_schemas as *const (),
-    validate as *const (),
+    schema::get_schemas as *const (),
+    schema::putref_schemas as *const (),
+    schema::validate as *const (),
     set_property as *const (),
     get_property as *const (),
-    validate_node as *const (),
+    schema::validate_node as *const (),
     import_node as *const (),
 ]);
 
@@ -1373,7 +1499,7 @@ extern "system" fn list_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HR
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    record(b"IXMLDOMNodeList::QueryInterface(no such interface)", LEDGER_OTHER, data1(&iid));
+    crate::record_iid("IXMLDOMNodeList::QueryInterface: no", &iid);
     E_NOINTERFACE
 }
 
@@ -1506,7 +1632,7 @@ extern "system" fn map_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HRe
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    record(b"IXMLDOMNamedNodeMap::QueryInterface(no such interface)", LEDGER_OTHER, data1(&iid));
+    crate::record_iid("IXMLDOMNamedNodeMap::QueryInterface: no", &iid);
     E_NOINTERFACE
 }
 
@@ -1643,7 +1769,7 @@ extern "system" fn error_query(this: Obj, riid: *const Guid, out: *mut Obj) -> H
         return S_OK;
     }
     put(out, core::ptr::null_mut());
-    record(b"IXMLDOMParseError::QueryInterface(no such interface)", LEDGER_OTHER, data1(&iid));
+    crate::record_iid("IXMLDOMParseError::QueryInterface: no", &iid);
     E_NOINTERFACE
 }
 
@@ -1721,3 +1847,6 @@ static ERROR_VTABLE: VTable<14> = VTable([
     error_linepos as *const (),
     error_filepos as *const (),
 ]);
+
+mod schema;
+pub use schema::new_cache;

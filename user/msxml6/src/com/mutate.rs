@@ -23,7 +23,7 @@ use crate::{VT_DISPATCH, VT_EMPTY};
 
 /// The node object behind `p` when it is one of this DLL's (a program
 /// may pass any IXMLDOMNode; one gala did not make is not supported).
-fn ours<'a>(p: Obj) -> Option<&'a NodeObj> {
+pub(super) fn ours<'a>(p: Obj) -> Option<&'a NodeObj> {
     if p.is_null() {
         return None;
     }

@@ -4659,7 +4659,9 @@ built for x64 and x86.
 - **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
   ProgID Msxml2.DOMDocument.6.0) and FreeThreadedDOMDocument60
   ({88D96A06-...}, Msxml2.FreeThreadedDOMDocument.6.0; Click-to-Run's
-  App-V pieces create it) under `HKLM\SOFTWARE\Classes\CLSID` and
+  App-V pieces create it) and XMLSchemaCache60 ({88D96A07-...},
+  Msxml2.XMLSchemaCache.6.0; App-V's ConfigurePackage) under
+  `HKLM\SOFTWARE\Classes\CLSID` and
   `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
   `%SystemRoot%\System32\msxml6.dll` (SysWOW64's for 32-bit programs,
   through the file system redirector); ole32's CoCreateInstance loads it
@@ -4682,8 +4684,12 @@ built for x64 and x86.
 - **Loading**: loadXML parses the string; load takes a VT_BSTR path or
   `file:` URL, reads the file whole (64 MiB at most) and parses it before
   returning, whatever `async` says (async load of local files is
-  synchronous: recorded as "other"); URLs of other schemes and IStreams
-  are not supported (recorded; S_FALSE, E_NOTIMPL). The reader is
+  synchronous: recorded as "other"); a `res:` URL
+  (`res://<module>[/<type>]/<name>`, urlmon's res protocol: the type
+  RT_HTML when not given, `#<n>` an integer type or name as
+  FindResource takes it, the module loaded under that name or else
+  mapped as a data file) reads that resource; URLs of other schemes and
+  IStreams are not supported (recorded; S_FALSE, E_NOTIMPL). The reader is
   `gala_xml` (galapkg's MSIX reader): no DTDs (MSXML 6's ProhibitDTD;
   setting it FALSE is recorded and changes nothing), the encoding
   declaration is not read (UTF-8 or a BOM). White space only text is
@@ -4776,12 +4782,63 @@ built for x64 and x86.
   createNode gave (createElement: none, "p:name" stays undeclared); a
   new attribute's prefix resolves through the declarations in scope.
   `xml` declares a namespace only for a node that has one.
+- **Schemas and validation** (`com/schema.rs`, `xsd.rs` and `xsd/`;
+  `msxml_test`'s `schema`, from MSXML's documentation and Wine's msxml3
+  tests run on Windows; App-V's ConfigurePackage creates the cache).
+  XMLSchemaCache60 (IXMLDOMSchemaCollection and 2) keeps each target
+  namespace's compiled schema documents. add takes a document of ours
+  (any node: its whole document, copied) or a BSTR naming a file or
+  `res:` URL; VT_NULL removes the namespace. It fails with E_FAIL for a
+  document that is not an XSD schema (XDR is gone from MSXML 6), one
+  that does not compile, a namespace other than the schema's
+  targetNamespace, a global name declared twice in a namespace (MSXML 6
+  merges a namespace's documents, "partial schemas"), and, while
+  validateOnLoad is on (the default), a name no schema in the cache
+  declares; imports have no location and resolve in the cache ("lax").
+  An add is atomic (made on a copy). get is E_NOTIMPL (as in MSXML 6),
+  remove of an absent namespace S_OK, namespaceURI past the end E_FAIL
+  with the output untouched, addCollection merges another cache of
+  ours, the collection's validate checks that every name resolves. The
+  document's `schemas` holds a cache of ours (a reference; VT_NULL,
+  VT_EMPTY and NULL clear it, another variant type is E_FAIL); validate
+  and validateNode give S_OK and an error of code 0, or S_FALSE and the
+  error (no document element XML_E_NOTWF, no cache or no schema for the
+  root's namespace XML_E_NODTD, then the documented codes:
+  XML_ELEMENT_UNDECLARED, XML_INVALID_CONTENT, XML_ELEMENT_NOT_COMPLETE,
+  XML_ATTRIBUTE_NOT_DEFINED, XML_ATTRIBUTE_VALUE, XML_ATTRIBUTE_FIXED,
+  XML_ILLEGAL_TEXT, XML_REQUIRED_ATTRIBUTE_MISSING); load and loadXML
+  validate when validateOnParse is on, a cache is set and it has a
+  schema for the document element's namespace, and an invalid document
+  fails to load (the parse error has the code and reason; the document
+  is empty). The XSD subset (`xsd.rs`'s header lists it) is what App-V's
+  own schemas use (its package manifest, deployment and user
+  configuration, connection group and file system metadata schemas all
+  compile) and Wine's tests: global and local elements, named and
+  anonymous types, sequence, choice and all with bounds, any and
+  anyAttribute, attributes with use, default and fixed, simple and
+  complex content extension, simple types by restriction with
+  enumeration, pattern (XSD's regular expressions, plus `\uXXXX`,
+  which App-V's patterns use), the length and integer bound facets and
+  whiteSpace, unique and key, and the built-in string, name, number,
+  boolean and binary types. Anything else in a schema fails its add
+  with E_FAIL and a ledger line naming the construct (`add(XSD not
+  supported: xs:redefine`, a facet, a built-in type, a regular
+  expression's escape); while validating, xsi:type, xsi:nil and a name
+  no schema declares are errors, never a pass. Content models are
+  matched as sets of positions (no determinism needed); the elements of
+  `all` once each in any order. Limits: default attribute values are
+  not added to the tree (recorded with their count; MSXML adds them);
+  the validation error codes are the documented ones, the exact code
+  for each case and the reasons' text are gala's (`msxml_test`'s `info`
+  lines until a Windows run); validation stops at the first error.
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): the character
   data editors (put_data, substringData, appendData, insertData,
   deleteData, replaceData, splitText, the processing instruction's
-  put_data), createEntityReference, save to a stream, transforms,
-  schemas and validation, typed values, the event handlers, abort,
+  put_data), createEntityReference, save to a stream, transforms
+  (transformNode, transformNodeToObject; XSLTemplate60 is not
+  registered), the schema cache's getSchema, getDeclaration and
+  enumerator (the Schema Object Model), typed values, the event handlers, abort,
   nodeFromID, the selection's own methods and the enumerators
   (`get__newEnum`). Implement them when a program's run reaches one.
 - **To measure on Windows** (`msxml_test`'s `info` lines): what
@@ -4790,7 +4847,13 @@ built for x64 and x86.
   whether normalize drops empty text nodes (gala does, as the W3C DOM),
   importNode(NULL) (gala E_INVALIDARG), and the bytes save writes for a
   document whose declaration names no encoding (gala: UTF-8, no BOM, the
-  declaration as it is).
+  declaration as it is); for schemas, the error code of each kind of
+  invalid document, add's answer under a namespace that is not the
+  targetNamespace and with a reference unresolved while validateOnLoad
+  is on (gala E_FAIL for both), the collection's validate while a name
+  is unresolved (gala E_FAIL), the order of namespaceURI's entries
+  (gala: the order added) and validate's code for a document whose
+  namespace has no schema (gala XML_E_NODTD).
 
 ### RPC: rpcrt4
 

@@ -2064,14 +2064,36 @@ need gala's.
      (`ole32.dll!CoGetClassObject(class not registered)`, detail
      0x88d96a07), MSXML 6's XSD schema cache; APPLYCONFIGURATION ends
      with 30175, the service and setup.exe with 17002 at about 1570 s.
-     Next: the schema cache (IXMLDOMSchemaCollection2: add, the
-     document's `schemas` property, validate and validateOnParse
-     against XSD), as far as App-V's use of it shows (what it adds and
-     whether it validates or only loads schemas; the ledger names each
-     method it reaches). To measure on Windows
+     Done: XMLSchemaCache60 registered in both views and served
+     (IXMLDOMSchemaCollection2, the document's `schemas`, validate,
+     validateNode and validateOnParse against XSD, schemas from files and
+     `res:` URLs), test first (`msxml_test`'s `schema`, x64 and x86;
+     ARCHITECTURE "msxml6"). The XSD subset is sized from the schemas
+     App-V's own DLLs carry as RT_HTML resources (AppVManifest.dll: the
+     AppX root, the appv/2014 and appv/2019 manifest schemas;
+     AppVPolicy.dll: deployment and user configuration, connection
+     groups; AppVFileSystemMetadata.dll): all of them compile and resolve
+     with gala's subset (checked on the host against the files taken
+     from Office's i640.cab), and what the subset lacks fails the add
+     loudly. Those DLLs also carry XSLT transforms (a namespace clean-up
+     run before validation, with a parameter, and an appv namespace
+     normalization using `msxsl:node-set` and the namespace axis): XSLT
+     (XSLTemplate60, transformNode) is not implemented yet.
+     With the cache registered, ConfigurePackage failed at the same
+     place with E_NOINTERFACE (17002 at about 1768 s): it creates the
+     cache asking for an IID whose first dword is CLSID_XMLSchemaCache60's
+     (`XMLSchemaCache60::QueryInterface` miss in the ledger). Done: the
+     cache answers QueryInterface(CLSID_XMLSchemaCache60) with itself
+     (App-V's code works on Windows, so MSXML answers it; probe issue
+     #125 asks what Windows gives), and every QueryInterface miss of
+     msxml6 now records the whole IID. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
+     And (probe issue #125) the schema test's `info` lines: the
+     validation error codes per case, add's answers for a namespace
+     other than the targetNamespace and an unresolved reference, the
+     QueryInterface above.
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a

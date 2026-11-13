@@ -189,7 +189,7 @@ fn identity(obj: Obj) -> usize {
 }
 
 /// A numbered `info` line.
-fn info_hr(what: &str, hr: HResult) {
+pub(super) fn info_hr(what: &str, hr: HResult) {
     Line::new()
         .s(NAME.as_bytes())
         .s(b": info ")
