@@ -4738,6 +4738,25 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   11 24H2, 26100); trace diffing against Windows, the sampling profiler
   and live introspection, fuzzing (OBSERVABILITY "Planned
   facilities").
+- **MCP: agents working as a real gala user**: `gala mcp` speaks the
+  Model Context Protocol over stdin and stdout, reached as
+  `ssh user@gala gala mcp`, so an agent (Claude Code or another MCP
+  client) works in gala with that user's token and nothing more. Login,
+  keys and encryption are item SSH's; no new port, no new
+  authentication. Tools: gala's commands (`ps`, `start`, `windows`,
+  `kill`, `stats`, the task manager's copy text), the ledger and the
+  event stream, window screenshots, UI Automation (find, invoke, type;
+  item UIA), and later SN's snapshots. The SSH logon is a network
+  logon; seeing and driving windows needs the user's interactive
+  session, which "attach to my desktop" asks for under RS's rule (one's
+  own session, or SeTcbPrivilege), with the desktop showing that an
+  agent is attached and the user able to cut it off. Read-only tools by
+  default, input and process control only when the user's settings
+  allow, rate limits, every call in the audit trail as any process's
+  actions are. Uses: agents testing and debugging real programs (start
+  Office, read the ledger, click through a dialog), xtask's scenarios
+  on the same tools instead of their own serial scripts, item AI's
+  start menu.
 - **Applications put to sleep**: a program that is not in use stops
   costing anything. Freeze: every thread of the program's process tree
   stopped (as R9's quiescence stops them), no CPU, its memory moving to
