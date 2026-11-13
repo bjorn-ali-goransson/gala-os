@@ -4655,3 +4655,19 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   11 24H2, 26100); trace diffing against Windows, the sampling profiler
   and live introspection, fuzzing (OBSERVABILITY "Planned
   facilities").
+- **Hibernation**: gala saves the whole running system to its own disk,
+  powers off, and resumes everything on the next boot, on real hardware
+  as well as in a VM. It is R9's handover sent to the next boot through
+  the disk instead of to a new kernel in memory: threads stopped at a
+  quiescent point, the kernel's state in the versioned handover format,
+  memory paged out to the page file where it can be and the rest
+  written beside it, devices reset and rebuilt as after a handover. New
+  pieces: a resume path at boot (Limine and the kernel find the image,
+  check its build and that the disk has not changed since, and resume
+  instead of booting fresh); the clock's jump and renewed network leases
+  on resume; programs told as on Windows (power broadcasts). What a
+  handover refuses, hibernation refuses with the same reason (R9's and
+  SN's list). It also gives CS a fallback: on a fatal error, try to
+  hibernate before restarting. Sleep (suspend to RAM) is apart and
+  harder: ACPI sleep states and drivers that save and restore device
+  state.
