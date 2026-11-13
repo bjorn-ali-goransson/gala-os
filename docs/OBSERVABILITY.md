@@ -68,9 +68,25 @@ port. Lines that tools and agents rely on:
   file system's and the image cache's structures by their capacities,
   the rest of the heap as "other"; the
   state dump prints it as `statedump: heap by owner:`, and `persist`'s
-  low-memory warning as `persist: heap by owner:`) and `nt:` (`nt::stats`: system calls, waits,
+  low-memory warning as `persist: heap by owner:`; image layouts count
+  the pages in memory), `stats: image pages: R of T in memory; built B
+  (again after a drop A), dropped D` (`section::PageStats`: the cache's
+  layouts' pages and, since boot, pages built at a first touch or again,
+  and dropped under memory pressure; also `statedump: image pages:` and
+  `persist: image pages:`) and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
+- `section: dropped N image frames (F of T frames free; image pages
+  ...): <image> P pages, ...` when memory is short and image pages went
+  (at most a line a second, N since the last line; ARCHITECTURE
+  "Sections"), with an `image trim` event (`events=image`: `name`,
+  `pages`) per image; `section: building page I of <image> failed:
+  <status>` when a dropped page cannot be built again (its file changed
+  or is unreadable: the fault then waits out memory and fails as one
+  out of memory); `section: <image> changes: its unused layout leaves
+  the cache` / `changes while in use: its layout built whole (N KiB)`
+  when a file an image layout holds is written, truncated or mapped
+  writable.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
   (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
   which wow64.dll is used, or why a 32-bit program cannot start, e.g.

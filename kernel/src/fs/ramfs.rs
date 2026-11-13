@@ -55,6 +55,7 @@ use alloc::boxed::Box;
 
 use super::clusters::Clusters;
 use super::log::{self, Op, Run};
+use super::pagetable::{PageTable, Slot};
 use crate::mm::heap::{TryVec, try_box};
 use core::cell::Cell;
 
@@ -96,6 +97,11 @@ pub enum FsError {
     NotSealable,
     /// A rename or hard link from one volume's tree to another's.
     CrossVolume,
+    /// The call would change a file an image layout builds its pages from
+    /// (`hold_image`): `take_held` says which; let the layouts go
+    /// (`nt::section::release_image_holds`), call again
+    /// (`nt::file::with_pages`).
+    ImageHeld,
     /// A page the call needs lives on the disk only (a disk-backed C:):
     /// `take_page_in` says which; read it, `fill` it, call again
     /// (`nt::file::with_pages`).
@@ -154,35 +160,15 @@ enum Data {
     /// Immutable contents owned elsewhere (boot modules).
     Static(&'static [u8]),
     /// `len` bytes in whole pages; bytes past `len` are kept zero. A page
-    /// not made yet (`None`) holds `backing`'s bytes at its offset (zeros
-    /// past `backing`): a boot module's file turns into pages lazily, a page
-    /// at a time when it is written or mapped (copying a large file at once
-    /// held the file system for many seconds). On a disk-backed C: (D4)
-    /// `disk` says which pages live in a cluster of the data area: such a
-    /// page not in memory is read from the disk (`FsError::NotResident`).
-    Paged { pages: Vec<Option<Box<Page>>>, len: usize, backing: &'static [u8], disk: Vec<Slot> },
-}
-
-/// Where a page of a disk-backed file lives (`Data::Paged::disk`; a page
-/// past the vector's end has the default: no cluster).
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-struct Slot {
-    /// Its cluster plus one (0: none).
-    cluster: u32,
-    /// Changed in memory since the cluster was last written.
-    dirty: bool,
-    /// The cluster holds the page's data (it was written, or the change
-    /// log says so): only then may the page leave memory.
-    stored: bool,
-    /// Written or read back since `evict`'s hand last passed it: it gets
-    /// a second chance (the hand clears it) before it may leave.
-    recent: bool,
-}
-
-impl Slot {
-    fn cluster(&self) -> Option<u32> {
-        self.cluster.checked_sub(1)
-    }
+    /// not made yet (not in `pages`) holds `backing`'s bytes at its offset
+    /// (zeros past `backing`): a boot module's file turns into pages
+    /// lazily, a page at a time when it is written or mapped (copying a
+    /// large file at once held the file system for many seconds). On a
+    /// disk-backed C: (D4) the table's slots say which pages live in a
+    /// cluster of the data area: such a page not in memory is read from
+    /// the disk (`FsError::NotResident`). The table costs what is in
+    /// memory and the runs of clusters (`pagetable`), not the file's size.
+    Paged { pages: PageTable, len: usize, backing: &'static [u8] },
 }
 
 /// The pages `[first, end)` that the bytes `bytes` of a file touch.
@@ -195,23 +181,21 @@ fn page_span(bytes: &core::ops::Range<u64>) -> (usize, usize) {
 /// Page `i` made if it was not (from `backing`, else zero). The caller
 /// has made sure it is not a page that lives on the disk only.
 fn page_mut<'a>(
-    pages: &'a mut [Option<Box<Page>>],
+    pages: &'a mut PageTable,
     backing: &[u8],
     i: usize,
 ) -> Result<&'a mut Page, FsError> {
-    let slot = pages.get_mut(i).ok_or(FsError::NoMemory)?;
-    if slot.is_none() {
+    pages.get_or_make(i, || {
         let mut page = try_box(Page([0; PAGE])).map_err(|_| FsError::NoMemory)?;
         let from = (i * PAGE).min(backing.len());
         let to = ((i + 1) * PAGE).min(backing.len());
         page.0[..to - from].copy_from_slice(&backing[from..to]);
-        *slot = Some(page);
-    }
-    slot.as_deref_mut().ok_or(FsError::NoMemory)
+        Ok(page)
+    })
 }
 
 impl Data {
-    const EMPTY: Data = Data::Paged { pages: Vec::new(), len: 0, backing: &[], disk: Vec::new() };
+    const EMPTY: Data = Data::Paged { pages: PageTable::new(), len: 0, backing: &[] };
 
     fn len(&self) -> usize {
         match self {
@@ -222,24 +206,21 @@ impl Data {
 
     fn slot(&self, i: usize) -> Slot {
         match self {
-            Data::Paged { disk, .. } => disk.get(i).copied().unwrap_or_default(),
+            Data::Paged { pages, .. } => pages.slot(i),
             Data::Static(_) => Slot::default(),
         }
     }
 
-    /// The slot of page `i`, the vector grown to cover it.
-    fn slot_mut(&mut self, i: usize) -> Result<&mut Slot, FsError> {
-        let (pages, _, _, disk) = self.paged()?;
-        if disk.len() <= i {
-            let n = pages.len().max(i + 1);
-            disk.try_reserve(n - disk.len()).map_err(|_| FsError::NoMemory)?;
-            disk.resize(n, Slot::default());
-        }
-        Ok(&mut disk[i])
+    /// Changes the slot of page `i` (within the file's pages).
+    fn update_slot(&mut self, i: usize, f: impl FnOnce(&mut Slot)) -> Result<(), FsError> {
+        let (pages, _, _) = self.paged()?;
+        let mut slot = pages.slot(i);
+        f(&mut slot);
+        pages.set_slot(i, slot)
     }
 
     fn resident(&self, i: usize) -> bool {
-        matches!(self, Data::Paged { pages, .. } if pages.get(i).is_some_and(Option::is_some))
+        matches!(self, Data::Paged { pages, .. } if pages.resident(i))
     }
 
     /// The cluster to read page `i` from: it is not in memory and lives
@@ -266,7 +247,7 @@ impl Data {
                     let (page, off) = (at / PAGE, at % PAGE);
                     let k = (PAGE - off).min(n - done);
                     let out = &mut buf[done..done + k];
-                    match pages.get(page).and_then(|p| p.as_deref()) {
+                    match pages.get(page) {
                         Some(p) => out.copy_from_slice(&p.0[off..off + k]),
                         None if self.missing(page).is_some() => {
                             return if done == 0 { Err(page) } else { Ok(done) };
@@ -287,44 +268,24 @@ impl Data {
     }
 
     /// The pages, after turning static data into (lazy) pages.
-    #[allow(clippy::type_complexity)]
-    fn paged(
-        &mut self,
-    ) -> Result<
-        (&mut Vec<Option<Box<Page>>>, &mut usize, &mut &'static [u8], &mut Vec<Slot>),
-        FsError,
-    > {
+    fn paged(&mut self) -> Result<(&mut PageTable, &mut usize, &mut &'static [u8]), FsError> {
         if let Data::Static(s) = *self {
-            let mut pages = Vec::new();
-            let n = s.len().div_ceil(PAGE);
-            pages.try_reserve_exact(n).map_err(|_| FsError::NoMemory)?;
-            pages.extend(core::iter::repeat_with(|| None).take(n));
-            *self = Data::Paged { pages, len: s.len(), backing: s, disk: Vec::new() };
+            let mut pages = PageTable::new();
+            pages.cover(s.len().div_ceil(PAGE))?;
+            *self = Data::Paged { pages, len: s.len(), backing: s };
         }
         match self {
-            Data::Paged { pages, len, backing, disk } => Ok((pages, len, backing, disk)),
+            Data::Paged { pages, len, backing } => Ok((pages, len, backing)),
             Data::Static(_) => unreachable!(),
         }
-    }
-
-    /// Makes sure the pages cover `size` bytes (new pages are zero, made
-    /// when first used).
-    fn cover(pages: &mut Vec<Option<Box<Page>>>, size: usize) -> Result<(), FsError> {
-        let need = size.div_ceil(PAGE);
-        if need > pages.len() {
-            pages.try_reserve(need - pages.len()).map_err(|_| FsError::NoMemory)?;
-            let more = need - pages.len();
-            pages.extend(core::iter::repeat_with(|| None).take(more));
-        }
-        Ok(())
     }
 
     /// Writes `data` at `start`; a page on the disk only must be in memory
     /// first unless the write covers all of it (see `RamFs::write`).
     fn write_at(&mut self, start: usize, data: &[u8]) -> Result<(), FsError> {
         let end = start.checked_add(data.len()).ok_or(FsError::NoMemory)?;
-        let (pages, len, backing, _) = self.paged()?;
-        Self::cover(pages, end)?;
+        let (pages, len, backing) = self.paged()?;
+        pages.cover(end.div_ceil(PAGE))?;
         let mut done = 0;
         while done < data.len() {
             let at = start + done;
@@ -341,25 +302,18 @@ impl Data {
     /// `freed`. A partial last page on the disk only must be in memory
     /// first (see `RamFs::set_size`).
     fn set_len(&mut self, size: usize, freed: &mut Vec<u32>) -> Result<(), FsError> {
-        let (pages, len, backing, disk) = self.paged()?;
-        Self::cover(pages, size)?;
+        let (pages, len, backing) = self.paged()?;
+        pages.cover(size.div_ceil(PAGE))?;
         if size < *len {
             // Keep bytes past the end zero (mapped views show them): pages
             // not made yet read from the backing, so it ends there too.
             *backing = &backing[..size.min(backing.len())];
             let keep = size.div_ceil(PAGE);
-            pages.truncate(keep);
-            if disk.len() > keep {
-                for slot in disk.drain(keep..) {
-                    if let Some(c) = slot.cluster() {
-                        // Out of memory: the cluster stays used until the
-                        // next mount (`Clusters::leaked` counts such).
-                        let _ = freed.try_push(c);
-                    }
-                }
-            }
+            // Out of memory for `freed`: a cluster stays used until the
+            // next mount (`Clusters::leaked` counts such).
+            pages.truncate(keep, freed);
             if !size.is_multiple_of(PAGE)
-                && let Some(Some(last)) = pages.get_mut(keep - 1)
+                && let Some(last) = pages.get_mut(keep - 1)
             {
                 last.0[size % PAGE..].fill(0);
             }
@@ -381,11 +335,11 @@ impl Data {
 
     /// Every cluster the file uses.
     fn clusters(&self) -> impl Iterator<Item = u32> + '_ {
-        let disk: &[Slot] = match self {
-            Data::Paged { disk, .. } => disk,
-            Data::Static(_) => &[],
+        let pages = match self {
+            Data::Paged { pages, .. } => Some(pages),
+            Data::Static(_) => None,
         };
-        disk.iter().filter_map(Slot::cluster)
+        pages.into_iter().flat_map(PageTable::clusters)
     }
 }
 
@@ -509,6 +463,10 @@ pub struct Node {
     /// protected by its descriptor, as Windows' system files are
     /// (`Node::is_program_file`), not by an attribute.
     program: bool,
+    /// Image layouts that build their pages from its contents
+    /// (`hold_image`): while any does, its contents do not change
+    /// (`FsError::ImageHeld`) and its data outlives its names.
+    image_holds: u32,
     /// Created or changed since boot (or by the change log): part of a
     /// snapshot of the changes (`snapshot`).
     dirty: bool,
@@ -750,6 +708,9 @@ pub struct HeapUse {
 
 pub struct RamFs {
     nodes: Vec<Option<Node>>,
+    /// The file whose change `FsError::ImageHeld` last refused
+    /// (`take_held`).
+    held: Option<NodeId>,
     /// Changes are recorded for the disk (fs::log) while this is on.
     pub recording: bool,
     /// The change log is being replayed: what it makes is not the boot's.
@@ -894,6 +855,7 @@ impl RamFs {
             volume: ROOT,
             boot: true,
             program: false,
+            image_holds: 0,
             dirty: false,
             reparse: None,
             serial: next_version(),
@@ -902,6 +864,7 @@ impl RamFs {
         nodes.try_push(Some(root)).map_err(|_| FsError::NoMemory)?;
         Ok(Self {
             nodes,
+            held: None,
             recording: false,
             replaying: false,
             ops: Vec::new(),
@@ -1217,6 +1180,7 @@ impl RamFs {
             volume: self.node(parent).map_or(ROOT, |n| n.volume),
             boot: !self.recording && !self.replaying,
             program: false,
+            image_holds: 0,
             dirty: self.recording || self.replaying,
             reparse: None,
             serial: next_version(),
@@ -1350,6 +1314,11 @@ impl RamFs {
             o.shared_delete -= u32::from(share.delete);
         }
         if node.opens.handles == 0 {
+            if node.detached && node.image_holds > 0 {
+                // An image layout still builds pages from it
+                // (`release_image` frees it).
+                return;
+            }
             if node.detached {
                 // Its name went at the unlink (and was recorded then).
                 if let Some(node) = self.nodes[id].take() {
@@ -1372,6 +1341,13 @@ impl RamFs {
     fn remove(&mut self, id: NodeId) {
         if let Some(i) = self.links.iter().position(|l| l.node == id) {
             let _ = self.promote(id, i);
+            return;
+        }
+        if self.node(id).is_some_and(|n| n.image_holds > 0 && !n.detached) {
+            // An image layout builds pages from it: its name goes, its
+            // data lives on, detached, until the last layout lets it go
+            // (`release_image`), as an open file's does.
+            self.detach(id);
             return;
         }
         let Some(node) = self.nodes.get_mut(id).and_then(Option::take) else { return };
@@ -1743,10 +1719,9 @@ impl RamFs {
             u.tree += n.reparse.as_ref().map_or(0, |r| r.data.capacity());
             match &n.kind {
                 Kind::Directory(c) => u.tree += c.capacity() * size_of::<NodeId>(),
-                Kind::File(Data::Paged { pages, disk, .. }) => {
-                    u.tree += pages.capacity() * size_of::<Option<Box<Page>>>();
-                    u.tree += disk.capacity() * size_of::<Slot>();
-                    u.pages += pages.iter().flatten().count() * size_of::<Page>();
+                Kind::File(Data::Paged { pages, .. }) => {
+                    u.tree += pages.table_bytes();
+                    u.pages += pages.resident_count() * size_of::<Page>();
                 }
                 Kind::Symlink(t) => u.tree += t.capacity(),
                 Kind::File(Data::Static(_)) | Kind::Socket => {}
@@ -1995,6 +1970,7 @@ impl RamFs {
         now: u64,
     ) -> Result<usize, FsError> {
         let replaying = self.replaying;
+        self.unheld(id)?;
         let node = self.node_mut(id)?;
         let seals = node.seals.unwrap_or(0);
         let contents = match &mut node.kind {
@@ -2097,6 +2073,7 @@ impl RamFs {
     /// Truncates or extends (with zeros) to `size`.
     pub fn set_size(&mut self, id: NodeId, size: u64, now: u64) -> Result<(), FsError> {
         let replaying = self.replaying;
+        self.unheld(id)?;
         let node = self.node_mut(id)?;
         let seals = node.seals.unwrap_or(0);
         let (mapped, mapped_size) = (node.map_count > 0, node.mapped_size);
@@ -2159,6 +2136,9 @@ impl RamFs {
     /// cannot shrink below `size` until `unmap`. A `writable` one voids the
     /// version until it ends (`Node::version`).
     pub fn map(&mut self, id: NodeId, size: u64, writable: bool) -> Result<(), FsError> {
+        if writable {
+            self.unheld(id)?;
+        }
         let node = self.node_mut(id)?;
         if writable && node.seals.unwrap_or(0) & (SEAL_WRITE | SEAL_FUTURE_WRITE) != 0 {
             return Err(FsError::Sealed);
@@ -2198,6 +2178,70 @@ impl RamFs {
         }
         // What its views changed was marked dirty as each ended
         // (`view_ended`).
+    }
+
+    /// An image layout of file `id` at contents version `version` builds
+    /// its pages from the file from now on (`nt::section::ImageLayout`):
+    /// until `release_image`, a change to the contents (a write, a size,
+    /// a writable mapping) is refused with `FsError::ImageHeld` (the
+    /// caller lets the layouts go and calls again), and the file's data
+    /// outlives its names. NotFound if the contents have another version.
+    pub fn hold_image(&mut self, id: NodeId, version: u64) -> Result<(), FsError> {
+        let node = self.node_mut(id)?;
+        if node.version() != Some(version) {
+            return Err(FsError::NotFound);
+        }
+        node.image_holds += 1;
+        Ok(())
+    }
+
+    /// An image layout lets file `id` go (`hold_image`); a file removed
+    /// meanwhile and closed goes with its last layout.
+    pub fn release_image(&mut self, id: NodeId) {
+        let Ok(node) = self.node_mut(id) else { return };
+        node.image_holds = node.image_holds.saturating_sub(1);
+        if node.image_holds == 0
+            && node.detached
+            && node.opens.handles == 0
+            && let Some(node) = self.nodes[id].take()
+        {
+            self.release(&node);
+        }
+    }
+
+    /// Image layouts hold file `id` (`hold_image`).
+    pub fn image_held(&self, id: NodeId) -> bool {
+        self.node(id).is_some_and(|n| n.image_holds > 0)
+    }
+
+    /// The file whose change `FsError::ImageHeld` refused, once.
+    pub fn take_held(&mut self) -> Option<NodeId> {
+        self.held.take()
+    }
+
+    /// Err(ImageHeld) if image layouts hold file `id` (its contents are
+    /// about to change), noting it for `take_held`.
+    fn unheld(&mut self, id: NodeId) -> Result<(), FsError> {
+        if self.image_held(id) {
+            self.held = Some(id);
+            return Err(FsError::ImageHeld);
+        }
+        Ok(())
+    }
+
+    /// Takes node `id` out of its directory, alive (unlinked: no name).
+    fn detach(&mut self, id: NodeId) {
+        let Ok(node) = self.node_mut(id) else { return };
+        node.detached = true;
+        let (parent, directory) = (node.parent, node.is_dir());
+        let old = core::mem::take(&mut node.name);
+        if let Ok(Kind::Directory(c)) = self.node_mut(parent).map(|n| &mut n.kind) {
+            c.retain(|&x| x != id);
+        }
+        self.note(parent, &old, directory, ACTION_REMOVED);
+        if let Ok(node) = self.node_mut(id) {
+            node.name = old;
+        }
     }
 
     /// A view of a section on file `id` showing `bytes` of it begins: the
@@ -2799,8 +2843,9 @@ impl RamFs {
             page.0[len.saturating_sub(at).min(PAGE)..].fill(0);
         }
         let Data::Paged { pages, .. } = data else { return false };
-        let Some(slot) = pages.get_mut(req.index) else { return false };
-        *slot = Some(page);
+        if pages.insert(req.index, page).is_err() {
+            return false;
+        }
         self.note_clean(req.node, req.index);
         true
     }
@@ -2900,7 +2945,7 @@ impl RamFs {
         let c = area.clusters.alloc().ok_or(FsError::DiskFull)?;
         let given = match &mut self.nodes.get_mut(id).and_then(Option::as_mut).map(|n| &mut n.kind)
         {
-            Some(Kind::File(d)) => d.slot_mut(i).map(|slot| {
+            Some(Kind::File(d)) => d.update_slot(i, |slot| {
                 *slot = Slot { cluster: c + 1, dirty: false, stored: false, recent: false };
             }),
             _ => Err(FsError::NotFound),
@@ -2923,12 +2968,12 @@ impl RamFs {
         else {
             return;
         };
-        let Ok(slot) = d.slot_mut(i) else {
-            area.dirty_lost = true;
-            return;
-        };
-        if !slot.dirty {
-            slot.dirty = true;
+        if !d.slot(i).dirty {
+            // (A bit beside the page: no memory needed.)
+            if d.update_slot(i, |slot| slot.dirty = true).is_err() {
+                area.dirty_lost = true;
+                return;
+            }
             if area.dirty.try_reserve(1).is_ok() {
                 area.dirty.push_back((id, i));
             } else {
@@ -2944,10 +2989,8 @@ impl RamFs {
         if self.area.is_none() {
             return;
         }
-        if let Ok(Kind::File(d)) = self.node_mut(id).map(|n| &mut n.kind)
-            && let Ok(slot) = d.slot_mut(i)
-        {
-            slot.recent = true;
+        if let Ok(Kind::File(d)) = self.node_mut(id).map(|n| &mut n.kind) {
+            let _ = d.update_slot(i, |slot| slot.recent = true);
         }
         if let Some(a) = self.area.as_mut() {
             a.candidates += 1;
@@ -3000,22 +3043,21 @@ impl RamFs {
                     if i * PAGE >= size {
                         break;
                     }
-                    let slot = data.slot_mut(i)?;
-                    if let Some(old) = slot.cluster()
+                    if let Some(old) = data.slot(i).cluster()
                         && old != r.cluster + k
                     {
                         let _ = freed.try_push(old);
                     }
-                    *slot = Slot {
-                        cluster: r.cluster + k + 1,
-                        dirty: false,
-                        stored: true,
-                        recent: false,
-                    };
-                    if let Data::Paged { pages, .. } = data
-                        && let Some(p) = pages.get_mut(i)
-                    {
-                        *p = None;
+                    data.update_slot(i, |slot| {
+                        *slot = Slot {
+                            cluster: r.cluster + k + 1,
+                            dirty: false,
+                            stored: true,
+                            recent: false,
+                        };
+                    })?;
+                    if let Data::Paged { pages, .. } = data {
+                        drop(pages.take(i));
                     }
                 }
             }
@@ -3041,29 +3083,29 @@ impl RamFs {
             if n.volume != ROOT || n.seals.is_some() {
                 continue;
             }
-            let Kind::File(Data::Paged { pages, disk, .. }) = &mut n.kind else { continue };
-            for s in disk.iter_mut() {
-                if let Some(c) = s.cluster()
-                    && !clusters.claim(c)
-                {
-                    *s = Slot::default();
+            let Kind::File(Data::Paged { pages, .. }) = &mut n.kind else { continue };
+            // Clusters another file (or nothing: out of range) has: the
+            // page loses it (rare: a damaged log).
+            let mut lost = Vec::new();
+            for (i, c) in pages.cluster_pages() {
+                if !clusters.claim(c) {
+                    let _ = lost.try_push(i);
                     dropped += 1;
                 }
             }
-            for (i, p) in pages.iter().enumerate() {
-                let has = disk.get(i).is_some_and(|s| s.cluster().is_some());
-                if p.is_some() && !has {
-                    if disk.len() <= i {
-                        if disk.try_reserve(pages.len() - disk.len()).is_err() {
-                            dirty_lost = true;
-                            continue;
-                        }
-                        disk.resize(pages.len(), Slot::default());
-                    }
-                    disk[i].dirty = true;
-                    if dirty.try_push((id, i)).is_err() {
-                        dirty_lost = true;
-                    }
+            for i in lost {
+                let _ = pages.set_slot(i, Slot::default());
+            }
+            let mut unbacked = Vec::new();
+            for (i, _) in pages.resident_pages() {
+                if pages.slot(i).cluster().is_none() && unbacked.try_push(i).is_err() {
+                    dirty_lost = true;
+                }
+            }
+            for i in unbacked {
+                let slot = Slot { dirty: true, ..pages.slot(i) };
+                if pages.set_slot(i, slot).is_err() || dirty.try_push((id, i)).is_err() {
+                    dirty_lost = true;
                 }
             }
         }
@@ -3150,7 +3192,7 @@ impl RamFs {
             let mut full = false;
             'nodes: for id in 0..self.nodes.len() {
                 let count = match self.nodes[id].as_ref().map(|n| &n.kind) {
-                    Some(Kind::File(Data::Paged { disk, .. })) => disk.len(),
+                    Some(Kind::File(Data::Paged { pages, .. })) => pages.len(),
                     _ => continue,
                 };
                 for i in 0..count {
@@ -3170,13 +3212,14 @@ impl RamFs {
         out.sort_unstable_by_key(|w| w.cluster);
         for (k, w) in out.iter().enumerate() {
             let dst = &mut staging[k * PAGE..(k + 1) * PAGE];
-            if let Some(Some(Node { kind: Kind::File(Data::Paged { pages, disk, .. }), .. })) =
+            if let Some(Some(Node { kind: Kind::File(Data::Paged { pages, .. }), .. })) =
                 self.nodes.get_mut(w.node)
-                && let (Some(Some(p)), Some(slot)) = (pages.get(w.index), disk.get_mut(w.index))
+                && let Some(p) = pages.get(w.index)
             {
                 dst.copy_from_slice(&p.0);
-                slot.stored = true;
-                slot.recent = true;
+                // Bits beside the page: no memory needed.
+                let slot = Slot { stored: true, recent: true, ..pages.slot(w.index) };
+                let _ = pages.set_slot(w.index, slot);
             }
         }
         if let Some(a) = self.area.as_mut() {
@@ -3213,10 +3256,8 @@ impl RamFs {
                 }
             },
         };
-        if let Ok(Kind::File(d)) = self.node_mut(id).map(|n| &mut n.kind)
-            && let Ok(slot) = d.slot_mut(i)
-        {
-            slot.dirty = false;
+        if let Ok(Kind::File(d)) = self.node_mut(id).map(|n| &mut n.kind) {
+            let _ = d.update_slot(i, |slot| slot.dirty = false);
         }
         // Within the capacity the caller checked.
         let _ = out.try_push(Writeback { node: id, index: i, cluster });
@@ -3230,10 +3271,8 @@ impl RamFs {
             let same = matches!(self.node(w.node).map(|n| &n.kind),
                 Some(Kind::File(d)) if d.slot(w.index).cluster() == Some(w.cluster));
             if same {
-                if let Ok(Kind::File(d)) = self.node_mut(w.node).map(|n| &mut n.kind)
-                    && let Ok(slot) = d.slot_mut(w.index)
-                {
-                    slot.dirty = false;
+                if let Ok(Kind::File(d)) = self.node_mut(w.node).map(|n| &mut n.kind) {
+                    let _ = d.update_slot(w.index, |slot| slot.dirty = false);
                 }
                 self.page_dirty(w.node, w.index);
             }
@@ -3268,12 +3307,9 @@ impl RamFs {
         st.scans = area.scans;
         st.skipped = area.skipped;
         for n in self.nodes.iter().flatten() {
-            let Kind::File(Data::Paged { pages, disk, .. }) = &n.kind else { continue };
-            for (i, p) in pages.iter().enumerate() {
-                if p.is_none() {
-                    continue;
-                }
-                let slot = disk.get(i).copied().unwrap_or_default();
+            let Kind::File(Data::Paged { pages, .. }) = &n.kind else { continue };
+            for (i, _) in pages.resident_pages() {
+                let slot = pages.slot(i);
                 st.resident += 1;
                 if slot.dirty {
                     st.dirty += 1;
@@ -3317,26 +3353,31 @@ impl RamFs {
         while gone < max && visits > 0 {
             if let Some(Some(node)) = self.nodes.get_mut(id)
                 && node.views_unlisted == 0
-                && let Kind::File(Data::Paged { pages, disk, .. }) = &mut node.kind
+                && let Kind::File(Data::Paged { pages, .. }) = &mut node.kind
             {
                 let views = &node.views;
                 let mut dropped = false;
-                while i < pages.len() && gone < max {
-                    let slot = disk.get_mut(i);
-                    let page = &mut pages[i];
-                    i += 1;
-                    let Some(slot) = slot else { continue };
-                    if page.is_none() || !slot.stored || slot.dirty || slot.cluster().is_none() {
+                while gone < max {
+                    // Pages in memory only (a file's chunks with none are
+                    // skipped whole).
+                    let Some(at) = pages.next_resident(i) else {
+                        i = pages.len();
+                        break;
+                    };
+                    i = at + 1;
+                    let slot = pages.slot(at);
+                    if !slot.stored || slot.dirty || slot.cluster().is_none() {
                         continue;
                     }
-                    if views.iter().any(|&(a, b)| (a..b).contains(&(i - 1))) {
+                    if views.iter().any(|&(a, b)| (a..b).contains(&at)) {
                         continue;
                     }
                     if slot.recent {
-                        slot.recent = false;
+                        // A bit beside the page: no memory needed.
+                        let _ = pages.set_slot(at, Slot { recent: false, ..slot });
                         continue;
                     }
-                    *page = None;
+                    drop(pages.take(at));
                     dropped = true;
                     gone += 1;
                 }
@@ -3998,7 +4039,7 @@ mod tests {
         let id = f.add_static_file(ROOT, &w("m"), &BIG, false, 1).unwrap();
         f.map(id, BIG.len() as u64, true).unwrap();
         let made = |f: &RamFs| match &f.node(id).unwrap().kind {
-            Kind::File(Data::Paged { pages, .. }) => pages.iter().filter(|p| p.is_some()).count(),
+            Kind::File(Data::Paged { pages, .. }) => pages.resident_count(),
             _ => usize::MAX,
         };
         // Mapping made no page; reads come from the module.
@@ -4060,6 +4101,46 @@ mod tests {
         let d = f.create(ROOT, &w("d"), true, 5).unwrap();
         f.set_basic(d, Times::default(), Some(0x02)).unwrap();
         assert_eq!(f.node(d).unwrap().attributes, 0x02 | ATTRIBUTE_DIRECTORY);
+    }
+
+    /// A file an image layout builds pages from keeps its contents (a
+    /// change is refused, naming the file, until the layouts let it go)
+    /// and its data outlives its name until the last layout lets it go.
+    #[test]
+    fn image_holds_keep_a_file_s_contents() {
+        let mut f = fs();
+        let a = f.create(ROOT, &w("a.dll"), false, 1).unwrap();
+        f.write(a, 0, b"MZ", 2).unwrap();
+        let v = f.node(a).unwrap().version().unwrap();
+        assert_eq!(f.hold_image(a, v + 1000), Err(FsError::NotFound), "another version");
+        f.hold_image(a, v).unwrap();
+        f.hold_image(a, v).unwrap();
+        assert_eq!(f.write(a, 0, b"ZM", 3), Err(FsError::ImageHeld));
+        assert_eq!(f.take_held(), Some(a));
+        assert_eq!(f.take_held(), None);
+        assert_eq!(f.set_size(a, 0, 3), Err(FsError::ImageHeld));
+        assert_eq!(f.map(a, 2, true), Err(FsError::ImageHeld));
+        assert_eq!(f.take_held(), Some(a));
+        // Reading and mapping read-only go on; the version stays.
+        f.map(a, 2, false).unwrap();
+        f.unmap(a, false);
+        assert_eq!(f.node(a).unwrap().version(), Some(v));
+        // Deleted: the name goes, the data stays for the layouts.
+        f.unlink(ROOT, &w("a.dll")).unwrap();
+        assert_eq!(f.find(ROOT, &w("a.dll")), Ok(None));
+        let mut buf = [0u8; 2];
+        assert_eq!(f.read(a, 0, &mut buf), Ok(2));
+        assert_eq!(&buf, b"MZ");
+        f.release_image(a);
+        assert!(f.node(a).is_some());
+        f.release_image(a);
+        assert!(f.node(a).is_none(), "freed with its last layout");
+        // Released, a file changes again.
+        let b = f.create(ROOT, &w("b.dll"), false, 1).unwrap();
+        let v = f.node(b).unwrap().version().unwrap();
+        f.hold_image(b, v).unwrap();
+        f.release_image(b);
+        f.write(b, 0, b"MZ", 2).unwrap();
     }
 
     #[test]

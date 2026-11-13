@@ -650,6 +650,10 @@ fn lazy_writer(_: usize) {
         platform::sleep_ms(CADENCE_MS.load(Ordering::Relaxed));
         if PENDING.load(Ordering::Acquire) || registry_due() {
             sync(Cause::Lazy);
+        } else {
+            // Nothing to write: memory may still be short (a sync lets
+            // pages go when it ends).
+            relieve();
         }
     }
 }
@@ -803,6 +807,8 @@ fn write_pages(list: &[Writeback], staging: &[u8]) -> bool {
 /// same when it ends; pages it is writing must not leave before that).
 pub fn relieve() {
     if DATA_START.load(Ordering::Relaxed) == 0 {
+        // No file cache to let go: image pages alone.
+        super::section::relieve();
         return;
     }
     if TURN.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
@@ -815,7 +821,7 @@ pub fn relieve() {
 /// of it (at least 64 MiB), back up to that plus 16 MiB.
 fn evict() {
     let (free, total) = platform::frame_stats();
-    let low = (total / 4).max(64 * 256);
+    let low = super::section::low_mark(total);
     if free >= low {
         if free >= low + 16 * 256 {
             SHORT.store(false, Ordering::Relaxed);
@@ -825,6 +831,8 @@ fn evict() {
     let want = (low + 16 * 256 - free) as usize;
     let gone = file::with_fs(|fs| fs.evict(want));
     EVICTED.fetch_add(gone as u64, Ordering::Relaxed);
+    // Then image pages (built again from their files when touched).
+    let images = super::section::relieve();
     // Short of the mark: say once (until free memory is back above it)
     // what holds the memory, so a run that ends out of memory explains
     // itself.
@@ -838,8 +846,9 @@ fn evict() {
             let c = file::with_fs(|fs| fs.cache_stats());
             let heap = crate::mm::heap::stats();
             warn!(
-                "persist: free memory stays low after letting {gone} pages go: {after} of {total} \
-                 frames free (want {low}); files' pages in memory {} ({} dirty, {} never \
+                "persist: free memory stays low after letting {gone} pages and {images} image \
+                 frames go: {after} of {total} frames free (want {low}); files' pages in \
+                 memory {} ({} dirty, {} never \
                  written, {} of mapped files), queued dirty {}; {} scans letting pages go, {} \
                  skipped after a futile one; heap {} KiB in use, \
                  {} slab and {} large pages; frames in use by {}",
@@ -856,6 +865,7 @@ fn evict() {
                 super::platform::FrameUses(super::platform::frame_uses()),
             );
             warn!("persist: heap by owner: {}", super::stats::HeapOwners::now(heap.in_use));
+            warn!("persist: image pages: {}", super::section::PageStats);
             let (threads, dead, slots) = super::platform::thread_counts();
             warn!(
                 "persist: {threads} kernel threads, {dead} dead not reaped yet (their stacks \

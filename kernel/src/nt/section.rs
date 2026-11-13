@@ -17,6 +17,7 @@ use super::status::NtStatus;
 use super::vad::{self, Access};
 use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub const SEC_RESERVE: u32 = 0x400_0000;
 pub const SEC_COMMIT: u32 = 0x800_0000;
@@ -70,8 +71,87 @@ pub const SEC_FILE: u32 = 0x80_0000;
 /// bytes a layout gives (alignment, what is zeroed, relocation).
 pub const LAYOUT_VERSION: u32 = 1;
 
+use crate::fs::ramfs::Page;
+const PAGE: usize = PAGE_SIZE as usize;
+
+/// File bytes that land in the image: `len` bytes from file offset
+/// `offset` at RVA `rva` (the headers, then each section's raw data, in
+/// that order: a later part overwrites an earlier one).
+#[derive(Clone, Copy, Debug)]
+struct Part {
+    rva: usize,
+    offset: usize,
+    len: usize,
+}
+
+/// Reads `buf.len()` bytes of an image's file from an offset.
+type Reader<'a> = dyn FnMut(usize, &mut [u8]) -> Result<(), NtStatus> + 'a;
+
+/// Fills `page` (zeroed by the caller) with page `index` of the image the
+/// `parts` describe, reading the file through `read(offset, buf)`.
+fn fill_page(
+    parts: &[Part],
+    index: usize,
+    page: &mut [u8; PAGE],
+    read: &mut Reader<'_>,
+) -> Result<(), NtStatus> {
+    let (start, end) = (index * PAGE, index * PAGE + PAGE);
+    for p in parts {
+        let (lo, hi) = (p.rva.max(start), (p.rva + p.len).min(end));
+        if lo < hi {
+            read(p.offset + (lo - p.rva), &mut page[lo - start..hi - start])?;
+        }
+    }
+    Ok(())
+}
+
+/// Where a layout's pages are built from (again, after one was dropped).
+enum Source {
+    /// File `node` while its contents have `version`. The layout holds
+    /// the file (`RamFs::hold_image`): a change to it waits until every
+    /// layout it holds is built whole or gone (`release_image_holds`), so
+    /// a page built again has the bytes it had.
+    File { node: crate::fs::ramfs::NodeId, version: u64 },
+    /// Bytes in memory (host tests).
+    #[cfg(test)]
+    Bytes(Vec<u8>),
+}
+
+/// One page of a layout.
+#[derive(Default)]
+struct Slot {
+    /// The page laid out (unrelocated), if built and not dropped since.
+    page: Option<alloc::boxed::Box<Page>>,
+    /// The page relocated for the alternative base, if made.
+    relocated: Option<Frame>,
+    /// Built or faulted in since the trimmer last passed: a second chance.
+    recent: bool,
+    /// Dropped before: its next build counts as a rebuild.
+    dropped: bool,
+}
+
+/// A layout's pages and what may happen to them, under one lock.
+struct Pages {
+    slots: Vec<Slot>,
+    /// Pages may be dropped and built again from `ImageLayout::source`
+    /// (false once built whole: `release_image_holds`, or for a layout
+    /// made from memory or from a file without a stable version).
+    lazy: bool,
+    /// Holders that need every page to stay (`pin_all`): none is dropped.
+    pins: u32,
+    /// Where the trimmer goes on in this layout.
+    hand: usize,
+    /// Whether the layout still holds its file (`Source::File`).
+    holding: bool,
+}
+
 /// An executable image laid out at its preferred base (headers and
 /// sections at their RVAs), with the protection of every page.
+///
+/// Its pages are built at their first touch (a view's fault, a relocated
+/// page, a process's start) from the file, and while it holds the file
+/// they may be dropped under memory pressure (`trim`) and built again: an
+/// image costs the pages programs use, not its size.
 pub struct ImageLayout {
     pub base: u64,
     /// Header fields a new process needs (`process::spawn`).
@@ -81,7 +161,10 @@ pub struct ImageLayout {
     /// every view at the preferred base maps these very pages, so an
     /// image is in memory once, not as a copy plus the frames made from
     /// it.
-    pages: Vec<alloc::boxed::Box<crate::fs::ramfs::Page>>,
+    pages: IrqMutex<Pages>,
+    /// What the pages are built from.
+    source: Option<Source>,
+    parts: Vec<Part>,
     /// SizeOfImage.
     size: usize,
     page_protect: Vec<u32>,
@@ -95,9 +178,11 @@ pub struct ImageLayout {
     relocatable: bool,
     /// The image's system-wide alternative base (as Windows' ASLR gives
     /// each image one), taken on first need when its preferred base is in
-    /// use, and the frames relocated for it, shared by every view there.
+    /// use; the frames relocated for it (`Slot::relocated`) are shared by
+    /// every view there.
     dynamic: IrqMutex<Option<u64>>,
-    relocated: IrqMutex<Vec<Option<Frame>>>,
+    /// Its file's NT path (logs: what the trimmer dropped).
+    name: Vec<u16>,
 }
 
 /// Where alternative image bases are taken from: downwards from here, in
@@ -127,12 +212,57 @@ pub struct ImageInfo {
     pub large_address_aware: bool,
 }
 
+/// Image pages built (at a first touch, or again after a drop), built
+/// again, and dropped since boot (the end-of-run `stats: image pages`
+/// line, `persist`'s low-memory warning).
+static BUILT: AtomicU64 = AtomicU64::new(0);
+static REBUILT: AtomicU64 = AtomicU64::new(0);
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// BUILT when a trim last found nothing to drop: trims return at once
+/// until FUTILE_AFTER more pages were built (their work in proportion to
+/// what can go, as the file cache's eviction).
+static FUTILE_AT: AtomicU64 = AtomicU64::new(u64::MAX);
+const FUTILE_AFTER: u64 = 256;
+
+/// The counters: (built, built again, dropped).
+pub fn page_counts() -> (u64, u64, u64) {
+    (
+        BUILT.load(Ordering::Relaxed),
+        REBUILT.load(Ordering::Relaxed),
+        DROPPED.load(Ordering::Relaxed),
+    )
+}
+
+/// The image pages line (`stats: image pages: ...`, the state dump):
+/// the cache's layouts' pages in memory of all, and the counters.
+pub struct PageStats;
+
+impl core::fmt::Display for PageStats {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (built, again, dropped) = page_counts();
+        match try_image_pages() {
+            Some((resident, all)) => write!(f, "{resident} of {all} in memory")?,
+            None => f.write_str("(lock held)")?,
+        }
+        write!(f, "; built {built} (again after a drop {again}), dropped {dropped}")
+    }
+}
+
 impl Drop for ImageLayout {
     fn drop(&mut self) {
         // `pages` go back to the heap with the layout: every view holds
         // the layout while it maps them.
-        for frame in self.relocated.lock().iter().flatten() {
-            platform::free_frame(*frame);
+        let holding = {
+            let mut pages = self.pages.lock();
+            for slot in pages.slots.iter_mut() {
+                if let Some(frame) = slot.relocated.take() {
+                    platform::free_frame(frame);
+                }
+            }
+            core::mem::take(&mut pages.holding)
+        };
+        if let (true, Some(Source::File { node, .. })) = (holding, &self.source) {
+            super::file::with_fs(|fs| fs.release_image(*node));
         }
     }
 }
@@ -152,41 +282,124 @@ pub fn image_section_protect(characteristics: u32) -> u32 {
     }
 }
 
+/// The frame of a layout's page (a whole-page heap allocation).
+fn frame_of(page: &Page) -> Frame {
+    platform::frame_of_heap_page(page as *const Page as usize)
+}
+
+/// What the trimmer takes out of a layout at once: a page's index, its
+/// laid-out page and its relocated frame (freed once no view maps them).
+type Taken = Option<(usize, Option<alloc::boxed::Box<Page>>, Option<Frame>)>;
+const TRIM_BATCH: usize = 64;
+/// Pages a trim looks at, at most.
+const TRIM_SCAN: usize = 8192;
+
+/// Holds every page of a layout in memory while it lives (`pin_all`).
+pub struct Pinned<'a>(&'a ImageLayout);
+
+impl Drop for Pinned<'_> {
+    fn drop(&mut self) {
+        let mut pages = self.0.pages.lock();
+        pages.pins = pages.pins.saturating_sub(1);
+    }
+}
+
 impl ImageLayout {
-    /// Lays out the PE image in `data`.
+    /// Lays out the PE image in `data` (built whole: there is nothing to
+    /// build a page again from).
     pub fn new(data: &[u8]) -> Result<Self, NtStatus> {
-        Self::build(data.len(), |offset, buf| {
+        let mut read = |offset: usize, buf: &mut [u8]| {
             let src = data.get(offset..offset + buf.len()).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
             buf.copy_from_slice(src);
             Ok(())
-        })
+        };
+        let layout = Self::parse(data.len(), &mut read, None, Vec::new())?;
+        layout.build_whole_from(&mut read)?;
+        Ok(layout)
     }
 
-    /// Lays out the image in file `node`, read a page at a time into the
-    /// layout's pages (never a copy of the whole file).
-    pub fn from_file(node: crate::fs::ramfs::NodeId) -> Result<Self, NtStatus> {
-        let len = super::file::with_fs(|fs| fs.node(node).map(crate::fs::ramfs::Node::size))
-            .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
-        let len = usize::try_from(len).map_err(|_| NtStatus::INVALID_IMAGE_FORMAT)?;
-        Self::build(len, |offset, buf| {
-            let n = super::file::read(node, offset as u64, buf).map_err(super::file::fs_status)?;
-            // The file shrank meanwhile.
-            if n < buf.len() {
-                return Err(NtStatus::INVALID_IMAGE_FORMAT);
-            }
+    /// A layout of `data` whose pages are built at their first touch and
+    /// may be dropped (host tests of what a file's layout does).
+    #[cfg(test)]
+    fn lazy_from_bytes(data: &[u8]) -> Result<Self, NtStatus> {
+        let mut read = |offset: usize, buf: &mut [u8]| {
+            let src = data.get(offset..offset + buf.len()).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
+            buf.copy_from_slice(src);
             Ok(())
-        })
+        };
+        let mut copy = Vec::new();
+        copy.try_extend_from_slice(data).map_err(|_| NtStatus::NO_MEMORY)?;
+        let layout = Self::parse(data.len(), &mut read, Some(Source::Bytes(copy)), Vec::new())?;
+        layout.pages.lock().lazy = true;
+        Ok(layout)
     }
 
-    /// Lays out the image of `file_len` bytes that `read(offset, buf)`
-    /// reads (exactly `buf.len()` bytes).
-    fn build(
+    /// Lays out the image in file `node`. While the file has a stable
+    /// version the layout holds it and builds each page at its first touch
+    /// (read from the file a page at a time, never a copy of the whole
+    /// file); otherwise (a writable data section maps it) it is built
+    /// whole now.
+    pub fn from_file(node: crate::fs::ramfs::NodeId) -> Result<Self, NtStatus> {
+        use super::file::{fs_status, with_fs};
+        // The size and the version, and the hold, in one hold of the file
+        // system.
+        let (len, version) = with_fs(|fs| {
+            let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+            let (len, version) = (n.size(), n.version());
+            if let Some(v) = version {
+                fs.hold_image(node, v).map_err(fs_status)?;
+            }
+            Ok::<_, NtStatus>((len, version))
+        })?;
+        let release = || {
+            if version.is_some() {
+                with_fs(|fs| fs.release_image(node));
+            }
+        };
+        let name = super::file::nt_path(node).unwrap_or_default();
+        let Ok(len) = usize::try_from(len) else {
+            release();
+            return Err(NtStatus::INVALID_IMAGE_FORMAT);
+        };
+        let built = match version {
+            Some(v) => {
+                let mut read = |offset: usize, buf: &mut [u8]| {
+                    super::file::read_version(node, v, offset as u64, buf).map_err(fs_status)
+                };
+                let source = Some(Source::File { node, version: v });
+                Self::parse(len, &mut read, source, name).inspect(|l| {
+                    let mut pages = l.pages.lock();
+                    (pages.lazy, pages.holding) = (true, true);
+                })
+            }
+            None => {
+                let mut read = |offset: usize, buf: &mut [u8]| {
+                    let n = super::file::read(node, offset as u64, buf).map_err(fs_status)?;
+                    // The file shrank meanwhile.
+                    if n < buf.len() {
+                        return Err(NtStatus::INVALID_IMAGE_FORMAT);
+                    }
+                    Ok(())
+                };
+                Self::parse(len, &mut read, None, name)
+                    .and_then(|l| l.build_whole_from(&mut read).map(|()| l))
+            }
+        };
+        if built.is_err() {
+            release();
+        }
+        built
+    }
+
+    /// Reads an image's headers, its parts and its relocation table
+    /// through `read`; no page is built yet.
+    fn parse(
         file_len: usize,
-        mut read: impl FnMut(usize, &mut [u8]) -> Result<(), NtStatus>,
+        read: &mut Reader<'_>,
+        source: Option<Source>,
+        name: Vec<u16>,
     ) -> Result<Self, NtStatus> {
         use super::pe::{PeError, PeImage};
-        use crate::fs::ramfs::Page;
-        const PAGE: usize = PAGE_SIZE as usize;
         // The headers: the first page, or SizeOfHeaders if more.
         let mut head = Vec::new();
         let mut want = file_len.min(PAGE);
@@ -206,31 +419,17 @@ impl ImageLayout {
         })?;
         let size = image.size_of_image as usize;
         let count = size.div_ceil(PAGE);
-        let mut pages = Vec::new();
-        pages.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
-        for _ in 0..count {
-            let page =
-                crate::mm::heap::try_box(Page([0; PAGE])).map_err(|_| NtStatus::NO_MEMORY)?;
-            let _ = pages.try_push(page);
-        }
-        // Copies file bytes [offset, offset + len) to RVA `rva`, a page at
-        // a time.
-        let mut place = |pages: &mut [alloc::boxed::Box<Page>], rva: usize, offset: usize, len| {
-            let mut done = 0;
-            while done < len {
-                let at = rva + done;
-                let (page, within) = (at / PAGE, at % PAGE);
-                let n = (len - done).min(PAGE - within);
-                let dst = pages.get_mut(page).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
-                read(offset + done, &mut dst.0[within..within + n])?;
-                done += n;
-            }
-            Ok::<(), NtStatus>(())
-        };
-        place(&mut pages, 0, 0, image.size_of_headers as usize)?;
+        let mut parts = Vec::new();
+        parts.try_reserve_exact(1 + image.sections().count()).map_err(|_| NtStatus::NO_MEMORY)?;
+        let _ = parts.try_push(Part { rva: 0, offset: 0, len: image.size_of_headers as usize });
         for s in image.sections() {
             let len = s.raw_size.min(s.memory_size()) as usize;
-            place(&mut pages, s.virtual_address as usize, s.raw_offset as usize, len)?;
+            let part = Part { rva: s.virtual_address as usize, offset: s.raw_offset as usize, len };
+            // A part past the image is a bad image (as laying it out found).
+            if part.rva.checked_add(len).is_none_or(|end| end > count * PAGE) && len != 0 {
+                return Err(NtStatus::INVALID_IMAGE_FORMAT);
+            }
+            let _ = parts.try_push(part);
         }
         let mut page_protect = Vec::new();
         page_protect.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -243,10 +442,11 @@ impl ImageLayout {
                 *p = image_section_protect(s.characteristics);
             }
         }
-        let mut relocated = Vec::new();
-        relocated.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
-        relocated.resize(count, None);
-        // The relocation table, copied out of the laid-out image.
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(count).map_err(|_| NtStatus::NO_MEMORY)?;
+        slots.resize_with(count, Slot::default);
+        // The relocation table, read out of the image as laid out (each
+        // page it lies in made into a buffer, not kept).
         let directory = image.directory(super::pe::DIRECTORY_BASERELOC);
         let mut relocs = Vec::new();
         let mut reloc_index = Vec::new();
@@ -258,8 +458,15 @@ impl ImageLayout {
                 return Err(NtStatus::INVALID_IMAGE_FORMAT);
             }
             relocs.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
-            for at in rva..rva + len {
-                let _ = relocs.try_push(pages[at / PAGE].0[at % PAGE]);
+            let mut buf = [0u8; PAGE];
+            let mut at = rva;
+            while at < rva + len {
+                let i = at / PAGE;
+                buf.fill(0);
+                fill_page(&parts, i, &mut buf, read)?;
+                let end = (rva + len).min((i + 1) * PAGE);
+                let _ = relocs.try_extend_from_slice(&buf[at - i * PAGE..end - i * PAGE]);
+                at = end;
             }
             let table = super::pe::DataDirectory { rva: 0, size: directory.size };
             super::pe::relocation_blocks(&relocs, table, |page, at| {
@@ -284,41 +491,159 @@ impl ImageLayout {
         Ok(ImageLayout {
             base: image.image_base,
             info,
-            pages,
+            pages: IrqMutex::new(Pages { slots, lazy: false, pins: 0, hand: 0, holding: false }),
+            source,
+            parts,
             size,
             page_protect,
             relocs,
             reloc_index,
             relocatable: image.relocatable,
             dynamic: IrqMutex::new(None),
-            relocated: IrqMutex::new(relocated),
+            name,
         })
     }
 
+    /// Builds every page now through `read` (a layout that cannot build
+    /// one again: from memory, or a file without a stable version).
+    fn build_whole_from(&self, read: &mut Reader<'_>) -> Result<(), NtStatus> {
+        let count = self.page_protect.len();
+        for i in 0..count {
+            let mut page =
+                crate::mm::heap::try_box(Page([0; PAGE])).map_err(|_| NtStatus::NO_MEMORY)?;
+            fill_page(&self.parts, i, &mut page.0, read)?;
+            self.pages.lock().slots[i].page = Some(page);
+        }
+        BUILT.fetch_add(count as u64, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Reads `buf.len()` bytes of the image's file from `offset`, as they
+    /// were when it was laid out.
+    fn read_source(&self, offset: usize, buf: &mut [u8]) -> Result<(), NtStatus> {
+        match &self.source {
+            Some(Source::File { node, version }) => {
+                super::file::read_version(*node, *version, offset as u64, buf)
+                    .map_err(super::file::fs_status)
+            }
+            #[cfg(test)]
+            Some(Source::Bytes(data)) => {
+                let src =
+                    data.get(offset..offset + buf.len()).ok_or(NtStatus::INVALID_IMAGE_FORMAT)?;
+                buf.copy_from_slice(src);
+                Ok(())
+            }
+            None => Err(NtStatus::INVALID_IMAGE_FORMAT),
+        }
+    }
+
+    /// Page `index` built from the file (memory first made room for, as
+    /// a file's page read from the disk does).
+    fn build(&self, index: usize) -> Result<alloc::boxed::Box<Page>, NtStatus> {
+        super::persist::relieve();
+        let mut page =
+            crate::mm::heap::try_box(Page([0; PAGE])).map_err(|_| NtStatus::NO_MEMORY)?;
+        let mut read = |offset: usize, buf: &mut [u8]| self.read_source(offset, buf);
+        fill_page(&self.parts, index, &mut page.0, &mut read)?;
+        Ok(page)
+    }
+
+    /// The frame of page `index` (unrelocated contents), built now if it
+    /// is not in memory and `make`. A page given is touched (`recent`).
+    fn frame(&self, index: usize, make: bool) -> Option<Frame> {
+        {
+            let mut pages = self.pages.lock();
+            let slot = pages.slots.get_mut(index)?;
+            if let Some(page) = &slot.page {
+                let frame = frame_of(page);
+                slot.recent |= make;
+                return Some(frame);
+            }
+            if !make {
+                return None;
+            }
+        }
+        // Built with no lock held (it reads the file, maybe the disk).
+        let page = match self.build(index) {
+            Ok(page) => page,
+            Err(e) => {
+                crate::warn!(
+                    "section: building page {index} of {} failed: {e:?}",
+                    crate::events::Utf16(&self.name)
+                );
+                return None;
+            }
+        };
+        let mut pages = self.pages.lock();
+        let slot = pages.slots.get_mut(index)?;
+        if slot.page.is_none() {
+            BUILT.fetch_add(1, Ordering::Relaxed);
+            if slot.dropped {
+                REBUILT.fetch_add(1, Ordering::Relaxed);
+            }
+            slot.page = Some(page);
+        }
+        // (Another thread built it meanwhile: ours goes.)
+        slot.recent = true;
+        slot.page.as_deref().map(frame_of)
+    }
+
     /// The shared frame of page `index` (unrelocated contents): the
-    /// layout's own page.
+    /// layout's own page, built now if it is not in memory.
     pub fn shared_frame(&self, index: usize) -> Option<Frame> {
-        let page: &crate::fs::ramfs::Page = self.pages.get(index)?;
-        Some(platform::frame_of_heap_page(page as *const _ as usize))
+        self.frame(index, true)
+    }
+
+    /// The frame of page `index` if it is in memory (nothing built).
+    pub fn resident_frame(&self, index: usize) -> Option<Frame> {
+        self.frame(index, false)
+    }
+
+    /// Copies `buf.len()` bytes of the laid-out image from `rva`, building
+    /// the pages they are in (with no lock held).
+    fn read_image(&self, rva: usize, buf: &mut [u8]) -> Option<()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let at = rva + done;
+            let (index, within) = (at / PAGE, at % PAGE);
+            let n = (buf.len() - done).min(PAGE - within);
+            loop {
+                {
+                    let pages = self.pages.lock();
+                    if let Some(page) = &pages.slots.get(index)?.page {
+                        buf[done..done + n].copy_from_slice(&page.0[within..within + n]);
+                        break;
+                    }
+                }
+                self.frame(index, true)?;
+            }
+            done += n;
+        }
+        Some(())
+    }
+
+    /// Page `index` as laid out, into `out`, from memory or built from the
+    /// file for this once (not kept: the digest and exports read every
+    /// page without making them all resident).
+    fn page_copy(&self, index: usize, out: &mut [u8; PAGE]) -> Option<()> {
+        {
+            let pages = self.pages.lock();
+            if let Some(page) = &pages.slots.get(index)?.page {
+                out.copy_from_slice(&page.0);
+                return Some(());
+            }
+        }
+        out.fill(0);
+        let mut read = |offset: usize, buf: &mut [u8]| self.read_source(offset, buf);
+        fill_page(&self.parts, index, out, &mut read).ok()
     }
 
     /// Page `index` relocated by `delta` into `out` (a copy).
-    fn relocated_page(
-        &self,
-        index: usize,
-        delta: u64,
-        out: &mut [u8; PAGE_SIZE as usize],
-    ) -> Option<()> {
-        const PAGE: usize = PAGE_SIZE as usize;
-        out.copy_from_slice(&self.pages.get(index)?.0);
+    fn relocated_page(&self, index: usize, delta: u64, out: &mut [u8; PAGE]) -> Option<()> {
+        self.read_image(index * PAGE, out)?;
         // The unrelocated image, across the pages' edges.
         let value = |rva: usize, buf: &mut [u8]| {
-            for (k, b) in buf.iter_mut().enumerate() {
-                let at = rva + k;
-                let page = self.pages.get(at / PAGE).ok_or(super::pe::PeError::BadRelocation)?;
-                *b = page.0[at % PAGE];
-            }
-            Ok(())
+            self.read_image(rva, buf).ok_or(super::pe::PeError::BadRelocation)
         };
         super::pe::relocate_in_place(
             &self.relocs,
@@ -337,11 +662,9 @@ impl ImageLayout {
         let mut dynamic = self.dynamic.lock();
         if dynamic.is_none() {
             let size = self.size().next_multiple_of(0x1_0000);
-            let taken = NEXT_DYNAMIC.fetch_update(
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-                |top| top.checked_sub(size).filter(|&b| b >= DYNAMIC_BOTTOM),
-            );
+            let taken = NEXT_DYNAMIC.fetch_update(Ordering::AcqRel, Ordering::Acquire, |top| {
+                top.checked_sub(size).filter(|&b| b >= DYNAMIC_BOTTOM)
+            });
             *dynamic = taken.ok().map(|top| top - size);
         }
         *dynamic
@@ -350,24 +673,30 @@ impl ImageLayout {
     /// The shared frame of page `index` relocated for the alternative base
     /// `base` (made on first use).
     fn relocated_frame(&self, index: usize, base: u64) -> Option<Frame> {
-        if let Some(frame) = *self.relocated.lock().get(index)? {
-            return Some(frame);
+        {
+            let mut pages = self.pages.lock();
+            let slot = pages.slots.get_mut(index)?;
+            if let Some(frame) = slot.relocated {
+                slot.recent = true;
+                return Some(frame);
+            }
         }
         // Made without the lock (interrupts stay on): two threads may make
         // the same page; the second one's frame is freed.
-        let mut page = [0u8; PAGE_SIZE as usize];
+        let mut page = [0u8; PAGE];
         self.relocated_page(index, base.wrapping_sub(self.base), &mut page)?;
         let frame = UserSpace::frame_with(&page)?;
-        let mut relocated = self.relocated.lock();
-        let slot = relocated.get_mut(index)?;
-        match *slot {
+        let mut pages = self.pages.lock();
+        let slot = pages.slots.get_mut(index)?;
+        slot.recent = true;
+        match slot.relocated {
             Some(first) => {
-                drop(relocated);
+                drop(pages);
                 platform::free_frame(frame);
                 Some(first)
             }
             None => {
-                *slot = Some(frame);
+                slot.relocated = Some(frame);
                 Some(frame)
             }
         }
@@ -379,11 +708,20 @@ impl ImageLayout {
 
     /// A digest of the laid-out image (FNV-1a, 64 bits): a kernel handover
     /// checks that the next kernel lays the file out to the same bytes
-    /// before it maps them into a carried process.
+    /// before it maps them into a carried process. Pages not in memory
+    /// are built for it and not kept. 0 if one cannot be read.
     pub fn digest(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in self.pages.iter().flat_map(|p| p.0.iter()).take(self.size) {
-            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        let mut page = [0u8; PAGE];
+        let mut left = self.size;
+        for i in 0..self.page_protect.len() {
+            if self.page_copy(i, &mut page).is_none() {
+                return 0;
+            }
+            for &b in page.iter().take(left) {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+            left = left.saturating_sub(PAGE);
         }
         h ^ self.base.rotate_left(17)
     }
@@ -405,7 +743,7 @@ impl ImageLayout {
             Some(b) if b != base => return Err(NtStatus::CONFLICTING_ADDRESSES),
             _ => *dynamic = Some(base),
         }
-        NEXT_DYNAMIC.fetch_min(base, core::sync::atomic::Ordering::AcqRel);
+        NEXT_DYNAMIC.fetch_min(base, Ordering::AcqRel);
         Ok(())
     }
 
@@ -415,7 +753,7 @@ impl ImageLayout {
     /// (its pages are private).
     pub fn view_frame(&self, index: usize, view_base: u64, make: bool) -> Option<Frame> {
         if view_base == self.base {
-            return self.shared_frame(index);
+            return self.frame(index, make);
         }
         if self.dynamic() != Some(view_base) {
             return None;
@@ -423,7 +761,7 @@ impl ImageLayout {
         if make {
             return self.relocated_frame(index, view_base);
         }
-        *self.relocated.lock().get(index)?
+        self.pages.lock().slots.get(index)?.relocated
     }
 
     /// The protection of each page (headers and gaps read-only).
@@ -435,12 +773,83 @@ impl ImageLayout {
     /// asked of ntdll's layouts at boot only).
     pub fn export(&self, name: &[u8]) -> Option<u32> {
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(self.size).ok()?;
-        for page in &self.pages {
-            let _ = bytes.try_extend_from_slice(&page.0);
+        bytes.try_reserve_exact(self.page_protect.len() * PAGE).ok()?;
+        let mut page = [0u8; PAGE];
+        for i in 0..self.page_protect.len() {
+            self.page_copy(i, &mut page)?;
+            let _ = bytes.try_extend_from_slice(&page);
         }
         bytes.truncate(self.size);
         super::pe::find_export(&bytes, name)
+    }
+
+    /// Builds every page and keeps them all until the guard goes (a view
+    /// with private relocated pages copies them under its process's
+    /// locks, where nothing may be built). None without the memory.
+    pub fn pin_all(&self) -> Option<Pinned<'_>> {
+        self.pages.lock().pins += 1;
+        let pinned = Pinned(self);
+        for i in 0..self.page_protect.len() {
+            self.frame(i, true)?;
+        }
+        Some(pinned)
+    }
+
+    /// Builds it whole and lets its file go (the file is about to change:
+    /// `release_image_holds`). Whether it could.
+    fn build_whole(&self) -> bool {
+        let Some(_pinned) = self.pin_all() else { return false };
+        let holding = {
+            let mut pages = self.pages.lock();
+            pages.lazy = false;
+            core::mem::take(&mut pages.holding)
+        };
+        if let (true, Some(Source::File { node, .. })) = (holding, &self.source) {
+            super::file::with_fs(|fs| fs.release_image(*node));
+        }
+        true
+    }
+
+    /// Whether it may drop pages and holds its file `node`.
+    fn holds(&self, node: crate::fs::ramfs::NodeId) -> bool {
+        matches!(self.source, Some(Source::File { node: n, .. }) if n == node)
+            && self.pages.lock().holding
+    }
+
+    /// Takes pages not touched since the trimmer last passed out of the
+    /// layout into `batch` (a page touched since gets a second chance: its
+    /// mark cleared), going on from where it stopped, at most once round.
+    /// None from a layout that cannot build them again or is pinned.
+    /// Each page looked at counts against `budget`.
+    fn take_cold(&self, batch: &mut [Taken], budget: &mut usize) -> usize {
+        let mut pages = self.pages.lock();
+        if !pages.lazy || pages.pins > 0 {
+            return 0;
+        }
+        let count = pages.slots.len();
+        let (mut n, mut i) = (0, pages.hand);
+        for _ in 0..count {
+            if n == batch.len() || *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            if i >= count {
+                i = 0;
+            }
+            let slot = &mut pages.slots[i];
+            if slot.page.is_some() || slot.relocated.is_some() {
+                if slot.recent {
+                    slot.recent = false;
+                } else {
+                    batch[n] = Some((i, slot.page.take(), slot.relocated.take()));
+                    slot.dropped = true;
+                    n += 1;
+                }
+            }
+            i += 1;
+        }
+        pages.hand = i;
+        n
     }
 }
 
@@ -475,41 +884,48 @@ fn evictable<K, T>(cache: &[(K, KArc<T>)], keep: usize) -> Option<usize> {
 /// Image layouts this large or larger are logged when made.
 const LOGGED_LAYOUT: u64 = 8 << 20;
 
-/// The image layouts the cache holds on the kernel heap: their pages
-/// (which views at the preferred base map) and tables (frames relocated
-/// for an alternative base are section pages, counted apart), and how
-/// many; None while its lock is held (the state dump must not wait).
+/// The image layouts the cache holds on the kernel heap: their pages in
+/// memory (which views at the preferred base map) and tables (frames
+/// relocated for an alternative base are section pages, counted apart),
+/// and how many; None while its lock is held (the state dump must not
+/// wait).
 pub fn try_image_heap() -> Option<(usize, usize)> {
     let cache = IMAGE_CACHE.try_lock()?;
-    let bytes = cache
-        .iter()
-        .map(|(_, l)| {
-            l.pages.len() * PAGE_SIZE as usize
-                + l.relocs.capacity()
-                + 4 * (l.page_protect.capacity() + l.reloc_index.capacity())
-        })
-        .sum();
+    let mut bytes = 0;
+    for (_, l) in cache.iter() {
+        let pages = l.pages.try_lock()?;
+        bytes += pages.slots.iter().filter(|s| s.page.is_some()).count() * PAGE
+            + pages.slots.capacity() * core::mem::size_of::<Slot>()
+            + l.relocs.capacity()
+            + 4 * (l.page_protect.capacity() + l.reloc_index.capacity());
+    }
     Some((bytes, cache.len()))
+}
+
+/// The cache's layouts' pages: (in memory, in all); None while a lock is
+/// held.
+pub fn try_image_pages() -> Option<(usize, usize)> {
+    let cache = IMAGE_CACHE.try_lock()?;
+    let (mut resident, mut all) = (0, 0);
+    for (_, l) in cache.iter() {
+        let pages = l.pages.try_lock()?;
+        resident += pages.slots.iter().filter(|s| s.page.is_some()).count();
+        all += pages.slots.len();
+    }
+    Some((resident, all))
 }
 
 pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>, NtStatus> {
     let version = super::file::with_fs(|fs| fs.node(node).and_then(|n| n.version()));
-    if let Some(v) = version {
-        let mut cache = IMAGE_CACHE.lock();
-        if let Some(i) = cache.iter().position(|(key, _)| *key == (node, v)) {
-            // Most recently used last.
-            let entry = cache.remove(i);
-            let layout = entry.1.clone();
-            // Room was there a moment ago: this cannot fail.
-            let _ = cache.try_push(entry);
-            return Ok(layout);
-        }
+    if let Some(v) = version
+        && let Some(layout) = cached(node, v)
+    {
+        return Ok(layout);
     }
     let built = ImageLayout::from_file(node)
         .and_then(|layout| KArc::try_new(layout).map_err(|_| NtStatus::NO_MEMORY));
-    // Large layouts (each holds its own frames) and failures are logged:
-    // what explains a kernel short of memory, or an image that does not
-    // load.
+    // Large layouts and failures are logged: what explains a kernel short
+    // of memory, or an image that does not load.
     let size = built.as_ref().map_or(0, |l| l.size());
     if built.is_err() || size >= LOGGED_LAYOUT {
         let path = super::file::nt_path(node).unwrap_or_default();
@@ -522,27 +938,279 @@ pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>,
     }
     let layout = built?;
     if let Some(v) = version {
-        let evicted = {
+        let (layout, evicted) = {
             let mut cache = IMAGE_CACHE.lock();
-            // Drop older versions of this file and, when full, the oldest
-            // unused layout.
-            let mut evicted = Vec::new();
-            let _ = evicted.try_reserve(cache.len());
-            while let Some(i) = cache.iter().position(|((n, _), _)| *n == node) {
-                let _ = evicted.try_push(cache.remove(i));
+            // Laid out by another thread meanwhile: that one is the file's
+            // (every layout that holds a file is in the cache, so a change
+            // to the file finds it: `release_image_holds`); ours goes.
+            if let Some(i) = cache.iter().position(|(key, _)| *key == (node, v)) {
+                (cache[i].1.clone(), Some(layout))
+            } else {
+                // Drop older versions of this file and, when full, the
+                // oldest unused layout.
+                let mut evicted = Vec::new();
+                let _ = evicted.try_reserve(cache.len());
+                while let Some(i) = cache.iter().position(|((n, _), _)| *n == node) {
+                    let _ = evicted.try_push(cache.remove(i).1);
+                }
+                // A layout held only here cannot gain a holder meanwhile:
+                // other holders clone it from theirs, the cache under this
+                // lock.
+                if let Some(i) = evictable(&cache, IMAGE_CACHE_SIZE) {
+                    let _ = evicted.try_push(cache.remove(i).1);
+                }
+                if cache.try_push(((node, v), layout.clone())).is_err() {
+                    // Not cached, so it must not hold the file (nothing
+                    // would find it to let the file change).
+                    let _ = layout.build_whole();
+                }
+                drop(cache);
+                // Freed outside the lock (frames go back to the allocator;
+                // a layout lets its file go).
+                drop(evicted);
+                (layout, None)
             }
-            // A layout held only here cannot gain a holder meanwhile: other
-            // holders clone it from theirs, the cache under this lock.
-            if let Some(i) = evictable(&cache, IMAGE_CACHE_SIZE) {
-                let _ = evicted.try_push(cache.remove(i));
-            }
-            let _ = cache.try_push(((node, v), layout.clone()));
-            evicted
         };
-        // Freed outside the lock (frames go back to the allocator).
         drop(evicted);
+        return Ok(layout);
     }
     Ok(layout)
+}
+
+/// The cached layout of file `node` at version `v` (most recently used
+/// last).
+fn cached(node: crate::fs::ramfs::NodeId, v: u64) -> Option<KArc<ImageLayout>> {
+    let mut cache = IMAGE_CACHE.lock();
+    let i = cache.iter().position(|(key, _)| *key == (node, v))?;
+    let entry = cache.remove(i);
+    let layout = entry.1.clone();
+    // Room was there a moment ago: this cannot fail.
+    let _ = cache.try_push(entry);
+    Some(layout)
+}
+
+/// File `node` is about to change (`FsError::ImageHeld`): every layout
+/// that holds it lets it go, an unused one by leaving the cache, one in
+/// use by building its pages whole (its views keep the bytes they had,
+/// as they would on Windows, which refuses the change instead). Logged,
+/// with what it cost.
+pub fn release_image_holds(node: crate::fs::ramfs::NodeId) {
+    // Each pass lets one go; the cache has at most so many.
+    let passes = IMAGE_CACHE.lock().len() + 1;
+    for _ in 0..passes {
+        let found = {
+            let cache = IMAGE_CACHE.lock();
+            cache
+                .iter()
+                .find(|((n, _), l)| *n == node && l.holds(node))
+                .map(|(k, l)| (*k, l.clone()))
+        };
+        let Some((key, layout)) = found else { return };
+        let unused = {
+            let mut cache = IMAGE_CACHE.lock();
+            // Only the cache and `layout` hold it.
+            match cache.iter().position(|(k, l)| *k == key && KArc::ptr_eq(l, &layout)) {
+                Some(i) if KArc::strong_count(&layout) == 2 => Some(cache.remove(i)),
+                _ => None,
+            }
+        };
+        let name = crate::events::Utf16(&layout.name);
+        if let Some(entry) = unused {
+            crate::info!("section: {name} changes: its unused layout leaves the cache");
+            drop(entry);
+            drop(layout);
+            continue;
+        }
+        if !layout.build_whole() {
+            crate::warn!(
+                "section: {name} changes while in use: no memory to build its layout whole"
+            );
+            return;
+        }
+        crate::info!(
+            "section: {name} changes while in use: its layout built whole ({} KiB)",
+            layout.size() / 1024
+        );
+    }
+}
+
+/// Free frames below which memory is short: a quarter of the machine's,
+/// at least 64 MiB (the file cache's mark too: `persist::evict`).
+pub fn low_mark(total: u64) -> u64 {
+    (total / 4).max(64 * 256)
+}
+
+/// While free memory is below the mark, image pages go (`trim`) until it
+/// is 16 MiB above it again. Cheap when it is not (one look at the frame
+/// counts): run before a user fault makes a page (`vm::resolve_fault`)
+/// and by the file cache's eviction after its own pages.
+pub fn relieve() -> usize {
+    let (free, total) = platform::frame_stats();
+    let low = low_mark(total);
+    if free >= low {
+        return 0;
+    }
+    trim((low + 16 * 256 - free) as usize)
+}
+
+/// Lets image pages go while memory is short: pages of layouts that can
+/// build them again from their file and not touched since the last pass
+/// (a clock with a second chance, round the cache's layouts) leave every
+/// view that maps them and are freed. Returns how many frames went
+/// (pages and relocated frames). Logged (`section: dropped ...`) and an
+/// `image trim` event. Called with no lock held (it takes the process
+/// list, each process's views and address space).
+pub fn trim(want: usize) -> usize {
+    let built = BUILT.load(Ordering::Relaxed);
+    let futile = FUTILE_AT.load(Ordering::Relaxed);
+    if futile != u64::MAX && built < futile.saturating_add(FUTILE_AFTER) {
+        return 0;
+    }
+    static START: AtomicUsize = AtomicUsize::new(0);
+    let count = IMAGE_CACHE.lock().len();
+    let start = START.fetch_add(1, Ordering::Relaxed);
+    let mut gone = 0;
+    // The pages looked at, at most (the hand goes on from there next
+    // time): a trim's work is bounded, as it runs before faults.
+    let mut budget = TRIM_SCAN;
+    // What went, by layout (the log line names the first few).
+    let mut named: [(Option<KArc<ImageLayout>>, usize); 4] = Default::default();
+    let mut others = 0;
+    // Twice round: a first visit may only take second chances away.
+    for k in 0..2 * count {
+        if gone >= want || budget == 0 {
+            break;
+        }
+        let layout = {
+            let cache = IMAGE_CACHE.lock();
+            match cache.len() {
+                0 => break,
+                n => cache[(start + k) % n].1.clone(),
+            }
+        };
+        let mut dropped = 0;
+        while gone < want && budget > 0 {
+            let mut batch: [Taken; TRIM_BATCH] = [const { None }; TRIM_BATCH];
+            let n = layout.take_cold(&mut batch, &mut budget);
+            if n == 0 {
+                break;
+            }
+            unmap_everywhere(&layout, &batch[..n]);
+            for (_, page, relocated) in batch.iter_mut().take(n).filter_map(Option::take) {
+                gone += usize::from(page.is_some());
+                drop(page);
+                if let Some(frame) = relocated {
+                    platform::free_frame(frame);
+                    gone += 1;
+                }
+            }
+            dropped += n;
+        }
+        if dropped > 0 {
+            DROPPED.fetch_add(dropped as u64, Ordering::Relaxed);
+            crate::events::emit(
+                crate::events::Category::Image,
+                "image trim",
+                format_args!(r#""name":{},"pages":{dropped}"#, crate::events::Utf16(&layout.name)),
+            );
+            match named.iter_mut().find(|(l, _)| l.is_none()) {
+                Some(slot) => *slot = (Some(layout), dropped),
+                None => others += dropped,
+            }
+        }
+    }
+    if gone == 0 {
+        // Nothing could go in all it looked at: not again until pages
+        // were built (a scan cut short by its budget is not futile).
+        if budget > 0 {
+            FUTILE_AT.store(built, Ordering::Relaxed);
+        }
+        return 0;
+    }
+    FUTILE_AT.store(u64::MAX, Ordering::Relaxed);
+    // One line a second at most, with what went since the last one.
+    static UNLOGGED: AtomicU64 = AtomicU64::new(0);
+    static LOGGED_AT: AtomicU64 = AtomicU64::new(0);
+    let since = UNLOGGED.fetch_add(gone as u64, Ordering::Relaxed) + gone as u64;
+    let now = platform::monotonic_ns();
+    let last = LOGGED_AT.load(Ordering::Relaxed);
+    if (last == 0 || now.saturating_sub(last) >= 1_000_000_000)
+        && LOGGED_AT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        UNLOGGED.fetch_sub(since, Ordering::Relaxed);
+        let (free, total) = platform::frame_stats();
+        crate::info!(
+            "section: dropped {since} image frames ({free} of {total} frames free; image \
+             pages {}): {}",
+            PageStats,
+            Named(&named, others)
+        );
+    }
+    gone
+}
+
+/// The log line's list of what went (`trim`).
+struct Named<'a>(&'a [(Option<KArc<ImageLayout>>, usize)], usize);
+
+impl core::fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut first = true;
+        for (layout, pages) in self.0 {
+            if let Some(l) = layout {
+                if !first {
+                    f.write_str(", ")?;
+                }
+                first = false;
+                write!(f, "{} {pages} pages", crate::events::Utf16(&l.name))?;
+            }
+        }
+        if self.1 > 0 {
+            write!(f, ", {} pages of other images", self.1)?;
+        }
+        Ok(())
+    }
+}
+
+/// Unmaps the pages in `batch` (taken out of `layout`) from every process
+/// that shows them: views at the preferred base (and the executable)
+/// map the laid-out pages, views at the alternative base the relocated
+/// frames. Invariant: a fault maps a layout's frame only after checking,
+/// under its process's views lock, that the layout still has it
+/// (`SectionPage::current`); this takes each process's views lock after
+/// the pages left the layout, so no view keeps one once it returns.
+fn unmap_everywhere(layout: &KArc<ImageLayout>, batch: &[Taken]) {
+    let dynamic = layout.dynamic();
+    super::process::with_each(|p| {
+        let views = p.views.lock();
+        let of_layout =
+            |v: &View| v.section().image.as_ref().is_some_and(|l| KArc::ptr_eq(l, layout));
+        let exe = p.layout().is_some_and(|l| KArc::ptr_eq(l, layout)) && p.image.0 == layout.base;
+        let at_base = exe || views.iter().any(|v| v.base == layout.base && of_layout(v));
+        let at_dynamic = dynamic.is_some_and(|d| views.iter().any(|v| v.base == d && of_layout(v)));
+        if !at_base && !at_dynamic {
+            return;
+        }
+        let mut space = p.space.lock();
+        for (i, page, relocated) in batch.iter().flatten() {
+            let offset = *i as u64 * PAGE_SIZE;
+            if let (true, Some(page)) = (at_base, page) {
+                let va = layout.base + offset;
+                if space.mapping(va) == Some((frame_of(page), true)) {
+                    space.unmap_page(va);
+                }
+            }
+            if let (Some(d), Some(frame)) = (dynamic.filter(|_| at_dynamic), relocated) {
+                let va = d + offset;
+                if space.mapping(va) == Some((*frame, true)) {
+                    space.unmap_page(va);
+                }
+            }
+        }
+        // The space's lock goes first: its release flushes every CPU's
+        // translations of what was unmapped.
+        drop(space);
+        drop(views);
+    });
 }
 
 impl Section {
@@ -586,7 +1254,8 @@ impl Section {
     ) -> Result<Self, NtStatus> {
         vad::access_of(protect)?;
         let writable = matches!(protect, vad::PAGE_READWRITE | vad::PAGE_EXECUTE_READWRITE);
-        super::file::with_fs(|fs| fs.map(node, size, writable)).map_err(super::file::fs_status)?;
+        super::file::with_pages(|fs| fs.map(node, size, writable))
+            .map_err(super::file::fs_status)?;
         Ok(Section {
             size,
             protect,
@@ -622,7 +1291,7 @@ impl Section {
             (false, _) => (vad::PAGE_EXECUTE_WRITECOPY, false),
         };
         let shared = writes;
-        super::file::with_fs(|fs| fs.map(node, size, shared)).map_err(super::file::fs_status)?;
+        super::file::with_pages(|fs| fs.map(node, size, shared)).map_err(super::file::fs_status)?;
         Ok(Section {
             size,
             protect,
@@ -885,6 +1554,26 @@ fn map_image_view(
     base: u64,
     offset: u64,
 ) -> Result<Mapped, NtStatus> {
+    if let Some(mapped) = map_image_view_at(process, object, image, base, offset, false)? {
+        return Ok(mapped);
+    }
+    // Private pages are copied under the process's locks, where no page
+    // may be built (it reads the file): every page first, kept while they
+    // are copied.
+    let _pinned = image.pin_all().ok_or(NtStatus::NO_MEMORY)?;
+    map_image_view_at(process, object, image, base, offset, true)?.ok_or(NtStatus::NO_MEMORY)
+}
+
+/// `map_image_view`; None (nothing mapped) when the view needs private
+/// pages and the layout is not `pinned` whole.
+fn map_image_view_at(
+    process: &Process,
+    object: &ObjectRef,
+    image: &ImageLayout,
+    base: u64,
+    offset: u64,
+    pinned: bool,
+) -> Result<Option<Mapped>, NtStatus> {
     if offset != 0 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
@@ -949,7 +1638,11 @@ fn map_image_view(
             i += run;
         }
         let _ = views.try_push(View::new(view_base, size, 0, object.clone()));
-        return Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign });
+        return Ok(Some(Mapped { base: view_base, size, relocated: delta != 0, foreign }));
+    }
+    if !pinned {
+        let _ = vad.release(view_base, 0);
+        return Ok(None);
     }
     // Elsewhere private pages, relocated a page at a time (a large image
     // is never copied whole).
@@ -992,7 +1685,7 @@ fn map_image_view(
         }
     }
     let _ = views.try_push(View::new(view_base, size, 0, object.clone()));
-    Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign })
+    Ok(Some(Mapped { base: view_base, size, relocated: delta != 0, foreign }))
 }
 
 /// Unmaps the view containing `addr`.
@@ -1045,26 +1738,94 @@ pub fn mapped_file_name(process: &Process, addr: u64) -> Option<Result<Vec<u16>,
     Some(out.try_extend_from_slice(name).map(|()| out).map_err(|_| NtStatus::NO_MEMORY))
 }
 
-/// The data section frame backing user address `addr`, if it is in a
-/// view of a data section, with that section (keep it while the frame is
-/// used). Called with no lock held: a file's page may be made now, and
-/// the file system then delivers change notifications, which write user
-/// memory (and may fault).
-pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
-    let (section, index, view_base) = {
+/// A section's page a fault found (`frame_for`), mapped only if it is
+/// still current under the process's views lock (`current`).
+pub struct SectionPage {
+    /// The view's section (None for the executable's image); keep it
+    /// while the frame is used.
+    section: Option<ObjectRef>,
+    /// An image page's layout, index and view base.
+    image: Option<(KArc<ImageLayout>, usize, u64)>,
+    pub frame: Frame,
+}
+
+impl SectionPage {
+    /// Whether `addr` still shows this page: its view is still there
+    /// (`views`: the process's, locked by the caller) and an image page
+    /// is still its layout's. Invariant: the trimmer takes a page out of
+    /// its layout before it unmaps it from each process under that
+    /// process's views lock (`unmap_everywhere`), so a page checked here
+    /// and mapped before the lock goes is unmapped by it, and one taken
+    /// out first fails this check (the fault looks again).
+    pub fn current(&self, process: &Process, views: &[View], addr: u64) -> bool {
+        let there = match &self.section {
+            Some(s) => in_view_of(views, addr, s),
+            None => executable_page(process, addr).is_some(),
+        };
+        there
+            && match &self.image {
+                Some((layout, index, base)) => {
+                    layout.view_frame(*index, *base, false) == Some(self.frame)
+                }
+                None => true,
+            }
+    }
+
+    /// Whether every process mapping its section shares the page (a
+    /// pagefile-backed section, a file mapped writable through).
+    fn shared(&self) -> bool {
+        self.section.as_ref().is_some_and(|s| section_of(s).writes_through())
+    }
+}
+
+/// For `addr` in the process's executable image (mapped at its preferred
+/// base at the process's start, its pages at their first touch): its
+/// layout and the page's index.
+fn executable_page(process: &Process, addr: u64) -> Option<(&KArc<ImageLayout>, usize)> {
+    let (base, size) = process.image;
+    let layout = process.layout()?;
+    let inside = base == layout.base && (base..base.saturating_add(size)).contains(&addr);
+    inside.then(|| (layout, ((addr - base) / PAGE_SIZE) as usize))
+}
+
+/// The section frame backing user address `addr`, if it is in a view of
+/// a section or in the executable's image, made now. Called with no lock
+/// held: a file's page may be made now (read from the disk), and the file
+/// system then delivers change notifications, which write user memory
+/// (and may fault); an image's page is built from its file.
+pub fn frame_for(process: &Process, addr: u64) -> Option<SectionPage> {
+    let found = {
         let views = process.views.lock();
-        let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
-        let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
-        (v.section.clone(), index, v.base)
+        views.iter().find(|v| (v.base..v.base + v.size).contains(&addr)).and_then(|v| {
+            let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
+            Some((v.section.clone(), index, v.base))
+        })
+    };
+    let Some((section, index, view_base)) = found else {
+        let (layout, index) = executable_page(process, addr)?;
+        let layout = layout.clone();
+        let frame = layout.shared_frame(index)?;
+        let image = Some((layout, index, process.image.0));
+        return Some(SectionPage { section: None, image, frame });
     };
     // An image view's page: its shared (or shared relocated) frame, made
     // now; None for a view with private pages (mapped with the view) or
     // no memory.
-    let frame = match &section_of(&section).image {
-        Some(image) => image.view_frame(index, view_base, true)?,
-        None => section_of(&section).frame(index)?,
-    };
-    Some((section, frame))
+    match &section_of(&section).image {
+        Some(image) => {
+            let image = image.clone();
+            let frame = image.view_frame(index, view_base, true)?;
+            Some(SectionPage {
+                section: Some(section),
+                image: Some((image, index, view_base)),
+                frame,
+            })
+        }
+        None => {
+            let frame = section_of(&section).frame(index)?;
+            Some(SectionPage { section: Some(section), image: None, frame })
+        }
+    }
 }
 
 /// The frame behind `addr` if it is in a view whose pages every process
@@ -1072,8 +1833,8 @@ pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
 /// writable through), made now if it was not yet: the identity of the
 /// memory there across processes (a Linux shared futex's key).
 pub fn shared_frame_at(process: &Process, addr: u64) -> Option<Frame> {
-    let (section, frame) = frame_for(process, addr)?;
-    section_of(&section).writes_through().then_some(frame)
+    let page = frame_for(process, addr)?;
+    page.shared().then_some(page.frame)
 }
 
 /// For `addr` in one of `views` (the process's, locked by the caller):
@@ -1124,6 +1885,13 @@ mod tests {
 mod layout_tests {
     use super::*;
 
+    /// The bytes of page `index` of `layout` (built now if need be).
+    fn page_bytes(layout: &ImageLayout, index: usize) -> [u8; 4096] {
+        let mut out = [0u8; 4096];
+        layout.read_image(index * 4096, &mut out).unwrap();
+        out
+    }
+
     /// A layout's pages and relocations match the whole-image ones
     /// (`pe::relocate_page` over a contiguous layout).
     #[test]
@@ -1136,7 +1904,7 @@ mod layout_tests {
         image.lay_out(&mut whole);
         let reloc = image.directory(super::super::pe::DIRECTORY_BASERELOC);
         assert!(!layout.relocs.is_empty());
-        for i in 0..layout.pages.len() {
+        for i in 0..layout.page_protect.len() {
             let mut want = [0u8; 4096];
             super::super::pe::relocate_page(&whole, reloc, 0x10000, i * 4096, &mut want, None)
                 .unwrap();
@@ -1144,5 +1912,63 @@ mod layout_tests {
             layout.relocated_page(i, 0x10000, &mut got).unwrap();
             assert!(want == got, "page {i}");
         }
+    }
+
+    /// A layout built at first touch has the bytes of one built whole; its
+    /// pages go only after a second chance, and come back the same, also
+    /// relocated; a pinned layout keeps them all.
+    #[test]
+    fn dropped_pages_are_built_again_the_same() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../user/bin/testkernel32.dll");
+        let data = std::fs::read(path).unwrap();
+        let whole = ImageLayout::new(&data).unwrap();
+        let lazy = ImageLayout::lazy_from_bytes(&data).unwrap();
+        let count = whole.page_protect.len();
+        // Nothing is built before it is touched.
+        assert!((0..count).all(|i| lazy.resident_frame(i).is_none()));
+        let expected: Vec<[u8; 4096]> = (0..count).map(|i| page_bytes(&whole, i)).collect();
+        for (i, want) in expected.iter().enumerate() {
+            assert!(page_bytes(&lazy, i) == *want, "page {i} built at its first touch");
+        }
+        assert!((0..count).all(|i| lazy.resident_frame(i).is_some()));
+        // The first pass takes every page's second chance away.
+        let mut batch: Vec<Taken> = (0..count).map(|_| None).collect();
+        assert_eq!(lazy.take_cold(&mut batch, &mut { usize::MAX }), 0);
+        // Touched again since: page 0 stays, the rest go.
+        lazy.shared_frame(0).unwrap();
+        let n = lazy.take_cold(&mut batch, &mut { usize::MAX });
+        assert_eq!(n, count - 1);
+        assert!(batch.iter().flatten().all(|(i, page, _)| *i != 0 && page.is_some()));
+        drop(batch);
+        assert!(lazy.resident_frame(0).is_some());
+        assert!((1..count).all(|i| lazy.resident_frame(i).is_none()));
+        // Built again, the same bytes; relocated as the whole image's.
+        for (i, want) in expected.iter().enumerate() {
+            assert!(page_bytes(&lazy, i) == *want, "page {i} built again");
+            let (mut a, mut b) = ([0u8; 4096], [0u8; 4096]);
+            whole.relocated_page(i, 0x10000, &mut a).unwrap();
+            lazy.relocated_page(i, 0x10000, &mut b).unwrap();
+            assert!(a == b, "page {i} relocated");
+        }
+        assert_eq!(lazy.digest(), whole.digest());
+        // A pinned layout gives nothing up; one built whole neither.
+        let pinned = lazy.pin_all().unwrap();
+        let mut batch: Vec<Taken> = (0..count).map(|_| None).collect();
+        assert_eq!(
+            lazy.take_cold(&mut batch, &mut { usize::MAX })
+                + lazy.take_cold(&mut batch, &mut { usize::MAX }),
+            0
+        );
+        drop(pinned);
+        assert_eq!(
+            whole.take_cold(&mut batch, &mut { usize::MAX })
+                + whole.take_cold(&mut batch, &mut { usize::MAX }),
+            0
+        );
+        assert!(
+            lazy.take_cold(&mut batch, &mut { usize::MAX })
+                + lazy.take_cold(&mut batch, &mut { usize::MAX })
+                > 0
+        );
     }
 }

@@ -100,9 +100,16 @@ const OOM_RETRIES: u32 = 100;
 /// raised an access violation that exception_test's handler continued
 /// from for ever.
 pub fn resolve_fault(process: &Process, addr: u64, kind: AccessKind) -> Fault {
+    // Short of memory, image pages go first (they are built again from
+    // their files when touched): the file cache's pages, then images'.
+    super::persist::relieve();
     for _ in 0..OOM_RETRIES {
         match resolve_once(process, addr, kind) {
-            Fault::OutOfMemory => platform::sleep_ms(1),
+            Fault::OutOfMemory => {
+                // Whatever image pages can go (none if none can).
+                super::section::trim(256);
+                platform::sleep_ms(1);
+            }
             other => return other,
         }
     }
@@ -148,9 +155,7 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     }
     let section_frame = if mapped && !process.space.lock().is_mapped(addr) {
         match &section_page {
-            Some((section, frame)) if super::section::in_view_of(&views, addr, section) => {
-                Some(*frame)
-            }
+            Some(page) if page.current(process, &views, addr) => Some(page.frame),
             // An image page always has a frame (its view maps the private
             // ones at once): no memory to make it.
             None if looked_up && image => return Fault::OutOfMemory,

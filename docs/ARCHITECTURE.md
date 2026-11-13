@@ -684,9 +684,11 @@ numbers and the version reported to programs depend on it.
 (GalaCreateProcess):
 
 - **Image**: the executable is laid out by the image cache ("Sections")
-  and mapped at its preferred base (`process::map_image`), every page
-  borrowing the layout's shared frame (read-only, or copy-on-write for
-  writable sections), so processes of one program share its pages. The
+  and mapped at its preferred base (`process::map_image`): its ranges
+  committed, each page mapped at its first touch to the layout's shared
+  frame (read-only, or copy-on-write for writable sections:
+  `section::frame_for`), so processes of one program share its pages and
+  a page dropped under memory pressure comes back. The
   base must leave the first 64 KiB free and end below the PEB. The
   executable itself is not relocated (TODO in `map_image`: relocate when
   the preferred base is taken). Executables with imports are accepted
@@ -1403,12 +1405,49 @@ address-space teardown never free.
   is the image once: its pages are page-sized heap allocations
   (`ramfs::Page`, frames by `frame_of_heap_page`, as a file's pages are)
   that views at the preferred base map borrowed, so processes of one
-  program share its code, and the pages live as long as the layout (held
-  by the cache, sections and each process). It is built from the file a
-  page at a time (`ImageLayout::from_file`: the headers, then each
-  section's raw data read into the pages it lands in), never through a
-  copy of the whole file; only the relocation table is kept apart
-  (`relocs`, what relocating a page reads beside the page).
+  program share its code. Parsing reads only the headers and the
+  relocation table (`relocs`, what relocating a page reads beside the
+  page); the file's parts (the headers, each section's raw data) say
+  where each page's bytes come from.
+- **Image pages at first touch, dropped under pressure**: a layout of a
+  file with a stable version builds each page when it is first needed (a
+  fault in a view or the executable, a relocated page, a handover's
+  digest without keeping it) from the file (`ImageLayout::frame`,
+  `fill_page`; `file::read_version` checks the contents' version), and
+  holds the file (`RamFs::hold_image`): a write, a size change or a
+  writable mapping of a held file is refused with `FsError::ImageHeld`
+  until every layout of it lets it go (`release_image_holds`: an unused
+  one leaves the cache, one in use is built whole; logged; the retry is
+  `file::with_pages`'s, and a truncating open's), and a held file's data
+  outlives its names (detached until its last layout goes). Every
+  layout that holds its file is in the cache (a second one laid out at
+  once is dropped). While free memory is below the mark (a quarter, at
+  least 64 MiB: the file cache's), `section::trim` lets image pages go: a
+  clock with a second chance (`Slot::recent`, set when a page is built or
+  given to a fault) round the cache's layouts, at most 8192 pages looked
+  at per call; a page taken out of its layout (laid-out page and
+  relocated frame) is unmapped from every listed process that shows it
+  (`unmap_everywhere`: views at the preferred or alternative base, the
+  executable) under that process's views and space locks, then freed.
+  **Invariant**: a fault maps a layout's frame only after checking, under
+  its process's views lock, that the layout still has it
+  (`SectionPage::current`), so a page the trimmer takes out is either
+  refused there or unmapped by it; only listed processes map layout
+  frames (a handover's carried image pages come back by faults). A
+  layout made from memory, or from a file a writable data section maps,
+  is built whole and never dropped; a pinned one (`pin_all`: a view
+  that needs private relocated pages, built under its process's locks)
+  keeps its pages. The trim runs before each user fault
+  (`vm::resolve_fault`, through `persist::relieve`: the file cache's
+  pages first), from the lazy writer each second, and at a fault that
+  found no memory; a call that dropped nothing makes the next return at
+  once until 256 more pages were built. It says what it dropped
+  (`section: dropped N image frames (...): <image> <pages>, ...`, a
+  line a second at most; an `image trim` event per layout); the end of
+  a run and the state dump print `image pages: R of T in memory; built
+  B (again after a drop A), dropped D` (`section::PageStats`), the low
+  memory warning too. Host tests: `dropped_pages_are_built_again_the_same`,
+  `image_holds_keep_a_file_s_contents`; boot test `imagetrim_test`.
 - **Image bases**: an image view goes to the image's preferred base, or,
   when that is taken (every x64 DLL MSVC links prefers 0x180000000), to
   the image's system-wide alternative base, given once per image layout
@@ -1437,11 +1476,8 @@ address-space teardown never free.
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
   not the whole table. A relocated frame is made at the page's first
-  touch, outside the layout's lock. Laying the file out still makes the
-  whole image resident (chrome.dll: 340 MB, about 0.3 s per 33 MB under
-  TCG), once per file version: pages are not yet built at their first
-  touch nor dropped under memory pressure (they are clean, the file
-  holds them; ROADMAP OF, the memory).
+  touch, outside the layout's lock, from the layout's pages (built then
+  if need be).
 - **Copy-on-write**: PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY pages are
   mapped read-only (`vm::flags_for`). A write fault gives the page a
   private frame (a copy of the borrowed shared frame, or the frame it
@@ -6202,10 +6238,24 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   area is attached (`RamFs::attach_area`, by `persist::mount` after the
   replay). Boot modules stay where they are (their unchanged pages read
   from the module); a page of one that changes gets a cluster.
-- **Per page** (`ramfs::Slot`, beside the file's pages): its cluster, if
-  any; `dirty` (changed in memory since written); `stored` (the cluster
-  holds its data). A page is in memory, or on the disk only (`stored`,
+- **Per page** (`pagetable::Slot`): its cluster, if any; `dirty`
+  (changed in memory since written); `stored` (the cluster holds its
+  data); `recent`. A page is in memory, or on the disk only (`stored`,
   not in memory), or a hole (no cluster: the module's bytes or zeros).
+- **A file's page table** (`fs::pagetable::PageTable`) costs what is in
+  memory and the runs of clusters, not the file's size (a table of 16
+  bytes a page made Office's 12 000 files' tree 47 MiB): the pages in
+  memory sit in chunks of 512 slots (a heap page each, made when one of
+  its pages comes into memory, given back with its last), the chunk
+  table holding each chunk's `dirty`, `stored` and `recent` bits (208
+  bytes per 512 pages); clusters are extents (runs of consecutive pages
+  in consecutive clusters, sorted by page: a file written in one go is
+  one run, or a few). Changing a page's bits needs no memory (the
+  write-back and eviction free memory and must need none); only giving a
+  page a cluster may (a run split), and fails changing nothing. Eviction
+  skips chunks with no page in memory. Host tests in `pagetable`
+  (`a_large_file_not_in_memory_costs_its_chunk_table_and_runs`: 4 GiB on
+  the disk in under 512 KiB).
 - **Allocation** (`fs::clusters`, a bitmap in memory, rebuilt at each
   mount from the replayed files' clusters: nothing on the disk to keep
   consistent, a crash leaks nothing). A write takes a cluster for each
@@ -6326,7 +6376,9 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   could not reserve the writeback's or the log's buffers (`persist: no
   memory to reserve ...`), and, once each time free memory stays below
   the mark after letting pages go (again only after it was back at the
-  target), `persist: free memory stays low ...` with the files' pages in
+  target), `persist: free memory stays low after letting N pages and M
+  image frames go ...` (image pages go after the files' own:
+  `section::relieve`, "Sections") with the files' pages in
   memory (dirty, never written, of mapped files; the dirty list;
   `RamFs::cache_stats`), the heap, the frames by use ("Physical
   memory"), the kernel threads (dead ones, stacks not yet freed) and
@@ -14636,7 +14688,7 @@ older entries).
 |---|---|---|
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id; v3: the session; v4 (`handover_next`): the handovers it came through |
-| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
+| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file; the page is not mapped at adoption but comes back at its first touch from that layout, as only listed processes may map a layout's frames), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: comes back at its first touch, the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
 | 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |

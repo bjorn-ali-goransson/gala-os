@@ -358,19 +358,55 @@ pub fn read_all(node: NodeId) -> Result<Vec<u8>, NtStatus> {
 /// disk each page it finds on the disk only (a disk-backed C:, D4:
 /// `FsError::NotResident`), then running it again. The read happens with
 /// the file system released; a page that changed meanwhile is read again.
+/// A change to a file image layouts build pages from
+/// (`FsError::ImageHeld`) first lets them go
+/// (`section::release_image_holds`), once.
 pub fn with_pages<R>(mut f: impl FnMut(&mut RamFs) -> Result<R, FsError>) -> Result<R, FsError> {
+    let mut released = false;
     loop {
-        let (r, wanted) = with_fs(|fs| {
+        let (r, wanted, held) = with_fs(|fs| {
             let r = f(fs);
             let wanted =
                 if matches!(r, Err(FsError::NotResident)) { fs.take_page_in() } else { None };
-            (r, wanted)
+            let held = if matches!(r, Err(FsError::ImageHeld)) { fs.take_held() } else { None };
+            (r, wanted, held)
         });
-        match (r, wanted) {
-            (Err(FsError::NotResident), Some(req)) => page_in(&req)?,
-            (r, _) => return r,
+        match (r, wanted, held) {
+            (Err(FsError::NotResident), Some(req), _) => page_in(&req)?,
+            (Err(FsError::ImageHeld), _, Some(node)) if !released => {
+                super::section::release_image_holds(node);
+                released = true;
+            }
+            (r, _, _) => return r,
         }
     }
+}
+
+/// Reads exactly `buf.len()` bytes of file `node` from `offset` while its
+/// contents have version `version` (an image layout building a page:
+/// `section::ImageLayout`); NotFound if they changed or the file ends
+/// first.
+pub fn read_version(
+    node: NodeId,
+    version: u64,
+    offset: u64,
+    buf: &mut [u8],
+) -> Result<(), FsError> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done as u64;
+        let n = with_pages(|fs| {
+            if fs.node(node).and_then(ramfs::Node::version) != Some(version) {
+                return Err(FsError::NotFound);
+            }
+            fs.read(node, at, &mut buf[done..])
+        })?;
+        if n == 0 {
+            return Err(FsError::NotFound);
+        }
+        done += n;
+    }
+    Ok(())
 }
 
 /// Reads page `req` from its cluster into memory (see `with_pages`).
@@ -446,6 +482,9 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::DiskFull => NtStatus::DISK_FULL,
         // A page that could not be read from the disk (`with_pages`).
         FsError::NotResident => NtStatus::IO_DEVICE_ERROR,
+        // A change to a file whose image layouts could not let it go
+        // (`with_pages`): Windows' answer to a change of an image in use.
+        FsError::ImageHeld => NtStatus::SHARING_VIOLATION,
         // FSCTL_SET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT (NTFS's
         // answers).
         FsError::ReparseHasData => NtStatus::IO_REPARSE_DATA_INVALID,
@@ -779,83 +818,100 @@ pub fn create(
     };
     let now = platform::system_time();
     let mut via = None;
-    let (node, information) = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
-        let existing = match parts.last() {
-            None => Some(start),
-            Some(last) => {
-                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
-                let found = fs.find(parent, last).map_err(fs_status)?;
-                if found.is_some() && fs.is_hard_link(parent, last) {
-                    // Opened by a hard link: its own name (`FileObject::via`).
-                    if fs.entry_delete_pending(parent, last) {
-                        return Err(NtStatus::DELETE_PENDING);
+    // A truncating open of a file image layouts build pages from lets
+    // them go first (`section::release_image_holds`), then again.
+    let mut released = false;
+    let (node, information) = loop {
+        let mut held = None;
+        let r = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
+            let existing = match parts.last() {
+                None => Some(start),
+                Some(last) => {
+                    let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
+                    let found = fs.find(parent, last).map_err(fs_status)?;
+                    if found.is_some() && fs.is_hard_link(parent, last) {
+                        // Opened by a hard link: its own name (`FileObject::via`).
+                        if fs.entry_delete_pending(parent, last) {
+                            return Err(NtStatus::DELETE_PENDING);
+                        }
+                        let mut name = Vec::new();
+                        name.try_extend_from_slice(last).map_err(|_| NtStatus::NO_MEMORY)?;
+                        via = Some((parent, name));
                     }
-                    let mut name = Vec::new();
-                    name.try_extend_from_slice(last).map_err(|_| NtStatus::NO_MEMORY)?;
-                    via = Some((parent, name));
+                    found
                 }
-                found
+            };
+            match existing {
+                Some(node) => {
+                    let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+                    if disposition == FILE_CREATE {
+                        return Err(NtStatus::OBJECT_NAME_COLLISION);
+                    }
+                    // A Linux symbolic link or socket is a reparse point
+                    // nothing here follows (ARCHITECTURE "Files"): opened only
+                    // as itself. An NT link's was followed before
+                    // (`resolve_links`), unless it is the one to create.
+                    let reparse = n.is_symlink() || n.is_socket() || n.reparse().is_some();
+                    if reparse && options & FILE_OPEN_REPARSE_POINT == 0 {
+                        return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
+                    }
+                    if want_dir && !n.is_dir() {
+                        return Err(NtStatus::NOT_A_DIRECTORY);
+                    }
+                    if want_file && n.is_dir() {
+                        return Err(NtStatus::FILE_IS_A_DIRECTORY);
+                    }
+                    if access.write && n.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
+                        return Err(NtStatus::ACCESS_DENIED);
+                    }
+                    let truncate =
+                        matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
+                    if truncate && n.is_dir() {
+                        return Err(NtStatus::INVALID_PARAMETER);
+                    }
+                    fs.open(node, access, share).map_err(fs_status)?;
+                    let information = match disposition {
+                        FILE_SUPERSEDE => FILE_SUPERSEDED,
+                        FILE_OVERWRITE | FILE_OVERWRITE_IF => FILE_OVERWRITTEN,
+                        _ => FILE_OPENED,
+                    };
+                    if truncate && let Err(e) = fs.set_size(node, 0, now) {
+                        fs.close(node, access, share);
+                        if e == FsError::ImageHeld {
+                            held = fs.take_held();
+                        }
+                        return Err(fs_status(e));
+                    }
+                    Ok((node, information))
+                }
+                None => {
+                    if matches!(disposition, FILE_OPEN | FILE_OVERWRITE) {
+                        return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
+                    }
+                    let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+                    let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
+                    let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
+                    // In a Linux tree (a WSL distribution's: its directories
+                    // have POSIX modes), a file Windows makes gets the mode
+                    // WSL's server gives one, 0644 (a directory 0755), so
+                    // Linux sees it as it would a file it made.
+                    if fs.node(parent).is_some_and(|p| p.mode.is_some()) {
+                        fs.set_mode(node, if want_dir { 0o755 } else { 0o644 })
+                            .map_err(fs_status)?;
+                    }
+                    fs.open(node, access, share).map_err(fs_status)?;
+                    Ok((node, FILE_CREATED))
+                }
             }
-        };
-        match existing {
-            Some(node) => {
-                let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
-                if disposition == FILE_CREATE {
-                    return Err(NtStatus::OBJECT_NAME_COLLISION);
-                }
-                // A Linux symbolic link or socket is a reparse point
-                // nothing here follows (ARCHITECTURE "Files"): opened only
-                // as itself. An NT link's was followed before
-                // (`resolve_links`), unless it is the one to create.
-                let reparse = n.is_symlink() || n.is_socket() || n.reparse().is_some();
-                if reparse && options & FILE_OPEN_REPARSE_POINT == 0 {
-                    return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
-                }
-                if want_dir && !n.is_dir() {
-                    return Err(NtStatus::NOT_A_DIRECTORY);
-                }
-                if want_file && n.is_dir() {
-                    return Err(NtStatus::FILE_IS_A_DIRECTORY);
-                }
-                if access.write && n.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
-                    return Err(NtStatus::ACCESS_DENIED);
-                }
-                let truncate =
-                    matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
-                if truncate && n.is_dir() {
-                    return Err(NtStatus::INVALID_PARAMETER);
-                }
-                fs.open(node, access, share).map_err(fs_status)?;
-                let information = match disposition {
-                    FILE_SUPERSEDE => FILE_SUPERSEDED,
-                    FILE_OVERWRITE | FILE_OVERWRITE_IF => FILE_OVERWRITTEN,
-                    _ => FILE_OPENED,
-                };
-                if truncate && let Err(e) = fs.set_size(node, 0, now) {
-                    fs.close(node, access, share);
-                    return Err(fs_status(e));
-                }
-                Ok((node, information))
+        });
+        match (r, held) {
+            (Err(_), Some(node)) if !released => {
+                crate::nt::section::release_image_holds(node);
+                released = true;
             }
-            None => {
-                if matches!(disposition, FILE_OPEN | FILE_OVERWRITE) {
-                    return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
-                }
-                let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
-                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
-                let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
-                // In a Linux tree (a WSL distribution's: its directories
-                // have POSIX modes), a file Windows makes gets the mode
-                // WSL's server gives one, 0644 (a directory 0755), so
-                // Linux sees it as it would a file it made.
-                if fs.node(parent).is_some_and(|p| p.mode.is_some()) {
-                    fs.set_mode(node, if want_dir { 0o755 } else { 0o644 }).map_err(fs_status)?;
-                }
-                fs.open(node, access, share).map_err(fs_status)?;
-                Ok((node, FILE_CREATED))
-            }
+            (r, _) => break r?,
         }
-    })?;
+    };
     let directory = with_fs(|fs| fs.node(node).is_some_and(ramfs::Node::is_dir));
     let file = FileObject {
         node,

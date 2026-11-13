@@ -1213,6 +1213,8 @@ struct Dll {
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
+    // imagetrim_test's DLL of known contents.
+    Dll { package: "imagetrim_dll", file: "imagetrim_dll.dll", exported_as: "imagetrim_dll.dll" },
     Dll { package: "tlsdll", file: "tlsdll.dll", exported_as: "tlsdll.dll" },
     // gala's kernel32.dll, exported under another name like ntdll.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
@@ -3795,6 +3797,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // Hard links and delete dispositions (user/hardlink_test).
     ("hardlink_test", "ntdll.dll", "Windows/System32"),
     ("hardlink_test", "kernel32.dll", "Windows/System32"),
+    ("imagetrim_test", "ntdll.dll", "Windows/System32"),
+    ("imagetrim_test", "kernel32.dll", "Windows/System32"),
+    ("imagetrim_test", "imagetrim_dll.dll", "gala"),
     ("wow64_hardlink_test", "wow64.dll", "Windows/System32"),
     ("wow64_hardlink_test", "ntdll.dll", "Windows/System32"),
     ("wow64_hardlink_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -4049,6 +4054,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "hardlink_test",
+    "imagetrim_test",
     "writeback_test",
     "gdiplus_test",
     "uisettings_test",
@@ -4159,13 +4165,6 @@ const LINUX_MENU_TIMEOUT: Duration = Duration::from_secs(600);
 /// Memory for `linux_menu`'s VM: the image's Linux roots, the
 /// distribution's tree (a second copy, on C: in memory), its download.
 const LINUX_MENU_MEMORY_MIB: u64 = 1536;
-/// Memory for `office_install_local`'s VM. A NAMED STOPGAP (ROADMAP
-/// "Known issues and stopgaps"): at 512 MiB the install's publish ran out
-/// of frames (the kernel heap grown by Office's registry kept wholly in
-/// memory, the service's private memory with no page file, image
-/// sections copied from the file cache). Replaced by those fixes (ROADMAP
-/// OF, "the memory"); then the scenario goes back to the default.
-const OFFICE_LOCAL_MEMORY_MIB: u64 = 4096;
 /// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
 /// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
 /// gala guest under TCG fetched 512 MiB of the same CDN file with curl
@@ -5994,10 +5993,6 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("linux_menu")) {
         memory = memory.max(LINUX_MENU_MEMORY_MIB);
     }
-    // A stopgap to replace (OFFICE_LOCAL_MEMORY_MIB).
-    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("office_install_local")) {
-        memory = memory.max(OFFICE_LOCAL_MEMORY_MIB);
-    }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
@@ -7591,6 +7586,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=hardlink_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["hardlink_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Image pages dropped under memory pressure and built again from
+        // their files (ROADMAP OF, the memory; user/imagetrim_test): a
+        // DLL and its relocated copy read the same while private memory
+        // fills the machine to an eighth free; the kernel says what it
+        // dropped.
+        name: "imagetrim_test",
+        cmdline: "qemu_exit run=imagetrim_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "section: dropped",
+            "imagetrim_dll.dll",
+            "imagetrim_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The same through WOW64 (user/hardlink_test built for x86).
@@ -11744,6 +11755,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("imagetrim_test", "memory pressure: gala-um's memory is the host's, never short"),
     ("taskmgr", "needs a screen (Task Manager's window) and Linux programs (no LX in gala-um yet)"),
     ("explorer", "needs a screen (Explorer's window) and Linux programs (no LX in gala-um yet)"),
     ("wsl", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
