@@ -2044,7 +2044,21 @@ need gala's.
      msxml3 tests run on Windows; ARCHITECTURE "msxml6"). To measure on
      Windows (its `info` lines): removeAttributeNode and removeAttribute
      of what the element lacks, normalize's empty text, importNode(NULL),
-     the bytes save writes. To measure on Windows
+     the bytes save writes. With them the merge completes (C2R's log:
+     `AppX::ManifestMerge::Merge` "Finished AppX manifest merge", each
+     product's manifest merged into `AppXManifest.common.16.xml`,
+     `AppXManifest::Save` to `Microsoft Office\AppXManifest.xml` and
+     `ThinAppXManifest.xml`), and `OfficeVirtRegistration` then failed
+     in App-V's `OISVAPI::ConfigurePackage` (`xmlutils.cpp : 56`,
+     0x80040154): it asks COM for FreeThreadedDOMDocument60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a06), so APPLYCONFIGURATION ended with 30175 and the
+     service with 17002 at about 1700 s. Done: FreeThreadedDOMDocument60
+     registered and served (`msxml_test`'s `free_threaded`, x64 and
+     x86). A stopgap to replace: it is the rental document, which locks
+     nothing (recorded at each creation); a free-threaded document needs
+     its calls serialized (a lock per document around every method)
+     before a program uses one from two threads at once. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).

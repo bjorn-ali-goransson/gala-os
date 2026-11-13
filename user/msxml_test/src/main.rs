@@ -4,7 +4,8 @@
 //! (dlls/msxml3/tests/domdoc.c, run against Windows, where MSXML 6 is
 //! part of the system) and of real Windows on CI's runner (this program's
 //! run there):
-//! - CoCreateInstance(CLSID_DOMDocument60) gives IXMLDOMDocument2, which
+//! - CoCreateInstance(CLSID_DOMDocument60) (and
+//!   CLSID_FreeThreadedDOMDocument60) gives IXMLDOMDocument2, which
 //!   answers QueryInterface for IXMLDOMDocument3, IXMLDOMDocument,
 //!   IXMLDOMNode, IDispatch and IUnknown; on a thread that never
 //!   initialized COM it is CO_E_NOTINITIALIZED while the process has no
@@ -181,6 +182,8 @@ const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
 const DOM_D4: [u8; 8] = [0xb2, 0x0e, 0x00, 0xc0, 0x4f, 0x98, 0x3e, 0x60];
 const CLSID_DOMDOCUMENT60: Guid =
     guid(0x88d9_6a05, 0xf192, 0x11d4, [0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5]);
+const CLSID_FREETHREADEDDOMDOCUMENT60: Guid =
+    guid(0x88d9_6a06, 0xf192, 0x11d4, [0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5]);
 const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_IDISPATCH: Guid = guid(0x0002_0400, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_IXMLDOMNODE: Guid = guid(0x2933_bf80, 0x7b36, 0x11d2, DOM_D4);
@@ -1277,10 +1280,40 @@ fn run() -> Result<(), u32> {
     clone(&mut c, doc)?;
     inherited_namespaces(&mut c, doc)?;
     mutation::mutation(&mut c, doc)?;
+    free_threaded(&mut c)?;
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };
     implicit_mta(&mut c)
+}
+
+/// FreeThreadedDOMDocument60 (msxml6.h's CLSID; Click-to-Run's App-V
+/// pieces create it): the same document interfaces, loading and
+/// selecting as DOMDocument60's.
+fn free_threaded(c: &mut Checks) -> Result<(), u32> {
+    let mut doc: Obj = null_mut();
+    // SAFETY: valid GUIDs and output.
+    let hr = unsafe {
+        CoCreateInstance(
+            &CLSID_FREETHREADEDDOMDOCUMENT60,
+            null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IXMLDOMDOCUMENT2,
+            &mut doc,
+        )
+    };
+    c.hr(hr, S_OK)?;
+    let (hr, doc3) = query(doc, &IID_IXMLDOMDOCUMENT3);
+    c.hr(hr, S_OK)?;
+    release(doc3);
+    let (hr, ok) = load_xml(doc, "<a><b/></a>");
+    c.hr(hr, S_OK)?;
+    c.eq(ok as u16 as u64, VARIANT_TRUE as u16 as u64)?;
+    let (hr, b) = select_single(doc, "a/b");
+    c.hr(hr, S_OK)?;
+    release(b);
+    release(doc);
+    Ok(())
 }
 
 /// What CoCreateInstance(CLSID_DOMDocument60) gave on a thread that

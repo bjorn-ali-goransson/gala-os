@@ -4657,12 +4657,17 @@ with (`msxml_test`, `wow64_msxml_test`; ROADMAP OF). `user/msxml6`,
 built for x64 and x86.
 
 - **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
-  ProgID Msxml2.DOMDocument.6.0) under `HKLM\SOFTWARE\Classes\CLSID`
-  and `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
+  ProgID Msxml2.DOMDocument.6.0) and FreeThreadedDOMDocument60
+  ({88D96A06-...}, Msxml2.FreeThreadedDOMDocument.6.0; Click-to-Run's
+  App-V pieces create it) under `HKLM\SOFTWARE\Classes\CLSID` and
+  `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
   `%SystemRoot%\System32\msxml6.dll` (SysWOW64's for 32-bit programs,
   through the file system redirector); ole32's CoCreateInstance loads it
-  and calls DllGetClassObject. FreeThreadedDOMDocument60 and the older
-  MSXML classes are not registered (CoGetClassObject records the class).
+  and calls DllGetClassObject. The free-threaded class is the same
+  document, which locks nothing (a stopgap, ROADMAP OF; each creation is
+  recorded, `FreeThreadedDOMDocument60(served as rental: no locking)`).
+  The older MSXML classes are not registered (CoGetClassObject records
+  the class).
 - **Objects** (`com.rs`): the document owns its tree, an arena of nodes
   (`dom.rs`; index 0 the document node). A node object handed out is a
   wrapper (vtable for its node type, references, document, index) that
