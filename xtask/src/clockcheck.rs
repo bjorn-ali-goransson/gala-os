@@ -132,6 +132,22 @@ pub struct Watcher {
     thread: Option<thread::JoinHandle<()>>,
     log: PathBuf,
     start: Instant,
+    paused: Arc<Mutex<Paused>>,
+}
+
+/// Time the VM spent stopped on purpose (a machine snapshot's save,
+/// snapshot.rs): its clocks do not run then, so the host's time leaves
+/// it out too.
+#[derive(Default)]
+struct Paused {
+    total: Duration,
+    since: Option<Instant>,
+}
+
+impl Paused {
+    fn now(&self) -> Duration {
+        self.total + self.since.map_or(Duration::ZERO, |s| s.elapsed())
+    }
 }
 
 impl Watcher {
@@ -139,16 +155,33 @@ impl Watcher {
     pub fn start(log: &Path, start: Instant) -> Self {
         let marks = Arc::new(Mutex::new(ClockMarks::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(Mutex::new(Paused::default()));
         let thread = {
             let (marks, stop, log) = (marks.clone(), stop.clone(), log.to_path_buf());
+            let paused = paused.clone();
             thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    poll_now(&marks, &log, start);
+                    poll_now(&marks, &log, start, &paused);
                     thread::sleep(POLL);
                 }
             })
         };
-        Watcher { marks, stop, thread: Some(thread), log: log.to_path_buf(), start }
+        Watcher { marks, stop, thread: Some(thread), log: log.to_path_buf(), start, paused }
+    }
+
+    /// The VM is being stopped on purpose (until `resumed`).
+    pub fn paused(&self) {
+        if let Ok(mut p) = self.paused.lock() {
+            p.since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    pub fn resumed(&self) {
+        if let Ok(mut p) = self.paused.lock()
+            && let Some(since) = p.since.take()
+        {
+            p.total += since.elapsed();
+        }
     }
 
     /// Stops the thread, reads the rest of the log, gives the verdict.
@@ -157,13 +190,16 @@ impl Watcher {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        poll_now(&self.marks, &self.log, self.start);
+        poll_now(&self.marks, &self.log, self.start, &self.paused);
         self.marks.lock().ok()?.verdict()
     }
 }
 
-fn poll_now(marks: &Mutex<ClockMarks>, log: &Path, start: Instant) {
-    let ms = || start.elapsed().as_millis() as u64;
+fn poll_now(marks: &Mutex<ClockMarks>, log: &Path, start: Instant, paused: &Mutex<Paused>) {
+    let ms = || {
+        let off = paused.lock().map_or(Duration::ZERO, |p| p.now());
+        start.elapsed().saturating_sub(off).as_millis() as u64
+    };
     if let Ok(mut m) = marks.lock() {
         m.poll(log, ms(), ms);
     }

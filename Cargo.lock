@@ -2408,6 +2408,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapshot_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

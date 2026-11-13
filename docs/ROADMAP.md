@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first, and a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -2030,10 +2030,16 @@ need gala's.
      element that uses it (Wine's msxml3 tests; `msxml_test`'s
      `inherited_namespaces`, x64 and x86: each subtree's xml loads
      again with its names in their namespaces), and the ledger has the
-     text at a parse error (`parse error at: ...`). Next: the merge
-     again, with the install resumed from a machine snapshot (ROADMAP
-     SN) rather than a 30-minute run; if it still fails, the ledger's
-     `parse error at:` shows the service's input. To measure on Windows
+     text at a parse error (`parse error at: ...`). With it the
+     manifest loads and the merge goes on to change the merged document:
+     the service ends at IXMLDOMNode::replaceChild, which gala's msxml6
+     lacks (`msxml6.dll!IXMLDOMNode::replaceChild not implemented, ending
+     the process`; OfficeClickToRun.exe 17002 at about 1648 s, setup.exe
+     at about 1690 s; the same end resumed from a machine snapshot taken
+     at `process integrator.exe`, 21 s of run time instead of 1706 s,
+     ROADMAP SN). Next: replaceChild, test first in `msxml_test`, then
+     the merge again (a snapshot cannot carry the fix: msxml6.dll is a
+     boot module the service loaded at about 42 s). To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
@@ -4120,20 +4126,55 @@ times to branch (try two fixes from the same state). For users,
 `gala snapshot` saves a program and `gala restore` brings it back,
 on the same machine or, exported, on another.
 
-**Step 1: whole-machine snapshots in xtask.** QEMU saves and restores a
-whole VM (memory, devices, a copy-on-write disk layer); no kernel
-change. xtask saves when a given ledger or serial line appears
-(`--snapshot-at <pattern> --snapshot-name <name>`) and starts later
-runs from it (`--from-snapshot <name>`), each run on its own disk
-layer so branches do not see each other. Limits: the guest clock jumps
-on restore (the kernel re-reads time as after a host stall), and
-connections to the host and the internet are gone (local sources are
-fine). A restored run is not a replay: threads may interleave
-differently (R5 is the deterministic tool). Snapshots speed up
-iteration and never replace a full run: CI keeps running every
-scenario from boot. Snapshots of the Office install hold several GB,
-kept under `target/snapshots`, with their size and the build they came
-from (a snapshot of another build is refused with the reason).
+**Step 1: whole-machine snapshots in xtask.** Done
+(`xtask/src/snapshot.rs`, WORKFLOW "Machine snapshots"; scenario
+`snapshot_machine`, host tests `snapshot::tests`). `boot-test <scenario>
+--snapshot-at <line> --snapshot-name <name> [--snapshot-stop]` saves the
+machine when the line comes in its serial log (the ledger's lines are
+there too): over QMP, `stop`, `blockdev-snapshot-sync` (the disk image,
+frozen, moves into the snapshot; the run goes on in a new qcow2 layer),
+then a migration of memory and devices through gzip. `boot-test
+--from-snapshot <name>` starts QEMU with `-incoming` from it, on a qcow2
+layer of its own over the frozen disk, and judges what comes after the
+resume. `cargo xtask snapshots [rm <name>]` lists and deletes them
+(`target/snapshots/<name>/`: manifest, state, disk, the log up to the
+save). A snapshot resumes only on the build it was taken from: the
+manifest names the SHA-256 of the kernel, every boot module and the
+command line, QEMU, the accelerator, memory and processors, and a
+difference is refused with each one named. That is exactly what the
+saved memory holds: gala's DLLs and test programs are boot modules
+loaded into memory by Limine, not files on the disk, so a changed DLL is
+refused as a changed kernel is. No kernel change was needed: the
+guest's clocks stop with the machine and go on from the saved values
+(no jump; only the RTC follows the host, and the kernel reads it only
+after boot), so its wall clock is behind the host's by the time saved
+(ARCHITECTURE "What a guest's clock follows"); the host-side clock check
+leaves the save's pause out. `snapshot_machine` runs in `cargo xtask
+test` (about 20 s under TCG). Connections to the host and the internet
+do not survive a resume (local sources are fine); a resumed run is not
+a replay (R5 is the deterministic tool); snapshots never replace a full
+run in CI. Limits: one scenario booted alone, BIOS boots, not a
+snapshot of a resumed run.
+Measured on `office_install_local` (TCG, with #117's msxml6): saved at
+`process integrator.exe (pid` (1675 s into the run, just before App-V's
+manifest merge) in 5.2 s, 117 MiB of state and the 7.6 GB disk (in
+`/dev/shm`); resumed in 3.1 s, the run reached the install's end (the
+service's IXMLDOMNode::replaceChild, ROADMAP OF) in 21 s of run time,
+where the run from boot took 1706 s. The service had loaded
+`System32\msxml6.dll` at about 42 s (`events=image`), so no snapshot
+past the first minute can take a changed msxml6.dll, even once DLLs
+are files on the disk: a resumed run can only take a module no process
+has mapped yet.
+Next (step 1c): resuming with other DLLs. Since they are boot
+modules, a snapshot cannot take a fixed DLL today; for fixes in DLLs
+the Office install has not loaded yet at the save, the boot modules
+would move to the disk (the open question in ARCHITECTURE "Chain of
+trust"), and a resumed run's own layer would take the new files (same
+place on the disk; the kernel's file tree in memory names their size and
+clusters, so a file that grows needs the kernel's help, a boot module
+the kernel reads at a resume). Until then a snapshot is taken with the
+build the fix is tried on (the fix in a stage after the save) and
+resumed as often as the stage needs.
 
 **Step 1b: a failing CI run leaves its snapshot.** When a scenario
 fails or times out in CI, xtask asks QEMU to save the VM before ending

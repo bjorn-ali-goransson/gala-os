@@ -466,6 +466,14 @@ of the time, and the HPET still advanced exactly with host time). So:
   test limits therefore count the VM's run time (wall time less its
   vCPU threads' run-queue wait: `xtask/src/vmtime.rs`), not any guest
   clock.
+- A machine stopped by QEMU (a whole-machine snapshot's save, WORKFLOW
+  "Machine snapshots") stops these clocks with it, and a resumed
+  snapshot goes on from the saved values: the kernel sees no jump, and
+  nothing in it needs to re-read time. Only the CMOS RTC follows the
+  host across the gap, and the kernel reads it only during the RTC check
+  after boot, so the guest's wall clock (boot time plus the TSC) stays
+  behind the host's by the time the machine was stopped or saved
+  (measured by `snapshot_machine`).
 - Timer interrupts can come tens of ms late (QEMU raises them from its
   main-loop thread), so KUSER_SHARED_DATA's snapshot, written at each
   tick as on Windows, can lag the performance counter by that much: a
