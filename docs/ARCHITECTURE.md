@@ -4766,8 +4766,9 @@ built for x64 and x86.
   (UTF-8, or UTF-16 LE with a BOM when the declaration names UTF-16;
   streams recorded, E_NOTIMPL). The rules: a NULL node is E_INVALIDARG
   with the output left alone; a reference or old node that is not a
-  child E_INVALIDARG with the output NULL; the document, the parent or
-  its ancestor, a kind the parent cannot hold (a document takes one
+  child E_INVALIDARG with the output NULL; a document node
+  E_INVALIDARG (measured on Windows Server 2025; Wine's tests expect
+  E_FAIL); the parent or its ancestor, a kind the parent cannot hold (a document takes one
   element, comments and processing instructions; an attribute text
   only; text, comments and processing instructions nothing) E_FAIL; an
   attribute on an element already E_FAIL; a namespace declaration
