@@ -848,13 +848,18 @@ fn evict() {
     let want = (low + 16 * 256 - free) as usize;
     let gone = file::with_fs(|fs| fs.evict(want));
     EVICTED.fetch_add(gone as u64, Ordering::Relaxed);
-    // Then image pages (built again from their files when touched).
-    let images = super::section::relieve();
-    // Then processes' private pages, to the page file (written first: the
-    // dearest to let go, so the last).
+    // Then processes' private pages that were not touched since the page
+    // file's clock last passed (the processor's accessed bit: cold by
+    // evidence), to the page file; then image pages (built again from
+    // their files when touched), whose mark says only when a page was
+    // built or faulted in, not whether it is in use: put first, they went
+    // while in use and came back at once (at 384 MiB Office's service
+    // dropped 9 000 image pages and built 3 300 again with 190 MiB of
+    // private memory resident).
     let (free, _) = platform::frame_stats();
     let paged =
         if free < low { super::pagefile::page_out((low + 16 * 256 - free) as usize) } else { 0 };
+    let images = super::section::relieve();
     // Short of the mark: say once (until free memory is back above it)
     // what holds the memory, so a run that ends out of memory explains
     // itself.

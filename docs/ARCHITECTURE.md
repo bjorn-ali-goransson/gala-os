@@ -1267,10 +1267,15 @@ so a machine commits more than its memory, as Windows does.
   only NT processes are looked at), not the PEB's page and not TEBs
   (the kernel reads a TEB under the VAD's lock, `thread::current_stack`,
   where no fault can be resolved).
-- **When**: `persist::evict`, after the file cache's pages and image
-  pages (`section::relieve`) could not bring free memory back to the
-  mark (a quarter of memory, at least 64 MiB), pages out what is still
-  missing, at most 1024 pages (4 MiB) per call: so before each user
+- **When**: `persist::evict`, after the file cache's pages could not
+  bring free memory back to the mark (a quarter of memory, at least 64
+  MiB), pages out what is still missing, at most 1024 pages (4 MiB) per
+  call, before image pages go (`section::relieve`): a private page goes
+  only when the processor has not touched it since the hand last passed
+  (cold by evidence), while an image page's mark says only when it was
+  built or faulted in; with images first, Office's service at 384 MiB
+  dropped image pages in use and built them again at once, thousands,
+  while its private memory stayed resident. So before each user
   fault while memory is short, from the lazy writer each second, after
   every sync, and from a fault that found no memory (`resolve_fault`'s
   retries call `persist::relieve`).
@@ -1573,7 +1578,8 @@ address-space teardown never free.
   that needs private relocated pages, built under its process's locks)
   keeps its pages. The trim runs before each user fault
   (`vm::resolve_fault`, through `persist::relieve`: the file cache's
-  pages first), from the lazy writer each second, and at a fault that
+  pages first, then cold private pages to the page file, "The page
+  file"), from the lazy writer each second, and at a fault that
   found no memory; a call that dropped nothing makes the next return at
   once until 256 more pages were built. It says what it dropped
   (`section: dropped N image frames (...): <image> <pages>, ...`, a
@@ -6510,8 +6516,9 @@ more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
   could not reserve the writeback's or the log's buffers (`persist: no
   memory to reserve ...`), and, once each time free memory stays below
   the mark after letting pages go (again only after it was back at the
-  target), `persist: free memory stays low after letting N pages and M
-  image frames go ...` (image pages go after the files' own:
+  target), `persist: free memory stays low after letting N pages, M
+  image frames and P private pages go ...` (private pages go to the page
+  file after the files' own, then image pages: "The page file",
   `section::relieve`, "Sections") with the files' pages in
   memory (dirty, never written, of mapped files; the dirty list;
   `RamFs::cache_stats`), the heap, the frames by use ("Physical
