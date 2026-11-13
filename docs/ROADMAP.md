@@ -3083,15 +3083,38 @@ kernel), the Hyper-V backends of both products, and Windows containers
    `/proc` and `/sys` as these programs read them. Namespaces and
    cgroups are core objects (ARCHITECTURE "Plan: Linux containers
    through a WSL facade"), not LX-only state.
+   Nesting is a requirement, not an afterthought: namespaces and
+   cgroups are trees whose every level carries its own limits (a
+   cgroup subtree delegated to a container is divided again inside
+   it), and gala's overlay takes an overlay as its upper layer (Linux's
+   refuses, which is why Docker-in-Docker falls back to `vfs` or a
+   volume there). Goal beyond Linux: a nested container runtime
+   without `--privileged`, an inner root fully contained (as Sysbox
+   does on Linux).
 5. Podman: `podman machine init`, `start`, then `podman run` from the
    Windows side; Podman Desktop after BR stage 2 (Electron).
 6. Docker Desktop: install, the backend service, its distribution, the
    `docker` CLI over `\\.\pipe\docker_engine` running containers; then
    the dashboard (Electron, after BR stage 2).
+7. Container engines on Linux itself, with no Windows side: in a
+   distribution on gala (a WSL one or LD's desktop), the distribution's
+   own `podman` and `docker` (dockerd, containerd, runc or crun) run
+   containers, rootless Podman first (user namespaces with
+   newuidmap/newgidmap and /etc/subuid, rootless networking through
+   pasta or slirp4netns, overlay in a user namespace, cgroup v2
+   delegated by systemd's user instance), then rootful Podman and
+   Docker.
+8. Nesting: the official `docker:dind` image runs `docker run --rm
+   hello-world` inside it; Podman in Podman (`quay.io/podman/stable`)
+   likewise; then both without `--privileged`. The sibling pattern
+   (the host's `/var/run/docker.sock` mounted into a container) comes
+   with step 6 or 7.
 
 **Done when**: from a gala command prompt, `podman run --rm hello-world`
 and `docker run --rm hello-world` print their greeting with both
-products installed by their own installers; then a container serving
+products installed by their own installers; the same from a shell in a Linux
+distribution on gala with its own Podman and Docker, and from inside a
+`docker:dind` container; then a container serving
 HTTP reached from the Windows side (`-p 8080:80`). Observability with
 each step: the facade's calls as events (`events=wsl`), each
 distribution's console and the products' logs copied into the serial
