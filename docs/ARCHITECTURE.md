@@ -4776,7 +4776,9 @@ built for x64 and x86.
   E_INVALIDARG, the output NULL (MSXML 6 measured on Windows Server
   2025; Wine's msxml3 tests expect E_FAIL); a document's second element
   E_FAIL; an attribute on an element already E_FAIL; a namespace declaration
-  cannot be changed in place (E_FAIL). The node returned is the object
+  cannot be changed in place (E_FAIL); put_nodeValue on a document is
+  E_INVALIDARG (MSXML 6 measured on Windows; Wine's msxml3 tests expect
+  E_FAIL), on an element or fragment E_FAIL. The node returned is the object
   passed (the same pointer). A fragment inserted gives its children and
   is left empty. Text inserted into an attribute adds to its value (an
   attribute has no child nodes in gala's tree: replaceChild and

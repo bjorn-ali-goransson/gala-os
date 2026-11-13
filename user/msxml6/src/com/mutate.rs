@@ -321,13 +321,16 @@ pub(super) extern "system" fn put_text(this: Obj, s: Bstr) -> HResult {
     }
 }
 
-/// IXMLDOMNode::put_nodeValue: E_FAIL for elements, documents and
-/// fragments (they have none); strings and numbers otherwise.
+/// IXMLDOMNode::put_nodeValue: a document is E_INVALIDARG (MSXML 6
+/// measured on Windows; Wine's msxml3 tests expect E_FAIL), elements and
+/// fragments E_FAIL (they have no value); strings and numbers otherwise.
 pub(super) extern "system" fn put_node_value(this: Obj, v: Variant) -> HResult {
     let d = doc(this);
     let i = idx(this);
-    if matches!(d.tree.node(i).kind, Kind::Element | Kind::Document | Kind::Fragment) {
-        return E_FAIL;
+    match d.tree.node(i).kind {
+        Kind::Document => return E_INVALIDARG,
+        Kind::Element | Kind::Fragment => return E_FAIL,
+        _ => {}
     }
     match variant_text(&v) {
         Some(value) => set_value(d, i, value),

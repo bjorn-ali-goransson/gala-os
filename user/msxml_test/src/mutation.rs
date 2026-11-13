@@ -720,12 +720,12 @@ fn attributes(c: &mut Checks) -> Result<(), u32> {
     let mut s: Bstr = null_mut();
     c.hr(call!(el, GET_NAMESPACE_URI, fn(*mut Bstr) -> HResult, &mut s), S_FALSE)?;
     xml_is(c, el, "<prefix:name xmlns:prefix=\"uri\"/>")?;
-    c.hr(set_attribute(el, "xmlns:prefix", "uri2"), E_FAIL)?;
+    c.code(set_attribute(el, "xmlns:prefix", "uri2"), E_FAIL)?;
     xml_is(c, el, "<prefix:name xmlns:prefix=\"uri\"/>")?;
     let name = Wide::new("xmlns:prefix");
     let mut attr: Obj = null_mut();
     c.hr(call!(el, GET_ATTRIBUTE_NODE, fn(Bstr, *mut Obj) -> HResult, name.0, &mut attr), S_OK)?;
-    c.hr(put_text(attr, "uri3"), E_FAIL)?;
+    c.code(put_text(attr, "uri3"), E_FAIL)?;
     release(attr);
     c.hr(set_attribute(el, "attr1", "value"), S_OK)?;
     let name = Wide::new("attr1");
@@ -793,13 +793,15 @@ fn attributes(c: &mut Checks) -> Result<(), u32> {
     release(el);
 
     // put_nodeValue.
-    c.hr(put_node_value(doc, "one two three"), E_FAIL)?;
+    // A document: E_INVALIDARG (MSXML 6 on Windows; Wine's msxml3
+    // tests expect E_FAIL).
+    c.code(put_node_value(doc, "one two three"), E_INVALIDARG)?;
     let (hr, fragment) = create_node(doc, NODE_DOCUMENT_FRAGMENT, Some("test"), None);
     c.hr(hr, S_OK)?;
-    c.hr(put_node_value(fragment, "one two three"), E_FAIL)?;
+    c.code(put_node_value(fragment, "one two three"), E_FAIL)?;
     release(fragment);
     let el = create(c, doc, CREATE_ELEMENT, "test")?;
-    c.hr(put_node_value(el, "one two three"), E_FAIL)?;
+    c.code(put_node_value(el, "one two three"), E_FAIL)?;
     release(el);
     let text = create(c, doc, CREATE_TEXT_NODE, "")?;
     c.hr(put_node_value(text, "Jeeves & Wooster"), S_OK)?;
@@ -852,7 +854,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     c.hr(hr, S_OK)?;
     let (hr, el2) = get_obj(doc2, GET_DOCUMENT_ELEMENT);
     c.hr(hr, S_OK)?;
-    c.hr(call!(el2, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, null_mut()), E_FAIL)?;
+    c.code(call!(el2, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, null_mut()), E_FAIL)?;
     release(el2);
     release(doc2);
     release(attr);
@@ -928,7 +930,7 @@ fn named_map(c: &mut Checks) -> Result<(), u32> {
         call!(map, MAP_REMOVE_NAMED_ITEM, fn(Bstr, *mut Obj) -> HResult, n, out)
     };
     let mut out = UNTOUCHED;
-    c.hr(remove_named(None, &mut out), E_INVALIDARG)?;
+    c.code(remove_named(None, &mut out), E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let vr = Wide::new("vr");
     let mut removed: Obj = null_mut();
@@ -956,9 +958,9 @@ fn named_map(c: &mut Checks) -> Result<(), u32> {
             out
         )
     };
-    c.hr(remove_qualified(None, null_mut()), E_INVALIDARG)?;
+    c.code(remove_qualified(None, null_mut()), E_INVALIDARG)?;
     out = UNTOUCHED;
-    c.hr(remove_qualified(None, &mut out), E_INVALIDARG)?;
+    c.code(remove_qualified(None, &mut out), E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     c.hr(remove_qualified(Some("id"), null_mut()), S_OK)?;
     c.hr(remove_qualified(Some("id"), null_mut()), S_FALSE)?;
