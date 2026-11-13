@@ -4754,6 +4754,8 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -4837,7 +4839,9 @@ fn build_next_kernel(release: bool) -> Result<PathBuf> {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    Ok(next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))
+    let kernel = next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    drop_debug_relocations(&kernel)?;
+    Ok(kernel)
 }
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
@@ -18939,6 +18943,7 @@ fn kernel_variant(release: bool, variant: &str) -> Result<PathBuf> {
     trust::kernel_env(&mut cmd)?;
     run_quiet(&mut cmd)?;
     let dir = target_dir().join(KERNEL_TARGET).join(profile);
+    drop_debug_relocations(&dir.join("kernel"))?;
     let out = dir.join(format!("kernel-{variant}"));
     // Without its debug sections, as an image has it (most of its size).
     copy_kernel(&dir.join("kernel"), &out)?;
@@ -19332,6 +19337,8 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     let mut cmd = user_build();
     for dll in USER_DLLS {
         cmd.args(["--package", dll.package]);
@@ -19712,6 +19719,16 @@ fn copy(from: &Path, to: &Path) -> Result {
 /// symbolized on the host from the build's own ELF, which keeps it.
 fn copy_kernel(from: &Path, to: &Path) -> Result {
     run_quiet(Command::new("objcopy").arg("--strip-debug").arg(from).arg(to))
+}
+
+/// Removes the relocations of a kernel ELF's debug sections
+/// (`.rela.debug_*`), in place. kernel/build.rs links with `--emit-relocs`
+/// for the hot swap (SN step 1e), which needs those of the code and data
+/// only (hotswap.rs skips sections that are not loaded); lld keeps them
+/// for every section, and those of the DWARF are most of the file: 71 of
+/// 135 MB for a debug build. The DWARF itself stays for symbolizing.
+fn drop_debug_relocations(elf: &Path) -> Result {
+    run_quiet(Command::new("objcopy").arg("--remove-section=.rela.debug_*").arg(elf))
 }
 
 fn write(path: &Path, contents: &str) -> Result {

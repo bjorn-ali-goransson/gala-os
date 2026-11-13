@@ -15076,7 +15076,10 @@ finds it mapped and refuses).
 
 **Reading the kernel's builds** (xtask, `Image::from_elf`): the kernel
 is linked with `--emit-relocs` (every relocation kept in `.rela.*`
-sections, not loaded) and lld writes its map beside it (`kernel.map`;
+sections, not loaded; xtask removes those of the DWARF sections after
+each build, `drop_debug_relocations`, which lld keeps too and which were
+71 of a debug kernel's 135 MB: only the loaded sections' are read) and
+lld writes its map beside it (`kernel.map`;
 `kernel/build.rs`); an image's kernel and map are kept with its modules
 for a snapshot. Chunks are the map's input sections, as for a DLL, with
 the linker's merged constants (`.rodata.str*`, `.rodata.cst<n>`) and its
