@@ -1983,9 +1983,28 @@ need gala's.
      MiB, file tree 20 MiB, image layouts 23 MiB (5 200 of 20 400 pages
      in memory; 3 000 dropped, 320 built again), files' pages 7 MiB,
      other 19 MiB; the 4 GiB stopgap is gone (the scenario has the
-     default 512 MiB). Next, as the measurement shows them: a page file
-     for private memory (the service's 190-200 MiB of commit, at 512 MiB
-     the largest use: 206 MiB of user pages), the registry (16 MiB).
+     default 512 MiB). Done: a page file for private memory
+     (ARCHITECTURE "The page file"; `pagefile_test`, `pagefile_fail`):
+     `C:\pagefile.sys` on the data area, the commit limit memory plus the
+     page file (443 MiB at 512 MiB, so 886 MiB, growing up to 4 GiB),
+     NT processes' private pages written there when the file cache's and
+     image pages cannot bring free memory back to the mark, read back at
+     their next touch. At 512 MiB the run reaches the same point (the
+     publish, `integrator.exe` returning 0, the PackageManager crash
+     above, the service ending at 1760 s); at 2400 s the kernel heap is 80
+     MiB (registry 16 MiB, file tree 19 MiB, image layouts 23 MiB with
+     5 200 of 20 400 pages in memory, files' pages 4 MiB, other 18 MiB),
+     user pages 205 MiB, free memory 117 MiB and never below 89 MiB: the
+     file cache and image pages kept memory above the mark, so nothing was
+     paged out (the page file's work shows at less memory: below). Next,
+     as the measurement shows them: the registry (16 MiB), the file tree
+     (19 MiB).
+     Also: the page file's limits (ARCHITECTURE "The page file": a page
+     read back gives up its slot, no read-around, one second chance, no
+     per-process working sets); `pagefile_test`'s expectations are
+     Windows' documented behaviour and wait for a Windows run before
+     `ci-passing.txt` lists it (CI's page file is on D:, which the test
+     reads from SystemPageFileInformation).
      Also: FindFirstFileNameW listing every name of a file with hard
      links (FileHardLinkInformation).
      Also seen: the client's `OfficeC2RClient.exe
