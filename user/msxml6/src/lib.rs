@@ -1,14 +1,17 @@
-//! gala's msxml6.dll: MSXML 6's DOM, the class DOMDocument60
-//! (ARCHITECTURE "msxml6"), registered as an in-process server (the registry seed) and created through ole32's
+//! gala's msxml6.dll: MSXML 6's DOM, schema cache and XSLT, the classes
+//! DOMDocument60, FreeThreadedDOMDocument60, XMLSchemaCache60 and
+//! XSLTemplate60 (ARCHITECTURE "msxml6"), registered as in-process
+//! servers (the registry seed) and created through ole32's
 //! CoCreateInstance and this DLL's DllGetClassObject.
 //!
 //! The document parses with gala's XML reader (`gala_xml`, shared with
 //! galapkg) into a tree owned by the document (`dom`), selects with XPath
-//! 1.0 (`xpath`), and hands programs node objects that wrap the document
-//! and an index (`com`). What it does not implement fails honestly:
-//! E_NOTIMPL, recorded in the ledger as `msxml6.dll!<interface>::<method>`
-//! ("not implemented"); loads it cannot do (URLs, streams) are recorded
-//! and fail.
+//! 1.0 (`xpath`), validates against XSD schemas (`xsd`), transforms with
+//! XSLT 1.0 (`xslt`), and hands programs node objects that wrap the
+//! document and an index (`com`). What it does not implement fails
+//! honestly: E_NOTIMPL, recorded in the ledger as
+//! `msxml6.dll!<interface>::<method>` ("not implemented"); loads it
+//! cannot do (URLs, streams) are recorded and fail.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -32,6 +35,7 @@ mod com;
 mod dom;
 mod xpath;
 mod xsd;
+mod xslt;
 
 // The x64 build's memory routines come from gala's ntdll (as other
 // DLLs on `alloc` take them).
@@ -223,6 +227,7 @@ const MSXML6_D4: [u8; 8] = [0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5];
 const CLSID_DOMDOCUMENT60: Guid = guid(0x88d9_6a05, 0xf192, 0x11d4, MSXML6_D4);
 const CLSID_FREETHREADEDDOMDOCUMENT60: Guid = guid(0x88d9_6a06, 0xf192, 0x11d4, MSXML6_D4);
 pub const CLSID_XMLSCHEMACACHE60: Guid = guid(0x88d9_6a07, 0xf192, 0x11d4, MSXML6_D4);
+const CLSID_XSLTEMPLATE60: Guid = guid(0x88d9_6a08, 0xf192, 0x11d4, MSXML6_D4);
 pub const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 
@@ -312,7 +317,7 @@ extern "system" fn factory_create(
     if !outer.is_null() {
         return CLASS_E_NOAGGREGATION;
     }
-    com::new_document(riid, out)
+    com::new_document(riid, out, false)
 }
 
 extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
@@ -324,13 +329,20 @@ extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
 /// a free-threaded document may be used from several threads at once;
 /// recorded at each creation so a program that needs it shows).
 extern "system" fn free_threaded_create(
-    this: *mut c_void,
+    _this: *mut c_void,
     outer: *mut c_void,
     riid: *const Guid,
     out: *mut *mut c_void,
 ) -> HResult {
     record(b"FreeThreadedDOMDocument60(served as rental: no locking)", LEDGER_UNSUPPORTED, 0);
-    factory_create(this, outer, riid, out)
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if !outer.is_null() {
+        return CLASS_E_NOAGGREGATION;
+    }
+    com::new_document(riid, out, true)
 }
 
 static FREE_THREADED_VTABLE: VTable<5> = VTable([
@@ -358,6 +370,31 @@ extern "system" fn cache_create(
     com::new_cache(riid, out)
 }
 
+/// XSLTemplate60's CreateInstance (`com/xslt.rs`).
+extern "system" fn template_create(
+    _this: *mut c_void,
+    outer: *mut c_void,
+    riid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if !outer.is_null() {
+        return CLASS_E_NOAGGREGATION;
+    }
+    com::new_template(riid, out)
+}
+
+static TEMPLATE_FACTORY_VTABLE: VTable<5> = VTable([
+    factory_query as *const (),
+    factory_add_ref as *const (),
+    factory_release as *const (),
+    template_create as *const (),
+    factory_lock as *const (),
+]);
+
 static CACHE_FACTORY_VTABLE: VTable<5> = VTable([
     factory_query as *const (),
     factory_add_ref as *const (),
@@ -383,11 +420,11 @@ unsafe impl Sync for Factory {}
 static FACTORY: Factory = Factory { vtable: &FACTORY_VTABLE };
 static FREE_THREADED_FACTORY: Factory = Factory { vtable: &FREE_THREADED_VTABLE };
 static CACHE_FACTORY: Factory = Factory { vtable: &CACHE_FACTORY_VTABLE };
+static TEMPLATE_FACTORY: Factory = Factory { vtable: &TEMPLATE_FACTORY_VTABLE };
 
 /// DllGetClassObject: the class objects of DOMDocument60,
-/// FreeThreadedDOMDocument60 and XMLSchemaCache60; another class is
-/// recorded,
-/// CLASS_E_CLASSNOTAVAILABLE.
+/// FreeThreadedDOMDocument60, XMLSchemaCache60 and XSLTemplate60;
+/// another class is recorded, CLASS_E_CLASSNOTAVAILABLE.
 #[unsafe(no_mangle)]
 pub extern "system" fn DllGetClassObject(
     clsid: *const Guid,
@@ -406,6 +443,8 @@ pub extern "system" fn DllGetClassObject(
         &FREE_THREADED_FACTORY
     } else if c == CLSID_XMLSCHEMACACHE60 {
         &CACHE_FACTORY
+    } else if c == CLSID_XSLTEMPLATE60 {
+        &TEMPLATE_FACTORY
     } else {
         record(b"DllGetClassObject(class)", LEDGER_UNSUPPORTED, data1(&c));
         return CLASS_E_CLASSNOTAVAILABLE;

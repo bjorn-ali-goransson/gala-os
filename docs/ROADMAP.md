@@ -2077,10 +2077,8 @@ need gala's.
      groups; AppVFileSystemMetadata.dll): all of them compile and resolve
      with gala's subset (checked on the host against the files taken
      from Office's i640.cab), and what the subset lacks fails the add
-     loudly. Those DLLs also carry XSLT transforms (a namespace clean-up
-     run before validation, with a parameter, and an appv namespace
-     normalization using `msxsl:node-set` and the namespace axis): XSLT
-     (XSLTemplate60, transformNode) is not implemented yet.
+     loudly. Those DLLs also carry the XSLT transforms App-V runs before
+     validating (below).
      With the cache registered, ConfigurePackage failed at the same
      place with E_NOINTERFACE (17002 at about 1768 s): it creates the
      cache asking for an IID whose first dword is CLSID_XMLSchemaCache60's
@@ -2100,16 +2098,50 @@ need gala's.
      (no validate, validateNode or load-time validation in the ledger):
      the transform comes first, as the comment of App-V's clean-up XSLT
      says ("prior to using XSD for validation").
-     Next: XSLT, as far as App-V's transforms need it (XSLTemplate60,
-     IXSLTemplate::putref_stylesheet and createProcessor, IXSLProcessor's
-     input, addParameter, transform and output; the transforms' subset:
-     `xsl:template` match patterns and modes of apply-templates,
-     `choose`/`when`/`otherwise`, `copy`, `copy-of`, `element` and
-     `attribute` with attribute value templates, `value-of`, `param` and
-     `variable` (result tree fragments, `msxsl:node-set`), `output`;
-     XPath variables, and the namespace axis gala's XPath refuses), test
-     first in `msxml_test`, then the run shows whether the validation
-     passes on the transformed manifest. To measure on Windows
+     Done: XSLTemplate60 registered in both views and served
+     (IXSLTemplate, IXSLProcessor: input, output to a string, a
+     document or a stream, addParameter, setStartMode, transform) with
+     IXMLDOMNode's transformNode and transformNodeToObject, test first
+     (`msxml_test`'s `xslt`, x64 and x86: Wine's msxml3 XSLT tests and
+     transforms of this test's own shaped like App-V's; ARCHITECTURE
+     "msxml6"). The XSLT 1.0 subset is sized from App-V's own stylesheets
+     (RT_HTML resources: AppVManifest.dll's clean-up that keeps the
+     namespaces a parameter lists, the normalization of older appv
+     namespaces into the newest, shared with AppVPolicy.dll and
+     AppVFileSystemMetadata.dll, which reads IgnorableNamespaces'
+     prefixes through the namespace axis, and the alias step that
+     declares `appv` through `msxsl:node-set()`); what it lacks fails the
+     stylesheet with `XSLT not supported: <what>` in the ledger. With it
+     ConfigurePackage transforms the manifest three times (each into a
+     document, with 2 and 4 parameters), validates it against the
+     cache (valid), and then asks COM for CLSID_KnownFolderManager
+     ({4DF0C730-DF9D-4AE3-9153-AA6B82E9795A}, `knownfolder.cpp : 64`;
+     without it 0x80040154, `ole32.dll!CoGetClassObject(class not
+     registered)`, detail 0x4df0c730, APPLYCONFIGURATION ends with 30175).
+     The loop: snapshot at `process integrator.exe (pid`, a resume to
+     the failure in 37 s against about 1820 s from boot, the service's
+     log read from the resume's kept layer (`disk-files` reads it now).
+     Done: the Known Folder Manager, registered for shell32 in both
+     views, over one table of 72 known folder definitions that
+     SHGetFolderPathW and SHGetKnownFolderPath read too, test first
+     (`knownfolder_test`, x64 and x86: Wine's shell32 known folder
+     tests, every definition checked against Windows' as that test
+     lists them; ARCHITECTURE "shell32, version, powrprof, comctl32,
+     user32 strings"). To measure on Windows (its `info` lines):
+     FindFolderFromPath's code for no match, the codes for an unknown
+     id, and the folders whose path differs from SHGetFolderPathW's.
+     With it ConfigurePackage goes on to read typed values: the next
+     blocker is `msxml6.dll!IXMLDOMNode::get_nodeTypedValue` (not
+     implemented, E_NOTIMPL in the ledger), which fails ConfigurePackage
+     at `xmlutils.cpp : 1024` (`0x3e508025-0x80004001`, publishScope 1);
+     OfficeVirtRegistration ends with 30175 and setup with 17002, at 66 %.
+     Next: get_nodeTypedValue (and put_nodeTypedValue) over the node's
+     `dt:dt` data type, test first in `msxml_test`. Seen too,
+     not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
+     and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
+     on Windows (`msxml_test`'s `info` lines): a string output's
+     declaration, the prefixes and declarations of the App-V-shaped
+     results, the prefix the alias step's elements get. To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).

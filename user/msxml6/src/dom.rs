@@ -200,6 +200,43 @@ impl Tree {
         ""
     }
 
+    /// The namespace bindings in scope at element `el` (XPath's namespace
+    /// nodes but `xml`): each prefix ("" the default namespace) with the
+    /// URI its innermost declaration gives, innermost first; a name's
+    /// own prefix and namespace count as a declaration (a node a program
+    /// created carries no xmlns attribute); a default namespace undone
+    /// (`xmlns=""`) is left out.
+    pub fn in_scope(&self, el: u32) -> Vec<(String, String)> {
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        fn add<'a>(seen: &mut Vec<(&'a str, &'a str)>, p: &'a str, u: &'a str) {
+            if p != "xml" && !seen.iter().any(|(q, _)| *q == p) {
+                seen.push((p, u));
+            }
+        }
+        let mut x = el;
+        while x != NONE && self.node(x).kind == Kind::Element {
+            let n = self.node(x);
+            for &a in &n.attrs {
+                let an = self.node(a);
+                if an.is_xmlns() {
+                    let p = if an.name == "xmlns" { "" } else { an.local() };
+                    add(&mut seen, p, &an.value);
+                }
+            }
+            if !n.ns.is_empty() {
+                add(&mut seen, n.prefix(), &n.ns);
+            }
+            for &a in &n.attrs {
+                let an = self.node(a);
+                if !an.is_xmlns() && !an.prefix().is_empty() && !an.ns.is_empty() {
+                    add(&mut seen, an.prefix(), &an.ns);
+                }
+            }
+            x = n.parent;
+        }
+        seen.into_iter().filter(|(_, u)| !u.is_empty()).map(|(p, u)| (p.into(), u.into())).collect()
+    }
+
     /// Joins adjacent text nodes in the subtree of `i` and drops empty
     /// ones (IXMLDOMElement::normalize).
     pub fn normalize(&mut self, i: u32) {

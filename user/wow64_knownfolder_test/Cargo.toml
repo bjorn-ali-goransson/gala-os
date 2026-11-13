@@ -1,0 +1,16 @@
+[package]
+name = "wow64_knownfolder_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ntrt = { path = "../ntrt" }
+
+# The 32-bit build of user/knownfolder_test: one source for both.
+[[bin]]
+name = "wow64_knownfolder_test"
+path = "../knownfolder_test/src/main.rs"
+test = false
+bench = false

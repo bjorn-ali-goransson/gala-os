@@ -4668,15 +4668,18 @@ built for x64 and x86.
 - **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
   ProgID Msxml2.DOMDocument.6.0) and FreeThreadedDOMDocument60
   ({88D96A06-...}, Msxml2.FreeThreadedDOMDocument.6.0; Click-to-Run's
-  App-V pieces create it) and XMLSchemaCache60 ({88D96A07-...},
-  Msxml2.XMLSchemaCache.6.0; App-V's ConfigurePackage) under
+  App-V pieces create it), XMLSchemaCache60 ({88D96A07-...},
+  Msxml2.XMLSchemaCache.6.0; App-V's ConfigurePackage) and XSLTemplate60
+  ({88D96A08-...}, Msxml2.XSLTemplate.6.0; ConfigurePackage too) under
   `HKLM\SOFTWARE\Classes\CLSID` and
   `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
   `%SystemRoot%\System32\msxml6.dll` (SysWOW64's for 32-bit programs,
   through the file system redirector); ole32's CoCreateInstance loads it
   and calls DllGetClassObject. The free-threaded class is the same
   document, which locks nothing (a stopgap, ROADMAP OF; each creation is
-  recorded, `FreeThreadedDOMDocument60(served as rental: no locking)`).
+  recorded, `FreeThreadedDOMDocument60(served as rental: no locking)`);
+  the document remembers which class made it (an XSLT template takes
+  only a free-threaded stylesheet).
   The older MSXML classes are not registered (CoGetClassObject records
   the class).
 - **Objects** (`com.rs`): the document owns its tree, an arena of nodes
@@ -4733,8 +4736,9 @@ built for x64 and x86.
   other MSXML 6 properties (ProhibitDTD, ServerHTTPRequest,
   AllowDocumentFunction, MaxElementDepth, ...) are kept with their
   defaults; an unknown name is E_FAIL (recorded).
-- **XPath** (`xpath.rs`): XPath 1.0 whole but the namespace axis, id()
-  and lang() (E_FAIL, recorded): every other axis, node tests, predicates
+- **XPath** (`xpath.rs`): XPath 1.0 whole but id() and lang() (E_FAIL,
+  recorded), and in selections the namespace axis (E_FAIL, recorded;
+  XSLT's expressions have it): every other axis, node tests, predicates
   (a number is a position), unions, filter expressions, the operators
   with XPath's conversions and comparison rules, the core function
   library. Prefixes resolve through SelectionNamespaces only (an
@@ -4743,7 +4747,76 @@ built for x64 and x86.
   document order (attributes after their element). selectNodes and
   selectSingleNode fail with E_FAIL on an expression that is not a
   node-set. Numbers print as Rust's shortest round-trip form (XPath
-  wants no exponent: values beyond 1e21 differ).
+  wants no exponent: values beyond 1e21 differ). Namespace nodes are not
+  in the tree: an evaluation numbers them on demand in a table (ids with
+  the top bit set; one per element and prefix, the element's in-scope
+  bindings with `xml` last, ordered after their element and before its
+  attributes); their name is the prefix, their value the URI.
+- **XSLT** (`xslt.rs`, `com/xslt.rs`; `msxml_test`'s `xslt`, from
+  Wine's msxml3 tests run on Windows and transforms shaped like App-V's;
+  ROADMAP OF). XSLTemplate60 (IXSLTemplate: putref_stylesheet compiles
+  the stylesheet and holds it, from a free-threaded or a rental
+  document (MSXML 6 takes both; msxml3 refuses a rental one); a
+  document that is not a stylesheet or one that does not compile is
+  E_FAIL; NULL
+  resets; createProcessor) and its processor (IXSLProcessor: input, a
+  node of ours; output, a string (VT_EMPTY or NULL), a document of ours
+  whose tree the result replaces, or an IStream/ISequentialStream;
+  addParameter of strings, numbers and booleans, VT_EMPTY or VT_NULL
+  removing; setStartMode; transform; reset); IXMLDOMNode's
+  transformNode (a string) and transformNodeToObject (a document or a
+  stream; anything else E_INVALIDARG), which take a rental stylesheet
+  too. The subset is what App-V's own transforms use (AppVManifest.dll,
+  AppVPolicy.dll and AppVFileSystemMetadata.dll carry them as RT_HTML
+  resources: a clean-up that keeps the namespaces a parameter lists, a
+  normalization of older App-V namespaces into the newest that reads
+  IgnorableNamespaces' prefixes through the namespace axis, an alias
+  step that declares `appv` through `msxsl:node-set()` and the
+  namespace axis), with Wine's tests' cases: top-level template, param,
+  variable and output; match patterns (location paths of child,
+  attribute and `//` steps with predicates, unions; XSLT's default
+  priorities, an explicit priority, the last of equals) and named
+  templates, modes, parameters, the built-in rules; apply-templates,
+  call-template, for-each, value-of, copy-of, copy, if, choose, element
+  and attribute (name and namespace as attribute value templates),
+  text, variable and param (a select, or content: a result tree
+  fragment), comment, processing-instruction, message, fallback;
+  literal result elements with attribute value templates and their
+  in-scope namespaces (less the XSLT namespace, exclude-result-prefixes
+  and extension-element-prefixes); XPath with variables, the namespace
+  axis, current() and `msxsl:node-set()`. Top-level variables may use
+  ones later in the stylesheet (one that needs a global not yet
+  evaluated waits; a cycle is an error). Templates nest at most 200
+  deep (an error past it). The transform runs on a copy of the input's
+  tree (the XML declaration left out: not a node in XSLT's data model),
+  where result tree fragments live too; the result goes into a tree of
+  its own. Output names: a new element's prefix is declared on it when
+  the output does not bind it so; xsl:element with a namespace and an
+  unprefixed name takes the default namespace when it is that one, else
+  a prefix the output binds to it (App-V's alias step relies on it),
+  else declares a default namespace; an attribute in a namespace takes
+  a prefix bound to it or a made-up `ns<N>`; copy and copy-of bring the
+  source element's in-scope namespaces, declared where the output does
+  not bind them already; an attribute after the element's children is
+  dropped (recorded). Serializing: the declaration (`<?xml
+  version="1.0" encoding="..."?>`, unless omit-xml-declaration or the
+  html or text method) names UTF-16 for a string and the output's
+  encoding (UTF-16 when none) for a stream, which gets UTF-16 LE with a
+  byte order mark or UTF-8 (another encoding is written as UTF-8,
+  recorded); then the nodes as `xml` writes them (the html method too:
+  XML's syntax); the text method writes the text alone. With no method,
+  html when the result's first element is `html` in no namespace. Not
+  supported (the stylesheet fails with E_FAIL and `XSLT not supported:
+  <what>` in the ledger): xsl:sort, number, key, import, include,
+  apply-imports, attribute-set, namespace-alias, decimal-format,
+  strip-space, preserve-space, disable-output-escaping, msxsl:script
+  and other msxsl: elements, the simplified stylesheet, the functions
+  key(), document(), format-number(), generate-id(), system-property(),
+  unparsed-entity-uri(), element-/function-available() and msxsl:
+  functions but node-set(), id() and key() patterns; and (E_INVALIDARG,
+  recorded) parameters that are nodes or have a namespace, a start
+  mode's namespace, input that is not a node of ours (a stream, a
+  string).
 - **cloneNode** (`msxml_test`'s `clone`; ODT's setup.exe clones from its
   version descriptor): a node's clone is a new node of no parent in the
   same tree (the arena keeps it; detached nodes are never freed before
@@ -4852,9 +4925,9 @@ built for x64 and x86.
   `msxml6.dll!<interface>::<method>`, "not implemented"): the character
   data editors (put_data, substringData, appendData, insertData,
   deleteData, replaceData, splitText, the processing instruction's
-  put_data), createEntityReference, save to a stream, transforms
-  (transformNode, transformNodeToObject; XSLTemplate60 is not
-  registered), the schema cache's getSchema, getDeclaration and
+  put_data), createEntityReference, save to a stream, the XSLT
+  processor's addObject and get_readyState, the schema cache's
+  getSchema, getDeclaration and
   enumerator (the Schema Object Model), typed values, the event handlers, abort,
   nodeFromID, the selection's own methods and the enumerators
   (`get__newEnum`). Implement them when a program's run reaches one.
@@ -4870,7 +4943,12 @@ built for x64 and x86.
   is on (gala E_FAIL for both), the collection's validate while a name
   is unresolved (gala E_FAIL), the order of namespaceURI's entries
   (gala: the order added) and validate's code for a document whose
-  namespace has no schema (gala XML_E_NODTD).
+  namespace has no schema (gala XML_E_NODTD); for XSLT, a string
+  output's declaration (gala names UTF-16), the text of the
+  App-V-shaped results (which prefix a namespace gets, where its
+  declaration goes: gala makes up `ns<N>` for an attribute's namespace
+  no prefix is bound to) and the prefix the alias step's elements get
+  (gala: the one declared on the root).
 
 ### RPC: rpcrt4
 
@@ -4989,7 +5067,33 @@ of their own, clients of it) is the yardstick.
   its tokens through them, and an unknown one stopped it); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
-  folder Windows makes with one; `shell32_test`),
+  folder Windows makes with one; `shell32_test`). Both read one table
+  of known folder definitions (`user/shell32/src/knownfolder.rs`: 72
+  folders, each with its id, CSIDL, name, category, parent, relative
+  path, parsing name, attributes and KFDF_ flags, Windows' as Wine's
+  conformance test lists them, measured on build 26100 where it
+  differs: Documents, Downloads, Music, Pictures and Videos have the
+  parsing name `shell:::{<their This PC id>}`, Public has none, and
+  the Sidebar gadget folders are not defined; the virtual folders, the
+  libraries and the sample folders are left out). A folder's path is its root's (an
+  environment variable, the Windows or system directory) or its
+  parent's path, a backslash and its relative path, so a child is
+  always below its parent; the X64 folders exist in a 64-bit process
+  only. Windows keeps the definitions under `FolderDescriptions` in the
+  registry; gala's are compiled in. An unknown CSIDL or folder id is
+  recorded in the ledger. The Known Folder Manager
+  (CLSID_KnownFolderManager, registered for shell32 in both registry
+  views; App-V's package configuration asks it while the Click-to-Run
+  service installs Office) serves IKnownFolderManager (FolderIdFromCsidl,
+  FolderIdToCsidl, GetFolderIds, GetFolder, GetFolderByName by
+  canonical name, FindFolderFromPath exact or nearest parent,
+  case-insensitive, the longest match winning) and IKnownFolder (GetId,
+  GetCategory, GetPath with the KF_FLAG_ flags SHGetKnownFolderPath
+  takes, GetFolderDefinition, GetRedirectionCapabilities 0, SetPath
+  E_INVALIDARG on a fixed folder); RegisterFolder, UnregisterFolder,
+  Redirect, SetPath on another folder, GetShellItem, GetIDList,
+  GetFolderType and FindFolderFromIDList return E_NOTIMPL and are
+  recorded (`knownfolder_test`, x64 and x86),
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),

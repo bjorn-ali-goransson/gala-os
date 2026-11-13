@@ -425,9 +425,21 @@ hit (scenario `ledger_test`).
   and `validation: schema default attribute values not added to the
   tree` (unsupported; detail: how many); `load(res: URL)` for each
   resource loaded. A value too long for the ledger's 64 characters keeps
-  its end after `..` (a namespace's last part). Each QueryInterface
-  msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache>
-  {<the whole IID>}`, "other", its first dword as detail.
+  its end after `..` (a namespace's last part). XSLT ("other" unless
+  named): `XSLT transform (output: a string|a document|a stream)` for
+  each transform (detail: how many parameters it was given); a
+  stylesheet or transform that fails, `XSLT: <reason>` (`XSLT not
+  supported: <what>`, unsupported, for what gala's XSLT lacks: an
+  instruction, a function, a pattern's form) and `XSLT at: <the
+  expression or instruction>`; `XSLTemplate60::putref_stylesheet(a
+  rental document: E_FAIL)`, `IXSLProcessor::transform(no input)`,
+  `XSLTemplate60::createProcessor(no stylesheet)`, `XSLT output(...)`
+  and the processor's refusals of a parameter's, input's or start
+  mode's kind (unsupported), `XSLT: an attribute not on a new element
+  (dropped)`, `XSLT message: <text>` for xsl:message (terminate as
+  detail). Each QueryInterface
+  msxml6 does not answer: `msxml6.dll!QI? <node|list|map|error|cache|
+  XSLTemplate|XSLProcessor> {<the whole IID>}`, "other", its first dword as detail.
   The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
   for every status a client call raises (detail: the procedure number
   << 32 | the status: a program that fails over RPC names the call);
