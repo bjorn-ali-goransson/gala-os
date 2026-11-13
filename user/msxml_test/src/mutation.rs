@@ -305,7 +305,8 @@ fn replace_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     Ok(())
 }
 
-/// insertBefore (Wine's test_insertBefore): what each parent takes
+/// insertBefore (Wine's test_insertBefore, Windows' answers where they
+/// differ): a document is E_INVALIDARG; what each parent takes
 /// (E_FAIL otherwise, the output NULL), a reference node that is not a
 /// child (E_INVALIDARG), a node moved from another parent, a node
 /// from another document, and the namespaces the moved nodes' xml
@@ -316,12 +317,16 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, out) = insert_before(doc, null_mut(), null_variant());
     c.hr(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
+    // A document under a document: E_INVALIDARG on Windows (Server
+    // 2025's msxml6, issue-free CI run); the output and a document under
+    // itself are not measured yet.
     let (hr, out) = insert_before(doc, doc3, null_variant());
-    c.hr(hr, E_FAIL)?;
-    c.ok(out.is_null(), out as u64)?;
+    c.hr(hr, E_INVALIDARG)?;
+    info_hr("insertBefore(document) output is NULL", u32::from(out.is_null()) as HResult);
+    release(out);
     let (hr, out) = insert_before(doc, doc, null_variant());
-    c.hr(hr, E_FAIL)?;
-    c.ok(out.is_null(), out as u64)?;
+    info_hr("insertBefore(the document itself)", hr);
+    release(out);
 
     let (hr, attr) = create_node(doc, NODE_ATTRIBUTE, Some("attr"), None);
     c.hr(hr, S_OK)?;
@@ -331,11 +336,17 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, cdata) = create_node(doc3, NODE_CDATA_SECTION, Some("cdata"), None);
     c.hr(hr, S_OK)?;
     c.hr(has_children(cdata), S_FALSE)?;
-    for (parent, new) in [(cdata, attr), (cdata, doc), (doc3, cdata)] {
+    for (parent, new) in [(cdata, attr), (doc3, cdata)] {
         let (hr, out) = insert_before(parent, new, null_variant());
         c.hr(hr, E_FAIL)?;
         c.ok(out.is_null(), out as u64)?;
     }
+    // A document under a CDATA section: which check Windows makes first
+    // (the document's E_INVALIDARG or the parent's E_FAIL) is not
+    // measured yet.
+    let (hr, out) = insert_before(cdata, doc, null_variant());
+    info_hr("insertBefore(document under a CDATA section)", hr);
+    release(out);
     release(cdata);
     release(doc3);
 
@@ -390,7 +401,9 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         dispatch(null_mut()),
         null_mut()
     );
-    c.hr(hr, E_FAIL)?;
+    // A document under an element: gala answers E_INVALIDARG, as Windows
+    // does under a document; under an element not measured yet.
+    info_hr("insertBefore(document under an element)", hr);
     let (hr, out) = insert_before(elem1, elem4, dispatch(null_mut()));
     c.hr(hr, S_OK)?;
     c.ok(out == elem4, out as u64)?;

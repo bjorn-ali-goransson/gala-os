@@ -98,8 +98,9 @@ fn adopt(d: *mut Doc, p: Obj) -> u32 {
 
 /// Puts `new` under `this` before child `before` (None: at the end),
 /// in place of child `old` when one is given. The checks are MSXML's:
-/// a document, a node that is `this` or its ancestor, or a kind `this`
-/// cannot hold is E_FAIL, and so is a document's second element.
+/// a document is E_INVALIDARG (measured on Windows); a node that is
+/// `this` or its ancestor, or a kind `this` cannot hold is E_FAIL, and
+/// so is a document's second element.
 fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult {
     let Some(nn) = ours(new) else { return E_INVALIDARG };
     let d_ptr = node(this).doc;
@@ -107,7 +108,7 @@ fn place(this: Obj, new: Obj, before: Option<u32>, old: Option<u32>) -> HResult 
     let pk = doc(this).tree.node(p).kind;
     let nk = kind_of(nn);
     if nk == Kind::Document {
-        return E_FAIL;
+        return E_INVALIDARG;
     }
     if nn.doc == d_ptr && doc(this).tree.contains(nn.idx, p) {
         return E_FAIL;
