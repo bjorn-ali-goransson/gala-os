@@ -70,6 +70,7 @@ mod profile;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
+mod snapshot;
 mod triage;
 mod trust;
 
@@ -1545,6 +1546,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
+    ("snapshot_machine", "ntdll.dll", "Windows/System32"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -3967,6 +3969,7 @@ const USER_PROGRAMS: &[&str] = &[
     "xstate_test",
     "straddle_test",
     "statedump_test",
+    "snapshot_test",
     "clockcal_test",
     "safepoint_test",
     "shootdown_test",
@@ -4246,7 +4249,14 @@ commands:
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
                boot tests [--no-boot: all but the boot tests]
   boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
-               (XTASK_SHARD=i/n: the i-th of n shares of the VMs)
+               (XTASK_SHARD=i/n: the i-th of n shares of the VMs);
+               one scenario saved as a whole machine when a line appears in its
+               serial log: --snapshot-at <text> --snapshot-name <name>
+               [--snapshot-stop: end the run there]; a run resumed from one:
+               --from-snapshot <name> [scenario] (only on the build it was taken
+               from; docs/WORKFLOW.md, Machine snapshots)
+  snapshots    list the machine snapshots (target/snapshots): what, when, size,
+               build; snapshots rm <name> deletes one
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -4352,7 +4362,8 @@ fn main() -> ExitCode {
                         boot_tests(release, None)
                     }
                 }),
-            Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
+            Some("boot-test") => boot_test_command(release, &args),
+            Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
             Some("docker-test") => docker_test(&args[1..]),
@@ -4451,6 +4462,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `cargo xtask boot-test [filter] [snapshot options]` (snapshot.rs).
+fn boot_test_command(release: bool, args: &[String]) -> Result {
+    let request = snapshot::parse_request(args)?;
+    let filter = args.get(1).filter(|a| !a.starts_with("--")).cloned();
+    // A resumed run's scenario is its snapshot's.
+    let filter = match (&request, filter) {
+        (Some(snapshot::Request::Restore { name }), None) => Some(format!(
+            "{}$",
+            snapshot::Manifest::read(&snapshot::root(&target_dir()).join(name))?.scenario
+        )),
+        (_, filter) => filter,
+    };
+    snapshot::set_request(request);
+    boot_tests(release, filter.as_ref())
 }
 
 fn root() -> PathBuf {
@@ -4897,6 +4924,11 @@ fn make_iso_unchecked(
     )?;
     // Hybrid image: bootable by BIOS (Limine's stages) and UEFI.
     run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso))?;
+    // What a machine snapshot of it must match (snapshot.rs).
+    let _ = fs::remove_file(snapshot::digests_path(&iso));
+    if snapshot::digests_wanted() {
+        snapshot::write_boot_digests(&iso, &snapshot::boot_digests(&iso_root)?)?;
+    }
     // The tree is in the image now (it can be as large: disk space).
     let _ = fs::remove_dir_all(&iso_root);
     if name == "gala-os" {
@@ -6306,6 +6338,18 @@ const SCENARIOS: &[Scenario] = &[
             "statedump: end",
             "the guest's state dump (NMI) took",
         ],
+    },
+    Scenario {
+        // SN step 1: a whole-machine snapshot (snapshot.rs). The run is
+        // saved at snapshot_test's `phase 1 done` and goes on to its end;
+        // two runs resumed from the snapshot, each on its own disk layer,
+        // must reach the end too, with phase 3's lines and not phase 1's
+        // (SNAPSHOT_SCENARIOS). C: on a disk (`persist`), so the disk's
+        // layers are part of it.
+        name: "snapshot_machine",
+        cmdline: "qemu_exit persist run=snapshot_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["snapshot_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // A semaphore released and waited on from two processors at once.
@@ -11431,6 +11475,15 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
+    if snapshot::request().is_some() && selected.len() != 1 {
+        return Err(format!(
+            "a machine snapshot is of one scenario; the filter selects {} (`name$` selects one)",
+            selected.len()
+        ));
+    }
+    if selected.iter().any(|s| SNAPSHOT_SCENARIOS.iter().any(|p| p.name == s.name)) {
+        snapshot::want_digests();
+    }
     let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
@@ -11483,6 +11536,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         // to boot by hand), nor its disk image (a failed one's is kept to
         // look at: it says what it takes on the host).
         let disk = iso.with_extension("disk.img");
+        let _ = fs::remove_file(snapshot::digests_path(&iso));
         if result.1.iter().all(|(_, v)| v.is_ok()) {
             let _ = fs::remove_file(&iso);
             if !reuse_disk() {
@@ -12773,6 +12827,15 @@ const QEMU_FORWARD_FAILED: &str = "host forwarding rule";
 /// A net scenario whose QEMU could not forward its host port (another
 /// process took it between the lease and QEMU's bind) boots again with
 /// another port, up to three times.
+/// What a boot run does with a machine snapshot (snapshot.rs).
+enum Snap<'a> {
+    /// Save the machine when the line appears.
+    Save(snapshot::Save<'a>),
+    /// Start from the snapshot.
+    Restore(&'a snapshot::Restore),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_vm(
     iso: &Path,
     boot: Boot,
@@ -12781,10 +12844,11 @@ fn run_vm(
     stop_after_client: bool,
     disk: Option<&Path>,
     screen: Option<&'static ScreenCheck>,
+    snap: Option<&Snap>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let mut tries = 0;
     loop {
-        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen)?;
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap)?;
         let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
         tries += 1;
         if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {
@@ -12807,6 +12871,7 @@ fn run_vm_once(
     stop_after_client: bool,
     disk: Option<&Path>,
     screen: Option<&'static ScreenCheck>,
+    snap: Option<&Snap>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -12888,7 +12953,45 @@ fn run_vm_once(
     if GPU_SCENARIOS.contains(&iso_scenario(iso)) {
         add_gpu(&mut cmd);
     }
+    // A machine snapshot is driven over a QMP connection of its own (the
+    // telemetry's closes after its query).
+    let snap_qmp = snap.map(|_| telemetry::qmp_socket());
+    if let Some(socket) = &snap_qmp {
+        let _ = fs::remove_file(socket);
+        cmd.arg("-qmp").arg(format!("unix:{},server=on,wait=off", socket.display()));
+    }
+    if let Some(Snap::Restore(r)) = snap {
+        cmd.args(snapshot::incoming_args(r)?);
+    }
+    // A run that saves: where its disk's writes go after the save.
+    let after_layer = match (snap, disk) {
+        (Some(Snap::Save(s)), Some(d)) => Some(snapshot::after_layer(d, s.name)?),
+        _ => None,
+    };
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
+    let mut snap_note = String::new();
+    if let (Some(Snap::Restore(r)), Some(socket)) = (snap, &snap_qmp) {
+        match snapshot::resume(socket, r) {
+            Ok(line) => snap_note += &line,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(socket);
+                let stderr =
+                    fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
+                return Err(format!(
+                    "resuming snapshot {}: {e}{}",
+                    r.manifest.name,
+                    if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (QEMU: {})", stderr.trim())
+                    }
+                ));
+            }
+        }
+    }
+    let mut snap_taken = false;
     let qmp_thread = {
         let qmp = qmp.clone();
         thread::spawn(move || telemetry::qmp_cpu_count(&qmp))
@@ -12908,6 +13011,36 @@ fn run_vm_once(
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
+        }
+        // The machine snapshot, once its line is in the log.
+        if let (Some(Snap::Save(s)), Some(qmp)) = (snap, &snap_qmp)
+            && !snap_taken
+            && fs::read(&log).is_ok_and(|b| b.windows(s.at.len()).any(|w| w == s.at.as_bytes()))
+        {
+            snap_taken = true;
+            // The guest's clocks stop with it; the host-side check must
+            // not count the save.
+            clock_marks.paused();
+            let saved = snapshot::save(qmp, s, disk, &log);
+            clock_marks.resumed();
+            match saved {
+                Ok(line) => {
+                    eprint!("{}", line.replace("xtask: ", &format!("xtask: {}: ", s.scenario)));
+                    snap_note += &line;
+                    if s.stop {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                }
+                Err(e) => {
+                    // The machine may be left stopped: the run ends here.
+                    snap_note += &format!("xtask: snapshot: {} not saved: {e}\n", s.name);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
         }
         shots.take_due(&socket, start.elapsed());
         if let Some(check) = screen.filter(|_| screen_verdict.is_none())
@@ -13015,9 +13148,24 @@ fn run_vm_once(
         thread::sleep(Duration::from_millis(50));
     };
     let _ = fs::remove_file(&socket);
+    if let Some(qmp) = &snap_qmp {
+        let _ = fs::remove_file(qmp);
+    }
+    if let Some(layer) = &after_layer {
+        let _ = fs::remove_file(layer);
+    }
+    if let Some(Snap::Save(s)) = snap
+        && !snap_taken
+    {
+        snap_note += &format!(
+            "xtask: snapshot: {} not taken: {:?} never came in the serial log\n",
+            s.name, s.at
+        );
+    }
     let total = start.elapsed();
     let vm_time = vm_clock.sample();
     let mut serial = read_log(&log);
+    serial += &snap_note;
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -15622,12 +15770,15 @@ fn add_gpu(cmd: &mut Command) {
 /// A virtio-blk disk backed by the raw image `path` (the legacy
 /// interface, as for the network card).
 fn add_disk(cmd: &mut Command, path: &Path) {
+    // A run resumed from a machine snapshot has a qcow2 layer of its own
+    // over the snapshot's disk (snapshot.rs); the rest are raw images.
+    let format = if path.extension().is_some_and(|e| e == "qcow2") { "qcow2" } else { "raw" };
     // A host error (the host's disk full under a sparse image) reaches the
     // guest as a failed request, which it logs, rather than pausing the VM
     // (QEMU's default for ENOSPC) until the scenario times out.
     cmd.arg("-drive")
         .arg(format!(
-            "if=none,id=d0,format=raw,werror=report,rerror=report,file={}",
+            "if=none,id=d0,format={format},werror=report,rerror=report,file={}",
             path.display()
         ))
         .args(["-device", "virtio-blk-pci,drive=d0,disable-legacy=off"]);
@@ -15794,6 +15945,16 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         name: "memload_test",
         size: 2 << 30,
         host_mib: Some(1024),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // SN step 1: the disk a snapshot's layers stack on.
+        name: "snapshot_machine",
+        size: 64 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -16053,7 +16214,8 @@ fn boot_earlier(
     disk: &Path,
 ) -> Result {
     for (n, expect) in d.earlier_boots.iter().enumerate() {
-        let (status, serial, _) = run_vm(image, boot, timeout, None, false, Some(disk), None)?;
+        let (status, serial, _) =
+            run_vm(image, boot, timeout, None, false, Some(disk), None, None)?;
         let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
         let _ = fs::write(&kept, &serial);
         let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
@@ -17951,7 +18113,8 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None, None)?;
+    let (status, serial, _) =
+        run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None, None, None)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -18045,17 +18208,85 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         Vm::Single(s) => Some(s.name),
         Vm::Batch(_) => None,
     };
-    let disk = match single.map(|name| new_disk(name, iso)).transpose() {
-        Ok(d) => d.flatten(),
-        Err(e) => {
-            return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
-        }
+    let fail = |e: String| -> (BootTime, Vec<(&'a Scenario, Result)>) {
+        (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect())
     };
-    if let (Some(name), Some(d)) = (single, disk.as_deref())
+    // Machine snapshots (snapshot.rs): one asked for on the command line,
+    // or a scenario that takes and resumes its own (SNAPSHOT_SCENARIOS).
+    let pair = single
+        .filter(|_| snapshot::request().is_none())
+        .and_then(|n| SNAPSHOT_SCENARIOS.iter().find(|p| p.name == n));
+    let machine = match single {
+        _ if snapshot::request().is_none() && pair.is_none() => None,
+        None => return fail("a machine snapshot is of one scenario, booted alone".into()),
+        Some(_) if boot == Boot::Uefi => {
+            return fail(
+                "machine snapshots of UEFI boots are not supported yet (the firmware's \
+                 variable store, a disk of its own, would have to be part of them)"
+                    .into(),
+            );
+        }
+        Some(name) => match machine_now(name, iso, boot) {
+            Ok(m) => Some(m),
+            Err(e) => return fail(e),
+        },
+    };
+    let restore = match (snapshot::request(), &machine) {
+        (Some(snapshot::Request::Restore { name }), Some(m)) => {
+            match snapshot::prepare_restore(&target_dir(), name, m, &qemu_img()) {
+                Ok(r) => Some(r),
+                Err(e) => return fail(e),
+            }
+        }
+        _ => None,
+    };
+    let save: Option<(String, String, bool)> = match (snapshot::request(), pair) {
+        (Some(snapshot::Request::Save { at, name, stop }), _) => {
+            Some((at.clone(), name.clone(), *stop))
+        }
+        (None, Some(p)) => Some((p.at.to_string(), format!("test-{}", p.name), false)),
+        _ => None,
+    };
+    if let Some((_, name, _)) = &save {
+        let dir = snapshot::root(&target_dir()).join(name);
+        if pair.is_some() {
+            // A scenario's own, left by an earlier failed run.
+            let _ = fs::remove_dir_all(&dir);
+        }
+        if dir.exists() {
+            return fail(format!(
+                "snapshot {name} exists already ({}; `cargo xtask snapshots rm {name}`)",
+                dir.display()
+            ));
+        }
+    }
+    let disk = match &restore {
+        Some(r) => r.layer.clone(),
+        None => match single.map(|name| new_disk(name, iso)).transpose() {
+            Ok(d) => d.flatten(),
+            Err(e) => return fail(e),
+        },
+    };
+    if let (None, Some(name), Some(d)) = (&restore, single, disk.as_deref())
         && let Err(e) = earlier_boots(name, iso, boot, timeout, d)
     {
-        return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
+        return fail(e);
     }
+    let target = target_dir();
+    let snap = match (&restore, &save, &machine, single) {
+        (Some(r), ..) => Some(Snap::Restore(r)),
+        (None, Some((at, name, stop)), Some(m), Some(scenario)) => {
+            Some(Snap::Save(snapshot::Save {
+                target: &target,
+                name,
+                at,
+                stop: *stop,
+                scenario,
+                machine: m,
+            }))
+        }
+        _ => None,
+    };
     let screen = single.and_then(screen_check);
     let want_cpus = telemetry::vm_cpus(iso);
     // The clock under a busy host: every host CPU kept busy while it runs.
@@ -18064,7 +18295,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     let mut attempt = 0;
     let (status, serial, time) = loop {
         let (status, serial, time) =
-            match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen) {
+            match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen, snap.as_ref()) {
                 Ok(r) => r,
                 Err(e) => {
                     return (
@@ -18078,7 +18309,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         // test what it should: once more (not with a disk: its state moved
         // on).
         let got = telemetry::cpus_online(&serial);
-        if attempt == 0 && disk.is_none() && got.is_some_and(|n| n < want_cpus) {
+        if attempt == 0 && disk.is_none() && snap.is_none() && got.is_some_and(|n| n < want_cpus) {
             // Keep the short boot's logs: the next boot overwrites them.
             for ext in ["serial.log", "phases.log", "qemu.log", "bios.log"] {
                 let _ = fs::copy(
@@ -18142,7 +18373,46 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                         Err(format!("event stream lacks (or, for a '!' entry, has) {missing:?}"))
                     }
                 })
-                .and_then(|()| disk.as_deref().map_or(Ok(()), |d| check_disk(s.name, d)));
+                // A snapshot's disk moved into it; a resumed run's is a layer.
+                .and_then(|()| match disk.as_deref() {
+                    Some(d) if snap.is_none() => check_disk(s.name, d),
+                    _ => Ok(()),
+                });
+            let verdict = match (&save, &restore) {
+                (Some((_, name, stop)), _) => {
+                    let saved = serial.contains(snapshot::SAVED);
+                    let line = serial
+                        .lines()
+                        .find(|l| l.starts_with("xtask: snapshot: "))
+                        .unwrap_or("no snapshot line")
+                        .trim_start_matches("xtask: snapshot: ");
+                    let verdict = match () {
+                        _ if !saved => Err(format!("snapshot {name}: {line}")),
+                        // The run ended at the save: the save is its result.
+                        _ if *stop => Ok(()),
+                        _ => verdict,
+                    };
+                    match pair {
+                        Some(p) => verdict.and_then(|()| restore_pair(s, p, iso, boot, timeout)),
+                        None => verdict,
+                    }
+                }
+                (None, Some(r)) => {
+                    if let Some(layer) = &r.layer {
+                        if verdict.is_ok() {
+                            let _ = fs::remove_file(layer);
+                        } else if let Some(used) = host_usage_mib(layer) {
+                            eprintln!(
+                                "xtask: kept the resumed run's disk layer {} ({used} MiB on the \
+                                 host; delete it when done)",
+                                layer.display()
+                            );
+                        }
+                    }
+                    verdict
+                }
+                _ => verdict,
+            };
             vec![(*s, verdict)]
         }
         Vm::Batch(group) => group
@@ -18211,6 +18481,145 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     (time, verdicts)
 }
 
+/// A scenario that takes a machine snapshot of itself and resumes it
+/// (ROADMAP SN step 1): saved when `at` comes, the run goes on to its end
+/// and is judged as usual; then two runs resumed from the snapshot, each
+/// on its own disk layer, are judged on what they print after the resume,
+/// which must not have any of `absent` (they would mean a fresh boot or a
+/// replay of what came before the save). The snapshot's frozen disk must
+/// be as it was after both.
+struct SnapshotScenario {
+    name: &'static str,
+    at: &'static str,
+    absent: &'static [&'static str],
+}
+
+const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[SnapshotScenario {
+    name: "snapshot_machine",
+    at: "snapshot_test: phase 1 done",
+    absent: &["snapshot_test: phase 1 done", KERNEL_BANNER, "run: begin"],
+}];
+
+/// The two resumed runs of a SNAPSHOT_SCENARIOS entry (its snapshot is
+/// `test-<name>`, deleted after they pass).
+fn restore_pair(
+    s: &Scenario,
+    p: &SnapshotScenario,
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+) -> Result {
+    let name = format!("test-{}", s.name);
+    let dir = snapshot::root(&target_dir()).join(&name);
+    let frozen = |dir: &Path| -> Result<String> {
+        let out = Command::new("sha256sum")
+            .arg(dir.join("disk.img"))
+            .output()
+            .map_err(|e| format!("sha256sum: {e}"))?;
+        Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").into())
+    };
+    let before = frozen(&dir)?;
+    let machine = machine_now(s.name, iso, boot)?;
+    let mut layers = Vec::new();
+    for i in 1..=2 {
+        let r = snapshot::prepare_restore(&target_dir(), &name, &machine, &qemu_img())?;
+        let (status, serial, time) = run_vm(
+            iso,
+            boot,
+            timeout,
+            None,
+            false,
+            r.layer.as_deref(),
+            None,
+            Some(&Snap::Restore(&r)),
+        )?;
+        let kept = iso.with_extension(format!("restore{i}.serial.log"));
+        let _ = fs::write(&kept, &serial);
+        let facts = RunFacts {
+            events: Some(iso.with_extension("events.jsonl")),
+            secs: Some(time.total.as_secs_f64()),
+        };
+        judge(s, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)
+            .map_err(|e| format!("resumed run {i}: {e}"))?;
+        // The guest's lines (xtask's own name the snapshot's line).
+        let guest: String =
+            serial.lines().filter(|l| !l.starts_with("xtask:")).map(|l| format!("{l}\n")).collect();
+        if let Some(a) = p.absent.iter().find(|a| guest.contains(*a)) {
+            return Err(format!(
+                "resumed run {i} printed {a:?}, which comes before the snapshot ({})",
+                kept.display()
+            ));
+        }
+        // The guest's wall clock after the resume against the host's.
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Some(guest) = serial
+            .lines()
+            .find_map(|l| l.split("snapshot_test: guest time ").nth(1))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            eprintln!(
+                "xtask: {}: resumed run {i}: the guest's clock {}s behind the host's",
+                s.name,
+                host.saturating_sub(guest)
+            );
+        }
+        layers.extend(r.layer.clone());
+        if let Some(layer) = &r.layer {
+            let _ = fs::remove_file(layer);
+        }
+    }
+    if layers.len() == 2 && layers[0] == layers[1] {
+        return Err("both resumed runs had the same disk layer".into());
+    }
+    if frozen(&dir)? != before {
+        return Err(format!(
+            "the snapshot's frozen disk {} changed",
+            dir.join("disk.img").display()
+        ));
+    }
+    fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// The machine a run of `scenario` on `iso` would be, as a snapshot sees
+/// it (snapshot.rs): QEMU's version, memory and processors, and the boot
+/// image's digests (made with it).
+fn machine_now(scenario: &str, iso: &Path, boot: Boot) -> Result<snapshot::Machine> {
+    let cmd = qemu(iso, boot)?;
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    // The last one counts (XTASK_QEMU_ARGS come after xtask's own).
+    let last =
+        |flag: &str| args.iter().rposition(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let memory = last("-m").unwrap_or_default();
+    let memory_mib = memory
+        .trim_end_matches(['M', 'm'])
+        .parse::<u64>()
+        .map_err(|e| format!("QEMU's -m {memory}: {e}"))?;
+    let smp = last("-smp").unwrap_or_default();
+    let cpus = smp
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("cpus=")
+        .parse::<u32>()
+        .map_err(|e| format!("QEMU's -smp {smp}: {e}"))?;
+    Ok(snapshot::Machine {
+        scenario: scenario.into(),
+        qemu: snapshot::qemu_version(&qemu_binary()),
+        memory_mib,
+        cpus,
+        boot: snapshot::read_boot_digests(iso)?,
+    })
+}
+
+/// The qemu-img that goes with `qemu_binary()` (its directory), else the
+/// one on PATH.
+fn qemu_img() -> PathBuf {
+    let beside = qemu_binary().with_file_name("qemu-img");
+    if beside.is_file() { beside } else { PathBuf::from("qemu-img") }
+}
+
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     let disk = new_disk(scenario.name, iso)?;
@@ -18226,6 +18635,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         scenario.exit_status == XTASK_STOPS,
         disk.as_deref(),
         screen_check(scenario.name),
+        None,
     )?;
     let facts = RunFacts {
         events: Some(iso.with_extension("events.jsonl")),

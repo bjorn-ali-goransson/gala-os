@@ -706,6 +706,25 @@ names the directory; it holds that boot's files only, an earlier
 failure's are removed first), so a program's own log is read as the
 file it wrote.
 
+### Machine snapshots
+
+xtask's whole-machine snapshots (`xtask/src/snapshot.rs`; WORKFLOW
+"Machine snapshots") leave:
+
+- in the saving run's log `xtask: snapshot: saved <name> at <line> in
+  <s> (<n> MiB of memory and devices, gzip; disk <n> MiB on the host)
+  into <dir>`, or `not saved: <why>` (the QMP command and QEMU's error)
+  or `not taken: <line> never came in the serial log`; the run fails
+  without its snapshot;
+- in the snapshot: `manifest` (scenario, time, the line, QEMU, machine,
+  sizes, each boot file's SHA-256) and `serial.log`, the run's log up to
+  the save (what led there);
+- in a resumed run's log `xtask: snapshot: resumed <name> (scenario,
+  taken at <line>, <age> ago) in <s>, on its own disk layer <path>`; a
+  resume that fails says why with QEMU's standard error, a refused one
+  names every difference from the build it needs;
+- a failed resumed run keeps its disk layer and says where.
+
 ### Crash record across reboots
 
 `kernel/src/crash.rs` (ROADMAP R4): a panic writes its message, the

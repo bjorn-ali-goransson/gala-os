@@ -217,6 +217,7 @@ alone prints the usage.
 | `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
 | `events <events.jsonl>` | summarize an event stream |
 | `office-source [--pin]` | fetch the pinned Office build's files from Microsoft's CDN into the host's cache, for `office_install_local` ("Office's fast path"); `--pin` prints their checksums |
+| `snapshots [rm <name>]` | the machine snapshots in `target/snapshots` ("Machine snapshots"); `boot-test <scenario> --snapshot-at <line> --snapshot-name <name> [--snapshot-stop]` takes one, `boot-test --from-snapshot <name>` resumes one |
 | `disk-files <image> [C:/path] [--out DIR]` | what a disk image holds on C: (the files programs wrote, read with the kernel's own volume, log and file-system code); `--out` copies them ("Disk tests") |
 | `otel <log\|events.jsonl\|scenario> [events.jsonl] [--out P] [--endpoint URL]` | OTLP/JSON ("OpenTelemetry") |
 | `profile <events.jsonl\|scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` | the sampling profiler's report (OBSERVABILITY `sample`) |
@@ -574,6 +575,90 @@ image, what the image must hold afterwards).
   is the kernel and the boot modules. `memload_test` reproduces a long
   download in four minutes; it runs in a 256 MiB VM (`MEMLOAD_MEMORY_MIB`)
   so that its file cache holds less than it downloads.
+
+### Machine snapshots (ROADMAP SN)
+
+A long run is reached once and later runs start from there
+(`xtask/src/snapshot.rs`):
+
+```sh
+# save when the line comes (the run goes on; --snapshot-stop ends it there)
+cargo xtask boot-test 'office_install_local$' \
+    --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge
+cargo xtask snapshots                  # name, scenario, when, size, kernel, machine
+cargo xtask boot-test --from-snapshot office-merge   # as often as wanted
+cargo xtask snapshots rm office-merge
+```
+
+- **What is saved**: QEMU's own state over QMP. xtask stops the
+  machine (`stop` drains the disk's requests), freezes its disk with
+  `blockdev-snapshot-sync` (the image moves into the snapshot as
+  `disk.img`; the run that saved writes to a new qcow2 layer, deleted
+  when it ends), migrates the stopped machine's memory and devices
+  through `gzip -1` into `state.gz`, writes `manifest` and the serial
+  log so far (`serial.log`), then continues the machine. A resumed run
+  is QEMU with the same machine, `-S -incoming exec:gzip -dc ...`, and a
+  qcow2 layer of its own over `disk.img` (`runs/<pid>-<n>.qcow2`,
+  deleted after a pass, kept after a failure), so two resumed runs never
+  see each other's writes and the snapshot's disk never changes.
+- **Its log is what comes after the resume**: the scenario's expected
+  lines are checked there (a line printed before the save is not in
+  it), followed by `xtask: snapshot: resumed <name> (scenario, taken at
+  <line>, <age> ago) in <s>`. The saving run's log has `xtask: snapshot:
+  saved <name> ...` (or `not saved: <why>`, `not taken: <line> never
+  came`), and the run fails without its snapshot.
+- **It resumes only on the build it was taken from**: the manifest
+  names the SHA-256 of the kernel, every boot module and Limine's
+  config (the command line), QEMU's version, the accelerator, memory and
+  processors; anything else is refused before the boot with every
+  difference named (`boot image files differ: boot/msxml6.dll`, `the
+  kernel differs`, `the machine differs`). gala's DLLs are boot modules
+  held in the guest's memory (ARCHITECTURE "Contents from boot
+  modules"), not files on its disk, so a changed DLL changes the saved
+  state as a changed kernel does; so do `XTASK_CMDLINE`, `XTASK_EVENTS`
+  (the command line) and `XTASK_QEMU_ARGS` that change memory or
+  processors. Every image carries all the test programs, so changing any
+  of them (`user/bin` included) refuses every snapshot too. A module
+  that a process mapped before the save cannot change anyway (the
+  Office service maps msxml6.dll in its first minute), so a snapshot
+  helps with what happens after the save on one build: re-running a late
+  stage, watching it with the monitor, resuming twice to compare. Resume
+  with the same `XTASK_EVENTS` the snapshot was taken with.
+- **Office**: `office_install_local` saved at `process integrator.exe
+  (pid` (1675 s in, just before App-V's manifest merge) takes 5 s, 117
+  MiB of state plus its 7.6 GB disk; a resume reaches the install's end
+  in about 21 s of run time (40 s with the build check), against 1706 s
+  from boot. With "Office's fast path"'s link in /dev/shm and
+  `target/snapshots` linked there too, nothing large touches `/`.
+- **Where**: `target/snapshots/<name>/`. Office's are several GB: make
+  `target/snapshots` a symbolic link to a directory on the file system
+  of the scenario's disk image (`/dev/shm` with "Office's fast path"'s
+  link: `ln -s /dev/shm/snapshots target/snapshots`), since the frozen
+  image is moved, not copied; xtask says so when they differ.
+- **The guest's clock**: the TSC, HPET, PM timer and LAPIC timer stop
+  while the machine is stopped and go on from the saved values after a
+  resume, so the kernel sees no jump (measured under TCG; snapshot_test's longest 100 ms wait
+  around the save is about 105 ms). Only the CMOS RTC follows the host;
+  the kernel reads it only during the RTC check after boot. The guest's
+  wall clock therefore runs behind the host's by the time from the save
+  to the resume (`snapshot_machine` prints it: `the guest's clock Ns
+  behind the host's`); every resumed run of one snapshot starts at the
+  same guest time. The host-side clock check (`clockcheck.rs`) leaves
+  the save's pause out.
+- **Limits**: one scenario booted alone, BIOS boots only (UEFI's variable
+  store would be a second disk to save), not of a resumed run (a
+  snapshot of a snapshot), not with `XTASK_REUSE_DISK`. Connections to
+  the host (a network client, a forwarded port) do not survive; a net
+  client waiting for a line printed before the save never starts. A
+  resumed run is not a replay: threads may interleave differently.
+  The kept layer of a failed resumed run is qcow2, which `disk-files`
+  does not read (`qemu-img convert -O raw` it first, or use `dump=`).
+- **Test**: `snapshot_machine` (in `cargo xtask test`, about 20 s under
+  TCG): snapshot_test saved at `phase 1 done`, the run goes on, then
+  two resumed runs must print `snapshot_test: ok` and none of phase 1's
+  lines, the kernel's banner or `run: begin`, and the frozen disk's
+  digest must not change; host tests `snapshot::tests` (manifest, the
+  build check's reasons, arguments).
 
 ### GPU tests
 
@@ -4184,7 +4269,7 @@ ARCHITECTURE "Waits".
 | Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |
 | Triage of the test programs on real Windows: run-all's data and probe scripts | `user/windows/` (`docs/windows-triage-brief.md`; requests and findings are GitHub issues labelled `windows` / `from-windows`) |
 | gala under KVM on the Windows machine: Chromium's memory, the WPT run, the performance profile | `docs/windows-kvm-brief.md` (GitHub issue #1, branch `windows-kvm`) |
-| Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs` (encoders `otel/wire.rs`, batching and sending `otel/send.rs`); lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
+| Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs` (encoders `otel/wire.rs`, batching and sending `otel/send.rs`); lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs`; machine snapshots `snapshot.rs` |
 | Docker test image | `docker/test.Dockerfile` |
 | Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
 
