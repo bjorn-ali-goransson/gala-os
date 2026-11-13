@@ -240,7 +240,7 @@ has a section under "Open items".
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
@@ -4525,6 +4525,18 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    Statistics the percentiles' sample counts. The same text from
    `gala ps --copy` and `gala stats --copy`; the scenario checks the
    clipboard's text against the view.
+5. Sparklines: a small line of the last minute beside every metric, as
+   Windows' Performance sidebar: in Performance's list on the left
+   (each processor, memory, disk, network, the process, thread and
+   handle counts, from `taskmgr::History`), and in the CPU, Memory,
+   Disk and Network columns of Processes and Details per process
+   (a fixed ring of samples per process, kept with its row and dropped
+   when it ends; no allocation per sample), and beside each
+   Statistics row (its p50 and p99 over time). Scaled per metric
+   (CPU and memory to 100 %, throughput to the visible peak, the peak
+   written beside it); the scenario checks the lines rise under its
+   busy thread and stay flat for an idle process, and the Copy text
+   carries the sampled values.
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its
