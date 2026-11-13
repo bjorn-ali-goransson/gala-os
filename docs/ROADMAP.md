@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first, and a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -4120,20 +4120,45 @@ times to branch (try two fixes from the same state). For users,
 `gala snapshot` saves a program and `gala restore` brings it back,
 on the same machine or, exported, on another.
 
-**Step 1: whole-machine snapshots in xtask.** QEMU saves and restores a
-whole VM (memory, devices, a copy-on-write disk layer); no kernel
-change. xtask saves when a given ledger or serial line appears
-(`--snapshot-at <pattern> --snapshot-name <name>`) and starts later
-runs from it (`--from-snapshot <name>`), each run on its own disk
-layer so branches do not see each other. Limits: the guest clock jumps
-on restore (the kernel re-reads time as after a host stall), and
-connections to the host and the internet are gone (local sources are
-fine). A restored run is not a replay: threads may interleave
-differently (R5 is the deterministic tool). Snapshots speed up
-iteration and never replace a full run: CI keeps running every
-scenario from boot. Snapshots of the Office install hold several GB,
-kept under `target/snapshots`, with their size and the build they came
-from (a snapshot of another build is refused with the reason).
+**Step 1: whole-machine snapshots in xtask.** Done
+(`xtask/src/snapshot.rs`, WORKFLOW "Machine snapshots"; scenario
+`snapshot_machine`, host tests `snapshot::tests`). `boot-test <scenario>
+--snapshot-at <line> --snapshot-name <name> [--snapshot-stop]` saves the
+machine when the line comes in its serial log (the ledger's lines are
+there too): over QMP, `stop`, `blockdev-snapshot-sync` (the disk image,
+frozen, moves into the snapshot; the run goes on in a new qcow2 layer),
+then a migration of memory and devices through gzip. `boot-test
+--from-snapshot <name>` starts QEMU with `-incoming` from it, on a qcow2
+layer of its own over the frozen disk, and judges what comes after the
+resume. `cargo xtask snapshots [rm <name>]` lists and deletes them
+(`target/snapshots/<name>/`: manifest, state, disk, the log up to the
+save). A snapshot resumes only on the build it was taken from: the
+manifest names the SHA-256 of the kernel, every boot module and the
+command line, QEMU, the accelerator, memory and processors, and a
+difference is refused with each one named. That is exactly what the
+saved memory holds: gala's DLLs and test programs are boot modules
+loaded into memory by Limine, not files on the disk, so a changed DLL is
+refused as a changed kernel is. No kernel change was needed: the
+guest's clocks stop with the machine and go on from the saved values
+(no jump; only the RTC follows the host, and the kernel reads it only
+after boot), so its wall clock is behind the host's by the time saved
+(ARCHITECTURE "What a guest's clock follows"); the host-side clock check
+leaves the save's pause out. `snapshot_machine` runs in `cargo xtask
+test` (about 20 s under TCG). Connections to the host and the internet
+do not survive a resume (local sources are fine); a resumed run is not
+a replay (R5 is the deterministic tool); snapshots never replace a full
+run in CI. Limits: one scenario booted alone, BIOS boots, not a
+snapshot of a resumed run.
+Next (step 1c): resuming with other DLLs. Since they are boot
+modules, a snapshot cannot take a fixed DLL today; for fixes in DLLs
+the Office install has not loaded yet at the save, the boot modules
+would move to the disk (the open question in ARCHITECTURE "Chain of
+trust"), and a resumed run's own layer would take the new files (same
+place on the disk; the kernel's file tree in memory names their size and
+clusters, so a file that grows needs the kernel's help, a boot module
+the kernel reads at a resume). Until then a snapshot is taken with the
+build the fix is tried on (the fix in a stage after the save) and
+resumed as often as the stage needs.
 
 **Step 1b: a failing CI run leaves its snapshot.** When a scenario
 fails or times out in CI, xtask asks QEMU to save the VM before ending
