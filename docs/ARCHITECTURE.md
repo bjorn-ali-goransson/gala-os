@@ -5068,11 +5068,14 @@ of their own, clients of it) is the yardstick.
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
   folder Windows makes with one; `shell32_test`). Both read one table
-  of known folder definitions (`user/shell32/src/knownfolder.rs`: 74
+  of known folder definitions (`user/shell32/src/knownfolder.rs`: 72
   folders, each with its id, CSIDL, name, category, parent, relative
   path, parsing name, attributes and KFDF_ flags, Windows' as Wine's
-  conformance test lists them; the virtual folders, the libraries and
-  the sample folders are left out). A folder's path is its root's (an
+  conformance test lists them, measured on build 26100 where it
+  differs: Documents, Downloads, Music, Pictures and Videos have the
+  parsing name `shell:::{<their This PC id>}`, Public has none, and
+  the Sidebar gadget folders are not defined; the virtual folders, the
+  libraries and the sample folders are left out). A folder's path is its root's (an
   environment variable, the Windows or system directory) or its
   parent's path, a backslash and its relative path, so a child is
   always below its parent; the X64 folders exist in a 64-bit process

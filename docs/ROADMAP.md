@@ -2122,7 +2122,7 @@ need gala's.
      the failure in 37 s against about 1820 s from boot, the service's
      log read from the resume's kept layer (`disk-files` reads it now).
      Done: the Known Folder Manager, registered for shell32 in both
-     views, over one table of 74 known folder definitions that
+     views, over one table of 72 known folder definitions that
      SHGetFolderPathW and SHGetKnownFolderPath read too, test first
      (`knownfolder_test`, x64 and x86: Wine's shell32 known folder
      tests, every definition checked against Windows' as that test
