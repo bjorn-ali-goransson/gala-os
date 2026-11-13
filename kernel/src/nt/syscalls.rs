@@ -191,6 +191,9 @@ pub const GALA_LX_DISTRO: u32 = 0x7fe2;
 /// The task manager's data (gala's own; nt::tasks): every process of
 /// both personalities, the machine's load, End task for Linux ones.
 pub const GALA_TASKS: u32 = 0x7fe8;
+/// The hot swap scenarios' probe of a kernel change (gala's own;
+/// nt::hotswap_probe, ROADMAP SN step 1e).
+pub const GALA_HOTSWAP_PROBE: u32 = 0x7ff0;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -497,6 +500,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_LX_SPAWN, "GalaLxSpawn", 3, wsl_calls::gala_lx_spawn),
     (GALA_LX_DISTRO, "GalaLxDistro", 5, wsl_calls::gala_lx_distro),
     (GALA_TASKS, "GalaTasks", 5, gala_tasks),
+    (GALA_HOTSWAP_PROBE, "GalaHotswapProbe", 3, gala_hotswap_probe),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -4263,6 +4267,18 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
 /// between calls); op 2 signals Linux process `arg` with signal
 /// `length`; op 3 ends the WSL distribution named by the
 /// UTF-8 `buffer` (`*returned` how many processes ended).
+/// GalaHotswapProbe(Op, Value, *Out): nt::hotswap_probe.
+fn gala_hotswap_probe(call: &mut Call<'_>) -> NtStatus {
+    let (op, value, out) = (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2));
+    let values = tri!(super::hotswap_probe::probe(op, value));
+    if out != 0 {
+        for (i, v) in values.into_iter().enumerate() {
+            tri!(call.write_u64(out + 8 * i as u64, v));
+        }
+    }
+    NtStatus::SUCCESS
+}
+
 fn gala_tasks(call: &mut Call<'_>) -> NtStatus {
     let (op, arg, buffer, length, returned) =
         (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32, arg!(call, 4));

@@ -275,10 +275,17 @@ pub fn check_build(m: &Manifest, now: &Machine) -> Result {
 /// checks that nothing else in it changed) and the signed manifest (their
 /// digests).
 pub fn hotswap_allowed(dlls: &[String]) -> Vec<String> {
-    let mut v: Vec<String> =
-        dlls.iter().flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")]).collect();
+    let mut v: Vec<String> = dlls
+        .iter()
+        .filter(|d| *d != crate::hotswap::KERNEL)
+        .flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")])
+        .collect();
     v.push("boot/limine/limine.conf".into());
     v.push("boot/gala.manifest".into());
+    // The kernel too, for `--hot-swap-unsafe kernel` (SN step 1e).
+    if dlls.iter().any(|d| d == crate::hotswap::KERNEL) {
+        v.push(KERNEL.into());
+    }
     v
 }
 
@@ -292,7 +299,9 @@ pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Re
     }
     let short = |s: &str| s.chars().take(12).collect::<String>();
     let kernel_now = now.boot.iter().find(|(p, _)| p == KERNEL).map(|(_, s)| s.as_str());
-    if m.kernel() != kernel_now {
+    if m.kernel() != kernel_now && allowed.iter().any(|a| a == KERNEL) && kernel_now.is_some() {
+        differ.push(KERNEL.to_string());
+    } else if m.kernel() != kernel_now {
         why.push(format!(
             "the kernel differs (snapshot {}, this build {})",
             m.kernel().map_or("none".into(), short),
@@ -401,12 +410,30 @@ pub fn modules_dir(iso: &Path) -> PathBuf {
 /// with the map lld wrote beside that output (`deps/<stem>.map`, taken
 /// only when `deps/<stem>.dll` is the very file: a map of another build
 /// would mislead the diff).
-pub fn keep_modules(iso: &Path, iso_root: &Path, dlls: &[(String, PathBuf)]) -> Result {
+pub fn keep_modules(
+    iso: &Path,
+    iso_root: &Path,
+    dlls: &[(String, PathBuf)],
+    kernel: &Path,
+) -> Result {
     let dir = modules_dir(iso);
     let _ = fs::remove_dir_all(&dir);
     let conf = "boot/limine/limine.conf";
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     fs::copy(iso_root.join(conf), dir.join("limine.conf")).map_err(|e| format!("{conf}: {e}"))?;
+    // The kernel (as the image has it: without debug sections) and lld's
+    // map of its build (`<kernel>.map` beside the build output, written by
+    // the link: kernel/build.rs), for `--hot-swap-unsafe kernel`.
+    let kept = dir.join(KERNEL);
+    if let Some(parent) = kept.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::copy(iso_root.join(KERNEL), &kept).map_err(|e| format!("{KERNEL}: {e}"))?;
+    let map = kernel.with_extension("map");
+    if map.is_file() {
+        fs::copy(&map, kept.with_extension("map"))
+            .map_err(|e| format!("{}: {e}", map.display()))?;
+    }
     for (path, source) in dlls {
         let to = dir.join(path);
         if let Some(parent) = to.parent() {
@@ -1074,6 +1101,18 @@ mod tests {
         assert!(check_build_except(&m, &now, &other).unwrap_err().contains("boot/msxml6.dll"));
         now.boot[0].1 = "f".repeat(64);
         assert!(check_build_except(&m, &now, &allowed).unwrap_err().contains("kernel differs"));
+        // With the kernel named too (SN step 1e), the kernel may differ:
+        // it is one of those that do.
+        let both = hotswap_allowed(&["kernel".to_string(), "msxml6.dll".to_string()]);
+        assert!(both.contains(&KERNEL.to_string()) && !both.contains(&"boot/kernel.dll".into()));
+        assert_eq!(
+            check_build_except(&m, &now, &both),
+            Ok(vec![
+                KERNEL.to_string(),
+                "boot/limine/limine.conf".to_string(),
+                "boot/msxml6.dll".to_string()
+            ])
+        );
         // A snapshot of a hot-swapped run keeps the mark.
         let marked = Manifest { hot_swapped: Some("msxml6.dll".into()), ..m };
         assert_eq!(Manifest::parse(&marked.to_text()), Ok(marked));

@@ -1557,6 +1557,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hotswap_machine", "hotswap_dll.dll", "gala"),
     ("hotswap_stack", "ntdll.dll", "Windows/System32"),
     ("hotswap_stack", "hotswap_dll.dll", "gala"),
+    ("khotswap_machine", "ntdll.dll", "Windows/System32"),
+    ("khotswap_machine", "hotswap_dll.dll", "gala"),
+    ("khotswap_stack", "ntdll.dll", "Windows/System32"),
+    ("khotswap_stack", "hotswap_dll.dll", "gala"),
+    ("khotswap_both", "ntdll.dll", "Windows/System32"),
+    ("khotswap_both", "hotswap_dll.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -4271,12 +4277,15 @@ commands:
                --from-snapshot <name> [scenario] (only on the build it was taken
                from; docs/WORKFLOW.md, Machine snapshots); AT YOUR OWN RISK,
                never a real run: --from-snapshot <name> --hot-swap-unsafe
-               <dll>[,<dll>...] splices the named DLLs' new build into the
-               resumed programs (docs/WORKFLOW.md, Hot swapping DLLs)
+               [kernel,]<dll>[,<dll>...] splices the new build of the kernel
+               and the named DLLs into the resumed machine (docs/WORKFLOW.md,
+               Hot swapping DLLs and the kernel)
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
-  hotswap-diff what a hot swap would patch: hotswap-diff <old.dll> <old.map>
-               <new.dll> <new.map> (lld maps: target/<target>/release/deps)
+  hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
+               <new> <new.map>, DLLs or the kernel (lld maps: a DLL's in
+               target/<target>/release/deps, the kernel's beside it as
+               kernel.map; XTASK_HOTSWAP_WHY=1: why each changed)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -4491,20 +4500,30 @@ fn main() -> ExitCode {
     }
 }
 
-/// `cargo xtask hotswap-diff <old.dll> <old.map> <new.dll> <new.map>`:
-/// what `--hot-swap-unsafe` would patch, or why it would refuse
+/// `cargo xtask hotswap-diff <old> <old.map> <new> <new.map>` (DLLs or
+/// the kernel): what `--hot-swap-unsafe` would patch, or why it would
+/// refuse
 /// (hotswap.rs).
 fn hotswap_diff(args: &[String]) -> Result {
     let [old, old_map, new, new_map] = args else {
         return Err(
-            "usage: cargo xtask hotswap-diff <old.dll> <old.map> <new.dll> <new.map>".into()
+            "usage: cargo xtask hotswap-diff <old> <old.map> <new> <new.map> (DLLs or the kernel)"
+                .into(),
         );
     };
     let read = |p: &String| fs::read(p).map_err(|e| format!("{p}: {e}"));
     let text = |p: &String| fs::read_to_string(p).map_err(|e| format!("{p}: {e}"));
-    let old_image = hotswap::Image::read(&read(old)?, &text(old_map)?)?;
+    // The kernel (an ELF) or a DLL (a PE image).
+    let image = |bytes: &[u8], map: &str| {
+        if bytes.starts_with(b"\x7fELF") {
+            hotswap::Image::from_elf(bytes, map)
+        } else {
+            hotswap::Image::read(bytes, map)
+        }
+    };
+    let old_image = image(&read(old)?, &text(old_map)?)?;
     let new_file = read(new)?;
-    let new_image = hotswap::Image::read(&new_file, &text(new_map)?)?;
+    let new_image = image(&new_file, &text(new_map)?)?;
     let name =
         Path::new(new).file_name().map_or("dll".into(), |n| n.to_string_lossy().into_owned());
     let patch = hotswap::diff(&old_image, &new_image, &name, &new_file)?;
@@ -4727,11 +4746,16 @@ fn build_kernel(release: bool) -> Result {
     // Every kernel xtask builds trusts the test key (R8; `XTASK_UNSIGNED`).
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    // The default build (kernel/build.rs: a variant is a hot swap
+    // scenario's, `kernel_variant`).
+    cmd.env_remove("GALA_KERNEL_VARIANT");
     trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -4815,7 +4839,9 @@ fn build_next_kernel(release: bool) -> Result<PathBuf> {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    Ok(next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))
+    let kernel = next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    drop_debug_relocations(&kernel)?;
+    Ok(kernel)
 }
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
@@ -4895,6 +4921,11 @@ fn make_iso_unchecked(
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    // `kernel=<path>`: another build of the kernel (a kernel hot swap
+    // scenario's variant, `kernel_variant`).
+    if let Some((path, _)) = extra.iter().find(|(f, _)| f.starts_with("kernel=")) {
+        kernel = PathBuf::from(&path["kernel=".len()..]);
+    }
     // R9 (d): the other build as a boot module, to hand over to.
     let builds = name
         .strip_prefix("test-")
@@ -4936,6 +4967,9 @@ fn make_iso_unchecked(
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
+        if file.starts_with("kernel=") {
+            continue;
+        }
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
         if file.starts_with("target/prebuilt/") {
@@ -5036,7 +5070,7 @@ fn make_iso_unchecked(
     let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
     if snapshot::digests_wanted() {
         snapshot::write_boot_digests(&iso, &snapshot::boot_digests(&iso_root)?)?;
-        snapshot::keep_modules(&iso, &iso_root, &dlls)?;
+        snapshot::keep_modules(&iso, &iso_root, &dlls, &kernel)?;
     }
     // The tree is in the image now (it can be as large: disk space).
     let _ = fs::remove_dir_all(&iso_root);
@@ -6485,6 +6519,53 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=hotswap_test.exe args=stack",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["hotswap_test: callback 11", "hotswap_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SN step 1e: hot swapping the kernel into a resumed machine
+        // (hotswap.rs, SNAPSHOT_SCENARIOS). hotswap_test reads the kernel's
+        // probe (nt::hotswap_probe) before and after its marker, where the
+        // run is saved; resumed with the kernel's `hotswap_v2` build
+        // swapped in (applied: the new values) and its `hotswap_layout`
+        // build (refused by xtask: a static changed size).
+        name: "khotswap_machine",
+        cmdline: "qemu_exit run=hotswap_test.exe args=kernel",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1e: the run is saved while hotswap_test's thread waits
+        // inside the kernel's changed probe function (its kernel stack
+        // holds a return address into it): the guest refuses the swap of
+        // the kernel and of the DLL in the same plan, undoing the DLL's
+        // (SNAPSHOT_SCENARIOS), and the program goes on with the first
+        // builds.
+        name: "khotswap_stack",
+        cmdline: "qemu_exit run=hotswap_test.exe args=kstack",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1e: the kernel and a DLL in one plan
+        // (`--hot-swap-unsafe kernel,hotswap_dll.dll`): saved at the
+        // marker, resumed with both second builds (SNAPSHOT_SCENARIOS).
+        name: "khotswap_both",
+        cmdline: "qemu_exit run=hotswap_test.exe args=both",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // SN step 1d in a WOW64 process: the 32-bit hotswap_test on
@@ -11530,6 +11611,10 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || HOST_PAGE_SCENARIOS.contains(&s.name)
         || disk_scenario(s.name).is_some()
         || s.name.starts_with("onecpu_")
+        // A scenario that snapshots and resumes itself is one machine's
+        // (in a batch it would take no snapshot and run none of its
+        // resumes, and still pass).
+        || SNAPSHOT_SCENARIOS.iter().any(|p| p.name == s.name)
     {
         return None;
     }
@@ -18670,10 +18755,12 @@ struct SnapshotScenario {
     hotswap: &'static [HotswapCase],
 }
 
-/// A resume of a hot swap scenario: hotswap_dll's build `variant` swapped
-/// in (`hotswap_variant`), and what must come of it.
+/// A resume of a hot swap scenario: hotswap_dll's build `dll` swapped in
+/// (`hotswap_variant`), the kernel's build `kernel` (`kernel_variant`),
+/// or both in one plan, and what must come of it.
 struct HotswapCase {
-    variant: &'static str,
+    dll: Option<&'static str>,
+    kernel: Option<&'static str>,
     outcome: HotswapOutcome,
 }
 
@@ -18700,7 +18787,8 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         absent: &["hotswap_test: marker", KERNEL_BANNER],
         hotswap: &[
             HotswapCase {
-                variant: "v2",
+                dll: Some("v2"),
+                kernel: None,
                 outcome: HotswapOutcome::Applied(&[
                     "hotswap: NOT A REAL RUN",
                     "hotswap: \\gala\\hotswap_dll.dll: the file is the new build now",
@@ -18711,7 +18799,8 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
                 ]),
             },
             HotswapCase {
-                variant: "layout",
+                dll: Some("layout"),
+                kernel: None,
                 outcome: HotswapOutcome::RefusedByXtask(
                     "static hotswap_dll::TABLE changed size (32 -> 64 bytes)",
                 ),
@@ -18723,7 +18812,8 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         at: "hotswap_test: marker",
         absent: &["hotswap_test: marker", KERNEL_BANNER],
         hotswap: &[HotswapCase {
-            variant: "v2",
+            dll: Some("v2"),
+            kernel: None,
             outcome: HotswapOutcome::Applied(&[
                 "hotswap: hotswap_dll32.dll (x86):",
                 "hotswap: applied: hotswap_dll32.dll in 1 process(es), 5 function(s) patched",
@@ -18734,11 +18824,78 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         }],
     },
     SnapshotScenario {
+        name: "khotswap_machine",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[
+            HotswapCase {
+                dll: None,
+                kernel: Some("hotswap_v2"),
+                outcome: HotswapOutcome::Applied(&[
+                    "hotswap: NOT A REAL RUN",
+                    "hotswap: kernel: blob mapped at 0xffffffffe0000000",
+                    "hotswap: kernel: patched kernel!<kernel::nt::hotswap_probe::ProbeValue as \
+                     kernel::nt::hotswap_probe::ProbeObject>::get",
+                    "hotswap: kernel: stack check:",
+                    "hotswap: applied: kernel: 4 function(s) patched",
+                    "hotswap_test: kernel after: version 2, calls 2, object 107, global 1042",
+                    "hotswap_test: ok",
+                    "exited with status 0x00000000",
+                ]),
+            },
+            HotswapCase {
+                dll: None,
+                kernel: Some("hotswap_layout"),
+                outcome: HotswapOutcome::RefusedByXtask(
+                    "static kernel::nt::hotswap_probe::PROBE_TABLE changed size (32 -> 64 bytes)",
+                ),
+            },
+        ],
+    },
+    SnapshotScenario {
+        name: "khotswap_stack",
+        at: "hotswap probe: waiting in the kernel",
+        absent: &["hotswap_test: kstack", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: Some("hotswap_v2"),
+            outcome: HotswapOutcome::RefusedByGuest(
+                "kernel!kernel::nt::hotswap_probe::wait_in_kernel (changed) is on the kernel \
+                 stack of thread",
+                &[
+                    "hotswap: undoing the 1 DLL(s) swapped before the kernel",
+                    "hotswap: kernel: the blob's window is unmapped again",
+                    "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+                    "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+                    "hotswap_test: ok",
+                ],
+            ),
+        }],
+    },
+    SnapshotScenario {
+        name: "khotswap_both",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: Some("hotswap_v2"),
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: applied: hotswap_dll.dll in 1 process(es), 5 function(s) patched",
+                "hotswap: applied: kernel: 4 function(s) patched",
+                "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                "hotswap_test: kernel after: version 2, calls 2, object 107, global 1042",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
+    },
+    SnapshotScenario {
         name: "hotswap_stack",
         at: "hotswap_test: marker",
         absent: &["hotswap_test: marker", KERNEL_BANNER],
         hotswap: &[HotswapCase {
-            variant: "v2",
+            dll: Some("v2"),
+            kernel: None,
             outcome: HotswapOutcome::RefusedByGuest(
                 "hotswap_dll.dll!hs_call_back (changed) is on the stack of thread",
                 &["hotswap_test: callback 11", "hotswap_test: ok"],
@@ -18762,6 +18919,45 @@ fn hotswap_variant(feature: &str, target: &str, package: &str) -> Result<PathBuf
     Ok(target_dir().join(target).join(&profile).join(format!("{package}.dll")))
 }
 
+/// The kernel's builds for the kernel hot swap scenarios, by variant
+/// (made once per run).
+static KERNEL_VARIANTS: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Builds the kernel as `GALA_KERNEL_VARIANT=<variant>` (kernel/build.rs:
+/// `hotswap_v2`, `hotswap_layout`) with the default build's settings, in
+/// a profile of its own (`khotswap`, `khotswap-release`; Cargo.toml), and
+/// copies it (as an image has it) and its map to `kernel-<variant>` there (the next variant's
+/// build replaces `kernel`). A cfg, not a feature: the kernel crate's
+/// metadata, and so every TypeId and symbol, stays the default build's.
+fn kernel_variant(release: bool, variant: &str) -> Result<PathBuf> {
+    let mut built = KERNEL_VARIANTS.lock().map_err(|_| "kernel variants: a poisoned lock")?;
+    if let Some(path) = built.get(variant) {
+        return Ok(path.clone());
+    }
+    let profile = if release { "khotswap-release" } else { "khotswap" };
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+        .args(["--profile", profile])
+        .env("GALA_KERNEL_VARIANT", variant);
+    trust::kernel_env(&mut cmd)?;
+    run_quiet(&mut cmd)?;
+    let dir = target_dir().join(KERNEL_TARGET).join(profile);
+    drop_debug_relocations(&dir.join("kernel"))?;
+    let out = dir.join(format!("kernel-{variant}"));
+    // Without its debug sections, as an image has it (most of its size).
+    copy_kernel(&dir.join("kernel"), &out)?;
+    fs::copy(dir.join("kernel.map"), out.with_extension("map"))
+        .map_err(|e| format!("{}.map: {e}", out.display()))?;
+    // Its incremental state is as large as the default build's (about 2
+    // GB with debug information): not kept, so the next variant is a
+    // fresh incremental build (still incremental: a build that is not
+    // partitions the code otherwise, and every function would differ).
+    let _ = fs::remove_dir_all(dir.join("incremental"));
+    built.insert(variant.to_string(), out.clone());
+    Ok(out)
+}
+
 /// The resumes of a hot swap scenario (`p.hotswap`), from its snapshot
 /// `test-<name>` (deleted after them).
 fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Duration) -> Result {
@@ -18773,21 +18969,45 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
         if x86 { ("hotswap_dll32", USER_TARGET_X86) } else { ("hotswap_dll", USER_TARGET) };
     let dll = format!("{package}.dll");
     for case in p.hotswap {
-        let built = hotswap_variant(case.variant, target, package)?;
-        let built = built.to_string_lossy().into_owned();
+        let built = match case.dll {
+            Some(variant) => {
+                hotswap_variant(variant, target, package)?.to_string_lossy().into_owned()
+            }
+            None => String::new(),
+        };
         let x86_built = format!("x86={built}");
-        let extras: Vec<(&str, &str)> = extra_modules(s.name)
+        let mut extras: Vec<(&str, &str)> = extra_modules(s.name)
             .into_iter()
             .map(|(f, d)| match f {
-                "hotswap_dll.dll" => (built.as_str(), d),
-                "x86/hotswap_dll32.dll" => (x86_built.as_str(), d),
+                "hotswap_dll.dll" if case.dll.is_some() => (built.as_str(), d),
+                "x86/hotswap_dll32.dll" if case.dll.is_some() => (x86_built.as_str(), d),
                 _ => (f, d),
             })
             .collect();
-        let image = format!("{name}-{}", case.variant);
+        let kernel = match case.kernel {
+            Some(variant) => format!("kernel={}", kernel_variant(release, variant)?.display()),
+            None => String::new(),
+        };
+        if case.kernel.is_some() {
+            extras.push((kernel.as_str(), ""));
+        }
+        let mut swap = Vec::new();
+        let mut parts = Vec::new();
+        if let Some(variant) = case.dll {
+            swap.push(dll.clone());
+            parts.push(format!("{dll}'s {variant} build"));
+        }
+        if let Some(variant) = case.kernel {
+            swap.push(hotswap::KERNEL.to_string());
+            parts.push(format!("the kernel's {variant} build"));
+        }
+        let image = format!(
+            "{name}-{}-{}",
+            case.dll.unwrap_or("dll1"),
+            case.kernel.map_or("k1", |k| k.trim_start_matches("hotswap_"))
+        );
         let iso = make_iso(release, &image, &scenario_cmdline(s), &extras)?;
         let machine = machine_now(s.name, &iso, boot)?;
-        let swap = [dll.clone()];
         let prepared = snapshot::prepare_restore(
             &target_dir(),
             &name,
@@ -18795,7 +19015,7 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
             &qemu_img(),
             Some((&swap, &iso)),
         );
-        let label = format!("hot swap of the {} build", case.variant);
+        let label = format!("hot swap of {}", parts.join(" and "));
         let result = match (&case.outcome, prepared) {
             (HotswapOutcome::RefusedByXtask(want), Err(e)) if e.contains(want) => {
                 eprintln!("xtask: {}: {label}: refused as it must be: {e}", s.name);
@@ -18836,19 +19056,24 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
                 // The event stream says it too.
                 let events =
                     fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
-                let event = match outcome {
-                    HotswapOutcome::Applied(_) => {
-                        format!(r#""ev":"hotswap","result":"applied","dll":"{dll}""#)
-                    }
-                    _ => r#""ev":"hotswap","result":"refused""#.to_string(),
+                let wanted: Vec<String> = match outcome {
+                    HotswapOutcome::Applied(_) => swap
+                        .iter()
+                        .map(|d| match d.as_str() {
+                            hotswap::KERNEL => {
+                                r#""ev":"hotswap","result":"applied","image":"kernel""#.to_string()
+                            }
+                            _ => format!(r#""ev":"hotswap","result":"applied","dll":"{d}""#),
+                        })
+                        .collect(),
+                    _ => vec![r#""ev":"hotswap","result":"refused""#.to_string()],
                 };
-                if !events.contains(&event) {
+                if let Some(event) = wanted.iter().find(|e| !events.contains(e.as_str())) {
                     return Err(format!("{label}: the event stream lacks {event}"));
                 }
                 let result = match outcome {
                     HotswapOutcome::Applied(lines) => {
-                        let (v, expected) =
-                            hotswap::verdict(&serial, std::slice::from_ref(&dll), missing(lines));
+                        let (v, expected) = hotswap::verdict(&serial, &swap, missing(lines));
                         match (expected, v) {
                             (true, Err(e)) if e.starts_with(hotswap::NOT_A_REAL_RUN) => Ok(()),
                             (_, Err(e)) => Err(format!("{label}: {e}")),
@@ -18856,7 +19081,7 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
                         }
                     }
                     HotswapOutcome::RefusedByGuest(why, lines) => {
-                        let (v, _) = hotswap::verdict(&serial, std::slice::from_ref(&dll), Ok(()));
+                        let (v, _) = hotswap::verdict(&serial, &swap, Ok(()));
                         match v {
                             Err(e) if e.contains("refused the hot swap") && e.contains(why) => {
                                 missing(lines)
@@ -19112,6 +19337,8 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     let mut cmd = user_build();
     for dll in USER_DLLS {
         cmd.args(["--package", dll.package]);
@@ -19492,6 +19719,16 @@ fn copy(from: &Path, to: &Path) -> Result {
 /// symbolized on the host from the build's own ELF, which keeps it.
 fn copy_kernel(from: &Path, to: &Path) -> Result {
     run_quiet(Command::new("objcopy").arg("--strip-debug").arg(from).arg(to))
+}
+
+/// Removes the relocations of a kernel ELF's debug sections
+/// (`.rela.debug_*`), in place. kernel/build.rs links with `--emit-relocs`
+/// for the hot swap (SN step 1e), which needs those of the code and data
+/// only (hotswap.rs skips sections that are not loaded); lld keeps them
+/// for every section, and those of the DWARF are most of the file: 71 of
+/// 135 MB for a debug build. The DWARF itself stays for symbolizing.
+fn drop_debug_relocations(elf: &Path) -> Result {
+    run_quiet(Command::new("objcopy").arg("--remove-section=.rela.debug_*").arg(elf))
 }
 
 fn write(path: &Path, contents: &str) -> Result {
@@ -19933,5 +20170,27 @@ mod um_scenarios {
         }
         let schannel = SCENARIOS.iter().find(|s| s.name == "schannel_test").unwrap();
         assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_scenarios {
+    use super::*;
+
+    /// A scenario that snapshots and resumes itself boots alone: batched
+    /// with others that share its boot modules (hotswap_machine and
+    /// hotswap_stack did), it took no snapshot, ran none of its resumes
+    /// and passed.
+    #[test]
+    fn snapshot_scenarios_are_never_batched() {
+        for p in SNAPSHOT_SCENARIOS {
+            let s = SCENARIOS.iter().find(|s| s.name == p.name).expect("its scenario");
+            assert_eq!(batchable(s), None, "{} would be batched", p.name);
+        }
+        let pair: Vec<&Scenario> = SCENARIOS
+            .iter()
+            .filter(|s| s.name == "hotswap_machine" || s.name == "khotswap_both")
+            .collect();
+        assert_eq!(plan_vms(&pair).len(), 2);
     }
 }

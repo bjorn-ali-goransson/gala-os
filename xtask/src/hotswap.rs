@@ -1,7 +1,13 @@
-//! Hot swapping gala's own DLLs into a machine resumed from a snapshot
-//! (ROADMAP SN step 1d; WORKFLOW "Hot swapping DLLs into a snapshot (at
-//! your own risk)"): `boot-test --from-snapshot <name> --hot-swap-unsafe
-//! <dll>[,<dll>...]`.
+//! Hot swapping gala's own DLLs and the kernel into a machine resumed from
+//! a snapshot (ROADMAP SN steps 1d and 1e; WORKFLOW "Hot swapping DLLs and
+//! the kernel into a snapshot (at your own risk)"): `boot-test
+//! --from-snapshot <name> --hot-swap-unsafe [kernel,]<dll>[,<dll>...]`.
+//!
+//! The kernel is read from its ELF (linked with `--emit-relocs`) and lld's
+//! map of it (`Image::from_elf`) into the same chunks, references and
+//! diff; its plan record (machine `KERNEL_MACHINE`) is applied by the
+//! kernel itself with every other CPU stopped (ARCHITECTURE "Hot swapping
+//! the kernel into a resumed machine").
 //!
 //! **Not a real run.** What this module makes is a patch to programs that
 //! are already running: their DLL is not replaced but redirected, function
@@ -64,6 +70,12 @@ pub const VERSION: u32 = 1;
 pub const FW_CFG_NAME: &str = "opt/gala/hotswap";
 /// The bytes a patched entry needs: `jmp rel32`.
 pub const JUMP_LEN: u32 = 5;
+/// A plan record's machine for the kernel (1 x64 and 2 x86 are DLLs';
+/// the kernel's `hotswap::KERNEL`).
+pub const KERNEL_MACHINE: u8 = 3;
+/// A static of the kernel's hot swap: a kernel without it cannot take
+/// a kernel record.
+pub const KERNEL_SUPPORT: &str = "kernel::hotswap::PATCHING";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Machine {
@@ -117,6 +129,14 @@ pub struct Chunk {
     /// The crate of its object file (`msxml6`, `core`, ...).
     pub krate: String,
     pub kind: Kind,
+    /// Its input section's name (`.text._RNv...`, `.rdata`).
+    pub section: String,
+    /// Its alignment (a copy keeps it; 16 at least).
+    pub align: u32,
+    /// Code that is not a compiled function of its own (the kernel's
+    /// `global_asm!`: entry stubs, the context switch, trampolines): its
+    /// references cannot be known for sure, so it is never copied.
+    pub asm: bool,
 }
 
 impl Chunk {
@@ -153,6 +173,20 @@ pub struct Image {
     pub exports: BTreeSet<String>,
     /// Sorted by rva, non-empty ones only.
     pub chunks: Vec<Chunk>,
+    /// The kernel (an ELF of gala's build, `from_elf`), not a DLL.
+    pub kernel: bool,
+    /// Relocation sites of 32-bit absolute addresses the CPU sign-extends
+    /// (the kernel's `R_X86_64_32S`).
+    pub signed: BTreeSet<u32>,
+    /// Relocation sites that name a linker script's symbol
+    /// (`__text_start`): compared and bound by that name.
+    pub link_refs: BTreeMap<u32, String>,
+    /// The linker script's symbols: name -> address relative to `base`.
+    pub linker: BTreeMap<String, i64>,
+    /// Relocation sites -> the rva of the symbol they name (not a
+    /// section's): a reference is to that symbol's chunk, at whatever
+    /// offset (one past a string's end is still that string).
+    pub reloc_symbols: BTreeMap<u32, u32>,
 }
 
 fn u16_at(b: &[u8], at: usize) -> Result<u16> {
@@ -229,6 +263,11 @@ pub fn normalize_name(name: &str) -> String {
 /// `.../gala_xml-88f9.gala_xml.1c17-cgu.1.rcgu.o`, `msxml6` of
 /// `.../msxml6.msxml6.f397-cgu.0.rcgu.o`.
 fn crate_of(object: &str) -> String {
+    // An archive's member: `.../libkernel-e55c.rlib(kernel-e55c.x.rcgu.o)`.
+    let object = match object.strip_suffix(')').and_then(|o| o.rsplit_once('(')) {
+        Some((_, member)) => member,
+        None => object,
+    };
     let file = object.rsplit('/').next().unwrap_or(object);
     let end = file.find(['-', '.']).unwrap_or(file.len());
     file[..end].to_string()
@@ -306,7 +345,8 @@ impl Image {
                 _ if ch & 0x8000_0000 != 0 => Kind::Writable,
                 _ => Kind::ReadOnly,
             };
-            image.chunks.push(Chunk { rva, size, names, krate, kind });
+            let (section, asm, align) = (input, false, 16);
+            image.chunks.push(Chunk { rva, size, names, krate, kind, section, asm, align });
         }
         image.chunks.sort_by_key(|c| c.rva);
         Ok(image)
@@ -372,6 +412,11 @@ impl Image {
             imports: BTreeMap::new(),
             exports: BTreeSet::new(),
             chunks: Vec::new(),
+            kernel: false,
+            signed: BTreeSet::new(),
+            link_refs: BTreeMap::new(),
+            linker: BTreeMap::new(),
+            reloc_symbols: BTreeMap::new(),
         };
         // Base relocations (directory 5).
         let (rva, size) = dir(5)?;
@@ -466,6 +511,23 @@ impl Image {
         self.sections.iter().map(|s| s.1).min().unwrap_or(0x1000)
     }
 
+    /// What the reference at `site` (an rva) to `va` names: a linker
+    /// script's symbol by its name, else what `va` is.
+    fn target_at(&self, site: u32, va: u64) -> Target {
+        if let Some(name) = self.link_refs.get(&site) {
+            return Target::Linker(name.clone());
+        }
+        // The chunk of the symbol the relocation names, at the offset the
+        // reference has from it.
+        if let Some(&sym) = self.reloc_symbols.get(&site)
+            && let Some((idx, _)) = self.chunk_at(sym)
+            && let Some(rva) = va.checked_sub(self.base)
+        {
+            return Target::Chunk { idx, off: rva as i64 - i64::from(self.chunks[idx].rva) };
+        }
+        self.target(va)
+    }
+
     /// What `va` names.
     fn target(&self, va: u64) -> Target {
         let Some(rva) = va.checked_sub(self.base).and_then(|r| u32::try_from(r).ok()) else {
@@ -484,12 +546,407 @@ impl Image {
     }
 }
 
+/// One input section of lld's ELF map (`-Map`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElfMapEntry {
+    pub va: u64,
+    pub size: u64,
+    pub align: u32,
+    /// The output section (`.text`).
+    pub out: String,
+    /// The input section (`.text._RNvCs..._6kernel4main`).
+    pub input: String,
+    /// The crate of its object file (`kernel`, `core`, `<internal>`).
+    pub krate: String,
+    /// The symbols at its start, demangled and normalized.
+    pub names: Vec<String>,
+}
+
+/// Parses lld's ELF map (`-Map`): `VMA LMA Size Align Out In Symbol`,
+/// the four numbers (hex, hex, hex, decimal) then at column 49 an output
+/// section, an input section 8 columns in, a symbol 16 in; a linker
+/// script's assignment (`__text_start = .`) at any depth. Returns the
+/// input sections and the assignments (name -> address).
+pub fn parse_elf_map(text: &str) -> Result<(Vec<ElfMapEntry>, BTreeMap<String, u64>)> {
+    let mut entries: Vec<ElfMapEntry> = Vec::new();
+    let mut symbols = BTreeMap::new();
+    let mut out = String::new();
+    for (n, line) in text.lines().enumerate().skip(1) {
+        // The four numbers, then (one space after them) the rest.
+        let mut end = 0;
+        let mut numbers = [""; 4];
+        for number in &mut numbers {
+            let from = end + line[end..].len() - line[end..].trim_start().len();
+            let to = line[from..].find(' ').map_or(line.len(), |i| from + i);
+            *number = &line[from..to];
+            end = to;
+        }
+        let bad = || format!("map line {}: {line:?}", n + 1);
+        let (Ok(va), Ok(size), Ok(align)) = (
+            u64::from_str_radix(numbers[0], 16),
+            u64::from_str_radix(numbers[2], 16),
+            numbers[3].parse::<u32>(),
+        ) else {
+            return Err(bad());
+        };
+        let rest = line.get(end + 1..).ok_or_else(bad)?;
+        let indent = rest.len() - rest.trim_start().len();
+        let text = rest.trim();
+        if let Some((name, _)) = text.split_once(" = ") {
+            if !name.contains(' ') && !name.is_empty() && name != "." {
+                symbols.insert(name.to_string(), va);
+            }
+            continue;
+        }
+        match indent {
+            0 => out = text.to_string(),
+            8 => {
+                let (object, input) = match text.rfind(":(") {
+                    Some(i) => {
+                        (&text[..i], text[i + 2..].strip_suffix(')').unwrap_or(&text[i + 2..]))
+                    }
+                    None => (text, text),
+                };
+                entries.push(ElfMapEntry {
+                    va,
+                    size,
+                    align,
+                    out: out.clone(),
+                    input: input.to_string(),
+                    krate: crate_of(object),
+                    names: vec![],
+                });
+            }
+            _ => {
+                if let Some(e) = entries.last_mut()
+                    && e.va == va
+                {
+                    let name = normalize_name(text);
+                    if !e.names.contains(&name) {
+                        e.names.push(name);
+                    }
+                }
+            }
+        }
+    }
+    Ok((entries, symbols))
+}
+
+/// A section header of an ELF64 file.
+#[derive(Clone, Debug)]
+struct ElfSection {
+    name: String,
+    kind: u32,
+    flags: u64,
+    addr: u64,
+    offset: u64,
+    size: u64,
+    link: u32,
+    info: u32,
+}
+
+impl ElfSection {
+    const ALLOC: u64 = 2;
+    const WRITE: u64 = 1;
+    const EXEC: u64 = 4;
+}
+
+fn elf_sections(elf: &[u8]) -> Result<Vec<ElfSection>> {
+    if elf.get(..4) != Some(b"\x7fELF") || elf.get(4) != Some(&2) || elf.get(5) != Some(&1) {
+        return Err("not a 64-bit little-endian ELF file".into());
+    }
+    if u16_at(elf, 18)? != 62 {
+        return Err("not an x86-64 ELF file".into());
+    }
+    let shoff = u64_at(elf, 0x28)? as usize;
+    let shentsize = usize::from(u16_at(elf, 0x3a)?);
+    let shnum = usize::from(u16_at(elf, 0x3c)?);
+    let shstrndx = usize::from(u16_at(elf, 0x3e)?);
+    let header = |i: usize| -> Result<ElfSection> {
+        let h = shoff + i * shentsize;
+        Ok(ElfSection {
+            name: String::new(),
+            kind: u32_at(elf, h + 4)?,
+            flags: u64_at(elf, h + 8)?,
+            addr: u64_at(elf, h + 16)?,
+            offset: u64_at(elf, h + 24)?,
+            size: u64_at(elf, h + 32)?,
+            link: u32_at(elf, h + 40)?,
+            info: u32_at(elf, h + 44)?,
+        })
+        .and_then(|mut s| {
+            s.name = u32_at(elf, h)?.to_string();
+            Ok(s)
+        })
+    };
+    let strtab = header(shstrndx)?.offset as usize;
+    let mut out = Vec::new();
+    for i in 0..shnum {
+        let mut s = header(i)?;
+        let at: usize = s.name.parse().unwrap_or(0);
+        s.name = c_string(elf, strtab + at);
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// The base address the kernel's `rva`s are relative to: its lowest
+/// allocated section (the linker script's `__kernel_start`).
+fn elf_base(sections: &[ElfSection]) -> u64 {
+    sections
+        .iter()
+        .filter(|s| s.flags & ElfSection::ALLOC != 0 && s.addr != 0)
+        .map(|s| s.addr)
+        .min()
+        .unwrap_or(0)
+}
+
+impl Image {
+    /// Reads gala's kernel (an ELF linked with `--emit-relocs`: its
+    /// relocations are kept) and lld's map of it. The image's `timestamp`
+    /// and `size_of_image` are the CRC-32 and size of its `.text`: what the
+    /// running kernel checks it is (`kernel/src/hotswap.rs`).
+    pub fn from_elf(elf: &[u8], map: &str) -> Result<Image> {
+        let sections = elf_sections(elf)?;
+        let base = elf_base(&sections);
+        let alloc: Vec<&ElfSection> = sections
+            .iter()
+            .filter(|s| s.flags & ElfSection::ALLOC != 0 && s.addr >= base && base != 0)
+            .collect();
+        let end = alloc.iter().map(|s| s.addr + s.size).max().unwrap_or(base);
+        let extent = end - base;
+        if extent > 1 << 30 {
+            return Err(format!("the kernel spans {extent:#x} bytes"));
+        }
+        let mut mem = vec![0u8; extent as usize];
+        let mut image_sections = Vec::new();
+        for s in &alloc {
+            let rva = (s.addr - base) as usize;
+            if s.kind != 8 {
+                // Not NOBITS: its contents.
+                let from = elf
+                    .get(s.offset as usize..(s.offset + s.size) as usize)
+                    .ok_or_else(|| format!("section {} lies outside the file", s.name))?;
+                mem[rva..rva + from.len()].copy_from_slice(from);
+            }
+            let ch = 0x4000_0000
+                | if s.flags & ElfSection::EXEC != 0 { 0x2000_0000 } else { 0 }
+                | if s.flags & ElfSection::WRITE != 0 { 0x8000_0000 } else { 0 };
+            image_sections.push((s.name.clone(), rva as u32, s.size as u32, ch));
+        }
+        let text = alloc.iter().find(|s| s.name == ".text").ok_or("the kernel has no .text")?;
+        let text_at = (text.addr - base) as usize;
+        let text_bytes = &mem[text_at..text_at + text.size as usize];
+        let (entries, assignments) = parse_elf_map(map)?;
+        // The map must be this file's: its output sections where the
+        // file's are.
+        for s in &alloc {
+            let listed = map.lines().any(|l| {
+                let mut f = l.split_whitespace();
+                let va = f.next().and_then(|v| u64::from_str_radix(v, 16).ok());
+                let size = f.nth(1).and_then(|v| u64::from_str_radix(v, 16).ok());
+                f.nth(1) == Some(s.name.as_str())
+                    && f.next().is_none()
+                    && va == Some(s.addr)
+                    && size == Some(s.size)
+            });
+            if !listed {
+                return Err(format!(
+                    "the map does not list the kernel's {} at {:#x} ({:#x} bytes): it is the map \
+                     of another build",
+                    s.name, s.addr, s.size
+                ));
+            }
+        }
+        let linker: BTreeMap<String, i64> =
+            assignments.iter().map(|(n, &va)| (n.clone(), va.wrapping_sub(base) as i64)).collect();
+        let mut image = Image {
+            machine: Machine::X64,
+            base,
+            size_of_image: text.size as u32,
+            timestamp: crc32(text_bytes),
+            mem,
+            sections: image_sections,
+            relocs: BTreeMap::new(),
+            imports: BTreeMap::new(),
+            exports: BTreeSet::new(),
+            chunks: Vec::new(),
+            kernel: true,
+            signed: BTreeSet::new(),
+            link_refs: BTreeMap::new(),
+            linker,
+            reloc_symbols: BTreeMap::new(),
+        };
+        // The relocations kept in the file (`.rela.<section>`), for its
+        // allocated sections: absolute ones are references the decoder
+        // cannot see; any naming a linker script's symbol is compared and
+        // bound by that name.
+        let symtab = sections.iter().find(|s| s.kind == 2);
+        let symbol_name = |index: u64| -> Option<String> {
+            let st = symtab?;
+            let strings = sections.get(st.link as usize)?.offset as usize;
+            let sym = st.offset as usize + index as usize * 24;
+            Some(c_string(elf, strings + u32_at(elf, sym).ok()? as usize))
+        };
+        // A symbol's value, if it is one of an object (not a section's,
+        // not the file's, not undefined).
+        let symbol_value = |index: u64| -> Option<u64> {
+            let sym = symtab?.offset as usize + index as usize * 24;
+            let kind = elf.get(sym + 4)? & 0xf;
+            let shndx = u16_at(elf, sym + 6).ok()?;
+            let value = u64_at(elf, sym + 8).ok()?;
+            (kind != 3 && kind != 4 && shndx != 0 && value >= base).then_some(value)
+        };
+        for rela in sections.iter().filter(|s| s.kind == 4) {
+            let Some(target) = sections.get(rela.info as usize) else { continue };
+            if target.flags & ElfSection::ALLOC == 0 || target.addr < base {
+                continue;
+            }
+            let data = elf
+                .get(rela.offset as usize..(rela.offset + rela.size) as usize)
+                .ok_or_else(|| format!("{} lies outside the file", rela.name))?;
+            for r in data.chunks_exact(24) {
+                let offset = u64::from_le_bytes(r[..8].try_into().unwrap_or([0; 8]));
+                let info = u64::from_le_bytes(r[8..16].try_into().unwrap_or([0; 8]));
+                let Some(site) = offset.checked_sub(base).and_then(|v| u32::try_from(v).ok())
+                else {
+                    continue;
+                };
+                match info & 0xffff_ffff {
+                    1 => {
+                        image.relocs.insert(site, 8);
+                    }
+                    10 => {
+                        image.relocs.insert(site, 4);
+                    }
+                    11 => {
+                        image.relocs.insert(site, 4);
+                        image.signed.insert(site);
+                    }
+                    _ => {}
+                }
+                let sym = info >> 32;
+                if sym != 0
+                    && let Some(name) = symbol_name(sym)
+                    && image.linker.contains_key(&name)
+                {
+                    image.link_refs.insert(site, name);
+                } else if sym != 0
+                    // Relocations to the symbol itself (64, PC32, PLT32,
+                    // 32, 32S, PC64), not to its GOT slot.
+                    && matches!(info & 0xffff_ffff, 1 | 2 | 4 | 10 | 11 | 24)
+                    && let Some(value) = symbol_value(sym)
+                    && let Ok(rva) = u32::try_from(value - base)
+                {
+                    image.reloc_symbols.insert(site, rva);
+                }
+            }
+        }
+        // Chunks: every input section; the linker's merged constants
+        // (`<internal>` `.rodata.str*`, `.rodata.cst<n>`) and its GOT split
+        // into their entries, each known by its contents.
+        for e in entries {
+            let Some(sec) = alloc.iter().find(|s| s.name == e.out) else { continue };
+            if e.size == 0 || e.va < base {
+                continue;
+            }
+            let rva = (e.va - base) as u32;
+            let kind = if sec.flags & ElfSection::EXEC != 0 {
+                Kind::Code
+            } else if e.out == ".got" {
+                Kind::ReadOnly
+            } else if sec.flags & ElfSection::WRITE != 0 {
+                Kind::Writable
+            } else {
+                Kind::ReadOnly
+            };
+            let piece = |rva: u32, size: u32| Chunk {
+                rva,
+                size,
+                names: vec![],
+                krate: e.krate.clone(),
+                kind,
+                section: e.input.clone(),
+                asm: false,
+                align: 1,
+            };
+            let internal = e.krate == "<internal>";
+            if internal && e.out == ".got" {
+                for at in (0..e.size as u32).step_by(8) {
+                    let value = u64_at(&image.mem, (rva + at) as usize)?;
+                    if value != 0 {
+                        image.relocs.insert(rva + at, 8);
+                    }
+                    image.chunks.push(piece(rva + at, 8.min(e.size as u32 - at)));
+                }
+                continue;
+            }
+            if internal && let Some(n) = e.input.strip_prefix(".rodata.cst") {
+                let n: u32 = n.parse().unwrap_or(0);
+                if n > 0 && e.size % u64::from(n) == 0 {
+                    for at in (0..e.size as u32).step_by(n as usize) {
+                        image.chunks.push(piece(rva + at, n));
+                    }
+                    continue;
+                }
+            }
+            if internal && e.input.starts_with(".rodata.str") {
+                let width = e.input.rsplit('.').nth(1).and_then(|w| w.parse::<u32>().ok());
+                let width = width.unwrap_or(1).max(1) as usize;
+                let bytes = &image.mem[rva as usize..(rva as usize + e.size as usize)];
+                let mut start = 0usize;
+                let mut at = 0usize;
+                while at + width <= bytes.len() {
+                    if bytes[at..at + width].iter().all(|&b| b == 0) {
+                        image.chunks.push(piece(rva + start as u32, (at + width - start) as u32));
+                        start = at + width;
+                    }
+                    at += width;
+                }
+                if start < bytes.len() {
+                    image.chunks.push(piece(rva + start as u32, (bytes.len() - start) as u32));
+                }
+                continue;
+            }
+            // Assembly: code in a section that is not `.text.<symbol>` of
+            // a compiled function.
+            let asm = kind == Kind::Code
+                && match e.input.strip_prefix(".text.") {
+                    None => true,
+                    Some(rest) => {
+                        let rest = rest.strip_prefix("unlikely.").unwrap_or(rest);
+                        !rest.starts_with("_R")
+                            && !rest.starts_with("_ZN")
+                            && !e.names.iter().any(|n| n == rest)
+                    }
+                };
+            image.chunks.push(Chunk {
+                rva,
+                size: e.size as u32,
+                names: e.names,
+                krate: e.krate,
+                kind,
+                section: e.input,
+                asm,
+                align: e.align,
+            });
+        }
+        image.chunks.sort_by_key(|c| c.rva);
+        Ok(image)
+    }
+}
+
 /// What a reference names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    Chunk { idx: usize, off: i64 },
+    Chunk {
+        idx: usize,
+        off: i64,
+    },
     Import(String),
     Header(u32),
+    /// A linker script's symbol (the kernel's `__text_start`).
+    Linker(String),
     Unknown(u64),
 }
 
@@ -503,6 +960,8 @@ pub struct Ref {
     pub width: u8,
     pub anchor: Option<u32>,
     pub target: Target,
+    /// A 32-bit absolute address the CPU sign-extends.
+    pub signed: bool,
 }
 
 /// A chunk with its references taken out: the bytes (each reference's
@@ -534,12 +993,16 @@ fn normalize(image: &Image, idx: usize) -> Norm {
             n.problem = Some(format!("a base relocation at +{at:#x} crosses its end"));
             continue;
         }
+        let signed = image.signed.contains(&rva);
         let va = if width == 8 {
             u64::from_le_bytes(n.bytes[at..at + 8].try_into().unwrap_or([0; 8]))
+        } else if signed {
+            i32::from_le_bytes(n.bytes[at..at + 4].try_into().unwrap_or([0; 4])) as i64 as u64
         } else {
             u64::from(u32::from_le_bytes(n.bytes[at..at + 4].try_into().unwrap_or([0; 4])))
         };
-        n.refs.push(Ref { at: at as u32, width, anchor: None, target: image.target(va) });
+        let target = image.target_at(rva, va);
+        n.refs.push(Ref { at: at as u32, width, anchor: None, target, signed });
     }
     if c.kind == Kind::Code {
         let ip = image.base + u64::from(c.rva);
@@ -583,7 +1046,8 @@ fn normalize(image: &Image, idx: usize) -> Norm {
                         at: field,
                         width: 4,
                         anchor: Some(insn_end),
-                        target: image.target(target),
+                        target: image.target_at(c.rva + field, target),
+                        signed: false,
                     });
                 }
             }
@@ -607,7 +1071,8 @@ fn normalize(image: &Image, idx: usize) -> Norm {
                         at: field,
                         width: offsets.immediate_size() as u8,
                         anchor: Some(insn_end),
-                        target: image.target(target),
+                        target: image.target_at(c.rva + field, target),
+                        signed: false,
                     });
                 }
             }
@@ -647,9 +1112,26 @@ fn jump_table(image: &Image, idx: usize, owner: usize) -> Option<Vec<Ref>> {
             width: 4,
             anchor: Some(0),
             target: Target::Chunk { idx: owner, off: target - i64::from(o.rva) },
+            signed: false,
         });
     }
     Some(refs)
+}
+
+/// A table of absolute addresses into one function (the kernel's jump
+/// tables: 64-bit entries, each relocated): an anonymous read-only chunk
+/// that only `owner` uses, every reference of it into `owner`. Its
+/// entries are bound to wherever `owner` is, so it goes with a copy of
+/// it, never bound to the old image's copy (whose entries are into the
+/// old function's body).
+fn absolute_table(image: &Image, n: &Norm, idx: usize, owner: usize) -> bool {
+    let c = &image.chunks[idx];
+    c.anonymous()
+        && c.kind == Kind::ReadOnly
+        && !n.refs.is_empty()
+        && n.refs.iter().all(|r| {
+            r.anchor.is_none() && matches!(r.target, Target::Chunk { idx, .. } if idx == owner)
+        })
 }
 
 /// An image with each chunk normalized and known by a key.
@@ -657,6 +1139,11 @@ struct Analyzed<'a> {
     image: &'a Image,
     norms: Vec<Norm>,
     keys: Vec<String>,
+    /// A chunk known by its contents: its key's start (`A:<kind>:`, or
+    /// `N:<name>@` for a name several chunks have); empty for the others.
+    prefix: Vec<String>,
+    /// Content hashes computed so far.
+    memo: std::cell::RefCell<HashMap<usize, u64>>,
     /// Key -> chunk.
     by_key: HashMap<String, usize>,
     /// Every name (crate-qualified) -> chunk: identical code folding gives
@@ -693,43 +1180,71 @@ impl<'a> Analyzed<'a> {
         for (&t, u) in &users {
             if u.len() == 1 {
                 let owner = *u.iter().next().unwrap_or(&0);
-                if image.chunks[owner].kind == Kind::Code
-                    && let Some(refs) = jump_table(image, t, owner)
-                {
+                if image.chunks[owner].kind != Kind::Code {
+                    continue;
+                }
+                if let Some(refs) = jump_table(image, t, owner) {
                     let n = &mut norms[t];
                     for r in &refs {
                         n.bytes[r.at as usize..r.at as usize + 4].fill(0);
                     }
                     n.refs = refs;
                     tables.insert(t, owner);
+                } else if absolute_table(image, &norms[t], t, owner) {
+                    tables.insert(t, owner);
                 }
             }
         }
-        // Names: crate-qualified, numbered when equal.
+        // Names: crate-qualified. A name several chunks have (a function
+        // copied into several codegen units, generic instances) and a chunk
+        // with none (string literals, vtables, jump tables) are known by
+        // their contents too, references included: an order of chunks that
+        // changes between builds changes nothing.
         let mut by_name = HashMap::new();
         let mut keys = vec![String::new(); image.chunks.len()];
-        let mut seen: HashMap<String, u32> = HashMap::new();
+        let mut prefix = vec![String::new(); image.chunks.len()];
+        let primary = |c: &Chunk| format!("{}::{}", c.krate, c.name());
+        let mut count: HashMap<String, u32> = HashMap::new();
+        for c in image.chunks.iter().filter(|c| !c.anonymous() && c.kind != Kind::Other) {
+            *count.entry(primary(c)).or_insert(0) += 1;
+        }
         for (i, c) in image.chunks.iter().enumerate() {
-            if c.anonymous() || c.kind == Kind::Other {
+            if c.kind == Kind::Other {
                 continue;
             }
-            let primary = format!("{}::{}", c.krate, c.name());
-            let n = seen.entry(primary.clone()).or_insert(0);
-            keys[i] = if *n == 0 { format!("N:{primary}") } else { format!("N:{primary}#{n}") };
-            *n += 1;
+            if c.anonymous() {
+                prefix[i] = format!("A:{:?}:", c.kind);
+                continue;
+            }
+            let p = primary(c);
+            if count.get(&p) == Some(&1) {
+                keys[i] = format!("N:{p}");
+            } else {
+                prefix[i] = format!("N:{p}@");
+            }
             for name in &c.names {
                 by_name.entry(format!("{}::{name}", c.krate)).or_insert(i);
             }
         }
-        let mut a = Analyzed { image, norms, keys, by_key: HashMap::new(), by_name, tables };
-        // Anonymous chunks: by their contents, references included.
-        for i in 0..image.chunks.len() {
-            if a.keys[i].is_empty() && image.chunks[i].kind != Kind::Other {
-                let mut busy = BTreeSet::new();
-                let h = a.content_hash(i, &mut busy);
-                a.keys[i] = format!("A:{:?}:{h:016x}", image.chunks[i].kind);
+        let mut a = Analyzed {
+            image,
+            norms,
+            keys,
+            prefix,
+            memo: std::cell::RefCell::new(HashMap::new()),
+            by_key: HashMap::new(),
+            by_name,
+            tables,
+        };
+        let hashes: Vec<Option<u64>> = (0..image.chunks.len())
+            .map(|i| (!a.prefix[i].is_empty()).then(|| a.content_hash(i, &mut BTreeSet::new())))
+            .collect();
+        for (i, h) in hashes.into_iter().enumerate() {
+            if let Some(h) = h {
+                a.keys[i] = format!("{}{h:016x}", a.prefix[i]);
             }
         }
+        a.memo.borrow_mut().clear();
         for (i, k) in a.keys.iter().enumerate() {
             if !k.is_empty() {
                 a.by_key.entry(k.clone()).or_insert(i);
@@ -741,6 +1256,9 @@ impl<'a> Analyzed<'a> {
     /// A hash of anonymous chunk `i`: its kind, normalized bytes and its
     /// references by what they name.
     fn content_hash(&self, i: usize, busy: &mut BTreeSet<usize>) -> u64 {
+        if let Some(&h) = self.memo.borrow().get(&i) {
+            return h;
+        }
         let n = &self.norms[i];
         let mut h = fnv(&n.bytes, 0xcbf2_9ce4_8422_2325);
         h = fnv(&[self.image.chunks[i].kind as u8], h);
@@ -750,6 +1268,7 @@ impl<'a> Analyzed<'a> {
             h = fnv(format!("{}:{}:{:?}:{key}", r.at, r.width, r.anchor).as_bytes(), h);
         }
         busy.remove(&i);
+        self.memo.borrow_mut().insert(i, h);
         h
     }
 
@@ -761,12 +1280,13 @@ impl<'a> Analyzed<'a> {
                 } else if busy.contains(idx) {
                     "cycle".into()
                 } else {
-                    format!("A:{:016x}", self.content_hash(*idx, busy))
+                    format!("{}{:016x}", self.prefix[*idx], self.content_hash(*idx, busy))
                 };
                 format!("{k}+{off}")
             }
             Target::Import(name) => format!("I:{name}"),
             Target::Header(off) => format!("H:{off}"),
+            Target::Linker(name) => format!("L:{name}"),
             Target::Unknown(va) => format!("U:{va:#x}"),
         }
     }
@@ -822,6 +1342,8 @@ pub struct Summary {
 #[derive(Clone, Debug, Default)]
 pub struct Patch {
     pub machine: Option<Machine>,
+    /// The kernel's patch (plan record machine 3), not a DLL's.
+    pub kernel: bool,
     /// The guest's path of the file (`\Windows\System32\x.dll`).
     pub path: String,
     pub old_timestamp: u32,
@@ -851,6 +1373,51 @@ pub struct Fixup {
     /// 0: an RVA in the old image; 1: an offset in the blob.
     pub space: u8,
     pub target: i64,
+    /// A 32-bit absolute address the CPU sign-extends (the kernel).
+    pub signed: bool,
+}
+
+/// Why chunk `i` of the new build differs from chunk `j` of the old
+/// (`XTASK_HOTSWAP_WHY=1`, WORKFLOW "Hot swapping DLLs and the kernel into
+/// a snapshot"): the first byte and the first reference that differ, and
+/// what each build's reference is to. A change that should not be there
+/// (code the edit did not touch) is explained by it.
+fn why_changed(o: &Analyzed, n: &Analyzed, j: usize, i: usize) -> String {
+    let (a, b) = (o.signature(j), n.signature(i));
+    let byte = a.0.iter().zip(&b.0).position(|(x, y)| x != y);
+    let reference = a.1.iter().zip(&b.1).position(|(x, y)| x != y);
+    let mut out = format!(
+        "xtask: hot swap: why {} changed: first different byte {byte:?} ({} -> {} bytes), \
+         first different reference {reference:?} ({} -> {} references)\n",
+        n.image.chunks[i].name(),
+        a.0.len(),
+        b.0.len(),
+        a.1.len(),
+        b.1.len()
+    );
+    let describe = |an: &Analyzed, chunk: usize, k: usize| -> String {
+        let Some(r) = an.norms[chunk].refs.get(k) else { return String::new() };
+        let what = match r.target {
+            Target::Chunk { idx, .. } => {
+                let c = &an.image.chunks[idx];
+                let norm = &an.norms[idx];
+                format!(
+                    " ({:?}, {} bytes, input section {}, starts {:02x?})",
+                    c.kind,
+                    c.size,
+                    c.section,
+                    &norm.bytes[..norm.bytes.len().min(16)]
+                )
+            }
+            _ => String::new(),
+        };
+        format!("+{:#x}: {}{what}", r.at, an.target_key(&r.target))
+    };
+    if let Some(k) = reference {
+        out += &format!("xtask: hot swap:   old {}\n", describe(o, j, k));
+        out += &format!("xtask: hot swap:   new {}\n", describe(n, i, k));
+    }
+    out
 }
 
 /// Compares `old` with `new` (both gala's builds of the DLL at `path` in
@@ -888,6 +1455,12 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
         }
         let old_i = old_of(i);
         let same = old_i.is_some_and(|j| o.signature(j) == n.signature(i));
+        if !same
+            && let Some(j) = old_i
+            && std::env::var_os("XTASK_HOTSWAP_WHY").is_some()
+        {
+            eprint!("{}", why_changed(&o, &n, j, i));
+        }
         fates[i] = Some(match (c.kind, old_i, same) {
             (_, Some(j), true) => Fate::Old(j),
             (Kind::Code, Some(j), false) => Fate::Copy(Some(j)),
@@ -896,8 +1469,8 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
                 let was = &old.chunks[j];
                 if was.size != c.size {
                     refusals.push(format!(
-                        "static {} changed size ({} -> {} bytes): the running program's copy \
-                         keeps the old layout",
+                        "static {} changed size ({} -> {} bytes): the running copy keeps \
+                         the old layout",
                         c.name(),
                         was.size,
                         c.size
@@ -1022,6 +1595,14 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
         if let Some(p) = &n.norms[i].problem {
             refusals.push(format!("{} {p}", c.name()));
         }
+        if c.asm {
+            refusals.push(format!(
+                "{} is assembly (input section {}: global_asm, an entry stub or a trampoline), \
+                 not a compiled function: what it references cannot be known for sure",
+                c.name(),
+                c.section
+            ));
+        }
         if c.kind == Kind::Writable && c.anonymous() {
             refusals.push(format!(
                 "anonymous writable data ({} bytes at {:#x}) is needed by the new code and \
@@ -1098,7 +1679,7 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
             blob.resize(at, 0xcc);
             data_off = Some(at as u32);
         }
-        let at = blob.len().next_multiple_of(16);
+        let at = blob.len().next_multiple_of(c.align.clamp(16, 4096) as usize);
         let fill = if c.kind == Kind::Code { 0xcc } else { 0 };
         blob.resize(at, fill);
         place.insert(i, at as u32);
@@ -1133,6 +1714,16 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
                     }
                 },
                 Target::Header(off) => (0, i64::from(*off)),
+                Target::Linker(name) => match old.linker.get(name) {
+                    Some(&at) => (0, at),
+                    None => {
+                        return Err(format!(
+                            "{path}: refused: {} references the linker script's {name}, which \
+                             the old build does not have",
+                            new.chunks[i].name()
+                        ));
+                    }
+                },
                 Target::Unknown(va) => {
                     return Err(format!(
                         "{path}: refused: {} references {va:#x}, which is in no chunk of the map",
@@ -1146,6 +1737,7 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
                 width: r.width,
                 space,
                 target,
+                signed: r.signed,
             });
         }
     }
@@ -1160,6 +1752,7 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
     summary.new_functions.sort();
     Ok(Patch {
         machine: Some(new.machine),
+        kernel: new.kernel,
         path: path.to_string(),
         old_timestamp: old.timestamp,
         old_size_of_image: old.size_of_image,
@@ -1215,7 +1808,8 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// The plan's bytes (ARCHITECTURE "Hot swapping DLLs (SN step 1d)", the
+/// The plan's bytes (ARCHITECTURE "Hot swapping DLLs into a resumed
+/// machine", the
 /// kernel's `hotswap::Plan`): a 32-byte header (magic, version,
 /// image count, nonce, total length, CRC-32 of the rest with its field
 /// 0), then per image a record.
@@ -1245,11 +1839,12 @@ pub fn encode(patches: &[Patch], nonce: u64) -> Vec<u8> {
             fixups.extend_from_slice(&f.target.to_le_bytes());
             fixups.push(f.width);
             fixups.push(f.space);
-            fixups.extend_from_slice(&[0; 6]);
+            fixups.push(u8::from(f.signed));
+            fixups.extend_from_slice(&[0; 5]);
         }
         let path = p.path.as_bytes();
         let mut rec = Vec::new();
-        rec.push(p.machine.map_or(0, Machine::code));
+        rec.push(if p.kernel { KERNEL_MACHINE } else { p.machine.map_or(0, Machine::code) });
         rec.extend_from_slice(&[0; 3]);
         for v in [
             p.old_timestamp,
@@ -1286,11 +1881,12 @@ pub fn banner(dlls: &[String]) -> String {
     format!(
         "{line}\n\
          !!  HOT SWAP (--hot-swap-unsafe {}): THIS IS NOT A REAL RUN.\n\
-         !!  Running programs get code of another build spliced into them. The\n\
-         !!  checks refuse what they can see; logic that depends on state the old\n\
-         !!  code built, and invariants of data whose layout did not change, are\n\
-         !!  not checked. Results are at your own risk and never count as a pass:\n\
-         !!  every fix still gets a full run from boot before its pull request.\n\
+         !!  Running programs (and the kernel, when named) get code of another\n\
+         !!  build spliced into them. The checks refuse what they can see; logic\n\
+         !!  that depends on state the old code built, and invariants of data\n\
+         !!  whose layout did not change, are not checked. Results are at your\n\
+         !!  own risk and never count as a pass: every fix still gets a full run\n\
+         !!  from boot before its pull request.\n\
          {line}\n",
         dlls.join(",")
     )
@@ -1302,6 +1898,9 @@ pub const NOT_A_REAL_RUN: &str = "hot-swapped (not a real run)";
 /// The exit status of a hot-swapped `boot-test` whose scenario printed
 /// what it expects: distinct from a pass (0) and a failure (1).
 pub const EXIT_HOT_SWAPPED: u8 = 3;
+
+/// The name `--hot-swap-unsafe` takes for the kernel.
+pub const KERNEL: &str = "kernel";
 
 /// Reads `--hot-swap-unsafe <dll>[,<dll>...]` (only with
 /// `--from-snapshot`; never in CI).
@@ -1322,8 +1921,13 @@ pub fn parse_flag(args: &[String]) -> Result<Option<Vec<String>>> {
         );
     }
     let dlls: Vec<String> = value.split(',').map(|d| d.trim().to_ascii_lowercase()).collect();
-    if dlls.iter().any(|d| !d.ends_with(".dll") || d.contains('/') || d.contains('\\')) {
-        return Err(format!("--hot-swap-unsafe {value}: give DLL file names (msxml6.dll)"));
+    if dlls
+        .iter()
+        .any(|d| (d != KERNEL && !d.ends_with(".dll")) || d.contains('/') || d.contains('\\'))
+    {
+        return Err(format!(
+            "--hot-swap-unsafe {value}: give `kernel` and DLL file names (kernel,msxml6.dll)"
+        ));
     }
     Ok(Some(dlls))
 }
@@ -1397,6 +2001,9 @@ pub fn prepare(
     let mut swapped: Vec<String> =
         dlls.iter().flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")]).collect();
     swapped.push("boot/gala.manifest".into());
+    if dlls.iter().any(|d| d == KERNEL) {
+        swapped.push(crate::snapshot::KERNEL.into());
+    }
     if conf_without(&old_conf, &swapped) != conf_without(&new_conf, &swapped) {
         return Err(
             "--hot-swap-unsafe: Limine's config differs in more than the swapped DLLs' hashes \
@@ -1409,6 +2016,17 @@ pub fn prepare(
     let mut names = Vec::new();
     let mut text = banner(dlls);
     for dll in dlls {
+        if dll == KERNEL {
+            if !differ.iter().any(|d| d == crate::snapshot::KERNEL) {
+                text += "xtask: hot swap kernel: the same in this build as in the snapshot\n";
+                continue;
+            }
+            let patch = kernel_patch(&old_dir, &new_dir)?;
+            text += &patch.summary.describe(KERNEL);
+            patches.push(patch);
+            names.push(KERNEL.to_string());
+            continue;
+        }
         let mut any = false;
         for path in [format!("boot/{dll}"), format!("boot/x86/{dll}")] {
             if !differ.contains(&path) {
@@ -1459,6 +2077,40 @@ pub fn prepare(
     std::fs::write(&plan, encode(&patches, nonce.max(1)))
         .map_err(|e| format!("{}: {e}", plan.display()))?;
     Ok(Prepared { dlls: names, plan })
+}
+
+/// The kernel's patch: the snapshot's kernel (`old_dir`, its modules)
+/// against this build's (`new_dir`), each with its map (`boot/kernel`,
+/// `boot/kernel.map`).
+fn kernel_patch(old_dir: &std::path::Path, new_dir: &std::path::Path) -> Result<Patch> {
+    let load = |d: &std::path::Path| -> Result<(Vec<u8>, String)> {
+        let file = d.join(crate::snapshot::KERNEL);
+        let map = file.with_extension("map");
+        let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let map = std::fs::read_to_string(&map).map_err(|e| {
+            format!(
+                "{}: {e} (no linker map of the kernel: it is kept beside a snapshot's kernel \
+                 since SN step 1e; take the snapshot again)",
+                map.display()
+            )
+        })?;
+        Ok((bytes, map))
+    };
+    let (old_bytes, old_map) = load(old_dir)?;
+    let (new_bytes, new_map) = load(new_dir)?;
+    if !old_map.lines().any(|l| l.trim_end().ends_with(KERNEL_SUPPORT)) {
+        return Err(format!(
+            "--hot-swap-unsafe kernel: the snapshot's kernel cannot take a kernel hot swap (it has \
+             no {KERNEL_SUPPORT}: it predates SN step 1e); take the snapshot again"
+        ));
+    }
+    let old =
+        Image::from_elf(&old_bytes, &old_map).map_err(|e| format!("the snapshot's kernel: {e}"))?;
+    let new =
+        Image::from_elf(&new_bytes, &new_map).map_err(|e| format!("this build's kernel: {e}"))?;
+    let mut patch = diff(&old, &new, KERNEL, &[])?;
+    patch.path = KERNEL.into();
+    Ok(patch)
 }
 
 /// The verdict of a hot-swapped run (never a pass): the guest's refusal,
@@ -1540,7 +2192,10 @@ mod tests {
         for &(name, kind, rva, bytes) in chunks {
             mem[rva as usize..rva as usize + bytes.len()].copy_from_slice(bytes);
             let names = if name.is_empty() { vec![] } else { vec![name.to_string()] };
-            cs.push(Chunk { rva, size: bytes.len() as u32, names, krate: "t".into(), kind });
+            let section = String::new();
+            let size = bytes.len() as u32;
+            let krate = "t".to_string();
+            cs.push(Chunk { rva, size, names, krate, kind, section, asm: false, align: 16 });
         }
         cs.sort_by_key(|c| c.rva);
         Image {
@@ -1558,6 +2213,11 @@ mod tests {
             imports: BTreeMap::from([(0x2ff0, "kernel32.dll!Sleep".to_string())]),
             exports: BTreeSet::new(),
             chunks: cs,
+            kernel: false,
+            signed: BTreeSet::new(),
+            link_refs: BTreeMap::new(),
+            linker: BTreeMap::new(),
+            reloc_symbols: BTreeMap::new(),
         }
     }
 
@@ -1621,7 +2281,14 @@ mod tests {
         // B's copy reads the OLD G: an RVA in the old image.
         assert_eq!(
             p.fixups,
-            vec![Fixup { at: 2, anchor: Some(6), width: 4, space: 0, target: 0x3000 }]
+            vec![Fixup {
+                at: 2,
+                anchor: Some(6),
+                width: 4,
+                space: 0,
+                target: 0x3000,
+                signed: false
+            }]
         );
         // The displacement's bytes are left for the kernel.
         assert_eq!(&p.blob[..10], &[0x8b, 0x05, 0, 0, 0, 0, 0x83, 0xc0, 0x01, 0xc3]);
@@ -1873,6 +2540,196 @@ mod tests {
                 parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe A.dll,b.dll")),
                 Ok(Some(vec!["a.dll".to_string(), "b.dll".to_string()]))
             );
+            assert_eq!(
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe kernel,a.dll")),
+                Ok(Some(vec!["kernel".to_string(), "a.dll".to_string()]))
+            );
+            assert!(
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe kernel.exe"))
+                    .is_err()
+            );
         }
+    }
+
+    const KBASE: u64 = 0xffff_ffff_8000_0000;
+
+    /// `image`'s chunks as the kernel's: its base in the top 2 GiB,
+    /// `signed` the sites of sign-extended 32-bit absolute addresses.
+    fn kernel(chunks: &[(&str, Kind, u32, &[u8])], relocs: &[(u32, u8)], signed: &[u32]) -> Image {
+        let mut i = image(chunks, relocs);
+        i.base = KBASE;
+        i.kernel = true;
+        i.imports.clear();
+        i.signed = signed.iter().copied().collect();
+        i
+    }
+
+    /// `mov eax, [abs32]` (sign-extended) reading `to`, then `ret`: the
+    /// kernel code model's absolute addressing.
+    fn load_abs(to: u32) -> Vec<u8> {
+        let mut v = vec![0x8b, 0x04, 0x25];
+        v.extend_from_slice(&((KBASE + u64::from(to)) as u32).to_le_bytes());
+        v.push(0xc3);
+        v
+    }
+
+    #[test]
+    fn the_kernel_binds_sign_extended_addresses_and_marks_its_record() {
+        // B reads G through a sign-extended 32-bit absolute address (its
+        // relocation at +3); B changes (one more instruction).
+        let make = |extra: bool| {
+            let mut b = load_abs(0x3000);
+            if extra {
+                b.insert(0, 0x90);
+            }
+            let at = if extra { 0x1014 } else { 0x1013 };
+            let mut a = call(0x1000, 0x1010).to_vec();
+            a.extend_from_slice(&[0xc3, 0x90, 0x90]);
+            kernel(
+                &[
+                    ("A", Kind::Code, 0x1000, &a),
+                    ("B", Kind::Code, 0x1010, &b),
+                    ("G", Kind::Writable, 0x3000, &[1, 0, 0, 0, 0, 0, 0, 0]),
+                ],
+                &[(at, 4)],
+                &[at],
+            )
+        };
+        let p = diff(&make(false), &make(true), KERNEL, &[]).unwrap();
+        assert!(p.kernel);
+        assert_eq!(p.entries.len(), 1);
+        // B's copy reads the OLD G: an RVA of the old kernel, sign-extended.
+        assert_eq!(
+            p.fixups,
+            vec![Fixup { at: 4, anchor: None, width: 4, space: 0, target: 0x3000, signed: true }]
+        );
+        let plan = encode(&[p], 1);
+        // The record's machine byte: after the header and its length.
+        assert_eq!(plan[32 + 4], KERNEL_MACHINE);
+        // The fixup's flag.
+        assert!(plan.windows(2).any(|w| w == [4, 0]));
+    }
+
+    #[test]
+    fn a_table_of_absolute_addresses_goes_with_its_function() {
+        // F: jmp [abs32 + rax*8] through T (two 64-bit entries into F);
+        // T anonymous, only F uses it. F changes in a case, T does not
+        // (same offsets): T must be copied with F, never bound to the old
+        // T (whose entries are into the old F).
+        let make = |case: u8| {
+            let mut f = vec![0xff, 0x24, 0xc5];
+            f.extend_from_slice(&((KBASE + 0x2000) as u32).to_le_bytes());
+            let case0 = 0x1010 + f.len() as u32;
+            f.extend_from_slice(&[0x90, 0xc3]);
+            let case1 = 0x1010 + f.len() as u32;
+            f.extend_from_slice(&[0x31, case, 0xc3]);
+            let t: Vec<u8> =
+                [case0, case1].iter().flat_map(|c| (KBASE + u64::from(*c)).to_le_bytes()).collect();
+            let mut a = call(0x1000, 0x1010).to_vec();
+            a.extend_from_slice(&[0xc3, 0x90, 0x90]);
+            kernel(
+                &[
+                    ("A", Kind::Code, 0x1000, &a),
+                    ("F", Kind::Code, 0x1010, &f),
+                    ("", Kind::ReadOnly, 0x2000, &t),
+                ],
+                &[(0x1013, 4), (0x2000, 8), (0x2008, 8)],
+                &[0x1013],
+            )
+        };
+        let p = diff(&make(0xc0), &make(0xc8), KERNEL, &[]).unwrap();
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.summary.new_data.len(), 1, "{:?}", p.summary);
+        // Both entries are bound into F's copy (blob space, offsets 7 and 9).
+        let entries: Vec<(u8, i64)> =
+            p.fixups.iter().filter(|f| f.width == 8).map(|f| (f.space, f.target)).collect();
+        assert_eq!(entries, vec![(1, 7), (1, 9)]);
+        // F's table reference is to the copy too.
+        assert!(p.fixups.iter().any(|f| f.at == 3 && f.space == 1 && f.signed));
+    }
+
+    #[test]
+    fn assembly_is_never_copied() {
+        let make = |b: u8| {
+            let mut i = kernel(
+                &[("stub", Kind::Code, 0x1000, &[0x90, b, 0x90, 0x90, 0x90, 0xc3])],
+                &[],
+                &[],
+            );
+            i.chunks[0].asm = true;
+            i.chunks[0].section = ".text.context".into();
+            i
+        };
+        let e = diff(&make(0x90), &make(0xcc), KERNEL, &[]).unwrap_err();
+        assert!(e.contains("stub is assembly (input section .text.context"), "{e}");
+    }
+
+    #[test]
+    fn functions_of_one_name_are_known_by_their_contents() {
+        // Two copies of D (as codegen units make of an #[inline] function),
+        // in either order: nothing changed.
+        let d1 = [0x31, 0xc0, 0x90, 0x90, 0x90, 0xc3];
+        let d2 = [0x31, 0xc9, 0x90, 0x90, 0x90, 0xc3];
+        let make = |first: &[u8], second: &[u8]| {
+            kernel(&[("D", Kind::Code, 0x1000, first), ("D", Kind::Code, 0x1010, second)], &[], &[])
+        };
+        let p = diff(&make(&d1, &d2), &make(&d2, &d1), KERNEL, &[]).unwrap();
+        assert!(p.entries.is_empty() && p.blob.is_empty(), "{:?}", p.summary);
+    }
+
+    #[test]
+    fn a_reference_one_past_a_string_is_to_that_string() {
+        // C takes the end of the 1-byte string S (S + 1 = where T starts):
+        // the relocation names S, so the reference is S+1, not T+0, and a
+        // build where T moves away is the same.
+        let make = |t_at: u32| {
+            let mut c = vec![0x48, 0xc7, 0xc0];
+            c.extend_from_slice(&((KBASE + 0x2001) as u32).to_le_bytes());
+            c.push(0xc3);
+            let mut i = kernel(
+                &[
+                    ("C", Kind::Code, 0x1000, &c),
+                    ("", Kind::ReadOnly, 0x2000, &[0]),
+                    ("", Kind::ReadOnly, t_at, b"t\0"),
+                ],
+                &[(0x1003, 4)],
+                &[0x1003],
+            );
+            i.reloc_symbols.insert(0x1003, 0x2000);
+            i
+        };
+        let p = diff(&make(0x2001), &make(0x2010), KERNEL, &[]).unwrap();
+        assert!(p.entries.is_empty(), "{:?}", p.summary);
+    }
+
+    #[test]
+    fn the_kernels_map_is_read() {
+        let map = "             VMA              LMA     Size Align Out     In      Symbol\n\
+               0                0 ffffffff80000000     1 . = 0xffffffff80000000\n\
+ffffffff80000000                0        0     1 __kernel_start = .\n\
+ffffffff800cb000 ffffffff800cb000      312    16 .text\n\
+ffffffff800cb000 ffffffff800cb000        9    16         /t/deps/kernel-ceb3.ab6.1nm.rcgu.o:(.text.kmain)\n\
+ffffffff800cb000 ffffffff800cb000        9     1                 kmain\n\
+ffffffff800cb010 ffffffff800cb010       26    16         /t/deps/libkernel-e55c.rlib(kernel-e55c.00q.1gk.rcgu.o):(.text._RNvCs8_6kernel4main)\n\
+ffffffff800cb010 ffffffff800cb010       26     1                 kernel::main (.llvm.15847438787998897310)\n\
+ffffffff800cb040 ffffffff800cb040        a    16         <internal>:(.text)\n";
+        let (entries, symbols) = parse_elf_map(map).unwrap();
+        assert_eq!(symbols.get("__kernel_start"), Some(&KBASE));
+        assert!(!symbols.contains_key("."));
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[1],
+            ElfMapEntry {
+                va: 0xffff_ffff_800c_b010,
+                size: 0x26,
+                align: 16,
+                out: ".text".into(),
+                input: ".text._RNvCs8_6kernel4main".into(),
+                krate: "kernel".into(),
+                names: vec!["kernel::main".into()],
+            }
+        );
+        assert_eq!(entries[0].krate, "kernel");
+        assert_eq!(entries[2].krate, "<internal>");
     }
 }

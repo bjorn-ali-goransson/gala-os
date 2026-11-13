@@ -203,7 +203,7 @@ alone prints the usage.
 | `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` or `MANUAL` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
 | `export-tests` | copy the built test programs and DLLs to `user/bin/`, then remake derived test data |
-| `hotswap-diff <old.dll> <old.map> <new.dll> <new.map>` | what `--hot-swap-unsafe` would patch in a DLL, or why it refuses ("Hot swapping DLLs into a snapshot") |
+| `hotswap-diff <old> <old.map> <new> <new.map>` | what `--hot-swap-unsafe` would patch in a DLL or the kernel, or why it refuses ("Hot swapping DLLs and the kernel into a snapshot") |
 | `iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]` | a bootable image ("Bootable images and USB sticks") |
 | `screenshot [--uefi] [--at 1,3,5] [--name N] [--scenario S] [cmdline...]` | PNGs of the screen ("Screenshots") |
 | `serve <scenario> [port]` | boot a network scenario and keep it running ("Serving to a browser", "SSH into a running gala") |
@@ -622,7 +622,8 @@ cargo xtask snapshots rm office-merge
   of them (`user/bin` included) refuses every snapshot too. A module
   that a process mapped before the save cannot change (the Office
   service maps msxml6.dll in its first minute) but through a hot swap
-  ("Hot swapping DLLs into a snapshot", at your own risk), so a snapshot
+  ("Hot swapping DLLs and the kernel into a snapshot", at your own
+  risk), so a snapshot
   helps with what happens after the save on one build: re-running a late
   stage, watching it with the monitor, resuming twice to compare. Resume
   with the same `XTASK_EVENTS` the snapshot was taken with.
@@ -656,9 +657,11 @@ cargo xtask snapshots rm office-merge
   The kept layer of a failed resumed run is qcow2, which `disk-files`
   does not read (`qemu-img convert -O raw` it first, or use `dump=`).
 - **Hot swaps**: a snapshot also keeps its image's DLL modules with
-  their linker maps (`modules/`: 37 MB for the Office image; the image
-  keeps them as `<image>.modules/`), which `--hot-swap-unsafe` diffs a
-  new build against ("Hot swapping DLLs into a snapshot").
+  their linker maps, and its kernel (without debug sections) with lld's
+  map of its build (`modules/`: 37 MB of DLLs for the Office image and
+  about 20 MB for the kernel; the image keeps them as
+  `<image>.modules/`), which `--hot-swap-unsafe` diffs a new build against
+  ("Hot swapping DLLs and the kernel into a snapshot").
 - **Test**: `snapshot_machine` (in `cargo xtask test`, about 20 s under
   TCG): snapshot_test saved at `phase 1 done`, the run goes on, then
   two resumed runs must print `snapshot_test: ok` and none of phase 1's
@@ -666,76 +669,118 @@ cargo xtask snapshots rm office-merge
   digest must not change; host tests `snapshot::tests` (manifest, the
   build check's reasons, arguments).
 
-### Hot swapping DLLs into a snapshot (at your own risk)
+### Hot swapping DLLs and the kernel into a snapshot (at your own risk)
 
 > **A hot-swapped run is not a real run, and its results are at your own
-> risk.** It splices code of another build into programs that are
+> risk.** It splices code of another build into programs (and a kernel)
 > running with the state the old build made. It never counts as a pass:
 > xtask marks it `hot-swapped (not a real run)` and exits with status 3,
 > CI refuses the flag, and **every fix still gets a full run from boot
 > before its pull request.**
 
-It is for trying a fix to one of gala's DLLs in seconds from a snapshot
-taken just before the failure (msxml6.dll during the Office install)
-instead of a 30-minute run from boot (ROADMAP SN step 1d; ARCHITECTURE
-"Hot swapping DLLs into a resumed machine"):
+It is for trying a fix to one of gala's DLLs or to the kernel in seconds
+from a snapshot taken just before the failure (msxml6.dll during the
+Office install) instead of a 30-minute run from boot (ROADMAP SN steps
+1d and 1e; ARCHITECTURE "Hot swapping DLLs into a resumed machine" and
+"Hot swapping the kernel into a resumed machine"):
 
 ```sh
 cargo xtask boot-test 'office_install_local$' \
     --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge --snapshot-stop
-# edit user/msxml6, then, as often as wanted:
+# edit user/msxml6 or the kernel, then, as often as wanted:
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
-# what it would patch, without a run (maps: target/<target>/release/deps):
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxml6.dll
+# what it would patch, without a run (a DLL's maps: target/<target>/release/deps;
+# the kernel's: target/x86_64-unknown-none/<profile>/kernel.map, or a snapshot's modules/boot):
 cargo xtask hotswap-diff old/msxml6.dll old/msxml6.map new/msxml6.dll new/msxml6.map
+cargo xtask hotswap-diff old/kernel old/kernel.map new/kernel new/kernel.map
+XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as changed
 ```
 
+- **Measured**: on `office_install_local` saved at `process
+  integrator.exe (pid` (1755 s in), a one-line change to a kernel
+  function is diffed, swapped (the other CPU stopped for 14 ms) and
+  reaches the install's end in 19 s of run time (about a minute with
+  the build and the resume).
 - **What happens**: xtask prints the banner, then per DLL (and its
-  32-bit twin, if that changed too) the functions it patches, the new
-  functions and the data it copies; the guest, at the resumed machine's
-  first instruction, stops every program thread, checks, maps the new
-  code beside the image in every process that has it, makes each
-  changed function's old entry jump to its new version, replaces the
-  DLL's file for later loads, and lets the programs go on. Its log has
+  32-bit twin, if that changed too) and for the kernel the functions it
+  patches, the new functions and the data it copies; the guest, at the
+  resumed machine's first instruction, stops every program thread; it
+  checks the kernel's record against itself and maps the kernel's new
+  code beside its image (nothing jumps there yet), then per DLL checks,
+  maps the new code beside the image in every process that has it, makes
+  each changed function's old entry jump to its new version and replaces
+  the DLL's file for later loads; last it stops every other CPU, scans
+  every kernel stack and interrupt stack, and makes the changed kernel
+  functions' entries jumps; then it lets the programs go on. Its log has
   `hotswap: NOT A REAL RUN ...`, a line per process and per patched
-  function, then `hotswap: applied: <dll> ...` or `hotswap: refused:
-  <why>` (the programs then go on unpatched; xtask fails the run with
-  that reason).
+  function, then `hotswap: applied: <dll> ...` and `hotswap: applied:
+  kernel: ...` (with `hotswap: kernel: stack check: ...`: the stacks
+  scanned and how long the CPUs were stopped), or `hotswap: refused:
+  <why>` (everything is undone, the programs go on unpatched; xtask
+  fails the run with that reason).
 - **What the checks cover** (each refusal names the symbol): the rest of
-  the build is the snapshot's (kernel, every other module, the command
-  line, the machine); a changed function on any thread's stack (its
-  instruction pointer in one, or a return address into one: a
-  conservative scan of every word of the stack, so a stale value also
-  refuses); a writable static whose size changed; anonymous writable
-  data the new code needs; a new import; a changed thread-local
-  template; code that does not decode or relocate; a function too short
-  for the jump; identical code folding that changed. A function reading
-  read-only data that changed is patched with it.
+  the build is the snapshot's (every other module, the command line, the
+  machine; the kernel too unless it is named); a changed DLL function on
+  any thread's stack (its instruction pointer in one, or a return
+  address into one: a conservative scan of every word of the stack, so a
+  stale value also refuses); a changed kernel function on any kernel
+  stack in use (every thread's, the boot thread's and the idle loops',
+  from its stack pointer up) or anywhere on any CPU's double-fault, NMI
+  or machine-check stack (scanned whole), or the patch's own code; a
+  writable static whose size changed; anonymous writable data the new
+  code needs; a new import; a changed thread-local template; code that
+  does not decode or relocate; assembly (the kernel's `global_asm!`:
+  entry stubs, the context switch); a function too short for the jump;
+  identical code folding that changed. A function reading read-only data
+  that changed is patched with it; a jump table goes with its function.
+  One refusal undoes everything (the DLLs swapped before the kernel's
+  refusal are put back).
 - **What they cannot cover**: logic that depends on state the old code
   built and the new code reads differently (a cache filled the old way,
   a flag that now means something else); changed invariants of data
   whose layout did not change (same size, other meaning or field
-  order); stored pointers to the old copy of a constant that changed; a
-  function the CPU ran between the snapshot and the resume (none: no
-  user instruction runs before the swap) but whose effects the old code
-  already left. New code has no unwind data registered (an exception
-  through it is not unwound), and new exports are not visible to
-  GetProcAddress.
+  order): a kernel structure on the heap whose fields changed is not
+  seen (only statics' sizes are compared), so a change to a type's
+  layout is a fresh run from boot; stored pointers to the old copy of a
+  constant that changed (an old vtable, a function pointer compared with
+  a new one); a function the CPU ran between the snapshot and the resume
+  but whose effects the old code already left. New DLL code has no
+  unwind data registered (an exception through it is not unwound), new
+  exports are not visible to GetProcAddress, and new kernel code has no
+  symbols (a backtrace through it shows addresses in the window,
+  0xffffffffe0000000 up).
 - **Marks**: the banner (before and after), the verdict and exit status
-  3, the guest's `hotswap:` lines, the `hotswap` ledger entry and event,
-  `this run was hot-swapped (...)` in every crash report and state
-  dump, triage's `HOT-SWAPPED, NOT A REAL RUN` line. A snapshot whose
-  manifest says `hot_swapped:` is refused for a normal resume.
-- **Needs**: a snapshot taken by this version of xtask (it keeps its
-  DLLs and their linker maps in `modules/`; an older one is refused
-  with that reason), DLLs gala's build made (the map: every user build
-  writes `deps/<name>.map`), a `run=` scenario (the swap runs from the
-  boot thread's wait), x64 or x86 DLLs.
-- **Pitfalls**: the snapshot pins everything but the named DLLs, so
+  3, the guest's `hotswap:` lines, the `hotswap` ledger entry and event
+  (`"dll":"<name>"` or `"image":"kernel"`), `this run was hot-swapped
+  (...)` in every crash report and state dump, triage's `HOT-SWAPPED,
+  NOT A REAL RUN` line. A snapshot whose manifest says `hot_swapped:` is
+  refused for a normal resume.
+- **Needs**: a snapshot taken by this version of xtask (it keeps its DLLs
+  and kernel with their linker maps in `modules/`; an older one is
+  refused with that reason; for the kernel, one whose kernel has the hot
+  swap's support, `kernel::hotswap::PATCHING`), DLLs gala's build made
+  (the map: every user build writes `deps/<name>.map`) and the kernel
+  gala's build made (`--emit-relocs` and `kernel.map`: kernel/build.rs),
+  a `run=` scenario (the swap runs from the boot thread's wait), x64 or
+  x86 DLLs.
+- **Pitfalls**: the snapshot pins everything but what is named, so
   while a long snapshot run goes on, change nothing else that goes into
   its image (the kernel, any test program, any other DLL) if you mean
   to resume it with a swap. A 4-byte function cannot take the jump
   (refused: make the old build's function longer, or swap its callers).
-  `target/snapshots` linked into `/dev/shm` for Office breaks
+  A kernel change inlined into a function that every blocked thread is
+  in (the system call dispatcher, `nt::wait`) is refused for the stack:
+  while iterating, keep the changed function out of line
+  (`#[inline(never)]`) or take the snapshot where no thread waits in its
+  callers. The kernel's dev profile has a codegen unit per module
+  (`codegen-units = 1024`, Cargo.toml): with fewer, rustc merges modules
+  by size, and an edit to one moves others' code between units (and
+  their inlining), which the diff sees as hundreds of changed functions;
+  `XTASK_HOTSWAP_WHY=1` shows why a function counts as changed. A
+  release kernel (16 units) has the same problem: iterate on the dev
+  build. `target/snapshots` linked into `/dev/shm` for Office breaks
   `snapshot_machine` (its disk is on `/`): link it back after. xtask
   removes the Office disk image's link after a pass, so make it again
   before the next Office run, or the 8 GB image lands on `/`.
@@ -752,12 +797,34 @@ cargo xtask hotswap-diff old/msxml6.dll old/msxml6.map new/msxml6.dll new/msxml6
   (wow64_hotswap_test on hotswap_dll32, hotswap_dll's source built for
   x86 under its own name: the 32-bit stack,
   a blob below 2 GiB, absolute fixups).
-  The variants are built in profiles of their own (`hotswap-v2`,
+  The kernel's: `khotswap_machine` (hotswap_test's `kernel` mode reads
+  the kernel's probe, `nt::hotswap_probe`, through GalaHotswapProbe):
+  resumed with the kernel's `hotswap_v2` build swapped in it must print
+  `kernel after: version 2, calls 2, object 107, global 1042` (the same
+  four kinds of change, in the kernel, the object a `Box<dyn>` on the
+  kernel heap) with `hotswap: applied: kernel: 4 function(s) patched`;
+  its `hotswap_layout` build is refused by xtask (`static
+  kernel::nt::hotswap_probe::PROBE_TABLE changed size`).
+  `khotswap_stack` (`kstack`): saved while the program's thread waits
+  inside the changed `wait_in_kernel`; the kernel and the DLL in one
+  plan, the guest refuses (`is on the kernel stack of thread`), undoes
+  the DLL's swap and the program goes on with both first builds.
+  `khotswap_both` (`both`): the kernel and hotswap_dll swapped in one
+  plan (`--hot-swap-unsafe kernel,hotswap_dll.dll`), both applied.
+  The DLL variants are built in profiles of their own (`hotswap-v2`,
   `hotswap-layout`: `target/<triple>/hotswap-*/`); a variant image takes
-  its 32-bit DLL as `x86=<path>`. Host tests:
-  `hotswap::tests` in xtask (diff, normalization, jump tables, imports,
-  refusals, the plan) and the kernel (the plan, binding, the stack
-  check's ranges).
+  its 32-bit DLL as `x86=<path>`. The kernel's variants are chosen by
+  `GALA_KERNEL_VARIANT` (a cfg from kernel/build.rs, not a cargo
+  feature: a feature changes the crate's metadata, and so every TypeId
+  in the code), built in the `khotswap` profile (the dev profile's
+  settings: `target/x86_64-unknown-none/khotswap/kernel-<variant>`, its
+  incremental state removed after each, about 380 MB kept), and an
+  image takes one as `kernel=<path>`. Host tests: `hotswap::tests` in
+  xtask (diff, normalization, jump tables (relative and absolute),
+  imports, refusals, the kernel's map, sign-extended addresses,
+  relocations' symbols, functions known by contents, the plan) and the
+  kernel (the plan, binding (sign-extended too), the stack check's
+  ranges).
 
 ### GPU tests
 

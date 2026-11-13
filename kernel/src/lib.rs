@@ -86,6 +86,8 @@ pub const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// The kernel's start: from Limine (`handover` is `None`), or from the
 /// previous kernel after a kernel handover (ROADMAP R9).
 pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
+    // Where the boot thread's stack ends (a hot swap's stack scan).
+    arch::hotpatch::note_boot_stack();
     arch::bootphase::mark("entry");
     console::init();
     kprintln!();

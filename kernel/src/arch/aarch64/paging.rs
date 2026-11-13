@@ -52,6 +52,10 @@ pub fn kernel_image() -> Range<u64> {
     0..0
 }
 
+pub fn kernel_text() -> Range<u64> {
+    0..0
+}
+
 pub fn map_mmio(_phys: u64, _len: u64) -> Result<u64, PagingError> {
     Err(PagingError::NotInitialized)
 }

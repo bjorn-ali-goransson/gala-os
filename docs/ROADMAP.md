@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -4169,9 +4169,9 @@ pointer, old processes restarted one at a time), then the kernel
 handover: the running kernel stops every thread at a quiescent point,
 writes its state as versioned data, and a new kernel rebuilds it and
 reissues blocked calls, so programs carry on. Live patching of single
-functions is not part of live update; its one form is SN step 1d's hot
-swap of gala's DLLs into a resumed test snapshot, a development tool
-whose runs are never real.
+functions is not part of live update; its one form is SN steps 1d and
+1e's hot swap of gala's DLLs and kernel into a resumed test snapshot, a
+development tool whose runs are never real.
 
 **Done so far** (milestones, each with its scenarios): (a) handover to
 the same build with no programs (`handover_same`, `handover_uefi`,
@@ -4335,6 +4335,46 @@ run from boot needs 30 minutes to get there. A first try found two
 faults, fixed with `hotswap_wow64` and the all-or-nothing rule: the
 32-bit blob's reservation was not at a 64 KiB boundary, and a later
 DLL's refusal left an earlier one swapped.
+
+**Step 1e: hot swapping the kernel into a resumed snapshot (at your own
+risk).** Done (the DLL swap's code with `Image::from_elf` in
+`xtask/src/hotswap.rs`, `KernelPatch` in `kernel/src/hotswap.rs`,
+`kernel/src/arch/x86_64/hotpatch.rs`, `smp::stop_others`,
+`sched::kernel_stacks`; WORKFLOW "Hot swapping DLLs and the kernel into a
+snapshot (at your own risk)", ARCHITECTURE "Hot swapping the kernel into a
+resumed machine"; scenarios `khotswap_machine`, `khotswap_stack`,
+`khotswap_both` on hotswap_test's kernel modes and the kernel's probe
+(`nt::hotswap_probe`); host tests in xtask and the kernel). A kernel fix
+late in a long run is tried from a snapshot: `--hot-swap-unsafe kernel`,
+or `kernel,msxml6.dll` (one plan, all or nothing). The kernel is linked
+with `--emit-relocs` and lld's map; xtask diffs the snapshot's kernel
+with the new build function by function as it does a DLL (its merged
+constants and GOT split, relocations' symbols, sign-extended addresses,
+absolute jump tables, assembly refused). The guest applies it last,
+after the DLLs: the new code mapped in a window beside the image
+(0xffffffffe0000000, W^X), every other CPU stopped, every kernel stack in
+use and every interrupt stack scanned, then each changed function's
+entry made a jump through the direct map's alias. Refused, naming the
+symbol: a changed function on a kernel stack (or the patch's own), a
+static that changed size, assembly, a function too short for the jump,
+any other change to the build. Never a real run, marked as step 1d's
+runs are. For a diff to see only the edit, the kernel's dev profile has
+a codegen unit per module (`codegen-units = 1024`; rustc's 256 merged
+modules by size, and any edit moved other code between units) and the
+scenarios' kernel variants are chosen by a cfg, not a feature (a feature
+changes every TypeId). Not checked (the user's risk): a structure on the
+heap whose layout changed (only statics' sizes are compared), state the
+old code built that the new code reads differently. Limits: no symbols
+for new kernel code, one kernel swap per boot, the dev build (a release
+kernel's 16 codegen units see unrelated changes), `run=` scenarios.
+Shown on the Office install (`office_install_local`, TCG): saved at
+`process integrator.exe (pid` (1755 s in; 116 MiB of state, the 7.7 GB
+disk), resumed with `nt::process::finish`'s exit line changed: xtask
+patched that one function (and its new string); the guest scanned 35
+kernel stacks and 6 interrupt stacks with the other CPU stopped for 14
+ms, and every later exit line came from the new code, the install
+reaching its end (msxml6's replaceChild, ROADMAP OF) in 19 s of run
+time, where the run from boot needs 29 minutes to get there.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private

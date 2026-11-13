@@ -19,6 +19,13 @@ panic = "abort"
 # boot tests running Go programs slow.
 [profile.dev.package.kernel]
 opt-level = 1
+# A codegen unit per module (the kernel has about 400; rustc's default for
+# an incremental build is 256, and it merges modules into that many by
+# size): an edit to one module then never moves another module's code
+# into another unit, where it would be inlined differently. A hot swap of
+# the kernel (ROADMAP SN step 1e) compares builds function by function,
+# so this keeps a change to what it is.
+codegen-units = 1024
 
 # The manifest's signature check (R8) at every boot: optimized in test
 # builds too.
@@ -37,6 +44,25 @@ debug = true
 inherits = "release"
 
 [profile.hotswap-layout]
+inherits = "release"
+
+# The kernel builds the kernel hot swap scenarios swap in (ROADMAP SN step
+# 1e; xtask `kernel_variant`, with the kernel's `hotswap_v2` or
+# `hotswap_layout` feature): the settings of the build they are swapped
+# into (dev, or release with `--release`), in a directory of their own
+# (target/x86_64-unknown-none/khotswap/), so that the default kernel is
+# never replaced while other scenarios make their images.
+[profile.khotswap]
+inherits = "dev"
+
+[profile.khotswap.package.kernel]
+opt-level = 1
+codegen-units = 1024
+
+[profile.khotswap.package.ed25519-compact]
+opt-level = 3
+
+[profile.khotswap-release]
 inherits = "release"
 
 # smoltcp 0.12.0 with gala's patch (THIRD_PARTY.md): a TCP socket's state as

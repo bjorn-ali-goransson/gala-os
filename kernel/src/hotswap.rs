@@ -1,6 +1,8 @@
-//! Hot swapping gala's own DLLs into a machine resumed from a snapshot
-//! (ROADMAP SN step 1d; ARCHITECTURE "Hot swapping DLLs (SN step 1d)";
-//! WORKFLOW "Hot swapping DLLs into a snapshot (at your own risk)").
+//! Hot swapping gala's own DLLs and the kernel into a machine resumed from
+//! a snapshot (ROADMAP SN steps 1d and 1e; ARCHITECTURE "Hot swapping DLLs
+//! into a resumed machine" and "Hot swapping the kernel into a resumed
+//! machine"; WORKFLOW "Hot swapping DLLs and the kernel into a snapshot
+//! (at your own risk)").
 //!
 //! **Not a real run.** xtask (`xtask/src/hotswap.rs`) compares the
 //! snapshot's build of a DLL with a new one and hands the resumed machine
@@ -45,6 +47,21 @@
 //! new code reads differently, invariants of data whose layout did not
 //! change, new code's unwinding (no unwind data is registered for the
 //! blob), new exports (the old export table is kept).
+//!
+//! **The kernel** (SN step 1e; a plan record of machine `KERNEL`, made
+//! from the snapshot's kernel and a new build as a DLL's is) is applied
+//! here too, from the same boot thread, last: the record is checked
+//! against the running kernel (the CRC-32 of its code), its blob bound
+//! for the window beside the image (`arch::hotpatch::WINDOW`) and mapped
+//! there (code read-only and executable, data writable), while nothing
+//! jumps there yet; then the DLLs; then every other CPU is stopped
+//! (`smp::stop_others`), every kernel stack in use (each thread's, from
+//! its stack pointer) and every CPU's interrupt stacks (whole) are
+//! scanned for an address inside a changed function, and only if none is
+//! found are the old entries made jumps (through the direct map's alias
+//! of the code), before any CPU runs on. No CPU runs kernel code but the
+//! patch's own while it is written, and the patch's own code is on the
+//! scanned stacks, so it cannot be one of the changed functions.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -63,6 +80,10 @@ const FIXUP: usize = 24;
 const ENTRY: usize = 16;
 /// A patched entry: `jmp rel32`.
 const JUMP: usize = 5;
+/// The plan record machine of the kernel (1 x64 and 2 x86 are DLLs').
+pub const KERNEL: u8 = 3;
+/// How long the other CPUs may take to stop for the kernel's patch.
+const STOP_MS: u64 = 1000;
 /// How long the programs may take to stop running user code.
 const QUIET_MS: u64 = 3000;
 /// The most of a stack the check reads.
@@ -101,6 +122,9 @@ pub struct Fixup {
     pub width: u8,
     /// 0: an RVA in the old image; 1: an offset in the blob.
     pub space: u8,
+    /// A 32-bit absolute address the CPU sign-extends (the kernel's code
+    /// model: an address in the top 2 GiB).
+    pub signed: bool,
 }
 
 /// A changed function: its old place and its copy in the blob.
@@ -203,14 +227,17 @@ impl<'a> ImagePlan<'a> {
         if at != r.len() {
             return Err(PlanError("an image record is longer than its sizes"));
         }
-        if machine != 1 && machine != 2 {
-            return Err(PlanError("a machine other than x64 or x86"));
+        if machine != 1 && machine != 2 && machine != KERNEL {
+            return Err(PlanError("a machine other than x64, x86 or the kernel"));
         }
         if data_off as usize > blob_len.next_multiple_of(4096) || data_off % 4096 != 0 {
             return Err(PlanError("the blob's data offset"));
         }
         for e in plan.entries() {
-            if e.size < JUMP as u32 || e.at as usize >= blob_len || e.rva >= old_size_of_image {
+            // A kernel record's entries are checked against the running
+            // kernel's code when it is applied.
+            let outside = machine != KERNEL && e.rva >= old_size_of_image;
+            if e.size < JUMP as u32 || e.at as usize >= blob_len || outside {
                 return Err(PlanError("an entry outside the blob or the image"));
             }
         }
@@ -227,6 +254,7 @@ impl<'a> ImagePlan<'a> {
                 target: i64::from_le_bytes([f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]]),
                 width: f[16],
                 space: f[17],
+                signed: f[18] != 0,
             }
         })
     }
@@ -250,11 +278,17 @@ impl<'a> ImagePlan<'a> {
     fn is_x86(&self) -> bool {
         self.machine == 2
     }
+
+    /// Whether this record is the kernel's.
+    pub fn is_kernel(&self) -> bool {
+        self.machine == KERNEL
+    }
 }
 
 /// Writes the plan's fixups into `blob` (a copy of the plan's) for an old
 /// image at `image` and the blob at `at`. An Err names what does not fit
-/// (a rel32 out of reach, a 32-bit absolute address above 4 GiB).
+/// (a rel32 out of reach, a 32-bit absolute address above 4 GiB, a
+/// sign-extended one outside the top or bottom 2 GiB).
 pub fn bind(blob: &mut [u8], plan: &ImagePlan, image: u64, at: u64) -> Result<(), &'static str> {
     for f in plan.fixups() {
         let base = if f.space == 0 { image } else { at };
@@ -275,7 +309,10 @@ pub fn bind(blob: &mut [u8], plan: &ImagePlan, image: u64, at: u64) -> Result<()
         match f.width {
             8 => field.copy_from_slice(&value.to_le_bytes()),
             4 => {
-                if f.anchor.is_none() && value > u64::from(u32::MAX) {
+                if f.anchor.is_none() && f.signed && i32::try_from(value as i64).is_err() {
+                    return Err("a sign-extended 32-bit absolute address out of reach");
+                }
+                if f.anchor.is_none() && !f.signed && value > u64::from(u32::MAX) {
                     return Err("a 32-bit absolute address above 4 GiB");
                 }
                 field.copy_from_slice(&(value as u32).to_le_bytes());
@@ -578,16 +615,27 @@ fn write_code(process: &Process, va: u64, bytes: &[u8]) -> Result<(), &'static s
 
 fn apply_plan(plan: &Plan) -> Result<(), Refused> {
     info!(
-        "hotswap: NOT A REAL RUN: a hot swap of {} DLL(s) (plan nonce {:#x}); results are at the \
-         user's own risk",
+        "hotswap: NOT A REAL RUN: a hot swap of {} image(s) (plan nonce {:#x}); results are at \
+         the user's own risk",
         plan.images.len(),
         plan.nonce
     );
     let threads = wait_quiet()?;
     info!("hotswap: {} threads stopped (none runs user code)", threads.len());
+    // The kernel's record first: checked, bound and mapped beside the
+    // image, with no code jumping there yet (its `Drop` unmaps it if the
+    // swap stops before its entries are patched).
+    let mut kernel: Option<KernelPatch> = None;
+    for image in plan.images.iter().filter(|i| i.is_kernel()) {
+        if kernel.is_some() {
+            info!("hotswap: refused: the plan has two kernel records");
+            return Err(Refused);
+        }
+        kernel = Some(KernelPatch::prepare(image)?);
+    }
     // Every DLL's processes and stack check before anything changes.
     let mut checked = alloc::vec::Vec::new();
-    for image in &plan.images {
+    for image in plan.images.iter().filter(|i| !i.is_kernel()) {
         let targets = targets(image)?;
         info!(
             "hotswap: {} ({}): {} changed function(s), blob {} bytes, {} fixups; mapped in {} \
@@ -624,10 +672,434 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
             }
         }
     }
+    // The kernel last: its stack check and its entries, every other CPU
+    // stopped. Nothing can fail after it.
+    if let Some(k) = &mut kernel
+        && let Err(r) = k.apply()
+    {
+        if !applied.is_empty() {
+            info!("hotswap: undoing the {} DLL(s) swapped before the kernel", applied.len());
+        }
+        applied.iter().rev().for_each(Applied::undo);
+        return Err(r);
+    }
     for a in &applied {
         a.report();
     }
+    if let Some(k) = &kernel {
+        k.report();
+    }
     Ok(())
+}
+
+/// The CPU (its index + 1) writing the kernel's entries, 0 when none: an
+/// NMI on another CPU waits until the write is done
+/// (`wait_while_patching`), so no code runs that may be half written.
+static PATCHING: AtomicU32 = AtomicU32::new(0);
+
+/// Called first by the NMI handler: waits while another CPU writes the
+/// kernel's patched entries (a profiler sample or a state dump asked for
+/// meanwhile).
+pub fn wait_while_patching() {
+    let me = crate::arch::percpu::cpu_index() + 1;
+    loop {
+        let p = PATCHING.load(Ordering::Acquire);
+        if p == 0 || p == me {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// The most of one kernel stack the check reads (kernel stacks are 64
+/// KiB, the boot thread's at most a few hundred).
+const KERNEL_STACK_LIMIT: u64 = 1 << 20;
+
+/// One changed kernel function: its old place, the direct map's alias of
+/// each of its first bytes, and the jump to its copy.
+struct KernelEntry {
+    va: u64,
+    end: u64,
+    aliases: [u64; JUMP],
+    jump: [u8; JUMP],
+    old: [u8; JUMP],
+}
+
+/// The kernel's record, ready: its blob mapped in the window, its entries
+/// not patched yet (unmapped again on drop unless they were).
+struct KernelPatch<'a> {
+    image: &'a ImagePlan<'a>,
+    area: crate::arch::hotpatch::Area,
+    entries: alloc::vec::Vec<KernelEntry>,
+    /// Room for every thread's stack, filled while the CPUs are stopped
+    /// (nothing is allocated then).
+    stacks: alloc::vec::Vec<crate::sched::StackInUse>,
+    applied: bool,
+    /// What the stack check looked at.
+    scanned: Scanned,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Scanned {
+    stacks: u32,
+    interrupt_stacks: u32,
+    words: u64,
+    cpus: u32,
+    ns: u64,
+}
+
+/// What the stack check found.
+enum Found {
+    /// The patch's own code is a changed function (entry `i`).
+    Patcher(u64, usize),
+    /// More threads than the room made for them.
+    TooMany,
+    /// A thread's stack bounds are not known or not plausible.
+    Unknown(crate::sched::StackInUse),
+    /// A word on a thread's stack: (stack, slot, value, entry).
+    Stack(crate::sched::StackInUse, u64, u64, usize),
+    /// A word on CPU `cpu`'s interrupt stack `which`: (slot, value, entry).
+    Interrupt(usize, usize, u64, u64, usize),
+    /// A page of a stack that cannot be read.
+    Unreadable(u64),
+}
+
+impl Drop for KernelPatch<'_> {
+    fn drop(&mut self) {
+        if !self.applied && self.area.pages() > 0 {
+            self.area.unmap();
+            info!("hotswap: kernel: the blob's window is unmapped again (nothing was patched)");
+        }
+    }
+}
+
+/// The CRC-32 of the running kernel's first `len` bytes of code.
+fn kernel_code_crc(start: u64, len: u64) -> Option<u32> {
+    let mut crc = 0;
+    let mut buf = [0u8; 4096];
+    let mut at = 0;
+    while at < len {
+        let n = ((len - at) as usize).min(buf.len());
+        if !crate::arch::hotpatch::read_kernel(start + at, &mut buf[..n]) {
+            return None;
+        }
+        crc = crate::fs::log::crc32(crc, &buf[..n]);
+        at += n as u64;
+    }
+    Some(crc)
+}
+
+/// Scans the words of `[low, high)` for an address inside one of
+/// `ranges`: `Err((slot, value, range))`, or `Err((page, 0, usize::MAX))`
+/// for a page that cannot be read.
+fn scan_words(
+    low: u64,
+    high: u64,
+    ranges: &[(u64, u64)],
+    words: &mut u64,
+) -> Result<(), (u64, u64, usize)> {
+    let mut buf = [0u8; 4096];
+    let mut at = low & !7;
+    while at < high {
+        let n = ((high - at) as usize).min(buf.len() - (at % 4096) as usize);
+        if !crate::arch::hotpatch::read_kernel(at, &mut buf[..n]) {
+            return Err((at, 0, usize::MAX));
+        }
+        for (k, w) in buf[..n].chunks_exact(8).enumerate() {
+            let v = u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+            if let Some(i) = inside(ranges, v) {
+                return Err((at + 8 * k as u64, v, i));
+            }
+        }
+        *words += (n / 8) as u64;
+        at += n as u64;
+    }
+    Ok(())
+}
+
+impl<'a> KernelPatch<'a> {
+    /// Checks the kernel's record against the running kernel, binds its
+    /// blob for the window and maps it there.
+    fn prepare(image: &'a ImagePlan<'a>) -> Result<KernelPatch<'a>, Refused> {
+        use crate::arch::hotpatch;
+        let text = crate::arch::paging::kernel_text();
+        let base = crate::arch::paging::kernel_image().start;
+        let len = u64::from(image.old_size_of_image);
+        if len == 0 || len > text.end - text.start {
+            info!(
+                "hotswap: refused: kernel: the plan's code size ({len:#x} bytes) is not this \
+                 kernel's ({:#x})",
+                text.end - text.start
+            );
+            return Err(Refused);
+        }
+        let Some(crc) = kernel_code_crc(text.start, len) else {
+            info!("hotswap: refused: kernel: its code could not be read");
+            return Err(Refused);
+        };
+        if crc != image.old_timestamp {
+            info!(
+                "hotswap: refused: kernel: the running kernel is not the plan's old build (the \
+                 CRC-32 of its code is {crc:#010x}, the plan's {:#010x})",
+                image.old_timestamp
+            );
+            return Err(Refused);
+        }
+        info!(
+            "hotswap: kernel: {} changed function(s), blob {} bytes (code below +{:#x}), {} \
+             fixups; the running kernel is the plan's old build (CRC-32 {crc:#010x} of its {len} \
+             bytes of code)",
+            image.entries().count(),
+            image.blob.len(),
+            image.data_off,
+            image.fixups().count()
+        );
+        let mut entries = alloc::vec::Vec::new();
+        entries.try_reserve_exact(image.entries().count()).map_err(|_| Refused)?;
+        for e in image.entries() {
+            let va = base + u64::from(e.rva);
+            let end = va + u64::from(e.size);
+            let to = hotpatch::WINDOW + u64::from(e.at);
+            let mut aliases = [0u64; JUMP];
+            let mut ok = va >= text.start && end <= text.end;
+            for (k, a) in aliases.iter_mut().enumerate() {
+                match hotpatch::text_alias(va + k as u64) {
+                    Some(alias) => *a = alias,
+                    None => ok = false,
+                }
+            }
+            let mut old = [0u8; JUMP];
+            ok &= hotpatch::read_kernel(va, &mut old);
+            let jump = jump(va, to);
+            let (true, Some(jump)) = (ok, jump) else {
+                info!(
+                    "hotswap: refused: kernel: {} at {va:#x} ({} bytes) is not in this kernel's \
+                     code, or its copy at {to:#x} is out of a jump's reach",
+                    e.name, e.size
+                );
+                return Err(Refused);
+            };
+            entries.try_push(KernelEntry { va, end, aliases, jump, old }).map_err(|_| Refused)?;
+        }
+        let mut blob = alloc::vec::Vec::new();
+        let bound = blob
+            .try_reserve_exact(image.blob.len())
+            .map_err(|_| "no memory for the blob")
+            .and_then(|()| blob.try_extend_from_slice(image.blob).map_err(|_| "no memory"))
+            .and_then(|()| bind(&mut blob, image, base, hotpatch::WINDOW));
+        if let Err(e) = bound {
+            info!(
+                "hotswap: refused: kernel: the blob cannot be bound at {:#x}: {e}",
+                hotpatch::WINDOW
+            );
+            return Err(Refused);
+        }
+        let area = match hotpatch::map_area(&blob, image.data_off as usize) {
+            Ok(a) => a,
+            Err(e) => {
+                info!(
+                    "hotswap: refused: kernel: the blob's window at {:#x} could not be mapped: \
+                     {e:?}",
+                    hotpatch::WINDOW
+                );
+                return Err(Refused);
+            }
+        };
+        info!(
+            "hotswap: kernel: blob mapped at {:#x} ({} pages; code read-only and executable, data \
+             from +{:#x} writable); no entry jumps there yet",
+            area.base,
+            area.pages(),
+            image.data_off
+        );
+        let mut patch = KernelPatch {
+            image,
+            area,
+            entries,
+            stacks: alloc::vec::Vec::new(),
+            applied: false,
+            scanned: Scanned::default(),
+        };
+        let (_, _, slots) = crate::sched::thread_counts();
+        if patch.stacks.try_reserve_exact(slots + 64).is_err() {
+            info!("hotswap: refused: kernel: no memory for the stack check");
+            return Err(Refused);
+        }
+        Ok(patch)
+    }
+
+    /// The stack check and the patch, every other CPU stopped.
+    fn apply(&mut self) -> Result<(), Refused> {
+        use crate::arch::{hotpatch, smp};
+        let mut ranges = alloc::vec::Vec::new();
+        ranges.try_reserve_exact(self.entries.len()).map_err(|_| Refused)?;
+        for e in &self.entries {
+            ranges.try_push((e.va, e.end)).map_err(|_| Refused)?;
+        }
+        let deadline = crate::time::SpinDeadline::after_ns(STOP_MS * 1_000_000);
+        let (stacks, entries) = (&mut self.stacks, &self.entries);
+        let mut scanned = Scanned::default();
+        let t0 = crate::time::raw_monotonic_ns();
+        let outcome = smp::stop_others(
+            || deadline.passed(),
+            |sps| -> Result<(), Found> {
+                let here = hotpatch::current_ip();
+                if let Some(i) = inside(&ranges, here) {
+                    return Err(Found::Patcher(here, i));
+                }
+                stacks.clear();
+                crate::sched::kernel_stacks(sps, stacks).map_err(|_| Found::TooMany)?;
+                for st in stacks.iter() {
+                    if st.top == 0
+                        || st.sp == 0
+                        || st.sp >= st.top
+                        || st.top - st.sp > KERNEL_STACK_LIMIT
+                    {
+                        return Err(Found::Unknown(*st));
+                    }
+                    scan_words(st.sp, st.top, &ranges, &mut scanned.words).map_err(
+                        |(slot, v, i)| match i {
+                            usize::MAX => Found::Unreadable(slot),
+                            i => Found::Stack(*st, slot, v, i),
+                        },
+                    )?;
+                    scanned.stacks += 1;
+                }
+                let online = smp::online_mask();
+                for cpu in (0..smp::MAX_CPUS).filter(|c| online & (1 << c) != 0) {
+                    scanned.cpus += 1;
+                    for (which, (low, high)) in smp::interrupt_stacks(cpu).into_iter().enumerate() {
+                        if high <= low {
+                            continue;
+                        }
+                        scan_words(low, high, &ranges, &mut scanned.words).map_err(
+                            |(slot, v, i)| match i {
+                                usize::MAX => Found::Unreadable(slot),
+                                i => Found::Interrupt(cpu, which, slot, v, i),
+                            },
+                        )?;
+                        scanned.interrupt_stacks += 1;
+                    }
+                }
+                // None is in use: the entries, then serialized (every
+                // other CPU serializes before it runs on).
+                let me = crate::arch::percpu::cpu_index() + 1;
+                PATCHING.store(me, Ordering::Release);
+                for e in entries {
+                    hotpatch::write_text(&e.aliases, &e.jump);
+                }
+                hotpatch::serialize();
+                PATCHING.store(0, Ordering::Release);
+                Ok(())
+            },
+        );
+        scanned.ns = crate::time::raw_monotonic_ns().saturating_sub(t0);
+        self.scanned = scanned;
+        let name = |i: usize| self.image.entries().nth(i).map_or("?", |e| e.name);
+        let found = match outcome {
+            Err(smp::NotStopped(mask)) => {
+                info!(
+                    "hotswap: refused: kernel: CPU(s) {mask:#x} did not stop within {STOP_MS} ms \
+                     (interrupts off that long: a CPU stuck in the kernel)"
+                );
+                return Err(Refused);
+            }
+            Ok(Ok(())) => {
+                self.applied = true;
+                return Ok(());
+            }
+            Ok(Err(found)) => found,
+        };
+        let s = scanned;
+        let looked = format_args!(
+            "({} kernel stacks and {} interrupt stacks of {} CPUs scanned, {} words, every other \
+             CPU stopped)",
+            s.stacks, s.interrupt_stacks, s.cpus, s.words
+        );
+        match found {
+            Found::Patcher(ip, i) => info!(
+                "hotswap: refused: kernel: kernel!{} (changed) is the patch's own code (it runs at \
+                 {ip:#x}): the hot swap cannot patch itself",
+                name(i)
+            ),
+            Found::TooMany => info!(
+                "hotswap: refused: kernel: more threads than the stack check made room for {looked}"
+            ),
+            Found::Unknown(st) => info!(
+                "hotswap: refused: kernel: thread {} ({}): its kernel stack's bounds are not known \
+                 (stack pointer {:#x}, top {:#x}), so it cannot be checked {looked}",
+                st.thread.index(),
+                st.name,
+                st.sp,
+                st.top
+            ),
+            Found::Unreadable(page) => {
+                info!("hotswap: refused: kernel: a stack page at {page:#x} cannot be read {looked}")
+            }
+            Found::Stack(st, slot, v, i) => info!(
+                "hotswap: refused: kernel!{} (changed) is on the kernel stack of thread {} ({}): \
+                 its stack at {slot:#x} (stack pointer {:#x}) holds {v:#x} (+{:#x} into it); a \
+                 changed function a thread is in cannot be swapped (take the snapshot when no \
+                 thread is in it) {looked}",
+                name(i),
+                st.thread.index(),
+                st.name,
+                st.sp,
+                v - ranges[i].0
+            ),
+            Found::Interrupt(cpu, which, slot, v, i) => info!(
+                "hotswap: refused: kernel!{} (changed) is on CPU {cpu}'s {} stack: at {slot:#x} \
+                 holds {v:#x} (+{:#x} into it; the interrupt stacks are scanned whole, so a stale \
+                 value counts too) {looked}",
+                name(i),
+                ["double fault", "NMI", "machine check"][which.min(2)],
+                v - ranges[i].0
+            ),
+        }
+        Err(Refused)
+    }
+
+    /// The lines, ledger entry and event of the kernel's swap.
+    fn report(&self) {
+        for (e, k) in self.image.entries().zip(&self.entries) {
+            info!(
+                "hotswap: kernel: patched kernel!{} (at {:#x}, {} bytes, began {:02x?}) -> {:#x}",
+                e.name,
+                k.va,
+                e.size,
+                k.old,
+                self.area.base + u64::from(e.at)
+            );
+        }
+        let s = self.scanned;
+        info!(
+            "hotswap: kernel: stack check: {} kernel stacks and {} interrupt stacks of {} CPUs, {} \
+             words, none in a changed function; the CPUs were stopped for {} us",
+            s.stacks,
+            s.interrupt_stacks,
+            s.cpus,
+            s.words,
+            s.ns / 1000
+        );
+        let entries = self.entries.len();
+        note_swapped("kernel");
+        crate::nt::ledger::record(
+            "hotswap",
+            "kernel hot-swapped into the running machine (not a real run)",
+            entries as u64,
+        );
+        crate::events::emit_always(format_args!(
+            r#""ev":"hotswap","result":"applied","image":"kernel","patched":{entries},"blob":{},"stacks":{},"stopped_us":{}"#,
+            self.image.blob.len(),
+            s.stacks,
+            s.ns / 1000
+        ));
+        info!(
+            "hotswap: applied: kernel: {entries} function(s) patched, the new code at {:#x}; NOT A \
+             REAL RUN",
+            self.area.base
+        );
+    }
 }
 
 /// One DLL swapped in its processes (undone if a later one fails).
@@ -1047,7 +1519,14 @@ mod tests {
         assert_eq!(image.file, b"MZ");
         assert_eq!(
             image.fixups().collect::<Vec<_>>(),
-            vec![Fixup { at: 2, anchor: Some(6), target: 0x3000, width: 4, space: 0 }]
+            vec![Fixup {
+                at: 2,
+                anchor: Some(6),
+                target: 0x3000,
+                width: 4,
+                space: 0,
+                signed: false
+            }]
         );
         assert_eq!(
             image.entries().collect::<Vec<_>>(),
@@ -1086,6 +1565,41 @@ mod tests {
         // Out of reach: refused, not truncated.
         let far = 0x7000_0000_0000u64;
         assert!(bind(&mut blob, &plan.images[0], image, far).is_err());
+    }
+
+    #[test]
+    fn a_kernel_record_binds_sign_extended_addresses() {
+        // A kernel record (machine 3): a 32-bit absolute address of the
+        // old kernel's static (sign-extended: the top 2 GiB) and one of
+        // the blob's own data, the blob in the window.
+        let mut bytes = plan_bytes(
+            &[0; 16],
+            &[(0, u32::MAX, 0x3000, 4, 0), (8, u32::MAX, 0x10, 4, 1)],
+            &[(0x1010, 7, 0)],
+        );
+        // Machine 3 and both fixups' sign-extension flag; then the CRC.
+        let rec = 32 + 4;
+        bytes[rec] = KERNEL;
+        let fixups = rec + 4 + 9 * 4 + b"\\Windows\\System32\\x.dll".len() + 16;
+        bytes[fixups + 18] = 1;
+        bytes[fixups + FIXUP + 18] = 1;
+        bytes[28..32].fill(0);
+        let crc = crate::fs::log::crc32(0, &bytes);
+        bytes[28..32].copy_from_slice(&crc.to_le_bytes());
+        let plan = Plan::parse(&bytes).unwrap();
+        let image = &plan.images[0];
+        assert!(image.is_kernel());
+        assert!(image.fixups().all(|f| f.signed));
+        let base = 0xffff_ffff_8000_0000u64;
+        let window = 0xffff_ffff_e000_0000u64;
+        let mut blob = image.blob.to_vec();
+        bind(&mut blob, image, base, window).unwrap();
+        let read =
+            |at: usize| i32::from_le_bytes(blob[at..at + 4].try_into().unwrap()) as i64 as u64;
+        assert_eq!(read(0), base + 0x3000);
+        assert_eq!(read(8), window + 0x10);
+        // Not in the top 2 GiB: refused, not truncated.
+        assert!(bind(&mut blob, image, 0xffff_ff00_0000_0000, window).is_err());
     }
 
     #[test]
