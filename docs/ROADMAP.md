@@ -4738,6 +4738,20 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   11 24H2, 26100); trace diffing against Windows, the sampling profiler
   and live introspection, fuzzing (OBSERVABILITY "Planned
   facilities").
+- **Applications put to sleep**: a program that is not in use stops
+  costing anything. Freeze: every thread of the program's process tree
+  stopped (as R9's quiescence stops them), no CPU, its memory moving to
+  the page file under pressure. Deep sleep: a program snapshot (SN
+  step 2) written to disk and the process ended, all its memory freed,
+  restored on wake; Windows cannot do this for Win32 programs (it
+  suspends only packaged apps, and throttles others with EcoQoS). Policy:
+  asleep after a while minimized, awake on a click or `gala wake`, the
+  taskbar showing it; programs that ask get Windows' suspend and resume
+  notifications. Never asleep: a program others depend on (a COM server,
+  a pipe or shared-lock holder, a service), which the kernel knows from
+  the handles between processes; network connections time out and
+  timers fire at once on wake, so both are named in the policy's
+  decision.
 - **Hibernation**: gala saves the whole running system to its own disk,
   powers off, and resumes everything on the next boot, on real hardware
   as well as in a VM. It is R9's handover sent to the next boot through
