@@ -617,8 +617,19 @@ cargo xtask snapshots rm office-merge
   modules"), not files on its disk, so a changed DLL changes the saved
   state as a changed kernel does; so do `XTASK_CMDLINE`, `XTASK_EVENTS`
   (the command line) and `XTASK_QEMU_ARGS` that change memory or
-  processors. Take the snapshot with the build the fixes will be tried
-  on, or with the fix in the next stage's code path only.
+  processors. Every image carries all the test programs, so changing any
+  of them (`user/bin` included) refuses every snapshot too. A module
+  that a process mapped before the save cannot change anyway (the
+  Office service maps msxml6.dll in its first minute), so a snapshot
+  helps with what happens after the save on one build: re-running a late
+  stage, watching it with the monitor, resuming twice to compare. Resume
+  with the same `XTASK_EVENTS` the snapshot was taken with.
+- **Office**: `office_install_local` saved at `process integrator.exe
+  (pid` (1675 s in, just before App-V's manifest merge) takes 5 s, 117
+  MiB of state plus its 7.6 GB disk; a resume reaches the install's end
+  in about 21 s of run time (40 s with the build check), against 1706 s
+  from boot. With "Office's fast path"'s link in /dev/shm and
+  `target/snapshots` linked there too, nothing large touches `/`.
 - **Where**: `target/snapshots/<name>/`. Office's are several GB: make
   `target/snapshots` a symbolic link to a directory on the file system
   of the scenario's disk image (`/dev/shm` with "Office's fast path"'s

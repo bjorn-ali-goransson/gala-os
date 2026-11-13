@@ -2030,10 +2030,16 @@ need gala's.
      element that uses it (Wine's msxml3 tests; `msxml_test`'s
      `inherited_namespaces`, x64 and x86: each subtree's xml loads
      again with its names in their namespaces), and the ledger has the
-     text at a parse error (`parse error at: ...`). Next: the merge
-     again, with the install resumed from a machine snapshot (ROADMAP
-     SN) rather than a 30-minute run; if it still fails, the ledger's
-     `parse error at:` shows the service's input. To measure on Windows
+     text at a parse error (`parse error at: ...`). With it the
+     manifest loads and the merge goes on to change the merged document:
+     the service ends at IXMLDOMNode::replaceChild, which gala's msxml6
+     lacks (`msxml6.dll!IXMLDOMNode::replaceChild not implemented, ending
+     the process`; OfficeClickToRun.exe 17002 at about 1648 s, setup.exe
+     at about 1690 s; the same end resumed from a machine snapshot taken
+     at `process integrator.exe`, 21 s of run time instead of 1706 s,
+     ROADMAP SN). Next: replaceChild, test first in `msxml_test`, then
+     the merge again (a snapshot cannot carry the fix: msxml6.dll is a
+     boot module the service loaded at about 42 s). To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
@@ -4149,6 +4155,16 @@ do not survive a resume (local sources are fine); a resumed run is not
 a replay (R5 is the deterministic tool); snapshots never replace a full
 run in CI. Limits: one scenario booted alone, BIOS boots, not a
 snapshot of a resumed run.
+Measured on `office_install_local` (TCG, with #117's msxml6): saved at
+`process integrator.exe (pid` (1675 s into the run, just before App-V's
+manifest merge) in 5.2 s, 117 MiB of state and the 7.6 GB disk (in
+`/dev/shm`); resumed in 3.1 s, the run reached the install's end (the
+service's IXMLDOMNode::replaceChild, ROADMAP OF) in 21 s of run time,
+where the run from boot took 1706 s. The service had loaded
+`System32\msxml6.dll` at about 42 s (`events=image`), so no snapshot
+past the first minute can take a changed msxml6.dll, even once DLLs
+are files on the disk: a resumed run can only take a module no process
+has mapped yet.
 Next (step 1c): resuming with other DLLs. Since they are boot
 modules, a snapshot cannot take a fixed DLL today; for fixes in DLLs
 the Office install has not loaded yet at the save, the boot modules
