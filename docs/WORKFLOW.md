@@ -1245,6 +1245,12 @@ numbers, 0x7f.., fail there).
   32-bit kernel32 takes `memcpy`, MSVC's 64-bit division helpers,
   `__chkstk` and `strlen` from it; its no_mangle ones become extra
   exports).
+- wow64.dll's query conversions: a class whose result has a variable
+  size (a name, a list) takes any buffer that holds the converted
+  result (and STATUS_BUFFER_TOO_SMALL with the length otherwise), not
+  `reply`'s exact length, which fits only fixed-size structures
+  (ThreadNameInformation's exact-length check made every 32-bit
+  GetThreadDescription fail).
 - A cdecl (`extern "C"`) import on x86 with `import_name_type =
   "undecorated"` loses one leading underscore (rustc takes it for the C
   decoration: `__acrt_iob_func` is imported as `_acrt_iob_func`): give

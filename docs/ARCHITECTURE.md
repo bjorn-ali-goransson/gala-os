@@ -3354,9 +3354,9 @@ ntdll imports.
   sleeper, and a waiter not yet asleep sees the counter moved and
   returns, a spurious wake the API allows). A wake with nobody waiting
   costs no system call (the waiter list is in the process). Invariant:
-  a blocked thread sleeps (see the critical sections in ntdll); the
-  thread pool's WaitFor*Callbacks still polls (Sleep(1)) until the
-  callbacks finish.
+  a blocked thread sleeps (see the critical sections in ntdll; the
+  thread pool's WaitFor*Callbacks sleeps on its object's condition
+  variable).
 - **Global and local memory** (`global.rs`; `kernel32_misc_test`):
   GMEM_FIXED/LMEM_FIXED memory is a process-heap block (at least one
   byte) and its pointer is the handle. Moveable memory is a handle to a
@@ -3385,19 +3385,89 @@ ntdll imports.
   resource notifications that never report low memory, WER registration
   as a no-op, GetSystemTimes (every processor idle), the process
   settings Go sets at startup.
-- **Thread pool** (`pool.rs`): worker threads (up to 8, started as
-  needed) take callbacks from one completion port; each timer and wait
-  object has a helper thread that sleeps until its due time or handle.
-  Objects count queued and running callbacks; WaitFor*Callbacks can
-  cancel the queued ones. Callback environments are ignored and closed
-  objects are not freed (TODO). Timer queues on the pool's timers:
-  CreateTimerQueue(Timer), ChangeTimerQueueTimer, DeleteTimerQueueTimer,
-  DeleteTimerQueue(Ex) (the WAITORTIMERCALLBACK gets its parameter and
-  TRUE; WT_EXECUTEONLYONCE makes it one-shot, other WT_ flags only choose
-  threads on Windows and are ignored; NULL is the default queue).
-  Deleting with INVALID_HANDLE_VALUE waits for a running callback;
-  otherwise a running callback makes it fail with ERROR_IO_PENDING and
-  the completion event is set by a helper thread when it returns.
+- **Thread pool** (`threadpool.rs`; `threadpool_test`,
+  `wow64_threadpool_test`, `kernel32_pool_test`): Windows' whole
+  family as kernel32 exports it (Windows has it in ntdll's Tp*, with
+  kernel32/kernelbase over them; gala's ntdll has no Tp* exports and
+  kernelbase forwards to kernel32). Expected results from Wine's
+  ntdll threadpool and kernel32 thread tests.
+  - Pools (TP_POOL, CreateThreadpool; the default pool is made at first
+    use and never goes): a completion port, worker threads (named
+    `threadpool worker (pool N)`, the default pool 0: the `thread name`
+    event and the state dump show them), a maximum (500 by default, as
+    Windows'; at least 1) and a minimum (started at once:
+    SetThreadpoolThreadMinimum is FALSE if a worker cannot start), the
+    stack (Query/SetThreadpoolStackInformation; the image's sizes, not
+    validated). A queued callback goes on one of three priority lists
+    (TP_CALLBACK_PRIORITY) and posts a token packet; a worker taking a
+    token runs the first queued callback, round robin among objects. A
+    worker starts when work is queued and no worker is idle (or
+    starting), and again whenever a worker takes a token with more
+    waiting and none idle, up to the maximum (`thread pool(callbacks
+    wait at the maximum)` in the ledger the first time it is reached);
+    a worker idle 20 s leaves while more than the minimum remain (one
+    stays while an I/O is started). CallbackMayRunLong is TRUE if a
+    worker is idle or one can start, else FALSE with
+    ERROR_TOO_MANY_THREADS.
+  - Callback environments (TP_CALLBACK_ENVIRON versions 1 and 3; another
+    version or a priority above 2 is ERROR_INVALID_PARAMETER): pool,
+    cleanup group and its cancel callback, the RaceDll kept loaded while
+    the object lives, the activation context (active around the
+    callback), the finalization callback (after the callback, before
+    the instance's actions), LongFunction. Persistent is recorded
+    (`thread pool(persistent callback)`) and runs on ordinary workers.
+  - Objects (work, timer, wait, I/O, simple callbacks) count queued,
+    running and associated callbacks (and started and dropped I/O)
+    under their pool's lock and are freed with their last reference:
+    the creator's until Close*, one per queued callback and per started
+    I/O, a cleanup group's while it closes them. Queued callbacks still
+    run after Close*. WaitFor*Callbacks (TRUE: queued ones dropped
+    first) sleeps on the object's condition variable until no callback
+    is queued or associated; DisassociateCurrentThreadFromCallback
+    takes a running one out of that count.
+  - Timers: one thread (`threadpool timers`) for all pools, a list
+    sorted by due time (the interrupt time; absolute FILETIMEs converted
+    against the system time when set). A due time 0 fires at once; a
+    period re-arms it; IsThreadpoolTimerSet is TRUE from a non-NULL due
+    time until a NULL one (also after a one-shot fired, as Windows);
+    SetThreadpoolTimerEx returns whether it was set. The window is not
+    used (firing at the due time is within it).
+  - Waits: threads (`threadpool waits`) of up to 63 wait objects each
+    (WaitForMultipleObjects with the thread's event), a wait object
+    joining one at creation. SetThreadpoolWait waits on a duplicate of
+    the handle (the caller may close its own, as Windows allows), once:
+    WAIT_OBJECT_0 (the wait took the object's count) or WAIT_TIMEOUT
+    (a 0 timeout at once); a setting count tells a stale wake from the
+    current setting. SetThreadpoolWaitEx returns whether a wait was
+    pending. A handle that cannot be waited on stops the thread's waits
+    (`SetThreadpoolWait(handle not waitable)` in the ledger).
+  - I/O: CreateThreadpoolIo binds the handle to the pool's port with the
+    object as key; a completion runs the callback with the OVERLAPPED,
+    the Win32 error of its status and the byte count, if a
+    StartThreadpoolIo announced it (CancelThreadpoolIo takes one back;
+    WaitForThreadpoolIoCallbacks(TRUE) makes the announced ones'
+    completions dropped). One that no StartThreadpoolIo announced runs
+    anyway and is recorded.
+  - Cleanup groups: CloseThreadpoolCleanupGroupMembers takes the
+    members, stops their timers and waits, drops their queued
+    callbacks if asked, waits for their running ones (disassociated
+    included), then calls each member's cancel callback (with
+    cancellation, on the calling thread, object context then cleanup
+    context; not for one already closed, nor a simple callback that ran)
+    and closes it.
+  - Instance actions after the callback: leave a critical section,
+    release a mutex, release a semaphore, set an event, free a library.
+  - Timer queues on the pool's timers: CreateTimerQueue(Timer),
+    ChangeTimerQueueTimer, DeleteTimerQueueTimer, DeleteTimerQueue(Ex)
+    (the WAITORTIMERCALLBACK gets its parameter and TRUE;
+    WT_EXECUTEONLYONCE makes it one-shot, other WT_ flags only choose
+    threads on Windows and are ignored; NULL is the default queue).
+    Deleting with INVALID_HANDLE_VALUE waits for a running callback;
+    otherwise a running callback makes it fail with ERROR_IO_PENDING and
+    the completion event is set by a helper thread when it returns.
+    RegisterWaitForSingleObject is a pool wait re-armed after each
+    callback (unless WT_EXECUTEONLYONCE); QueueUserWorkItem a simple
+    callback on the default pool.
 - **System** (`sysmem.rs`, `processor.rs`): memory status, VirtualAlloc/
   Free/Query, working set sizes (kept, not applied), system information,
   processor groups and topology (one group, one NUMA node, one package, a

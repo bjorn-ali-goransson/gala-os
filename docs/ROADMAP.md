@@ -1971,9 +1971,15 @@ need gala's.
      CloseThreadpoolCleanupGroup(Members); the ledger's missing exports,
      9 hits each). APPLYCONFIGURATION then fails ("Encountered fatal
      exception", ErrorCodeOnly 127), the service ends with 17002 at
-     1872 s and setup.exe with 17002 at 1913 s. Next: those thread pool
-     functions (test first, Wine's kernel32 and ntdll threadpool tests),
-     then what AppVIsvApi.dll does at registration.
+     1872 s and setup.exe with 17002 at 1913 s. Done: the thread pool's
+     whole family Click-to-Run's DLLs import (`tools/import_survey.py`
+     over the ClickToRun files of `i640.cab`, x64 and x86: private pools
+     and their limits, cleanup groups, and callback environments for
+     the work, timer and wait objects that 18, 13 and 14 of the files
+     use), with
+     I/O objects, the instance functions and the stack information
+     (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
+     threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
      Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
      30088, logged as non-fatal at the start).
      The memory (`heap by owner` and `image pages`, the state dump of a
@@ -4507,8 +4513,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     the XSTATE area; SEH's nested exceptions and collided unwinds.
   - Waits: wait-all satisfied only when all objects are signaled at its
     re-check; an atomic SignalObjectAndWait; the thread pool's
-    WaitFor*Callbacks polls (Sleep(1)), its callback environments and
-    freeing of closed objects.
+    persistent callbacks (TP_CALLBACK_ENVIRON's Persistent, recorded)
+    and ntdll's Tp* exports (gala's pool is kernel32's).
   - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
     security, asynchronous writes that pend.
   - Access checks for processes, threads, pipes, devices and traversal;
