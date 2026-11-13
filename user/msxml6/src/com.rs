@@ -20,12 +20,15 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::dom::{Kind, NONE, Tree};
+
+mod mutate;
 use crate::{
     Bstr, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_IUNKNOWN, LEDGER_OTHER, LEDGER_UNSUPPORTED, S_FALSE, S_OK, VARIANT_FALSE, VARIANT_TRUE,
     VT_BOOL, VT_BSTR, VT_BYREF, VT_I2, VT_I4, VT_INT, VT_NULL, VT_UI4, VT_UNKNOWN, Variant, bstr,
     data1, free_box, guid, not_implemented, put, record, text, try_box, xpath,
 };
+use mutate::*;
 
 type Obj = *mut c_void;
 
@@ -47,6 +50,8 @@ const IID_IXMLDOMPROCESSINGINSTRUCTION: Guid = dom_iid(0x2933_bf89);
 const IID_IXMLDOMCDATASECTION: Guid = dom_iid(0x2933_bf8a);
 const IID_IXMLDOMDOCUMENT2: Guid = dom_iid(0x2933_bf95);
 const IID_IXMLDOMDOCUMENT3: Guid = dom_iid(0x2933_bf96);
+const IID_IXMLDOMDOCUMENTFRAGMENT: Guid =
+    guid(0x3efa_a413, 0x272f, 0x11d2, [0x83, 0x6f, 0x00, 0x00, 0xf8, 0x7a, 0x77, 0x82]);
 const IID_IXMLDOMSELECTION: Guid =
     guid(0xaa63_4fc7, 0x5888, 0x44a7, [0xa2, 0x57, 0x3a, 0x47, 0x15, 0x0d, 0x3a, 0x0e]);
 const IID_IXMLDOMPARSEERROR: Guid =
@@ -220,6 +225,7 @@ fn wrap(d: &mut Doc, i: u32) -> Obj {
         Kind::Comment => &COMMENT_VTABLE as *const VTable<51> as *const (),
         Kind::Pi => &PI_VTABLE as *const VTable<46> as *const (),
         Kind::Document => &DOC_VTABLE as *const VTable<84> as *const (),
+        Kind::Fragment => &FRAGMENT_VTABLE as *const VTable<43> as *const (),
     };
     match try_box(NodeObj { vtable, refs: AtomicU32::new(1), doc: d_ptr, idx: i }) {
         Some(p) => {
@@ -316,6 +322,7 @@ extern "system" fn node_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HR
             }
             Kind::Comment => iid == IID_IXMLDOMCHARACTERDATA || iid == IID_IXMLDOMCOMMENT,
             Kind::Pi => iid == IID_IXMLDOMPROCESSINGINSTRUCTION,
+            Kind::Fragment => iid == IID_IXMLDOMDOCUMENTFRAGMENT,
         };
     if !ok {
         put(out, core::ptr::null_mut());
@@ -400,12 +407,6 @@ macro_rules! not_implemented {
 }
 
 not_implemented! {
-    put_node_value(Variant) = b"IXMLDOMNode::put_nodeValue";
-    insert_before(Obj, Variant, *mut Obj) = b"IXMLDOMNode::insertBefore";
-    replace_child(Obj, Obj, *mut Obj) = b"IXMLDOMNode::replaceChild";
-    remove_child(Obj, *mut Obj) = b"IXMLDOMNode::removeChild";
-    append_child(Obj, *mut Obj) = b"IXMLDOMNode::appendChild";
-    put_text(Bstr) = b"IXMLDOMNode::put_text";
     get_specified(*mut i16) = b"IXMLDOMNode::get_specified";
     get_definition(*mut Obj) = b"IXMLDOMNode::get_definition";
     get_node_typed_value(*mut Variant) = b"IXMLDOMNode::get_nodeTypedValue";
@@ -417,21 +418,9 @@ not_implemented! {
     transform_node_to_object(Obj, Variant) = b"IXMLDOMNode::transformNodeToObject";
     get_doctype(*mut Obj) = b"IXMLDOMDocument::get_doctype";
     get_implementation(*mut Obj) = b"IXMLDOMDocument::get_implementation";
-    putref_document_element(Obj) = b"IXMLDOMDocument::putref_documentElement";
-    create_element(Bstr, *mut Obj) = b"IXMLDOMDocument::createElement";
-    create_document_fragment(*mut Obj) = b"IXMLDOMDocument::createDocumentFragment";
-    create_text_node(Bstr, *mut Obj) = b"IXMLDOMDocument::createTextNode";
-    create_comment(Bstr, *mut Obj) = b"IXMLDOMDocument::createComment";
-    create_cdata_section(Bstr, *mut Obj) = b"IXMLDOMDocument::createCDATASection";
-    create_processing_instruction(Bstr, Bstr, *mut Obj) =
-        b"IXMLDOMDocument::createProcessingInstruction";
-    create_attribute(Bstr, *mut Obj) = b"IXMLDOMDocument::createAttribute";
     create_entity_reference(Bstr, *mut Obj) = b"IXMLDOMDocument::createEntityReference";
-    doc_get_elements_by_tag_name(Bstr, *mut Obj) = b"IXMLDOMDocument::getElementsByTagName";
-    create_node(Variant, Bstr, Bstr, *mut Obj) = b"IXMLDOMDocument::createNode";
     node_from_id(Bstr, *mut Obj) = b"IXMLDOMDocument::nodeFromID";
     abort() = b"IXMLDOMDocument::abort";
-    save(Variant) = b"IXMLDOMDocument::save";
     put_onreadystatechange(Variant) = b"IXMLDOMDocument::put_onreadystatechange";
     put_ondataavailable(Variant) = b"IXMLDOMDocument::put_ondataavailable";
     put_ontransformnode(Variant) = b"IXMLDOMDocument::put_ontransformnode";
@@ -440,14 +429,6 @@ not_implemented! {
     putref_schemas(Variant) = b"IXMLDOMDocument2::putref_schemas";
     validate(*mut Obj) = b"IXMLDOMDocument2::validate";
     validate_node(Obj, *mut Obj) = b"IXMLDOMDocument3::validateNode";
-    import_node(Obj, i16, *mut Obj) = b"IXMLDOMDocument3::importNode";
-    set_attribute(Bstr, Variant) = b"IXMLDOMElement::setAttribute";
-    remove_attribute(Bstr) = b"IXMLDOMElement::removeAttribute";
-    set_attribute_node(Obj, *mut Obj) = b"IXMLDOMElement::setAttributeNode";
-    remove_attribute_node(Obj, *mut Obj) = b"IXMLDOMElement::removeAttributeNode";
-    el_get_elements_by_tag_name(Bstr, *mut Obj) = b"IXMLDOMElement::getElementsByTagName";
-    normalize() = b"IXMLDOMElement::normalize";
-    put_value(Variant) = b"IXMLDOMAttribute::put_value";
     put_data(Bstr) = b"IXMLDOMCharacterData::put_data";
     substring_data(i32, i32, *mut Bstr) = b"IXMLDOMCharacterData::substringData";
     append_data(Bstr) = b"IXMLDOMCharacterData::appendData";
@@ -467,6 +448,7 @@ extern "system" fn get_node_name(this: Obj, out: *mut Bstr) -> HResult {
         Kind::Text => "#text",
         Kind::CData => "#cdata-section",
         Kind::Comment => "#comment",
+        Kind::Fragment => "#document-fragment",
         _ => n.name.as_str(),
     };
     give_str(out, Some(name))
@@ -480,7 +462,7 @@ extern "system" fn get_node_value(this: Obj, out: *mut Variant) -> HResult {
     }
     let n = doc(this).tree.node(idx(this));
     match n.kind {
-        Kind::Element | Kind::Document => {
+        Kind::Element | Kind::Document | Kind::Fragment => {
             variant_null(out);
             S_FALSE
         }
@@ -585,6 +567,7 @@ extern "system" fn get_node_type_string(this: Obj, out: *mut Bstr) -> HResult {
         Kind::Pi => "processinginstruction",
         Kind::Comment => "comment",
         Kind::Document => "document",
+        Kind::Fragment => "documentfragment",
     };
     give_str(out, Some(s))
 }
@@ -1265,6 +1248,9 @@ static ELEMENT_VTABLE: VTable<52> = with::<52, 9>([
     normalize as *const (),
 ]);
 
+/// IXMLDOMDocumentFragment adds nothing to IXMLDOMNode.
+static FRAGMENT_VTABLE: VTable<43> = with::<43, 0>([]);
+
 static ATTRIBUTE_VTABLE: VTable<46> = with::<46, 3>([
     get_node_name as *const (), // get_name
     get_value as *const (),
@@ -1607,9 +1593,6 @@ extern "system" fn map_reset(this: Obj) -> HResult {
 }
 
 not_implemented! {
-    map_set_named_item(Obj, *mut Obj) = b"IXMLDOMNamedNodeMap::setNamedItem";
-    map_remove_named_item(Bstr, *mut Obj) = b"IXMLDOMNamedNodeMap::removeNamedItem";
-    map_remove_qualified_item(Bstr, Bstr, *mut Obj) = b"IXMLDOMNamedNodeMap::removeQualifiedItem";
     map_new_enum(*mut Obj) = b"IXMLDOMNamedNodeMap::get__newEnum";
 }
 

@@ -138,6 +138,15 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; FreeThreadedDOMDocument60 (CLSID_FreeThreadedDOMDocument60; Click-to-Run's
+; App-V pieces create it).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}]
+@=sz:Free Threaded XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.FreeThreadedDOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
 ; The Windows Imaging Component (wincodec.h's CLSID_WICImagingFactory1
 ; and 2, the PNG and BMP decoders, CLSID_WICDefaultFormatConverter;
 ; user/windowscodecs). Both models: the factory is free-threaded.
@@ -237,6 +246,15 @@
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\ProgID]
 @=sz:Msxml2.DOMDocument.6.0
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
+; FreeThreadedDOMDocument60 (CLSID_FreeThreadedDOMDocument60; Click-to-Run's
+; App-V pieces create it).
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}]
+@=sz:Free Threaded XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.FreeThreadedDOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A06-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
 ; Windows Runtime classes (ole32's RoGetActivationFactory reads them):

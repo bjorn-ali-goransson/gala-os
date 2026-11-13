@@ -77,6 +77,7 @@ pub const VT_NULL: u16 = 1;
 pub const VT_I2: u16 = 2;
 pub const VT_I4: u16 = 3;
 pub const VT_BSTR: u16 = 8;
+pub const VT_DISPATCH: u16 = 9;
 pub const VT_BOOL: u16 = 11;
 pub const VT_UNKNOWN: u16 = 13;
 pub const VT_UI4: u16 = 19;
@@ -219,6 +220,7 @@ pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
 
 const MSXML6_D4: [u8; 8] = [0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5];
 const CLSID_DOMDOCUMENT60: Guid = guid(0x88d9_6a05, 0xf192, 0x11d4, MSXML6_D4);
+const CLSID_FREETHREADEDDOMDOCUMENT60: Guid = guid(0x88d9_6a06, 0xf192, 0x11d4, MSXML6_D4);
 pub const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 
@@ -281,6 +283,28 @@ extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
     S_OK
 }
 
+/// FreeThreadedDOMDocument60's CreateInstance: the same document as
+/// DOMDocument60's, whose objects lock nothing (a stopgap, ROADMAP OF:
+/// a free-threaded document may be used from several threads at once;
+/// recorded at each creation so a program that needs it shows).
+extern "system" fn free_threaded_create(
+    this: *mut c_void,
+    outer: *mut c_void,
+    riid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    record(b"FreeThreadedDOMDocument60(served as rental: no locking)", LEDGER_UNSUPPORTED, 0);
+    factory_create(this, outer, riid, out)
+}
+
+static FREE_THREADED_VTABLE: VTable<5> = VTable([
+    factory_query as *const (),
+    factory_add_ref as *const (),
+    factory_release as *const (),
+    free_threaded_create as *const (),
+    factory_lock as *const (),
+]);
+
 static FACTORY_VTABLE: VTable<5> = VTable([
     factory_query as *const (),
     factory_add_ref as *const (),
@@ -296,9 +320,10 @@ struct Factory {
 // SAFETY: an immutable pointer to a static.
 unsafe impl Sync for Factory {}
 static FACTORY: Factory = Factory { vtable: &FACTORY_VTABLE };
+static FREE_THREADED_FACTORY: Factory = Factory { vtable: &FREE_THREADED_VTABLE };
 
-/// DllGetClassObject: the class object of DOMDocument60; another class
-/// (FreeThreadedDOMDocument60 among them: not registered) is recorded,
+/// DllGetClassObject: the class objects of DOMDocument60 and
+/// FreeThreadedDOMDocument60; another class is recorded,
 /// CLASS_E_CLASSNOTAVAILABLE.
 #[unsafe(no_mangle)]
 pub extern "system" fn DllGetClassObject(
@@ -312,11 +337,15 @@ pub extern "system" fn DllGetClassObject(
     put(out, core::ptr::null_mut());
     // SAFETY: the caller's CLSID.
     let c = unsafe { *clsid };
-    if c != CLSID_DOMDOCUMENT60 {
+    let factory = if c == CLSID_DOMDOCUMENT60 {
+        &FACTORY
+    } else if c == CLSID_FREETHREADEDDOMDOCUMENT60 {
+        &FREE_THREADED_FACTORY
+    } else {
         record(b"DllGetClassObject(class)", LEDGER_UNSUPPORTED, data1(&c));
         return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    factory_query(&FACTORY as *const Factory as *mut c_void, riid, out)
+    };
+    factory_query(factory as *const Factory as *mut c_void, riid, out)
 }
 
 /// DllCanUnloadNow: S_FALSE (gala does not unload msxml6).
