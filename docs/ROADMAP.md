@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first, and a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -4025,6 +4025,23 @@ iteration and never replace a full run: CI keeps running every
 scenario from boot. Snapshots of the Office install hold several GB,
 kept under `target/snapshots`, with their size and the build they came
 from (a snapshot of another build is refused with the reason).
+
+**Step 1b: a failing CI run leaves its snapshot.** When a scenario
+fails or times out in CI, xtask asks QEMU to save the VM before ending
+it (the stuck state itself: every thread, what it waits on, who holds
+what; a hang or a leak shows its cause instead of only where it
+stopped). The artifact holds the snapshot, compressed, with the build
+it needs: the kernel, the boot image and the test binaries.
+`cargo xtask restore-ci <run> <scenario>` downloads it and resumes it
+locally, paused, with the monitor and a debugger attached; CI under KVM
+and a local TCG run differ in timing, so a failure that does not
+reproduce locally is still inspected as it happened. Bounds: only on
+failure, a size cap per artifact, a few days' retention (GitHub's
+artifact storage quota is the limit), at most one snapshot per job. The
+guest holds test data only, and must stay so: artifacts are as visible
+as the repository. From step 2 on, a faulting program is snapshotted at
+the fault, before it ends (a minidump that can be resumed), which is
+much smaller than the machine.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private
