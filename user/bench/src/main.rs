@@ -16,12 +16,112 @@ use ntrt::*;
 
 const THREAD_AFFINITY_MASK: u32 = 4;
 
-/// gala's kernel32.dll (87 KiB): the image that `image_load` loads, as
-/// the loader loads each DLL of each new process.
-static IMAGE: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/x86_64-pc-windows-msvc/release/kernel32.dll"
-));
+/// The DLL `image_load` loads, as the loader loads each DLL of each new
+/// process: made here (`make_image`), not taken from the build, so that
+/// bench.exe depends on its own source only (it embedded the built
+/// kernel32.dll, and every change to kernel32 changed bench.exe).
+/// Sections: .text (256 KiB), .rdata (256 KiB, a 64-bit address every
+/// 256 bytes), .data (64 KiB), .reloc (those addresses' fixups).
+const IMAGE_BASE: u64 = 0x1_8000_0000;
+const TEXT_SIZE: usize = 0x4_0000;
+const RDATA_SIZE: usize = 0x4_0000;
+const DATA_SIZE: usize = 0x1_0000;
+/// Fixups per 4 KiB page of .rdata, and the size of its block (header,
+/// entries).
+const FIXUPS_PER_PAGE: usize = 16;
+const RELOC_BLOCK: usize = 8 + 2 * FIXUPS_PER_PAGE;
+const RELOC_SIZE: usize = RDATA_SIZE / 0x1000 * RELOC_BLOCK;
+const HEADERS: usize = 0x400;
+/// Sections: name, RVA, size, file offset, characteristics.
+const SECTIONS: [(&[u8; 8], usize, usize, usize, u32); 4] = [
+    (b".text\0\0\0", 0x1000, TEXT_SIZE, HEADERS, 0x6000_0020),
+    (b".rdata\0\0", 0x1000 + TEXT_SIZE, RDATA_SIZE, HEADERS + TEXT_SIZE, 0x4000_0040),
+    (
+        b".data\0\0\0",
+        0x1000 + TEXT_SIZE + RDATA_SIZE,
+        DATA_SIZE,
+        HEADERS + TEXT_SIZE + RDATA_SIZE,
+        0xc000_0040,
+    ),
+    (
+        b".reloc\0\0",
+        0x1000 + TEXT_SIZE + RDATA_SIZE + DATA_SIZE,
+        RELOC_SIZE,
+        HEADERS + TEXT_SIZE + RDATA_SIZE + DATA_SIZE,
+        0x4200_0040,
+    ),
+];
+/// The file's size (RELOC_SIZE is a multiple of the file alignment).
+const IMAGE_FILE: usize = HEADERS + TEXT_SIZE + RDATA_SIZE + DATA_SIZE + RELOC_SIZE;
+
+/// Writes the DLL into `pe` (IMAGE_FILE bytes, zeroed): a PE32+ DLL as
+/// the PE format's documentation lays one out, with no entry point.
+fn make_image(pe: &mut [u8]) {
+    let put =
+        |pe: &mut [u8], at: usize, bytes: &[u8]| pe[at..at + bytes.len()].copy_from_slice(bytes);
+    let (reloc_rva, size_of_image) =
+        (SECTIONS[3].1, (SECTIONS[3].1 + RELOC_SIZE).div_ceil(0x1000) * 0x1000);
+    put(pe, 0, b"MZ");
+    put(pe, 0x3c, &0x80u32.to_le_bytes());
+    put(pe, 0x80, b"PE\0\0");
+    // The file header: AMD64, 4 sections, the optional header's size,
+    // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DLL.
+    put(pe, 0x84, &0x8664u16.to_le_bytes());
+    put(pe, 0x86, &(SECTIONS.len() as u16).to_le_bytes());
+    put(pe, 0x94, &240u16.to_le_bytes());
+    put(pe, 0x96, &0x2022u16.to_le_bytes());
+    let opt = 0x98;
+    put(pe, opt, &0x20bu16.to_le_bytes());
+    put(pe, opt + 4, &(TEXT_SIZE as u32).to_le_bytes());
+    put(pe, opt + 8, &((RDATA_SIZE + DATA_SIZE + RELOC_SIZE) as u32).to_le_bytes());
+    put(pe, opt + 20, &(SECTIONS[0].1 as u32).to_le_bytes());
+    put(pe, opt + 24, &IMAGE_BASE.to_le_bytes());
+    put(pe, opt + 32, &0x1000u32.to_le_bytes());
+    put(pe, opt + 36, &0x200u32.to_le_bytes());
+    // Operating system and subsystem versions 6.0.
+    put(pe, opt + 40, &6u16.to_le_bytes());
+    put(pe, opt + 48, &6u16.to_le_bytes());
+    put(pe, opt + 56, &(size_of_image as u32).to_le_bytes());
+    put(pe, opt + 60, &(HEADERS as u32).to_le_bytes());
+    // Windows GUI; HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT.
+    put(pe, opt + 68, &2u16.to_le_bytes());
+    put(pe, opt + 70, &0x0160u16.to_le_bytes());
+    for (i, v) in [0x10_0000u64, 0x1000, 0x10_0000, 0x1000].iter().enumerate() {
+        put(pe, opt + 72 + 8 * i, &v.to_le_bytes());
+    }
+    put(pe, opt + 108, &16u32.to_le_bytes());
+    // Data directory 5: the base relocations.
+    put(pe, opt + 112 + 5 * 8, &(reloc_rva as u32).to_le_bytes());
+    put(pe, opt + 112 + 5 * 8 + 4, &(RELOC_SIZE as u32).to_le_bytes());
+    for (i, &(name, rva, size, file, flags)) in SECTIONS.iter().enumerate() {
+        let h = opt + 240 + 40 * i;
+        put(pe, h, name);
+        put(pe, h + 8, &(size as u32).to_le_bytes());
+        put(pe, h + 12, &(rva as u32).to_le_bytes());
+        put(pe, h + 16, &(size as u32).to_le_bytes());
+        put(pe, h + 20, &(file as u32).to_le_bytes());
+        put(pe, h + 36, &flags.to_le_bytes());
+    }
+    // .text: int3; .data: a pattern.
+    pe[SECTIONS[0].3..SECTIONS[0].3 + TEXT_SIZE].fill(0xcc);
+    for (i, b) in pe[SECTIONS[2].3..SECTIONS[2].3 + DATA_SIZE].iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    // .rdata's addresses (each the address of the next) and their fixups
+    // (IMAGE_REL_BASED_DIR64), a block per page.
+    let (rdata_rva, rdata) = (SECTIONS[1].1, SECTIONS[1].3);
+    for page in 0..RDATA_SIZE / 0x1000 {
+        let block = SECTIONS[3].3 + page * RELOC_BLOCK;
+        put(pe, block, &((rdata_rva + page * 0x1000) as u32).to_le_bytes());
+        put(pe, block + 4, &(RELOC_BLOCK as u32).to_le_bytes());
+        for k in 0..FIXUPS_PER_PAGE {
+            let offset = k * 0x100;
+            let target = IMAGE_BASE + (rdata_rva + page * 0x1000 + offset + 0x100) as u64;
+            put(pe, rdata + page * 0x1000 + offset, &target.to_le_bytes());
+            put(pe, block + 8 + 2 * k, &((10u16 << 12) | offset as u16).to_le_bytes());
+        }
+    }
+}
 
 /// Grows a PE image's last section by `extra` bytes of virtual size (and
 /// SizeOfImage with it): pages past the file's data, zero when mapped.
@@ -46,6 +146,30 @@ fn bench(name: &str, n: u64, mut op: impl FnMut()) {
     }
     let (end, _) = performance_counter();
     report(name, (end - start) as u64, freq as u64, n);
+}
+
+/// Says so if `make_image`'s DLL did not load (its numbers would measure
+/// a failure): `bench: <name> did not load: section <status> view
+/// <status>`.
+fn check_load(name: &str, (section, view): (NtStatus, NtStatus)) {
+    if section as i32 >= 0 && view as i32 >= 0 {
+        return;
+    }
+    print("bench: ");
+    print(name);
+    print(" did not load: section ");
+    hex(section);
+    print(" view ");
+    hex(view);
+    print("\r\n");
+}
+
+fn hex(v: u32) {
+    let mut digits = *b"0x00000000";
+    for i in 0..8 {
+        digits[2 + i] = b"0123456789abcdef"[(v >> (28 - 4 * i)) as usize & 0xf];
+    }
+    write_file(stdout(), &digits);
 }
 
 fn report(name: &str, ticks: u64, freq: u64, n: u64) {
@@ -194,22 +318,31 @@ fn main() -> u32 {
     let attrs = ObjectAttributes::new(&path, Handle(0), OBJ_CASE_INSENSITIVE);
     let opts = FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE;
     let (_, f, _) = create_file(&attrs, GENERIC_WRITE | DELETE, 0, FILE_OVERWRITE_IF, opts);
-    write_file_info(f, IMAGE);
+    let (_, image_buf, _) = allocate(0, IMAGE_FILE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // SAFETY: a fresh (zeroed) read-write allocation of IMAGE_FILE bytes.
+    let image = unsafe { core::slice::from_raw_parts_mut(image_buf as *mut u8, IMAGE_FILE) };
+    make_image(image);
+    write_file_info(f, image);
     close(f);
+    // The section's and the view's statuses (a view not at the preferred
+    // base is STATUS_IMAGE_NOT_AT_BASE, a success).
     let load = || {
         let share = FILE_SHARE_READ | FILE_SHARE_DELETE;
         let (_, f, _) = open_file(&attrs, GENERIC_READ | GENERIC_EXECUTE, share, opts);
-        let (_, section) = create_image_section(f);
-        let (_, view, _) = map_view(section, 0, 0, PAGE_EXECUTE_WRITECOPY);
+        let (made, section) = create_image_section(f);
+        let (mapped, view, _) = map_view(section, 0, 0, PAGE_EXECUTE_WRITECOPY);
         unmap_view(view);
         close(section);
         close(f);
+        (made, mapped)
     };
     // Once untimed: the first load lays the file out (an OS caches that,
     // as Windows does its image sections); the bench measures the loads
     // after it.
-    load();
-    bench("image_load", 50, &load);
+    check_load("image_load", load());
+    bench("image_load", 50, || {
+        load();
+    });
     let (_, f, _) = open_file(&attrs, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, opts);
     set_file(f, 13, &[1]); // FileDispositionInformation: delete
     close(f);
@@ -217,20 +350,18 @@ fn main() -> u32 {
     // size grown: zero pages), not touched after mapping: a view's cost
     // must not grow with the image (chrome.dll is 340 MB; its processes
     // touch a fraction of it).
-    let (_, buf, _) = allocate(0, IMAGE.len(), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    // SAFETY: a fresh read-write allocation of IMAGE.len() bytes.
-    let big = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, IMAGE.len()) };
-    big.copy_from_slice(IMAGE);
-    grow_last_section(big, 32 << 20);
+    grow_last_section(image, 32 << 20);
     let (_, f, _) = create_file(&attrs, GENERIC_WRITE | DELETE, 0, FILE_OVERWRITE_IF, opts);
-    write_file_info(f, big);
+    write_file_info(f, image);
     close(f);
-    load();
-    bench("image_load_32m_untouched", 20, &load);
+    check_load("image_load_32m_untouched", load());
+    bench("image_load_32m_untouched", 20, || {
+        load();
+    });
     let (_, f, _) = open_file(&attrs, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, opts);
     set_file(f, 13, &[1]); // FileDispositionInformation: delete
     close(f);
-    free(buf, 0, MEM_RELEASE);
+    free(image_buf, 0, MEM_RELEASE);
     bench("thread_create_exit", 100, || {
         let (_, h, _) = create_thread(exit_now, 0, false);
         wait(h, None);
