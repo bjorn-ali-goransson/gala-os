@@ -35,6 +35,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use super::platform::Age;
 use super::platform::{self, PAGE_SIZE};
 use super::process::Process;
 use super::status::NtStatus;
@@ -42,7 +43,6 @@ use super::vad::PageState;
 use super::vm::{self, Fault};
 use crate::fs::ramfs::{FsError, NodeId, ROOT, RamFs};
 use crate::mm::heap::TryVec;
-use crate::mm::paging::Age;
 use crate::mm::swap;
 use crate::sync::IrqMutex;
 
@@ -358,7 +358,7 @@ impl Drop for Turn {
 #[derive(Clone, Copy)]
 struct Candidate {
     virt: u64,
-    frame: crate::mm::frame::Frame,
+    frame: platform::Frame,
     token: u64,
 }
 
@@ -414,7 +414,7 @@ fn page_out_process(
     budget: &mut usize,
     staging: &mut [u8],
 ) -> Result<(usize, u64), usize> {
-    use crate::mm::paging::USER_END;
+    use super::platform::USER_END;
     let mut tebs = Vec::new();
     let _ = tebs.try_reserve_exact(MAX_TEBS);
     super::thread::teb_pages(p, &mut tebs);
@@ -422,7 +422,7 @@ fn page_out_process(
     let mut virt = from;
     let mut freed = 0;
     let mut batch =
-        [Candidate { virt: 0, frame: crate::mm::frame::Frame::from_number(0), token: 0 }; BATCH];
+        [Candidate { virt: 0, frame: platform::Frame::from_number(0), token: 0 }; BATCH];
     while freed < want && *budget > 0 && virt < USER_END {
         // The clock: ages pages until a batch of old ones is found.
         let mut n = 0;
@@ -626,7 +626,7 @@ fn page_in_with(process: &Process, page: u64, token: u64, buf: &mut [u8]) -> Fau
 /// Brings every page of `process` back from the page file (a kernel
 /// handover carries pages in memory only). Err if one cannot come back.
 pub fn bring_back(process: &Process) -> Result<(), NtStatus> {
-    use crate::mm::paging::USER_END;
+    use super::platform::USER_END;
     if SIZE.load(Ordering::Relaxed) == 0 {
         return Ok(());
     }
