@@ -1369,21 +1369,11 @@ pub fn restore(rec: &Record<'_>) {
         return;
     }
     match restore_all(rec) {
-        Ok((processes, threads)) => {
-            // How long the programs were stopped (the clock at the record).
-            let clock = rec.section(tag::CLOCK).map(|mut c| record::Clock::read(&mut c));
-            let at = clock.as_ref().map_or(0, record::Clock::monotonic_ns);
+        Ok((processes, threads, pause_ms)) => {
+            let at = rec
+                .section(tag::CLOCK)
+                .map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns());
             let now = crate::time::raw_monotonic_ns();
-            // In the tick count that waits' deadlines and GetTickCount
-            // use, from when the programs stopped (just before the record;
-            // the record's own time if the writer did not say): what a
-            // sleep spanning the handover can be late by.
-            let stopped = rec.section(tag::STOPPED).map(|mut s| s.u64());
-            let ticks = crate::time::raw_ticks().saturating_sub(
-                stopped.unwrap_or_else(|| clock.as_ref().map_or(0, record::Clock::ticks)),
-            );
-            let pause_ms = ticks * 1000 / crate::time::TICK_HZ;
-            crate::nt::syscalls::set_handover_pause(super::generation(), pause_ms);
             crate::info!(
                 "handover: {processes} process(es) and {threads} thread(s) resumed, {} ms after \
                  the record (stopped {pause_ms} ms of the tick count)",
@@ -1488,7 +1478,7 @@ fn system_ntdll(path: &[u16], digest: u64) -> Option<ObjectRef> {
     (same_file && same_bytes).then_some(ntdll.section)
 }
 
-fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
+fn restore_all(rec: &Record<'_>) -> Result<(usize, usize, u64), Failed> {
     let mut objects = Objects(Vec::new());
     if let Some(mut header) = rec.section(tag::PROCESSES).and_then(|mut r| r.entry()) {
         thread::continue_ids_from(header.u64());
@@ -1887,7 +1877,10 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         crate::nt::timer::adopt(t)?;
     }
 
-    // Go.
+    // Go. The pause is published first: a thread may run on another CPU
+    // as soon as it starts and ask GalaHandoverPause at once (a sleep
+    // that spanned the handover is already due).
+    let pause_ms = publish_pause(rec);
     for (_, t) in &live {
         thread::start_adopted(t)?;
     }
@@ -1900,7 +1893,22 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         );
         RESUMED.lock().try_push(p.clone()).map_err(no_memory)?;
     }
-    Ok((processes.len(), live.len()))
+    Ok((processes.len(), live.len(), pause_ms))
+}
+
+/// Notes how long the programs were stopped (GalaHandoverPause), up to
+/// now, just before their threads go on, and returns it (ms). In the tick
+/// count that waits' deadlines and GetTickCount use, from when the
+/// programs stopped (just before the record; the record's own time if the
+/// writer did not say): what a sleep spanning the handover can be late by.
+fn publish_pause(rec: &Record<'_>) -> u64 {
+    let stopped = rec.section(tag::STOPPED).map(|mut s| s.u64()).unwrap_or_else(|| {
+        rec.section(tag::CLOCK).map_or(0, |mut c| record::Clock::read(&mut c).ticks())
+    });
+    let ticks = crate::time::raw_ticks().saturating_sub(stopped);
+    let pause_ms = ticks * 1000 / crate::time::TICK_HZ;
+    crate::nt::syscalls::set_handover_pause(super::generation(), pause_ms);
+    pause_ms
 }
 
 fn socket_damage(e: Option<AllocError>) -> NtStatus {
