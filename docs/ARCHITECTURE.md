@@ -15363,7 +15363,10 @@ older entries).
   them (`wait_quiet`: from then a thread whose wait ends does not get
   back to user mode; STOPPED holds the tick count then) to the threads
   going on; a record without STOPPED (an older writer) gives the pause
-  from the record on.
+  from the record on. The next kernel publishes it before it starts the
+  first carried thread (`carry::publish_pause`): a thread whose sleep
+  spanned the handover is due at once and may ask on another CPU before
+  the boot thread logs "resumed".
 - **What is carried** (sections, all REQUIRED; version 1 except
   PROCESSES 3 (4 in `handover_next`), THREADS 3, TIMERS 2; lists are
   entries with a length, or tables with a stride, so items gain fields
