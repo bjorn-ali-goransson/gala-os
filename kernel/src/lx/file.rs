@@ -526,6 +526,8 @@ pub fn errno_of(e: FsError) -> u16 {
         FsError::DiskFull => super::errno::ENOSPC,
         // A page that could not be read from the disk (nt::file::with_pages).
         FsError::NotResident => super::errno::EIO,
+        // A change to a file whose image layouts could not let it go.
+        FsError::ImageHeld => super::errno::ETXTBSY,
     }
 }
 
@@ -538,12 +540,14 @@ fn with_pages_errno<R>(
 }
 
 /// A file-system result as `with_pages_errno` wants it: NotResident goes
-/// out to be read in, the other errors become errnos.
+/// out to be read in (ImageHeld to let image layouts go), the other
+/// errors become errnos.
 fn paged<T>(
     r: core::result::Result<T, FsError>,
 ) -> core::result::Result<core::result::Result<T, u16>, FsError> {
     match r {
         Err(FsError::NotResident) => Err(FsError::NotResident),
+        Err(FsError::ImageHeld) => Err(FsError::ImageHeld),
         Err(e) => Ok(Err(errno_of(e))),
         Ok(v) => Ok(Ok(v)),
     }
@@ -1254,81 +1258,97 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
     let umask = *call.lx.umask.lock();
     let now = platform::system_time();
     let access = Access { read: readable, write: writable, delete: false };
-    let node = with_fs(|fs| -> core::result::Result<NodeId, u16> {
-        let node = match found.node {
-            Some(n) => {
-                if creating && flags & O_EXCL != 0 {
-                    return Err(EEXIST);
-                }
-                let node = fs.node(n).ok_or(ENOENT)?;
-                if node.is_symlink() {
-                    // Not followed (O_NOFOLLOW): only O_PATH opens the link.
-                    if flags & O_DIRECTORY != 0 {
+    // A truncating open of a file image layouts build pages from lets
+    // them go first (`section::release_image_holds`), then again.
+    let mut released = false;
+    let node = loop {
+        let mut held = None;
+        let r = with_fs(|fs| -> core::result::Result<NodeId, u16> {
+            let node = match found.node {
+                Some(n) => {
+                    if creating && flags & O_EXCL != 0 {
+                        return Err(EEXIST);
+                    }
+                    let node = fs.node(n).ok_or(ENOENT)?;
+                    if node.is_symlink() {
+                        // Not followed (O_NOFOLLOW): only O_PATH opens the link.
+                        if flags & O_DIRECTORY != 0 {
+                            return Err(ENOTDIR);
+                        }
+                        if !path_only {
+                            return Err(ELOOP);
+                        }
+                    }
+                    // A socket's name opens as nothing (open(2): ENXIO), but
+                    // as itself with O_PATH.
+                    if node.is_socket() && !path_only {
+                        return Err(ENXIO);
+                    }
+                    if node.is_dir() {
+                        if writable || (creating && flags & O_DIRECTORY == 0) {
+                            return Err(EISDIR);
+                        }
+                    } else if flags & O_DIRECTORY != 0 {
                         return Err(ENOTDIR);
                     }
-                    if !path_only {
-                        return Err(ELOOP);
+                    let bits = perm(node);
+                    if !path_only
+                        && ((readable && bits & 0o400 == 0)
+                            || (writable
+                                && (bits & 0o200 == 0
+                                    || node.attributes & ramfs::ATTRIBUTE_READONLY != 0)))
+                    {
+                        return Err(EACCES);
                     }
+                    n
                 }
-                // A socket's name opens as nothing (open(2): ENXIO), but
-                // as itself with O_PATH.
-                if node.is_socket() && !path_only {
-                    return Err(ENXIO);
-                }
-                if node.is_dir() {
-                    if writable || (creating && flags & O_DIRECTORY == 0) {
+                None => {
+                    if !creating {
+                        return Err(ENOENT);
+                    }
+                    if slash {
                         return Err(EISDIR);
                     }
-                } else if flags & O_DIRECTORY != 0 {
-                    return Err(ENOTDIR);
+                    let name = found.name.as_deref().ok_or(ENOENT)?;
+                    let bits = (mode as u16) & !(umask as u16);
+                    fs.create_posix(found.dir, name, false, bits, now).map_err(|e| match e {
+                        // A name an NT program deletes stays taken until its
+                        // last close (NT's delete).
+                        FsError::Exists => {
+                            ledger::record("openat", "linux option missing", 3);
+                            EBUSY
+                        }
+                        e => errno_of(e),
+                    })?
                 }
-                let bits = perm(node);
-                if !path_only
-                    && ((readable && bits & 0o400 == 0)
-                        || (writable
-                            && (bits & 0o200 == 0
-                                || node.attributes & ramfs::ATTRIBUTE_READONLY != 0)))
-                {
-                    return Err(EACCES);
+            };
+            fs.open(node, access, SHARE_ALL).map_err(|e| {
+                if e == FsError::SharingViolation {
+                    ledger::record("openat", "linux option missing", 4);
                 }
-                n
+                errno_of(e)
+            })?;
+            if flags & O_TRUNC != 0
+                && writable
+                && !is_dir(fs, node)
+                && let Err(e) = fs.set_size(node, 0, now)
+            {
+                fs.close(node, access, SHARE_ALL);
+                if e == FsError::ImageHeld {
+                    held = fs.take_held();
+                }
+                return Err(errno_of(e));
             }
-            None => {
-                if !creating {
-                    return Err(ENOENT);
-                }
-                if slash {
-                    return Err(EISDIR);
-                }
-                let name = found.name.as_deref().ok_or(ENOENT)?;
-                let bits = (mode as u16) & !(umask as u16);
-                fs.create_posix(found.dir, name, false, bits, now).map_err(|e| match e {
-                    // A name an NT program deletes stays taken until its
-                    // last close (NT's delete).
-                    FsError::Exists => {
-                        ledger::record("openat", "linux option missing", 3);
-                        EBUSY
-                    }
-                    e => errno_of(e),
-                })?
+            Ok(node)
+        });
+        match (r, held) {
+            (Err(_), Some(node)) if !released => {
+                crate::nt::section::release_image_holds(node);
+                released = true;
             }
-        };
-        fs.open(node, access, SHARE_ALL).map_err(|e| {
-            if e == FsError::SharingViolation {
-                ledger::record("openat", "linux option missing", 4);
-            }
-            errno_of(e)
-        })?;
-        if flags & O_TRUNC != 0
-            && writable
-            && !is_dir(fs, node)
-            && let Err(e) = fs.set_size(node, 0, now)
-        {
-            fs.close(node, access, SHARE_ALL);
-            return Err(errno_of(e));
+            (r, _) => break r?,
         }
-        Ok(node)
-    })?;
+    };
     let dir = with_fs(|fs| is_dir(fs, node));
     let file = OpenFile {
         node,

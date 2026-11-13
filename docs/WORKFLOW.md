@@ -527,8 +527,9 @@ image, what the image must hold afterwards).
 - A kept image is readable on the host: `cargo xtask disk-files
   target/debug/test-<scenario>.disk.img C:/Users/Public --out <dir>`
   lists what programs wrote under that path and copies it out (xtask
-  compiles the kernel's `fs::volume`, `fs::log`, `fs::ramfs` and
-  `fs::clusters` for the host, `xtask/src/diskimage.rs`). A run that hung
+  compiles the kernel's `fs::volume`, `fs::log`, `fs::ramfs`,
+  `fs::pagetable` and `fs::clusters` for the host,
+  `xtask/src/diskimage.rs`: a new module they use goes there too). A run that hung
   or was stopped leaves its programs' logs there (`dump=` prints only
   after the programs end): that is how a stalled `office_install`'s
   Click-to-Run log is read. Logs in UTF-16 (`iconv -f utf-16le`).
@@ -1437,16 +1438,12 @@ a cache on the host:
   to a file in `/dev/shm` holds it in memory (then XTASK_LOW_DISK=1,
   since xtask checks the target disk's room). Delete that file when done
   (xtask removes only the link after a pass).
-- Its VM has 4 GiB (`OFFICE_LOCAL_MEMORY_MIB`, a stopgap: ROADMAP "Known
-  issues and stopgaps"): with the image in `/dev/shm` the host needs
-  both in RAM (about 12 GB; the guest's file cache fills its 4 GiB). On
-  a 15 GB host with other builds running, a full hour's run was killed
-  by the host's OOM killer near its end (QEMU "exited with None", no
-  state dump): bound the run to the stage under study with
-  `XTASK_TIMEOUT` (its timeout's state dump has `heap by owner`), and
-  read Click-to-Run's own logs from the kept image (`cargo xtask
-  disk-files <image> C:/Windows/Temp --out DIR`: `<MACHINE>-<date>.log`,
-  UTF-16).
+- Its VM has the default 512 MiB; with the image in `/dev/shm` the
+  host needs the image (about 8 GB) and the VM in RAM. Bound the run to
+  the stage under study with `XTASK_TIMEOUT` (its timeout's state dump
+  has `heap by owner` and `image pages`), and read Click-to-Run's own
+  logs from the kept image (`cargo xtask disk-files <image>
+  C:/Windows/Temp --out DIR`: `<MACHINE>-<date>.log`, UTF-16).
 - Limits: the cache is one build of one product set; the download itself
   (`office_install`'s first half hour: the transport, ranges, the
   service's staging of what it fetched) is not exercised, so run

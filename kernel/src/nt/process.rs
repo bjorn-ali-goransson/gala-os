@@ -315,6 +315,16 @@ impl Process {
 /// opened by id as on Windows. `prune` forgets the rest.
 static PROCESSES: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
 
+/// Runs `f` on every listed process with the list's lock held (no
+/// process is added or dropped meanwhile; `f` may take each process's
+/// views and address-space locks, in that order: the image trimmer,
+/// `section::trim`).
+pub fn with_each(mut f: impl FnMut(&Process)) {
+    for p in PROCESSES.lock().iter() {
+        f(p);
+    }
+}
+
 /// Drops exited processes that only PROCESSES refers to (outside the lock:
 /// dropping one frees its address space).
 pub fn prune() {
@@ -481,16 +491,13 @@ fn put_u32(space: &mut UserSpace, addr: u64, value: u32) -> Result<(), UserFault
     space.write_initial(addr, &value.to_le_bytes())
 }
 
-/// Maps the image at its preferred base.
-/// Maps the executable at its preferred base: every page borrows the
-/// layout's shared frame (read-only, or copy-on-write for writable
+/// Maps the executable at its preferred base: its ranges are committed
+/// and each page is mapped at its first touch (`section::frame_for`), to
+/// the layout's shared frame (read-only, or copy-on-write for writable
 /// sections, which a first write makes private: `vm::resolve_fault`), so
-/// processes of the same program share its pages, as image views do.
-fn map_image(
-    space: &mut UserSpace,
-    vad: &mut Vad,
-    image: &super::section::ImageLayout,
-) -> Result<u64, LoadError> {
+/// processes of the same program share its pages, as image views do, and
+/// a page the layout dropped under memory pressure comes back.
+fn map_image(vad: &mut Vad, image: &super::section::ImageLayout) -> Result<u64, LoadError> {
     let base = image.base;
     let size = image.size();
     let end = base.checked_add(size).ok_or(LoadError::BadImageBase)?;
@@ -501,11 +508,13 @@ fn map_image(
     }
     // TODO: relocate when the preferred base is taken.
     vad.reserve(Some(base), size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)?;
-    for (i, &protect) in image.page_protect().iter().enumerate() {
-        let va = base + i as u64 * PAGE_SIZE;
-        vad.commit(va, PAGE_SIZE, protect)?;
-        let frame = image.shared_frame(i).ok_or(LoadError::OutOfMemory)?;
-        space.map_borrowed(va, frame, vm::flags_for(protect)).map_err(LoadError::Paging)?;
+    // One commit per run of equal protection (as an image view's).
+    let protect = image.page_protect();
+    let mut i = 0;
+    while i < protect.len() {
+        let run = protect[i..].iter().take_while(|&&p| p == protect[i]).count();
+        vad.commit(base + i as u64 * PAGE_SIZE, run as u64 * PAGE_SIZE, protect[i])?;
+        i += run;
     }
     Ok(base)
 }
@@ -800,7 +809,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     if info.x86 {
         vad.set_limit(super::wow64::limit(info.large_address_aware));
     }
-    let base = map_image(&mut space, &mut vad, &image)?;
+    let base = map_image(&mut vad, &image)?;
     let id = thread::next_id();
     crate::events::emit(
         crate::events::Category::Image,

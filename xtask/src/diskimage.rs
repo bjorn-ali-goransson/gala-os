@@ -14,6 +14,9 @@ pub mod clusters;
 #[path = "../../kernel/src/fs/log.rs"]
 #[allow(dead_code)]
 pub mod log;
+#[path = "../../kernel/src/fs/pagetable.rs"]
+#[allow(dead_code)]
+pub mod pagetable;
 #[path = "../../kernel/src/fs/ramfs.rs"]
 #[allow(dead_code, clippy::all)]
 pub mod ramfs;

@@ -557,6 +557,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::sharing_stats().1
     );
     info!("stats: heap by owner: {}", nt::stats::HeapOwners::now(heap.in_use));
+    info!("stats: image pages: {}", nt::section::PageStats);
     info!(
         "stats: frames in use by {}; heap {} slab and {} large pages",
         mm::FrameUses(mm::frame_uses()),

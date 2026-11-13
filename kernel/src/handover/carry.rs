@@ -692,7 +692,7 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         } else if va == kuser::ADDRESS {
             PageRec { va, value: 0, kind: PageKind::SharedData, flags }
         } else if (image_base..image_base + image_size).contains(&va)
-            && layout.shared_frame(((va - image_base) / PAGE_SIZE) as usize) == Some(frame)
+            && layout.resident_frame(((va - image_base) / PAGE_SIZE) as usize) == Some(frame)
         {
             PageRec { va, value: (va - image_base) / PAGE_SIZE, kind: PageKind::Image, flags }
         } else if let Some((l, base)) = image_view(va) {
@@ -701,7 +701,7 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
                 return Err(refuse("a DLL page the handover cannot carry"));
             }
             PageRec { va, value: index as u64, kind: PageKind::ImageView, flags }
-        } else if section::frame_for(process, va).is_some_and(|(_, f)| f == frame) {
+        } else if section::frame_for(process, va).is_some_and(|p| p.frame == frame) {
             PageRec { va, value: 0, kind: PageKind::Section, flags }
         } else {
             return Err(refuse("a mapped page the handover cannot carry"));
@@ -1988,19 +1988,17 @@ fn restore_process(
                 kuser::map_page(&mut space).map_err(|_| NtStatus::NO_MEMORY)?;
                 continue;
             }
-            PageKind::Image => layout.shared_frame(page.value as usize),
+            // Image pages come back at their first touch
+            // (`section::frame_for`): the layout builds them then, and
+            // only a listed process's mappings may hold a layout's frame
+            // (the trimmer unmaps them from listed processes alone).
+            PageKind::Image | PageKind::ImageView => continue,
             PageKind::Section => view.and_then(|v| {
                 let index = (page.va - v.base + v.offset) / PAGE_SIZE;
                 match &v.section.body {
                     ObjectBody::Section(s) => s.frame(index as usize),
                     _ => None,
                 }
-            }),
-            PageKind::ImageView => view.and_then(|v| match &v.section.body {
-                ObjectBody::Section(s) => {
-                    s.image.as_ref()?.view_frame(page.value as usize, v.base, true)
-                }
-                _ => None,
             }),
         };
         let mapped = frame.is_some_and(|f| space.map_borrowed(page.va, f, page.flags).is_ok());
