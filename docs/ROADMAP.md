@@ -3301,11 +3301,15 @@ the next breakthroughs).
    session script runs rootful Xwayland on `:1` as one window "Xwayland
    on :1" framed by shasha (`-decorate`: libdecor takes the server's
    decorations), twm managing an xterm in it, typed into from the
-   desktop; `exit` ends the session; seen on a manual boot. twm is the
+   desktop; `exit` ends the session; seen on a manual boot. Maximised
+   from the desktop (Win+Up in the screen check, as the caption's button
+   or `gala maximize`): the server's configure of 1278 x 718, maximized,
+   and Xwayland's X screen follows the window's size (its root fills the
+   window, twm and the xterm redrawn in place). twm is the
    lightest X desktop that shows the path; Xfce needs a D-Bus session
    bus, xfconf and over a hundred packages, a later step. Next:
-   maximise (the X screen following the window's size) and full screen
-   (xdg_toplevel.set_fullscreen, ignored today), then Xfce): rootful Xwayland as one window
+   full screen (xdg_toplevel.set_fullscreen, ignored today), then
+   Xfce): rootful Xwayland as one window
    running a light desktop session (Xfce), which can be maximised or
    put full screen. Full screen is a choice of presentation, not of
    speed: both paths copy the session's damaged pixels in software.

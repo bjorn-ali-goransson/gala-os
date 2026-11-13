@@ -13623,7 +13623,9 @@ const XTERM_SCREEN: ScreenCheck = ScreenCheck {
 /// (libdecor takes the server's decorations) at (64, 48), its client area
 /// from (65, 81), the X root black; inside it twm's frame around the
 /// session's xterm (twm's title bar blue, #3465a4, from about (106,
-/// 122)), which has the keyboard: `exit` ends the xterm and the session.
+/// 122)), which has the keyboard. Win+Up maximizes the window and the X
+/// screen follows (its root to the work area's last pixel, twm's frame
+/// redrawn 64 left and 48 up); `exit` ends the xterm and the session.
 const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
     marker: "desktop: shown window 'Xwayland on :1'",
     steps: &[
@@ -13634,6 +13636,19 @@ const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::At(800, 600, 0x000000),            // the X root
                 PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4), // twm's title bar
                 PixelCheck::At(300, 300, 0xffffff),            // the xterm
+            ],
+        },
+        ScreenStep {
+            // Win+Up: maximized (a configure of the work area's client
+            // size, 1278 x 718); the X screen follows the window's size:
+            // the root reaches its last pixel at (1 + 1277, 33 + 717), and
+            // twm's title is back (a dump mid-redraw lacks it).
+            after: "",
+            input: &["sendkey meta_l-up"],
+            pixels: &[
+                PixelCheck::At(1 + 1100, 33 + 600, 0x000000),
+                PixelCheck::At(1 + 1277, 33 + 717, 0x000000),
+                PixelCheck::AnyIn(62, 78, 34, 10, 0xffffff), // twm's title "xterm"
             ],
         },
         ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },

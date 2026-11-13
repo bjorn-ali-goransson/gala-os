@@ -11968,7 +11968,9 @@ and the client draws the size it is told:
 - **Maximize** (SC_MAXIMIZE): the work area (the screen above the
   taskbar) less shasha's frame for a framed window (1278 x 718 on a
   1280 x 800 screen), states maximized and activated, at (0, 0); the
-  window's rectangle is kept. **Restore** (SC_RESTORE of a maximized
+  window's rectangle is kept. Rootful Xwayland (`-decorate`, LD step 6's
+  desktop, `lx_xdesktop`) resizes its X screen to the configured size,
+  so a maximized desktop session fills the work area. **Restore** (SC_RESTORE of a maximized
   one): that rectangle's surface size and place (none kept: 0x0, the
   client chooses). **Place** (GALA_WM_PLACE: Snap, back from Snap,
   `gala place`): the rectangle's surface size; against the work area's
