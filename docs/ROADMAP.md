@@ -1987,18 +1987,22 @@ need gala's.
      (ARCHITECTURE "The page file"; `pagefile_test`, `pagefile_fail`):
      `C:\pagefile.sys` on the data area, the commit limit memory plus the
      page file (443 MiB at 512 MiB, so 886 MiB, growing up to 4 GiB),
-     NT processes' private pages written there when the file cache's and
-     image pages cannot bring free memory back to the mark, read back at
-     their next touch. At 512 MiB the run reaches the same point (the
-     publish, `integrator.exe` returning 0, the PackageManager crash
-     above, the service ending at 1760 s); at 2400 s the kernel heap is 80
-     MiB (registry 16 MiB, file tree 19 MiB, image layouts 23 MiB with
-     5 200 of 20 400 pages in memory, files' pages 4 MiB, other 18 MiB),
-     user pages 205 MiB, free memory 117 MiB and never below 89 MiB: the
-     file cache and image pages kept memory above the mark, so nothing was
-     paged out (the page file's work shows at less memory: below). Next,
-     as the measurement shows them: the registry (16 MiB), the file tree
-     (19 MiB).
+     NT processes' private pages not touched since the clock last passed
+     written there when the file cache's pages cannot bring free memory
+     back to the mark (before image pages go), read back at their next
+     touch. At 512 MiB the run reaches the same point (the publish,
+     `integrator.exe` returning 0, the service's PackageManager crash at
+     1810 s); at 2400 s the kernel heap is 82 MiB (registry 16 MiB, file
+     tree 19 MiB, image layouts 23 MiB with 5 250 of 20 400 pages in
+     memory, files' pages 4 MiB, other 18 MiB), user pages 205 MiB, free
+     memory 118 MiB, never below 93 MiB: nothing needed paging out. At
+     384 MiB (`XTASK_QEMU_ARGS="-m 384M"`, a 315 MiB page file) it reaches
+     the same point (1826 s): 117 MiB of private memory paged out in 1 878
+     writes, 24 MiB read back, user pages 112 MiB at 2400 s; image pages
+     dropped 4 400 and built again 1 570 (with image pages let go before
+     private ones: 15 300 and 9 750, while 131 MiB of private memory stayed
+     resident). Next, as the measurement shows them: the registry (16
+     MiB), the file tree (19 MiB).
      Also: the page file's limits (ARCHITECTURE "The page file": a page
      read back gives up its slot, no read-around, one second chance, no
      per-process working sets); `pagefile_test`'s expectations are
