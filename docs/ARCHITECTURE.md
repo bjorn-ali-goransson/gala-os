@@ -1347,8 +1347,9 @@ so a machine commits more than its memory, as Windows does.
   and generations, `fs::ramfs`'s
   `the_page_file_s_clusters_are_taken_outside_every_file_and_never_recorded`,
   `nt::pagefile`'s sizes.
-- Limits: a page read back gives its slot up (a clean page goes out
-  with a write again); one page read per fault (no read-around); the
+- Limits: pagefile-backed sections' pages (shared memory) stay in
+  memory (the section owns them, views borrow them); a page read back
+  gives its slot up (a clean page goes out with a write again); one page read per fault (no read-around); the
   clock's only policy is one second chance; working sets are not kept
   per process (no quota on what one process keeps in memory); a page
   file never shrinks during a boot.
