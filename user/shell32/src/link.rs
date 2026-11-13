@@ -303,12 +303,12 @@ fn object<'a>(this: *mut c_void, slot: usize) -> &'a mut Link {
     unsafe { &mut *(this.cast::<*const ()>().sub(slot).cast::<Link>()) }
 }
 
-fn iid(p: *const Guid) -> Guid {
+pub(crate) fn iid(p: *const Guid) -> Guid {
     // SAFETY: the caller's GUID (null checked).
     if p.is_null() { [0; 16] } else { unsafe { p.read_unaligned() } }
 }
 
-fn put<T>(out: *mut T, v: T) {
+pub(crate) fn put<T>(out: *mut T, v: T) {
     // SAFETY: the caller's output (null checked by the callers).
     unsafe { out.write_unaligned(v) };
 }
@@ -1926,7 +1926,7 @@ fn serialize(link: &Link, out: &mut HBuf<u8>) -> bool {
 
 // ---- The class object ----
 
-extern "system" fn factory_query(
+pub(crate) extern "system" fn factory_query(
     this: *mut c_void,
     riid: *const Guid,
     out: *mut *mut c_void,
@@ -1947,10 +1947,10 @@ extern "system" fn factory_query(
 }
 
 /// The class object is static: its references are not counted.
-extern "system" fn factory_add_ref(_this: *mut c_void) -> u32 {
+pub(crate) extern "system" fn factory_add_ref(_this: *mut c_void) -> u32 {
     2
 }
-extern "system" fn factory_release(_this: *mut c_void) -> u32 {
+pub(crate) extern "system" fn factory_release(_this: *mut c_void) -> u32 {
     1
 }
 
@@ -1975,7 +1975,7 @@ extern "system" fn factory_create(
     r
 }
 
-extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
+pub(crate) extern "system" fn factory_lock(_this: *mut c_void, _lock: i32) -> HResult {
     S_OK
 }
 
@@ -1995,8 +1995,9 @@ struct Factory {
 unsafe impl Sync for Factory {}
 static FACTORY: Factory = Factory { vtable: &FACTORY_VTABLE };
 
-/// DllGetClassObject: the class object of CLSID_ShellLink (other classes
-/// are recorded: CLASS_E_CLASSNOTAVAILABLE).
+/// DllGetClassObject: the class objects of CLSID_ShellLink and
+/// CLSID_KnownFolderManager (other classes are recorded:
+/// CLASS_E_CLASSNOTAVAILABLE).
 #[unsafe(no_mangle)]
 pub extern "system" fn DllGetClassObject(
     clsid: *const Guid,
@@ -2008,6 +2009,10 @@ pub extern "system" fn DllGetClassObject(
     }
     put(out, core::ptr::null_mut());
     let c = iid(clsid);
+    if c == crate::knownfolder::CLSID_KNOWN_FOLDER_MANAGER {
+        let factory = &crate::knownfolder::FACTORY as *const crate::knownfolder::Factory;
+        return factory_query(factory as *mut c_void, riid, out);
+    }
     if c != CLSID_SHELL_LINK {
         let d1 = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
         unsupported(b"shell32.dll!DllGetClassObject(class)", d1.into());

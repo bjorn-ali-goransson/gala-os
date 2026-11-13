@@ -5065,7 +5065,30 @@ of their own, clients of it) is the yardstick.
   its tokens through them, and an unknown one stopped it); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
-  folder Windows makes with one; `shell32_test`),
+  folder Windows makes with one; `shell32_test`). Both read one table
+  of known folder definitions (`user/shell32/src/knownfolder.rs`: 74
+  folders, each with its id, CSIDL, name, category, parent, relative
+  path, parsing name, attributes and KFDF_ flags, Windows' as Wine's
+  conformance test lists them; the virtual folders, the libraries and
+  the sample folders are left out). A folder's path is its root's (an
+  environment variable, the Windows or system directory) or its
+  parent's path, a backslash and its relative path, so a child is
+  always below its parent; the X64 folders exist in a 64-bit process
+  only. Windows keeps the definitions under `FolderDescriptions` in the
+  registry; gala's are compiled in. An unknown CSIDL or folder id is
+  recorded in the ledger. The Known Folder Manager
+  (CLSID_KnownFolderManager, registered for shell32 in both registry
+  views; App-V's package configuration asks it while the Click-to-Run
+  service installs Office) serves IKnownFolderManager (FolderIdFromCsidl,
+  FolderIdToCsidl, GetFolderIds, GetFolder, GetFolderByName by
+  canonical name, FindFolderFromPath exact or nearest parent,
+  case-insensitive, the longest match winning) and IKnownFolder (GetId,
+  GetCategory, GetPath with the KF_FLAG_ flags SHGetKnownFolderPath
+  takes, GetFolderDefinition, GetRedirectionCapabilities 0, SetPath
+  E_INVALIDARG on a fixed folder); RegisterFolder, UnregisterFolder,
+  Redirect, SetPath on another folder, GetShellItem, GetIDList,
+  GetFolderType and FindFolderFromIDList return E_NOTIMPL and are
+  recorded (`knownfolder_test`, x64 and x86),
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),

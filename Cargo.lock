@@ -1255,6 +1255,13 @@ name = "keyed_event_test"
 version = "0.1.0"
 
 [[package]]
+name = "knownfolder_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3169,6 +3176,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_knownfolder_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

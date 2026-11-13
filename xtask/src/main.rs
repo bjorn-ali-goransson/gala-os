@@ -3883,6 +3883,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msxml_test", "ole32.dll", "Windows/System32"),
     ("msxml_test", "oleaut32.dll", "Windows/System32"),
     ("msxml_test", "msxml6.dll", "Windows/System32"),
+    // The Known Folder Manager through COM (user/knownfolder_test), x64
+    // and x86.
+    ("knownfolder_test", "ntdll.dll", "Windows/System32"),
+    ("knownfolder_test", "kernel32.dll", "Windows/System32"),
+    ("knownfolder_test", "advapi32.dll", "Windows/System32"),
+    ("knownfolder_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("knownfolder_test", "ole32.dll", "Windows/System32"),
+    ("knownfolder_test", "oleaut32.dll", "Windows/System32"),
+    ("knownfolder_test", "shell32.dll", "Windows/System32"),
+    ("wow64_knownfolder_test", "wow64.dll", "Windows/System32"),
+    ("wow64_knownfolder_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/shell32.dll", "Windows/SysWOW64"),
     // The Windows Imaging Component through COM (user/windowscodecs_test).
     ("windowscodecs_test", "ntdll.dll", "Windows/System32"),
     ("windowscodecs_test", "kernel32.dll", "Windows/System32"),
@@ -4103,6 +4120,7 @@ const USER_PROGRAMS: &[&str] = &[
     "svc_test",
     "svcrun_test",
     "msxml_test",
+    "knownfolder_test",
     "windowscodecs_test",
     "d2d1_test",
     "winhttp_cb_test",
@@ -4141,6 +4159,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_svc_test",
     "wow64_svcrun_test",
     "wow64_msxml_test",
+    "wow64_knownfolder_test",
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
     "wow64_combase_test",
@@ -8079,6 +8098,23 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit wallpaper=night run=d2d1_test.exe args=window",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["d2d1_test: window drawn", "xtask: screen ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Known Folder Manager (user/knownfolder_test): shell32's
+        // CLSID_KnownFolderManager, its folders and their definitions,
+        // GetPath against SHGetKnownFolderPath and SHGetFolderPathW,
+        // FindFolderFromPath.
+        name: "knownfolder_test",
+        cmdline: "qemu_exit run=knownfolder_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["knownfolder_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/knownfolder_test built for x86).
+        name: "wow64_knownfolder_test",
+        cmdline: "qemu_exit run=wow64_knownfolder_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_knownfolder_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/msxml_test built for x86).
@@ -12149,6 +12185,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_knownfolder_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_schannel_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wininet_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

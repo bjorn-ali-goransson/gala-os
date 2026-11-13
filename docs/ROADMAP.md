@@ -2114,22 +2114,24 @@ need gala's.
      stylesheet with `XSLT not supported: <what>` in the ledger. With it
      ConfigurePackage transforms the manifest three times (each into a
      document, with 2 and 4 parameters), validates it against the
-     cache (valid), and then fails at `knownfolder.cpp : 64` with
-     0x80040154: it asks COM for CLSID_KnownFolderManager
-     ({4DF0C730-DF9D-4AE3-9153-AA6B82E9795A},
-     `ole32.dll!CoGetClassObject(class not registered)`, detail
-     0x4df0c730), shell32's IKnownFolderManager, which gala neither
-     registers nor implements; APPLYCONFIGURATION (OfficeVirtRegistration)
-     ends with 30175, the service and setup.exe with 17002 at about 1820
-     s. The loop: snapshot at `process integrator.exe (pid`, a resume to
+     cache (valid), and then asks COM for CLSID_KnownFolderManager
+     ({4DF0C730-DF9D-4AE3-9153-AA6B82E9795A}, `knownfolder.cpp : 64`;
+     without it 0x80040154, `ole32.dll!CoGetClassObject(class not
+     registered)`, detail 0x4df0c730, APPLYCONFIGURATION ends with 30175).
+     The loop: snapshot at `process integrator.exe (pid`, a resume to
      the failure in 37 s against about 1820 s from boot, the service's
      log read from the resume's kept layer (`disk-files` reads it now).
-     Next: the Known Folder Manager, as far as App-V asks it
-     (CLSID_KnownFolderManager registered for shell32,
-     IKnownFolderManager: GetFolder, GetFolderByName and FindFolderFromPath
-     are the likely calls; IKnownFolder's GetPath and GetId), test first
-     against Windows' answers; then the run shows ConfigurePackage's next
-     step. Seen too, not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
+     Done: the Known Folder Manager, registered for shell32 in both
+     views, over one table of 74 known folder definitions that
+     SHGetFolderPathW and SHGetKnownFolderPath read too, test first
+     (`knownfolder_test`, x64 and x86: Wine's shell32 known folder
+     tests, every definition checked against Windows' as that test
+     lists them; ARCHITECTURE "shell32, version, powrprof, comctl32,
+     user32 strings"). To measure on Windows (its `info` lines):
+     FindFolderFromPath's code for no match, the codes for an unknown
+     id, and the folders whose path differs from SHGetFolderPathW's.
+     Next: the run with it shows ConfigurePackage's next step. Seen too,
+     not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
      and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
      on Windows (`msxml_test`'s `info` lines): a string output's
      declaration, the prefixes and declarations of the App-V-shaped
