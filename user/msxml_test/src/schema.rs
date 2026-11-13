@@ -319,7 +319,8 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     expect_add(c, cache, CFG_NS, CFG_XSD, S_OK)?;
     expect_len(c, cache, 2)?;
     // namespaceURI: both, in some order; past the end E_FAIL with the
-    // output untouched; a NULL output E_POINTER (checked first).
+    // output NULL (MSXML 6 on Windows); a NULL output E_POINTER (checked
+    // first).
     let mut seen = [false; 2];
     for i in 0..2 {
         let mut s: Bstr = null_mut();
@@ -335,12 +336,12 @@ fn collection(c: &mut Checks, cache: Obj) -> Result<(), u32> {
     c.ok(seen[0] && seen[1], 0)?;
     let mut s: Bstr = 0x1 as Bstr;
     c.code(call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 2, &mut s), E_FAIL)?;
-    c.ok(s == 0x1 as Bstr, s as u64)?;
-    c.hr(
+    c.note(s.is_null(), s as u64)?;
+    c.code(
         call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 0, null_mut()),
         E_POINTER,
     )?;
-    c.hr(
+    c.code(
         call!(cache, SC_GET_NAMESPACE_URI, fn(i32, *mut Bstr) -> HResult, 2, null_mut()),
         E_POINTER,
     )?;

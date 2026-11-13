@@ -16,7 +16,7 @@
 //!   added again merges ("partial schemas"); an add is atomic;
 //! - get is E_NOTIMPL in MSXML 6 (getSchema replaces it); remove of a
 //!   namespace not there is E_NOTIMPL (measured on Windows); length and namespaceURI (an index
-//!   past the end E_FAIL, the output untouched; NULL outputs E_POINTER);
+//!   past the end E_FAIL, the output NULL; NULL outputs E_POINTER);
 //!   addCollection merges another cache's schemas; validate checks that
 //!   every name resolves (what validateOnLoad false postponed).
 //!
@@ -340,7 +340,11 @@ extern "system" fn cache_get_namespace_uri(this: Obj, index: i32, out: *mut Bstr
     }
     match usize::try_from(index).ok().and_then(|i| cache(this).entries.get(i)) {
         Some(e) => give_str(out, Some(&e.ns)),
-        None => E_FAIL,
+        None => {
+            // MSXML 6 sets the output to NULL (measured on Windows).
+            put(out, core::ptr::null_mut());
+            E_FAIL
+        }
     }
 }
 
