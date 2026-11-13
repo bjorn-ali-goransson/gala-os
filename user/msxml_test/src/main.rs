@@ -370,7 +370,10 @@ impl Line {
     }
 }
 
-struct Checks(u32);
+/// The check counter, and the first check that `code` found wrong (0
+/// when none): an error-code check records its mismatch and goes on, so
+/// one run on Windows reports every code that differs.
+struct Checks(u32, u32);
 
 impl Checks {
     #[track_caller]
@@ -395,6 +398,32 @@ impl Checks {
     #[track_caller]
     fn hr(&mut self, got: HResult, want: HResult) -> Result<(), u32> {
         self.ok(got == want, got as u32 as u64)
+    }
+
+    /// An error code whose mismatch does not stop the test: it is
+    /// printed with the code expected, and the test fails at its end
+    /// with the first such check's number.
+    #[track_caller]
+    fn code(&mut self, got: HResult, want: HResult) -> Result<(), u32> {
+        self.0 += 1;
+        if got != want {
+            Line::new()
+                .s(NAME.as_bytes())
+                .s(b": check ")
+                .dec(u64::from(self.0))
+                .s(b" got ")
+                .hex(got as u32 as u64)
+                .s(b" want ")
+                .hex(want as u32 as u64)
+                .s(b" (line ")
+                .dec(u64::from(core::panic::Location::caller().line()))
+                .s(b", continuing)\r\n")
+                .print();
+            if self.1 == 0 {
+                self.1 = self.0;
+            }
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -1255,7 +1284,7 @@ fn inherited_namespaces(c: &mut Checks, doc: Obj) -> Result<(), u32> {
 }
 
 fn run() -> Result<(), u32> {
-    let mut c = Checks(0);
+    let mut c = Checks(0, 0);
     // SAFETY: plain call.
     c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) }, S_OK)?;
     let mut doc: Obj = null_mut();
@@ -1284,7 +1313,11 @@ fn run() -> Result<(), u32> {
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };
-    implicit_mta(&mut c)
+    implicit_mta(&mut c)?;
+    match c.1 {
+        0 => Ok(()),
+        first => Err(first),
+    }
 }
 
 /// FreeThreadedDOMDocument60 (msxml6.h's CLSID; Click-to-Run's App-V

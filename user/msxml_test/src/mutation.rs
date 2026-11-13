@@ -224,10 +224,10 @@ fn remove_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     let (hr, ba) = get_obj(fo, GET_FIRST_CHILD);
     c.hr(hr, S_OK)?;
     let (hr, out) = remove(root, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = remove(root, ba);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     c.hr(has_children(fo), S_OK)?;
     let (hr, out) = remove(root, fo);
@@ -235,7 +235,7 @@ fn remove_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     c.ok(out == fo, out as u64)?;
     release(out);
     let (hr, out) = remove(root, fo);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, parent) = get_obj(fo, GET_PARENT_NODE);
     c.hr(hr, S_FALSE)?;
@@ -270,16 +270,16 @@ fn replace_child(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     let (hr, ba) = get_obj(fo, GET_FIRST_CHILD);
     c.hr(hr, S_OK)?;
     let (hr, out) = replace(root, ba, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = replace(root, null_mut(), fo);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let (hr, out) = replace(root, bs, ba);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = replace(fo, fo, ba);
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_FAIL)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = replace(root, ba, fo);
     c.hr(hr, S_OK)?;
@@ -315,13 +315,13 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let doc = new_doc(c)?;
     let doc3 = new_doc(c)?;
     let (hr, out) = insert_before(doc, null_mut(), null_variant());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     // A document under a document: E_INVALIDARG on Windows (Server
     // 2025's msxml6, issue-free CI run); the output and a document under
     // itself are not measured yet.
     let (hr, out) = insert_before(doc, doc3, null_variant());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     info_hr("insertBefore(document) output is NULL", u32::from(out.is_null()) as HResult);
     release(out);
     let (hr, out) = insert_before(doc, doc, null_variant());
@@ -331,14 +331,14 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, attr) = create_node(doc, NODE_ATTRIBUTE, Some("attr"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(doc3, attr, null_variant());
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_FAIL)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, cdata) = create_node(doc3, NODE_CDATA_SECTION, Some("cdata"), None);
     c.hr(hr, S_OK)?;
     c.hr(has_children(cdata), S_FALSE)?;
     for (parent, new) in [(cdata, attr), (doc3, cdata)] {
         let (hr, out) = insert_before(parent, new, null_variant());
-        c.hr(hr, E_FAIL)?;
+        c.code(hr, E_FAIL)?;
         c.ok(out.is_null(), out as u64)?;
     }
     // A document under a CDATA section: which check Windows makes first
@@ -354,10 +354,10 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let (hr, attr2) = create_node(doc, NODE_ATTRIBUTE, Some("attr2"), None);
     c.hr(hr, S_OK)?;
     let (hr, out) = insert_before(attr, attr2, null_variant());
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_FAIL)?;
     c.ok(out.is_null(), out as u64)?;
     let (hr, out) = insert_before(attr, attr2, Variant { vt: VT_UNKNOWN, ..dispatch(attr) });
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out.is_null(), out as u64)?;
     release(attr2);
     let text = create(c, doc, CREATE_TEXT_NODE, "text")?;
@@ -378,7 +378,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
         let (hr, node) = create_node(doc, kind, Some("cdata"), None);
         c.hr(hr, S_OK)?;
         let (hr, out) = insert_before(attr, node, null_variant());
-        c.hr(hr, E_FAIL)?;
+        c.code(hr, E_FAIL)?;
         c.ok(out.is_null(), out as u64)?;
         release(node);
     }
@@ -391,7 +391,7 @@ fn insert(c: &mut Checks) -> Result<(), u32> {
     let elem4 = create(c, doc, CREATE_ELEMENT, "elem4")?;
     c.hr(has_children(elem1), S_FALSE)?;
     let (hr, out) = insert_before(elem1, null_mut(), null_variant());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let hr = call!(
         elem1,
@@ -526,7 +526,7 @@ fn append_child(c: &mut Checks) -> Result<(), u32> {
     let elem = create(c, doc, CREATE_ELEMENT, "elem")?;
     let elem2 = create(c, doc, CREATE_ELEMENT, "elem2")?;
     c.hr(append_only(doc, elem), S_OK)?;
-    c.hr(append_only(doc, elem2), E_FAIL)?;
+    c.code(append_only(doc, elem2), E_FAIL)?;
     let comment1 = create(c, doc, CREATE_COMMENT, "Comment1")?;
     let comment2 = create(c, doc, CREATE_COMMENT, "Comment2")?;
     c.hr(append_only(doc, comment1), S_OK)?;
@@ -646,7 +646,7 @@ fn creation(c: &mut Checks) -> Result<(), u32> {
     }
     for kind in [NODE_DOCUMENT, NODE_ENTITY] {
         let (hr, out) = create_node(doc, kind, Some("name"), None);
-        c.hr(hr, E_INVALIDARG)?;
+        c.code(hr, E_INVALIDARG)?;
         c.ok(out == UNTOUCHED, out as u64)?;
     }
     let el = create(c, doc, CREATE_ELEMENT, "prefix:name")?;
@@ -827,7 +827,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     c.hr(hr, S_OK)?;
     let mut out = UNTOUCHED;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, null_mut(), &mut out);
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     let attr = create(c, doc, CREATE_ATTRIBUTE, "attr")?;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, &mut out);
@@ -839,7 +839,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     release(attr2);
     out = UNTOUCHED;
     let hr = call!(el, SET_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, attr, &mut out);
-    c.hr(hr, E_FAIL)?;
+    c.code(hr, E_FAIL)?;
     c.ok(out == UNTOUCHED, out as u64)?;
     release(el);
     let doc2 = new_doc(c)?;
@@ -879,7 +879,7 @@ fn attribute_nodes(c: &mut Checks) -> Result<(), u32> {
     let hr = call!(el, REMOVE_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, other, null_mut());
     info_hr("removeAttributeNode(not the element's)", hr);
     let hr = call!(el, REMOVE_ATTRIBUTE_NODE, fn(Obj, *mut Obj) -> HResult, null_mut(), null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     release(other);
     release(attr);
     release(el);
@@ -1069,10 +1069,10 @@ fn more(c: &mut Checks) -> Result<(), u32> {
         null_mut(),
         &mut list
     );
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     let hr =
         call!(doc, DOC_GET_ELEMENTS_BY_TAG_NAME, fn(Bstr, *mut Obj) -> HResult, star.0, null_mut());
-    c.hr(hr, E_INVALIDARG)?;
+    c.code(hr, E_INVALIDARG)?;
     for (name, want) in [("*", 6), ("bs", 1), ("ba", 1), ("x", 0)] {
         let n = Wide::new(name);
         let hr =
