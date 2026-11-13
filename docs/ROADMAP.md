@@ -243,6 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
+| SN | Snapshots: whole machines, then single programs, from the command line | planned | machine snapshots in xtask first; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -3999,6 +4000,82 @@ system image and its kernel and every connection and session goes on.
 **Design**: ARCHITECTURE "Kernel handover", "Programs across a
 handover", "Versions and negotiation", "Sockets across a handover";
 WORKFLOW "Debugging a kernel handover (R9)".
+
+### SN. Snapshots: whole machines, then single programs
+
+**Goal**: save a running state and start from it again, as often as
+wanted. For testing, a long scenario is reached once (the Office
+install's 30 minutes to App-V's manifest merge), and each try at a fix
+starts from there in seconds; one snapshot can be restored several
+times to branch (try two fixes from the same state). For users,
+`gala snapshot` saves a program and `gala restore` brings it back,
+on the same machine or, exported, on another.
+
+**Step 1: whole-machine snapshots in xtask.** QEMU saves and restores a
+whole VM (memory, devices, a copy-on-write disk layer); no kernel
+change. xtask saves when a given ledger or serial line appears
+(`--snapshot-at <pattern> --snapshot-name <name>`) and starts later
+runs from it (`--from-snapshot <name>`), each run on its own disk
+layer so branches do not see each other. Limits: the guest clock jumps
+on restore (the kernel re-reads time as after a host stall), and
+connections to the host and the internet are gone (local sources are
+fine). A restored run is not a replay: threads may interleave
+differently (R5 is the deterministic tool). Snapshots speed up
+iteration and never replace a full run: CI keeps running every
+scenario from boot. Snapshots of the Office install hold several GB,
+kept under `target/snapshots`, with their size and the build they came
+from (a snapshot of another build is refused with the reason).
+
+**Step 2: single programs, inside gala.** A program snapshot is R9's
+handover state cut down to one process tree: its address space (private
+pages, page-file slots read back, image and file views by name and
+digest), threads with their contexts and the calls they are blocked in
+(reissued on restore, as after a handover), handles and the objects
+behind them, its token, windows, console, registry views and sockets.
+What cannot be carried makes the snapshot refuse with the reason, as a
+handover does; R9's list of what is not carried yet is the list to
+work through here too. A program's files are captured as references
+plus digests: restore refuses, naming the file, if an image or mapped
+file differs, and a snapshot can include the files it has open for
+writing.
+
+**Step 3: the command line.**
+- `gala snapshot <pid|name> [--name <n>] [--stop]`: freezes the
+  process tree at a quiescent point, writes the snapshot, then lets it
+  run on (or ends it with `--stop`).
+- `gala snapshots`: lists them (program, time, size, build).
+- `gala restore <name>`: starts the program from the snapshot as a new
+  process tree (new process and thread ids; handles and window handles
+  are remapped as a handover remaps them).
+- `gala snapshot delete <name>`.
+- Restoring the same snapshot twice runs two independent copies (the
+  branch).
+
+**Step 4: export to another machine.**
+- `gala snapshot export <name> <file>`: one file, versioned like R9's
+  state format, holding the snapshot, the images and files it needs (or
+  only their names and digests with `--refs`), and a manifest naming
+  the gala build, the program's identity and what it held (sockets,
+  windows) that the target must reconnect.
+- `gala snapshot import <file>`: checks the format version, the
+  digests and a signature (R8's keys).
+- On the new machine, connections to the outside are closed with the
+  error a lost network gives, and the program sees its windows on the
+  new desktop.
+- Snapshots hold secrets (a program's memory, its token's identity), so
+  an export is encrypted to its target and restoring as another user
+  is refused (SECURITY).
+
+**Tests**: scenarios `snapshot_machine` (save at a line, restore twice,
+both runs reach the end), `snapshot_program` (a test program counts,
+is snapshotted, killed, restored, goes on counting; a second restore
+runs beside it), `snapshot_refused` (a program holding what cannot be
+carried) and `snapshot_export` (export, import on a fresh boot,
+restore).
+
+**Design**: builds on ARCHITECTURE "Kernel handover", "Programs across
+a handover" and "Versions and negotiation"; the design goes in its own
+ARCHITECTURE section when step 2 starts.
 
 ### OT. OpenTelemetry as the telemetry model
 
