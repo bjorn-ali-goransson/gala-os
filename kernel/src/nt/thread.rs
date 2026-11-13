@@ -963,6 +963,15 @@ pub fn hold_for_handover(on: bool) {
     }
 }
 
+/// From an NMI (a hot swap asked for at a resumed machine's first
+/// instruction, `crate::hotswap`): every thread returning to user mode waits
+/// on the way, as `hold_for_handover(true)` makes them, without waking
+/// anyone (one store, nothing locked). The hot swap then calls
+/// `hold_for_handover` itself, from a thread that may take locks.
+pub fn hold_from_nmi() {
+    HOLD.store(true, Ordering::SeqCst);
+}
+
 /// NtSuspendThread: raises the suspend count (the thread stops on its way
 /// back to user mode). Returns the previous count.
 pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
@@ -999,6 +1008,8 @@ pub fn take_restart_deadline() -> Option<Option<u64>> {
 pub struct Snapshot {
     pub id: u64,
     pub teb: u64,
+    /// A WOW64 thread's 32-bit TEB (0 for others).
+    pub teb32: u64,
     pub process: KArc<Process>,
     pub sched: Option<ThreadId>,
     /// The system call it is in (number, user registers at the `syscall`).
@@ -1042,6 +1053,7 @@ pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
     Some(Snapshot {
         id: t.id,
         teb: t.teb,
+        teb32: t.teb32,
         process: t.process.clone(),
         sched,
         in_syscall,

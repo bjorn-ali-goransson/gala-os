@@ -1,0 +1,20 @@
+[package]
+name = "hotswap_dll"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+# The builds hotswap_test's scenarios swap in (ROADMAP SN step 1d; xtask
+# builds each in a profile of its own, `hotswap-v2` and `hotswap-layout`;
+# user/hotswap_dll32 is this source for the 32-bit build):
+# `v2` changes four functions, adds a function and a static; `layout`
+# also changes a static's size (refused).
+[features]
+v2 = []
+layout = ["v2"]

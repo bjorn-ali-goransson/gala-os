@@ -52,8 +52,9 @@ pub enum Request {
     /// Save the run when `at` appears in its serial log; `stop`: end the
     /// run there instead of letting it go on.
     Save { at: String, name: String, stop: bool },
-    /// Start the run from snapshot `name`.
-    Restore { name: String },
+    /// Start the run from snapshot `name`; `hotswap`: the DLLs to swap in
+    /// (`--hot-swap-unsafe`, hotswap.rs: never a real run).
+    Restore { name: String, hotswap: Option<Vec<String>> },
 }
 
 static REQUEST: OnceLock<Option<Request>> = OnceLock::new();
@@ -77,6 +78,10 @@ pub fn parse_request(args: &[String]) -> Result<Option<Request>> {
     let name = value("--snapshot-name")?;
     let from = value("--from-snapshot")?;
     let stop = args.iter().any(|a| a == "--snapshot-stop");
+    if from.is_none() {
+        // Refused without a snapshot to resume.
+        crate::hotswap::parse_flag(args)?;
+    }
     match (at, name, from) {
         (None, None, None) if !stop => Ok(None),
         (Some(at), Some(name), None) => {
@@ -88,7 +93,7 @@ pub fn parse_request(args: &[String]) -> Result<Option<Request>> {
         }
         (None, None, Some(name)) if !stop => {
             check_name(&name)?;
-            Ok(Some(Request::Restore { name }))
+            Ok(Some(Request::Restore { name, hotswap: crate::hotswap::parse_flag(args)? }))
         }
         (_, _, Some(_)) => {
             Err("--from-snapshot cannot be combined with taking a snapshot (not supported yet: \
@@ -168,6 +173,9 @@ pub struct Manifest {
     /// sorted by path: the kernel, the boot modules, Limine's config (the
     /// command line).
     pub boot: Vec<(String, String)>,
+    /// Taken from a run that had DLLs hot-swapped into it (their names):
+    /// never a base for a normal resume.
+    pub hot_swapped: Option<String>,
 }
 
 impl Manifest {
@@ -186,6 +194,9 @@ impl Manifest {
         field("state_bytes", &self.state_bytes.to_string());
         field("disk_bytes", &self.disk_bytes.to_string());
         field("save_ms", &self.save_ms.to_string());
+        if let Some(dlls) = &self.hot_swapped {
+            field("hot_swapped", dlls);
+        }
         for (path, sha) in &self.boot {
             t += &format!("boot: {sha} {path}\n");
         }
@@ -215,6 +226,7 @@ impl Manifest {
                 "state_bytes" => m.state_bytes = number(value)?,
                 "disk_bytes" => m.disk_bytes = number(value)?,
                 "save_ms" => m.save_ms = number(value)?,
+                "hot_swapped" => m.hot_swapped = Some(value.into()),
                 "boot" => {
                     let (sha, path) =
                         value.split_once(' ').ok_or_else(|| format!("manifest line {line:?}"))?;
@@ -255,7 +267,26 @@ pub struct Machine {
 /// modules and command line, QEMU and machine. The error names every
 /// difference (the accelerator is checked once QEMU runs: `resume`).
 pub fn check_build(m: &Manifest, now: &Machine) -> Result {
+    check_build_except(m, now, &[]).map(drop)
+}
+
+/// The files a hot swap of `dlls` may change in the boot image: the DLLs
+/// (64- and 32-bit), Limine's config (their hashes; `hotswap::prepare`
+/// checks that nothing else in it changed) and the signed manifest (their
+/// digests).
+pub fn hotswap_allowed(dlls: &[String]) -> Vec<String> {
+    let mut v: Vec<String> =
+        dlls.iter().flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")]).collect();
+    v.push("boot/limine/limine.conf".into());
+    v.push("boot/gala.manifest".into());
+    v
+}
+
+/// `check_build`, but files in `allowed` may differ (`--hot-swap-unsafe`):
+/// the ones that do.
+pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Result<Vec<String>> {
     let mut why = Vec::new();
+    let mut differ = Vec::new();
     if m.scenario != now.scenario {
         why.push(format!("it is of scenario {}, not {}", m.scenario, now.scenario));
     }
@@ -271,6 +302,7 @@ pub fn check_build(m: &Manifest, now: &Machine) -> Result {
     let (mut changed, mut gone, mut added) = (Vec::new(), Vec::new(), Vec::new());
     for (path, sha) in m.boot.iter().filter(|(p, _)| p != KERNEL) {
         match now.boot.iter().find(|(p, _)| p == path) {
+            Some((_, s)) if s != sha && allowed.contains(path) => differ.push(path.clone()),
             Some((_, s)) if s != sha => changed.push(path.as_str()),
             Some(_) => {}
             None => gone.push(path.as_str()),
@@ -306,7 +338,7 @@ pub fn check_build(m: &Manifest, now: &Machine) -> Result {
         ));
     }
     if why.is_empty() {
-        Ok(())
+        Ok(differ)
     } else {
         Err(format!(
             "snapshot {} cannot resume on this build: {} (the guest holds the kernel, \
@@ -353,6 +385,65 @@ pub fn boot_digests(iso_root: &Path) -> Result<Vec<(String, String)>> {
         return Err(format!("sha256sum: {} digests for {} files", sums.len(), paths.len()));
     }
     Ok(paths.into_iter().zip(sums).collect())
+}
+
+/// Where a boot image keeps a copy of its DLL modules, each with its
+/// linker map (`<path>.map`), and Limine's config: `<image>.modules/`. A
+/// snapshot takes it along (`modules/`): `--hot-swap-unsafe` compares a
+/// new build of a DLL with the one the snapshot's memory holds
+/// (hotswap.rs).
+pub fn modules_dir(iso: &Path) -> PathBuf {
+    iso.with_extension("modules")
+}
+
+/// Fills `modules_dir(iso)` from the image tree `iso_root`: Limine's config
+/// and each DLL module `(path in the tree, the build output it came from)`
+/// with the map lld wrote beside that output (`deps/<stem>.map`, taken
+/// only when `deps/<stem>.dll` is the very file: a map of another build
+/// would mislead the diff).
+pub fn keep_modules(iso: &Path, iso_root: &Path, dlls: &[(String, PathBuf)]) -> Result {
+    let dir = modules_dir(iso);
+    let _ = fs::remove_dir_all(&dir);
+    let conf = "boot/limine/limine.conf";
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    fs::copy(iso_root.join(conf), dir.join("limine.conf")).map_err(|e| format!("{conf}: {e}"))?;
+    for (path, source) in dlls {
+        let to = dir.join(path);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let bytes = fs::read(iso_root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+        fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        let (Some(stem), Some(out)) = (source.file_stem(), source.parent()) else { continue };
+        let deps = out.join("deps");
+        let stem = stem.to_string_lossy();
+        if fs::read(deps.join(format!("{stem}.dll"))).is_ok_and(|b| b == bytes)
+            && let Ok(map) = fs::read(deps.join(format!("{stem}.map")))
+        {
+            fs::write(to.with_file_name(format!("{}.map", file_name(path))), map)
+                .map_err(|e| format!("{path}.map: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Copies directory tree `from` to `to`.
+fn copy_tree(from: &Path, to: &Path) -> Result {
+    fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for e in fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
+        let e = e.map_err(|e| e.to_string())?;
+        let target = to.join(e.file_name());
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            copy_tree(&e.path(), &target)?;
+        } else {
+            fs::copy(e.path(), &target).map_err(|err| format!("{}: {err}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Where an image's digests are kept: `<image>.boot.sha256`.
@@ -500,6 +591,8 @@ pub struct Save<'a> {
     pub stop: bool,
     pub scenario: &'a str,
     pub machine: &'a Machine,
+    /// The image's `modules_dir`, taken along into the snapshot.
+    pub modules: Option<PathBuf>,
 }
 
 /// The new layer a run that was saved goes on writing to (next to its
@@ -612,7 +705,12 @@ fn save_into(
         disk_bytes,
         save_ms,
         boot: s.machine.boot.clone(),
+        hot_swapped: None,
     };
+    // The DLLs and their maps, for a hot swap into this snapshot later.
+    if let Some(modules) = s.modules.as_ref().filter(|d| d.is_dir()) {
+        copy_tree(modules, &partial.join("modules"))?;
+    }
     fs::write(partial.join("manifest"), m.to_text()).map_err(|e| e.to_string())?;
     if !s.stop {
         q.cmd("cont", "{}")?;
@@ -632,22 +730,42 @@ pub struct Restore {
     pub manifest: Manifest,
     /// The run's own disk layer (qcow2 over the snapshot's disk).
     pub layer: Option<PathBuf>,
+    /// A hot swap into it (`--hot-swap-unsafe`): never a real run.
+    pub hotswap: Option<crate::hotswap::Prepared>,
 }
 
 /// Checks that snapshot `name` can resume on `now` and makes the run's
-/// own disk layer (`qemu_img`: the qemu-img to use).
+/// own disk layer (`qemu_img`: the qemu-img to use). With `hotswap` (the
+/// DLLs, the image `now` was made from), the named DLLs may differ and
+/// their plan is made (hotswap.rs).
 pub fn prepare_restore(
     target: &Path,
     name: &str,
     now: &Machine,
     qemu_img: &Path,
+    hotswap: Option<(&[String], &Path)>,
 ) -> Result<Restore> {
     let dir = root(target).join(name);
     if !dir.is_dir() {
         return Err(format!("no snapshot {name} ({} lists them)", "cargo xtask snapshots"));
     }
     let manifest = Manifest::read(&dir)?;
-    check_build(&manifest, now)?;
+    if let (Some(dlls), None) = (&manifest.hot_swapped, &hotswap) {
+        return Err(format!(
+            "snapshot {name} was taken from a run with {dlls} hot-swapped into it: it is not a \
+             base for a normal resume (not a real run)"
+        ));
+    }
+    let hotswap = match hotswap {
+        None => {
+            check_build(&manifest, now)?;
+            None
+        }
+        Some((dlls, iso)) => {
+            let differ = check_build_except(&manifest, now, &hotswap_allowed(dlls))?;
+            Some(crate::hotswap::prepare(&dir, iso, dlls, &differ)?)
+        }
+    };
     let layer = match &manifest.disk {
         None => None,
         Some(file) => {
@@ -673,14 +791,24 @@ pub fn prepare_restore(
             Some(layer)
         }
     };
-    Ok(Restore { dir, manifest, layer })
+    Ok(Restore { dir, manifest, layer, hotswap })
 }
 
 /// QEMU's arguments that make a run start from `r`: paused, its memory
-/// and devices from the migration stream.
+/// and devices from the migration stream; a hot swap's plan as a fw_cfg
+/// file (`opt/gala/hotswap`: not part of the migrated state).
 pub fn incoming_args(r: &Restore) -> Result<Vec<String>> {
     let state = shell_path(&r.dir.join("state.gz"))?;
-    Ok(vec!["-S".into(), "-incoming".into(), format!("exec:gzip -dc {state}")])
+    let mut args = vec!["-S".into(), "-incoming".into(), format!("exec:gzip -dc {state}")];
+    if let Some(h) = &r.hotswap {
+        let plan = h.plan.to_str().ok_or("the plan's path is not UTF-8")?;
+        if plan.contains(',') {
+            return Err(format!("{plan}: a path with a comma cannot go in QEMU's -fw_cfg"));
+        }
+        args.push("-fw_cfg".into());
+        args.push(format!("name={},file={plan}", crate::hotswap::FW_CFG_NAME));
+    }
+    Ok(args)
 }
 
 /// Waits for QEMU (QMP at `socket`) to have loaded the snapshot, checks
@@ -711,6 +839,11 @@ pub fn resume(socket: &Path, r: &Restore) -> Result<String> {
     if let Some(status) = json_str(&migrated, "status").filter(|s| *s != "completed") {
         return Err(format!("loading the snapshot: migration status {status}"));
     }
+    // A hot swap: an NMI to every CPU, taken before the first instruction
+    // the resumed machine runs (the kernel's `hotswap::on_nmi`).
+    if r.hotswap.is_some() {
+        q.cmd("inject-nmi", "{}")?;
+    }
     q.cmd("cont", "{}")?;
     let m = &r.manifest;
     let age = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -725,7 +858,15 @@ pub fn resume(socket: &Path, r: &Restore) -> Result<String> {
             Some(l) => format!(", on its own disk layer {}", l.display()),
             None => String::new(),
         }
-    ))
+    ) + &match &r.hotswap {
+        Some(h) => format!(
+            "xtask: hotswap: {} asked to be swapped in at the resume (NOT A REAL RUN; the \
+             guest's `hotswap:` lines say what it did; plan {})\n",
+            h.dlls.join(","),
+            h.plan.display()
+        ),
+        None => String::new(),
+    })
 }
 
 fn duration_words(secs: u64) -> String {
@@ -852,6 +993,7 @@ mod tests {
                 ("boot/msxml6.dll".into(), "c".repeat(64)),
                 ("boot/x86/msxml6.dll".into(), "d".repeat(64)),
             ],
+            hot_swapped: None,
         }
     }
 
@@ -917,6 +1059,27 @@ mod tests {
     }
 
     #[test]
+    fn a_hot_swap_allows_only_its_dlls_to_differ() {
+        let m = manifest();
+        let mut now = machine(&m);
+        now.boot[1].1 = "1".repeat(64); // limine.conf (the DLL's hash)
+        now.boot[2].1 = "2".repeat(64); // msxml6.dll
+        let allowed = hotswap_allowed(&["msxml6.dll".to_string()]);
+        assert_eq!(
+            check_build_except(&m, &now, &allowed),
+            Ok(vec!["boot/limine/limine.conf".to_string(), "boot/msxml6.dll".to_string()])
+        );
+        // Another DLL, or the kernel, is still refused.
+        let other = hotswap_allowed(&["xmllite.dll".to_string()]);
+        assert!(check_build_except(&m, &now, &other).unwrap_err().contains("boot/msxml6.dll"));
+        now.boot[0].1 = "f".repeat(64);
+        assert!(check_build_except(&m, &now, &allowed).unwrap_err().contains("kernel differs"));
+        // A snapshot of a hot-swapped run keeps the mark.
+        let marked = Manifest { hot_swapped: Some("msxml6.dll".into()), ..m };
+        assert_eq!(Manifest::parse(&marked.to_text()), Ok(marked));
+    }
+
+    #[test]
     fn requests() {
         let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
         assert_eq!(parse_request(&args("boot-test hello")), Ok(None));
@@ -926,7 +1089,7 @@ mod tests {
         );
         assert_eq!(
             parse_request(&args("boot-test --from-snapshot s1")),
-            Ok(Some(Request::Restore { name: "s1".into() }))
+            Ok(Some(Request::Restore { name: "s1".into(), hotswap: None }))
         );
         assert!(parse_request(&args("boot-test x --snapshot-at phase")).is_err());
         assert!(parse_request(&args("boot-test x --snapshot-name ../x --snapshot-at p")).is_err());

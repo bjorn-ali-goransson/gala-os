@@ -38,6 +38,10 @@ pub fn take_request() -> bool {
 /// Part 2: everything that needs locks, from a thread that may wait.
 pub fn full_dump() {
     info!("statedump: threads (NT, then scheduler), the ledger, the statistics:");
+    #[cfg(not(feature = "hosted"))]
+    if crate::hotswap::swapped() {
+        info!("statedump: {}", crate::hotswap::Mark);
+    }
     crate::nt::thread::dump();
     // Each process's commit and its pool and handle quotas (nt::quota).
     crate::nt::process::dump();
@@ -182,6 +186,13 @@ mod nmi {
         }
         let cpu = me();
         let Some(snap) = SNAPSHOTS.get(cpu) else { return };
+        // A hot swap asked for at a resumed machine's first instruction
+        // (ROADMAP SN step 1d): no dump request (the watchdog's
+        // backtrace requests are not looked at).
+        let traced = TRACE_ONLY.load(Ordering::Acquire) & (1 << cpu) != 0;
+        if !traced && crate::hotswap::on_nmi(frame.from_user_mode()) {
+            return;
+        }
         snap.ip.store(frame.ip(), Ordering::Relaxed);
         snap.sp.store(frame.sp(), Ordering::Relaxed);
         snap.mode.store(frame.mode() as u8, Ordering::Relaxed);
