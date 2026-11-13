@@ -5050,3 +5050,14 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   hibernate before restarting. Sleep (suspend to RAM) is apart and
   harder: ACPI sleep states and drivers that save and restore device
   state.
+- **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
+  gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
+  kernel ELF's symbols, the target port), on a boot or on a snapshot's
+  resume (`--from-snapshot`: attach just before a failure instead of
+  after a 30-minute run). Breakpoints, stepping, reading and writing
+  variables, memory and registers; under KVM a few hardware breakpoints,
+  under TCG any number. Reverse debugging (gdb's `reverse-step` and
+  `reverse-continue`) through QEMU's record/replay: TCG only, one CPU
+  practical, much slower, so for short repros rather than the Office
+  install. gala-um already takes `gdb -p`, with `--sim` and
+  `--record`/`--replay` to return to the same point (WORKFLOW).
