@@ -20,7 +20,7 @@
 //!   Shell_TrayWnd): NIM_ADD once (a second add fails), NIM_MODIFY,
 //!   NIM_SETVERSION, NIM_SETFOCUS of an icon there (not of one that is
 //!   not), Shell_NotifyIconGetRect (a rectangle; a failure for an unknown
-//!   icon), a balloon (NIF_INFO), NIM_DELETE with cbSize 3, the ANSI
+//!   icon, its HRESULT an `info` line), a balloon (NIF_INFO), NIM_DELETE with cbSize 3, the ANSI
 //!   form, an icon named by its GUID.
 //! - On gala only (64-bit: `gala tray` and `gala tray click`, the
 //!   desktop's named actions): the icon is listed with its tip, a click
@@ -381,6 +381,12 @@ impl Line {
 
 fn say(what: &[u8]) {
     Line::new().s(NAME.as_bytes()).s(b": ").s(what).s(b"\r\n").print();
+}
+
+/// An `info` line: a value Windows' checks accept but do not pin, for
+/// the record.
+fn info(what: &[u8], v: u64) {
+    Line::new().s(NAME.as_bytes()).s(b": info ").s(what).s(b" ").hex(v).s(b"\r\n").print();
 }
 
 struct Checks(u32);
@@ -863,7 +869,9 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
         c.ok(r.right > r.left && r.bottom > r.top, r.left as u64)?;
         let none = Identifier { uid: 98, ..id };
         let mut nr = Rect::default();
-        c.ok(Shell_NotifyIconGetRect(&none, &mut nr) < 0, 0)?;
+        let hr = Shell_NotifyIconGetRect(&none, &mut nr);
+        c.ok(hr < 0, hr as u32 as u64)?;
+        info(b"Shell_NotifyIconGetRect of an unknown icon", hr as u32 as u64);
         let middle = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         if gala {
             // shasha's taskbar: the bottom 48 rows; the icon in them.

@@ -16,8 +16,9 @@
 //!
 //! - The process default (this program's manifest): GetCurrentActCtx
 //!   NULL; QueryActCtxW of NULL: detailed information (format 1, one
-//!   assembly, its manifest a file, the application directory the
-//!   executable's), the assembly's encoded identity, run level asInvoker,
+//!   assembly, its root manifest a file, the executable's own path; the
+//!   application directory the executable's), the assembly's encoded
+//!   identity and its manifest a file (Windows), run level asInvoker,
 //!   the compatibility list (Windows 10's GUID, 40 bytes); its file
 //!   (DLL redirection), window class (`1.2.3.4!GalaActCtxClass`), COM
 //!   class and ProgID are found with nothing activated.
@@ -240,7 +241,7 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_SXS_CANT_GEN_ACTCTX: u32 = 14001;
-const ERROR_SXS_SECTION_NOT_FOUND: u32 = 14004;
+const ERROR_SXS_SECTION_NOT_FOUND: u32 = 14000;
 const ERROR_SXS_KEY_NOT_FOUND: u32 = 14007;
 
 const DLL_REDIRECTION: u32 = 2;
@@ -1034,11 +1035,14 @@ fn process_default(c: &mut Checks) -> Result<(), u32> {
         let d = &*buf.as_ptr().cast::<Detailed>();
         c.eq(d.format_version.into(), 1)?;
         c.eq(d.assembly_count.into(), 1)?;
-        info("process default's root manifest path type", d.root_manifest_type.into());
-        info("process default's root manifest path characters", d.root_manifest_chars.into());
-        if d.root_manifest != 0 {
-            info_text("process default's root manifest path", units(d.root_manifest));
-        }
+        // The manifest is the executable's RT_MANIFEST 1: the root manifest
+        // path is the executable's own (Windows).
+        let mut exe = [0u16; 260];
+        let n = GetModuleFileNameW(0, exe.as_mut_ptr(), 260) as usize;
+        c.eq(d.root_manifest_type.into(), PATH_WIN32_FILE.into())?;
+        c.eq(d.root_manifest_chars.into(), n as u64)?;
+        c.ok(d.root_manifest != 0, 0)?;
+        c.text(units(d.root_manifest), &exe[..n], true)?;
         c.eq(d.appdir_type.into(), PATH_WIN32_FILE.into())?;
         c.text(units(d.appdir), exe_dir().s(), true)?;
     }
@@ -1064,7 +1068,7 @@ fn process_default(c: &mut Checks) -> Result<(), u32> {
             Wide::of(r#"Gala.ActCtxTest,type="win32",version="1.2.3.4""#).s(),
             false,
         )?;
-        info("process default's assembly manifest path type", a.manifest_type.into());
+        c.eq(a.manifest_type.into(), PATH_WIN32_FILE.into())?;
         c.eq(a.directory as u64, 0)?;
     }
     run_level(c, 0, 1, 0)?;
@@ -1108,10 +1112,7 @@ fn process_default(c: &mut Checks) -> Result<(), u32> {
             &mut d,
         );
         c.ok(r != 0, 0)?;
-        info(
-            "RETURN_HACTCTX's context for the process default is not NULL",
-            u64::from(d.actctx != 0),
-        );
+        info("RETURN_HACTCTX's context for the process default", d.actctx as u64);
         if d.actctx != 0 {
             ReleaseActCtx(d.actctx);
         }

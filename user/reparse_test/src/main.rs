@@ -3,10 +3,12 @@
 //! test_reparse_points as run on Windows, NTFS's FSCTL documentation):
 //!
 //! - Without SeCreateSymbolicLinkPrivilege (a standard user):
-//!   CreateSymbolicLinkW fails with ERROR_PRIVILEGE_NOT_HELD, also with
-//!   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (developer mode is off),
-//!   and leaves no file; the test ends there (`no symbolic link
-//!   privilege`).
+//!   CreateSymbolicLinkW fails with ERROR_PRIVILEGE_NOT_HELD and leaves no
+//!   file; the test ends there (`no symbolic link privilege`). With
+//!   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE a standard user's
+//!   Windows made the link (developer mode's state on that machine
+//!   unknown): the result and the developer-mode switch are `info` lines
+//!   until a run settles what decides it.
 //! - With it (an administrator, SYSTEM; CreateSymbolicLinkW enables it):
 //!   an absolute link (its reparse data: IO_REPARSE_TAG_SYMLINK, the
 //!   substitute name `\??\` and the full path, the print name as given,
@@ -77,6 +79,19 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
 }
 
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RegGetValueW(
+        key: isize,
+        subkey: *const u16,
+        value: *const u16,
+        flags: u32,
+        kind: *mut u32,
+        data: *mut c_void,
+        size: *mut u32,
+    ) -> u32;
+}
+
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -133,6 +148,39 @@ fn out(text: &[u8]) {
             core::ptr::null_mut(),
         )
     };
+}
+
+/// An `info` line: what Windows answers, for the record (not checked).
+fn info(what: &[u8], v: u32) {
+    out(b"reparse_test: info ");
+    out(what);
+    out(b" ");
+    out(&hex(v));
+    out(b"\r\n");
+}
+
+/// Developer mode's switch: AllowDevelopmentWithoutDevLicense (a DWORD)
+/// of `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock`,
+/// or 0xffff0000 and RegGetValueW's error.
+fn developer_mode() -> u32 {
+    const HKEY_LOCAL_MACHINE: isize = 0x8000_0002_u32 as i32 as isize;
+    const RRF_RT_REG_DWORD: u32 = 0x10;
+    let key = Path::new(&[], b"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppModelUnlock");
+    let value = Path::new(&[], b"AllowDevelopmentWithoutDevLicense");
+    let (mut v, mut size) = (0u32, 4u32);
+    // SAFETY: NUL-terminated names; a DWORD and its size.
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.ptr(),
+            value.ptr(),
+            RRF_RT_REG_DWORD,
+            core::ptr::null_mut(),
+            (&raw mut v).cast(),
+            &mut size,
+        )
+    };
+    if r == 0 { v } else { 0xffff_0000 | r }
 }
 
 fn hex(v: u32) -> [u8; 8] {
@@ -385,12 +433,24 @@ fn run() -> Result<(), u32> {
         unsafe {
             c.eq(GetLastError().into(), ERROR_PRIVILEGE_NOT_HELD.into())?;
             c.eq(GetFileAttributesW(nopriv.ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+            // ALLOW_UNPRIVILEGED_CREATE: a standard user's Windows made the
+            // link, on a machine whose developer mode is not known; both
+            // are printed until a run says what decides it.
             SetLastError(0);
             let target = Path::new(&[], b"t.txt");
             let flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-            c.eq(CreateSymbolicLinkW(nopriv.ptr(), target.ptr(), flags).into(), 0)?;
-            c.eq(GetLastError().into(), ERROR_PRIVILEGE_NOT_HELD.into())?;
-            c.eq(GetFileAttributesW(nopriv.ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+            let made = CreateSymbolicLinkW(nopriv.ptr(), target.ptr(), flags);
+            let error = if made == 0 { GetLastError() } else { 0 };
+            info(
+                b"ALLOW_UNPRIVILEGED_CREATE without the privilege (0: made, else the error)",
+                error,
+            );
+            info(b"developer mode (AllowDevelopmentWithoutDevLicense)", developer_mode());
+            if made != 0 {
+                DeleteFileW(nopriv.ptr());
+            } else {
+                c.eq(GetFileAttributesW(nopriv.ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+            }
             clean(d);
             RemoveDirectoryW(dir.ptr());
         }

@@ -39,7 +39,8 @@
 //!   STG_E_MEDIUMFULL, Stat's size and type.
 //! - The BMP decoder (bmpformat.c): a 2x3 24 bpp image (24bppBGR, 96 dpi
 //!   when one of the header's resolutions is 0, rows bottom-up, the
-//!   CopyPixels argument errors, one frame, no palette, metadata,
+//!   CopyPixels argument errors, one frame (another index
+//!   WINCODEC_ERR_FRAMEMISSING, Windows), no palette, metadata,
 //!   colour contexts or thumbnail, a second Initialize
 //!   WINCODEC_ERR_WRONGSTATE); a 1 bpp image with a core header
 //!   (1bppIndexed and its colour table); 32 bpp bit fields (32bppBGR,
@@ -67,8 +68,9 @@
 //! What Windows does that the documentation leaves open is printed as
 //! `info` lines and not checked: a PNG's resolution without pHYs, PBGRA
 //! -> BGRA's rounding, where nearest neighbour samples when it halves an
-//! image, Linear's values between two pixels, and
-//! WICCreateImagingFactory_Proxy with SDK version 0.
+//! image, Linear's values between two pixels, and a PNG's GetFrame(1).
+//! WICCreateImagingFactory_Proxy with SDK version 0 is
+//! WINCODEC_ERR_UNSUPPORTEDVERSION (Windows).
 //!
 //! Prints `windowscodecs_test: ok`, or `windowscodecs_test: check N got X
 //! (line L)` and exits with N.
@@ -124,7 +126,9 @@ const E_INVALIDARG: Hr = 0x8007_0057_u32 as i32;
 const STG_E_MEDIUMFULL: Hr = 0x8003_0070_u32 as i32;
 const ARITHMETIC_OVERFLOW: Hr = 0x8007_0216_u32 as i32;
 const WINCODEC_ERR_WRONGSTATE: Hr = 0x8898_2f04_u32 as i32;
+const WINCODEC_ERR_UNSUPPORTEDVERSION: Hr = 0x8898_2f0b_u32 as i32;
 const WINCODEC_ERR_NOTINITIALIZED: Hr = 0x8898_2f0c_u32 as i32;
+const WINCODEC_ERR_FRAMEMISSING: Hr = 0x8898_2f62_u32 as i32;
 const WINCODEC_ERR_ALREADYLOCKED: Hr = 0x8898_2f0d_u32 as i32;
 const WINCODEC_ERR_CODECNOTHUMBNAIL: Hr = 0x8898_2f44_u32 as i32;
 const WINCODEC_ERR_PALETTEUNAVAILABLE: Hr = 0x8898_2f45_u32 as i32;
@@ -717,10 +721,7 @@ fn run() -> Result<(), u32> {
     let mut f0: Obj = null_mut();
     // SAFETY: as above.
     let r = unsafe { WICCreateImagingFactory_Proxy(0, &mut f0) };
-    info("WICCreateImagingFactory_Proxy(0)", r as u32 as u64);
-    if r == S_OK {
-        release(f0);
-    }
+    c.hr(r, WINCODEC_ERR_UNSUPPORTEDVERSION)?;
 
     bitmaps(&mut c, f)?;
     palettes(&mut c, f)?;
@@ -1035,7 +1036,7 @@ fn bmp(c: &mut Checks, f: Obj) -> Result<(), u32> {
     let (r, n) = frame_count(d);
     c.hr(r, S_OK)?;
     c.eq(n.into(), 1)?;
-    c.hr(get_frame(d, 1).0, E_INVALIDARG)?;
+    c.hr(get_frame(d, 1).0, WINCODEC_ERR_FRAMEMISSING)?;
     let (r, p) = make(f, 9);
     c.hr(r, S_OK)?;
     let dpal: extern "system" fn(Obj, Obj) -> Hr = unsafe { m(d, 7) };
@@ -1157,6 +1158,11 @@ fn png(c: &mut Checks, f: Obj) -> Result<(), u32> {
     let (r, g) = container(d);
     c.hr(r, S_OK)?;
     c.guid(&g, &CONTAINER_PNG)?;
+    let (r, other) = get_frame(d, 1);
+    info("PNG GetFrame(1)", r as u32 as u64);
+    if r == S_OK {
+        release(other);
+    }
     let dcontexts: extern "system" fn(Obj, u32, *mut Obj, *mut u32) -> Hr = unsafe { m(d, 10) };
     let mut count = 0xdead_beef;
     c.hr(dcontexts(d, 0, null_mut(), &mut count), WINCODEC_ERR_UNSUPPORTEDOPERATION)?;

@@ -2,9 +2,10 @@
 //! DLL's class objects and its two exported helpers.
 //!
 //! - One static factory serves the process (its references are not
-//!   counted). WICCreateImagingFactory_Proxy gives it for any SDK
-//!   version (a version other than WINCODEC_SDK_VERSION1 0x0236 and
-//!   ...2 0x0237 is recorded).
+//!   counted). WICCreateImagingFactory_Proxy gives it for
+//!   WINCODEC_SDK_VERSION1 0x0236 and ...2 0x0237; version 0 is
+//!   WINCODEC_ERR_UNSUPPORTEDVERSION (Windows); another version is
+//!   served and recorded (what Windows answers is not measured).
 //! - DllGetClassObject serves CLSID_WICImagingFactory (1 and 2), the
 //!   PNG decoder (CLSID_WICPngDecoder1 and 2), the BMP decoder and
 //!   CLSID_WICDefaultFormatConverter; another class is recorded,
@@ -32,9 +33,9 @@ use crate::decoder::{CONTAINER_BMP, CONTAINER_PNG, Container};
 use crate::transform::Kinds;
 use crate::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid,
-    HResult, Header, Obj, S_FALSE, S_OK, Source, VTable, WINCODEC_ERR_COMPONENTNOTFOUND, bitmap,
-    data1, decoder, format, gap, guid, not_implemented, put, read_guid, release_object, stream,
-    transform,
+    HResult, Header, Obj, S_FALSE, S_OK, Source, VTable, WINCODEC_ERR_COMPONENTNOTFOUND,
+    WINCODEC_ERR_UNSUPPORTEDVERSION, bitmap, data1, decoder, format, gap, guid, not_implemented,
+    put, read_guid, release_object, stream, transform,
 };
 
 const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
@@ -367,6 +368,9 @@ factory_not_impl! {
 pub extern "system" fn WICCreateImagingFactory_Proxy(version: u32, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_INVALIDARG;
+    }
+    if version == 0 {
+        return WINCODEC_ERR_UNSUPPORTEDVERSION;
     }
     if version != SDK_VERSION1 && version != SDK_VERSION2 {
         gap(b"WICCreateImagingFactory_Proxy(SDK version)", version.into());
