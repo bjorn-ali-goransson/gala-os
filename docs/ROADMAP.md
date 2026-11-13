@@ -2031,15 +2031,46 @@ need gala's.
      `inherited_namespaces`, x64 and x86: each subtree's xml loads
      again with its names in their namespaces), and the ledger has the
      text at a parse error (`parse error at: ...`). With it the
-     manifest loads and the merge goes on to change the merged document:
-     the service ends at IXMLDOMNode::replaceChild, which gala's msxml6
-     lacks (`msxml6.dll!IXMLDOMNode::replaceChild not implemented, ending
-     the process`; OfficeClickToRun.exe 17002 at about 1648 s, setup.exe
-     at about 1690 s; the same end resumed from a machine snapshot taken
-     at `process integrator.exe`, 21 s of run time instead of 1706 s,
-     ROADMAP SN). Next: replaceChild, test first in `msxml_test`, then
-     the merge again (a snapshot cannot carry the fix: msxml6.dll is a
-     boot module the service loaded at about 42 s). To measure on Windows
+     manifest loads, and the merge then ended the service at
+     `msxml6.dll!IXMLDOMNode::replaceChild` (not implemented, 17002 at
+     about 1650 s; the same end resumed from a machine snapshot taken
+     at `process integrator.exe` in 21 s of run time instead of 1706 s,
+     ROADMAP SN). Done: the DOM's mutation family as a whole (the
+     create methods and createNode, document fragments, insertBefore,
+     appendChild, removeChild, replaceChild, putref_documentElement,
+     setAttribute, removeAttribute, setAttributeNode,
+     removeAttributeNode, the attribute map's setNamedItem,
+     removeNamedItem and removeQualifiedItem, put_text, put_nodeValue,
+     normalize, getElementsByTagName, importNode, save to a file),
+     test first (`msxml_test`'s `mutation`, x64 and x86, from Wine's
+     msxml3 tests run on Windows; ARCHITECTURE "msxml6"). To measure on
+     Windows (its `info` lines): removeAttributeNode and removeAttribute
+     of what the element lacks, normalize's empty text, importNode(NULL),
+     the bytes save writes. With them the merge completes (C2R's log:
+     `AppX::ManifestMerge::Merge` "Finished AppX manifest merge", each
+     product's manifest merged into `AppXManifest.common.16.xml`,
+     `AppXManifest::Save` to `Microsoft Office\AppXManifest.xml` and
+     `ThinAppXManifest.xml`), and `OfficeVirtRegistration` then failed
+     in App-V's `OISVAPI::ConfigurePackage` (`xmlutils.cpp : 56`,
+     0x80040154): it asks COM for FreeThreadedDOMDocument60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a06), so APPLYCONFIGURATION ended with 30175 and the
+     service with 17002 at about 1700 s. Done: FreeThreadedDOMDocument60
+     registered and served (`msxml_test`'s `free_threaded`, x64 and
+     x86). A stopgap to replace: it is the rental document, which locks
+     nothing (recorded at each creation); a free-threaded document needs
+     its calls serialized (a lock per document around every method)
+     before a program uses one from two threads at once. With it
+     ConfigurePackage gets further and fails at `xmlutils.cpp : 592`,
+     0x80040154 again: it asks COM for XMLSchemaCache60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a07), MSXML 6's XSD schema cache; APPLYCONFIGURATION ends
+     with 30175, the service and setup.exe with 17002 at about 1570 s.
+     Next: the schema cache (IXMLDOMSchemaCollection2: add, the
+     document's `schemas` property, validate and validateOnParse
+     against XSD), as far as App-V's use of it shows (what it adds and
+     whether it validates or only loads schemas; the ledger names each
+     method it reaches). To measure on Windows
      (the test's `info` lines, probe issue #116): the exact text of each subtree, in
      particular whether declarations it does not use come along (an
      attribute value `u:n` names a prefix only its ancestor declares).
