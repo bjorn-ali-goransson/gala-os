@@ -4755,8 +4755,10 @@ built for x64 and x86.
 - **XSLT** (`xslt.rs`, `com/xslt.rs`; `msxml_test`'s `xslt`, from
   Wine's msxml3 tests run on Windows and transforms shaped like App-V's;
   ROADMAP OF). XSLTemplate60 (IXSLTemplate: putref_stylesheet compiles
-  the stylesheet and holds it; a rental document, a document that is
-  not a stylesheet or one that does not compile are E_FAIL; NULL
+  the stylesheet and holds it, from a free-threaded or a rental
+  document (MSXML 6 takes both; msxml3 refuses a rental one); a
+  document that is not a stylesheet or one that does not compile is
+  E_FAIL; NULL
   resets; createProcessor) and its processor (IXSLProcessor: input, a
   node of ours; output, a string (VT_EMPTY or NULL), a document of ours
   whose tree the result replaces, or an IStream/ISequentialStream;
@@ -5094,11 +5096,14 @@ of their own, clients of it) is the yardstick.
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
   folder Windows makes with one; `shell32_test`). Both read one table
-  of known folder definitions (`user/shell32/src/knownfolder.rs`: 74
+  of known folder definitions (`user/shell32/src/knownfolder.rs`: 72
   folders, each with its id, CSIDL, name, category, parent, relative
   path, parsing name, attributes and KFDF_ flags, Windows' as Wine's
-  conformance test lists them; the virtual folders, the libraries and
-  the sample folders are left out). A folder's path is its root's (an
+  conformance test lists them, measured on build 26100 where it
+  differs: Documents, Downloads, Music, Pictures and Videos have the
+  parsing name `shell:::{<their This PC id>}`, Public has none, and
+  the Sidebar gadget folders are not defined; the virtual folders, the
+  libraries and the sample folders are left out). A folder's path is its root's (an
   environment variable, the Windows or system directory) or its
   parent's path, a backslash and its relative path, so a child is
   always below its parent; the X64 folders exist in a 64-bit process
@@ -15490,7 +15495,10 @@ older entries).
   them (`wait_quiet`: from then a thread whose wait ends does not get
   back to user mode; STOPPED holds the tick count then) to the threads
   going on; a record without STOPPED (an older writer) gives the pause
-  from the record on.
+  from the record on. The next kernel publishes it before it starts the
+  first carried thread (`carry::publish_pause`): a thread whose sleep
+  spanned the handover is due at once and may ask on another CPU before
+  the boot thread logs "resumed".
 - **What is carried** (sections, all REQUIRED; version 1 except
   PROCESSES 3 (4 in `handover_next`), THREADS 3, TIMERS 2; lists are
   entries with a length, or tables with a stride, so items gain fields

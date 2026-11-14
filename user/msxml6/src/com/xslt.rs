@@ -6,8 +6,9 @@
 //! tests run on Windows (domdoc.c's test_xsltemplate, test_xsltext,
 //! test_transformNodeToObject):
 //! - IXSLTemplate: putref_stylesheet(NULL) resets; the stylesheet must
-//!   be a free-threaded document (a rental one is E_FAIL) holding a
-//!   stylesheet that compiles (else E_FAIL); the template holds a
+//!   hold a stylesheet that compiles (else E_FAIL), in a free-threaded
+//!   or a rental document (MSXML 6 takes both, measured on Windows;
+//!   msxml3 refuses a rental one); the template holds a
 //!   reference on it; get_stylesheet(NULL) is E_INVALIDARG;
 //!   createProcessor(NULL) E_INVALIDARG, and the processor holds a
 //!   reference on its template;
@@ -349,11 +350,6 @@ extern "system" fn putref_stylesheet(this: Obj, node_: Obj) -> HResult {
         return S_OK;
     }
     let Some(n) = mutate::ours(node_) else { return E_INVALIDARG };
-    // SAFETY: a node object holds a reference on its document.
-    if !unsafe { (*n.doc).free_threaded } {
-        record(b"XSLTemplate60::putref_stylesheet(a rental document: E_FAIL)", LEDGER_OTHER, 0);
-        return E_FAIL;
-    }
     let sheet = match compile_node(n) {
         Ok(s) => s,
         Err(hr) => return hr,

@@ -521,12 +521,13 @@ fn template(c: &mut Checks) -> Result<(), u32> {
     let (hr, n) = get_obj(t, T_GET_STYLESHEET);
     c.hr(hr, S_OK)?;
     c.ok(n.is_null(), n as u64)?;
-    // Not a stylesheet; a stylesheet in a rental document.
+    // Not a stylesheet: E_FAIL. A stylesheet in a rental document: MSXML 6
+    // takes it (measured on Windows; Wine's msxml3 tests have E_FAIL).
     let not_xsl = loaded(c, &CLSID_FREETHREADEDDOMDOCUMENT60, "<a>test</a>")?;
-    c.code(call!(t, T_PUTREF_STYLESHEET, fn(Obj) -> HResult, not_xsl), E_FAIL)?;
+    c.hr(call!(t, T_PUTREF_STYLESHEET, fn(Obj) -> HResult, not_xsl), E_FAIL)?;
     release(not_xsl);
     let rental = loaded(c, &CLSID_DOMDOCUMENT60, GREETING_XSL)?;
-    c.code(call!(t, T_PUTREF_STYLESHEET, fn(Obj) -> HResult, rental), E_FAIL)?;
+    c.hr(call!(t, T_PUTREF_STYLESHEET, fn(Obj) -> HResult, rental), S_OK)?;
     release(rental);
     let ss = loaded(c, &CLSID_FREETHREADEDDOMDOCUMENT60, GREETING_XSL)?;
     c.hr(call!(t, T_PUTREF_STYLESHEET, fn(Obj) -> HResult, ss), S_OK)?;

@@ -1,7 +1,11 @@
 //! The known folders Windows defines, as Wine's conformance test
 //! (dlls/shell32/tests/shellpath.c, known_folders) lists them, without
 //! the virtual folders, the libraries and the sample folders: the
-//! expectations of `definitions`.
+//! expectations of `definitions`. Where Windows 11 24H2 (build 26100)
+//! answers otherwise the entry is its answer (measured): Documents,
+//! Downloads, Music, Pictures and Videos parse as `shell:::{...}`,
+//! Public has no parsing name, and the Sidebar gadget folders
+//! (SidebarParts, SidebarDefaultParts) are not defined.
 
 use super::{Kf, guid};
 
@@ -223,10 +227,7 @@ pub const FOLDERS: &[Kf] = &[
             [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
         )],
         relative: &["Documents"],
-        parsing: &[
-            "::{59031a47-3f72-44a7-89c5-5595fe6b30ee}\\{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
-            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\::{A8CDFF1C-4878-43be-B5FD-F8091C1C60D0}",
-        ],
+        parsing: &["shell:::{A8CDFF1C-4878-43be-B5FD-F8091C1C60D0}"],
         attributes: 0x1,
         flags: 0xc,
     },
@@ -243,9 +244,7 @@ pub const FOLDERS: &[Kf] = &[
             [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
         )],
         relative: &["Downloads"],
-        parsing: &[
-            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\::{374DE290-123F-4565-9164-39C4925E467B}",
-        ],
+        parsing: &["shell:::{374DE290-123F-4565-9164-39C4925E467B}"],
         attributes: 0x1,
         flags: 0x2c,
     },
@@ -437,10 +436,7 @@ pub const FOLDERS: &[Kf] = &[
             [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
         )],
         relative: &["Music"],
-        parsing: &[
-            "::{59031a47-3f72-44a7-89c5-5595fe6b30ee}\\{4BD8D571-6D19-48D3-BE97-422220080E43}",
-            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\::{1CF1260C-4DD0-4EBB-811F-33C572699FDE}",
-        ],
+        parsing: &["shell:::{1CF1260C-4DD0-4EBB-811F-33C572699FDE}"],
         attributes: 0x1,
         flags: 0xc,
     },
@@ -508,10 +504,7 @@ pub const FOLDERS: &[Kf] = &[
             [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
         )],
         relative: &["Pictures"],
-        parsing: &[
-            "::{59031a47-3f72-44a7-89c5-5595fe6b30ee}\\{33E28130-4E1E-4676-835A-98395C3BC3BB}",
-            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\::{3ADD1653-EB32-4CB0-BBD7-DFA0ABB5ACCA}",
-        ],
+        parsing: &["shell:::{3ADD1653-EB32-4CB0-BBD7-DFA0ABB5ACCA}"],
         attributes: 0x1,
         flags: 0xc,
     },
@@ -672,7 +665,7 @@ pub const FOLDERS: &[Kf] = &[
         category: 2,
         parents: &[],
         relative: &[],
-        parsing: &["::{4336a54d-038b-4685-ab02-99bb52d3fb8b}"],
+        parsing: &[],
         attributes: 0x1,
         flags: 0x8,
     },
@@ -965,40 +958,6 @@ pub const FOLDERS: &[Kf] = &[
         flags: 0x0,
     },
     Kf {
-        id: guid(0x7b396e54, 0x9ec5, 0x4300, [0xbe, 0x0a, 0x24, 0x82, 0xeb, 0xae, 0x1a, 0x26]),
-        what: "SidebarDefaultParts",
-        csidl: -1,
-        name: "Default Gadgets",
-        category: 3,
-        parents: &[guid(
-            0x905e63b6,
-            0xc1bf,
-            0x494e,
-            [0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a],
-        )],
-        relative: &["Windows Sidebar\\Gadgets"],
-        parsing: &[],
-        attributes: 0x0,
-        flags: 0x0,
-    },
-    Kf {
-        id: guid(0xa75d362e, 0x50fc, 0x4fb7, [0xac, 0x2c, 0xa8, 0xbe, 0xaa, 0x31, 0x44, 0x93]),
-        what: "SidebarParts",
-        csidl: -1,
-        name: "Gadgets",
-        category: 4,
-        parents: &[guid(
-            0xf1b32785,
-            0x6fba,
-            0x4fcf,
-            [0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91],
-        )],
-        relative: &["Microsoft\\Windows Sidebar\\Gadgets"],
-        parsing: &[],
-        attributes: 0x0,
-        flags: 0x0,
-    },
-    Kf {
         id: guid(0x625b53c3, 0xab48, 0x4ec1, [0xba, 0x1f, 0xa1, 0xef, 0x41, 0x46, 0xfc, 0x19]),
         what: "StartMenu",
         csidl: 11,
@@ -1149,10 +1108,7 @@ pub const FOLDERS: &[Kf] = &[
             [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
         )],
         relative: &["Videos"],
-        parsing: &[
-            "::{59031a47-3f72-44a7-89c5-5595fe6b30ee}\\{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
-            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\::{A0953C92-50DC-43BF-BE83-3742FED03C9C}",
-        ],
+        parsing: &["shell:::{A0953C92-50DC-43BF-BE83-3742FED03C9C}"],
         attributes: 0x1,
         flags: 0xc,
     },
