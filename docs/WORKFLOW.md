@@ -1212,15 +1212,23 @@ code `xtask/src/trust.rs`).
   public URL. The job summary lists the release, files, new blobs and
   each role's expiry. A manual run: Actions, "Release", "Run workflow",
   choose publish (from main), refresh or renew-root.
-- **One-time setup** (the owner): make the keys and store them as the
-  secret without them touching the screen or a file: `cargo xtask feed
-  keygen | gh secret set GALA_FEED_KEYS --env release` (the key ids go
-  to standard error: keep them to recognise the keys later). Besides
-  it, the environment `release` (or the repository) needs the secrets
+- **Keys in CI** (`.github/feed-keys.sh`, a step before each job signs):
+  they live in a second, private R2 bucket (`gala-os-signing-keys`, `KEYS_BUCKET` in release.yml) as the
+  object `feed-keys`, a `GALA_FEED_KEYS` value; the step reads it, masks
+  every seed in the log and hands it to the later steps as
+  `GALA_FEED_KEYS`. When it is missing, a publish against an empty feed
+  (no `1.root.json` at `FEED_URL`) makes the keys (`feed keygen`, key ids
+  in the log) and stores them with a conditional put that never
+  overwrites; any other run fails naming what is missing. A feed with a
+  root but no keys is refused: the keys are lost, and only putting back
+  a copy or a new root 1 in a new, empty feed bucket recovers (clients
+  trust root 1 or a later root they took).
+- **One-time setup** (the owner): the private R2 bucket for the keys
+  (`gala-os-signing-keys`), and an R2 API token with read and write on both buckets. In the
+  environment `release` (or the repository): the secrets
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and the variables
-  `R2_ACCOUNT_ID`, `R2_BUCKET`. The first publish against the empty
-  bucket makes root 1. A lost secret means a new root 1 for a new
-  bucket (clients trust root 1 or a later root they took): keep a copy
+  `R2_ACCOUNT_ID`, `R2_BUCKET` (the public feed). A missing one fails the job naming it. The first publish
+  makes the keys and root 1; keep a copy of `feed-keys`
   offline. GitHub disables the schedules of a public repository without
   activity for 60 days (the feed then freezes within a day): re-enable
   the workflow on the Actions page.

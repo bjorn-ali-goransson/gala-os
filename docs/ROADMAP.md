@@ -4263,13 +4263,13 @@ floor in the superblock's sector. Next:
    release tree, `cargo xtask release-tree`: kernel, system DLLs,
    Limine, sealed config, manifest), refreshed every 6 hours (targets
    too when near its expiry), root renewed monthly (`feed renew-root`);
-   every key, root included, from the `GALA_FEED_KEYS` secret (`feed
-   keygen`); `feed pull` / `feed push` move only what changed, timestamp
+   every key, root included, made by the first publish (`feed keygen`)
+   and kept in a private R2 bucket the jobs read (`.github/feed-keys.sh`); `feed pull` / `feed push` move only what changed, timestamp
    last, never overwriting a published version; each run checks the
    result as the client does before and after the upload. Host tests
    for each piece and for the workflows' steps against a directory
    standing in for the bucket (ARCHITECTURE "The update feed"; WORKFLOW
-   "The update feed"). Every key lives in CI's secrets (the owner's
+   "The update feed"). Every key lives with CI (the owner's
    decision, for now): CI can rotate keys and re-sign root, at the
    price that whoever controls CI controls the trust chain; root's
    validity is short (90 days, re-signed monthly; targets 30 days,
@@ -4299,7 +4299,10 @@ floor in the superblock's sector. Next:
    - Out of it: distributions inside LX update themselves (their own
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).
-   - Open: where the release key lives.
+   - The keys live in a private R2 bucket the release jobs make and read
+     (`gala-os-signing-keys`); the feed bucket is public at its custom domain,
+     `https://updates.gala-os.com` (`FEED_URL` in release.yml). Root keys
+     offline and the targets key in a KMS remain the later move above.
 
 WORKFLOW "Signed images".
 
