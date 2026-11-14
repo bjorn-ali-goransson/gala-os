@@ -3668,7 +3668,29 @@ the next breakthroughs).
    which needs gtk2's engine and theme files, the icon theme, fonts and
    GIMP's own data (brushes, patterns, tool presets: what `-d` left
    out); then all of its plug-ins (about 120 processes queried at a
-   first start). Open: a Linux process keeps its name across execve
+   first start). In progress (the owner): GIMP 3.2.2 on Ubuntu 26.04
+   LTS instead (GTK 3, native Wayland; WORKFLOW "Linux roots from Ubuntu
+   26.04"), the Linux roots with it: glibc 2.43, libffi, libwayland-client,
+   weston and the "gtk3" and "x11" roots are resolute's (traced on 26.04),
+   and `lx_dyn`, `lx_simple_shm`, `lx_xterm` and `lx_gtk_x11` pass on them;
+   `lx_gtk`, `lx_gtk_pie`, `lx_xdesktop` and `linux_menu` fail on what is
+   listed below, and `lx_gimp_batch` times out: its "gimp" root is still
+   24.04's 2.10, now beside 26.04's libraries (its script for 3.2,
+   `user/lx/gimp/batch3.scm`, deterministic on 26.04: `file-png-export`
+   with every optional chunk off). What 26.04 needs that gala lacks, each
+   test first: GTK 3 loads images through glycin, whose loader runs as a
+   process (`glycin-svg`) after bubblewrap fails (a `clone` with
+   CLONE_NEWUSER: EPERM without user namespaces), needing `ioctl(FIONBIO)`
+   on pipes and sockets (gala: ENOTTY, and Rust's spawn panics), timerfd,
+   capget (an unprivileged process: all zero) and seccomp's probes
+   (GET_ACTION_AVAIL, GET_NOTIF_SIZES; a filter mode's flags checked:
+   EFAULT for a NULL program); uutils' coreutils (`sleep` in
+   session.sh) need `prctl(PR_GET_AUXV)` or /proc/self/auxv (rustix
+   panics without), sigaltstack; xterm's utempter setfsuid and setfsgid;
+   a Rust panic in gala then failed to unwind ("failed to initiate
+   panic, error 5"), to explain. Then the transcripts 26.04 answers
+   otherwise (gtk_test's stderr: glycin's "running without sandbox"),
+   and THIRD_PARTY's rows for the new versions. Open: a Linux process keeps its name across execve
    (the log says `sh (pid N)` for gimp-console), and rseq is ENOSYS
    (glibc carries on without it).
 

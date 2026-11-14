@@ -2193,6 +2193,44 @@ source).
   (sealing a memfd against writing: EBUSY while a writable mapping is
   left) must not see the child's mappings (`lx::process_ended`).
 
+### Linux roots from Ubuntu 26.04 (ROADMAP LD)
+
+The Linux roots (`LINUX_ROOTS`, the "glibc", "wayland_client" and
+"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket.
+A root is what its workload opened on real 26.04, traced:
+
+- `tools/linux-roots/mkchroot.sh <base.tar.gz> <dir> <packages>` makes a
+  fresh chroot from Ubuntu's base image (`ubuntu-base-26.04-base-amd64`,
+  its SHA256SUMS checked with gpgv against the archive keyring), apt on
+  the release pocket only, the workload's packages without recommends:
+  one chroot per root, so nothing another root's packages bring is
+  traced. Run the workload (`tools/linux-roots/workloads/`) in it under
+  `strace -f -y` **as uid 1000** (`chroot --userspec=1000:1000`): gala's
+  programs are unprivileged, and some decide by it (glycin's sandbox
+  reads capget).
+- `plan.py <chroot> plan.json <traces>` gives the files by package;
+  `rows.py <index dir> plan.json rows.rs --exclude <earlier roots' files>`
+  the `Deb` rows from resolute's verified `Packages` indexes (InRelease
+  checked with gpgv, the `Packages.xz` hashes it lists); `replace_root.py
+  <root> rows.rs` puts them in xtask. The glibc prebuilt's files (ld.so,
+  libc, libm), libffi's and libwayland-client's are excluded from the
+  roots, the rest of libc6 (libresolv) is not.
+- Pitfalls met: Xwayland caches compiled keymaps in `/var/lib/xkb`
+  (clear `*.xkm` before tracing, or the keymap's files are never
+  opened); Xwayland loads Mesa's `swrast_dri.so` (gallium and LLVM:
+  185 MB) for GLX, which gala's Xwayland runs without: move
+  `/usr/lib/x86_64-linux-gnu/dri` aside for the trace; `/usr/share/X11/xkb`
+  is a link to `xkeyboard-config-2`, and xkbcomp opens files relative to
+  the target after a chdir (the plan adds them under the link too);
+  strace's `<unfinished ...>` lines carry paths that were used;
+  `/usr/bin/sleep` (uutils) is a link into another package and
+  `icons/default/index.theme` an update-alternatives link (both
+  `<installed>=<packaged>`); a root's links to one file (an icon theme's
+  cursors) are copies at assembly.
+- Transcripts recorded on 24.04 that 26.04 answers otherwise get their
+  own `<scenario>.txt`, recorded in the chroot (lx-expect's
+  expected.txt stays the CI host's).
+
 ### GIMP (ROADMAP LD step 9)
 
 - Scenario `lx_gimp_batch` (`cargo xtask boot-test 'lx_gimp_batch$'`,

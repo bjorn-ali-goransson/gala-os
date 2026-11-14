@@ -443,18 +443,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["busybox"],
         excludes: &[],
     },
-    // glibc 2.39 as Ubuntu 24.04 (noble) ships it: the libc6 package of
-    // the release pocket (2.39-0ubuntu8, never changed once released;
-    // the SHA-256 is the one we measured, Ubuntu signs the archive's
-    // index, not the .deb: THIRD_PARTY.md). A Debian package (an ar
+    // glibc 2.43 as Ubuntu 26.04 LTS (resolute) ships it: the libc6
+    // package of the release pocket (2.43-2ubuntu2, never changed once
+    // released; the SHA-256 is the one in the release's signed Packages
+    // index: THIRD_PARTY.md). A Debian package (an ar
     // archive) unpacked with dpkg-deb; its members moved here by their
     // file names. The program interpreter, libc and libm that dynamically
     // linked Linux programs (user/lx's GLIBC_TESTS) load (ROADMAP LD);
     // they run only inside gala.
     Prebuilt {
         name: "glibc",
-        url: "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb",
-        checksum: "af36c7ac770770fe3d3c10e85d6bc538e76e57570ba7db7d397fb9f654783ef3",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.43-2ubuntu2_amd64.deb",
+        checksum: "c13775dc0c984403f3fcad229d14507a9f387763bd07ace1e5f93897ee6b8434",
         members: &[
             "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
             "usr/lib/x86_64-linux-gnu/libc.so.6",
@@ -462,36 +462,36 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
-    // weston 13.0.0's demo clients as Ubuntu 24.04 (noble) ships them
-    // (universe, the release pocket's weston 13.0.0-4build3; the SHA-256
+    // weston 14.0.2's demo clients as Ubuntu 26.04 (resolute) ships them
+    // (universe, the release pocket's weston 14.0.2-5; the SHA-256
     // is the one in the release's signed Packages index): only
     // weston-simple-shm, a real libwayland client (ROADMAP LD step 2,
     // scenario lx_simple_shm). It needs libwayland-client and libffi
     // (below) besides glibc. Inside gala only.
     Prebuilt {
         name: "weston",
-        url: "https://archive.ubuntu.com/ubuntu/pool/universe/w/weston/weston_13.0.0-4build3_amd64.deb",
-        checksum: "bcf6f344c6d5bede9f3f601be1015b0550fa31dd8c7b3e51ac0fe34702dac73c",
+        url: "https://archive.ubuntu.com/ubuntu/pool/universe/w/weston/weston_14.0.2-5_amd64.deb",
+        checksum: "edf3509ee3b2fb0b94d45e3e090be2a5cdf0a18e4ebdfef2160d2e2b1c05090f",
         members: &["usr/bin/weston-simple-shm"],
         excludes: &[],
     },
-    // libwayland-client 1.22.0 (Ubuntu 24.04's libwayland-client0
-    // 1.22.0-2.1build1, main; SHA-256 from the signed Packages index).
+    // libwayland-client 1.24.0 (Ubuntu 26.04's libwayland-client0
+    // 1.24.0-2, main; SHA-256 from the signed Packages index).
     // The member is the soname's symbolic link: its target is kept under
     // the link's name.
     Prebuilt {
         name: "libwayland-client",
-        url: "https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.22.0-2.1build1_amd64.deb",
-        checksum: "6af0aed41d75149bea22fa468f01eb058ffe3e35ef07ff2f13fb88a90387881d",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.24.0-2_amd64.deb",
+        checksum: "094db0e190b53872e4d5310cd5fa09ca28ee3936386cd09e5f7d13e645aa12ab",
         members: &["usr/lib/x86_64-linux-gnu/libwayland-client.so.0"],
         excludes: &[],
     },
-    // libffi 3.4.6 (Ubuntu 24.04's libffi8 3.4.6-1build1, main; SHA-256
+    // libffi 3.5.2 (Ubuntu 26.04's libffi8 3.5.2-4, main; SHA-256
     // from the signed Packages index): libwayland-client's dependency.
     Prebuilt {
         name: "libffi",
-        url: "https://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb",
-        checksum: "637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.5.2-4_amd64.deb",
+        checksum: "4a7423124bbd459c0aa38b7389ec7802fa6899654767a95fc27de70967fedd48",
         members: &["usr/lib/x86_64-linux-gnu/libffi.so.8"],
         excludes: &[],
     },
@@ -605,343 +605,925 @@ struct Deb {
 
 const LINUX_ROOTS: &[LinuxRoot] = &[
     LinuxRoot {
-        // GTK 3 (3.24.41) and its whole library closure as Ubuntu 24.04
-        // builds them (ldd of libgtk-3.so.0 on Ubuntu 24.04, less glibc,
-        // libffi and libwayland-client: the "glibc" and "wayland_client"
-        // module sets), fontconfig's own fonts.conf and one font, DejaVu
-        // Sans: what user/lx/gtk_test needs (ROADMAP LD step 3, `lx_gtk`).
-        // Left out on purpose, as a minimal install of the packages would not
-        // be: icon and cursor themes (GTK 3 falls back to the icons in its
-        // own resources, libwayland-cursor to its built-in cursors), GSettings
-        // schemas and GIO modules (GLib's memory settings backend), the
-        // gdk-pixbuf loaders (PNG is built in). Of xkb-data (libxkbcommon0
-        // depends on it) only what GDK's default keymap (rules evdev, model
-        // pc105, layout us) includes: the server's own keymap comes whole with
-        // wl_keyboard.
+        // GTK 3 (3.24.52) and its whole library closure as Ubuntu 26.04 LTS
+        // (resolute) builds them, with the data a minimal install of them
+        // has and GTK opens: what user/lx/gtk_test opened under `strace -f
+        // -y` on Ubuntu 26.04, over Wayland (weston) and X11 (Xvfb), less
+        // glibc, libffi and libwayland-client (the "glibc" and
+        // "wayland_client" module sets) and the generated caches (GIO's
+        // module cache, GSettings' compiled schemas, fontconfig's and the
+        // icon theme's caches; the MIME cache is made at assembly from
+        // shared-mime-info's XML). GTK 3 loads images through glycin, whose
+        // loaders run as their own processes (`glycin-svg` for the icons'
+        // SVGs), sandboxed by bubblewrap where it can (WORKFLOW "Linux
+        // roots from Ubuntu 26.04").
         name: "gtk3",
         debs: &[
             Deb {
-                pool: "main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_amd64.deb",
-                sha256: "9df0579cd298a1f2b7a40efd519c849745aecd193a09733cf4d1032284a62bbf",
-                files: &["etc/fonts/fonts.conf"],
+                pool: "main/a/adwaita-icon-theme/adwaita-icon-theme_50.0-1_all.deb",
+                sha256: "db9f11a94f993de589e7d8879664cb371eb8aefc8a2bce100d923951e4ef30c8",
+                files: &[
+                    "usr/share/icons/Adwaita/cursor.theme",
+                    "usr/share/icons/Adwaita/cursors/X_cursor",
+                    "usr/share/icons/Adwaita/cursors/alias",
+                    "usr/share/icons/Adwaita/cursors/all-resize",
+                    "usr/share/icons/Adwaita/cursors/all-scroll",
+                    "usr/share/icons/Adwaita/cursors/arrow",
+                    "usr/share/icons/Adwaita/cursors/bd_double_arrow",
+                    "usr/share/icons/Adwaita/cursors/bottom_left_corner",
+                    "usr/share/icons/Adwaita/cursors/bottom_right_corner",
+                    "usr/share/icons/Adwaita/cursors/bottom_side",
+                    "usr/share/icons/Adwaita/cursors/cell",
+                    "usr/share/icons/Adwaita/cursors/col-resize",
+                    "usr/share/icons/Adwaita/cursors/context-menu",
+                    "usr/share/icons/Adwaita/cursors/copy",
+                    "usr/share/icons/Adwaita/cursors/cross",
+                    "usr/share/icons/Adwaita/cursors/cross_reverse",
+                    "usr/share/icons/Adwaita/cursors/crosshair",
+                    "usr/share/icons/Adwaita/cursors/default",
+                    "usr/share/icons/Adwaita/cursors/diamond_cross",
+                    "usr/share/icons/Adwaita/cursors/dnd-ask",
+                    "usr/share/icons/Adwaita/cursors/dnd-move",
+                    "usr/share/icons/Adwaita/cursors/e-resize",
+                    "usr/share/icons/Adwaita/cursors/ew-resize",
+                    "usr/share/icons/Adwaita/cursors/fd_double_arrow",
+                    "usr/share/icons/Adwaita/cursors/fleur",
+                    "usr/share/icons/Adwaita/cursors/grab",
+                    "usr/share/icons/Adwaita/cursors/grabbing",
+                    "usr/share/icons/Adwaita/cursors/hand1",
+                    "usr/share/icons/Adwaita/cursors/hand2",
+                    "usr/share/icons/Adwaita/cursors/help",
+                    "usr/share/icons/Adwaita/cursors/left_ptr",
+                    "usr/share/icons/Adwaita/cursors/left_side",
+                    "usr/share/icons/Adwaita/cursors/move",
+                    "usr/share/icons/Adwaita/cursors/n-resize",
+                    "usr/share/icons/Adwaita/cursors/ne-resize",
+                    "usr/share/icons/Adwaita/cursors/nesw-resize",
+                    "usr/share/icons/Adwaita/cursors/no-drop",
+                    "usr/share/icons/Adwaita/cursors/not-allowed",
+                    "usr/share/icons/Adwaita/cursors/ns-resize",
+                    "usr/share/icons/Adwaita/cursors/nw-resize",
+                    "usr/share/icons/Adwaita/cursors/nwse-resize",
+                    "usr/share/icons/Adwaita/cursors/pointer",
+                    "usr/share/icons/Adwaita/cursors/progress",
+                    "usr/share/icons/Adwaita/cursors/question_arrow",
+                    "usr/share/icons/Adwaita/cursors/right_side",
+                    "usr/share/icons/Adwaita/cursors/row-resize",
+                    "usr/share/icons/Adwaita/cursors/s-resize",
+                    "usr/share/icons/Adwaita/cursors/sb_h_double_arrow",
+                    "usr/share/icons/Adwaita/cursors/sb_v_double_arrow",
+                    "usr/share/icons/Adwaita/cursors/se-resize",
+                    "usr/share/icons/Adwaita/cursors/sw-resize",
+                    "usr/share/icons/Adwaita/cursors/tcross",
+                    "usr/share/icons/Adwaita/cursors/text",
+                    "usr/share/icons/Adwaita/cursors/top_left_arrow",
+                    "usr/share/icons/Adwaita/cursors/top_left_corner",
+                    "usr/share/icons/Adwaita/cursors/top_right_corner",
+                    "usr/share/icons/Adwaita/cursors/top_side",
+                    "usr/share/icons/Adwaita/cursors/vertical-text",
+                    "usr/share/icons/Adwaita/cursors/w-resize",
+                    "usr/share/icons/Adwaita/cursors/wait",
+                    "usr/share/icons/Adwaita/cursors/watch",
+                    "usr/share/icons/Adwaita/cursors/xterm",
+                    "usr/share/icons/Adwaita/cursors/zoom-in",
+                    "usr/share/icons/Adwaita/cursors/zoom-out",
+                    "usr/share/icons/Adwaita/index.theme",
+                    "usr/share/icons/Adwaita/symbolic/ui/window-close-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/ui/window-maximize-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/ui/window-minimize-symbolic.svg",
+                    "usr/share/icons/default/index.theme=usr/share/icons/Adwaita/cursor.theme",
+                ],
             },
             Deb {
-                pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
-                sha256: "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
-                files: &["usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+                pool: "main/b/bubblewrap/bubblewrap_0.11.1-1_amd64.deb",
+                sha256: "090bb705b6d49213b288f19d78be78a55a1b72843efb12eae73ab5cca0f54b8d",
+                files: &["usr/bin/bwrap"],
             },
             Deb {
-                pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb",
-                sha256: "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
-                files: &["usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"],
+                pool: "main/d/dconf/dconf-gsettings-backend_0.49.0-4_amd64.deb",
+                sha256: "4da7b8309d49079ebac028c1f3284df02463da451cbd5f90ea61e535534531ac",
+                files: &["usr/lib/x86_64-linux-gnu/gio/modules/libdconfsettings.so"],
             },
             Deb {
-                pool: "main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb",
-                sha256: "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
-                files: &["usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"],
+                pool: "main/f/fontconfig/fontconfig-config_2.17.1-3ubuntu1_amd64.deb",
+                sha256: "304cc61f61b94399453db02e1032d9f74a0bd737307acb4ed847f8da9406b8c1",
+                files: &[
+                    "etc/fonts/conf.d/10-hinting-slight.conf",
+                    "etc/fonts/conf.d/10-scale-bitmap-fonts.conf",
+                    "etc/fonts/conf.d/10-sub-pixel-rgb.conf",
+                    "etc/fonts/conf.d/10-yes-antialias.conf",
+                    "etc/fonts/conf.d/11-lcdfilter-default.conf",
+                    "etc/fonts/conf.d/20-unhint-small-vera.conf",
+                    "etc/fonts/conf.d/30-metric-aliases.conf",
+                    "etc/fonts/conf.d/40-nonlatin.conf",
+                    "etc/fonts/conf.d/45-generic.conf",
+                    "etc/fonts/conf.d/45-latin.conf",
+                    "etc/fonts/conf.d/48-spacing.conf",
+                    "etc/fonts/conf.d/49-sansserif.conf",
+                    "etc/fonts/conf.d/50-user.conf",
+                    "etc/fonts/conf.d/51-local.conf",
+                    "etc/fonts/conf.d/60-generic.conf",
+                    "etc/fonts/conf.d/60-latin.conf",
+                    "etc/fonts/conf.d/65-fonts-persian.conf",
+                    "etc/fonts/conf.d/65-nonlatin.conf",
+                    "etc/fonts/conf.d/69-unifont.conf",
+                    "etc/fonts/conf.d/70-no-bitmaps-except-emoji.conf",
+                    "etc/fonts/conf.d/80-delicious.conf",
+                    "etc/fonts/conf.d/90-synthetic.conf",
+                    "etc/fonts/fonts.conf",
+                    "usr/share/fontconfig/conf.avail/05-reset-dirs-sample.conf",
+                    "usr/share/fontconfig/conf.avail/09-autohint-if-no-hinting.conf",
+                    "usr/share/fontconfig/conf.avail/10-autohint.conf",
+                    "usr/share/fontconfig/conf.avail/10-hinting-full.conf",
+                    "usr/share/fontconfig/conf.avail/10-hinting-medium.conf",
+                    "usr/share/fontconfig/conf.avail/10-hinting-none.conf",
+                    "usr/share/fontconfig/conf.avail/10-hinting-slight.conf",
+                    "usr/share/fontconfig/conf.avail/10-no-antialias.conf",
+                    "usr/share/fontconfig/conf.avail/10-scale-bitmap-fonts.conf",
+                    "usr/share/fontconfig/conf.avail/10-sub-pixel-bgr.conf",
+                    "usr/share/fontconfig/conf.avail/10-sub-pixel-none.conf",
+                    "usr/share/fontconfig/conf.avail/10-sub-pixel-rgb.conf",
+                    "usr/share/fontconfig/conf.avail/10-sub-pixel-vbgr.conf",
+                    "usr/share/fontconfig/conf.avail/10-sub-pixel-vrgb.conf",
+                    "usr/share/fontconfig/conf.avail/10-unhinted.conf",
+                    "usr/share/fontconfig/conf.avail/10-yes-antialias.conf",
+                    "usr/share/fontconfig/conf.avail/11-lcdfilter-default.conf",
+                    "usr/share/fontconfig/conf.avail/11-lcdfilter-legacy.conf",
+                    "usr/share/fontconfig/conf.avail/11-lcdfilter-light.conf",
+                    "usr/share/fontconfig/conf.avail/11-lcdfilter-none.conf",
+                    "usr/share/fontconfig/conf.avail/20-unhint-small-vera.conf",
+                    "usr/share/fontconfig/conf.avail/25-unhint-nonlatin.conf",
+                    "usr/share/fontconfig/conf.avail/30-metric-aliases.conf",
+                    "usr/share/fontconfig/conf.avail/35-lang-normalize.conf",
+                    "usr/share/fontconfig/conf.avail/40-nonlatin.conf",
+                    "usr/share/fontconfig/conf.avail/45-generic.conf",
+                    "usr/share/fontconfig/conf.avail/45-latin.conf",
+                    "usr/share/fontconfig/conf.avail/48-guessfamily.conf",
+                    "usr/share/fontconfig/conf.avail/48-spacing.conf",
+                    "usr/share/fontconfig/conf.avail/49-sansserif.conf",
+                    "usr/share/fontconfig/conf.avail/50-user.conf",
+                    "usr/share/fontconfig/conf.avail/51-local.conf",
+                    "usr/share/fontconfig/conf.avail/53-monospace-lcd-filter.conf",
+                    "usr/share/fontconfig/conf.avail/60-generic.conf",
+                    "usr/share/fontconfig/conf.avail/60-latin.conf",
+                    "usr/share/fontconfig/conf.avail/65-fonts-persian.conf",
+                    "usr/share/fontconfig/conf.avail/65-khmer.conf",
+                    "usr/share/fontconfig/conf.avail/65-nonlatin.conf",
+                    "usr/share/fontconfig/conf.avail/69-unifont.conf",
+                    "usr/share/fontconfig/conf.avail/70-force-bitmaps.conf",
+                    "usr/share/fontconfig/conf.avail/70-no-bitmaps-and-emoji.conf",
+                    "usr/share/fontconfig/conf.avail/70-no-bitmaps-except-emoji.conf",
+                    "usr/share/fontconfig/conf.avail/70-no-bitmaps.conf",
+                    "usr/share/fontconfig/conf.avail/70-yes-bitmaps.conf",
+                    "usr/share/fontconfig/conf.avail/80-delicious.conf",
+                    "usr/share/fontconfig/conf.avail/90-synthetic.conf",
+                ],
             },
             Deb {
-                pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb",
-                sha256: "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
-                files: &["usr/lib/x86_64-linux-gnu/libatspi.so.0"],
+                pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8build1_all.deb",
+                sha256: "f4606b12eb41ddf7932d3a1ebc2019f9bbf90d0824943a2dc0c77a00f43019f2",
+                files: &[
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-lgc-sans.conf",
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-lgc-serif.conf",
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-sans.conf",
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-serif.conf",
+                    "etc/fonts/conf.avail/57-dejavu-sans.conf",
+                    "etc/fonts/conf.avail/57-dejavu-serif.conf",
+                    "etc/fonts/conf.avail/58-dejavu-lgc-sans.conf",
+                    "etc/fonts/conf.avail/58-dejavu-lgc-serif.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-lgc-sans.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-lgc-serif.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-sans.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-serif.conf",
+                    "etc/fonts/conf.d/57-dejavu-sans.conf",
+                    "etc/fonts/conf.d/57-dejavu-serif.conf",
+                    "etc/fonts/conf.d/58-dejavu-lgc-sans.conf",
+                    "etc/fonts/conf.d/58-dejavu-lgc-serif.conf",
+                    "usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                ],
             },
             Deb {
-                pool: "main/u/util-linux/libblkid1_2.39.3-9ubuntu6_amd64.deb",
-                sha256: "47433bcaf43d1c6ed2e2acbc7dc70f6d6ed149e64f12d25b2ddb714a56c4e8dd",
-                files: &["usr/lib/x86_64-linux-gnu/libblkid.so.1"],
+                pool: "main/f/fonts-dejavu/fonts-dejavu-mono_2.37-8build1_all.deb",
+                sha256: "bf5ad873961972ea8f1299ef99c1854715e68d9aa798830fb78c5b222ddeb4b9",
+                files: &[
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-lgc-sans-mono.conf",
+                    "etc/fonts/conf.avail/20-unhint-small-dejavu-sans-mono.conf",
+                    "etc/fonts/conf.avail/57-dejavu-sans-mono.conf",
+                    "etc/fonts/conf.avail/58-dejavu-lgc-sans-mono.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-lgc-sans-mono.conf",
+                    "etc/fonts/conf.d/20-unhint-small-dejavu-sans-mono.conf",
+                    "etc/fonts/conf.d/57-dejavu-sans-mono.conf",
+                    "etc/fonts/conf.d/58-dejavu-lgc-sans-mono.conf",
+                ],
             },
             Deb {
-                pool: "main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
-                sha256: "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
+                pool: "main/g/glycin/glycin-loaders_2.1.1+ds-0ubuntu1_amd64.deb",
+                sha256: "2b94910793dddd6cc6cc689bea65c526e3c3e3dfd2125f4464c239fc6e5856d4",
+                files: &[
+                    "usr/libexec/glycin-loaders/2+/glycin-svg",
+                    "usr/share/glycin-loaders/2+/conf.d/glycin-heif.conf",
+                    "usr/share/glycin-loaders/2+/conf.d/glycin-image-rs.conf",
+                    "usr/share/glycin-loaders/2+/conf.d/glycin-jxl.conf",
+                    "usr/share/glycin-loaders/2+/conf.d/glycin-svg.conf",
+                ],
+            },
+            Deb {
+                pool: "main/h/hicolor-icon-theme/hicolor-icon-theme_0.18-2build1_all.deb",
+                sha256: "d05726c4a4dc15079ed2bd6ef633e7d6dca4c4be20296148b1c558dbd5a6c570",
+                files: &["usr/share/icons/hicolor/index.theme"],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.60.0-1_amd64.deb",
+                sha256: "01a202477896e89cb3d202086fa4e84b19d21527da146e52272d601b672ed763",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatk1.0-0t64_2.60.0-1_amd64.deb",
+                sha256: "c79169fe159a1810c941a36630d5e2687ffed9fb399d06780c45a5fe68815eab",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libatk-1.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libatk-1.0.so.0.26009.1",
+                ],
+            },
+            Deb {
+                pool: "main/g/gcc-16/libatomic1_16-20260322-1ubuntu1_amd64.deb",
+                sha256: "82fa61135e7154d7958feaa91ec1808a688eb1e0e06822ab35e99e2480feb148",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libatomic.so.1",
+                    "usr/lib/x86_64-linux-gnu/libatomic.so.1.2.0",
+                ],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.60.0-1_amd64.deb",
+                sha256: "7a221510a5f9a67e2f871176b6636dce13fcee85236f591553017b9ba5eb3bf5",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libatspi.so.0",
+                    "usr/lib/x86_64-linux-gnu/libatspi.so.0.0.1",
+                ],
+            },
+            Deb {
+                pool: "main/u/util-linux/libblkid1_2.41.3-3ubuntu2_amd64.deb",
+                sha256: "f2caf1f807c0b203e5f4545c3010ac34b2dd5f546704e5b1b9c62a41d483771e",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libblkid.so.1",
+                    "usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0",
+                ],
+            },
+            Deb {
+                pool: "main/b/brotli/libbrotli1_1.2.0-3build1_amd64.deb",
+                sha256: "858242571fc2585c1f8eb83ae01d020f0f4a92679d0de8fe31146f6687bdd84a",
                 files: &[
                     "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1",
+                    "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1.2.0",
                     "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1",
+                    "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1.2.0",
                 ],
             },
             Deb {
-                pool: "main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
-                sha256: "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b",
-                files: &["usr/lib/x86_64-linux-gnu/libbsd.so.0"],
+                pool: "main/libb/libbsd/libbsd0_0.12.2-2build2_amd64.deb",
+                sha256: "62019928a6baeaba8d12d2d4cb7c1e4c9a9550a1eb4541b8de0cacfeae1d09e3",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libbsd.so.0",
+                    "usr/lib/x86_64-linux-gnu/libbsd.so.0.12.2",
+                ],
             },
             Deb {
-                pool: "main/b/bzip2/libbz2-1.0_1.0.8-5.1_amd64.deb",
-                sha256: "695132af8a40fe417f7d4e5ea742d64521c04e069442a4719c2bd0f10ab93d94",
-                files: &["usr/lib/x86_64-linux-gnu/libbz2.so.1.0"],
+                pool: "main/b/bzip2/libbz2-1.0_1.0.8-6build2_amd64.deb",
+                sha256: "387910c6d79c39c47d83ca729b84c0d30c674a340e3b290ec7b6df3288c19f9a",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libbz2.so.1.0",
+                    "usr/lib/x86_64-linux-gnu/libbz2.so.1.0.4",
+                ],
             },
             Deb {
-                pool: "main/c/cairo/libcairo-gobject2_1.18.0-3build1_amd64.deb",
-                sha256: "f5483cbe43455fc9e9cba7f0e166bd0a731c02db2902ba562719848f72e8c403",
-                files: &["usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"],
+                pool: "main/c/cairo/libcairo-gobject2_1.18.4-3_amd64.deb",
+                sha256: "1d48661d59bb164fc27e88bb8e6a8dab0cdfdbf35ea5d2bbf3ebffe849a38822",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2",
+                    "usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2.11804.4",
+                ],
             },
             Deb {
-                pool: "main/c/cairo/libcairo2_1.18.0-3build1_amd64.deb",
-                sha256: "96950b306889ff6e4248bb937b0a3b56e72dacf643fe732214ce375f0f6bbb36",
-                files: &["usr/lib/x86_64-linux-gnu/libcairo.so.2"],
+                pool: "main/c/cairo/libcairo2_1.18.4-3_amd64.deb",
+                sha256: "525ab7b5ad6529ea35aa09308ddd1fd2325c85ad70e7483ba66b526d8ee9f7a7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libcairo.so.2",
+                    "usr/lib/x86_64-linux-gnu/libcairo.so.2.11804.4",
+                ],
             },
             Deb {
-                pool: "main/libc/libcap2/libcap2_2.66-5ubuntu2_amd64.deb",
-                sha256: "a6cce0b5f149707a6359e4f03a05fb7417c5e1d3fde9e12c651e804b4c479bbb",
-                files: &["usr/lib/x86_64-linux-gnu/libcap.so.2"],
+                pool: "main/libc/libcap2/libcap2_2.75-10ubuntu2_amd64.deb",
+                sha256: "150603a0792b1d22aa0bde0a26c27b413018c799284003e4b43cba587a5b3a18",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libcap.so.2",
+                    "usr/lib/x86_64-linux-gnu/libcap.so.2.75",
+                ],
             },
             Deb {
-                pool: "main/libd/libdatrie/libdatrie1_0.2.13-3build1_amd64.deb",
-                sha256: "1ae164e40e413eac4fbd38ce1c6ef9591f7a03278ad9076d71fa29258727f447",
-                files: &["usr/lib/x86_64-linux-gnu/libdatrie.so.1"],
+                pool: "main/libd/libdatrie/libdatrie1_0.2.14-1_amd64.deb",
+                sha256: "1ba5a9190119370912ec5955c8129cdf2780a098ed6c80e9ecca05cc515bd039",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdatrie.so.1",
+                    "usr/lib/x86_64-linux-gnu/libdatrie.so.1.4.1",
+                ],
             },
             Deb {
-                pool: "main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
-                sha256: "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2",
-                files: &["usr/lib/x86_64-linux-gnu/libdbus-1.so.3"],
+                pool: "main/d/dbus/libdbus-1-3_1.16.2-2ubuntu4_amd64.deb",
+                sha256: "af7be2be588d15a16c696ab43ba3e92bd5f9a6850e8780234059b02a67716e58",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdbus-1.so.3",
+                    "usr/lib/x86_64-linux-gnu/libdbus-1.so.3.38.3",
+                ],
             },
             Deb {
-                pool: "main/libe/libepoxy/libepoxy0_1.5.10-1build1_amd64.deb",
-                sha256: "e2e754da4e7fb89021476b093cb5ebe9b1859a688fa37739809e529627d39f1f",
-                files: &["usr/lib/x86_64-linux-gnu/libepoxy.so.0"],
+                pool: "main/libd/libdrm/libdrm-amdgpu1_2.4.131-1_amd64.deb",
+                sha256: "f992d3b87be69d160d433626e2144f6446946143cb83bdc71adef71766783de0",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+                    "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1.131.0",
+                ],
             },
             Deb {
-                pool: "main/e/expat/libexpat1_2.6.1-2build1_amd64.deb",
-                sha256: "730b29497212289cda8a3139e693a3538af0cb57846c24f807d1bb293a591c5e",
-                files: &["usr/lib/x86_64-linux-gnu/libexpat.so.1"],
+                pool: "main/libd/libdrm/libdrm-intel1_2.4.131-1_amd64.deb",
+                sha256: "77411c3b93c8756862a18ccaa4413a65777f40819abdd1468954ba859c8aa740",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdrm_intel.so.1",
+                    "usr/lib/x86_64-linux-gnu/libdrm_intel.so.1.131.0",
+                ],
             },
             Deb {
-                pool: "main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
-                sha256: "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
-                files: &["usr/lib/x86_64-linux-gnu/libfontconfig.so.1"],
+                pool: "main/libd/libdrm/libdrm2_2.4.131-1_amd64.deb",
+                sha256: "b87e6f715d0795a88b53fbe268004a1acbd0d728da0cc0ab9108aff5ab4e1929",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdrm.so.2",
+                    "usr/lib/x86_64-linux-gnu/libdrm.so.2.131.0",
+                ],
             },
             Deb {
-                pool: "main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_amd64.deb",
-                sha256: "321dda934f62fa8af08529a8c4c34b0ec040f172c0a945dce10b8be6f1014917",
-                files: &["usr/lib/x86_64-linux-gnu/libfreetype.so.6"],
+                pool: "main/libe/libedit/libedit2_3.1-20251016-1_amd64.deb",
+                sha256: "22338fcbcaae99f67ca7b2e20d1730bc29d3c02bcd2414e457f99be96442ee29",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libedit.so.2",
+                    "usr/lib/x86_64-linux-gnu/libedit.so.2.0.76",
+                ],
             },
             Deb {
-                pool: "main/f/fribidi/libfribidi0_1.0.13-3build1_amd64.deb",
-                sha256: "6cd50259d39ce0dfafee2632c6268538e6a02590e77161a133e9683af346dd1d",
-                files: &["usr/lib/x86_64-linux-gnu/libfribidi.so.0"],
+                pool: "main/e/elfutils/libelf1t64_0.194-4_amd64.deb",
+                sha256: "c2feae172b14d2a8317348023c5e0b6572314c097a9f7b8225c62b0988cc8d92",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libelf-0.194.so",
+                    "usr/lib/x86_64-linux-gnu/libelf.so.1",
+                ],
             },
             Deb {
-                pool: "main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_amd64.deb",
-                sha256: "ff32bae487706ba6ca646b5b72d89b935e3b8b2811d02e4ad7360cb97d90e2d0",
-                files: &["usr/lib/x86_64-linux-gnu/libgcrypt.so.20"],
+                pool: "main/libe/libepoxy/libepoxy0_1.5.10-2build1_amd64.deb",
+                sha256: "2f4525535b2c7c6d61cc5c131f1cb3f5c0d70177ccf550a05f80d12016dfcfdf",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libepoxy.so.0",
+                    "usr/lib/x86_64-linux-gnu/libepoxy.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_amd64.deb",
-                sha256: "d9779cdbb11e5fb6056b39868b689bd2e6a152f60d7fa54fcf7113942eedab24",
-                files: &["usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"],
+                pool: "main/e/expat/libexpat1_2.7.4-1_amd64.deb",
+                sha256: "ef78089497946219cac03209d951bbfff93480104e791b770a7bf6429452e475",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libexpat.so.1",
+                    "usr/lib/x86_64-linux-gnu/libexpat.so.1.11.2",
+                ],
             },
             Deb {
-                pool: "main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_amd64.deb",
-                sha256: "629359e915f4466cf9cb0fa6c38270d9af1e03e28fab557ce31977d5ab34f13d",
+                pool: "main/libf/libffi/libffi8_3.5.2-4_amd64.deb",
+                sha256: "4a7423124bbd459c0aa38b7389ec7802fa6899654767a95fc27de70967fedd48",
+                files: &["usr/lib/x86_64-linux-gnu/libffi.so.8.2.0"],
+            },
+            Deb {
+                pool: "main/f/fontconfig/libfontconfig1_2.17.1-3ubuntu1_amd64.deb",
+                sha256: "72ba4fc43155566b46442b741a6892d5d1f1581ba58cdfd037aabf47ad9080f7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libfontconfig.so.1",
+                    "usr/lib/x86_64-linux-gnu/libfontconfig.so.1.16.1",
+                ],
+            },
+            Deb {
+                pool: "main/f/freetype/libfreetype6_2.14.2+dfsg-1_amd64.deb",
+                sha256: "a76ad9102039122ef72b01c9c364e7d8967331414cbe19151c01d1391ff9fe25",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libfreetype.so.6",
+                    "usr/lib/x86_64-linux-gnu/libfreetype.so.6.20.5",
+                ],
+            },
+            Deb {
+                pool: "main/f/fribidi/libfribidi0_1.0.16-5_amd64.deb",
+                sha256: "47fb50e96401a46c06d5122cd04cc42316f65530b9f868d2d450576a379d5d34",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libfribidi.so.0",
+                    "usr/lib/x86_64-linux-gnu/libfribidi.so.0.4.0",
+                ],
+            },
+            Deb {
+                pool: "main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_amd64.deb",
+                sha256: "2fb4d81c14fdf34251639ae82f5181f9f98480ea16125d535571ac1be9db3065",
+                files: &["usr/lib/x86_64-linux-gnu/libgcc_s.so.1"],
+            },
+            Deb {
+                pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.44.5+dfsg-4ubuntu1_amd64.deb",
+                sha256: "ccd902384546225842384de0c46dad4670ccdda17b697bed4518610ed2e08e89",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0.4400.5",
+                ],
+            },
+            Deb {
+                pool: "main/libg/libglvnd/libgl1_1.7.0-3_amd64.deb",
+                sha256: "83ec3a454b28e947a6886e9ae8167e129e25d7a2fd741aaffcdca76eddff5955",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libGL.so.1",
+                    "usr/lib/x86_64-linux-gnu/libGL.so.1.7.0",
+                ],
+            },
+            Deb {
+                pool: "main/m/mesa/libgl1-mesa-dri_26.0.3-1ubuntu1_amd64.deb",
+                sha256: "8bd0ad7943526487b4e21161a2d55566dd78ffa32448c801662bddba55bd7576",
+                files: &["usr/share/drirc.d/00-mesa-defaults.conf"],
+            },
+            Deb {
+                pool: "main/g/glib2.0/libglib2.0-0t64_2.88.0-1_amd64.deb",
+                sha256: "8883a2bd236e54af0af33d7115835929c959bc50fd02ba63496ab6908b0c204a",
                 files: &[
                     "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0.8800.0",
                     "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8800.0",
                     "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0.8800.0",
                     "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0.8800.0",
                 ],
             },
             Deb {
-                pool: "main/libg/libgpg-error/libgpg-error0_1.47-3build2_amd64.deb",
-                sha256: "81a30b5888e0af43b72bfdbdb44209b82e521eadf8848ff201542e6d258f6a1f",
-                files: &["usr/lib/x86_64-linux-gnu/libgpg-error.so.0"],
-            },
-            Deb {
-                pool: "main/g/graphite2/libgraphite2-3_1.3.14-2build1_amd64.deb",
-                sha256: "e2a91c59a2b26649ed0b331bedab0c92e56cc2021cce27df1080089edaad7aba",
-                files: &["usr/lib/x86_64-linux-gnu/libgraphite2.so.3"],
-            },
-            Deb {
-                pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_amd64.deb",
-                sha256: "011d0688aeb8e40fb146b6d6cd3d892e2a81b1e181320bcf2bf7e2d7206ae156",
+                pool: "main/libg/libglvnd/libglvnd0_1.7.0-3_amd64.deb",
+                sha256: "db2cd8cff67e3e210f5223dfe41f000efd4d3d887ab05bda2e88c4a622f12b36",
                 files: &[
-                    "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
-                    "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+                    "usr/lib/x86_64-linux-gnu/libGLdispatch.so.0",
+                    "usr/lib/x86_64-linux-gnu/libGLdispatch.so.0.0.0",
                 ],
             },
             Deb {
-                pool: "main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
-                sha256: "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
-                files: &["usr/lib/x86_64-linux-gnu/libharfbuzz.so.0"],
+                pool: "main/m/mesa/libglx-mesa0_26.0.3-1ubuntu1_amd64.deb",
+                sha256: "8b9c5841ebea4df8c6e2ca67c527addd48c3dee0c1d5686414ff7b5e6ad5fcf5",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libGLX_mesa.so.0",
+                    "usr/lib/x86_64-linux-gnu/libGLX_mesa.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
-                sha256: "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
-                files: &["usr/lib/x86_64-linux-gnu/libjpeg.so.8"],
+                pool: "main/libg/libglvnd/libglx0_1.7.0-3_amd64.deb",
+                sha256: "e0b75c32f773201ebca2184d94dfc34f6e09470c7cf6e425d48b270e516fd909",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libGLX.so.0",
+                    "usr/lib/x86_64-linux-gnu/libGLX.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/l/lz4/liblz4-1_1.9.4-1build1_amd64.deb",
-                sha256: "b9b69dedb126755f063396a6d3a3361066f9661f1c21cf5635cdd5ff6605796a",
-                files: &["usr/lib/x86_64-linux-gnu/liblz4.so.1"],
+                pool: "main/g/glycin/libglycin-2-0_2.1.1+ds-0ubuntu1_amd64.deb",
+                sha256: "99b6836d1068436e7f92cc3a7b2c2c0efddeea12dc50c16a727f45bc044d4393",
+                files: &["usr/lib/x86_64-linux-gnu/libglycin-2.so.0"],
             },
             Deb {
-                pool: "main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_amd64.deb",
-                sha256: "28851b3997e4ba74bb3197bd58796bd3041c204c21df85fe0ddafdcaced647f0",
-                files: &["usr/lib/x86_64-linux-gnu/liblzma.so.5"],
+                pool: "main/g/graphite2/libgraphite2-3_1.3.14-11ubuntu1_amd64.deb",
+                sha256: "6899c78615e681af21b88f00ac6b5b3966319093bc0bb7073ab1ed2e80192cf5",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgraphite2.so.3",
+                    "usr/lib/x86_64-linux-gnu/libgraphite2.so.3.2.1",
+                ],
             },
             Deb {
-                pool: "main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
-                sha256: "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a",
-                files: &["usr/lib/x86_64-linux-gnu/libmd.so.0"],
+                pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.52-0ubuntu1_amd64.deb",
+                sha256: "d03b766dd7ba2becf66cf21424bb441af4dbf62841b314af2720df74d95bda1a",
+                files: &[
+                    "etc/gtk-3.0/settings.ini",
+                    "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgdk-3.so.0.2420.32",
+                    "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2420.32",
+                ],
             },
             Deb {
-                pool: "main/u/util-linux/libmount1_2.39.3-9ubuntu6_amd64.deb",
-                sha256: "ccf07f3dfdda05311e66882d420140e32aeceaaa17725a0956214d81f5944995",
-                files: &["usr/lib/x86_64-linux-gnu/libmount.so.1"],
+                pool: "main/h/harfbuzz/libharfbuzz0b_12.3.2-2_amd64.deb",
+                sha256: "ec93ea39ddeb5a98179b60eab4af234b6c676f1958106645d1f4b19280d4cd09",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libharfbuzz.so.0",
+                    "usr/lib/x86_64-linux-gnu/libharfbuzz.so.0.61232.0",
+                ],
             },
             Deb {
-                pool: "main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_amd64.deb",
-                sha256: "09dfa5c881ab273ec6bc1830adcefdc407fcd619316e68fb26ca3a23d0fc9f54",
-                files: &["usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"],
+                pool: "main/l/lcms2/liblcms2-2_2.17-1_amd64.deb",
+                sha256: "6beb06e118c5a49abc312d029d6dc1ba47009e51a284d598bf394465522292f2",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/liblcms2.so.2",
+                    "usr/lib/x86_64-linux-gnu/liblcms2.so.2.0.17",
+                ],
             },
             Deb {
-                pool: "main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_amd64.deb",
-                sha256: "98cf5fc9076c2911fe20dfc1e41cd8f686a2bb5d539b1105fab18105b0db1376",
-                files: &["usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"],
+                pool: "main/l/llvm-toolchain-21/libllvm21_21.1.8-6ubuntu1_amd64.deb",
+                sha256: "9e758998dcb4aa27abbe64f2dee7bc490d9eb0721afa334a82a2b1bf6c7648f9",
+                files: &["usr/lib/x86_64-linux-gnu/libLLVM.so.21.1"],
             },
             Deb {
-                pool: "main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_amd64.deb",
-                sha256: "cc6bc9d86ef5f329edacaa4895232d8a9b8f95c5cbc77c3c460a3f64cecc213d",
-                files: &["usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"],
+                pool: "main/libm/libmd/libmd0_1.1.0-2build4_amd64.deb",
+                sha256: "da684bb562e167721ae38366586aaee0b4cc580b9ee6d0220128b15ef9c5be75",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libmd.so.0",
+                    "usr/lib/x86_64-linux-gnu/libmd.so.0.1.0",
+                ],
             },
             Deb {
-                pool: "main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_amd64.deb",
-                sha256: "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84",
-                files: &["usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"],
+                pool: "main/u/util-linux/libmount1_2.41.3-3ubuntu2_amd64.deb",
+                sha256: "c0bd8dbe186941f2aaf2b1536d1b48084a7ceda68369afb7f66391b9bcacba36",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libmount.so.1",
+                    "usr/lib/x86_64-linux-gnu/libmount.so.1.1.0",
+                ],
             },
             Deb {
-                pool: "main/p/pixman/libpixman-1-0_0.42.2-1build1_amd64.deb",
-                sha256: "d9c2931c4c424615eeab9dd5ae08bfc608b84e803c1d3ccddf319270db213421",
-                files: &["usr/lib/x86_64-linux-gnu/libpixman-1.so.0"],
+                pool: "main/p/pango1.0/libpango-1.0-0_1.57.0-1_amd64.deb",
+                sha256: "309f30a8ea77e0264a3c8b66811188f5b788fe87b33be3cafd97c8f221235591",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpango-1.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpango-1.0.so.0.5700.0",
+                ],
             },
             Deb {
-                pool: "main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_amd64.deb",
-                sha256: "128d505038cc19dfc218658562ca5917ec242b79e6e2bbfb65ee27f297a53924",
-                files: &["usr/lib/x86_64-linux-gnu/libpng16.so.16"],
+                pool: "main/p/pango1.0/libpangocairo-1.0-0_1.57.0-1_amd64.deb",
+                sha256: "a989e666bb0d64636a10a1253c949f92a282782d79d1725e0e1acc17282909a5",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0.5700.0",
+                ],
             },
             Deb {
-                pool: "main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
-                sha256: "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864",
+                pool: "main/p/pango1.0/libpangoft2-1.0-0_1.57.0-1_amd64.deb",
+                sha256: "c1e08ebf03feded26a42a0f07f94789e5995b402d704d2faafdc86fffda0b28b",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0.5700.0",
+                ],
+            },
+            Deb {
+                pool: "main/libp/libpciaccess/libpciaccess0_0.18.1-1ubuntu4_amd64.deb",
+                sha256: "685b89a66f0bf31d5e011d99af3cb110c44844cea0d62ae461e777da66350059",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpciaccess.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpciaccess.so.0.11.1",
+                ],
+            },
+            Deb {
+                pool: "main/p/pcre2/libpcre2-8-0_10.46-1build1_amd64.deb",
+                sha256: "3e116766f1a7b149994d4745556023d993d26401223d1595520a991d4ba737fb",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.14.0",
+                ],
+            },
+            Deb {
+                pool: "main/p/pixman/libpixman-1-0_0.46.4-1_amd64.deb",
+                sha256: "55a274db32d4824a1f1a48c42e959fe4293a4e4b545d400d89949cfabe160cc3",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpixman-1.so.0",
+                    "usr/lib/x86_64-linux-gnu/libpixman-1.so.0.46.4",
+                ],
+            },
+            Deb {
+                pool: "main/libp/libpng1.6/libpng16-16t64_1.6.57-1_amd64.deb",
+                sha256: "e3af297b2131aea35eab7e2751b4158ec7ae4ffb6d746043199f766fc727744f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libpng16.so.16",
+                    "usr/lib/x86_64-linux-gnu/libpng16.so.16.57.0",
+                ],
+            },
+            Deb {
+                pool: "main/libr/librsvg/librsvg2-2_2.61.3+dfsg-3_amd64.deb",
+                sha256: "af1d01163b01f45a027054c3e0bcdadf01d5d318b8b9ffdcaa13c01ec4e2f2e7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/librsvg-2.so.2",
+                    "usr/lib/x86_64-linux-gnu/librsvg-2.so.2.61.3",
+                ],
+            },
+            Deb {
+                pool: "main/libs/libseccomp/libseccomp2_2.6.0-2ubuntu5_amd64.deb",
+                sha256: "c5e4b198f251da0ede226fd179830bd8767482821a1773f835358f726795cb16",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libseccomp.so.2",
+                    "usr/lib/x86_64-linux-gnu/libseccomp.so.2.6.0",
+                ],
+            },
+            Deb {
+                pool: "main/libs/libselinux/libselinux1_3.9-4build1_amd64.deb",
+                sha256: "3ce3aea44b2ec00780c48b1b8e1f7e672166ec3ccac14b0eae8890e55983061e",
                 files: &["usr/lib/x86_64-linux-gnu/libselinux.so.1"],
             },
             Deb {
-                pool: "main/s/systemd/libsystemd0_255.4-1ubuntu8_amd64.deb",
-                sha256: "64ba97fddff491b86597e93b078e2fe3256cb80f9a113ae9d8dd1361f01b84ed",
-                files: &["usr/lib/x86_64-linux-gnu/libsystemd.so.0"],
+                pool: "main/l/lm-sensors/libsensors5_3.6.2-2build1_amd64.deb",
+                sha256: "9249cd2be68acd7b589030df72a457b89fadea6c426002b00648ad2d153d9748",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libsensors.so.5",
+                    "usr/lib/x86_64-linux-gnu/libsensors.so.5.0.0",
+                ],
             },
             Deb {
-                pool: "main/libt/libthai/libthai0_0.1.29-2build1_amd64.deb",
-                sha256: "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508",
-                files: &["usr/lib/x86_64-linux-gnu/libthai.so.0"],
+                pool: "main/g/gcc-16/libstdc++6_16-20260322-1ubuntu1_amd64.deb",
+                sha256: "a32b9ad585e39bdc7bd15d1eae6293461e6d466859a1dd2f7862d1e40f89b9d8",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+                    "usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.35",
+                ],
             },
             Deb {
-                pool: "main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_amd64.deb",
-                sha256: "29c20da27e8e37c984cf0518635c11cd0441f4cb6a2919a9f6eee1809171d327",
-                files: &["usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"],
+                pool: "main/s/systemd/libsystemd0_259.5-0ubuntu3_amd64.deb",
+                sha256: "a93b416fd58067a14061763bfc9a23d18b0d4e0914b9a678ff7795e02f71d532",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libsystemd.so.0",
+                    "usr/lib/x86_64-linux-gnu/libsystemd.so.0.42.0",
+                ],
             },
             Deb {
-                pool: "main/w/wayland/libwayland-egl1_1.22.0-2.1build1_amd64.deb",
-                sha256: "76cd17d2776428e0a0551b8f8fd954eeb3d39ca8ed2f88a38a5e4ce3ce3b2f16",
-                files: &["usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"],
+                pool: "main/libt/libthai/libthai0_0.1.30-1_amd64.deb",
+                sha256: "c06f206be1ef7aa8208110b38945205ebc742dd777cbb39142baa555fe61390a",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libthai.so.0",
+                    "usr/lib/x86_64-linux-gnu/libthai.so.0.3.2",
+                ],
             },
             Deb {
-                pool: "main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
-                sha256: "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
-                files: &["usr/lib/x86_64-linux-gnu/libX11.so.6"],
+                pool: "main/n/ncurses/libtinfo6_6.6+20251231-1_amd64.deb",
+                sha256: "42705a701a98d84c203c6f96f08c6fd6a29a1ef978683e1ffbf0e27535b20ddb",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libtinfo.so.6",
+                    "usr/lib/x86_64-linux-gnu/libtinfo.so.6.6",
+                ],
             },
             Deb {
-                pool: "main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb",
-                sha256: "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
-                files: &["usr/lib/x86_64-linux-gnu/libXau.so.6"],
+                pool: "main/w/wayland/libwayland-client0_1.24.0-2_amd64.deb",
+                sha256: "094db0e190b53872e4d5310cd5fa09ca28ee3936386cd09e5f7d13e645aa12ab",
+                files: &["usr/lib/x86_64-linux-gnu/libwayland-client.so.0.24.0"],
             },
             Deb {
-                pool: "main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_amd64.deb",
-                sha256: "7d83a0668b1a693b5ea2e496206e8371fb6beda4c54a2b4b3902005915c272c5",
-                files: &["usr/lib/x86_64-linux-gnu/libxcb-render.so.0"],
+                pool: "main/w/wayland/libwayland-cursor0_1.24.0-2_amd64.deb",
+                sha256: "941affa9ef61b0cca5cfac1fab13e8e78168af306709df4adf546c76be82a1de",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0",
+                    "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0.24.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_amd64.deb",
-                sha256: "229d1280d459f1ba44c22939d3f9b61d9d20932d9a646b3fe4ce50be4cdf2325",
-                files: &["usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"],
+                pool: "main/w/wayland/libwayland-egl1_1.24.0-2_amd64.deb",
+                sha256: "692358c252186b132f6807548cffffe6f358d5b2139e8d57d0763b1f3ba28c61",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libwayland-egl.so.1",
+                    "usr/lib/x86_64-linux-gnu/libwayland-egl.so.1.24.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb",
-                sha256: "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
-                files: &["usr/lib/x86_64-linux-gnu/libxcb.so.1"],
+                pool: "main/libx/libx11/libx11-6_1.8.13-1_amd64.deb",
+                sha256: "7e643e76063b94df9159c8b8fd4b8bf53d2fbf119c9889a5cc6842b6be272e4f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libX11.so.6",
+                    "usr/lib/x86_64-linux-gnu/libX11.so.6.4.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb",
-                sha256: "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
-                files: &["usr/lib/x86_64-linux-gnu/libXcomposite.so.1"],
+                pool: "main/libx/libx11/libx11-xcb1_1.8.13-1_amd64.deb",
+                sha256: "e20ab288f2f756800ae25e7a827ae70aee64272f692dd3cb8f706764b6767de9",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libX11-xcb.so.1",
+                    "usr/lib/x86_64-linux-gnu/libX11-xcb.so.1.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
-                sha256: "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
-                files: &["usr/lib/x86_64-linux-gnu/libXcursor.so.1"],
+                pool: "main/libx/libxau/libxau6_1.0.11-1build2_amd64.deb",
+                sha256: "6c0b2dd4654db30449754e6e1adf84a34d8a8d7dddeb75f8c9c463ad86645274",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXau.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXau.so.6.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb",
-                sha256: "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
-                files: &["usr/lib/x86_64-linux-gnu/libXdamage.so.1"],
+                pool: "main/libx/libxcb/libxcb-dri3-0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "2e0e3916c647a74e081621f385aa296dab3052b2582b0781d9fbea2f15696ef4",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-dri3.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-dri3.so.0.1.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb",
-                sha256: "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
-                files: &["usr/lib/x86_64-linux-gnu/libXdmcp.so.6"],
+                pool: "main/libx/libxcb/libxcb-glx0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "857c34618ae56b2577d8d439cf86f80375582626193efaa3229c6767106a1a20",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-glx.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-glx.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
-                sha256: "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
-                files: &["usr/lib/x86_64-linux-gnu/libXext.so.6"],
+                pool: "main/libx/libxcb/libxcb-present0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "64f23e7166461758d158220305e93a98fe75c570b68f96303a1c2395a58d5d7d",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-present.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-present.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
-                sha256: "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
-                files: &["usr/lib/x86_64-linux-gnu/libXfixes.so.3"],
+                pool: "main/libx/libxcb/libxcb-randr0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "78977a067ec1d59bb4ded1b35835d0ba70e6538aac1ea7edefe413795aaa0d4f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0.1.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
-                sha256: "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
-                files: &["usr/lib/x86_64-linux-gnu/libXi.so.6"],
+                pool: "main/libx/libxcb/libxcb-render0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "2bdd10dd88c99523a62bfcc2b71b59fdf93ee396e8baf617c76fc3ec38f39bde",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-render.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-render.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
-                sha256: "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
-                files: &["usr/lib/x86_64-linux-gnu/libXinerama.so.1"],
+                pool: "main/libx/libxcb/libxcb-shm0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "e70d52936aabd7a90e9cd8af0f54ca050cde244f8382ffc5524ba65117c199c4",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-shm.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-shm.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
-                sha256: "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
-                files: &["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"],
+                pool: "main/libx/libxcb/libxcb-sync1_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "8883f5e6badab24cb7487390bf1a888bb714e406f6c799345c33e4b69a8f3112",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-sync.so.1",
+                    "usr/lib/x86_64-linux-gnu/libxcb-sync.so.1.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
-                sha256: "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
-                files: &["usr/lib/x86_64-linux-gnu/libXrandr.so.2"],
+                pool: "main/libx/libxcb/libxcb-xfixes0_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "00c1381b61e2e5b8a78e89b15818a214a8f44f1fae6a9ddd95e7c61de8ea33d2",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
-                sha256: "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
-                files: &["usr/lib/x86_64-linux-gnu/libXrender.so.1"],
+                pool: "main/libx/libxcb/libxcb1_1.17.0-2ubuntu1_amd64.deb",
+                sha256: "069e64705e4a5721a223b4d22643bbaeaa63a6efbb56ebd3d7c4a31c4a26fa1c",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcb.so.1",
+                    "usr/lib/x86_64-linux-gnu/libxcb.so.1.1.0",
+                ],
             },
             Deb {
-                pool: "main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_amd64.deb",
-                sha256: "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
-                files: &["usr/lib/x86_64-linux-gnu/libzstd.so.1"],
+                pool: "main/libx/libxcomposite/libxcomposite1_0.4.6-1build1_amd64.deb",
+                sha256: "b8557d5aba1e575acfb169f47e798c449c8a5ca05846861f1480724d4cfc5ce3",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXcomposite.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXcomposite.so.1.0.0",
+                ],
             },
             Deb {
-                pool: "main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_amd64.deb",
-                sha256: "0b93d16d7498f092fa3070fbbad28cdbc6b3d640f1a7681b96fc37f20d1219f1",
-                files: &["usr/lib/x86_64-linux-gnu/libz.so.1"],
+                pool: "main/libx/libxcursor/libxcursor1_1.2.3-1build1_amd64.deb",
+                sha256: "0f3d9816a3a557590ca1b31f2548b1988ad7ec9de976bad07cc24cc7d69b4ee7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXcursor.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXcursor.so.1.0.2",
+                ],
             },
-            // gdk-pixbuf (which depends on it) picks an image's loader by its
-            // MIME type through GIO, which reads the MIME database's mime.cache:
-            // made at installation from this XML (`update_mime_database`).
             Deb {
-                pool: "main/s/shared-mime-info/shared-mime-info_2.4-4_amd64.deb",
-                sha256: "7a774ea291ab99bfa987866c6b68e825531eeea7c8a732dd47d14cf480453fda",
+                pool: "main/libx/libxdamage/libxdamage1_1.1.7-1_amd64.deb",
+                sha256: "dd751597c6216105774a93769972d1cb6dad5fd1ba91f090197d7acc85c406cb",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXdamage.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXdamage.so.1.1.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxdmcp/libxdmcp6_1.1.5-2_amd64.deb",
+                sha256: "d5d51e67063ff11e81698d8ee90bab5af763dc0a793929f33712bb74e7633768",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXdmcp.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXdmcp.so.6.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxext/libxext6_1.3.4-1build3_amd64.deb",
+                sha256: "b867ba9daa9437ba3f18cba9646d9e3db55e5197bd4feb53184b1414c05210ca",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXext.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXext.so.6.4.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build2_amd64.deb",
+                sha256: "f3a71f6aa12000480c419e44f3aa5bdca7eb862b720d0307661b4e886db1c5f8",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXfixes.so.3",
+                    "usr/lib/x86_64-linux-gnu/libXfixes.so.3.1.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxi/libxi6_1.8.2-2_amd64.deb",
+                sha256: "b975dd89cac8c32a3cf622e1b7f5434db59f37eda87dfee399d0806d9953db0a",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXi.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXi.so.6.1.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build2_amd64.deb",
+                sha256: "02d3dce422acc3ac9b5491f47acdd07bc7c3f78ce193865f2920d38b10fbadf5",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXinerama.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXinerama.so.1.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxkbcommon/libxkbcommon0_1.13.1-1_amd64.deb",
+                sha256: "7988d2375d10277ab4a54641aa6181accfaf3f5d25e48b050bf42a9583d4f926",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0.13.1",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxml2/libxml2-16_2.15.2+dfsg-0.1_amd64.deb",
+                sha256: "f0c87cee9a1fb871e66698dc05fe38e0a3e7232eb961b690a8e7dc26f9753813",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxml2.so.16",
+                    "usr/lib/x86_64-linux-gnu/libxml2.so.16.1.2",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxrandr/libxrandr2_1.5.4-1build1_amd64.deb",
+                sha256: "d0052315ac1417234777c0872568a86fce4d3a3316c041e5a2200da70f43a855",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXrandr.so.2",
+                    "usr/lib/x86_64-linux-gnu/libXrandr.so.2.2.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxrender/libxrender1_0.9.12-1build1_amd64.deb",
+                sha256: "60b2f01e8124318e2a11049b82c764fd4c05c21adba11312e93ab116d6594f1e",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXrender.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXrender.so.1.3.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxres/libxres1_1.2.1-1build2_amd64.deb",
+                sha256: "c7794a754880ef7bde4a73c0257dd48d8e3f387ee1618ba97f8e5cf5cdd7c80f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXRes.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXRes.so.1.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxshmfence/libxshmfence1_1.3.3-1build1_amd64.deb",
+                sha256: "85d6b6883a35e1a3b78af3dda6bb6b843c06cbead030a00d9de7d31a8077d562",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxshmfence.so.1",
+                    "usr/lib/x86_64-linux-gnu/libxshmfence.so.1.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/libx/libxxf86vm/libxxf86vm1_1.1.4-2_amd64.deb",
+                sha256: "ff01ae50526c23c6c747e1efd98ee3785a1d28458e865277fc367c565bb94703",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXxf86vm.so.1",
+                    "usr/lib/x86_64-linux-gnu/libXxf86vm.so.1.0.0",
+                ],
+            },
+            Deb {
+                pool: "main/libz/libzstd/libzstd1_1.5.7+dfsg-3_amd64.deb",
+                sha256: "34365d611ccf1f717f90a92fbe52ed96ae1829ab9be363c68a83563322797f8f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libzstd.so.1",
+                    "usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+                ],
+            },
+            Deb {
+                pool: "main/m/mesa/mesa-libgallium_26.0.3-1ubuntu1_amd64.deb",
+                sha256: "997c3342fd8e74d61621d98b903122b7c34be687c886fb86edeeb96abb4600c0",
+                files: &["usr/lib/x86_64-linux-gnu/libgallium-26.0.3-1ubuntu1.so"],
+            },
+            Deb {
+                pool: "main/s/shared-mime-info/shared-mime-info_2.4-5build3_amd64.deb",
+                sha256: "da2eb52074c56dc60f6e446166ad799baa9a53e619971debd033e99ed37f158f",
                 files: &["usr/share/mime/packages/freedesktop.org.xml"],
             },
             Deb {
-                pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
-                sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+                pool: "main/x/xkeyboard-config/xkb-data_2.46-2_all.deb",
+                sha256: "a24f82b33020836444593a7ffbed959458852e28cfe16de2ff95bcbdcfbdb2d3",
                 files: &[
                     "usr/share/X11/xkb/compat/accessx",
                     "usr/share/X11/xkb/compat/basic",
@@ -971,232 +1553,328 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                     "usr/share/X11/xkb/types/mousekeys",
                     "usr/share/X11/xkb/types/numpad",
                     "usr/share/X11/xkb/types/pc",
+                    "usr/share/xkeyboard-config-2/compat/accessx",
+                    "usr/share/xkeyboard-config-2/compat/basic",
+                    "usr/share/xkeyboard-config-2/compat/caps",
+                    "usr/share/xkeyboard-config-2/compat/complete",
+                    "usr/share/xkeyboard-config-2/compat/iso9995",
+                    "usr/share/xkeyboard-config-2/compat/ledcaps",
+                    "usr/share/xkeyboard-config-2/compat/lednum",
+                    "usr/share/xkeyboard-config-2/compat/ledscroll",
+                    "usr/share/xkeyboard-config-2/compat/level5",
+                    "usr/share/xkeyboard-config-2/compat/misc",
+                    "usr/share/xkeyboard-config-2/compat/mousekeys",
+                    "usr/share/xkeyboard-config-2/compat/xfree86",
+                    "usr/share/xkeyboard-config-2/keycodes/aliases",
+                    "usr/share/xkeyboard-config-2/keycodes/evdev",
+                    "usr/share/xkeyboard-config-2/rules/evdev",
+                    "usr/share/xkeyboard-config-2/symbols/inet",
+                    "usr/share/xkeyboard-config-2/symbols/keypad",
+                    "usr/share/xkeyboard-config-2/symbols/pc",
+                    "usr/share/xkeyboard-config-2/symbols/srvr_ctrl",
+                    "usr/share/xkeyboard-config-2/symbols/us",
+                    "usr/share/xkeyboard-config-2/types/basic",
+                    "usr/share/xkeyboard-config-2/types/complete",
+                    "usr/share/xkeyboard-config-2/types/extra",
+                    "usr/share/xkeyboard-config-2/types/iso9995",
+                    "usr/share/xkeyboard-config-2/types/level5",
+                    "usr/share/xkeyboard-config-2/types/mousekeys",
+                    "usr/share/xkeyboard-config-2/types/numpad",
+                    "usr/share/xkeyboard-config-2/types/pc",
+                ],
+            },
+            Deb {
+                pool: "main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu3_amd64.deb",
+                sha256: "c45bbbf9c87457d90b8ba38720c5f01b9388c380d40f303c26f5c4953932da26",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libz.so.1",
+                    "usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
                 ],
             },
         ],
     },
     LinuxRoot {
-        // X11 through Xwayland (ROADMAP LD step 5, `lx_xterm`): Ubuntu 24.04's
-        // Xwayland 23.2.6, xkbcomp (Xwayland runs it through `/bin/sh -c` to
-        // compile each keymap), dash as /bin/sh, and xterm 390, with the
-        // libraries of theirs the "gtk3" root lacks (shipped with it: libX11,
-        // libxcb, fontconfig and friends are there). Xwayland runs with
-        // `-shm`: libgbm, libdrm, libGL and libdecor are linked but not used
-        // (no glamor, no rootful decorations). Of xkb-data, the geometry the
-        // default keymap names (the rest is the "gtk3" root's); X's core
-        // fonts are Xwayland's built-ins ("fixed" and "cursor"), which xterm's
-        // default font is. libresolv is glibc's (libtirpc needs it).
+        // X11 through Xwayland (ROADMAP LD step 5, `lx_xterm`): Ubuntu 26.04's
+        // Xwayland 24.1.10, xkbcomp (Xwayland runs it through `/bin/sh -c` to
+        // compile each keymap), dash as /bin/sh, xterm 407 and twm (the
+        // xdesktop session's), with what they opened under `strace -f -y` on
+        // Ubuntu 26.04 that the "gtk3" root lacks: rootless Xwayland with
+        // `-shm` and an xterm, rootful Xwayland with `-decorate`, twm and an
+        // xterm. Mesa's DRI driver (`swrast_dri.so`, with gallium and LLVM:
+        // 185 MB) was moved aside for the trace: Xwayland then runs without
+        // GLX, as gala's has (`-shm`, no glamor).
         name: "x11",
         debs: &[
             Deb {
-                pool: "main/x/xwayland/xwayland_23.2.6-1_amd64.deb",
-                sha256: "50c42bd751b33b617954ed7264ef03d18750d78b20b62359e7d8c6f5aa205ce3",
-                files: &["usr/bin/Xwayland"],
-            },
-            // A distribution's desktop in one window (LD step 6, `lx_xdesktop`):
-            // twm, X.Org's window manager (its libraries are xterm's), and
-            // coreutils' sleep for the session script.
-            // Xlib's locale database, the C locale's part: without it Xlib
-            // warns that the locale is not supported and xterm finds no
-            // input method (stderr lines real Linux does not print).
-            Deb {
-                pool: "main/libx/libx11/libx11-data_1.8.7-1build1_all.deb",
-                sha256: "9ae01f7747e7f479394c697c55acf11d3baf139e8e54b7c4adfb55ef9c50de08",
-                files: &[
-                    "usr/share/X11/locale/locale.alias",
-                    "usr/share/X11/locale/locale.dir",
-                    "usr/share/X11/locale/compose.dir",
-                    "usr/share/X11/locale/C/XLC_LOCALE",
-                    "usr/share/X11/locale/C/XI18N_OBJS",
-                    "usr/share/X11/locale/C/Compose",
-                ],
-            },
-            Deb {
-                pool: "universe/t/twm/twm_1.0.10-1build2_amd64.deb",
-                sha256: "29517224de67d2dcd27be2e4cde9394e9aad5d3507491b053c2b3b4f895af9c2",
-                files: &["usr/bin/twm"],
-            },
-            Deb {
-                pool: "main/c/coreutils/coreutils_9.4-3ubuntu6_amd64.deb",
-                sha256: "0d19c3e94f04ff1aafde46701fe1783da0a068a4904adc3794c30140f1aaeb8f",
-                files: &["usr/bin/sleep"],
-            },
-            Deb {
-                pool: "main/x/x11-xkb-utils/x11-xkb-utils_7.7+8build2_amd64.deb",
-                sha256: "69df4191e165f8b89d067f6234fcce89a4923d27d1e66dd92e6d63d6da93cdb0",
-                files: &["usr/bin/xkbcomp"],
-            },
-            Deb {
-                pool: "universe/x/xterm/xterm_390-1ubuntu3_amd64.deb",
-                sha256: "3541b6956d6c4be71db7b66ec91985bd5eb128fb130e806f1c879f9d94a97c72",
-                // Its desktop entry: the start menu lists it as one of the
-                // distribution's applications (LD step 7, `linux_menu`).
-                files: &["usr/bin/xterm", "usr/share/applications/debian-xterm.desktop"],
-            },
-            Deb {
-                pool: "main/d/dash/dash_0.5.12-6ubuntu5_amd64.deb",
-                sha256: "e97728d8deaa51300255f0572bbd68b9549e0894a184c056dc420fc4e0ba0781",
+                pool: "main/d/dash/dash_0.5.12-12ubuntu3_amd64.deb",
+                sha256: "563091a9b615a5a59951c2cc4478163d099df366a051113e8ce5bb2baab7f0c8",
                 files: &["usr/bin/sh"],
             },
             Deb {
-                pool: "main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb",
-                sha256: "af36c7ac770770fe3d3c10e85d6bc538e76e57570ba7db7d397fb9f654783ef3",
+                pool: "main/g/glibc/libc6_2.43-2ubuntu2_amd64.deb",
+                sha256: "c13775dc0c984403f3fcad229d14507a9f387763bd07ace1e5f93897ee6b8434",
                 files: &["usr/lib/x86_64-linux-gnu/libresolv.so.2"],
             },
             Deb {
-                pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
-                sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
-                files: &["usr/share/X11/xkb/geometry/pc"],
+                pool: "main/e/e2fsprogs/libcom-err2_1.47.2-3ubuntu4_amd64.deb",
+                sha256: "180b6ea0b9c07d4fd2ede79e29ee8eca830cd9384f856507e28dc24d1d3ae514",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libcom_err.so.2",
+                    "usr/lib/x86_64-linux-gnu/libcom_err.so.2.1",
+                ],
             },
             Deb {
-                pool: "main/libg/libglvnd/libgl1_1.7.0-1build1_amd64.deb",
-                sha256: "e2b2fadeb883f073b566ad1d7874f6702397514d258473e96152a89d4d502a09",
-                files: &["usr/lib/x86_64-linux-gnu/libGL.so.1"],
+                pool: "main/libd/libdecor-0/libdecor-0-0_0.2.5-1_amd64.deb",
+                sha256: "23ea4cd788fe5bf9883fd125dd1ac973db807b9a888dae70abde5bb9d2584de1",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libdecor-0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libdecor-0.so.0.200.5",
+                ],
             },
             Deb {
-                pool: "main/libg/libglvnd/libglx0_1.7.0-1build1_amd64.deb",
-                sha256: "aa4953182f30abde90cb5b072e83d7286b557b325769b8686196a7bd396d8795",
-                files: &["usr/lib/x86_64-linux-gnu/libGLX.so.0"],
+                pool: "main/libe/libei/libei1_1.5.0-3_amd64.deb",
+                sha256: "d3b0b40cb7cf3686c0aaebf6e6b4e11c8903d295fb9b5ffc9e66d99cf8448f7b",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libei.so.1",
+                    "usr/lib/x86_64-linux-gnu/libei.so.1.5.0",
+                ],
             },
             Deb {
-                pool: "main/libg/libglvnd/libglvnd0_1.7.0-1build1_amd64.deb",
-                sha256: "33f5e07c74f73c2bfb44086ae0f9e6da52acd6c104d30ffe8fd768d8253d5e82",
-                files: &["usr/lib/x86_64-linux-gnu/libGLdispatch.so.0"],
+                pool: "main/libf/libfontenc/libfontenc1_1.1.8-1build2_amd64.deb",
+                sha256: "1fab0e125d793da45d91b346c334c496776d69709a7ea78c3b34d5db6db69eab",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libfontenc.so.1",
+                    "usr/lib/x86_64-linux-gnu/libfontenc.so.1.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxfont/libxfont2_2.0.6-1build1_amd64.deb",
-                sha256: "1d5653c395f17f48473fce56cdab30eed16aac017359e6d2c34bc402d85197a0",
-                files: &["usr/lib/x86_64-linux-gnu/libXfont2.so.2"],
+                pool: "main/m/mesa/libgbm1_26.0.3-1ubuntu1_amd64.deb",
+                sha256: "8cb40b0bf0f2399825e85d03aa35c6069ce567686c14476175d45768cfcad0f3",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgbm.so.1",
+                    "usr/lib/x86_64-linux-gnu/libgbm.so.1.0.0",
+                ],
             },
             Deb {
-                pool: "main/libf/libfontenc/libfontenc1_1.1.8-1build1_amd64.deb",
-                sha256: "0c5d57211cac9659e7f4c856f5e1922c4a522fe8bcf5776e9707b2811f965702",
-                files: &["usr/lib/x86_64-linux-gnu/libfontenc.so.1"],
+                pool: "main/libg/libgcrypt20/libgcrypt20_1.12.0-2_amd64.deb",
+                sha256: "e063b7f814fe20453a8d8f7954aed902e539b36b3ba7e6c00074829f1ce1a174",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgcrypt.so.20",
+                    "usr/lib/x86_64-linux-gnu/libgcrypt.so.20.7.0",
+                ],
             },
             Deb {
-                pool: "main/libd/libdecor-0/libdecor-0-0_0.2.2-1build2_amd64.deb",
-                sha256: "64bf085d16e504e9ed39b91d2a46748fb8881ad7f3603fbacef6c11c04aa7064",
-                files: &["usr/lib/x86_64-linux-gnu/libdecor-0.so.0"],
+                pool: "main/libg/libgpg-error/libgpg-error0_1.58-2_amd64.deb",
+                sha256: "02d02854c5f9cc2cc47b8c4bb6a468c16df1bc2c4627cf83bd1dab0bff6d0263",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgpg-error.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgpg-error.so.0.41.1",
+                ],
             },
             Deb {
-                pool: "main/libd/libdrm/libdrm2_2.4.120-2build1_amd64.deb",
-                sha256: "f5fb4e7ce17921cc466fb7911abf91495ffb181b36772f68e2e82cb621703112",
-                files: &["usr/lib/x86_64-linux-gnu/libdrm.so.2"],
+                pool: "main/k/krb5/libgssapi-krb5-2_1.22.1-2ubuntu4_amd64.deb",
+                sha256: "e9329ba8c8c92b6cb10e3adf8bb75ed6289ada8e4f395550b3f1dc84f251f7ac",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2",
+                    "usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2.2",
+                ],
             },
             Deb {
-                pool: "main/m/mesa/libgbm1_24.0.5-1ubuntu1_amd64.deb",
-                sha256: "bffad21d2383429d6dbec8395ba8d8476a0ed69e7e0b1c3ef2f27da99211b200",
-                files: &["usr/lib/x86_64-linux-gnu/libgbm.so.1"],
+                pool: "main/libi/libice/libice6_1.1.1-1build1_amd64.deb",
+                sha256: "d755a3f99a4895165703aad60ff15cf931e04da41b35facb15393d7d4b2c0242",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libICE.so.6",
+                    "usr/lib/x86_64-linux-gnu/libICE.so.6.3.0",
+                ],
             },
             Deb {
-                pool: "main/libt/libtirpc/libtirpc3t64_1.3.4+ds-1.1build1_amd64.deb",
-                sha256: "3a3cd37160399ab235fdf2f13159fd288940abb9660e0ed1afb418b44c73d43a",
-                files: &["usr/lib/x86_64-linux-gnu/libtirpc.so.3"],
+                pool: "main/k/krb5/libk5crypto3_1.22.1-2ubuntu4_amd64.deb",
+                sha256: "f8a985e1bc63f943db0ca9ada3309edfda4042a3023e36d80c6cf3e9591c557b",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libk5crypto.so.3",
+                    "usr/lib/x86_64-linux-gnu/libk5crypto.so.3.1",
+                ],
             },
             Deb {
-                pool: "main/k/krb5/libgssapi-krb5-2_1.20.1-6ubuntu2_amd64.deb",
-                sha256: "0e22fb29a907ef6deeb56543bcbf9f736500cb37da2e3a6257c1bedf7c0783db",
-                files: &["usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2"],
+                pool: "main/k/keyutils/libkeyutils1_1.6.3-6ubuntu3_amd64.deb",
+                sha256: "ea7d3cc642ffe2459c35a85c894f80e92499b9eba13bdcb225e0aa751c0970be",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libkeyutils.so.1",
+                    "usr/lib/x86_64-linux-gnu/libkeyutils.so.1.10",
+                ],
             },
             Deb {
-                pool: "main/k/krb5/libkrb5-3_1.20.1-6ubuntu2_amd64.deb",
-                sha256: "10ab284396a94349aa319c7c0a59cc747c5d75ba8b81e0ffcbdae96d8d8a2a78",
-                files: &["usr/lib/x86_64-linux-gnu/libkrb5.so.3"],
+                pool: "main/k/krb5/libkrb5-3_1.22.1-2ubuntu4_amd64.deb",
+                sha256: "bcba1775a914698ba5270f0febb1c47a3fceede86b17c574550d84e0b581dc0f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libkrb5.so.3",
+                    "usr/lib/x86_64-linux-gnu/libkrb5.so.3.3",
+                ],
             },
             Deb {
-                pool: "main/k/krb5/libk5crypto3_1.20.1-6ubuntu2_amd64.deb",
-                sha256: "212318ab9c98e151cfd331b9310827d43316dcf33e1e0e8d3d9fc2b3fbd88cfb",
-                files: &["usr/lib/x86_64-linux-gnu/libk5crypto.so.3"],
+                pool: "main/k/krb5/libkrb5support0_1.22.1-2ubuntu4_amd64.deb",
+                sha256: "f9cfb4ba27d0745cbfc7c064cc68f15ea3d6b144a4fd1da9c5f83fe30008aef7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libkrb5support.so.0",
+                    "usr/lib/x86_64-linux-gnu/libkrb5support.so.0.1",
+                ],
             },
             Deb {
-                pool: "main/e/e2fsprogs/libcom-err2_1.47.0-2.4~exp1ubuntu4_amd64.deb",
-                sha256: "c95d59cad331f88ddffa3a85f1119bac98dd956916af642c60dd66a485ee97df",
-                files: &["usr/lib/x86_64-linux-gnu/libcom_err.so.2"],
+                pool: "main/libe/libei/liboeffis1_1.5.0-3_amd64.deb",
+                sha256: "8c64c961da0fb331554f02c416865d7ae6d1c9499959dc4b799b693183780e34",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/liboeffis.so.1",
+                    "usr/lib/x86_64-linux-gnu/liboeffis.so.1.5.0",
+                ],
             },
             Deb {
-                pool: "main/k/krb5/libkrb5support0_1.20.1-6ubuntu2_amd64.deb",
-                sha256: "5a6aa4d7f11ccad8f4bdfbce5e718827875d9440b1fb3d40c82dff0d9edb6e9b",
-                files: &["usr/lib/x86_64-linux-gnu/libkrb5support.so.0"],
+                pool: "main/libs/libsm/libsm6_1.2.6-1build1_amd64.deb",
+                sha256: "8f0d18029ed6918c8a422c8108d5efe6bc3a0e264dc65844b47132aad426536c",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libSM.so.6",
+                    "usr/lib/x86_64-linux-gnu/libSM.so.6.0.1",
+                ],
             },
             Deb {
-                pool: "main/k/keyutils/libkeyutils1_1.6.3-3build1_amd64.deb",
-                sha256: "0679f198b0128179e46cdf956fb2022c23c758664c00bc8efa0382d509683a8a",
-                files: &["usr/lib/x86_64-linux-gnu/libkeyutils.so.1"],
+                pool: "main/libt/libtirpc/libtirpc3t64_1.3.7-0.1_amd64.deb",
+                sha256: "a6c68bbbcbaf2941aee004e581289958c690d17b867be510940a82df2a5572c1",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libtirpc.so.3",
+                    "usr/lib/x86_64-linux-gnu/libtirpc.so.3.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxcvt/libxcvt0_0.1.2-1build1_amd64.deb",
-                sha256: "73215b31e1585e042aa2b9dc97cf4dfcfc6287fb0f6eca8bcab0b1f30a51c8e7",
-                files: &["usr/lib/x86_64-linux-gnu/libxcvt.so.0"],
+                pool: "main/libu/libutempter/libutempter0_1.2.1-4build1_amd64.deb",
+                sha256: "8f0f912d0108286b99a953bd0f6febb41187bdf8608fa11ac3af026a6d8b6771",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libutempter.so.0",
+                    "usr/lib/x86_64-linux-gnu/libutempter.so.1.2.1",
+                    "usr/lib/x86_64-linux-gnu/utempter/utempter",
+                ],
             },
             Deb {
-                pool: "main/libx/libxshmfence/libxshmfence1_1.3-1build5_amd64.deb",
-                sha256: "bc6de4bfaf9050a8ba83d4bcfb114131b081084a7972c03417f8523d52b5c742",
-                files: &["usr/lib/x86_64-linux-gnu/libxshmfence.so.1"],
+                pool: "main/u/util-linux/libuuid1_2.41.3-3ubuntu2_amd64.deb",
+                sha256: "ea9d94da2fb6564391145f3a9630c140c8dd771a38ae753983e8dc55cc22e102",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libuuid.so.1",
+                    "usr/lib/x86_64-linux-gnu/libuuid.so.1.3.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxkbfile/libxkbfile1_1.1.0-1build4_amd64.deb",
-                sha256: "22ac5b7dca740e606261cebdfaf1a07738e92ad3d123570694374ddb4d5afea2",
-                files: &["usr/lib/x86_64-linux-gnu/libxkbfile.so.1"],
+                pool: "main/libx/libx11/libx11-data_1.8.13-1_all.deb",
+                sha256: "8188c233d59dc419205c314ef8f230fc83ca7a3e7e9b9671f18b469fd3e428ae",
+                files: &[
+                    "usr/share/X11/locale/C/XLC_LOCALE",
+                    "usr/share/X11/locale/compose.dir",
+                    "usr/share/X11/locale/iso8859-1/Compose",
+                    "usr/share/X11/locale/locale.alias",
+                    "usr/share/X11/locale/locale.dir",
+                ],
             },
             Deb {
-                pool: "main/libx/libxaw/libxaw7_1.0.14-1build2_amd64.deb",
-                sha256: "2a9cdc82ecf566de76e05394efc604c9cced49e12c28b10e1ca101062b47bac0",
-                files: &["usr/lib/x86_64-linux-gnu/libXaw.so.7"],
+                pool: "main/libx/libxaw/libxaw7_1.0.16-1build1_amd64.deb",
+                sha256: "8771b09a2ed641887411b9c5e10621440972340710fa4a8e015f062e5a7f5930",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXaw.so.7",
+                    "usr/lib/x86_64-linux-gnu/libXaw7.so.7.0.0",
+                ],
             },
             Deb {
-                pool: "main/libx/libxmu/libxmu6_1.1.3-3build2_amd64.deb",
-                sha256: "05c13bce0e9a80139dfa72cc8e7a695b4f7d58b1884423929eade62179d99853",
-                files: &["usr/lib/x86_64-linux-gnu/libXmu.so.6"],
+                pool: "main/libx/libxcvt/libxcvt0_0.1.3-1build1_amd64.deb",
+                sha256: "3660c17f9a96c3fe1edd81b2795a17d273b3da39444f2d39f715ebd85cabe6ff",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxcvt.so.0",
+                    "usr/lib/x86_64-linux-gnu/libxcvt.so.0.1.3",
+                ],
             },
             Deb {
-                pool: "main/libx/libxt/libxt6t64_1.2.1-1.2build1_amd64.deb",
-                sha256: "2e4317d5ae1a45e517771ea0b8d93519b5f915ab08983facecd480d64dbd1489",
-                files: &["usr/lib/x86_64-linux-gnu/libXt.so.6"],
+                pool: "main/libx/libxfont/libxfont2_2.0.6-2_amd64.deb",
+                sha256: "d47fa48e08c31a57443a062c9f8623ffe9837700ab292b7e94151bedc022af1f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXfont2.so.2",
+                    "usr/lib/x86_64-linux-gnu/libXfont2.so.2.0.0",
+                ],
             },
             Deb {
-                pool: "main/libi/libice/libice6_1.0.10-1build3_amd64.deb",
-                sha256: "ad1edb5303574fee154e487947177e5bd15363aa71b92f78f5a2a7145fdb81c5",
-                files: &["usr/lib/x86_64-linux-gnu/libICE.so.6"],
+                pool: "main/x/xft/libxft2_2.3.6-1build2_amd64.deb",
+                sha256: "a6ad7fd2294e8e04d553919b5beed0269ebc6f73d41261ed1059c7fde83227f0",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXft.so.2",
+                    "usr/lib/x86_64-linux-gnu/libXft.so.2.3.6",
+                ],
             },
             Deb {
-                pool: "main/libs/libsm/libsm6_1.2.3-1build3_amd64.deb",
-                sha256: "1d27ebc381b499075a28c504be4d7d424c63b6866354736ac7f8d25813860cdf",
-                files: &["usr/lib/x86_64-linux-gnu/libSM.so.6"],
+                pool: "main/libx/libxkbfile/libxkbfile1_1.1.0-1build5_amd64.deb",
+                sha256: "40bf42bc549b5d1f848e2ce8c1bafc9777e0fd4b943bbff922dd340f7ab3f5d7",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libxkbfile.so.1",
+                    "usr/lib/x86_64-linux-gnu/libxkbfile.so.1.0.2",
+                ],
             },
             Deb {
-                pool: "main/libx/libxpm/libxpm4_3.5.17-1build2_amd64.deb",
-                sha256: "ad9d9cb9be156d8b80c12735ecb4aae57e5501280a9f952749e8b71a7e5f9c97",
-                files: &["usr/lib/x86_64-linux-gnu/libXpm.so.4"],
+                pool: "main/libx/libxmu/libxmu6_1.1.3-4_amd64.deb",
+                sha256: "15e9c3a2bd4132a2873b339b4af578dd19462f1eee705b025f656ea548aba19f",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXmu.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXmu.so.6.2.0",
+                ],
             },
             Deb {
-                pool: "main/x/xft/libxft2_2.3.6-1build1_amd64.deb",
-                sha256: "b4f4f3255c0b8773b260c61cbe20ee7c63799cfc0e4e389fa58375dd480b093a",
-                files: &["usr/lib/x86_64-linux-gnu/libXft.so.2"],
+                pool: "main/libx/libxpm/libxpm4_3.5.17-1build3_amd64.deb",
+                sha256: "6016d743494fca51d029b07d3eabac0c774dd2ba1ec3ea9f4288c47c89474ac6",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXpm.so.4",
+                    "usr/lib/x86_64-linux-gnu/libXpm.so.4.11.0",
+                ],
             },
             Deb {
-                pool: "main/libu/libutempter/libutempter0_1.2.1-3build1_amd64.deb",
-                sha256: "46c0dfbfeca19ba0773398d654b7e7225b178f26b414f0e2f8250519551bfb32",
-                files: &["usr/lib/x86_64-linux-gnu/libutempter.so.0"],
+                pool: "main/libx/libxt/libxt6t64_1.2.1-1.3build1_amd64.deb",
+                sha256: "b4255d5aea7986fa06ae3a3599f9e5c38a58ded1c3b79cfaf3c2959ad160eeff",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libXt.so.6",
+                    "usr/lib/x86_64-linux-gnu/libXt.so.6.0.0",
+                ],
             },
             Deb {
-                pool: "main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2_amd64.deb",
-                sha256: "53e1e1753729d04cf65b05e6e58abe06e2bb76cc07eff0e1b2a638a638ca209b",
-                files: &["usr/lib/x86_64-linux-gnu/libtinfo.so.6"],
+                pool: "main/n/ncurses/ncurses-base_6.6+20251231-1_all.deb",
+                sha256: "c36efa1e8456f40595f910047d2ebae8f51dcb918ca91c2da94ff733a00630a7",
+                files: &["usr/share/terminfo/x/xterm"],
             },
             Deb {
-                pool: "main/u/util-linux/libuuid1_2.39.3-9ubuntu6_amd64.deb",
-                sha256: "4ba2c3a10469d1ab8e01a9af8e39093ed43addada658c04737287c5f91a1645b",
-                files: &["usr/lib/x86_64-linux-gnu/libuuid.so.1"],
+                pool: "main/r/rust-coreutils/rust-coreutils_0.8.0-0ubuntu3_amd64.deb",
+                sha256: "c5c87994f543e3a771803e8cffce87a7e4e133dda59318bd874f58aaf40ac91f",
+                files: &[
+                    "usr/bin/sleep=usr/lib/cargo/bin/coreutils/sleep",
+                    "usr/share/coreutils/locales/uucore/en-US.ftl",
+                ],
             },
             Deb {
-                pool: "main/w/wayland/libwayland-server0_1.22.0-2.1build1_amd64.deb",
-                sha256: "edbfa4b6857691ae922cc768a753fab230eee9e956aa2ce4f2eaa8d9ad777dca",
-                files: &["usr/lib/x86_64-linux-gnu/libwayland-server.so.0"],
+                pool: "universe/t/twm/twm_1.0.10-1build3_amd64.deb",
+                sha256: "9adcabbcdb21ed3df715fd83ef8d752b64e3b00a85276c70fd0c2464c03ae8bd",
+                files: &["usr/bin/twm"],
             },
             Deb {
-                pool: "main/libx/libxcb/libxcb-randr0_1.15-1ubuntu2_amd64.deb",
-                sha256: "b5cb519823a05a617b543dc9b6a9289b7648b20048244abe021caa706309835a",
-                files: &["usr/lib/x86_64-linux-gnu/libxcb-randr.so.0"],
+                pool: "main/x/x11-xkb-utils/x11-xkb-utils_7.7+9build1_amd64.deb",
+                sha256: "f17d61317a9f0db99db7a2c7b81d462a35008c85089fb573d2175ed504f6157b",
+                files: &["usr/bin/xkbcomp"],
+            },
+            Deb {
+                pool: "main/x/xkeyboard-config/xkb-data_2.46-2_all.deb",
+                sha256: "a24f82b33020836444593a7ffbed959458852e28cfe16de2ff95bcbdcfbdb2d3",
+                files: &[
+                    "usr/share/X11/xkb/geometry/pc",
+                    "usr/share/xkeyboard-config-2/geometry/pc",
+                ],
+            },
+            Deb {
+                pool: "universe/x/xterm/xterm_407-1ubuntu1_amd64.deb",
+                sha256: "152cef8061050bb3428e3078208bc94187b57a6885a851094c26ad77e9db9169",
+                files: &["etc/X11/app-defaults/XTerm", "usr/bin/xterm"],
+            },
+            Deb {
+                pool: "main/x/xwayland/xwayland_24.1.10-1_amd64.deb",
+                sha256: "f620802e59cb10a4d66e0ed2abf16ad425be1ab2b7a3deef1c2b367647c2c7a5",
+                files: &["usr/bin/Xwayland"],
             },
         ],
     },
@@ -6000,7 +6678,10 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
             }
-            fs::rename(&from, &to).map_err(|e| format!("{file} in {url}: {e}"))?;
+            // Copied, not moved: several names may be links to one file
+            // (an icon theme's cursors: cross and cross_reverse are
+            // crosshair).
+            fs::copy(&from, &to).map_err(|e| format!("{file} in {url}: {e}"))?;
         }
         fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
     }
