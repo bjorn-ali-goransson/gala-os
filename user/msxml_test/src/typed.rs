@@ -20,7 +20,7 @@
 
 use core::ptr::null_mut;
 
-use super::mutation::{create, info_hr, new_doc, xml_is};
+use super::mutation::{create, new_doc, xml_is};
 use super::*;
 
 #[cfg_attr(
