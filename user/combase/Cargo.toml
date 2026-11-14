@@ -1,0 +1,16 @@
+[package]
+name = "combase"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+# The 32-bit build (SysWOW64's combase): the memory routines and unwind
+# personality the compiler calls on x86.
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

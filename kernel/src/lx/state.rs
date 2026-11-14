@@ -48,6 +48,10 @@ pub enum Stream {
     Stdin,
     Stdout,
     Stderr,
+    /// The output of a program the kernel runs for itself (Xwayland and
+    /// what it starts: `wayland::xwayland`), logged as `lx: pid N
+    /// service: <line>`, apart from a test program's transcript.
+    Service,
 }
 
 impl Stream {
@@ -56,6 +60,7 @@ impl Stream {
             Stream::Stdin => "stdin",
             Stream::Stdout => "stdout",
             Stream::Stderr => "stderr",
+            Stream::Service => "service",
         }
     }
 }
@@ -144,6 +149,11 @@ pub enum Object {
     Unix(KArc<super::unix::UnixSocket>),
     /// An eventfd's counter (`lx::eventfd`).
     EventFd(KArc<super::eventfd::EventFd>),
+    /// A Windows-side object: a standard handle of the NT program that
+    /// started the process (`lx::ntio`, `lx::distro`).
+    Nt(KArc<super::ntio::NtFile>),
+    /// A pseudo-terminal's master or slave (`lx::pty`).
+    Pty(super::pty::End),
 }
 
 impl Drop for Fd {
@@ -178,7 +188,9 @@ impl Drop for Fd {
             | Object::File(_)
             | Object::Device(_)
             | Object::Socket(_)
-            | Object::EventFd(_) => {}
+            | Object::EventFd(_)
+            | Object::Pty(_)
+            | Object::Nt(_) => {}
         }
     }
 }
@@ -205,7 +217,9 @@ impl Fd {
             | Object::Socket(_)
             | Object::Unix(_)
             | Object::Epoll(_)
-            | Object::EventFd(_) => {}
+            | Object::EventFd(_)
+            | Object::Pty(_)
+            | Object::Nt(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }
     }
@@ -298,6 +312,10 @@ pub struct LxProcess {
     pub threads: IrqMutex<Vec<LxThread>>,
     /// The parent's pid; 0 for a process the kernel started (`lxrun=`).
     pub parent: u64,
+    /// Its session and process group (`lx::session`): its own for a
+    /// process the kernel started, its parent's for a fork's child.
+    pub sid: AtomicU64,
+    pub pgid: AtomicU64,
     /// The signal the parent gets when this process ends (SIGCHLD for a
     /// fork; clone's low byte).
     pub exit_signal: u32,
@@ -309,6 +327,10 @@ pub struct LxProcess {
     /// The current directory (chdir; a forked child's starts as its
     /// parent's).
     pub cwd: IrqMutex<NodeId>,
+    /// Its root directory: the shared tree's root, or a WSL
+    /// distribution's (`lx::distro`); a fork's child has its parent's,
+    /// execve keeps it (no chroot yet).
+    pub root: NodeId,
     /// The file-mode creation mask (umask(2); 022 at the start).
     pub umask: IrqMutex<u32>,
     /// The program it runs (its node: `/proc/self/exe`; execve changes
@@ -331,11 +353,24 @@ pub struct LxProcess {
 static TABLE: IrqMutex<Vec<KArc<LxProcess>>> = IrqMutex::new(Vec::new());
 
 /// Creates the state of a new Linux process `pid` running the program at
-/// node `exe`, with fds 0, 1 and 2 on the console, in directory `cwd`.
-pub fn create(pid: u64, brk: u64, cwd: NodeId, exe: NodeId) -> Result<KArc<LxProcess>, AllocError> {
+/// node `exe`, in directory `cwd` under root directory `root`, with fds
+/// 0, 1 and 2 on `stdio` (None: the console, which is the log).
+pub fn create(
+    pid: u64,
+    brk: u64,
+    cwd: NodeId,
+    exe: NodeId,
+    root: NodeId,
+    stdio: Option<[Object; 3]>,
+) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
-    for stream in [Stream::Stdin, Stream::Stdout, Stream::Stderr] {
-        let fd = KArc::try_new(Fd::new(Object::Console(stream), false))?;
+    let objects = stdio.unwrap_or([
+        Object::Console(Stream::Stdin),
+        Object::Console(Stream::Stdout),
+        Object::Console(Stream::Stderr),
+    ]);
+    for object in objects {
+        let fd = KArc::try_new(Fd::new(object, false))?;
         fds.try_push(Some(Slot { fd, cloexec: false }))?;
     }
     let state = KArc::try_new(LxProcess {
@@ -343,12 +378,15 @@ pub fn create(pid: u64, brk: u64, cwd: NodeId, exe: NodeId) -> Result<KArc<LxPro
         main_tid: AtomicU64::new(0),
         threads: IrqMutex::new(Vec::new()),
         parent: 0,
+        sid: AtomicU64::new(pid),
+        pgid: AtomicU64::new(pid),
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(Brk { start: brk, current: brk }),
         signals: IrqMutex::new(Signals::default()),
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
+        root,
         umask: IrqMutex::new(0o022),
         exe: IrqMutex::new(exe),
         rlimits: IrqMutex::new(super::resource::Limits::default()),
@@ -387,12 +425,15 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
         main_tid: AtomicU64::new(0),
         threads: IrqMutex::new(Vec::new()),
         parent: parent.pid,
+        sid: AtomicU64::new(parent.sid.load(Ordering::Relaxed)),
+        pgid: AtomicU64::new(parent.pgid.load(Ordering::Relaxed)),
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(brk),
         signals: IrqMutex::new(signals),
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
+        root: parent.root,
         umask: IrqMutex::new(umask),
         exe: IrqMutex::new(exe),
         rlimits: IrqMutex::new(rlimits),
@@ -421,7 +462,33 @@ pub fn discard(child: &LxProcess) {
     drop(fds);
 }
 
+/// The pids of the Linux processes whose root directory is `root` (a
+/// WSL distribution's processes: `lx::distro`); with `root` None, of
+/// every process not rooted at the shared tree's root.
+pub fn rooted_at(root: Option<NodeId>) -> Result<Vec<u64>, AllocError> {
+    let table = TABLE.lock();
+    let mut out = Vec::new();
+    for p in table.iter() {
+        let wanted = match root {
+            Some(r) => p.root == r,
+            None => p.root != crate::fs::ramfs::ROOT,
+        };
+        if wanted {
+            out.try_push(p.pid)?;
+        }
+    }
+    Ok(out)
+}
+
 /// The state of Linux process `pid`.
+/// Calls `f` for each Linux process (under the table's lock: `f` takes no
+/// other lock of theirs but their atomics).
+pub fn each(mut f: impl FnMut(&LxProcess)) {
+    for p in TABLE.lock().iter() {
+        f(p);
+    }
+}
+
 pub fn get(pid: u64) -> Option<KArc<LxProcess>> {
     TABLE.lock().iter().find(|p| p.pid == pid).cloned()
 }
@@ -459,6 +526,10 @@ pub fn ended(pid: u64, status: NtStatus) {
         i.map(|i| table.remove(i))
     };
     let Some(state) = state else { return };
+    // A session leader's end leaves its terminal without a session.
+    if state.sid.load(Ordering::Relaxed) == pid {
+        super::pty::session_ended(pid);
+    }
     {
         let mut lines = state.lines.lock();
         for (i, stream) in [Stream::Stdout, Stream::Stderr].into_iter().enumerate() {
@@ -619,7 +690,7 @@ impl LxProcess {
     /// Bytes written to the console stream `stream` (stdout or stderr):
     /// logged a line at a time.
     pub fn console_write(&self, stream: Stream, data: &[u8]) -> Result<(), AllocError> {
-        let i = if stream == Stream::Stderr { 1 } else { 0 };
+        let i = if matches!(stream, Stream::Stderr | Stream::Service) { 1 } else { 0 };
         let mut lines = self.lines.lock();
         let buf = &mut lines[i];
         for &b in data {
@@ -804,6 +875,10 @@ pub fn dump() {
                         e.waiters.len()
                     );
                 }
+                Object::Nt(n) => {
+                    crate::info!("lx: pid {} fd {i}: windows {:?}", p.pid, n.kind);
+                }
+                Object::Pty(end) => super::pty::describe(p.pid, i, end),
                 _ => {}
             }
         }

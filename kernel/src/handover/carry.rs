@@ -190,6 +190,7 @@ impl Programs {
 
 /// Lets the programs run again (a refused or failed handover).
 pub fn release() {
+    crate::nt::pagefile::hold(false);
     tcp::restart();
     sched::freeze_users(false);
     thread::hold_for_handover(false);
@@ -207,6 +208,8 @@ pub fn collect() -> Result<Option<Programs>, Refusal> {
     if crate::clockctl::armed() {
         return Err(Refusal::Kernel("clock control is on (its state is not carried)"));
     }
+    // Nothing goes to the page file while the programs are carried.
+    crate::nt::pagefile::hold(true);
     let collected = wait_quiet().and_then(|threads| collect_stopped(&processes, threads));
     if collected.is_err() {
         release();
@@ -639,6 +642,11 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
     if process.job.lock().is_some() {
         return Err(refuse("a job"));
     }
+    // A service's process: the SCM's record of it (its status, its
+    // dispatcher's request slot) is not carried yet.
+    if crate::nt::scm_run::runs_service(pid) {
+        return Err(refuse("a service the SCM started"));
+    }
     // The executable is laid out again from its file.
     let exe = process::open_program(process.path).map_err(|_| refuse("no executable file"))?;
     if !matches!(&exe.body, ObjectBody::File(f) if file::survives_handover(f.node)) {
@@ -665,7 +673,10 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
             _ => None,
         }
     };
-    // The pages, as the page tables have them.
+    // The pages, as the page tables have them: those in the page file
+    // first brought back (the record carries memory only).
+    crate::nt::pagefile::bring_back(process)
+        .map_err(|_| refuse("pages in the page file that do not fit in memory"))?;
     let mut raw: Vec<(u64, Frame, crate::mm::paging::PageFlags)> = Vec::new();
     let mut full = false;
     process.space.lock().for_each_page(|va, frame, flags| {
@@ -687,7 +698,7 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
         } else if va == kuser::ADDRESS {
             PageRec { va, value: 0, kind: PageKind::SharedData, flags }
         } else if (image_base..image_base + image_size).contains(&va)
-            && layout.shared_frame(((va - image_base) / PAGE_SIZE) as usize) == Some(frame)
+            && layout.resident_frame(((va - image_base) / PAGE_SIZE) as usize) == Some(frame)
         {
             PageRec { va, value: (va - image_base) / PAGE_SIZE, kind: PageKind::Image, flags }
         } else if let Some((l, base)) = image_view(va) {
@@ -696,7 +707,7 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
                 return Err(refuse("a DLL page the handover cannot carry"));
             }
             PageRec { va, value: index as u64, kind: PageKind::ImageView, flags }
-        } else if section::frame_for(process, va).is_some_and(|(_, f)| f == frame) {
+        } else if section::frame_for(process, va).is_some_and(|p| p.frame == frame) {
             PageRec { va, value: 0, kind: PageKind::Section, flags }
         } else {
             return Err(refuse("a mapped page the handover cannot carry"));
@@ -833,6 +844,10 @@ fn check_object(
         ObjectBody::WindowStation(_) | ObjectBody::Desktop(_) => {
             return Err(refuse("a window station or desktop handle"));
         }
+        // The service control manager's handles are not carried yet.
+        ObjectBody::ScManager(_) | ObjectBody::Service(_) => {
+            return Err(refuse("a service control manager handle"));
+        }
         ObjectBody::Directory(_) | ObjectBody::SymbolicLink(_) => {
             return Err(refuse("an object directory or link handle"));
         }
@@ -841,6 +856,7 @@ fn check_object(
         | ObjectBody::DiskDevice
         | ObjectBody::Disk(_)
         | ObjectBody::NullDevice
+        | ObjectBody::MupDevice
         | ObjectBody::Null(_) => return Err(refuse("a device handle")),
     }
     Ok(())
@@ -1138,7 +1154,8 @@ impl Programs {
                     .write(w, &name_of(object)?)?;
             }
             (ObjectBody::File(f), tag::FILES) => {
-                let path = file::volume_path(f.node).map_err(|_| AllocError)?;
+                // The name it was opened by (a hard link's own).
+                let path = file::handle_path(f).map_err(|_| AllocError)?;
                 let shape = if f.directory {
                     file::FILE_DIRECTORY_FILE
                 } else {
@@ -1352,21 +1369,11 @@ pub fn restore(rec: &Record<'_>) {
         return;
     }
     match restore_all(rec) {
-        Ok((processes, threads)) => {
-            // How long the programs were stopped (the clock at the record).
-            let clock = rec.section(tag::CLOCK).map(|mut c| record::Clock::read(&mut c));
-            let at = clock.as_ref().map_or(0, record::Clock::monotonic_ns);
+        Ok((processes, threads, pause_ms)) => {
+            let at = rec
+                .section(tag::CLOCK)
+                .map_or(0, |mut c| record::Clock::read(&mut c).monotonic_ns());
             let now = crate::time::raw_monotonic_ns();
-            // In the tick count that waits' deadlines and GetTickCount
-            // use, from when the programs stopped (just before the record;
-            // the record's own time if the writer did not say): what a
-            // sleep spanning the handover can be late by.
-            let stopped = rec.section(tag::STOPPED).map(|mut s| s.u64());
-            let ticks = crate::time::raw_ticks().saturating_sub(
-                stopped.unwrap_or_else(|| clock.as_ref().map_or(0, record::Clock::ticks)),
-            );
-            let pause_ms = ticks * 1000 / crate::time::TICK_HZ;
-            crate::nt::syscalls::set_handover_pause(super::generation(), pause_ms);
             crate::info!(
                 "handover: {processes} process(es) and {threads} thread(s) resumed, {} ms after \
                  the record (stopped {pause_ms} ms of the tick count)",
@@ -1471,7 +1478,7 @@ fn system_ntdll(path: &[u16], digest: u64) -> Option<ObjectRef> {
     (same_file && same_bytes).then_some(ntdll.section)
 }
 
-fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
+fn restore_all(rec: &Record<'_>) -> Result<(usize, usize, u64), Failed> {
     let mut objects = Objects(Vec::new());
     if let Some(mut header) = rec.section(tag::PROCESSES).and_then(|mut r| r.entry()) {
         thread::continue_ids_from(header.u64());
@@ -1870,7 +1877,10 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         crate::nt::timer::adopt(t)?;
     }
 
-    // Go.
+    // Go. The pause is published first: a thread may run on another CPU
+    // as soon as it starts and ask GalaHandoverPause at once (a sleep
+    // that spanned the handover is already due).
+    let pause_ms = publish_pause(rec);
     for (_, t) in &live {
         thread::start_adopted(t)?;
     }
@@ -1883,7 +1893,22 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         );
         RESUMED.lock().try_push(p.clone()).map_err(no_memory)?;
     }
-    Ok((processes.len(), live.len()))
+    Ok((processes.len(), live.len(), pause_ms))
+}
+
+/// Notes how long the programs were stopped (GalaHandoverPause), up to
+/// now, just before their threads go on, and returns it (ms). In the tick
+/// count that waits' deadlines and GetTickCount use, from when the
+/// programs stopped (just before the record; the record's own time if the
+/// writer did not say): what a sleep spanning the handover can be late by.
+fn publish_pause(rec: &Record<'_>) -> u64 {
+    let stopped = rec.section(tag::STOPPED).map(|mut s| s.u64()).unwrap_or_else(|| {
+        rec.section(tag::CLOCK).map_or(0, |mut c| record::Clock::read(&mut c).ticks())
+    });
+    let ticks = crate::time::raw_ticks().saturating_sub(stopped);
+    let pause_ms = ticks * 1000 / crate::time::TICK_HZ;
+    crate::nt::syscalls::set_handover_pause(super::generation(), pause_ms);
+    pause_ms
 }
 
 fn socket_damage(e: Option<AllocError>) -> NtStatus {
@@ -1959,9 +1984,7 @@ fn restore_process(
     for mut v in e.table().iter() {
         let v = ViewRec::read(&mut v);
         let section = objects.get(v.section).ok_or(NtStatus::INVALID_HANDLE)?.clone();
-        views
-            .try_push(section::View { base: v.base, size: v.size, offset: v.offset, section })
-            .map_err(no_memory)?;
+        views.try_push(section::View::new(v.base, v.size, v.offset, section)).map_err(no_memory)?;
     }
     let mut space = crate::nt::platform::UserSpace::new().map_err(|_| NtStatus::NO_MEMORY)?;
     for mut page in e.table().iter() {
@@ -1979,19 +2002,17 @@ fn restore_process(
                 kuser::map_page(&mut space).map_err(|_| NtStatus::NO_MEMORY)?;
                 continue;
             }
-            PageKind::Image => layout.shared_frame(page.value as usize),
+            // Image pages come back at their first touch
+            // (`section::frame_for`): the layout builds them then, and
+            // only a listed process's mappings may hold a layout's frame
+            // (the trimmer unmaps them from listed processes alone).
+            PageKind::Image | PageKind::ImageView => continue,
             PageKind::Section => view.and_then(|v| {
                 let index = (page.va - v.base + v.offset) / PAGE_SIZE;
                 match &v.section.body {
                     ObjectBody::Section(s) => s.frame(index as usize),
                     _ => None,
                 }
-            }),
-            PageKind::ImageView => view.and_then(|v| match &v.section.body {
-                ObjectBody::Section(s) => {
-                    s.image.as_ref()?.view_frame(page.value as usize, v.base, true)
-                }
-                _ => None,
             }),
         };
         let mapped = frame.is_some_and(|f| space.map_borrowed(page.va, f, page.flags).is_ok());

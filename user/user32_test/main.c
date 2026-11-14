@@ -39,9 +39,9 @@
  *   the new one, WM_KILLFOCUS); SW_SHOWNOACTIVATE leaves the active one;
  *   SetActiveWindow activates again.
  * - Alt+F4: WM_SYSKEYDOWN with VK_F4 and the Alt bit (lParam bit 29)
- *   to DefWindowProc posts WM_SYSCOMMAND SC_CLOSE to the top-level
- *   window, which closes it once the message is dispatched; F4 alone
- *   does not.
+ *   given to DefWindowProc while the Alt key is not held leaves the
+ *   window, once the queue is drained too (measured on 26200, issue #59);
+ *   F4 alone does not close it either.
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
  *   until EndDeferWindowPos, which applies every position and size;
  *   SetWindowPos to the same size sends no WM_SIZE; WindowFromPoint finds
@@ -152,7 +152,8 @@
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
  *   gets a new id; its WM_TIMER carries the procedure in lParam and
- *   DispatchMessage calls it.
+ *   DispatchMessage calls it. SetCoalescableTimer (the Click-to-Run
+ *   client's) acts as SetTimer for a window: its id, then WM_TIMER.
  * - The display: EnumDisplayMonitors calls back once (one monitor) with
  *   the screen's rectangle and the data; MonitorFromPoint finds it for a
  *   point on the screen, and for one off it only by the default flags;
@@ -411,6 +412,11 @@ static void timers(void) {
     DispatchMessageW(&m);
     CHECK(timer_proc_calls == 1);
     CHECK(KillTimer(NULL, timer_proc_id));
+    // SetCoalescableTimer: SetTimer with a tolerance (here
+    // TIMERV_NO_COALESCING); a window's timer is its id and WM_TIMER.
+    CHECK(SetCoalescableTimer(w, 9, 20, NULL, TIMERV_NO_COALESCING) == 9);
+    CHECK(GetMessageW(&m, w, 0, 0) == 1 && m.message == WM_TIMER && m.wParam == 9);
+    CHECK(KillTimer(w, 9));
 
     // MsgWaitForMultipleObjects: WAIT_OBJECT_0 + count when a message of the
     // wake mask is queued, a handle's index when it is signalled.
@@ -1327,7 +1333,9 @@ static void custom_frame(void) {
     CHECK(ClientToScreen(w, &p) && p.x == 58 && p.y == 60);
     CHECK(GetWindowRect(w, &r) && r.left == 50 && r.top == 60 && r.right == 350 && r.bottom == 260);
     DestroyWindow(w);
-    /* Alt+F4 closes a window through DefWindowProc. */
+    /* Alt+F4 sent to DefWindowProc without the Alt key held: the window
+       survives, F4 alone or with the Alt bit in lParam (measured on 26200,
+       issue #59). */
     HWND f4 = CreateWindowExW(0, L"User32TestPos", L"alt f4", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL, NULL,
                               GetModuleHandleW(NULL), NULL);
     CHECK(f4 != NULL);
@@ -1340,7 +1348,8 @@ static void custom_frame(void) {
     CHECK(IsWindow(f4));
     while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
         DispatchMessageW(&m);
-    CHECK(!IsWindow(f4));
+    CHECK(IsWindow(f4));
+    DestroyWindow(f4);
 
     /* DefWindowProc's frame: a caption above the client area. */
     HWND plain = CreateWindowExW(0, L"User32TestPos", L"plain", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL,

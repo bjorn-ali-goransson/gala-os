@@ -18,7 +18,11 @@
 //! backslash, like \\.\C:, it is the volume itself: open for attributes,
 //! FILE_TYPE_DISK, IOCTL_STORAGE_QUERY_PROPERTY's access alignment (512-byte
 //! logical sectors), data access denied to a standard user),
-//! RemoveDirectoryW, RtlGetLastNtStatus after a failure, NtFlushBuffersFileEx, all inside the temporary directory. Prints
+//! RemoveDirectoryW, RtlGetLastNtStatus after a failure, NtFlushBuffersFileEx,
+//! an empty path (ERROR_PATH_NOT_FOUND from GetFileAttributes(Ex)W,
+//! FindFirstFileW, CreateFileW, DeleteFileW, RemoveDirectoryW and
+//! CreateDirectoryW, as Wine's conformance tests give Windows' results),
+//! all inside the temporary directory. Prints
 //! `kernel32_file_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -452,6 +456,45 @@ fn run() -> Result<(), u32> {
             GetFileAttributesW(Path::new(temp, b"gala_nodir\\missing").ptr()).into(),
             INVALID_FILE_ATTRIBUTES.into(),
         )?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+
+        // An empty path names nothing (not the current directory): every
+        // file function fails with ERROR_PATH_NOT_FOUND (Wine's conformance
+        // tests, run on Windows). ODT's setup.exe asks whether its unset
+        // download folder "" exists, and deletes "\*" recursively if so.
+        let empty = [0u16; 1];
+        let mut data = [0u32; 9];
+        let mut find = [0u16; 296];
+        SetLastError(0);
+        c.eq(GetFileAttributesW(empty.as_ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        c.eq(GetFileAttributesExW(empty.as_ptr(), 0, data.as_mut_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        let f = FindFirstFileW(empty.as_ptr(), find.as_mut_ptr());
+        c.eq(f as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        let h = CreateFileW(
+            empty.as_ptr(),
+            GENERIC_READ,
+            7,
+            core::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            core::ptr::null_mut(),
+        );
+        c.eq(h as isize as u64, INVALID_HANDLE_VALUE as isize as u64)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        c.eq(DeleteFileW(empty.as_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        c.eq(RemoveDirectoryW(empty.as_ptr()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
+        SetLastError(0);
+        c.eq(CreateDirectoryW(empty.as_ptr(), core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND.into())?;
 
         // FindFirstFileW/FindNextFileW: a.txt is listed; then no more.

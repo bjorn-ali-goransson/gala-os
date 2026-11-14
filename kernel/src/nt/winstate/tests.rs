@@ -230,3 +230,36 @@ fn served_owners_hear_of_activation_and_the_pointer_leaving() {
     s.unlisten_server(1, thread);
     assert!(!s.served(1));
 }
+
+#[test]
+fn input_left_untaken_for_five_seconds_is_not_responding() {
+    let mut s = state();
+    let a = s.create(1, 10, 20, 300, 200, &title("A"), 0).unwrap();
+    s.show(a, 1, true).unwrap();
+    // Nothing waiting: responding, however long.
+    let t0 = crate::nt::platform::monotonic_ns();
+    assert!(!s.not_responding(1, t0 + 60 * HUNG_NS));
+    // A click waits: responding until 5 s have passed untaken.
+    s.send(a, 0x201, 1, 0);
+    let t1 = crate::nt::platform::monotonic_ns();
+    assert!(!s.not_responding(1, t1));
+    assert!(s.not_responding(1, t1 + HUNG_NS));
+    // More input does not move the start.
+    s.send(a, 0x202, 0, 0);
+    assert!(s.not_responding(1, t1 + HUNG_NS));
+    // Taken: responding again; another process is never concerned.
+    assert_eq!(messages(&mut s, 1).len(), 2);
+    assert!(!s.not_responding(1, t1 + 60 * HUNG_NS));
+    assert!(!s.not_responding(2, t1 + 60 * HUNG_NS));
+    // A program that takes part of its input waits from then on.
+    s.send(a, 0x201, 1, 0);
+    let mut one = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 1];
+    s.send(a, 0x202, 0, 0);
+    s.take_input(1, &mut one);
+    let t2 = crate::nt::platform::monotonic_ns();
+    assert!(!s.not_responding(1, t2 + HUNG_NS / 2));
+    assert!(s.not_responding(1, t2 + HUNG_NS + 1));
+    // Its windows gone, it is forgotten.
+    s.destroy_owned(1);
+    assert!(!s.not_responding(1, t2 + 60 * HUNG_NS));
+}

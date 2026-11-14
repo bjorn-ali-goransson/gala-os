@@ -420,8 +420,9 @@ fn prepare_and_go(
         };
     marker.write(0, &marker_bytes(value, next));
 
-    // The disk: what is pending written, so the log position is final.
-    crate::nt::persist::sync();
+    // The disk: what is pending written (the registry's too), so the log
+    // position is final.
+    crate::nt::persist::flush(crate::nt::persist::Cause::Handover);
     let volume = crate::nt::persist::position();
 
     // All on the boot CPU from here.

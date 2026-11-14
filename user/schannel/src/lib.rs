@@ -32,6 +32,7 @@ use gala_heap as _;
 mod attrs;
 mod creds;
 mod ffi;
+mod layout;
 mod trust;
 
 use alloc::string::String;
@@ -46,6 +47,13 @@ use ffi::{
 };
 use schannel_tls::{ClientSettings, ServerSettings, Session, Validation, sec};
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -60,13 +68,18 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn GetCurrentThreadId() -> u32;
 }
 
 /// MSVC-target codegen references this marker symbol directly.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 

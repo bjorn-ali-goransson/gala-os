@@ -1,0 +1,23 @@
+<!-- The Office Deployment Tool's configuration for scenario
+     office_install_gui (ROADMAP OF): config.xml's products with the
+     installer's windows shown (Display Level Full), so that the install
+     can be watched; AcceptEULA: the owner accepted Microsoft's licence
+     terms for this. -->
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="Current">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="OneDrive" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Outlook" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+  </Add>
+  <Updates Enabled="FALSE" />
+  <Display Level="Full" AcceptEULA="TRUE" />
+  <Logging Level="Standard" Path="C:\gala\odtlog" />
+</Configuration>

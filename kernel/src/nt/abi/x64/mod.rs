@@ -490,7 +490,51 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let mut cs = [0u8; 2];
     tri!(call.process.read(context + 0x38, &mut cs).map_err(|_| NtStatus::ACCESS_VIOLATION));
     let x86 = u32::from(u16::from_le_bytes(cs)) == crate::nt::layout::wow64::CS32;
-    let note = crate::nt::crashreport::Note::new(&call.process, NtStatus(code), access, regs, x86);
+    let mut note =
+        crate::nt::crashreport::Note::new(&call.process, NtStatus(code), access, regs, x86);
+    // A C++ throw: what was thrown, read now (the object and the
+    // runtime's type data are gone once the process has ended).
+    if code == crate::nt::crashreport::CXX_EXCEPTION {
+        let mut params = [0u64; 4];
+        for (i, p) in params.iter_mut().enumerate().take(count.min(4) as usize) {
+            *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
+        }
+        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+        let params = &params[..count.min(4) as usize];
+        note.cxx = crate::nt::crashreport::CxxThrow::decode(params, x86, &read);
+    }
+    // A delay-load failure: the DLL and function it was looking for.
+    use crate::nt::crashreport::{DELAY_DLL, DELAY_PROC, DelayLoad};
+    if matches!(code, DELAY_DLL | DELAY_PROC) && count >= 1 {
+        let info = tri!(call.read_u64(record + 0x20));
+        let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
+        note.delay = DelayLoad::decode(info, x86, &read);
+    }
+    note.flags = tri!(call.read_u64(record)).wrapping_shr(32) as u32;
+    // 32-bit code: the SEH registrations the dispatcher walked (the list
+    // is unchanged by a search that found no handler).
+    if x86 && let Some((teb32, _, _)) = crate::nt::thread::current_stack32(&call.process) {
+        let word = |at: u64| {
+            let mut b = [0u8; 4];
+            call.process.read(at, &mut b).ok().map(|()| u32::from_le_bytes(b))
+        };
+        note.seh_head = word(teb32);
+        let mut frame = note.seh_head.unwrap_or(0);
+        while note.seh_len < note.seh.len() {
+            if frame == u32::MAX {
+                note.seh_end = true;
+                break;
+            }
+            let (Some(next), Some(handler)) = (word(u64::from(frame)), word(u64::from(frame) + 4))
+            else {
+                break;
+            };
+            note.seh[note.seh_len] = (frame, handler);
+            note.seh_len += 1;
+            frame = next;
+        }
+        note.seh_end |= frame == u32::MAX;
+    }
     *call.process.unhandled_exception.lock() = Some(note);
     NtStatus::SUCCESS
 }

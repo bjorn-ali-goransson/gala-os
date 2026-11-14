@@ -172,7 +172,11 @@ fn run() -> Result<(), u32> {
     c.eq(u32_at(basic, 44), u64::from(-2i32 as u32))?;
     c.eq(set_thread(t, THREAD_PRIORITY, &Al(12i32.to_le_bytes()).0).into(), ok)?;
     c.eq(query_thread(t, 0, basic).0.into(), ok)?;
-    c.eq(u32_at(basic, 40), 12)?; // Priority
+    // Priority is the thread's current priority, which Windows lowers
+    // toward the base as quanta end (CI's runner read 11), so it is checked
+    // to lie between the base (6 here: 8 - 2) and the value set.
+    let current = u32_at(basic, 40);
+    c.ok((6..=12).contains(&current), current)?; // Priority
     c.eq(
         set_thread(t, THREAD_PRIORITY, &Al(12u64.to_le_bytes()).0).into(),
         STATUS_INFO_LENGTH_MISMATCH.into(),

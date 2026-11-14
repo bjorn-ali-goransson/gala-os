@@ -5,6 +5,17 @@ on:
   # gets no run (each push to a pull request's branch ran twice otherwise).
   push:
     branches: [main]
+    # The website has its own pipeline (website.yml). A merge that only
+    # touches it starts no runner here, and so publishes no release
+    # either (release.yml runs off this workflow's completion).
+    paths-ignore:
+      - web/**
+      - .github/workflows/website.yml
+  # Not filtered by path: the `linux` and `windows` checks are required by
+  # the `main-run-ci` ruleset, and a workflow skipped by a path filter
+  # never reports them, leaving the pull request waiting for a status that
+  # can never arrive. The `changes` job below makes the skip decision
+  # instead, where it is visible and reports a conclusion.
   pull_request:
 
 # A newer push to the same pull request cancels the run of the older one.
@@ -13,10 +24,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which half of the repository a pull request touches: the website
+  # (`web/`, published by website.yml) or the system. A pull request that
+  # only moves the website skips the jobs below rather than spending a
+  # QEMU runner and a Windows runner on it.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.what.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: what
+        name: Is there anything outside web/ in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # A push to main is already filtered by paths-ignore above, and
+          # a manual run means "run everything".
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request: the system jobs run"
+            exit 0
+          fi
+          # The fork point, not the base tip: a base that has moved on
+          # since would otherwise show its own commits as this change's.
+          fork=$(git merge-base "$BASE" "$HEAD")
+          changed=$(git diff --name-only "$fork" "$HEAD")
+          echo "$changed" | sed 's/^/  /'
+          # No files at all means something unexpected about the range, so
+          # run the system jobs rather than silently skipping them.
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "the system is touched: the system jobs run"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "website only: the system jobs are skipped"
+          fi
+
   # gala itself: the kernel and its programs, booted in QEMU. GitHub's Linux
   # runners have hardware virtualization, so the boots run under KVM (xtask
   # passes `-accel kvm` when /dev/kvm exists and falls back to TCG).
   linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +97,16 @@ jobs:
           key: gala-qemu-11.1.3
       - name: Build the pinned QEMU
         run: cargo xtask qemu
+      # The pinned downloads the host tests and gala-um use (the JDK...),
+      # kept between runs as in the boot jobs (each checksum-checked at use).
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-linux-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-linux-
       - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
         uses: actions/setup-go@v5
         with:
@@ -62,6 +127,11 @@ jobs:
           cargo clippy -p kernel --lib --features hosted -- -D warnings
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
+          cargo clippy -p wsl --lib --tests -- -D warnings
+          cargo clippy -p taskmgr --lib --tests -- -D warnings
+          cargo clippy -p shellns --tests -- -D warnings
+          cargo clippy -p explorer --lib --tests -- -D warnings
+          cargo clippy -p gala_xml --tests -- -D warnings
           cargo clippy -p lx_abi --tests -- -D warnings
           cargo clippy -p wl_abi --tests -- -D warnings
           cargo clippy -p afd_abi --tests -- -D warnings
@@ -69,10 +139,10 @@ jobs:
           cargo clippy -p tuf --tests -- -D warnings
           cargo clippy -p lx_abi --target x86_64-unknown-none -- -D warnings
           cargo clippy -p wl_abi --target x86_64-unknown-none -- -D warnings
-          cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives
-          cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives -p advapi32 -p comctl32 -p powrprof -p shell32 -p version -p psapi -p ole32 -p oleaut32 -p bcrypt -p tlsdll -p iphlpapi -p secur32 -p winhttp -p http_client -p gala_stubs -p gala_heap -p netapi32 -p pdh -p setupapi -p shlwapi -p rpcrt4 -p urlmon -p wininet -p userenv -p xolehlp -p odbc32 -p wldap32 -p wsock32 -p kernelbase -p gdi32 -p authz -p wintrust -p webservices -p dhcpcsvc -p dbghelp -p msvcrt -p crypt32 -p shfolder -p dwmapi -p cfgmgr32 -p dwrite -p imm32 -p shcore -p wtsapi32 -p msctf -p xmllite -p uxtheme -p comdlg32 -p oleacc -p uiautomationcore -p mpr -p winspool -p msimg32 -p richedit -p riched20 -p msftedit -p clusapi -p resutils -p security -p normaliz -p schannel_tls -p schannel -p schannel_test -p wow64 -p user32 -- -D warnings
-          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p clock_test -p handover_test -p handover_k32_test -p handover_net_test -p udp_test -p sshfwd_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p smpcow_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p unimplemented_test -p rpcrt4_test -p netapi32_test -p pdh_test -p setupapi_test -p clusapi_test -p sspi_test -p dpapi_test -p cert_test -p tds_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p replay_test -p kernel32_env_test -p kernel32_file_test -p pipe_test -p quota_test -p lock_test -p seh_test -p kernel32_sync_test -p kernel32_py_test -p kernel32_locale_test -p disk_test -p rtl_test -p gui_test -p persist_test -p kernel32_system_test -p kernel32_clr_test -p com_test -p bcrypt_test -p console_test -p advapi32_test -p token_test -p security_test -p access_test -p logon_test -p system_test -p lsa_test -p restricted_test -p cmd -p cmd_test -p profile_test -p registry_test -p keyed_event_test -p iphlpapi_test -p afd_poll_test -p dirchange_test -p win32_misc_test -p kernel32_pool_test -p tls_test -p manifest_test -p gala -p gala_cli_test -p pk_install_test -p galapkg -p smpsem_test -p xstate_test -p vmcycle_test -p xmodify_test -p statedump_test -p conpty_test -p session_test -p presenter_test -p winsta_test -p straddle_test -p smprace_test -p browser_api_test -p dwrite_test -p clockcal_test -p safepoint_test -p shootdown_test -p schannel_tls -p schannel -p schannel_test -- -D warnings
-          cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p advapi32 -p bcryptprimitives -p wow64_adv_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -- -D warnings
+          cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testdll_gap -p hotswap_dll -p imagetrim_dll -p testntdll -p kernel32 -p bcryptprimitives
+          cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testdll_gap -p hotswap_dll -p imagetrim_dll -p testntdll -p kernel32 -p bcryptprimitives -p advapi32 -p comctl32 -p powrprof -p shell32 -p version -p psapi -p ole32 -p oleaut32 -p bcrypt -p tlsdll -p iphlpapi -p secur32 -p winhttp -p http_client -p gala_stubs -p gala_heap -p netapi32 -p pdh -p setupapi -p shlwapi -p rpcrt4 -p urlmon -p wininet -p userenv -p xolehlp -p odbc32 -p wldap32 -p wsock32 -p kernelbase -p gdi32 -p authz -p wintrust -p webservices -p dhcpcsvc -p dbghelp -p msvcrt -p ucrtbase -p crypt32 -p ncrypt -p msi -p msxml6 -p combase -p appxdeploymentclient -p shfolder -p dwmapi -p cfgmgr32 -p dwrite -p imm32 -p shcore -p wtsapi32 -p msctf -p xmllite -p uxtheme -p comdlg32 -p oleacc -p uiautomationcore -p mpr -p winspool -p msimg32 -p richedit -p riched20 -p msftedit -p clusapi -p resutils -p security -p normaliz -p wldp -p rstrtmgr -p wofutil -p sppc -p schannel_tls -p schannel -p schannel_test -p wow64 -p user32 -p gdiplus -p windowscodecs -p d2d1 -p windows_ui -p d3dcompiler_47 -- -D warnings
+          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p clock_test -p handover_test -p handover_k32_test -p handover_net_test -p udp_test -p sshfwd_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p smpcow_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p unimplemented_test -p rpcrt4_test -p rpc_test -p netapi32_test -p pdh_test -p setupapi_test -p clusapi_test -p sspi_test -p dpapi_test -p cert_test -p tds_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p replay_test -p kernel32_env_test -p kernel32_file_test -p pipe_test -p quota_test -p pagefile_test -p lock_test -p seh_test -p kernel32_sync_test -p kernel32_py_test -p kernel32_locale_test -p disk_test -p rtl_test -p gui_test -p persist_test -p volume_test -p kernel32_system_test -p kernel32_clr_test -p com_test -p bcrypt_test -p console_test -p advapi32_test -p token_test -p security_test -p access_test -p logon_test -p system_test -p lsa_test -p restricted_test -p cmd -p cmd_test -p profile_test -p registry_test -p regnotify_test -p actctx_test -p keyed_event_test -p iphlpapi_test -p afd_poll_test -p dirchange_test -p win32_misc_test -p kernel32_pool_test -p tls_test -p manifest_test -p gala -p gala_cli_test -p start_menu_test -p linux_menu_test -p writeback_test -p taskmgr -p taskmgr_test -p pk_install_test -p galapkg -p smpsem_test -p xstate_test -p vmcycle_test -p xmodify_test -p statedump_test -p snapshot_test -p hotswap_test -p conpty_test -p session_test -p presenter_test -p winsta_test -p clipboard_test -p straddle_test -p smprace_test -p browser_api_test -p dwrite_test -p clockcal_test -p safepoint_test -p shootdown_test -p schannel_tls -p schannel -p schannel_test -p ucrt_test -p office_api_test -p office_k32_test -p msi_test -p rstrtmgr_test -p wofutil_test -p sppc_test -p sip_test -p actionid_test -p hardlink_test -p threadpool_test -p imagetrim_test -p wintrust_test -p cab_probe -p setupcab_test -p combase_test -p svc_test -p svcrun_test -p msxml_test -p knownfolder_test -p winhttp_cb_test -p runas_test -p gdiplus_test -p windowscodecs_test -p d2d1_test -p uisettings_test -p tray_test -p consolerun -p reparse_test -p wsl -p wsl_test -p explorer -p explorer_test -- -D warnings
+          cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_hotswap_test -p hotswap_dll32 -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p ucrtbase -p wow64_ucrt_test -p wow64_office_api_test -p wow64_office_k32_test -p wow64_cert_test -p wow64_msi_test -p wow64_rstrtmgr_test -p wow64_hardlink_test -p wow64_threadpool_test -p rstrtmgr -p wow64_wintrust_test -p wow64_setupcab_test -p wow64_combase_test -p wow64_svc_test -p wow64_svcrun_test -p wow64_msxml_test -p wow64_knownfolder_test -p wow64_winhttp_cb_test -p wow64_runas_test -p advapi32 -p bcryptprimitives -p wow64_adv_test -p wow64_regnotify_test -p wow64_actctx_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -p crypt32 -p ncrypt -p msi -p wintrust -p setupapi -p msxml6 -p combase -p appxdeploymentclient -p normaliz -p powrprof -p wldp -p schannel_tls -p schannel -p urlmon -p wininet -p iphlpapi -p wow64_schannel_test -p gdiplus -p windows_ui -p wow64_gdiplus_test -p wow64_uisettings_test -p wow64_tray_test -- -D warnings
       - name: Linux test programs (user/lx) against real Linux; binaries match their sources
         run: cargo xtask lx-expect && git diff --exit-code user/lx
       - name: Unit tests, gala-um and replay (the boots run in the boot jobs)
@@ -84,6 +154,8 @@ jobs:
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
   # Each shard builds what it boots and fetches the prebuilt programs.
   boot:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -119,6 +191,20 @@ jobs:
           cache: false
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # The pinned downloads (PREBUILT, the Linux roots' packages), kept
+      # between runs: each is checked against its pinned checksum at each
+      # use (an unpacked tree carries a marker naming it), so an older cache
+      # is safe and only what is missing is fetched; a release host's
+      # outage (a 504 from GitHub's release downloads) then fails only the
+      # runs that need a new download.
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-${{ matrix.shard }}-
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
@@ -135,6 +221,8 @@ jobs:
   # Server 2025 is build 26100, the pinned build. The report has the schema
   # of `cargo xtask report`, so `cargo xtask compare` reads it.
   windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4

@@ -170,12 +170,12 @@ has a section under "Open items".
 | Waits, events, mutants, semaphores, keyed events, timers | `wait_test`, `sync_test`, `keyed_event_test`, `timer_test`, `smpsem_test`, `smprace_test` |
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
-| Files, directories, async I/O, APCs, IOCP, file locks, change notification | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test` |
-| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `fpu_test`, `safepoint_test` |
+| Files, directories, async I/O, APCs, IOCP, file locks, change notification, reparse points and NT symbolic links | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test`, `reparse_test` |
+| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `cxx_throw`, `fpu_test`, `safepoint_test` |
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
 | Pipes, child processes with redirected stdio | `pipe_test`, `process_test` |
-| Registry | `registry_test`; ARCHITECTURE "Registry" |
+| Registry, change notification, rename | `registry_test`, `regnotify_test`, `wow64_regnotify_test`; ARCHITECTURE "Registry" |
 | Differential runner against Windows | `cargo xtask report`/`compare`, `user/bin/run-all.ps1` |
 
 ### Programs and Win32
@@ -190,16 +190,17 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
-| D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
+| UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
+| D1-D4 | Disk: virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory), written back lazily as Windows' cache manager does (FlushFileBuffers, write-through and unbuffered handles at once; a dirty limit throttling writers) | done | `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`, `writeback_test`, `writeback_crash`, `writeback_lazy`; ARCHITECTURE "Disk", "A disk-backed C:" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); next: a distribution's GTK application, a socket per session, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); next after them: GIMP (step 9) |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -213,6 +214,7 @@ has a section under "Open items".
 | W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| SM | Start menu: default apps and install-on-click | steps 1-2 done; step 3 next (the owner) | see "SM. The start menu's apps" below |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | MCP | The system's actions as tools for AI clients | planned | `gala mcp` and aichat's custom tools from one description per command; tools loaded by category through a tool call |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
@@ -241,7 +243,11 @@ has a section under "Open items".
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
+| CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
+| EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -648,8 +654,8 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
    700 x 500, so its snapped half would be 700 wide as on Windows; the
    desktop's docking test and the scenario's checks change with it);
    SetWindowPos's WM_NCCALCSIZE.
-2. Rich edit: RTF streams, undo, the clipboard (user32 has none yet),
-   OLE callbacks (wx asks for them).
+2. Rich edit: RTF streams, undo, cut, copy and paste over user32's
+   clipboard, OLE callbacks (wx asks for them).
 3. A transfer over SFTP (`filezilla_sftp` lists only): a download and
    an upload through the queue.
 
@@ -676,6 +682,51 @@ Windows' metrics (`gdi32_test`).
    (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SM. The start menu's apps
+
+**Goal** (the owner): the start menu offers what a fresh Windows does
+(the Command Prompt and gala's other default programs) and, beside them,
+apps that are not installed yet: a click installs them through
+`gala install` (winget manifests, item PK) and the tile then starts the
+installed program. The first: Microsoft Office (`Microsoft.Office`, the
+Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
+.NET (`Microsoft.DotNet.SDK.9`), Python (`Python.Python.3.13`), Chromium
+(`Hibbiki.Chromium`), Git (`Git.Git`), 7-Zip (`7zip.7zip`).
+
+**Done**: steps 1 and 2. The start menu lists gala's Command Prompt
+(System32's cmd.exe, else C:\gala's) and the catalog: each entry a name,
+a winget id and where its installer puts the program (checked against
+the winget-pkgs manifests: user scope under %LOCALAPPDATA% first, then
+the machine's). Not installed, a tile is dimmed with a download badge
+and a click runs `gala install <id>` in a console window; installed, it
+starts the program. A console program started from the menu gets its own
+console window. Tests: the desktop's and `nt::action`'s host tests,
+scenario `start_menu` (start_menu_test and a screen check: the tiles,
+the Command Prompt clicked, 7-Zip's install started and its window
+closed). TimKosse.FileZilla.Client is not in winget-pkgs today: its tile
+shows `gala install`'s "no package" in the window (the portable
+C:\filezilla placement of the FileZilla scenarios still counts as
+installed).
+
+**Next** (each test first: the desktop's host tests, a screen scenario,
+a screenshot):
+1. Step 3: the Windows way of listing installed apps: the start menu
+   reads the shortcuts under the Start Menu\Programs folders (all users
+   and the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
+   anything installed appears without a catalog entry; the catalog then
+   only names what can be installed. With SH, all of this moves to
+   `shasha.exe`.
+2. gala's cmd.exe has no interactive prompt yet (only `/c`): the
+   Command Prompt's window says so and cmd ends (ledger
+   `cmd.exe!interactive prompt`). The prompt (reading lines from the
+   console, the internal commands it has) makes the tile useful.
+3. A scenario that installs a catalog package on a click from a source
+   the test serves (needs a way to give the boot user's environment
+   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed).
+   Installs that fail on gala (Office until OF is done, an installer
+   needing elevation without UAC's prompt) fail in their window with
+   `gala install`'s own message.
 
 ### SH. The shell in user mode
 
@@ -768,9 +819,8 @@ tool runs: confirmations are gala's (step 3).
    endpoint over plain HTTP (a test program serving a scripted SSE
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
-   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today; gala's
-   own is decided, item OF).
+   Burn exe, PK stage 3); the UCRT is gala's own ucrtbase.dll
+   (ARCHITECTURE "The UCRT").
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1157,8 +1207,8 @@ own session and shell.
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
-   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
-   per station.
+   desktops with windows of their own; UOI_USER_SID; atoms per station
+   (the clipboard is the station's: LD step 3).
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -1174,8 +1224,8 @@ own session and shell.
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
-5. Later: several desktops per session, a secure desktop, clipboard,
-   seamless windows, RDP proper. Interim, with no gala work: QEMU's
+5. Later: several desktops per session, a secure desktop, the
+   clipboard over the remote protocol, seamless windows, RDP proper. Interim, with no gala work: QEMU's
    `-vnc`.
 
 **Done when**: B3b: an xtask test client connects through a forwarded
@@ -1228,8 +1278,7 @@ the kernel.
    redistributable). gdi32's GetGlyphOutline (Mesa's
    wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
    (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
-   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
    STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
    resources); everything else it imports gala has. d3d11_test needs
    DXBC shaders, and the host has no HLSL compiler (Ubuntu's
@@ -1237,6 +1286,16 @@ the kernel.
    vkd3d-shader compiler for `build.sh`, or assemble the two shaders
    with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
    beside the program the same way.
+   `d3dcompiler_47.dll` (the decision, for Office's Click-to-Run UI,
+   which imports D3DCompile): gala's own DLL with a working
+   D3DCreateBlob and no HLSL compiler: D3DCompile, D3DCompile2 and
+   D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message
+   blob, recorded with the target profile (a stopgap, named so: compiled
+   shaders need a Direct3D 11 device, which d3d11's G0 stub does not
+   give, so a program cannot use them yet anyway; `office_api_test`
+   expects Windows' S_OK on Windows). It is replaced by a real compiler
+   with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
+   on it) behind this DLL's exports, PREBUILT.
 3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
 4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
@@ -1398,7 +1457,8 @@ samples).
    ping late); the on_device_model utility's delay import of `dxgi.dll`
    (G0). After it:
    what `tools/import_survey.py` still lists (the rest of the delay imports:
-   advapi32's services and ImpersonateAnonymousToken, iphlpapi,
+   advapi32's service functions beyond the SCM's queries (svc_test) and
+   ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy
    resolver, oleacc; the static imports that are still `gala_stubs`:
    crypt32, kernel32's comm and locale formatting); GetAdaptersAddresses
@@ -1532,9 +1592,8 @@ need gala's.
   WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
   used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
   and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
-  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Some are
-  stubs today (CreateMutexExW, GetShortPathNameA, GetThreadIOPendingFlag,
-  GetVolumePathNamesForVolumeNameW): they must work, not only exist.
+  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Each must
+  work, not only exist.
 - **Then, as the apps draw and work** (delay imports, files needing
   each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
   (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
@@ -1545,6 +1604,43 @@ need gala's.
   the survey's output. Direct2D and WIC lead the drawing path (Office
   draws through Direct2D/DirectWrite, falling back to GDI+), with GPU
   G2's Direct3D 11 under Direct2D.
+  - WIC (`windowscodecs`, ARCHITECTURE "windowscodecs"; `windowscodecs_test`,
+    x64): done for the factory (both Office imports,
+    WICCreateImagingFactory_Proxy and WICConvertBitmapSource, and COM),
+    bitmaps and locks, palettes, streams, the PNG and BMP decoders in
+    their native formats, the format converter, the scaler and the
+    clipper. Next: a JPEG decoder (Office's documents carry JPEG
+    pictures), CreateBitmapFromHBITMAP/HICON, the ICO and GIF decoders,
+    conversion to grey and indexed formats, the PNG metadata reader and
+    the PNG encoder, each as Office's use shows it (the ledger names what
+    it asks for). A stopgap to replace: the scaler's Cubic, Fant and
+    HighQualityCubic modes interpolate as Linear (recorded each time);
+    their filters, measured against Windows, come with the JPEG work.
+    The `info` lines of `windowscodecs_test` (a PNG's resolution
+    without pHYs, PBGRA -> BGRA rounding, nearest-neighbour sampling when
+    halving, Linear's weights, a PNG's GetFrame(1)) wait for a Windows
+    run; its first run (issue #91) settled WICCreateImagingFactory_Proxy(0)
+    (WINCODEC_ERR_UNSUPPORTEDVERSION) and a BMP's GetFrame(1)
+    (WINCODEC_ERR_FRAMEMISSING).
+  - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, and
+    the `d2d1_window` screen scenario): done for the factory (both
+    kinds, ID2D1Multithread; the ordinals Office imports), the matrix
+    helpers, software render targets over WIC bitmaps, device contexts
+    (BindDC) and windows (hardware requests drawn in software), solid,
+    linear, radial and bitmap brushes, bitmaps (from memory and WIC),
+    rectangles, rounded rectangles, ellipses, lines and path geometries
+    (lines, Béziers, arcs, fill modes) filled and stroked with widths,
+    caps and joins, antialiased or aliased, transforms and axis-aligned
+    clips, DrawBitmap. Next, as Office's use shows it (the ledger names
+    each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
+    layout first), layers, compatible render targets, drawing state
+    blocks, the GDI interop interface, dashes, ID2D1Factory1 and device
+    contexts, then D3D11-backed targets with GPU G2. The `info` lines of
+    `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
+    of 32bppBGRA, antialiased edge values) and its expectations wait for
+    a Windows run: the first (issue #94) stopped at D2D1CreateFactory,
+    E_NOINTERFACE for an IID_ID2D1Factory with two bytes wrong in both
+    the test and the DLL (now d2d1.h's value).
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
@@ -1556,28 +1652,1004 @@ need gala's.
    scenario that boots them, with the files gala's own install put
    there (the owner: no files from elsewhere; the native install below
    comes first).
-   - The UCRT for the installer: gala's own `ucrtbase.dll` and
-     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
-     msvcrt, test first against Windows (the owner's decision; also
-     the answer to PK's AIChat UCRT question and the JDK copies the
-     scenarios carry today).
-   - Alongside, natively: a pending scenario `office_install` runs the
-     Office Deployment Tool's `setup.exe /configure` in gala (its
-     ledger ranks the installer's blockers; the guest needs the CDN, so
-     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
-     32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs it does not load yet: it imports the UCRT
-     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
-     above) and nine kernel32 functions
-     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
-     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
-     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
-     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
-     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
-     wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
-     cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
-     control manager (advapi32's service calls are stubs); a few
-     shlwapi, user32, ole32, imm32 and shell32 functions.
+   - The UCRT (the owner's decision: gala's own; also the answer to
+     PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
+     resolve to it), x64 and x86, msvcrt's source with the UCRT's own
+     functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
+     `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
+     covers every UCRT import of ODT's setup.exe and of curl, CPython,
+     `cxx_eh_test`, `pk_install_inno` and NumPy's DLLs, whose scenarios
+     use it and no longer copy the JDK's. Next: what the JDK,
+     PowerShell, .NET, PostgreSQL and SQL Server LocalDB still import
+     that gala's lacks (65 functions across their files: the C++
+     runtime functions Windows' ucrtbase also exports,
+     `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
+     `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
+     `_Gettnames` (recorded, NULL); the `_s` path, date and case
+     functions (`_splitpath_s`, `_strdate_s`, ...; the wide `_wcsupr_s`,
+     `_wcslwr_s`, `_wsplitpath_s` and `_wmakepath_s` are done); the
+     multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
+     `tools/import_survey.py` on their directories lists them), then those
+     scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
+     files. `ucrt_test`/`wow64_ucrt_test` pass on CI's Windows
+     (`user/windows/ci-passing.txt`).
+   - The load list's kernel32 and ntdll functions, test first in
+     `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
+     CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
+     OpenSemaphoreA/W, K32EnumProcesses, K32GetProcessImageFileNameW,
+     RtlCaptureStackBackTrace (x86 too), WerRegisterMemoryBlock/
+     WerUnregisterMemoryBlock, IsSystemResumeAutomatic,
+     GetPhysicallyInstalledSystemMemory, QueryActCtxW (basic
+     information), FindActCtxSectionStringW, QueueUserWorkItem,
+     GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
+     AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression;
+     registry change notification (NtNotifyChangeKey,
+     NtNotifyChangeMultipleKeys, RegNotifyChangeKeyValue with
+     REG_NOTIFY_THREAD_AGNOSTIC) and NtRenameKey/RegRenameKey with its
+     change-log record (`regnotify_test`, `wow64_regnotify_test`,
+     `persist_test`; ARCHITECTURE "Registry"); the completion statuses,
+     a kept change, a deleted watched key and a subordinate in the
+     master's hive are Windows' (issue #83); to measure before
+     `ci-passing.txt` lists them (the tests' `info` lines): a kept
+     change's IOSB, a subordinate in another hive and two, what a rename
+     fires and the renaming handle's own name.
+     Activation contexts from real manifests (`actctx_test`,
+     `wow64_actctx_test`; ARCHITECTURE "Activation contexts"): the
+     manifest read (embedded RT_MANIFEST and .manifest files, UTF-8 and
+     UTF-16, refused as Windows refuses), dependencies found beside the
+     application or the manifest (Microsoft's as system assemblies), the
+     DLL redirection, window class, COM server and ProgID sections in
+     Windows' layouts, FindActCtxSectionStringW/A and
+     FindActCtxSectionGuid through the active then the process default
+     context (the executable's own manifest), QueryActCtxW's classes 2-6
+     and a DLL's own context (RT_MANIFEST 2); GetThreadIOPendingFlag is
+     ThreadIsIoPending, the kernel's count of a thread's outstanding
+     socket, pipe and directory-watch requests (`office_api_test`;
+     ARCHITECTURE "I/O requests and their thread"). The process
+     default's root manifest path (the executable's) and a waiting
+     registry watch's GetThreadIOPendingFlag (0) are Windows' (issues
+     #85, #83). To measure before `ci-passing.txt` lists `actctx_test`
+     (the `info` lines): the handle RETURN_HACTCTX gives for the process
+     default (25H2 printed "not NULL: 0", i.e. NULL, while its report
+     read it as not NULL), the executable's
+     QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE context, a dependency's
+     directory name, ulFlags and ulFileCount; and for
+     GetThreadIOPendingFlag a request on a file with a completion port
+     (gala: not counted; `office_api_test`).
+     The kernel32 functions the apps and OfficeC2RClient.exe use once
+     (`import_survey.py ... --roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE
+     --static`), in `office_k32_test`/`wow64_office_k32_test`
+     (ARCHITECTURE "kernel32"): CompareStringA (and punctuation before
+     digits before letters, NULs without weight, in every linguistic
+     comparison), FoldStringW (Unicode normalization tables from
+     `tools/nls_tables.py`), GetStringTypeA/ExA, IsBadReadPtr,
+     IsBadWritePtr, IsBadCodePtr, IsBadStringPtrA/W, Offer/Reclaim/
+     DiscardVirtualMemory, ResolveLocaleName, SetThreadIdealProcessor(Ex)
+     (the kernel's ThreadIdealProcessor and ThreadIdealProcessorEx),
+     WinExec, GetNumberFormatW/A/Ex and GetCurrencyFormatW/A/Ex. To
+     IsBadReadPtr using up a guard page, OfferVirtualMemory of an
+     unaligned address (ERROR_INVALID_PARAMETER) and CompareStringA's
+     ERROR_INVALID_FLAGS for SORT_DIGITSASNUMBERS are Windows' (issue
+     #88). To measure before `ci-passing.txt` lists them (the tests'
+     `info` lines): which default ResolveLocaleName(NULL) names (25H2's
+     was not the system's), GetNumberFormatA's rounding of 9.995; and
+     whether Windows' kernelbase exports OfferVirtualMemory and
+     ReclaimVirtualMemory (`api-ms-win-core-memory-l1-1-2`; Wine's
+     kernelbase.spec, which `exports.txt` follows, lacks them).
+     Left: the sections gala reads but does not build (typelibs,
+     interface proxy/stubs, CLR classes and surrogates, WinRT
+     activatable classes, loadFrom; recorded), QueryActCtxSettingsW.
+     `office_api_test` and `wow64_office_api_test` pass on CI's Windows
+     (`ci-passing.txt`).
+   - Alongside, natively: the pending scenario `office_install` runs
+     the Office Deployment Tool's `setup.exe /configure` in gala
+     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     re-pinned when Microsoft replaces the file at its URL;
+     `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
+     Current channel, Display None, AcceptEULA; a net scenario, the
+     guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
+     `setup.exe` is a 32-bit x86 program (WOW64); every static import is
+     there (the UCRT and kernel32 functions above). Done: the i686
+     crypt32 and ncrypt (`wow64_cert_test`: cert_test's source for x86,
+     the caller's structures typed and checked against wincrypt.h for
+     both widths, ARCHITECTURE "The 32-bit system DLLs"). How far it
+     gets: it starts, starts its copy (a second setup.exe), whose crypt32
+     now loads and answers (its own embedded signature asked of
+     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: the
+     message and its store, below); it reads its Office and Click-to-Run registry keys (absent)
+     and ends with 0xc06d007e at its next delay-loaded DLL, msi.dll,
+     imported by ordinal (MsiCloseHandle #8, MsiEnumComponentQualifiersW
+     #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
+     MsiQueryProductStateW #113, MsiSetInternalUI #141,
+     MsiGetComponentPathW #173, MsiConfigureProductExW #190,
+     MsiProvideQualifiedComponentExW #203). Done: gala's msi.dll, x64
+     and x86, these nine with their ordinals, answered as Windows does
+     for products and components it has not installed (`msi_test`,
+     `wow64_msi_test`; ARCHITECTURE "Other DLLs"). Past msi it disables
+     its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
+     `office_api_test`), queries its activation context (QueryActCtxW's
+     module context and the manifest sections: done, `actctx_test`),
+     asks COM for a class not registered, and loads normaliz and powrprof
+     (done: both built for i686 too; `office_api_test` and
+     `wow64_office_api_test` check IdnToAscii/IdnToUnicode and
+     CallNtPowerInformation's processor information). It then sets up
+     its download of its configuration from officeclient.microsoft.com
+     over a synchronous winhttp session with a status callback (done:
+     WinHttpSetStatusCallback and the synchronous notifications, per
+     handle and inherited, in Windows' order; the real connect time-out,
+     30 s here; WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH accepted as
+     Windows does; `winhttp_cb_test`, `wow64_winhttp_cb_test`;
+     ARCHITECTURE "WinHTTP and WinINet"). Its relaunched copy asks
+     ShellExecuteEx for "runas" (done: elevation as SECURITY.md
+     "Elevation" designs it; `runas_test`, `wow64_runas_test`,
+     `runas_declined`): as the boot user, a standard user, gala declines
+     as a cancelled UAC prompt (recorded) and setup.exe goes to report the
+     error, so the scenario runs it as SYSTEM (`as=system`, an
+     administrator, as Configuration Manager and Intune run ODT), elevated
+     (the `, elevated token` start lines), which asks for no elevation.
+     Its configuration it reads with MSXML 6 (done: gala's msxml6.dll,
+     x64 and x86, DOMDocument60 registered in both registry views;
+     `msxml_test`, `wow64_msxml_test`; ARCHITECTURE "msxml6"): it loads
+     `C:\gala\config.xml` (load, async left on: loaded before load
+     returns, recorded), then documentElement, selectSingleNode("Add"),
+     selectNodes("Product", "Language", "ExcludeApp", "Remove",
+     "RemoveMSI", "Display", "Logging", "Updates", "Property", "@ID"),
+     the node lists' length and item, getAttribute (SourcePath, Version,
+     Channel, OfficeClientEdition, Level, AcceptEULA, Path, Enabled, ...),
+     attributes, nodeType and nodeValue: no DOM method it calls is
+     missing. Before that, urlmon is asked for and missing
+     (`urlmon.dll` missing dll, survived), two WinHttpSetOption options
+     are recorded unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
+     WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
+     (`events=net` shows none). After the configuration it asks kernel32
+     for GetUserDefaultGeoName (done: "US", GetUserGeoID's GEO_ISO2;
+     `office_api_test`, `wow64_office_api_test`) and loads wldp.dll to
+     check for S mode (done: gala's wldp.dll, x64 and x86, unlocked, no
+     policy in force; the same tests), looks for an Office 2013
+     Click-to-Run (`C:\Program Files\Microsoft Office 15\ClientX64\...`,
+     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`:
+     absent, as on a clean Windows) and throws a C++ exception over the
+     absent key (the crash report decodes it: `shared::Exception`, a
+     std::exception, its message "Cannot open Registry Key"), which its
+     own catch takes. Done: that catch works (the 32-bit ntdll links a
+     registration of its own around each handler call, as Windows; before,
+     an earlier catch had linked an unwound frame back and the
+     registration list looped on itself, so this throw found no handler:
+     the crash report's SEH list showed it; ARCHITECTURE "WOW64",
+     `wow64_seh_test`). The elevated copy (pid 12) then delay-loads
+     advapi32's OpenSCManagerW (done: gala's service control manager,
+     in the kernel over the registry's Services key, the client
+     functions in advapi32 for both widths; `svc_test`,
+     `wow64_svc_test`; ARCHITECTURE "The service control manager"):
+     it connects (granted 0x2000b: connect, create service and lock, with
+     READ_CONTROL) and opens `OfficeSvc` twice, ERROR_SERVICE_DOES_NOT_EXIST
+     as on a machine without Office (`scm:` lines). It then asks WinRT
+     for Windows.Management.Deployment.PackageManager through C++/WinRT,
+     which loads `combase.dll` by name (done: gala's combase.dll, x64 and
+     x86, Windows' export list as forwarders to ole32, which has the
+     HSTRINGs in Windows' layout, RoGetActivationFactory from the
+     `ActivatableClassId` registration, CoIncrementMTAUsage and error
+     origination; PackageManager in gala's AppXDeploymentClient.dll,
+     answering as a machine without MSIX packages; `combase_test`,
+     `wow64_combase_test`; ARCHITECTURE "COM: ole32 and oleaut32"), and
+     looks for a Store Office (`appxdeploymentclient.dll!FindPackagesByNamePublisher(Microsoft.O...`
+     in the ledger: none). The elevated copy (pid 12) then starts its
+     downloads over winhttp, on TLS from 32-bit (done: gala's
+     schannel.dll for i686, its caller structures typed for both widths;
+     `wow64_schannel_test`, schannel_test's source built for x86 against
+     the same Nginx; ARCHITECTURE "Schannel (TLS)"). The scenario ships
+     the public roots a full image has (`user/roots/public-roots.pem`).
+     DNS and TCP connections to Microsoft's servers work over QEMU's
+     NAT; in the agent sandbox the handshake then fails as it
+     should: its egress gateway intercepts TLS with its own CA ("Egress
+     Gateway SDS Issuing CA", `openssl s_client` on the host shows the
+     same), which no root store trusts (`crypt32.dll!SSL:
+     CERT_E_UNTRUSTEDROOT`, chain error 0x20, `schannel.dll!ISC:
+     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT), every run (an empty path
+     is ERROR_PATH_NOT_FOUND, not the current directory, so setup.exe's
+     cleanup of its unset folder "" no longer deletes C:\, SysWOW64's
+     bcrypt.dll with it; `kernel32_file_test`, ARCHITECTURE "Files").
+     With direct egress the chain is Microsoft's,
+     to a public root (not yet seen in a run). Its error path asks urlmon's
+     security manager (done: urlmon.dll for x64 and x86,
+     CoInternetCreateSecurityManager with MapUrlToZone and GetSecurityId
+     as Windows' default settings answer them; `office_api_test`,
+     `wow64_office_api_test`, expectations from Wine's sec_mgr.c run on
+     Windows; ARCHITECTURE "WOW64"): ProcessUrlAction(
+     https://officeclient.microsoft.com..., URLACTION_CREDENTIALS_USE
+     0x1a00), answered E_NOTIMPL and recorded (Windows answers from the
+     Internet zone's policy under Internet Settings\Zones), and MapUrlToZone(
+     https://ecs.office.com/config/v2/Office/...) = 3, Internet. It then
+     asks wininet for its cookies (done: gala's wininet.dll for i686 too,
+     with every wininet function setup.exe imports: InternetGetCookieExW,
+     no cookies as on a fresh profile, recorded `wininet.dll!InternetGet
+     CookieExW(no cookie store)`, asked twice, with
+     INTERNET_COOKIE_HTTPONLY and without; InternetQueryOptionW,
+     InternetSetStatusCallbackW with WinINet's notifications, and the A
+     functions InternetConnectA, HttpOpenRequestA, HttpAddRequestHeadersA,
+     HttpQueryInfoA, InternetCrackUrlA; `wininet_test` and its x86 twin
+     `wow64_wininet_test`, expectations from Wine's wininet tests run on
+     Windows, both of which pass on Windows with the test CA trusted
+     (measured on 26200, issue #61; `ci-passing.txt`); ARCHITECTURE
+     "WinHTTP and WinINet"), asks the 32-bit ntdll
+     for RtlConvertDeviceFamilyInfoToString through GetProcAddress
+     (missing export, survived), lists the network adapters (done:
+     gala's iphlpapi.dll for i686 too, with GetAdaptersInfo for both
+     widths from the kernel's interface records, which carry the
+     gateway; `office_api_test`, `wow64_office_api_test`, on a card;
+     ARCHITECTURE "Network interfaces"), asks WinRT for
+     Windows.Networking.Connectivity.NetworkInformation and
+     Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator
+     (not registered, recorded; REGDB_E_CLASSNOTREG, survived) and opens
+     an asynchronous wininet session (`wininet.dll!InternetOpenW(INTERNET_
+     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). It then uses
+     shlwapi's path helpers (done: PathIsUNCW, PathGetArgsW,
+     PathGetCharTypeW, PathGetDriveNumberW, StrRetToBufW, every shlwapi
+     function it imports; `shlwapi_test` and its x86 twin
+     `wow64_shlwapi_test`) and ole32's call cancellation (done:
+     CoEnableCallCancellation, CoDisableCallCancellation, CoCancelCall;
+     `combase_test`, `wow64_combase_test`), asks COM for BITS's
+     BackgroundCopyManager ({4991D34B-80A1-4291-83B6-3328366B9097}, an
+     out-of-process server: `ole32.dll!CoGetClassObject(out-of-process
+     server)`, recorded, survived) and the zone policy of the CDN's URL
+     (`urlmon.dll!ProcessUrlAction(http://officecdn.microsoft.com/...)`).
+     It then checks signatures with WinVerifyTrust (done: gala's
+     wintrust.dll, x64 and x86, Authenticode over PE images: the image
+     hash, the PKCS #7 SignedData through crypt32's CryptMsg* decoding,
+     the signer's signature, the RFC 3161 timestamp, the chain with the
+     Authenticode policy, Microsoft's code signing roots in the root
+     store, and the three WTHelper functions; CryptQueryObject's
+     embedded PKCS #7, which setup.exe asks for its own signature, is
+     answered too; `wintrust_test`, `wow64_wintrust_test`, expected
+     results from Wine's softpub.c tests run on Windows; ARCHITECTURE
+     "wintrust: Authenticode"; issue #57's measurements: a signer whose
+     signature fails is TRUST_E_NOSIGNATURE, a dual-signed image falls
+     back to its nested signature): its own setup.exe verifies (its
+     WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
+     CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
+     as attached), and it downloads the version descriptor cab from
+     officecdn.microsoft.com over http and verifies it (done: the
+     cabinet subject in gala's wintrust, its digest the range every
+     signed CDN cabinet's signature matches; `wintrust_test`'s cabinet
+     cases, which are `cab_probe`'s answers on Windows (issue #59);
+     ARCHITECTURE "wintrust:
+     Authenticode"). Rejected, that cabinet ended the run: ODT's log
+     (`C:\Users\Public\GALA-<date>.log`, dumped) said
+     `MRO::LoadFromVCab ... InvalidSignature (HR:0x800B0003)`, "Cannot
+     download and extract version descriptor", and only then, on its
+     way out, came slc.dll and the SetSystemFileCacheSize and
+     NtSetSystemInformation lookups (telemetry at exit, not causes).
+     Accepted, setup.exe closes three all-zero WINTRUST_DATAs
+     (dwStateAction CLOSE, cbStruct 0: 1 with the last error 1, as
+     Windows answers, `cab_probe` on 26200, issue #59) and extracts
+     the cabinet with setupapi's SetupIterateCabinetW (done: x64 and
+     x86, over galapkg's cabinet reader, v64.cab being LZX:21;
+     `setupcab_test`, `wow64_setupcab_test`, expected results from
+     Wine's setupcab.c tests, both passing on Windows (issue #59; the
+     32-bit one has an `asInvoker` manifest so that UAC's installer
+     detection lets it start unelevated); ARCHITECTURE "Other DLLs").
+     It loads the descriptor's XML with MSXML 6 and clones from it
+     (done: IXMLDOMNode::cloneNode; `msxml_test`, `wow64_msxml_test`,
+     Wine's test_cloneNode), downloads the product's cabinets and
+     streams for about 70 s (DeliveryOptimization and BITS are asked
+     first: REGDB_E_CLASSNOTREG, it falls back to HTTP), installs their
+     catalog files (wintrust's CryptCATAdminAcquireContext is a stub:
+     `wintrust.dll!CryptCATAdminAcquireContext` missing export; ODT logs
+     `C2R::CatalogFiles::Install` UnexpectedError and goes on) and
+     starts the 64-bit Click-to-Run client, `C:\Program Files\Common
+     Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe platform=x64
+     culture=en-us productstoadd=O365ProPlusRetail.16_en-us_x-none ...`
+     (done: the scenario ships the whole 64-bit system,
+     `FULL_SYSTEM_SCENARIOS`; the client's missing exports, kernel32's
+     WerRegisterFile and ntdll's NtSetInformationKey, and its delay-loaded
+     user32 SetCoalescableTimer, x64 and x86: `office_api_test`,
+     `registry_test`, `user32_test`). The client registers its log for
+     error reports, sets its registry keys' control flags
+     (REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG, recorded: gala has
+     no registry virtualization) and installs a global hook
+     (`user32.dll!SetWindowsHookExW(global)`, recorded).
+     It then becomes an RPC server (done: gala's RPC runtime in rpcrt4,
+     local RPC over ncalrpc and ncacn_np with the NDR engine's -Oicf
+     interpreter, every rpcrt4 function the Click-to-Run client, C2R64.dll,
+     ApiClient.dll and the App-V DLLs import; `rpc_test`, expectations
+     from Wine's rpc.c and server.c run on Windows; ARCHITECTURE "RPC:
+     rpcrt4"): RpcServerUseProtseqEpW and RpcServerRegisterIf3 with
+     security descriptors (recorded: no access check), and it creates
+     the ClickToRunSvc service (`scm:` lines: automatic start, its
+     `OfficeClickToRun.exe /service` path).
+     It sets the service's description and failure actions (done:
+     ChangeServiceConfig2W/A and QueryServiceConfig2W/A, levels 1-7 as
+     the service key's values; `svc_test`, `wow64_svc_test`, Wine's
+     service.c test_queryconfig2 on Windows; ARCHITECTURE "The service
+     control manager").
+     It gives the service its descriptor (done: SetServiceObjectSecurity
+     and QueryServiceObjectSecurity, the descriptor kept in the service
+     key's `Security\Security`; `svc_test`, `wow64_svc_test`).
+     It starts ClickToRunSvc (done: the SCM runs services, own-process
+     ones as LocalSystem in session 0, with SYSTEM's profile environment
+     and no standard handles, the dispatcher's handshake,
+     SetServiceStatus, the controls and a killed process's
+     ERROR_PROCESS_ABORTED; `svcrun_test`, `wow64_svcrun_test`, Wine's
+     advapi32 and services tests run on Windows, and issue #65's
+     measurements on 26200: a failed start's status, a missing
+     executable's ERROR_FILE_NOT_FOUND, a STOP to a START_PENDING
+     service, the second dispatcher, the environment; ARCHITECTURE "The
+     service control manager"; what Windows reports for a live process
+     whose service reported STOPPED with controls accepted is not
+     measured): `OfficeClickToRun.exe /service` connects
+     at once and reports RUNNING (accepting stop, shutdown and
+     pre-shutdown, 0x85). Its process pool creates its COM objects from
+     a thread that never initialized COM while the process has an MTA
+     (done: the implicit MTA in CoGetClassObject; `msxml_test`; before,
+     CO_E_NOTINITIALIZED stopped the service with 17000), and it asks
+     shell32 for CSIDL_SYSTEMX86 (done: SysWOW64 and the x86 program
+     files; `win32_misc_test`).
+     It runs the INSTALL scenario
+     (DeliveryOptimization is REGDB_E_CLASSNOTREG, it falls back to HTTP;
+     catalogs as before), downloads and indexes the stream manifest, and
+     checks for room (done: a disk-backed C:, ARCHITECTURE "A disk-backed
+     C:", `volume_test`; the scenario is MANUAL, `persist` on a 16 GiB
+     sparse disk, 3600 s of run time; its log: `AvailableSpace 15741`,
+     `free:=16506359808 required:=4437233664`).
+     It stages its download through the Restart Manager (done: gala's
+     rstrtmgr.dll, below) and downloads the streams over HTTP: 256 KiB
+     ranges from officecdn.microsoft.com, now over kept-alive
+     connections (done: connection reuse in gala's winhttp and wininet,
+     ARCHITECTURE "WinHTTP and WinINet", `winhttp_test` 14; a connection
+     carries 95-300 MB), at 0.5-0.6 MB/s of guest time under TCG per
+     connection (`XTASK_EVENTS=net`'s `tcp close` lines carry each
+     connection's bytes; keep-alive did not raise it, so the time is the
+     network path's under TCG and the client's own work, not the
+     connections). It loads wofutil.dll (done: gala's, no overlay
+     filter, below).
+     Done: the memory. A 512 MiB VM ran out of memory about 30 min in;
+     frames counted by use (ARCHITECTURE "Physical memory") showed 224
+     MiB of user pages: the client service's commit grew with every
+     short thread it made and ended (5252 reservations), as gala freed
+     neither an ended thread's TEB nor its stack. Now the kernel frees
+     them (ARCHITECTURE "What an ended thread leaves"; `memload_test`),
+     the writeback needs no memory (buffers reserved at mount, records put
+     back instead of lost: before, one failed sync left only snapshots,
+     which failed for want of memory), eviction is a clock with no queue
+     to grow, and pages of a mapped file leave unless a live view shows
+     them (ARCHITECTURE "A disk-backed C:").
+     Done: the slowdown after about 1400 s (connections carrying 3-10 MB
+     over 100-300 s, TLS handshakes growing from 0.1 s to 1 s, the
+     download at 0.03 MB/s by 2000 s). The client makes a thread per
+     range and per pipe client, about 9000 in an hour, and the scheduler
+     kept every dead thread's record: the boot CPU's tick walked all of
+     them under the scheduler's lock for sleepers and timed-out waiters
+     (the NMI dump caught CPU 0 in `sched::on_tick`'s walk and CPU 1
+     spinning on the lock, with 8961 dead records). Now reaping removes a
+     record and its slot is reused under a new id (a slot's generation in
+     the id; ARCHITECTURE "Threads and scheduling"; `sched::table`'s unit
+     tests; `memload_test`: 2777 threads made, 10 slots).
+     The download completes in about 1650-2100 s of run time (it varies
+     with the host): 10701 of 10701 files (`CDownloadManager.RetryTelemetry`
+     `completeSuccess`), 1.82 GB over HTTP, 4.41 GB under
+     `Program Files\Microsoft Office\Updates\Download\PackageFiles`,
+     memory flat (the thread table at 33 threads in 40 slots at the
+     end). Done: staging (`CRepoOperation.Stage` `CompleteStaging`,
+     4.41 GB written, `DownloadSucceeded` true, about 4 min after the
+     download). It links Click-to-Run's virtualization DLLs
+     (AppvIsvSubsystems32/64, C2R32/64) from `Common Files\Microsoft
+     Shared\ClickToRun` into the package's `root\client` and
+     `root\office16` with CreateSymbolicLinkW (16 links); kernel32's
+     stub answered ERROR_PRIVILEGE_NOT_HELD
+     (`VirtualizationHelper::EnsureVirtualizationDlls: Failed to create
+     SymLink`), which repoman reported as `repoleaves.cpp:1028` hr
+     0xa0000058 and `SetCurrentState failed ... currentState=1 state=2`,
+     retried every minute (the service's late system calls,
+     `events_from=`, showed the root\client open and the FormatMessage
+     of 1314 right before the error). Now NT symbolic links and reparse
+     points are there (ARCHITECTURE "Files", `reparse_test`), SYSTEM's
+     SeCreateSymbolicLinkPrivilege enabled for the call.
+     The client's next task, STAGEREGISTRY
+     (`C2R::VirtualRegistry::MergeAndStageRegistry`), loads OffReg.dll
+     (the offline registry library: it reads and writes hive files
+     itself, with CreateFileW/ReadFile/WriteFile), which failed to load
+     (`RegistrationFailure (Failed to load OffReg.dll , Error:0x7f)`,
+     setup.exe exit 17004) for want of its imports. Done: ntdll's
+     RtlRunOnceBeginInitialize/Complete (and the rest of RtlRunOnce*,
+     with kernel32's InitOnce* over them), the SRW locks in ntdll
+     (kernel32's exports forward, as on Windows) and every word wait in
+     ntdll's RtlWaitOnAddress (kernelbase's WaitOnAddress and kernel32's
+     condition variables too: one waiter list, so a lock taken through
+     one DLL is woken through the other), the bitmap routines
+     (RtlNumberOfSetBits, RtlFindNextForwardRunClear and their
+     companions); msvcrt's bounded string functions (wcsnlen,
+     wcsncpy_s, wcscat_s and the rest of the strcpy_s family, shared
+     with ucrtbase); advapi32's private object security
+     (CreatePrivateObjectSecurity*, SetPrivateObjectSecurity(Ex),
+     DestroyPrivateObjectSecurity, MakeSelfRelativeSD) over the kernel's
+     inheritance rules (gala's GalaNewSecurityObject and
+     GalaSetSecurityObject; ARCHITECTURE "Security descriptors"), and
+     GetSidLengthRequired, which it calls once loaded;
+     `office_api_test` and `wow64_office_api_test` (`offreg.rs`, Wine's
+     conformance tests run on Windows and the documentation).
+     Then MergeAndStageRegistry detokenizes the package's registry
+     through known folders and stopped at those shell32 lacked
+     (`Failed to get known folder mapping.`, 0x80070002 for
+     [{Fonts}], [{ProgramFilesX86}], [{ProgramFilesX64}], the common
+     files ones and [{SystemX86}]); done: those known folders
+     (`win32_misc_test`). [{AppVPackageRoot}] is App-V's own token, not
+     a Windows known folder.
+     STAGEREGISTRY then succeeds. The next task, UNINSTALLCENTENNIAL
+     (removing a Store-installed Office), runs
+     `InspectorOfficeGadget.exe deprovisionuninstall` (32-bit, .NET
+     Framework: it imports mscoree.dll alone, which gala lacks, so each
+     start ends 0xc0000135; the task goes on), and the service ended on
+     a delay-load failure of wtsapi32's WTSEnumerateSessionsW (crash
+     report `delay load of WTSAPI32.dll!WTSEnumerateSessionsW`, about
+     2520 s). Done: WTSEnumerateSessionsW/A over the kernel's session
+     list (Wine's wtsapi.c test on Windows); ntdll's
+     RtlValidRelativeSecurityDescriptor, whose import the service's
+     pieces resolve (`office_api_test`'s `service.rs`).
+     The service then writes Office's registry (NtCreateKey and
+     NtSetValueKey, one after another), and each took 0.65 s: with
+     `persist`, every system call's sync rewrote the registry's log as a
+     whole snapshot once the changed keys alone passed the log's 1 MiB
+     bound (the NMI dump caught `persist::sync_registry` encoding a
+     snapshot; 1016 creates in 1290 s). Done: the bound is also twice
+     the last snapshot, so syncs cost their own changes, amortized
+     (ARCHITECTURE "The registry kept"; `persist`'s unit test). With
+     that the service wrote 17000 keys and 25000 values in 1200 s, until
+     the 16 MiB snapshot, encoded whole, failed for want of memory
+     (`persist: registry changes not written (NoMemory)`, frames free
+     reaching 0) and every sync after it tried again; done: snapshots
+     are written as the registry is walked, a chunk at a time.
+     On the fast path (below) the registry staging then ran for the
+     rest of the hour at about 40 ms per NtCreateKey and NtSetValueKey
+     (19000 creates and 25000 values from 1300 s to 3600 s, every
+     system call's sync writing the change and flushing the disk; NtClose
+     20 ms); done: the registry is flushed lazily, as Windows' is (at the
+     first sync 5 s after the last, or at NtFlushKey, a program's end, a
+     handover; ARCHITECTURE "The registry kept").
+     With that STAGEREGISTRY ends in minutes and UNINSTALLCENTENNIAL
+     runs at about 1700 s on the fast path; the service then ended on
+     the delay load of WTSAPI32.dll!WTSQueryUserToken (crash report);
+     done: WTSQueryUserToken (the console user's token for a
+     SeTcbPrivilege holder, as documented; GalaSession's
+     SESSION_USER_TOKEN, wow64.dll converts GalaSession now).
+     The next delay load the task needed was USERENV.dll!
+     CreateEnvironmentBlock (crash report, about 1360 s in); done:
+     CreateEnvironmentBlock and DestroyEnvironmentBlock (Wine's userenv
+     test on Windows), the boot writing the processor variables into
+     `Session Manager\Environment` as Windows keeps them.
+     UNINSTALLCENTENNIAL then completes (InspectorOfficeGadget's starts
+     still fail without .NET Framework) and APPLYCONFIGURATION fails
+     publishing the staged install (`Failed to publish working op ,
+     Error:0x80070057`; repoman's DownloadManagers.hpp:575 E_INVALIDARG,
+     `SetCurrentState ... currentState=2 state=4`; setup.exe's client
+     ends 17004 at about 1850 s), the one ERROR_INVALID_PARAMETER of the
+     run's ledger being kernel32's GetFileInformationByHandleEx(FileIdInfo,
+     class 18); done: FileIdInformation (ARCHITECTURE "Files").
+     With it the publish goes on and the service ended on the delay load
+     of SHLWAPI.dll!PathBuildRootW (crash report, about 1835 s); done:
+     PathBuildRootW and A (Wine's shlwapi path.c test on Windows).
+     APPLYCONFIGURATION then published the staged install into
+     `Program Files\Microsoft Office\root` at about 0.13 MB/s (4 KiB
+     NtReadFile/NtWriteFile pairs of about 30 ms each, every call's sync
+     writing its page and the volume's record and flushing the disk) and
+     was cut off by the hour; done: file data is written back lazily, as
+     Windows' cache manager does (ARCHITECTURE "A disk-backed C:": the
+     lazy writer every second; FlushFileBuffers, write-through and
+     unbuffered handles and a program's end at once; a dirty limit;
+     `writeback_test`, `writeback_crash`, `writeback_lazy`).
+     With it STAGEREGISTRY and UNINSTALLCENTENNIAL end and
+     APPLYCONFIGURATION starts at about 1350 s (550 s earlier); its first
+     step launched OfficeC2RClient.exe, whose 30 MiB image took 400 s to
+     lay out from the disk because every page read walked the whole tree
+     to let pages go while other uses held the memory; done: a futile
+     eviction is not repeated until pages could leave (ARCHITECTURE "A
+     disk-backed C:"). Where the fast path ends now (about 1600 s):
+     APPLYCONFIGURATION publishes the staged files with hard links
+     (`fileops::HardlinkOperation`), which fail (kernel32's CreateHardLinkW
+     is unsupported, ERROR_NOT_SUPPORTED; NtSetInformationFile has no
+     FileLinkInformation), falls back to copying, and the copy fails with
+     ERROR_NOT_ENOUGH_MEMORY: the 512 MiB VM has no free frame (the
+     `persist: free memory stays low` lines: the kernel heap 157 MiB,
+     most of it grown during the registry staging, Office's registry kept
+     in memory; the service's 190 MiB of private memory; 63 MiB of
+     section pages, the client's 30 MiB image laid out whole; the files'
+     pages only 2 MiB); setup.exe ends with 17004. Done: hard links
+     (CreateHardLinkW/A, NtSetInformationFile FileLinkInformation(Ex),
+     a handle opened by a link acting on its own name; the change log's
+     Link record keeps them) and FileDispositionInformationEx
+     (SetFileInformationByHandle's FileDispositionInfoEx, class 21, 10
+     hits), test first (`hardlink_test`, `wow64_hardlink_test`, from Wine's
+     test_hard_link, test_file_link_information and
+     test_file_disposition_information; ARCHITECTURE "Files"). With
+     these APPLYCONFIGURATION publishes the staged
+     install with hard links (`CRepoOperation.Publish` in 5.5 min),
+     publishes its registry, runs `integrator.exe /U ...` (it returns
+     0), and then the service (OfficeClickToRun.exe) ends with an access
+     violation at about 1595 s (deterministic; crash report:
+     OfficeClickToRun.exe+0x2da027 reading 0, rax E_NOINTERFACE):
+     it loads gala's appxdeploymentclient.dll (PackageManager) and asks
+     one of its objects for interface
+     {1aa79035-cc71-4b2e-80a6-c7041d8579a7}, which it lacks, and goes on
+     without checking (the ledger's `appxdeploymentclient.dll!QI ...`,
+     recorded since). Done: that interface, IPackageManager9 (probe issue
+     #108 measured its IID and method order on Windows; ARCHITECTURE
+     "Windows Runtime classes"; `combase_test`): the service calls its
+     FindProvisionedPackages (an empty IVector<Package>) and goes on
+     (`PackageManager::GetSortedProvisionedMsixPackages`, MSIX cleanup)
+     to the virtualization's registration (`OfficeVirtRegistration`),
+     where loading `ClickToRun\AppVIsvApi.dll` fails with 0x7f nine times
+     (`OISVAPI::LoadDll`): gala's kernel32 lacks the thread pool
+     functions it imports (CreateThreadpool, CloseThreadpool,
+     SetThreadpoolThreadMaximum/Minimum, CreateThreadpoolCleanupGroup,
+     CloseThreadpoolCleanupGroup(Members); the ledger's missing exports,
+     9 hits each). APPLYCONFIGURATION then fails ("Encountered fatal
+     exception", ErrorCodeOnly 127), the service ends with 17002 at
+     1872 s and setup.exe with 17002 at 1913 s. Done: the thread pool's
+     whole family Click-to-Run's DLLs import (`tools/import_survey.py`
+     over the ClickToRun files of `i640.cab`, x64 and x86: private pools
+     and their limits, cleanup groups, and callback environments for
+     the work, timer and wait objects that 18, 13 and 14 of the files
+     use), with
+     I/O objects, the instance functions and the stack information
+     (`threadpool_test`, `wow64_threadpool_test`, from Wine's ntdll
+     threadpool and kernel32 thread tests; ARCHITECTURE "Thread pool").
+     Next: the values the tests print as `info` until Windows' answer is
+     read from the `windows` job's report: 32-bit
+     SetThreadpoolStackInformation's refusal of sizes of 1 (its error and
+     rule), whether a version 9999 environment's priority is read, a
+     wait's handles once it fired, and `_wmakepath_s`'s buffer after
+     ERANGE (gala writes "\0:d\\" and leaves the rest).
+     With it AppVIsvApi.dll loads and OISVAPI::Initialize fails
+     instead in the orchestration's component loader (`componentloader.h
+     : 216`, 0x7f; ErrorCode 30175, APPLYCONFIGURATION 127, the service
+     17002 at about 1845 s): the App-V DLLs it loads import, statically,
+     the 64-bit kernel32's Wow64Disable/RevertWow64FsRedirection (the
+     ledger's missing exports), DosDateTimeToFileTime,
+     PathCchCanonicalize and the UCRT's `_wcsupr_s`, `_wcslwr_s`,
+     `_wsplitpath_s`, `_wmakepath_s`, `_resetstkoflw` and
+     `_get_heap_handle` (`tools/import_survey.py` on them). Done, test
+     first (`office_api_test`'s `appv.rs`, `ucrt_test`, x64 and x86):
+     every static import of the App-V DLLs now resolves (NtOpenJobObject
+     only as a stub). With them the orchestration initializes and
+     `Orchestration::UpdateAppV` merges Office's AppX manifests
+     (`C:\Program Files\Microsoft Office\PackageManifests`): loading
+     `AppXManifest.common.16.xml` (2.1 MB, UTF-16 LE with a BOM) fails
+     (`TryRefreshMergedManifest`: `XmlDocument loadXML failed , Error:0x1`,
+     msxml's S_FALSE), and APPLYCONFIGURATION ends with 30088 (the
+     service 17002 at about 1816 s). gala_xml parses that file as read
+     from the disk (a host check), so the string the service hands
+     loadXML differs; msxml6 now records each parse error's reason and
+     place in the ledger (ARCHITECTURE "msxml6"): the string fails at
+     line 1, column 18 with `undeclared namespace prefix 'appv'` (the
+     service 17002 at about 1874 s). A one-line string using `appv:`
+     without declaring it is what reloading a node's `xml` gave: gala's
+     msxml6 serialized an element subtree with its own attributes only,
+     not the namespace declarations it inherits. Done: `xml` declares
+     a prefix or default namespace an ancestor left out bound on the
+     element that uses it (Wine's msxml3 tests; `msxml_test`'s
+     `inherited_namespaces`, x64 and x86: each subtree's xml loads
+     again with its names in their namespaces), and the ledger has the
+     text at a parse error (`parse error at: ...`). With it the
+     manifest loads, and the merge then ended the service at
+     `msxml6.dll!IXMLDOMNode::replaceChild` (not implemented, 17002 at
+     about 1650 s; the same end resumed from a machine snapshot taken
+     at `process integrator.exe` in 21 s of run time instead of 1706 s,
+     ROADMAP SN). Done: the DOM's mutation family as a whole (the
+     create methods and createNode, document fragments, insertBefore,
+     appendChild, removeChild, replaceChild, putref_documentElement,
+     setAttribute, removeAttribute, setAttributeNode,
+     removeAttributeNode, the attribute map's setNamedItem,
+     removeNamedItem and removeQualifiedItem, put_text, put_nodeValue,
+     normalize, getElementsByTagName, importNode, save to a file),
+     test first (`msxml_test`'s `mutation`, x64 and x86, from Wine's
+     msxml3 tests run on Windows; ARCHITECTURE "msxml6"). To measure on
+     Windows (its `info` lines): removeAttributeNode and removeAttribute
+     of what the element lacks, normalize's empty text, importNode(NULL),
+     the bytes save writes. With them the merge completes (C2R's log:
+     `AppX::ManifestMerge::Merge` "Finished AppX manifest merge", each
+     product's manifest merged into `AppXManifest.common.16.xml`,
+     `AppXManifest::Save` to `Microsoft Office\AppXManifest.xml` and
+     `ThinAppXManifest.xml`), and `OfficeVirtRegistration` then failed
+     in App-V's `OISVAPI::ConfigurePackage` (`xmlutils.cpp : 56`,
+     0x80040154): it asks COM for FreeThreadedDOMDocument60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a06), so APPLYCONFIGURATION ended with 30175 and the
+     service with 17002 at about 1700 s. Done: FreeThreadedDOMDocument60
+     registered and served (`msxml_test`'s `free_threaded`, x64 and
+     x86). A stopgap to replace: it is the rental document, which locks
+     nothing (recorded at each creation); a free-threaded document needs
+     its calls serialized (a lock per document around every method)
+     before a program uses one from two threads at once. With it
+     ConfigurePackage gets further and fails at `xmlutils.cpp : 592`,
+     0x80040154 again: it asks COM for XMLSchemaCache60
+     (`ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a07), MSXML 6's XSD schema cache; APPLYCONFIGURATION ends
+     with 30175, the service and setup.exe with 17002 at about 1570 s.
+     Done: XMLSchemaCache60 registered in both views and served
+     (IXMLDOMSchemaCollection2, the document's `schemas`, validate,
+     validateNode and validateOnParse against XSD, schemas from files and
+     `res:` URLs), test first (`msxml_test`'s `schema`, x64 and x86;
+     ARCHITECTURE "msxml6"). The XSD subset is sized from the schemas
+     App-V's own DLLs carry as RT_HTML resources (AppVManifest.dll: the
+     AppX root, the appv/2014 and appv/2019 manifest schemas;
+     AppVPolicy.dll: deployment and user configuration, connection
+     groups; AppVFileSystemMetadata.dll): all of them compile and resolve
+     with gala's subset (checked on the host against the files taken
+     from Office's i640.cab), and what the subset lacks fails the add
+     loudly. Those DLLs also carry the XSLT transforms App-V runs before
+     validating (below).
+     With the cache registered, ConfigurePackage failed at the same
+     place with E_NOINTERFACE (17002 at about 1768 s): it creates the
+     cache asking for an IID whose first dword is CLSID_XMLSchemaCache60's
+     (`XMLSchemaCache60::QueryInterface` miss in the ledger). Done: the
+     cache answers QueryInterface(CLSID_XMLSchemaCache60) with itself
+     (App-V's code works on Windows, so MSXML answers it; probe issue
+     #125 asks what Windows gives), and every QueryInterface miss of
+     msxml6 now records the whole IID. With it ConfigurePackage creates
+     the cache, adds one schema (a document, not a URL; namespace
+     `http://schemas.microsoft.com/ap...`, cut by the ledger: the
+     ledger now keeps a long value's end) and sets it as a document's
+     `schemas`, then fails at `xmlutils.cpp : 672` with 0x80040154: it
+     asks COM for XSLTemplate60 ({88D96A08-...},
+     `ole32.dll!CoGetClassObject(class not registered)`, detail
+     0x88d96a08); APPLYCONFIGURATION ends with 30175, the service and
+     setup.exe with 17002 at about 1678 s. No validation ran before it
+     (no validate, validateNode or load-time validation in the ledger):
+     the transform comes first, as the comment of App-V's clean-up XSLT
+     says ("prior to using XSD for validation").
+     Done: XSLTemplate60 registered in both views and served
+     (IXSLTemplate, IXSLProcessor: input, output to a string, a
+     document or a stream, addParameter, setStartMode, transform) with
+     IXMLDOMNode's transformNode and transformNodeToObject, test first
+     (`msxml_test`'s `xslt`, x64 and x86: Wine's msxml3 XSLT tests and
+     transforms of this test's own shaped like App-V's; ARCHITECTURE
+     "msxml6"). The XSLT 1.0 subset is sized from App-V's own stylesheets
+     (RT_HTML resources: AppVManifest.dll's clean-up that keeps the
+     namespaces a parameter lists, the normalization of older appv
+     namespaces into the newest, shared with AppVPolicy.dll and
+     AppVFileSystemMetadata.dll, which reads IgnorableNamespaces'
+     prefixes through the namespace axis, and the alias step that
+     declares `appv` through `msxsl:node-set()`); what it lacks fails the
+     stylesheet with `XSLT not supported: <what>` in the ledger. With it
+     ConfigurePackage transforms the manifest three times (each into a
+     document, with 2 and 4 parameters), validates it against the
+     cache (valid), and then asks COM for CLSID_KnownFolderManager
+     ({4DF0C730-DF9D-4AE3-9153-AA6B82E9795A}, `knownfolder.cpp : 64`;
+     without it 0x80040154, `ole32.dll!CoGetClassObject(class not
+     registered)`, detail 0x4df0c730, APPLYCONFIGURATION ends with 30175).
+     The loop: snapshot at `process integrator.exe (pid`, a resume to
+     the failure in 37 s against about 1820 s from boot, the service's
+     log read from the resume's kept layer (`disk-files` reads it now).
+     Done: the Known Folder Manager, registered for shell32 in both
+     views, over one table of 72 known folder definitions that
+     SHGetFolderPathW and SHGetKnownFolderPath read too, test first
+     (`knownfolder_test`, x64 and x86: Wine's shell32 known folder
+     tests, every definition checked against Windows' as that test
+     lists them; ARCHITECTURE "shell32, version, powrprof, comctl32,
+     user32 strings"). To measure on Windows (its `info` lines):
+     FindFolderFromPath's code for no match, the codes for an unknown
+     id, and the folders whose path differs from SHGetFolderPathW's.
+     With it ConfigurePackage goes on to read typed values. Done:
+     nodeTypedValue and dataType, get and put, over the `dt:dt` data
+     types (test first, `msxml_test`'s typed section on x64 and x86:
+     Wine's msxml3 typed value tests, aligned to MSXML 6's answers on
+     Windows where they differ; ARCHITECTURE "msxml6", Typed values).
+     With them (as first written, before that alignment: a run with
+     the aligned msxml6 is to confirm) ConfigurePackage succeeds, the service updates
+     the App-V configuration and merges and saves the AppX manifests
+     (`ThinAppXManifest.xml`), then OfficeClickToRun.exe died of an
+     access violation executing shell32.dll+0 from AppVCatalog.dll
+     (about 1735 s after boot): AppVCatalog.dll imports
+     `SHELL32.dll!#165`, which gala's shell32 did not export, and the
+     loader bound the empty ordinal slot (RVA 0) to the module's base.
+     Done: the loader treats an RVA of 0 as no export (an import of it
+     is a missing export, `dll!#N` in the ledger, the load failing with
+     STATUS_ORDINAL_NOT_FOUND; LdrGetProcedureAddress fails the same
+     way; the kernel's `find_export` too), test first in `loader_test`
+     (`testdll`'s ordinal gap, `testdll_gap` importing it); shell32's
+     ordinal 165, SHCreateDirectory, with SHCreateDirectoryExW, test
+     first in `knownfolder_test` (x64 and x86, by ordinal, Wine's
+     shlfileop tests). With the loader fix OfficeClickToRun.exe no
+     longer started (0xc0000138): it imports oleaut32's RegisterTypeLib
+     (#163) and UnRegisterTypeLib (#186), which had bound to the base
+     unnoticed; both are exported at their ordinals now and fail with
+     TYPE_E_REGISTRYACCESS, recorded (`oleaut32_test`; gala loads no
+     type library). Then OfficeClickToRun.exe got past the App-V
+     catalog and died of 0xc06d007f (delay-loaded function not found)
+     in AppVIntegration.dll: `USERENV.dll!ExpandEnvironmentStringsForUserW`,
+     a named stub (GetProcAddress treats stubs as absent). Done:
+     ExpandEnvironmentStringsForUserW against the user's environment
+     block, test first in `office_api_test` (Microsoft's documentation).
+     With that, the App-V integration runs and the install reaches its
+     fonts task, but its second integrator.exe
+     (`root\Integration\Integrator.exe /I /License ...`, about 2450 s
+     after boot) died of 0xc06d007e (delay-loaded DLL not found):
+     `osppc.dll!SLOpen`. No osppc.dll is laid down: on Windows 8 and
+     later Office's licensing goes to the system's Software Protection
+     client, sppc.dll, which gala lacked. Done: gala's sppc.dll
+     (ARCHITECTURE "Other DLLs", sppc), a file-backed license store
+     with the SL* functions integrator.exe imports, test first in
+     `sppc_test` (failure answers measured against Windows' documented
+     codes; the round trip of an unsigned license is gala's own, which
+     Windows refuses). Integrator.exe now installs Office's licenses
+     through it (SLInstallLicense, SLGetSLIDList, SLGetLicenseInformation
+     in the ledger) and exits 0. The next integrator.exe died of
+     0xc06d007f (delay-loaded function not found):
+     `CRYPT32.dll!CryptSIPAddProvider`, a named stub. Done: crypt32's
+     CryptSIPAddProvider and CryptSIPRemoveProvider (ARCHITECTURE
+     "crypt32", SIP registration), the documented registry entries
+     under `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
+     test first in `sip_test` (Wine's crypt32 sip tests, which pass on
+     Windows); integrator.exe registers Office's VBA SIP through it.
+     The same integrator.exe then died of 0xc06d007f on
+     `WINTRUST.dll!WintrustAddActionID`. Done: wintrust's
+     WintrustAddActionID and WintrustRemoveActionID (ARCHITECTURE
+     "wintrust: Authenticode", trust provider registration), the
+     documented entries under
+     `HKLM\Software\Microsoft\Cryptography\Providers\Trust`, test
+     first in `actionid_test`. Next: the install's next blocker, found
+     from a snapshot taken at integrator.exe's start. A failure there fails the install as before: the service ends with 17002 and setup.exe with
+     0x426a (17002, "C2RClient returned a failing exit code"). Seen
+     too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
+     run time), Office's product key not decoded by gala's sppc
+     (SLInstallProofOfPurchase answers SL_E_INVALID_PRODUCT_KEY; no
+     run has called it yet), and osppcext.dll!SLActivateProduct
+     (integrator.exe's other delay import, not reached).
+     To measure on Windows (`loader_test`'s `info`
+     lines): GetProcAddress for an ordinal in a gap (documented as
+     possibly an invalid non-NULL address) and the status of loading a
+     DLL that imports one. Seen too,
+     not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
+     and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
+     on Windows (`msxml_test`'s `info` lines): a string output's
+     declaration, the prefixes and declarations of the App-V-shaped
+     results, the prefix the alias step's elements get. To measure on Windows
+     (the test's `info` lines, probe issue #116): the exact text of each subtree, in
+     particular whether declarations it does not use come along (an
+     attribute value `u:n` names a prefix only its ancestor declares).
+     And (probe issue #125) the schema test's `info` lines: the
+     validation error codes per case, add's answers for a namespace
+     other than the targetNamespace and an unresolved reference, the
+     QueryInterface above.
+     Seen too: CryptCATAdminAcquireContext is missing (`CatalogFiles::Install`,
+     30088, logged as non-fatal at the start).
+     The memory (`heap by owner` and `image pages`, the state dump of a
+     run bounded at 1800 s with 4 GiB; the files' pages, 2.5-2.7 GiB
+     there, are the cache, given back under pressure): before the layout
+     fix, image layouts 80 MiB (89 images) plus 69 MiB of section pages
+     copied from them; with layouts held once, 83 MiB and 7 MiB of
+     section pages; with image pages built at their first touch
+     (ARCHITECTURE "Sections"), 34 MiB (7 900 of 20 400 pages in memory);
+     the file tree 47 MiB for 12 000 nodes (16 bytes per 4 KiB page);
+     the registry 16 MiB (22 000 keys, 31 000 values), other 20 MiB.
+     Done: image pages built at their first touch and dropped under
+     memory pressure (built again from their files; `imagetrim_test`),
+     and a file's page tables as extents (pages in memory in chunks,
+     clusters as runs: `fs::pagetable`). At 512 MiB the run then reached
+     the same point (the publish, `integrator.exe` returning 0, then the
+     service's IPackageManager9 crash, fixed since; 1630 s of the service against
+     1550 s with 4 GiB), the kernel heap 84 MiB at 2400 s: registry 16
+     MiB, file tree 20 MiB, image layouts 23 MiB (5 200 of 20 400 pages
+     in memory; 3 000 dropped, 320 built again), files' pages 7 MiB,
+     other 19 MiB; the 4 GiB stopgap is gone (the scenario has the
+     default 512 MiB). Done: a page file for private memory
+     (ARCHITECTURE "The page file"; `pagefile_test`, `pagefile_fail`):
+     `C:\pagefile.sys` on the data area, the commit limit memory plus the
+     page file (443 MiB at 512 MiB, so 886 MiB, growing up to 4 GiB),
+     NT processes' private pages not touched since the clock last passed
+     written there when the file cache's pages cannot bring free memory
+     back to the mark (before image pages go), read back at their next
+     touch. At 512 MiB the run reached the same point (the publish,
+     `integrator.exe` returning 0, then, before IPackageManager9, the
+     service's crash at 1810 s); at 2400 s the kernel heap is 82 MiB (registry 16 MiB, file
+     tree 19 MiB, image layouts 23 MiB with 5 250 of 20 400 pages in
+     memory, files' pages 4 MiB, other 18 MiB), user pages 205 MiB, free
+     memory 118 MiB, never below 93 MiB: nothing needed paging out. At
+     384 MiB (`XTASK_QEMU_ARGS="-m 384M"`, a 315 MiB page file) it reaches
+     the same point (1826 s): 117 MiB of private memory paged out in 1 878
+     writes, 24 MiB read back, user pages 112 MiB at 2400 s; image pages
+     dropped 4 400 and built again 1 570 (with image pages let go before
+     private ones: 15 300 and 9 750, while 131 MiB of private memory stayed
+     resident). Next, as the measurement shows them: the registry (16
+     MiB), the file tree (19 MiB).
+     Also: the page file's limits (ARCHITECTURE "The page file": a page
+     read back gives up its slot, no read-around, one second chance, no
+     per-process working sets); `pagefile_test`'s expectations are
+     Windows' documented behaviour and wait for a Windows run before
+     `ci-passing.txt` lists it (CI's page file is on D:, which the test
+     reads from SystemPageFileInformation).
+     Also: FindFirstFileNameW listing every name of a file with hard
+     links (FileHardLinkInformation).
+     Also seen: the client's `OfficeC2RClient.exe
+     /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
+     ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
+     Framework.
+     Its log also warns per file that kernel32's GetCachedSigningLevel and
+     SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
+     getting proc addr for get/set cached signing level`, a warning; it
+     goes on); their answers for a file with no cached level need a
+     Windows measurement.
+     HKCU still names the boot user's hive while running as SYSTEM
+     (advapi32's `current_user_path` is fixed to the boot user's SID;
+     Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
+     Done: gala's rstrtmgr.dll (x64 and x86, for 32-bit installers such
+     as Inno Setup's too: sessions, RmRegisterResources,
+     RmGetList over the kernel's FileProcessIdsUsingFileInformation,
+     RmShutdown, RmRestart, the filters, RmJoinSession within a process;
+     QueryFullProcessImageNameW of other processes; `rstrtmgr_test`, `wow64_rstrtmgr_test`, from
+     Microsoft's documentation, its open answers printed for a run on
+     Windows; ARCHITECTURE "Other DLLs"). Left of it: sessions shared
+     between processes (RmJoinSession of another process's key,
+     recorded), a window lookup for RmMainWindow (recorded), asking
+     applications to close before forcing (recorded).
+     Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
+     WofIsExternalFile a physical file, the driver functions
+     ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
+     Done: a development fast path, `office_install_local` (MANUAL):
+     the pinned build's files from the CDN cached on the host once
+     (`cargo xtask office-source`, 3.2 GB) and put on the fresh disk as
+     C:\OfficeSource in seconds (`diskimage::inject`), with ODT's
+     SourcePath pointing there; the Click-to-Run client starts about as
+     before but nothing is downloaded (WORKFLOW "Office's fast path").
+     `office_install` stays the whole path's check.
+     Next, in the order the run reaches them: what STAGEREGISTRY and
+     the apply after it need; the stream
+     download's speed under TCG (the
+     network path: `memload_test`'s loopback HTTP moves about 1.4 MB/s,
+     its AFD calls 4 ms each); GetCachedSigningLevel and
+     SetCachedSigningLevel (a Windows measurement first); HKCU from the caller's token; the RPC calls the client's
+     pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
+     names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
+     piece needs it); CryptCATAdmin*
+     (catalogs: a catalog SIP, member lookup
+     by hash); slc.dll and the two exports once a run needs them, with
+     their Windows answers (measured on 26200 for a standard user and an
+     administrator, issue #60): SLOpen S_OK with a non-NULL handle and
+     SLClose S_OK for either; SetSystemFileCacheSize(-1, -1, 0) FALSE
+     with ERROR_ACCESS_DENIED and
+     NtSetSystemInformation(SystemFileCacheInformationEx, 0x51)
+     STATUS_ACCESS_DENIED until SeIncreaseQuotaPrivilege is enabled
+     (an administrator holds it disabled; a standard user does not hold
+     it, so AdjustTokenPrivileges gives ERROR_NOT_ALL_ASSIGNED), then
+     TRUE and STATUS_SUCCESS;
+     then the other DLLs
+     setup.exe imports that gala has no i686 build of (xmllite,
+     webservices, cabinet, credui, and osppc.dll, which is the system's
+     sppc.dll, gala's being x64 only so far) and the functions its imports lack (shell32's
+     SHGetSettings, user32's CheckRadioButton,
+     iphlpapi's CreateSortedAddressPairs); BITS (the
+     BackgroundCopyManager it asks for: absent, survived); WinINet's
+     asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
+     RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
+     ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
+     direct egress (the TLS chain of Microsoft's servers to a public
+     root), then what the run reaches after them (its log
+     in `target/failed/office_install.dump/` once it writes one); more of
+     gdiplus as setup.exe's error UI asks it, HKCU from the caller's token,
+     winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
+     the XML it downloads (the CDN's cab manifests: more of the DOM as
+     the run reaches it; load of URLs is recorded unsupported);
+     wintrust's WINTRUST_SIGNATURE_SETTINGS (choosing among the
+     signatures) and legacy countersignatures,
+     crypt32's detached messages; FormatMessage's system text for
+     ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
+     dispatcher's nested exceptions and collided unwinds.
+   - The install to watch: the MANUAL scenario `office_install_gui` is
+     `office_install` with its windows shown
+     (`user/office_install/config_full.xml`: Display Level Full,
+     AcceptEULA), on the same 16 GiB disk and limit, booted by UEFI.
+     setup.exe still runs as SYSTEM, elevated, but on the console's
+     desktop: `consolerun.exe` starts it in the console's session on
+     `winsta0\default` (as `psexec -s -i`, MDT's ServiceUI; SECURITY.md
+     "Elevation"); `wait=all` keeps the boot while Click-to-Run works
+     after setup.exe ends. `XTASK_SHOTS=60,120,300,... cargo xtask
+     boot-test office_install_gui` writes screenshots (WORKFLOW
+     "Screenshots"). Done, test first: setup.exe's splash draws with
+     gala's gdiplus.dll (`gdiplus_test`, `wow64_gdiplus_test`: the
+     seventeen flat-API functions it delay-loads, PNG decoding;
+     ARCHITECTURE "Other DLLs"), asks Windows.UI's UISettings
+     (`uisettings_test`, `wow64_uisettings_test`; gala's windows.ui.dll),
+     LOCALE_IREADINGLAYOUT (`kernel32_locale_test`), answers its
+     static text's WM_CTLCOLORSTATIC with a null brush (which now paints
+     nothing: `gdi32_test`) and wraps its texts in U+202A/U+202C (no
+     width, not drawn: `gdi32_test`). The splash ("We're getting things
+     ready...", the Microsoft logo) shows as on Windows from about 25 s
+     to 70 s of run time.
+     Where the watched install ends now: when setup.exe has started the
+     Click-to-Run client it closes its splash (its main thread sends
+     WM_USER+1; the splash thread destroys its window, posts WM_QUIT)
+     and the splash thread then faults right after its message loop,
+     at setup.exe+0x817f reading 0xffffffec (a NULL object less 0x28,
+     read at +0x14; its thread argument still holds the two HWNDs), with
+     no system call between WM_QUIT and the fault. The crash report's
+     register memory and deeper stack place it inside the thread procedure, not in thread
+     exit: the C++ runtime's thread_start (+0x37fdcc) still has its call
+     to the procedure on the stack (return +0x37fdf7), then frames
+     returning to +0x3f6e75, +0x38094d, +0x3805e4 and +0x8100; ebx can be
+     the splash's own object (the pointer its window keeps in extra
+     bytes index 0, which GetWindowLongW returns on every message up to
+     WM_NCDESTROY, as on Windows): its first word is in setup.exe (a
+     vtable), its second its own address, its fifth to seventh 0, and
+     none of its first twelve words changes from WM_CREATE to the fault
+     (traced). Not the cause (each tried and ruled out): UISettings'
+     activation, the hide and deactivation messages DestroyWindow sends
+     before WM_DESTROY on Windows, WM_SIZE/WM_MOVE at creation,
+     WM_SHOWWINDOW (now sent, and the window hidden before WM_DESTROY:
+     `wow64_gui_test`), any GDI+ status (all Ok), the user32, gdi32 and
+     kernel32 names the process resolves with GetProcAddress (all
+     exported; setup.exe imports no user32 function and resolves every
+     one so), SetForegroundWindow failing (tried: no timer follows), one
+     more loop iteration before WM_QUIT (a WM_NULL first: the same
+     fault), and the timer lead: setup.exe never calls SetTimer; its
+     timers are SetCoalescableTimer's, ids 5 (30 s) and 7 (5 s), on the
+     window of another thread (tid 32 here), which also registers for
+     raw input and six power-setting notifications and kills them on
+     WM_TIMER; the WM_TIMER #77 saw on the splash thread may be its IME
+     windows' (the hooks were per thread). Done on the way: that window
+     died at once before (RegisterRawInputDevices refused the 32-bit
+     RAWINPUTDEVICE, 12 bytes; ARCHITECTURE "Raw input",
+     `wow64_gui_test`), and a window's timer set from another thread
+     now fires on the window's thread, with each waiting thread woken
+     by an event of its own (ARCHITECTURE "Timers", "The message
+     queue"). On gala the splash thread enters GetMessage once and gets
+     no message until WM_QUIT: the main thread's SendMessage(WM_USER+1)
+     runs its close (ShowWindow(SW_HIDE), PostQuitMessage from
+     WM_DESTROY, DestroyWindow); on Windows (#77) the loop dispatches a
+     WM_PAINT between DestroyWindow and WM_QUIT. Next: a Windows
+     measurement of the splash object's words over its life and of the
+     calls the splash thread makes between GetMessage's 0 and its exit
+     (the issue drafted with this change), and a run as SYSTEM on the
+     console (psexec -s -i), the account the scenario uses, to learn
+     whether Windows' setup.exe faults there too.
+     setup.exe ending so takes consolerun with it; the Click-to-Run
+     client and service go on downloading (1.4 GB on C: in 900 s). The
+     client's NotificationFlyout ("Microsoft 365 and Office are
+     installing in the background (0%)") is shown at (-9999, -9999),
+     where it waits to be placed by its notification-area icon (NIM_ADD,
+     NIM_SETVERSION). Done: shasha's taskbar has a notification area
+     (Shell_NotifyIconW/A with every NIM_ message, the NOTIFYICONDATA
+     sizes and versions, version 4's callback layout, balloons,
+     Shell_NotifyIconGetRect; `gala tray` and its clicks; comctl32's
+     LoadIconMetric and LoadIconWithScaleDown, PNG icons and sizes in
+     CreateIconFromResourceEx, .ico files in LoadImageW; `tray_test`,
+     `wow64_tray_test`; ARCHITECTURE "The notification area"); whether
+     the flyout then shows is the next run's to see.
+     OfficeC2RClient.exe, the client's React Native UI
+     (`react-native-win32.dll`, `c2rui.dll`, delay-loaded), started with
+     0xc0000135. Done, test first (`office_api_test`,
+     `wow64_office_api_test`; `tools/import_survey.py --roots
+     OfficeC2RClient.exe --static` lists only two stubs left, kernel32's
+     GetCurrencyFormatW and GetNumberFormatW, which end the process if
+     called): kernel32's local atom table (AddAtomW/A,
+     FindAtomW/A, GetAtomNameW/A, DeleteAtom, InitAtomTable, and the
+     global table's A forms); the app-model API sets
+     (`api-ms-win-appmodel-runtime-*`, which its C++ runtime loads for
+     the app policies) resolve to kernelbase, and kernel32 answers the
+     AppPolicy queries and the package queries
+     (APPMODEL_ERROR_NO_PACKAGE); oleaut32's imports by ordinal:
+     OleCreateFontIndirect (#420, an IFont), SafeArrayRedim (#40) and the
+     DECIMAL functions (VarDecAdd/Sub/Mul/Div/Abs/Fix/Int/Neg/Round/Cmp,
+     VarDecFromI4/R8, VarR8FromDec); `d3dcompiler_47.dll` (below and
+     GPU G2's decision). Not yet run: whether the UI then starts (a run
+     of `office_install_gui`). Next, in that order: the splash thread's fault
+     (the Windows measurement above); OfficeC2RClient.exe's React Native
+     UI (Direct3D
+     11 through GPU G2, DirectComposition). Found on the way, not yet
+     done: CreateWindowEx sends no WM_SIZE/WM_MOVE after WM_CREATE to a
+     child or popup window (Wine's msg.c WmCreateChildSeq,
+     WmCreatePopupSeq) and DestroyWindow sends no WM_WINDOWPOSCHANGING/
+     CHANGED (hide), WM_NCACTIVATE, WM_ACTIVATE and WM_KILLFOCUS before
+     WM_DESTROY (WmDestroyOverlappedSeq, WmDestroyChildSeq);
+     GetSystemMetrics answers 0 for the scroll bar metrics (SM_CXVSCROLL
+     and the others; SystemParametersInfo says 17) and for any index it
+     does not know, without a ledger line; PatBlt is fixed for a null
+     brush but BitBlt and MaskBlt with a pattern raster operation still
+     paint a null brush as black; PostThreadMessage to a thread of
+     the same process goes through the kernel and arrives after what
+     the thread posted locally since (PostMessage, PostQuitMessage),
+     not in posting order as in Windows' one posted queue; there is
+     no trace of a program's user32 calls (this hunt used a
+     throw-away one over GalaConsoleTrace, which WOW64 does not thunk).
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,
@@ -1594,7 +2666,8 @@ it, for programs and for gala's own tools.
 
 **Done so far**: Schannel, client and server, TLS 1.2 and 1.3, in
 schannel.dll on rustls with the RustCrypto provider (`schannel_test`
-against Nginx with OpenSSL and an in-process server; host tests `cargo
+against Nginx with OpenSSL and an in-process server, and its x86 build
+`wow64_schannel_test` through SysWOW64's schannel.dll; host tests `cargo
 test -p schannel_tls`): SSPI's token rules, EncryptMessage/
 DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
 validation against gala's machine root store (`System32\gala\roots`),
@@ -1614,8 +2687,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and chunked bodies, an untrusted issuer, a closed port,
    WinHttpCrackUrl; automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
    and MAX_HTTP_AUTOMATIC_REDIRECTS, WINHTTP_OPTION_URL; ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there: connection reuse,
-   asynchronous sessions and status callbacks, proxies, authentication,
+   "WinHTTP and WinINet"); the status callbacks of a synchronous
+   session and the connect time-out (`winhttp_cb_test`,
+   `wow64_winhttp_cb_test`). Still open there: connection reuse,
+   asynchronous sessions (and their completion notifications), proxies,
+   authentication,
    WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
@@ -1624,8 +2700,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
    issuer as ERROR_INTERNET_INVALID_CA, a closed port, a redirect
    followed and one not (INTERNET_FLAG_NO_AUTO_REDIRECT); ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there, besides winhttp's list:
-   the A functions, InternetQueryOptionW, FTP, the cache,
+   "WinHTTP and WinINet"); x86 too (`wow64_wininet_test`), with
+   InternetQueryOptionW, InternetSetStatusCallbackW, InternetGetCookieExW
+   (no cookie store: none) and the A functions ODT's setup.exe imports.
+   Still open there, besides winhttp's list: the other A functions, the
+   cookie store (Set-Cookie kept, sent and answered), FTP, the cache,
    InternetTimeFrom/ToSystemTimeW.
 3. Done: curl and Git over Schannel. curl.se's own Windows build
    (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no
@@ -1807,7 +2886,8 @@ is left is delay-loaded or stubbed.
 **Next** (what is left, by DLL):
 1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
    spy around every operation and track spied blocks), the OLE clipboard
-   and DoDragDrop (need user32's clipboard).
+   (OleSetClipboard and friends, over user32's clipboard) and
+   DoDragDrop.
 2. crypt32: the other decode types the programs use (which ones is only
    seen at run time: the ledger's `CryptDecodeObjectEx` lines),
    CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt
@@ -2030,9 +3110,52 @@ WM_ACTIVATE, before WM_WINDOWPOSCHANGED), the next one does not
 (user32_test, when the process may set the foreground; it prints the
 sequence when that check fails).
 
+Done (issues #67-#94, Windows' answers on 25H2 build 26200, a standard
+user): d2d1's and d2d1_test's IID_ID2D1Factory had two bytes wrong (the
+factory was E_NOINTERFACE on Windows), and actctx_test's and kernel32's
+ERROR_SXS_SECTION_NOT_FOUND was 14004 for 14000: both now the headers'
+values (a scan of every `ERROR_*` constant against winerror.h finds no
+other). WICCreateImagingFactory_Proxy(0) is
+WINCODEC_ERR_UNSUPPORTEDVERSION and a BMP's GetFrame(1)
+WINCODEC_ERR_FRAMEMISSING (windowscodecs_test). IsBadReadPtr uses up a
+guard page (PAGE_READWRITE afterwards), OfferVirtualMemory of an
+unaligned address is ERROR_INVALID_PARAMETER, CompareStringA refuses
+SORT_DIGITSASNUMBERS with ERROR_INVALID_FLAGS (office_k32_test). The
+process default's root manifest path is the executable's, type 2, and
+its assembly's manifest type 2 (actctx_test). Registry notification
+(regnotify_test): STATUS_NOTIFY_ENUM_DIR and Information 0 after a
+change, STATUS_NOTIFY_CLEANUP after a close and for the watched key's
+own deletion, a kept change returns STATUS_SUCCESS at once, a
+synchronous request STATUS_NOTIFY_ENUM_DIR, the same value set again is
+no change, a security change fires ATTRIBUTES, asynchronous
+RegNotifyChangeKeyValue without an event is ERROR_INVALID_PARAMETER, a
+subordinate in the master's hive STATUS_INVALID_PARAMETER, a waiting
+watch is no pending I/O. ntdll has no RtlFindNextForwardRunSet (Wine's
+only), so gala's does not export it and office_api_test checks it is
+absent. tray_test passes as it is (its unknown icon's HRESULT is now an
+`info` line); volume_test passes, its disk-full part skipped on a C: with
+2 GiB free or more.
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
+   - from issues #67-#94: reparse_test as a standard user made a link
+     with SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (developer mode
+     unknown; the result and AllowDevelopmentWithoutDevLicense are now
+     `info` lines) and its elevated half; regnotify_test's renaming
+     handle, whose KeyNameInformation is not the new name on Windows
+     (its query status and name are `info` lines: the handle lacks
+     KEY_QUERY_VALUE); ResolveLocaleName(NULL), not the system default
+     on 25H2 (system or user default is an `info` line); actctx_test's
+     RETURN_HACTCTX handle for the process default (the report's value
+     0 means NULL, its text says not NULL; the handle itself is printed
+     now); d2d1_test past the factory and windowscodecs_test past the
+     factory (their `info` lines); memload_test's thread-stack totals
+     (unchanged when sampled: they need a wait before the sample to say
+     whether Windows frees the stack); winhttp_test 14's connection reuse
+     (needs the elevated Nginx setup); volume_test's disk-full part on a
+     volume under 2 GiB free (TEMP on a small VHD: the program writes in
+     %TEMP%);
    - SetPriorityClass's REALTIME from a token that holds
      SeIncreaseBasePriorityPrivilege disabled (an elevated prompt):
      REALTIME or HIGH (gala: REALTIME);
@@ -2279,6 +3402,25 @@ distribution on the Linux personality (LX), with no virtual machine.
 kernel), the Hyper-V backends of both products, and Windows containers
 (Docker Desktop's "Windows containers" mode: HCS, server silos).
 
+**Done so far**:
+- Step 2's core (`wsl` with user/wsl_test, the screen scenario
+  `wsl_terminal`; ARCHITECTURE "The WSL facade"): gala's `wsl.exe` in
+  System32 with `--import` of a rootfs tarball (tar or tar.gz),
+  `-l`/`-l -v`, `-d <distro> [--exec] <cmd>` and `-- <command line>`,
+  the default distribution's login shell, `--terminate`, `--shutdown`,
+  `--unregister`, `--set-default`, `--version`, with WSL's messages,
+  UTF-16 output and exit codes; the per-user registry under
+  HKCU\...\Lxss as Windows keeps it; each distribution's own tree
+  (`<BasePath>\rootfs`, made by the kernel: GalaLxNode) in which its LX
+  processes are rooted (a file written in one is absent from another);
+  the starter's console and pipes as their fds (`lx::ntio`), so `wsl -d
+  bb` in a console window (and the start menu's Linux tile) is the
+  distribution's terminal: busybox's shell prompts, edits and runs
+  commands there; `events=wsl`. wsl_test's uncertain answers (version
+  lines, error-code lines, BasePath's form, the state right after a
+  command, a terminated wsl.exe's exit code) are `info` lines to record
+  on Windows; real WSL's transcripts (step 1) are still to be recorded.
+
 **Next** (each step test first; the recordings of step 1 are the spec):
 1. Spec: on real Windows 11 24H2, record what each product does to set
    up and to run `hello-world`: every `wsl.exe` command line and its
@@ -2289,15 +3431,15 @@ kernel), the Hyper-V backends of both products, and Windows containers
    init, dockerd/containerd/runc and podman/conmon/crun. The ranked
    result (Windows side, facade, Linux system calls) goes in this
    section, like AG's blocker list.
-2. The facade's core, test first against recorded `wsl.exe`
-   transcripts: gala's `wsl.exe` and WSL service with `--import` of a
-   rootfs tarball, `-d <distro> [--exec] <cmd>`, `-l -v`,
-   `--terminate`, `--shutdown`, `--unregister`, `--version`, the
-   per-user distribution registry, and a distribution's init as an LX
-   process. Scenario: `wsl --import` of a busybox rootfs, then
-   `wsl -d bb -- echo hi`.
-3. The facade's plumbing: `/mnt/<drive>` inside the distribution and
-   `\\wsl.localhost\<distro>` outside (one file system, no 9P), interop
+2. The facade's core's rest: wsl_test checked on Windows (its `info`
+   lines become checks); the WSL service (the COM interface Docker
+   Desktop and Podman call, the registry's one writer), a
+   distribution's init as an LX process (an instance that outlives its
+   last command, as WSL's), DefaultUid applied (root inside the
+   distribution), `-u`, `--cd`, `--export`, ptys and process groups
+   for the terminal (LX "Next" 2-3: job control, Ctrl+C as SIGINT).
+3. The facade's plumbing: `/mnt/<drive>` inside the distribution
+   (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
    (Windows programs started from Linux and back), `wsl.conf`, hvsocket
    (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
    side as one core socket pair, localhost forwarding over one shared
@@ -2309,15 +3451,38 @@ kernel), the Hyper-V backends of both products, and Windows containers
    `/proc` and `/sys` as these programs read them. Namespaces and
    cgroups are core objects (ARCHITECTURE "Plan: Linux containers
    through a WSL facade"), not LX-only state.
+   Nesting is a requirement, not an afterthought: namespaces and
+   cgroups are trees whose every level carries its own limits (a
+   cgroup subtree delegated to a container is divided again inside
+   it), and gala's overlay takes an overlay as its upper layer (Linux's
+   refuses, which is why Docker-in-Docker falls back to `vfs` or a
+   volume there). Goal beyond Linux: a nested container runtime
+   without `--privileged`, an inner root fully contained (as Sysbox
+   does on Linux).
 5. Podman: `podman machine init`, `start`, then `podman run` from the
    Windows side; Podman Desktop after BR stage 2 (Electron).
 6. Docker Desktop: install, the backend service, its distribution, the
    `docker` CLI over `\\.\pipe\docker_engine` running containers; then
    the dashboard (Electron, after BR stage 2).
+7. Container engines on Linux itself, with no Windows side: in a
+   distribution on gala (a WSL one or LD's desktop), the distribution's
+   own `podman` and `docker` (dockerd, containerd, runc or crun) run
+   containers, rootless Podman first (user namespaces with
+   newuidmap/newgidmap and /etc/subuid, rootless networking through
+   pasta or slirp4netns, overlay in a user namespace, cgroup v2
+   delegated by systemd's user instance), then rootful Podman and
+   Docker.
+8. Nesting: the official `docker:dind` image runs `docker run --rm
+   hello-world` inside it; Podman in Podman (`quay.io/podman/stable`)
+   likewise; then both without `--privileged`. The sibling pattern
+   (the host's `/var/run/docker.sock` mounted into a container) comes
+   with step 6 or 7.
 
 **Done when**: from a gala command prompt, `podman run --rm hello-world`
 and `docker run --rm hello-world` print their greeting with both
-products installed by their own installers; then a container serving
+products installed by their own installers; the same from a shell in a Linux
+distribution on gala with its own Podman and Docker, and from inside a
+`docker:dind` container; then a container serving
 HTTP reached from the Windows side (`-p 8080:80`). Observability with
 each step: the facade's calls as events (`events=wsl`), each
 distribution's console and the products' logs copied into the serial
@@ -2496,6 +3661,42 @@ the next breakthroughs).
   (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
   rseq and SA_ONSTACK (below), and the Wayland requests accepted and
   not used (regions, set_cursor, min and max sizes, set_parent).
+- Step 3's first part, Windows' clipboard as Windows has it
+  (`clipboard_test`: two processes, its expectations Windows'
+  documented behaviour; ARCHITECTURE "The clipboard"): one per window
+  station in the kernel (`nt::clipboard`, the GalaClipboard* services
+  0x7fc0-0x7fc7), OpenClipboard's lock across processes
+  (ERROR_ACCESS_DENIED, GetOpenClipboardWindow), the owner
+  (GetClipboardOwner after EmptyClipboard), HGLOBAL formats copied
+  through the kernel and charged to the setter's paged pool quota
+  (GetClipboardData's handle made per process, freed by user32 once the
+  data changes), the synthesized text formats and CF_LOCALE in
+  Windows' enumeration order, the sequence number, the format listeners
+  (WM_CLIPBOARDUPDATE posted across processes), `events=ipc` and the
+  state dump's clipboard line.
+- Step 5, X11 programs through rootless Xwayland (`lx_xterm`;
+  ARCHITECTURE "X11 programs through Xwayland"): `xwayland=on` gives
+  display `:0`, held by the Wayland server, whose first client starts
+  Ubuntu 24.04's Xwayland (the Linux root "x11": Xwayland, xkbcomp,
+  xterm, dash as /bin/sh and their libraries; `-rootless -shm`, the
+  listeners and the window manager's connection handed over), and the
+  server's own X window manager (`wayland::xwm`, host tests: Composite
+  redirection, MapRequest, titles, `WL_SURFACE_ID`, focus, close) gives
+  each top-level X window's surface the `x11` role: xterm is a framed,
+  titled window of the desktop running dash on a pty; the screen check
+  types `echo hi` and sees its output, drags over it with the mouse
+  (xterm's selection) and types `exit`, which ends it. A GTK program
+  under X11 (`lx_gtk_x11`: gtk_test with GDK_BACKEND=x11, its
+  transcript Xvfb's on Linux) shows its window; the screen check clicks
+  its button and the frame's close button (WM_DELETE_WINDOW through the
+  window manager). Built for it:
+  pseudo-terminals, sessions and process groups (`lx::pty`,
+  `lx::session`; user/lx/pty_test's transcript, recorded on Linux, now
+  matches: `lx_pty`, `lx_pty_pie`), glibc's fork (clone with
+  CLONE_CHILD_SETTID, CLONE_CHILD_CLEARTID, CLONE_PARENT_SETTID),
+  setresuid and setresgid, Xwayland's output kept out of the program's
+  transcript (`lx: pid N service:`), and two Linux roots shipped to one
+  directory.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2547,13 +3748,19 @@ the next breakthroughs).
    on a MSG_PEEK, collecting rights cycles in flight.
 3. **One clipboard for both personalities** (the owner: "would be
    amazing"), test first at each layer:
-   - Windows' clipboard as Windows has it, one per window station in
-     the kernel (user32's is per process today): OpenClipboard's owner
-     and its lock across processes, SetClipboardData/GetClipboardData
-     of memory handles copied through the kernel, delayed rendering
-     (WM_RENDERFORMAT), the sequence number and the format listeners
-     (WM_CLIPBOARDUPDATE); a test copying between two processes,
-     recorded on Windows;
+   - Windows' clipboard's open ends (its first part is done, above),
+     ledgered where a program reaches them: delayed rendering (SetClipboardData
+     with NULL is kept, WM_RENDERFORMAT and WM_RENDERALLFORMATS are not
+     sent), GDI handle formats across processes (CF_BITMAP,
+     CF_ENHMETAFILE, CF_PALETTE stay the setter's; the bitmap and
+     metafile synthesized formats CF_DIB, CF_DIBV5, CF_METAFILEPICT are
+     not made), registered formats are per process
+     (RegisterClipboardFormat shares user32's table of registered
+     messages: a station-wide atom table is to come), the viewer chain
+     (SetClipboardViewer, WM_DRAWCLIPBOARD), WM_DESTROYCLIPBOARD posted
+     rather than sent, CF_LOCALE's code pages (user32 converts text
+     through the system's ANSI and OEM code pages); `clipboard_test`
+     passes on CI's Windows (`user/windows/ci-passing.txt`);
    - the Wayland selection across clients: data offers to the focused
      client, `receive` passing its descriptor to the source's `send`;
      a two-client test against weston;
@@ -2563,7 +3770,18 @@ the next breakthroughs).
      Windows copy offers Wayland clients the same MIME types, the data
      converted when pasted (delayed rendering on both sides); a
      scenario copying from a GTK window and pasting into a Windows edit
-     control, and back.
+     control, and back. What it needs from the kernel clipboard, beyond
+     the seams there (`Clipboard::offer`: the Wayland server puts text
+     on the clipboard as an owner without a window, refused while a
+     program has it open; `Clipboard::text`; the sequence number to
+     notice a Windows copy): delayed rendering first (a Wayland source
+     offered as formats with no data, rendered by the server's `send`
+     when a Windows program asks: the kernel waiting for the bytes
+     instead of WM_RENDERFORMAT), a kernel-side listener (the server
+     told of a Windows change as WM_CLIPBOARDUPDATE tells windows), the
+     session's interactive station (WinSta0) as the one bridged, and the
+     text conversion user32 does today (UTF-8 to CF_UNICODETEXT) on the
+     kernel side.
 4. Step 3's rest: an application as a distribution ships it (GTK 3, the
    owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
    with its GSettings schemas, icon theme and keyboard input checked on
@@ -2572,8 +3790,54 @@ the next breakthroughs).
    scenarios pass them today; who the program is comes from its token,
    `lx::identity`) and has no D-Bus session bus yet (GTK goes
    without it: accessibility and portals are skipped).
-5. X11 programs through Xwayland, once the Wayland server holds.
-6. Linux Chromium beside Windows Chromium (BR's): a distribution's
+5. X11 programs through Xwayland: rootless Xwayland, xterm and a GTK
+   program under X11 are done (above); next, a distribution's GTK
+   application under X11. Open, each test first: SysV and
+   POSIX shared memory (MIT-SHM; nothing has reached it yet),
+   `/proc/<pid>/cmdline` (Xwayland names its clients by it), the X
+   selections and the clipboard bridged to the desktop's,
+   `_NET_WM_STATE` (maximize, full screen) for X windows,
+   `xwayland_shell_v1` instead of `WL_SURFACE_ID`, a stop for SIGTSTP
+   (job control), a recorded glibc fork test of the clone flags.
+6. A distribution's desktop (the owner; its first part done: `lx_xdesktop`,
+   its screen check passing: user/lx/xdesktop's
+   session script runs rootful Xwayland on `:1` as one window "Xwayland
+   on :1" framed by shasha (`-decorate`: libdecor takes the server's
+   decorations), twm managing an xterm in it, typed into from the
+   desktop; `exit` ends the session; seen on a manual boot. Maximised
+   from the desktop (Win+Up in the screen check, as the caption's button
+   or `gala maximize`): the server's configure of 1278 x 718, maximized,
+   and Xwayland's X screen follows the window's size (its root fills the
+   window, twm and the xterm redrawn in place). twm is the
+   lightest X desktop that shows the path; Xfce needs a D-Bus session
+   bus, xfconf and over a hundred packages, a later step. Next:
+   full screen (xdg_toplevel.set_fullscreen, ignored today), then
+   Xfce): rootful Xwayland as one window
+   running a light desktop session (Xfce), which can be maximised or
+   put full screen. Full screen is a choice of presentation, not of
+   speed: both paths copy the session's damaged pixels in software.
+   Screenshots at each step.
+7. Linux distributions in shasha's start menu (the owner; built:
+   `linux_menu`, ARCHITECTURE "Start menu"): a "Linux distributions"
+   section of suggested distributions (Ubuntu, Alpine), collapsible,
+   each suggestion dismissable and the whole section hideable, the
+   choices kept in the user's hive; a suggestion installs on click
+   (`gala linux-install`: its rootfs fetched over winhttp and imported
+   through `wsl --import`, the progress on its tile); an installed one
+   starts step 6's desktop; its context menu opens a terminal (`wsl -d
+   <name>` in a console window) or one of its applications (its
+   `.desktop` files), X and Wayland programs reaching the desktop
+   through WSLg's environment and a socket node in the distribution's
+   tree. The scenario's distributions are stand-ins served by the host.
+   Open: the desktop session is gala's script, which a real
+   distribution lacks (it should come from gala, through `/mnt/c` or
+   WSLg's `/mnt/wslg`, once CT step 3 mounts them, with Xwayland
+   installed in it or provided), the persistence across a reboot checked
+   by a two-boot scenario (today by `persist_test`'s registry part and
+   linux_menu_test's reading of the keys), import progress (`wsl
+   --import` reports none), cancelling an install, icons from the
+   `.desktop` files' `Icon=`.
+8. Linux Chromium beside Windows Chromium (BR's): a distribution's
    Chromium (or Google's Linux build) with `--ozone-platform=wayland
    --no-sandbox` in a boot scenario, its window on the same desktop as
    `chromium_window`'s, both browsers running at once and loading a page
@@ -2585,6 +3849,16 @@ the next breakthroughs).
    (user namespaces, seccomp-bpf; shares CT's namespace work) so
    `--no-sandbox` goes, and the clipboard between the two browsers
    (`wl_data_device` bridged to the Windows clipboard).
+9. GIMP on Linux (the owner): a distribution's GIMP (Ubuntu 24.04's
+   GTK 3 build, its packages as a `LINUX_ROOTS` root) started on the
+   desktop, opening an image, applying a filter and saving it, in a
+   boot scenario with a screen check, the saved file compared with the
+   one GIMP writes on real Linux. Expected blockers, each a Linux test
+   program recorded on real Linux first: its plug-ins as separate
+   processes talking over pipes (fork/exec, `pipe2`, `poll`), GEGL's
+   and babl's worker threads and their caches under `~/.cache`,
+   fontconfig and fonts, GSettings schemas and the icon theme (step
+   4's), D-Bus optional.
 
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
@@ -2595,6 +3869,43 @@ programs' transcripts match real Linux's.
 surfaces as `winstate` windows wearing shasha's frame through
 xdg-decoration, one socket per session, the limits on client input,
 `events=wayland` and `wayland=trace`.
+
+### WS. The website and the domain
+
+**Goal**: gala-os.com explains what gala is and what runs on it, from the
+same facts the repository holds, and the domain also carries the update
+feed.
+
+**Done**: the site itself (`web/`, WORKFLOW "The website"): a React page
+prerendered to static HTML, with the map of ARCHITECTURE's sections and
+their status, the programs and their boot scenarios, and the design
+decisions; its own pipeline (`website.yml`) publishing to GitHub Pages,
+kept apart from the system's CI in both directions (WORKFLOW "The two
+pipelines stay apart"). GitHub Pages is enabled on the repository with
+"GitHub Actions" as its source, and its custom domain is `gala-os.com`.
+DNS at Cloudflare now serves the apex as four `A` and four `AAAA`
+DNS-only records to GitHub Pages, and `www` as a DNS-only `CNAME` to
+`bjorn-ali-goransson.github.io` (WORKFLOW "The domain"); the proxied
+records to GoDaddy's parking addresses that answered with error 525 are
+gone. What crawlers read is in place too (WORKFLOW "Being found"):
+`robots.txt` naming the search engines and AI crawlers one by one, a
+generated `sitemap.xml` and `llms.txt`, canonical and Open Graph and
+JSON-LD in the page, and an IndexNow submission after each deploy. The
+certificate for the domain has been issued and HTTPS is enforced, so the
+site answers on `https://gala-os.com` and nothing else. The feed has its
+own name as well: `updates.gala-os.com` is a proxied R2 custom domain in
+front of the release bucket, and `FEED_URL` in release.yml points at it
+rather than at R2's rate-limited development URL.
+
+**Next**:
+1. Verify ownership in Google Search Console and Bing Webmaster Tools,
+   which is a sign-in and so is done by hand. Search Console's DNS method
+   wants a TXT record on the apex, in the same Cloudflare zone.
+2. The owner's own screenshots of gala running, replacing the two crash
+   screens the site shows now (`web/public/shots/`, listed in `App.tsx`).
+3. Open: whether the ARCHITECTURE map is generated from the document's
+   headings instead of restated in `web/src/content.ts`, which would stop
+   the two drifting apart.
 
 ### AR. ARM64 port
 
@@ -2857,7 +4168,7 @@ wow64.dll converts 32-bit system calls in user mode).
 2. Gaps the x86 Inno runs leave in the ledger: FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
    on that error path, when a COM class is missing, Inno's Setup raised an
    access violation, not yet understood), comctl32's TaskDialogIndirect,
-   shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc
+   shell32's SHPathPrepareForWriteW, riched20/msftedit and sfc
    for i686.
 3. Two Windows 11 measurements (issue #8) that change how threads and
    static TLS start in a 32-bit process. **NtCreateThread** (the old call
@@ -3014,7 +4325,8 @@ from the command line first (CLI parity; the server profile too).
 3. Stage 3's rest: what Inno Setup's own install still reports and
    skips (the ledger of `pk_install_inno`): unpinning its shortcuts at
    uninstall (SHCreateItemFromParsingName), SHPathPrepareForWriteW, the
-   taskbar list (CLSID_TaskbarList), the Restart Manager (rstrtmgr.dll),
+   taskbar list (CLSID_TaskbarList), the Restart Manager's sessions
+   shared between processes (rstrtmgr.dll, ARCHITECTURE "Other DLLs"),
    HTML Help (hhctrl.ocx); its compiler compiling a script (ISCC.exe and
    the IDE's ISCmplr.dll write the Setup's icons and version with
    BeginUpdateResourceW/UpdateResourceW/EndUpdateResourceW, stubs today:
@@ -3150,13 +4462,13 @@ floor in the superblock's sector. Next:
    release tree, `cargo xtask release-tree`: kernel, system DLLs,
    Limine, sealed config, manifest), refreshed every 6 hours (targets
    too when near its expiry), root renewed monthly (`feed renew-root`);
-   every key, root included, from the `GALA_FEED_KEYS` secret (`feed
-   keygen`); `feed pull` / `feed push` move only what changed, timestamp
+   every key, root included, made by the first publish (`feed keygen`)
+   and kept in a private R2 bucket the jobs read (`.github/feed-keys.sh`); `feed pull` / `feed push` move only what changed, timestamp
    last, never overwriting a published version; each run checks the
    result as the client does before and after the upload. Host tests
    for each piece and for the workflows' steps against a directory
    standing in for the bucket (ARCHITECTURE "The update feed"; WORKFLOW
-   "The update feed"). Every key lives in CI's secrets (the owner's
+   "The update feed"). Every key lives with CI (the owner's
    decision, for now): CI can rotate keys and re-sign root, at the
    price that whoever controls CI controls the trust chain; root's
    validity is short (90 days, re-signed monthly; targets 30 days,
@@ -3186,9 +4498,10 @@ floor in the superblock's sector. Next:
    - Out of it: distributions inside LX update themselves (their own
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).
-   - Open: a custom domain or CDN in front of the R2 bucket (the public
-     URL is R2's development URL, rate-limited; `FEED_URL` in
-     release.yml); where the release key lives.
+   - The keys live in a private R2 bucket the release jobs make and read
+     (`gala-os-signing-keys`); the feed bucket is public at its custom domain,
+     `https://updates.gala-os.com` (`FEED_URL` in release.yml). Root keys
+     offline and the targets key in a KMS remain the later move above.
 
 WORKFLOW "Signed images".
 
@@ -3199,7 +4512,9 @@ pointer, old processes restarted one at a time), then the kernel
 handover: the running kernel stops every thread at a quiescent point,
 writes its state as versioned data, and a new kernel rebuilds it and
 reissues blocked calls, so programs carry on. Live patching of single
-functions only if a need appears.
+functions is not part of live update; its one form is SN steps 1d and
+1e's hot swap of gala's DLLs and kernel into a resumed test snapshot, a
+development tool whose runs are never real.
 
 **Done so far** (milestones, each with its scenarios): (a) handover to
 the same build with no programs (`handover_same`, `handover_uefi`,
@@ -3242,6 +4557,236 @@ system image and its kernel and every connection and session goes on.
 **Design**: ARCHITECTURE "Kernel handover", "Programs across a
 handover", "Versions and negotiation", "Sockets across a handover";
 WORKFLOW "Debugging a kernel handover (R9)".
+
+### SN. Snapshots: whole machines, then single programs
+
+**Goal**: save a running state and start from it again, as often as
+wanted. For testing, a long scenario is reached once (the Office
+install's 30 minutes to App-V's manifest merge), and each try at a fix
+starts from there in seconds; one snapshot can be restored several
+times to branch (try two fixes from the same state). For users,
+`gala snapshot` saves a program and `gala restore` brings it back,
+on the same machine or, exported, on another.
+
+**Step 1: whole-machine snapshots in xtask.** Done
+(`xtask/src/snapshot.rs`, WORKFLOW "Machine snapshots"; scenario
+`snapshot_machine`, host tests `snapshot::tests`). `boot-test <scenario>
+--snapshot-at <line> --snapshot-name <name> [--snapshot-stop]` saves the
+machine when the line comes in its serial log (the ledger's lines are
+there too): over QMP, `stop`, `blockdev-snapshot-sync` (the disk image,
+frozen, moves into the snapshot; the run goes on in a new qcow2 layer),
+then a migration of memory and devices through gzip. `boot-test
+--from-snapshot <name>` starts QEMU with `-incoming` from it, on a qcow2
+layer of its own over the frozen disk, and judges what comes after the
+resume. `cargo xtask snapshots [rm <name>]` lists and deletes them
+(`target/snapshots/<name>/`: manifest, state, disk, the log up to the
+save). A snapshot resumes only on the build it was taken from: the
+manifest names the SHA-256 of the kernel, every boot module and the
+command line, QEMU, the accelerator, memory and processors, and a
+difference is refused with each one named. That is exactly what the
+saved memory holds: gala's DLLs and test programs are boot modules
+loaded into memory by Limine, not files on the disk, so a changed DLL is
+refused as a changed kernel is. No kernel change was needed: the
+guest's clocks stop with the machine and go on from the saved values
+(no jump; only the RTC follows the host, and the kernel reads it only
+after boot), so its wall clock is behind the host's by the time saved
+(ARCHITECTURE "What a guest's clock follows"); the host-side clock check
+leaves the save's pause out. `snapshot_machine` runs in `cargo xtask
+test` (about 20 s under TCG). Connections to the host and the internet
+do not survive a resume (local sources are fine); a resumed run is not
+a replay (R5 is the deterministic tool); snapshots never replace a full
+run in CI. Limits: one scenario booted alone, BIOS boots, not a
+snapshot of a resumed run.
+Measured on `office_install_local` (TCG, with #117's msxml6): saved at
+`process integrator.exe (pid` (1675 s into the run, just before App-V's
+manifest merge) in 5.2 s, 117 MiB of state and the 7.6 GB disk (in
+`/dev/shm`); resumed in 3.1 s, the run reached the install's end (the
+service's IXMLDOMNode::replaceChild, ROADMAP OF) in 21 s of run time,
+where the run from boot took 1706 s. The service had loaded
+`System32\msxml6.dll` at about 42 s (`events=image`), so no snapshot
+past the first minute can take a changed msxml6.dll as a module, even
+once DLLs are files on the disk: a resumed run can only take a module no
+process has mapped yet, or patch one into the running programs (step
+1d, at the user's risk).
+Next (step 1c): resuming with other DLLs. Since they are boot
+modules, a snapshot cannot take a fixed DLL today; for fixes in DLLs
+the Office install has not loaded yet at the save, the boot modules
+would move to the disk (the open question in ARCHITECTURE "Chain of
+trust"), and a resumed run's own layer would take the new files (same
+place on the disk; the kernel's file tree in memory names their size and
+clusters, so a file that grows needs the kernel's help, a boot module
+the kernel reads at a resume). Until then a snapshot is taken with the
+build the fix is tried on (the fix in a stage after the save) and
+resumed as often as the stage needs.
+
+**Step 1b: a failing CI run leaves its snapshot.** When a scenario
+fails or times out in CI, xtask asks QEMU to save the VM before ending
+it (the stuck state itself: every thread, what it waits on, who holds
+what; a hang or a leak shows its cause instead of only where it
+stopped). The artifact holds the snapshot, compressed, with the build
+it needs: the kernel, the boot image and the test binaries.
+`cargo xtask restore-ci <run> <scenario>` downloads it and resumes it
+locally, paused, with the monitor and a debugger attached; CI under KVM
+and a local TCG run differ in timing, so a failure that does not
+reproduce locally is still inspected as it happened. Bounds: only on
+failure, a size cap per artifact, a few days' retention (GitHub's
+artifact storage quota is the limit), at most one snapshot per job. The
+guest holds test data only, and must stay so: artifacts are as visible
+as the repository. From step 2 on, a faulting program is snapshotted at
+the fault, before it ends (a minidump that can be resumed), which is
+much smaller than the machine.
+
+**Step 1d: hot swapping gala's DLLs into a resumed snapshot (at your
+own risk).** Done (`xtask/src/hotswap.rs`, `kernel/src/hotswap.rs`,
+`kernel/src/arch/x86_64/fwcfg.rs`; WORKFLOW "Hot swapping DLLs into a
+snapshot (at your own risk)", ARCHITECTURE "Hot swapping DLLs into a
+resumed machine"; scenarios `hotswap_machine`, `hotswap_stack` and
+`hotswap_wow64` on `hotswap_test` (and its 32-bit build) and
+`hotswap_dll`; host tests `hotswap::tests` in xtask and the kernel). A fix to a DLL is tried in seconds from a snapshot
+taken just before the failure: `boot-test --from-snapshot <name>
+--hot-swap-unsafe <dll>[,<dll>...]`. xtask compares the snapshot's build
+of each DLL (the snapshot keeps its DLLs and lld's maps) with the new
+one function by function, references normalized (decoded code,
+relocations, jump tables), and makes a plan; the resumed machine gets it
+through fw_cfg with an NMI before its first instruction, stops every
+program thread, checks that no changed function is on any thread's
+stack, maps the new code beside the image in every process that has
+it, bound to the old image's statics, functions and import table, and
+makes each changed function's old entry jump to its new version (old
+vtables and stored pointers land in new code), then replaces the file
+for later loads. Refused with the reason: a changed function on a
+stack, a static that changed size, anonymous writable data, a new
+import, changed thread-local data, code that does not decode or
+relocate, a function too short for the jump, changed identical-code
+folding, any other change to the build. Never a real run: a banner,
+`hotswap:` lines, a ledger entry and an event, marked crash reports,
+state dumps and triage, the verdict `hot-swapped (not a real run)` with
+exit status 3, refused in CI; every fix still gets a full run from boot
+before its pull request. Not checked (the user's risk): state the old
+code built that the new code reads differently, invariants of data
+whose layout did not change. Limits: no unwind data for the new code,
+new exports invisible to GetProcAddress, `run=` scenarios only.
+Shown on the Office install (`office_install_local`, TCG): saved at
+`process integrator.exe (pid` (1827 s in; 118 MiB of state, the 7.6 GB
+disk), resumed with msxml6.dll's `replaceChild` changed (a new ledger
+name): xtask patched that one function in the 64- and the 32-bit build;
+the guest stopped 29 threads, patched both OfficeClickToRun.exe
+processes (64-bit) and setup.exe (WOW64, the blob below 2 GiB), and the
+service reached the new code (`msxml6.dll!IXMLDOMNode::replaceChild
+(hot-swapped build)` in the ledger) in a resumed run of 22 s, where the
+run from boot needs 30 minutes to get there. A first try found two
+faults, fixed with `hotswap_wow64` and the all-or-nothing rule: the
+32-bit blob's reservation was not at a 64 KiB boundary, and a later
+DLL's refusal left an earlier one swapped.
+
+**Step 1e: hot swapping the kernel into a resumed snapshot (at your own
+risk).** Done (the DLL swap's code with `Image::from_elf` in
+`xtask/src/hotswap.rs`, `KernelPatch` in `kernel/src/hotswap.rs`,
+`kernel/src/arch/x86_64/hotpatch.rs`, `smp::stop_others`,
+`sched::kernel_stacks`; WORKFLOW "Hot swapping DLLs and the kernel into a
+snapshot (at your own risk)", ARCHITECTURE "Hot swapping the kernel into a
+resumed machine"; scenarios `khotswap_machine`, `khotswap_stack`,
+`khotswap_both` on hotswap_test's kernel modes and the kernel's probe
+(`nt::hotswap_probe`); host tests in xtask and the kernel). A kernel fix
+late in a long run is tried from a snapshot: `--hot-swap-unsafe kernel`,
+or `kernel,msxml6.dll` (one plan, all or nothing). The kernel is linked
+with `--emit-relocs` and lld's map; xtask diffs the snapshot's kernel
+with the new build function by function as it does a DLL (its merged
+constants and GOT split, relocations' symbols, sign-extended addresses,
+absolute jump tables, assembly refused). The guest applies it last,
+after the DLLs: the new code mapped in a window beside the image
+(0xffffffffe0000000, W^X), every other CPU stopped, every kernel stack in
+use and every interrupt stack scanned, then each changed function's
+entry made a jump through the direct map's alias. Refused, naming the
+symbol: a changed function on a kernel stack (or the patch's own), a
+static that changed size, assembly, a function too short for the jump,
+any other change to the build. Never a real run, marked as step 1d's
+runs are. For a diff to see only the edit, the kernel's dev profile has
+a codegen unit per module (`codegen-units = 1024`; rustc's 256 merged
+modules by size, and any edit moved other code between units) and the
+scenarios' kernel variants are chosen by a cfg, not a feature (a feature
+changes every TypeId). Not checked (the user's risk): a structure on the
+heap whose layout changed (only statics' sizes are compared), state the
+old code built that the new code reads differently. Limits: no symbols
+for new kernel code, one kernel swap per boot, the dev build (a release
+kernel's 16 codegen units see unrelated changes), `run=` scenarios.
+Shown on the Office install (`office_install_local`, TCG): saved at
+`process integrator.exe (pid` (1755 s in; 116 MiB of state, the 7.7 GB
+disk), resumed with `nt::process::finish`'s exit line changed: xtask
+patched that one function (and its new string); the guest scanned 35
+kernel stacks and 6 interrupt stacks with the other CPU stopped for 14
+ms, and every later exit line came from the new code, the install
+reaching its end (msxml6's replaceChild, ROADMAP OF) in 19 s of run
+time, where the run from boot needs 29 minutes to get there.
+
+**Step 1f: whole files and added modules in a hot swap.** Done
+(`xtask/src/hotswap.rs`: `prepare`, plan version 2 with a mode per
+record; `snapshot::check_build_swap`; `kernel/src/hotswap.rs`:
+`file_check`, `apply_file`, `FILE_RECORDS`; `file::processes_mapping`,
+`file::create_with_directories`; scenario `hotswap_files`, the
+`hotswap_machine` layout case refused by the guest; host tests in xtask
+and the kernel). So that one snapshot serves a whole fix loop: a module
+no process maps at the resume (a DLL loaded later, a program started
+later) is replaced as a whole file, with no layout check, and a module
+new in the build is added; Limine's config and the manifest may differ
+by those modules alone. `--hot-swap-unsafe` without a list takes every
+changed module (patched where a process maps it and the diff takes it,
+else whole); with a list, the named DLLs are patched and other changed
+modules replaced whole. A whole file a process maps is refused by the
+guest, naming the process. Each file is logged (`hotswap: <path>:
+replaced whole|added ...: <reason>`, `hotswap: applied: <name>`), with
+the ledger entry and event; the run stays not a real one.
+
+**Step 2: single programs, inside gala.** A program snapshot is R9's
+handover state cut down to one process tree: its address space (private
+pages, page-file slots read back, image and file views by name and
+digest), threads with their contexts and the calls they are blocked in
+(reissued on restore, as after a handover), handles and the objects
+behind them, its token, windows, console, registry views and sockets.
+What cannot be carried makes the snapshot refuse with the reason, as a
+handover does; R9's list of what is not carried yet is the list to
+work through here too. A program's files are captured as references
+plus digests: restore refuses, naming the file, if an image or mapped
+file differs, and a snapshot can include the files it has open for
+writing.
+
+**Step 3: the command line.**
+- `gala snapshot <pid|name> [--name <n>] [--stop]`: freezes the
+  process tree at a quiescent point, writes the snapshot, then lets it
+  run on (or ends it with `--stop`).
+- `gala snapshots`: lists them (program, time, size, build).
+- `gala restore <name>`: starts the program from the snapshot as a new
+  process tree (new process and thread ids; handles and window handles
+  are remapped as a handover remaps them).
+- `gala snapshot delete <name>`.
+- Restoring the same snapshot twice runs two independent copies (the
+  branch).
+
+**Step 4: export to another machine.**
+- `gala snapshot export <name> <file>`: one file, versioned like R9's
+  state format, holding the snapshot, the images and files it needs (or
+  only their names and digests with `--refs`), and a manifest naming
+  the gala build, the program's identity and what it held (sockets,
+  windows) that the target must reconnect.
+- `gala snapshot import <file>`: checks the format version, the
+  digests and a signature (R8's keys).
+- On the new machine, connections to the outside are closed with the
+  error a lost network gives, and the program sees its windows on the
+  new desktop.
+- Snapshots hold secrets (a program's memory, its token's identity), so
+  an export is encrypted to its target and restoring as another user
+  is refused (SECURITY).
+
+**Tests**: scenarios `snapshot_machine` (save at a line, restore twice,
+both runs reach the end), `snapshot_program` (a test program counts,
+is snapshotted, killed, restored, goes on counting; a second restore
+runs beside it), `snapshot_refused` (a program holding what cannot be
+carried) and `snapshot_export` (export, import on a fresh boot,
+restore).
+
+**Design**: builds on ARCHITECTURE "Kernel handover", "Programs across
+a handover" and "Versions and negotiation"; the design goes in its own
+ARCHITECTURE section when step 2 starts.
 
 ### OT. OpenTelemetry as the telemetry model
 
@@ -3438,6 +4983,267 @@ schedule and applies vendors' security releases first, from advisories
 published in the feed; a security fix can be prepared in private and shipped through
 the feed.
 
+### CS. Crash-safe: no hard resets, a kind crash screen
+
+**Goal** (the owner): the user never has to reset the machine, and when
+the worst happens the screen they see is calm, clear and useful: no
+blue screen. A kernel failure costs at most the thread or program that
+was in the kernel when it happened.
+
+**Today**: a program's fault ends that program (crash report, the rest
+runs on); a kernel panic prints the message, a backtrace and the flight
+recorder to the console and serial log, then halts. gala loads no
+third-party kernel drivers (the usual cause of Windows' bugchecks); its
+own drivers are Rust, `unsafe` confined, allocation fallible.
+
+**How Windows does it** (public documentation, for comparison): a
+bugcheck stops every processor, paints the stop screen (stop code, a QR
+code to its documentation, "% complete"; Windows 11 24H2 made it
+black and shorter), writes a crash dump through a separate, preloaded
+copy of the boot disk's driver run in polled mode (the normal stack is
+not trusted after a crash) into the page file or a dedicated dump
+file, and restarts; at the next boot the dump becomes MEMORY.DMP or a
+minidump and "Windows recovered from an unexpected shutdown" is
+offered. Repeated failed boots go to the recovery environment (24H2:
+Quick Machine Recovery fetches fixes from there). Watchdog bugchecks
+catch hangs; live kernel dumps record some failures without stopping.
+
+**Next** (each test first, with fault injection: R2's `failpoint=`
+gains kernel panic, hang and corruption points):
+1. Restart on panic: instead of halting, the panic path writes its
+   crash record and hands the machine to a fresh copy of the running
+   kernel through R9's handover, carrying programs, windows and
+   sockets; the thread that was in the kernel gets an error from its
+   system call, or its program ends if its state cannot be trusted.
+   The record is validated section by section (CRC, versions) and a
+   section that fails is dropped, never trusted; if carrying fails,
+   the fresh kernel starts clean without the firmware (R9's
+   "same build" path), the session restored from the disk (registry
+   and file log are already crash-consistent). Scenario: a panic
+   injected under a desktop workload; the programs still answer after.
+2. Hangs: a watchdog (NMI per CPU, the scheduler's heartbeat) takes the
+   same path when the kernel stops making progress.
+3. Telling the user after a recovery: a notification on shasha's
+   desktop ("gala recovered from a problem; your programs kept
+   running"), what was affected, a link to the report.
+4. The last resort, when no handover is possible: a self-contained
+   panic path (its own stack, no heap, no locks, the framebuffer
+   already mapped, the other CPUs stopped) that
+   - paints the crash screen (step 5);
+   - saves the crash record where it survives: a reserved RAM region
+     kept across a warm reset (as Linux's pstore/ramoops), a reserved
+     area of the boot disk written by a polled driver of its own (as
+     Windows' dump stack), and a small UEFI variable as the fallback;
+   - restarts, by handover when the image is intact, else by reset;
+     at the next start the record becomes a report and the session is
+     restored: programs that registered for restart
+     (RegisterApplicationRestart) come back with their own recovery
+     data, the rest are offered to reopen.
+   Repeated failures within minutes start the previous kernel image
+   kept beside the current one (A/B), then a minimal safe mode.
+5. The crash screen (the owner: as kind as possible, thinking outside
+   the box), drawn by the last-resort path itself. The layout is the
+   owner's mockup, `docs/images/crash-screen-layout.png`, with its
+   illustration `docs/images/crash-screen-art.png` (the camel being
+   revived) built into the kernel image so nothing has to load: the
+   gala logo top left; the illustration on the left; on the right the
+   headline ("Gala has crashed."), the reassurance ("This was a
+   problem in Gala, not in your programs or your files.") and the
+   saving checklist (emergency path, resilient memory, disk with a
+   percentage, firmware backup, each Done, in progress or Pending);
+   below, "What happens next" on the left and the QR code with "Crash
+   details" on the right; at the bottom the countdown and three keys,
+   R (restart now), S (stay on this screen), D (technical details).
+   Text and figures scale with the screen's resolution. Its contents:
+   - plain words: what happened, that it was gala's fault and not
+     theirs, what is safe (files saved up to when, which programs were
+     open and will come back) and what happens next, with a countdown
+     to the automatic restart and a key to restart now or to stay;
+   - progress of the saving, step by step;
+   - the program that was running when it happened, if one was;
+   - a QR code that carries the crash itself (the owner), not only a
+     link: a URL to galaos.com whose fragment (after `#`, so nothing
+     reaches a server until the user opens it) holds the build
+     (version and git commit), the stop reason, and the backtrace as
+     code offsets in the kernel image, compressed to fit a QR code
+     readable from a phone at arm's length. No user data goes in it:
+     no file names, no memory contents. The page resolves the offsets
+     against the debug information published for that exact build
+     (CI uploads each release's symbols) into function names and lines
+     linked to the source on GitHub at that commit; it hashes the top
+     frames into a crash signature, shows the GitHub issue already
+     open for that signature or a prefilled new one, and what changed
+     since in those files (fixed in a later build, with the commit).
+     The same link sits in the recovery notification (step 3) and the
+     saved report; at the next start gala offers to send the full
+     record (nothing leaves the machine without consent);
+   - large text, high contrast, keyboard alone (no mouse driver is
+     trusted), localised strings built in;
+   - a details view for developers: message, backtrace, flight
+     recorder, the record's identifier.
+   Screenshots of each state; a design review against Windows' and
+   macOS' screens first.
+6. The crash page on galaos.com (with step 5's QR code): the symbol
+   store per build, the decoder of the fragment, signatures matched to
+   GitHub issues, and a test that a crash injected in a scenario
+   decodes to the right function and line at the right commit.
+
+**Done when**: injected panics, hangs and corruptions in each
+subsystem (scheduler, memory, network, disk, display, input) end in a
+recovered desktop with its programs (steps 1-3) or, for corruption the
+handover refuses, in the crash screen, a saved record and a restored
+session after the restart (steps 4-5); no scenario needs a reset.
+
+**Design**: ARCHITECTURE "Kernel handover", "Diagnostics of stuck and
+crashed programs"; the crash screen and the last-resort path get their
+own sections with step 4.
+
+### TM. A task manager for Windows and Linux programs alike
+
+**Goal** (the owner): one task manager on shasha's desktop that shows
+every process gala runs, Windows and Linux (LX, WSL distributions)
+together, and lets the user end or inspect any of them.
+
+**Done so far** (scenario `taskmgr`, test `user/taskmgr_test`, host
+tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
+- Step 1, the data: GalaTasks lists every process of both
+  personalities in one layout (pid, parent, platform, image or `comm`,
+  command line, user, CPU time from the scheduler's new per-thread
+  accounting, working set, commit, threads, handles or fds, start time,
+  taskbar window, WSL distribution) and the machine's load (busy and
+  idle time per processor, memory, disk and network bytes);
+  NtQuerySystemInformation keeps Windows' contents (NT processes only);
+  `gala ps` lists both, `gala kill` ends a Linux process as End task
+  does.
+- Step 2, the program: gala's `taskmgr.exe` (Ctrl+Shift+Esc, the
+  taskbar's context menu, the start menu's tile when System32 has it):
+  Processes grouped as Windows does with Linux by distribution,
+  sortable columns, search, End task (TerminateProcess; SIGTERM then
+  SIGKILL; a distribution's whole tree from its heading), Details with
+  the full columns, Performance graphs per processor, memory, disk and
+  network. The scenario ends one of each from it and its graphs move
+  under a busy thread; its screendumps are the views' pictures.
+- Step 3, hung programs: a window whose input waits untaken for 5 s is
+  "Not responding" (Windows' rule; the desktop's input queue), in the
+  query and red in the Status column; the scenario's frozen window is,
+  its busy one never. Not covered: messages between programs, Wayland
+  clients, Linux D state (gala's Linux waits are all interruptible:
+  ledgered); no "(Not Responding)" caption or ghost window yet.
+
+**Next** (each test first, checked on the screen, screenshots):
+1. Inspection: open file location, a process's threads with their
+   stacks (the state dump's walker), its open handles or fds, and
+   "Create dump file" through the crash report's writer.
+2. Images: `taskmgr.exe` in System32 of every desktop image (it ships
+   per scenario now, as `wsl.exe`), and ProcessTimes/GetSystemTimes
+   from the same CPU accounting.
+3. Statistics: distributions over time, not only totals, in a
+   Statistics view beside Performance (top lists, sortable, p50/p95/p99
+   columns, a chosen window of 1, 10 or 60 s) and `gala stats`:
+   - per thread and process: CPU over the window (the busiest threads
+     now, by name), scheduling latency (runnable to running), run-slice
+     length, context switches per second, and blocked time split by
+     what is waited on (event, pipe, socket, disk, lock) with the top
+     objects named;
+   - per system call and per file, disk or socket: latency
+     percentiles; page faults per second, served from memory or read
+     from disk and the page file;
+   - trends: working set, commit, handles or GDI objects that only grow
+     (leak suspects, from the quota accounting); the kernel locks with
+     the most contention and wait (lockdep knows each); how long a hung
+     window's input has waited.
+   Built as fixed-size log-bucket histograms per CPU (no allocation on
+   the hot path), percentiles read from them on demand, exported as
+   OpenTelemetry exponential histograms (item OT); the cost measured
+   with `bench`, and each counter switchable at run time.
+4. Copy: a Copy button (and Ctrl+C) in every view that puts what the
+   view shows on the clipboard as text, ready to paste to a person or
+   an agent: the view's name, the time and window, the gala build, the
+   sort and filter, then the visible rows as a Markdown table with
+   their units (selected rows only when there is a selection), and in
+   Statistics the percentiles' sample counts. The same text from
+   `gala ps --copy` and `gala stats --copy`; the scenario checks the
+   clipboard's text against the view.
+5. Sparklines: a small line of the last minute beside every metric, as
+   Windows' Performance sidebar: in Performance's list on the left
+   (each processor, memory, disk, network, the process, thread and
+   handle counts, from `taskmgr::History`), and in the CPU, Memory,
+   Disk and Network columns of Processes and Details per process
+   (a fixed ring of samples per process, kept with its row and dropped
+   when it ends; no allocation per sample), and beside each
+   Statistics row (its p50 and p99 over time). Scaled per metric
+   (CPU and memory to 100 %, throughput to the visible peak, the peak
+   written beside it); the scenario checks the lines rise under its
+   busy thread and stay flat for an idle process, and the Copy text
+   carries the sampled values.
+
+**Done when**: a scenario with Windows programs and a WSL distribution
+running shows them all in one list, ends one of each from it, and its
+Performance graphs move under a load (met by `taskmgr`; the item stays
+open for the steps above).
+
+**Design**: ARCHITECTURE "The task manager".
+
+### EX. A file explorer over every file system
+
+**Goal** (the owner): an Explorer for opening folders and files, as
+Windows' File Explorer does, that lists every file system gala holds in
+one tree: the Windows drives, each WSL distribution's root (as Windows
+shows `\\wsl.localhost\<distro>`), the Linux personality's own root,
+and removable or network volumes as they come.
+
+**Done so far** (`explorer_test`, scenario `explorer` with its screen
+check; ARCHITECTURE "The file explorer"):
+- Step 1's core: `\\wsl.localhost\<distro>\...` and `\\wsl$\...` for
+  every Windows program, the distribution's own tree in the one file
+  system (`nt::wslfs`: UNC paths through `\Device\Mup`, Linux links
+  followed inside the distribution, names case-sensitive, Windows'
+  new files 0644), FileStatLxInformation with the Linux mode, uid and
+  gid; shell32's namespace (`user/shellns`, `namespace.rs`): the
+  desktop, This PC with the drives, Linux with each distribution,
+  IShellFolder, IShellItem, their enumerators, the item ID list
+  functions, known folders' lists and items, parsing and display names
+  as Windows gives them (Wine's shlfolder.c and shellpath.c and
+  Microsoft's documentation); ShellExecute opens documents with their
+  association (a Linux file's Linux path for `wsl.exe`).
+- Step 2's core: gala's `explorer.exe` (navigation pane, address bar
+  with paths and `\\wsl.localhost` names, Details and Icons views,
+  sorting, search by name, opening with the association, Back and Up),
+  Win+E and the start menu's tile.
+- Of steps 3-4: copy (and cut) and paste through the clipboard
+  (CF_HDROP, SHFileOperationW), rename (F2), delete, new folder, Open in Terminal (cmd, or `wsl
+  -d` in the Linux folder), Properties with the Linux permissions, and
+  live updates (ReadDirectoryChangesW: a Linux process's new file shows
+  without a refresh). The Done-when scenario runs: Explorer browses
+  from C: into `bb`'s root through the Linux node, pastes a file there,
+  opens it with its program and sees a Linux-made file appear.
+
+**Next** (each test first, checked on the screen, screenshots):
+1. The namespace's rest: the files on the user's Desktop, the Recycle
+   Bin, IShellItem2 and property stores, GetUIObjectOf's context menus
+   and data objects (other programs' "Open folder" and drag sources);
+   Linux names Windows cannot hold mapped as WSL maps them; removable
+   and network volumes as they come.
+2. The program's rest: SHBrowseForFolderW and IFileDialog as dialogs
+   of this namespace (and "Open folder" in other programs), several
+   selected items, rename in place, a tree that expands any folder.
+3. Operations' rest: cut checked on the screen, delete to the Recycle Bin,
+   drag and drop between panes and to the desktop, with progress and
+   conflicts handled as Windows does; across file systems (a Windows
+   drive to a distribution and back) with the source's Linux modes kept
+   where they can be (a copy now takes a new file's 0644).
+4. Thumbnails through WIC; inotify for Linux programs watching what
+   Windows programs change (ReadDirectoryChangesW already sees Linux
+   changes); the rest of Properties (sizes of folders, attributes).
+
+**Done when**: a scenario opens Explorer, browses from C: into a WSL
+distribution's root through the Linux node, copies a file from one to
+the other, opens it with its program, and sees the copy appear without
+a refresh.
+
+**Design**: ARCHITECTURE "The file explorer" (and "The WSL facade" for
+`\\wsl.localhost`).
+
 ## Known issues and stopgaps
 
 Each entry: what, why it matters, the structural fix, the owning item.
@@ -3569,6 +5375,15 @@ xtask test` or CI.
 | `filezilla`, `filezilla_flaui`, `filezilla_sftp` | slow (about 100 s, 45 s and 45 s in the kernel under TCG) | W3 |
 | `sshd` | `ssh-keygen -A` and `sshd -t` only; superseded by `sshd_login`, `sshd_server` | SSH (move into the suite or drop) |
 
+### Manual scenarios
+
+`MANUAL` in xtask: never in `cargo xtask test` or CI, by design; run by
+exact name (`cargo xtask boot-test office_install`).
+
+| Scenario | Why manual | Owner |
+|---|---|---|
+| `office_install` | the Office Deployment Tool installs Word, Excel and PowerPoint from Microsoft's CDN: a ~5.4 GB download onto a disk-backed C: (a 16 GiB sparse image, up to ~6 GiB on the host) | OF |
+
 ### Environment
 
 - **QEMU must be the pinned one**: QEMU 8.1.0-8.2.5's TCG (Ubuntu
@@ -3586,12 +5401,29 @@ xtask test` or CI.
 
 Wanted, not scheduled. Each becomes an item with a section when it is.
 
+- **Hygiene sweep** (the owner; in a few months, not now): first
+  enumerate the practices gala's code should not follow, by sweeping
+  the code (e.g. large arrays on the stack in kernel and DLL code,
+  which a signal or exception path runs on a limited stack); then, for
+  each enumerated item, a subagent sweeps the code for instances and
+  fixes them. Prompted by the richer crash report (register memory and
+  the deeper stack, 1 KiB arrays on the exception path), suspected when
+  `fpu_test` failed in gala-um; the cause was elsewhere (a new thread's
+  first entry took the host's SSE registers: docs/GALA_UM.md).
+
 - **Self-hosting**: building gala's own test programs (then Nginx) on
   gala. H1-H10 built the base (pipes, child processes, busybox, TinyCC
   building itself, make, Lua and SQLite built on gala); what is left is
   a Windows-hosted toolchain (llvm-mingw, or the MSVC Rust target)
   running on gala, cargo spawning compilers, and a larger writable file
-  system on the disk.
+  system on the disk. Then Rust and its build tools (rustup's
+  toolchain: cargo, rustc, lld, clippy, rustfmt; llvm-objcopy; git)
+  on gala, by the Windows route or the Linux one (LX runs glibc's
+  dynamic programs; rustc needs many threads, gigabytes mapped and a
+  jobserver over pipes), so gala builds its own kernel and DLLs; the
+  new kernel is then taken over by R9's handover (signed with a key the
+  running kernel trusts, R8), or a small change patched in place as SN
+  step 1e's hot swap does. Tests that boot QEMU stay on a host.
 - **DR, Windows drivers, staged and isolated**: Windows keeps a stable
   binary driver ABI, so vendor drivers are a realistic catalogue (Linux
   drivers are not: no stable in-kernel API, GPL-2.0; LX is a user-space
@@ -3627,8 +5459,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     the XSTATE area; SEH's nested exceptions and collided unwinds.
   - Waits: wait-all satisfied only when all objects are signaled at its
     re-check; an atomic SignalObjectAndWait; the thread pool's
-    WaitFor*Callbacks polls (Sleep(1)), its callback environments and
-    freeing of closed objects.
+    persistent callbacks (TP_CALLBACK_ENVIRON's Persistent, recorded)
+    and ntdll's Tp* exports (gala's pool is kernel32's).
   - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
     security, asynchronous writes that pend.
   - Access checks for processes, threads, pipes, devices and traversal;
@@ -3655,3 +5487,63 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   11 24H2, 26100); trace diffing against Windows, the sampling profiler
   and live introspection, fuzzing (OBSERVABILITY "Planned
   facilities").
+- **MCP: agents working as a real gala user**: `gala mcp` speaks the
+  Model Context Protocol over stdin and stdout, reached as
+  `ssh user@gala gala mcp`, so an agent (Claude Code or another MCP
+  client) works in gala with that user's token and nothing more. Login,
+  keys and encryption are item SSH's; no new port, no new
+  authentication. Tools: gala's commands (`ps`, `start`, `windows`,
+  `kill`, `stats`, the task manager's copy text), the ledger and the
+  event stream, window screenshots, UI Automation (find, invoke, type;
+  item UIA), and later SN's snapshots. The SSH logon is a network
+  logon; seeing and driving windows needs the user's interactive
+  session, which "attach to my desktop" asks for under RS's rule (one's
+  own session, or SeTcbPrivilege), with the desktop showing that an
+  agent is attached and the user able to cut it off. Read-only tools by
+  default, input and process control only when the user's settings
+  allow, rate limits, every call in the audit trail as any process's
+  actions are. Uses: agents testing and debugging real programs (start
+  Office, read the ledger, click through a dialog), xtask's scenarios
+  on the same tools instead of their own serial scripts, item AI's
+  start menu.
+- **Applications put to sleep**: a program that is not in use stops
+  costing anything. Freeze: every thread of the program's process tree
+  stopped (as R9's quiescence stops them), no CPU, its memory moving to
+  the page file under pressure. Deep sleep: a program snapshot (SN
+  step 2) written to disk and the process ended, all its memory freed,
+  restored on wake; Windows cannot do this for Win32 programs (it
+  suspends only packaged apps, and throttles others with EcoQoS). Policy:
+  asleep after a while minimized, awake on a click or `gala wake`, the
+  taskbar showing it; programs that ask get Windows' suspend and resume
+  notifications. Never asleep: a program others depend on (a COM server,
+  a pipe or shared-lock holder, a service), which the kernel knows from
+  the handles between processes; network connections time out and
+  timers fire at once on wake, so both are named in the policy's
+  decision.
+- **Hibernation**: gala saves the whole running system to its own disk,
+  powers off, and resumes everything on the next boot, on real hardware
+  as well as in a VM. It is R9's handover sent to the next boot through
+  the disk instead of to a new kernel in memory: threads stopped at a
+  quiescent point, the kernel's state in the versioned handover format,
+  memory paged out to the page file where it can be and the rest
+  written beside it, devices reset and rebuilt as after a handover. New
+  pieces: a resume path at boot (Limine and the kernel find the image,
+  check its build and that the disk has not changed since, and resume
+  instead of booting fresh); the clock's jump and renewed network leases
+  on resume; programs told as on Windows (power broadcasts). What a
+  handover refuses, hibernation refuses with the same reason (R9's and
+  SN's list). It also gives CS a fallback: on a fatal error, try to
+  hibernate before restarting. Sleep (suspend to RAM) is apart and
+  harder: ACPI sleep states and drivers that save and restore device
+  state.
+- **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
+  gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
+  kernel ELF's symbols, the target port), on a boot or on a snapshot's
+  resume (`--from-snapshot`: attach just before a failure instead of
+  after a 30-minute run). Breakpoints, stepping, reading and writing
+  variables, memory and registers; under KVM a few hardware breakpoints,
+  under TCG any number. Reverse debugging (gdb's `reverse-step` and
+  `reverse-continue`) through QEMU's record/replay: TCG only, one CPU
+  practical, much slower, so for short repros rather than the Office
+  install. gala-um already takes `gdb -p`, with `--sim` and
+  `--record`/`--replay` to return to the same point (WORKFLOW).

@@ -7,11 +7,16 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::cert::{CertCreateCertificateContext, CertFreeCertificateContext};
+use crate::cert::{Blob, CertCreateCertificateContext, CertFreeCertificateContext};
+use crate::layout::{AltNameEntry, AltNameInfo, AltNameValue};
 use crate::store::{CertAddCertificateContextToStore, CertOpenStore, error, unsupported};
 use core::ffi::c_void;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CreateFileW(
         name: *const u16,
@@ -137,6 +142,10 @@ const CERT_QUERY_OBJECT_FILE: u32 = 1;
 const CERT_QUERY_OBJECT_BLOB: u32 = 2;
 const CERT_QUERY_CONTENT_CERT: u32 = 1;
 const CERT_QUERY_CONTENT_FLAG_CERT: u32 = 1 << CERT_QUERY_CONTENT_CERT;
+const CERT_QUERY_CONTENT_PKCS7_SIGNED: u32 = 8;
+const CERT_QUERY_CONTENT_PKCS7_SIGNED_EMBED: u32 = 10;
+const CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED: u32 = 1 << CERT_QUERY_CONTENT_PKCS7_SIGNED;
+const CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: u32 = 1 << CERT_QUERY_CONTENT_PKCS7_SIGNED_EMBED;
 const CERT_QUERY_FORMAT_BINARY: u32 = 1;
 const CERT_QUERY_FORMAT_BASE64_ENCODED: u32 = 2;
 const CERT_QUERY_FORMAT_FLAG_BINARY: u32 = 1 << CERT_QUERY_FORMAT_BINARY;
@@ -157,12 +166,44 @@ fn put<T>(p: *mut T, v: T) {
     }
 }
 
+/// The PKCS #7 SignedData in a PE image's certificate table (its first
+/// WIN_CERTIFICATE of type WIN_CERT_TYPE_PKCS_SIGNED_DATA), if any.
+pub(crate) fn embedded_signature(image: &[u8]) -> Option<&[u8]> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*image.get(at)?, *image.get(at + 1)?]));
+    let u32_at =
+        |at: usize| Some(u32::from_le_bytes(image.get(at..at + 4)?.try_into().ok()?) as usize);
+    if image.get(..2) != Some(b"MZ") {
+        return None;
+    }
+    let nt = u32_at(0x3c)?;
+    if image.get(nt..nt + 4) != Some(b"PE\0\0") {
+        return None;
+    }
+    let optional = nt + 24;
+    let directories = match u16_at(optional)? {
+        0x10b => optional + 96,
+        0x20b => optional + 112,
+        _ => return None,
+    };
+    let (at, size) = (u32_at(directories + 32)?, u32_at(directories + 36)?);
+    let table = image.get(at..at.checked_add(size)?)?;
+    let length = u32_at(at)?;
+    // WIN_CERT_TYPE_PKCS_SIGNED_DATA (2).
+    if u16_at(at + 6)? != 2 || length < 8 || length > table.len() {
+        return None;
+    }
+    Some(&table[8..length])
+}
+
 /// CryptQueryObject: what a file (CERT_QUERY_OBJECT_FILE) or blob holds;
 /// gala recognises a certificate, DER (CERT_QUERY_FORMAT_BINARY) or
 /// base64 with or without PEM lines (CERT_QUERY_FORMAT_BASE64_ENCODED),
-/// giving its context and a memory store holding it. Anything else, or a
-/// certificate the flags do not ask for, is CRYPT_E_NO_MATCH (other
-/// content kinds are recorded).
+/// giving its context and a memory store holding it; a PKCS #7 SignedData
+/// (CERT_QUERY_CONTENT_PKCS7_SIGNED, DER) and the one embedded in a PE
+/// image's certificate table (CERT_QUERY_CONTENT_PKCS7_SIGNED_EMBED: an
+/// Authenticode signature), giving its decoded message and a store of its
+/// certificates. Anything else, or a kind the flags do not ask for, is
+/// CRYPT_E_NO_MATCH (other content kinds are recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn CryptQueryObject(
     object_type: u32,
@@ -198,8 +239,51 @@ pub extern "system" fn CryptQueryObject(
         }
         _ => return error(E_INVALIDARG, 0),
     };
-    if content_flags & !CERT_QUERY_CONTENT_FLAG_CERT != 0 {
-        unsupported(b"crypt32.dll!CryptQueryObject(content)", content_flags.into());
+    let known = CERT_QUERY_CONTENT_FLAG_CERT
+        | CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED
+        | CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED;
+    if content_flags & !known != 0 {
+        unsupported(b"crypt32.dll!CryptQueryObject(content)", (content_flags & !known).into());
+    }
+    let message = |der: &[u8], kind: u32| -> Option<i32> {
+        let h = crate::msg::decode(der);
+        if h.is_null() {
+            return None;
+        }
+        put(encoding, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING);
+        put(content, kind);
+        put(format, CERT_QUERY_FORMAT_BINARY);
+        put(context, core::ptr::null());
+        if !store.is_null() {
+            // CERT_STORE_PROV_MSG (1).
+            let s = CertOpenStore(core::ptr::without_provenance(1), 0, 0, 0, h);
+            if s.is_null() {
+                crate::msg::CryptMsgClose(h);
+                return Some(0);
+            }
+            put(store, s);
+        }
+        if msg.is_null() {
+            crate::msg::CryptMsgClose(h);
+        } else {
+            put(msg, h);
+        }
+        Some(1)
+    };
+    if content_flags & CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED != 0
+        && format_flags & CERT_QUERY_FORMAT_FLAG_BINARY != 0
+        && let Some(sig) = embedded_signature(data)
+        && let Some(r) = message(sig, CERT_QUERY_CONTENT_PKCS7_SIGNED_EMBED)
+    {
+        return r;
+    }
+    if content_flags & CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED != 0
+        && format_flags & CERT_QUERY_FORMAT_FLAG_BINARY != 0
+        && data.first() == Some(&0x30)
+        && crate::msg::parse_signed(data).is_ok()
+        && let Some(r) = message(data, CERT_QUERY_CONTENT_PKCS7_SIGNED)
+    {
+        return r;
     }
     if content_flags & CERT_QUERY_CONTENT_FLAG_CERT == 0 {
         return error(CRYPT_E_NO_MATCH, 0);
@@ -244,7 +328,6 @@ pub extern "system" fn CryptQueryObject(
 
 // ---- CryptDecodeObjectEx ----
 
-const X509_ALTERNATE_NAME: usize = 12;
 const CRYPT_DECODE_ALLOC_FLAG: u32 = 0x8000;
 
 /// CRYPT_DECODE_PARA: its size and an allocator.
@@ -253,25 +336,6 @@ struct DecodePara {
     size: u32,
     alloc: Option<extern "system" fn(usize) -> *mut u8>,
     free: Option<extern "system" fn(*mut u8)>,
-}
-
-/// Whether the structure type (an LPCSTR: a small number or an OID
-/// string) is the subjectAltName.
-fn is_alt_name(t: *const u8) -> bool {
-    let n = t as usize;
-    if n < 0x10000 {
-        return n == X509_ALTERNATE_NAME;
-    }
-    let mut i = 0;
-    // SAFETY: the caller's NUL-terminated OID string.
-    let s = unsafe {
-        while *t.add(i) != 0 && i < 64 {
-            i += 1;
-        }
-        core::slice::from_raw_parts(t, i)
-    };
-    // szOID_SUBJECT_ALT_NAME2, szOID_ISSUER_ALT_NAME2, szOID_SUBJECT_ALT_NAME.
-    s == b"2.5.29.17" || s == b"2.5.29.18" || s == b"2.5.29.7"
 }
 
 /// A DER TLV at `at`: (tag, content start, end).
@@ -330,37 +394,40 @@ fn alt_entries(der: &[u8], mut f: impl FnMut(u32, &[u8])) -> Result<usize, u32> 
     Ok(n)
 }
 
-/// CERT_ALT_NAME_INFO and its entries (24 bytes each: the choice, then a
-/// string pointer or a CRYPT_DATA_BLOB).
+/// CERT_ALT_NAME_INFO and its entries (CERT_ALT_NAME_ENTRY: the choice,
+/// then a string pointer or a CRYPT_DATA_BLOB; `layout`).
 fn alt_name(der: &[u8], out: *mut u8, room: usize) -> Result<usize, u32> {
+    use core::mem::size_of;
     // The size: header, entries, then the strings (UTF-16, NUL) and IPs.
     let mut extra = 0;
     let count = alt_entries(der, |choice, v| {
         extra += if choice == CERT_ALT_NAME_IP_ADDRESS { v.len() } else { (v.len() + 1) * 2 };
     })?;
-    let header = 16;
-    let size = header + count * 24 + extra.next_multiple_of(8);
+    let header = size_of::<AltNameInfo>();
+    let entry = size_of::<AltNameEntry>();
+    let size = header + count * entry + extra.next_multiple_of(size_of::<usize>());
     if out.is_null() || room < size {
         return Ok(size);
     }
     // SAFETY: the caller's (or our allocated) buffer of `size` bytes.
     unsafe {
         core::ptr::write_bytes(out, 0, size);
-        let entries = out.add(header);
-        (out as *mut u32).write(count as u32);
-        (out.add(8) as *mut *mut u8).write(entries);
-        let mut text = entries.add(count * 24);
+        let entries = out.add(header).cast::<AltNameEntry>();
+        out.cast::<AltNameInfo>().write_unaligned(AltNameInfo { count: count as u32, entries });
+        let mut text = out.add(header + count * entry);
         let mut i = 0;
         alt_entries(der, |choice, v| {
-            let e = entries.add(i * 24);
-            (e as *mut u32).write(choice);
+            let e = entries.add(i);
             if choice == CERT_ALT_NAME_IP_ADDRESS {
-                (e.add(8) as *mut u32).write(v.len() as u32);
-                (e.add(16) as *mut *mut u8).write(text);
+                let blob = Blob { size: v.len() as u32, data: text };
+                e.write_unaligned(AltNameEntry { choice, value: AltNameValue { blob } });
                 core::ptr::copy_nonoverlapping(v.as_ptr(), text, v.len());
                 text = text.add(v.len());
             } else {
-                (e.add(8) as *mut *mut u8).write(text);
+                e.write_unaligned(AltNameEntry {
+                    choice,
+                    value: AltNameValue { text: text.cast() },
+                });
                 for (k, &b) in v.iter().enumerate() {
                     (text.add(k * 2) as *mut u16).write_unaligned(b.into());
                 }
@@ -378,8 +445,9 @@ fn alt_name(der: &[u8], out: *mut u8, room: usize) -> Result<usize, u32> {
 /// when short) or, with CRYPT_DECODE_ALLOC_FLAG, into memory it
 /// allocates (LocalAlloc, or the CRYPT_DECODE_PARA's allocator). gala
 /// decodes the alternative names (X509_ALTERNATE_NAME and the
-/// subject/issuer alt name OIDs: e-mail, DNS, URL and IP entries); other
-/// types are recorded and fail with CRYPT_E_ASN1_BADTAG.
+/// subject/issuer alt name OIDs: e-mail, DNS, URL and IP entries) and
+/// `decode`'s types; other types are recorded and fail with
+/// CRYPT_E_ASN1_BADTAG.
 #[unsafe(no_mangle)]
 pub extern "system" fn CryptDecodeObjectEx(
     encoding: u32,
@@ -398,12 +466,19 @@ pub extern "system" fn CryptDecodeObjectEx(
     {
         return error(E_INVALIDARG, 0);
     }
-    if !is_alt_name(struct_type) {
-        unsupported(b"crypt32.dll!CryptDecodeObjectEx(type)", struct_type as u64 & 0xffff_ffff);
-        return error(CRYPT_E_ASN1_BADTAG, 0);
-    }
     // SAFETY: the caller's encoding.
     let der = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    if let Some(r) = crate::decode::decode_ex(struct_type, der, flags, para, out, out_len) {
+        return r;
+    }
+    if !crate::decode::is_alt_name(struct_type) {
+        let number = struct_type as usize;
+        unsupported(
+            b"crypt32.dll!CryptDecodeObjectEx(type)",
+            if number < 0x10000 { number as u64 } else { 0 },
+        );
+        return error(CRYPT_E_ASN1_BADTAG, 0);
+    }
     let size = match alt_name(der, core::ptr::null_mut(), 0) {
         Ok(s) => s,
         Err(e) => return error(e, 0),

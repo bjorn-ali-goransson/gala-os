@@ -124,13 +124,19 @@ static SAMPLE_TICKS: [AtomicU64; crate::arch::smp::MAX_CPUS] =
 // A sample must be able to land anywhere, including code that runs with
 // interrupts off (every `IrqMutex` section, interrupt handlers): a timer
 // tick held back there is taken where interrupts come back on, which
-// bills a whole locked section to its unlock. So samples are NMIs: every
-// `SAMPLE_EVERY` ticks a CPU sends one to the next online CPU (round
-// robin), which records where it was into its ring without locks; its
-// own next tick writes the events (a ring of `RING`). The sender's tick may be late (its own
-// interrupts off), but that only moves when the target is sampled, not
-// where. With one CPU the tick samples itself (and is blind inside
-// interrupts-off sections).
+// bills a whole locked section to its unlock. So kernel samples are
+// NMIs: every `SAMPLE_EVERY` ticks a CPU sends one to the next online CPU
+// (round robin), which records where it was into its ring without locks;
+// its own next tick writes the events (a ring of `RING`). The sender's
+// tick may be late (its own interrupts off), but that only moves when the
+// target is sampled, not where. User mode always runs with interrupts
+// on, so a CPU's own tick that interrupts it is already exact: every
+// `SAMPLE_EVERY` ticks a CPU in user mode samples itself, and an NMI that
+// lands in user mode records nothing. User samples so never depend on
+// the neighbor's vCPU being scheduled (on a loaded host it can miss a
+// program's whole user-mode stretch), and both kinds come at the same
+// rate, so their shares stay unbiased. With one CPU the tick samples
+// itself (and is blind inside interrupts-off sections).
 
 /// Samples a CPU can hold until its tick writes them: 8 x 10 ms at the
 /// default rate with interrupts off.
@@ -206,7 +212,8 @@ pub fn set_sample_probe(on: bool) {
 }
 
 /// The profiler's part of a tick: write this CPU's waiting NMI sample,
-/// and every `SAMPLE_EVERY` ticks ask the next busy CPU for one.
+/// and every `SAMPLE_EVERY` ticks sample itself if the tick interrupted
+/// user mode and ask the next busy CPU for a (kernel) NMI sample.
 fn sample_tick(frame: &TrapFrame, idle: bool) {
     let cpu = crate::arch::percpu::cpu_index() as usize;
     write_samples(cpu);
@@ -221,6 +228,11 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
             sample_here(frame);
         }
         return;
+    }
+    // This CPU's own user-mode sample (exact: user mode runs with
+    // interrupts on); its kernel samples come from the neighbor's NMI.
+    if frame.from_user_mode() {
+        sample_here(frame);
     }
     // The next online CPU after this one.
     let n = crate::arch::smp::MAX_CPUS;
@@ -252,6 +264,18 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     if PROBING[cpu].load(Ordering::Relaxed) {
         PROBE_HITS.fetch_add(1, Ordering::Relaxed);
     }
+    // User mode is sampled by this CPU's own tick (`sample_tick`).
+    if frame.from_user_mode() {
+        return true;
+    }
+    // A sample of the profiler writing samples is not kept: writing one
+    // (port I/O a byte at a time, a VM exit each) can take longer than
+    // the sampling period on a loaded host, so samples of the writer would
+    // keep its loop going for ever (a CPU that never leaves its tick).
+    if WRITING[cpu].load(Ordering::Relaxed) {
+        SAMPLES_OF_WRITER.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
     let ring = &RINGS[cpu];
     let head = ring.head.load(Ordering::Relaxed);
     if head - ring.tail.load(Ordering::Acquire) >= RING as u64 {
@@ -279,17 +303,29 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     true
 }
 
-/// Writes CPU `cpu`'s waiting NMI samples (from its tick).
+/// Per CPU: its tick is writing its samples (`write_samples`); an NMI
+/// then keeps nothing.
+static WRITING: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::smp::MAX_CPUS];
+/// NMI samples that landed in the writing of samples (not kept; the
+/// `events:` line).
+pub static SAMPLES_OF_WRITER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes CPU `cpu`'s waiting NMI samples (from its tick): those waiting
+/// when it starts, at most the ring, so a tick's work is bounded whatever
+/// the host's speed.
 fn write_samples(cpu: usize) {
-    let Some(ring) = RINGS.get(cpu) else { return };
+    let (Some(ring), Some(writing)) = (RINGS.get(cpu), WRITING.get(cpu)) else { return };
     // Drops happen only while the ring is full, so after its newest
     // sample: they go with the last one written now (a drop needs a full
     // ring, so there is one).
     let mut lost = ring.lost.swap(0, Ordering::Relaxed);
+    let head = ring.head.load(Ordering::Acquire);
+    writing.store(true, Ordering::Relaxed);
     loop {
         let tail = ring.tail.load(Ordering::Relaxed);
-        let head = ring.head.load(Ordering::Acquire);
         if tail == head {
+            writing.store(false, Ordering::Relaxed);
             return;
         }
         let e = &ring.entries[tail as usize % RING];
@@ -311,7 +347,8 @@ fn write_samples(cpu: usize) {
     }
 }
 
-/// A sample of this CPU from its own tick (one CPU only).
+/// A sample of this CPU from its own tick (in user mode, or any with one
+/// CPU).
 fn sample_here(frame: &TrapFrame) {
     let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
     let user = frame.from_user_mode();

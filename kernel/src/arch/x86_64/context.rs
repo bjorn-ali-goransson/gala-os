@@ -47,7 +47,7 @@ impl KernelStack {
         };
         let mut stack = KernelStack { slot, pages: 0 };
         for i in 0..STACK_PAGES {
-            let frame = mm::allocate_frame().ok_or(StackError::OutOfMemory)?;
+            let frame = mm::allocate_frame(mm::Use::KernelStack).ok_or(StackError::OutOfMemory)?;
             let virt = stack.bottom() + i as u64 * PAGE_SIZE;
             if paging::map_kernel_page(virt, frame, PageFlags::KERNEL_RW).is_err() {
                 let _ = mm::free_frame(frame);
@@ -139,6 +139,13 @@ impl Context {
             p.copy_from_nonoverlapping(frame.as_ptr(), frame.len());
         }
         Ok(Context { rsp: AtomicU64::new(rsp), area })
+    }
+
+    /// The stack pointer the last switch away from this context saved (0
+    /// before the first): where a switched-out thread's kernel stack is
+    /// in use from, for a hot swap's stack scan.
+    pub fn saved_sp(&self) -> u64 {
+        self.rsp.load(core::sync::atomic::Ordering::Acquire)
     }
 
     /// The x87/SSE/AVX state saved by the last switch away from this

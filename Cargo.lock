@@ -14,6 +14,20 @@ name = "access_test"
 version = "0.1.0"
 
 [[package]]
+name = "actctx_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "actionid_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -82,6 +96,13 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "apc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "appxdeploymentclient"
 version = "0.1.0"
 dependencies = [
  "ntrt",
@@ -217,6 +238,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "cab_probe"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,6 +307,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard_test"
+version = "0.1.0"
+
+[[package]]
 name = "clock_test"
 version = "0.1.0"
 dependencies = [
@@ -311,6 +343,20 @@ version = "0.1.0"
 [[package]]
 name = "com_test"
 version = "0.1.0"
+
+[[package]]
+name = "combase"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "combase_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "comctl32"
@@ -348,6 +394,13 @@ version = "0.1.0"
 [[package]]
 name = "console_window_test"
 version = "0.1.0"
+
+[[package]]
+name = "consolerun"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "const-oid"
@@ -408,6 +461,7 @@ name = "crypt32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -469,11 +523,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "d2d1"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "libm",
+]
+
+[[package]]
+name = "d2d1_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "d3d11"
 version = "0.1.0"
 
 [[package]]
 name = "d3d12"
+version = "0.1.0"
+
+[[package]]
+name = "d3dcompiler_47"
 version = "0.1.0"
 
 [[package]]
@@ -703,6 +776,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "shellns",
+]
+
+[[package]]
+name = "explorer_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,6 +881,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "galapkg",
+ "taskmgr",
 ]
 
 [[package]]
@@ -808,9 +897,14 @@ name = "gala_stubs"
 version = "0.1.0"
 
 [[package]]
+name = "gala_xml"
+version = "0.1.0"
+
+[[package]]
 name = "galapkg"
 version = "0.1.0"
 dependencies = [
+ "gala_xml",
  "miniz_oxide 0.8.9",
  "sha2",
 ]
@@ -825,6 +919,22 @@ dependencies = [
  "noto-sans-mono-bitmap",
  "ntrt",
  "ttf-parser",
+]
+
+[[package]]
+name = "gdiplus"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+ "ntrt",
+]
+
+[[package]]
+name = "gdiplus_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
@@ -899,6 +1009,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hardlink_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -958,8 +1075,32 @@ name = "hostnet_test"
 version = "0.1.0"
 
 [[package]]
+name = "hotswap_dll"
+version = "0.1.0"
+
+[[package]]
+name = "hotswap_dll32"
+version = "0.1.0"
+
+[[package]]
+name = "hotswap_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "http_client"
 version = "0.1.0"
+
+[[package]]
+name = "iced-x86"
+version = "1.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
+dependencies = [
+ "lazy_static",
+]
 
 [[package]]
 name = "image_test"
@@ -973,6 +1114,17 @@ name = "imagesize"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
+name = "imagetrim_dll"
+version = "0.1.0"
+
+[[package]]
+name = "imagetrim_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "imm32"
@@ -1016,6 +1168,7 @@ name = "iphlpapi"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1109,6 +1262,13 @@ name = "keyed_event_test"
 version = "0.1.0"
 
 [[package]]
+name = "knownfolder_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1154,6 +1314,13 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "linux_menu_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
 
 [[package]]
 name = "loader_test"
@@ -1275,6 +1442,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "msi"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "msi_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "msimg32"
 version = "0.1.0"
 dependencies = [
@@ -1295,10 +1476,27 @@ name = "mswsock"
 version = "0.1.0"
 
 [[package]]
+name = "msxml6"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "gala_xml",
+ "ntrt",
+]
+
+[[package]]
+name = "msxml_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ncrypt"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1315,6 +1513,9 @@ version = "0.1.0"
 [[package]]
 name = "normaliz"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "noto-sans-mono-bitmap"
@@ -1386,6 +1587,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "office_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ole32"
 version = "0.1.0"
 dependencies = [
@@ -1404,7 +1619,6 @@ dependencies = [
 name = "oleaut32"
 version = "0.1.0"
 dependencies = [
- "gala_stubs",
  "ntrt",
 ]
 
@@ -1443,6 +1657,10 @@ dependencies = [
  "primeorder",
  "sha2",
 ]
+
+[[package]]
+name = "pagefile_test"
+version = "0.1.0"
 
 [[package]]
 name = "paste"
@@ -1577,6 +1795,7 @@ name = "powrprof"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1685,6 +1904,17 @@ name = "registry_test"
 version = "0.1.0"
 
 [[package]]
+name = "regnotify_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "reparse_test"
+version = "0.1.0"
+
+[[package]]
 name = "replay_test"
 version = "0.1.0"
 
@@ -1768,9 +1998,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "rpcrt4"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
 ]
 
@@ -1800,8 +2038,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rstrtmgr"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "ntrt",
+]
+
+[[package]]
+name = "rstrtmgr_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "rtl_test"
 version = "0.1.0"
+
+[[package]]
+name = "runas_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "rustc_version"
@@ -1898,6 +2158,7 @@ name = "schannel"
 version = "0.1.0"
 dependencies = [
  "gala_heap",
+ "ntrt",
  "schannel_tls",
  "sha2",
 ]
@@ -2008,10 +2269,22 @@ version = "0.1.0"
 [[package]]
 name = "setupapi"
 version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "galapkg",
+ "ntrt",
+]
 
 [[package]]
 name = "setupapi_test"
 version = "0.1.0"
+
+[[package]]
+name = "setupcab_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "sha1"
@@ -2043,9 +2316,15 @@ version = "0.1.0"
 name = "shell32"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
  "ntrt",
+ "shellns",
 ]
+
+[[package]]
+name = "shellns"
+version = "0.1.0"
 
 [[package]]
 name = "shfolder"
@@ -2097,6 +2376,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a9c6883ca9c3c7c90e888de77b7a5c849c779d25d74a1269b0218b14e8b136c"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "sip_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
@@ -2166,6 +2452,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapshot_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2188,6 +2481,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sppc"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "gala_xml",
+ "ntrt",
+]
+
+[[package]]
+name = "sppc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "sshfwd_test"
 version = "0.1.0"
 
@@ -2200,6 +2509,10 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "start_menu_test"
+version = "0.1.0"
 
 [[package]]
 name = "startup_test"
@@ -2236,6 +2549,20 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "svcrun_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "svgtypes"
@@ -2295,6 +2622,21 @@ name = "system_test"
 version = "0.1.0"
 
 [[package]]
+name = "taskmgr"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
+
+[[package]]
+name = "taskmgr_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "taskmgr",
+]
+
+[[package]]
 name = "tds_test"
 version = "0.1.0"
 
@@ -2308,6 +2650,10 @@ version = "0.1.0"
 
 [[package]]
 name = "testdll32"
+version = "0.1.0"
+
+[[package]]
+name = "testdll_gap"
 version = "0.1.0"
 
 [[package]]
@@ -2343,6 +2689,13 @@ dependencies = [
 
 [[package]]
 name = "threadinfo_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "threadpool_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
@@ -2394,6 +2747,13 @@ name = "token_test"
 version = "0.1.0"
 
 [[package]]
+name = "tray_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2416,12 +2776,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "ucrtbase"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+ "libm",
+ "ntrt",
+]
+
+[[package]]
 name = "udp_test"
 version = "0.1.0"
 
 [[package]]
 name = "uiautomationcore"
 version = "0.1.0"
+
+[[package]]
+name = "uisettings_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "um"
@@ -2461,6 +2844,7 @@ name = "urlmon"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2469,15 +2853,13 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
+ "miniz_oxide 0.8.9",
  "ntrt",
 ]
 
 [[package]]
 name = "userenv"
 version = "0.1.0"
-dependencies = [
- "gala_stubs",
-]
 
 [[package]]
 name = "usvg"
@@ -2531,6 +2913,10 @@ version = "0.1.0"
 dependencies = [
  "ntrt",
 ]
+
+[[package]]
+name = "volume_test"
+version = "0.1.0"
 
 [[package]]
 name = "wait_test"
@@ -2612,6 +2998,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
+name = "windows_ui"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2630,6 +3023,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
+name = "windowscodecs"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "windowscodecs_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "winhttp"
 version = "0.1.0"
 dependencies = [
@@ -2640,12 +3048,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "winhttp_cb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wininet"
 version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
  "http_client",
+ "ntrt",
 ]
 
 [[package]]
@@ -2679,6 +3095,14 @@ name = "wintrust"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
+]
+
+[[package]]
+name = "wintrust_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
 ]
 
 [[package]]
@@ -2693,8 +3117,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "wldp"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wofutil"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wofutil_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64"
 version = "0.1.0"
+
+[[package]]
+name = "wow64_actctx_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "wow64_adv_test"
@@ -2704,7 +3156,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_cert_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_combase_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_fs_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_gdiplus_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_hardlink_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_hotswap_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
@@ -2725,7 +3212,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_knownfolder_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_msi_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_msxml_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_office_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_regnotify_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_rstrtmgr_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_runas_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_schannel_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_seh_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_setupcab_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_svc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_svcrun_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
@@ -2746,12 +3317,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_threadpool_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_tray_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_uisettings_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_winhttp_cb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_wintrust_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "writeback_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ws2_32"
 version = "0.1.0"
 dependencies = [
  "afd_abi",
  "gala_stubs",
  "ntrt",
+]
+
+[[package]]
+name = "wsl"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "wsl_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
 ]
 
 [[package]]
@@ -2807,6 +3442,7 @@ dependencies = [
  "ed25519-compact",
  "flate2",
  "fontdue",
+ "iced-x86",
  "libc",
  "proc-macro2",
  "resvg",

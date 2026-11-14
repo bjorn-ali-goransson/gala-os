@@ -516,6 +516,8 @@ pub enum ObjectBody {
     Pipe(super::pipe::PipeEnd),
     /// `\Device\Null` (`\??\NUL`, the DOS device NUL).
     NullDevice,
+    /// `\Device\Mup` (`\??\UNC`): UNC paths; WSL's servers (nt::wslfs).
+    MupDevice,
     /// `\Device\Harddisk0\DR0` (`\??\PhysicalDrive0`): the disk (nt::disk).
     DiskDevice,
     /// An open of the disk: raw sector access.
@@ -537,6 +539,10 @@ pub enum ObjectBody {
     WindowStation(super::winsta::WindowStation),
     /// A desktop of a window station (nt::winsta).
     Desktop(super::winsta::Desktop),
+    /// A connection to the service control manager (nt::scm).
+    ScManager(super::scm::ScManager),
+    /// A service handle (nt::scm).
+    Service(super::scm::ServiceObject),
 }
 
 /// Where a named object lives in the namespace.
@@ -660,6 +666,7 @@ impl KObject {
             ObjectBody::NamedPipeDevice => "Device",
             ObjectBody::Pipe(_) => "File",
             ObjectBody::NullDevice => "Device",
+            ObjectBody::MupDevice => "Device",
             ObjectBody::Null(_) => "File",
             ObjectBody::DiskDevice => "Device",
             ObjectBody::Disk(_) => "File",
@@ -670,6 +677,8 @@ impl KObject {
             ObjectBody::Token(_) => "Token",
             ObjectBody::WindowStation(_) => "WindowStation",
             ObjectBody::Desktop(_) => "Desktop",
+            ObjectBody::ScManager(_) => "ScManager",
+            ObjectBody::Service(_) => "Service",
         }
     }
 
@@ -712,13 +721,16 @@ impl KObject {
             | ObjectBody::AfdDevice
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
+            | ObjectBody::MupDevice
             | ObjectBody::DiskDevice
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
             | ObjectBody::KeyedEvent(_)
             | ObjectBody::Token(_)
             | ObjectBody::WindowStation(_)
-            | ObjectBody::Desktop(_) => None,
+            | ObjectBody::Desktop(_)
+            | ObjectBody::ScManager(_)
+            | ObjectBody::Service(_) => None,
         }
     }
 
@@ -740,6 +752,7 @@ impl KObject {
             | ObjectBody::NamedPipeDevice
             | ObjectBody::Pipe(_)
             | ObjectBody::NullDevice
+            | ObjectBody::MupDevice
             | ObjectBody::Null(_)
             | ObjectBody::DiskDevice
             | ObjectBody::Disk(_)
@@ -751,6 +764,8 @@ impl KObject {
             ObjectBody::Token(_) => super::token::TOKEN_MAPPING,
             ObjectBody::WindowStation(_) => super::winsta::WINSTA_MAPPING,
             ObjectBody::Desktop(_) => super::winsta::DESKTOP_MAPPING,
+            ObjectBody::ScManager(_) => super::scm::SCM_MAPPING,
+            ObjectBody::Service(_) => super::scm::SERVICE_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

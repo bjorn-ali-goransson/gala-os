@@ -20,7 +20,8 @@
 //!   or batch file." on stderr.
 //! - Not yet: `&`, `&&`, `||`, `|`, `( )`, batch files, `if`/`for`/`set`,
 //!   the interactive prompt; each is reported to the missing-features
-//!   ledger and ends cmd with exit code 1.
+//!   ledger and ends cmd with exit code 1 (the interactive prompt also
+//!   says so on stderr).
 
 #![no_std]
 #![no_main]
@@ -686,6 +687,14 @@ fn execute(c: &mut Command, names: &Text) -> u32 {
 fn main() -> u32 {
     let (command, s_switch, has_c) = after_switches(command_line());
     if !has_c {
+        // Said where it is seen: a console window (the start menu's
+        // Command Prompt) would otherwise close on nothing.
+        // SAFETY: a plain call.
+        let err = unsafe { GetStdHandle(-12i32 as u32) };
+        write_ascii(
+            err,
+            b"gala's cmd.exe has no interactive prompt yet: only cmd /c <command>.\r\n",
+        );
         unsupported(b"cmd.exe!interactive prompt");
     }
     let mut unquoted = Text::new();

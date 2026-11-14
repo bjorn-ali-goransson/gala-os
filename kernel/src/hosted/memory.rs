@@ -74,7 +74,7 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
             return core::ptr::null_mut();
         }
         if layout.size() == PAGE_SIZE as usize && layout.align() == PAGE_SIZE as usize {
-            if let Some(frame) = mm::allocate_frame() {
+            if let Some(frame) = mm::allocate_frame(mm::Use::Heap) {
                 return hhdm_ptr(frame);
             }
             // The NT layer's page (a file page sections may map) must be a
@@ -108,8 +108,8 @@ fn hhdm_ptr(frame: Frame) -> *mut u8 {
     (mm::hhdm_offset() + frame.start()) as *mut u8
 }
 
-fn zeroed_frame() -> Option<Frame> {
-    let frame = mm::allocate_frame()?;
+fn zeroed_frame(use_: mm::Use) -> Option<Frame> {
+    let frame = mm::allocate_frame(use_)?;
     // SAFETY: a freshly allocated frame of the memfd view, owned by us.
     unsafe { hhdm_ptr(frame).write_bytes(0, PAGE_SIZE as usize) };
     Some(frame)
@@ -292,7 +292,7 @@ impl UserSpace {
         }
         for i in 0..pages {
             let page = check_user(virt + i * PAGE_SIZE)?;
-            let frame = zeroed_frame().ok_or_else(map_err)?;
+            let frame = zeroed_frame(mm::Use::UserPage).ok_or_else(map_err)?;
             if let Err(e) = self.insert(page, Page { frame, flags, borrowed: false }) {
                 let _ = mm::free_frame(frame);
                 return Err(e);
@@ -340,6 +340,37 @@ impl UserSpace {
         flags.borrowed = false;
         let page = check_user(virt)?;
         self.insert(page, Page { frame, flags, borrowed: false })
+    }
+
+    /// The page file (`nt::pagefile`) needs a disk: gala-um has none. Nothing ages.
+    pub fn age_page(&mut self, _virt: u64) -> crate::mm::paging::Age {
+        crate::mm::paging::Age::Absent
+    }
+
+    pub fn copy_page(&mut self, _virt: u64, _frame: Frame, _buf: &mut [u8]) -> bool {
+        false
+    }
+
+    pub fn reserve_frees(&mut self, _n: usize) -> bool {
+        false
+    }
+
+    pub fn page_out(&mut self, _virt: u64, _frame: Frame, _token: u64) -> bool {
+        false
+    }
+
+    pub fn swapped(&mut self, _virt: u64) -> Option<u64> {
+        None
+    }
+
+    pub fn page_in(
+        &mut self,
+        _virt: u64,
+        _token: u64,
+        _data: &[u8],
+        _flags: PageFlags,
+    ) -> Result<bool, PagingError> {
+        Ok(false)
     }
 
     pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
@@ -407,7 +438,7 @@ impl UserSpace {
         mut flags: PageFlags,
     ) -> Result<(), PagingError> {
         let page = check_user(virt)?;
-        let frame = mm::allocate_frame().ok_or_else(map_err)?;
+        let frame = mm::allocate_frame(mm::Use::UserPage).ok_or_else(map_err)?;
         // SAFETY: two distinct frames of the memfd view.
         unsafe {
             core::ptr::copy_nonoverlapping(hhdm_ptr(source), hhdm_ptr(frame), PAGE_SIZE as usize)
@@ -475,7 +506,7 @@ impl UserSpace {
     }
 
     pub fn frame_with(data: &[u8]) -> Option<Frame> {
-        let frame = zeroed_frame()?;
+        let frame = zeroed_frame(mm::Use::SectionPage)?;
         let n = data.len().min(PAGE_SIZE as usize);
         // SAFETY: a fresh frame of the memfd view, owned by the caller.
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), hhdm_ptr(frame), n) };
@@ -483,7 +514,7 @@ impl UserSpace {
     }
 
     pub fn zeroed_frame() -> Option<Frame> {
-        zeroed_frame()
+        zeroed_frame(mm::Use::SectionPage)
     }
 }
 
@@ -508,7 +539,7 @@ pub struct SharedPage {
 
 impl SharedPage {
     pub fn new() -> Result<Self, PagingError> {
-        Ok(Self { frame: zeroed_frame().ok_or_else(map_err)? })
+        Ok(Self { frame: zeroed_frame(mm::Use::SectionPage).ok_or_else(map_err)? })
     }
 
     pub fn frame(&self) -> Frame {

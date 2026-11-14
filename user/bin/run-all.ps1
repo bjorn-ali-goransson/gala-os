@@ -89,6 +89,29 @@ function Get-Fault([string]$exePath) {
 $arguments = @{ "args_test" = 'alpha "beta gamma"'; "wow64_crt_test" = 'one "two three"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
 # smp_test takes an expected processor count (cpus=N); none on Windows.
 
+# cab_probe (a probe, on no required list) verifies Microsoft's signed
+# cabinets and altered copies of them: two from the Office CDN, the
+# version descriptor ODT's setup.exe downloads and the release history
+# (Microsoft replaces them with each release; any current ones do).
+# Without them it probes only the self-signed cabinet it embeds.
+if (Test-Path (Join-Path $here "cab_probe.exe")) {
+    $cabDir = Join-Path $env:TEMP "gala-cab-probe"
+    New-Item -ItemType Directory -Force -Path $cabDir | Out-Null
+    $cabs = @()
+    foreach ($u in @(
+        "http://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/Office/Data/v64.cab",
+        "http://officecdn.microsoft.com/pr/wsus/releasehistory.cab")) {
+        $f = Join-Path $cabDir ([IO.Path]::GetFileName($u))
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $f -TimeoutSec 60
+            $cabs += '"' + $f + '"'
+        } catch {
+            Write-Host ("cab_probe: {0} not downloaded: {1}" -f $u, $_.Exception.Message.Trim())
+        }
+    }
+    if ($cabs.Count -gt 0) { $arguments["cab_probe"] = $cabs -join " " }
+}
+
 # Programs whose non-zero exit is the answer, not a failure, so that a
 # reader (and `cargo xtask compare`) can tell the two apart. Each value is
 # what Windows gives; where xtask's scenario says the same for gala, its
@@ -101,14 +124,19 @@ $expected = @{
     "busybox"             = 3           # 0x3: its command line here ends `exit 3`
     "busybox_script"      = 4           # 0x4: script.sh ends `exit 4`
     "crash"               = 3221225477  # 0xc0000005: it crashes on purpose
+    "cxx_throw"           = 3765269347  # 0xe06d7363: a C++ throw nothing catches, on purpose
     "unimplemented_test"  = 3           # 0x3 is Windows' own answer (gala: 0xc0000002)
     "missing_import_test" = 3221225785  # 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND, the point of it
-    # gala's own programs (user/cmd, user/conhost, user/gala), not tests:
+    "consolerun"          = 2           # a tool (user/consolerun): no program named, its usage
+    # gala's own programs (user/cmd, user/conhost, user/gala, user/wsl,
+    # user/explorer), not tests:
     # they import ntdll!GalaRecordMissing, which the real ntdll has not, so
     # Windows refuses to load them. 0xc0000139.
     "cmd"                 = 3221225785
     "conhost"             = 3221225785
     "gala"                = 3221225785
+    "wsl"                 = 3221225785  # gala's wsl.exe (user/wsl): ntdll!GalaLx*
+    "explorer"            = 3221225785  # gala's explorer.exe (user/explorer): ntdll!GalaRecordMissing
 }
 
 $results = @()
@@ -153,18 +181,20 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
     # alone it waits for its window to be closed.
     if ($name -eq "flaui_target") { continue }
-    # winhttp_test and wininet_test fetch from the Nginx that the
-    # schannel_test setup above starts (plain HTTP on 127.0.0.1:8080, TLS on
-    # 8443 with the test CA's certificate for localhost), and that setup
+    # winhttp_test, winhttp_cb_test and wininet_test (and their WOW64 twins)
+    # fetch from the Nginx that the schannel_test setup above starts (plain
+    # HTTP on 127.0.0.1:8080, TLS on 8443 with the test CA's certificate
+    # for localhost), and that setup
     # needs an administrator. Without it they wait for a server that is not
     # there and are killed at the timeout, a minute each.
-    if (($name -eq "winhttp_test" -or $name -eq "wininet_test") -and $null -ne $schannelSkip) {
+    if (($name -eq "winhttp_test" -or $name -eq "winhttp_cb_test" -or $name -eq "wow64_winhttp_cb_test" -or
+         $name -eq "wininet_test" -or $name -eq "wow64_wininet_test") -and $null -ne $schannelSkip) {
         $why = "no Nginx: " + $schannelSkip
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
         continue
     }
-    if ($name -eq "schannel_test" -and $null -ne $schannelSkip) {
+    if (($name -eq "schannel_test" -or $name -eq "wow64_schannel_test") -and $null -ne $schannelSkip) {
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $schannelSkip }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
         continue

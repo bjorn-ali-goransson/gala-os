@@ -38,6 +38,37 @@ fn root_len(s: &[u16]) -> usize {
 
 /// PathRemoveFileSpecW: removes the last component and its backslash (a
 /// root keeps its own); FALSE if nothing was removed.
+/// PathBuildRootW(szRoot, iDrive): `X:\` for drive 0 (A) to 25 (Z) in
+/// the caller's buffer; another drive number leaves it empty (as Windows
+/// since Vista, Wine's shlwapi path.c test on Windows); szRoot returned.
+#[unsafe(no_mangle)]
+pub extern "system" fn PathBuildRootW(root: *mut u16, drive: i32) -> *mut u16 {
+    if !root.is_null() {
+        let text: [u16; 4] = if (0..26).contains(&drive) {
+            [u16::from(b'A') + drive as u16, u16::from(b':'), u16::from(b'\\'), 0]
+        } else {
+            [0; 4]
+        };
+        let n = if text[0] == 0 { 1 } else { 4 };
+        // SAFETY: the caller's buffer of at least four characters.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), root, n) };
+    }
+    root
+}
+
+/// PathBuildRootA: PathBuildRootW's in ANSI.
+#[unsafe(no_mangle)]
+pub extern "system" fn PathBuildRootA(root: *mut u8, drive: i32) -> *mut u8 {
+    if !root.is_null() {
+        let text: [u8; 4] =
+            if (0..26).contains(&drive) { [b'A' + drive as u8, b':', b'\\', 0] } else { [0; 4] };
+        let n = if text[0] == 0 { 1 } else { 4 };
+        // SAFETY: the caller's buffer of at least four bytes.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), root, n) };
+    }
+    root
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn PathRemoveFileSpecW(path: *mut u16) -> i32 {
     if path.is_null() {

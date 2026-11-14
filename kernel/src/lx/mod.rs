@@ -48,8 +48,15 @@
 //!   pages every mapping shares.
 //! - [`unix`]: AF_UNIX sockets (the core's `crate::unix`), SCM_RIGHTS,
 //!   sendmsg/recvmsg.
+//!
+//! The WSL facade's kernel side (ROADMAP CT):
+//! - [`distro`]: a distribution's tree unpacked node by node, its
+//!   processes started from NT (rooted in its tree, with their starter's
+//!   token, console and standard handles), counted and ended.
+//! - [`ntio`]: Linux fds on the Windows side's pipes, consoles and files.
 
 pub mod dispatch;
+pub mod distro;
 pub mod elf;
 pub mod epoll;
 pub mod errno;
@@ -62,9 +69,12 @@ pub mod identity;
 pub mod machine;
 pub mod memfd;
 pub mod mm;
+pub mod ntio;
 pub mod poll;
 pub mod prctl;
+pub mod pty;
 pub mod resource;
+pub mod session;
 pub mod sigcalls;
 pub mod signal;
 pub mod socket;

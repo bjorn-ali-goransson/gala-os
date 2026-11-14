@@ -48,7 +48,11 @@ Each program below is checked by a boot scenario (its name is in the last
 column): xtask boots gala in QEMU, runs the program and compares the
 output with what Windows gives. `cargo xtask test` (and CI) runs every
 scenario except the *pending* ones, which are run on request with
-`cargo xtask boot-test <name>`.
+`cargo xtask boot-test <name>`, and the *manual* ones, too long or too
+large for CI, which run only by name: among them `office_install` and
+`office_install_gui`, the Office Deployment Tool installing Microsoft 365
+on a disk-backed C: (in progress, ROADMAP OF; `XTASK_SHOTS=60,120 cargo
+xtask boot-test office_install_gui` takes screenshots as it runs).
 
 ### Programs built from source
 
@@ -271,6 +275,69 @@ To compare with Windows, copy `user/bin` to a Windows 11 machine, run
 `powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
 there, then `cargo xtask compare windows.json` here.
 
+### Long runs: snapshots and hot swap
+
+> **A hot-swapped run is not a real run.** It splices code of another
+> build into a machine running on the state the old build made. Its
+> results are at your own risk and never count as a pass: xtask marks it
+> `hot-swapped (not a real run)` and exits with status 3, CI refuses it,
+> and **every fix still gets a full run from boot before its pull
+> request.**
+
+Some scenarios reach their interesting part late: the Office install
+(`office_install_local`) needs about 30 minutes before App-V's manifest
+merge. Instead of a run from boot for every try at a fix, the machine is
+saved once just before the failure and each try starts from there in
+seconds:
+
+```sh
+# once: save the machine when the line comes (--snapshot-stop ends the run there)
+cargo xtask boot-test 'office_install_local$' \
+    --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge --snapshot-stop
+cargo xtask snapshots                                # list them (rm <name> deletes one)
+cargo xtask boot-test --from-snapshot office-merge   # resume, as often as wanted
+```
+
+A snapshot resumes only on the build it was taken from. To try a fix,
+edit gala's DLLs, programs or the kernel (boot-test builds them) and swap
+the changes into the resumed machine:
+
+```sh
+# every module that changed or is new since the snapshot:
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe
+# or only these patched (fixed msxml6.dll's replaceChild, a kernel function):
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxml6.dll
+# what would be patched, without a run:
+cargo xtask hotswap-diff old.dll old.map new.dll new.map
+```
+
+On the Office install, a kernel fix tried this way reaches the
+install's end in about 20 seconds of run time after the resume, where
+the run from boot needs half an hour.
+
+A module no process has mapped at the resume (a DLL loaded only later,
+a program started later) is replaced as a whole file, and a module new
+in the build is added, so one snapshot serves a whole fix loop. Code a
+running process has mapped, and the kernel, are patched instead: xtask
+compares the snapshot's build with the new one function by function and
+patches only what changed: the old code stays where it is (running
+programs and the kernel's own data hold addresses into it), the new
+functions go beside it, and each changed function's entry jumps to its
+new version. It is refused, with the reason and the symbol named, when
+it cannot be done safely: a changed function that some thread is in
+(its stack), a static that changed size or a new import in a DLL a
+process maps, assembly (the kernel's entry stubs), a function too short
+for the jump, a change to the command line or to where a module goes. A
+refusal of one part refuses all of it. Take a fresh snapshot when a change is refused. What
+the checks cannot see (state the old code built that the new code reads
+differently) is why the run is never a real one.
+
+The details, pitfalls and limits are in
+[`docs/WORKFLOW.md`](docs/WORKFLOW.md) ("Machine snapshots", "Hot
+swapping DLLs and the kernel into a snapshot (at your own risk)").
+
 ## Running your own programs
 
 ### A bootable image
@@ -364,7 +431,7 @@ only those DLLs, and the kernel under them, are gala's.
 flowchart TB
     subgraph user["User mode (per process, in a session)"]
         app["Windows program (.exe)<br/>Go · Rust · mingw-w64 · MSVC · JDK · .NET · official releases"]
-        crt["msvcrt.dll<br/>(or the program's own UCRT)"]
+        crt["msvcrt.dll · ucrtbase.dll<br/>(gala's C runtimes)"]
         dlls["kernel32 · kernelbase · advapi32 · user32 · gdi32 · ws2_32<br/>shell32 · ole32 · bcrypt · ncrypt · secur32 · winhttp · ... (~50)"]
         ntdll["ntdll.dll<br/>loader · heaps · exception and APC dispatch · system call stubs"]
         tools["gala's programs<br/>conhost.exe · cmd.exe · gala.exe"]

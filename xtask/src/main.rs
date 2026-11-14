@@ -3,6 +3,43 @@
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
 //! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
+// The kernel's file-system modules (`diskimage`) use `alloc::` paths.
+extern crate alloc;
+
+/// What the kernel's file-system modules take from its heap module
+/// (`crate::mm::heap`), for `diskimage`, which compiles them for the host.
+mod mm {
+    pub mod heap {
+        #[derive(Debug)]
+        pub struct AllocError;
+
+        pub trait TryVec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError>;
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone;
+        }
+
+        impl<T> TryVec<T> for Vec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError> {
+                self.push(value);
+                Ok(())
+            }
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone,
+            {
+                self.extend_from_slice(other);
+                Ok(())
+            }
+        }
+
+        pub fn try_box<T>(value: T) -> Result<Box<T>, AllocError> {
+            Ok(Box::new(value))
+        }
+    }
+}
+
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -13,6 +50,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod diskimage;
 mod feed;
 mod lint;
 mod lx_expect;
@@ -20,8 +58,10 @@ mod stub_audit;
 mod telemetry;
 mod vmtime;
 mod wpt;
+mod wsl_rootfs;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
+mod hotswap;
 #[path = "../../kernel/src/trust/manifest.rs"]
 #[allow(dead_code)]
 mod manifest;
@@ -31,6 +71,7 @@ mod profile;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
 mod sha256;
+mod snapshot;
 mod triage;
 mod trust;
 
@@ -467,6 +508,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["innosetup-7.1.1-x64.exe"],
         excludes: &[],
     },
+    // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
+    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // measured: Microsoft replaces the file at this URL with each release,
+    // so a new one fails the checksum until it is pinned again). Scenario
+    // office_install (ROADMAP OF) runs it inside gala; never committed.
+    Prebuilt {
+        name: "odt",
+        url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
+        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        members: &["setup.exe"],
+        excludes: &[],
+    },
     // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
     // (jrsoftware.org's GitHub release; the SHA-256 is winget-pkgs'
     // JRSoftware.InnoSetup 6.5.4 manifest's, whose only installer is x86):
@@ -545,377 +598,604 @@ struct Deb {
     files: &'static [&'static str],
 }
 
-const LINUX_ROOTS: &[LinuxRoot] = &[LinuxRoot {
-    // GTK 3 (3.24.41) and its whole library closure as Ubuntu 24.04
-    // builds them (ldd of libgtk-3.so.0 on Ubuntu 24.04, less glibc,
-    // libffi and libwayland-client: the "glibc" and "wayland_client"
-    // module sets), fontconfig's own fonts.conf and one font, DejaVu
-    // Sans: what user/lx/gtk_test needs (ROADMAP LD step 3, `lx_gtk`).
-    // Left out on purpose, as a minimal install of the packages would not
-    // be: icon and cursor themes (GTK 3 falls back to the icons in its
-    // own resources, libwayland-cursor to its built-in cursors), GSettings
-    // schemas and GIO modules (GLib's memory settings backend), the
-    // gdk-pixbuf loaders (PNG is built in). Of xkb-data (libxkbcommon0
-    // depends on it) only what GDK's default keymap (rules evdev, model
-    // pc105, layout us) includes: the server's own keymap comes whole with
-    // wl_keyboard.
-    name: "gtk3",
-    debs: &[
-        Deb {
-            pool: "main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_amd64.deb",
-            sha256: "9df0579cd298a1f2b7a40efd519c849745aecd193a09733cf4d1032284a62bbf",
-            files: &["etc/fonts/fonts.conf"],
-        },
-        Deb {
-            pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
-            sha256: "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
-            files: &["usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
-        },
-        Deb {
-            pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb",
-            sha256: "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
-            files: &["usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"],
-        },
-        Deb {
-            pool: "main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb",
-            sha256: "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
-            files: &["usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"],
-        },
-        Deb {
-            pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb",
-            sha256: "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
-            files: &["usr/lib/x86_64-linux-gnu/libatspi.so.0"],
-        },
-        Deb {
-            pool: "main/u/util-linux/libblkid1_2.39.3-9ubuntu6_amd64.deb",
-            sha256: "47433bcaf43d1c6ed2e2acbc7dc70f6d6ed149e64f12d25b2ddb714a56c4e8dd",
-            files: &["usr/lib/x86_64-linux-gnu/libblkid.so.1"],
-        },
-        Deb {
-            pool: "main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
-            sha256: "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
-            files: &[
-                "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1",
-                "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1",
-            ],
-        },
-        Deb {
-            pool: "main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
-            sha256: "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b",
-            files: &["usr/lib/x86_64-linux-gnu/libbsd.so.0"],
-        },
-        Deb {
-            pool: "main/b/bzip2/libbz2-1.0_1.0.8-5.1_amd64.deb",
-            sha256: "695132af8a40fe417f7d4e5ea742d64521c04e069442a4719c2bd0f10ab93d94",
-            files: &["usr/lib/x86_64-linux-gnu/libbz2.so.1.0"],
-        },
-        Deb {
-            pool: "main/c/cairo/libcairo-gobject2_1.18.0-3build1_amd64.deb",
-            sha256: "f5483cbe43455fc9e9cba7f0e166bd0a731c02db2902ba562719848f72e8c403",
-            files: &["usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"],
-        },
-        Deb {
-            pool: "main/c/cairo/libcairo2_1.18.0-3build1_amd64.deb",
-            sha256: "96950b306889ff6e4248bb937b0a3b56e72dacf643fe732214ce375f0f6bbb36",
-            files: &["usr/lib/x86_64-linux-gnu/libcairo.so.2"],
-        },
-        Deb {
-            pool: "main/libc/libcap2/libcap2_2.66-5ubuntu2_amd64.deb",
-            sha256: "a6cce0b5f149707a6359e4f03a05fb7417c5e1d3fde9e12c651e804b4c479bbb",
-            files: &["usr/lib/x86_64-linux-gnu/libcap.so.2"],
-        },
-        Deb {
-            pool: "main/libd/libdatrie/libdatrie1_0.2.13-3build1_amd64.deb",
-            sha256: "1ae164e40e413eac4fbd38ce1c6ef9591f7a03278ad9076d71fa29258727f447",
-            files: &["usr/lib/x86_64-linux-gnu/libdatrie.so.1"],
-        },
-        Deb {
-            pool: "main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
-            sha256: "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2",
-            files: &["usr/lib/x86_64-linux-gnu/libdbus-1.so.3"],
-        },
-        Deb {
-            pool: "main/libe/libepoxy/libepoxy0_1.5.10-1build1_amd64.deb",
-            sha256: "e2e754da4e7fb89021476b093cb5ebe9b1859a688fa37739809e529627d39f1f",
-            files: &["usr/lib/x86_64-linux-gnu/libepoxy.so.0"],
-        },
-        Deb {
-            pool: "main/e/expat/libexpat1_2.6.1-2build1_amd64.deb",
-            sha256: "730b29497212289cda8a3139e693a3538af0cb57846c24f807d1bb293a591c5e",
-            files: &["usr/lib/x86_64-linux-gnu/libexpat.so.1"],
-        },
-        Deb {
-            pool: "main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
-            sha256: "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
-            files: &["usr/lib/x86_64-linux-gnu/libfontconfig.so.1"],
-        },
-        Deb {
-            pool: "main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_amd64.deb",
-            sha256: "321dda934f62fa8af08529a8c4c34b0ec040f172c0a945dce10b8be6f1014917",
-            files: &["usr/lib/x86_64-linux-gnu/libfreetype.so.6"],
-        },
-        Deb {
-            pool: "main/f/fribidi/libfribidi0_1.0.13-3build1_amd64.deb",
-            sha256: "6cd50259d39ce0dfafee2632c6268538e6a02590e77161a133e9683af346dd1d",
-            files: &["usr/lib/x86_64-linux-gnu/libfribidi.so.0"],
-        },
-        Deb {
-            pool: "main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_amd64.deb",
-            sha256: "ff32bae487706ba6ca646b5b72d89b935e3b8b2811d02e4ad7360cb97d90e2d0",
-            files: &["usr/lib/x86_64-linux-gnu/libgcrypt.so.20"],
-        },
-        Deb {
-            pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_amd64.deb",
-            sha256: "d9779cdbb11e5fb6056b39868b689bd2e6a152f60d7fa54fcf7113942eedab24",
-            files: &["usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"],
-        },
-        Deb {
-            pool: "main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_amd64.deb",
-            sha256: "629359e915f4466cf9cb0fa6c38270d9af1e03e28fab557ce31977d5ab34f13d",
-            files: &[
-                "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
-                "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
-                "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
-                "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
-            ],
-        },
-        Deb {
-            pool: "main/libg/libgpg-error/libgpg-error0_1.47-3build2_amd64.deb",
-            sha256: "81a30b5888e0af43b72bfdbdb44209b82e521eadf8848ff201542e6d258f6a1f",
-            files: &["usr/lib/x86_64-linux-gnu/libgpg-error.so.0"],
-        },
-        Deb {
-            pool: "main/g/graphite2/libgraphite2-3_1.3.14-2build1_amd64.deb",
-            sha256: "e2a91c59a2b26649ed0b331bedab0c92e56cc2021cce27df1080089edaad7aba",
-            files: &["usr/lib/x86_64-linux-gnu/libgraphite2.so.3"],
-        },
-        Deb {
-            pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_amd64.deb",
-            sha256: "011d0688aeb8e40fb146b6d6cd3d892e2a81b1e181320bcf2bf7e2d7206ae156",
-            files: &[
-                "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
-                "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
-            ],
-        },
-        Deb {
-            pool: "main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
-            sha256: "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
-            files: &["usr/lib/x86_64-linux-gnu/libharfbuzz.so.0"],
-        },
-        Deb {
-            pool: "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
-            sha256: "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
-            files: &["usr/lib/x86_64-linux-gnu/libjpeg.so.8"],
-        },
-        Deb {
-            pool: "main/l/lz4/liblz4-1_1.9.4-1build1_amd64.deb",
-            sha256: "b9b69dedb126755f063396a6d3a3361066f9661f1c21cf5635cdd5ff6605796a",
-            files: &["usr/lib/x86_64-linux-gnu/liblz4.so.1"],
-        },
-        Deb {
-            pool: "main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_amd64.deb",
-            sha256: "28851b3997e4ba74bb3197bd58796bd3041c204c21df85fe0ddafdcaced647f0",
-            files: &["usr/lib/x86_64-linux-gnu/liblzma.so.5"],
-        },
-        Deb {
-            pool: "main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
-            sha256: "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a",
-            files: &["usr/lib/x86_64-linux-gnu/libmd.so.0"],
-        },
-        Deb {
-            pool: "main/u/util-linux/libmount1_2.39.3-9ubuntu6_amd64.deb",
-            sha256: "ccf07f3dfdda05311e66882d420140e32aeceaaa17725a0956214d81f5944995",
-            files: &["usr/lib/x86_64-linux-gnu/libmount.so.1"],
-        },
-        Deb {
-            pool: "main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_amd64.deb",
-            sha256: "09dfa5c881ab273ec6bc1830adcefdc407fcd619316e68fb26ca3a23d0fc9f54",
-            files: &["usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"],
-        },
-        Deb {
-            pool: "main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_amd64.deb",
-            sha256: "98cf5fc9076c2911fe20dfc1e41cd8f686a2bb5d539b1105fab18105b0db1376",
-            files: &["usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"],
-        },
-        Deb {
-            pool: "main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_amd64.deb",
-            sha256: "cc6bc9d86ef5f329edacaa4895232d8a9b8f95c5cbc77c3c460a3f64cecc213d",
-            files: &["usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"],
-        },
-        Deb {
-            pool: "main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_amd64.deb",
-            sha256: "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84",
-            files: &["usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"],
-        },
-        Deb {
-            pool: "main/p/pixman/libpixman-1-0_0.42.2-1build1_amd64.deb",
-            sha256: "d9c2931c4c424615eeab9dd5ae08bfc608b84e803c1d3ccddf319270db213421",
-            files: &["usr/lib/x86_64-linux-gnu/libpixman-1.so.0"],
-        },
-        Deb {
-            pool: "main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_amd64.deb",
-            sha256: "128d505038cc19dfc218658562ca5917ec242b79e6e2bbfb65ee27f297a53924",
-            files: &["usr/lib/x86_64-linux-gnu/libpng16.so.16"],
-        },
-        Deb {
-            pool: "main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
-            sha256: "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864",
-            files: &["usr/lib/x86_64-linux-gnu/libselinux.so.1"],
-        },
-        Deb {
-            pool: "main/s/systemd/libsystemd0_255.4-1ubuntu8_amd64.deb",
-            sha256: "64ba97fddff491b86597e93b078e2fe3256cb80f9a113ae9d8dd1361f01b84ed",
-            files: &["usr/lib/x86_64-linux-gnu/libsystemd.so.0"],
-        },
-        Deb {
-            pool: "main/libt/libthai/libthai0_0.1.29-2build1_amd64.deb",
-            sha256: "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508",
-            files: &["usr/lib/x86_64-linux-gnu/libthai.so.0"],
-        },
-        Deb {
-            pool: "main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_amd64.deb",
-            sha256: "29c20da27e8e37c984cf0518635c11cd0441f4cb6a2919a9f6eee1809171d327",
-            files: &["usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"],
-        },
-        Deb {
-            pool: "main/w/wayland/libwayland-egl1_1.22.0-2.1build1_amd64.deb",
-            sha256: "76cd17d2776428e0a0551b8f8fd954eeb3d39ca8ed2f88a38a5e4ce3ce3b2f16",
-            files: &["usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
-            sha256: "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
-            files: &["usr/lib/x86_64-linux-gnu/libX11.so.6"],
-        },
-        Deb {
-            pool: "main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb",
-            sha256: "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
-            files: &["usr/lib/x86_64-linux-gnu/libXau.so.6"],
-        },
-        Deb {
-            pool: "main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_amd64.deb",
-            sha256: "7d83a0668b1a693b5ea2e496206e8371fb6beda4c54a2b4b3902005915c272c5",
-            files: &["usr/lib/x86_64-linux-gnu/libxcb-render.so.0"],
-        },
-        Deb {
-            pool: "main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_amd64.deb",
-            sha256: "229d1280d459f1ba44c22939d3f9b61d9d20932d9a646b3fe4ce50be4cdf2325",
-            files: &["usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"],
-        },
-        Deb {
-            pool: "main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb",
-            sha256: "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
-            files: &["usr/lib/x86_64-linux-gnu/libxcb.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb",
-            sha256: "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
-            files: &["usr/lib/x86_64-linux-gnu/libXcomposite.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
-            sha256: "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
-            files: &["usr/lib/x86_64-linux-gnu/libXcursor.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb",
-            sha256: "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
-            files: &["usr/lib/x86_64-linux-gnu/libXdamage.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb",
-            sha256: "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
-            files: &["usr/lib/x86_64-linux-gnu/libXdmcp.so.6"],
-        },
-        Deb {
-            pool: "main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
-            sha256: "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
-            files: &["usr/lib/x86_64-linux-gnu/libXext.so.6"],
-        },
-        Deb {
-            pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
-            sha256: "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
-            files: &["usr/lib/x86_64-linux-gnu/libXfixes.so.3"],
-        },
-        Deb {
-            pool: "main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
-            sha256: "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
-            files: &["usr/lib/x86_64-linux-gnu/libXi.so.6"],
-        },
-        Deb {
-            pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
-            sha256: "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
-            files: &["usr/lib/x86_64-linux-gnu/libXinerama.so.1"],
-        },
-        Deb {
-            pool: "main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
-            sha256: "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
-            files: &["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"],
-        },
-        Deb {
-            pool: "main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
-            sha256: "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
-            files: &["usr/lib/x86_64-linux-gnu/libXrandr.so.2"],
-        },
-        Deb {
-            pool: "main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
-            sha256: "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
-            files: &["usr/lib/x86_64-linux-gnu/libXrender.so.1"],
-        },
-        Deb {
-            pool: "main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_amd64.deb",
-            sha256: "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
-            files: &["usr/lib/x86_64-linux-gnu/libzstd.so.1"],
-        },
-        Deb {
-            pool: "main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_amd64.deb",
-            sha256: "0b93d16d7498f092fa3070fbbad28cdbc6b3d640f1a7681b96fc37f20d1219f1",
-            files: &["usr/lib/x86_64-linux-gnu/libz.so.1"],
-        },
-        // gdk-pixbuf (which depends on it) picks an image's loader by its
-        // MIME type through GIO, which reads the MIME database's mime.cache:
-        // made at installation from this XML (`update_mime_database`).
-        Deb {
-            pool: "main/s/shared-mime-info/shared-mime-info_2.4-4_amd64.deb",
-            sha256: "7a774ea291ab99bfa987866c6b68e825531eeea7c8a732dd47d14cf480453fda",
-            files: &["usr/share/mime/packages/freedesktop.org.xml"],
-        },
-        Deb {
-            pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
-            sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
-            files: &[
-                "usr/share/X11/xkb/compat/accessx",
-                "usr/share/X11/xkb/compat/basic",
-                "usr/share/X11/xkb/compat/caps",
-                "usr/share/X11/xkb/compat/complete",
-                "usr/share/X11/xkb/compat/iso9995",
-                "usr/share/X11/xkb/compat/ledcaps",
-                "usr/share/X11/xkb/compat/lednum",
-                "usr/share/X11/xkb/compat/ledscroll",
-                "usr/share/X11/xkb/compat/level5",
-                "usr/share/X11/xkb/compat/misc",
-                "usr/share/X11/xkb/compat/mousekeys",
-                "usr/share/X11/xkb/compat/xfree86",
-                "usr/share/X11/xkb/keycodes/aliases",
-                "usr/share/X11/xkb/keycodes/evdev",
-                "usr/share/X11/xkb/rules/evdev",
-                "usr/share/X11/xkb/symbols/inet",
-                "usr/share/X11/xkb/symbols/keypad",
-                "usr/share/X11/xkb/symbols/pc",
-                "usr/share/X11/xkb/symbols/srvr_ctrl",
-                "usr/share/X11/xkb/symbols/us",
-                "usr/share/X11/xkb/types/basic",
-                "usr/share/X11/xkb/types/complete",
-                "usr/share/X11/xkb/types/extra",
-                "usr/share/X11/xkb/types/iso9995",
-                "usr/share/X11/xkb/types/level5",
-                "usr/share/X11/xkb/types/mousekeys",
-                "usr/share/X11/xkb/types/numpad",
-                "usr/share/X11/xkb/types/pc",
-            ],
-        },
-    ],
-}];
+const LINUX_ROOTS: &[LinuxRoot] = &[
+    LinuxRoot {
+        // GTK 3 (3.24.41) and its whole library closure as Ubuntu 24.04
+        // builds them (ldd of libgtk-3.so.0 on Ubuntu 24.04, less glibc,
+        // libffi and libwayland-client: the "glibc" and "wayland_client"
+        // module sets), fontconfig's own fonts.conf and one font, DejaVu
+        // Sans: what user/lx/gtk_test needs (ROADMAP LD step 3, `lx_gtk`).
+        // Left out on purpose, as a minimal install of the packages would not
+        // be: icon and cursor themes (GTK 3 falls back to the icons in its
+        // own resources, libwayland-cursor to its built-in cursors), GSettings
+        // schemas and GIO modules (GLib's memory settings backend), the
+        // gdk-pixbuf loaders (PNG is built in). Of xkb-data (libxkbcommon0
+        // depends on it) only what GDK's default keymap (rules evdev, model
+        // pc105, layout us) includes: the server's own keymap comes whole with
+        // wl_keyboard.
+        name: "gtk3",
+        debs: &[
+            Deb {
+                pool: "main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_amd64.deb",
+                sha256: "9df0579cd298a1f2b7a40efd519c849745aecd193a09733cf4d1032284a62bbf",
+                files: &["etc/fonts/fonts.conf"],
+            },
+            Deb {
+                pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
+                sha256: "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
+                files: &["usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb",
+                sha256: "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
+                files: &["usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb",
+                sha256: "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
+                files: &["usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"],
+            },
+            Deb {
+                pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb",
+                sha256: "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
+                files: &["usr/lib/x86_64-linux-gnu/libatspi.so.0"],
+            },
+            Deb {
+                pool: "main/u/util-linux/libblkid1_2.39.3-9ubuntu6_amd64.deb",
+                sha256: "47433bcaf43d1c6ed2e2acbc7dc70f6d6ed149e64f12d25b2ddb714a56c4e8dd",
+                files: &["usr/lib/x86_64-linux-gnu/libblkid.so.1"],
+            },
+            Deb {
+                pool: "main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
+                sha256: "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1",
+                    "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1",
+                ],
+            },
+            Deb {
+                pool: "main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
+                sha256: "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b",
+                files: &["usr/lib/x86_64-linux-gnu/libbsd.so.0"],
+            },
+            Deb {
+                pool: "main/b/bzip2/libbz2-1.0_1.0.8-5.1_amd64.deb",
+                sha256: "695132af8a40fe417f7d4e5ea742d64521c04e069442a4719c2bd0f10ab93d94",
+                files: &["usr/lib/x86_64-linux-gnu/libbz2.so.1.0"],
+            },
+            Deb {
+                pool: "main/c/cairo/libcairo-gobject2_1.18.0-3build1_amd64.deb",
+                sha256: "f5483cbe43455fc9e9cba7f0e166bd0a731c02db2902ba562719848f72e8c403",
+                files: &["usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"],
+            },
+            Deb {
+                pool: "main/c/cairo/libcairo2_1.18.0-3build1_amd64.deb",
+                sha256: "96950b306889ff6e4248bb937b0a3b56e72dacf643fe732214ce375f0f6bbb36",
+                files: &["usr/lib/x86_64-linux-gnu/libcairo.so.2"],
+            },
+            Deb {
+                pool: "main/libc/libcap2/libcap2_2.66-5ubuntu2_amd64.deb",
+                sha256: "a6cce0b5f149707a6359e4f03a05fb7417c5e1d3fde9e12c651e804b4c479bbb",
+                files: &["usr/lib/x86_64-linux-gnu/libcap.so.2"],
+            },
+            Deb {
+                pool: "main/libd/libdatrie/libdatrie1_0.2.13-3build1_amd64.deb",
+                sha256: "1ae164e40e413eac4fbd38ce1c6ef9591f7a03278ad9076d71fa29258727f447",
+                files: &["usr/lib/x86_64-linux-gnu/libdatrie.so.1"],
+            },
+            Deb {
+                pool: "main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
+                sha256: "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2",
+                files: &["usr/lib/x86_64-linux-gnu/libdbus-1.so.3"],
+            },
+            Deb {
+                pool: "main/libe/libepoxy/libepoxy0_1.5.10-1build1_amd64.deb",
+                sha256: "e2e754da4e7fb89021476b093cb5ebe9b1859a688fa37739809e529627d39f1f",
+                files: &["usr/lib/x86_64-linux-gnu/libepoxy.so.0"],
+            },
+            Deb {
+                pool: "main/e/expat/libexpat1_2.6.1-2build1_amd64.deb",
+                sha256: "730b29497212289cda8a3139e693a3538af0cb57846c24f807d1bb293a591c5e",
+                files: &["usr/lib/x86_64-linux-gnu/libexpat.so.1"],
+            },
+            Deb {
+                pool: "main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
+                sha256: "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
+                files: &["usr/lib/x86_64-linux-gnu/libfontconfig.so.1"],
+            },
+            Deb {
+                pool: "main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_amd64.deb",
+                sha256: "321dda934f62fa8af08529a8c4c34b0ec040f172c0a945dce10b8be6f1014917",
+                files: &["usr/lib/x86_64-linux-gnu/libfreetype.so.6"],
+            },
+            Deb {
+                pool: "main/f/fribidi/libfribidi0_1.0.13-3build1_amd64.deb",
+                sha256: "6cd50259d39ce0dfafee2632c6268538e6a02590e77161a133e9683af346dd1d",
+                files: &["usr/lib/x86_64-linux-gnu/libfribidi.so.0"],
+            },
+            Deb {
+                pool: "main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_amd64.deb",
+                sha256: "ff32bae487706ba6ca646b5b72d89b935e3b8b2811d02e4ad7360cb97d90e2d0",
+                files: &["usr/lib/x86_64-linux-gnu/libgcrypt.so.20"],
+            },
+            Deb {
+                pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_amd64.deb",
+                sha256: "d9779cdbb11e5fb6056b39868b689bd2e6a152f60d7fa54fcf7113942eedab24",
+                files: &["usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"],
+            },
+            Deb {
+                pool: "main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_amd64.deb",
+                sha256: "629359e915f4466cf9cb0fa6c38270d9af1e03e28fab557ce31977d5ab34f13d",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
+                ],
+            },
+            Deb {
+                pool: "main/libg/libgpg-error/libgpg-error0_1.47-3build2_amd64.deb",
+                sha256: "81a30b5888e0af43b72bfdbdb44209b82e521eadf8848ff201542e6d258f6a1f",
+                files: &["usr/lib/x86_64-linux-gnu/libgpg-error.so.0"],
+            },
+            Deb {
+                pool: "main/g/graphite2/libgraphite2-3_1.3.14-2build1_amd64.deb",
+                sha256: "e2a91c59a2b26649ed0b331bedab0c92e56cc2021cce27df1080089edaad7aba",
+                files: &["usr/lib/x86_64-linux-gnu/libgraphite2.so.3"],
+            },
+            Deb {
+                pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_amd64.deb",
+                sha256: "011d0688aeb8e40fb146b6d6cd3d892e2a81b1e181320bcf2bf7e2d7206ae156",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+                ],
+            },
+            Deb {
+                pool: "main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
+                sha256: "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
+                files: &["usr/lib/x86_64-linux-gnu/libharfbuzz.so.0"],
+            },
+            Deb {
+                pool: "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
+                sha256: "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
+                files: &["usr/lib/x86_64-linux-gnu/libjpeg.so.8"],
+            },
+            Deb {
+                pool: "main/l/lz4/liblz4-1_1.9.4-1build1_amd64.deb",
+                sha256: "b9b69dedb126755f063396a6d3a3361066f9661f1c21cf5635cdd5ff6605796a",
+                files: &["usr/lib/x86_64-linux-gnu/liblz4.so.1"],
+            },
+            Deb {
+                pool: "main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_amd64.deb",
+                sha256: "28851b3997e4ba74bb3197bd58796bd3041c204c21df85fe0ddafdcaced647f0",
+                files: &["usr/lib/x86_64-linux-gnu/liblzma.so.5"],
+            },
+            Deb {
+                pool: "main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
+                sha256: "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a",
+                files: &["usr/lib/x86_64-linux-gnu/libmd.so.0"],
+            },
+            Deb {
+                pool: "main/u/util-linux/libmount1_2.39.3-9ubuntu6_amd64.deb",
+                sha256: "ccf07f3dfdda05311e66882d420140e32aeceaaa17725a0956214d81f5944995",
+                files: &["usr/lib/x86_64-linux-gnu/libmount.so.1"],
+            },
+            Deb {
+                pool: "main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_amd64.deb",
+                sha256: "09dfa5c881ab273ec6bc1830adcefdc407fcd619316e68fb26ca3a23d0fc9f54",
+                files: &["usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"],
+            },
+            Deb {
+                pool: "main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_amd64.deb",
+                sha256: "98cf5fc9076c2911fe20dfc1e41cd8f686a2bb5d539b1105fab18105b0db1376",
+                files: &["usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"],
+            },
+            Deb {
+                pool: "main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_amd64.deb",
+                sha256: "cc6bc9d86ef5f329edacaa4895232d8a9b8f95c5cbc77c3c460a3f64cecc213d",
+                files: &["usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"],
+            },
+            Deb {
+                pool: "main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_amd64.deb",
+                sha256: "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84",
+                files: &["usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"],
+            },
+            Deb {
+                pool: "main/p/pixman/libpixman-1-0_0.42.2-1build1_amd64.deb",
+                sha256: "d9c2931c4c424615eeab9dd5ae08bfc608b84e803c1d3ccddf319270db213421",
+                files: &["usr/lib/x86_64-linux-gnu/libpixman-1.so.0"],
+            },
+            Deb {
+                pool: "main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_amd64.deb",
+                sha256: "128d505038cc19dfc218658562ca5917ec242b79e6e2bbfb65ee27f297a53924",
+                files: &["usr/lib/x86_64-linux-gnu/libpng16.so.16"],
+            },
+            Deb {
+                pool: "main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
+                sha256: "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864",
+                files: &["usr/lib/x86_64-linux-gnu/libselinux.so.1"],
+            },
+            Deb {
+                pool: "main/s/systemd/libsystemd0_255.4-1ubuntu8_amd64.deb",
+                sha256: "64ba97fddff491b86597e93b078e2fe3256cb80f9a113ae9d8dd1361f01b84ed",
+                files: &["usr/lib/x86_64-linux-gnu/libsystemd.so.0"],
+            },
+            Deb {
+                pool: "main/libt/libthai/libthai0_0.1.29-2build1_amd64.deb",
+                sha256: "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508",
+                files: &["usr/lib/x86_64-linux-gnu/libthai.so.0"],
+            },
+            Deb {
+                pool: "main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_amd64.deb",
+                sha256: "29c20da27e8e37c984cf0518635c11cd0441f4cb6a2919a9f6eee1809171d327",
+                files: &["usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"],
+            },
+            Deb {
+                pool: "main/w/wayland/libwayland-egl1_1.22.0-2.1build1_amd64.deb",
+                sha256: "76cd17d2776428e0a0551b8f8fd954eeb3d39ca8ed2f88a38a5e4ce3ce3b2f16",
+                files: &["usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
+                sha256: "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
+                files: &["usr/lib/x86_64-linux-gnu/libX11.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb",
+                sha256: "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
+                files: &["usr/lib/x86_64-linux-gnu/libXau.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_amd64.deb",
+                sha256: "7d83a0668b1a693b5ea2e496206e8371fb6beda4c54a2b4b3902005915c272c5",
+                files: &["usr/lib/x86_64-linux-gnu/libxcb-render.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_amd64.deb",
+                sha256: "229d1280d459f1ba44c22939d3f9b61d9d20932d9a646b3fe4ce50be4cdf2325",
+                files: &["usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb",
+                sha256: "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
+                files: &["usr/lib/x86_64-linux-gnu/libxcb.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb",
+                sha256: "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
+                files: &["usr/lib/x86_64-linux-gnu/libXcomposite.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
+                sha256: "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
+                files: &["usr/lib/x86_64-linux-gnu/libXcursor.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb",
+                sha256: "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
+                files: &["usr/lib/x86_64-linux-gnu/libXdamage.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb",
+                sha256: "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
+                files: &["usr/lib/x86_64-linux-gnu/libXdmcp.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
+                sha256: "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
+                files: &["usr/lib/x86_64-linux-gnu/libXext.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
+                sha256: "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
+                files: &["usr/lib/x86_64-linux-gnu/libXfixes.so.3"],
+            },
+            Deb {
+                pool: "main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
+                sha256: "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
+                files: &["usr/lib/x86_64-linux-gnu/libXi.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
+                sha256: "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
+                files: &["usr/lib/x86_64-linux-gnu/libXinerama.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
+                sha256: "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
+                files: &["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
+                sha256: "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
+                files: &["usr/lib/x86_64-linux-gnu/libXrandr.so.2"],
+            },
+            Deb {
+                pool: "main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
+                sha256: "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
+                files: &["usr/lib/x86_64-linux-gnu/libXrender.so.1"],
+            },
+            Deb {
+                pool: "main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_amd64.deb",
+                sha256: "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
+                files: &["usr/lib/x86_64-linux-gnu/libzstd.so.1"],
+            },
+            Deb {
+                pool: "main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_amd64.deb",
+                sha256: "0b93d16d7498f092fa3070fbbad28cdbc6b3d640f1a7681b96fc37f20d1219f1",
+                files: &["usr/lib/x86_64-linux-gnu/libz.so.1"],
+            },
+            // gdk-pixbuf (which depends on it) picks an image's loader by its
+            // MIME type through GIO, which reads the MIME database's mime.cache:
+            // made at installation from this XML (`update_mime_database`).
+            Deb {
+                pool: "main/s/shared-mime-info/shared-mime-info_2.4-4_amd64.deb",
+                sha256: "7a774ea291ab99bfa987866c6b68e825531eeea7c8a732dd47d14cf480453fda",
+                files: &["usr/share/mime/packages/freedesktop.org.xml"],
+            },
+            Deb {
+                pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
+                sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+                files: &[
+                    "usr/share/X11/xkb/compat/accessx",
+                    "usr/share/X11/xkb/compat/basic",
+                    "usr/share/X11/xkb/compat/caps",
+                    "usr/share/X11/xkb/compat/complete",
+                    "usr/share/X11/xkb/compat/iso9995",
+                    "usr/share/X11/xkb/compat/ledcaps",
+                    "usr/share/X11/xkb/compat/lednum",
+                    "usr/share/X11/xkb/compat/ledscroll",
+                    "usr/share/X11/xkb/compat/level5",
+                    "usr/share/X11/xkb/compat/misc",
+                    "usr/share/X11/xkb/compat/mousekeys",
+                    "usr/share/X11/xkb/compat/xfree86",
+                    "usr/share/X11/xkb/keycodes/aliases",
+                    "usr/share/X11/xkb/keycodes/evdev",
+                    "usr/share/X11/xkb/rules/evdev",
+                    "usr/share/X11/xkb/symbols/inet",
+                    "usr/share/X11/xkb/symbols/keypad",
+                    "usr/share/X11/xkb/symbols/pc",
+                    "usr/share/X11/xkb/symbols/srvr_ctrl",
+                    "usr/share/X11/xkb/symbols/us",
+                    "usr/share/X11/xkb/types/basic",
+                    "usr/share/X11/xkb/types/complete",
+                    "usr/share/X11/xkb/types/extra",
+                    "usr/share/X11/xkb/types/iso9995",
+                    "usr/share/X11/xkb/types/level5",
+                    "usr/share/X11/xkb/types/mousekeys",
+                    "usr/share/X11/xkb/types/numpad",
+                    "usr/share/X11/xkb/types/pc",
+                ],
+            },
+        ],
+    },
+    LinuxRoot {
+        // X11 through Xwayland (ROADMAP LD step 5, `lx_xterm`): Ubuntu 24.04's
+        // Xwayland 23.2.6, xkbcomp (Xwayland runs it through `/bin/sh -c` to
+        // compile each keymap), dash as /bin/sh, and xterm 390, with the
+        // libraries of theirs the "gtk3" root lacks (shipped with it: libX11,
+        // libxcb, fontconfig and friends are there). Xwayland runs with
+        // `-shm`: libgbm, libdrm, libGL and libdecor are linked but not used
+        // (no glamor, no rootful decorations). Of xkb-data, the geometry the
+        // default keymap names (the rest is the "gtk3" root's); X's core
+        // fonts are Xwayland's built-ins ("fixed" and "cursor"), which xterm's
+        // default font is. libresolv is glibc's (libtirpc needs it).
+        name: "x11",
+        debs: &[
+            Deb {
+                pool: "main/x/xwayland/xwayland_23.2.6-1_amd64.deb",
+                sha256: "50c42bd751b33b617954ed7264ef03d18750d78b20b62359e7d8c6f5aa205ce3",
+                files: &["usr/bin/Xwayland"],
+            },
+            // A distribution's desktop in one window (LD step 6, `lx_xdesktop`):
+            // twm, X.Org's window manager (its libraries are xterm's), and
+            // coreutils' sleep for the session script.
+            // Xlib's locale database, the C locale's part: without it Xlib
+            // warns that the locale is not supported and xterm finds no
+            // input method (stderr lines real Linux does not print).
+            Deb {
+                pool: "main/libx/libx11/libx11-data_1.8.7-1build1_all.deb",
+                sha256: "9ae01f7747e7f479394c697c55acf11d3baf139e8e54b7c4adfb55ef9c50de08",
+                files: &[
+                    "usr/share/X11/locale/locale.alias",
+                    "usr/share/X11/locale/locale.dir",
+                    "usr/share/X11/locale/compose.dir",
+                    "usr/share/X11/locale/C/XLC_LOCALE",
+                    "usr/share/X11/locale/C/XI18N_OBJS",
+                    "usr/share/X11/locale/C/Compose",
+                ],
+            },
+            Deb {
+                pool: "universe/t/twm/twm_1.0.10-1build2_amd64.deb",
+                sha256: "29517224de67d2dcd27be2e4cde9394e9aad5d3507491b053c2b3b4f895af9c2",
+                files: &["usr/bin/twm"],
+            },
+            Deb {
+                pool: "main/c/coreutils/coreutils_9.4-3ubuntu6_amd64.deb",
+                sha256: "0d19c3e94f04ff1aafde46701fe1783da0a068a4904adc3794c30140f1aaeb8f",
+                files: &["usr/bin/sleep"],
+            },
+            Deb {
+                pool: "main/x/x11-xkb-utils/x11-xkb-utils_7.7+8build2_amd64.deb",
+                sha256: "69df4191e165f8b89d067f6234fcce89a4923d27d1e66dd92e6d63d6da93cdb0",
+                files: &["usr/bin/xkbcomp"],
+            },
+            Deb {
+                pool: "universe/x/xterm/xterm_390-1ubuntu3_amd64.deb",
+                sha256: "3541b6956d6c4be71db7b66ec91985bd5eb128fb130e806f1c879f9d94a97c72",
+                // Its desktop entry: the start menu lists it as one of the
+                // distribution's applications (LD step 7, `linux_menu`).
+                files: &["usr/bin/xterm", "usr/share/applications/debian-xterm.desktop"],
+            },
+            Deb {
+                pool: "main/d/dash/dash_0.5.12-6ubuntu5_amd64.deb",
+                sha256: "e97728d8deaa51300255f0572bbd68b9549e0894a184c056dc420fc4e0ba0781",
+                files: &["usr/bin/sh"],
+            },
+            Deb {
+                pool: "main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb",
+                sha256: "af36c7ac770770fe3d3c10e85d6bc538e76e57570ba7db7d397fb9f654783ef3",
+                files: &["usr/lib/x86_64-linux-gnu/libresolv.so.2"],
+            },
+            Deb {
+                pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
+                sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+                files: &["usr/share/X11/xkb/geometry/pc"],
+            },
+            Deb {
+                pool: "main/libg/libglvnd/libgl1_1.7.0-1build1_amd64.deb",
+                sha256: "e2b2fadeb883f073b566ad1d7874f6702397514d258473e96152a89d4d502a09",
+                files: &["usr/lib/x86_64-linux-gnu/libGL.so.1"],
+            },
+            Deb {
+                pool: "main/libg/libglvnd/libglx0_1.7.0-1build1_amd64.deb",
+                sha256: "aa4953182f30abde90cb5b072e83d7286b557b325769b8686196a7bd396d8795",
+                files: &["usr/lib/x86_64-linux-gnu/libGLX.so.0"],
+            },
+            Deb {
+                pool: "main/libg/libglvnd/libglvnd0_1.7.0-1build1_amd64.deb",
+                sha256: "33f5e07c74f73c2bfb44086ae0f9e6da52acd6c104d30ffe8fd768d8253d5e82",
+                files: &["usr/lib/x86_64-linux-gnu/libGLdispatch.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxfont/libxfont2_2.0.6-1build1_amd64.deb",
+                sha256: "1d5653c395f17f48473fce56cdab30eed16aac017359e6d2c34bc402d85197a0",
+                files: &["usr/lib/x86_64-linux-gnu/libXfont2.so.2"],
+            },
+            Deb {
+                pool: "main/libf/libfontenc/libfontenc1_1.1.8-1build1_amd64.deb",
+                sha256: "0c5d57211cac9659e7f4c856f5e1922c4a522fe8bcf5776e9707b2811f965702",
+                files: &["usr/lib/x86_64-linux-gnu/libfontenc.so.1"],
+            },
+            Deb {
+                pool: "main/libd/libdecor-0/libdecor-0-0_0.2.2-1build2_amd64.deb",
+                sha256: "64bf085d16e504e9ed39b91d2a46748fb8881ad7f3603fbacef6c11c04aa7064",
+                files: &["usr/lib/x86_64-linux-gnu/libdecor-0.so.0"],
+            },
+            Deb {
+                pool: "main/libd/libdrm/libdrm2_2.4.120-2build1_amd64.deb",
+                sha256: "f5fb4e7ce17921cc466fb7911abf91495ffb181b36772f68e2e82cb621703112",
+                files: &["usr/lib/x86_64-linux-gnu/libdrm.so.2"],
+            },
+            Deb {
+                pool: "main/m/mesa/libgbm1_24.0.5-1ubuntu1_amd64.deb",
+                sha256: "bffad21d2383429d6dbec8395ba8d8476a0ed69e7e0b1c3ef2f27da99211b200",
+                files: &["usr/lib/x86_64-linux-gnu/libgbm.so.1"],
+            },
+            Deb {
+                pool: "main/libt/libtirpc/libtirpc3t64_1.3.4+ds-1.1build1_amd64.deb",
+                sha256: "3a3cd37160399ab235fdf2f13159fd288940abb9660e0ed1afb418b44c73d43a",
+                files: &["usr/lib/x86_64-linux-gnu/libtirpc.so.3"],
+            },
+            Deb {
+                pool: "main/k/krb5/libgssapi-krb5-2_1.20.1-6ubuntu2_amd64.deb",
+                sha256: "0e22fb29a907ef6deeb56543bcbf9f736500cb37da2e3a6257c1bedf7c0783db",
+                files: &["usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2"],
+            },
+            Deb {
+                pool: "main/k/krb5/libkrb5-3_1.20.1-6ubuntu2_amd64.deb",
+                sha256: "10ab284396a94349aa319c7c0a59cc747c5d75ba8b81e0ffcbdae96d8d8a2a78",
+                files: &["usr/lib/x86_64-linux-gnu/libkrb5.so.3"],
+            },
+            Deb {
+                pool: "main/k/krb5/libk5crypto3_1.20.1-6ubuntu2_amd64.deb",
+                sha256: "212318ab9c98e151cfd331b9310827d43316dcf33e1e0e8d3d9fc2b3fbd88cfb",
+                files: &["usr/lib/x86_64-linux-gnu/libk5crypto.so.3"],
+            },
+            Deb {
+                pool: "main/e/e2fsprogs/libcom-err2_1.47.0-2.4~exp1ubuntu4_amd64.deb",
+                sha256: "c95d59cad331f88ddffa3a85f1119bac98dd956916af642c60dd66a485ee97df",
+                files: &["usr/lib/x86_64-linux-gnu/libcom_err.so.2"],
+            },
+            Deb {
+                pool: "main/k/krb5/libkrb5support0_1.20.1-6ubuntu2_amd64.deb",
+                sha256: "5a6aa4d7f11ccad8f4bdfbce5e718827875d9440b1fb3d40c82dff0d9edb6e9b",
+                files: &["usr/lib/x86_64-linux-gnu/libkrb5support.so.0"],
+            },
+            Deb {
+                pool: "main/k/keyutils/libkeyutils1_1.6.3-3build1_amd64.deb",
+                sha256: "0679f198b0128179e46cdf956fb2022c23c758664c00bc8efa0382d509683a8a",
+                files: &["usr/lib/x86_64-linux-gnu/libkeyutils.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxcvt/libxcvt0_0.1.2-1build1_amd64.deb",
+                sha256: "73215b31e1585e042aa2b9dc97cf4dfcfc6287fb0f6eca8bcab0b1f30a51c8e7",
+                files: &["usr/lib/x86_64-linux-gnu/libxcvt.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxshmfence/libxshmfence1_1.3-1build5_amd64.deb",
+                sha256: "bc6de4bfaf9050a8ba83d4bcfb114131b081084a7972c03417f8523d52b5c742",
+                files: &["usr/lib/x86_64-linux-gnu/libxshmfence.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxkbfile/libxkbfile1_1.1.0-1build4_amd64.deb",
+                sha256: "22ac5b7dca740e606261cebdfaf1a07738e92ad3d123570694374ddb4d5afea2",
+                files: &["usr/lib/x86_64-linux-gnu/libxkbfile.so.1"],
+            },
+            Deb {
+                pool: "main/libx/libxaw/libxaw7_1.0.14-1build2_amd64.deb",
+                sha256: "2a9cdc82ecf566de76e05394efc604c9cced49e12c28b10e1ca101062b47bac0",
+                files: &["usr/lib/x86_64-linux-gnu/libXaw.so.7"],
+            },
+            Deb {
+                pool: "main/libx/libxmu/libxmu6_1.1.3-3build2_amd64.deb",
+                sha256: "05c13bce0e9a80139dfa72cc8e7a695b4f7d58b1884423929eade62179d99853",
+                files: &["usr/lib/x86_64-linux-gnu/libXmu.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxt/libxt6t64_1.2.1-1.2build1_amd64.deb",
+                sha256: "2e4317d5ae1a45e517771ea0b8d93519b5f915ab08983facecd480d64dbd1489",
+                files: &["usr/lib/x86_64-linux-gnu/libXt.so.6"],
+            },
+            Deb {
+                pool: "main/libi/libice/libice6_1.0.10-1build3_amd64.deb",
+                sha256: "ad1edb5303574fee154e487947177e5bd15363aa71b92f78f5a2a7145fdb81c5",
+                files: &["usr/lib/x86_64-linux-gnu/libICE.so.6"],
+            },
+            Deb {
+                pool: "main/libs/libsm/libsm6_1.2.3-1build3_amd64.deb",
+                sha256: "1d27ebc381b499075a28c504be4d7d424c63b6866354736ac7f8d25813860cdf",
+                files: &["usr/lib/x86_64-linux-gnu/libSM.so.6"],
+            },
+            Deb {
+                pool: "main/libx/libxpm/libxpm4_3.5.17-1build2_amd64.deb",
+                sha256: "ad9d9cb9be156d8b80c12735ecb4aae57e5501280a9f952749e8b71a7e5f9c97",
+                files: &["usr/lib/x86_64-linux-gnu/libXpm.so.4"],
+            },
+            Deb {
+                pool: "main/x/xft/libxft2_2.3.6-1build1_amd64.deb",
+                sha256: "b4f4f3255c0b8773b260c61cbe20ee7c63799cfc0e4e389fa58375dd480b093a",
+                files: &["usr/lib/x86_64-linux-gnu/libXft.so.2"],
+            },
+            Deb {
+                pool: "main/libu/libutempter/libutempter0_1.2.1-3build1_amd64.deb",
+                sha256: "46c0dfbfeca19ba0773398d654b7e7225b178f26b414f0e2f8250519551bfb32",
+                files: &["usr/lib/x86_64-linux-gnu/libutempter.so.0"],
+            },
+            Deb {
+                pool: "main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2_amd64.deb",
+                sha256: "53e1e1753729d04cf65b05e6e58abe06e2bb76cc07eff0e1b2a638a638ca209b",
+                files: &["usr/lib/x86_64-linux-gnu/libtinfo.so.6"],
+            },
+            Deb {
+                pool: "main/u/util-linux/libuuid1_2.39.3-9ubuntu6_amd64.deb",
+                sha256: "4ba2c3a10469d1ab8e01a9af8e39093ed43addada658c04737287c5f91a1645b",
+                files: &["usr/lib/x86_64-linux-gnu/libuuid.so.1"],
+            },
+            Deb {
+                pool: "main/w/wayland/libwayland-server0_1.22.0-2.1build1_amd64.deb",
+                sha256: "edbfa4b6857691ae922cc768a753fab230eee9e956aa2ce4f2eaa8d9ad777dca",
+                files: &["usr/lib/x86_64-linux-gnu/libwayland-server.so.0"],
+            },
+            Deb {
+                pool: "main/libx/libxcb/libxcb-randr0_1.15-1ubuntu2_amd64.deb",
+                sha256: "b5cb519823a05a617b543dc9b6a9289b7648b20048244abe021caa706309835a",
+                files: &["usr/lib/x86_64-linux-gnu/libxcb-randr.so.0"],
+            },
+        ],
+    },
+];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
@@ -935,7 +1215,14 @@ struct Dll {
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
+    // Imports testdll's ordinal 2, which has no export (loader_test).
+    Dll { package: "testdll_gap", file: "testdll_gap.dll", exported_as: "testdll_gap.dll" },
+    // imagetrim_test's DLL of known contents.
+    Dll { package: "imagetrim_dll", file: "imagetrim_dll.dll", exported_as: "imagetrim_dll.dll" },
     Dll { package: "tlsdll", file: "tlsdll.dll", exported_as: "tlsdll.dll" },
+    // The DLL the hot swap scenarios patch (its first build; the others
+    // are `hotswap_variant`'s).
+    Dll { package: "hotswap_dll", file: "hotswap_dll.dll", exported_as: "hotswap_dll.dll" },
     // gala's kernel32.dll, exported under another name like ntdll.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32.dll" },
     Dll {
@@ -948,6 +1235,9 @@ const USER_DLLS: &[Dll] = &[
     // gala's msvcrt.dll (the C runtime of mingw-w64 programs), advapi32.dll
     // and user32.dll (only what Nginx imports).
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
+    // gala's ucrtbase.dll (the Universal C Runtime; msvcrt's source with
+    // the UCRT's own functions: ARCHITECTURE "The UCRT").
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's winmm.dll (timer resolution; Go and the JVM load it).
@@ -1010,6 +1300,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "cfgmgr32", file: "cfgmgr32.dll", exported_as: "testcfgmgr32.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
+    // wldp.dll: Windows Lockdown Policy, unlocked (ODT's setup.exe).
+    Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp.dll" },
     // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
     Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
@@ -1017,6 +1309,12 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
     Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
     Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
+    // The HLSL compiler's DLL: D3DCreateBlob; no compiler yet (G2).
+    Dll {
+        package: "d3dcompiler_47",
+        file: "d3dcompiler_47.dll",
+        exported_as: "testd3dcompiler_47.dll",
+    },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -1026,6 +1324,46 @@ const USER_DLLS: &[Dll] = &[
     // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
     Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder.dll" },
+    // msi.dll: Windows Installer's queries, nothing installed (msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
+    // rstrtmgr.dll: the Restart Manager (rstrtmgr_test; Click-to-Run's
+    // repoman.dll and OfficeClickToRun.exe).
+    Dll { package: "rstrtmgr", file: "rstrtmgr.dll", exported_as: "testrstrtmgr.dll" },
+    // wofutil.dll: the Windows Overlay Filter's API, no filter attached
+    // (wofutil_test; Click-to-Run's staging).
+    Dll { package: "wofutil", file: "wofutil.dll", exported_as: "testwofutil.dll" },
+    // sppc.dll: the Software Protection Platform's client over gala's
+    // license store (sppc_test; Click-to-Run's integrator installs
+    // Office's licenses through it).
+    Dll { package: "sppc", file: "sppc.dll", exported_as: "testsppc.dll" },
+    // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
+    // window with (gdiplus_test).
+    Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
+    // Windows.UI.dll: the Windows Runtime class UISettings, the system's
+    // colours and UI preferences (uisettings_test; ODT's setup.exe).
+    Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui.dll" },
+    // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
+    // WindowsCodecs.dll: the Windows Imaging Component, its factory,
+    // bitmaps, PNG and BMP decoders, converter, scaler and clipper
+    // (windowscodecs_test; Office decodes its images through it).
+    Dll {
+        package: "windowscodecs",
+        file: "windowscodecs.dll",
+        exported_as: "testwindowscodecs.dll",
+    },
+    // d2d1.dll: Direct2D in software, render targets over WIC bitmaps,
+    // DCs and windows (d2d1_test; Office draws with it).
+    Dll { package: "d2d1", file: "d2d1.dll", exported_as: "testd2d1.dll" },
+    // combase.dll: forwarders to ole32's COM and Windows Runtime base;
+    // appxdeploymentclient.dll: Windows.Management.Deployment.PackageManager
+    // with no packages (combase_test).
+    Dll { package: "combase", file: "combase.dll", exported_as: "testcombase.dll" },
+    Dll {
+        package: "appxdeploymentclient",
+        file: "appxdeploymentclient.dll",
+        exported_as: "testappxdeploymentclient.dll",
+    },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -1055,6 +1393,8 @@ const USER_DLLS: &[Dll] = &[
 const USER_DLLS_X86: &[Dll] = &[
     // The 32-bit ntdll: testntdll built for i686.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
+    // The DLL the WOW64 hot swap scenario patches (hotswap_dll's source).
+    Dll { package: "hotswap_dll32", file: "hotswap_dll32.dll", exported_as: "hotswap_dll32.dll" },
     // A 32-bit test DLL (wow64_import_test).
     Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
     // The 32-bit kernel32: gala's kernel32 built for i686, and the
@@ -1063,6 +1403,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit ucrtbase: gala's UCRT built for i686.
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase32.dll" },
     // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
@@ -1095,6 +1437,54 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur3232.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder32.dll" },
     Dll { package: "bcrypt", file: "bcrypt.dll", exported_as: "testbcrypt32.dll" },
+    // crypt32 and the ncrypt it loads for keys (ODT's setup.exe delay-loads
+    // crypt32; wow64_cert_test).
+    Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt3232.dll" },
+    Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt32.dll" },
+    // normaliz and powrprof (ODT's setup.exe delay-loads them after msi
+    // and imm32; wow64_office_api_test).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz32.dll" },
+    Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof32.dll" },
+    // schannel (the 32-bit secur32 loads it for TLS: ODT's setup.exe's
+    // downloads; wow64_schannel_test).
+    Dll { package: "schannel", file: "schannel.dll", exported_as: "testschannel32.dll" },
+    // urlmon (ODT's setup.exe delay-loads its security manager on its
+    // download's error path; wow64_office_api_test).
+    Dll { package: "urlmon", file: "urlmon.dll", exported_as: "testurlmon32.dll" },
+    // wininet (ODT's setup.exe delay-loads it for its cookies and its
+    // downloads; wow64_wininet_test).
+    Dll { package: "wininet", file: "wininet.dll", exported_as: "testwininet32.dll" },
+    // iphlpapi (ODT's setup.exe delay-loads GetAdaptersInfo;
+    // wow64_office_api_test).
+    Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi32.dll" },
+    // wldp (ODT's setup.exe loads it to check for S mode).
+    Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
+    // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // gdiplus (ODT's setup.exe delay-loads it to draw its window;
+    // wow64_gdiplus_test).
+    Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus32.dll" },
+    // Windows.UI.dll (ODT's setup.exe asks UISettings for its window's
+    // colours; wow64_uisettings_test).
+    Dll { package: "windows_ui", file: "windows.ui.dll", exported_as: "testwindows.ui32.dll" },
+    // rstrtmgr (32-bit installers: Inno Setup's; wow64_rstrtmgr_test).
+    Dll { package: "rstrtmgr", file: "rstrtmgr.dll", exported_as: "testrstrtmgr32.dll" },
+    // wintrust (ODT's setup.exe delay-loads it; wow64_wintrust_test).
+    Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust32.dll" },
+    // setupapi (ODT's setup.exe unpacks its cabinets with
+    // SetupIterateCabinetW; wow64_setupcab_test).
+    Dll { package: "setupapi", file: "setupapi.dll", exported_as: "testsetupapi32.dll" },
+    // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
+    // wow64_msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
+    // combase and PackageManager (ODT's setup.exe activates PackageManager
+    // through C++/WinRT; wow64_combase_test).
+    Dll { package: "combase", file: "combase.dll", exported_as: "testcombase32.dll" },
+    Dll {
+        package: "appxdeploymentclient",
+        file: "appxdeploymentclient.dll",
+        exported_as: "testappxdeploymentclient32.dll",
+    },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -1109,18 +1499,25 @@ fn built_dll_x86(file: &str) -> PathBuf {
     let release = target_dir().join(USER_TARGET_X86).join("release");
     match USER_DLLS_X86.iter().find(|d| d.file == file) {
         // As built_dll: cargo names it `<package>.dll`.
-        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        Some(d) if !plain_dll_name(d.file) => release.join(format!("{}.dll", d.package)),
         _ => release.join(file),
     }
 }
 
+/// Whether cargo can build `file` under its own name: a `.dll` whose
+/// stem is a crate name (no dot; Windows.UI.dll is not).
+fn plain_dll_name(file: &str) -> bool {
+    file.strip_suffix(".dll").is_some_and(|stem| !stem.contains('.'))
+}
+
 /// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
-/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv) is
-/// built under its package's name and shipped under its own.
+/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv,
+/// windows.ui.dll) is built under its package's name and shipped under
+/// its own.
 fn built_dll(file: &str) -> PathBuf {
     let release = target_dir().join(USER_TARGET).join("release");
     match USER_DLLS.iter().find(|d| d.file == file) {
-        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        Some(d) if !plain_dll_name(d.file) => release.join(format!("{}.dll", d.package)),
         _ => release.join(file),
     }
 }
@@ -1150,6 +1547,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "ntdll.dll", "Windows/System32"),
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
+    ("loader_test", "testdll_gap.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
@@ -1161,6 +1559,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("xstate_test", "ntdll.dll", "Windows/System32"),
     ("straddle_test", "ntdll.dll", "Windows/System32"),
     ("statedump_test", "ntdll.dll", "Windows/System32"),
+    ("snapshot_machine", "ntdll.dll", "Windows/System32"),
+    ("hotswap_machine", "ntdll.dll", "Windows/System32"),
+    ("hotswap_machine", "hotswap_dll.dll", "gala"),
+    ("hotswap_stack", "ntdll.dll", "Windows/System32"),
+    ("hotswap_stack", "hotswap_dll.dll", "gala"),
+    ("khotswap_machine", "ntdll.dll", "Windows/System32"),
+    ("khotswap_machine", "hotswap_dll.dll", "gala"),
+    ("khotswap_stack", "ntdll.dll", "Windows/System32"),
+    ("khotswap_stack", "hotswap_dll.dll", "gala"),
+    ("khotswap_both", "ntdll.dll", "Windows/System32"),
+    ("khotswap_both", "hotswap_dll.dll", "gala"),
+    ("hotswap_files", "ntdll.dll", "Windows/System32"),
+    ("hotswap_files", "hotswap_dll.dll", "gala"),
+    // hotswap_dll's first build under another name: a DLL loaded only
+    // after the snapshot (`<source>@<name>`, make_iso).
+    ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -1214,6 +1628,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("rpcrt4_test", "kernel32.dll", "Windows/System32"),
     ("rpcrt4_test", "rpcrt4.dll", "Windows/System32"),
     ("rpcrt4_test", "bcryptprimitives.dll", "Windows/System32"),
+    // rpc_test (ROADMAP OF): a local RPC server and its clients, in this
+    // process and in a second one (rpc_test.exe client).
+    ("rpc_test", "ntdll.dll", "Windows/System32"),
+    ("rpc_test", "kernel32.dll", "Windows/System32"),
+    ("rpc_test", "rpcrt4.dll", "Windows/System32"),
+    ("rpc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("rpc_test", "advapi32.dll", "Windows/System32"),
+    ("rpc_test", "secur32.dll", "Windows/System32"),
+    ("rpc_test", "security.dll", "Windows/System32"),
+    ("rpc_test", "bcrypt.dll", "Windows/System32"),
     ("unimplemented_test", "ntdll.dll", "Windows/System32"),
     ("unimplemented_test", "kernel32.dll", "Windows/System32"),
     ("unimplemented_test", "xolehlp.dll", "Windows/System32"),
@@ -1251,6 +1675,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("conpty_test", "user32.dll", "Windows/System32"),
     ("conpty_test", "gdi32.dll", "Windows/System32"),
     ("conpty_test", "user/bin/conhost.exe", "Windows/System32"),
+    // start_menu: gala's cmd.exe and conhost.exe in System32 as on Windows
+    // (also C:\gala's boot modules: the menu prefers System32), and what
+    // `gala install` loads (advapi32: the registry).
+    ("start_menu", "user/bin/cmd.exe", "Windows/System32"),
+    ("start_menu", "user/bin/conhost.exe", "Windows/System32"),
+    ("start_menu", "advapi32.dll", "Windows/System32"),
+    ("start_menu", "bcryptprimitives.dll", "Windows/System32"),
     ("console_window", "ntdll.dll", "Windows/System32"),
     ("console_window", "kernel32.dll", "Windows/System32"),
     ("console_window", "user32.dll", "Windows/System32"),
@@ -1270,6 +1701,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("persist_test", "secur32.dll", "Windows/System32"),
     ("persist_test", "bcryptprimitives.dll", "Windows/System32"),
     ("persist_test", "bcrypt.dll", "Windows/System32"),
+    ("volume_test", "ntdll.dll", "Windows/System32"),
+    ("volume_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
@@ -1334,6 +1767,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("registry_test", "kernel32.dll", "Windows/System32"),
     ("registry_test", "advapi32.dll", "Windows/System32"),
     ("registry_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("actctx_test", "ntdll.dll", "Windows/System32"),
+    ("actctx_test", "kernel32.dll", "Windows/System32"),
+    ("regnotify_test", "ntdll.dll", "Windows/System32"),
+    ("regnotify_test", "kernel32.dll", "Windows/System32"),
+    ("regnotify_test", "advapi32.dll", "Windows/System32"),
+    ("regnotify_test", "bcryptprimitives.dll", "Windows/System32"),
     ("security_test", "ntdll.dll", "Windows/System32"),
     ("security_test", "kernel32.dll", "Windows/System32"),
     ("security_test", "advapi32.dll", "Windows/System32"),
@@ -1383,6 +1822,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "ntdll.dll", "Windows/System32"),
+    ("clipboard_test", "kernel32.dll", "Windows/System32"),
+    ("clipboard_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "gdi32.dll", "Windows/System32"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -1435,6 +1878,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
     ("kernel32_file_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_file_test", "kernel32.dll", "Windows/System32"),
+    ("reparse_test", "ntdll.dll", "Windows/System32"),
+    ("reparse_test", "kernel32.dll", "Windows/System32"),
+    ("reparse_test", "advapi32.dll", "Windows/System32"),
+    ("reparse_test", "bcryptprimitives.dll", "Windows/System32"),
     ("pipe_test", "ntdll.dll", "Windows/System32"),
     ("pipe_test", "kernel32.dll", "Windows/System32"),
     ("pipe_test", "advapi32.dll", "Windows/System32"),
@@ -1467,6 +1914,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("pagefile_test", "ntdll.dll", "Windows/System32"),
+    ("pagefile_test", "kernel32.dll", "Windows/System32"),
+    ("pagefile_fail", "ntdll.dll", "Windows/System32"),
+    ("pagefile_fail", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ntdll.dll", "Windows/System32"),
     ("quota_test", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ws2_32.dll", "Windows/System32"),
@@ -1630,6 +2081,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
     ("lx_prctl", "user/lx/bin/prctl_test", "lx"),
     ("lx_prctl_pie", "user/lx/bin/prctl_test-pie", "lx"),
+    ("lx_pty", "user/lx/bin/pty_test", "lx"),
+    ("lx_pty_pie", "user/lx/bin/pty_test-pie", "lx"),
     ("lx_eventfd", "user/lx/bin/eventfd_test", "lx"),
     ("lx_eventfd_pie", "user/lx/bin/eventfd_test-pie", "lx"),
     ("lx_statfs", "user/lx/bin/statfs_test", "lx"),
@@ -1685,16 +2138,147 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_gtk_pie", "user/lx/bin/gtk_test-pie", "lx"),
     ("gtk3", "target/prebuilt/gtk3/usr/", "usr"),
     ("gtk3", "target/prebuilt/gtk3/etc/", "etc"),
+    // X11 through Xwayland (LD step 5): Xwayland, xkbcomp, xterm and
+    // their libraries (LINUX_ROOTS "x11", shipped with "gtk3"), dash as
+    // /bin/sh (Xwayland runs xkbcomp through it, xterm the user's shell).
+    ("x11", "target/prebuilt/x11/usr/", "usr"),
+    ("x11", "target/prebuilt/x11/usr/bin/sh", "bin"),
+    // A distribution's desktop in one window (LD step 6): the session
+    // script and twm's configuration.
+    ("xdesktop", "user/lx/xdesktop/session.sh", "lx/xdesktop"),
+    ("xdesktop", "user/lx/xdesktop/twmrc", "lx/xdesktop"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_httpd", "user/lx/busybox/httpd.sh", "lx"),
+    // ROADMAP CT step 2: gala's wsl.exe in System32 as Windows has it,
+    // the busybox rootfs tarballs (`wsl_rootfs`) beside wsl_test.
+    ("wsl", "user/bin/wsl.exe", "Windows/System32"),
+    ("wsl", "ntdll.dll", "Windows/System32"),
+    ("wsl", "kernel32.dll", "Windows/System32"),
+    ("wsl", "advapi32.dll", "Windows/System32"),
+    ("wsl", "bcryptprimitives.dll", "Windows/System32"),
+    ("wsl", "target/wsl/bb-rootfs.tar", "gala"),
+    ("wsl", "target/wsl/bb-rootfs.tar.gz", "gala"),
+    // The distribution's terminal: wsl.exe in a console window (gala's
+    // conhost.exe draws it: user32, gdi32).
+    ("wsl_terminal", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("wsl_terminal", "user/bin/wsl.exe", "Windows/System32"),
+    ("wsl_terminal", "ntdll.dll", "Windows/System32"),
+    ("wsl_terminal", "kernel32.dll", "Windows/System32"),
+    ("wsl_terminal", "advapi32.dll", "Windows/System32"),
+    ("wsl_terminal", "bcryptprimitives.dll", "Windows/System32"),
+    ("wsl_terminal", "user32.dll", "Windows/System32"),
+    ("wsl_terminal", "gdi32.dll", "Windows/System32"),
+    ("wsl_terminal", "target/wsl/bb-rootfs.tar", "gala"),
+    ("wsl_terminal", "target/wsl/bb-rootfs.tar.gz", "gala"),
+    // The task manager (ROADMAP TM): gala's taskmgr.exe where Windows has
+    // it (the start menu's tile, Ctrl+Shift+Esc), wsl.exe and the busybox
+    // distribution taskmgr_test runs, the DLLs both find in System32.
+    ("taskmgr", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("taskmgr", "user/bin/taskmgr.exe", "Windows/System32"),
+    ("taskmgr", "user/bin/wsl.exe", "Windows/System32"),
+    ("taskmgr", "ntdll.dll", "Windows/System32"),
+    ("taskmgr", "kernel32.dll", "Windows/System32"),
+    ("taskmgr", "advapi32.dll", "Windows/System32"),
+    ("taskmgr", "bcryptprimitives.dll", "Windows/System32"),
+    ("taskmgr", "user32.dll", "Windows/System32"),
+    ("taskmgr", "gdi32.dll", "Windows/System32"),
+    ("taskmgr", "target/wsl/bb-rootfs.tar", "gala"),
+    // The file explorer (ROADMAP EX): gala's explorer.exe where Windows
+    // has it (Win+E, the start menu's tile), shell32's namespace, wsl.exe
+    // and the busybox distribution explorer_test browses into.
+    ("explorer", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("explorer", "user/bin/explorer.exe", "Windows"),
+    ("explorer", "user/bin/wsl.exe", "Windows/System32"),
+    ("explorer", "user/bin/cmd.exe", "Windows/System32"),
+    ("explorer", "user/bin/conhost.exe", "Windows/System32"),
+    ("explorer", "ntdll.dll", "Windows/System32"),
+    ("explorer", "kernel32.dll", "Windows/System32"),
+    ("explorer", "advapi32.dll", "Windows/System32"),
+    ("explorer", "bcryptprimitives.dll", "Windows/System32"),
+    ("explorer", "user32.dll", "Windows/System32"),
+    ("explorer", "gdi32.dll", "Windows/System32"),
+    ("explorer", "shell32.dll", "Windows/System32"),
+    ("explorer", "shlwapi.dll", "Windows/System32"),
+    ("explorer", "ole32.dll", "Windows/System32"),
+    ("explorer", "comctl32.dll", "Windows/System32"),
+    ("explorer", "target/wsl/bb-rootfs.tar", "gala"),
+    // The start menu's Linux distributions (LD step 7): wsl.exe, conhost.exe
+    // for a distribution's terminal, winhttp for `gala linux-install`'s
+    // download (the rootfs comes from the host: `linux_menu_rootfs`), and
+    // the Linux roots for X display :0 (an application from the context
+    // menu runs under the server's rootless Xwayland).
+    ("linux_menu", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("linux_menu", "user/bin/wsl.exe", "Windows/System32"),
+    ("linux_menu", "user/bin/conhost.exe", "Windows/System32"),
+    ("linux_menu", "ntdll.dll", "Windows/System32"),
+    ("linux_menu", "kernel32.dll", "Windows/System32"),
+    ("linux_menu", "advapi32.dll", "Windows/System32"),
+    ("linux_menu", "bcryptprimitives.dll", "Windows/System32"),
+    ("linux_menu", "user32.dll", "Windows/System32"),
+    ("linux_menu", "gdi32.dll", "Windows/System32"),
+    ("linux_menu", "msvcrt.dll", "Windows/System32"),
+    ("linux_menu", "winhttp.dll", "Windows/System32"),
+    ("linux_menu", "ws2_32.dll", "Windows/System32"),
+    ("linux_menu", "mswsock.dll", "Windows/System32"),
+    ("linux_menu", "secur32.dll", "Windows/System32"),
+    ("linux_menu", "schannel.dll", "Windows/System32"),
+    ("linux_menu", "crypt32.dll", "Windows/System32"),
+    ("linux_menu", "bcrypt.dll", "Windows/System32"),
+    ("linux_menu", "ncrypt.dll", "Windows/System32"),
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    // Memory under sustained work (user/memload_test, C): thread churn,
+    // downloads from schannel_test's Nginx onto a disk-backed C:.
+    ("memload_test", "msvcrt.dll", "Windows/System32"),
+    ("memload_test", "winhttp.dll", "Windows/System32"),
+    ("memload_test", "user/bin/memload_test.exe", "gala"),
+    // WinHTTP's status callbacks (user/winhttp_cb_test), x64 and x86,
+    // against schannel_test's Nginx (MODULE_SETS).
+    ("winhttp_cb_test", "winhttp.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "wow64.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // Schannel through WOW64 (user/schannel_test built for x86) against
+    // schannel_test's Nginx (MODULE_SETS): the 32-bit secur32, schannel,
+    // crypt32, ncrypt and bcrypt.
+    ("wow64_schannel_test", "wow64.dll", "Windows/System32"),
+    ("wow64_schannel_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/schannel.dll", "Windows/SysWOW64"),
     ("wininet_test", "msvcrt.dll", "Windows/System32"),
     ("wininet_test", "wininet.dll", "Windows/System32"),
     ("wininet_test", "user/bin/wininet_test.exe", "gala"),
+    // wininet_test's source built for x86 (user/wininet_test/build.sh)
+    // through SysWOW64's wininet, against the same Nginx (MODULE_SETS).
+    ("wow64_wininet_test", "wow64.dll", "Windows/System32"),
+    ("wow64_wininet_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/wininet.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/schannel.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "user/bin/wow64_wininet_test.exe", "gala"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -1729,7 +2313,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shlwapi_test", "shlwapi.dll", "Windows/System32"),
     ("shlwapi_test", "advapi32.dll", "Windows/System32"),
     ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("shlwapi_test", "ole32.dll", "Windows/System32"),
     ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    // shlwapi_test's source built for x86 (user/shlwapi_test/build.sh).
+    ("wow64_shlwapi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_shlwapi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "user/bin/wow64_shlwapi_test.exe", "gala"),
     ("ole32_test", "ntdll.dll", "Windows/System32"),
     ("ole32_test", "kernel32.dll", "Windows/System32"),
     ("ole32_test", "msvcrt.dll", "Windows/System32"),
@@ -1850,9 +2445,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_inno", "crypt32.dll", "Windows/System32"),
     ("pk_install_inno", "msimg32.dll", "Windows/System32"),
     ("pk_install_inno", "msctf.dll", "Windows/System32"),
-    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
-    // Microsoft's redistributable copy from the JDK, as other scenarios).
-    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    // The UCRT: gala's ucrtbase.dll, in System32 as on Windows.
+    ("pk_install_inno", "ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -2313,9 +2907,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
     // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
-    // gala's DLLs it imports, the JDK's UCRT beside it.
+    // gala's DLLs it imports (its UCRT gala's ucrtbase).
     ("python_hello", "target/prebuilt/python/", "python"),
-    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ucrtbase.dll", "Windows/System32"),
     ("python_hello", "ntdll.dll", "Windows/System32"),
     ("python_hello", "kernel32.dll", "Windows/System32"),
     ("python_hello", "advapi32.dll", "Windows/System32"),
@@ -2337,7 +2931,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // P1 step 6: pip and venv on the full CPython layout (PREBUILT
     // `python-full`) in C:\python, as python_hello's.
     ("python_pip", "target/prebuilt/python-full/tools/", "python"),
-    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ucrtbase.dll", "Windows/System32"),
     ("python_pip", "ntdll.dll", "Windows/System32"),
     ("python_pip", "kernel32.dll", "Windows/System32"),
     ("python_pip", "advapi32.dll", "Windows/System32"),
@@ -2660,12 +3254,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     // C++ exceptions with Microsoft's C++ runtime (the JDK's
-    // redistributable copies, app-local).
+    // redistributable vcruntime140, app-local) on gala's UCRT.
     ("cxx_eh_test", "ntdll.dll", "Windows/System32"),
     ("cxx_eh_test", "kernel32.dll", "Windows/System32"),
     ("cxx_eh_test", "user/bin/cxx_eh_test.exe", "gala"),
     ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
-    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "gala"),
+    ("cxx_eh_test", "ucrtbase.dll", "Windows/System32"),
+    // A C++ throw nothing catches (user/cxx_eh_test/throw.cpp): the crash
+    // report names the thrown type and what().
+    ("cxx_throw", "ntdll.dll", "Windows/System32"),
+    ("cxx_throw", "kernel32.dll", "Windows/System32"),
+    ("cxx_throw", "user/bin/cxx_throw.exe", "gala"),
+    ("cxx_throw", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
+    ("cxx_throw", "ucrtbase.dll", "Windows/System32"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -2832,11 +3433,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     // curl for Windows, run by busybox sh (user/curl/curl.sh) against
     // schannel_test's Nginx (MODULE_SETS): curl.se's build (PREBUILT
-    // curl; the UCRT is the JDK's redistributable ucrtbase.dll, in
-    // System32 as on Windows) and Git for Windows' Schannel curl (PREBUILT
+    // curl, on gala's UCRT: ucrtbase.dll in System32, as on Windows) and
+    // Git for Windows' Schannel curl (PREBUILT
     // gitcurl), each as C:\curl.
     ("curl", "target/prebuilt/curl/curl-8.23.0_8-win64-mingw/bin/curl.exe", "curl"),
-    ("curl", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    ("curl", "ucrtbase.dll", "Windows/System32"),
     ("curl", "normaliz.dll", "Windows/System32"),
     ("curl_common", "iphlpapi.dll", "Windows/System32"),
     ("curl_schannel", "target/prebuilt/gitcurl/mingw64/bin/", "curl"),
@@ -2861,6 +3462,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_crash", "wow64.dll", "Windows/System32"),
     ("wow64_thread_test", "wow64.dll", "Windows/System32"),
     // A 32-bit program with imports: the 32-bit ntdll's loader.
+    ("hotswap_wow64", "wow64.dll", "Windows/System32"),
+    ("hotswap_wow64", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("hotswap_wow64", "x86/hotswap_dll32.dll", "gala"),
     ("wow64_import_test", "wow64.dll", "Windows/System32"),
     ("wow64_import_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_import_test", "x86/testdll32.dll", "gala"),
@@ -2951,12 +3555,431 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
     ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
+    // office_install: the Office Deployment Tool's setup.exe (PREBUILT odt,
+    // 32-bit) with its configuration, the 32-bit DLLs gala has of those it
+    // loads, and the 64-bit ntdll and kernel32 for the 64-bit programs it
+    // starts.
+    ("office_install", "wow64.dll", "Windows/System32"),
+    ("office_install", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/user32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/version.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/schannel.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/urlmon.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/wininet.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/iphlpapi.dll", "Windows/SysWOW64"),
+    // The machine's root store as a full image has it (system_modules:
+    // the public CAs), which Schannel's validation of Microsoft's servers
+    // reads.
+    ("office_install", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
+    ("office_install", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("office_install", "x86/wintrust.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/setupapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("office_install", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msxml6.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/powrprof.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/wldp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/combase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/appxdeploymentclient.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdiplus.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/windows.ui.dll", "Windows/SysWOW64"),
+    ("office_install", "ntdll.dll", "Windows/System32"),
+    ("office_install", "kernel32.dll", "Windows/System32"),
+    ("office_install", "ucrtbase.dll", "Windows/System32"),
+    ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
+    ("office_install", "user/office_install/config.xml", "gala"),
+    // office_install_gui: office_install's files (MODULE_SETS) and the
+    // configuration that shows ODT's and Click-to-Run's windows.
+    ("office_install_gui", "user/office_install/config_full.xml", "gala"),
+    // office_install_local: office_install's files (MODULE_SETS) and the
+    // configuration that installs from C:\OfficeSource.
+    ("office_install_local", "user/office_install/config_local.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_actctx_test", "wow64.dll", "Windows/System32"),
+    ("wow64_actctx_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_actctx_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "wow64.dll", "Windows/System32"),
+    ("wow64_regnotify_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_regnotify_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // gala's UCRT, called directly (user/ucrt_test), x64 and x86.
+    ("ucrt_test", "ntdll.dll", "Windows/System32"),
+    ("ucrt_test", "kernel32.dll", "Windows/System32"),
+    ("ucrt_test", "ucrtbase.dll", "Windows/System32"),
+    ("ucrt_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // ShellExecute's "runas" (user/runas_test), x64 and x86: shell32 and
+    // the advapi32 it loads for the caller's token.
+    ("runas_test", "ntdll.dll", "Windows/System32"),
+    ("runas_test", "kernel32.dll", "Windows/System32"),
+    ("runas_test", "shell32.dll", "Windows/System32"),
+    ("runas_test", "advapi32.dll", "Windows/System32"),
+    ("runas_test", "secur32.dll", "Windows/System32"),
+    ("runas_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("runas_test", "bcrypt.dll", "Windows/System32"),
+    ("wow64_runas_test", "wow64.dll", "Windows/System32"),
+    ("wow64_runas_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // The kernel32 and ntdll functions Office imports (user/office_api_test),
+    // x64 and x86.
+    ("office_api_test", "ntdll.dll", "Windows/System32"),
+    ("office_api_test", "kernel32.dll", "Windows/System32"),
+    ("office_api_test", "imm32.dll", "Windows/System32"),
+    ("office_api_test", "normaliz.dll", "Windows/System32"),
+    ("office_api_test", "powrprof.dll", "Windows/System32"),
+    ("office_api_test", "wldp.dll", "Windows/System32"),
+    ("office_api_test", "urlmon.dll", "Windows/System32"),
+    ("office_api_test", "iphlpapi.dll", "Windows/System32"),
+    // OfficeC2RClient.exe's oleaut32 imports by ordinal; the font's HFONT
+    // through gdi32 and user32 (loaded by the test).
+    ("office_api_test", "oleaut32.dll", "Windows/System32"),
+    ("office_api_test", "user32.dll", "Windows/System32"),
+    ("office_api_test", "gdi32.dll", "Windows/System32"),
+    ("office_api_test", "d3dcompiler_47.dll", "Windows/System32"),
+    // What OffReg.dll imports besides ntdll (office_api_test's offreg.rs).
+    ("office_api_test", "msvcrt.dll", "Windows/System32"),
+    ("office_api_test", "advapi32.dll", "Windows/System32"),
+    ("office_api_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("office_api_test", "wtsapi32.dll", "Windows/System32"),
+    ("office_api_test", "userenv.dll", "Windows/System32"),
+    ("office_api_test", "shlwapi.dll", "Windows/System32"),
+    // The kernel32 functions Office imports once each (user/office_k32_test).
+    ("office_k32_test", "ntdll.dll", "Windows/System32"),
+    ("office_k32_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_office_k32_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/iphlpapi.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
+    // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
+    // which the 32-bit crypt32 reads through Sysnative.
+    ("wow64_cert_test", "wow64.dll", "Windows/System32"),
+    ("wow64_cert_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // WinVerifyTrust (user/wintrust_test), x64 and x86: wintrust, crypt32
+    // and bcrypt; Microsoft's code signing roots as a full image has them;
+    // the real signed images it verifies, from their downloads (PREBUILT
+    // odt and python; not committed).
+    ("wintrust_test", "ntdll.dll", "Windows/System32"),
+    ("wintrust_test", "kernel32.dll", "Windows/System32"),
+    ("wintrust_test", "advapi32.dll", "Windows/System32"),
+    ("wintrust_test", "wintrust.dll", "Windows/System32"),
+    ("wintrust_test", "crypt32.dll", "Windows/System32"),
+    ("wintrust_test", "bcrypt.dll", "Windows/System32"),
+    ("wintrust_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wintrust_test", "ncrypt.dll", "Windows/System32"),
+    ("wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
+    // cab_probe: the embedded self-signed cabinet through gala's wintrust.
+    ("cab_probe", "ntdll.dll", "Windows/System32"),
+    ("cab_probe", "kernel32.dll", "Windows/System32"),
+    ("cab_probe", "advapi32.dll", "Windows/System32"),
+    ("cab_probe", "wintrust.dll", "Windows/System32"),
+    ("cab_probe", "crypt32.dll", "Windows/System32"),
+    ("cab_probe", "bcrypt.dll", "Windows/System32"),
+    ("cab_probe", "bcryptprimitives.dll", "Windows/System32"),
+    ("cab_probe", "ncrypt.dll", "Windows/System32"),
+    ("wow64_wintrust_test", "wow64.dll", "Windows/System32"),
+    ("wow64_wintrust_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/wintrust.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("wow64_wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
+    // SetupIterateCabinetW (user/setupcab_test), x64 and x86.
+    ("setupcab_test", "ntdll.dll", "Windows/System32"),
+    ("setupcab_test", "kernel32.dll", "Windows/System32"),
+    ("setupcab_test", "setupapi.dll", "Windows/System32"),
+    ("wow64_setupcab_test", "wow64.dll", "Windows/System32"),
+    ("wow64_setupcab_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/setupapi.dll", "Windows/SysWOW64"),
+    // msi's queries (user/msi_test), x64 and x86.
+    ("msi_test", "ntdll.dll", "Windows/System32"),
+    ("msi_test", "kernel32.dll", "Windows/System32"),
+    ("msi_test", "msi.dll", "Windows/System32"),
+    ("wow64_rstrtmgr_test", "wow64.dll", "Windows/System32"),
+    ("wow64_rstrtmgr_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/rstrtmgr.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // The notification area, PNG icons, LoadIconMetric (user/tray_test),
+    // x64 on the screen and x86 on a Test presenter.
+    ("tray_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("tray_test", "ntdll.dll", "Windows/System32"),
+    ("tray_test", "kernel32.dll", "Windows/System32"),
+    ("tray_test", "user32.dll", "Windows/System32"),
+    ("tray_test", "gdi32.dll", "Windows/System32"),
+    ("tray_test", "shell32.dll", "Windows/System32"),
+    ("tray_test", "comctl32.dll", "Windows/System32"),
+    ("wow64_tray_test", "wow64.dll", "Windows/System32"),
+    ("wow64_tray_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_tray_test", "x86/comctl32.dll", "Windows/SysWOW64"),
+    // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
+    // and x86.
+    ("uisettings_test", "ntdll.dll", "Windows/System32"),
+    ("uisettings_test", "kernel32.dll", "Windows/System32"),
+    ("uisettings_test", "advapi32.dll", "Windows/System32"),
+    ("uisettings_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("uisettings_test", "user32.dll", "Windows/System32"),
+    ("uisettings_test", "gdi32.dll", "Windows/System32"),
+    ("uisettings_test", "ole32.dll", "Windows/System32"),
+    ("uisettings_test", "oleaut32.dll", "Windows/System32"),
+    ("uisettings_test", "combase.dll", "Windows/System32"),
+    ("uisettings_test", "windows.ui.dll", "Windows/System32"),
+    ("wow64_uisettings_test", "wow64.dll", "Windows/System32"),
+    ("wow64_uisettings_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/combase.dll", "Windows/SysWOW64"),
+    ("wow64_uisettings_test", "x86/windows.ui.dll", "Windows/SysWOW64"),
+    // GDI+'s flat API (user/gdiplus_test), x64 and x86.
+    ("gdiplus_test", "ntdll.dll", "Windows/System32"),
+    ("gdiplus_test", "kernel32.dll", "Windows/System32"),
+    ("gdiplus_test", "gdi32.dll", "Windows/System32"),
+    ("gdiplus_test", "shlwapi.dll", "Windows/System32"),
+    ("gdiplus_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("gdiplus_test", "ole32.dll", "Windows/System32"),
+    ("gdiplus_test", "gdiplus.dll", "Windows/System32"),
+    ("wow64_gdiplus_test", "wow64.dll", "Windows/System32"),
+    ("wow64_gdiplus_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_gdiplus_test", "x86/gdiplus.dll", "Windows/SysWOW64"),
+    // The Windows Overlay Filter's API (user/wofutil_test).
+    // File data written back lazily (user/writeback_test).
+    ("writeback_test", "ntdll.dll", "Windows/System32"),
+    ("writeback_test", "kernel32.dll", "Windows/System32"),
+    // Hard links and delete dispositions (user/hardlink_test).
+    ("hardlink_test", "ntdll.dll", "Windows/System32"),
+    ("hardlink_test", "kernel32.dll", "Windows/System32"),
+    ("imagetrim_test", "ntdll.dll", "Windows/System32"),
+    ("imagetrim_test", "kernel32.dll", "Windows/System32"),
+    ("imagetrim_test", "imagetrim_dll.dll", "gala"),
+    ("wow64_hardlink_test", "wow64.dll", "Windows/System32"),
+    ("wow64_hardlink_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_hardlink_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_hardlink_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // The thread pool's family (user/threadpool_test).
+    ("threadpool_test", "ntdll.dll", "Windows/System32"),
+    ("threadpool_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "wow64.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_threadpool_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_threadpool_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wofutil_test", "ntdll.dll", "Windows/System32"),
+    ("wofutil_test", "kernel32.dll", "Windows/System32"),
+    ("wofutil_test", "wofutil.dll", "Windows/System32"),
+    // The Software Protection Platform's client (user/sppc_test).
+    ("sppc_test", "ntdll.dll", "Windows/System32"),
+    ("sppc_test", "kernel32.dll", "Windows/System32"),
+    ("sppc_test", "sppc.dll", "Windows/System32"),
+    // crypt32's SIP registration in the registry (user/sip_test).
+    ("sip_test", "ntdll.dll", "Windows/System32"),
+    ("sip_test", "kernel32.dll", "Windows/System32"),
+    ("sip_test", "advapi32.dll", "Windows/System32"),
+    ("sip_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("sip_test", "crypt32.dll", "Windows/System32"),
+    // wintrust's trust provider registration in the registry
+    // (user/actionid_test).
+    ("actionid_test", "ntdll.dll", "Windows/System32"),
+    ("actionid_test", "kernel32.dll", "Windows/System32"),
+    ("actionid_test", "advapi32.dll", "Windows/System32"),
+    ("actionid_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("actionid_test", "wintrust.dll", "Windows/System32"),
+    ("actionid_test", "crypt32.dll", "Windows/System32"),
+    ("actionid_test", "bcrypt.dll", "Windows/System32"),
+    ("actionid_test", "ncrypt.dll", "Windows/System32"),
+    // The Restart Manager (user/rstrtmgr_test): rstrtmgr and the
+    // advapi32 it asks for services.
+    ("rstrtmgr_test", "ntdll.dll", "Windows/System32"),
+    ("rstrtmgr_test", "kernel32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "rstrtmgr.dll", "Windows/System32"),
+    ("rstrtmgr_test", "advapi32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("rstrtmgr_test", "secur32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "bcrypt.dll", "Windows/System32"),
+    // The service control manager's client (user/svc_test), x64 and x86.
+    ("svc_test", "ntdll.dll", "Windows/System32"),
+    ("svc_test", "kernel32.dll", "Windows/System32"),
+    ("svc_test", "advapi32.dll", "Windows/System32"),
+    ("svc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("svc_test", "secur32.dll", "Windows/System32"),
+    ("svc_test", "bcrypt.dll", "Windows/System32"),
+    ("svc_test", "user/access_test/access_test.regseed", "registry"),
+    ("wow64_svc_test", "wow64.dll", "Windows/System32"),
+    ("wow64_svc_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "user/access_test/access_test.regseed", "registry"),
+    // Services that run (user/svcrun_test): the program is its own
+    // service, x64 and x86.
+    ("svcrun_test", "ntdll.dll", "Windows/System32"),
+    ("svcrun_test", "kernel32.dll", "Windows/System32"),
+    ("svcrun_test", "advapi32.dll", "Windows/System32"),
+    ("svcrun_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_svcrun_test", "wow64.dll", "Windows/System32"),
+    ("wow64_svcrun_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // MSXML 6's DOM through COM (user/msxml_test), x64 and x86.
+    ("msxml_test", "ntdll.dll", "Windows/System32"),
+    ("msxml_test", "kernel32.dll", "Windows/System32"),
+    ("msxml_test", "advapi32.dll", "Windows/System32"),
+    ("msxml_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("msxml_test", "ole32.dll", "Windows/System32"),
+    ("msxml_test", "oleaut32.dll", "Windows/System32"),
+    ("msxml_test", "msxml6.dll", "Windows/System32"),
+    // The Known Folder Manager through COM (user/knownfolder_test), x64
+    // and x86.
+    ("knownfolder_test", "ntdll.dll", "Windows/System32"),
+    ("knownfolder_test", "kernel32.dll", "Windows/System32"),
+    ("knownfolder_test", "advapi32.dll", "Windows/System32"),
+    ("knownfolder_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("knownfolder_test", "ole32.dll", "Windows/System32"),
+    ("knownfolder_test", "oleaut32.dll", "Windows/System32"),
+    ("knownfolder_test", "shell32.dll", "Windows/System32"),
+    ("wow64_knownfolder_test", "wow64.dll", "Windows/System32"),
+    ("wow64_knownfolder_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_knownfolder_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    // The Windows Imaging Component through COM (user/windowscodecs_test).
+    ("windowscodecs_test", "ntdll.dll", "Windows/System32"),
+    ("windowscodecs_test", "kernel32.dll", "Windows/System32"),
+    ("windowscodecs_test", "advapi32.dll", "Windows/System32"),
+    ("windowscodecs_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("windowscodecs_test", "ole32.dll", "Windows/System32"),
+    ("windowscodecs_test", "oleaut32.dll", "Windows/System32"),
+    ("windowscodecs_test", "shlwapi.dll", "Windows/System32"),
+    ("windowscodecs_test", "windowscodecs.dll", "Windows/System32"),
+    // Direct2D (user/d2d1_test): WIC bitmaps, DCs and windows; its window
+    // scenario (d2d1_window) takes the same set and a wallpaper.
+    ("d2d1_test", "ntdll.dll", "Windows/System32"),
+    ("d2d1_test", "kernel32.dll", "Windows/System32"),
+    ("d2d1_test", "advapi32.dll", "Windows/System32"),
+    ("d2d1_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d2d1_test", "ole32.dll", "Windows/System32"),
+    ("d2d1_test", "oleaut32.dll", "Windows/System32"),
+    ("d2d1_test", "shlwapi.dll", "Windows/System32"),
+    ("d2d1_test", "user32.dll", "Windows/System32"),
+    ("d2d1_test", "gdi32.dll", "Windows/System32"),
+    ("d2d1_test", "windowscodecs.dll", "Windows/System32"),
+    ("d2d1_test", "d2d1.dll", "Windows/System32"),
+    ("d2d1_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/msxml6.dll", "Windows/SysWOW64"),
+    // combase.dll and Windows Runtime activation (user/combase_test), x64
+    // and x86.
+    ("combase_test", "ntdll.dll", "Windows/System32"),
+    ("combase_test", "kernel32.dll", "Windows/System32"),
+    ("combase_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("combase_test", "ole32.dll", "Windows/System32"),
+    ("combase_test", "oleaut32.dll", "Windows/System32"),
+    ("combase_test", "combase.dll", "Windows/System32"),
+    ("combase_test", "appxdeploymentclient.dll", "Windows/System32"),
+    ("wow64_combase_test", "wow64.dll", "Windows/System32"),
+    ("wow64_combase_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/combase.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/appxdeploymentclient.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3014,6 +4037,8 @@ const USER_PROGRAMS: &[&str] = &[
     "xstate_test",
     "straddle_test",
     "statedump_test",
+    "snapshot_test",
+    "hotswap_test",
     "clockcal_test",
     "safepoint_test",
     "shootdown_test",
@@ -3023,6 +4048,7 @@ const USER_PROGRAMS: &[&str] = &[
     "missing_import_test",
     "unimplemented_test",
     "rpcrt4_test",
+    "rpc_test",
     "netapi32_test",
     "pdh_test",
     "setupapi_test",
@@ -3042,11 +4068,18 @@ const USER_PROGRAMS: &[&str] = &[
     "gui_test",
     "conhost",
     "console_window_test",
+    "wsl",
+    "wsl_test",
+    "taskmgr",
+    "taskmgr_test",
+    "explorer",
+    "explorer_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
     "gpu_stub_test",
     "persist_test",
+    "volume_test",
     "kernel32_system_test",
     "kernel32_clr_test",
     "com_test",
@@ -3061,15 +4094,20 @@ const USER_PROGRAMS: &[&str] = &[
     "session_test",
     "presenter_test",
     "winsta_test",
+    "clipboard_test",
     "lsa_test",
     "restricted_test",
     "cmd",
     "cmd_test",
     "gala",
     "gala_cli_test",
+    "start_menu_test",
+    "linux_menu_test",
     "pk_install_test",
     "profile_test",
     "registry_test",
+    "regnotify_test",
+    "actctx_test",
     "keyed_event_test",
     "iphlpapi_test",
     "afd_poll_test",
@@ -3090,22 +4128,77 @@ const USER_PROGRAMS: &[&str] = &[
     "udp_test",
     "process_test",
     "commit_test",
+    "pagefile_test",
     "quota_test",
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "ucrt_test",
+    "office_api_test",
+    "office_k32_test",
+    "msi_test",
+    "rstrtmgr_test",
+    "wofutil_test",
+    "sppc_test",
+    "sip_test",
+    "actionid_test",
+    "hardlink_test",
+    "threadpool_test",
+    "imagetrim_test",
+    "writeback_test",
+    "gdiplus_test",
+    "uisettings_test",
+    "tray_test",
+    "wintrust_test",
+    "cab_probe",
+    "setupcab_test",
+    "svc_test",
+    "svcrun_test",
+    "msxml_test",
+    "knownfolder_test",
+    "windowscodecs_test",
+    "d2d1_test",
+    "winhttp_cb_test",
+    "runas_test",
+    "combase_test",
+    "consolerun",
+    "reparse_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
 /// x86 runtime), shipped and exported like USER_PROGRAMS.
 const USER_PROGRAMS_X86: &[&str] = &[
+    "wow64_gdiplus_test",
+    "wow64_uisettings_test",
+    "wow64_tray_test",
     "wow64_test",
     "wow64_thread_test",
     "wow64_import_test",
+    "wow64_hotswap_test",
     "wow64_seh_test",
     "wow64_fs_test",
     "wow64_k32_test",
     "wow64_adv_test",
+    "wow64_regnotify_test",
+    "wow64_actctx_test",
+    "wow64_ucrt_test",
+    "wow64_office_api_test",
+    "wow64_office_k32_test",
+    "wow64_cert_test",
+    "wow64_msi_test",
+    "wow64_rstrtmgr_test",
+    "wow64_hardlink_test",
+    "wow64_threadpool_test",
+    "wow64_wintrust_test",
+    "wow64_setupcab_test",
+    "wow64_svc_test",
+    "wow64_svcrun_test",
+    "wow64_msxml_test",
+    "wow64_knownfolder_test",
+    "wow64_winhttp_cb_test",
+    "wow64_runas_test",
+    "wow64_combase_test",
+    "wow64_schannel_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -3130,6 +4223,9 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// took ~45 s alone and hit 120 s there). They get this much instead of
 /// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
+    "taskmgr",
+    "explorer",
+    "memload_test",
     "java_version",
     "java_hello",
     "java_http",
@@ -3145,6 +4241,11 @@ const SLOW_SCENARIOS: &[&str] = &[
     "python_pip_https",
     "python_numpy",
 ];
+/// Memory for memload_test's VM (its file cache holds less than the
+/// 192 MiB it downloads).
+const MEMLOAD_MEMORY_MIB: u64 = 256;
+/// Memory for the page file's scenarios (`pagefile_test`).
+const PAGEFILE_MEMORY_MIB: u64 = 256;
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
@@ -3153,6 +4254,20 @@ const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 /// and a harness run under TCG (a report run, PENDING: not in the gate).
 const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+/// `linux_menu`: a distribution of ~45 MB fetched and imported, its
+/// desktop, a terminal and an application started, under TCG (about
+/// 110 s of run time measured).
+const LINUX_MENU_TIMEOUT: Duration = Duration::from_secs(600);
+/// Memory for `linux_menu`'s VM: the image's Linux roots, the
+/// distribution's tree (a second copy, on C: in memory), its download.
+const LINUX_MENU_MEMORY_MIB: u64 = 1536;
+/// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
+/// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
+/// gala guest under TCG fetched 512 MiB of the same CDN file with curl
+/// onto a disk-backed C: in 179 s (3.0 MB/s): about 1480 s for the
+/// download, after about 360 s of setup before it (run time, measured);
+/// twice that for a slower host.
+const OFFICE_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Scenarios run under an artificial host load (clockcheck::HostLoad:
 /// a busy thread on every host CPU) whose guest clock must agree with the
@@ -3171,6 +4286,10 @@ fn scenario_timeout(name: &str) -> Duration {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
+    } else if name.starts_with("office_install") {
+        OFFICE_INSTALL_TIMEOUT
+    } else if name == "linux_menu" {
+        LINUX_MENU_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")
@@ -3205,7 +4324,22 @@ commands:
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
                boot tests [--no-boot: all but the boot tests]
   boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
-               (XTASK_SHARD=i/n: the i-th of n shares of the VMs)
+               (XTASK_SHARD=i/n: the i-th of n shares of the VMs);
+               one scenario saved as a whole machine when a line appears in its
+               serial log: --snapshot-at <text> --snapshot-name <name>
+               [--snapshot-stop: end the run there]; a run resumed from one:
+               --from-snapshot <name> [scenario] (only on the build it was taken
+               from; docs/WORKFLOW.md, Machine snapshots); AT YOUR OWN RISK,
+               never a real run: --from-snapshot <name> --hot-swap-unsafe
+               [kernel,]<dll>[,<dll>...] splices the new build of the kernel
+               and the named DLLs into the resumed machine (docs/WORKFLOW.md,
+               Hot swapping DLLs and the kernel)
+  snapshots    list the machine snapshots (target/snapshots): what, when, size,
+               build; snapshots rm <name> deletes one
+  hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
+               <new> <new.map>, DLLs or the kernel (lld maps: a DLL's in
+               target/<target>/release/deps, the kernel's beside it as
+               kernel.map; XTASK_HOTSWAP_WHY=1: why each changed)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -3257,6 +4391,8 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  disk-files   what a disk image (a kept <iso>.disk.img) holds on C:, read with the
+               kernel's own code: disk-files <image> [C:/path] [--out DIR]
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
   relay <port> one connection on standard input/output to 127.0.0.1:<port>
@@ -3309,7 +4445,9 @@ fn main() -> ExitCode {
                         boot_tests(release, None)
                     }
                 }),
-            Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
+            Some("boot-test") => boot_test_command(release, &args),
+            Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
+            Some("hotswap-diff") => hotswap_diff(&args[1..]),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
             Some("docker-test") => docker_test(&args[1..]),
@@ -3378,6 +4516,8 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("feed") => feed::cli(&args[1..]),
+            Some("disk-files") => diskimage::disk_files(&args[1..]),
+            Some("office-source") => office_source_command(&args[1..]),
             Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(dir) => release_tree(release, Path::new(dir)),
                 None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
@@ -3401,12 +4541,100 @@ fn main() -> ExitCode {
         };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // A hot-swapped run whose scenario printed what it expects: its own
+        // status, never success.
+        Err(e) if e.starts_with(hotswap::NOT_A_REAL_RUN) => {
+            eprintln!("xtask: {e}");
+            ExitCode::from(hotswap::EXIT_HOT_SWAPPED)
+        }
         Err(e) => {
             eprintln!("xtask: error: {e}");
             ExitCode::FAILURE
         }
     }
 }
+
+/// `cargo xtask hotswap-diff <old> <old.map> <new> <new.map>` (DLLs or
+/// the kernel): what `--hot-swap-unsafe` would patch, or why it would
+/// refuse
+/// (hotswap.rs).
+fn hotswap_diff(args: &[String]) -> Result {
+    let [old, old_map, new, new_map] = args else {
+        return Err(
+            "usage: cargo xtask hotswap-diff <old> <old.map> <new> <new.map> (DLLs or the kernel)"
+                .into(),
+        );
+    };
+    let read = |p: &String| fs::read(p).map_err(|e| format!("{p}: {e}"));
+    let text = |p: &String| fs::read_to_string(p).map_err(|e| format!("{p}: {e}"));
+    // The kernel (an ELF) or a DLL (a PE image).
+    let image = |bytes: &[u8], map: &str| {
+        if bytes.starts_with(b"\x7fELF") {
+            hotswap::Image::from_elf(bytes, map)
+        } else {
+            hotswap::Image::read(bytes, map)
+        }
+    };
+    let old_image = image(&read(old)?, &text(old_map)?)?;
+    let new_file = read(new)?;
+    let new_image = image(&new_file, &text(new_map)?)?;
+    let name =
+        Path::new(new).file_name().map_or("dll".into(), |n| n.to_string_lossy().into_owned());
+    let patch = hotswap::diff(&old_image, &new_image, &name, &new_file)?;
+    print!("{}", patch.summary.describe(&name));
+    println!(
+        "xtask: hot swap {name}: blob {} bytes ({} fixups), {} entries patched",
+        patch.blob.len(),
+        patch.fixups.len(),
+        patch.entries.len()
+    );
+    Ok(())
+}
+
+/// `cargo xtask boot-test [filter] [snapshot options]` (snapshot.rs).
+fn boot_test_command(release: bool, args: &[String]) -> Result {
+    let request = snapshot::parse_request(args)?;
+    let filter = args.get(1).filter(|a| !a.starts_with("--")).cloned();
+    // A resumed run's scenario is its snapshot's.
+    let filter = match (&request, filter) {
+        (Some(snapshot::Request::Restore { name, .. }), None) => Some(format!(
+            "{}$",
+            snapshot::Manifest::read(&snapshot::root(&target_dir()).join(name))?.scenario
+        )),
+        (_, filter) => filter,
+    };
+    let hotswap = match &request {
+        Some(snapshot::Request::Restore { hotswap: Some(dlls), .. }) => Some(dlls.clone()),
+        _ => None,
+    };
+    if let Some(dlls) = &hotswap {
+        eprint!("{}", hotswap::banner(dlls));
+    }
+    snapshot::set_request(request);
+    let result = boot_tests(release, filter.as_ref());
+    match hotswap {
+        None => result,
+        // Never a pass: what the scenario printed is told apart from a
+        // failure by the exit status (EXIT_HOT_SWAPPED).
+        Some(dlls) => {
+            eprint!("{}", hotswap::banner(&dlls));
+            match (result, HOTSWAP_EXPECTED.load(std::sync::atomic::Ordering::Relaxed)) {
+                (Err(_), true) | (Ok(()), _) => Err(format!(
+                    "{}: the scenario printed what it expects with {} swapped in; this is no \
+                     pass (exit status {}): run it from boot before a pull request",
+                    hotswap::NOT_A_REAL_RUN,
+                    hotswap::swap_label(&dlls),
+                    hotswap::EXIT_HOT_SWAPPED
+                )),
+                (Err(e), false) => Err(format!("{e} (a hot-swapped run: not a real run)")),
+            }
+        }
+    }
+}
+
+/// Set when a hot-swapped scenario printed what it expects (hotswap.rs:
+/// still no pass).
+static HOTSWAP_EXPECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
@@ -3438,12 +4666,15 @@ fn user_build_for(target: &str) -> Command {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    // Cargo merges this array with the target's rustflags in
+    // .cargo/config.toml. lld's map of each image (`deps/<name>.map`: every
+    // input section with its address, size and symbols; not part of the
+    // image) is what `--hot-swap-unsafe` diffs builds with (hotswap.rs).
+    let mut flags = vec!["-Clink-arg=/lldmap".to_string()];
     if let Some(home) = cargo_home {
-        // Cargo merges this array with the target's rustflags in
-        // .cargo/config.toml.
-        let flag = format!("--remap-path-prefix={}=/cargo", home.display());
-        cmd.arg("--config").arg(format!("target.{target}.rustflags=[{flag:?}]"));
+        flags.push(format!("--remap-path-prefix={}=/cargo", home.display()));
     }
+    cmd.arg("--config").arg(format!("target.{target}.rustflags={flags:?}"));
     cmd
 }
 
@@ -3472,6 +4703,14 @@ fn unit_tests() -> Result {
             .arg("handover::"),
     )?;
     run_cmd(cargo().args(["test", "--package", "xtask"]))?;
+    // gala's wsl.exe's tar, gzip, command line and -l -v (ROADMAP CT).
+    run_cmd(cargo().args(["test", "--package", "wsl", "--lib"]))?;
+    // gala's taskmgr.exe's model: the kernel's records, groups, sorting,
+    // CPU shares (ROADMAP TM).
+    run_cmd(cargo().args(["test", "--package", "taskmgr", "--lib"]))?;
+    // gala's shell namespace's model and explorer.exe's (ROADMAP EX).
+    run_cmd(cargo().args(["test", "--package", "shellns"]))?;
+    run_cmd(cargo().args(["test", "--package", "explorer", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -3482,6 +4721,8 @@ fn unit_tests() -> Result {
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The XML reader galapkg and msxml6.dll share.
+    run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -3559,11 +4800,16 @@ fn build_kernel(release: bool) -> Result {
     // Every kernel xtask builds trusts the test key (R8; `XTASK_UNSIGNED`).
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    // The default build (kernel/build.rs: a variant is a hot swap
+    // scenario's, `kernel_variant`).
+    cmd.env_remove("GALA_KERNEL_VARIANT");
     trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -3635,8 +4881,25 @@ fn next_target_dir() -> PathBuf {
     target_dir().join("next")
 }
 
-/// Builds the `handover_next` kernel (R9 (d)) and returns its path.
+/// Builds the `handover_next` kernel (R9 (d)) and returns its path. The
+/// handover scenarios' images are made in parallel and share this one
+/// output, which `drop_debug_relocations` rewrites in place: the build
+/// runs once per profile and process, under a lock, and the others wait
+/// for it and take its path (two `objcopy`s on the same file at once
+/// failed the handover scenarios).
 fn build_next_kernel(release: bool) -> Result<PathBuf> {
+    static BUILT: std::sync::Mutex<[Option<PathBuf>; 2]> = std::sync::Mutex::new([None, None]);
+    let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let slot = &mut built[usize::from(release)];
+    if let Some(kernel) = slot {
+        return Ok(kernel.clone());
+    }
+    let kernel = build_next_kernel_unlocked(release)?;
+    *slot = Some(kernel.clone());
+    Ok(kernel)
+}
+
+fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
         .args(["--features", "handover_next", "--target-dir"])
@@ -3647,7 +4910,9 @@ fn build_next_kernel(release: bool) -> Result<PathBuf> {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    Ok(next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))
+    let kernel = next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    drop_debug_relocations(&kernel)?;
+    Ok(kernel)
 }
 
 fn make_iso(release: bool, name: &str, cmdline: &str, extra: &[(&str, &str)]) -> Result<PathBuf> {
@@ -3727,6 +4992,11 @@ fn make_iso_unchecked(
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    // `kernel=<path>`: another build of the kernel (a kernel hot swap
+    // scenario's variant, `kernel_variant`).
+    if let Some((path, _)) = extra.iter().find(|(f, _)| f.starts_with("kernel=")) {
+        kernel = PathBuf::from(&path["kernel=".len()..]);
+    }
     // R9 (d): the other build as a boot module, to hand over to.
     let builds = name
         .strip_prefix("test-")
@@ -3753,6 +5023,9 @@ fn make_iso_unchecked(
     }
     copy_kernel(&kernel, &boot.join("kernel"))?;
     let mut modules = String::new();
+    // DLL modules (path in the tree, the build output): kept with their
+    // linker maps beside a snapshot's image (`snapshot::keep_modules`).
+    let mut dlls: Vec<(String, PathBuf)> = Vec::new();
     if let Some((module, path)) = &other_kernel {
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
@@ -3765,10 +5038,17 @@ fn make_iso_unchecked(
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
+        if file.starts_with("kernel=") {
+            continue;
+        }
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
         if file.starts_with("target/prebuilt/") {
             fetch_prebuilt(file.trim_end_matches('/'))?;
+        }
+        // The WSL scenarios' rootfs tarballs, made from busybox.
+        if file.starts_with("target/wsl/") {
+            make_wsl_rootfs()?;
         }
         // A path ending in a slash is a directory tree, shipped as C:\<dir>
         // with its subdirectories: packed into one USTAR archive the kernel
@@ -3777,7 +5057,11 @@ fn make_iso_unchecked(
         if file.ends_with('/') {
             let mut files = Vec::new();
             tree_files(&root().join(file), Path::new(""), &mut files)?;
-            let archive = format!("{}.tree.tar", dir.replace('/', "_"));
+            // Named after the source too: two trees may go to one
+            // directory (the Linux roots "gtk3" and "x11" both to usr).
+            let source = file.trim_start_matches("target/prebuilt/").trim_end_matches('/');
+            let archive =
+                format!("{}.{}.tree.tar", dir.replace('/', "_"), source.replace('/', "_"));
             write_tar(&root().join(file), &files, &boot.join(&archive))?;
             // Data directories are writable (`tarw:`), program files not.
             let kind = if WRITABLE_TREES.contains(dir) { "tarw" } else { "tar" };
@@ -3786,23 +5070,48 @@ fn make_iso_unchecked(
             );
             continue;
         }
+        // `x86=<path>`: a 32-bit DLL built elsewhere (a hot swap
+        // scenario's variant, `hotswap_variant`), under boot/x86 as a
+        // USER_DLLS_X86 one would be.
+        if let Some(path) = file.strip_prefix("x86=") {
+            let path = Path::new(path);
+            let name = path.file_name().and_then(|n| n.to_str()).ok_or("x86= needs a file")?;
+            let x86 = boot.join("x86");
+            fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
+            copy(path, &x86.join(name))?;
+            dlls.push((format!("boot/x86/{name}"), path.to_path_buf()));
+            modules +=
+                &format!("    module_path: boot():/boot/x86/{name}\n    module_string: {dir}\n");
+            continue;
+        }
         // A 32-bit DLL: under boot/x86 (its name is often a 64-bit one's;
         // the kernel names the file after the path's last part).
         if let Some(dll) = x86_dll(file) {
             let x86 = boot.join("x86");
             fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
             copy(&built_dll_x86(dll.file), &x86.join(dll.file))?;
+            dlls.push((format!("boot/x86/{}", dll.file), built_dll_x86(dll.file)));
             modules += &format!(
                 "    module_path: boot():/boot/x86/{}\n    module_string: {dir}\n",
                 dll.file
             );
             continue;
         }
+        // `<source>@<name>`: the source (a built DLL or a file) under
+        // another name (a hot swap scenario's copies of hotswap_dll).
+        let (file, renamed) = match file.split_once('@') {
+            Some((source, name)) => (source, Some(name)),
+            None => (*file, None),
+        };
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
-            None => (built_dll(file), *file),
+            None => (built_dll(file), file),
         };
+        let name = renamed.unwrap_or(name);
         copy(&source, &boot.join(name))?;
+        if name.ends_with(".dll") {
+            dlls.push((format!("boot/{name}"), source.clone()));
+        }
         modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
@@ -3834,12 +5143,81 @@ fn make_iso_unchecked(
     )?;
     // Hybrid image: bootable by BIOS (Limine's stages) and UEFI.
     run_quiet(Command::new(limine.join("limine")).arg("bios-install").arg(&iso))?;
+    // What a machine snapshot of it must match (snapshot.rs).
+    let _ = fs::remove_file(snapshot::digests_path(&iso));
+    let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
+    if snapshot::digests_wanted() {
+        snapshot::write_boot_digests(&iso, &snapshot::boot_digests(&iso_root)?)?;
+        snapshot::keep_modules(&iso, &iso_root, &dlls, &kernel)?;
+    }
     // The tree is in the image now (it can be as large: disk space).
     let _ = fs::remove_dir_all(&iso_root);
     if name == "gala-os" {
         eprintln!("xtask: built {}", iso.display());
     }
     Ok(iso)
+}
+
+/// The module sets whose files make `linux_menu`'s Ubuntu stand-in: LD
+/// step 6's desktop (the session, Xwayland, twm, xterm and its desktop
+/// entry, their libraries, glibc).
+const LINUX_MENU_ROOT_SETS: &[&str] = &["xdesktop", "x11", "gtk3", "wayland_client", "glibc"];
+
+/// `linux_menu`'s distributions, served by `serve-page` from
+/// `target/linux-menu/` under the file names of the suggestions' URLs
+/// (kernel/src/nt/desktop/linux.rs; the guest's `linux_mirror=`): a
+/// stand-in for Ubuntu's WSL image made of LINUX_MENU_ROOT_SETS (Ubuntu
+/// 24.04's packages, as the ISO's Linux roots, with LD step 6's desktop
+/// session at /lx/xdesktop), and for Alpine's mini root the busybox
+/// root of the WSL scenarios. Made again each run (deterministic).
+fn linux_menu_rootfs() -> Result<PathBuf> {
+    let dir = root().join("target/linux-menu");
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (set, file, to) in EXTRA_MODULES.iter().filter(|m| LINUX_MENU_ROOT_SETS.contains(&m.0)) {
+        let _ = set;
+        if file.starts_with("target/prebuilt/") {
+            fetch_prebuilt(file.trim_end_matches('/'))?;
+        }
+        let source = root().join(file);
+        if file.ends_with('/') {
+            let mut rel = Vec::new();
+            tree_files(&source, Path::new(""), &mut rel)?;
+            for r in rel.iter().filter(|r| source.join(r).is_file()) {
+                let data = fs::read(source.join(r)).map_err(|e| format!("reading {r:?}: {e}"))?;
+                files.push((format!("{to}/{}", r.to_string_lossy()), data));
+            }
+        } else {
+            let name = file.rsplit('/').next().unwrap_or(file);
+            let data = fs::read(&source).map_err(|e| format!("reading {file}: {e}"))?;
+            files.push((format!("{to}/{name}"), data));
+        }
+    }
+    // One entry per path (two sets may ship one file).
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+    wsl_rootfs::make_tree(&files, &dir.join("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"))?;
+    make_wsl_rootfs()?;
+    let bb = root().join("target/wsl/bb-rootfs.tar.gz");
+    fs::copy(&bb, dir.join("alpine-minirootfs-3.20.3-x86_64.tar.gz"))
+        .map_err(|e| format!("copying {bb:?}: {e}"))?;
+    Ok(dir)
+}
+
+/// `target/wsl/bb-rootfs.tar[.gz]` (`wsl_rootfs`), once per xtask run
+/// (ISOs are built in parallel).
+fn make_wsl_rootfs() -> Result {
+    static MADE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    if *made {
+        return Ok(());
+    }
+    let busybox = "target/prebuilt/busybox-linux/busybox";
+    fetch_prebuilt(busybox)?;
+    let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
+    wsl_rootfs::make(&root(), &data)?;
+    *made = true;
+    Ok(())
 }
 
 /// Writes the files `files` (relative to `dir`) as a USTAR archive (the
@@ -4334,6 +5712,11 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         &[r#"!"ev":"syscall","pid":4,"#, r#""ev":"syscall","pid":12,"#],
     ),
     (
+        // The mask set aside at boot is set again by the waiting thread.
+        "events_from",
+        &[r#""ev":"syscall","pid":4,"#],
+    ),
+    (
         // `events_pid=` limits system-call events to those processes:
         // process_test's own (pid 4), none of its children's; a wait
         // names the object it waits on.
@@ -4397,6 +5780,20 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
             r#""station":"WinSta0","desktop":"Default","from":"logon""#,
             r#""from":"startupinfo""#,
             r#""from":"parent""#,
+        ],
+    ),
+    (
+        // ROADMAP LD step 3: the clipboard's steps across the two
+        // processes, the child's CF_TEXT synthesized from the parent's
+        // CF_UNICODETEXT and the open refused while the other holds it.
+        "clipboard_test",
+        &[
+            r#""ev":"clipboard","op":"set""#,
+            r#""format":13,"kind":0,"size":64"#,
+            r#""format":1,"source":13,"kind":0,"size":64"#,
+            r#""op":"close""#,
+            r#""changed":true,"listeners":1"#,
+            r#""op":"open denied""#,
         ],
     ),
     (
@@ -4486,9 +5883,33 @@ const PENDING: &[&str] = &[
     "sshd",
 ];
 
+/// Scenarios that are never part of `cargo xtask test` or CI by design
+/// (not "being brought up": they are run by hand, by exact name, e.g.
+/// `cargo xtask boot-test office_install`): runs too long or too large
+/// for every change's gate.
+const MANUAL: &[&str] = &[
+    // OF: Office's installer: a ~5.4 GB download from Microsoft's CDN
+    // onto a disk-backed C: (OFFICE_INSTALL_TIMEOUT).
+    "office_install",
+    // OF: the same install with its windows on the console's desktop, to
+    // watch (screenshots: XTASK_SHOTS).
+    "office_install_gui",
+    // OF: office_install from the host's cache of the CDN's files
+    // (`cargo xtask office-source`), put on the disk (development's fast
+    // path).
+    "office_install_local",
+];
+
+/// Whether scenario `name` runs only when named exactly (PENDING, MANUAL).
+fn named_only(name: &str) -> bool {
+    PENDING.contains(&name) || MANUAL.contains(&name)
+}
+
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
+    // A framebuffer to show the installer's windows (XTASK_SHOTS).
+    "office_install_gui",
     "chromium_window",
     "boot_config_edited",
     "handover_uefi",
@@ -4507,6 +5928,13 @@ const UEFI_SCENARIOS: &[&str] = &[
     "virtio_gpu_reset",
     "filezilla",
     "console_window",
+    "wsl_terminal",
+    "start_menu",
+    "taskmgr",
+    "explorer",
+    "linux_menu",
+    "tray_test",
+    "d2d1_window",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -4527,6 +5955,9 @@ enum NetClient {
     Tls,
     /// GETs `/` and expects a 200 whose body contains all of these.
     Contains(&'static [&'static str]),
+    /// Nothing: the guest only connects out (the card and QEMU's NAT to
+    /// the host's network are what the scenario needs).
+    Outbound,
     /// Logs on with the host's ssh and user/sshd/client_ed25519 as
     /// `galatest` and runs `echo` (`ssh_client`).
     Ssh,
@@ -4597,6 +6028,12 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
+    ("office_install", "run: begin setup.exe", NetClient::Outbound),
+    ("office_install_local", "run: begin setup.exe", NetClient::Outbound),
+    ("office_install_gui", "run: begin consolerun.exe", NetClient::Outbound),
+    // A card for GetAdaptersInfo to list (nothing connects).
+    ("office_api_test", "run: begin office_api_test.exe", NetClient::Outbound),
+    ("wow64_office_api_test", "run: begin wow64_office_api_test.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -4818,6 +6255,20 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
     }
+    // memload_test: a machine smaller than the default, so that what it
+    // downloads is more than the machine's memory within the slow
+    // scenarios' time (TCG's loopback HTTP moved about 1.4 MB/s).
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("memload")) {
+        memory = MEMLOAD_MEMORY_MIB;
+    }
+    // The page file's scenarios: more private memory than the machine
+    // has, written and read back, within the scenario's time.
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("pagefile")) {
+        memory = PAGEFILE_MEMORY_MIB;
+    }
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("linux_menu")) {
+        memory = memory.max(LINUX_MENU_MEMORY_MIB);
+    }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
@@ -4930,6 +6381,27 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["cxx_eh_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // A C++ exception nothing catches (user/cxx_eh_test/throw.cpp):
+        // the process ends with 0xe06d7363 as on Windows, and the crash
+        // report decodes the throw (ThrowInfo's catchable types, the
+        // std::exception's what()).
+        name: "cxx_throw",
+        cmdline: "qemu_exit run=cxx_throw.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "cxx_throw: throwing std::runtime_error",
+            "crash report: cxx_throw.exe (pid 4) ended by an unhandled exception 0xe06d7363 \
+             (C++ exception)",
+            "crash report:   C++ throw of std::runtime_error (.?AVruntime_error@std@@), 2 \
+             catchable types",
+            "crash report:     catchable as std::exception",
+            "crash report:   what(): \"config missing\"",
+            // vfptr, the text, whether to free it.
+            "crash report:     word 1 (0x",
+            "process cxx_throw.exe (pid 4) exited with status 0xe06d7363",
+        ],
+    },
+    Scenario {
         name: "timer_test",
         cmdline: "qemu_exit run=timer_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -4961,7 +6433,13 @@ const SCENARIOS: &[Scenario] = &[
         name: "loader_test",
         cmdline: "qemu_exit run=loader_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["loader_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            // testdll's ordinal 2 has no export (RVA 0): asked for, and
+            // imported by testdll_gap.dll, it is a missing export.
+            r#"ledger: {"service":"testdll.dll!#2","what":"missing export""#,
+            "loader_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "smp_test",
@@ -5089,6 +6567,124 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // SN step 1: a whole-machine snapshot (snapshot.rs). The run is
+        // saved at snapshot_test's `phase 1 done` and goes on to its end;
+        // two runs resumed from the snapshot, each on its own disk layer,
+        // must reach the end too, with phase 3's lines and not phase 1's
+        // (SNAPSHOT_SCENARIOS). C: on a disk (`persist`), so the disk's
+        // layers are part of it.
+        name: "snapshot_machine",
+        cmdline: "qemu_exit persist run=snapshot_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["snapshot_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SN step 1d: hot swapping a DLL into a resumed machine
+        // (hotswap.rs, HOTSWAP_SCENARIOS). The run itself, on the DLL's
+        // first build, is saved at `hotswap_test: marker` and goes on to
+        // these lines; then resumed runs with the DLL's `v2` build
+        // swapped in (applied: the new values) and its `layout` build
+        // (refused by xtask: a static changed size).
+        name: "hotswap_machine",
+        cmdline: "qemu_exit run=hotswap_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1d: the snapshot is taken inside a callback the DLL's
+        // changed `hs_call_back` made: the swap is refused by the guest's
+        // stack check (HOTSWAP_SCENARIOS) and the program goes on with
+        // the first build.
+        name: "hotswap_stack",
+        cmdline: "qemu_exit run=hotswap_test.exe args=stack",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["hotswap_test: callback 11", "hotswap_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SN step 1e: hot swapping the kernel into a resumed machine
+        // (hotswap.rs, SNAPSHOT_SCENARIOS). hotswap_test reads the kernel's
+        // probe (nt::hotswap_probe) before and after its marker, where the
+        // run is saved; resumed with the kernel's `hotswap_v2` build
+        // swapped in (applied: the new values) and its `hotswap_layout`
+        // build (refused by xtask: a static changed size).
+        name: "khotswap_machine",
+        cmdline: "qemu_exit run=hotswap_test.exe args=kernel",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1e: the run is saved while hotswap_test's thread waits
+        // inside the kernel's changed probe function (its kernel stack
+        // holds a return address into it): the guest refuses the swap of
+        // the kernel and of the DLL in the same plan, undoing the DLL's
+        // (SNAPSHOT_SCENARIOS), and the program goes on with the first
+        // builds.
+        name: "khotswap_stack",
+        cmdline: "qemu_exit run=hotswap_test.exe args=kstack",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1e: the kernel and a DLL in one plan
+        // (`--hot-swap-unsafe kernel,hotswap_dll.dll`): saved at the
+        // marker, resumed with both second builds (SNAPSHOT_SCENARIOS).
+        name: "khotswap_both",
+        cmdline: "qemu_exit run=hotswap_test.exe args=both",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1f: modules no process maps, swapped as whole files
+        // (hotswap.rs, SNAPSHOT_SCENARIOS). Saved at the marker, before
+        // hotswap_test loads hotswap_late.dll and hotswap_added.dll by
+        // name (the first is hotswap_dll's first build, the second is not
+        // in the image); resumed with every changed module swapped in
+        // (`--hot-swap-unsafe` with no list): hotswap_late.dll replaced
+        // whole by a build a patch cannot take, hotswap_added.dll added.
+        name: "hotswap_files",
+        cmdline: "qemu_exit run=hotswap_test.exe args=files",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: late version 1",
+            "hotswap_test: added: not found",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // SN step 1d in a WOW64 process: the 32-bit hotswap_test on
+        // hotswap_dll32 (hotswap_dll's source for x86), saved at its marker; a resume with
+        // the `v2` build swapped in (HOTSWAP_SCENARIOS): the 32-bit stack,
+        // a blob below 2 GiB, absolute (HIGHLOW) fixups.
+        name: "hotswap_wow64",
+        cmdline: "qemu_exit run=wow64_hotswap_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // A semaphore released and waited on from two processors at once.
         name: "smpsem_test",
         cmdline: "qemu_exit run=smpsem_test.exe",
@@ -5208,6 +6804,19 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["process_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // `events_from=` starts the stream late (here at once, after the
+        // kernel thread that waits for it has run; see EVENT_EXPECT).
+        name: "events_from",
+        cmdline: "qemu_exit events=syscall events_from=0 run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "events: the stream starts 0 s after boot (events_from=)",
+            "events: the stream starts now",
+            "process_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Smoke test only; `cargo xtask bench` collects the numbers.
         name: "bench",
         cmdline: "qemu_exit run=bench.exe",
@@ -5281,6 +6890,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=rpcrt4_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["rpcrt4_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "rpc_test",
+        cmdline: "qemu_exit run=rpc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rpc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "unimplemented_test",
@@ -5464,6 +7079,16 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP LD step 3: the window station's clipboard, in the
+        // kernel, between two processes (user/clipboard_test): formats
+        // copied through the kernel, the synthesized text formats, the
+        // lock across processes, the sequence number, WM_CLIPBOARDUPDATE.
+        name: "clipboard_test",
+        cmdline: "qemu_exit events=ipc run=clipboard_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clipboard_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Security model S4 (docs/SECURITY.md): LSA logons as sshd makes
         // them, run as SYSTEM (user/lsa_test).
         name: "lsa_test",
@@ -5533,6 +7158,39 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=registry_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["registry_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Registry change notification (NtNotifyChangeKey,
+        // NtNotifyChangeMultipleKeys, RegNotifyChangeKeyValue) and key
+        // rename (NtRenameKey, RegRenameKey) (user/regnotify_test).
+        name: "regnotify_test",
+        cmdline: "qemu_exit run=regnotify_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["regnotify_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/regnotify_test built for x86).
+        name: "wow64_regnotify_test",
+        cmdline: "qemu_exit run=wow64_regnotify_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_regnotify_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Activation contexts from real manifests: the process default
+        // (the program's own RT_MANIFEST), manifest files with
+        // dependencies, their sections and QueryActCtxW's classes
+        // (user/actctx_test).
+        name: "actctx_test",
+        cmdline: "qemu_exit run=actctx_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["actctx_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/actctx_test built for x86).
+        name: "wow64_actctx_test",
+        cmdline: "qemu_exit run=wow64_actctx_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_actctx_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // P1 (PowerShell): the console (CONOUT$, CONIN$) behind redirected
@@ -5659,6 +7317,31 @@ const SCENARIOS: &[Scenario] = &[
             "console_window_test: raw z",
             "console_window_test: ctrl-c",
             "console_window_test: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
+        // console window) and an install-on-click tile (7-Zip, not
+        // installed: `gala install 7zip.7zip` in a console window);
+        // START_MENU_SCREEN clicks them.
+        name: "start_menu",
+        cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "start_menu_test: listed",
+            "desktop: start menu starts Command Prompt: C:\\Windows\\System32\\cmd.exe",
+            "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
+            "gala's cmd.exe has no interactive prompt yet",
+            "start_menu_test: command prompt window",
+            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip",
+            "desktop: started C:\\gala\\gala.exe (pid",
+            // Offline (no network card, no winhttp.dll): gala says why in
+            // the window.
+            "gala: source https://github.com/microsoft/winget-pkgs: listing",
+            "start_menu_test: install window closed",
+            "xtask: screen ok",
+            "start_menu_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -5943,6 +7626,50 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // D4: a disk-backed C: (`persist` on a fresh 1 GiB disk,
+        // DISK_SCENARIOS): free space is the disk's, a 640 MiB file (more
+        // than the VM's 512 MiB) is written and read back, writing past
+        // the free space fails with ERROR_DISK_FULL.
+        name: "volume_test",
+        cmdline: "qemu_exit persist run=volume_test.exe args=640",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["volume_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The page file (ROADMAP OF, the memory): a 256 MiB VM
+        // (`PAGEFILE_MEMORY_MIB`) with C: on a 1 GiB disk (`persist`,
+        // DISK_SCENARIOS) commits, writes and reads back 1.25 times its
+        // memory; the commit limit is memory plus \pagefile.sys, which
+        // grows past it.
+        name: "pagefile_test",
+        cmdline: "qemu_exit persist run=pagefile_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pagefile: created \\pagefile.sys of ",
+            "pagefile: grown to ",
+            "pagefile_test: ok",
+            "exited with status 0x00000000",
+            // Every slot back with its process's end.
+            "0 MiB in use (most ",
+            "; 0 stray tokens",
+        ],
+    },
+    Scenario {
+        // The page file when the disk fails a page out: the first batch's
+        // write fails (`failpoint=pageout:nth:1`); its pages stay in
+        // memory, their slots free again, and the program's memory is
+        // intact (the next batches go out).
+        name: "pagefile_fail",
+        cmdline: "qemu_exit persist run=pagefile_test.exe failpoint=pageout:nth:1",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pagefile: the disk failed a write of ",
+            "pagefile_test: ok",
+            "exited with status 0x00000000",
+            "pages failed to write",
+        ],
+    },
+    Scenario {
         // D2: files kept across a reboot (`persist`: C: is kept on the
         // disk); DISK_SCENARIOS boots it twice, this is the second boot.
         name: "persist_test",
@@ -6008,6 +7735,514 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala's UCRT (ucrtbase.dll) called directly: start-up, printf and
+        // scanf with the UCRT's options, streams, strings, locale, math,
+        // the exit sequence (user/ucrt_test).
+        name: "ucrt_test",
+        cmdline: "qemu_exit run=ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ucrt_test: ok",
+            "ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The kernel32 and ntdll functions Office's programs import
+        // (user/office_api_test): CreateFile2, FindFirstFileNameW,
+        // CreateMutexExW, OpenSemaphoreA, K32EnumProcesses, the
+        // activation-context queries, RtlIntegerToUnicodeString,
+        // RtlIsNameInExpression, the AVL generic tables and the rest.
+        name: "office_api_test",
+        cmdline: "qemu_exit run=office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The kernel32 functions Office's apps and its Click-to-Run client
+        // import once each (user/office_k32_test): CompareStringA,
+        // FoldStringW, GetStringTypeExA, IsBad*Ptr, Offer/Reclaim/
+        // DiscardVirtualMemory, ResolveLocaleName, SetThreadIdealProcessor
+        // (the kernel's ThreadIdealProcessor), GetNumberFormat* and
+        // GetCurrencyFormat*, WinExec.
+        name: "office_k32_test",
+        cmdline: "qemu_exit run=office_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_k32_test built for x86).
+        name: "wow64_office_k32_test",
+        cmdline: "qemu_exit run=wow64_office_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // ShellExecute's "runas" by an elevated caller (SYSTEM): no
+        // prompt, the child starts with the caller's token, elevated
+        // (user/runas_test; docs/SECURITY.md "Elevation").
+        name: "runas_test",
+        cmdline: "qemu_exit as=system run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: elevated (type 1): runas started an elevated child",
+            "personality nt, elevated token",
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/runas_test built for x86): the x86
+        // SHELLEXECUTEINFOW and shell32.
+        name: "wow64_runas_test",
+        cmdline: "qemu_exit as=system run=wow64_runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_runas_test: elevated (type 1): runas started an elevated child",
+            "32-bit x86 (WOW64), elevated token",
+            "wow64_runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // NT symbolic links and reparse points (user/reparse_test;
+        // ROADMAP OF: Click-to-Run's staging links its virtualization DLLs
+        // into the product's folder). As SYSTEM, which holds
+        // SeCreateSymbolicLinkPrivilege.
+        name: "reparse_test",
+        cmdline: "qemu_exit as=system run=reparse_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["reparse_test: links made", "reparse_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same by the boot user, a standard user: no privilege, no
+        // link (ERROR_PRIVILEGE_NOT_HELD), nothing left behind.
+        name: "reparse_test_user",
+        cmdline: "qemu_exit run=reparse_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "reparse_test: no symbolic link privilege",
+            "reparse_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // "runas" by the boot user, a standard user: UAC would prompt;
+        // gala has no prompt and declines, recorded (user/runas_test).
+        name: "runas_declined",
+        cmdline: "qemu_exit run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: not elevated (type 1): runas declined",
+            r#"ledger: {"service":"shell32.dll!ShellExecute(runas: elevation prompt)","what":"unsupported""#,
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_api_test built for x86).
+        name: "wow64_office_api_test",
+        cmdline: "qemu_exit run=wow64_office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // crypt32 through WOW64 (user/cert_test built for x86): its
+        // structures in their x86 layouts, the chain engine, CRLs, PFX.
+        name: "wow64_cert_test",
+        cmdline: "qemu_exit run=wow64_cert_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_cert_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WinVerifyTrust's Authenticode (user/wintrust_test): Wine's
+        // self-signed images and their corrupted copies, an unsigned image,
+        // ODT's setup.exe, dual-signed (Microsoft's roots).
+        name: "wintrust_test",
+        cmdline: "qemu_exit run=wintrust_test.exe args=require",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wintrust_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SetupIterateCabinetW (user/setupcab_test): Wine's setupcab.c
+        // cases (bad paths, an empty file, no callback; its MSZIP cabinet
+        // iterated and extracted, a file skipped), and the stored
+        // self-signed cabinet.
+        name: "setupcab_test",
+        cmdline: "qemu_exit run=setupcab_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setupcab_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/setupcab_test built for x86), as
+        // ODT's 32-bit setup.exe calls it.
+        name: "wow64_setupcab_test",
+        cmdline: "qemu_exit run=wow64_setupcab_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_setupcab_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A probe (user/cab_probe), the counterpart of its Windows run:
+        // WinVerifyTrust of the self-signed cabinet and of copies with
+        // one byte of the header changed, and the candidate digests,
+        // through gala's wintrust. It asserts nothing but finishing.
+        name: "cab_probe",
+        cmdline: "qemu_exit run=cab_probe.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "cab_probe: selfsigned.cab: candidate A: 0..4, 8..36, 38..40, reserve's end..signature (gala's): matches",
+            "cab_probe: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/wintrust_test built for x86).
+        name: "wow64_wintrust_test",
+        cmdline: "qemu_exit run=wow64_wintrust_test.exe args=require",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_wintrust_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Windows Installer's queries with nothing installed, the
+        // functions and ordinals ODT's setup.exe imports (user/msi_test).
+        name: "msi_test",
+        cmdline: "qemu_exit run=msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Restart Manager: sessions, what uses registered files (this
+        // process, a child), shutdown and restart, filters
+        // (user/rstrtmgr_test).
+        name: "rstrtmgr_test",
+        cmdline: "qemu_exit run=rstrtmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rstrtmgr_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GDI+'s flat API as ODT's setup.exe draws with it: startup,
+        // bitmaps over the caller's memory and from a PNG stream, solid
+        // brushes, filling and drawing on a bitmap and on a DIB section's
+        // device context (user/gdiplus_test).
+        name: "gdiplus_test",
+        cmdline: "qemu_exit run=gdiplus_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["gdiplus_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/gdiplus_test built for x86).
+        name: "wow64_gdiplus_test",
+        cmdline: "qemu_exit run=wow64_gdiplus_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_gdiplus_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The notification area (user/tray_test): Shell_NotifyIcon's
+        // messages, the icon on shasha's taskbar, `gala tray` and its
+        // clicks, then a real click (TRAY_SCREEN); PNG icons and
+        // LoadIconMetric. UEFI: a screen.
+        name: "tray_test",
+        cmdline: "qemu_exit wallpaper=night run=tray_test.exe args=screen",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "tray_test: icons",
+            "desktop: notification-area icon added: window",
+            "tray_test: icon at 1168,776",
+            "tray_test: gala tray",
+            "tray_test: click the icon",
+            "tray_test: clicked",
+            "xtask: screen ok",
+            "desktop: notification-area icon deleted: window",
+            "tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same from a 32-bit program, on a Test presenter (a shell
+        // without a screen: BIOS).
+        name: "wow64_tray_test",
+        cmdline: "qemu_exit presenter=test run=wow64_tray_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: notification-area icon added: window",
+            "wow64_tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Windows.UI.ViewManagement.UISettings: its factory and objects,
+        // weak references, the theme's and accent's colours, the classic
+        // elements' system colours (user/uisettings_test).
+        name: "uisettings_test",
+        cmdline: "qemu_exit run=uisettings_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["uisettings_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/uisettings_test built for x86).
+        name: "wow64_uisettings_test",
+        cmdline: "qemu_exit run=wow64_uisettings_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_uisettings_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // File data written back lazily, as Windows' cache manager does:
+        // what programs see (FlushFileBuffers, write-through and
+        // unbuffered handles; user/writeback_test).
+        name: "writeback_test",
+        cmdline: "qemu_exit run=writeback_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A power cut after unflushed writes (`powercut`; no write-back
+        // by time): the second boot finds what was flushed and nothing
+        // of what was not (DISK_SCENARIOS).
+        name: "writeback_crash",
+        cmdline: "qemu_exit persist powercut writeback_ms=600000 run=writeback_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000", "powercut:"],
+    },
+    Scenario {
+        // Data not flushed reaches the disk by itself within seconds: a
+        // power cut 4 s after the write loses none of it.
+        name: "writeback_lazy",
+        cmdline: "qemu_exit persist powercut run=writeback_test.exe args=lazy",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["writeback_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Hard links (CreateHardLinkW, FileLinkInformation(Ex)) and
+        // FileDispositionInformationEx (user/hardlink_test).
+        name: "hardlink_test",
+        cmdline: "qemu_exit run=hardlink_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["hardlink_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Image pages dropped under memory pressure and built again from
+        // their files (ROADMAP OF, the memory; user/imagetrim_test): a
+        // DLL and its relocated copy read the same while private memory
+        // fills the machine to an eighth free; the kernel says what it
+        // dropped.
+        name: "imagetrim_test",
+        cmdline: "qemu_exit run=imagetrim_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "section: dropped",
+            "imagetrim_dll.dll",
+            "imagetrim_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The thread pool's whole family as Click-to-Run's DLLs use it
+        // (ROADMAP OF; user/threadpool_test): private pools, callback
+        // environments, cleanup groups, work, timer, wait and I/O objects.
+        name: "threadpool_test",
+        cmdline: "qemu_exit run=threadpool_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["threadpool_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/threadpool_test built for x86).
+        name: "wow64_threadpool_test",
+        cmdline: "qemu_exit run=wow64_threadpool_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_threadpool_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/hardlink_test built for x86).
+        name: "wow64_hardlink_test",
+        cmdline: "qemu_exit run=wow64_hardlink_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_hardlink_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Windows Overlay Filter's API with no filter attached
+        // (user/wofutil_test).
+        name: "wofutil_test",
+        cmdline: "qemu_exit run=wofutil_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wofutil_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Software Protection Platform's client over gala's license
+        // store (user/sppc_test).
+        name: "sppc_test",
+        cmdline: "qemu_exit run=sppc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sppc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // crypt32's subject interface package registration, as Office's
+        // integrator registers its VBA SIP (user/sip_test). As SYSTEM: it
+        // writes HKLM, as an administrator does.
+        name: "sip_test",
+        cmdline: "qemu_exit as=system run=sip_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sip_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // wintrust's trust provider registration, as Office's integrator
+        // registers its VBA trust provider (user/actionid_test). As
+        // SYSTEM: it writes HKLM, as an administrator does.
+        name: "actionid_test",
+        cmdline: "qemu_exit as=system run=actionid_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["actionid_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/rstrtmgr_test built for x86).
+        name: "wow64_rstrtmgr_test",
+        cmdline: "qemu_exit run=wow64_rstrtmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_rstrtmgr_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msi_test built for x86).
+        name: "wow64_msi_test",
+        cmdline: "qemu_exit run=wow64_msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // combase.dll: HSTRINGs, RoInitialize, activation from the
+        // registry, PackageManager with no packages, error origination
+        // (user/combase_test).
+        name: "combase_test",
+        cmdline: "qemu_exit run=combase_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["combase_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/combase_test built for x86).
+        name: "wow64_combase_test",
+        cmdline: "qemu_exit run=wow64_combase_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_combase_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The service control manager's client functions as an
+        // administrator (SYSTEM, as CI's elevated Windows runner):
+        // opening, AFD's status and configuration, enumeration, creating
+        // and deleting a service, and a standard user's (galatest's)
+        // rights (user/svc_test).
+        name: "svc_test",
+        cmdline: "qemu_exit as=system run=svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        // The standard user's part ran: galatest was refused all access.
+        expect: &[
+            "svc_test: ok",
+            "exited with status 0x00000000",
+            "(svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/svc_test built for x86).
+        name: "wow64_svc_test",
+        cmdline: "qemu_exit as=system run=wow64_svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_svc_test: ok",
+            "exited with status 0x00000000",
+            "(wow64_svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
+    },
+    Scenario {
+        // Services that run, as an administrator (SYSTEM): the program
+        // creates services whose executable is itself, starts them (the
+        // SCM's process as SYSTEM in session 0, the dispatcher's
+        // handshake), controls, stops and kills them (user/svcrun_test).
+        name: "svcrun_test",
+        cmdline: "qemu_exit as=system run=svcrun_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "svcrun_test: ok",
+            "exited with status 0x00000000",
+            "(svcrun_test.exe) asked to start \"svcrun_test_exit\": 0xc007041d",
+            "scm: service \"svcrun_test_kill\": its process svcrun_test.exe",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/svcrun_test built for x86): a
+        // 32-bit client and 32-bit services.
+        name: "wow64_svcrun_test",
+        cmdline: "qemu_exit as=system run=wow64_svcrun_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_svcrun_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
+        // attributes, XPath selection, parse errors (user/msxml_test).
+        name: "msxml_test",
+        cmdline: "qemu_exit run=msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Windows Imaging Component (user/windowscodecs_test): the
+        // factory through COM, bitmaps, palettes, streams, the PNG and
+        // BMP decoders, conversion, scaling, clipping.
+        name: "windowscodecs_test",
+        cmdline: "qemu_exit run=windowscodecs_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["windowscodecs_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Direct2D (user/d2d1_test): the factory, matrices, WIC bitmap,
+        // DC and window render targets, brushes, geometries, drawing.
+        name: "d2d1_test",
+        cmdline: "qemu_exit run=d2d1_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["d2d1_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A window drawn with Direct2D through a window render target
+        // (d2d1_test window; D2D1_WINDOW_SCREEN checks its pixels, then
+        // q ends it). UEFI: a screen.
+        name: "d2d1_window",
+        cmdline: "qemu_exit wallpaper=night run=d2d1_test.exe args=window",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["d2d1_test: window drawn", "xtask: screen ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Known Folder Manager (user/knownfolder_test): shell32's
+        // CLSID_KnownFolderManager, its folders and their definitions,
+        // GetPath against SHGetKnownFolderPath and SHGetFolderPathW,
+        // FindFolderFromPath.
+        name: "knownfolder_test",
+        cmdline: "qemu_exit run=knownfolder_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["knownfolder_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/knownfolder_test built for x86).
+        name: "wow64_knownfolder_test",
+        cmdline: "qemu_exit run=wow64_knownfolder_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_knownfolder_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msxml_test built for x86).
+        name: "wow64_msxml_test",
+        cmdline: "qemu_exit run=wow64_msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
+        // built for x86), its `_libm_sse2_*` functions included.
+        name: "wow64_ucrt_test",
+        cmdline: "qemu_exit run=wow64_ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_ucrt_test: ok",
+            "wow64_ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "prng_test",
@@ -6272,6 +8507,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=shlwapi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (shlwapi_test's source built for x86 by
+        // its build.sh), on SysWOW64's shlwapi: ODT's setup.exe's.
+        name: "wow64_shlwapi_test",
+        cmdline: "qemu_exit run=wow64_shlwapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_shlwapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
@@ -7808,6 +10051,44 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Memory stays bounded under sustained work (ROADMAP OF: what the
+        // Click-to-Run client does): 2000 threads made and ended, 192 MiB
+        // downloaded from Nginx in 256 KiB ranges (a thread each) onto a
+        // disk-backed C: in a 256 MiB VM (`MEMLOAD_MEMORY_MIB`), read
+        // back through views (DISK_SCENARIOS: a 2 GiB sparse disk).
+        name: "memload_test",
+        cmdline: "qemu_exit persist start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=memload_test.exe args=192",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["memload_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WinHTTP's status callbacks on a synchronous session (ROADMAP OF:
+        // ODT's setup.exe), against the same Nginx.
+        name: "winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["winhttp_cb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/winhttp_cb_test built for x86).
+        name: "wow64_winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_winhttp_cb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Schannel through WOW64 (user/schannel_test built for x86)
+        // against the same Nginx.
+        name: "wow64_schannel_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_schannel_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_schannel_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
         // user/http_client) against the same Nginx.
         name: "wininet_test",
@@ -7815,6 +10096,16 @@ const SCENARIOS: &[Scenario] = &[
                   run=wininet_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wininet_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64: wininet_test's source built for x86
+        // (user/wininet_test/build.sh), on SysWOW64's wininet, against the
+        // same Nginx.
+        name: "wow64_wininet_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_wininet_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_wininet_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // TLS step 3: curl for Windows (curl.se's build, PREBUILT curl),
@@ -8191,6 +10482,54 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OF (pending): the Office Deployment Tool's setup.exe (x86,
+        // PREBUILT odt) installs Word, Excel and PowerPoint as
+        // user/office_install/config.xml asks, from Microsoft's CDN (a
+        // net scenario: QEMU's NAT to the host's network). Its log goes to
+        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF). As
+        // SYSTEM: ODT needs an administrator (its "runas" is declined for
+        // the boot user, a standard user; docs/SECURITY.md "Elevation").
+        name: "office_install",
+        cmdline: "qemu_exit persist as=system run=setup.exe \
+                  args=/configure%20C:\\gala\\config.xml dump=C:/gala/odtlog,C:/Users/Public",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
+        // OF (manual, development's fast path): office_install from the
+        // host's cache of the CDN's files for its products (`cargo xtask
+        // office-source`, OFFICE_SOURCE), which xtask puts on the fresh
+        // disk as C:\OfficeSource (`diskimage::inject`, no copy on the
+        // host); config_local.xml names it as SourcePath, so nothing is
+        // downloaded and the run reaches the install's later stages
+        // without the half hour of download.
+        name: "office_install_local",
+        cmdline: "qemu_exit persist as=system run=setup.exe \
+                  args=/configure%20C:\\gala\\config_local.xml \
+                  dump=C:/gala/odtlog,C:/Users/Public",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
+        // OF (manual): office_install with its windows shown
+        // (config_full.xml: Display Level Full), to watch the install
+        // (`XTASK_SHOTS=120,300,... cargo xtask boot-test
+        // office_install_gui`: screendumps in target/screenshots/). Still
+        // as SYSTEM, an administrator, but on the console's desktop:
+        // consolerun moves its token to the console's session and starts
+        // setup.exe on `winsta0\default`, as `psexec -s -i` and MDT's
+        // ServiceUI do (as=system alone puts it in session 0, which
+        // nothing shows: WORKFLOW "Windows in another session").
+        // `wait=all`: the boot goes on while the Click-to-Run client and
+        // service work after setup.exe ends (ROADMAP OF: where it ends).
+        name: "office_install_gui",
+        cmdline: "qemu_exit persist as=system wait=all run=consolerun.exe \
+                  args=C:\\gala\\setup.exe%20/configure%20C:\\gala\\config_full.xml \
+                  dump=C:/gala/odtlog,C:/Users/Public",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["consolerun.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -8249,6 +10588,7 @@ const SCENARIOS: &[Scenario] = &[
             "crash report:   eax=",
             "crash report:   eip=",
             "crash report:   [esp+0x00]",
+            "stack values above those point into an image)",
             "process wow64_test.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
@@ -8329,6 +10669,7 @@ const SCENARIOS: &[Scenario] = &[
             "crash report:   personality nt, session ",
             "crash report:   rax=",
             "crash report:   [rsp+0x00]",
+            "stack values above those point into an image)",
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
@@ -8605,6 +10946,24 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/eventfd_test", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/pty_test (LD step 5: xterm's shell runs on a pty):
+        // /dev/ptmx and /dev/pts/<n>, the line discipline (canonical
+        // editing, echo, raw mode, VMIN/VTIME), ISIG's signals to the
+        // foreground group of the session it controls, SIGWINCH, the
+        // hang-up; its transcript must be its expected.txt (real Linux's).
+        name: "lx_pty",
+        cmdline: "qemu_exit lxrun=/lx/pty_test lxargs=./pty_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/pty_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/pty_test as a static-pie.
+        name: "lx_pty_pie",
+        cmdline: "qemu_exit lxrun=/lx/pty_test-pie lxargs=./pty_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/pty_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/eventfd_test as a static-pie.
         name: "lx_eventfd_pie",
         cmdline: "qemu_exit lxrun=/lx/eventfd_test-pie lxargs=./eventfd_test",
@@ -8770,6 +11129,65 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // X11 through rootless Xwayland (LD step 5): xterm 390 on display
+        // :0, which the Wayland server holds (`xwayland=on`); its connect
+        // starts Ubuntu's Xwayland (LINUX_ROOTS "x11"), whose window
+        // manager is the server's (wayland::xwm): xterm's window is a
+        // framed window of the desktop titled by its WM_NAME. The screen
+        // check (XTERM_SCREEN) types a command in its shell (dash, through
+        // a pty) and sees its output, opens xterm's Ctrl+click menu (an
+        // override-redirect window) and types `exit`, which ends xterm.
+        name: "lx_xterm",
+        cmdline: "qemu_exit presenter=test wayland=on xwayland=on events=wayland lxrun=/usr/bin/xterm lxargs=xterm lxenv=DISPLAY=:0%20HOME=/Users/gala%20SHELL=/bin/sh%20PATH=/usr/bin:/bin",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "xwayland: started /usr/bin/Xwayland :0",
+            "xwm: shown",
+            "desktop: shown window 'xterm'",
+            "xtask: screen ok",
+            "run: end /usr/bin/xterm",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // A distribution's desktop (LD step 6): rootful Xwayland on :1 as
+        // one framed window (user/lx/xdesktop/session.sh), twm managing an
+        // xterm inside it. The screen check (XDESKTOP_SCREEN) sees the frame,
+        // the X root, twm's frame and the xterm, then types `exit`, which
+        // ends the session. The script's transcript is sh/lx_xdesktop.txt.
+        name: "lx_xdesktop",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/bin/sh lxargs=sh%20/lx/xdesktop/session.sh lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala%20SHELL=/bin/sh%20PATH=/usr/bin:/bin",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'Xwayland on :1'",
+            "xtask: screen ok",
+            "run: end /bin/sh",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/gtk_test under X11 (LD step 5): GDK's X11 backend on
+        // display :0, through rootless Xwayland and the server's window
+        // manager. Run with --input: the screen check (GTK_X11_SCREEN)
+        // clicks its button and the frame's close button, so its window
+        // shows whatever the timing (self-driven, it may close before
+        // Xwayland commits a buffer). Its transcript, lx_gtk_x11.txt, is
+        // Xvfb's on the host (self-driven; the same lines).
+        name: "lx_gtk_x11",
+        cmdline: "qemu_exit presenter=test wayland=on xwayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=DISPLAY=:0%20GDK_BACKEND=x11%20HOME=/Users/gala%20PATH=/usr/bin:/bin",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "xwayland: started /usr/bin/Xwayland :0",
+            "xwm: shown",
+            "desktop: shown window 'gtk_test'",
+            "run: end /lx/gtk_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/gtk_test as a PIE (LD step 3): the GTK 3 program clicks
         // its own button and closes its own window, as on Linux (lx-expect).
         name: "lx_gtk_pie",
@@ -8917,6 +11335,135 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/busybox", BOOT_OK_MARKER],
     },
     Scenario {
+        // ROADMAP CT step 2: gala's wsl.exe as Windows' WSL answers
+        // (user/wsl_test): --import of a busybox rootfs (tar and tar.gz),
+        // `-d bb -- echo hi`, two distributions with separate file
+        // systems, -l -v, --set-default, --terminate, --shutdown,
+        // --unregister.
+        name: "wsl",
+        cmdline: "qemu_exit run=wsl_test.exe events=wsl",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "wsl: bb: pid",
+            "wsl: bb: terminated",
+            "wsl: bb2: tree removed",
+            "wsl_test: ok",
+            "process wsl_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A distribution's terminal (ROADMAP CT step 2): wsl_test imports
+        // bb, then `wsl -d bb` runs its login shell in a console window;
+        // WSL_TERMINAL_SCREEN types a command and checks its output, then
+        // `exit` ends the shell and wsl.exe.
+        name: "wsl_terminal",
+        cmdline: "qemu_exit wallpaper=night run=wsl_test.exe,wsl.exe args=import,-d%20bb console=wsl.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wsl_test: imported bb", "wsl: bb: pid", "xtask: screen ok", "run: end wsl.exe"],
+    },
+    Scenario {
+        // The start menu's "Linux distributions" (LD step 7) on the screen
+        // (UEFI): LINUX_MENU_SCREEN collapses and expands the section,
+        // dismisses Alpine, installs Ubuntu from its tile (its rootfs a
+        // stand-in served by the host: `linux_menu_rootfs`; fetched by
+        // `gala linux-install`, imported by `wsl --import`, the progress
+        // on the tile), starts its desktop (LD step 6's session), opens a
+        // terminal and XTerm from its context menu, and hides the
+        // section; linux_menu_test follows the registry.
+        name: "linux_menu",
+        cmdline: "qemu_exit wayland=on xwayland=on events=wsl,window wallpaper=night linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "linux_menu_test: ready",
+            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
+            "linux_menu_test: Alpine dismissed",
+            "desktop: start menu: linux install Ubuntu: C:\\gala\\gala.exe linux-install Ubuntu http://10.0.2.100/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+            "gala: linux: Ubuntu: installed",
+            "linux_menu_test: Ubuntu installed",
+            "desktop: start menu: linux desktop Ubuntu",
+            "wayland: listening in a distribution's tree too",
+            "desktop: shown window 'Xwayland on :1'",
+            "desktop: start menu: linux terminal Ubuntu",
+            "desktop: shown window 'wsl.exe'",
+            "desktop: start menu: linux app Ubuntu",
+            "desktop: shown window 'xterm'",
+            "desktop: start menu: Linux distributions hidden, dismissed [Alpine]",
+            "linux_menu_test: section hidden",
+            "desktop: start menu: Linux distributions shown, dismissed [Alpine]",
+            "linux_menu_test: section shown again",
+            "xtask: screen ok",
+            "linux_menu_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The task manager (ROADMAP TM steps 1-2): taskmgr_test runs a
+        // Windows program with a window and a busybox distribution's
+        // processes, checks the kernel's one list of both (GalaTasks) and
+        // NtQuerySystemInformation's Windows-only one; TASKMGR_SCREEN
+        // opens Task Manager with Ctrl+Shift+Esc, shows each view, and
+        // ends from it the window's program, a Linux process (SIGTERM),
+        // one that ignores SIGTERM (SIGKILL after the grace time) and
+        // the distribution's whole tree.
+        name: "taskmgr",
+        cmdline: "qemu_exit wallpaper=night events=process,wsl,window run=taskmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "taskmgr_test: ready",
+            "(taskmgr_test.exe) is not responding: its input has waited untaken",
+            "taskmgr_test: frozen window not responding",
+            "desktop: Ctrl+Shift+Esc: Task Manager",
+            "(Taskmgr.exe) lists the processes",
+            "(Taskmgr.exe) terminates pid",
+            "taskmgr_test: busy window ended, exit code 1",
+            "(Taskmgr.exe) ends linux process",
+            "with signal 15: 0x00000000",
+            "taskmgr_test: sleep ended",
+            "with signal 9: 0x00000000",
+            "taskmgr_test: sh ended",
+            "(Taskmgr.exe) ends linux distribution (bb: 1 process(es)): 0x00000000",
+            "taskmgr_test: distribution ended",
+            "taskmgr_test: task manager closed",
+            "xtask: screen ok",
+            "taskmgr_test: ok",
+            "process taskmgr_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The file explorer (ROADMAP EX): explorer_test imports a busybox
+        // distribution and checks `\\wsl.localhost` paths and shell32's
+        // namespace over C: and the distribution.
+        name: "explorer",
+        cmdline: "qemu_exit wallpaper=night events=wsl,window run=explorer_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wsl: bb: imported",
+            "explorer_test: plumbing ok",
+            "explorer_test: namespace ok",
+            "explorer_test: ready",
+            "desktop: Win+E: File Explorer",
+            "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            "explorer: navigate C:\\explorer.d\\files (1 items)",
+            "explorer: navigate ::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6} (",
+            "explorer: navigate \\\\wsl.localhost\\bb\\tmp (",
+            "explorer: paste 1 item(s) into \\\\wsl.localhost\\bb\\tmp: ok",
+            "explorer_test: copied",
+            "explorer: open \\\\wsl.localhost\\bb\\tmp\\notes.galatxt: started",
+            "explorer_test: opened",
+            "items (+live.txt)",
+            "explorer: properties notes.galatxt",
+            "Permissions: -rw-r--r--",
+            "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            "explorer: closed",
+            "explorer_test: explorer closed",
+            "xtask: screen ok",
+            "explorer_test: ok",
+            "process explorer_test.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -8985,9 +11532,17 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("d2d1_window", "d2d1_test"),
+    ("d2d1_window", "d2d1_window"),
+    ("office_install_gui", "office_install"),
+    ("office_install_gui", "office_install_gui"),
+    ("office_install_local", "office_install"),
+    ("office_install_local", "office_install_local"),
+    ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
+    ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
     ("pk_install_zip", "pk_install_test"),
@@ -9009,12 +11564,16 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("noscreen_windows", "presenter_test"),
     ("server_profile_windows", "presenter_test"),
     ("gala_cli", "gui_test"),
+    ("start_menu", "gui_test"),
+    ("start_menu", "start_menu"),
     ("virtio_gpu", "gui_test"),
     ("gui_test_headless", "gui_test"),
     ("virtio_gpu_reset", "gui_test"),
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("runas_declined", "runas_test"),
+    ("reparse_test_user", "reparse_test"),
     ("handover_disk", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
@@ -9027,6 +11586,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("handover_upgrade_uefi", "handover_k32_test"),
     ("handover_downgrade_refused", "handover_k32_test"),
     ("crash_record", "hello"),
+    ("writeback_crash", "writeback_test"),
+    ("writeback_lazy", "writeback_test"),
     ("watchdog", "busybox"),
     ("failpoint_heap", "kernel32_test"),
     ("failpoint_frame", "kernel32_test"),
@@ -9087,8 +11648,18 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("memload_test", "memload_test"),
+    ("memload_test", "schannel_test"),
+    ("winhttp_cb_test", "winhttp_cb_test"),
+    ("winhttp_cb_test", "schannel_test"),
+    ("wow64_winhttp_cb_test", "wow64_winhttp_cb_test"),
+    ("wow64_winhttp_cb_test", "schannel_test"),
+    ("wow64_schannel_test", "wow64_schannel_test"),
+    ("wow64_schannel_test", "schannel_test"),
     ("wininet_test", "wininet_test"),
     ("wininet_test", "schannel_test"),
+    ("wow64_wininet_test", "wow64_wininet_test"),
+    ("wow64_wininet_test", "schannel_test"),
     ("curl", "curl"),
     ("curl", "curl_common"),
     ("curl", "schannel_test"),
@@ -9107,6 +11678,25 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_simple_shm", "weston"),
     ("lx_simple_shm", "wayland_client"),
     ("lx_simple_shm", "glibc"),
+    ("linux_menu", "linux_menu"),
+    ("linux_menu", "x11"),
+    ("linux_menu", "gtk3"),
+    ("linux_menu", "wayland_client"),
+    ("linux_menu", "glibc"),
+    ("lx_xdesktop", "xdesktop"),
+    ("lx_xdesktop", "x11"),
+    ("lx_xdesktop", "gtk3"),
+    ("lx_xdesktop", "wayland_client"),
+    ("lx_xdesktop", "glibc"),
+    ("lx_gtk_x11", "lx_gtk"),
+    ("lx_gtk_x11", "x11"),
+    ("lx_gtk_x11", "gtk3"),
+    ("lx_gtk_x11", "wayland_client"),
+    ("lx_gtk_x11", "glibc"),
+    ("lx_xterm", "x11"),
+    ("lx_xterm", "gtk3"),
+    ("lx_xterm", "wayland_client"),
+    ("lx_xterm", "glibc"),
     ("lx_gtk", "lx_gtk"),
     ("lx_gtk", "gtk3"),
     ("lx_gtk", "wayland_client"),
@@ -9116,6 +11706,19 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_gtk_pie", "wayland_client"),
     ("lx_gtk_pie", "glibc"),
 ];
+
+/// Scenarios that also ship the whole 64-bit system a full image has
+/// (`system_modules`): installers whose product's own programs import
+/// what they will (office_install: ODT starts the 64-bit
+/// OfficeClickToRun.exe, whose imports are only seen in the run).
+const FULL_SYSTEM_SCENARIOS: &[&str] =
+    &["office_install", "office_install_gui", "office_install_local"];
+
+/// A scenario's kernel command line as its image has it.
+fn scenario_cmdline(s: &Scenario) -> String {
+    let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+    format!("{}{screen}{}", s.cmdline, events_flag())
+}
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
@@ -9136,6 +11739,9 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
             modules.push((kernelbase, dir));
         }
     }
+    if FULL_SYSTEM_SCENARIOS.contains(&name) {
+        modules.extend(system_modules());
+    }
     modules.sort_unstable();
     modules.dedup();
     modules
@@ -9153,6 +11759,10 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || HOST_PAGE_SCENARIOS.contains(&s.name)
         || disk_scenario(s.name).is_some()
         || s.name.starts_with("onecpu_")
+        // A scenario that snapshots and resumes itself is one machine's
+        // (in a batch it would take no snapshot and run none of its
+        // resumes, and still pass).
+        || SNAPSHOT_SCENARIOS.iter().any(|p| p.name == s.name)
     {
         return None;
     }
@@ -9239,8 +11849,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let selected: Vec<&Scenario> = SCENARIOS
         .iter()
         .filter(|s| match filter {
-            // Pending scenarios run only when named exactly.
-            None => !PENDING.contains(&s.name),
+            // Pending and manual scenarios run only when named exactly.
+            None => !named_only(s.name),
             Some(f) if exact => s.name == f.as_str(),
             // `name$`: that scenario only (`hello$`, not java_hello too).
             Some(f) if f.ends_with('$') => s.name == f.trim_end_matches('$'),
@@ -9248,26 +11858,29 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
             Some(f) if f.contains(',') => f.split(',').any(|n| n == s.name),
             // A pending scenario runs when named exactly; others match
             // by substring.
-            Some(f) => {
-                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
-            }
+            Some(f) => s.name == f.as_str() || (s.name.contains(f.as_str()) && !named_only(s.name)),
         })
         .collect();
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
+    if snapshot::request().is_some() && selected.len() != 1 {
+        return Err(format!(
+            "a machine snapshot is of one scenario; the filter selects {} (`name$` selects one)",
+            selected.len()
+        ));
+    }
+    if selected.iter().any(|s| SNAPSHOT_SCENARIOS.iter().any(|p| p.name == s.name)) {
+        snapshot::want_digests();
+    }
     let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
-    let screen = |s: &Scenario| {
-        let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
-        format!("{screen}{}", events_flag())
-    };
     let make = |vm: &Vm| match vm {
         Vm::Single(s) => make_iso(
             release,
             &format!("test-{}", s.name),
-            &format!("{}{}", s.cmdline, screen(s)),
+            &scenario_cmdline(s),
             &extra_modules(s.name),
         ),
         Vm::Batch(group) => {
@@ -9305,9 +11918,24 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         }
         let result = boot_vm(vm, &iso);
         // A passing VM's image is not needed again (a failed one is kept
-        // to boot by hand).
+        // to boot by hand), nor its disk image (a failed one's is kept to
+        // look at: it says what it takes on the host).
+        let disk = iso.with_extension("disk.img");
+        let _ = fs::remove_file(snapshot::digests_path(&iso));
+        // A snapshot took its own copy of the DLLs and maps; a hot swap's
+        // plan was for this run only.
+        let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
+        let _ = fs::remove_file(iso.with_extension("hotswap.plan"));
         if result.1.iter().all(|(_, v)| v.is_ok()) {
             let _ = fs::remove_file(&iso);
+            if !reuse_disk() {
+                let _ = fs::remove_file(&disk);
+            }
+        } else if let Some(used) = host_usage_mib(&disk) {
+            eprintln!(
+                "xtask: kept {} ({used} MiB on the host; delete it when done)",
+                disk.display()
+            );
         }
         Ok(result)
     });
@@ -9643,12 +12271,40 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("imagetrim_test", "memory pressure: gala-um's memory is the host's, never short"),
+    ("taskmgr", "needs a screen (Task Manager's window) and Linux programs (no LX in gala-um yet)"),
+    ("explorer", "needs a screen (Explorer's window) and Linux programs (no LX in gala-um yet)"),
+    ("wsl", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
+    ("wsl_terminal", "Linux programs (the WSL facade's distributions): no LX in gala-um yet"),
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_thread_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_import_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_gdiplus_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_uisettings_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_rstrtmgr_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_hardlink_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_threadpool_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_knownfolder_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_schannel_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_wininet_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_shlwapi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install_gui", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install_local", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -9656,21 +12312,39 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_regnotify_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_actctx_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_runas_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("office_k32_test", "WinExec starts a child process (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    (
+        "rpc_test",
+        "a child process: the RPC client of `rpc_test.exe client` (one NT process per Linux process)",
+    ),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
+    (
+        "svcrun_test",
+        "its services are child processes the SCM starts (one NT process per Linux process)",
+    ),
+    ("wow64_svcrun_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
+    (
+        "rstrtmgr_test",
+        "a child process that holds a file open for RmGetList (one NT process per Linux process)",
+    ),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
+    ("clipboard_test", "a child process (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
@@ -9678,6 +12352,11 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
+    ("start_menu", "needs a screen (the start menu is on the desktop)"),
+    ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
+    ("tray_test", "needs a screen (the notification area is on the taskbar)"),
+    ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
+    ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
 ];
 
 /// The kernel flags gala-um applies to a scenario's run (`um_command`),
@@ -10538,6 +13217,15 @@ const QEMU_FORWARD_FAILED: &str = "host forwarding rule";
 /// A net scenario whose QEMU could not forward its host port (another
 /// process took it between the lease and QEMU's bind) boots again with
 /// another port, up to three times.
+/// What a boot run does with a machine snapshot (snapshot.rs).
+enum Snap<'a> {
+    /// Save the machine when the line appears.
+    Save(snapshot::Save<'a>),
+    /// Start from the snapshot.
+    Restore(&'a snapshot::Restore),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_vm(
     iso: &Path,
     boot: Boot,
@@ -10546,10 +13234,11 @@ fn run_vm(
     stop_after_client: bool,
     disk: Option<&Path>,
     screen: Option<&'static ScreenCheck>,
+    snap: Option<&Snap>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let mut tries = 0;
     loop {
-        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen)?;
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap)?;
         let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
         tries += 1;
         if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {
@@ -10572,6 +13261,7 @@ fn run_vm_once(
     stop_after_client: bool,
     disk: Option<&Path>,
     screen: Option<&'static ScreenCheck>,
+    snap: Option<&Snap>,
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let log = iso.with_extension("serial.log");
     let _ = fs::remove_file(&log);
@@ -10653,7 +13343,45 @@ fn run_vm_once(
     if GPU_SCENARIOS.contains(&iso_scenario(iso)) {
         add_gpu(&mut cmd);
     }
+    // A machine snapshot is driven over a QMP connection of its own (the
+    // telemetry's closes after its query).
+    let snap_qmp = snap.map(|_| telemetry::qmp_socket());
+    if let Some(socket) = &snap_qmp {
+        let _ = fs::remove_file(socket);
+        cmd.arg("-qmp").arg(format!("unix:{},server=on,wait=off", socket.display()));
+    }
+    if let Some(Snap::Restore(r)) = snap {
+        cmd.args(snapshot::incoming_args(r)?);
+    }
+    // A run that saves: where its disk's writes go after the save.
+    let after_layer = match (snap, disk) {
+        (Some(Snap::Save(s)), Some(d)) => Some(snapshot::after_layer(d, s.name)?),
+        _ => None,
+    };
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn QEMU: {e}"))?;
+    let mut snap_note = String::new();
+    if let (Some(Snap::Restore(r)), Some(socket)) = (snap, &snap_qmp) {
+        match snapshot::resume(socket, r) {
+            Ok(line) => snap_note += &line,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(socket);
+                let stderr =
+                    fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
+                return Err(format!(
+                    "resuming snapshot {}: {e}{}",
+                    r.manifest.name,
+                    if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (QEMU: {})", stderr.trim())
+                    }
+                ));
+            }
+        }
+    }
+    let mut snap_taken = false;
     let qmp_thread = {
         let qmp = qmp.clone();
         thread::spawn(move || telemetry::qmp_cpu_count(&qmp))
@@ -10669,10 +13397,42 @@ fn run_vm_once(
     let clock_marks = clockcheck::Watcher::start(&log, start);
     // The limit counts the VM's run time (vmtime.rs).
     let mut vm_clock = vmtime::VmClock::new(child.id(), start);
+    let mut shots = Shots::from_env(iso_scenario(iso))?;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
+        // The machine snapshot, once its line is in the log.
+        if let (Some(Snap::Save(s)), Some(qmp)) = (snap, &snap_qmp)
+            && !snap_taken
+            && fs::read(&log).is_ok_and(|b| b.windows(s.at.len()).any(|w| w == s.at.as_bytes()))
+        {
+            snap_taken = true;
+            // The guest's clocks stop with it; the host-side check must
+            // not count the save.
+            clock_marks.paused();
+            let saved = snapshot::save(qmp, s, disk, &log);
+            clock_marks.resumed();
+            match saved {
+                Ok(line) => {
+                    eprint!("{}", line.replace("xtask: ", &format!("xtask: {}: ", s.scenario)));
+                    snap_note += &line;
+                    if s.stop {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                }
+                Err(e) => {
+                    // The machine may be left stopped: the run ends here.
+                    snap_note += &format!("xtask: snapshot: {} not saved: {e}\n", s.name);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        }
+        shots.take_due(&socket, start.elapsed());
         if let Some(check) = screen.filter(|_| screen_verdict.is_none())
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
@@ -10704,6 +13464,7 @@ fn run_vm_once(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
+                NetClient::Outbound => Ok(()),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::SshServer => ssh_server_client(port),
@@ -10777,9 +13538,24 @@ fn run_vm_once(
         thread::sleep(Duration::from_millis(50));
     };
     let _ = fs::remove_file(&socket);
+    if let Some(qmp) = &snap_qmp {
+        let _ = fs::remove_file(qmp);
+    }
+    if let Some(layer) = &after_layer {
+        let _ = fs::remove_file(layer);
+    }
+    if let Some(Snap::Save(s)) = snap
+        && !snap_taken
+    {
+        snap_note += &format!(
+            "xtask: snapshot: {} not taken: {:?} never came in the serial log\n",
+            s.name, s.at
+        );
+    }
     let total = start.elapsed();
     let vm_time = vm_clock.sample();
     let mut serial = read_log(&log);
+    serial += &snap_note;
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -10914,6 +13690,77 @@ fn boot_telemetry(f: BootFacts) -> String {
 /// The failure reason for a VM that got fewer CPUs than it asked for.
 fn fewer_cpus(got: u32, want: u32) -> String {
     format!("VM got {got} of {want} CPUs (host overloaded?)")
+}
+
+/// `XTASK_SHOTS=120,300,...`: screendumps of a boot test's screen at
+/// those seconds of wall time since QEMU started, written to
+/// `target/screenshots/<scenario>-<t>s.png` (WORKFLOW "Screenshots"): to
+/// watch a long scenario (office_install_gui) with its serial log, disk
+/// and network, which `cargo xtask screenshot` does not set up.
+struct Shots {
+    scenario: String,
+    times: Vec<f64>,
+    next: usize,
+}
+
+impl Shots {
+    fn from_env(scenario: &str) -> Result<Self> {
+        let mut times = match env::var("XTASK_SHOTS") {
+            Ok(list) if !list.trim().is_empty() => list
+                .split(',')
+                .map(|t| t.trim().parse().map_err(|_| format!("XTASK_SHOTS: bad time {t:?}")))
+                .collect::<Result<Vec<f64>>>()?,
+            _ => Vec::new(),
+        };
+        times.sort_by(f64::total_cmp);
+        Ok(Self { scenario: scenario.to_string(), times, next: 0 })
+    }
+
+    /// Takes the screendumps whose time has come; one that fails is
+    /// reported on stderr and the run goes on (a picture is not a verdict).
+    fn take_due(&mut self, socket: &Path, elapsed: Duration) {
+        while let Some(&t) = self.times.get(self.next) {
+            if elapsed < Duration::from_secs_f64(t) {
+                return;
+            }
+            self.next += 1;
+            let dir = target_dir().join("screenshots");
+            let png = dir.join(format!("{}-{t}s.png", self.scenario));
+            let taken = fs::create_dir_all(&dir)
+                .map_err(|e| format!("creating {dir:?}: {e}"))
+                .and_then(|()| screendump_png(socket, &png));
+            match taken {
+                Ok(()) => {
+                    eprintln!("xtask: wrote {} ({:.0} s in)", png.display(), elapsed.as_secs_f64())
+                }
+                Err(e) => eprintln!("xtask: screenshot at {t} s: {e}"),
+            }
+        }
+    }
+}
+
+/// A screendump through the monitor at `socket`, as a PNG at `png`.
+fn screendump_png(socket: &Path, png: &Path) -> Result {
+    use std::io::Write;
+    let mut monitor = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| format!("cannot connect to the QEMU monitor: {e}"))?;
+    let ppm = png.with_extension("ppm");
+    let _ = fs::remove_file(&ppm);
+    writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
+    // Written once QEMU's size of it stops changing.
+    let mut last = 0;
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        let len = fs::metadata(&ppm).map_or(0, |m| m.len());
+        if len > 0 && len == last {
+            let converted = ppm_to_png(&ppm, png);
+            let _ = fs::remove_file(&ppm);
+            return converted;
+        }
+        last = len;
+    }
+    let _ = fs::remove_file(&ppm);
+    Err(format!("no screendump at {} within 10 s", ppm.display()))
 }
 
 /// A fresh short path for a VM's monitor socket.
@@ -11281,6 +14128,869 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// user/lx/gtk_test under X11 (`lx_gtk_x11`, `--input`): its X window
+/// framed by shasha at (64, 48), the client area (320 x 200) from (65,
+/// 81): GTK's background, its label and its button. A click on the button
+/// (the pointer starts at (640, 400)), then on the frame's close button
+/// at (362, 65), which the window manager turns into WM_DELETE_WINDOW.
+/// The program waits for both, so its window is on the desktop whatever
+/// the timing of Xwayland's first buffer (self-driven, it could close
+/// before Xwayland committed one).
+const GTK_X11_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'gtk_test'",
+    steps: &[
+        ScreenStep {
+            after: "stdout: window drawn",
+            input: &[],
+            pixels: &[
+                PixelCheck::Varied(70, 56, 60, 16, 4), // "gtk_test" in the caption
+                PixelCheck::At(200, 120, 0xf6f5f4),    // GTK's background
+                PixelCheck::AnyIn(140, 145, 170, 20, 0x2e3436), // the label
+                PixelCheck::Varied(190, 230, 70, 16, 16), // "Click me"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -161",
+                "mouse_move -161 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "stdout: button clicked: Click me",
+            input: &["mouse_move 138 -174", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+    ],
+};
+
+/// The start menu (600 x 640 at (340, 100) on the 1280 x 800 screen) and
+/// its tiles: 89 x 84 cells from (372, 216), six to a row, each icon (32 x
+/// 32) 26 px in and 10 down, its name from 48 down. In start_menu's image:
+/// Command Prompt, Hello window (gui_test.exe), then the catalog, none of
+/// it installed (a download badge, the accent, over each icon's
+/// bottom-right corner): Microsoft Office, FileZilla, .NET, Python;
+/// Chromium, Git, 7-Zip on the second row. The pointer starts in the
+/// middle (640, 400).
+/// Keys typing `text` (lowercase letters, digits, space, `-`, `/`) and
+/// Enter.
+macro_rules! typed {
+    ($($key:literal),*) => { &[$(concat!("sendkey ", $key)),*, "sendkey ret"] };
+}
+
+/// xterm through rootless Xwayland (`lx_xterm`): the first window of the
+/// Wayland server, framed at (64, 48), its client area (484 x 316: 80 x
+/// 24 cells of X's built-in 6 x 13 "fixed" font, one pixel of border
+/// first) from (65, 81); the text black on white, lines 13 pixels apart
+/// from y 84, columns 6 apart from x 67. dash's prompt `$ `, then
+/// `echo hi` typed and its output on the second line; a drag over that
+/// output (PS/2: the pointer starts at (640, 400)) selects it, which
+/// xterm shows reversed (black where the cell was white); `exit` ends
+/// the shell and xterm.
+const XTERM_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'xterm'",
+    steps: &[
+        ScreenStep {
+            after: "desktop: shown window 'xterm'",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(300, 300, 0xffffff),          // xterm's background
+                PixelCheck::AnyIn(66, 84, 12, 12, 0x000000), // the prompt "$"
+                PixelCheck::Varied(70, 56, 40, 16, 4),       // "xterm" in the caption
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: typed!("e", "c", "h", "o", "spc", "h", "i"),
+            pixels: &[PixelCheck::AnyIn(68, 99, 10, 9, 0x000000)], // "hi"
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -255",
+                "mouse_move -255 -42",
+                "mouse_move -62 0",
+                "mouse_button 1",
+                "mouse_move 10 0",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(70, 98, 0x000000)], // "hi" selected
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
+/// A distribution's desktop in one window (`lx_xdesktop`): rootful
+/// Xwayland's 1024 x 640 window "Xwayland on :1", framed by shasha
+/// (libdecor takes the server's decorations) at (64, 48), its client area
+/// from (65, 81), the X root black; inside it twm's frame around the
+/// session's xterm (twm's title bar blue, #3465a4, from about (106,
+/// 122)), which has the keyboard. Win+Up maximizes the window and the X
+/// screen follows (its root to the work area's last pixel, twm's frame
+/// redrawn 64 left and 48 up); `exit` ends the xterm and the session.
+const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'Xwayland on :1'",
+    steps: &[
+        ScreenStep {
+            after: "session: display :1 ready",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(800, 600, 0x000000),            // the X root
+                PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4), // twm's title bar
+                PixelCheck::At(300, 300, 0xffffff),            // the xterm
+            ],
+        },
+        ScreenStep {
+            // Win+Up: maximized (a configure of the work area's client
+            // size, 1278 x 718); the X screen follows the window's size:
+            // the root reaches its last pixel at (1 + 1277, 33 + 717), and
+            // twm's title is back (a dump mid-redraw lacks it).
+            after: "",
+            input: &["sendkey meta_l-up"],
+            pixels: &[
+                PixelCheck::At(1 + 1100, 33 + 600, 0x000000),
+                PixelCheck::At(1 + 1277, 33 + 717, 0x000000),
+                PixelCheck::AnyIn(62, 78, 34, 10, 0xffffff), // twm's title "xterm"
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
+/// The start menu's Linux distributions (`linux_menu`, UEFI's screen of
+/// 1280 x 800, wallpaper "night"). The menu (600 x 640) at (340, 100):
+/// the pinned grid's two rows from y 216, the section's heading at (372,
+/// 388) ("Linux distributions" from x 392, "Hide" at 852..908), its
+/// tiles from (372, 416), 89 apart: an icon at tile + (26, 10), a
+/// download badge at icon + (20, 20), a suggestion's dismiss cross at its
+/// top right (tile + (67, 0), 18 x 18), the progress bar at tile + (12,
+/// 68). The start button at (640, 776) alone on the taskbar, (616, 776)
+/// beside one window. A context menu opens at the pointer, 32-pixel items
+/// from 4 below its top. The pointer starts at (640, 400); each move is
+/// from where the step before left it (few moves: QEMU's PS/2 queue drops
+/// what a busy guest has not read).
+const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "linux_menu_test: ready",
+    steps: &[
+        // The menu: the section shown, Ubuntu and Alpine not installed
+        // (each with a download badge). Its picture: "section shown".
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(392, 390, 140, 18, 0x1b1b1b), // "Linux distributions"
+                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),  // Ubuntu's badge
+                PixelCheck::AnyIn(507, 446, 16, 16, 0x005fb8),  // Alpine's badge
+            ],
+        },
+        // The heading: collapsed (no tiles). "section collapsed".
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -190 -255",
+                "mouse_move 0 -121",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(410, 440, 0xf2f4f8), PixelCheck::At(426, 454, 0xf2f4f8)],
+        },
+        // Expanded again.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 2 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8)],
+        },
+        // Alpine's dismiss cross: its tile goes.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 25", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(515, 454, 0xf2f4f8),
+                PixelCheck::AnyIn(418, 446, 16, 16, 0x005fb8),
+            ],
+        },
+        // Ubuntu's tile: it installs (the menu stays open).
+        ScreenStep {
+            after: "linux_menu_test: Alpine dismissed",
+            input: &["mouse_move -122 15", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // Its progress bar while it downloads (the host holds the rest of
+        // the file until this check passes: HELD_DOWNLOADS): "installing".
+        ScreenStep {
+            after: "Linux distribution Ubuntu: downloading (5",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(384, 484, 61, 4, 0x005fb8)],
+        },
+        // Installed: in full colour, no badge, no bar. "installed".
+        ScreenStep {
+            after: "linux_menu_test: Ubuntu installed",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(398, 426, 32, 32, 0xdc6034)],
+        },
+        // A click: its desktop (rootful Xwayland on :1, twm, an xterm).
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 1 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // "desktop started": the frame at (64, 48), the X root black,
+        // twm's title bar, the xterm.
+        ScreenStep {
+            after: "desktop: shown window 'Xwayland on :1'",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(800, 600, 0x000000),
+                PixelCheck::AnyIn(100, 120, 80, 24, 0x3465a4),
+                PixelCheck::At(300, 300, 0xffffff),
+            ],
+        },
+        // `exit` in its xterm ends the session.
+        ScreenStep {
+            after: "session: display :1 ready",
+            input: typed!("e", "x", "i", "t"),
+            pixels: &[],
+        },
+        // The menu again, Ubuntu's context menu: "Open terminal" and
+        // XTerm (from its .desktop file). "context menu".
+        ScreenStep {
+            after: "session: done",
+            input: &[
+                "mouse_move 224 255",
+                "mouse_move 0 81",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -225 -255",
+                "mouse_move 0 -81",
+                "mouse_button 2",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(430, 452, 100, 16, 0x1b1b1b), // "Open terminal"
+                PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b),  // "XTerm"
+                PixelCheck::At(620, 500, 0xffffff),
+            ],
+        },
+        // "Open terminal": `wsl -d Ubuntu` in a console window.
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 20", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // dash's prompt, then `echo $SHELL$SHELL` (an output that is not
+        // its own echo: /bin/sh/bin/sh).
+        ScreenStep {
+            after: "desktop: shown window 'wsl.exe'",
+            input: typed!(
+                "e", "c", "h", "o", "spc", "shift-4", "shift-s", "shift-h", "shift-e", "shift-l",
+                "shift-l", "shift-4", "shift-s", "shift-h", "shift-e", "shift-l", "shift-l"
+            ),
+            pixels: &[],
+        },
+        // "terminal": the command and its output in the console.
+        ScreenStep {
+            after: "/bin/sh/bin/sh",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(66, 98, 300, 60, 0xcccccc)],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+        // The menu (beside the console window's button), the context menu,
+        // XTerm: an xterm under the desktop's rootless Xwayland.
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 116 255",
+                "mouse_move 0 61",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -201 -255",
+                "mouse_move 0 -81",
+                "mouse_button 2",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::AnyIn(430, 484, 60, 16, 0x1b1b1b)],
+        },
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 85 52", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        // "application": its window (shasha's frame at (96, 80): the
+        // second Wayland window), white with dash's prompt.
+        ScreenStep {
+            after: "desktop: shown window 'xterm'",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(104, 90, 40, 16, 0x1b1b1b), // "xterm" in its caption
+                PixelCheck::At(300, 300, 0xffffff),
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+        // "Hide": the section goes. "section hidden".
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 116 255",
+                "mouse_move 0 29",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move 255 -255",
+                "mouse_move 9 -121",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[PixelCheck::At(450, 440, 0xf2f4f8), PixelCheck::At(500, 398, 0xf2f4f8)],
+        },
+        // The menu's own context menu (a right click on its background,
+        // at (880, 400): the card kept inside the menu, at (712, 400))
+        // shows the section again; linux_menu_test waits for that before
+        // it ends (no pixels here: the guest is ending).
+        ScreenStep {
+            after: "linux_menu_test: section hidden",
+            input: &[
+                "mouse_button 2",
+                "mouse_button 0",
+                "mouse_move -80 20",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+    ],
+};
+
+/// The distribution's terminal (`wsl_terminal`): wsl.exe's console
+/// window at (60, 60) (conhost's grid, lines 19 pixels apart from y 98)
+/// with bb's login shell. `uname -sr` and `ls /` typed at its prompt,
+/// their output in the window (light grey text, Campbell's 0xcccccc);
+/// the screendump of that step is the terminal's picture
+/// (`test-wsl_terminal.screen3.png`); then `exit` ends the shell and
+/// wsl.exe.
+const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "wsl: bb: pid",
+    steps: &[
+        // The prompt, from bb's /etc/profile, and the window shown (keys
+        // before that go nowhere: the first ones of a command were lost).
+        ScreenStep { after: "root@bb:/root# ", input: &[], pixels: &[] },
+        ScreenStep {
+            after: "desktop: shown window 'wsl.exe'",
+            input: typed!("u", "n", "a", "m", "e", "spc", "minus", "s", "r"),
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "Linux 6.18.0-gala",
+            input: typed!("l", "s", "spc", "slash"),
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "tmp",
+            input: &[],
+            pixels: &[
+                // The prompt, the commands and their output: text on
+                // the console's black.
+                PixelCheck::AnyIn(66, 98, 300, 20, 0xcccccc),
+                PixelCheck::AnyIn(66, 136, 300, 60, 0xcccccc),
+                // `ls /` on the fifth line: the directories in ls's bold
+                // blue (Campbell's bright blue).
+                PixelCheck::AnyIn(66, 174, 300, 16, 0x3b78ff),
+                PixelCheck::At(600, 300, 0x0c0c0c),
+            ],
+        },
+        ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
+    ],
+};
+
+/// File Explorer (scenario `explorer`, ROADMAP EX): its window at (100,
+/// 40), 1080 x 700, so its client area starts at (101, 73); in it the
+/// address bar (client y 6-38, from x 84), the navigation pane (rows 28
+/// apart from client y 88: This PC, C:, the folders down to the current
+/// one, Linux, the distributions) and the Details view's rows (24 apart
+/// from client y 112, the name column from x 233). The pointer starts at
+/// (640, 400). Win+E opens it on This PC (screen 1); the address bar
+/// takes `C:\explorer.d\files`, where the file is selected and copied
+/// (Ctrl+C, screen 3); the navigation pane's Linux node lists `bb` (screen 5),
+/// whose root (screen 7) leads to `tmp`, where Ctrl+V pastes the copy;
+/// the search finds it and Enter opens it with its association
+/// (explorer_test's `open` mode); a file a Linux process writes then
+/// shows without a refresh (screen 11); its context menu's Properties
+/// shows the Linux permissions (screen 13); F2 renames it; Ctrl+Shift+2
+/// is the icon view (screen 15); Alt+F4 closes it. Each step waits for explorer's
+/// own log line of the one before (`explorer: navigate ...`).
+const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "explorer_test: ready",
+    steps: &[
+        ScreenStep { after: "explorer_test: ready", input: &["sendkey meta_l-e"], pixels: &[] },
+        ScreenStep {
+            // 1: This PC: selected in the navigation pane, C: listed.
+            after: "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(201, 174, 0xe3e3e3),            // This PC, selected
+                PixelCheck::AnyIn(330, 185, 30, 24, 0x7a8694), // C:'s drive icon
+                PixelCheck::AnyIn(130, 76, 300, 30, 0x1b1b1b), // the caption's title
+            ],
+        },
+        ScreenStep {
+            // The address bar (401, 95) takes C:\explorer.d\files.
+            after: "",
+            input: &[
+                "mouse_move -239 -255",
+                "mouse_move 0 -50",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey shift-c",
+                "sendkey shift-semicolon",
+                "sendkey backslash",
+                "sendkey e",
+                "sendkey x",
+                "sendkey p",
+                "sendkey l",
+                "sendkey o",
+                "sendkey r",
+                "sendkey e",
+                "sendkey r",
+                "sendkey dot",
+                "sendkey d",
+                "sendkey backslash",
+                "sendkey f",
+                "sendkey i",
+                "sendkey l",
+                "sendkey e",
+                "sendkey s",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 3 (2 is the typing): the file at row 0 (501, 197), selected
+            // and copied.
+            after: "explorer: navigate C:\\explorer.d\\files (1 items)",
+            input: &["mouse_move 100 102", "mouse_button 1", "mouse_button 0", "sendkey ctrl-c"],
+            pixels: &[
+                PixelCheck::At(620, 205, 0xcce4f7),
+                PixelCheck::AnyIn(334, 189, 16, 16, 0x8a8a8a),
+            ],
+        },
+        ScreenStep {
+            // The navigation pane's Linux node (row 4: This PC, C:,
+            // explorer.d, files, Linux) at (201, 286).
+            after: "explorer: copy C:\\explorer.d\\files\\notes.galatxt",
+            input: &["mouse_move -255 89", "mouse_move -45 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 5: Linux lists bb (the pane: This PC, C:, Linux, bb); bb's
+            // row 0 (501, 197) selected, then Enter.
+            after: "explorer: navigate ::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6} (",
+            input: &["mouse_move 255 -89", "mouse_move 45 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::At(201, 230, 0xe3e3e3), // Linux (row 2 now), selected
+                PixelCheck::AnyIn(334, 189, 16, 16, 0xe95420), // bb's tile
+                PixelCheck::At(620, 205, 0xcce4f7), // bb selected
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
+        ScreenStep {
+            // 7: the distribution's root: bin, etc, mnt, root, tmp (row 4,
+            // (501, 293)), selected, Enter.
+            after: "explorer: navigate \\\\wsl.localhost\\bb (",
+            input: &["mouse_move 0 96", "mouse_button 1", "mouse_button 0", "sendkey ret"],
+            pixels: &[PixelCheck::AnyIn(334, 189, 16, 96, 0xf8c84a)], // folders
+        },
+        ScreenStep {
+            // Ctrl+V: the copy into the distribution.
+            after: "explorer: navigate \\\\wsl.localhost\\bb\\tmp (",
+            input: &["sendkey ctrl-v"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 9: the search finds the copy; row 0 (501, 197), Enter opens
+            // it.
+            after: "explorer_test: copied",
+            input: &[
+                "sendkey n",
+                "sendkey o",
+                "sendkey t",
+                "sendkey e",
+                "sendkey s",
+                "mouse_move 0 -96",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey ret",
+            ],
+            pixels: &[PixelCheck::At(620, 205, 0xcce4f7)],
+        },
+        ScreenStep {
+            // 10: opened; Esc clears the search.
+            after: "explorer_test: opened",
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::Varied(322, 185, 700, 150, 4)],
+        },
+        ScreenStep {
+            // 11: live.txt, written by a Linux process, listed.
+            after: "items (+live.txt)",
+            input: &[],
+            pixels: &[PixelCheck::Varied(322, 185, 700, 150, 4)],
+        },
+        ScreenStep {
+            // The copy found again; a right click on it (501, 197): its
+            // menu; Properties is its fourth item (551, 306).
+            after: "",
+            input: &[
+                "sendkey n",
+                "sendkey o",
+                "sendkey t",
+                "sendkey e",
+                "sendkey s",
+                "mouse_button 2",
+                "mouse_button 0",
+                "mouse_move 50 109",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 13: Properties with the Linux permissions; Esc.
+            after: "explorer: properties notes.galatxt",
+            input: &[],
+            pixels: &[PixelCheck::At(600, 268, 0x005fb8)],
+        },
+        ScreenStep {
+            // Esc closes Properties; F2 renames the copy (typing replaces
+            // the name), Enter.
+            after: "",
+            input: &[
+                "sendkey esc",
+                "sendkey f2",
+                "sendkey r",
+                "sendkey e",
+                "sendkey n",
+                "sendkey a",
+                "sendkey m",
+                "sendkey e",
+                "sendkey d",
+                "sendkey dot",
+                "sendkey t",
+                "sendkey x",
+                "sendkey t",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 15: Esc clears the search; the icon view (.X11-unix's folder
+            // first).
+            after: "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            input: &["sendkey esc", "sendkey ctrl-shift-2"],
+            pixels: &[
+                PixelCheck::At(1106, 120, 0xe3e3e3),           // Icons, chosen
+                PixelCheck::AnyIn(355, 170, 60, 60, 0xf8c84a), // a 48-pixel folder
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+    ],
+};
+
+/// Task Manager (scenario `taskmgr`, ROADMAP TM): its window at (120,
+/// 40), 1040 x 700, so its client area starts at (121, 73) (a 1-pixel
+/// outline and a 32-row caption); in it the navigation (Processes,
+/// Performance, Details at client y 76, 116, 156), the rows from client y
+/// 128, 24 apart (row 0 at screen y 213, row 1 at 237) and End task at
+/// screen (1079, 145). The pointer starts at (640, 400). First a click
+/// on the frozen window, which then is "Not responding" (red in the
+/// Status column); Ctrl+Shift+Esc opens Task Manager; each view is a
+/// screendump (`test-taskmgr.screen<n>.png`: 1 Processes, 2
+/// Performance, 3 Details, 4 the busy window found and selected, 6
+/// `sleep`, 8 `sh`, 10 the distribution's heading, 12 after the ends); the search finds each victim (row 0 its group's heading,
+/// row 1 the process), End task ends it, and taskmgr_test says so before
+/// the next step; Alt+F4 closes Task Manager last.
+const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "taskmgr_test: ready",
+    steps: &[
+        ScreenStep {
+            after: "",
+            // A click on the frozen window (its client area at (1190,
+            // 400), right of where Task Manager will be), back to the
+            // middle: its input waits untaken.
+            input: &[
+                "mouse_move 255 0",
+                "mouse_move 255 0",
+                "mouse_move 40 0",
+                "mouse_button 1",
+                "mouse_button 0",
+                "mouse_move -255 0",
+                "mouse_move -255 0",
+                "mouse_move -40 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: frozen window not responding",
+            input: &["sendkey ctrl-shift-esc"],
+            pixels: &[
+                PixelCheck::AnyIn(675, 201, 120, 300, 0xc42b1c), // "Not responding"
+                PixelCheck::AnyIn(137, 87, 120, 20, 0x1b1b1b),   // "Task Manager"
+                PixelCheck::At(271, 133, 0xe3e3e3),              // Processes, selected
+                PixelCheck::AnyIn(127, 139, 3, 16, 0x005fb8),    // its accent bar
+                PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8),  // "Apps (2)"
+                PixelCheck::AnyIn(121, 201, 400, 460, 0xe95420), // a Linux group
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Performance (201, 189): a graph per processor, one busy.
+            input: &[
+                "mouse_move -220 -211",
+                "mouse_move -219 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(317, 217, 800, 200, 0x117dbb), // CPU graphs
+                PixelCheck::AnyIn(317, 217, 800, 200, 0x9fcbe3), // load under a line
+                PixelCheck::AnyIn(317, 450, 800, 250, 0x8b12ae), // memory's graph
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Details (201, 229): Windows and Linux processes in one list.
+            input: &["mouse_move 0 40", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(300, 175, 700, 22, 0x5d5d5d), // the column headers
+                PixelCheck::AnyIn(305, 201, 30, 460, 0xe95420), // Linux tiles
+                PixelCheck::AnyIn(305, 201, 30, 460, 0x0078d4), // Windows tiles
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Processes (201, 149), "busy" searched, row 1 (521, 237)
+            // selected: End task lights up.
+            input: &[
+                "mouse_move 0 -80",
+                "mouse_button 1",
+                "mouse_button 0",
+                "sendkey b",
+                "sendkey u",
+                "sendkey s",
+                "sendkey y",
+                "mouse_move 255 88",
+                "mouse_move 65 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::At(700, 240, 0xcce4f7),  // the selection (row 1)
+                PixelCheck::At(1030, 135, 0x005fb8), // End task enabled
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // End task (1079, 145).
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: busy window ended",
+            // "sleep" searched, its row selected.
+            input: &[
+                "sendkey esc",
+                "sendkey s",
+                "sendkey l",
+                "sendkey e",
+                "sendkey e",
+                "sendkey p",
+                "mouse_move -255 92",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+                PixelCheck::At(700, 240, 0xcce4f7),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: sleep ended",
+            // "sh", which ignores SIGTERM: SIGKILL after the grace time.
+            input: &[
+                "sendkey esc",
+                "sendkey s",
+                "sendkey h",
+                "mouse_move -255 92",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::At(700, 240, 0xcce4f7),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -92",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: sh ended",
+            // "cat" searched, the distribution's heading (row 0, 521,
+            // 213) selected: End task ends its whole tree.
+            input: &[
+                "sendkey esc",
+                "sendkey c",
+                "sendkey a",
+                "sendkey t",
+                "mouse_move -255 68",
+                "mouse_move -255 0",
+                "mouse_move -48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::At(700, 212, 0xcce4f7), // the heading selected
+                PixelCheck::At(1030, 135, 0x005fb8),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 -68",
+                "mouse_move 255 0",
+                "mouse_move 48 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "taskmgr_test: distribution ended",
+            // The search cleared: what is left.
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8)],
+        },
+        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+    ],
+};
+
+const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "start_menu_test: ready",
+    steps: &[
+        ScreenStep {
+            after: "",
+            // To the start button (640, 776: alone on the taskbar), a
+            // click: the menu.
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // Command Prompt
+                PixelCheck::AnyIn(372, 264, 85, 14, 0x1b1b1b), // "Command"
+                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // Hello window
+                PixelCheck::AnyIn(598, 248, 12, 12, 0x005fb8), // Office's badge
+                PixelCheck::AnyIn(550, 264, 85, 30, 0x1b1b1b), // "Microsoft Office"
+                PixelCheck::AnyIn(865, 248, 12, 12, 0x005fb8), // Python's badge
+                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // The Command Prompt's tile (414, 242), a click: cmd.exe in
+            // a console window.
+            input: &[
+                "mouse_move -226 -255",
+                "mouse_move 0 -255",
+                "mouse_move 0 -24",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "desktop: shown window 'cmd.exe'",
+            // conhost's window at (60, 60): Campbell's background, and
+            // what cmd said (its first line) in Campbell's grey.
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
+                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Back to the start button (615, 776, beside the console
+            // window's button now), the menu again: the Command
+            // Prompt is recent now; 7-Zip still has its badge.
+            input: &[
+                "mouse_move 201 255",
+                "mouse_move 0 255",
+                "mouse_move 0 24",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
+                PixelCheck::AnyIn(392, 596, 32, 32, 0x333333), // recent: Command Prompt
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
+            // in a console window.
+            input: &[
+                "mouse_move -23 -255",
+                "mouse_move 0 -195",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "desktop: shown window 'gala.exe'",
+            // Its console window, with gala's output in it.
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
+                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+            ],
+        },
+        ScreenStep {
+            after: "start_menu_test: install window",
+            // Alt+F4 closes it (the active window): its conhost.exe ends.
+            input: &["sendkey alt-f4"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
 /// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
@@ -11288,6 +14998,57 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
 /// start button (Gala's fortress) and the window's button centred, the
 /// clock at the right; the start menu (600 x 640) opens centred above it
 /// at (340, 100). Shaded colours are checked as "some pixel near".
+/// tray_test's icon on the taskbar (1280 x 800: the first icon's slot is
+/// 32 px left of the clock's 96, its middle at (1168, 776)): the blue
+/// square with the white middle, then a click on it with the mouse
+/// (from the middle of the screen), which the program waits for.
+const TRAY_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "tray_test: click the icon",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(1160, 768, 4, 4, 0x2080f0), // the icon's blue
+                PixelCheck::At(1168, 776, 0xffffff),          // its white middle
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move 255 255",
+                "mouse_move 255 121",
+                "mouse_move 18 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+    ],
+};
+
+/// user/d2d1_test's window (`args=window`): at (100, 100), its client
+/// area from (101, 133) as gui_test's; Direct2D drew a blue gradient, a
+/// red rounded rectangle at client (20, 20) - (140, 100), a green circle
+/// about (220, 70) with a black outline and a gold star about (220, 200).
+/// Then q ends the program.
+const D2D1_WINDOW_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "d2d1_test: window drawn",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(101 + 80, 133 + 60, 0xdb143d), // the rounded rectangle
+                PixelCheck::At(101 + 220, 133 + 70, 0x218c21), // the circle
+                PixelCheck::AnyIn(101 + 214, 133 + 194, 12, 12, 0xffd600), // the star
+                PixelCheck::Varied(101, 133, 380, 250, 6),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey q"], pixels: &[] },
+    ],
+};
+
 const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
     marker: "gui_test: painted",
     steps: &[
@@ -11314,7 +15075,8 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[
                 PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
                 PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
+                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // "Command Prompt"
+                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // "Hello window"
             ],
         },
         ScreenStep {
@@ -11536,9 +15298,19 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     ("gui_test", GUI_TEST_SCREEN),
+    ("start_menu", START_MENU_SCREEN),
+    ("taskmgr", TASKMGR_SCREEN),
+    ("explorer", EXPLORER_SCREEN),
+    ("wsl_terminal", WSL_TERMINAL_SCREEN),
+    ("tray_test", TRAY_SCREEN),
+    ("d2d1_window", D2D1_WINDOW_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),
+    ("lx_gtk_x11", GTK_X11_SCREEN),
+    ("lx_xterm", XTERM_SCREEN),
+    ("lx_xdesktop", XDESKTOP_SCREEN),
+    ("linux_menu", LINUX_MENU_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
@@ -12016,9 +15788,13 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
     let log = iso.with_extension("serial.log");
+    let wait = SCREEN_STEP_WAITS
+        .iter()
+        .find(|(n, _)| *n == iso_scenario(iso))
+        .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
-            wait_for_line(&log, step.after).map_err(|e| format!("step {n}: {e}"))?;
+            wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
         }
         for command in step.input {
             // Each command, then time for the guest to read the device
@@ -12033,21 +15809,44 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
             thread::sleep(Duration::from_millis(250));
         }
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+        // A host-side wait this step's check ends (HELD_DOWNLOADS).
+        if HELD_DOWNLOADS.iter().any(|&(name, held)| name == iso_scenario(iso) && held == n) {
+            let release = iso.with_extension("serve.release");
+            fs::write(&release, b"").map_err(|e| format!("step {n}: writing {release:?}: {e}"))?;
+        }
     }
     Ok(())
 }
 
-/// Waits for `line` in the serial log `log`. A give-up only (the VM's
-/// own limit is not checked while a screen check runs): two minutes.
-fn wait_for_line(log: &Path, line: &str) -> Result {
+/// Downloads `serve-page` holds part-way until a screen step has seen
+/// them in progress: (scenario, the step whose pixels must pass first).
+/// `linux_menu`'s progress step checks the tile's bar while the rootfs
+/// is still downloading; without the hold a fast machine (KVM) finished
+/// the install before the screendump. serve-page sends HELD_FRACTION of
+/// the file, then waits for `<iso>.serve.release` (written once that
+/// step passes) before the rest.
+const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
+/// How much of a held download goes first, in percent.
+const HELD_PERCENT: usize = 60;
+
+/// How long a screen step waits for its `after` line: a give-up only
+/// (the VM's own limit is not checked while a screen check runs).
+const SCREEN_STEP_WAIT: Duration = Duration::from_secs(120);
+/// Scenarios whose steps wait on longer work: `linux_menu`'s install
+/// (17.7 MB fetched from the host and imported: about 40 s under TCG on
+/// an idle host, several times that beside other VMs) between two steps.
+const SCREEN_STEP_WAITS: &[(&str, Duration)] = &[("linux_menu", Duration::from_secs(300))];
+
+/// Waits at most `limit` for `line` in the serial log `log`.
+fn wait_for_line(log: &Path, line: &str, limit: Duration) -> Result {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(120) {
+    while start.elapsed() < limit {
         if fs::read(log).is_ok_and(|b| b.windows(line.len()).any(|w| w == line.as_bytes())) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("no {line:?} in the serial log within 120 s"))
+    Err(format!("no {line:?} in the serial log within {} s", limit.as_secs()))
 }
 
 fn check_screen_step(
@@ -12280,7 +16079,7 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
 
 /// Scenarios whose guest fetches `http://10.0.2.100/` from the host
 /// (`add_host_page_net`).
-const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt"];
+const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt", "linux_menu"];
 
 /// The page `serve-page` serves (user/hostnet_test checks it byte for
 /// byte).
@@ -12315,6 +16114,15 @@ fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     if log.to_string_lossy().contains("chromium_wpt") {
         return wpt::guestfwd();
     }
+    // linux_menu: the suggested distributions' stand-ins, by file name,
+    // held part-way until the screen check has seen the progress
+    // (HELD_DOWNLOADS).
+    if log.to_string_lossy().contains("linux_menu") {
+        cmd.env("XTASK_SERVE_DIR", linux_menu_rootfs()?);
+        let release = log.with_extension("release");
+        let _ = fs::remove_file(&release);
+        cmd.env("XTASK_SERVE_HOLD", release);
+    }
     Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
 
@@ -12342,11 +16150,44 @@ fn serve_page() -> Result {
     {
         let _ = writeln!(log, "xtask: serve-page: {first:?}");
     }
+    // A file of XTASK_SERVE_DIR named by the request's last component
+    // (linux_menu's rootfs tarballs), else the page.
+    let file = env::var_os("XTASK_SERVE_DIR").and_then(|dir| {
+        let target = first.split(' ').nth(1)?;
+        let name = target.rsplit('/').next()?;
+        let ok = !name.is_empty() && !name.starts_with('.') && !name.contains('\\');
+        ok.then(|| Path::new(&dir).join(name)).filter(|p| p.is_file())
+    });
+    let mut out = std::io::stdout().lock();
+    if let Some(path) = file {
+        let data = fs::read(&path).map_err(|e| format!("reading {path:?}: {e}"))?;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            data.len()
+        );
+        // XTASK_SERVE_HOLD: HELD_PERCENT of a large file, then the rest
+        // once that file exists (the screen check saw the progress), at
+        // most 10 minutes later (a give-up: the check failed).
+        let first = match env::var_os("XTASK_SERVE_HOLD") {
+            Some(_) if data.len() > 1 << 20 => data.len() * HELD_PERCENT / 100,
+            _ => data.len(),
+        };
+        out.write_all(head.as_bytes())
+            .and_then(|()| out.write_all(&data[..first]))
+            .and_then(|()| out.flush())
+            .map_err(|e| e.to_string())?;
+        if let Some(release) = env::var_os("XTASK_SERVE_HOLD").filter(|_| first < data.len()) {
+            let start = Instant::now();
+            while !Path::new(&release).exists() && start.elapsed() < Duration::from_secs(600) {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        return out.write_all(&data[first..]).and_then(|()| out.flush()).map_err(|e| e.to_string());
+    }
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HOST_PAGE}",
         HOST_PAGE.len()
     );
-    let mut out = std::io::stdout().lock();
     out.write_all(response.as_bytes()).and_then(|()| out.flush()).map_err(|e| e.to_string())
 }
 
@@ -12359,16 +16200,29 @@ fn add_gpu(cmd: &mut Command) {
 /// A virtio-blk disk backed by the raw image `path` (the legacy
 /// interface, as for the network card).
 fn add_disk(cmd: &mut Command, path: &Path) {
+    // A run resumed from a machine snapshot has a qcow2 layer of its own
+    // over the snapshot's disk (snapshot.rs); the rest are raw images.
+    let format = if path.extension().is_some_and(|e| e == "qcow2") { "qcow2" } else { "raw" };
+    // A host error (the host's disk full under a sparse image) reaches the
+    // guest as a failed request, which it logs, rather than pausing the VM
+    // (QEMU's default for ENOSPC) until the scenario times out.
     cmd.arg("-drive")
-        .arg(format!("if=none,id=d0,format=raw,file={}", path.display()))
+        .arg(format!(
+            "if=none,id=d0,format={format},werror=report,rerror=report,file={}",
+            path.display()
+        ))
         .args(["-device", "virtio-blk-pci,drive=d0,disable-legacy=off"]);
 }
 
 /// A scenario that gets a disk.
 struct DiskScenario {
     name: &'static str,
-    /// Bytes.
+    /// Bytes (a sparse file on the host: only what the guest writes takes
+    /// room).
     size: usize,
+    /// What the image may take on the host at most, in MiB, when that is
+    /// less than its size (checked free before it boots); None: its size.
+    host_mib: Option<u64>,
     /// What to put on the fresh (zeroed) image.
     setup: fn(&mut [u8]),
     /// What the image must hold after the last boot (its first MiB).
@@ -12385,6 +16239,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "disk_test",
         size: 16 << 20,
+        host_mib: None,
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
@@ -12394,6 +16249,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R1 invariant 4: the device is reset under the driver mid-test.
         name: "disk_reset",
         size: 16 << 20,
+        host_mib: None,
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
@@ -12403,6 +16259,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // LocalDB's data files stay on the disk (twice: two log areas).
         name: "sqllocaldb_persist",
         size: 1 << 30,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["tds_test: created", "exited with status 0x00000000"]],
@@ -12411,6 +16268,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "failpoint_disk",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -12419,6 +16277,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "failpoint_disk_delay",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -12428,6 +16287,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R9 (a): the volume handed over between kernels.
         name: "handover_disk",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -12437,6 +16297,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R8 step 6: the earlier boot is release 2 (trust::EARLIER_SIGNING).
         name: "rollback_refused",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&[
@@ -12447,11 +16308,113 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // OF: C: on the disk (`persist`) with room for Office: the
+        // Click-to-Run client asks for 5432 MB free; 16 GiB leaves room
+        // for its updates and the system. On the host the image grows to
+        // what the install writes (the products, ~5.4 GB, and logs).
+        name: "office_install",
+        size: 16 << 30,
+        host_mib: Some(6 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // office_install_local's disk: the cached download (put on it by
+        // new_disk) and the install it makes.
+        name: "office_install_local",
+        size: 16 << 30,
+        host_mib: Some(8 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // office_install's disk, for the same install shown on the screen.
+        name: "office_install_gui",
+        size: 16 << 30,
+        host_mib: Some(6 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // D4: C: on the disk; volume_test fills it (sparse until then).
+        name: "volume_test",
+        size: 1 << 30,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // The page file's room: a quarter of the data area at most.
+        name: "pagefile_test",
+        size: 1 << 30,
+        host_mib: Some(768),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "pagefile_fail",
+        size: 1 << 30,
+        host_mib: Some(768),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // memload_test's 192 MiB file and its blob (sparse until then).
+        name: "memload_test",
+        size: 2 << 30,
+        host_mib: Some(1024),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // SN step 1: the disk a snapshot's layers stack on.
+        name: "snapshot_machine",
+        size: 64 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_test",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["persist_test: first boot", "exited with status 0x00000000"]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "writeback_crash",
+        size: 32 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["writeback_test: crash written", "powercut:"]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "writeback_lazy",
+        size: 32 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&["writeback_test: lazy written", "powercut:"]],
         earlier_fail: false,
     },
     DiskScenario {
@@ -12459,6 +16422,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // and leaves its crash record on the disk; this boot prints it.
         name: "crash_record",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&[
@@ -12493,9 +16457,39 @@ fn disk_test_check(image: &[u8]) -> Result {
     }
 }
 
+fn reuse_disk() -> bool {
+    env::var_os("XTASK_REUSE_DISK").is_some_and(|v| v == "1")
+}
+
+/// MiB a (sparse) file takes on the host.
+fn host_usage_mib(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| (m.blocks() * 512) >> 20)
+}
+
 /// Makes scenario `name`'s fresh disk image next to `iso`, if it has one.
+/// The host must have room for what the image may grow to
+/// (`DiskScenario::host_mib`), unless `XTASK_LOW_DISK=1` starts it anyway
+/// (the guest then logs failed disk writes once the host's disk is full).
+/// `XTASK_REUSE_DISK=1`: the image a failed run kept is booted again as
+/// it is (a later stage of a long run without its earlier stages:
+/// office_install's staging after its download), and kept after a pass.
 fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
     let Some(d) = disk_scenario(name) else { return Ok(None) };
+    let kept = iso.with_extension("disk.img");
+    if reuse_disk() && kept.exists() {
+        eprintln!(
+            "xtask: {name} boots on its kept disk image {} (XTASK_REUSE_DISK)",
+            kept.display()
+        );
+        return Ok(Some(kept));
+    }
+    let need = d.host_mib.unwrap_or(d.size as u64 >> 20);
+    if env::var_os("XTASK_LOW_DISK").is_none() {
+        check_disk_space(name, need + MIN_FREE_MIB).map_err(|e| {
+            format!("{e}\nxtask: {name}'s disk image may take {need} MiB (XTASK_LOW_DISK=1 starts it anyway)")
+        })?;
+    }
     // What setup writes goes in the first MiB; the rest is a sparse file.
     let mut image = vec![0u8; d.size.min(1 << 20)];
     (d.setup)(&mut image);
@@ -12506,7 +16500,106 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if name == "office_install_local" {
+        let source = office_source()?;
+        let t = Instant::now();
+        let (files, bytes) = diskimage::inject(&path, &source, "\\OfficeSource")?;
+        eprintln!(
+            "xtask: {name}: put {} ({files} files, {} MiB) on the disk as C:\\OfficeSource in {:.1}s",
+            source.display(),
+            bytes >> 20,
+            t.elapsed().as_secs_f64()
+        );
+    }
     Ok(Some(path))
+}
+
+/// The version of Office the host's cache holds: office_install's
+/// products (64-bit, English, Current channel) as the CDN serves them, in
+/// the layout of ODT's `setup.exe /download` (`Office\Data\...`), so that
+/// config_local.xml's SourcePath finds them. Pinned as PREBUILT is: a
+/// newer build is a deliberate change of these lines (the checksums from
+/// `cargo xtask office-source --pin`).
+const OFFICE_SOURCE_VERSION: &str = "16.0.20527.20196";
+/// The Current channel's content on the CDN (the client's own log names
+/// it: `pr/492350f6-.../Office/Data/v64.cab`).
+const OFFICE_SOURCE_URL: &str =
+    "http://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/Office/Data";
+/// The files under `Office\Data` (`{v}`: the version) and their SHA-256s:
+/// those the Click-to-Run client fetched for these products in
+/// office_install's runs (its log names each).
+const OFFICE_SOURCE: &[(&str, &str)] = &[
+    ("v64.cab", "bc33d6f5431f494bbfd36a912b49c3cc488513c50b5ef7bea9f801cb594ba07a"),
+    ("v64_{v}.cab", "231c411348a65fde60f14081f35d9771ea42b60b62e7fd14bbc1f412be58bbd1"),
+    ("{v}/i640.cab", "72b07bef01bc57d9684b380abe01a65910d80411e5bd4cad901c73bcbd87148f"),
+    ("{v}/i641033.cab", "1ddca4b1ed0f68b646ff7f367acec502f4306124fadbbbc630b816da2a017802"),
+    ("{v}/s640.cab", "d2d0ed663372aa38ce24dfe3af0a1db6814f821eff6cb8bf069bca2560bf759c"),
+    ("{v}/s641033.cab", "84892149bac189603809e698014f9b7f0016c26614198116aea21b7ebfbea7f7"),
+    (
+        "{v}/stream.x64.en-us.dat",
+        "6f4c27dddfb1b35dc75fd5e18ba1c403d533aa8c4b18718331b2f2e13e18d59b",
+    ),
+    (
+        "{v}/stream.x64.x-none.dat",
+        "e9ec4b9e32b34f0e6debb4006ee99722ac6e765f1472ac27282c13572bd82f6a",
+    ),
+];
+
+/// The cache's directory for OFFICE_SOURCE_VERSION (outside the
+/// repository's tracked files, like PREBUILT's).
+fn office_source_dir() -> PathBuf {
+    target_dir().join("prebuilt").join("office-source").join(OFFICE_SOURCE_VERSION)
+}
+
+/// The cached files' C:\OfficeSource, or how to make it.
+fn office_source() -> Result<PathBuf> {
+    let dir = office_source_dir().join("OfficeSource");
+    if office_source_dir().join(".complete").exists() {
+        return Ok(dir);
+    }
+    Err(format!(
+        "xtask: no cached Office source at {} (`cargo xtask office-source` fetches it; \
+         WORKFLOW \"Office's fast path\")",
+        dir.display()
+    ))
+}
+
+/// `cargo xtask office-source [--pin]`: fetches OFFICE_SOURCE into the
+/// cache (about 2.4 GB; a file already there is kept), checking each
+/// file's SHA-256; `--pin` prints the table with the checksums of what it
+/// has instead (for a new version).
+fn office_source_command(args: &[String]) -> Result {
+    let pin = args.iter().any(|a| a == "--pin");
+    let base = office_source_dir();
+    let data = base.join("OfficeSource").join("Office").join("Data");
+    fs::create_dir_all(data.join(OFFICE_SOURCE_VERSION)).map_err(|e| e.to_string())?;
+    check_disk_space("office-source", 3 << 10)?;
+    for (name, sum) in OFFICE_SOURCE {
+        let name = name.replace("{v}", OFFICE_SOURCE_VERSION);
+        let file = data.join(&name);
+        if !file.exists() {
+            let part = file.with_extension("part");
+            let url = format!("{OFFICE_SOURCE_URL}/{name}");
+            eprintln!("xtask: fetching {url}");
+            run_cmd(
+                Command::new("curl").args(["-sSfL", "--retry", "5", "-o"]).arg(&part).arg(&url),
+            )?;
+            fs::rename(&part, &file).map_err(|e| e.to_string())?;
+        }
+        let out = Command::new("sha256sum").arg(&file).output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let got = text.split_whitespace().next().unwrap_or("");
+        if pin {
+            println!("    (\"{}\", \"{got}\"),", name.replace(OFFICE_SOURCE_VERSION, "{v}"));
+        } else if got != *sum {
+            return Err(format!("{}: SHA-256 {got}, pinned {sum}", file.display()));
+        }
+    }
+    if !pin {
+        fs::write(base.join(".complete"), OFFICE_SOURCE_VERSION).map_err(|e| e.to_string())?;
+        eprintln!("xtask: Office {OFFICE_SOURCE_VERSION}'s source is in {}", base.display());
+    }
+    Ok(())
 }
 
 /// Checks scenario `name`'s disk image after its run.
@@ -12551,7 +16644,8 @@ fn boot_earlier(
     disk: &Path,
 ) -> Result {
     for (n, expect) in d.earlier_boots.iter().enumerate() {
-        let (status, serial, _) = run_vm(image, boot, timeout, None, false, Some(disk), None)?;
+        let (status, serial, _) =
+            run_vm(image, boot, timeout, None, false, Some(disk), None, None)?;
         let kept = iso.with_extension(format!("boot{}.serial.log", n + 1));
         let _ = fs::write(&kept, &serial);
         let missing: Vec<&str> = expect.iter().copied().filter(|e| !serial.contains(e)).collect();
@@ -13867,6 +17961,66 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// The guest files a boot's `dump=` printed (`dump: begin C:/dir/name (N
+/// bytes)`, its lines, `dump: end C:/dir/name`), written below `dir` at
+/// their guest paths (`dir/dir/name`, without the drive); the paths
+/// written. A file cut off by the end of the log is kept as far as it
+/// got.
+fn save_dumps(serial: &str, dir: &Path) -> Vec<PathBuf> {
+    // Only this boot's files: an earlier failure's were kept beside them
+    // and read as this run's (office_install's logs, named by the time).
+    let _ = fs::remove_dir_all(dir);
+    let mut saved = Vec::new();
+    let mut current: Option<(PathBuf, String)> = None;
+    let flush = |file: Option<(PathBuf, String)>, saved: &mut Vec<PathBuf>| {
+        if let Some((path, text)) = file {
+            let written = path.parent().map_or(Ok(()), fs::create_dir_all);
+            if written.and_then(|()| fs::write(&path, text)).is_ok() {
+                saved.push(path);
+            }
+        }
+    };
+    for line in serial.lines() {
+        let Some(rest) = line.split_once("dump: ").map(|(_, r)| r) else { continue };
+        if let Some(begin) = rest.strip_prefix("begin ") {
+            flush(current.take(), &mut saved);
+            let guest = begin.rsplit_once(" (").map_or(begin, |(p, _)| p);
+            // The guest path's parts, without the drive or anything that
+            // would leave `dir`.
+            let mut path = dir.to_path_buf();
+            for part in guest.split(['/', '\\']) {
+                if part.is_empty() || part.ends_with(':') || part == "." || part == ".." {
+                    continue;
+                }
+                path.push(part.replace(':', "_"));
+            }
+            current = Some((path, String::new()));
+        } else if rest.starts_with("end ") {
+            flush(current.take(), &mut saved);
+        } else if let Some((_, text)) = current.as_mut() {
+            text.push_str(rest);
+            text.push('\n');
+        }
+    }
+    flush(current.take(), &mut saved);
+    saved
+}
+
+#[test]
+fn dumps_become_files() {
+    let dir = env::temp_dir().join(format!("xtask-dumps-{}", std::process::id()));
+    let serial = "[info ] dump: C:/gala/odtlog: a directory of 1 entries\n\
+                  [info ] dump: begin C:/gala/odtlog/A-1.log (12 bytes)\n\
+                  [info ] dump: one\n[info ] dump: two\n\
+                  [info ] dump: end C:/gala/odtlog/A-1.log\n\
+                  [info ] dump: begin C:/../x.log (1 bytes)\n[info ] dump: cut";
+    let saved = save_dumps(serial, &dir);
+    assert_eq!(saved, [dir.join("gala/odtlog/A-1.log"), dir.join("x.log")]);
+    assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "one\ntwo\n");
+    assert_eq!(fs::read_to_string(&saved[1]).unwrap(), "cut\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Judges one scenario from the exit status and its part of the log.
 /// Judges a run; on failure the serial log is kept in
 /// `target/failed/<scenario>.log` (rare failures need it), with its
@@ -13902,8 +18056,16 @@ fn judge(
         };
         let summary = triage::triage(serial, events.as_deref(), &facts);
         let kept = format!("{serial}\n{symbols}\n{summary}");
+        // The guest files the scenario's `dump=` printed, as files again.
+        let dumps = save_dumps(serial, &dir.join(format!("{name}.dump")));
+        let dumps = match dumps.len() {
+            0 => String::new(),
+            n => format!("; {n} guest files in {}", dir.join(format!("{name}.dump")).display()),
+        };
         match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
-            Ok(()) => format!("{e} (serial log: {}; it ends with a triage)", path.display()),
+            Ok(()) => {
+                format!("{e} (serial log: {}; it ends with a triage{dumps})", path.display())
+            }
             Err(_) => e,
         }
     })
@@ -14381,7 +18543,8 @@ fn bench_results(text: &str) -> Vec<(String, u64)> {
 fn bench(release: bool, windows: Option<&Path>) -> Result {
     build_kernel(release)?;
     let iso = make_iso(release, "bench", "qemu_exit noscreen run=bench.exe", &[])?;
-    let (status, serial, _) = run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None, None)?;
+    let (status, serial, _) =
+        run_vm(&iso, Boot::Bios, BOOT_TEST_TIMEOUT, None, false, None, None, None)?;
     if status.and_then(|s| s.code()) != Some(QEMU_EXIT_SUCCESS) || !serial.contains("bench: done") {
         return Err(format!(
             "bench did not finish; see {}",
@@ -14475,17 +18638,87 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         Vm::Single(s) => Some(s.name),
         Vm::Batch(_) => None,
     };
-    let disk = match single.map(|name| new_disk(name, iso)).transpose() {
-        Ok(d) => d.flatten(),
-        Err(e) => {
-            return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
-        }
+    let fail = |e: String| -> (BootTime, Vec<(&'a Scenario, Result)>) {
+        (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect())
     };
-    if let (Some(name), Some(d)) = (single, disk.as_deref())
+    // Machine snapshots (snapshot.rs): one asked for on the command line,
+    // or a scenario that takes and resumes its own (SNAPSHOT_SCENARIOS).
+    let pair = single
+        .filter(|_| snapshot::request().is_none())
+        .and_then(|n| SNAPSHOT_SCENARIOS.iter().find(|p| p.name == n));
+    let machine = match single {
+        _ if snapshot::request().is_none() && pair.is_none() => None,
+        None => return fail("a machine snapshot is of one scenario, booted alone".into()),
+        Some(_) if boot == Boot::Uefi => {
+            return fail(
+                "machine snapshots of UEFI boots are not supported yet (the firmware's \
+                 variable store, a disk of its own, would have to be part of them)"
+                    .into(),
+            );
+        }
+        Some(name) => match machine_now(name, iso, boot) {
+            Ok(m) => Some(m),
+            Err(e) => return fail(e),
+        },
+    };
+    let restore = match (snapshot::request(), &machine) {
+        (Some(snapshot::Request::Restore { name, hotswap }), Some(m)) => {
+            let hotswap = hotswap.as_deref().map(|d| (d, iso));
+            match snapshot::prepare_restore(&target_dir(), name, m, &qemu_img(), hotswap) {
+                Ok(r) => Some(r),
+                Err(e) => return fail(e),
+            }
+        }
+        _ => None,
+    };
+    let save: Option<(String, String, bool)> = match (snapshot::request(), pair) {
+        (Some(snapshot::Request::Save { at, name, stop }), _) => {
+            Some((at.clone(), name.clone(), *stop))
+        }
+        (None, Some(p)) => Some((p.at.to_string(), format!("test-{}", p.name), false)),
+        _ => None,
+    };
+    if let Some((_, name, _)) = &save {
+        let dir = snapshot::root(&target_dir()).join(name);
+        if pair.is_some() {
+            // A scenario's own, left by an earlier failed run.
+            let _ = fs::remove_dir_all(&dir);
+        }
+        if dir.exists() {
+            return fail(format!(
+                "snapshot {name} exists already ({}; `cargo xtask snapshots rm {name}`)",
+                dir.display()
+            ));
+        }
+    }
+    let disk = match &restore {
+        Some(r) => r.layer.clone(),
+        None => match single.map(|name| new_disk(name, iso)).transpose() {
+            Ok(d) => d.flatten(),
+            Err(e) => return fail(e),
+        },
+    };
+    if let (None, Some(name), Some(d)) = (&restore, single, disk.as_deref())
         && let Err(e) = earlier_boots(name, iso, boot, timeout, d)
     {
-        return (BootTime::default(), scenarios.iter().map(|&s| (s, Err(e.clone()))).collect());
+        return fail(e);
     }
+    let target = target_dir();
+    let snap = match (&restore, &save, &machine, single) {
+        (Some(r), ..) => Some(Snap::Restore(r)),
+        (None, Some((at, name, stop)), Some(m), Some(scenario)) => {
+            Some(Snap::Save(snapshot::Save {
+                target: &target,
+                name,
+                at,
+                stop: *stop,
+                scenario,
+                machine: m,
+                modules: Some(snapshot::modules_dir(iso)),
+            }))
+        }
+        _ => None,
+    };
     let screen = single.and_then(screen_check);
     let want_cpus = telemetry::vm_cpus(iso);
     // The clock under a busy host: every host CPU kept busy while it runs.
@@ -14494,7 +18727,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     let mut attempt = 0;
     let (status, serial, time) = loop {
         let (status, serial, time) =
-            match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen) {
+            match run_vm(iso, boot, timeout, net, stop, disk.as_deref(), screen, snap.as_ref()) {
                 Ok(r) => r,
                 Err(e) => {
                     return (
@@ -14508,7 +18741,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
         // test what it should: once more (not with a disk: its state moved
         // on).
         let got = telemetry::cpus_online(&serial);
-        if attempt == 0 && disk.is_none() && got.is_some_and(|n| n < want_cpus) {
+        if attempt == 0 && disk.is_none() && snap.is_none() && got.is_some_and(|n| n < want_cpus) {
             // Keep the short boot's logs: the next boot overwrites them.
             for ext in ["serial.log", "phases.log", "qemu.log", "bios.log"] {
                 let _ = fs::copy(
@@ -14572,7 +18805,61 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
                         Err(format!("event stream lacks (or, for a '!' entry, has) {missing:?}"))
                     }
                 })
-                .and_then(|()| disk.as_deref().map_or(Ok(()), |d| check_disk(s.name, d)));
+                // A snapshot's disk moved into it; a resumed run's is a layer.
+                .and_then(|()| match disk.as_deref() {
+                    Some(d) if snap.is_none() => check_disk(s.name, d),
+                    _ => Ok(()),
+                });
+            let verdict = match (&save, &restore) {
+                (Some((_, name, stop)), _) => {
+                    let saved = serial.contains(snapshot::SAVED);
+                    let line = serial
+                        .lines()
+                        .find(|l| l.starts_with("xtask: snapshot: "))
+                        .unwrap_or("no snapshot line")
+                        .trim_start_matches("xtask: snapshot: ");
+                    let verdict = match () {
+                        _ if !saved => Err(format!("snapshot {name}: {line}")),
+                        // The run ended at the save: the save is its result.
+                        _ if *stop => Ok(()),
+                        _ => verdict,
+                    };
+                    match pair {
+                        Some(p) if !p.hotswap.is_empty() => {
+                            verdict.and_then(|()| hotswap_cases(s, p, boot, timeout))
+                        }
+                        Some(p) => verdict.and_then(|()| restore_pair(s, p, iso, boot, timeout)),
+                        None => verdict,
+                    }
+                }
+                (None, Some(r)) => {
+                    let scenario_ok = verdict.is_ok();
+                    // A hot-swapped run never passes (hotswap.rs).
+                    let verdict = match &r.hotswap {
+                        Some(h) => {
+                            let (v, expected) = hotswap::verdict(&serial, &h.dlls, verdict);
+                            if expected {
+                                HOTSWAP_EXPECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            v
+                        }
+                        None => verdict,
+                    };
+                    if let Some(layer) = &r.layer {
+                        if scenario_ok {
+                            let _ = fs::remove_file(layer);
+                        } else if let Some(used) = host_usage_mib(layer) {
+                            eprintln!(
+                                "xtask: kept the resumed run's disk layer {} ({used} MiB on the \
+                                 host; delete it when done)",
+                                layer.display()
+                            );
+                        }
+                    }
+                    verdict
+                }
+                _ => verdict,
+            };
             vec![(*s, verdict)]
         }
         Vm::Batch(group) => group
@@ -14641,6 +18928,574 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     (time, verdicts)
 }
 
+/// A scenario that takes a machine snapshot of itself and resumes it
+/// (ROADMAP SN step 1): saved when `at` comes, the run goes on to its end
+/// and is judged as usual; then two runs resumed from the snapshot, each
+/// on its own disk layer, are judged on what they print after the resume,
+/// which must not have any of `absent` (they would mean a fresh boot or a
+/// replay of what came before the save). The snapshot's frozen disk must
+/// be as it was after both.
+struct SnapshotScenario {
+    name: &'static str,
+    at: &'static str,
+    absent: &'static [&'static str],
+    /// Instead of the two plain resumes: hot swaps (SN step 1d,
+    /// `hotswap_cases`).
+    hotswap: &'static [HotswapCase],
+}
+
+/// A resume of a hot swap scenario: hotswap_dll's build `dll` swapped in
+/// (`hotswap_variant`), the kernel's build `kernel` (`kernel_variant`),
+/// or both in one plan, and what must come of it. With `files`, the
+/// image's modules (variant, file name in `gala`) are hotswap_dll's
+/// builds, replacing or added to the scenario's, and the resume swaps in
+/// every changed module (`--hot-swap-unsafe` with no list).
+struct HotswapCase {
+    dll: Option<&'static str>,
+    kernel: Option<&'static str>,
+    files: &'static [(&'static str, &'static str)],
+    outcome: HotswapOutcome,
+}
+
+enum HotswapOutcome {
+    /// Applied: the lines the resumed run prints.
+    Applied(&'static [&'static str]),
+    /// xtask refuses before the resume, with this in its reason.
+    RefusedByXtask(&'static str),
+    /// The guest refuses (this in its `hotswap: refused:` line) and the
+    /// programs go on unpatched (these lines).
+    RefusedByGuest(&'static str, &'static [&'static str]),
+}
+
+const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
+    SnapshotScenario {
+        name: "snapshot_machine",
+        at: "snapshot_test: phase 1 done",
+        absent: &["snapshot_test: phase 1 done", KERNEL_BANNER, "run: begin"],
+        hotswap: &[],
+    },
+    SnapshotScenario {
+        name: "hotswap_machine",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[
+            HotswapCase {
+                dll: Some("v2"),
+                kernel: None,
+                files: &[],
+                outcome: HotswapOutcome::Applied(&[
+                    "hotswap: NOT A REAL RUN",
+                    "hotswap: \\gala\\hotswap_dll.dll: the file is the new build now",
+                    "hotswap: applied: hotswap_dll.dll in 1 process(es), 5 function(s) patched",
+                    "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                    "hotswap_test: ok",
+                    "exited with status 0x00000000",
+                ]),
+            },
+            // A build a patch cannot take: its file is to be replaced
+            // whole, which the guest refuses while hotswap_test maps it.
+            HotswapCase {
+                dll: Some("layout"),
+                kernel: None,
+                files: &[],
+                outcome: HotswapOutcome::RefusedByGuest(
+                    "\\gala\\hotswap_dll.dll is mapped in process",
+                    &[
+                        "not patchable: static hotswap_dll::TABLE changed size (32 -> 64 bytes)",
+                        "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+                        "hotswap_test: ok",
+                    ],
+                ),
+            },
+        ],
+    },
+    SnapshotScenario {
+        name: "hotswap_files",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: None,
+            kernel: None,
+            files: &[("layout", "hotswap_late.dll"), ("v2", "hotswap_added.dll")],
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: NOT A REAL RUN",
+                "hotswap: \\gala\\hotswap_late.dll: replaced whole (",
+                "no process maps it): not patchable: static hotswap_dll::TABLE changed size",
+                "hotswap: \\gala\\hotswap_added.dll: added (",
+                "hotswap: applied: hotswap_late.dll",
+                "hotswap: applied: hotswap_added.dll",
+                "hotswap_test: late version 2",
+                "hotswap_test: added version 2",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
+    },
+    SnapshotScenario {
+        name: "hotswap_wow64",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: None,
+            files: &[],
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: hotswap_dll32.dll (x86):",
+                "hotswap: applied: hotswap_dll32.dll in 1 process(es), 5 function(s) patched",
+                "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
+    },
+    SnapshotScenario {
+        name: "khotswap_machine",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[
+            HotswapCase {
+                dll: None,
+                kernel: Some("hotswap_v2"),
+                files: &[],
+                outcome: HotswapOutcome::Applied(&[
+                    "hotswap: NOT A REAL RUN",
+                    "hotswap: kernel: blob mapped at 0xffffffffe0000000",
+                    "hotswap: kernel: patched kernel!<kernel::nt::hotswap_probe::ProbeValue as \
+                     kernel::nt::hotswap_probe::ProbeObject>::get",
+                    "hotswap: kernel: stack check:",
+                    "hotswap: applied: kernel: 4 function(s) patched",
+                    "hotswap_test: kernel after: version 2, calls 2, object 107, global 1042",
+                    "hotswap_test: ok",
+                    "exited with status 0x00000000",
+                ]),
+            },
+            HotswapCase {
+                dll: None,
+                kernel: Some("hotswap_layout"),
+                files: &[],
+                outcome: HotswapOutcome::RefusedByXtask(
+                    "static kernel::nt::hotswap_probe::PROBE_TABLE changed size (32 -> 64 bytes)",
+                ),
+            },
+        ],
+    },
+    SnapshotScenario {
+        name: "khotswap_stack",
+        at: "hotswap probe: waiting in the kernel",
+        absent: &["hotswap_test: kstack", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: Some("hotswap_v2"),
+            files: &[],
+            outcome: HotswapOutcome::RefusedByGuest(
+                "kernel!kernel::nt::hotswap_probe::wait_in_kernel (changed) is on the kernel \
+                 stack of thread",
+                &[
+                    "hotswap: undoing the 1 DLL(s) swapped before the kernel",
+                    "hotswap: kernel: the blob's window is unmapped again",
+                    "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+                    "hotswap_test: kernel after: version 1, calls 0, object 7, global 42",
+                    "hotswap_test: ok",
+                ],
+            ),
+        }],
+    },
+    SnapshotScenario {
+        name: "khotswap_both",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: Some("hotswap_v2"),
+            files: &[],
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: applied: hotswap_dll.dll in 1 process(es), 5 function(s) patched",
+                "hotswap: applied: kernel: 4 function(s) patched",
+                "hotswap_test: after: version 2, calls 2, object 107, global 1042, callback 12",
+                "hotswap_test: kernel after: version 2, calls 2, object 107, global 1042",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
+    },
+    SnapshotScenario {
+        name: "hotswap_stack",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: Some("v2"),
+            kernel: None,
+            files: &[],
+            outcome: HotswapOutcome::RefusedByGuest(
+                "hotswap_dll.dll!hs_call_back (changed) is on the stack of thread",
+                &["hotswap_test: callback 11", "hotswap_test: ok"],
+            ),
+        }],
+    },
+];
+
+/// Builds hotswap_dll with `feature` in a profile of its own
+/// (`hotswap-<feature>`, Cargo.toml): its DLL, with its map beside it in
+/// `deps/`.
+fn hotswap_variant(feature: &str, target: &str, package: &str) -> Result<PathBuf> {
+    let profile = format!("hotswap-{feature}");
+    let cmd = user_build_for(target);
+    // user_build_for asks for --release; this build has its own profile.
+    let args: Vec<std::ffi::OsString> =
+        cmd.get_args().filter(|a| *a != "--release").map(|a| a.to_os_string()).collect();
+    let mut cmd = cargo();
+    cmd.args(args).args(["--profile", &profile, "-p", package, "--features", feature]);
+    run_quiet(&mut cmd)?;
+    Ok(target_dir().join(target).join(&profile).join(format!("{package}.dll")))
+}
+
+/// The kernel's builds for the kernel hot swap scenarios, by variant
+/// (made once per run).
+static KERNEL_VARIANTS: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Builds the kernel as `GALA_KERNEL_VARIANT=<variant>` (kernel/build.rs:
+/// `hotswap_v2`, `hotswap_layout`) with the default build's settings, in
+/// a profile of its own (`khotswap`, `khotswap-release`; Cargo.toml), and
+/// copies it (as an image has it) and its map to `kernel-<variant>` there (the next variant's
+/// build replaces `kernel`). A cfg, not a feature: the kernel crate's
+/// metadata, and so every TypeId and symbol, stays the default build's.
+fn kernel_variant(release: bool, variant: &str) -> Result<PathBuf> {
+    let mut built = KERNEL_VARIANTS.lock().map_err(|_| "kernel variants: a poisoned lock")?;
+    if let Some(path) = built.get(variant) {
+        return Ok(path.clone());
+    }
+    let profile = if release { "khotswap-release" } else { "khotswap" };
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+        .args(["--profile", profile])
+        .env("GALA_KERNEL_VARIANT", variant);
+    trust::kernel_env(&mut cmd)?;
+    run_quiet(&mut cmd)?;
+    let dir = target_dir().join(KERNEL_TARGET).join(profile);
+    drop_debug_relocations(&dir.join("kernel"))?;
+    let out = dir.join(format!("kernel-{variant}"));
+    // Without its debug sections, as an image has it (most of its size).
+    copy_kernel(&dir.join("kernel"), &out)?;
+    fs::copy(dir.join("kernel.map"), out.with_extension("map"))
+        .map_err(|e| format!("{}.map: {e}", out.display()))?;
+    // Its incremental state is as large as the default build's (about 2
+    // GB with debug information): not kept, so the next variant is a
+    // fresh incremental build (still incremental: a build that is not
+    // partitions the code otherwise, and every function would differ).
+    let _ = fs::remove_dir_all(dir.join("incremental"));
+    built.insert(variant.to_string(), out.clone());
+    Ok(out)
+}
+
+/// The resumes of a hot swap scenario (`p.hotswap`), from its snapshot
+/// `test-<name>` (deleted after them).
+fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Duration) -> Result {
+    let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+    let name = format!("test-{}", s.name);
+    // The 32-bit DLL in a WOW64 scenario, the 64-bit one otherwise.
+    let x86 = extra_modules(s.name).iter().any(|(f, _)| *f == "x86/hotswap_dll32.dll");
+    let (package, target) =
+        if x86 { ("hotswap_dll32", USER_TARGET_X86) } else { ("hotswap_dll", USER_TARGET) };
+    let dll = format!("{package}.dll");
+    for case in p.hotswap {
+        let built = match case.dll {
+            Some(variant) => {
+                hotswap_variant(variant, target, package)?.to_string_lossy().into_owned()
+            }
+            None => String::new(),
+        };
+        let x86_built = format!("x86={built}");
+        // `files`: hotswap_dll's builds under the names given.
+        let mut files = Vec::new();
+        for (variant, file) in case.files {
+            let path = hotswap_variant(variant, target, package)?;
+            files.push((*file, format!("{}@{file}", path.display())));
+        }
+        // A file the snapshot's build has keeps its place in the config (a
+        // moved module is not resumable); a new one goes last.
+        let in_place = |f: &str| files.iter().find(|(n, _)| f.ends_with(&format!("@{n}")));
+        let mut extras: Vec<(&str, &str)> = extra_modules(s.name)
+            .into_iter()
+            .map(|(f, d)| match f {
+                "hotswap_dll.dll" if case.dll.is_some() => (built.as_str(), d),
+                "x86/hotswap_dll32.dll" if case.dll.is_some() => (x86_built.as_str(), d),
+                _ => in_place(f).map_or((f, d), |(_, new)| (new.as_str(), d)),
+            })
+            .collect();
+        extras.extend(
+            files
+                .iter()
+                .filter(|(n, _)| {
+                    !extra_modules(s.name).iter().any(|(f, _)| f.ends_with(&format!("@{n}")))
+                })
+                .map(|(_, f)| (f.as_str(), "gala")),
+        );
+        let kernel = match case.kernel {
+            Some(variant) => format!("kernel={}", kernel_variant(release, variant)?.display()),
+            None => String::new(),
+        };
+        if case.kernel.is_some() {
+            extras.push((kernel.as_str(), ""));
+        }
+        let mut swap = Vec::new();
+        let mut parts = Vec::new();
+        if let Some(variant) = case.dll {
+            swap.push(dll.clone());
+            parts.push(format!("{dll}'s {variant} build"));
+        }
+        if let Some(variant) = case.kernel {
+            swap.push(hotswap::KERNEL.to_string());
+            parts.push(format!("the kernel's {variant} build"));
+        }
+        for (variant, file) in case.files {
+            parts.push(format!("{file} as hotswap_dll's {variant} build"));
+        }
+        // With `files`, the automatic mode: every changed module.
+        if !case.files.is_empty() {
+            swap.clear();
+        }
+        let image = format!(
+            "{name}-{}-{}{}",
+            case.dll.unwrap_or("dll1"),
+            case.kernel.map_or("k1", |k| k.trim_start_matches("hotswap_")),
+            if case.files.is_empty() { "" } else { "-files" }
+        );
+        let iso = make_iso(release, &image, &scenario_cmdline(s), &extras)?;
+        let machine = machine_now(s.name, &iso, boot)?;
+        let prepared = snapshot::prepare_restore(
+            &target_dir(),
+            &name,
+            &machine,
+            &qemu_img(),
+            Some((&swap, &iso)),
+        );
+        let label = format!("hot swap of {}", parts.join(" and "));
+        let result = match (&case.outcome, prepared) {
+            (HotswapOutcome::RefusedByXtask(want), Err(e)) if e.contains(want) => {
+                eprintln!("xtask: {}: {label}: refused as it must be: {e}", s.name);
+                Ok(())
+            }
+            (HotswapOutcome::RefusedByXtask(want), r) => Err(format!(
+                "{label}: xtask must refuse it with {want:?}, but: {}",
+                r.err().unwrap_or_else(|| "it was not refused".into())
+            )),
+            (_, Err(e)) => Err(format!("{label}: {e}")),
+            (outcome, Ok(r)) => {
+                // What the plan swaps (the modules that changed), as the
+                // guest names them in `hotswap: applied:`.
+                let swap = r.hotswap.as_ref().map(|h| h.dlls.clone()).unwrap_or_default();
+                let (_, serial, _) = run_vm(
+                    &iso,
+                    boot,
+                    timeout,
+                    None,
+                    false,
+                    r.layer.as_deref(),
+                    None,
+                    Some(&Snap::Restore(&r)),
+                )?;
+                let kept = iso.with_extension("serial.log");
+                let _ = fs::write(&kept, &serial);
+                let guest: String = serial
+                    .lines()
+                    .filter(|l| !l.starts_with("xtask:"))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                let missing = |lines: &[&str]| -> Result {
+                    match lines.iter().find(|l| !guest.contains(*l)) {
+                        Some(l) => Err(format!(
+                            "{label}: the resumed run lacks {l:?} ({})",
+                            kept.display()
+                        )),
+                        None => Ok(()),
+                    }
+                };
+                // The event stream says it too.
+                let events =
+                    fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
+                let wanted: Vec<String> = match outcome {
+                    HotswapOutcome::Applied(_) => swap
+                        .iter()
+                        .map(|d| match d.as_str() {
+                            hotswap::KERNEL => {
+                                r#""ev":"hotswap","result":"applied","image":"kernel""#.to_string()
+                            }
+                            _ => format!(r#""ev":"hotswap","result":"applied","dll":"{d}""#),
+                        })
+                        .collect(),
+                    _ => vec![r#""ev":"hotswap","result":"refused""#.to_string()],
+                };
+                if let Some(event) = wanted.iter().find(|e| !events.contains(e.as_str())) {
+                    return Err(format!("{label}: the event stream lacks {event}"));
+                }
+                let result = match outcome {
+                    HotswapOutcome::Applied(lines) => {
+                        let (v, expected) = hotswap::verdict(&serial, &swap, missing(lines));
+                        match (expected, v) {
+                            (true, Err(e)) if e.starts_with(hotswap::NOT_A_REAL_RUN) => Ok(()),
+                            (_, Err(e)) => Err(format!("{label}: {e}")),
+                            (_, Ok(())) => Err(format!("{label}: a hot-swapped run passed")),
+                        }
+                    }
+                    HotswapOutcome::RefusedByGuest(why, lines) => {
+                        let (v, _) = hotswap::verdict(&serial, &swap, Ok(()));
+                        match v {
+                            Err(e) if e.contains("refused the hot swap") && e.contains(why) => {
+                                missing(lines)
+                            }
+                            other => Err(format!(
+                                "{label}: the guest must refuse it with {why:?}, but: {other:?} ({})",
+                                kept.display()
+                            )),
+                        }
+                    }
+                    HotswapOutcome::RefusedByXtask(_) => Ok(()),
+                };
+                if let Some(a) = p.absent.iter().find(|a| guest.contains(*a)) {
+                    return Err(format!(
+                        "{label}: the resumed run printed {a:?}, from before the snapshot"
+                    ));
+                }
+                if let Some(layer) = &r.layer {
+                    let _ = fs::remove_file(layer);
+                }
+                if result.is_ok() {
+                    eprintln!("xtask: {}: {label}: as it must be (log {})", s.name, kept.display());
+                }
+                result
+            }
+        };
+        result?;
+        for ext in ["iso", "boot.sha256", "hotswap.plan"] {
+            let _ = fs::remove_file(iso.with_extension(ext));
+        }
+        let _ = fs::remove_dir_all(snapshot::modules_dir(&iso));
+    }
+    let dir = snapshot::root(&target_dir()).join(&name);
+    fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// The two resumed runs of a SNAPSHOT_SCENARIOS entry (its snapshot is
+/// `test-<name>`, deleted after they pass).
+fn restore_pair(
+    s: &Scenario,
+    p: &SnapshotScenario,
+    iso: &Path,
+    boot: Boot,
+    timeout: Duration,
+) -> Result {
+    let name = format!("test-{}", s.name);
+    let dir = snapshot::root(&target_dir()).join(&name);
+    let frozen = |dir: &Path| -> Result<String> {
+        let out = Command::new("sha256sum")
+            .arg(dir.join("disk.img"))
+            .output()
+            .map_err(|e| format!("sha256sum: {e}"))?;
+        Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").into())
+    };
+    let before = frozen(&dir)?;
+    let machine = machine_now(s.name, iso, boot)?;
+    let mut layers = Vec::new();
+    for i in 1..=2 {
+        let r = snapshot::prepare_restore(&target_dir(), &name, &machine, &qemu_img(), None)?;
+        let (status, serial, time) = run_vm(
+            iso,
+            boot,
+            timeout,
+            None,
+            false,
+            r.layer.as_deref(),
+            None,
+            Some(&Snap::Restore(&r)),
+        )?;
+        let kept = iso.with_extension(format!("restore{i}.serial.log"));
+        let _ = fs::write(&kept, &serial);
+        let facts = RunFacts {
+            events: Some(iso.with_extension("events.jsonl")),
+            secs: Some(time.total.as_secs_f64()),
+        };
+        judge(s, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)
+            .map_err(|e| format!("resumed run {i}: {e}"))?;
+        // The guest's lines (xtask's own name the snapshot's line).
+        let guest: String =
+            serial.lines().filter(|l| !l.starts_with("xtask:")).map(|l| format!("{l}\n")).collect();
+        if let Some(a) = p.absent.iter().find(|a| guest.contains(*a)) {
+            return Err(format!(
+                "resumed run {i} printed {a:?}, which comes before the snapshot ({})",
+                kept.display()
+            ));
+        }
+        // The guest's wall clock after the resume against the host's.
+        let host = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Some(guest) = serial
+            .lines()
+            .find_map(|l| l.split("snapshot_test: guest time ").nth(1))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            eprintln!(
+                "xtask: {}: resumed run {i}: the guest's clock {}s behind the host's",
+                s.name,
+                host.saturating_sub(guest)
+            );
+        }
+        layers.extend(r.layer.clone());
+        if let Some(layer) = &r.layer {
+            let _ = fs::remove_file(layer);
+        }
+    }
+    if layers.len() == 2 && layers[0] == layers[1] {
+        return Err("both resumed runs had the same disk layer".into());
+    }
+    if frozen(&dir)? != before {
+        return Err(format!(
+            "the snapshot's frozen disk {} changed",
+            dir.join("disk.img").display()
+        ));
+    }
+    fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// The machine a run of `scenario` on `iso` would be, as a snapshot sees
+/// it (snapshot.rs): QEMU's version, memory and processors, and the boot
+/// image's digests (made with it).
+fn machine_now(scenario: &str, iso: &Path, boot: Boot) -> Result<snapshot::Machine> {
+    let cmd = qemu(iso, boot)?;
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    // The last one counts (XTASK_QEMU_ARGS come after xtask's own).
+    let last =
+        |flag: &str| args.iter().rposition(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let memory = last("-m").unwrap_or_default();
+    let memory_mib = memory
+        .trim_end_matches(['M', 'm'])
+        .parse::<u64>()
+        .map_err(|e| format!("QEMU's -m {memory}: {e}"))?;
+    let smp = last("-smp").unwrap_or_default();
+    let cpus = smp
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("cpus=")
+        .parse::<u32>()
+        .map_err(|e| format!("QEMU's -smp {smp}: {e}"))?;
+    Ok(snapshot::Machine {
+        scenario: scenario.into(),
+        qemu: snapshot::qemu_version(&qemu_binary()),
+        memory_mib,
+        cpus,
+        boot: snapshot::read_boot_digests(iso)?,
+    })
+}
+
+/// The qemu-img that goes with `qemu_binary()` (its directory), else the
+/// one on PATH.
+fn qemu_img() -> PathBuf {
+    let beside = qemu_binary().with_file_name("qemu-img");
+    if beside.is_file() { beside } else { PathBuf::from("qemu-img") }
+}
+
 /// Boots a scenario alone (for reports), without printing its log.
 fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
     let disk = new_disk(scenario.name, iso)?;
@@ -14656,6 +19511,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         scenario.exit_status == XTASK_STOPS,
         disk.as_deref(),
         screen_check(scenario.name),
+        None,
     )?;
     let facts = RunFacts {
         events: Some(iso.with_extension("events.jsonl")),
@@ -14717,6 +19573,7 @@ fn system_modules() -> Vec<(&'static str, &'static str)> {
         .map(|d| (d.file, "Windows/System32"))
         .collect();
     modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules.push(("user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"));
     modules
 }
 
@@ -14738,6 +19595,8 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
+    let profile = if release { "release" } else { "debug" };
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET).join(profile).join("kernel"))?;
     let mut cmd = user_build();
     for dll in USER_DLLS {
         cmd.args(["--package", dll.package]);
@@ -15118,6 +19977,16 @@ fn copy(from: &Path, to: &Path) -> Result {
 /// symbolized on the host from the build's own ELF, which keeps it.
 fn copy_kernel(from: &Path, to: &Path) -> Result {
     run_quiet(Command::new("objcopy").arg("--strip-debug").arg(from).arg(to))
+}
+
+/// Removes the relocations of a kernel ELF's debug sections
+/// (`.rela.debug_*`), in place. kernel/build.rs links with `--emit-relocs`
+/// for the hot swap (SN step 1e), which needs those of the code and data
+/// only (hotswap.rs skips sections that are not loaded); lld keeps them
+/// for every section, and those of the DWARF are most of the file: 71 of
+/// 135 MB for a debug build. The DWARF itself stays for symbolizing.
+fn drop_debug_relocations(elf: &Path) -> Result {
+    run_quiet(Command::new("objcopy").arg("--remove-section=.rela.debug_*").arg(elf))
 }
 
 fn write(path: &Path, contents: &str) -> Result {
@@ -15559,5 +20428,27 @@ mod um_scenarios {
         }
         let schannel = SCENARIOS.iter().find(|s| s.name == "schannel_test").unwrap();
         assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_scenarios {
+    use super::*;
+
+    /// A scenario that snapshots and resumes itself boots alone: batched
+    /// with others that share its boot modules (hotswap_machine and
+    /// hotswap_stack did), it took no snapshot, ran none of its resumes
+    /// and passed.
+    #[test]
+    fn snapshot_scenarios_are_never_batched() {
+        for p in SNAPSHOT_SCENARIOS {
+            let s = SCENARIOS.iter().find(|s| s.name == p.name).expect("its scenario");
+            assert_eq!(batchable(s), None, "{} would be batched", p.name);
+        }
+        let pair: Vec<&Scenario> = SCENARIOS
+            .iter()
+            .filter(|s| s.name == "hotswap_machine" || s.name == "khotswap_both")
+            .collect();
+        assert_eq!(plan_vms(&pair).len(), 2);
     }
 }

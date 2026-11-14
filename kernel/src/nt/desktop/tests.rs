@@ -65,7 +65,8 @@ fn click(d: &mut Desktop, x: i64, y: i64) {
 #[test]
 fn the_start_button_opens_and_closes_the_start_menu() {
     let (mut d, _) = desktop_with_window();
-    d.set_programs(&[0]);
+    let tile = Entry { program: 0, installed: true };
+    d.set_programs(&[tile]);
     let start = d.start_rect();
     let inside = (d.menu_rect().x + 20, d.menu_rect().y + d.menu_rect().h - 20);
     let before = d.pixel(inside.0, inside.1);
@@ -89,7 +90,7 @@ fn the_start_button_opens_and_closes_the_start_menu() {
     let item = d.menu_item_rect(0);
     click(&mut d, item.x + 20, item.y + 10);
     assert!(!d.menu_open());
-    assert_eq!(d.take_launch().map(|p| p.name), Some(PROGRAMS[0].name));
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(PROGRAMS[0].name));
     assert!(d.take_launch().is_none());
     assert_eq!(d.recent[0], 0);
     // The Windows key opens it; typing filters; Escape closes.
@@ -97,14 +98,135 @@ fn the_start_button_opens_and_closes_the_start_menu() {
     assert!(!d.menu_open());
     d.key(0x5b, 0x5b, true, false);
     assert!(d.menu_open());
-    for k in b"FILEZ" {
+    for k in b"PROMP" {
         d.key(*k, 0, false, true);
     }
-    assert_eq!(d.listed(), [0]);
+    assert_eq!(d.listed(), [tile]);
     d.key(b'Q', 0, false, true);
     assert!(d.listed().is_empty());
     d.key(0x1b, 1, false, true);
     assert!(!d.menu_open());
+}
+
+/// Whether a path exists, for the listing: these do.
+fn on_disk(present: &'static [&'static str]) -> impl FnMut(&str) -> bool {
+    move |path: &str| present.iter().any(|p| p.eq_ignore_ascii_case(path))
+}
+
+fn names(programs: &[Program], (tiles, n): ([Entry; MAX_TILES], usize)) -> Vec<(&str, bool)> {
+    tiles[..n].iter().map(|e| (programs[e.program].name, e.installed)).collect()
+}
+
+#[test]
+fn the_start_menu_lists_default_programs_and_the_catalog() {
+    // gala's cmd.exe where every image has it (a boot module in C:\gala):
+    // the Command Prompt; the catalog always, none of it installed.
+    let tiles = list_programs(PROGRAMS, &mut on_disk(&["C:\\gala\\cmd.exe"]));
+    assert_eq!(
+        names(PROGRAMS, tiles),
+        [
+            ("Command Prompt", true),
+            ("Microsoft Office", false),
+            ("FileZilla", false),
+            (".NET", false),
+            ("Python", false),
+            ("Chromium", false),
+            ("Git", false),
+            ("7-Zip", false),
+        ]
+    );
+    // Installed: where each package's installer puts the program, the
+    // per-user places under the boot user's %LOCALAPPDATA%; FileZilla
+    // also in the scenarios' portable place. Command Prompt in System32.
+    let present = &[
+        "C:\\Windows\\System32\\cmd.exe",
+        "C:\\gala\\gui_test.exe",
+        "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+        "C:\\filezilla\\filezilla.exe",
+        "C:\\Program Files\\dotnet\\dotnet.exe",
+        "C:\\Users\\gala\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+        "C:\\Program Files\\Chromium\\Application\\chrome.exe",
+        "C:\\Users\\gala\\AppData\\Local\\Programs\\Git\\git-bash.exe",
+        "C:\\Program Files\\7-Zip\\7zFM.exe",
+    ];
+    let tiles = list_programs(PROGRAMS, &mut on_disk(present));
+    let listed = names(PROGRAMS, tiles);
+    assert_eq!(listed.len(), 9);
+    assert!(listed.iter().all(|&(_, installed)| installed), "{listed:?}");
+    assert_eq!(listed[1], ("Hello window", true));
+    // Every tile fits the grid.
+    assert!(PROGRAMS.len() <= MAX_TILES);
+}
+
+#[test]
+fn the_listing_has_one_tile_per_name_and_finds_the_first_existing_path() {
+    const TABLE: &[Program] = &[
+        Program { name: "Tool", paths: &["C:\\a\\tool.exe"], colors: (0, 0), package: None },
+        Program { name: "Tool", paths: &["C:\\b\\tool.exe"], colors: (0, 0), package: None },
+        Program { name: "Gone", paths: &["C:\\gone.exe"], colors: (0, 0), package: None },
+        Program {
+            name: "App",
+            paths: &["%LOCALAPPDATA%\\App\\app.exe", "%ProgramFiles%\\App\\app.exe"],
+            colors: (0, 0),
+            package: Some("Vendor.App"),
+        },
+        Program { name: "App", paths: &["C:\\app.exe"], colors: (0, 0), package: None },
+    ];
+    // The first "Tool" is missing, the second is there: one tile, the
+    // second's. "Gone" (no package) is not listed; "App" once, not
+    // installed.
+    let tiles = list_programs(TABLE, &mut on_disk(&["C:\\b\\tool.exe", "C:\\app.exe"]));
+    assert_eq!(
+        tiles.0[..tiles.1],
+        [Entry { program: 1, installed: true }, Entry { program: 3, installed: false },]
+    );
+    // The machine scope's place when the user's is empty.
+    let mut buf = [0; 260];
+    let found = TABLE[3].find(&mut on_disk(&["C:\\Program Files\\App\\app.exe"]), &mut buf);
+    assert_eq!(found, Some((1, "C:\\Program Files\\App\\app.exe")));
+}
+
+#[test]
+fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: false },
+    ]);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    assert!(d.menu_open());
+    // The badge: the accent over the icon's bottom-right corner, on the
+    // second tile only.
+    let badge = |d: &Desktop, k: usize| {
+        let r = d.menu_item_rect(k);
+        let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
+        d.pixel(ix + 23, iy + 28)
+    };
+    assert_eq!(badge(&d, 1), ACCENT);
+    assert_ne!(badge(&d, 0), ACCENT);
+    // Its name on two lines: something drawn on the second.
+    let r = d.menu_item_rect(1);
+    let dark = |c: u32| (c & 0xff) < 0x80 && (c >> 8 & 0xff) < 0x80 && (c >> 16 & 0xff) < 0x80;
+    let second = (r.x..r.x + r.w).any(|x| (r.y + 63..r.y + 78).any(|y| dark(d.pixel(x, y))));
+    assert!(second);
+    // A click hands the program to the caller, which installs it.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(!d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+}
+
+#[test]
+fn enter_in_the_start_menu_starts_the_first_tile_at_once() {
+    let (mut d, _) = desktop_with_window();
+    d.set_programs(&[Entry { program: 0, installed: true }]);
+    d.key(0x5b, 0x5b, true, true);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(d.menu_open());
+    d.key(0x0d, 0x1c, false, true);
+    assert!(!d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Command Prompt"));
 }
 
 #[test]
@@ -986,4 +1108,315 @@ fn a_press_outside_a_popup_grab_s_owner_ends_it_and_goes_nowhere() {
     d.destroy(q, 7).unwrap();
     assert_eq!(d.s.popup_grab, None);
     assert_eq!(d.take_input(7, &mut out), 0);
+}
+
+/// A notification-area icon: drawn left of the clock, its rectangle
+/// known, a click and a right click are its window's callback messages
+/// in version 4's layout, a balloon shows above the taskbar and a click
+/// on it is NIN_BALLOONUSERCLICK; the icon goes with its process.
+#[test]
+fn notification_area_icons_are_drawn_clicked_and_dropped() {
+    let (mut d, _) = desktop_with_window();
+    let red = [0xffff_0000u32; tray::ICON * tray::ICON];
+    let data = tray::Data {
+        flags: tray::NIF_MESSAGE | tray::NIF_ICON | tray::NIF_TIP,
+        hwnd: 0x20040,
+        uid: 3,
+        callback: 0x8001,
+        tip: title("Syncing"),
+        icon: red.to_vec(),
+        ..tray::Data::default()
+    };
+    d.tray_op(7, tray::NIM_ADD, &data).unwrap();
+    assert_eq!(d.tray_op(7, tray::NIM_ADD, &data), Err(NtStatus::OBJECT_NAME_COLLISION));
+    let key = tray::Key::Id(0x20040, 3);
+    let r = d.tray_rect(key).unwrap();
+    assert_eq!(r, Rect { x: 1024 - CLOCK_W - tray::SLOT, y: 768 - 48 + 4, w: tray::SLOT, h: 40 });
+    assert_eq!(d.pixel(r.x + r.w / 2, r.y + r.h / 2), 0x00ff_0000);
+    d.tray_op(7, tray::NIM_SETVERSION, &tray::Data { version: 4, ..data.clone() }).unwrap();
+    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+    click(&mut d, cx, cy);
+    go(&mut d, cx, cy, 2);
+    go(&mut d, cx, cy, 0);
+    let at = (cx as u64) | (cy as u64) << 16;
+    let events: Vec<(u64, u64)> =
+        d.take_tray_posts().iter().map(|p| (p.wparam, p.lparam)).collect();
+    assert_eq!(
+        events,
+        [
+            // The pointer arriving over it.
+            (at, 0x200 | 3 << 16),
+            (at, 0x201 | 3 << 16),
+            (at, 0x202 | 3 << 16),
+            (at, u64::from(tray::NIN_SELECT) | 3 << 16),
+            (at, 0x204 | 3 << 16),
+            (at, 0x205 | 3 << 16),
+            (at, u64::from(tray::WM_CONTEXTMENU) | 3 << 16),
+        ]
+    );
+    // The named action does the same as the mouse.
+    d.tray_click(key, tray::Button::Left).unwrap();
+    assert_eq!(d.take_tray_posts().len(), 3);
+    // A balloon, clicked.
+    let info = tray::Data {
+        flags: tray::NIF_INFO,
+        title: title("Installing"),
+        info: title("Office is installing in the background"),
+        ..data.clone()
+    };
+    d.tray_op(7, tray::NIM_MODIFY, &info).unwrap();
+    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
+    assert_eq!(card.x + card.w, 1024 - 12);
+    assert_eq!(d.pixel(card.x + 8, card.y + card.h - 4), MENU_COLOR);
+    click(&mut d, card.x + 20, card.y + 20);
+    let events: Vec<u64> = d.take_tray_posts().iter().map(|p| p.lparam & 0xffff).collect();
+    assert_eq!(events, [u64::from(tray::NIN_BALLOONSHOW), u64::from(tray::NIN_BALLOONUSERCLICK)]);
+    assert!(d.card.is_none());
+    d.destroy_owned(7);
+    assert_eq!(d.tray_rect(key), None);
+    assert_ne!(d.pixel(cx, cy), 0x00ff_0000);
+}
+
+/// The start menu open on a desktop with one window, listing the Command
+/// Prompt and `listing`'s Linux section.
+fn menu_with_linux(listing: linux::Listing) -> Desktop {
+    let (mut d, _) = desktop_with_window();
+    d.set_programs(&[Entry { program: 0, installed: true }]);
+    d.set_linux(listing);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    assert!(d.menu_open());
+    d
+}
+
+fn installed(name: &str, apps: &[(&str, &str)]) -> linux::Distro {
+    let mut d = linux::Distro::new(linux::Name::new(name.as_bytes()).unwrap(), true);
+    for (i, (n, e)) in apps.iter().enumerate() {
+        d.apps[i] = Some(linux::App {
+            name: linux::Text::cut(n),
+            exec: linux::Text::new(e.as_bytes()).unwrap(),
+        });
+    }
+    d
+}
+
+fn centre(r: Rect) -> (i64, i64) {
+    (r.x + r.w / 2, r.y + r.h / 2)
+}
+
+fn right_click(d: &mut Desktop, x: i64, y: i64) {
+    go(d, x, y, 0);
+    go(d, x, y, 2);
+    go(d, x, y, 0);
+}
+
+#[test]
+fn the_linux_section_collapses_hides_and_dismisses_its_suggestions() {
+    let mut d = menu_with_linux(linux::Listing::default());
+    // Two suggestions, not installed: dimmed, each with a download badge
+    // and a dismiss button; the heading below the pinned row.
+    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Ubuntu", "Alpine"]);
+    let heading = d.linux_heading_rect();
+    assert!(heading.y > d.menu_item_rect(0).y + TILE_H - 4);
+    let tile = d.linux_tile_rect(0);
+    let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
+    assert_eq!(d.pixel(ix + 23, iy + 28), ACCENT);
+    // The heading collapses the tiles away, and back.
+    let (hx, hy) = (heading.x + 40, heading.y + 10);
+    click(&mut d, hx, hy);
+    assert!(d.linux.prefs.collapsed);
+    assert_eq!(d.hit(ix + 5, iy + 5), Hit::Menu);
+    assert_eq!(d.take_prefs(), Some(linux::Prefs { collapsed: true, ..Default::default() }));
+    click(&mut d, hx, hy);
+    assert!(!d.linux.prefs.collapsed);
+    assert_eq!(d.hit(ix + 5, iy + 5), Hit::LinuxEntry(0));
+    // Alpine's dismiss button: it is not suggested again; the menu stays.
+    let (x, y) = centre(d.linux_dismiss_rect(1));
+    click(&mut d, x, y);
+    assert!(d.menu_open());
+    let names: Vec<&str> = d.linux_tiles().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Ubuntu"]);
+    assert_eq!(d.take_prefs().map(|p| p.dismissed), Some(0b10));
+    // A listing read while the choices wait to be saved keeps them.
+    d.prefs_changed = true;
+    d.set_linux(linux::Listing::default());
+    assert_eq!(d.linux.prefs.dismissed, 0b10);
+    d.take_prefs();
+    // "Hide": the section goes; the menu's context menu brings it back.
+    let (x, y) = centre(d.linux_hide_rect());
+    click(&mut d, x, y);
+    assert!(d.linux.prefs.hidden);
+    assert_eq!(d.take_prefs().map(|p| p.hidden), Some(true));
+    let (bx, by) = (d.menu_rect().x + 300, d.menu_rect().y + 400);
+    assert_eq!(d.hit(bx, by), Hit::Menu);
+    right_click(&mut d, bx, by);
+    let c = d.context.unwrap();
+    assert_eq!(c.items[0], Some(linux::Item::ShowSection));
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(!d.linux.prefs.hidden && d.context.is_none() && d.menu_open());
+    assert_eq!(d.take_prefs().map(|p| (p.hidden, p.dismissed)), Some((false, 0b10)));
+}
+
+#[test]
+fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
+    let mut d = menu_with_linux(linux::Listing::default());
+    let tile = d.linux_tile_rect(0);
+    click(&mut d, tile.x + 20, tile.y + 20);
+    // The menu stays open, the tile shows its progress.
+    assert!(d.menu_open());
+    let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
+    match d.take_launch() {
+        Some(Launch::Linux(linux::Request::Install(n, 0))) => assert_eq!(n, ubuntu),
+        _ => panic!("no install"),
+    }
+    // A second click while it installs asks for nothing.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(d.take_launch().is_none());
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
+    let (bx, by) = (tile.x + 13, tile.y + 69);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    d.linux_progress(ubuntu, Some(linux::Progress::Failed));
+    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
+    // A failed install may be tried again.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
+    // Registered: its progress goes, it is drawn in full colour.
+    let mut listing = linux::Listing::default();
+    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm")]));
+    d.set_linux(listing);
+    assert!(d.progress.is_empty());
+    assert_ne!(d.pixel(bx, by), ACCENT);
+    assert!(d.linux_tiles()[0].installed);
+    // A click starts its desktop; the menu closes.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(!d.menu_open());
+    assert!(
+        matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Desktop(n))) if n == ubuntu)
+    );
+}
+
+#[test]
+fn an_installed_distributions_context_menu_opens_a_terminal_or_an_application() {
+    let mut listing = linux::Listing::default();
+    listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm"), ("Editor", "ed -s")]));
+    let mut d = menu_with_linux(listing);
+    let tile = d.linux_tile_rect(0);
+    // A suggestion's tile has no context menu; an installed one has.
+    let second = d.linux_tile_rect(1);
+    right_click(&mut d, second.x + 20, second.y + 20);
+    assert!(d.context.is_none());
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let c = d.context.unwrap();
+    assert_eq!(
+        c.items[..4],
+        [Some(linux::Item::Terminal), Some(linux::Item::App(0)), Some(linux::Item::App(1)), None]
+    );
+    let r = d.context_rect().unwrap();
+    assert!(d.menu_rect().contains(r.x, r.y) && d.menu_rect().contains(r.x + r.w, r.y + r.h));
+    // A click beside it closes it and does nothing else.
+    let m = d.menu_rect();
+    click(&mut d, m.x + 300, m.y + 30);
+    assert!(d.context.is_none() && d.menu_open() && d.take_launch().is_none());
+    // The second application.
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 4 + 2 * linux::ITEM_H + 10);
+    assert!(!d.menu_open());
+    match d.take_launch() {
+        Some(Launch::Linux(linux::Request::App(n, app))) => {
+            assert_eq!((n.as_str(), app.exec.as_str()), ("Ubuntu", "ed -s"));
+        }
+        _ => panic!("no application"),
+    }
+    // "Open terminal".
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    right_click(&mut d, tile.x + 20, tile.y + 20);
+    let r = d.context_rect().unwrap();
+    click(&mut d, r.x + 20, r.y + 14);
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Terminal(_)))));
+}
+
+#[test]
+fn ctrl_shift_esc_starts_task_manager_and_no_program_sees_the_esc() {
+    let (mut d, _) = desktop_with_window();
+    let _ = sent(&mut d);
+    // Esc alone goes to the active window.
+    d.key(0x1b, 1, false, true);
+    d.key(0x1b, 1, false, false);
+    assert!(d.take_launch().is_none());
+    assert!(sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == 0x1b));
+    // With Ctrl and Shift held: Task Manager, and the window gets the
+    // modifiers only.
+    d.key(0x11, 0x1d, false, true);
+    d.key(0x10, 0x2a, false, true);
+    d.key(0x1b, 1, false, true);
+    d.key(0x1b, 1, false, false);
+    d.key(0x10, 0x2a, false, false);
+    d.key(0x11, 0x1d, false, false);
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
+    assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == 0x1b));
+    // Once only, and not again with the modifiers released.
+    d.key(0x1b, 1, false, true);
+    assert!(d.take_launch().is_none());
+}
+
+#[test]
+fn the_taskbars_context_menu_starts_task_manager() {
+    let (mut d, _) = desktop_with_window();
+    // A right click on the taskbar's free space (left of the centred
+    // buttons) opens the menu above it; a press elsewhere closes it.
+    let bar_y = 768 - i64::from(TASKBAR) / 2;
+    right_click(&mut d, 100, bar_y);
+    let r = d.bar_menu_rect().expect("the taskbar's menu is open");
+    assert!(r.y + r.h <= 768 - i64::from(TASKBAR));
+    click(&mut d, 600, 300);
+    assert!(d.bar_menu_rect().is_none());
+    assert!(d.take_launch().is_none());
+    // Its item: Task Manager; the menu closes.
+    right_click(&mut d, 100, bar_y);
+    let r = d.bar_menu_rect().expect("open again");
+    let (x, y) = centre(Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM });
+    go(&mut d, x, y, 0);
+    assert!(d.render_card().is_some());
+    click(&mut d, x, y);
+    assert!(d.bar_menu_rect().is_none());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(TASK_MANAGER));
+}
+
+#[test]
+fn task_manager_is_listed_where_windows_has_it() {
+    let tiles = list_programs(PROGRAMS, &mut on_disk(&["C:\\Windows\\System32\\Taskmgr.exe"]));
+    assert_eq!(
+        names(PROGRAMS, tiles),
+        [
+            (TASK_MANAGER, true),
+            ("Microsoft Office", false),
+            ("FileZilla", false),
+            (".NET", false),
+            ("Python", false),
+            ("Chromium", false),
+            ("Git", false),
+            ("7-Zip", false)
+        ]
+    );
+}
+
+#[test]
+fn win_e_starts_file_explorer() {
+    let (mut d, _) = desktop_with_window();
+    d.key(0x5b, 0x5b, true, true);
+    d.key(b'E', 0x12, false, true);
+    d.key(b'E', 0x12, false, false);
+    d.key(0x5b, 0x5b, true, false);
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some(FILE_EXPLORER));
+    // The Windows key used with E opens no start menu, and no window saw
+    // the E.
+    assert!(!d.menu_open());
+    assert!(!sent(&mut d).iter().any(|m| m.1 == WM_KEYDOWN && m.2 == u64::from(b'E')));
+    // E alone is the window's.
+    d.key(b'E', 0x12, false, true);
+    assert!(d.take_launch().is_none());
 }

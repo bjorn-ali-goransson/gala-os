@@ -13,7 +13,9 @@
 //! - Dispatch: the vectored exception handlers, then each registration's
 //!   handler, `handler(record, frame, context, dispatcher_context)` (cdecl),
 //!   until one returns ExceptionContinueExecution (the context is
-//!   resumed) ; the vectored continue handlers; unhandled: the top-level
+//!   resumed), each called under a registration of the dispatcher's own
+//!   linked at the head of the list (`call_frame`, as Windows' nested
+//!   exception frame: Microsoft's C++ catch relinks it); the vectored continue handlers; unhandled: the top-level
 //!   filter, then the process ends with the exception code (the kernel
 //!   keeps it for the crash report).
 //! - `RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)`:
@@ -24,10 +26,12 @@
 //!   address), dispatched as above; a handled exception resumes after the
 //!   call.
 //!
-//! Not yet: nested exceptions (a handler's own exception is dispatched
-//! from the handler's frame, not marked EXCEPTION_NESTED_CALL) and
-//! collided unwinds (dispositions 2 and 3 are taken as
-//! ExceptionContinueSearch), SafeSEH's handler tables.
+//! Not yet: nested exceptions (a handler's own exception meets the
+//! dispatcher's registration, which answers ExceptionNestedException, but
+//! the search goes on through the frames below it rather than skipping
+//! to the handled frame with EXCEPTION_NESTED_CALL) and collided unwinds
+//! (dispositions 2 and 3 are taken as ExceptionContinueSearch), SafeSEH's
+//! handler tables.
 
 use crate::{ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, with_handlers};
 
@@ -102,16 +106,81 @@ fn set_record_flags(record: *mut u8, flags: u32) {
     unsafe { record.add(ER_FLAGS).cast::<u32>().write_unaligned(flags) }
 }
 
-/// Calls the handler of the registration at `frame`.
-fn call_frame(record: *mut u8, frame: usize, context: *mut u8) -> u32 {
+/// The registration the dispatcher links above the program's frames while
+/// a handler runs (x86 Windows' nested-exception frame): its Next the
+/// list's head at the call, its handler `nested`, then the frame whose
+/// handler is running.
+#[repr(C)]
+struct Nested {
+    registration: Registration,
+    frame: usize,
+}
+
+/// The handler of the dispatcher's own registration while a frame's
+/// handler dispatches an exception: an exception raised inside that
+/// handler meets it first and is a nested one (ExceptionNestedException,
+/// the frame being handled in the dispatcher context); unwinding passes
+/// it (ExceptionContinueSearch).
+unsafe extern "C" fn nested_dispatch(
+    record: *mut u8,
+    frame: usize,
+    _context: *mut u8,
+    dispatcher: *mut usize,
+) -> u32 {
+    if record_flags(record) & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND) != 0 {
+        return 1;
+    }
+    // SAFETY: `frame` is a `Nested` this module linked; the dispatcher
+    // context is the caller's.
+    unsafe { *dispatcher = (*(frame as *const Nested)).frame };
+    2 // ExceptionNestedException
+}
+
+/// The same while a frame's handler runs for an unwind: an unwind from
+/// inside it that meets this registration collides with the running one
+/// (ExceptionCollidedUnwind); a dispatch passes it.
+unsafe extern "C" fn nested_unwind(
+    record: *mut u8,
+    frame: usize,
+    _context: *mut u8,
+    dispatcher: *mut usize,
+) -> u32 {
+    if record_flags(record) & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND) == 0 {
+        return 1;
+    }
+    // SAFETY: as in `nested_dispatch`.
+    unsafe { *dispatcher = (*(frame as *const Nested)).frame };
+    3 // ExceptionCollidedUnwind
+}
+
+/// Calls the handler of the registration at `frame`, with the
+/// dispatcher's own registration (`nested`'s handler) linked at the head
+/// of the list while it runs, as x86 Windows does: a handler sees fs:[0]
+/// pointing at it, and Microsoft's C++ runtime depends on that (its catch
+/// saves the head, unwinds to the catching frame and links the saved
+/// registration back above it; were the head the program's newest frame,
+/// a frame already unwound would be linked back and the list would later
+/// loop). Unlinked again after the call if it is still the head (a
+/// handler that unwound past it has removed it).
+fn call_frame(record: *mut u8, frame: usize, context: *mut u8, nested: Handler) -> u32 {
     // SAFETY: a registration on this thread's stack (`frame_ok`).
     let handler = unsafe { (*(frame as *const Registration)).handler };
     let mut dispatcher_context = 0usize;
+    let own = Nested {
+        registration: Registration { next: exception_list(), handler: nested as usize },
+        frame,
+    };
+    let own_at = &own as *const Nested as usize;
+    set_exception_list(own_at);
     // SAFETY: the handler the frame registered, called as documented.
-    unsafe {
+    let disposition = unsafe {
         let f: Handler = core::mem::transmute(handler);
         f(record, frame, context, &mut dispatcher_context)
+    };
+    if exception_list() == own_at {
+        set_exception_list(own.registration.next);
     }
+    disposition
 }
 
 /// The frames' handlers, newest first: whether one continued execution.
@@ -128,7 +197,7 @@ fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
         // ExceptionContinueExecution; anything else is taken as
         // ExceptionContinueSearch (ExceptionNestedException and
         // ExceptionCollidedUnwind too: see the module).
-        if call_frame(record, frame, context) == 0 {
+        if call_frame(record, frame, context, nested_dispatch) == 0 {
             if record_flags(record) & EXCEPTION_NONCONTINUABLE != 0 {
                 raise_status(STATUS_NONCONTINUABLE_EXCEPTION, record);
             }
@@ -254,7 +323,7 @@ extern "system" fn unwind(target: usize, record: *mut u8, context: *mut u8) -> !
             crate::GalaRecordMissing(what.as_ptr(), what.len(), 2, frame as u64);
             break;
         }
-        call_frame(record, frame, context);
+        call_frame(record, frame, context, nested_unwind);
         // SAFETY: as in `call_frame`.
         let next = unsafe { (*(frame as *const Registration)).next };
         set_exception_list(next);

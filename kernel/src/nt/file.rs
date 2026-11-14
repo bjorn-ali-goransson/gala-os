@@ -8,10 +8,12 @@ use alloc::vec::Vec;
 
 use super::namespace;
 use super::object::{KObject, ObjectBody, ObjectRef};
+use super::process::Process;
 use super::status::NtStatus;
 use crate::fs::ramfs::{self, Access, FsError, NodeId, RamFs, Share};
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 static FS: IrqMutex<Option<RamFs>> = IrqMutex::new(None);
 
@@ -23,8 +25,11 @@ pub fn with_fs<R>(f: impl FnOnce(&mut RamFs) -> R) -> R {
         let mut guard = FS.lock();
         let fs = guard.as_mut().expect("file system initialized");
         let r = f(fs);
-        if fs.recording && fs.has_ops() {
-            super::persist::note_pending();
+        if fs.recording {
+            if fs.has_ops() {
+                super::persist::note_pending();
+            }
+            super::persist::note_dirty(fs.dirty_queued());
         }
         (r, super::notify::collect(fs))
     };
@@ -57,13 +62,14 @@ pub const FILE_OVERWRITTEN: u64 = 3;
 
 // CreateOptions.
 pub const FILE_DIRECTORY_FILE: u32 = 0x0001;
+pub const FILE_WRITE_THROUGH: u32 = 0x0002;
+pub const FILE_NO_INTERMEDIATE_BUFFERING: u32 = 0x0008;
 pub const FILE_SYNCHRONOUS_IO_ALERT: u32 = 0x0010;
 pub const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
 pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
 pub const FILE_DELETE_ON_CLOSE: u32 = 0x1000;
 pub const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
-/// Directories created at boot.
 /// The directories every boot starts with: the system's, the user's
 /// profile (`gala`, as advapi32's GetUserName names the user) with its
 /// AppData folders, the shared ones.
@@ -74,6 +80,11 @@ const DIRECTORIES: &[&[&str]] = &[
     &["Users", "Public"],
     &["Users", "gala", "AppData", "Roaming"],
     &["Users", "gala", "AppData", "Local", "Temp"],
+    // SYSTEM's profile and the system's temporary directory, a
+    // LocalSystem service's (nt::process::SERVICE_ENVIRONMENT).
+    &["Windows", "System32", "config", "systemprofile", "AppData", "Roaming"],
+    &["Windows", "System32", "config", "systemprofile", "AppData", "Local"],
+    &["Windows", "Temp"],
     &["ProgramData"],
     &["Program Files", "Common Files"],
     // The 32-bit programs' (WOW64; ProgramFiles in a 32-bit process).
@@ -128,6 +139,13 @@ pub fn init() -> Result<(), NtStatus> {
     namespace::create(None, &wide("\\Device\\Null")?, null, false, false)?;
     let link = namespace::new_symbolic_link(&wide("\\Device\\Null")?)?;
     namespace::create(None, &wide("\\??\\NUL")?, link, false, false)?;
+    // UNC paths (`\??\UNC\server\share`) reach the multiple UNC
+    // provider's device; nt::wslfs serves WSL's servers below it.
+    let mup =
+        KObject::with_permanence(ObjectBody::MupDevice, true).map_err(|_| NtStatus::NO_MEMORY)?;
+    namespace::create(None, &wide(super::wslfs::MUP_DEVICE)?, mup, false, false)?;
+    let link = namespace::new_symbolic_link(&wide(super::wslfs::MUP_DEVICE)?)?;
+    namespace::create(None, &wide(super::wslfs::UNC_LINK)?, link, false, false)?;
     Ok(())
 }
 
@@ -169,7 +187,7 @@ pub fn reopen(
 ) -> Result<ObjectRef, NtStatus> {
     let mut name = Vec::new();
     name.try_extend_from_slice(path).map_err(|_| NtStatus::NO_MEMORY)?;
-    let path = FilePath { start: ramfs::ROOT, name };
+    let path = FilePath { start: ramfs::ROOT, name, linux: None };
     let created = create(&path, granted, share, FILE_OPEN, options)?;
     if let ObjectBody::File(f) = &created.object.body {
         *f.position.lock() = position;
@@ -225,10 +243,158 @@ pub fn nt_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     Ok(out)
 }
 
+/// Whether two NT paths name the same file (the volume's names are case
+/// insensitive; ASCII case folding, as the volume's own lookups).
+pub fn same_path(a: &[u16], b: &[u16]) -> bool {
+    let fold = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| fold(x) == fold(y))
+}
+
+/// FileProcessIdsUsingFileInformation: the ids of the running processes
+/// that use file `node`, in process order: a handle open on it, a view of
+/// a section on it (a mapped data file or a loaded DLL) or it as their
+/// executable. `query` (process id, handle) is the handle the question is
+/// asked through, which does not count by itself.
+pub fn processes_using(node: NodeId, query: (u64, u64)) -> Result<Vec<u64>, NtStatus> {
+    let name = nt_path(node)?;
+    let mut out = Vec::new();
+    for p in super::process::running().map_err(|_| NtStatus::NO_MEMORY)? {
+        let by_handle = p.handles.lock().iter().any(|(h, e)| {
+            matches!(&e.object.body, ObjectBody::File(f) if f.node == node) && (p.id, h.0) != query
+        });
+        let uses = by_handle
+            || p.views
+                .lock()
+                .iter()
+                .any(|v| v.section().file_name.as_deref().is_some_and(|n| same_path(n, &name)))
+            || p.image_nt_path().is_ok_and(|n| same_path(&n, &name));
+        if uses {
+            out.try_push(p.id).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+    }
+    Ok(out)
+}
+
+/// The running processes that map file `node`: a view of a section on it
+/// (a loaded DLL, a mapped data file) or it as their executable. A hot
+/// swap does not replace such a file whole (hotswap.rs); a handle alone
+/// does not count.
+pub fn processes_mapping(node: NodeId) -> Result<Vec<KArc<Process>>, NtStatus> {
+    let name = nt_path(node)?;
+    let mut out = Vec::new();
+    for p in super::process::running().map_err(|_| NtStatus::NO_MEMORY)? {
+        let maps = p
+            .views
+            .lock()
+            .iter()
+            .any(|v| v.section().file_name.as_deref().is_some_and(|n| same_path(n, &name)))
+            || p.image_nt_path().is_ok_and(|n| same_path(&n, &name));
+        if maps {
+            out.try_push(p).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Creates file `path` (`\\dir\\name` from the volume root) with
+/// `data`, and its missing directories (a hot swap's added module:
+/// hotswap.rs). An existing file is an error.
+pub fn create_with_directories(path: &str, data: &[u8]) -> Result<NodeId, NtStatus> {
+    let wide_path = wide(path)?;
+    let parts = components(&wide_path, false)?;
+    let (name, dirs) = parts.split_last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+    let now = platform::system_time();
+    let node = with_fs(|fs| {
+        let dir = fs.mkdir_all(dirs, now)?;
+        if fs.find(dir, name)?.is_some() {
+            return Err(FsError::Exists);
+        }
+        fs.create(dir, name, false, now)
+    })
+    .map_err(fs_status)?;
+    match write(node, 0, data, now) {
+        Ok(n) if n == data.len() => Ok(node),
+        other => {
+            let _ = remove(path);
+            Err(match other {
+                Err(e) => fs_status(e),
+                Ok(_) => NtStatus::DISK_FULL,
+            })
+        }
+    }
+}
+
+/// Removes file `path` (`\\dir\\name` from the volume root).
+pub fn remove(path: &str) -> Result<(), NtStatus> {
+    let wide_path = wide(path)?;
+    let parts = components(&wide_path, false)?;
+    let (name, dirs) = parts.split_last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+    with_fs(|fs| {
+        let dir = fs.resolve(ramfs::ROOT, dirs)?;
+        fs.unlink(dir, name)
+    })
+    .map_err(fs_status)
+}
+
 /// The path of `node` from the volume root (`\\dir\\name`), as
 /// FileNameInformation reports it.
 pub fn volume_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     with_fs(|fs| fs.path_of(node)).map_err(fs_status)
+}
+
+/// The file system's heap use, or None while its lock is held (the
+/// state dump must not wait).
+pub fn try_heap_use() -> Option<ramfs::HeapUse> {
+    FS.try_lock().map(|fs| fs.as_ref().map(RamFs::heap_use).unwrap_or_default())
+}
+
+/// The name of open file `file` from the volume root: the hard link it
+/// was opened by while that still names it, else its node's first name.
+pub fn handle_path(file: &FileObject) -> Result<Vec<u16>, NtStatus> {
+    with_fs(|fs| {
+        let via = file.via.lock();
+        match &*via {
+            Some((d, n)) if fs.find(*d, n) == Ok(Some(file.node)) => fs.entry_path(*d, n),
+            _ => fs.path_of(file.node),
+        }
+    })
+    .map_err(fs_status)
+}
+
+/// NT's delete of open file `file`'s name (FileDispositionInformation):
+/// the hard link it was opened by, else its node's first name.
+pub fn set_delete_pending(file: &FileObject, pending: bool) -> Result<(), FsError> {
+    with_fs(|fs| {
+        let via = file.via.lock();
+        match &*via {
+            Some((d, n)) if fs.find(*d, n) == Ok(Some(file.node)) => {
+                fs.set_entry_delete_pending(*d, n, pending)
+            }
+            _ => fs.set_delete_pending(file.node, pending),
+        }
+    })
+}
+
+/// Renames the name of open file `file` (the hard link it was opened by,
+/// else its first name) to `name` in directory `parent`.
+pub fn rename_open(
+    file: &FileObject,
+    parent: NodeId,
+    name: &[u16],
+    replace: bool,
+) -> Result<(), FsError> {
+    let mut owned = Vec::new();
+    owned.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+    with_fs(|fs| {
+        let mut via = file.via.lock();
+        let live = via.as_ref().is_some_and(|(d, n)| fs.find(*d, n) == Ok(Some(file.node)));
+        let Some((d, n)) = via.as_ref().filter(|_| live) else {
+            return fs.rename(file.node, parent, name, replace);
+        };
+        fs.rename_entry(*d, n, parent, name, replace)?;
+        *via = if fs.is_hard_link(parent, name) { Some((parent, owned)) } else { None };
+        Ok(())
+    })
 }
 
 /// The node at `path` (`\\`-separated, from the volume root).
@@ -245,9 +411,113 @@ pub fn read_all(node: NodeId) -> Result<Vec<u8>, NtStatus> {
     let mut data = Vec::new();
     data.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
     data.resize(len, 0);
-    let n = with_fs(|fs| fs.read(node, 0, &mut data)).map_err(fs_status)?;
+    let n = read(node, 0, &mut data).map_err(fs_status)?;
     data.truncate(n);
     Ok(data)
+}
+
+/// Runs `f` on the file system like `with_fs`, first reading from the
+/// disk each page it finds on the disk only (a disk-backed C:, D4:
+/// `FsError::NotResident`), then running it again. The read happens with
+/// the file system released; a page that changed meanwhile is read again.
+/// A change to a file image layouts build pages from
+/// (`FsError::ImageHeld`) first lets them go
+/// (`section::release_image_holds`), once.
+pub fn with_pages<R>(mut f: impl FnMut(&mut RamFs) -> Result<R, FsError>) -> Result<R, FsError> {
+    let mut released = false;
+    loop {
+        let (r, wanted, held) = with_fs(|fs| {
+            let r = f(fs);
+            let wanted =
+                if matches!(r, Err(FsError::NotResident)) { fs.take_page_in() } else { None };
+            let held = if matches!(r, Err(FsError::ImageHeld)) { fs.take_held() } else { None };
+            (r, wanted, held)
+        });
+        match (r, wanted, held) {
+            (Err(FsError::NotResident), Some(req), _) => page_in(&req)?,
+            (Err(FsError::ImageHeld), _, Some(node)) if !released => {
+                super::section::release_image_holds(node);
+                released = true;
+            }
+            (r, _, _) => return r,
+        }
+    }
+}
+
+/// Reads exactly `buf.len()` bytes of file `node` from `offset` while its
+/// contents have version `version` (an image layout building a page:
+/// `section::ImageLayout`); NotFound if they changed or the file ends
+/// first.
+pub fn read_version(
+    node: NodeId,
+    version: u64,
+    offset: u64,
+    buf: &mut [u8],
+) -> Result<(), FsError> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done as u64;
+        let n = with_pages(|fs| {
+            if fs.node(node).and_then(ramfs::Node::version) != Some(version) {
+                return Err(FsError::NotFound);
+            }
+            fs.read(node, at, &mut buf[done..])
+        })?;
+        if n == 0 {
+            return Err(FsError::NotFound);
+        }
+        done += n;
+    }
+    Ok(())
+}
+
+/// Reads page `req` from its cluster into memory (see `with_pages`).
+fn page_in(req: &ramfs::PageIn) -> Result<(), FsError> {
+    super::persist::relieve();
+    let mut page =
+        crate::mm::heap::try_box(ramfs::Page([0; ramfs::PAGE])).map_err(|_| FsError::NoMemory)?;
+    if super::persist::read_cluster(req.cluster, &mut page.0).is_err() {
+        warn!(
+            "file: cannot read cluster {} (page {} of node {})",
+            req.cluster, req.index, req.node
+        );
+        return Err(FsError::NotResident);
+    }
+    super::persist::note_page_in();
+    with_fs(|fs| fs.fill(req, page));
+    Ok(())
+}
+
+/// Reads file `node` from `offset` into `buf`: all of it, short only at
+/// the end of the file (pages on the disk only are read in).
+pub fn read(node: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done as u64;
+        let n = with_pages(|fs| fs.read(node, at, &mut buf[done..]))?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    Ok(done)
+}
+
+/// Writes `data` to file `node` at `offset` (pages it changes in part are
+/// read in first).
+pub fn write(node: NodeId, offset: u64, data: &[u8], now: u64) -> Result<usize, FsError> {
+    with_pages(|fs| fs.write(node, offset, data, now))
+}
+
+/// Sets file `node`'s size (a partial last page is read in first).
+pub fn set_size(node: NodeId, size: u64, now: u64) -> Result<(), FsError> {
+    with_pages(|fs| fs.set_size(node, size, now))
+}
+
+/// The address of mapped file `node`'s page `index` (read in first if it
+/// is on the disk only).
+pub fn page_address(node: NodeId, index: usize) -> Option<usize> {
+    with_pages(|fs| fs.page_address(node, index)).ok()
 }
 
 pub fn fs_status(e: FsError) -> NtStatus {
@@ -271,6 +541,17 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::NotSealable => NtStatus::INVALID_PARAMETER,
         // NT never reaches a volume's tree (ramfs's doc).
         FsError::CrossVolume => NtStatus::NOT_SAME_DEVICE,
+        FsError::DiskFull => NtStatus::DISK_FULL,
+        // A page that could not be read from the disk (`with_pages`).
+        FsError::NotResident => NtStatus::IO_DEVICE_ERROR,
+        // A change to a file whose image layouts could not let it go
+        // (`with_pages`): Windows' answer to a change of an image in use.
+        FsError::ImageHeld => NtStatus::SHARING_VIOLATION,
+        // FSCTL_SET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT (NTFS's
+        // answers).
+        FsError::ReparseHasData => NtStatus::IO_REPARSE_DATA_INVALID,
+        FsError::ReparseTagMismatch => NtStatus::IO_REPARSE_TAG_MISMATCH,
+        FsError::NotReparsePoint => NtStatus::NOT_A_REPARSE_POINT,
     }
 }
 
@@ -285,8 +566,19 @@ pub struct FileObject {
     /// Opened for synchronous I/O: the file position is maintained.
     pub synchronous: bool,
     pub position: IrqMutex<u64>,
-    /// FILE_DELETE_ON_CLOSE: delete pending once this open closes.
-    delete_on_close: bool,
+    /// FILE_DELETE_ON_CLOSE: delete pending once this open closes
+    /// (FileDispositionInformationEx's FILE_DISPOSITION_ON_CLOSE sets or
+    /// clears it).
+    delete_on_close: AtomicBool,
+    /// FileDispositionInformationEx's FILE_DISPOSITION_POSIX_SEMANTICS: its
+    /// name goes when this open closes, though others stay open (the node
+    /// lives on, detached, until they close).
+    posix_delete: AtomicBool,
+    /// The hard link it was opened by (directory, name) when that is not
+    /// the node's first name: the name it reports, the one a delete or a
+    /// rename through it acts on (`handle_path`, `entry_of`). None: the
+    /// node's first name.
+    pub via: IrqMutex<Option<(NodeId, Vec<u16>)>>,
     /// Directory enumeration state (NtQueryDirectoryFile).
     pub scan: IrqMutex<Option<DirScan>>,
     /// FileModeInformation: the mode options it was opened with.
@@ -300,9 +592,9 @@ pub struct FileObject {
 }
 
 /// CreateOptions reported by FileModeInformation.
-const MODE_OPTIONS: u32 = 0x0002 // FILE_WRITE_THROUGH
+const MODE_OPTIONS: u32 = FILE_WRITE_THROUGH
     | 0x0004 // FILE_SEQUENTIAL_ONLY
-    | 0x0008 // FILE_NO_INTERMEDIATE_BUFFERING
+    | FILE_NO_INTERMEDIATE_BUFFERING
     | FILE_SYNCHRONOUS_IO_ALERT
     | FILE_SYNCHRONOUS_IO_NONALERT
     | FILE_DELETE_ON_CLOSE;
@@ -320,9 +612,20 @@ impl FileObject {
             | (u32::from(self.share.delete) * FILE_SHARE_DELETE)
     }
 
-    /// FILE_DELETE_ON_CLOSE was given.
+    /// Its close deletes a name: FILE_DELETE_ON_CLOSE, or a POSIX delete
+    /// set through it.
     pub fn deletes_on_close(&self) -> bool {
-        self.delete_on_close
+        self.delete_on_close.load(Ordering::Relaxed) || self.posix_delete.load(Ordering::Relaxed)
+    }
+
+    /// Sets or clears FILE_DELETE_ON_CLOSE (FILE_DISPOSITION_ON_CLOSE).
+    pub fn set_delete_on_close(&self, on: bool) {
+        self.delete_on_close.store(on, Ordering::Relaxed);
+    }
+
+    /// Removes its name when it closes (FILE_DISPOSITION_POSIX_SEMANTICS).
+    pub fn set_posix_delete(&self, on: bool) {
+        self.posix_delete.store(on, Ordering::Relaxed);
     }
 
     /// The owner of its byte-range locks (`locks`): its address.
@@ -339,10 +642,20 @@ impl Drop for FileObject {
             super::notify::cleanup(self.lock_owner());
         }
         let (node, access, share) = (self.node, self.access, self.share);
+        let via = self.via.lock().take();
         let events = FS.lock().as_mut().map(|fs| {
-            if self.delete_on_close {
-                // Fails for a non-empty directory, which then stays.
-                let _ = fs.set_delete_pending(node, true);
+            let link = via.as_ref().filter(|(d, n)| fs.find(*d, n) == Ok(Some(node)));
+            // Each fails for a non-empty directory, which then stays.
+            if self.posix_delete.load(Ordering::Relaxed) {
+                let _ = match link {
+                    Some((d, n)) => fs.unlink(*d, n),
+                    None => fs.unlink_node(node),
+                };
+            } else if self.delete_on_close.load(Ordering::Relaxed) {
+                let _ = match link {
+                    Some((d, n)) => fs.set_entry_delete_pending(*d, n, true),
+                    None => fs.set_delete_pending(node, true),
+                };
             }
             fs.close(node, access, share);
             super::notify::collect(fs)
@@ -357,6 +670,10 @@ impl Drop for FileObject {
 pub struct FilePath {
     pub start: NodeId,
     pub name: Vec<u16>,
+    /// A path through `\\wsl.localhost\<distro>` (nt::wslfs): that
+    /// distribution's root, inside which `name` (a path below it) is
+    /// walked as Linux walks it (`resolve_links`); None for NT paths.
+    pub linux: Option<NodeId>,
 }
 
 /// Splits a `\\a\\b\\c` path (relative to the volume root) or an `a\\b`
@@ -392,6 +709,135 @@ pub fn lookup_path(path: &FilePath) -> Result<(Option<NodeId>, Option<NodeId>), 
         let Ok(parent) = fs.parent_of(start, &parts) else { return Ok((None, None)) };
         Ok((fs.find(parent, last).ok().flatten(), Some(parent)))
     })
+}
+
+/// How many reparse points one open may follow (as Windows: 63); more is
+/// STATUS_REPARSE_POINT_NOT_RESOLVED, a loop included.
+const MAX_REPARSE: usize = 63;
+
+/// SYMLINK_FLAG_RELATIVE: a symbolic link's target is relative to its
+/// directory.
+const SYMLINK_FLAG_RELATIVE: u32 = 1;
+
+/// Follows the NT symbolic links and junctions on `path` (and at its end
+/// if `follow_final`), as the I/O manager reparses an open that meets one
+/// (ARCHITECTURE "Files": reparse points): the path the open then names.
+/// A reparse point of another tag on the way, or at the end when followed,
+/// is STATUS_IO_REPARSE_TAG_NOT_HANDLED (no filter handles it here).
+pub fn resolve_links(path: FilePath, follow_final: bool) -> Result<FilePath, NtStatus> {
+    if path.linux.is_some() {
+        // A distribution's tree: its Linux links, inside it.
+        return super::wslfs::resolve(&path, follow_final);
+    }
+    let mut path = path;
+    for _ in 0..MAX_REPARSE {
+        match follow_once(&path, follow_final)? {
+            Some(next) => path = next,
+            None => return Ok(path),
+        }
+    }
+    Err(NtStatus::REPARSE_POINT_NOT_RESOLVED)
+}
+
+/// The path after the first link on `path`, or None if it meets none
+/// (or a component is missing: the open reports that).
+fn follow_once(path: &FilePath, follow_final: bool) -> Result<Option<FilePath>, NtStatus> {
+    let parts = components(&path.name, path.start != ramfs::ROOT)?;
+    let found = with_fs(|fs| -> Result<Option<(Vec<u16>, ramfs::Reparse, usize)>, NtStatus> {
+        let mut dir = path.start;
+        for (i, part) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            let Ok(Some(node)) = fs.find(dir, part) else { return Ok(None) };
+            let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+            if let Some(r) = n.reparse() {
+                if last && !follow_final {
+                    return Ok(None);
+                }
+                if r.tag != ramfs::TAG_SYMLINK && r.tag != ramfs::TAG_MOUNT_POINT {
+                    return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
+                }
+                let base = fs.path_of(n.parent()).map_err(fs_status)?;
+                let copy = ramfs::Reparse {
+                    tag: r.tag,
+                    data: crate::mm::heap::try_to_vec(&r.data).map_err(|_| NtStatus::NO_MEMORY)?,
+                };
+                return Ok(Some((base, copy, i + 1)));
+            }
+            if !n.is_dir() {
+                return Ok(None);
+            }
+            dir = node;
+        }
+        Ok(None)
+    })?;
+    let Some((base, reparse, used)) = found else { return Ok(None) };
+    let (target, relative) = link_target(&reparse)?;
+    // What is left of the path goes after the target.
+    let mut rest: Vec<u16> = Vec::new();
+    for part in &parts[used..] {
+        rest.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+        rest.try_extend_from_slice(part).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    if relative {
+        // From the link's directory, `.` and `..` taken out.
+        let mut name = base;
+        for part in target.split(|&c| c == u16::from(b'\\')) {
+            match part {
+                [] => {}
+                [0x2e] => {}
+                [0x2e, 0x2e] => {
+                    let cut = name.iter().rposition(|&c| c == u16::from(b'\\')).unwrap_or(0);
+                    name.truncate(cut);
+                }
+                _ => {
+                    name.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+                    name.try_extend_from_slice(part).map_err(|_| NtStatus::NO_MEMORY)?;
+                }
+            }
+        }
+        name.try_extend_from_slice(&rest).map_err(|_| NtStatus::NO_MEMORY)?;
+        return Ok(Some(FilePath { start: ramfs::ROOT, name, linux: None }));
+    }
+    // An NT path (`\??\C:\...`): through the object namespace to the volume.
+    let mut full = target;
+    while full.len() > 1 && full.last() == Some(&u16::from(b'\\')) {
+        full.pop();
+    }
+    full.try_extend_from_slice(&rest).map_err(|_| NtStatus::NO_MEMORY)?;
+    if full.first() != Some(&u16::from(b'\\')) {
+        return Err(NtStatus::OBJECT_NAME_INVALID);
+    }
+    let (device, name) = namespace::lookup_parse(None, &full, true)?;
+    if !matches!(device.body, ObjectBody::Volume) {
+        // A link to a device other than the volume (a pipe, ...).
+        super::ledger::record("reparse point", "target not on the volume", 0);
+        return Err(NtStatus::OBJECT_PATH_NOT_FOUND);
+    }
+    Ok(Some(FilePath { start: ramfs::ROOT, name, linux: None }))
+}
+
+/// A symbolic link's or junction's substitute name and whether it is
+/// relative to the link's directory (REPARSE_DATA_BUFFER after its
+/// header: SubstituteNameOffset, SubstituteNameLength, PrintNameOffset,
+/// PrintNameLength, a symbolic link's Flags, then the names).
+pub fn link_target(r: &ramfs::Reparse) -> Result<(Vec<u16>, bool), NtStatus> {
+    let d = &r.data;
+    let u16_at = |at: usize| d.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let (names, relative) = if r.tag == ramfs::TAG_SYMLINK {
+        let flags = d.get(8..12).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        (12, flags.ok_or(NtStatus::IO_REPARSE_DATA_INVALID)? & SYMLINK_FLAG_RELATIVE != 0)
+    } else {
+        (8, false)
+    };
+    let (off, len) = (
+        u16_at(0).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?,
+        u16_at(2).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?,
+    );
+    let bytes = d.get(names + off..names + off + len).ok_or(NtStatus::IO_REPARSE_DATA_INVALID)?;
+    let mut name = Vec::new();
+    name.try_reserve_exact(bytes.len() / 2).map_err(|_| NtStatus::NO_MEMORY)?;
+    name.extend(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])));
+    Ok((name, relative))
 }
 
 /// The result of NtCreateFile.
@@ -433,64 +879,101 @@ pub fn create(
         delete: share_mask & FILE_SHARE_DELETE != 0,
     };
     let now = platform::system_time();
-    let (node, information) = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
-        let existing = match parts.last() {
-            None => Some(start),
-            Some(last) => {
-                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
-                fs.find(parent, last).map_err(fs_status)?
+    let mut via = None;
+    // A truncating open of a file image layouts build pages from lets
+    // them go first (`section::release_image_holds`), then again.
+    let mut released = false;
+    let (node, information) = loop {
+        let mut held = None;
+        let r = with_fs(|fs| -> Result<(NodeId, u64), NtStatus> {
+            let existing = match parts.last() {
+                None => Some(start),
+                Some(last) => {
+                    let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
+                    let found = fs.find(parent, last).map_err(fs_status)?;
+                    if found.is_some() && fs.is_hard_link(parent, last) {
+                        // Opened by a hard link: its own name (`FileObject::via`).
+                        if fs.entry_delete_pending(parent, last) {
+                            return Err(NtStatus::DELETE_PENDING);
+                        }
+                        let mut name = Vec::new();
+                        name.try_extend_from_slice(last).map_err(|_| NtStatus::NO_MEMORY)?;
+                        via = Some((parent, name));
+                    }
+                    found
+                }
+            };
+            match existing {
+                Some(node) => {
+                    let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
+                    if disposition == FILE_CREATE {
+                        return Err(NtStatus::OBJECT_NAME_COLLISION);
+                    }
+                    // A Linux symbolic link or socket is a reparse point
+                    // nothing here follows (ARCHITECTURE "Files"): opened only
+                    // as itself. An NT link's was followed before
+                    // (`resolve_links`), unless it is the one to create.
+                    let reparse = n.is_symlink() || n.is_socket() || n.reparse().is_some();
+                    if reparse && options & FILE_OPEN_REPARSE_POINT == 0 {
+                        return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
+                    }
+                    if want_dir && !n.is_dir() {
+                        return Err(NtStatus::NOT_A_DIRECTORY);
+                    }
+                    if want_file && n.is_dir() {
+                        return Err(NtStatus::FILE_IS_A_DIRECTORY);
+                    }
+                    if access.write && n.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
+                        return Err(NtStatus::ACCESS_DENIED);
+                    }
+                    let truncate =
+                        matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
+                    if truncate && n.is_dir() {
+                        return Err(NtStatus::INVALID_PARAMETER);
+                    }
+                    fs.open(node, access, share).map_err(fs_status)?;
+                    let information = match disposition {
+                        FILE_SUPERSEDE => FILE_SUPERSEDED,
+                        FILE_OVERWRITE | FILE_OVERWRITE_IF => FILE_OVERWRITTEN,
+                        _ => FILE_OPENED,
+                    };
+                    if truncate && let Err(e) = fs.set_size(node, 0, now) {
+                        fs.close(node, access, share);
+                        if e == FsError::ImageHeld {
+                            held = fs.take_held();
+                        }
+                        return Err(fs_status(e));
+                    }
+                    Ok((node, information))
+                }
+                None => {
+                    if matches!(disposition, FILE_OPEN | FILE_OVERWRITE) {
+                        return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
+                    }
+                    let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+                    let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
+                    let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
+                    // In a Linux tree (a WSL distribution's: its directories
+                    // have POSIX modes), a file Windows makes gets the mode
+                    // WSL's server gives one, 0644 (a directory 0755), so
+                    // Linux sees it as it would a file it made.
+                    if fs.node(parent).is_some_and(|p| p.mode.is_some()) {
+                        fs.set_mode(node, if want_dir { 0o755 } else { 0o644 })
+                            .map_err(fs_status)?;
+                    }
+                    fs.open(node, access, share).map_err(fs_status)?;
+                    Ok((node, FILE_CREATED))
+                }
             }
-        };
-        match existing {
-            Some(node) => {
-                let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
-                if disposition == FILE_CREATE {
-                    return Err(NtStatus::OBJECT_NAME_COLLISION);
-                }
-                // A Linux symbolic link or socket is a reparse point
-                // nothing here follows (ARCHITECTURE "Files"): opened only
-                // as itself.
-                if (n.is_symlink() || n.is_socket()) && options & FILE_OPEN_REPARSE_POINT == 0 {
-                    return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
-                }
-                if want_dir && !n.is_dir() {
-                    return Err(NtStatus::NOT_A_DIRECTORY);
-                }
-                if want_file && n.is_dir() {
-                    return Err(NtStatus::FILE_IS_A_DIRECTORY);
-                }
-                if access.write && n.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
-                    return Err(NtStatus::ACCESS_DENIED);
-                }
-                let truncate =
-                    matches!(disposition, FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF);
-                if truncate && n.is_dir() {
-                    return Err(NtStatus::INVALID_PARAMETER);
-                }
-                fs.open(node, access, share).map_err(fs_status)?;
-                let information = match disposition {
-                    FILE_SUPERSEDE => FILE_SUPERSEDED,
-                    FILE_OVERWRITE | FILE_OVERWRITE_IF => FILE_OVERWRITTEN,
-                    _ => FILE_OPENED,
-                };
-                if truncate && let Err(e) = fs.set_size(node, 0, now) {
-                    fs.close(node, access, share);
-                    return Err(fs_status(e));
-                }
-                Ok((node, information))
+        });
+        match (r, held) {
+            (Err(_), Some(node)) if !released => {
+                crate::nt::section::release_image_holds(node);
+                released = true;
             }
-            None => {
-                if matches!(disposition, FILE_OPEN | FILE_OVERWRITE) {
-                    return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
-                }
-                let last = parts.last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
-                let parent = fs.parent_of(start, &parts).map_err(fs_status)?;
-                let node = fs.create(parent, last, want_dir, now).map_err(fs_status)?;
-                fs.open(node, access, share).map_err(fs_status)?;
-                Ok((node, FILE_CREATED))
-            }
+            (r, _) => break r?,
         }
-    })?;
+    };
     let directory = with_fs(|fs| fs.node(node).is_some_and(ramfs::Node::is_dir));
     let file = FileObject {
         node,
@@ -500,7 +983,9 @@ pub fn create(
         share,
         synchronous: options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT) != 0,
         position: IrqMutex::named("file.position", 0),
-        delete_on_close,
+        delete_on_close: AtomicBool::new(delete_on_close),
+        posix_delete: AtomicBool::new(false),
+        via: IrqMutex::named("file.via", via),
         scan: IrqMutex::new(None),
         mode: mode_of(options),
         dispatcher: crate::mm::heap::KArc::try_new(super::wait::Dispatcher::new(0)).map_err(
@@ -517,6 +1002,24 @@ pub fn create(
         Err(_) => return Err(NtStatus::NO_MEMORY),
     };
     Ok(Created { object, information })
+}
+
+/// The FileAttributes NtCreateFile gave for a file it created: the
+/// settable ones (read-only, hidden, system, temporary, not indexed; a
+/// file is also FILE_ATTRIBUTE_ARCHIVE, which it has from its creation).
+pub fn set_created_attributes(object: &ObjectRef, attributes: u32) -> Result<(), NtStatus> {
+    // READONLY, HIDDEN, SYSTEM, TEMPORARY, NOT_CONTENT_INDEXED.
+    const GIVEN: u32 = 0x01 | 0x02 | 0x04 | 0x100 | 0x2000;
+    let ObjectBody::File(file) = &object.body else { return Ok(()) };
+    if attributes & GIVEN == 0 {
+        return Ok(());
+    }
+    with_fs(|fs| {
+        let have = fs.node(file.node).map_or(0, |n| n.attributes);
+        let times = ramfs::Times::default();
+        fs.set_basic(file.node, times, Some(have | (attributes & GIVEN)))
+    })
+    .map_err(fs_status)
 }
 
 /// FILE_BASIC_INFORMATION (40 bytes) for `node`.
@@ -551,6 +1054,46 @@ pub fn standard_information(node: NodeId) -> Result<[u8; 24], NtStatus> {
         b[21] = u8::from(n.is_dir());
         Ok(b)
     })
+}
+
+/// FILE_STAT_LX_INFORMATION (96 bytes, learn.microsoft.com's layout) for
+/// `node` opened with `access` by a caller whose Linux ids are `me`:
+/// FileId, the four times, AllocationSize, EndOfFile, FileAttributes,
+/// ReparseTag, NumberOfLinks, EffectiveAccess, LxFlags, LxUid, LxGid,
+/// LxMode, LxDeviceIdMajor and Minor. The Lx fields are a Linux node's
+/// (a distribution's file: `lx::file::lx_metadata`); an NT file has none
+/// (LxFlags 0), as an NTFS file without WSL's metadata.
+pub fn stat_lx_information(
+    node: NodeId,
+    access: u32,
+    me: (u32, u32),
+) -> Result<[u8; 96], NtStatus> {
+    const LX_FILE_METADATA_HAS_UID: u32 = 0x1;
+    const LX_FILE_METADATA_HAS_GID: u32 = 0x2;
+    const LX_FILE_METADATA_HAS_MODE: u32 = 0x4;
+    const LX_FILE_CASE_SENSITIVE_DIR: u32 = 0x10;
+    let basic = basic_information(node)?;
+    let standard = standard_information(node)?;
+    let (tag, case_sensitive) = with_fs(|fs| {
+        fs.node(node).map_or((0, false), |n| (n.reparse_tag(), n.is_dir() && n.case_sensitive))
+    });
+    let mut b = [0u8; 96];
+    b[0..8].copy_from_slice(&index_number(node).to_le_bytes());
+    b[8..40].copy_from_slice(&basic[0..32]);
+    b[40..56].copy_from_slice(&standard[0..16]);
+    b[56..60].copy_from_slice(&basic[32..36]);
+    b[60..64].copy_from_slice(&tag.to_le_bytes());
+    b[64..68].copy_from_slice(&standard[16..20]);
+    b[68..72].copy_from_slice(&access.to_le_bytes());
+    let mut flags = if case_sensitive { LX_FILE_CASE_SENSITIVE_DIR } else { 0 };
+    if let Some((mode, uid, gid)) = crate::lx::file::lx_metadata(node, me) {
+        flags |= LX_FILE_METADATA_HAS_UID | LX_FILE_METADATA_HAS_GID | LX_FILE_METADATA_HAS_MODE;
+        b[76..80].copy_from_slice(&uid.to_le_bytes());
+        b[80..84].copy_from_slice(&gid.to_le_bytes());
+        b[84..88].copy_from_slice(&mode.to_le_bytes());
+    }
+    b[72..76].copy_from_slice(&flags.to_le_bytes());
+    Ok(b)
 }
 
 /// Where a directory enumeration stands.
@@ -631,6 +1174,12 @@ fn encode_entry(out: &mut [u8], class: u32, e: &Entry<'_>, name_at: usize) -> bo
         put(out, 48, &n.size().next_multiple_of(4096).to_le_bytes());
         put(out, 56, &n.attributes.to_le_bytes());
         put(out, 60, &(name_bytes as u32).to_le_bytes());
+        // EaSize: a reparse point's tag instead (what FindFirstFile puts
+        // in dwReserved0).
+        if class != FILE_DIRECTORY_INFORMATION && n.attributes & ramfs::ATTRIBUTE_REPARSE_POINT != 0
+        {
+            put(out, 64, &n.reparse_tag().to_le_bytes());
+        }
     }
     let room = (out.len() - name_at) / 2;
     for (i, c) in e.name.iter().take(room).enumerate() {
@@ -747,7 +1296,7 @@ const FILE_DEVICE_DISK: u32 = 7;
 const FILE_DEVICE_IS_MOUNTED: u32 = 0x20;
 const FILE_CASE_PRESERVED_NAMES: u32 = 0x2;
 const FILE_UNICODE_ON_DISK: u32 = 0x4;
-const VOLUME_SERIAL: u32 = 0x6a1a_0001;
+pub const VOLUME_SERIAL: u32 = 0x6a1a_0001;
 const SECTORS_PER_CLUSTER: u32 = 8;
 const BYTES_PER_SECTOR: u32 = 512;
 /// What FileFsSectorSizeInformation reports as the physical sector (a
@@ -757,9 +1306,17 @@ const PHYSICAL_BYTES_PER_SECTOR: u32 = 4096;
 const FS_NAME: &[u8] = b"NTFS";
 
 /// Volume information of `class` as (bytes, minimum buffer length). Sizes
-/// are in clusters of free and total RAM (the volume lives in memory).
+/// are in 4 KiB clusters: the data area's on a disk-backed C: (D4), else
+/// free and total RAM (the volume lives in memory).
 pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
-    let (free, total) = platform::frame_stats();
+    // Clusters a deleted or truncated file gave up count as free at once,
+    // as Windows reports a deleted file's space: they are free from the
+    // next write-back (a write that needs them sooner has one run first,
+    // `syscalls::write_range`).
+    let (free, total) = match with_fs(|fs| fs.area_size().map(|a| (a, fs.area_reclaimable()))) {
+        Some(((count, free), soon)) => (u64::from(free) + u64::from(soon), u64::from(count)),
+        None => platform::frame_stats(),
+    };
     let mut b = Vec::new();
     let grow = |b: &mut Vec<u8>, n: usize| -> Result<(), NtStatus> {
         b.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -843,5 +1400,17 @@ mod tests {
         );
         assert_eq!(mode_of(FILE_NON_DIRECTORY_FILE | FILE_DIRECTORY_FILE), 0);
         assert_eq!(mode_of(FILE_DELETE_ON_CLOSE | 0x0002), FILE_DELETE_ON_CLOSE | 0x0002);
+    }
+
+    #[test]
+    fn same_path_folds_ascii_case_only() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        assert!(same_path(
+            &w("\\Device\\X\\Program Files\\a.DLL"),
+            &w("\\device\\x\\program files\\A.dll")
+        ));
+        assert!(!same_path(&w("\\a\\b.dll"), &w("\\a\\b.dl")));
+        assert!(!same_path(&w("\\a\\b"), &w("\\a\\c")));
+        assert!(!same_path(&w("[x"), &w("{x")));
     }
 }

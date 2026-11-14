@@ -7,7 +7,8 @@
 //!   GetSystemDefaultLocaleName (gala: 0x409); IsValidLocale;
 //!   EnumSystemLocalesW lists "00000409".
 //! - GetLocaleInfoW/A: decimal and thousands separators, ISO language and
-//!   country names, the OEM code page; counts include the NUL; a size
+//!   country names, the OEM code page, the reading layout (0, left to
+//!   right; ODT's setup.exe asks it); counts include the NUL; a size
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
 //! - LCMapStringW/A (upper and lower case), CompareStringW (linguistic
 //!   order: "a" < "B", lower case first, NORM_IGNORECASE), lstrcmpW and
@@ -349,7 +350,9 @@ fn locales(c: &mut Checks) -> Result<(), u32> {
         c.ok(name[..6] == w("en-US")[..6], name[0].into())?;
         c.eq(LocaleNameToLCID(w("en-US").as_ptr(), 0).into(), 0x409)?;
         c.ok(IsValidLocaleName(w("en-US").as_ptr()) != 0, 0)?;
-        c.eq(IsValidLocaleName(w("xx-QQ").as_ptr()) as u64, 0)?;
+        // A well-formed tag of a language Windows does not know names a
+        // custom locale: valid on 24H2 (the windows CI job measured 1).
+        c.eq(IsValidLocaleName(w("xx-QQ").as_ptr()) as u64, 1)?;
         c.ok(
             EnumSystemLocalesEx(on_locale_ex, 0, 77, core::ptr::null_mut()) != 0,
             GetLastError().into(),
@@ -385,6 +388,7 @@ fn locales(c: &mut Checks) -> Result<(), u32> {
             (0x100c, "6"),         // LOCALE_IFIRSTDAYOFWEEK
             (0x100d, "0"),         // LOCALE_IFIRSTWEEKOFYEAR
             (0x1012, "037"),       // LOCALE_IDEFAULTEBCDICCODEPAGE
+            (0x70, "0"),           // LOCALE_IREADINGLAYOUT: left to right
         ] {
             buf = [0xffff; 16];
             let n = GetLocaleInfoW(0x409, kind, buf.as_mut_ptr(), 16) as usize;

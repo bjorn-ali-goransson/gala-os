@@ -7,8 +7,11 @@
 //! machine root store, then EncryptMessage (STREAM_HEADER, DATA,
 //! STREAM_TRAILER) and DecryptMessage in place (DATA, EXTRA;
 //! SEC_I_RENEGOTIATE's post-handshake messages back to the token loop;
-//! close_notify as SEC_I_CONTEXT_EXPIRED). Time-outs: WSAPoll before each
-//! send and receive.
+//! close_notify as SEC_I_CONTEXT_EXPIRED). Time-outs: a non-blocking
+//! connect waited for with WSAPoll (the connect time-out, each address
+//! in turn), WSAPoll before each send and receive. The steps are told to
+//! the request's observer (`Event`): resolving, each address tried, the
+//! connection made (after the handshake for https), a handshake failure.
 
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -24,8 +27,8 @@ use crate::err::{
     TIMEOUT,
 };
 use crate::{
-    Dll, IGNORE_CN_INVALID, IGNORE_DATE_INVALID, IGNORE_UNKNOWN_CA, IGNORE_WRONG_USAGE, failed,
-    missing, put,
+    Dll, Event, IGNORE_CN_INVALID, IGNORE_DATE_INVALID, IGNORE_UNKNOWN_CA, IGNORE_WRONG_USAGE,
+    Observer, failed, missing, put,
 };
 
 #[repr(C)]
@@ -128,6 +131,9 @@ unsafe extern "system" {
     fn FreeAddrInfoW(ai: *const AddrInfo);
     fn socket(af: i32, kind: i32, protocol: i32) -> usize;
     fn connect(s: usize, addr: *const c_void, len: i32) -> i32;
+    fn ioctlsocket(s: usize, cmd: i32, arg: *mut u32) -> i32;
+    fn getsockopt(s: usize, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
+    fn InetNtopW(family: i32, addr: *const c_void, text: *mut u16, size: usize) -> *const u16;
     fn send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32;
     fn recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn closesocket(s: usize) -> i32;
@@ -210,7 +216,16 @@ const SCH_CRED_AUTO_CRED_VALIDATION: u32 = 0x20;
 
 const POLLRDNORM: i16 = 0x100;
 const POLLWRNORM: i16 = 0x10;
+const POLLERR: i16 = 0x1;
+const POLLHUP: i16 = 0x2;
 const WSAETIMEDOUT: i32 = 10060;
+const WSAEWOULDBLOCK: i32 = 10035;
+const WSAECONNREFUSED: i32 = 10061;
+const FIONBIO: i32 = 0x8004_667e_u32 as i32;
+const SOL_SOCKET: i32 = 0xffff;
+const SO_ERROR: i32 = 0x1007;
+const AF_INET: i32 = 2;
+const AF_INET6: i32 = 23;
 
 /// "Microsoft Unified Security Protocol Provider" (UNISP_NAME_W).
 const UNISP: &[u8] = b"Microsoft Unified Security Protocol Provider\0";
@@ -248,8 +263,12 @@ pub struct Target<'a> {
     pub security_flags: u32,
     /// SP_PROT_* (0: Schannel's defaults).
     pub protocols: u32,
+    /// Per address tried (-1: the stack's own).
+    pub connect_timeout: i32,
     pub send_timeout: i32,
     pub receive_timeout: i32,
+    /// Who is told the steps.
+    pub observer: Option<Observer>,
 }
 
 impl Conn {
@@ -274,15 +293,42 @@ impl Conn {
             send_timeout: t.send_timeout,
             receive_timeout: t.receive_timeout,
         };
-        conn.socket = connect_to(t.dll, t.host, t.port)?;
-        if t.secure {
-            conn.handshake(t)?;
+        let (socket, address) = connect_to(t)?;
+        conn.socket = socket;
+        if t.secure
+            && let Err(e) = conn.handshake(t)
+        {
+            if crate::is_certificate(e) || e == SECURE_CHANNEL_ERROR {
+                Observer::tell(t.observer.as_ref(), Event::SecureFailure(e));
+            }
+            return Err(e);
         }
+        Observer::tell(t.observer.as_ref(), Event::Connected(address.text()));
         Ok(conn)
     }
 
     fn send_all(&self, data: &[u8]) -> Result<(), u32> {
         send_all(self.dll, self.socket, self.send_timeout, data)
+    }
+
+    /// The send and receive time-outs of the request now using it (a
+    /// connection taken from the pool).
+    pub fn set_timeouts(&mut self, send: i32, receive: i32) {
+        self.send_timeout = send;
+        self.receive_timeout = receive;
+    }
+
+    /// Whether an idle connection can carry another request: nothing
+    /// arrived while it waited (a readable socket is the server's close,
+    /// or bytes no request asked for), no TLS bytes are left over, and
+    /// no close_notify came.
+    pub fn idle_ok(&self) -> bool {
+        if !self.raw.is_empty() || self.tls.as_ref().is_some_and(|t| t.closed) {
+            return false;
+        }
+        let mut fd = PollFd { fd: self.socket, events: POLLRDNORM, revents: 0 };
+        // SAFETY: one WSAPOLLFD of ours; no wait.
+        unsafe { WSAPoll(&mut fd, 1, 0) == 0 }
     }
 
     /// Appends what the server sends next to `out`; Ok(0) when it closed.
@@ -687,8 +733,98 @@ fn socket_error(dll: Dll, what: &[u8]) -> u32 {
     if e == WSAETIMEDOUT { TIMEOUT } else { CONNECTION_ERROR }
 }
 
-/// Resolves `host` and connects to its addresses in the order given.
-fn connect_to(dll: Dll, host: &[u16], port: u16) -> Result<usize, u32> {
+/// An address as text (InetNtopW: no port), NUL-terminated.
+struct Address {
+    text: [u16; 48],
+    len: usize,
+}
+
+impl Address {
+    /// `a`'s address; empty for a family other than IPv4 and IPv6.
+    fn of(a: &AddrInfo) -> Address {
+        let mut out = Address { text: [0; 48], len: 0 };
+        // The address within SOCKADDR_IN (offset 4) or SOCKADDR_IN6 (8).
+        let at = match a.family {
+            AF_INET => 4,
+            AF_INET6 => 8,
+            _ => return out,
+        };
+        // SAFETY: GetAddrInfoW's sockaddr of the family; our buffer of
+        // `text.len()` characters.
+        let r = unsafe {
+            InetNtopW(
+                a.family,
+                a.addr.cast::<u8>().add(at).cast(),
+                out.text.as_mut_ptr(),
+                out.text.len(),
+            )
+        };
+        if !r.is_null() {
+            out.len = out.text.iter().position(|&c| c == 0).unwrap_or(0);
+        }
+        out
+    }
+
+    /// With its NUL.
+    fn text(&self) -> &[u16] {
+        &self.text[..=self.len]
+    }
+}
+
+/// Connects `s` to `a`, waiting at most `timeout` ms (-1: the stack's
+/// own wait); the Winsock error otherwise (WSAETIMEDOUT for the time-out).
+fn attempt(s: usize, a: &AddrInfo, timeout: i32) -> Result<(), i32> {
+    // SAFETY: our socket and GetAddrInfoW's address; plain calls.
+    unsafe {
+        if timeout < 0 {
+            return if connect(s, a.addr, a.addrlen as i32) == 0 {
+                Ok(())
+            } else {
+                Err(WSAGetLastError())
+            };
+        }
+        let mut on = 1u32;
+        if ioctlsocket(s, FIONBIO, &mut on) != 0 {
+            return Err(WSAGetLastError());
+        }
+        if connect(s, a.addr, a.addrlen as i32) != 0 {
+            let e = WSAGetLastError();
+            if e != WSAEWOULDBLOCK {
+                return Err(e);
+            }
+            let mut fd = PollFd { fd: s, events: POLLWRNORM, revents: 0 };
+            match WSAPoll(&mut fd, 1, timeout) {
+                0 => return Err(WSAETIMEDOUT),
+                n if n < 0 => return Err(WSAGetLastError()),
+                _ => {}
+            }
+            let mut error = 0i32;
+            let mut len = 4i32;
+            if getsockopt(s, SOL_SOCKET, SO_ERROR, (&raw mut error).cast(), &mut len) != 0 {
+                return Err(WSAGetLastError());
+            }
+            if error != 0 {
+                return Err(error);
+            }
+            if fd.revents & (POLLERR | POLLHUP) != 0 && fd.revents & POLLWRNORM == 0 {
+                return Err(WSAECONNREFUSED);
+            }
+        }
+        let mut off = 0u32;
+        if ioctlsocket(s, FIONBIO, &mut off) != 0 {
+            return Err(WSAGetLastError());
+        }
+    }
+    Ok(())
+}
+
+/// Resolves the target's host and connects to its addresses in the
+/// order given, each within the connect time-out; the socket and the
+/// address it connected to. All failed: err::TIMEOUT when the last one
+/// timed out, else CANNOT_CONNECT.
+fn connect_to(t: &Target) -> Result<(usize, Address), u32> {
+    let (dll, host, port) = (t.dll, t.host, t.port);
+    let observer = t.observer.as_ref();
     let mut name = Vec::new();
     put(&mut name, host)?;
     put(&mut name, &[0])?;
@@ -712,11 +848,16 @@ fn connect_to(dll: Dll, host: &[u16], port: u16) -> Result<usize, u32> {
     hints.socktype = 1; // SOCK_STREAM
     hints.protocol = 6; // IPPROTO_TCP
     let mut list: *const AddrInfo = null();
+    Observer::tell(observer, Event::Resolving(&name));
     // SAFETY: NUL-terminated strings and hints of ours.
     let r = unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut list) };
     if r != 0 {
         failed(dll, b"GetAddrInfoW", r as u64);
         return Err(NAME_NOT_RESOLVED);
+    }
+    if !list.is_null() {
+        // SAFETY: the list GetAddrInfoW made.
+        Observer::tell(observer, Event::Resolved(Address::of(unsafe { &*list }).text()));
     }
     let mut last = 0;
     let mut ai = list;
@@ -725,22 +866,34 @@ fn connect_to(dll: Dll, host: &[u16], port: u16) -> Result<usize, u32> {
     unsafe {
         while !ai.is_null() {
             let a = &*ai;
+            let address = Address::of(a);
+            Observer::tell(observer, Event::Connecting(address.text()));
             let s = socket(a.family, 1, 6);
             if s == usize::MAX {
                 last = WSAGetLastError();
-            } else if connect(s, a.addr, a.addrlen as i32) == 0 {
-                found = Some(s);
-                break;
             } else {
-                last = WSAGetLastError();
-                closesocket(s);
+                match attempt(s, a, t.connect_timeout) {
+                    Ok(()) => {
+                        found = Some((s, address));
+                        break;
+                    }
+                    Err(e) => {
+                        last = e;
+                        closesocket(s);
+                    }
+                }
             }
             ai = a.next;
         }
         FreeAddrInfoW(list);
     }
     found.ok_or_else(|| {
-        failed(dll, b"connect", last as u64);
-        CANNOT_CONNECT
+        if last == WSAETIMEDOUT {
+            failed(dll, b"connect timed out", t.connect_timeout as u64);
+            TIMEOUT
+        } else {
+            failed(dll, b"connect", last as u64);
+            CANNOT_CONNECT
+        }
     })
 }

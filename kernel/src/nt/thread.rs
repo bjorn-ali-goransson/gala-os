@@ -7,7 +7,7 @@
 
 use super::platform;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::layout::{self, teb};
 use super::object::{KObject, ObjectBody, ObjectRef};
@@ -28,6 +28,10 @@ pub struct NtThread {
     pub teb: u64,
     /// A WOW64 thread's 32-bit TEB (its FS in 32-bit code); 0 otherwise.
     pub teb32: u64,
+    /// The reservation of the user stack it was created with (INITIAL_TEB's
+    /// StackAllocationBase; a WOW64 thread's 32-bit one), freed with its
+    /// TEB when it ends itself (`release_user_memory`); 0: none.
+    user_stack: u64,
     pub process: KArc<Process>,
     /// Scheduler thread, once spawned.
     sched_id: IrqMutex<Option<ThreadId>>,
@@ -35,8 +39,14 @@ pub struct NtThread {
     pub dispatcher: Dispatcher,
     exit_status: IrqMutex<Option<NtStatus>>,
     suspend_count: IrqMutex<u32>,
-    /// Set when another thread asked this one to terminate.
+    /// Set when this thread is to end on its way back to user mode: asked
+    /// by another thread (`request_termination`) or by itself.
     terminate_request: IrqMutex<Option<NtStatus>>,
+    /// Another thread ended it (TerminateThread): its stack stays.
+    ended_by_other: core::sync::atomic::AtomicBool,
+    /// Its creator gave it its stack (kernel32's CreateThread:
+    /// GALA_THREAD_FREE_STACK): freed when it ends itself.
+    owns_stack: core::sync::atomic::AtomicBool,
     /// What it starts with: its registers. Its x87/SSE state is always
     /// fresh (MXCSR 0x1f80, XMM 0): NtCreateThread ignores the CONTEXT's
     /// floating-point part, as Windows 11 does.
@@ -90,6 +100,47 @@ pub struct NtThread {
     /// The absolute deadline of the reissued call (`take_restart_deadline`):
     /// Some(None) = none (infinite).
     restart_deadline: IrqMutex<Option<Option<u64>>>,
+    /// Its I/O requests outstanding (`IoPending`): ThreadIsIoPending.
+    io_pending: AtomicU32,
+    /// ThreadIdealProcessor: the processor it would rather run on, a hint
+    /// kept and reported (the scheduler does not take it yet). It starts
+    /// at the process's next processor in turn (`default_ideal`); not
+    /// carried across a kernel handover (it starts there again).
+    ideal: AtomicU32,
+}
+
+/// A new thread's ideal processor: its process's threads take the online
+/// processors in turn, as Windows Internals describes Windows' per-process
+/// seed.
+fn default_ideal(ordinal: u32) -> u32 {
+    let online = platform::online_mask();
+    let count = online.count_ones().max(1);
+    // The (ordinal mod count)-th online processor.
+    (0..64u32)
+        .filter(|&cpu| online & (1u64 << cpu) != 0)
+        .nth((ordinal % count) as usize)
+        .unwrap_or(0)
+}
+
+/// One I/O request of a thread, counted while it is outstanding (an IRP
+/// on the thread's list, in Windows' terms): created when the request
+/// starts, dropped when it completes or is cancelled. ThreadIsIoPending
+/// (GetThreadIOPendingFlag) is whether a thread has any.
+pub struct IoPending(ObjectRef);
+
+impl IoPending {
+    /// One request of the running thread (None for kernel threads).
+    pub fn current() -> Option<IoPending> {
+        let object = current()?;
+        as_thread(&object).io_pending.fetch_add(1, Ordering::AcqRel);
+        Some(IoPending(object))
+    }
+}
+
+impl Drop for IoPending {
+    fn drop(&mut self) {
+        as_thread(&self.0).io_pending.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// How a thread a kernel handover carried goes on (ARCHITECTURE
@@ -161,6 +212,11 @@ pub fn base_increment(base: i32) -> i32 {
 }
 
 impl NtThread {
+    /// Its stack goes with it when it ends itself (GALA_THREAD_FREE_STACK).
+    pub fn free_stack_on_exit(&self) {
+        self.owns_stack.store(true, Ordering::Relaxed);
+    }
+
     pub fn affinity(&self) -> u64 {
         self.affinity.load(core::sync::atomic::Ordering::Relaxed)
     }
@@ -186,6 +242,13 @@ impl NtThread {
         tid.map_or(0, platform::context_switches)
     }
 
+    /// Nanoseconds it has run on a processor (0 once its scheduler
+    /// record is gone, or kept from before a handover).
+    pub fn cpu_time_ns(&self) -> u64 {
+        let tid = *self.sched_id.lock();
+        tid.map_or(0, platform::cpu_time_ns)
+    }
+
     /// ExitStatus as reported by NtQueryInformationThread.
     pub fn exit_status(&self) -> NtStatus {
         self.exit_status.lock().unwrap_or(NtStatus::PENDING)
@@ -193,6 +256,21 @@ impl NtThread {
 
     pub fn has_exited(&self) -> bool {
         self.exit_status.lock().is_some()
+    }
+
+    /// ThreadIsIoPending: it has I/O requests outstanding (`IoPending`).
+    pub fn io_pending(&self) -> bool {
+        self.io_pending.load(Ordering::Acquire) != 0
+    }
+
+    /// ThreadIdealProcessor.
+    pub fn ideal_processor(&self) -> u32 {
+        self.ideal.load(Ordering::Relaxed)
+    }
+
+    /// Sets ThreadIdealProcessor (validated by the caller); the previous one.
+    pub fn set_ideal_processor(&self, cpu: u32) -> u32 {
+        self.ideal.swap(cpu, Ordering::Relaxed)
     }
 }
 
@@ -227,7 +305,7 @@ const BY_SCHED_MAX: usize = 1 << 16;
 /// kept its process alive. Out of memory it is not indexed and `current`
 /// finds it by a scan.
 fn bind_sched(id: ThreadId, object: &ObjectRef) {
-    let i = id.as_usize();
+    let i = id.index();
     if i >= BY_SCHED_MAX {
         return;
     }
@@ -245,7 +323,7 @@ fn bind_sched(id: ThreadId, object: &ObjectRef) {
 /// Forgets `object` as the NT thread of scheduler thread `id`.
 fn unbind_sched(id: ThreadId, object: &ObjectRef) {
     let mut table = BY_SCHED.lock();
-    if let Some(slot) = table.get_mut(id.as_usize())
+    if let Some(slot) = table.get_mut(id.index())
         && slot.as_ref().is_some_and(|o| KArc::ptr_eq(o, object))
     {
         *slot = None;
@@ -258,7 +336,7 @@ pub fn current() -> Option<ObjectRef> {
     // An entry is checked: a scheduler id is reused once its thread is
     // gone, and an exit that missed `unbind_sched` must not name another
     // thread.
-    let indexed = BY_SCHED.lock().get(me.as_usize()).cloned().flatten();
+    let indexed = BY_SCHED.lock().get(me.index()).cloned().flatten();
     if let Some(o) = indexed
         && *as_thread(&o).sched_id.lock() == Some(me)
     {
@@ -289,6 +367,24 @@ pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
     let base = word(teb::STACK_BASE)?;
     let bottom = word(teb::DEALLOCATION_STACK)?;
     (bottom != 0 && bottom < base).then_some((t.teb, bottom, base))
+}
+
+/// The pages of `process`'s live threads' TEBs (and WOW64 TEB32s), into
+/// `out` (as far as it has room without growing: the page file's clock
+/// keeps them in memory, since the kernel reads them under the VAD's
+/// lock, `current_stack`, where no fault can be resolved).
+pub fn teb_pages(process: &Process, out: &mut Vec<u64>) {
+    process.for_each_thread(|object| {
+        let t = as_thread(object);
+        for page in 0..teb::PAGES {
+            if out.len() < out.capacity() {
+                let _ = out.try_push(t.teb + page * PAGE_SIZE);
+            }
+        }
+        if t.teb32 != 0 && out.len() < out.capacity() {
+            let _ = out.try_push(t.teb32 / PAGE_SIZE * PAGE_SIZE);
+        }
+    });
 }
 
 /// The current WOW64 thread's TEB32 and its 32-bit stack reservation
@@ -411,6 +507,7 @@ fn create_inner(
         Begin::Resume(r) => (Some(r), None),
         Begin::Wow64(start) => (None, Some(start)),
     };
+    let wow64_stack = wow64.as_ref().map(|s| u64::from(s.stack.2));
     if wow64.is_none() && !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
@@ -438,10 +535,17 @@ fn create_inner(
     if !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
+    let user_stack = match (&wow64_stack, process.personality) {
+        (Some(bottom), _) => *bottom,
+        (None, super::platform::Personality::Nt) => stack.2,
+        _ => 0,
+    };
+    let ordinal = process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let thread = NtThread {
         id,
         teb: teb_addr,
         teb32,
+        user_stack,
         process: process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
@@ -449,6 +553,8 @@ fn create_inner(
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
         terminate_request: IrqMutex::new(None),
+        ended_by_other: core::sync::atomic::AtomicBool::new(false),
+        owns_stack: core::sync::atomic::AtomicBool::new(false),
         start: regs,
         win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
@@ -461,12 +567,14 @@ fn create_inner(
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
-        ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        ordinal,
         start_bases: resume.as_ref().map(|r| r.1),
         resume: IrqMutex::new(resume.map(|r| r.0)),
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
+        io_pending: AtomicU32::new(0),
+        ideal: AtomicU32::new(default_ideal(ordinal)),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -636,6 +744,7 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
     if t.has_exited() {
         return;
     }
+    t.ended_by_other.store(true, Ordering::Relaxed);
     t.terminate_request.lock().get_or_insert(status);
     if let Some(tid) = *t.sched_id.lock() {
         platform::wake(tid);
@@ -854,6 +963,15 @@ pub fn hold_for_handover(on: bool) {
     }
 }
 
+/// From an NMI (a hot swap asked for at a resumed machine's first
+/// instruction, `crate::hotswap`): every thread returning to user mode waits
+/// on the way, as `hold_for_handover(true)` makes them, without waking
+/// anyone (one store, nothing locked). The hot swap then calls
+/// `hold_for_handover` itself, from a thread that may take locks.
+pub fn hold_from_nmi() {
+    HOLD.store(true, Ordering::SeqCst);
+}
+
 /// NtSuspendThread: raises the suspend count (the thread stops on its way
 /// back to user mode). Returns the previous count.
 pub fn suspend(object: &ObjectRef) -> Result<u32, NtStatus> {
@@ -890,6 +1008,8 @@ pub fn take_restart_deadline() -> Option<Option<u64>> {
 pub struct Snapshot {
     pub id: u64,
     pub teb: u64,
+    /// A WOW64 thread's 32-bit TEB (0 for others).
+    pub teb32: u64,
     pub process: KArc<Process>,
     pub sched: Option<ThreadId>,
     /// The system call it is in (number, user registers at the `syscall`).
@@ -933,6 +1053,7 @@ pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
     Some(Snapshot {
         id: t.id,
         teb: t.teb,
+        teb32: t.teb32,
         process: t.process.clone(),
         sched,
         in_syscall,
@@ -1014,6 +1135,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         id: a.id,
         teb: a.teb,
         teb32: 0,
+        user_stack: 0,
         process: a.process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(affinity),
@@ -1021,6 +1143,8 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         exit_status: IrqMutex::new(a.exited.map(|e| e.0)),
         suspend_count: IrqMutex::named("thread.suspend_count", a.suspend),
         terminate_request: IrqMutex::new(None),
+        ended_by_other: core::sync::atomic::AtomicBool::new(false),
+        owns_stack: core::sync::atomic::AtomicBool::new(false),
         start: UserRegs::default(),
         win32_start: a.win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
@@ -1039,6 +1163,8 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
+        io_pending: AtomicU32::new(0),
+        ideal: AtomicU32::new(default_ideal(a.ordinal)),
     };
     let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -1339,19 +1465,31 @@ pub fn exit_current(status: NtStatus) -> ! {
         // never got there), and messages sent to it fail.
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
+        // The clipboard it had open is closed (its listeners told).
+        super::clipboard::thread_ended(&t.process, t.id);
+        // Its registry change notifications end (unless made
+        // REG_NOTIFY_THREAD_AGNOSTIC), their events signaled.
+        super::regnotify::thread_ended(t.process.id, t.id);
         // A desktop handle it was set to (SetThreadDesktop) may be closed.
         t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
+        // Its CPU time stays with the process (the task manager's).
+        t.process.cpu_ended_ns.fetch_add(t.cpu_time_ns(), core::sync::atomic::Ordering::Relaxed);
         if let Some(id) = *t.sched_id.lock() {
             unbind_sched(id, &object);
         }
         let process = t.process.clone();
         let (teb, teb32) = (t.teb, t.teb32);
+        // Ended by another thread (TerminateThread): its stack stays, as
+        // TerminateThread's documentation says of Windows.
+        let by_other = t.ended_by_other.load(Ordering::Relaxed);
+        let owns = t.owns_stack.load(Ordering::Relaxed);
+        let user_stack = if by_other || !owns { 0 } else { t.user_stack };
         let last = process.remove_thread(&object);
-        // A WOW64 thread's 64-bit stack and TEB32 (the kernel's to free;
-        // a process's last thread leaves them to its address space's end).
-        if teb32 != 0 && !last && !process_is_exiting(t) {
-            super::wow64::release_thread(&process, teb, teb32);
+        // What the thread's user mode had (a process's last thread leaves
+        // it to its address space's end).
+        if !last && !process_is_exiting(t) {
+            release_user_memory(&process, teb, teb32, user_stack);
         }
         wait::set_signal(&object, 1);
         drop(object);
@@ -1362,6 +1500,30 @@ pub fn exit_current(status: NtStatus) -> ! {
         }
     }
     platform::exit()
+}
+
+/// Frees an ended thread's user-mode memory while its process goes on: its
+/// TEB, a WOW64 thread's 64-bit stack and TEB32, and the user stack it
+/// was created with (`user_stack`, 0 to keep it). Windows frees a
+/// thread's TEB when it ends, and its stack when it ends itself
+/// (CreateThread's documentation: "the thread's stack is freed when the
+/// thread terminates"); kept, each thread a program makes and ends would
+/// leave both behind (the Click-to-Run client makes thousands).
+fn release_user_memory(process: &Process, teb: u64, teb32: u64, user_stack: u64) {
+    if teb32 != 0 {
+        super::wow64::release_thread(process, teb, teb32);
+    }
+    for (what, base) in [("stack", user_stack), ("TEB", teb)] {
+        if base == 0 {
+            continue;
+        }
+        if let Err(e) = super::vm::free(process, base, 0, super::vm::MEM_RELEASE) {
+            warn!(
+                "thread: {} (pid {}): cannot free an ended thread's {what} at {base:#x}: {e:?}",
+                process.name, process.id
+            );
+        }
+    }
 }
 
 /// Makes the current thread exit with `status` on its way back to user

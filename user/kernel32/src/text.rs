@@ -241,6 +241,28 @@ pub extern "system" fn FileTimeToDosDateTime(
     TRUE
 }
 
+/// DosDateTimeToFileTime(wFatDate, wFatTime, lpFileTime): the FILETIME of
+/// an MS-DOS date and time (the fields FileTimeToDosDateTime writes; no
+/// time zone applied). Fields out of range are ERROR_INVALID_PARAMETER
+/// (as SystemTimeToFileTime).
+#[unsafe(no_mangle)]
+pub extern "system" fn DosDateTimeToFileTime(date: u16, time: u16, ft: *mut u64) -> Bool {
+    if ft.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let st = [
+        (date >> 9) + 1980,
+        (date >> 5) & 0xf,
+        0,
+        date & 0x1f,
+        time >> 11,
+        (time >> 5) & 0x3f,
+        (time & 0x1f) * 2,
+        0,
+    ];
+    SystemTimeToFileTime(st.as_ptr(), ft)
+}
+
 /// SYSTEMTIME fields of `t` (100 ns since 1601) into the caller's `st`.
 fn write_system_time(t: i64, st: *mut u16) {
     let since_epoch = t - UNIX_EPOCH_FILETIME;

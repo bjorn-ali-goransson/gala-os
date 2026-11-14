@@ -8,16 +8,18 @@
 //! body by Content-Length, chunked transfer coding or until the server
 //! closes, and automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
 //! (default: all but https to http) up to
-//! WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS (default 10). The engine is `user/http_client`, shared with wininet.dll;
-//! this crate is WinHTTP's functions, options and error codes over it
-//! (`request.rs`: the request's functions).
+//! WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS (default 10), and the
+//! status callbacks of a synchronous session (`callback.rs`); connections
+//! are kept for the next request to the same server (`http_client::pool`).
+//! The engine
+//! is `user/http_client`, shared with wininet.dll; this crate is
+//! WinHTTP's functions, options and error codes over it (`request.rs`:
+//! the request's functions).
 //!
 //! Limits (each recorded in the ledger where a program meets it):
 //! asynchronous sessions (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
 //! proxies (named proxies, WinHttpGetProxyForUrl), authentication, cookies,
-//! decompression, HTTP/2, connection reuse (each request has its own
-//! connection) and the connect and resolve time-outs (the stack's own
-//! apply). There are no Internet Explorer proxy settings on gala
+//! decompression, HTTP/2 and the resolve time-out (GetAddrInfoW's own applies). There are no Internet Explorer proxy settings on gala
 //! (WinHttpGetIEProxyConfigForCurrentUser: ERROR_FILE_NOT_FOUND, as
 //! documented for that case). A handle must not be closed while another
 //! thread uses it.
@@ -29,6 +31,7 @@
 extern crate alloc;
 use gala_heap as _;
 
+mod callback;
 mod request;
 mod unimplemented;
 
@@ -103,6 +106,7 @@ const WINHTTP_OPTION_RECEIVE_TIMEOUT: u32 = 6;
 const WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT: u32 = 7;
 const WINHTTP_OPTION_HANDLE_TYPE: u32 = 9;
 const WINHTTP_OPTION_SECURITY_FLAGS: u32 = 31;
+const WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH: u32 = 83;
 const WINHTTP_OPTION_URL: u32 = 34;
 const WINHTTP_OPTION_USER_AGENT: u32 = 41;
 const WINHTTP_OPTION_CONTEXT_VALUE: u32 = 45;
@@ -171,7 +175,12 @@ pub enum Kind {
 /// What an HINTERNET points to.
 pub struct Object {
     pub kind: Kind,
+    /// WINHTTP_OPTION_CONTEXT_VALUE: what the callback is given.
     pub context: usize,
+    /// The status callback (0: none) and the notifications it takes
+    /// (WinHttpSetStatusCallback's flags).
+    pub callback: usize,
+    pub flags: u32,
 }
 
 impl Object {
@@ -187,10 +196,21 @@ impl Object {
 /// The live handles.
 static HANDLES: Handles<Object> = Handles::new();
 
-/// A new handle for `kind` (0 with ERROR_NOT_ENOUGH_MEMORY).
-fn new_handle(kind: Kind) -> usize {
-    match HANDLES.insert(Object { kind, context: 0 }) {
+/// A new handle for `kind` (0 with ERROR_NOT_ENOUGH_MEMORY), with the
+/// context and callback of its parent (`parent`: 0 for a session), as
+/// handles made from a session inherit them; HANDLE_CREATED tells the
+/// callback.
+fn new_handle(kind: Kind, parent: usize) -> usize {
+    let (context, callback, flags) = match object(parent) {
+        Ok(p) => (p.context, p.callback, p.flags),
+        Err(_) => (0, 0, 0),
+    };
+    match HANDLES.insert(Object { kind, context, callback, flags }) {
         Ok(h) => {
+            if let Ok(o) = object(h) {
+                let observer = callback::observer(h, o);
+                callback::created(&observer, h);
+            }
             set_error(0);
             h
         }
@@ -209,6 +229,26 @@ fn object(h: usize) -> Result<&'static mut Object, u32> {
 fn request_of(h: usize) -> Result<&'static mut Request, u32> {
     match &mut object(h)?.kind {
         Kind::Request(r) => Ok(r),
+        _ => Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
+    }
+}
+
+/// A request, given its handle's callback for the steps to come; a
+/// non-zero `context` (WinHttpSendRequest's) becomes the request's.
+fn request_observed(h: usize, context: usize) -> Result<&'static mut Request, u32> {
+    let o = object(h)?;
+    if !matches!(o.kind, Kind::Request(_)) {
+        return Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE);
+    }
+    if context != 0 {
+        o.context = context;
+    }
+    let observer = callback::observer(h, o);
+    match &mut o.kind {
+        Kind::Request(r) => {
+            r.observer = Some(observer);
+            Ok(r)
+        }
         _ => Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
     }
 }
@@ -245,15 +285,18 @@ pub extern "system" fn WinHttpOpen(
             return 0;
         }
     };
-    new_handle(Kind::Session(Settings {
-        dll: DLL,
-        agent,
-        timeouts: DEFAULT_TIMEOUTS,
-        protocols: 0,
-        redirect_policy: REDIRECT_DISALLOW_HTTPS_TO_HTTP,
-        max_redirects: 10,
-        redirect_rules: RedirectRules::WinHttp,
-    }))
+    new_handle(
+        Kind::Session(Settings {
+            dll: DLL,
+            agent,
+            timeouts: DEFAULT_TIMEOUTS,
+            protocols: 0,
+            redirect_policy: REDIRECT_DISALLOW_HTTPS_TO_HTTP,
+            max_redirects: 10,
+            redirect_rules: RedirectRules::WinHttp,
+        }),
+        0,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -278,7 +321,7 @@ pub extern "system" fn WinHttpConnect(
         Ok(Connect { settings, host, port })
     })();
     match r {
-        Ok(c) => new_handle(Kind::Connect(c)),
+        Ok(c) => new_handle(Kind::Connect(c), session),
         Err(e) => {
             set_error(e);
             0
@@ -317,7 +360,7 @@ pub extern "system" fn WinHttpOpenRequest(
         )
     })();
     match r {
-        Ok(r) => new_handle(Kind::Request(r)),
+        Ok(r) => new_handle(Kind::Request(r), connect),
         Err(e) => {
             set_error(e);
             0
@@ -327,8 +370,13 @@ pub extern "system" fn WinHttpOpenRequest(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn WinHttpCloseHandle(h: usize) -> i32 {
+    let observer = object(h).map(|o| callback::observer(h, o));
     // Dropping a request closes its connection.
-    done(HANDLES.close(h))
+    let r = HANDLES.close(h);
+    if let (Ok(()), Ok(observer)) = (r, observer) {
+        callback::closing(&observer, h);
+    }
+    done(r)
 }
 
 /// A documented time-out value: -1 or 0 wait forever; below -1 is invalid.
@@ -352,7 +400,7 @@ pub extern "system" fn WinHttpSetTimeouts(
         let o = object(h)?;
         let (resolve, connect, send, receive) =
             (timeout(resolve)?, timeout(connect)?, timeout(send)?, timeout(receive)?);
-        note_unapplied(resolve, connect);
+        note_unapplied(resolve);
         let t = &mut o.settings().timeouts;
         t.resolve = resolve;
         t.connect = connect;
@@ -362,14 +410,11 @@ pub extern "system" fn WinHttpSetTimeouts(
     })())
 }
 
-/// The resolve and connect time-outs are not applied (the stack's own
-/// apply): recorded when a caller sets one other than the default.
-fn note_unapplied(resolve: i32, connect: i32) {
+/// The resolve time-out is not applied (GetAddrInfoW has no time limit;
+/// its own applies): recorded when a caller sets one.
+fn note_unapplied(resolve: i32) {
     if resolve != DEFAULT_TIMEOUTS.resolve {
         missing(b"resolve timeout", resolve as u64);
-    }
-    if connect != DEFAULT_TIMEOUTS.connect {
-        missing(b"connect timeout", connect as u64);
     }
 }
 
@@ -396,13 +441,10 @@ pub extern "system" fn WinHttpSetOption(h: usize, option: u32, buffer: *const u8
                 let t = &mut o.settings().timeouts;
                 match option {
                     WINHTTP_OPTION_RESOLVE_TIMEOUT => {
-                        note_unapplied(v, DEFAULT_TIMEOUTS.connect);
+                        note_unapplied(v);
                         t.resolve = v
                     }
-                    WINHTTP_OPTION_CONNECT_TIMEOUT => {
-                        note_unapplied(DEFAULT_TIMEOUTS.resolve, v);
-                        t.connect = v
-                    }
+                    WINHTTP_OPTION_CONNECT_TIMEOUT => t.connect = v,
                     WINHTTP_OPTION_SEND_TIMEOUT => t.send = v,
                     WINHTTP_OPTION_RECEIVE_TIMEOUT => t.receive = v,
                     _ => t.response = v,
@@ -449,6 +491,18 @@ pub extern "system" fn WinHttpSetOption(h: usize, option: u32, buffer: *const u8
             }
             WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS => {
                 o.settings().max_redirects = dword(buffer, len)?;
+            }
+            WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH => {
+                // A session's, exactly a DWORD (WINHTTP_ENABLE_PASSPORT_AUTH
+                // and the others). Passport's sign-in is retired: Windows
+                // returns its 401 to the caller (Wine's test_passport_auth,
+                // on Windows), as gala does without it.
+                if !matches!(o.kind, Kind::Session(_)) {
+                    return Err(ERROR_WINHTTP_INVALID_OPTION);
+                }
+                if buffer.is_null() || len != 4 {
+                    return Err(ERROR_INSUFFICIENT_BUFFER);
+                }
             }
             WINHTTP_OPTION_SECURITY_FLAGS => {
                 let v = dword(buffer, len)?;

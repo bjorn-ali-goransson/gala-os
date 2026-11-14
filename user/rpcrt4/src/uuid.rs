@@ -3,12 +3,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-#[link(name = "kernel32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn GetProcessHeap() -> usize;
-    fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
-    fn HeapFree(heap: usize, flags: u32, block: *mut u8) -> i32;
-}
+use crate::sys::{GetProcessHeap, HeapAlloc, HeapFree};
 
 #[link(name = "bcryptprimitives", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -179,7 +174,7 @@ fn free(text: *mut *mut u8) -> i32 {
     unsafe {
         let p = text.read();
         if !p.is_null() {
-            HeapFree(GetProcessHeap(), 0, p);
+            HeapFree(GetProcessHeap(), 0, p.cast());
         }
         text.write(core::ptr::null_mut());
     }

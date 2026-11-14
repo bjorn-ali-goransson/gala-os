@@ -1,5 +1,6 @@
-//! WinHttpCrackUrl and InternetCrackUrlW: a URL's components into
-//! URL_COMPONENTS (one layout in both APIs), with the documented
+//! WinHttpCrackUrl and InternetCrackUrlW/A: a URL's components into
+//! URL_COMPONENTS (one layout in both APIs; URL_COMPONENTSA the same
+//! with byte strings), with the documented
 //! conventions per component: length 0 leaves it out; a null
 //! pointer with a nonzero length (often -1) gets a pointer into the URL
 //! and the component's length; a buffer with its length in characters
@@ -9,24 +10,49 @@
 use crate::err::{INSUFFICIENT_BUFFER, INVALID_PARAMETER, INVALID_URL, UNRECOGNIZED_SCHEME};
 use crate::{Dll, missing};
 
-/// URL_COMPONENTS (x64 layout).
+/// URL_COMPONENTSW (`T` u16) and URL_COMPONENTSA (`T` u8), in the
+/// caller's width (the pointers are 4 or 8 bytes).
 #[repr(C)]
-pub struct UrlComponents {
+pub struct UrlComponentsOf<T> {
     size: u32,
-    scheme: *mut u16,
+    scheme: *mut T,
     scheme_length: u32,
     n_scheme: u32,
-    host: *mut u16,
+    host: *mut T,
     host_length: u32,
     port: u16,
-    user: *mut u16,
+    user: *mut T,
     user_length: u32,
-    password: *mut u16,
+    password: *mut T,
     password_length: u32,
-    path: *mut u16,
+    path: *mut T,
     path_length: u32,
-    extra: *mut u16,
+    extra: *mut T,
     extra_length: u32,
+}
+
+/// URL_COMPONENTS(W).
+pub type UrlComponents = UrlComponentsOf<u16>;
+/// URL_COMPONENTSA.
+pub type UrlComponentsA = UrlComponentsOf<u8>;
+
+/// A character of a URL the caller gives: UTF-16 or an ANSI byte. The
+/// delimiters are ASCII, so the byte offsets of an ANSI URL widened byte
+/// by byte are its components' offsets whatever its code page.
+pub trait Unit: Copy + Default + PartialEq {
+    fn unit(self) -> u16;
+}
+
+impl Unit for u16 {
+    fn unit(self) -> u16 {
+        self
+    }
+}
+
+impl Unit for u8 {
+    fn unit(self) -> u16 {
+        self.into()
+    }
 }
 
 const ICU_DECODE: u32 = 0x1000_0000;
@@ -134,10 +160,10 @@ pub fn parse(u: &[u16]) -> Result<Parts, u32> {
 ///
 /// # Safety
 /// `ptr` and `len` are the caller's component fields; `url` the URL.
-unsafe fn component(
-    url: *const u16,
+unsafe fn component<T: Unit>(
+    url: *const T,
     range: (usize, usize),
-    ptr: *mut *mut u16,
+    ptr: *mut *mut T,
     len: *mut u32,
 ) -> Result<(), u32> {
     let n = range.1 - range.0;
@@ -157,21 +183,21 @@ unsafe fn component(
             return Err(INSUFFICIENT_BUFFER);
         }
         core::ptr::copy_nonoverlapping(url.add(range.0), *ptr, n);
-        *(*ptr).add(n) = 0;
+        *(*ptr).add(n) = T::default();
         *len = n as u32;
     }
     Ok(())
 }
 
 /// Cracks `url` (`length` characters, 0: NUL-terminated) into the
-/// caller's URL_COMPONENTS; `schemes` are the API's numbers for http and
-/// https (nScheme).
-pub fn crack(
+/// caller's URL_COMPONENTS(W) or URL_COMPONENTSA; `schemes` are the API's
+/// numbers for http and https (nScheme).
+pub fn crack<T: Unit>(
     dll: Dll,
-    url: *const u16,
+    url: *const T,
     length: u32,
     flags: u32,
-    components: *mut UrlComponents,
+    components: *mut UrlComponentsOf<T>,
     schemes: [u32; 2],
 ) -> Result<(), u32> {
     if url.is_null() || components.is_null() {
@@ -179,15 +205,23 @@ pub fn crack(
     }
     // SAFETY: the caller's structure.
     let c = unsafe { &mut *components };
-    if c.size as usize != size_of::<UrlComponents>() {
+    if c.size as usize != size_of::<UrlComponentsOf<T>>() {
         return Err(INVALID_PARAMETER);
     }
     if flags & (ICU_DECODE | ICU_ESCAPE) != 0 {
         // The components are given as they are in the URL.
         missing(dll, b"CrackUrl(ICU_DECODE/ICU_ESCAPE)", flags.into());
     }
-    let n = if length == 0 { None } else { Some(length as usize) };
-    let text = crate::wide(url, n)?;
+    let n = if length == 0 {
+        // SAFETY: the caller's NUL-terminated URL.
+        (0..).take_while(|&i| unsafe { *url.add(i) } != T::default()).count()
+    } else {
+        length as usize
+    };
+    let mut text = alloc::vec::Vec::new();
+    text.try_reserve(n).map_err(|_| crate::err::NOT_ENOUGH_MEMORY)?;
+    // SAFETY: `n` characters of the caller's URL.
+    text.extend((0..n).map(|i| unsafe { *url.add(i) }.unit()));
     let p = parse(&text)?;
     let mut short = false;
     // SAFETY: the caller's fields; the ranges are inside `url`.

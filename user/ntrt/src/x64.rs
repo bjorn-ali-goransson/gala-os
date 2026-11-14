@@ -438,6 +438,33 @@ pub fn gala_session(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -
     unsafe { ntrt_gala_session(op, session, arg, buffer, length) }
 }
 
+/// GalaHotswapProbe (gala's own service, number 0x7ff0; the kernel's
+/// nt::hotswap_probe, ROADMAP SN step 1e): op 0 sets the probe's static,
+/// 1 makes its object, 2 reads `[version, calls, object, global]`, 3
+/// waits two seconds in the kernel. STATUS_INVALID_SYSTEM_SERVICE on
+/// Windows.
+/// A function of its own, not a `stubs!` entry: the linker drops it from
+/// the programs that do not call it.
+pub fn gala_hotswap_probe(op: u32, value: u64) -> (NtStatus, [u64; 4]) {
+    let mut out = [0u64; 4];
+    let status: u64;
+    // SAFETY: the system call as ntdll's stubs make it (arguments in r10,
+    // rdx, r8; rcx and r11 taken by `syscall`, the other volatile
+    // registers the kernel's to change); `out` is ours, four u64 as the
+    // service writes.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 0x7ff0u64 => status,
+            in("r10") u64::from(op),
+            in("rdx") value,
+            in("r8") out.as_mut_ptr(),
+            clobber_abi("win64"),
+        );
+    }
+    (status as NtStatus, out)
+}
+
 /// SESSION_QUERY: (status, [presenter, live, width, height, windows]).
 pub fn session_query(session: u32) -> (NtStatus, [u32; 5]) {
     let mut out = [0u32; 5];

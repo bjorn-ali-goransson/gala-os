@@ -181,6 +181,18 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
             None => Err(EBADF),
+            Some(f) if matches!(&f.object, Object::Pty(_)) => {
+                let Object::Pty(end) = &f.object else { return Err(ENOTTY) };
+                super::pty::ioctl(call, &f, end, a(1) as u32, a(2))
+            }
+            Some(f) if matches!(&f.object, Object::Nt(n) if n.is_terminal()) => {
+                let Object::Nt(n) = &f.object else { return Err(ENOTTY) };
+                n.ioctl(
+                    a(1) as u32,
+                    |out| call.process.read(a(2), out).map_err(|_| EFAULT),
+                    |data| call.process.write(a(2), data).map_err(|_| EFAULT),
+                )
+            }
             Some(_) => {
                 ledger::record("ioctl", "linux syscall stub", a(1));
                 Err(ENOTTY)
@@ -188,6 +200,11 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         },
         nr::WRITEV => writev(call, a(0), a(1), a(2)),
         nr::GETPID => Ok(call.process.id),
+        nr::SETSID => super::session::setsid(call),
+        nr::GETSID => super::session::getsid(call, a(0)),
+        nr::SETPGID => super::session::setpgid(call, a(0), a(1)),
+        nr::GETPGID => super::session::getpgid(call, a(0)),
+        nr::GETPGRP => super::session::getpgid(call, 0),
         nr::GETTID => Ok(super::threads::gettid(call)),
         // This thread ends; the process with its last thread.
         nr::EXIT => super::threads::exit(call, a(0)),
@@ -284,6 +301,16 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         // is EPERM (an unprivileged process).
         nr::SETUID => same_id(a(0), super::identity::of_process(&call.process).uid),
         nr::SETGID => same_id(a(0), super::identity::of_process(&call.process).gid),
+        // setresuid/setresgid(r, e, s): each -1 (unchanged) or the
+        // process's own id (it has no other: no saved set-user-id yet).
+        nr::SETRESUID => {
+            let own = super::identity::of_process(&call.process).uid;
+            same_ids([a(0), a(1), a(2)], own)
+        }
+        nr::SETRESGID => {
+            let own = super::identity::of_process(&call.process).gid;
+            same_ids([a(0), a(1), a(2)], own)
+        }
         nr::CLOSE_RANGE => close_range(call, a(0), a(1), a(2)),
         nr::SENDFILE => sendfile(call, a(0), a(1), a(2), a(3)),
         nr::POLL => super::poll::poll(call, a(0), a(1), a(2)),
@@ -430,7 +457,9 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
         | Object::Socket(_)
         | Object::Unix(_)
         | Object::Epoll(_)
-        | Object::EventFd(_) => None,
+        | Object::EventFd(_)
+        | Object::Pty(_)
+        | Object::Nt(_) => None,
     };
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
@@ -451,10 +480,17 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
                 Object::File(file) => file::status_flags(file),
-                Object::Socket(_) | Object::Unix(_) | Object::Epoll(_) | Object::EventFd(_) => {
-                    file::O_RDWR
-                }
+                Object::Socket(_)
+                | Object::Unix(_)
+                | Object::Epoll(_)
+                | Object::EventFd(_)
+                | Object::Pty(_) => file::O_RDWR,
                 Object::Device(d) => match (d.readable, d.writable) {
+                    (true, true) => file::O_RDWR,
+                    (false, true) => file::O_WRONLY,
+                    _ => 0,
+                },
+                Object::Nt(n) => match (n.readable(), n.writable()) {
                     (true, true) => file::O_RDWR,
                     (false, true) => file::O_WRONLY,
                     _ => 0,
@@ -500,6 +536,10 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
 
 fn same_id(id: u64, own: u32) -> Result {
     if id as u32 == own { Ok(0) } else { Err(EPERM) }
+}
+
+fn same_ids(ids: [u64; 3], own: u32) -> Result {
+    if ids.iter().all(|&id| id as u32 == u32::MAX || id as u32 == own) { Ok(0) } else { Err(EPERM) }
 }
 
 /// The `struct utsname` fields (65 bytes each): the system as Linux
@@ -566,7 +606,9 @@ fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
         | Object::EventFd(_)
         | Object::Socket(_)
         | Object::Unix(_)
-        | Object::Epoll(_) => Err(ESPIPE),
+        | Object::Epoll(_)
+        | Object::Pty(_)
+        | Object::Nt(_) => Err(ESPIPE),
         Object::File(file) => file::lseek(file, offset, whence),
         // A device's position means nothing: always 0.
         Object::Device(_) => Ok(0),
@@ -622,8 +664,18 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::File(file) => file::read(call, file, buf, count),
         Object::Device(dev) => file::device_read(call, dev, buf, count),
         Object::Socket(sock) => socket::recv(call, &f, sock, buf, count, 0),
+        Object::Pty(end) => super::pty::read(call, &f, end, buf, count),
         Object::Unix(u) => unix::recv(call, fd, &f, u, buf, count, 0),
         Object::EventFd(e) => super::eventfd::read(call, &f, e, buf, count),
+        Object::Nt(n) => {
+            let mut data = Vec::new();
+            let want = (count as usize).min(super::ntio::CHUNK);
+            data.try_reserve_exact(want).map_err(|_| ENOMEM)?;
+            data.resize(want, 0);
+            let got = n.read(&mut data)?;
+            call.process.write(buf, &data[..got]).map_err(|_| EFAULT)?;
+            Ok(got as u64)
+        }
         Object::PipeRead(pipe) => loop {
             if count == 0 {
                 return Ok(0);
@@ -669,6 +721,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     let count = count.min(MAX_RW);
     match &f.object {
         Object::Console(Stream::Stdin) | Object::PipeRead(_) | Object::Epoll(_) => Err(EBADF),
+        Object::Pty(end) => super::pty::write(call, &f, end, buf, count),
         Object::File(file) => file::write(call, file, buf, count),
         Object::Device(dev) => file::device_write(dev, count),
         Object::Socket(sock) => socket::send(call, &f, sock, count as usize, 0, |at, out| {
@@ -676,6 +729,32 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         }),
         Object::Unix(u) => unix::send(call, &f, u, buf, count, 0, 0),
         Object::EventFd(e) => super::eventfd::write(call, &f, e, buf, count),
+        Object::Nt(n) => {
+            // A piece at a time, as the console's below.
+            let mut done = 0u64;
+            let mut chunk = Vec::new();
+            while done < count {
+                let k = (count - done).min(super::ntio::CHUNK as u64) as usize;
+                chunk.clear();
+                if chunk.try_reserve_exact(k).is_err() {
+                    return if done > 0 { Ok(done) } else { Err(ENOMEM) };
+                }
+                chunk.resize(k, 0);
+                if call.process.read(buf + done, &mut chunk).is_err() {
+                    return if done > 0 { Ok(done) } else { Err(EFAULT) };
+                }
+                match n.write(call.process.id, &chunk) {
+                    Ok(w) => done += w as u64,
+                    Err(EPIPE) if done == 0 => {
+                        super::sigcalls::sigpipe(call);
+                        return Err(EPIPE);
+                    }
+                    Err(_) if done > 0 => return Ok(done),
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(done)
+        }
         Object::Console(stream) => {
             // A piece at a time; a fault after some pieces ends the write
             // with what was written, one at the start is EFAULT.
@@ -899,6 +978,7 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     match &f.object {
         Object::Console(Stream::Stdin) | Object::PipeRead(_) | Object::Epoll(_) => Err(EBADF),
+        Object::Pty(end) => super::pty::write_bytes(call, &f, end, data),
         Object::File(file) => file::write_bytes(file, data),
         Object::Device(dev) => file::device_write(dev, data.len() as u64),
         Object::Socket(sock) => socket::send(call, &f, sock, data.len(), 0, |at, out| {
@@ -907,6 +987,14 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
         }),
         Object::Unix(u) => unix::send_bytes(call, &f, u, data),
         Object::EventFd(e) => super::eventfd::write_bytes(call, &f, e, data),
+        Object::Nt(n) => match n.write(call.process.id, data) {
+            Ok(w) => Ok(w as u64),
+            Err(EPIPE) => {
+                super::sigcalls::sigpipe(call);
+                Err(EPIPE)
+            }
+            Err(e) => Err(e),
+        },
         Object::Console(stream) => {
             call.lx.console_write(*stream, data).map_err(|_| ENOMEM)?;
             Ok(data.len() as u64)

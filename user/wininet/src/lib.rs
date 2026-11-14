@@ -7,7 +7,10 @@
 //! InternetQueryDataAvailable, InternetReadFile, InternetOpenUrlW (http
 //! and https), InternetCrackUrlW, InternetSetOptionW and
 //! InternetCloseHandle; redirects are followed (301, 302, 303, 307, 308)
-//! unless INTERNET_FLAG_NO_AUTO_REDIRECT. The engine is
+//! unless INTERNET_FLAG_NO_AUTO_REDIRECT. Also InternetQueryOptionW,
+//! InternetGetCookieExW (no cookie store: none), the status callbacks
+//! (`callback.rs`) and the A functions ODT's setup.exe imports
+//! (`ansi.rs`). Built for x64 and x86 (SysWOW64). The engine is
 //! `user/http_client`, shared with
 //! winhttp.dll (the same connection, request, framing and header
 //! queries); this crate is WinINet's functions, flags and error codes
@@ -17,7 +20,8 @@
 //! asynchronous operation (INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
 //! proxies (INTERNET_OPEN_TYPE_PROXY), FTP and Gopher, authentication (user names
 //! and passwords are not sent), the cache (every request goes to the
-//! server, as with INTERNET_FLAG_RELOAD), cookies, decompression,
+//! server, as with INTERNET_FLAG_RELOAD), cookies (none kept or sent;
+//! InternetGetCookieExW records its empty answer), decompression,
 //! connection reuse and the connect time-out (the stack's own applies).
 //! InternetTimeFromSystemTimeW / InternetTimeToSystemTimeW are
 //! `gala_stubs` stubs. A handle must not be closed while another thread
@@ -30,6 +34,8 @@
 extern crate alloc;
 use gala_heap as _;
 
+mod ansi;
+mod callback;
 mod unimplemented;
 
 use alloc::vec::Vec;
@@ -45,6 +51,13 @@ use http_client::{
     Settings, Timeouts, err, narrow, wide,
 };
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -61,10 +74,15 @@ unsafe extern "C" {
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(e: u32);
 }
@@ -101,6 +119,20 @@ const INTERNET_OPTION_DATA_RECEIVE_TIMEOUT: u32 = 8;
 const INTERNET_OPTION_SECURITY_FLAGS: u32 = 31;
 const INTERNET_OPTION_USER_AGENT: u32 = 41;
 const INTERNET_OPTION_CONTEXT_VALUE: u32 = 45;
+const INTERNET_OPTION_HANDLE_TYPE: u32 = 9;
+const INTERNET_OPTION_URL: u32 = 34;
+const INTERNET_OPTION_CONNECTED_STATE: u32 = 50;
+
+/// INTERNET_HANDLE_TYPE_INTERNET, _CONNECT_HTTP, _HTTP_REQUEST.
+const HANDLE_TYPE_INTERNET: u32 = 1;
+const HANDLE_TYPE_CONNECT_HTTP: u32 = 4;
+const HANDLE_TYPE_HTTP_REQUEST: u32 = 13;
+
+/// INTERNET_STATE_CONNECTED.
+const STATE_CONNECTED: u32 = 1;
+
+const ERROR_NO_MORE_ITEMS: u32 = 259;
+const ERROR_INTERNET_INVALID_OPTION: u32 = err::INVALID_OPTION;
 
 /// INTERNET_SCHEME_HTTP and _HTTPS in WinINet's numbering.
 const SCHEMES: [u32; 2] = [3, 4];
@@ -155,8 +187,10 @@ fn done(r: Result<(), u32>) -> i32 {
 }
 
 /// Ends an HINTERNET entry point: the handle, or NULL with the error set.
-fn handle(r: Result<Kind, u32>, context: usize) -> usize {
-    match r.and_then(|kind| HANDLES.insert(Object { kind, context })) {
+/// The new handle gets its parent's status callback (`parent`: 0 for a
+/// session), and HANDLE_CREATED tells it.
+fn handle(r: Result<Kind, u32>, context: usize, parent: usize) -> usize {
+    match new_handle(r, context, parent) {
         Ok(h) => {
             set_error(0);
             h
@@ -166,6 +200,27 @@ fn handle(r: Result<Kind, u32>, context: usize) -> usize {
             0
         }
     }
+}
+
+fn new_handle(r: Result<Kind, u32>, context: usize, parent: usize) -> Result<usize, u32> {
+    let callback = if parent == 0 { 0 } else { HANDLES.get(parent).map_or(0, |p| p.callback) };
+    let h = HANDLES.insert(Object { kind: r?, context, callback })?;
+    callback::created(&callback::observer(parent, callback, context), h);
+    Ok(h)
+}
+
+/// A handle's callback as the engine's observer.
+fn observer_of(h: usize) -> Result<http_client::Observer, u32> {
+    let o = HANDLES.get(h)?;
+    Ok(callback::observer(h, o.callback, o.context))
+}
+
+/// A request, given its handle's callback for the steps to come.
+fn request_observed(h: usize) -> Result<&'static mut Request, u32> {
+    let observer = observer_of(h)?;
+    let r = request_of(h)?;
+    r.observer = Some(observer);
+    Ok(r)
 }
 
 struct Connect {
@@ -188,6 +243,8 @@ struct Object {
     kind: Kind,
     /// dwContext (INTERNET_OPTION_CONTEXT_VALUE).
     context: usize,
+    /// The status callback (0: none; `callback`).
+    callback: usize,
 }
 
 impl Object {
@@ -260,7 +317,7 @@ pub extern "system" fn InternetOpenW(
             redirect_rules: RedirectRules::WinInet,
         }))
     })();
-    handle(r, 0)
+    handle(r, 0, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -297,7 +354,7 @@ pub extern "system" fn InternetConnectW(
         }
         Ok(Kind::Connect(Connect { settings, host, port }))
     })();
-    handle(r, context)
+    handle(r, context, session)
 }
 
 /// A request from HttpOpenRequestW's or InternetOpenUrlW's flags.
@@ -352,7 +409,7 @@ pub extern "system" fn HttpOpenRequestW(
         };
         open_request(c, verb, object, version, referrer, accept, flags).map(Kind::Request)
     })();
-    handle(r, context)
+    handle(r, context, connect)
 }
 
 #[unsafe(no_mangle)]
@@ -380,7 +437,7 @@ pub extern "system" fn HttpSendRequestW(
     optional_length: u32,
 ) -> i32 {
     done((|| {
-        let r = request_of(h)?;
+        let r = request_observed(h)?;
         let headers = headers_text(headers, headers_length)?;
         let optional: &[u8] = if optional.is_null() || optional_length == 0 {
             &[]
@@ -427,7 +484,7 @@ pub extern "system" fn HttpQueryInfoW(
             Vec::new()
         };
         // SAFETY: the caller's length, buffer and index, as documented.
-        unsafe { r.query_info(level, &name, buffer, length, index) }
+        unsafe { r.query_info(level, &name, buffer, length, index, false) }
     })())
 }
 
@@ -439,7 +496,7 @@ pub extern "system" fn InternetQueryDataAvailable(
     _context: usize,
 ) -> i32 {
     done((|| {
-        let n = request_of(h)?.available()?;
+        let n = request_observed(h)?.available()?;
         if !available.is_null() {
             // SAFETY: the caller's DWORD.
             unsafe { *available = n.min(u32::MAX as usize) as u32 };
@@ -457,7 +514,7 @@ pub extern "system" fn InternetReadFile(
     read: *mut u32,
 ) -> i32 {
     done((|| {
-        let r = request_of(h)?;
+        let r = request_observed(h)?;
         if read.is_null() || (buffer.is_null() && len > 0) {
             return Err(ERROR_INVALID_PARAMETER);
         }
@@ -485,8 +542,18 @@ pub extern "system" fn InternetReadFile(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InternetCloseHandle(h: usize) -> i32 {
-    // Dropping a request closes its connection.
-    done(HANDLES.close(h))
+    done(close(h))
+}
+
+/// Closes a handle (dropping a request closes its connection);
+/// HANDLE_CLOSING tells its callback.
+fn close(h: usize) -> Result<(), u32> {
+    let observer = observer_of(h);
+    HANDLES.close(h)?;
+    if let Ok(observer) = observer {
+        callback::closing(&observer, h);
+    }
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -557,11 +624,29 @@ pub extern "system" fn InternetOpenUrlW(
         if !headers.is_empty() {
             r.add_headers(&headers, ADDREQ_FLAG_ADD)?;
         }
-        r.send(&[], &[], 0)?;
-        r.receive()?;
-        Ok(Kind::Request(r))
+        // The handle is made (HANDLE_CREATED) before the request is sent;
+        // a failed send closes it.
+        let h = new_handle(Ok(Kind::Request(r)), context, session)?;
+        let sent = request_observed(h).and_then(|r| {
+            r.send(&[], &[], 0)?;
+            r.receive()
+        });
+        if let Err(e) = sent {
+            let _ = close(h);
+            return Err(e);
+        }
+        Ok(h)
     })();
-    handle(r, context)
+    match r {
+        Ok(h) => {
+            set_error(0);
+            h
+        }
+        Err(e) => {
+            set_error(e);
+            0
+        }
+    }
 }
 
 /// A WinINet time-out value (milliseconds; 0 and 0xFFFFFFFF: no limit).
@@ -648,6 +733,186 @@ pub extern "system" fn InternetSetOptionW(
             }
         }
         Ok(())
+    })())
+}
+
+/// Writes a DWORD option value (`*len` then 4), or
+/// ERROR_INSUFFICIENT_BUFFER with 4.
+///
+/// # Safety
+/// `len` is the caller's DWORD and `buffer` its buffer of `*len` bytes.
+unsafe fn put_dword(buffer: *mut u8, len: *mut u32, v: u32) -> Result<(), u32> {
+    // SAFETY: as the function's contract.
+    unsafe {
+        if buffer.is_null() || *len < 4 {
+            *len = 4;
+            return Err(ERROR_INSUFFICIENT_BUFFER);
+        }
+        buffer.cast::<u32>().write_unaligned(v);
+        *len = 4;
+    }
+    Ok(())
+}
+
+/// Writes a string option as InternetQueryOptionW does (Wine's http.c
+/// test_user_pass_auth, run on Windows): the text with its NUL and
+/// `*len` its length in characters without it; or
+/// ERROR_INSUFFICIENT_BUFFER with the bytes needed with the NUL.
+///
+/// # Safety
+/// `len` is the caller's DWORD and `buffer` its buffer of `*len` bytes.
+unsafe fn put_text(
+    buffer: *mut u8,
+    len: *mut u32,
+    text: impl ExactSizeIterator<Item = u16>,
+) -> Result<(), u32> {
+    let n = text.len();
+    let needed = (n as u32 + 1) * 2;
+    // SAFETY: as the function's contract.
+    unsafe {
+        if buffer.is_null() || *len < needed {
+            *len = needed;
+            return Err(ERROR_INSUFFICIENT_BUFFER);
+        }
+        let out = buffer.cast::<u16>();
+        for (i, c) in text.enumerate() {
+            out.add(i).write_unaligned(c);
+        }
+        out.add(n).write_unaligned(0);
+        *len = n as u32;
+    }
+    Ok(())
+}
+
+/// A time-out as an option's DWORD (no limit: 0xFFFFFFFF).
+fn timeout_value(v: i32) -> u32 {
+    if v < 0 { u32::MAX } else { v as u32 }
+}
+
+/// The options a program reads back (Microsoft's "Option Flags"); one
+/// that is not here is recorded (`wininet.dll!InternetQueryOptionW`,
+/// the option as detail) and answered ERROR_INTERNET_INVALID_OPTION.
+#[unsafe(no_mangle)]
+pub extern "system" fn InternetQueryOptionW(
+    h: usize,
+    option: u32,
+    buffer: *mut u8,
+    len: *mut u32,
+) -> i32 {
+    done((|| {
+        if len.is_null() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        if h == 0 {
+            // The process-wide options.
+            return match option {
+                // SAFETY: the caller's length and buffer.
+                INTERNET_OPTION_CONNECTED_STATE => unsafe {
+                    put_dword(buffer, len, STATE_CONNECTED)
+                },
+                INTERNET_OPTION_USER_AGENT
+                | INTERNET_OPTION_URL
+                | INTERNET_OPTION_HANDLE_TYPE
+                | INTERNET_OPTION_SECURITY_FLAGS
+                | INTERNET_OPTION_CONTEXT_VALUE => Err(ERROR_INTERNET_INCORRECT_HANDLE_TYPE),
+                _ => {
+                    missing(b"InternetQueryOptionW(global)", option.into());
+                    Err(ERROR_INTERNET_INVALID_OPTION)
+                }
+            };
+        }
+        let o = HANDLES.get(h)?;
+        let t = o.settings().timeouts;
+        let value = match option {
+            INTERNET_OPTION_CONNECT_TIMEOUT => timeout_value(t.connect),
+            INTERNET_OPTION_SEND_TIMEOUT | INTERNET_OPTION_DATA_SEND_TIMEOUT => {
+                timeout_value(t.send)
+            }
+            INTERNET_OPTION_RECEIVE_TIMEOUT | INTERNET_OPTION_DATA_RECEIVE_TIMEOUT => {
+                timeout_value(t.receive)
+            }
+            // One connection attempt per address.
+            INTERNET_OPTION_CONNECT_RETRIES => 1,
+            INTERNET_OPTION_HANDLE_TYPE => match o.kind {
+                Kind::Session(_) => HANDLE_TYPE_INTERNET,
+                Kind::Connect(_) => HANDLE_TYPE_CONNECT_HTTP,
+                Kind::Request(_) => HANDLE_TYPE_HTTP_REQUEST,
+            },
+            INTERNET_OPTION_SECURITY_FLAGS => match &o.kind {
+                Kind::Request(r) => r.security_flags,
+                _ => return Err(ERROR_INTERNET_INCORRECT_HANDLE_TYPE),
+            },
+            INTERNET_OPTION_USER_AGENT => {
+                let Kind::Session(s) = &o.kind else {
+                    return Err(ERROR_INTERNET_INCORRECT_HANDLE_TYPE);
+                };
+                // SAFETY: the caller's length and buffer.
+                return unsafe { put_text(buffer, len, s.agent.iter().map(|&b| u16::from(b))) };
+            }
+            INTERNET_OPTION_URL => {
+                let Kind::Request(r) = &o.kind else {
+                    return Err(ERROR_INTERNET_INCORRECT_HANDLE_TYPE);
+                };
+                let url = r.url()?;
+                // SAFETY: the caller's length and buffer.
+                return unsafe { put_text(buffer, len, url.iter().copied()) };
+            }
+            INTERNET_OPTION_CONTEXT_VALUE => {
+                // SAFETY: the caller's length and buffer.
+                unsafe {
+                    if buffer.is_null() || (*len as usize) < size_of::<usize>() {
+                        *len = size_of::<usize>() as u32;
+                        return Err(ERROR_INSUFFICIENT_BUFFER);
+                    }
+                    buffer.cast::<usize>().write_unaligned(o.context);
+                    *len = size_of::<usize>() as u32;
+                }
+                return Ok(());
+            }
+            _ => {
+                missing(b"InternetQueryOptionW", option.into());
+                return Err(ERROR_INTERNET_INVALID_OPTION);
+            }
+        };
+        // SAFETY: the caller's length and buffer.
+        unsafe { put_dword(buffer, len, value) }
+    })())
+}
+
+/// The cookies WinINet would send to `url`. gala keeps no cookie store
+/// (responses' Set-Cookie headers are not kept), so there are none, as
+/// for a fresh profile: FALSE with ERROR_NO_MORE_ITEMS and `*size` 0
+/// (Wine's internet.c test_get_cookie and test_cookie_attrs, run on
+/// Windows), recorded (`InternetGetCookieExW(no cookie store)`). A URL
+/// without a scheme is ERROR_INTERNET_UNRECOGNIZED_SCHEME; one that is
+/// not http(s) (about:blank) or not whole, ERROR_INVALID_PARAMETER
+/// (test_cookie_url, test_null).
+#[unsafe(no_mangle)]
+pub extern "system" fn InternetGetCookieExW(
+    url: *const u16,
+    _name: *const u16,
+    _data: *mut u16,
+    size: *mut u32,
+    flags: u32,
+    _reserved: usize,
+) -> i32 {
+    done((|| {
+        if url.is_null() || size.is_null() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        let text = wide(url, None)?;
+        if let Err(e) = http_client::url::parse(&text) {
+            let has_scheme = text.contains(&u16::from(b':'));
+            return Err(if e == err::UNRECOGNIZED_SCHEME && !has_scheme {
+                e
+            } else {
+                ERROR_INVALID_PARAMETER
+            });
+        }
+        missing(b"InternetGetCookieExW(no cookie store)", flags.into());
+        // SAFETY: the caller's DWORD.
+        unsafe { *size = 0 };
+        Err(ERROR_NO_MORE_ITEMS)
     })())
 }
 

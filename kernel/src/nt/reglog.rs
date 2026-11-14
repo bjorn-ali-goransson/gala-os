@@ -41,6 +41,12 @@ pub enum RegOp {
         key: Vec<u16>,
         descriptor: Vec<u8>,
     },
+    /// The key (NtRenameKey) takes the name `name` (one component) under
+    /// the same parent, with everything below it.
+    RenameKey {
+        key: Vec<u16>,
+        name: Vec<u16>,
+    },
 }
 
 const MAGIC: u32 = u32::from_le_bytes(*b"GREG");
@@ -100,6 +106,11 @@ impl RegOp {
                 put_name(out, key)?;
                 put_bytes(out, descriptor)?;
                 5
+            }
+            RegOp::RenameKey { key, name } => {
+                put_name(out, key)?;
+                put_name(out, name)?;
+                6
             }
         };
         let len = out.len() - start - HEADER;
@@ -212,6 +223,10 @@ fn parse(kind: u8, r: &mut Reader<'_>) -> Option<Result<RegOp, NoMemory>> {
             Ok(descriptor) => RegOp::SetSecurity { key, descriptor },
             Err(e) => return Some(Err(e)),
         },
+        6 => match r.name()? {
+            Ok(name) => RegOp::RenameKey { key, name },
+            Err(e) => return Some(Err(e)),
+        },
         _ => return None,
     }))
 }
@@ -241,7 +256,8 @@ mod tests {
             },
             RegOp::DeleteValue { key: w("\\REGISTRY\\USER\\x"), name: w("v") },
             RegOp::SetSecurity { key: w("\\REGISTRY\\USER\\x"), descriptor: vec![1, 0, 4, 0x80] },
-            RegOp::DeleteKey { key: w("\\REGISTRY\\USER\\x") },
+            RegOp::RenameKey { key: w("\\REGISTRY\\USER\\x"), name: w("y") },
+            RegOp::DeleteKey { key: w("\\REGISTRY\\USER\\y") },
         ];
         let mut bytes = Vec::new();
         for op in &ops {
@@ -250,7 +266,7 @@ mod tests {
         assert_eq!(decode_all(&bytes).unwrap(), ops);
         // A torn last record is dropped, nothing before it.
         let cut = bytes.len() - 10; // past the padding, into the payload
-        assert_eq!(decode_all(&bytes[..cut]).unwrap(), ops[..4]);
+        assert_eq!(decode_all(&bytes[..cut]).unwrap(), ops[..5]);
         bytes[HEADER + 1] ^= 1;
         assert_eq!(decode_all(&bytes).unwrap(), vec![]);
     }

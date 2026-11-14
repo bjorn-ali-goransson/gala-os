@@ -26,7 +26,7 @@ impl Call<'_> {
     /// The caller's window station and startup desktop, chosen now if
     /// this is its first window station or desktop call (logged, with
     /// where the choice came from, and an event).
-    fn connection(&self) -> Result<(ObjectRef, ObjectRef), NtStatus> {
+    pub(super) fn connection(&self) -> Result<(ObjectRef, ObjectRef), NtStatus> {
         let ui = &self.process.ui;
         if let Some(r) = ui.resolved() {
             return r;

@@ -1,0 +1,17 @@
+[package]
+name = "wow64_tray_test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# The 32-bit build of user/tray_test: one source (and resources) for both.
+build = "../tray_test/build.rs"
+
+[dependencies]
+ntrt = { path = "../ntrt" }
+
+[[bin]]
+name = "wow64_tray_test"
+path = "../tray_test/src/main.rs"
+test = false
+bench = false

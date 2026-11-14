@@ -293,6 +293,8 @@ pub fn next_luid() -> u64 {
 /// (the machine GALA's domain, RID 1001; advapi32 knows the same SID).
 pub const USER: Sid = Sid::new(5, &[21, 1_000_000_001, 1_000_000_002, 1_000_000_003, 1001]);
 pub const LOCAL_SYSTEM: Sid = Sid::new(5, &[18]);
+/// BUILTIN\Administrators (S-1-5-32-544).
+pub const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
 pub const LOGON_SID: Sid = Sid::new(5, &[5, 0, LOGON_ID as u32]);
 
 /// The groups of a standard interactive user's token, as Windows gives
@@ -359,6 +361,20 @@ impl TokenData {
         self.groups.iter().find_map(|g| label_level(&g.sid)).unwrap_or(MEDIUM_LEVEL)
     }
 
+    /// TokenElevation's TokenIsElevated: the token holds
+    /// BUILTIN\Administrators enabled (not deny-only), as a full
+    /// administrator's token does (SYSTEM's, an elevated administrator's,
+    /// one with UAC off); a standard user's and a token whose
+    /// Administrators group was made deny-only (CreateRestrictedToken) are
+    /// not elevated.
+    pub fn elevated(&self) -> bool {
+        self.groups.iter().any(|g| {
+            g.sid == ADMINISTRATORS
+                && g.attributes & SE_GROUP_ENABLED != 0
+                && g.attributes & SE_GROUP_USE_FOR_DENY_ONLY == 0
+        })
+    }
+
     /// Makes `label` the token's integrity label.
     pub fn set_integrity(&mut self, label: Sid) -> Result<(), NtStatus> {
         let attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
@@ -399,7 +415,6 @@ impl TokenData {
     /// privileges LocalSystem holds, enabled as `whoami /priv` shows them
     /// in such a process.
     pub fn system() -> Result<TokenData, NtStatus> {
-        const ADMINISTRATORS: Sid = Sid::new(5, &[32, 544]);
         let groups = [
             Group { sid: ADMINISTRATORS, attributes: SE_GROUP_OWNER | 7 },
             Group { sid: Sid::new(1, &[0]), attributes: 7 },
@@ -950,8 +965,8 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
         TOKEN_SANDBOX_INERT => return dword(u32::from(data.sandbox_inert)),
         TOKEN_ELEVATION_TYPE => return dword(data.elevation_type),
         TOKEN_HAS_RESTRICTIONS => return dword(u32::from(!data.restricted.is_empty())),
-        TOKEN_ELEVATION
-        | TOKEN_VIRTUALIZATION_ALLOWED
+        TOKEN_ELEVATION => return dword(u32::from(data.elevated())),
+        TOKEN_VIRTUALIZATION_ALLOWED
         | TOKEN_VIRTUALIZATION_ENABLED
         | TOKEN_UI_ACCESS
         | TOKEN_IS_APP_CONTAINER
@@ -1029,6 +1044,20 @@ mod tests {
         assert_eq!(&b[..8], &[1, 5, 0, 0, 0, 0, 0, 5]);
         assert_eq!(Sid::parse(&b[..USER.len()]), Some(USER));
         assert_eq!(Sid::parse(&b[..USER.len() - 1]), None);
+    }
+
+    #[test]
+    fn elevation_is_an_enabled_administrators_group() {
+        let user = TokenData::boot_user().unwrap();
+        assert_eq!(query(7, &user, TOKEN_ELEVATION, 0).unwrap(), 0u32.to_le_bytes());
+        let mut system = TokenData::system().unwrap();
+        assert_eq!(query(7, &system, TOKEN_ELEVATION, 0).unwrap(), 1u32.to_le_bytes());
+        assert_eq!(query(7, &system, TOKEN_ELEVATION_TYPE, 0).unwrap(), 1u32.to_le_bytes());
+        // Administrators made deny-only (CreateRestrictedToken): not elevated.
+        for g in system.groups.iter_mut().filter(|g| g.sid == ADMINISTRATORS) {
+            g.attributes = SE_GROUP_USE_FOR_DENY_ONLY;
+        }
+        assert!(!system.elevated());
     }
 
     #[test]

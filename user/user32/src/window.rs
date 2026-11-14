@@ -62,7 +62,6 @@ unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
     fn CreateEventW(sa: *const c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
     fn SetEvent(h: Handle) -> i32;
-    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn WaitForMultipleObjects(count: u32, handles: *const Handle, all: i32, ms: u32) -> u32;
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
@@ -85,6 +84,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
 const WM_QUIT: u32 = 0x0012;
+pub(crate) const WM_SHOWWINDOW: u32 = 0x0018;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETICON: u32 = 0x007f;
 /// The desktop's request to move a window (Snap; kernel desktop
@@ -485,9 +485,109 @@ pub(crate) fn listen() {
     event();
 }
 
+/// Each thread's own wake event (auto-reset), made when it first waits
+/// for a message: (thread id, event). Every thread that waits in
+/// GetMessage or MsgWaitForMultipleObjects waits on its own event and on
+/// the process's (`event`, which the kernel sets); `wake` sets every
+/// thread's, so each waiting thread looks at its queue again. One
+/// auto-reset event for the process alone woke one waiter, which might
+/// not be the thread the message, timer or paint was for: that thread
+/// slept on (ODT's setup.exe waits in GetMessage on three threads).
+static WAITERS: [(AtomicU32, AtomicUsize); MAX_WAITERS] =
+    [const { (AtomicU32::new(0), AtomicUsize::new(0)) }; MAX_WAITERS];
+const MAX_WAITERS: usize = 64;
+/// Threads waiting without an event of their own (WAITERS was full, or
+/// CreateEvent failed): `wake` sets the process's event too while any.
+static UNLISTED: AtomicU32 = AtomicU32::new(0);
+
+/// The calling thread's wake event, made on first use; None if there is
+/// no room (recorded) or no event.
+fn own_event() -> Option<Handle> {
+    let me = me();
+    if let Some((_, e)) = WAITERS.iter().find(|(t, _)| t.load(Ordering::Acquire) == me) {
+        let e = e.load(Ordering::Acquire);
+        return (e != 0).then_some(e as Handle);
+    }
+    let Some((_, slot)) = WAITERS
+        .iter()
+        .find(|(t, _)| t.compare_exchange(0, me, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+    else {
+        unsupported(b"user32.dll!message wait: more than 64 waiting threads", MAX_WAITERS as u64);
+        return None;
+    };
+    // An ended thread's event is kept for the next one (never closed, so
+    // a concurrent `wake` never sets a handle that was reused).
+    let mut e = slot.load(Ordering::Acquire);
+    if e == 0 {
+        // SAFETY: a plain call.
+        e = unsafe { CreateEventW(core::ptr::null(), 0, 0, core::ptr::null()) } as usize;
+        slot.store(e, Ordering::Release);
+    }
+    (e != 0).then_some(e as Handle)
+}
+
+/// The thread ended: its slot is free; its event stays for the next.
+fn drop_own_event() {
+    let me = me();
+    if let Some((t, _)) = WAITERS.iter().find(|(t, _)| t.load(Ordering::Acquire) == me) {
+        t.store(0, Ordering::Release);
+    }
+}
+
+/// Tells every waiting thread of the process to look at its queue again.
 pub(crate) fn wake() {
-    // SAFETY: our event.
-    unsafe { SetEvent(event()) };
+    wake_others(0);
+    if UNLISTED.load(Ordering::Acquire) != 0 {
+        // SAFETY: our event.
+        unsafe { SetEvent(event()) };
+    }
+}
+
+/// Sets every thread's wake event but `except`'s.
+fn wake_others(except: u32) {
+    for (t, e) in WAITERS.iter() {
+        let tid = t.load(Ordering::Acquire);
+        let h = e.load(Ordering::Acquire);
+        if tid != 0 && tid != except && h != 0 {
+            // SAFETY: our event (closed only by its thread, at its end).
+            unsafe { SetEvent(h as Handle) };
+        }
+    }
+}
+
+/// Waits for `handles` (the caller's, at most 63) or for a wake of the
+/// calling thread, up to `ms`: WaitForMultipleObjects' result, the
+/// wake being WAIT_OBJECT_0 + handles.len(). A wake from the kernel
+/// (the process's event: input, messages from other processes, sent
+/// messages) may be another thread's: they are all told.
+fn wait_wake(handles: &[Handle], ms: u32) -> u32 {
+    let n = handles.len();
+    let mut all = [0 as Handle; 66];
+    all[..n].copy_from_slice(handles);
+    all[n] = event();
+    let own = if n + 2 <= 64 { own_event() } else { None };
+    let count = match own {
+        Some(h) => {
+            all[n + 1] = h;
+            n + 2
+        }
+        None => {
+            if n + 2 > 64 {
+                unsupported(b"user32.dll!MsgWaitForMultipleObjects(63 handles: no own wake)", 63);
+            }
+            UNLISTED.fetch_add(1, Ordering::AcqRel);
+            n + 1
+        }
+    };
+    // SAFETY: our array of `count` handles.
+    let r = unsafe { WaitForMultipleObjects(count as u32, all.as_ptr(), 0, ms) };
+    if own.is_none() {
+        UNLISTED.fetch_sub(1, Ordering::AcqRel);
+    }
+    if r == n as u32 {
+        wake_others(me());
+    }
+    if r == n as u32 + 1 { n as u32 } else { r }
 }
 
 pub(crate) fn set_last_error(code: u32) {
@@ -1213,7 +1313,8 @@ pub(crate) fn finish_create(
     hwnd
 }
 
-/// DestroyWindow: WM_DESTROY, WM_NCDESTROY, then the window is gone.
+/// DestroyWindow: the window hidden, WM_DESTROY, WM_NCDESTROY, then the
+/// window is gone.
 #[unsafe(no_mangle)]
 pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     if window(hwnd).is_none() {
@@ -1229,6 +1330,22 @@ pub extern "system" fn DestroyWindow(hwnd: Hwnd) -> i32 {
     };
     if was_shown {
         raise(EVENT_OBJECT_HIDE, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    }
+    // It is hidden before WM_DESTROY, without WM_SHOWWINDOW: its
+    // procedure sees IsWindowVisible 0 there, and a ShowWindow(SW_HIDE)
+    // of its own returns 0 (setup.exe's splash does that).
+    let hidden_desktop = with(|s| {
+        index_of(hwnd).map_or(0, |i| {
+            let w = &mut s.windows[i];
+            let d = if w.visible { w.desktop } else { 0 };
+            w.visible = false;
+            d
+        })
+    });
+    crate::foreign::sync(hwnd);
+    if hidden_desktop != 0 {
+        // SAFETY: our desktop window, hidden.
+        unsafe { GalaWindowShow(hidden_desktop, 0) };
     }
     // WM_DESTROY to the window, then its children (and theirs).
     SendMessageW(hwnd, WM_DESTROY, 0, 0);
@@ -1296,7 +1413,9 @@ pub(crate) fn thread_ended() {
             }
         }
     });
+    crate::timer::thread_ended(thread);
     crate::foreign::thread_ended();
+    drop_own_event();
 }
 
 #[unsafe(no_mangle)]
@@ -1327,6 +1446,15 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
     }
     let Some(i) = index_of(hwnd) else { return 0 };
     let show = cmd != 0; // SW_HIDE
+    // A change of visibility is announced first, while the window is
+    // still as it was: WM_SHOWWINDOW(shown, 0 for ShowWindow). Showing a
+    // shown window or hiding a hidden one sends nothing.
+    if window(hwnd).is_some_and(|w| w.visible != show) {
+        SendMessageW(hwnd, WM_SHOWWINDOW, usize::from(show), 0);
+        if window(hwnd).is_none() {
+            return 0;
+        }
+    }
     if window(hwnd).is_some_and(|w| w.parent != 0) {
         return crate::tree::show_child(hwnd, show);
     }
@@ -1929,9 +2057,13 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
         // The caption's state: nothing to draw (the desktop draws it);
         // TRUE lets the change proceed.
         WM_NCACTIVATE => 1,
-        // Alt+F4 (the Alt bit is lParam's bit 29): WM_SYSCOMMAND SC_CLOSE
-        // posted to the top-level window, as on Windows.
-        WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 => {
+        // Alt+F4 (the Alt bit is lParam's bit 29) while the Alt key is
+        // held: WM_SYSCOMMAND SC_CLOSE posted to the top-level window. The
+        // message alone, given to DefWindowProc while Alt is not held,
+        // leaves the window on Windows (measured on 26200, issue #59);
+        // that the thread's key state is what it checks is gala's reading
+        // of that (not measured with Alt held).
+        WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 && key_down(VK_MENU) => {
             let top = crate::tree::GetAncestor(hwnd, 2);
             PostMessageW(if top == 0 { hwnd } else { top }, 0x0112, 0xf060, 0);
             0
@@ -2225,12 +2357,6 @@ pub extern "system" fn GetCursorPos(point: *mut [i32; 2]) -> i32 {
     // SAFETY: the caller's POINT.
     unsafe { *point = [(packed & 0xffff) as i16 as i32, (packed >> 16) as i16 as i32] };
     1
-}
-
-/// GetClipboardOwner: NULL (gala has no clipboard yet).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClipboardOwner() -> Hwnd {
-    0
 }
 
 /// FindWindowW: a top-level window of ours with that class (NULL: any)
@@ -2881,9 +3007,26 @@ fn key_down(vk: usize) -> bool {
 }
 
 /// The character a key makes (US layout), with Shift, Caps Lock and Ctrl.
+/// With Ctrl, the US layout's control characters: a letter's (Ctrl+A is
+/// 1), Ctrl+[ ESC, Ctrl+\\ FS, Ctrl+] GS, Ctrl+Shift+2 NUL, Ctrl+Shift+6
+/// RS, Ctrl+Shift+- US; another digit or punctuation key makes none
+/// (Ctrl+Shift+2 is no `@`: Explorer's Ctrl+Shift+2 is a view, not a
+/// character).
 fn char_of(vk: usize) -> Option<u16> {
     let shift = key_down(VK_SHIFT);
     let ctrl = key_down(VK_CONTROL);
+    // The digit row and the punctuation keys (VK_OEM_*) with Ctrl.
+    if ctrl && matches!(vk, 0x30..=0x39 | 0xba..=0xc0 | 0xdb..=0xde) {
+        return match (vk, shift) {
+            (0xdb, false) => Some(0x1b),
+            (0xdc, false) => Some(0x1c),
+            (0xdd, false) => Some(0x1d),
+            (0x32, true) => Some(0x00),
+            (0x36, true) => Some(0x1e),
+            (0xbd, true) => Some(0x1f),
+            _ => None,
+        };
+    }
     let c = match vk {
         0x41..=0x5a => {
             if ctrl {
@@ -3111,6 +3254,14 @@ fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32 {
+    // The thread's wake event and the process's (the kernel's listener)
+    // exist before it looks at its queue: a wake between the look and the
+    // wait is kept. A process whose listener was registered only on its
+    // first wait lost a message another process sent in between (the
+    // kernel had no event to set): flaui_test's target never answered
+    // UI Automation's WM_GETOBJECT, about one boot in ten.
+    event();
+    own_event();
     loop {
         if let Some(m) = next(hwnd, min, max, true) {
             // SAFETY: the caller's MSG.
@@ -3118,8 +3269,7 @@ pub extern "system" fn GetMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32
             return i32::from(m.message != WM_QUIT);
         }
         // Until a message comes or the next timer is due.
-        // SAFETY: our event.
-        unsafe { WaitForSingleObject(event(), crate::timer::wait_ms()) };
+        wait_wake(&[], crate::timer::wait_ms());
     }
 }
 
@@ -3150,12 +3300,14 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         // SAFETY: the caller's array of `count` handles.
         return unsafe { WaitForMultipleObjects(count, handles, 1, ms) };
     }
-    let mut all = [0 as Handle; 64];
+    // As in GetMessageW: the wake events before the first look.
+    event();
+    own_event();
+    let mut all = [0 as Handle; 63];
     for (i, h) in all.iter_mut().take(count as usize).enumerate() {
         // SAFETY: the caller's array of `count` handles.
         *h = unsafe { *handles.add(i) };
     }
-    all[count as usize] = event();
     // SAFETY: a plain call.
     let start = unsafe { GetTickCount() };
     loop {
@@ -3166,8 +3318,7 @@ pub extern "system" fn MsgWaitForMultipleObjectsEx(
         let gone = unsafe { GetTickCount() }.wrapping_sub(start);
         let left = if ms == INFINITE { INFINITE } else { ms.saturating_sub(gone) };
         let timer = if mask & QS_TIMER != 0 { crate::timer::wait_ms() } else { INFINITE };
-        // SAFETY: our array of count + 1 handles.
-        let r = unsafe { WaitForMultipleObjects(count + 1, all.as_ptr(), 0, left.min(timer)) };
+        let r = wait_wake(&all[..count as usize], left.min(timer));
         match r {
             // A handle of the caller's (or abandoned: WAIT_ABANDONED_0 + i).
             _ if r < count || (0x80..0x80 + count).contains(&r) => return r,

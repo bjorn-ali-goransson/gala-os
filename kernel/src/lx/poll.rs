@@ -62,7 +62,13 @@ pub fn readiness(object: &Object) -> u16 {
             }
         }
         Object::File(_) | Object::Device(_) => POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM,
+        // No wait queue: ready at once, a read then waits (`lx::ntio`).
+        Object::Nt(n) => {
+            (if n.readable() { POLLIN | POLLRDNORM } else { 0 })
+                | (if n.writable() { POLLOUT | POLLWRNORM } else { 0 })
+        }
         Object::Socket(s) => socket::readiness(s),
+        Object::Pty(end) => super::pty::readiness(end),
         Object::Unix(u) => super::unix::readiness(u),
         Object::Epoll(e) => {
             if e.has_ready() {
@@ -98,7 +104,8 @@ pub fn events_count(object: &Object) -> u64 {
         Object::Unix(u) => u.core.arrivals(),
         Object::Epoll(e) => u64::from(e.has_ready()),
         Object::EventFd(e) => e.changes(),
-        Object::Console(_) | Object::File(_) | Object::Device(_) => 0,
+        Object::Pty(end) => super::pty::changes(end),
+        Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Nt(_) => 0,
     }
 }
 
@@ -159,9 +166,23 @@ impl Watch {
                     self.polled = true;
                 }
             }
+            Object::Pty(end) => {
+                let w = &end.pty.waiters;
+                if self.sockets.iter().any(|q| KArc::ptr_eq(q, w)) {
+                    return;
+                }
+                if self.sockets.try_push(w.clone()).is_err() {
+                    self.polled = true;
+                    return;
+                }
+                if w.add(self.me).is_err() {
+                    self.sockets.pop();
+                    self.polled = true;
+                }
+            }
             Object::Socket(_) | Object::Epoll(_) => self.polled = true,
             // Always ready: nothing to wait for.
-            Object::Console(_) | Object::File(_) | Object::Device(_) => {}
+            Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Nt(_) => {}
         }
     }
 

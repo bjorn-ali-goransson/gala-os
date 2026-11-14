@@ -26,8 +26,13 @@ pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
-pub use crate::mm::paging::{CacheMode, PageFlags};
+/// A page's age for the page file's clock, and the end of user space.
+pub use crate::mm::paging::{Age, CacheMode, PageFlags, USER_END};
+/// Frames in use by kind and the scheduler's thread counts, for
+/// persist's low-memory line.
+pub use crate::mm::{FrameUses, frame_uses};
 pub use crate::personality::Personality;
+pub use crate::sched::thread_counts;
 pub use crate::sched::{SpawnError, ThreadId, WakeReason};
 
 /// The implementation the NT layer runs on: the kernel, or gala-um's host
@@ -101,6 +106,16 @@ pub trait Threads {
     /// How many times `id` was switched to (SYSTEM_THREAD_INFORMATION's
     /// ContextSwitches).
     fn context_switches(id: ThreadId) -> u32;
+    /// Nanoseconds `id` has run on a processor (the task manager's CPU
+    /// time); 0 where the host schedules (gala-um).
+    fn cpu_time_ns(_id: ThreadId) -> u64 {
+        0
+    }
+    /// Processor `cpu`'s (busy, idle) nanoseconds so far; None where they
+    /// are not counted (gala-um) or the processor does not schedule.
+    fn cpu_load(_cpu: usize) -> Option<(u64, u64)> {
+        None
+    }
     fn current_cpu() -> u32;
     fn online_count() -> u32;
     fn online_mask() -> u64;
@@ -316,6 +331,14 @@ pub fn context_switches(id: ThreadId) -> u32 {
     <P as Threads>::context_switches(id)
 }
 #[inline]
+pub fn cpu_time_ns(id: ThreadId) -> u64 {
+    <P as Threads>::cpu_time_ns(id)
+}
+#[inline]
+pub fn cpu_load(cpu: usize) -> Option<(u64, u64)> {
+    <P as Threads>::cpu_load(cpu)
+}
+#[inline]
 pub fn current_cpu() -> u32 {
     <P as Threads>::current_cpu()
 }
@@ -425,6 +448,18 @@ pub fn entropy_seeded() -> bool {
 #[inline]
 pub fn fill_entropy(buf: &mut [u8]) -> bool {
     <P as Entropy>::fill_entropy(buf)
+}
+
+/// The disk's traffic since boot, (bytes read, bytes written), and whether
+/// the machine has a disk: the task manager's Performance view.
+#[inline]
+pub fn disk_traffic() -> (u64, u64, bool) {
+    use core::sync::atomic::Ordering;
+    (
+        crate::disk::READ_BYTES.load(Ordering::Relaxed),
+        crate::disk::WRITE_BYTES.load(Ordering::Relaxed),
+        crate::disk::present(),
+    )
 }
 
 #[inline]

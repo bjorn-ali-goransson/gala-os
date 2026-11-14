@@ -1,7 +1,9 @@
 //! gala's shell32.dll: the folder functions programs use to find the
-//! user's profile folders (the JVM's user.home). The answers come from the
-//! same place as the environment's: USERPROFILE, APPDATA, LOCALAPPDATA,
-//! ProgramData, ProgramFiles, and the Windows and system directories.
+//! user's profile folders (the JVM's user.home) and the Known Folder
+//! Manager (`knownfolder.rs`: Windows' known folder definitions, each
+//! folder below its parent). The roots come from the same place as the
+//! environment's: USERPROFILE, ProgramData, ProgramFiles, PUBLIC, and the
+//! Windows and system directories.
 //! Also SHGetFileInfoW with gala's system image lists (`fileinfo.rs`),
 //! running programs, dropped files and file operations (`shellops.rs`),
 //! and shell links (`link.rs`: CLSID_ShellLink, `.lnk` files,
@@ -11,11 +13,19 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
+use gala_heap as _;
+
 mod browser;
+#[macro_use]
 mod fileinfo;
 mod icons;
+mod knownfolder;
 mod link;
+mod namespace;
 mod shellops;
+mod tray;
 mod unimplemented;
 
 // The 32-bit build (SysWOW64) takes the memory routines, 64-bit
@@ -92,107 +102,6 @@ enum Folder {
     System,
 }
 
-const START_MENU: &str = "\\Microsoft\\Windows\\Start Menu";
-const PROGRAMS: &str = "\\Microsoft\\Windows\\Start Menu\\Programs";
-const STARTUP: &str = "\\Microsoft\\Windows\\Start Menu\\Programs\\Startup";
-
-/// CSIDL values and their folders (where Windows 11 has them).
-const CSIDLS: &[(i32, Folder)] = &[
-    (0x02, Folder::Env("APPDATA", PROGRAMS)), // CSIDL_PROGRAMS
-    (0x05, Folder::Env("USERPROFILE", "\\Documents")), // CSIDL_PERSONAL
-    (0x06, Folder::Env("USERPROFILE", "\\Favorites")), // CSIDL_FAVORITES
-    (0x07, Folder::Env("APPDATA", STARTUP)),  // CSIDL_STARTUP
-    (0x08, Folder::Env("APPDATA", "\\Microsoft\\Windows\\Recent")), // CSIDL_RECENT
-    (0x09, Folder::Env("APPDATA", "\\Microsoft\\Windows\\SendTo")), // CSIDL_SENDTO
-    (0x0b, Folder::Env("APPDATA", START_MENU)), // CSIDL_STARTMENU
-    (0x10, Folder::Env("USERPROFILE", "\\Desktop")), // CSIDL_DESKTOPDIRECTORY
-    (0x14, Folder::Env("windir", "\\Fonts")), // CSIDL_FONTS
-    (0x15, Folder::Env("APPDATA", "\\Microsoft\\Windows\\Templates")), // CSIDL_TEMPLATES
-    (0x16, Folder::Env("ProgramData", START_MENU)), // CSIDL_COMMON_STARTMENU
-    (0x17, Folder::Env("ProgramData", PROGRAMS)), // CSIDL_COMMON_PROGRAMS
-    (0x18, Folder::Env("ProgramData", STARTUP)), // CSIDL_COMMON_STARTUP
-    (0x19, Folder::Env("PUBLIC", "\\Desktop")), // CSIDL_COMMON_DESKTOPDIRECTORY
-    (0x1a, Folder::Env("APPDATA", "")),       // CSIDL_APPDATA
-    (0x1c, Folder::Env("LOCALAPPDATA", "")),  // CSIDL_LOCAL_APPDATA
-    (0x23, Folder::Env("ProgramData", "")),   // CSIDL_COMMON_APPDATA
-    (0x24, Folder::Windows),                  // CSIDL_WINDOWS
-    (0x25, Folder::System),                   // CSIDL_SYSTEM
-    (0x26, Folder::Env("ProgramFiles", "")),  // CSIDL_PROGRAM_FILES
-    (0x28, Folder::Env("USERPROFILE", "")),   // CSIDL_PROFILE
-    (0x2d, Folder::Env("ProgramData", "\\Microsoft\\Windows\\Templates")), // CSIDL_COMMON_TEMPLATES
-    (0x2e, Folder::Env("PUBLIC", "\\Documents")), // CSIDL_COMMON_DOCUMENTS
-];
-
-/// KNOWNFOLDERIDs (GUIDs as in memory: Data1-3 little endian) and their
-/// folders.
-const KNOWN: &[([u8; 16], Folder)] = &[
-    // FOLDERID_Profile {5E6C858F-0E22-4760-9AFE-EA3317B67173}
-    (
-        guid(0x5e6c858f, 0x0e22, 0x4760, [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73]),
-        Folder::Env("USERPROFILE", ""),
-    ),
-    // FOLDERID_RoamingAppData {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
-    (
-        guid(0x3eb685db, 0x65f9, 0x4cf6, [0xa0, 0x3a, 0xe3, 0xef, 0x65, 0x72, 0x9f, 0x3d]),
-        Folder::Env("APPDATA", ""),
-    ),
-    // FOLDERID_LocalAppData {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
-    (
-        guid(0xf1b32785, 0x6fba, 0x4fcf, [0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91]),
-        Folder::Env("LOCALAPPDATA", ""),
-    ),
-    // FOLDERID_Documents {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
-    (
-        guid(0xfdd39ad0, 0x238f, 0x46af, [0xad, 0xb4, 0x6c, 0x85, 0x48, 0x03, 0x69, 0xc7]),
-        Folder::Env("USERPROFILE", "\\Documents"),
-    ),
-    // FOLDERID_ProgramData {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}
-    (
-        guid(0x62ab5d82, 0xfdc1, 0x4dc3, [0xa9, 0xdd, 0x07, 0x0d, 0x1d, 0x49, 0x5d, 0x97]),
-        Folder::Env("ProgramData", ""),
-    ),
-    // FOLDERID_Windows {F38BF404-1D43-42F2-9305-67DE0B28FC23}
-    (
-        guid(0xf38bf404, 0x1d43, 0x42f2, [0x93, 0x05, 0x67, 0xde, 0x0b, 0x28, 0xfc, 0x23]),
-        Folder::Windows,
-    ),
-    // FOLDERID_System {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}
-    (
-        guid(0x1ac14e77, 0x02e7, 0x4e5d, [0xb7, 0x44, 0x2e, 0xb1, 0xae, 0x51, 0x98, 0xb7]),
-        Folder::System,
-    ),
-    // FOLDERID_UserProgramFiles {5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}
-    (
-        guid(0x5cd7aee2, 0x2219, 0x4a67, [0xb8, 0x5d, 0x6c, 0x9c, 0xe1, 0x56, 0x60, 0xcb]),
-        Folder::Env("LOCALAPPDATA", "\\Programs"),
-    ),
-    // FOLDERID_UserProgramFilesCommon {BCBD3057-CA5C-4622-B42D-BC56DB0AE516}
-    (
-        guid(0xbcbd3057, 0xca5c, 0x4622, [0xb4, 0x2d, 0xbc, 0x56, 0xdb, 0x0a, 0xe5, 0x16]),
-        Folder::Env("LOCALAPPDATA", "\\Programs\\Common"),
-    ),
-    // FOLDERID_Programs {A77F5D77-2E2B-44C3-A6A2-ABA601054A51}
-    (
-        guid(0xa77f5d77, 0x2e2b, 0x44c3, [0xa6, 0xa2, 0xab, 0xa6, 0x01, 0x05, 0x4a, 0x51]),
-        Folder::Env("APPDATA", PROGRAMS),
-    ),
-    // FOLDERID_StartMenu {625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}
-    (
-        guid(0x625b53c3, 0xab48, 0x4ec1, [0xba, 0x1f, 0xa1, 0xef, 0x41, 0x46, 0xfc, 0x19]),
-        Folder::Env("APPDATA", START_MENU),
-    ),
-    // FOLDERID_Desktop {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
-    (
-        guid(0xb4bfcc3a, 0xdb2c, 0x424c, [0xb0, 0x29, 0x7f, 0xe9, 0x9a, 0x87, 0xc6, 0x41]),
-        Folder::Env("USERPROFILE", "\\Desktop"),
-    ),
-    // FOLDERID_SavedGames {4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}
-    (
-        guid(0x4c5c32ff, 0xbb9d, 0x43b0, [0xb5, 0xb4, 0x2d, 0x72, 0xe5, 0x4e, 0xaa, 0xa4]),
-        Folder::Env("USERPROFILE", "\\Saved Games"),
-    ),
-];
-
 /// Creates the directory `path` (its first `n` units) and the ones above
 /// it that are missing, as CSIDL_FLAG_CREATE and KF_FLAG_CREATE ask.
 /// Whether it exists now.
@@ -234,7 +143,7 @@ fn resolve(folder: Folder, out: &mut [u16; MAX_PATH]) -> Option<usize> {
             Folder::Windows => GetWindowsDirectoryW(out.as_mut_ptr(), MAX_PATH as u32),
             Folder::System => GetSystemDirectoryW(out.as_mut_ptr(), MAX_PATH as u32),
             Folder::Env(var, sub) => {
-                let mut name = [0u16; 16];
+                let mut name = [0u16; 32];
                 for (d, c) in name.iter_mut().zip(var.encode_utf16()) {
                     *d = c;
                 }
@@ -267,11 +176,12 @@ pub extern "system" fn SHGetFolderPathW(
     _flags: u32,
     path: *mut u16,
 ) -> i32 {
-    let Some(&(_, folder)) = CSIDLS.iter().find(|(c, _)| *c == csidl & 0xff) else {
+    let Some(def) = knownfolder::by_csidl(csidl) else {
+        unsupported(b"shell32.dll!SHGetFolderPathW(csidl)", csidl as u32 as u64);
         return E_INVALIDARG;
     };
     let mut buf = [0u16; MAX_PATH];
-    let Some(n) = resolve(folder, &mut buf) else { return E_INVALIDARG };
+    let Some(n) = knownfolder::path(def, &mut buf) else { return E_INVALIDARG };
     if path.is_null() {
         return E_INVALIDARG;
     }
@@ -358,31 +268,15 @@ pub extern "system" fn SHGetKnownFolderPath(
         return E_INVALIDARG;
     }
     // SAFETY: the caller's GUID.
-    let id = unsafe { *id };
-    let Some(&(_, folder)) = KNOWN.iter().find(|(g, _)| *g == id) else {
+    let id = unsafe { id.read_unaligned() };
+    let Some(def) = knownfolder::by_id(&id) else {
         // SAFETY: the caller's output.
         unsafe { *path = core::ptr::null_mut() };
+        let d1 = u32::from_le_bytes([id[0], id[1], id[2], id[3]]);
+        unsupported(b"shell32.dll!SHGetKnownFolderPath(unknown folder)", d1.into());
         return E_FILE_NOT_FOUND;
     };
-    let mut buf = [0u16; MAX_PATH];
-    let Some(n) = resolve(folder, &mut buf) else { return E_FILE_NOT_FOUND };
-    const KF_FLAG_CREATE: u32 = 0x8000;
-    if flags & KF_FLAG_CREATE != 0 && !create_folder(&mut buf, n) {
-        // SAFETY: the caller's output.
-        unsafe { *path = core::ptr::null_mut() };
-        return E_FAIL;
-    }
-    // SAFETY: plain call.
-    let p = unsafe { LocalAlloc(0, 2 * (n + 1)) };
-    if p.is_null() {
-        return E_OUTOFMEMORY;
-    }
-    // SAFETY: a buffer of n + 1 units; the caller's output.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), p, n + 1);
-        *path = p;
-    }
-    S_OK
+    knownfolder::task_path(def, flags, path)
 }
 
 /// DllMain (the entry point our link flags name).

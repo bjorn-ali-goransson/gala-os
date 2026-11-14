@@ -115,8 +115,8 @@ fn memory_pages() -> (u64, u64, u64, u64) {
 }
 
 /// GlobalMemoryStatusEx: physical memory from the kernel; the "page file"
-/// figures are the commit limit and what is left of it (there is no page
-/// file: the limit is physical memory); the user address space.
+/// figures are the commit limit (memory plus the page file, as on
+/// Windows) and what is left of it; the user address space.
 #[unsafe(no_mangle)]
 pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool {
     // SAFETY: the caller's MEMORYSTATUSEX.
@@ -476,7 +476,10 @@ pub extern "system" fn K32GetProcessMemoryInfo(
     TRUE
 }
 
-/// QueryFullProcessImageNameW: this process's image path (Win32 form).
+/// QueryFullProcessImageNameW: a process's image path, in Win32 form
+/// (`C:\\...`, ProcessImageFileNameWin32) or with PROCESS_NAME_NATIVE in
+/// NT form (ProcessImageFileName); *size is the characters written
+/// without the NUL, ERROR_INSUFFICIENT_BUFFER when they do not fit.
 #[unsafe(no_mangle)]
 pub extern "system" fn QueryFullProcessImageNameW(
     process: Handle,
@@ -484,21 +487,47 @@ pub extern "system" fn QueryFullProcessImageNameW(
     buf: *mut u16,
     size: *mut u32,
 ) -> Bool {
-    if !is_current(process) {
-        unsupported(b"kernel32.dll!QueryFullProcessImageNameW(another process)", 0);
-        return fail_with(ERROR_ACCESS_DENIED, FALSE);
+    const PROCESS_NAME_NATIVE: u32 = 1;
+    if flags & !PROCESS_NAME_NATIVE != 0 || size.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    if flags != 0 {
-        unsupported(b"kernel32.dll!QueryFullProcessImageNameW(native)", flags.into());
+    let class = if flags & PROCESS_NAME_NATIVE != 0 {
+        27 // ProcessImageFileName
+    } else {
+        43 // ProcessImageFileNameWin32
+    };
+    // UNICODE_STRING, then its characters.
+    let mut info = [0usize; 1 + (2 * 1100) / size_of::<usize>()];
+    let mut ret = 0u32;
+    // SAFETY: a buffer of the given size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            class,
+            info.as_mut_ptr().cast(),
+            size_of_val(&info) as u32,
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
     }
+    // SAFETY: the UNICODE_STRING the kernel wrote; its buffer in `info`.
+    let chars = unsafe {
+        let len = usize::from(*info.as_ptr().cast::<u16>()) / 2;
+        core::slice::from_raw_parts(*info.as_ptr().add(1) as *const u16, len)
+    };
     // SAFETY: the caller's in/out size.
-    let room = unsafe { *size };
-    let n = super::process::GetModuleFileNameW(core::ptr::null_mut(), buf, room);
-    if n == 0 || n >= room {
+    let room = unsafe { *size } as usize;
+    if buf.is_null() || chars.len() + 1 > room {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
-    // SAFETY: as above.
-    unsafe { *size = n };
+    // SAFETY: the caller's buffer of `room` > len characters, and size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(chars.as_ptr(), buf, chars.len());
+        *buf.add(chars.len()) = 0;
+        *size = chars.len() as u32;
+    }
     TRUE
 }
 
@@ -556,7 +585,8 @@ fn set_basic_attributes(h: Handle, attributes: u32) -> Bool {
 
 /// SetFileInformationByHandle: the FILE_INFO_BY_HANDLE_CLASS values whose
 /// structures are the NT ones (basic, rename, disposition, allocation,
-/// end of file) go to NtSetInformationFile; others are reported.
+/// end of file, and the disposition and rename Ex forms) go to
+/// NtSetInformationFile; others are reported.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetFileInformationByHandle(
     h: Handle,
@@ -571,6 +601,11 @@ pub extern "system" fn SetFileInformationByHandle(
         4 => (13, 1), // FileDispositionInfo -> FileDispositionInformation
         5 => (19, 8), // FileAllocationInfo -> FileAllocationInformation
         6 => (20, 8), // FileEndOfFileInfo -> FileEndOfFileInformation
+        // FileDispositionInfoEx -> FileDispositionInformationEx (Flags)
+        21 => (64, 4),
+        // FileRenameInfoEx -> FileRenameInformationEx (Flags for the
+        // BOOLEAN)
+        22 => (65, super::mapping::RENAME_HEADER as u32),
         _ => {
             unsupported(b"kernel32.dll!SetFileInformationByHandle(class)", class.into());
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
@@ -833,3 +868,106 @@ pub extern "system" fn K32GetPerformanceInfo(info: *mut u8, size: u32) -> Bool {
 }
 
 const ERROR_BAD_LENGTH: u32 = 24;
+
+/// K32GetProcessImageFileNameW(process, buf, size): the process's image
+/// in the NT namespace (`\Device\HarddiskVolume1\...`), from
+/// ProcessImageFileName; its length, or 0 (ERROR_INSUFFICIENT_BUFFER)
+/// when it does not fit with its NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetProcessImageFileNameW(
+    process: Handle,
+    buf: *mut u16,
+    size: u32,
+) -> u32 {
+    // UNICODE_STRING, then its characters.
+    let mut info = [0usize; 1 + (2 * 1100) / size_of::<usize>()];
+    let mut ret = 0u32;
+    // SAFETY: a buffer of the given size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            27, // ProcessImageFileName
+            info.as_mut_ptr().cast(),
+            size_of_val(&info) as u32,
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, 0);
+    }
+    // SAFETY: the UNICODE_STRING the kernel wrote; its buffer in `info`.
+    let (len, chars) = unsafe {
+        let us = info.as_ptr().cast::<u16>();
+        let len = usize::from(*us) / 2;
+        let p = *info.as_ptr().add(1) as *const u16;
+        (len, core::slice::from_raw_parts(p, len))
+    };
+    if buf.is_null() || len + 1 > size as usize {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` > len characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(chars.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+    len as u32
+}
+
+/// K32GetProcessImageFileNameA: the W function in UTF-8 (gala's ANSI
+/// code page).
+#[unsafe(no_mangle)]
+pub extern "system" fn K32GetProcessImageFileNameA(
+    process: Handle,
+    buf: *mut u8,
+    size: u32,
+) -> u32 {
+    let mut w = [0u16; 1100];
+    let n = K32GetProcessImageFileNameW(process, w.as_mut_ptr(), w.len() as u32) as usize;
+    if n == 0 {
+        return 0;
+    }
+    let mut len = 0;
+    let mut out = [0u8; 3 * 1100];
+    for c in char::decode_utf16(w[..n].iter().copied()) {
+        let mut b = [0u8; 4];
+        for &x in c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b).as_bytes() {
+            out[len] = x;
+            len += 1;
+        }
+    }
+    if buf.is_null() || len + 1 > size as usize {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(out.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+    len as u32
+}
+
+/// GetPhysicallyInstalledSystemMemory(&kilobytes): the memory installed,
+/// which Windows reads from the firmware's SMBIOS memory devices. gala
+/// reports the physical memory it manages (SystemBasicInformation's
+/// pages): never less than GlobalMemoryStatusEx's total, as on Windows.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPhysicallyInstalledSystemMemory(kilobytes: *mut u64) -> Bool {
+    if kilobytes.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let b = super::basic_information();
+    let bytes = u64::from(b.physical_pages) * u64::from(b.page_size);
+    if bytes == 0 {
+        return fail_with(13, FALSE); // ERROR_INVALID_DATA
+    }
+    // SAFETY: the caller's ULONGLONG.
+    unsafe { kilobytes.write_unaligned(bytes.div_ceil(1024)) };
+    TRUE
+}
+
+/// IsSystemResumeAutomatic(): whether the system woke without a user
+/// (a wake timer); gala does not sleep, so FALSE.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsSystemResumeAutomatic() -> Bool {
+    FALSE
+}

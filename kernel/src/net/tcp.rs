@@ -966,11 +966,25 @@ pub fn kick() {
     }
 }
 
-/// The card's IPv4 address, prefix length and MAC, if there is a card.
-pub fn ethernet() -> Option<([u8; 4], u8, [u8; 6])> {
+/// The card's IPv4 configuration.
+pub struct Ethernet {
+    pub ip: [u8; 4],
+    pub prefix: u8,
+    pub mac: [u8; 6],
+    /// The default gateway.
+    pub gateway: [u8; 4],
+}
+
+/// The card's configuration, if there is a card.
+pub fn ethernet() -> Option<Ethernet> {
     let stack = STACK.lock();
     let s = stack.as_ref()?;
-    s.eth_ip.map(|ip| (ip, super::PREFIX, s.eth_mac))
+    s.eth_ip.map(|ip| Ethernet {
+        ip,
+        prefix: super::PREFIX,
+        mac: s.eth_mac,
+        gateway: super::GATEWAY.octets(),
+    })
 }
 
 /// Sets the function told about readiness changes (with the token given

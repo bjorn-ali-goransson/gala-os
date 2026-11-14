@@ -283,7 +283,9 @@ pub fn epoll_ctl(call: &Call<'_>, epfd: u64, op: u64, fd: u64, event: u64) -> Re
         | Object::Socket(_)
         | Object::Unix(_)
         | Object::EventFd(_)
-        | Object::Console(_) => {}
+        | Object::Console(_)
+        | Object::Pty(_)
+        | Object::Nt(_) => {}
     }
     let desc = f.id();
     match op {

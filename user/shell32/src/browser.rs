@@ -17,11 +17,10 @@
 //!   below the work area (none without a screen: ABM_GETTASKBARPOS fails), always on top, not auto-hidden; app bars of
 //!   one's own (ABM_NEW, ABM_SETPOS, ...) are not supported (reported, 0).
 //! - ShellExecuteA: ShellExecuteW with the strings converted (CP_ACP).
-//! - The shell namespace's objects (SHGetDesktopFolder, SHParseDisplayName,
-//!   SHCreateItemFromParsingName, SHOpenFolderAndSelectItems,
-//!   SHGetPropertyStoreForWindow, SHCreateAssociationRegistration,
-//!   SHGetStockIconInfo, SHOpenWithDialog) are not there yet: reported,
-//!   E_NOTIMPL with the output NULL.
+//! - SHOpenFolderAndSelectItems, SHGetPropertyStoreForWindow,
+//!   SHCreateAssociationRegistration, SHGetStockIconInfo and
+//!   SHOpenWithDialog are not there yet: reported, E_NOTIMPL with the
+//!   output NULL. (The namespace itself is `namespace.rs`.)
 
 use core::ffi::c_void;
 
@@ -92,7 +91,7 @@ pub extern "system" fn ILCreateFromPathW(path: *const u16) -> *mut u8 {
     if unsafe { GetFileAttributesW(z.as_ptr()) } == u32::MAX {
         return core::ptr::null_mut();
     }
-    super::fileinfo::new_list(Some((super::fileinfo::KIND_PATH, path)))
+    super::namespace::list_from_path(path)
 }
 
 static NEXT_REGISTRATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
@@ -280,36 +279,6 @@ fn no_namespace(what: &[u8], out: *mut *mut c_void) -> i32 {
         unsafe { out.write(core::ptr::null_mut()) };
     }
     E_NOTIMPL
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SHGetDesktopFolder(out: *mut *mut c_void) -> i32 {
-    no_namespace(b"shell32.dll!SHGetDesktopFolder", out)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SHParseDisplayName(
-    _name: *const u16,
-    _ctx: *mut c_void,
-    out: *mut *mut c_void,
-    _want: u32,
-    attributes: *mut u32,
-) -> i32 {
-    if !attributes.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { attributes.write(0) };
-    }
-    no_namespace(b"shell32.dll!SHParseDisplayName", out)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn SHCreateItemFromParsingName(
-    _name: *const u16,
-    _ctx: *mut c_void,
-    _iid: *const [u8; 16],
-    out: *mut *mut c_void,
-) -> i32 {
-    no_namespace(b"shell32.dll!SHCreateItemFromParsingName", out)
 }
 
 #[unsafe(no_mangle)]

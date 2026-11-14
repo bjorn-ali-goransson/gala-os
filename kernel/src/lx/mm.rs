@@ -152,20 +152,15 @@ fn cut(views: &mut Vec<View>, start: u64, end: u64, removed: &mut Vec<View>) -> 
         let v = views.swap_remove(i);
         let v_end = v.base + v.size;
         if v.base < start {
-            let _ = views.try_push(View {
-                base: v.base,
-                size: start - v.base,
-                offset: v.offset,
-                section: v.section.clone(),
-            });
+            let _ = views.try_push(View::new(v.base, start - v.base, v.offset, v.section.clone()));
         }
         if end < v_end {
-            let _ = views.try_push(View {
-                base: end,
-                size: v_end - end,
-                offset: v.offset + (end - v.base),
-                section: v.section.clone(),
-            });
+            let _ = views.try_push(View::new(
+                end,
+                v_end - end,
+                v.offset + (end - v.base),
+                v.section.clone(),
+            ));
         }
         let _ = removed.try_push(v);
         // The pieces were pushed at the end, past `i`: they do not
@@ -339,7 +334,7 @@ pub fn mmap(
         if done.is_ok() {
             if let Some((section, offset)) = view {
                 // Room reserved above.
-                let _ = views.try_push(View { base: start, size: len, offset, section });
+                let _ = views.try_push(View::new(start, len, offset, section));
             }
             sync(process, &vad, start, start + len);
         }
@@ -573,12 +568,7 @@ fn grow(
         // The view of the old range's last page, now at `end - PAGE`.
         let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&(end - PAGE)));
         let Some(v) = v else { return Err(EFAULT) };
-        let view = View {
-            base: end,
-            size: new_end - end,
-            offset: v.offset + (end - v.base),
-            section: v.section.clone(),
-        };
+        let view = View::new(end, new_end - end, v.offset + (end - v.base), v.section.clone());
         views.try_reserve(1).map_err(|_| ENOMEM)?;
         vad.map_exact(end, new_end, last.protect, last.kind).map_err(|_| ENOMEM)?;
         let _ = views.try_push(view);
@@ -620,12 +610,12 @@ fn move_to(
     for v in inside {
         let (s, e) = (v.base.max(old), (v.base + v.size).min(end));
         if s < e {
-            let _ = moved.try_push(View {
-                base: shift(s),
-                size: e - s,
-                offset: v.offset + (s - v.base),
-                section: v.section.clone(),
-            });
+            let _ = moved.try_push(View::new(
+                shift(s),
+                e - s,
+                v.offset + (s - v.base),
+                v.section.clone(),
+            ));
         }
         let _ = removed.try_push(v);
     }
@@ -774,7 +764,7 @@ mod tests {
     fn view(base: u64, pages: u64, offset: u64) -> View {
         let section = Section::new(64 * PAGE, vad::PAGE_EXECUTE_WRITECOPY, 0).unwrap();
         let section = KObject::new(ObjectBody::Section(section)).unwrap();
-        View { base, size: pages * PAGE, offset, section }
+        View::new(base, pages * PAGE, offset, section)
     }
 
     fn shape(views: &[View]) -> Vec<(u64, u64, u64)> {

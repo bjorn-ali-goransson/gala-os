@@ -5,8 +5,8 @@
 //! caches come from CPUID leaf 4 (deterministic cache parameters).
 
 use super::{
-    Bool, FALSE, Handle, NtSetInformationThread, STATUS_SUCCESS, TRUE, basic_information, fail,
-    fail_with, thread_basic,
+    Bool, FALSE, Handle, NtQueryInformationThread, NtSetInformationThread, STATUS_SUCCESS, TRUE,
+    basic_information, fail, fail_with, thread_basic,
 };
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -142,32 +142,72 @@ pub extern "system" fn SetThreadAffinityMask(thread: Handle, mask: usize) -> usi
     old as usize
 }
 
-/// Get/SetThreadIdealProcessorEx: a scheduling hint gala's scheduler does
-/// not take; the ideal processor reads as processor 0.
+/// ThreadIdealProcessor (13): sets a ULONG, the previous one returned as
+/// the status (MAXIMUM_PROCESSORS of the native kernel, 64, only asks).
+const THREAD_IDEAL_PROCESSOR: u32 = 13;
+/// ThreadIdealProcessorEx (33): a PROCESSOR_NUMBER, queried, or set with
+/// the previous one written back.
+const THREAD_IDEAL_PROCESSOR_EX: u32 = 33;
+
+/// MAXIMUM_PROCESSORS of this DLL's width: 64, or 32 in the 32-bit DLL.
+const MAXIMUM_PROCESSORS: u32 = 8 * size_of::<usize>() as u32;
+
+/// SetThreadIdealProcessor(hThread, dwIdealProcessor): the thread's
+/// previous ideal processor (a scheduling hint the kernel keeps; gala's
+/// scheduler does not take it); MAXIMUM_PROCESSORS only asks. (DWORD)-1
+/// with the error for a number the kernel refuses (above 64).
 #[unsafe(no_mangle)]
-pub extern "system" fn GetThreadIdealProcessorEx(_thread: Handle, n: *mut ProcessorNumber) -> Bool {
+pub extern "system" fn SetThreadIdealProcessor(thread: Handle, ideal: u32) -> u32 {
+    // The 32-bit DLL's MAXIMUM_PROCESSORS asks too.
+    let ideal = if ideal == MAXIMUM_PROCESSORS { 64 } else { ideal };
+    // SAFETY: a ULONG buffer.
+    let status = unsafe {
+        NtSetInformationThread(thread, THREAD_IDEAL_PROCESSOR, (&raw const ideal).cast(), 4)
+    };
+    if status >= 0xc000_0000 { fail(status, u32::MAX) } else { status }
+}
+
+/// GetThreadIdealProcessorEx: the thread's ideal processor (group 0).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadIdealProcessorEx(thread: Handle, n: *mut ProcessorNumber) -> Bool {
     if n.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    // SAFETY: the caller's output.
-    unsafe { n.write(ProcessorNumber { group: 0, number: 0, reserved: 0 }) };
-    TRUE
+    // SAFETY: the caller's PROCESSOR_NUMBER.
+    let status = unsafe {
+        NtQueryInformationThread(
+            thread,
+            THREAD_IDEAL_PROCESSOR_EX,
+            n.cast(),
+            4,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// SetThreadIdealProcessorEx: sets it, the previous one in `previous`.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetThreadIdealProcessorEx(
-    _thread: Handle,
+    thread: Handle,
     n: *const ProcessorNumber,
     previous: *mut ProcessorNumber,
 ) -> Bool {
-    // SAFETY: the caller's input.
-    let n = unsafe { *n };
-    if n.group != 0 || processor_mask() >> n.number == 0 {
+    if n.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's input; the kernel writes the previous one back.
+    let mut v = unsafe { *n };
+    // SAFETY: a PROCESSOR_NUMBER buffer of ours.
+    let status = unsafe {
+        NtSetInformationThread(thread, THREAD_IDEAL_PROCESSOR_EX, (&raw mut v).cast::<u8>(), 4)
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
     }
     if !previous.is_null() {
         // SAFETY: the caller's output.
-        unsafe { previous.write(ProcessorNumber { group: 0, number: 0, reserved: 0 }) };
+        unsafe { previous.write(v) };
     }
     TRUE
 }

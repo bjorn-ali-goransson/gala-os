@@ -10,3 +10,11 @@ crate-type = ["cdylib"]
 test = false
 bench = false
 
+
+[dependencies]
+gala_heap = { path = "../gala_heap" }
+# Its cabinet reader (MSZIP, LZX) for SetupIterateCabinetW.
+galapkg = { path = "../galapkg" }
+
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

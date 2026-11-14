@@ -223,32 +223,64 @@ static void assoc_checks(void) {
 
     wchar_t out[MAX_PATH];
     DWORD len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len), S_OK);
     CHECK(wcscmp(out, command) == 0 && len == wcslen(command) + 1);
     len = MAX_PATH;
     /* The command's program does not exist: CO_E_APPNOTFOUND (Windows 11
        25H2); an existing one (this program, below) is S_OK. */
-    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len)
-          == CO_E_APPNOTFOUND);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len), CO_E_APPNOTFOUND);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galatest", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galatest", NULL, out, &len), S_OK);
     CHECK(wcscmp(out, friendly) == 0);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L"GalaTest.File", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L"GalaTest.File", NULL, out, &len), S_OK);
     len = 0;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len) == S_FALSE);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len), S_FALSE);
     CHECK(len == wcslen(command) + 1);
     /* A short buffer: HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), not
        the documented E_POINTER, the size needed, and the string truncated
        into the buffer (Windows 11 25H2). */
     len = 4;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len)
-          == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len),
+             HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
     CHECK(len == wcslen(command) + 1);
     CHECK(wcsncmp(out, command, 3) == 0 && out[3] == 0);
+    /* An extension no class claims: the Unknown class's command, OpenWith
+       (Windows 11 25H2, issue #57: `C:\WINDOWS\system32\OpenWith.exe
+       "%1"`, the system directory as GetSystemDirectoryW spells it). */
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len)
-          == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION));
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len), S_OK);
+    wchar_t openwith[MAX_PATH + 32];
+    CHECK(GetSystemDirectoryW(openwith, MAX_PATH) > 0);
+    wcscat(openwith, L"\\OpenWith.exe \"%1\"");
+    CHECK(_wcsicmp(out, openwith) == 0);
+    CHECK_EQ(len, wcslen(openwith) + 1);
+    /* Its other strings come from the Unknown class too (measured on
+       26200, issue #61): the executable is OpenWith.exe (S_OK where it
+       exists, CO_E_APPNOTFOUND as for any class whose program is
+       missing), DefaultIcon expanded, and the document's name made up
+       from the extension, upper-cased, and " File". */
+    len = MAX_PATH;
+    HRESULT exe = AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galanone", NULL, out, &len);
+    openwith[wcslen(openwith) - 5] = 0;
+    if (GetFileAttributesW(openwith) != INVALID_FILE_ATTRIBUTES) {
+        CHECK_EQ(exe, S_OK);
+        CHECK(_wcsicmp(out, openwith) == 0);
+        CHECK_EQ(len, wcslen(openwith) + 1);
+    } else {
+        CHECK_EQ(exe, CO_E_APPNOTFOUND);
+    }
+    len = MAX_PATH;
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galanone", NULL, out, &len), S_OK);
+    CHECK(wcscmp(out, L"GALANONE File") == 0);
+    CHECK_EQ(len, 14);
+    len = MAX_PATH;
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_DEFAULTICON, L".galanone", NULL, out, &len), S_OK);
+    wchar_t icon[MAX_PATH + 32];
+    CHECK(GetWindowsDirectoryW(icon, MAX_PATH) > 0);
+    wcscat(icon, L"\\System32\\shell32.dll,0");
+    CHECK(_wcsicmp(out, icon) == 0);
+    CHECK_EQ(len, wcslen(icon) + 1);
     wchar_t me[MAX_PATH], existing[MAX_PATH + 8];
     CHECK(GetModuleFileNameW(NULL, me, MAX_PATH) > 0);
     wcscpy(existing, L"\"");
@@ -260,7 +292,7 @@ static void assoc_checks(void) {
           == ERROR_SUCCESS);
     RegCloseKey(key);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len), S_OK);
     CHECK(wcscmp(out, me) == 0);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\.galatest") == ERROR_SUCCESS);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\GalaTest.File") == ERROR_SUCCESS);
@@ -278,8 +310,10 @@ static void stream_checks(void) {
     CHECK(IStream_Seek(s, zero, STREAM_SEEK_CUR, &pos) == S_OK && pos.QuadPart == 13);
     CHECK(IStream_Seek(s, zero, STREAM_SEEK_SET, &pos) == S_OK && pos.QuadPart == 0);
     char buf[32] = {0};
-    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 13 && memcmp(buf, "hello, stream", 13) == 0);
-    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 0);
+    /* A read that gets fewer bytes than asked answers S_FALSE, a read of 0
+       at the end included (measured on 26200, issue #61). */
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_FALSE && n == 13 && memcmp(buf, "hello, stream", 13) == 0);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_FALSE && n == 0);
     STATSTG st;
     CHECK(IStream_Stat(s, &st, STATFLAG_NONAME) == S_OK && st.cbSize.QuadPart == 13 && st.type == STGTY_STREAM);
     ULARGE_INTEGER size;
@@ -290,7 +324,7 @@ static void stream_checks(void) {
     /* Read-only: the existing file. */
     s = NULL;
     CHECK(SHCreateStreamOnFileEx(L"shlwapi_stream.tmp", STGM_READ, 0, FALSE, NULL, &s) == S_OK);
-    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 5 && memcmp(buf, "hello", 5) == 0);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_FALSE && n == 5 && memcmp(buf, "hello", 5) == 0);
     CHECK(IStream_Write(s, "x", 1, &n) == STG_E_ACCESSDENIED);
     IStream_Release(s);
     CHECK(DeleteFileW(L"shlwapi_stream.tmp"));

@@ -32,13 +32,10 @@ mod arch;
 use arch::*;
 
 mod actctx;
-// kernel32's own address waits, for its SRW locks, condition variables
-// and InitOnce: kernelbase's source, built here with a list of its own and
-// not exported (WaitOnAddress and WakeByAddress* are kernelbase's alone).
-#[path = "../../kernelbase/src/address_wait.rs"]
-mod address_wait;
 mod ansi;
+mod appmodel;
 mod atom;
+mod buf;
 mod calendar;
 mod console;
 mod context;
@@ -49,9 +46,11 @@ mod idn;
 mod locale;
 mod mapping;
 mod messages;
+mod msvcp;
+mod nls;
 mod path;
 mod pipe;
-mod pool;
+mod probe;
 mod process;
 mod processor;
 mod procinfo;
@@ -62,6 +61,7 @@ mod runtime;
 mod sync;
 mod sysmem;
 mod text;
+mod threadpool;
 mod toolhelp;
 mod unimplemented;
 mod volume;
@@ -379,6 +379,13 @@ fn process_parameters() -> usize {
 fn unsupported(function: &[u8], detail: u64) {
     // SAFETY: a valid buffer; the service only reads it.
     unsafe { GalaRecordMissing(function.as_ptr(), function.len(), 2, detail) };
+}
+
+/// Records something worth knowing that is not a gap (a refused input, a
+/// fallback taken) in the ledger as "other".
+fn note(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 5, detail) };
 }
 
 /// Sets the last error from an NTSTATUS and returns `value` (the failure
@@ -834,11 +841,37 @@ fn is_sep(c: u16) -> bool {
     c == BACKSLASH || c == u16::from(b'/')
 }
 
+/// A UNC path's root (`\\server\share`, either separator): its length,
+/// or None when `path` is not a UNC path (`\\?\` and `\\.\` are not:
+/// the callers take them first) or names no server.
+fn unc_root_len(path: &[u16]) -> Option<usize> {
+    if path.len() < 3 || !is_sep(path[0]) || !is_sep(path[1]) || is_sep(path[2]) {
+        return None;
+    }
+    let server_end = path[2..].iter().position(|&c| is_sep(c)).map_or(path.len(), |i| i + 2);
+    if server_end >= path.len() {
+        return Some(path.len());
+    }
+    let share = server_end + 1;
+    Some(path[share..].iter().position(|&c| is_sep(c)).map_or(path.len(), |i| i + share))
+}
+
 /// The full Win32 path of `path` (GetFullPathNameW's rules): relative paths
 /// join the current directory, a leading separator takes the current drive,
 /// `/` becomes `\\`, and `.`/`..` components are resolved. `\\\\?\\` paths are
 /// returned unchanged.
 fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
+    // An empty path names nothing (it is not the current directory): every
+    // file function fails with ERROR_PATH_NOT_FOUND, as on Windows. A
+    // program that builds a path from an unset folder gets no file
+    // (ODT's setup.exe deletes "\*" recursively once "" exists); the
+    // ledger keeps the caller's mistake visible.
+    if path.is_empty() {
+        let what = b"kernel32.dll!empty path";
+        // SAFETY: a valid buffer; 5 is the ledger's "other".
+        unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 5, 0) };
+        return Err(3); // ERROR_PATH_NOT_FOUND
+    }
     let mut out = PathBuf::new();
     let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
     let device = [BACKSLASH, BACKSLASH, u16::from(b'.'), BACKSLASH];
@@ -850,8 +883,15 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
     }
     let drive = path.len() >= 2 && path[1] == u16::from(b':');
     let mut base = PathBuf::new();
-    if drive && path.len() >= 3 && is_sep(path[2]) {
+    // The root (`X:` or a UNC path's `\\server\share`) is the first
+    // `root_len` characters of `base`; `..` never climbs above it.
+    let root_len;
+    if let Some(n) = unc_root_len(path) {
+        base.push(&path[..n])?;
+        root_len = n;
+    } else if drive && path.len() >= 3 && is_sep(path[2]) {
         base.push(&path[..2])?;
+        root_len = 2;
     } else {
         // The current directory (with its trailing backslash).
         let mut cwd = [0u16; MAX_PATH_CHARS];
@@ -859,14 +899,22 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
         if n == 0 || n >= MAX_PATH_CHARS {
             return Err(3);
         }
+        let cwd_root = if drive { 2 } else { unc_root_len(&cwd[..n]).unwrap_or(2) };
         if drive || (!path.is_empty() && is_sep(path[0])) {
-            base.push(&cwd[..2])?; // the current drive ("X:rel" keeps it simple)
+            base.push(&cwd[..cwd_root])?; // the current drive ("X:rel" keeps it simple)
         } else {
             base.push(&cwd[..n])?;
         }
+        root_len = cwd_root;
     }
-    let rest = if drive { &path[2..] } else { path };
-    // Components: the base's after the drive, then the path's.
+    let rest = if let Some(n) = unc_root_len(path) {
+        &path[n..]
+    } else if drive {
+        &path[2..]
+    } else {
+        path
+    };
+    // Components: the base's after the root, then the path's.
     let mut parts: [(usize, usize, bool); 128] = [(0, 0, false); 128]; // (start, len, from base)
     let mut count = 0;
     let add = |src: &[u16],
@@ -894,11 +942,17 @@ fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
             }
         }
     };
-    let base_rest = &base.as_slice()[2..];
+    let base_rest = &base.as_slice()[root_len..];
     add(base_rest, true, &mut parts, &mut count);
     add(rest, false, &mut parts, &mut count);
-    out.push(&base.as_slice()[..2])?;
-    out.push(&[BACKSLASH])?;
+    let unc = root_len > 2;
+    // The root with `\` separators (`//server/share` is `\\server\share`).
+    for &c in &base.as_slice()[..root_len] {
+        out.push(&[if c == u16::from(b'/') { BACKSLASH } else { c }])?;
+    }
+    if !unc || count > 0 || path.last().is_some_and(|&c| is_sep(c)) {
+        out.push(&[BACKSLASH])?;
+    }
     for (i, &(start, len, from_base)) in parts[..count].iter().enumerate() {
         if i > 0 {
             out.push(&[BACKSLASH])?;
@@ -935,6 +989,12 @@ fn nt_path(path: *const u16) -> Result<PathBuf, u32> {
     if full.as_slice().starts_with(&verbatim) || full.as_slice().starts_with(&device) {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(&full.as_slice()[4..])?;
+    } else if unc_root_len(full.as_slice()).is_some() {
+        // `\\server\share\x` is `\??\UNC\server\share\x` (nt::wslfs serves
+        // WSL's servers below it).
+        nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
+        nt.push(&[u16::from(b'U'), u16::from(b'N'), u16::from(b'C')])?;
+        nt.push(&full.as_slice()[1..])?;
     } else {
         nt.push(&[BACKSLASH, u16::from(b'?'), u16::from(b'?'), BACKSLASH])?;
         nt.push(full.as_slice())?;
@@ -1095,6 +1155,11 @@ pub extern "system" fn CreateFileW(
     if !template.is_null() {
         unsupported(b"kernel32.dll!CreateFileW(template)", 0);
     }
+    // SAFETY: the caller's NUL-terminated path (its first unit).
+    if !path.is_null() && unsafe { *path } == 0 {
+        // An empty name: no such path (Windows; Wine's test_CreateFile2).
+        return fail_with(3, INVALID_HANDLE_VALUE); // ERROR_PATH_NOT_FOUND
+    }
     let nt_disposition = match disposition {
         1 => 2, // CREATE_NEW -> FILE_CREATE
         2 => 5, // CREATE_ALWAYS -> FILE_OVERWRITE_IF
@@ -1121,6 +1186,21 @@ pub extern "system" fn CreateFileW(
     }
     if flags & FILE_FLAG_OPEN_REPARSE_POINT != 0 {
         options |= FILE_OPEN_REPARSE_POINT;
+    }
+    // The caching flags, as CreateFile's documentation maps them to
+    // NtCreateFile's options (FileModeInformation reports them): data
+    // written through at once (FILE_WRITE_THROUGH), no buffering
+    // (FILE_NO_INTERMEDIATE_BUFFERING: whole sectors only), the access
+    // pattern hints (FILE_SEQUENTIAL_ONLY, FILE_RANDOM_ACCESS).
+    for (flag, option) in [
+        (0x8000_0000u32, 0x0002u32), // FILE_FLAG_WRITE_THROUGH
+        (0x2000_0000, 0x0008),       // FILE_FLAG_NO_BUFFERING
+        (0x0800_0000, 0x0004),       // FILE_FLAG_SEQUENTIAL_SCAN
+        (0x1000_0000, 0x0800),       // FILE_FLAG_RANDOM_ACCESS
+    ] {
+        if flags & flag != 0 {
+            options |= option;
+        }
     }
     // As Windows' CreateFileW: FILE_READ_ATTRIBUTES always, SYNCHRONIZE
     // for synchronous handles.
@@ -1573,7 +1653,8 @@ pub extern "system" fn GetFileAttributesExW(path: *const u16, level: u32, info: 
         FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         SHARE_ALL,
         1, // FILE_OPEN
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT,
+        // A symbolic link's own attributes, as GetFileAttributesW's.
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
         0,
     ) {
         Ok(o) => o,
@@ -1619,8 +1700,9 @@ fn delete_path(path: *const u16, directory: bool) -> Bool {
     // DELETE | FILE_READ_ATTRIBUTES, not synchronous (no SYNCHRONIZE): a
     // file the caller has no ACE on can be deleted through its
     // directory's FILE_DELETE_CHILD and FILE_LIST_DIRECTORY.
+    // A symbolic link is deleted itself, not its target.
     let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
-    let options = kind | FILE_OPEN_FOR_BACKUP_INTENT;
+    let options = kind | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT;
     let (h, _) = match open_path(path, DELETE | FILE_READ_ATTRIBUTES, SHARE_ALL, 1, options, 0) {
         Ok(o) => o,
         Err(e) => return fail_with(e, FALSE),
@@ -1714,14 +1796,15 @@ pub extern "system" fn GetFileInformationByHandleEx(
 ) -> Bool {
     // FILE_INFO_BY_HANDLE_CLASS -> (NT class, directory listing, restart).
     let (nt_class, listing, restart) = match class {
-        0 => (4, false, false),  // FileBasicInfo
-        1 => (5, false, false),  // FileStandardInfo
-        2 => (9, false, false),  // FileNameInfo
-        9 => (35, false, false), // FileAttributeTagInfo
-        10 => (37, true, false), // FileIdBothDirectoryInfo
-        11 => (37, true, true),  // FileIdBothDirectoryRestartInfo
-        14 => (2, true, false),  // FileFullDirectoryInfo
-        15 => (2, true, true),   // FileFullDirectoryRestartInfo
+        0 => (4, false, false),   // FileBasicInfo
+        1 => (5, false, false),   // FileStandardInfo
+        2 => (9, false, false),   // FileNameInfo
+        9 => (35, false, false),  // FileAttributeTagInfo
+        10 => (37, true, false),  // FileIdBothDirectoryInfo
+        11 => (37, true, true),   // FileIdBothDirectoryRestartInfo
+        14 => (2, true, false),   // FileFullDirectoryInfo
+        15 => (2, true, true),    // FileFullDirectoryRestartInfo
+        18 => (59, false, false), // FileIdInfo
         _ => {
             unsupported(b"kernel32.dll!GetFileInformationByHandleEx(class)", u64::from(class));
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
@@ -1776,6 +1859,11 @@ fn fill_find_data(entry: &[u8], data: *mut u16) {
         let size = u64_at(entry, 40);
         *ints.add(7) = (size >> 32) as u32;
         *ints.add(8) = size as u32;
+        // dwReserved0: a reparse point's tag (the entry's EaSize then).
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if u32_at(entry, 56) & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            *ints.add(9) = u32_at(entry, 64);
+        }
         for i in 0..name_len {
             *data.add(22 + i) = u16::from_le_bytes([entry[68 + 2 * i], entry[69 + 2 * i]]);
         }
@@ -1943,6 +2031,123 @@ pub extern "system" fn FindFirstStreamW(
 #[unsafe(no_mangle)]
 pub extern "system" fn FindNextStreamW(_find: Handle, _data: *mut u8) -> Bool {
     fail_with(38, FALSE)
+}
+
+/// FindFirstFileNameW(name, 0, &length, linkName): the file's first hard
+/// link name, from the volume root without the drive (`\dir\file`).
+/// gala's file system has one name per file, so this is the file's own
+/// path; `length` (in characters with the NUL) gets the size needed,
+/// with ERROR_MORE_DATA when the buffer is too small.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindFirstFileNameW(
+    name: *const u16,
+    flags: u32,
+    length: *mut u32,
+    link: *mut u16,
+) -> Handle {
+    if name.is_null() || length.is_null() || flags != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+    }
+    let h = CreateFileW(name, 0, 7, core::ptr::null_mut(), 3, 0x0200_0000, core::ptr::null_mut());
+    if h == INVALID_HANDLE_VALUE {
+        return INVALID_HANDLE_VALUE;
+    }
+    // FILE_STANDARD_INFORMATION's NumberOfLinks: the other names of a
+    // file with hard links are not listed yet (reported).
+    let mut standard = [0u8; 24];
+    let mut iosb = [0usize; 2];
+    // SAFETY: a 24-byte FILE_STANDARD_INFORMATION.
+    let status = unsafe { NtQueryInformationFile(h, &mut iosb, standard.as_mut_ptr(), 24, 5) };
+    let links = u32::from_le_bytes([standard[16], standard[17], standard[18], standard[19]]);
+    if status == STATUS_SUCCESS && links > 1 {
+        unsupported(b"kernel32.dll!FindFirstFileNameW(hard links)", links.into());
+    }
+    let mut path = [0u16; 1100];
+    let n = files::GetFinalPathNameByHandleW(h, path.as_mut_ptr(), path.len() as u32, 4);
+    CloseHandle(h);
+    if n == 0 || n as usize >= path.len() {
+        return INVALID_HANDLE_VALUE;
+    }
+    let n = n as usize;
+    // SAFETY: the caller's in/out length.
+    let room = unsafe { *length } as usize;
+    // SAFETY: as above.
+    unsafe { *length = n as u32 + 1 };
+    if link.is_null() || room <= n {
+        return fail_with(234, INVALID_HANDLE_VALUE); // ERROR_MORE_DATA
+    }
+    // SAFETY: the caller's buffer of `room` > n characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), link, n);
+        *link.add(n) = 0;
+    }
+    // A find handle FindClose takes (no directory behind it).
+    let state = VirtualAlloc(core::ptr::null_mut(), 0x1000, 0x3000, 4) as *mut FindState;
+    if state.is_null() {
+        return INVALID_HANDLE_VALUE;
+    }
+    // SAFETY: a fresh allocation.
+    unsafe { state.write(FindState { directory: core::ptr::null_mut() }) };
+    state.cast()
+}
+
+/// FindNextFileNameW: the only name was the first (ERROR_HANDLE_EOF).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNextFileNameW(
+    _find: Handle,
+    _length: *mut u32,
+    _link: *mut u16,
+) -> Bool {
+    fail_with(38, FALSE)
+}
+
+/// CREATEFILE2_EXTENDED_PARAMETERS (fileapi.h).
+#[repr(C)]
+pub struct CreateFile2Parameters {
+    size: u32,
+    attributes: u32,
+    flags: u32,
+    security_qos_flags: u32,
+    security: *mut c_void,
+    template: Handle,
+}
+
+/// CreateFile2(name, access, share, disposition, parameters): CreateFileW
+/// with the attributes, flags and QoS flags combined, as documented;
+/// parameters may be NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateFile2(
+    name: *const u16,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    parameters: *const CreateFile2Parameters,
+) -> Handle {
+    if parameters.is_null() {
+        return CreateFileW(
+            name,
+            access,
+            share,
+            core::ptr::null_mut(),
+            disposition,
+            0,
+            core::ptr::null_mut(),
+        );
+    }
+    // SAFETY: the caller's structure (its size checked first).
+    let p = unsafe { &*parameters };
+    if p.size as usize != size_of::<CreateFile2Parameters>() {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+    }
+    CreateFileW(
+        name,
+        access,
+        share,
+        p.security,
+        disposition,
+        p.attributes | p.flags | p.security_qos_flags,
+        p.template,
+    )
 }
 
 /// ReOpenFile: a new handle to the file `h` names (its own file
@@ -2922,6 +3127,10 @@ fn default_stack_commit() -> usize {
     image_optional_field(OPTIONAL_STACK_COMMIT)
 }
 
+/// gala's NtSetInformationThread class: the thread's stack is freed when it
+/// ends (the kernel's GALA_THREAD_FREE_STACK).
+const GALA_THREAD_FREE_STACK: u32 = 0x4761_0001;
+
 /// CreateThread: the stack is reserved and partly committed here, with a
 /// guard page (see below), then NtCreateThread starts the thread at
 /// `thread_start`. SECURITY_ATTRIBUTES give the thread's descriptor and
@@ -2994,13 +3203,23 @@ pub extern "system" fn CreateThread(
             &mut cid,
             &context,
             &initial_teb,
-            u8::from(flags & CREATE_SUSPENDED != 0),
+            1, // suspended until the stack is the thread's (below)
         )
     })
     .unwrap_or(0xc000_000d); // STATUS_INVALID_PARAMETER
     if status != STATUS_SUCCESS {
         VirtualFree(stack as *mut c_void, 0, 0x8000);
         return fail(status, core::ptr::null_mut());
+    }
+    // The stack goes with the thread when it ends, as Windows frees a
+    // CreateThread thread's stack (gala's own information class; before
+    // the thread can run, so it cannot end first).
+    // SAFETY: a handle just made; the class takes no data.
+    unsafe { NtSetInformationThread(h, GALA_THREAD_FREE_STACK, core::ptr::null(), 0) };
+    if flags & CREATE_SUSPENDED == 0 {
+        let mut previous = 0;
+        // SAFETY: a handle just made.
+        unsafe { NtResumeThread(h, &mut previous) };
     }
     if !thread_id.is_null() {
         // SAFETY: the caller's output pointer.
@@ -3009,8 +3228,6 @@ pub extern "system" fn CreateThread(
     h
 }
 
-/// ExitThread. TODO: DLL_THREAD_DETACH notifications; the stack is not
-/// freed (Windows frees it).
 /// TerminateThread(thread, code): ends another thread (or this one) at
 /// once with `code`, without its DLL notifications.
 #[unsafe(no_mangle)]
@@ -3020,6 +3237,9 @@ pub extern "system" fn TerminateThread(thread: Handle, code: u32) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// ExitThread: DLL_THREAD_DETACH, then NtTerminateThread; the kernel frees
+/// the thread's stack and TEB as it ends (ARCHITECTURE "What an ended
+/// thread leaves").
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitThread(code: u32) -> ! {
     fls_thread_exit();

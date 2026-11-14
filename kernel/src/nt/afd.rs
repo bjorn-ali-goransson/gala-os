@@ -445,6 +445,7 @@ pub fn get_events(socket: &ObjectRef, event: Option<&ObjectRef>) -> Result<u32, 
 /// call (then a failure posts nothing, and FILE_SKIP_COMPLETION_PORT_ON_
 /// SUCCESS suppresses the packet of a success).
 fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, immediate: bool) {
+    io.reserved.retire();
     if io.iosb != 0 {
         let _ = io.process.write_iosb(io.iosb, status, information);
     }
@@ -789,16 +790,25 @@ const POLL_KIND: usize = 4;
 /// What a request's completion will post, reserved when it starts
 /// (`notify::Reserved`): the packet to the endpoint's port, if the
 /// request has an ApcContext and no routine, and its routine's APC.
-fn reserve(state: &EndpointState, io: &Io) -> Result<super::notify::Reserved, NtStatus> {
+/// `issuer`: the thread whose request it is (ThreadIsIoPending), unless
+/// the socket has a completion port (thread-agnostic I/O).
+fn reserve(
+    state: &EndpointState,
+    io: &Io,
+    issuer: Option<super::thread::IoPending>,
+) -> Result<super::notify::Reserved, NtStatus> {
     let port = state.completion.lock().clone();
+    let issuer = if port.is_none() { issuer } else { None };
     let port = port.as_ref().filter(|_| io.context != 0 && io.apc.is_none()).map(|(p, _)| p);
-    super::notify::Reserved::new(port, io.apc.as_ref().map(|(t, _)| t))
+    Ok(super::notify::Reserved::new(port, io.apc.as_ref().map(|(t, _)| t))?.issued_by(issuer))
 }
 
 /// Starts a request: done at once if possible, else pending.
 fn submit(state: &EndpointState, mut op: Op, mut io: Io) -> NtStatus {
+    // The calling thread's request (looked up before the endpoint's lock).
+    let issuer = super::thread::IoPending::current();
     let mut pending = state.pending.lock();
-    io.reserved = match reserve(state, &io) {
+    io.reserved = match reserve(state, &io, issuer) {
         Ok(r) => r,
         Err(status) => return status,
     };
@@ -1879,7 +1889,8 @@ pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Resu
             apc: q.apc,
             reserved: super::notify::Reserved::none(),
         };
-        io.reserved = reserve(state, &io)?;
+        // The issuing thread is not carried: not counted as its.
+        io.reserved = reserve(state, &io, None)?;
         if usize::from(op.kind()) == POLL_KIND {
             state.polls.fetch_add(1, Ordering::AcqRel);
             let mut pollers = POLLERS.lock();

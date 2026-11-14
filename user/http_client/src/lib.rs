@@ -29,6 +29,7 @@ extern crate alloc;
 
 pub mod handles;
 pub mod net;
+pub mod pool;
 pub mod request;
 pub mod url;
 
@@ -190,6 +191,52 @@ pub fn narrow(dll: Dll, w: &[u16]) -> Result<Vec<u8>, u32> {
         v.push(if c > 0xff { b'?' } else { c as u8 });
     }
     Ok(v)
+}
+
+/// A step of a request, for the API's status callbacks (WinHTTP's
+/// WINHTTP_CALLBACK_STATUS_*), in the order a request takes them. The
+/// strings are UTF-16 and NUL-terminated (the NUL in the slice).
+pub enum Event<'a> {
+    /// Resolving the host name (the name).
+    Resolving(&'a [u16]),
+    /// The name resolved (its first address, as text).
+    Resolved(&'a [u16]),
+    /// Connecting to an address (each one tried).
+    Connecting(&'a [u16]),
+    /// Connected, the TLS handshake made for https (the address).
+    Connected(&'a [u16]),
+    /// The handshake failed: the error (a certificate's status, or
+    /// err::SECURE_CHANNEL_ERROR).
+    SecureFailure(u32),
+    Sending,
+    /// The request's bytes sent.
+    Sent(u32),
+    Receiving,
+    /// The response header block's bytes received.
+    Received(u32),
+    /// A redirect being followed (the new URL).
+    Redirect(&'a [u16]),
+}
+
+/// Who is told a request's events: `notify(handle, event)`, called on the
+/// thread making the call that takes the step. The DLL sets it (a
+/// snapshot of the handle's callback) before each call into the engine.
+#[derive(Clone, Copy)]
+pub struct Observer {
+    pub notify: fn(&Observer, Event),
+    /// The DLL's own data (its handle, callback, flags and context).
+    pub handle: usize,
+    pub callback: usize,
+    pub flags: u32,
+    pub context: usize,
+}
+
+impl Observer {
+    pub fn tell(o: Option<&Observer>, e: Event) {
+        if let Some(o) = o {
+            (o.notify)(o, e);
+        }
+    }
 }
 
 /// Time-outs in milliseconds; -1 waits forever.

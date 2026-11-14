@@ -58,6 +58,8 @@ fn main() {
         ("VariantTimeToSystemTime", 185),
         ("LoadTypeLib", 161),
         ("LoadRegTypeLib", 162),
+        ("RegisterTypeLib", 163),
+        ("UnRegisterTypeLib", 186),
         ("QueryPathOfRegTypeLib", 164),
         ("LoadTypeLibEx", 183),
         ("VarCyFromDec", 228),
@@ -87,6 +89,22 @@ fn main() {
         ("VarXor", 167),
         ("VarNeg", 173),
         ("VarNot", 174),
+        // What Office's Click-to-Run UI (OfficeC2RClient.exe) imports.
+        ("SafeArrayRedim", 40),
+        ("VarDecAdd", 177),
+        ("VarDecDiv", 178),
+        ("VarDecMul", 179),
+        ("VarDecSub", 181),
+        ("VarDecAbs", 182),
+        ("VarDecFix", 187),
+        ("VarDecInt", 188),
+        ("VarDecNeg", 189),
+        ("VarDecFromI4", 192),
+        ("VarDecFromR8", 194),
+        ("VarDecRound", 203),
+        ("VarDecCmp", 204),
+        ("VarR8FromDec", 220),
+        ("OleCreateFontIndirect", 420),
     ];
     for (name, ordinal) in ordinals {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name},@{ordinal}");

@@ -2,12 +2,14 @@
 //! results (public x64 layouts: winternl.h / mingw-w64), kept pure so they
 //! can be host-tested.
 
+use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
 
 pub const SYSTEM_BASIC_INFORMATION: u32 = 0;
 pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+pub const SYSTEM_PAGEFILE_INFORMATION: u32 = 18;
 pub const SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: u32 = 124;
 
 /// SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: Version 1; Flags and
@@ -25,9 +27,30 @@ pub fn query_performance_counter_information() -> [u8; 12] {
 /// is undocumented; this one is documented in docs/ARCHITECTURE.md
 /// ("Network interfaces"). Records of `INTERFACE_RECORD` bytes: index,
 /// IFTYPE, MTU, MAC length (u32 each), MAC (8 bytes), IPv4 address (4),
-/// prefix length (u32), NetLuidIndex (u32).
+/// prefix length (u32), NetLuidIndex (u32), IPv4 default gateway (4;
+/// 0.0.0.0: none).
 pub const GALA_NETWORK_INTERFACES: u32 = 0x6761_0001;
-pub const INTERFACE_RECORD: usize = 36;
+pub const INTERFACE_RECORD: usize = 40;
+
+/// gala's own class (not Windows'): the sessions that exist, for gala's
+/// wtsapi32.dll (Windows' asks its Remote Desktop service over RPC).
+/// Records of `SESSION_RECORD` bytes, in the order the sessions were
+/// made: the id and flags (bit 0: the console shows it), u32 each.
+pub const GALA_SESSIONS: u32 = 0x6761_0002;
+pub const SESSION_RECORD: usize = 8;
+
+/// GALA_SESSIONS' records.
+pub fn sessions() -> Result<alloc::vec::Vec<u8>, super::status::NtStatus> {
+    let ids = super::session::ids()?;
+    let console = super::session::active_console();
+    let nomem = |_| super::status::NtStatus::NO_MEMORY;
+    let mut out = alloc::vec::Vec::new();
+    for id in ids {
+        out.try_extend_from_slice(&id.to_le_bytes()).map_err(nomem)?;
+        out.try_extend_from_slice(&u32::from(id == console).to_le_bytes()).map_err(nomem)?;
+    }
+    Ok(out)
+}
 
 /// One interface for GALA_NETWORK_INTERFACES.
 pub struct Interface {
@@ -39,11 +62,14 @@ pub struct Interface {
     pub ipv4: [u8; 4],
     pub prefix: u32,
     pub luid_index: u32,
+    pub gateway: [u8; 4],
 }
 
-/// The loopback interface (always) and the card's, if `ethernet` (IPv4
-/// address, prefix, MAC): index 1 and 2, as Windows numbers loopback 1.
-pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFACE_RECORD], usize) {
+/// The loopback interface (always) and the card's, if `ethernet`: index 1
+/// and 2, as Windows numbers loopback 1.
+pub fn interfaces(
+    ethernet: Option<crate::net::tcp::Ethernet>,
+) -> ([u8; 2 * INTERFACE_RECORD], usize) {
     let mut list = [
         Some(Interface {
             index: 1,
@@ -54,19 +80,21 @@ pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFA
             ipv4: [127, 0, 0, 1],
             prefix: 8,
             luid_index: 0,
+            gateway: [0; 4],
         }),
         None,
     ];
-    if let Some((ip, prefix, mac)) = ethernet {
+    if let Some(e) = ethernet {
         list[1] = Some(Interface {
             index: 2,
             if_type: 6, // IF_TYPE_ETHERNET_CSMACD
             mtu: 1500,
-            mac,
+            mac: e.mac,
             mac_len: 6,
-            ipv4: ip,
-            prefix: u32::from(prefix),
+            ipv4: e.ip,
+            prefix: u32::from(e.prefix),
             luid_index: 32768, // the first Ethernet interface's
+            gateway: e.gateway,
         });
     }
     let mut out = [0u8; 2 * INTERFACE_RECORD];
@@ -81,6 +109,7 @@ pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFA
         r[24..28].copy_from_slice(&i.ipv4);
         r[28..32].copy_from_slice(&i.prefix.to_le_bytes());
         r[32..36].copy_from_slice(&i.luid_index.to_le_bytes());
+        r[36..40].copy_from_slice(&i.gateway);
         n += 1;
     }
     (out, n * INTERFACE_RECORD)
@@ -156,6 +185,26 @@ pub fn unicode_string_in_place(name: &[u16], buffer: u64) -> Option<Vec<u8>> {
     for (i, c) in name.iter().enumerate() {
         out[16 + 2 * i..18 + 2 * i].copy_from_slice(&c.to_le_bytes());
     }
+    Some(out)
+}
+
+/// SYSTEM_PAGEFILE_INFORMATION for one page file at user address
+/// `buffer`: NextEntryOffset 0 (the last), TotalSize, TotalInUse and
+/// PeakUsage in pages, then PageFileName (a UNICODE_STRING whose
+/// characters follow the entry, NUL-terminated). None without memory.
+pub fn pagefile_information(
+    (total, in_use, peak): (u32, u32, u32),
+    name: &[u16],
+    buffer: u64,
+) -> Option<Vec<u8>> {
+    let string = unicode_string_in_place(name, buffer + 16)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(16 + string.len()).ok()?;
+    out.resize(16, 0u8);
+    out[4..8].copy_from_slice(&total.to_le_bytes());
+    out[8..12].copy_from_slice(&in_use.to_le_bytes());
+    out[12..16].copy_from_slice(&peak.to_le_bytes());
+    out.try_extend_from_slice(&string).ok()?;
     Some(out)
 }
 

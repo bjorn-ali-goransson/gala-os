@@ -5,6 +5,7 @@ pub mod frame;
 pub mod heap;
 pub mod memmap;
 pub mod paging;
+pub mod swap;
 pub mod vmap;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::boot::{self, BootInfo};
 use crate::sync::IrqMutex;
 use frame::{Frame, FrameAllocator, FreeError};
+pub use frame::{USES, Use};
 use memmap::RegionKind;
 
 /// Size of a base page.
@@ -75,21 +77,59 @@ fn with_frames<R>(f: impl FnOnce(&mut FrameAllocator<'static>) -> R) -> Option<R
     FRAMES.lock().as_mut().map(f)
 }
 
-/// Allocates one physical frame, or `None` if memory is exhausted (or the
-/// allocator is not initialized yet).
-pub fn allocate_frame() -> Option<Frame> {
+/// Allocates one physical frame for `use_` (counted per use: `frame_uses`),
+/// or `None` if memory is exhausted (or the allocator is not initialized
+/// yet).
+pub fn allocate_frame(use_: Use) -> Option<Frame> {
     if crate::failpoint::hit(crate::failpoint::Point::Frame) {
         return None;
     }
-    with_frames(|a| a.allocate()).flatten()
+    with_frames(|a| a.allocate_for(use_)).flatten()
 }
 
 /// See [`FrameAllocator::allocate_contiguous`].
-pub fn allocate_frames(count: u64, align: u64) -> Option<Frame> {
+pub fn allocate_frames(count: u64, align: u64, use_: Use) -> Option<Frame> {
     if crate::failpoint::hit(crate::failpoint::Point::Frame) {
         return None;
     }
-    with_frames(|a| a.allocate_contiguous(count, align)).flatten()
+    with_frames(|a| a.allocate_contiguous_for(count, align, use_)).flatten()
+}
+
+/// Frames in use per `Use` (indexed by `Use as usize`): with the free
+/// frames they add up to the managed ones.
+pub fn frame_uses() -> [u64; USES] {
+    with_frames(|a| a.uses()).unwrap_or([0; USES])
+}
+
+/// `frame_uses` if the allocator's lock is free (a state dump).
+pub fn try_frame_uses() -> Option<[u64; USES]> {
+    let guard = FRAMES.try_lock_untracked()?;
+    guard.as_ref().map(|a| a.uses())
+}
+
+/// Frames in use per use, for log lines: `heap N, page tables N, ...`
+/// (only uses with frames).
+pub struct FrameUses(pub [u64; USES]);
+
+impl core::fmt::Display for FrameUses {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut first = true;
+        for u in Use::ALL {
+            let n = self.0[u as usize];
+            if n == 0 {
+                continue;
+            }
+            if !first {
+                out.write_str(", ")?;
+            }
+            first = false;
+            write!(out, "{} {n}", u.name())?;
+        }
+        if first {
+            out.write_str("none counted")?;
+        }
+        Ok(())
+    }
 }
 
 /// `framecheck` (kernel command line): user mappings of each frame are
@@ -147,6 +187,7 @@ pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
 /// Without them (no memory) nothing is shared: a fork copies its pages,
 /// as the log line says.
 pub fn init_sharing() {
+    init_uses();
     let Some(frames) = with_frames(|a| a.total_frames()) else { return };
     let Ok(count) = usize::try_from(frames) else { return };
     let mut table: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
@@ -161,6 +202,24 @@ pub fn init_sharing() {
         "mm: owner counts for {count} frames ({} KiB): copy-on-write sharing on",
         count * 2 / 1024
     );
+}
+
+/// Gives the frame allocator its table of frames' uses (one byte per frame
+/// of the span, from the heap): from then on every frame in use is
+/// counted by what it is for (`frame_uses`). Without memory for it the
+/// counts stay empty, as the log line says.
+fn init_uses() {
+    let Some(span) = with_frames(|a| a.span()) else { return };
+    let Ok(count) = usize::try_from(span) else { return };
+    let mut table: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if table.try_reserve_exact(count).is_err() {
+        crate::warn!("mm: no memory for {count} frames' uses: frames are not counted by use");
+        return;
+    }
+    table.resize(count, 0);
+    let table = table.leak();
+    with_frames(|a| a.set_use_table(table));
+    crate::info!("mm: frames counted by use ({} KiB table)", count / 1024);
 }
 
 /// Adds an owner to `frame` (a fork's copy-on-write page); false if it

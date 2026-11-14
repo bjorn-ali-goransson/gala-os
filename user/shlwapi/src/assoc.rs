@@ -43,6 +43,7 @@ unsafe extern "system" {
     fn FlushFileBuffers(h: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -151,8 +152,22 @@ fn class_value(r: &Registry, path: &[u16], name: Option<&[u16]>, out: &mut Buf) 
         );
         (r.close)(key);
         if got == 0 && (kind == REG_SZ || kind == REG_EXPAND_SZ) {
-            let n = (size as usize / 2).min(1024);
+            let n = (size as usize / 2).min(1023);
             let n = data[..n].iter().position(|&c| c == 0).unwrap_or(n);
+            if kind == REG_EXPAND_SZ {
+                // Its environment variables expanded, as Windows answers
+                // (Unknown's `%SystemRoot%\system32\OpenWith.exe "%1"`).
+                data[n] = 0;
+                let mut expanded = [0u16; 1024];
+                // SAFETY: a NUL-terminated string of ours; our buffer.
+                let m = unsafe {
+                    ExpandEnvironmentStringsW(data.as_ptr(), expanded.as_mut_ptr(), 1024)
+                } as usize;
+                if m > 0 && m <= 1024 {
+                    out.extend(&expanded[..m - 1]);
+                    return true;
+                }
+            }
             out.extend(&data[..n]);
             return true;
         }
@@ -175,7 +190,10 @@ const ASSOCSTR_DEFAULTICON: u32 = 15;
 /// S_FALSE and the size with no buffer; the string truncated, the size
 /// and HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) when it is short;
 /// HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
-/// registered. Other kinds are recorded.
+/// registered (ASSOCSTR_COMMAND of an extension without a class is the
+/// Unknown class's, OpenWith, and so are its executable and icon; its
+/// document name is the extension upper-cased and " File"). REG_EXPAND_SZ
+/// values are expanded. Other kinds are recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn AssocQueryStringW(
     _flags: u32,
@@ -205,7 +223,34 @@ pub extern "system" fn AssocQueryStringW(
             };
         }
         if !class_value(&r, a, None, &mut progid) || progid.text().is_empty() {
-            return NO_ASSOCIATION;
+            // An extension no class claims: its command, executable and
+            // icon are the Unknown class's, and its document name is made
+            // up from the extension, upper-cased, and " File" (no value
+            // holds it): `.galanone` answers OpenWith's command and
+            // program, shell32's icon 0 and "GALANONE File" (measured on
+            // 26200, issues #57 and #61).
+            match what {
+                ASSOCSTR_COMMAND | ASSOCSTR_EXECUTABLE | ASSOCSTR_DEFAULTICON => {}
+                ASSOCSTR_FRIENDLYDOCNAME => {
+                    let mut v = Buf::new();
+                    for &c in &a[1..] {
+                        let up = if (u16::from(b'a')..=u16::from(b'z')).contains(&c) {
+                            c - 0x20
+                        } else {
+                            c
+                        };
+                        v.push(up);
+                    }
+                    v.extend(&wide(b" File"));
+                    return hand(&v, out, count);
+                }
+                _ => {
+                    unsupported(b"shlwapi.dll!AssocQueryStringW(unclaimed extension)", what.into());
+                    return NO_ASSOCIATION;
+                }
+            }
+            progid = Buf::new();
+            progid.extend(&wide(b"Unknown")[..7]);
         }
     } else {
         progid.extend(a);
@@ -431,7 +476,9 @@ extern "system" fn read(this: *mut FileStream, buf: *mut u8, n: u32, got: *mut u
         // SAFETY: the caller's count.
         unsafe { *got = done };
     }
-    S_OK
+    // Fewer bytes than asked, 0 at the end included, is S_FALSE (measured
+    // on 26200, issue #61).
+    if done < n { S_FALSE } else { S_OK }
 }
 
 extern "system" fn write(this: *mut FileStream, buf: *const u8, n: u32, put: *mut u32) -> i32 {

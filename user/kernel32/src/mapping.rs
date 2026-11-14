@@ -627,6 +627,21 @@ pub extern "system" fn FreeConsole() -> Bool {
     TRUE
 }
 
+/// AttachConsole(pid): every gala process gets a console (conhost) when it
+/// starts and FreeConsole keeps it, so the documented answer for a
+/// process already attached: FALSE, ERROR_ACCESS_DENIED.
+#[unsafe(no_mangle)]
+pub extern "system" fn AttachConsole(_pid: u32) -> Bool {
+    fail_with(5, FALSE)
+}
+
+/// AllocConsole(): as AttachConsole, the process has one already
+/// (ERROR_ACCESS_DENIED).
+#[unsafe(no_mangle)]
+pub extern "system" fn AllocConsole() -> Bool {
+    fail_with(5, FALSE)
+}
+
 /// SetStdHandle: replaces a standard handle in the process parameters.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStdHandle(which: u32, h: Handle) -> Bool {
@@ -712,26 +727,58 @@ pub(crate) fn unhandled_filter() -> usize {
     FILTER.load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// The volume is in memory: report a fixed geometry (512-byte sectors, 4 KiB
-/// clusters) and 1 GiB free of 2 GiB.
-const CLUSTERS_FREE: u32 = 1 << 18;
-const CLUSTERS_TOTAL: u32 = 1 << 19;
+/// FILE_FS_FULL_SIZE_INFORMATION of the volume holding `path` (NULL: the
+/// current directory's): (total, caller-available, free) allocation
+/// units, sectors per unit, bytes per sector; or the error, set as
+/// GetLastError (opening the path: a missing directory fails as
+/// CreateFileW does, "" with ERROR_PATH_NOT_FOUND).
+fn volume_size(path: *const u16) -> Option<(u64, u64, u64, u32, u32)> {
+    let dot = [u16::from(b'.'), 0];
+    let path = if path.is_null() { dot.as_ptr() } else { path };
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let h = CreateFileW(
+        path,
+        0,
+        7,
+        core::ptr::null_mut(),
+        3,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        core::ptr::null_mut(),
+    );
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let (mut iosb, mut info) = ([0usize; 2], [0u8; 32]);
+    // SAFETY: a 32-byte FILE_FS_FULL_SIZE_INFORMATION buffer (class 7).
+    let status = unsafe { NtQueryVolumeInformationFile(h, &mut iosb, info.as_mut_ptr(), 32, 7) };
+    CloseHandle(h);
+    if status != STATUS_SUCCESS {
+        return fail(status, None);
+    }
+    let u64_at = |at: usize| u64::from(u32_at(&info, at)) | u64::from(u32_at(&info, at + 4)) << 32;
+    Some((u64_at(0), u64_at(8), u64_at(16), u32_at(&info, 24), u32_at(&info, 28)))
+}
 
+/// GetDiskFreeSpaceW: the volume's geometry and cluster counts
+/// (FileFsFullSizeInformation of the root given, or of the current
+/// directory's volume for NULL); counts past 32 bits are capped.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceW(
-    _root: *const u16,
+    root: *const u16,
     sectors_per_cluster: *mut u32,
     bytes_per_sector: *mut u32,
     free_clusters: *mut u32,
     total_clusters: *mut u32,
 ) -> Bool {
+    let Some((total, _, free, spc, bps)) = volume_size(root) else { return FALSE };
+    let cap = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
     // SAFETY: the caller's optional output pointers.
     unsafe {
         for (p, v) in [
-            (sectors_per_cluster, 8),
-            (bytes_per_sector, 512),
-            (free_clusters, CLUSTERS_FREE),
-            (total_clusters, CLUSTERS_TOTAL),
+            (sectors_per_cluster, spc),
+            (bytes_per_sector, bps),
+            (free_clusters, cap(free)),
+            (total_clusters, cap(total)),
         ] {
             if !p.is_null() {
                 *p = v;
@@ -741,17 +788,46 @@ pub extern "system" fn GetDiskFreeSpaceW(
     TRUE
 }
 
+/// GetDiskFreeSpaceA: GetDiskFreeSpaceW of the root converted to UTF-16.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDiskFreeSpaceA(
+    root: *const u8,
+    sectors_per_cluster: *mut u32,
+    bytes_per_sector: *mut u32,
+    free_clusters: *mut u32,
+    total_clusters: *mut u32,
+) -> Bool {
+    let mut wroot = [0u16; 261];
+    let root = if root.is_null() {
+        core::ptr::null()
+    } else {
+        match ansi_to_wide(root, &mut wroot[..260]) {
+            Some(n) => {
+                wroot[n] = 0;
+                wroot.as_ptr()
+            }
+            None => return fail_with(ERROR_INVALID_PARAMETER, FALSE),
+        }
+    };
+    GetDiskFreeSpaceW(root, sectors_per_cluster, bytes_per_sector, free_clusters, total_clusters)
+}
+
+/// GetDiskFreeSpaceExW: bytes available to the caller, total and free on
+/// the volume holding `directory` (any directory of it; NULL: the current
+/// directory's), from FileFsFullSizeInformation. No quotas: what is
+/// available to the caller is what is free.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceExW(
-    _directory: *const u16,
+    directory: *const u16,
     available: *mut u64,
     total: *mut u64,
     free: *mut u64,
 ) -> Bool {
-    let (f, t) = (u64::from(CLUSTERS_FREE) * 4096, u64::from(CLUSTERS_TOTAL) * 4096);
+    let Some((t, a, f, spc, bps)) = volume_size(directory) else { return FALSE };
+    let unit = u64::from(spc) * u64::from(bps);
     // SAFETY: the caller's optional output pointers.
     unsafe {
-        for (p, v) in [(available, f), (total, t), (free, f)] {
+        for (p, v) in [(available, a * unit), (total, t * unit), (free, f * unit)] {
             if !p.is_null() {
                 core::ptr::write_unaligned(p, v);
             }
@@ -806,6 +882,61 @@ pub extern "system" fn GetShortPathNameW(long: *const u16, short: *mut u16, size
     path.len() as u32
 }
 
+/// GetShortPathNameA: GetShortPathNameW in the ANSI code page (UTF-8);
+/// the length in bytes, or the size needed with the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetShortPathNameA(long: *const u8, short: *mut u8, size: u32) -> u32 {
+    let mut wide = [0u16; 1024];
+    let Some(path) = ansi_path_to_wide(long, &mut wide) else {
+        return crate::fail_with(crate::ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut out = [0u16; 1024];
+    let n = GetShortPathNameW(path, out.as_mut_ptr(), out.len() as u32) as usize;
+    if n == 0 || n >= out.len() {
+        return 0;
+    }
+    let mut bytes = [0u8; 3 * 1024];
+    let mut len = 0;
+    for c in char::decode_utf16(out[..n].iter().copied()) {
+        let mut b = [0u8; 4];
+        for &x in c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b).as_bytes() {
+            bytes[len] = x;
+            len += 1;
+        }
+    }
+    if len + 1 > size as usize {
+        return (len + 1) as u32;
+    }
+    // SAFETY: the caller's buffer of `size` bytes (len + 1 fit).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), short, len);
+        *short.add(len) = 0;
+    }
+    len as u32
+}
+
+/// A NUL-terminated ANSI (UTF-8) string as NUL-terminated UTF-16 in
+/// `out`; None for NULL, invalid UTF-8 or a string too long.
+fn ansi_path_to_wide(s: *const u8, out: &mut [u16; 1024]) -> Option<*const u16> {
+    if s.is_null() {
+        return None;
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    // SAFETY: the `n` bytes just measured.
+    let text = core::str::from_utf8(unsafe { core::slice::from_raw_parts(s, n) }).ok()?;
+    let mut i = 0;
+    for u in text.encode_utf16() {
+        *out.get_mut(i)? = u;
+        i += 1;
+    }
+    *out.get_mut(i)? = 0;
+    Some(out.as_ptr())
+}
+
 /// GetLongPathNameW: gala has no short (8.3) names, so the path itself.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetLongPathNameW(short: *const u16, long: *mut u16, size: u32) -> u32 {
@@ -835,13 +966,28 @@ pub(crate) const RENAME_HEADER: usize = 2 * size_of::<usize>() + 4;
 /// Renames `from` to `to` in one step (FileRenameInformation); `replace`:
 /// an existing `to` is replaced atomically (ReplaceIfExists).
 pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
+    // DELETE | SYNCHRONIZE
+    name_file(from, to, replace, 0x0001_0000 | 0x0010_0000, 10)
+}
+
+/// CreateHardLinkW's work: `to` becomes another name of file `from`
+/// (FileLinkInformation; an existing `to` is an error). The file is
+/// opened for SYNCHRONIZE only: a link needs no access to it.
+pub(crate) fn hard_link(from: *const u16, to: *const u16) -> Bool {
+    name_file(from, to, false, 0x0010_0000, 11)
+}
+
+/// Gives file `from` the name `to` through FILE_RENAME_INFORMATION or
+/// FILE_LINK_INFORMATION (the same layout): NT class `class`, the file
+/// opened with `access`.
+fn name_file(from: *const u16, to: *const u16, replace: bool, access: u32, class: u32) -> Bool {
     let target = match nt_path(to) {
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
     };
     let h = match open_path(
         from,
-        0x0001_0000 | 0x0010_0000,
+        access,
         SHARE_ALL,
         1,
         FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
@@ -864,7 +1010,7 @@ pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
     let mut iosb = [0usize; 2];
     let len = RENAME_HEADER + 2 * name.len();
     // SAFETY: a buffer of `len` bytes.
-    let status = unsafe { NtSetInformationFile(h, &mut iosb, info.as_ptr(), len as u32, 10) };
+    let status = unsafe { NtSetInformationFile(h, &mut iosb, info.as_ptr(), len as u32, class) };
     CloseHandle(h);
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }

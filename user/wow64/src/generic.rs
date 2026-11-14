@@ -362,14 +362,20 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f07, &[H]),                                          // NtDeleteKey
     (0x7f08, &[H, Us]),                                      // NtDeleteValueKey
     (0x7f09, &[H]),                                          // NtFlushKey
-    (0x7f0a, &[Oh, U, Oa]),                                  // NtCreateJobObject
-    (0x7f0b, &[H, H]),                                       // NtAssignProcessToJobObject
-    (0x7f0e, &[H, H]),                                       // NtIsProcessInJob
-    (0x7f0f, &[Oh, U, Oa, U]),                               // NtCreateKeyedEvent
-    (0x7f10, &[Oh, U, Oa]),                                  // NtOpenKeyedEvent
-    (0x7f11, &[H, U, U, U]),                                 // NtWaitForKeyedEvent
-    (0x7f12, &[H, U, U, U]),                                 // NtReleaseKeyedEvent
-    (0x7f13, &[H, H, Apc, U, U, U, U, U, U]),                // NtNotifyChangeDirectoryFile
+    (0x7fd6, &[H, U, U, U]),                                 // NtSetInformationKey
+    (0x7f25, &[H, H, Apc, U, U, U, U, U, U, U]),             // NtNotifyChangeKey
+    // At most one subordinate (a Count over 1 is refused): its
+    // OBJECT_ATTRIBUTES converts as one.
+    (0x7f26, &[H, U, Oa, H, Apc, U, U, U, U, U, U, U]), // NtNotifyChangeMultipleKeys
+    (0x7f27, &[H, Us]),                                 // NtRenameKey
+    (0x7f0a, &[Oh, U, Oa]),                             // NtCreateJobObject
+    (0x7f0b, &[H, H]),                                  // NtAssignProcessToJobObject
+    (0x7f0e, &[H, H]),                                  // NtIsProcessInJob
+    (0x7f0f, &[Oh, U, Oa, U]),                          // NtCreateKeyedEvent
+    (0x7f10, &[Oh, U, Oa]),                             // NtOpenKeyedEvent
+    (0x7f11, &[H, U, U, U]),                            // NtWaitForKeyedEvent
+    (0x7f12, &[H, U, U, U]),                            // NtReleaseKeyedEvent
+    (0x7f13, &[H, H, Apc, U, U, U, U, U, U]),           // NtNotifyChangeDirectoryFile
     // FILE_SEGMENT_ELEMENT is 8 bytes in both layouts (PVOID64).
     (0x7f14, &[H, H, Apc, U, U, U, U, U, U]), // NtReadFileScatter
     (0x7f15, &[H, H, Apc, U, U, U, U, U, U]), // NtWriteFileGather
@@ -387,6 +393,12 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f21, &[Us, Us, Us, U, Oh]), // GalaLogonUser
     (0x7f22, &[U]),                 // NtAllocateLocallyUniqueId
     (0x7f24, &[Oh, U, Oa]),         // NtCreateDirectoryObject
+    // GENERIC_MAPPING is four ULONGs; the result is self-relative.
+    // GalaSession: ULONG64s are two words each; its records and outputs
+    // are fixed-width (a handle as a ULONG64).
+    (0x7fb0, &[U, Hi, U, U, Hi, U, Hi, U, Hi]), // GalaSession
+    (0x7f28, &[Sd, Sd, U, U, H, U, U, U, U]),   // GalaNewSecurityObject
+    (0x7f29, &[U, Sd, Sd, U, H, U, U, U, U]),   // GalaSetSecurityObject
     // Console: a mode and what to do with it; *Seen (a ULONG).
     (0x7f3f, &[U, U]), // GalaConsoleMode
     (0x7f40, &[U]),    // GalaConsoleCtrl
@@ -431,6 +443,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f71, &[U]),                      // GalaWinEventUnhook
     (0x7f72, &[U, U, Hi, U, U]),         // GalaWinEventNotify
     (0x7f73, &[U, U, U]),                // GalaWinEventTake
+    (0x7f74, &[U, U, U, U]),             // GalaTrayIcon
     // Window stations and desktops: their handles are kernel handles.
     (0x7fa0, &[U, U, U, U, U, Oh]), // GalaUserObjectOpen
     (0x7fa1, &[U, U, Oh]),          // GalaUserObjectConnection
@@ -438,11 +451,32 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7fa3, &[U, H]),              // GalaUserObjectClose
     (0x7fa4, &[H, U, U, U, U]),     // GalaUserObjectInformation
     (0x7fa5, &[H, U, U, U]),        // GalaUserObjectEnum
-    (0x7f4d, &[U, U]),              // GalaRandom
-    (0x7f90, &[H, H]),              // NtCompareObjects
-    (0x7f91, &[H]),                 // NtSuspendProcess
-    (0x7f92, &[H]),                 // NtResumeProcess
-    (0x7f93, &[Oh, U, Oa, Cid]),    // NtOpenThread
+    // The clipboard: hwnds are 64-bit values.
+    (0x7fc0, &[U, Hi]),            // GalaClipboardOpen
+    (0x7fc1, &[U]),                // GalaClipboardClose
+    (0x7fc2, &[]),                 // GalaClipboardEmpty
+    (0x7fc3, &[U, U, U, U, U]),    // GalaClipboardSet
+    (0x7fc4, &[U, U, U, U]),       // GalaClipboardGet
+    (0x7fc5, &[U]),                // GalaClipboardInfo
+    (0x7fc6, &[U, U, U]),          // GalaClipboardFormats
+    (0x7fc7, &[U, Hi, U]),         // GalaClipboardListener
+    (0x7fd0, &[U, Oh]),            // GalaScmOpen
+    (0x7fd1, &[H, U, U, U, Oh]),   // GalaServiceOpen
+    (0x7fd2, &[H, U, U, U, Oh]),   // GalaServiceCreate
+    (0x7fd3, &[H, U, U, U, U]),    // GalaServiceQuery
+    (0x7fd4, &[H, U, U, U, U, U]), // GalaServiceEnum
+    (0x7fd5, &[H, U, U, U]),       // GalaServiceControl
+    (0x7fd7, &[H, U, U, U]),       // GalaServiceConfigure
+    (0x7fd8, &[U, U, U, U, U]),    // GalaServiceDispatch
+    (0x7fe0, &[H, U, U]),          // GalaLxNode
+    (0x7fe1, &[U, U, Oh]),         // GalaLxSpawn
+    (0x7fe2, &[U, H, U, U, U]),    // GalaLxDistro
+    (0x7fe8, &[U, U, U, U, U]),    // GalaTasks
+    (0x7f4d, &[U, U]),             // GalaRandom
+    (0x7f90, &[H, H]),             // NtCompareObjects
+    (0x7f91, &[H]),                // NtSuspendProcess
+    (0x7f92, &[H]),                // NtResumeProcess
+    (0x7f93, &[Oh, U, Oa, Cid]),   // NtOpenThread
 ];
 
 /// The kinds of service `number`'s arguments, if it converts generically.

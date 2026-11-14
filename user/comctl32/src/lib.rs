@@ -4,7 +4,8 @@
 //! (`toolbar.rs`), the header (`header.rs`), the list view
 //! (`listview.rs`) and the tree view (`treeview.rs`), drawn in the Windows 11 style (`common.rs`); and image
 //! lists (`imagelist.rs`); window subclassing (`subclass.rs`); flat
-//! scroll bars (`flatsb.rs`).
+//! scroll bars (`flatsb.rs`); icons at the system metrics' sizes
+//! (`icons.rs`: LoadIconMetric, LoadIconWithScaleDown).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -16,6 +17,7 @@ mod common;
 mod drag;
 mod flatsb;
 mod header;
+mod icons;
 mod imagelist;
 mod layout;
 mod listview;

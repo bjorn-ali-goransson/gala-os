@@ -1,4 +1,5 @@
-//! Export forwarders: these kernel32 exports name ntdll's functions, as on
+//! Export forwarders: these kernel32 exports name ntdll's functions (some
+//! under ntdll's Rtl names: the SRW locks, InitOnceInitialize), as on
 //! Windows (the loader follows them; defining them here would shadow the
 //! ntdll imports of the same name). Those of the architecture built.
 //!
@@ -104,9 +105,13 @@ fn main() {
     // The x86 build (SysWOW64's kernel32) forwards what the 32-bit ntdll
     // has: x86 has no function tables or virtual unwinding.
     let forwarders: &[&str] = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("x86") => {
-            &["RtlPcToFileHeader", "RtlCaptureContext", "RtlUnwind", "VerSetConditionMask"]
-        }
+        Ok("x86") => &[
+            "RtlPcToFileHeader",
+            "RtlCaptureContext",
+            "RtlUnwind",
+            "VerSetConditionMask",
+            "RtlCaptureStackBackTrace",
+        ],
         _ => &[
             "RtlLookupFunctionEntry",
             "RtlVirtualUnwind",
@@ -124,6 +129,20 @@ fn main() {
     };
     for name in forwarders {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
+    }
+    // Renamed forwarders (both architectures): the SRW locks and
+    // InitOnceInitialize are ntdll's, as on Windows.
+    for (name, target) in [
+        ("InitializeSRWLock", "RtlInitializeSRWLock"),
+        ("AcquireSRWLockExclusive", "RtlAcquireSRWLockExclusive"),
+        ("AcquireSRWLockShared", "RtlAcquireSRWLockShared"),
+        ("ReleaseSRWLockExclusive", "RtlReleaseSRWLockExclusive"),
+        ("ReleaseSRWLockShared", "RtlReleaseSRWLockShared"),
+        ("TryAcquireSRWLockExclusive", "RtlTryAcquireSRWLockExclusive"),
+        ("TryAcquireSRWLockShared", "RtlTryAcquireSRWLockShared"),
+        ("InitOnceInitialize", "RtlRunOnceInitialize"),
+    ] {
+        println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{target}");
     }
 
     let mut res = Vec::new();

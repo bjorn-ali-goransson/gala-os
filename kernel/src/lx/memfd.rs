@@ -128,7 +128,9 @@ fn sealable(f: &Fd, adding: bool) -> core::result::Result<ramfs::NodeId, u16> {
         | Object::Socket(_)
         | Object::Unix(_)
         | Object::Epoll(_)
-        | Object::EventFd(_) => (None, true),
+        | Object::EventFd(_)
+        | Object::Pty(_)
+        | Object::Nt(_) => (None, true),
     };
     if adding && !writable {
         return Err(EPERM);

@@ -24,12 +24,16 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// mode instead of the caller's (gala's processes always do: the error
 /// mode is not inherited yet). NSIS uninstallers pass it.
 const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+/// NORMAL_PRIORITY_CLASS: the class a new process gets anyway (ODT's
+/// setup.exe passes it when it starts its copy).
+const NORMAL_PRIORITY_CLASS: u32 = 0x20;
 /// Flags that change nothing on gala (one console, no windows).
 const IGNORED_FLAGS: u32 = DETACHED_PROCESS
     | CREATE_NEW_CONSOLE
     | CREATE_NEW_PROCESS_GROUP
     | CREATE_NO_WINDOW
-    | CREATE_DEFAULT_ERROR_MODE;
+    | CREATE_DEFAULT_ERROR_MODE
+    | NORMAL_PRIORITY_CLASS;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 
 /// STARTUPINFOW (and STARTUPINFOA, the same layout) followed by
@@ -1442,4 +1446,92 @@ pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle
 #[unsafe(no_mangle)]
 pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
     fail_with(ERROR_NOT_SUPPORTED, FALSE)
+}
+
+/// GetThreadIOPendingFlag(thread, &pending): whether the thread has I/O
+/// requests outstanding: NtQueryInformationThread's ThreadIsIoPending
+/// (its socket, pipe and directory-watch requests not yet complete; file
+/// I/O completes inside its call).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadIOPendingFlag(thread: Handle, pending: *mut Bool) -> Bool {
+    if pending.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut value = 0u32;
+    // SAFETY: a ULONG buffer; ThreadIsIoPending (16).
+    let status = unsafe {
+        NtQueryInformationThread(thread, 16, (&raw mut value).cast(), 4, core::ptr::null_mut())
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    // SAFETY: the caller's BOOL.
+    unsafe { *pending = Bool::from(value != 0) };
+    TRUE
+}
+
+/// WinExec(lpCmdLine, uCmdShow): CreateProcessA of the command line with
+/// uCmdShow as the window's show state; then, as Microsoft documents, it
+/// waits (up to 30 s) for the program's first GetMessage through
+/// user32's WaitForInputIdle when user32 is loaded and has it. Above 31
+/// on success; else the error when it is below 32 (ERROR_FILE_NOT_FOUND,
+/// ERROR_PATH_NOT_FOUND, ...), ERROR_BAD_FORMAT for the others, 0 out of
+/// memory.
+#[unsafe(no_mangle)]
+pub extern "system" fn WinExec(command_line: *const u8, show: u32) -> u32 {
+    const STARTF_USESHOWWINDOW: u32 = 1;
+    const ERROR_BAD_FORMAT: u32 = 11;
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    if command_line.is_null() {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    // CreateProcessA may write to the command line: a copy.
+    let mut line = [0u8; 2048];
+    // SAFETY: the caller's NUL-terminated command line.
+    let n = unsafe { super::strlen(command_line) };
+    if n >= line.len() {
+        unsupported(b"kernel32.dll!WinExec(command line length)", n as u64);
+        return ERROR_BAD_FORMAT;
+    }
+    // SAFETY: n bytes of the caller's string into our larger buffer.
+    unsafe { core::ptr::copy_nonoverlapping(command_line, line.as_mut_ptr(), n) };
+    // SAFETY: an all-zero STARTUPINFO is a valid bit pattern.
+    let mut startup: StartupInfoEx = unsafe { core::mem::zeroed() };
+    startup.cb = STARTUPINFO_SIZE as u32;
+    startup.flags = STARTF_USESHOWWINDOW;
+    startup.show_window = show as u16;
+    // PROCESS_INFORMATION: hProcess, hThread, dwProcessId, dwThreadId.
+    let mut info = [0usize; 4];
+    let created = CreateProcessA(
+        core::ptr::null(),
+        line.as_mut_ptr(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        FALSE,
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null(),
+        (&raw const startup).cast(),
+        info.as_mut_ptr(),
+    );
+    if created == FALSE {
+        return match GetLastError() {
+            ERROR_NOT_ENOUGH_MEMORY => 0,
+            e if e < 32 => e,
+            _ => ERROR_BAD_FORMAT,
+        };
+    }
+    let (process, thread) = (info[0] as Handle, info[1] as Handle);
+    type WaitForInputIdle = unsafe extern "system" fn(Handle, u32) -> u32;
+    let user32 = super::mapping::GetModuleHandleA(c"user32.dll".as_ptr().cast());
+    if !user32.is_null() {
+        let wait = super::GetProcAddress(user32, c"WaitForInputIdle".as_ptr().cast());
+        if !wait.is_null() {
+            // SAFETY: user32's WaitForInputIdle, by its documented type.
+            unsafe { core::mem::transmute::<*mut c_void, WaitForInputIdle>(wait)(process, 30_000) };
+        }
+    }
+    CloseHandle(thread);
+    CloseHandle(process);
+    33
 }

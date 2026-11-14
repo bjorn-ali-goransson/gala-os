@@ -12,6 +12,13 @@
 //!   stack); the handler unwinds to its frame (RtlUnwind, with ebx, esi,
 //!   edi and ebp saved around it: Windows' does not preserve them) and
 //!   resumes there. A read of address 0x10: parameters (0, 0x10).
+//! - While a handler runs, fs:[0] is not the program's: the dispatcher
+//!   has linked a registration of its own (below the faulting context's
+//!   stack pointer, its Next the program's newest registration), as x86
+//!   Windows calls every handler (Pietrek's "A Crash Course on the Depths
+//!   of Win32 Structured Exception Handling": the nested-exception frame).
+//!   Microsoft's C++ runtime relies on it: its catch saves that head,
+//!   unwinds and links it back above the catching frame.
 //! - A frame whose handler returns ExceptionContinueSearch under one that
 //!   handles: the inner handler is called to dispatch, then once with
 //!   EXCEPTION_UNWINDING by the outer handler's RtlUnwind; fs:[0] is back
@@ -205,6 +212,9 @@ static SEARCHED: AtomicU32 = AtomicU32::new(0);
 static UNWOUND: AtomicU32 = AtomicU32::new(0);
 /// Calls of `catch_handler` (dispatch only).
 static CAUGHT: AtomicU32 = AtomicU32::new(0);
+/// What `catch_handler` last saw of fs:[0]: the head, its Next, and the
+/// establisher frame it was called for.
+static HEAD: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
 
 fn rd(addr: usize) -> u32 {
     // SAFETY: the callers read the record and context the dispatcher
@@ -222,6 +232,10 @@ unsafe extern "C" fn catch_handler(record: usize, frame: usize, context: usize, 
         return 1; // ExceptionContinueSearch
     }
     CAUGHT.fetch_add(1, Ordering::SeqCst);
+    let head = teb_field(0);
+    for (s, v) in HEAD.iter().zip([head as u32, rd(head), frame as u32]) {
+        s.store(v, Ordering::SeqCst);
+    }
     let fields = [
         rd(record),
         rd(record + 4),
@@ -373,6 +387,12 @@ fn run() -> Result<(), u32> {
     c.eq(seen(9), 0x1234_5678)?;
     c.ok(seen(10) > stack_limit && seen(10) < stack_base, seen(10))?;
     c.eq(teb_field(0) as u32, list as u32)?;
+    // The handler ran under the dispatcher's own registration, linked
+    // above the program's frame (deeper on the stack than the fault).
+    let [head, next, frame] = HEAD.each_ref().map(|h| h.load(Ordering::SeqCst));
+    c.ok(head != frame, head)?;
+    c.eq(next, frame)?;
+    c.ok(head < seen(10) && head > stack_limit, head)?;
     // A read.
     // SAFETY: as above.
     c.eq(unsafe { gala_seh_try(gala_read_low, 0) }, STATUS_ACCESS_VIOLATION)?;

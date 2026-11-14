@@ -11,4 +11,3 @@ test = false
 bench = false
 
 [dependencies]
-gala_stubs = { path = "../gala_stubs" }

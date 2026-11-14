@@ -236,9 +236,25 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
     if sig > u64::from(abi::NSIG) {
         return Err(EINVAL);
     }
-    if pid <= 0 {
+    if pid == -1 {
         ledger::record("kill", "linux option missing", pid as u64);
         return Err(errno::ESRCH);
+    }
+    if pid <= 0 {
+        // A process group: the caller's (0) or -pid's (lx::session).
+        let pgid = if pid == 0 {
+            call.lx.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        } else {
+            u64::from(pid.unsigned_abs())
+        };
+        let pids = super::session::group_pids(pgid);
+        if pids.is_empty() {
+            return Err(errno::ESRCH);
+        }
+        for p in pids {
+            kill_call(call, p, sig)?;
+        }
+        return Ok(0);
     }
     let target = super::state::get(pid as u64).ok_or(errno::ESRCH)?;
     if sig == 0 {
@@ -258,6 +274,28 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
         return Ok(0);
     }
     raise_for(&target, pid as u64, 0, info, Target::Process);
+    Ok(0)
+}
+
+/// Signal `sig` (1 to NSIG) for Linux process `target` from `sender`, a
+/// process of either personality (the task manager's End task, ROADMAP
+/// TM): as kill(2) from a program of the sender's token (si_code
+/// SI_USER, the sender's pid and uid). ESRCH when `target` has no Linux
+/// state (not a Linux process, or already ended). The caller checks the
+/// permission.
+pub fn signal_from(sender: &Process, target: &KArc<Process>, sig: u32) -> Result {
+    let lx = super::state::get(target.id).ok_or(errno::ESRCH)?;
+    let info = Siginfo::from_process(
+        sig as i32,
+        abi::SI_USER,
+        sender.id as i32,
+        super::identity::of_process(sender).uid,
+    );
+    if sig == abi::SIGKILL {
+        kill(target, 0, sig, &info);
+    } else {
+        raise_for(&lx, target.id, 0, info, Target::Process);
+    }
     Ok(0)
 }
 

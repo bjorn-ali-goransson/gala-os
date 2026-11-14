@@ -47,6 +47,10 @@ impl Context {
         Ok(Context { sp: 0 })
     }
 
+    pub fn saved_sp(&self) -> u64 {
+        self.sp
+    }
+
     pub fn new_thread(
         _stack: &KernelStack,
         _entry: extern "C" fn() -> !,

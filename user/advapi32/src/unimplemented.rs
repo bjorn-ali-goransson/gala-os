@@ -5,10 +5,7 @@
 gala_stubs::unimplemented_exports!("advapi32.dll":
     ChangeServiceConfigA
     ChangeServiceConfigW
-    CloseServiceHandle
-    ControlService
     ControlTraceW
-    CreateServiceA
     CryptContextAddRef
     CryptEncrypt
     CryptGetHashParam
@@ -16,33 +13,17 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     CryptImportKey
     CryptSetProvParam
     DeleteAce
-    DeleteService
     EnableTrace
     EnumDependentServicesW
     EnumerateTraceGuids
-    GetSidLengthRequired
     LockServiceDatabase
     LogonUserExW
     LookupAccountSidA
-    OpenSCManagerA
-    OpenSCManagerW
-    OpenServiceA
-    OpenServiceW
     QueryAllTracesW
-    QueryServiceConfigA
-    QueryServiceConfigW
-    QueryServiceStatus
-    QueryServiceStatusEx
     RegConnectRegistryW
     RegCopyTreeW
-    RegisterServiceCtrlHandlerA
-    RegisterServiceCtrlHandlerExW
-    RegisterServiceCtrlHandlerW
     SetEntriesInAclA
     SetServiceBits
-    SetServiceStatus
-    StartServiceA
-    StartServiceW
     StartTraceW
     UnlockServiceDatabase
     CredDeleteW

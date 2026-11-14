@@ -12,39 +12,26 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     UpdateResourceW
     CancelSynchronousIo
     CheckTokenMembershipEx
-    CompareStringA
     ConvertThreadToFiber
     CreateFiber
     CreateFileMappingNumaW
-    CreateHardLinkA
-    CreateMutexExW
     EnumResourceLanguagesA
     FindFirstChangeNotificationW
     FindNextChangeNotification
-    GetCurrencyFormatEx
-    GetCurrencyFormatW
     GetNamedPipeHandleStateA
     GetNamedPipeInfo
     GetNumaNodeProcessorMaskEx
-    GetNumberFormatEx
-    GetNumberFormatW
-    GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
     GetTapePosition
     GetTapeStatus
-    GetThreadIOPendingFlag
-    GetVolumePathNamesForVolumeNameW
     GlobalMemoryStatus
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
-    OpenSemaphoreW
     PrepareTape
-    QueueUserWorkItem
     ReadConsoleOutputA
     RemoveDirectoryA
-    ResolveLocaleName
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
     SetFileValidData
@@ -58,8 +45,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WaitNamedPipeW
     WriteConsoleOutputA
     WriteTapemark
-    AllocConsole
-    AttachConsole
     ClearCommBreak
     ClearCommError
     CopyFileA
@@ -67,7 +52,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateTapePartition
     EraseTape
     EscapeCommFunction
-    FoldStringW
     GetBinaryTypeW
     GetCommModemStatus
     GetCommState
@@ -76,7 +60,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNamedPipeClientProcessId
     GetNumberOfConsoleMouseButtons
     IdnToUnicode
-    IsBadStringPtrA
     PurgeComm
     ReadConsoleOutputW
     ScrollConsoleScreenBufferW
@@ -90,8 +73,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleInputW
     WriteConsoleOutputW
     EnumResourceNamesW
-    GetDiskFreeSpaceA
-    IsBadReadPtr
     ReadConsoleOutputCharacterA
     // Inno Setup's Setup (Delphi's VCL) imports these.
 );

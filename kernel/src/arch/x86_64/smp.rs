@@ -53,6 +53,24 @@ static CPU_ROOT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS]
 /// Set once per-CPU blocks exist on the boot CPU and APs may run.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Vector of the IPI that stops the other CPUs while the kernel's code is
+/// patched (`stop_others`: a hot swap, ROADMAP SN step 1e).
+pub const STOP_VECTOR: u8 = 0x34;
+
+/// `stop_others`: the stop in progress (its generation; 0: none), the
+/// CPUs stopped in it, and the stack pointer each had there.
+static STOP_ACTIVE: AtomicU64 = AtomicU64::new(0);
+static STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
+static STOPPED: AtomicU64 = AtomicU64::new(0);
+static STOP_SP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Each CPU's interrupt stacks (double fault, NMI, machine check) as
+/// (lowest address, top) pairs, and an AP's own stack's top (the stack
+/// its idle thread runs on), for a hot swap's stack scan.
+static INTERRUPT_STACKS: [[AtomicU64; 6]; MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; 6] }; MAX_CPUS];
+static AP_STACK_TOP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
 /// Shootdowns that had to interrupt other CPUs, and IPIs sent for them.
 static SHOOTDOWNS: AtomicU64 = AtomicU64::new(0);
 static FLUSH_IPIS: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +225,107 @@ fn on_flush_ipi(_: &mut interrupts::TrapFrame) {
     apic::eoi();
 }
 
+fn record_interrupt_stacks(cpu: usize, ranges: [(u64, u64); 3]) {
+    for (i, (low, top)) in ranges.into_iter().enumerate() {
+        INTERRUPT_STACKS[cpu][2 * i].store(low, Ordering::Relaxed);
+        INTERRUPT_STACKS[cpu][2 * i + 1].store(top, Ordering::Release);
+    }
+}
+
+/// CPU `cpu`'s interrupt stacks (double fault, NMI, machine check) as
+/// `(lowest address, top)`; zeros for a CPU that never came online.
+pub fn interrupt_stacks(cpu: usize) -> [(u64, u64); 3] {
+    let s = &INTERRUPT_STACKS[cpu.min(MAX_CPUS - 1)];
+    core::array::from_fn(|i| {
+        (s[2 * i].load(Ordering::Relaxed), s[2 * i + 1].load(Ordering::Acquire))
+    })
+}
+
+/// The top of the stack AP `cpu` started on (its idle thread's); 0 for
+/// the boot CPU or an AP that never came online.
+pub fn ap_stack_top(cpu: usize) -> u64 {
+    AP_STACK_TOP.get(cpu).map_or(0, |t| t.load(Ordering::Acquire))
+}
+
+/// A CPU stopped by `stop_others`: records its stack pointer and waits,
+/// interrupts off, until the stop ends; then serializes (the code may have
+/// changed under it) and goes on.
+fn on_stop_ipi(_: &mut interrupts::TrapFrame) {
+    apic::eoi();
+    let generation = STOP_ACTIVE.load(Ordering::Acquire);
+    if generation == 0 {
+        // A stop that ended (or gave up) before this CPU took the IPI.
+        return;
+    }
+    let me = percpu::cpu_index() as usize;
+    STOP_SP[me].store(super::hotpatch::current_sp(), Ordering::Relaxed);
+    STOPPED.fetch_or(1 << me, Ordering::AcqRel);
+    while STOP_ACTIVE.load(Ordering::Acquire) == generation {
+        core::hint::spin_loop();
+    }
+    super::hotpatch::serialize();
+    STOPPED.fetch_and(!(1 << me), Ordering::AcqRel);
+}
+
+/// Why `stop_others` gave up: the CPUs (mask) that did not stop in time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotStopped(pub u64);
+
+/// Stops every other online CPU (an IPI: each records its stack pointer
+/// and spins with interrupts off), runs `f` with every CPU's stack
+/// pointer (this one's too) while no other CPU runs anything else, then
+/// lets them go; each serializes before it goes on. Interrupts are off
+/// on this CPU meanwhile. A CPU takes the IPI only with interrupts on, so
+/// none is stopped holding an `IrqMutex`: `f` may take one (and must not
+/// wait on anything another CPU would do). `expired` bounds the wait for
+/// the others; then none is left stopped and the CPUs that did not come
+/// are named.
+pub fn stop_others<R>(
+    expired: impl Fn() -> bool,
+    f: impl FnOnce(&[u64; MAX_CPUS]) -> R,
+) -> Result<R, NotStopped> {
+    let restore = cpu::disable_interrupts();
+    let me = percpu::cpu_index() as usize;
+    let others = online_mask() & !(1 << me);
+    let generation = STOP_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    STOP_ACTIVE.store(generation, Ordering::Release);
+    for c in (0..MAX_CPUS).filter(|c| others & (1 << c) != 0) {
+        apic::send_ipi(APIC_IDS[c].load(Ordering::Relaxed), STOP_VECTOR);
+    }
+    let mut all = false;
+    loop {
+        if STOPPED.load(Ordering::Acquire) & others == others {
+            all = true;
+            break;
+        }
+        if expired() {
+            break;
+        }
+        // A CPU waiting for this one's TLB flush (interrupts off) takes
+        // the stop once it is served.
+        serve_flush(me);
+        core::hint::spin_loop();
+    }
+    let result = if all {
+        let mut sps = [0u64; MAX_CPUS];
+        for (c, sp) in sps.iter_mut().enumerate() {
+            *sp = STOP_SP[c].load(Ordering::Relaxed);
+        }
+        sps[me] = super::hotpatch::current_sp();
+        Ok(f(&sps))
+    } else {
+        Err(NotStopped(others & !STOPPED.load(Ordering::Acquire)))
+    };
+    STOP_ACTIVE.store(0, Ordering::Release);
+    while STOPPED.load(Ordering::Acquire) & others != 0 {
+        core::hint::spin_loop();
+    }
+    if restore {
+        cpu::enable_interrupts();
+    }
+    result
+}
+
 /// Where an AP goes once it is set up (the scheduler's per-CPU start).
 static AP_MAIN: AtomicU64 = AtomicU64::new(0);
 
@@ -323,6 +442,10 @@ extern "C" fn ap_main(start: &'static ApStart) -> ! {
         let tss = gdt::load(start.tables, start.ist_tops);
         percpu::init(start.percpu, start.index, tss);
     }
+    let size = (super::context::STACK_PAGES as u64) * crate::mm::PAGE_SIZE;
+    let i = start.index as usize;
+    record_interrupt_stacks(i, start.ist_tops.map(|top| (top - size, top)));
+    AP_STACK_TOP[i].store(start.stack_top, Ordering::Release);
     cpu::enable_sse();
     interrupts::load();
     syscall::init_cpu();
@@ -378,6 +501,8 @@ pub fn init_bsp() {
     APIC_IDS[0].store(apic::id(), Ordering::Relaxed);
     interrupts::set_handler(RESCHEDULE_VECTOR, |_| apic::eoi());
     interrupts::set_handler(TLB_FLUSH_VECTOR, on_flush_ipi);
+    interrupts::set_handler(STOP_VECTOR, on_stop_ipi);
+    record_interrupt_stacks(0, gdt::bsp_interrupt_stacks());
     super::handover::init();
     if has_rdtscp() {
         // SAFETY: see `ap_main`.

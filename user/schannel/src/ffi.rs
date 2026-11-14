@@ -5,14 +5,22 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, block: *mut u8) -> i32;
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -84,9 +92,10 @@ pub struct SecHandle {
     pub upper: usize,
 }
 
-/// Tags in SecHandle.dwUpper (secur32 forwards handles with these).
-pub const CREDENTIAL_TAG: usize = 0x6761_6c61_5343_4843; // "galaSCHC"
-pub const CONTEXT_TAG: usize = 0x6761_6c61_5343_4858; // "galaSCHX"
+/// Tags in SecHandle.dwUpper (secur32 forwards handles with these; a
+/// ULONG_PTR, so their low half on x86).
+pub const CREDENTIAL_TAG: usize = 0x6761_6c61_5343_4843_u64 as usize; // "galaSCHC"
+pub const CONTEXT_TAG: usize = 0x6761_6c61_5343_4858_u64 as usize; // "galaSCHX"
 
 /// The state behind a handle with `tag`, if `handle` is one.
 pub fn state<'a, T>(handle: *const SecHandle, tag: usize) -> Option<&'a mut T> {

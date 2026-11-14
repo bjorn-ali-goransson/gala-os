@@ -52,7 +52,7 @@ struct DmaRegion {
 impl DmaRegion {
     fn new(bytes: usize) -> Option<Self> {
         let pages = bytes.div_ceil(PAGE) as u64;
-        let start = crate::mm::allocate_frames(pages, 1)?;
+        let start = crate::mm::allocate_frames(pages, 1, crate::mm::Use::Device)?;
         let region = Self { start, pages };
         // SAFETY: freshly allocated frames, HHDM-mapped, owned by `region`.
         unsafe { region.ptr(0).write_bytes(0, region.len()) };

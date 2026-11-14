@@ -23,7 +23,8 @@
 //!   element), as do cycles and more than `MAX_ELEMENTS`.
 //! - **Checks**: validity at pTime (or now) on every element; each
 //!   signature by the next element's key (CERT_TRUST_IS_NOT_SIGNATURE_VALID
-//!   on the signed one; RSA and ECDSA P-256/P-384 through bcrypt); the
+//!   on the signed one, with the failed step in the ledger:
+//!   `record_signature_failure`; RSA and ECDSA P-256/P-384 through bcrypt); the
 //!   root's presence in the trusted store (CERT_TRUST_IS_UNTRUSTED_ROOT);
 //!   basic constraints (CA, path length; v1/v2 certificates count as CAs
 //!   only from the engine's own stores) and keyCertSign; critical
@@ -51,19 +52,25 @@
 //!   ledger as `crypt32.dll!<policy>: <error>` (kind "other") with the
 //!   chain's error bits as detail: why a program refused a certificate.
 //!
-//! Layouts (x64) as wincrypt.h gives them: CERT_CHAIN_CONTEXT (72
-//! bytes), CERT_SIMPLE_CHAIN (40), CERT_CHAIN_ELEMENT (56),
-//! CERT_CHAIN_PARA (32 without its later fields, 96), CERT_CHAIN_ENGINE_CONFIG
-//! (64, 80 or 88), CERT_CHAIN_POLICY_STATUS (24).
+//! Layouts as wincrypt.h gives them, typed for both widths (x86 and
+//! x64, checked against the header's sizes: `layout`):
+//! CERT_CHAIN_CONTEXT (56 or 72 bytes), CERT_SIMPLE_CHAIN (32 or 40),
+//! CERT_CHAIN_ELEMENT (32 or 56); the caller's CERT_CHAIN_PARA,
+//! CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_POLICY_PARA and _STATUS and
+//! SSL_EXTRA_CERT_CHAIN_POLICY_PARA in `layout`.
 
 use core::ffi::c_void;
+
+use crate::layout::{
+    AuthenticodeExtraPara, ChainPara, ENGINE_CONFIG_SIZES, EngineConfig, EnhKeyUsage, PolicyPara,
+    PolicyStatus, SslExtraPara, UsageMatch, get, has,
+};
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use super::cert::{
     BIT_STRING, BOOLEAN, CertContext, CertDuplicateCertificateContext, CertFreeCertificateContext,
-    CertGetCertificateContextProperty, CertInfo, CertVerifyTimeValidity,
-    CryptVerifyCertificateSignatureEx, Der, INTEGER, OID, SEQUENCE, SET, c_text, extension_value,
-    oid_text,
+    CertGetCertificateContextProperty, CertInfo, CertVerifyTimeValidity, Der, INTEGER, OID,
+    SEQUENCE, SET, SignatureFailure, c_text, extension_value, oid_text, verify_signature,
 };
 use super::store::{
     CertAddStoreToCollection, CertCloseStore, CertDuplicateStore, CertFindCertificateInStore,
@@ -71,14 +78,22 @@ use super::store::{
 };
 use super::{SetLastError, crl};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -164,6 +179,15 @@ pub struct ChainContext {
     create_flags: u32,
     id: [u8; 16],
 }
+
+crate::layout::check!(core::mem::size_of::<TrustStatus>(), 8, 8);
+crate::layout::check!(core::mem::size_of::<Element>(), 32, 56);
+crate::layout::check!(core::mem::offset_of!(Element, extended), 28, 48);
+crate::layout::check!(core::mem::size_of::<SimpleChain>(), 32, 40);
+crate::layout::check!(core::mem::offset_of!(SimpleChain, freshness), 28, 36);
+crate::layout::check!(core::mem::size_of::<ChainContext>(), 56, 72);
+crate::layout::check!(core::mem::offset_of!(ChainContext, create_flags), 36, 48);
+crate::layout::check!(core::mem::offset_of!(ChainContext, id), 40, 52);
 
 const CHAIN_MAGIC: u32 = 0x6761_6c6e; // "galn"
 
@@ -300,17 +324,15 @@ fn engine<'a>(h: *mut c_void) -> Option<&'a Engine> {
     (e.magic == ENGINE_MAGIC).then_some(e)
 }
 
-/// CERT_CHAIN_ENGINE_CONFIG: cbSize, hRestrictedRoot (8),
-/// hRestrictedTrust (16), hRestrictedOther (24), cAdditionalStore (32),
-/// rghAdditionalStore (40), dwFlags (48), ..., hExclusiveRoot (64),
-/// hExclusiveTrustedPeople (72), dwExclusiveFlags (80).
-fn read<T: Copy>(p: *const u8, at: usize) -> T {
-    // SAFETY: inside the caller's structure (its size checked).
-    unsafe { p.add(at).cast::<T>().read_unaligned() }
+/// The cbSize a caller's structure starts with.
+fn size_of_caller(p: *const u8) -> u32 {
+    // SAFETY: every structure read so starts with its DWORD cbSize.
+    unsafe { p.cast::<u32>().read_unaligned() }
 }
 
 /// CertCreateCertificateChainEngine: an engine whose roots are
-/// hExclusiveRoot (CERT_CHAIN_ENGINE_CONFIG of 80 or 88 bytes), else
+/// hExclusiveRoot (a CERT_CHAIN_ENGINE_CONFIG with it: 48 or 52 bytes on
+/// x86, 80 or 88 on x64), else
 /// hRestrictedRoot, else the ROOT store, searching rghAdditionalStore for
 /// issuers too. Other sizes are E_INVALIDARG; hRestrictedTrust,
 /// hRestrictedOther, hExclusiveTrustedPeople and dwExclusiveFlags are
@@ -325,20 +347,35 @@ pub extern "system" fn CertCreateCertificateChainEngine(
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let size: u32 = read(config, 0);
-    if !matches!(size, 64 | 80 | 88) {
+    let size = size_of_caller(config);
+    if !ENGINE_CONFIG_SIZES.contains(&(size as usize)) {
         // SAFETY: plain call.
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let restricted_root: *mut c_void = read(config, 8);
-    let others: [*mut c_void; 2] = [read(config, 16), read(config, 24)];
-    let count: u32 = read(config, 32);
-    let stores: *const *mut c_void = read(config, 40);
+    let restricted_root = get!(config, EngineConfig, restricted_root);
+    let others = [
+        get!(config, EngineConfig, restricted_trust),
+        get!(config, EngineConfig, restricted_other),
+    ];
+    let count = get!(config, EngineConfig, additional_count);
+    let stores = get!(config, EngineConfig, additional);
     let (exclusive_root, people, exclusive_flags): (*mut c_void, *mut c_void, u32) = (
-        if size >= 80 { read(config, 64) } else { core::ptr::null_mut() },
-        if size >= 80 { read(config, 72) } else { core::ptr::null_mut() },
-        if size >= 88 { read(config, 80) } else { 0 },
+        if has!(size, EngineConfig, exclusive_root) {
+            get!(config, EngineConfig, exclusive_root)
+        } else {
+            core::ptr::null_mut()
+        },
+        if has!(size, EngineConfig, exclusive_trusted_people) {
+            get!(config, EngineConfig, exclusive_trusted_people)
+        } else {
+            core::ptr::null_mut()
+        },
+        if has!(size, EngineConfig, exclusive_flags) {
+            get!(config, EngineConfig, exclusive_flags)
+        } else {
+            0
+        },
     );
     if others.iter().any(|s| !s.is_null()) || !people.is_null() || exclusive_flags != 0 {
         unsupported(
@@ -465,19 +502,14 @@ fn holds(store: *mut c_void, c: *const CertContext) -> bool {
     true
 }
 
-/// Whether `subject`'s signature verifies with `issuer`'s key.
-fn signed_by(subject: *const CertContext, issuer: *const CertContext) -> bool {
-    let ok = CryptVerifyCertificateSignatureEx(
-        0,
-        1,
-        2, // CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT
-        subject.cast(),
-        2, // CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT
-        issuer.cast(),
-        0,
-        core::ptr::null(),
-    );
-    ok != 0
+/// Whether `subject`'s signature verifies with `issuer`'s key, or the
+/// step that failed.
+fn signed_by(
+    subject: *const CertContext,
+    issuer: *const CertContext,
+) -> Result<(), SignatureFailure> {
+    // CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT, _ISSUER_CERT.
+    verify_signature(2, subject.cast(), 2, issuer.cast())
 }
 
 /// Basic constraints: Ok(None) without the extension, Ok(Some((cA,
@@ -567,8 +599,9 @@ fn usage_ok(c: *const CertContext, requested: &[&[u8]], and: bool) -> bool {
 struct Built {
     certs: [*const CertContext; MAX_ELEMENTS],
     status: [TrustStatus; MAX_ELEMENTS],
-    /// Element i's signature verifies with element i + 1's key.
-    signed: [bool; MAX_ELEMENTS],
+    /// Element i's signature verifies with element i + 1's key, or the
+    /// step that failed.
+    signed: [Result<(), SignatureFailure>; MAX_ELEMENTS],
     n: usize,
     /// The chain-level errors (CERT_TRUST_IS_PARTIAL_CHAIN).
     chain_error: u32,
@@ -582,11 +615,12 @@ fn find_issuer(
     subject: *const CertContext,
     time: u64,
     chain: &[*const CertContext],
-) -> Option<(*const CertContext, u32, bool)> {
+) -> Option<(*const CertContext, u32, Result<(), SignatureFailure>)> {
     const CERT_FIND_SUBJECT_NAME: u32 = 0x2_0007;
     let issuer_name = &info(subject).issuer as *const super::cert::Blob;
     let aki = authority_key_id(subject);
-    let mut best: Option<(*const CertContext, u32, bool, u32)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut best: Option<(*const CertContext, u32, Result<(), SignatureFailure>, u32)> = None;
     let mut c = core::ptr::null();
     loop {
         // The enumeration frees the previous candidate.
@@ -603,7 +637,7 @@ fn find_issuer(
         let sig = signed_by(subject, c);
         let trusted = self_signed(c).is_some() && holds(e.root, c);
         let valid = CertVerifyTimeValidity(&time, info(c)) == 0;
-        let score = u32::from(sig) * 8
+        let score = u32::from(sig.is_ok()) * 8
             + u32::from(key_match || aki.is_none()) * 4
             + u32::from(trusted) * 2
             + u32::from(valid);
@@ -622,7 +656,7 @@ fn build(e: &Engine, cert: *const CertContext, time: u64, additional: *mut c_voi
     let mut b = Built {
         certs: [core::ptr::null(); MAX_ELEMENTS],
         status: [TrustStatus::default(); MAX_ELEMENTS],
-        signed: [false; MAX_ELEMENTS],
+        signed: [Ok(()); MAX_ELEMENTS],
         n: 1,
         chain_error: 0,
     };
@@ -681,8 +715,11 @@ fn check(e: &Engine, b: &mut Built, time: u64) {
         if CertVerifyTimeValidity(&time, info(c)) != 0 {
             status.error |= IS_NOT_TIME_VALID;
         }
-        if i + 1 < n && !b.signed[i] {
+        if i + 1 < n
+            && let Err(f) = b.signed[i]
+        {
             status.error |= IS_NOT_SIGNATURE_VALID;
+            record_signature_failure(i, f);
         }
         let is_root = i == n - 1 && !partial;
         let constraints = basic_constraints(c);
@@ -727,17 +764,15 @@ fn check(e: &Engine, b: &mut Built, time: u64) {
     }
 }
 
-/// CERT_CHAIN_PARA's RequestedUsage (cbSize at least 32): its type and
-/// OID strings.
+/// CERT_CHAIN_PARA's RequestedUsage (a cbSize that covers it): its type
+/// and OID strings.
 fn requested_usage<'a>(para: *const u8) -> (bool, [&'a [u8]; 8], usize) {
     let mut ids: [&[u8]; 8] = [&[]; 8];
-    let size: u32 = read(para, 0);
-    if size < 32 {
+    if !has!(size_of_caller(para), ChainPara, requested) {
         return (false, ids, 0);
     }
-    let kind: u32 = read(para, 8);
-    let count: u32 = read(para, 16);
-    let list: *const *const u8 = read(para, 24);
+    let UsageMatch { kind, usage: EnhKeyUsage { count, ids: list } } =
+        get!(para, ChainPara, requested);
     let n = (count as usize).min(ids.len());
     if list.is_null() {
         return (false, ids, 0);
@@ -749,7 +784,11 @@ fn requested_usage<'a>(para: *const u8) -> (bool, [&'a [u8]; 8], usize) {
     (kind == 0, ids, n) // USAGE_MATCH_TYPE_AND is 0
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
@@ -910,6 +949,8 @@ const CERT_E_CN_NO_MATCH: u32 = 0x800b_010f;
 const CERT_E_WRONG_USAGE: u32 = 0x800b_0110;
 const CERT_E_INVALID_NAME: u32 = 0x800b_0114;
 const TRUST_E_CERT_SIGNATURE: u32 = 0x8009_6004;
+const CERT_E_REVOKED: u32 = 0x800b_010c;
+const CERT_E_REVOCATION_FAILURE: u32 = 0x800b_010e;
 const TRUST_E_BASIC_CONSTRAINTS: u32 = 0x8009_6019;
 const CRYPT_E_REVOKED: u32 = 0x8009_2010;
 const CRYPT_E_NO_REVOCATION_CHECK: u32 = 0x8009_2012;
@@ -1152,12 +1193,12 @@ fn name_matches(c: *const CertContext, name: &[u8]) -> bool {
 /// server-gated-crypto usage; AUTHTYPE_CLIENT: clientAuth), then the
 /// server name.
 fn ssl_checks(b: &ChainBlock, extra: *const u8) -> Verdict {
-    if extra.is_null() || read::<u32>(extra, 0) < 24 {
+    if extra.is_null() || !has!(size_of_caller(extra), SslExtraPara, server_name) {
         return PASS;
     }
-    let auth: u32 = read(extra, 4);
-    let checks: u32 = read(extra, 8);
-    let server: *const u16 = read(extra, 16);
+    let auth = get!(extra, SslExtraPara, auth_type);
+    let checks = get!(extra, SslExtraPara, checks);
+    let server = get!(extra, SslExtraPara, server_name);
     let end = b.elements[0].cert;
     if checks & SSL_IGNORE_WRONG_USAGE == 0 {
         let wanted: &[&[u8]] = match auth {
@@ -1182,6 +1223,24 @@ fn ssl_checks(b: &ChainBlock, extra: *const u8) -> Verdict {
 }
 
 /// The name of a policy error, for the ledger.
+/// Records why element `index`'s signature did not verify with its
+/// issuer's key (CertGetCertificateChain's CERT_TRUST_IS_NOT_SIGNATURE_VALID):
+/// `crypt32.dll!chain element <i>: <step>` in the ledger, the step's
+/// status as detail (BCryptVerifySignature's 0xc000a000 for a signature
+/// that does not match; anything else means the check itself failed).
+fn record_signature_failure(index: usize, f: SignatureFailure) {
+    let mut text = [0u8; 96];
+    let mut n = 0;
+    let digit = [b'0' + (index % 10) as u8];
+    for part in [&b"crypt32.dll!chain element "[..], &digit, b": ", f.step] {
+        let part = &part[..part.len().min(text.len() - n)];
+        text[n..n + part.len()].copy_from_slice(part);
+        n += part.len();
+    }
+    // SAFETY: a valid buffer; 5 is the ledger's "other".
+    unsafe { GalaRecordMissing(text.as_ptr(), n, 5, f.status.into()) };
+}
+
 fn error_name(code: u32) -> &'static [u8] {
     match code {
         CERT_E_EXPIRED => b"CERT_E_EXPIRED",
@@ -1196,15 +1255,93 @@ fn error_name(code: u32) -> &'static [u8] {
         CRYPT_E_REVOKED => b"CRYPT_E_REVOKED",
         CRYPT_E_REVOCATION_OFFLINE => b"CRYPT_E_REVOCATION_OFFLINE",
         CRYPT_E_NO_REVOCATION_CHECK => b"CRYPT_E_NO_REVOCATION_CHECK",
+        CERT_E_REVOKED => b"CERT_E_REVOKED",
+        CERT_E_REVOCATION_FAILURE => b"CERT_E_REVOCATION_FAILURE",
         _ => b"?",
     }
 }
 
-/// CertVerifyCertificateChainPolicy: CERT_CHAIN_POLICY_BASE (1), SSL (4)
-/// and BASIC_CONSTRAINTS (5); AUTHENTICODE (2), AUTHENTICODE_TS (3),
-/// NT_AUTH (6), MICROSOFT_ROOT (7), EV (8) and SSL_F12 (9) are checked as
-/// BASE (SSL_F12 as SSL) and recorded; a policy named by an OID string
-/// is recorded and fails (CRYPT_E_NOT_FOUND).
+/// AUTHENTICODE_EXTRA_CERT_CHAIN_POLICY_PARA's dwRegPolicySettings: the
+/// Software Publishing state's WTPF_IGNOREREVOKATION and WTPF_OFFLINEOK_*
+/// (an unknown or offline revocation status is acceptable).
+const WTPF_IGNOREREVOKATION: u32 = 0x200;
+const WTPF_OFFLINEOK: u32 = 0x400 | 0x800 | 0x1000 | 0x2000;
+
+/// The Authenticode policies (AUTHENTICODE, 2; AUTHENTICODE_TS, 3): BASE's
+/// checks, a revoked certificate as CERT_E_REVOKED and an unknown
+/// revocation status as CERT_E_REVOCATION_FAILURE unless the extra para's
+/// dwRegPolicySettings accepts it (WTPF_IGNOREREVOKATION, WTPF_OFFLINEOK_*:
+/// Windows' default state, 0x23c00, does), as wintrust maps them.
+fn authenticode(b: &ChainBlock, flags: u32, extra: *const u8) -> Verdict {
+    let reg = if extra.is_null() || !has!(size_of_caller(extra), AuthenticodeExtraPara, reg_policy)
+    {
+        0
+    } else {
+        get!(extra, AuthenticodeExtraPara, reg_policy)
+    };
+    let mut flags = flags;
+    if reg & (WTPF_IGNOREREVOKATION | WTPF_OFFLINEOK) != 0 {
+        if b.context.status.error & REVOCATION_STATUS_UNKNOWN != 0 {
+            unsupported(
+                b"crypt32.dll!AUTHENTICODE: revocation unknown, accepted (WTPF_OFFLINEOK)",
+                0,
+            );
+        }
+        flags |= IGNORE_END_REV_UNKNOWN | IGNORE_CA_REV_UNKNOWN | IGNORE_ROOT_REV_UNKNOWN;
+    }
+    let v = base(b, flags, None);
+    match v.0 {
+        CRYPT_E_REVOKED => (CERT_E_REVOKED, v.1, v.2),
+        CRYPT_E_REVOCATION_OFFLINE | CRYPT_E_NO_REVOCATION_CHECK => {
+            (CERT_E_REVOCATION_FAILURE, v.1, v.2)
+        }
+        _ => v,
+    }
+}
+
+/// The SHA-1 of the public keys (the subjectPublicKey BIT STRING's
+/// contents) of Microsoft's roots that CERT_CHAIN_POLICY_MICROSOFT_ROOT
+/// accepts: Microsoft Root Authority, Microsoft Root Certificate Authority
+/// (2001; its two keys, as Wine's chain.c lists them) and Microsoft Root
+/// Certificate Authority 2010; with
+/// MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG also the
+/// application root, Microsoft Root Certificate Authority 2011 (the
+/// certificates' keys, from Microsoft's PKI repository).
+const MICROSOFT_ROOT_KEYS: [[u8; 20]; 4] = [
+    *b"\x69\x75\xda\xde\x08\x5c\xc5\x64\xe4\x1c\xda\x87\x55\x40\xdc\xaa\x5d\x70\x1f\xf9",
+    *b"\xf2\x44\xbb\xf1\xc3\x03\x76\x1b\x7d\xef\xe6\x1c\xef\xab\x30\x68\xf4\x61\xd5\xcd",
+    *b"\xdc\x6c\x94\xd3\xde\x87\x80\xa9\xf3\x43\xd9\x40\xfa\xa3\xf7\x17\xd9\x31\xde\x3f",
+    *b"\xd5\xf6\x56\xcb\x8f\xe8\xa2\x5c\x62\x68\xd1\x3d\x94\x90\x5b\xd7\xce\x9a\x18\xc4",
+];
+const MICROSOFT_APPLICATION_ROOT_KEY: [u8; 20] =
+    *b"\x72\x2d\x3a\x02\x31\x90\x43\xb9\x14\x05\x4e\xe1\xea\xa7\xc7\x31\xd1\x23\x89\x34";
+const CHECK_APPLICATION_ROOT: u32 = 0x2_0000;
+const ENABLE_TEST_ROOT: u32 = 0x1_0000;
+
+/// CERT_CHAIN_POLICY_MICROSOFT_ROOT: whether the chain's last element has
+/// one of Microsoft's root keys (CERT_E_UNTRUSTEDROOT at that element if
+/// not); nothing else is checked, as documented.
+fn microsoft_root(b: &ChainBlock, flags: u32) -> Verdict {
+    if flags & ENABLE_TEST_ROOT != 0 {
+        unsupported(b"crypt32.dll!MICROSOFT_ROOT(test roots not known)", 0);
+    }
+    let last = b.simple.count as usize - 1;
+    let key = &info(b.elements[last].cert).public_key.key;
+    // SAFETY: the certificate's key blob.
+    let bits = unsafe { core::slice::from_raw_parts(key.data, key.size as usize) };
+    let mut hash = [0u8; 20];
+    let known = crate::cert::hash_with(0x31, bits, &mut hash).is_ok()
+        && (MICROSOFT_ROOT_KEYS.contains(&hash)
+            || (flags & CHECK_APPLICATION_ROOT != 0 && hash == MICROSOFT_APPLICATION_ROOT_KEY));
+    if known { PASS } else { (CERT_E_UNTRUSTEDROOT, 0, last as i32) }
+}
+
+/// CertVerifyCertificateChainPolicy: CERT_CHAIN_POLICY_BASE (1),
+/// AUTHENTICODE (2) and AUTHENTICODE_TS (3) (`authenticode`), SSL (4),
+/// BASIC_CONSTRAINTS (5) and MICROSOFT_ROOT (7); NT_AUTH (6), EV (8) and
+/// SSL_F12 (9) are checked as BASE (SSL_F12 as SSL) and recorded; a
+/// policy named by an OID string is recorded and fails
+/// (CRYPT_E_NOT_FOUND).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertVerifyCertificateChainPolicy(
     policy: usize,
@@ -1222,13 +1359,16 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let (flags, extra) = if para.is_null() || read::<u32>(para, 0) < 16 {
+    let (flags, extra) = if para.is_null() || !has!(size_of_caller(para), PolicyPara, extra) {
         (0u32, core::ptr::null())
     } else {
-        (read::<u32>(para, 4), read::<*const u8>(para, 8))
+        (get!(para, PolicyPara, flags), get!(para, PolicyPara, extra))
     };
-    let ssl_flags =
-        if extra.is_null() || read::<u32>(extra, 0) < 24 { 0 } else { read::<u32>(extra, 8) };
+    let ssl_flags = if extra.is_null() || !has!(size_of_caller(extra), SslExtraPara, server_name) {
+        0
+    } else {
+        get!(extra, SslExtraPara, checks)
+    };
     let (name, verdict): (&[u8], Verdict) = match policy {
         1 => (b"BASE", base(b, flags, None)),
         4 | 9 => {
@@ -1246,7 +1386,9 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
             };
             (b"BASIC_CONSTRAINTS", v)
         }
-        2 | 3 | 6..=8 => {
+        2 | 3 => (b"AUTHENTICODE", authenticode(b, flags, extra)),
+        7 => (b"MICROSOFT_ROOT", microsoft_root(b, flags)),
+        6 | 8 => {
             unsupported(b"crypt32.dll!CertVerifyCertificateChainPolicy(as BASE)", policy as u64);
             (b"BASE", base(b, flags, None))
         }
@@ -1270,11 +1412,12 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
         unsafe { GalaRecordMissing(text.as_ptr(), n, 5, b.context.status.error.into()) };
     }
     // CERT_CHAIN_POLICY_STATUS: dwError, lChainIndex, lElementIndex.
+    let status = status.cast::<PolicyStatus>();
     // SAFETY: the caller's structure.
     unsafe {
-        status.add(4).cast::<u32>().write_unaligned(verdict.0);
-        status.add(8).cast::<i32>().write_unaligned(verdict.1);
-        status.add(12).cast::<i32>().write_unaligned(verdict.2);
+        core::ptr::addr_of_mut!((*status).error).write_unaligned(verdict.0);
+        core::ptr::addr_of_mut!((*status).chain_index).write_unaligned(verdict.1);
+        core::ptr::addr_of_mut!((*status).element_index).write_unaligned(verdict.2);
     }
     1
 }

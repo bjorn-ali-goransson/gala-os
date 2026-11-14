@@ -149,6 +149,140 @@ pub extern "system" fn RtlUpcaseUnicodeChar(c: u16) -> u16 {
     upcase(c)
 }
 
+const STATUS_BUFFER_OVERFLOW: u32 = 0x8000_0005;
+
+/// RtlIntegerToUnicodeString(value, base, string): `value` (unsigned) in
+/// base 2, 8, 10 or 16 (0: 10), upper-case digits, into the string's
+/// buffer with its NUL; STATUS_BUFFER_OVERFLOW (the buffer untouched)
+/// unless the digits and the NUL fit (Windows refuses room for the digits
+/// alone; office_api_test); STATUS_INVALID_PARAMETER for another base.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlIntegerToUnicodeString(
+    value: u32,
+    base: u32,
+    string: *mut UnicodeString,
+) -> u32 {
+    let base = if base == 0 { 10 } else { base };
+    if ![2, 8, 10, 16].contains(&base) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let mut digits = [0u16; 32];
+    let mut at = digits.len();
+    let mut v = value;
+    loop {
+        at -= 1;
+        digits[at] = u16::from(b"0123456789ABCDEF"[(v % base) as usize]);
+        v /= base;
+        if v == 0 {
+            break;
+        }
+    }
+    let text = &digits[at..];
+    // SAFETY: the caller's string with `maximum` bytes at its buffer.
+    unsafe {
+        let s = &mut *string;
+        let room = usize::from(s.maximum) / 2;
+        // The digits and their NUL must fit (Windows: STATUS_BUFFER_OVERFLOW
+        // for room for the digits alone, the buffer untouched).
+        if text.len() >= room {
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        core::ptr::copy_nonoverlapping(text.as_ptr(), s.buffer, text.len());
+        *s.buffer.add(text.len()) = 0;
+        s.length = (2 * text.len()) as u16;
+    }
+    STATUS_SUCCESS
+}
+
+const DOS_STAR: u16 = b'<' as u16;
+const DOS_QM: u16 = b'>' as u16;
+const DOS_DOT: u16 = b'"' as u16;
+const STAR: u16 = b'*' as u16;
+const QM: u16 = b'?' as u16;
+const DOT: u16 = b'.' as u16;
+
+/// RtlIsNameInExpression(expression, name, ignore_case, upcase_table):
+/// whether `name` matches `expression` (FsRtlIsNameInExpression's rules):
+/// `*` any characters, `?` one, `<` (DOS_STAR) any characters up to the
+/// name's last period, `>` (DOS_QM) one character, or none at a period or
+/// the end, `"` (DOS_DOT) a period, or nothing at the end; others
+/// themselves. With `ignore_case` the name is upper-cased (the expression
+/// must already be). A table of all positions of the name that a prefix
+/// of the expression can reach, row by row.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlIsNameInExpression(
+    expression: *const UnicodeString,
+    name: *const UnicodeString,
+    ignore_case: u8,
+    _upcase_table: *const u16,
+) -> u8 {
+    // SAFETY: the caller's strings.
+    let (e, n) = unsafe { (chars(expression), chars(name)) };
+    let fold = |c: u16| if ignore_case != 0 { upcase(c) } else { c };
+    let last_dot = n.iter().rposition(|&c| c == DOT);
+    let width = n.len() + 1;
+    // Two rows of `width` flags: the positions reachable before and after
+    // each expression character.
+    let rows = alloc(2 * width);
+    if rows.is_null() {
+        return 0;
+    }
+    // SAFETY: our two rows.
+    let (mut cur, mut next) = unsafe {
+        core::ptr::write_bytes(rows, 0, 2 * width);
+        (
+            core::slice::from_raw_parts_mut(rows, width),
+            core::slice::from_raw_parts_mut(rows.add(width), width),
+        )
+    };
+    cur[0] = 1;
+    for &x in e {
+        next.fill(0);
+        for i in 0..width {
+            if cur[i] == 0 {
+                continue;
+            }
+            match x {
+                STAR => next[i..].fill(1),
+                DOS_STAR => {
+                    // Up to the last period (not past it): any count.
+                    let stop = last_dot.map_or(n.len(), |d| if i <= d { d } else { n.len() });
+                    next[i..=stop.max(i)].fill(1);
+                }
+                QM => {
+                    if i < n.len() {
+                        next[i + 1] = 1;
+                    }
+                }
+                DOS_QM => {
+                    if i < n.len() && n[i] != DOT {
+                        next[i + 1] = 1;
+                    } else {
+                        next[i] = 1;
+                    }
+                }
+                DOS_DOT => {
+                    if i < n.len() && n[i] == DOT {
+                        next[i + 1] = 1;
+                    }
+                    if i == n.len() {
+                        next[i] = 1;
+                    }
+                }
+                c => {
+                    if i < n.len() && fold(n[i]) == c {
+                        next[i + 1] = 1;
+                    }
+                }
+            }
+        }
+        core::mem::swap(&mut cur, &mut next);
+    }
+    let matched = cur[n.len()];
+    RtlFreeHeap(process_heap(), 0, rows);
+    matched
+}
+
 /// RtlCopyUnicodeString(dst, src): as much as fits, NUL-terminated if
 /// there is room; a null source empties `dst`.
 #[unsafe(no_mangle)]
@@ -850,6 +984,77 @@ pub extern "system" fn RtlSetControlSecurityDescriptor(sd: *mut u8, mask: u16, b
     STATUS_SUCCESS
 }
 
+/// RtlValidRelativeSecurityDescriptor(SecurityDescriptorInput,
+/// SecurityDescriptorLength, RequiredInformation): whether the `length`
+/// bytes hold a valid self-relative descriptor (revision 1,
+/// SE_SELF_RELATIVE, its owner and group SIDs and present ACLs whole
+/// inside the length, revision 1 SIDs of at most 15 subauthorities,
+/// ACLs of revision 2 to 4 whose ACEs fit their size) with the parts
+/// RequiredInformation names (OWNER, GROUP: the SID; DACL, SACL:
+/// present), as the WDK documents it.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlValidRelativeSecurityDescriptor(
+    sd: *const u8,
+    length: u32,
+    required: u32,
+) -> u8 {
+    const SE_SELF_RELATIVE: u16 = 0x8000;
+    if sd.is_null() || length < 20 {
+        return 0;
+    }
+    // SAFETY: the caller's `length` bytes.
+    let b = unsafe { core::slice::from_raw_parts(sd, length as usize) };
+    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize;
+    let control = u16::from_le_bytes([b[2], b[3]]);
+    if b[0] != 1 || control & SE_SELF_RELATIVE == 0 {
+        return 0;
+    }
+    let sid_ok = |at: usize| {
+        at >= 20
+            && at + 8 <= b.len()
+            && b[at] == 1
+            && b[at + 1] <= 15
+            && at + 8 + 4 * usize::from(b[at + 1]) <= b.len()
+    };
+    let acl_ok = |at: usize| {
+        if at < 20 || at + 8 > b.len() || !(2..=4).contains(&b[at]) {
+            return false;
+        }
+        let size = usize::from(u16::from_le_bytes([b[at + 2], b[at + 3]]));
+        let count = u16::from_le_bytes([b[at + 4], b[at + 5]]);
+        if size < 8 || at + size > b.len() {
+            return false;
+        }
+        let mut ace = at + 8;
+        for _ in 0..count {
+            if ace + 4 > at + size {
+                return false;
+            }
+            let len = usize::from(u16::from_le_bytes([b[ace + 2], b[ace + 3]]));
+            if len < 4 || ace + len > at + size {
+                return false;
+            }
+            ace += len;
+        }
+        true
+    };
+    let (owner, group, sacl, dacl) = (u32_at(4), u32_at(8), u32_at(12), u32_at(16));
+    let present = |bit: u16| control & bit != 0;
+    if (owner != 0 && !sid_ok(owner))
+        || (group != 0 && !sid_ok(group))
+        || (present(0x10) && sacl != 0 && !acl_ok(sacl))
+        || (present(0x04) && dacl != 0 && !acl_ok(dacl))
+    {
+        return 0;
+    }
+    let needs = |bit: u32| required & bit != 0;
+    let ok = !(needs(1) && owner == 0
+        || needs(2) && group == 0
+        || needs(4) && !present(0x04)
+        || needs(8) && !present(0x10));
+    u8::from(ok)
+}
+
 /// RtlAbsoluteToSelfRelativeSD(abs, rel, &len): header, owner, group,
 /// SACL, DACL in that order (STATUS_BUFFER_TOO_SMALL and the size needed if
 /// `len` is too small).
@@ -897,7 +1102,10 @@ pub extern "system" fn RtlAbsoluteToSelfRelativeSD(
             rel.add(4 + 4 * i).cast::<u32>().write_unaligned(at as u32);
             at += sizes[i];
         }
-        *len = total as u32;
+        // On success the length is the caller's buffer's, unchanged (Wine's
+        // advapi32 security.c test_security_descriptor, run on Windows:
+        // MakeSelfRelativeSD into 188 bytes leaves 188 for a 184-byte
+        // descriptor).
     }
     STATUS_SUCCESS
 }

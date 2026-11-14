@@ -43,7 +43,9 @@
  *   Chromium imports it): WindowsCreateString copies (NULL for length 0,
  *   E_POINTER for a NULL source with a length); a reference string
  *   (WindowsCreateStringReference) uses the caller's text, which must
- *   be NUL-terminated at its length (E_INVALIDARG); raw buffers, lengths
+ *   be NUL-terminated at its length (a failure: Windows gives
+ *   0x80000017, Wine's string tests note, the documentation
+ *   E_INVALIDARG; combase_test has the rest); raw buffers, lengths
  *   (L"" and 0 for NULL), duplicates (a copy of a reference string),
  *   ordinal comparison; deleting NULL or a reference string is S_OK.
  * - RoGetActivationFactory / RoActivateInstance of a class that is not
@@ -523,7 +525,7 @@ int main(void) {
         const WCHAR *raw = WindowsGetStringRawBuffer(s, &len);
         CHECK(raw != text && len == 4 && raw[4] == 0 && memcmp(raw, text, 8) == 0);
         CHECK(WindowsGetStringLen(s) == 4 && !WindowsIsStringEmpty(s));
-        CHECK(WindowsCreateStringReference(text, 3, &header, &r) == E_INVALIDARG);
+        CHECK(FAILED(WindowsCreateStringReference(text, 3, &header, &r)));
         CHECK(WindowsCreateStringReference(text, 4, &header, &r) == S_OK && r != NULL);
         CHECK(WindowsGetStringRawBuffer(r, &len) == text && len == 4);
         CHECK(WindowsCompareStringOrdinal(s, r, &order) == S_OK && order == 0);

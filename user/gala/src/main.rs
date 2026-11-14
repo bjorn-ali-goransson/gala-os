@@ -12,14 +12,15 @@
 //! gala snap left|right|up|down <window>
 //! gala move <window> <x> <y> <width> <height>
 //! gala wallpaper <name>              dunes, ribbons, najdi, night or drawn
-//! gala ps                            list the processes
-//! gala kill <pid|name>               end a process (all of that name)
+//! gala ps                            list the processes, Windows and Linux
+//! gala kill <pid|name>               end a process (all of that name; a Linux one: SIGTERM, then SIGKILL)
 //! gala attach <session>              the console (screen, keyboard, mouse) shows that session
 //! gala install <id> [--version v] [--source dir] [--location dir]
 //! gala search <text> [--source dir]
 //! gala list [<text>]
 //! gala upgrade [<id>|--all] [--version v] [--source dir]
 //! gala uninstall <id>|--product-code <key>
+//! gala linux-install <name> <url>    fetch a Linux distribution and import it (the start menu's)
 //! gala help
 //! ```
 //!
@@ -53,6 +54,7 @@ extern crate alloc;
 use gala_heap as _;
 
 mod fetch;
+mod linux;
 mod pkg;
 
 use core::ffi::c_void;
@@ -72,6 +74,7 @@ unsafe extern "system" {
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetCurrentProcessId() -> u32;
+    fn Sleep(ms: u32);
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -85,6 +88,7 @@ unsafe extern "system" {
     ) -> u32;
     fn GalaSession(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn GalaTasks(op: u32, arg: usize, buffer: *mut u8, length: u32, returned: *mut u32) -> u32;
 }
 
 #[allow(dead_code)]
@@ -120,8 +124,12 @@ const USAGE: &str = "usage: gala <command> [arguments]
   snap left|right|up|down <window>
   move <window> <x> <y> <width> <height>
   wallpaper <name>              dunes, ribbons, najdi, night or drawn
-  ps                            list the processes
-  kill <pid|name>               end a process (every one of that name)
+  tray                          list the notification area's icons
+  tray click <hwnd> <id> [right]
+                                click an icon (its program gets what a click
+                                with the mouse sends it)
+  ps                            list the processes, Windows and Linux
+  kill <pid|name>               end a process (every one of that name; Linux: SIGTERM, then SIGKILL)
   attach <session>              the console shows that session (its desktop on the
                                 screen, the keyboard and mouse to it; SYSTEM only)
   install <id> [--version v] [--source dir] [--location dir]
@@ -133,6 +141,8 @@ const USAGE: &str = "usage: gala <command> [arguments]
                                 list or install newer versions
   uninstall <id>                remove a package (its files, commands, record;
                                 or run its uninstaller silently)
+  linux-install <name> <url>    fetch a Linux distribution's rootfs and import it
+                                (wsl --import), its progress on the start menu
   help                          this text
 
 Packages come from a winget-pkgs tree: --source <dir> (a local snapshot,
@@ -168,6 +178,12 @@ const ACTION_SNAP: u32 = 8;
 const ACTION_MOVE: u32 = 9;
 const ACTION_WALLPAPER: u32 = 10;
 const ACTION_PROGRAMS: u32 = 11;
+const ACTION_TRAY: u32 = 12;
+const ACTION_TRAY_CLICK: u32 = 13;
+const ACTION_LINUX_PROGRESS: u32 = 14;
+/// A notification-area icon's entry (kernel/src/nt/action.rs TRAY_ENTRY).
+const TRAY_ENTRY: usize = 44 + 2 * 128;
+const MAX_TRAY: usize = 64;
 const LIST_HEADER: usize = 8;
 const TITLE: usize = 128;
 const WINDOW_ENTRY: usize = 40 + 2 * TITLE;
@@ -175,6 +191,7 @@ const PROGRAM_ENTRY: usize = 8 + 2 * 32 + 2 * 128;
 const MAX_WINDOWS: usize = 64;
 
 const STATUS_SUCCESS: u32 = 0;
+const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
 const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
 const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xc000_0034;
 const STATUS_NOT_SUPPORTED: u32 = 0xc000_00bb;
@@ -745,6 +762,82 @@ fn list_programs() -> u32 {
     0
 }
 
+/// `gala tray`: the notification area's icons.
+fn list_tray() -> u32 {
+    static mut BUF: [u8; LIST_HEADER + MAX_TRAY * TRAY_ENTRY] =
+        [0; LIST_HEADER + MAX_TRAY * TRAY_ENTRY];
+    // SAFETY: the only reference to BUF while this runs (one thread).
+    let b = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+    let (status, n) = request(ACTION_TRAY, 0, [0; 4], &[], b);
+    if status != STATUS_SUCCESS {
+        return status_error(status, "listed");
+    }
+    let count = n.saturating_sub(LIST_HEADER) / TRAY_ENTRY;
+    Line::new()
+        .s("HWND")
+        .to(10)
+        .s("ID")
+        .to(16)
+        .s("PID")
+        .to(23)
+        .s("VERSION")
+        .to(31)
+        .s("X")
+        .to(37)
+        .s("Y")
+        .to(43)
+        .s("TIP")
+        .print();
+    for i in 0..count {
+        let e = &b[LIST_HEADER + i * TRAY_ENTRY..];
+        let hwnd = u64::from(u32_at(e, 0)) | u64::from(u32_at(e, 4)) << 32;
+        let mut l = Line::new();
+        l.hex(hwnd, 5).to(10).dec(i64::from(u32_at(e, 8))).to(16);
+        l.dec(i64::from(u32_at(e, 12))).to(23).dec(i64::from(u32_at(e, 16))).to(31);
+        if u32_at(e, 20) & 1 != 0 {
+            l.s("hidden").to(43);
+        } else {
+            l.dec(i64::from(u32_at(e, 24) as i32)).to(37).dec(i64::from(u32_at(e, 28) as i32));
+            l.to(43);
+        }
+        let len = (u32_at(e, 40) as usize).min(128);
+        let mut tip = [0u16; 128];
+        for (k, c) in tip.iter_mut().enumerate().take(len) {
+            *c = u16::from_le_bytes([e[44 + 2 * k], e[45 + 2 * k]]);
+        }
+        l.w(&tip[..len]).print();
+    }
+    0
+}
+
+/// `gala tray click <hwnd> <id> [right]`.
+fn tray_click(a: &Args) -> u32 {
+    let usage = "gala tray click <hwnd> <id> [right]";
+    if a.count < 5 || a.count > 6 {
+        return fail(EXIT_USAGE, &[usage]);
+    }
+    let (Some(hwnd), Some(id)) = (number(a.get(3)), number(a.get(4))) else {
+        return fail(EXIT_USAGE, &[usage]);
+    };
+    let button = if a.count == 6 {
+        if !a.is(5, "right") {
+            return fail(EXIT_USAGE, &[usage]);
+        }
+        1
+    } else {
+        0
+    };
+    let (status, _) =
+        request(ACTION_TRAY_CLICK, hwnd as u64, [id as i32, button, 0, 0], &[], &mut []);
+    if status == STATUS_OBJECT_NAME_NOT_FOUND {
+        return fail(EXIT_NOT_FOUND, &["no such icon in the notification area"]);
+    }
+    if status != STATUS_SUCCESS {
+        return status_error(status, "clicked");
+    }
+    0
+}
+
 /// A process from SystemProcessInformation: (pid, parent, threads, name).
 fn for_each_process(mut f: impl FnMut(u32, u32, u32, &[u16])) -> Result<(), u32> {
     // A 256 KiB buffer from the stack would be large; the process heap is
@@ -786,22 +879,79 @@ fn for_each_process(mut f: impl FnMut(u32, u32, u32, &[u16])) -> Result<(), u32>
     }
 }
 
-fn ps() -> u32 {
-    Line::new().s("PID").to(7).s("PARENT").to(15).s("THREADS").to(24).s("NAME").print();
-    let result = for_each_process(|pid, parent, threads, name| {
-        let mut l = Line::new();
-        l.dec(i64::from(pid)).to(7).dec(i64::from(parent)).to(15).dec(i64::from(threads)).to(24);
-        if name.is_empty() {
-            l.s(if pid == 0 { "System Idle Process" } else { "?" });
-        } else {
-            l.w(name);
+/// Every process of both personalities (GalaTasks op 0: ARCHITECTURE
+/// "The task manager"), or the error code once said.
+fn all_processes() -> Result<alloc::vec::Vec<taskmgr::Proc>, u32> {
+    let mut size = 64 * 1024;
+    loop {
+        let mut buf = alloc::vec![0u8; size];
+        let mut needed = 0u32;
+        // SAFETY: a buffer of its stated size and an out pointer.
+        let status = unsafe { GalaTasks(0, 0, buf.as_mut_ptr(), size as u32, &mut needed) };
+        if status == STATUS_BUFFER_TOO_SMALL && (needed as usize) >= size {
+            size = needed as usize + 4096;
+            continue;
         }
-        l.print();
-    });
-    match result {
-        Ok(()) => 0,
-        Err(code) => code,
+        if status != STATUS_SUCCESS {
+            return Err(status_error(status, "listed"));
+        }
+        buf.truncate(needed as usize);
+        return taskmgr::parse_processes(&buf)
+            .map(|(_, _, p)| p)
+            .ok_or_else(|| fail(EXIT_FAILED, &["the kernel's process list has another layout"]));
     }
+}
+
+/// `gala ps`: every process, Windows and Linux (a WSL distribution's
+/// named after its platform), as Task Manager's Details view lists them.
+fn ps() -> u32 {
+    let procs = match all_processes() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    Line::new()
+        .s("PID")
+        .to(7)
+        .s("PARENT")
+        .to(15)
+        .s("THREADS")
+        .to(24)
+        .s("PLATFORM")
+        .to(42)
+        .s("NAME")
+        .print();
+    for p in &procs {
+        let mut l = Line::new();
+        l.dec(p.pid as i64).to(7).dec(p.parent as i64).to(15).dec(i64::from(p.threads)).to(24);
+        l.s(&taskmgr::cell(p, 0, taskmgr::Column::Platform, false)).s(" ").to(42);
+        l.s(if p.image.is_empty() { "?" } else { &p.image });
+        l.print();
+    }
+    0
+}
+
+/// Ends Linux process `pid` as Task Manager does: SIGTERM, then SIGKILL
+/// if it is still there after the grace time.
+fn kill_linux(pid: u64) -> u32 {
+    let alive = || all_processes().is_ok_and(|v| v.iter().any(|p| p.pid == pid));
+    for sig in [15u32, 9] {
+        // SAFETY: no buffers.
+        let status = unsafe {
+            GalaTasks(2, pid as usize, core::ptr::null_mut(), sig, core::ptr::null_mut())
+        };
+        if status != STATUS_SUCCESS {
+            return status_error(status, "signalled");
+        }
+        for _ in 0..taskmgr::SIGTERM_GRACE_MS / 100 {
+            if !alive() {
+                Line::new().s("ended Linux process ").dec(pid as i64).print();
+                return 0;
+            }
+            // SAFETY: a plain call.
+            unsafe { Sleep(100) };
+        }
+    }
+    fail(EXIT_FAILED, &["the Linux process did not end"])
 }
 
 /// Whether process image `name` is `want` (any case; ".exe" optional).
@@ -827,6 +977,12 @@ fn kill(a: &Args) -> u32 {
     let mut pids = [0u32; 64];
     let mut n = 0;
     match number(target) {
+        Some(pid)
+            if all_processes()
+                .is_ok_and(|v| v.iter().any(|p| p.pid == pid as u64 && p.is_linux())) =>
+        {
+            return kill_linux(pid as u64);
+        }
         Some(pid) if pid > 0 && pid <= i64::from(u32::MAX) => {
             pids[0] = pid as u32;
             n = 1;
@@ -968,6 +1124,10 @@ fn run() -> u32 {
         list_windows()
     } else if a.is(1, "programs") {
         list_programs()
+    } else if a.is(1, "tray") && a.count == 2 {
+        list_tray()
+    } else if a.is(1, "tray") && a.is(2, "click") {
+        tray_click(&a)
     } else if a.is(1, "snap") {
         let side = ["left", "right", "up", "down"].iter().position(|s| a.is(2, s));
         let Some(side) = side else {
@@ -1006,6 +1166,13 @@ fn run() -> u32 {
         0
     } else if PACKAGE_COMMANDS.iter().any(|w| a.is(1, w)) {
         pkg::run(&a)
+    } else if a.is(1, "linux-install") {
+        if a.count != 4 {
+            return fail(EXIT_USAGE, &["gala linux-install <name> <url>"]);
+        }
+        let name = alloc::string::String::from_utf16_lossy(a.get(2));
+        let url = alloc::string::String::from_utf16_lossy(a.get(3));
+        linux::install(&name, &url)
     } else if a.is(1, "ps") {
         ps()
     } else if a.is(1, "kill") {

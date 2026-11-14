@@ -209,6 +209,20 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
     }
     o += &head;
     o += "\n";
+    // A hot-swapped run (ROADMAP SN step 1d): first, so no one reads the
+    // rest as a real run's.
+    let swapped: Vec<&str> = plain.iter().filter_map(|l| after(l, "hotswap: applied: ")).collect();
+    if !swapped.is_empty() {
+        writeln!(
+            o,
+            "triage: HOT-SWAPPED, NOT A REAL RUN (code of another build, DLLs or the kernel, \
+             spliced into the running machine; at your own risk): {}",
+            swapped.join("; ")
+        )
+        .ok();
+    } else if let Some(r) = plain.iter().find_map(|l| after(l, "hotswap: refused: ")) {
+        writeln!(o, "triage: hot swap asked for and refused (not a real run): {r}").ok();
+    }
     if let Some(h) = &facts.host {
         writeln!(o, "triage: host: {h}").ok();
     }

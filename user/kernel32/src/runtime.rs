@@ -768,3 +768,41 @@ pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
     }
     1
 }
+
+/// WerRegisterMemoryBlock(address, size): memory a Windows Error Report
+/// should include (at most WER_MAX_MEMORY_BLOCK_SIZE, 64 KiB). gala's
+/// crash reports (nt::crashreport) are made by the kernel and do not take
+/// a program's blocks: accepted (S_OK) and recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn WerRegisterMemoryBlock(address: *mut c_void, size: u32) -> u32 {
+    if address.is_null() || size == 0 || size > 64 * 1024 {
+        return 0x8007_0057; // E_INVALIDARG
+    }
+    unsupported(b"kernel32.dll!WerRegisterMemoryBlock(not in crash reports)", size.into());
+    0
+}
+
+/// WerUnregisterMemoryBlock(address): S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn WerUnregisterMemoryBlock(_address: *mut c_void) -> u32 {
+    0
+}
+
+/// WerRegisterFile(path, type, flags): a file a Windows Error Report
+/// should carry (Office's Click-to-Run client registers its logs). gala's
+/// crash reports do not take a program's files: accepted (S_OK) and
+/// recorded with the type as detail; a NULL path is E_INVALIDARG.
+#[unsafe(no_mangle)]
+pub extern "system" fn WerRegisterFile(path: *const u16, kind: u32, _flags: u32) -> u32 {
+    if path.is_null() {
+        return 0x8007_0057; // E_INVALIDARG
+    }
+    unsupported(b"kernel32.dll!WerRegisterFile(not in crash reports)", kind.into());
+    0
+}
+
+/// WerUnregisterFile(path): S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn WerUnregisterFile(_path: *const u16) -> u32 {
+    0
+}

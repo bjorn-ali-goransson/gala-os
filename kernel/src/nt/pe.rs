@@ -127,6 +127,16 @@ impl<'a> PeImage<'a> {
 
     /// Parses any image (executable or DLL), as for SEC_IMAGE sections.
     pub fn parse_image(data: &'a [u8]) -> Result<Self, PeError> {
+        Self::parse_headers(data, data.len())
+    }
+
+    /// Parses an image from its headers alone (`data` holds at least
+    /// SizeOfHeaders bytes) in a file of `file_len` bytes, which bound the
+    /// sections' raw data: what an image layout built from the file a
+    /// page at a time needs (`section::ImageLayout`). Its sections' data
+    /// is then not in `data` (`section_data`, `lay_out` are for whole
+    /// files).
+    pub fn parse_headers(data: &'a [u8], file_len: usize) -> Result<Self, PeError> {
         if data.get(0..2) != Some(b"MZ") {
             return Err(PeError::BadDosSignature);
         }
@@ -220,7 +230,7 @@ impl<'a> PeImage<'a> {
             if !s.virtual_address.is_multiple_of(section_alignment)
                 || s.virtual_address < prev_end
                 || end > size_of_image
-                || raw_end as usize > data.len()
+                || raw_end as usize > file_len
             {
                 return Err(PeError::SectionOutOfBounds);
             }
@@ -292,7 +302,9 @@ impl PeImage<'_> {
 }
 
 /// The RVA of export `name` in a laid-out image (`image` = SizeOfImage
-/// bytes as mapped). Forwarders are returned as their RVA too.
+/// bytes as mapped). Forwarders are returned as their RVA too. A name
+/// whose ordinal is past NumberOfFunctions, or whose slot holds RVA 0
+/// (the linker's mark for an ordinal with no export), is no export.
 pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
     let u32_at = |off: usize| -> Option<u32> {
         Some(u32::from_le_bytes(image.get(off..off.checked_add(4)?)?.try_into().ok()?))
@@ -305,6 +317,7 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
     if dir == 0 {
         return None;
     }
+    let function_count = u32_at(dir + 20)? as usize;
     let count = u32_at(dir + 24)? as usize;
     let functions = u32_at(dir + 28)? as usize;
     let names = u32_at(dir + 32)? as usize;
@@ -315,8 +328,11 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
         let end = text.iter().position(|&b| b == 0)?;
         if &text[..end] == name {
             let o = ordinals + 2 * i;
-            let ordinal = u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?);
-            return u32_at(functions + 4 * usize::from(ordinal));
+            let ordinal = usize::from(u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?));
+            if ordinal >= function_count {
+                return None;
+            }
+            return u32_at(functions + 4 * ordinal).filter(|&rva| rva != 0);
         }
     }
     None
@@ -420,6 +436,51 @@ pub fn relocate_page(
     let have = image.len().min(page_end).saturating_sub(page_rva);
     out[..have].copy_from_slice(&image[page_rva..page_rva + have]);
     out[have..].fill(0);
+    let value = |at: usize, b: &mut [u8]| {
+        b.copy_from_slice(image.get(at..at + b.len()).ok_or(PeError::BadRelocation)?);
+        Ok(())
+    };
+    relocate_page_contents(image, reloc, delta, page_rva, out, index, &value)
+}
+
+/// Reads the unrelocated image at an RVA into a buffer (relocations).
+pub type ImageReader<'a> = dyn Fn(usize, &mut [u8]) -> Result<(), PeError> + 'a;
+
+/// `relocate_page` of a page whose unrelocated contents are already in
+/// `out`, with the relocation table on its own (`table`: the directory's
+/// bytes, offsets in `index` relative to its start) and `value(rva, buf)`
+/// reading the unrelocated image (an entry may straddle the page's
+/// edge: its value is read whole, then the page's part written).
+pub fn relocate_in_place(
+    table: &[u8],
+    delta: u64,
+    page_rva: usize,
+    out: &mut [u8; 4096],
+    index: Option<&[u32]>,
+    value: &ImageReader<'_>,
+) -> Result<(), PeError> {
+    let reloc = DataDirectory { rva: 0, size: table.len() as u32 };
+    relocate_page_contents(table, reloc, delta, page_rva, out, index, value)
+}
+
+/// SizeOfHeaders of the image whose first bytes are `data` (None if they
+/// do not reach it).
+pub fn size_of_headers(data: &[u8]) -> Option<usize> {
+    let pe = u32_at(data, 0x3c).ok()? as usize;
+    Some(u32_at(data, pe + 4 + 20 + 60).ok()? as usize)
+}
+
+/// The relocations of page `page_rva` applied to `out` (the table at
+/// `reloc` in `image`).
+fn relocate_page_contents(
+    image: &[u8],
+    reloc: DataDirectory,
+    delta: u64,
+    page_rva: usize,
+    out: &mut [u8; 4096],
+    index: Option<&[u32]>,
+    value: &ImageReader<'_>,
+) -> Result<(), PeError> {
     if delta == 0 || reloc.size == 0 {
         return Ok(());
     }
@@ -433,14 +494,14 @@ pub fn relocate_page(
         let previous = page.checked_sub(1).and_then(|p| index.get(p));
         for &at in [previous, index.get(page)].into_iter().flatten() {
             if at != NO_BLOCK {
-                apply_block(image, start + at as usize, end, delta, page_rva, out)?;
+                apply_block(image, start + at as usize, end, delta, page_rva, out, value)?;
             }
         }
         return Ok(());
     }
     let mut block = start;
     while block + 8 <= end {
-        block = apply_block(image, block, end, delta, page_rva, out)?;
+        block = apply_block(image, block, end, delta, page_rva, out, value)?;
     }
     Ok(())
 }
@@ -480,6 +541,7 @@ fn apply_block(
     delta: u64,
     page_rva: usize,
     out: &mut [u8; 4096],
+    value: &ImageReader<'_>,
 ) -> Result<usize, PeError> {
     let page_end = page_rva + out.len();
     let page = u32_at(image, block).map_err(|_| PeError::BadRelocation)? as usize;
@@ -495,16 +557,18 @@ fn apply_block(
             let bytes: [u8; 8] = match kind {
                 IMAGE_REL_BASED_ABSOLUTE => continue,
                 IMAGE_REL_BASED_HIGHLOW => {
-                    let v = u32_at(image, at).map_err(|_| PeError::BadRelocation)?;
+                    let mut v = [0u8; 4];
+                    value(at, &mut v)?;
                     let mut b = [0u8; 8];
-                    b[..4].copy_from_slice(&v.wrapping_add(delta as u32).to_le_bytes());
+                    b[..4].copy_from_slice(
+                        &u32::from_le_bytes(v).wrapping_add(delta as u32).to_le_bytes(),
+                    );
                     b
                 }
                 IMAGE_REL_BASED_DIR64 => {
-                    let slot = image.get(at..at + 8).ok_or(PeError::BadRelocation)?;
-                    let v =
-                        u64::from_le_bytes(slot.try_into().map_err(|_| PeError::BadRelocation)?);
-                    v.wrapping_add(delta).to_le_bytes()
+                    let mut v = [0u8; 8];
+                    value(at, &mut v)?;
+                    u64::from_le_bytes(v).wrapping_add(delta).to_le_bytes()
                 }
                 _ => return Err(PeError::BadRelocation),
             };
@@ -730,6 +794,17 @@ mod tests {
         assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
         assert_eq!(find_export(&image, b"Gamma"), None);
         assert_eq!(find_export(&image, b"Alf"), None);
+        // A name whose slot is RVA 0 (an ordinal with no export) or whose
+        // ordinal is past NumberOfFunctions names no export.
+        let functions = 0x1000 + 0x40;
+        let alfa = image[functions + 4..functions + 8].to_vec();
+        image[functions + 4..functions + 8].fill(0);
+        assert_eq!(find_export(&image, b"Alfa"), None);
+        image[functions + 4..functions + 8].copy_from_slice(&alfa);
+        image[0x1000 + 20..0x1000 + 24].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(find_export(&image, b"Alfa"), None, "ordinal 1 of 1 function");
+        assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
+        image[0x1000 + 20..0x1000 + 24].copy_from_slice(&2u32.to_le_bytes());
         // The same in a PE32 image: its data directories start 16 bytes
         // earlier (no 64-bit ImageBase and stack/heap sizes).
         let opt = 0x44 + 24;

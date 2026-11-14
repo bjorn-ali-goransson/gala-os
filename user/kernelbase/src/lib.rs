@@ -4,13 +4,12 @@
 //! exports.txt), and implements what only kernelbase has (Windows' kernel32
 //! exports none of it): CompareObjectHandles, the interrupt-time queries
 //! (Cygwin's runtime autoloads those), WaitOnAddress and WakeByAddress*
-//! (`address_wait`, whose source kernel32 also builds for its own locks)
-//! and the PathCch functions (`path`). VirtualAlloc2 and four PathCch
+//! (over ntdll's RtlWaitOnAddress and RtlWakeAddress*, where every wait on
+//! a word sleeps) and the PathCch functions (`path`). VirtualAlloc2 and four PathCch
 //! functions are not implemented.
 
 #![no_std]
 
-mod address_wait;
 mod path;
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
@@ -94,6 +93,14 @@ pub extern "system" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
 unsafe extern "system" {
     fn NtCompareObjects(first: usize, second: usize) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
+    fn RtlWaitOnAddress(
+        address: *const core::ffi::c_void,
+        compare: *const core::ffi::c_void,
+        size: usize,
+        timeout: *const i64,
+    ) -> u32;
+    fn RtlWakeAddressSingle(address: *const core::ffi::c_void);
+    fn RtlWakeAddressAll(address: *const core::ffi::c_void);
 }
 
 /// TEB.LastErrorValue := RtlNtStatusToDosError(status).
@@ -133,7 +140,10 @@ pub extern "system" fn CompareObjectHandles(first: usize, second: usize) -> i32 
 /// WaitOnAddress(Address, CompareAddress, AddressSize, dwMilliseconds):
 /// waits while the value at Address equals the one at CompareAddress, until
 /// a WakeByAddress* call for Address (or a spurious wake) or the timeout
-/// (FALSE, ERROR_TIMEOUT). Sizes 1, 2, 4 and 8.
+/// (FALSE, ERROR_TIMEOUT). Sizes 1, 2, 4 and 8 (else
+/// ERROR_INVALID_PARAMETER).
+// The pointers go to ntdll, which checks them.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "system" fn WaitOnAddress(
     address: *const core::ffi::c_void,
@@ -141,25 +151,42 @@ pub extern "system" fn WaitOnAddress(
     size: usize,
     ms: u32,
 ) -> i32 {
-    match address_wait::wait(address, compare, size, ms) {
-        Ok(()) => 1,
-        Err(error) => {
-            set_last_error_code(error);
+    const INFINITE: u32 = u32::MAX;
+    const STATUS_TIMEOUT: u32 = 0x102;
+    const ERROR_TIMEOUT: u32 = 1460;
+    let relative = -(i64::from(ms) * 10_000);
+    let timeout = if ms == INFINITE { core::ptr::null() } else { &raw const relative };
+    // SAFETY: ntdll checks the pointers' presence and the size; the
+    // timeout lives through the call.
+    match unsafe { RtlWaitOnAddress(address, compare, size, timeout) } {
+        0 => 1,
+        STATUS_TIMEOUT => {
+            set_last_error_code(ERROR_TIMEOUT);
+            0
+        }
+        status => {
+            set_last_error(status);
             0
         }
     }
 }
 
 /// WakeByAddressSingle(Address): wakes one thread waiting on Address.
+// The pointers go to ntdll, which checks them.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeByAddressSingle(address: *const core::ffi::c_void) {
-    address_wait::wake(address, false);
+    // SAFETY: only the address's value is used.
+    unsafe { RtlWakeAddressSingle(address) };
 }
 
 /// WakeByAddressAll(Address): wakes every thread waiting on Address.
+// The pointers go to ntdll, which checks them.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeByAddressAll(address: *const core::ffi::c_void) {
-    address_wait::wake(address, true);
+    // SAFETY: only the address's value is used.
+    unsafe { RtlWakeAddressAll(address) };
 }
 
 gala_stubs::unimplemented_exports!("kernelbase.dll":

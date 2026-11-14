@@ -192,7 +192,14 @@ pub extern "C" fn _strtoui64(s: *const u8, end: *mut *mut u8, base: i32) -> u64 
 /// strtol (`long` is 32-bit on Windows).
 #[unsafe(no_mangle)]
 pub extern "C" fn strtol(s: *const u8, end: *mut *mut u8, base: i32) -> i32 {
-    _strtoi64(s, end, base).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    let v = _strtoi64(s, end, base);
+    let clamped = v.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    if clamped != v {
+        // Out of long's range: LONG_MAX or LONG_MIN and ERANGE.
+        // SAFETY: errno.
+        unsafe { *crate::stdio::_errno() = ERANGE };
+    }
+    clamped as i32
 }
 
 #[unsafe(no_mangle)]

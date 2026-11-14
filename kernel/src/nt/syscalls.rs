@@ -62,6 +62,17 @@ pub const NT_OPEN_KEY_EX: u32 = 0x7f06;
 pub const NT_DELETE_KEY: u32 = 0x7f07;
 pub const NT_DELETE_VALUE_KEY: u32 = 0x7f08;
 pub const NT_FLUSH_KEY: u32 = 0x7f09;
+/// gala's number for NtSetInformationKey until verified.
+pub const NT_SET_INFORMATION_KEY: u32 = 0x7fd6;
+/// gala's numbers for the registry's change notification and rename
+/// until verified (nt::regnotify).
+pub const NT_NOTIFY_CHANGE_KEY: u32 = 0x7f25;
+pub const NT_NOTIFY_CHANGE_MULTIPLE_KEYS: u32 = 0x7f26;
+pub const NT_RENAME_KEY: u32 = 0x7f27;
+// gala's own: the private-object descriptor rules (advapi32's
+// CreatePrivateObjectSecurity* and SetPrivateObjectSecurity*).
+pub const GALA_NEW_SECURITY_OBJECT: u32 = 0x7f28;
+pub const GALA_SET_SECURITY_OBJECT: u32 = 0x7f29;
 // Job objects: gala's numbers until verified (reached through ntdll).
 pub const NT_CREATE_JOB_OBJECT: u32 = 0x7f0a;
 pub const NT_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x7f0b;
@@ -149,6 +160,40 @@ pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
 /// gala's session service (session_calls; ROADMAP RS): what shows a
 /// session's desktop (presenters) and a Test frame's pixels.
 pub const GALA_SESSION: u32 = 0x7fb0;
+/// The window station's clipboard (gala's own; nt::clipboard,
+/// clipboard_calls.rs), for user32.
+pub const GALA_CLIPBOARD_OPEN: u32 = 0x7fc0;
+pub const GALA_CLIPBOARD_CLOSE: u32 = 0x7fc1;
+pub const GALA_CLIPBOARD_EMPTY: u32 = 0x7fc2;
+pub const GALA_CLIPBOARD_SET: u32 = 0x7fc3;
+pub const GALA_CLIPBOARD_GET: u32 = 0x7fc4;
+pub const GALA_CLIPBOARD_INFO: u32 = 0x7fc5;
+pub const GALA_CLIPBOARD_FORMATS: u32 = 0x7fc6;
+pub const GALA_CLIPBOARD_LISTENER: u32 = 0x7fc7;
+/// The service control manager (nt::scm, scm_calls): OpenSCManager,
+/// OpenService, CreateService, the status and configuration queries,
+/// EnumServicesStatusEx, CloseServiceHandle/DeleteService/StartService/
+/// ControlService, for advapi32.
+pub const GALA_SCM_OPEN: u32 = 0x7fd0;
+pub const GALA_SERVICE_OPEN: u32 = 0x7fd1;
+pub const GALA_SERVICE_CREATE: u32 = 0x7fd2;
+pub const GALA_SERVICE_QUERY: u32 = 0x7fd3;
+pub const GALA_SERVICE_ENUM: u32 = 0x7fd4;
+pub const GALA_SERVICE_CONTROL: u32 = 0x7fd5;
+/// ChangeServiceConfig2 (0x7fd6 is NtSetInformationKey).
+pub const GALA_SERVICE_CONFIGURE: u32 = 0x7fd7;
+/// A service process's control dispatcher and SetServiceStatus.
+pub const GALA_SERVICE_DISPATCH: u32 = 0x7fd8;
+/// The WSL facade (gala's own; nt::wsl_calls), for gala's wsl.exe.
+pub const GALA_LX_NODE: u32 = 0x7fe0;
+pub const GALA_LX_SPAWN: u32 = 0x7fe1;
+pub const GALA_LX_DISTRO: u32 = 0x7fe2;
+/// The task manager's data (gala's own; nt::tasks): every process of
+/// both personalities, the machine's load, End task for Linux ones.
+pub const GALA_TASKS: u32 = 0x7fe8;
+/// The hot swap scenarios' probe of a kernel change (gala's own;
+/// nt::hotswap_probe, ROADMAP SN step 1e).
+pub const GALA_HOTSWAP_PROBE: u32 = 0x7ff0;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -178,6 +223,9 @@ pub const GALA_WIN_EVENT_HOOK: u32 = 0x7f70;
 pub const GALA_WIN_EVENT_UNHOOK: u32 = 0x7f71;
 pub const GALA_WIN_EVENT_NOTIFY: u32 = 0x7f72;
 pub const GALA_WIN_EVENT_TAKE: u32 = 0x7f73;
+/// The notification area (Shell_NotifyIcon; ARCHITECTURE "The
+/// notification area").
+pub const GALA_TRAY_ICON: u32 = 0x7f74;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -408,6 +456,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
     (GALA_WIN_EVENT_NOTIFY, "GalaWinEventNotify", 4, gala_win_event_notify),
     (GALA_WIN_EVENT_TAKE, "GalaWinEventTake", 3, gala_win_event_take),
+    (GALA_TRAY_ICON, "GalaTrayIcon", 4, gala_tray_icon),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -431,6 +480,27 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
     (GALA_SESSION, "GalaSession", 5, session_calls::gala_session),
+    (GALA_CLIPBOARD_OPEN, "GalaClipboardOpen", 1, clipboard_calls::gala_clipboard_open),
+    (GALA_CLIPBOARD_CLOSE, "GalaClipboardClose", 1, clipboard_calls::gala_clipboard_close),
+    (GALA_CLIPBOARD_EMPTY, "GalaClipboardEmpty", 0, clipboard_calls::gala_clipboard_empty),
+    (GALA_CLIPBOARD_SET, "GalaClipboardSet", 5, clipboard_calls::gala_clipboard_set),
+    (GALA_CLIPBOARD_GET, "GalaClipboardGet", 4, clipboard_calls::gala_clipboard_get),
+    (GALA_CLIPBOARD_INFO, "GalaClipboardInfo", 1, clipboard_calls::gala_clipboard_info),
+    (GALA_CLIPBOARD_FORMATS, "GalaClipboardFormats", 3, clipboard_calls::gala_clipboard_formats),
+    (GALA_CLIPBOARD_LISTENER, "GalaClipboardListener", 2, clipboard_calls::gala_clipboard_listener),
+    (GALA_SCM_OPEN, "GalaScmOpen", 2, scm_calls::gala_scm_open),
+    (GALA_SERVICE_OPEN, "GalaServiceOpen", 5, scm_calls::gala_service_open),
+    (GALA_SERVICE_CREATE, "GalaServiceCreate", 5, scm_calls::gala_service_create),
+    (GALA_SERVICE_QUERY, "GalaServiceQuery", 5, scm_calls::gala_service_query),
+    (GALA_SERVICE_ENUM, "GalaServiceEnum", 6, scm_calls::gala_service_enum),
+    (GALA_SERVICE_CONTROL, "GalaServiceControl", 4, scm_calls::gala_service_control),
+    (GALA_SERVICE_CONFIGURE, "GalaServiceConfigure", 4, scm_calls::gala_service_configure),
+    (GALA_SERVICE_DISPATCH, "GalaServiceDispatch", 5, scm_calls::gala_service_dispatch),
+    (GALA_LX_NODE, "GalaLxNode", 3, wsl_calls::gala_lx_node),
+    (GALA_LX_SPAWN, "GalaLxSpawn", 3, wsl_calls::gala_lx_spawn),
+    (GALA_LX_DISTRO, "GalaLxDistro", 5, wsl_calls::gala_lx_distro),
+    (GALA_TASKS, "GalaTasks", 5, gala_tasks),
+    (GALA_HOTSWAP_PROBE, "GalaHotswapProbe", 3, gala_hotswap_probe),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -462,6 +532,15 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELETE_KEY, "NtDeleteKey", 1, registry_calls::nt_delete_key),
     (NT_DELETE_VALUE_KEY, "NtDeleteValueKey", 2, registry_calls::nt_delete_value_key),
     (NT_FLUSH_KEY, "NtFlushKey", 1, registry_calls::nt_flush_key),
+    (NT_SET_INFORMATION_KEY, "NtSetInformationKey", 4, registry_calls::nt_set_information_key),
+    (NT_NOTIFY_CHANGE_KEY, "NtNotifyChangeKey", 10, registry_calls::nt_notify_change_key),
+    (
+        NT_NOTIFY_CHANGE_MULTIPLE_KEYS,
+        "NtNotifyChangeMultipleKeys",
+        12,
+        registry_calls::nt_notify_change_multiple_keys,
+    ),
+    (NT_RENAME_KEY, "NtRenameKey", 2, registry_calls::nt_rename_key),
     (NT_CREATE_JOB_OBJECT, "NtCreateJobObject", 3, job_calls::nt_create_job_object),
     (NT_OPEN_PROCESS_TOKEN, "NtOpenProcessToken", 3, token_calls::nt_open_process_token),
     (NT_OPEN_PROCESS_TOKEN_EX, "NtOpenProcessTokenEx", 4, token_calls::nt_open_process_token_ex),
@@ -490,6 +569,18 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (NT_SET_SECURITY_OBJECT, "NtSetSecurityObject", 3, security_calls::nt_set_security_object),
     (GALA_LOGON_USER, "GalaLogonUser", 5, token_calls::gala_logon_user),
+    (
+        GALA_NEW_SECURITY_OBJECT,
+        "GalaNewSecurityObject",
+        9,
+        security_calls::gala_new_security_object,
+    ),
+    (
+        GALA_SET_SECURITY_OBJECT,
+        "GalaSetSecurityObject",
+        9,
+        security_calls::gala_set_security_object,
+    ),
     (
         NT_ALLOCATE_LOCALLY_UNIQUE_ID,
         "NtAllocateLocallyUniqueId",
@@ -674,8 +765,9 @@ fn dispatch(frame: &mut SyscallFrame) {
     };
     thread::set_in_syscall(&me, None);
     crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
-    // What the call changed on C: is on the disk before it returns.
-    super::persist::sync();
+    // C:'s changes are written back lazily; a writer past the dirty limit
+    // writes back here (throttling).
+    super::persist::after_call();
     let name = service.map_or("?", |&(_, name, ..)| name);
     let counter =
         if super::stats::is_wait(name) { &super::stats::WAITS } else { &super::stats::SYSCALLS };
@@ -1131,6 +1223,23 @@ fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     let object = tri!(entry.require(PROCESS_TERMINATE));
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if p.id != call.process.id && p.exit_status().is_none() {
+        // Who ended whom (Task Manager's End task, `gala kill`, a job's
+        // owner): the ended process's own exit line does not say.
+        crate::info!(
+            "process: pid {} ({}) terminates pid {} ({}) with status {:#010x}",
+            call.process.id,
+            call.process.name,
+            p.id,
+            p.name,
+            status.0
+        );
+        crate::events::emit(
+            crate::events::Category::Process,
+            "process terminate",
+            format_args!(r#""by":{},"pid":{},"status":{}"#, call.process.id, p.id, status.0),
+        );
+    }
     // Includes the caller if it belongs to `p`; it exits on its way out.
     process::terminate(p, status, true);
     NtStatus::SUCCESS
@@ -2664,6 +2773,123 @@ fn gala_window_capture(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// GalaTrayIcon's request (shell32 builds it from NOTIFYICONDATA, the
+/// same bytes for 32- and 64-bit callers): version (1), flags (NIF_*),
+/// hWnd (u64), uID, uCallbackMessage, dwState, dwStateMask, uVersion,
+/// dwInfoFlags, guidItem (16 bytes), the icon's side (0: none, at most
+/// TRAY_MAX_SIDE; the desktop scales it to 16 x 16), zero, then szTip
+/// (128 UTF-16 units), szInfoTitle (64), szInfo (256) and the icon (side
+/// x side 0xAARRGGBB, straight alpha, in room for the largest).
+pub const TRAY_REQUEST_VERSION: u32 = 1;
+pub const TRAY_TEXT_AT: usize = 64;
+pub const TRAY_ICON_AT: usize = TRAY_TEXT_AT
+    + 2 * (super::desktop::tray::TIP_LEN
+        + super::desktop::tray::TITLE_LEN
+        + super::desktop::tray::INFO_LEN);
+pub const TRAY_MAX_SIDE: usize = 64;
+pub const TRAY_REQUEST: usize = TRAY_ICON_AT + 4 * TRAY_MAX_SIDE * TRAY_MAX_SIDE;
+/// GalaTrayIcon's operation besides NIM_*: the icon's screen rectangle
+/// (Shell_NotifyIconGetRect) into `rect` (x, y, width, height as i32).
+pub const TRAY_RECT: u32 = 0x10;
+
+/// Decodes GalaTrayIcon's request (`TRAY_REQUEST` bytes):
+/// STATUS_INVALID_PARAMETER for another version or icon size.
+pub fn tray_request(b: &[u8]) -> Result<super::desktop::tray::Data, NtStatus> {
+    use super::desktop::tray;
+    if b.len() < TRAY_REQUEST {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    if u32_at(0) != TRAY_REQUEST_VERSION {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let side = u32_at(56) as usize;
+    if side > TRAY_MAX_SIDE {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let text = |at: usize, n: usize| -> Result<Vec<u16>, NtStatus> {
+        let units = &b[at..at + 2 * n];
+        let len = units.chunks_exact(2).position(|u| u == [0, 0]).unwrap_or(n);
+        let mut v = Vec::new();
+        v.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
+        v.extend(units[..2 * len].chunks_exact(2).map(|u| u16::from_le_bytes([u[0], u[1]])));
+        Ok(v)
+    };
+    let tip_at = TRAY_TEXT_AT;
+    let title_at = tip_at + 2 * tray::TIP_LEN;
+    let info_at = title_at + 2 * tray::TITLE_LEN;
+    let mut given = Vec::new();
+    given.try_reserve_exact(side * side).map_err(|_| NtStatus::NO_MEMORY)?;
+    given.extend(
+        b[TRAY_ICON_AT..TRAY_ICON_AT + 4 * side * side]
+            .chunks_exact(4)
+            .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])),
+    );
+    let icon = if side == 0 {
+        Vec::new()
+    } else {
+        super::desktop::scale_icon_to(&given, side, tray::ICON).ok_or(NtStatus::NO_MEMORY)?
+    };
+    let mut hwnd = [0u8; 8];
+    hwnd.copy_from_slice(&b[8..16]);
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(&b[40..56]);
+    Ok(tray::Data {
+        flags: u32_at(4),
+        hwnd: u64::from_le_bytes(hwnd),
+        uid: u32_at(16),
+        callback: u32_at(20),
+        state: u32_at(24),
+        state_mask: u32_at(28),
+        version: u32_at(32),
+        info_flags: u32_at(36),
+        guid,
+        tip: text(tip_at, tray::TIP_LEN)?,
+        title: text(title_at, tray::TITLE_LEN)?,
+        info: text(info_at, tray::INFO_LEN)?,
+        icon,
+    })
+}
+
+/// GalaTrayIcon(op, *request, length, *rect): Shell_NotifyIcon's
+/// message `op` (NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETFOCUS,
+/// NIM_SETVERSION) on the caller's session's notification area, or
+/// TRAY_RECT (the icon's screen rectangle into `rect`). Fails with
+/// STATUS_NOT_SUPPORTED where no shell runs (a bare desktop),
+/// OBJECT_NAME_COLLISION for an icon added twice, OBJECT_NAME_NOT_FOUND
+/// for one that is not there.
+fn gala_tray_icon(call: &mut Call<'_>) -> NtStatus {
+    use super::desktop::tray;
+    let op = arg!(call, 0) as u32;
+    let (ptr, len, out) = (arg!(call, 1), arg!(call, 2) as usize, arg!(call, 3));
+    if len != TRAY_REQUEST {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut raw = Vec::new();
+    if raw.try_reserve_exact(TRAY_REQUEST).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    raw.resize(TRAY_REQUEST, 0u8);
+    if call.process.read(ptr, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let data = tri!(tray_request(&raw));
+    let shell = &call.process.desk.shell;
+    if op == TRAY_RECT {
+        let r = tri!(super::desktop::tray_rect(shell, tray::Key::of(&data)));
+        let mut b = [0u8; 16];
+        for (i, v) in [r.x, r.y, r.w, r.h].into_iter().enumerate() {
+            b[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_le_bytes());
+        }
+        if call.process.write(out, &b).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        return NtStatus::SUCCESS;
+    }
+    tri!(super::desktop::tray_op(shell, call.process.id, op, &data));
+    NtStatus::SUCCESS
+}
+
 /// GalaWindowSetIcon(id, *pixels, size): the window's icon, `size` x
 /// `size` 0xAARRGGBB pixels (straight alpha, at most 64; 0 or no pixels:
 /// none), shown on its taskbar button.
@@ -3409,9 +3635,21 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
             let last = u32::from(t.process.thread_count() == 1);
             return call.return_info(&last.to_le_bytes(), buffer, length, ret_ptr);
         }
+        THREAD_IDEAL_PROCESSOR_EX => {
+            // PROCESSOR_NUMBER { Group, Number, Reserved }: gala has one
+            // group.
+            let cpu = t.ideal_processor() as u8;
+            return call.return_info(&[0, 0, cpu, 0], buffer, length, ret_ptr);
+        }
         THREAD_IS_TERMINATED => {
             let done = u32::from(t.has_exited());
             return call.return_info(&done.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        THREAD_IS_IO_PENDING => {
+            // A ULONG: its socket, pipe and directory-watch requests
+            // outstanding (thread::IoPending).
+            let pending = u32::from(t.io_pending());
+            return call.return_info(&pending.to_le_bytes(), buffer, length, ret_ptr);
         }
         THREAD_NAME_INFORMATION => {
             // THREAD_NAME_INFORMATION { UNICODE_STRING ThreadName }, the
@@ -3468,9 +3706,18 @@ const THREAD_AFFINITY_MASK: u64 = 4;
 const THREAD_IMPERSONATION_TOKEN: u64 = 5;
 const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
+const THREAD_IDEAL_PROCESSOR: u64 = 13;
+const THREAD_IDEAL_PROCESSOR_EX: u64 = 33;
+/// MAXIMUM_PROCESSORS (64-bit): ThreadIdealProcessor's "only ask".
+const MAXIMUM_PROCESSORS: u32 = 64;
+const THREAD_IS_IO_PENDING: u64 = 16;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
 const THREAD_IS_TERMINATED: u64 = 20;
 const THREAD_NAME_INFORMATION: u64 = 38;
+/// gala's own class (no data): the thread's stack is the thread's, freed
+/// when it ends (kernel32's CreateThread, which made it; a raw
+/// NtCreateThread's stack stays the caller's). Not a Windows class.
+pub const GALA_THREAD_FREE_STACK: u64 = 0x4761_0001;
 const THREAD_SET_LIMITED_INFORMATION: u32 = 0x0400;
 /// The longest thread name kept, in characters.
 const MAX_THREAD_NAME: usize = 256;
@@ -3511,9 +3758,17 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     let object = tri!(entry.require(THREAD_SET_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class == GALA_THREAD_FREE_STACK {
+        if length != 0 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        t.free_stack_on_exit();
+        return NtStatus::SUCCESS;
+    }
     let need = match class {
         THREAD_HIDE_FROM_DEBUGGER => 0,
-        THREAD_PRIORITY | THREAD_BASE_PRIORITY => 4,
+        THREAD_PRIORITY | THREAD_BASE_PRIORITY | THREAD_IDEAL_PROCESSOR => 4,
+        THREAD_IDEAL_PROCESSOR_EX => 4,
         THREAD_AFFINITY_MASK => 8,
         _ => return NtStatus::INVALID_INFO_CLASS,
     };
@@ -3522,6 +3777,9 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     if class == THREAD_HIDE_FROM_DEBUGGER {
         return NtStatus::SUCCESS; // there is no debugger to hide from
+    }
+    if class == THREAD_IDEAL_PROCESSOR || class == THREAD_IDEAL_PROCESSOR_EX {
+        return set_ideal_processor(call, t, class, buffer);
     }
     if class == THREAD_AFFINITY_MASK {
         let mut v = [0u8; 8];
@@ -3557,6 +3815,36 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
             p.1 = base;
             p.0 = p.0.max(base);
         }
+    }
+    NtStatus::SUCCESS
+}
+
+/// ThreadIdealProcessor (a ULONG: the previous ideal processor is the
+/// returned status, as Windows returns it; MAXIMUM_PROCESSORS only asks)
+/// and ThreadIdealProcessorEx (a PROCESSOR_NUMBER, the previous one
+/// written back). A processor number up to 63 is kept whether or not it
+/// is online (Windows accepts them: Wine's thread.c, a WOW64 process's
+/// 33); above, or another group, STATUS_INVALID_PARAMETER.
+fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer: u64) -> NtStatus {
+    let mut v = [0u8; 4];
+    if call.process.read(buffer, &mut v).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    if class == THREAD_IDEAL_PROCESSOR {
+        let cpu = u32::from_le_bytes(v);
+        return match cpu {
+            MAXIMUM_PROCESSORS => NtStatus(t.ideal_processor()),
+            c if c < MAXIMUM_PROCESSORS => NtStatus(t.set_ideal_processor(c)),
+            _ => NtStatus::INVALID_PARAMETER,
+        };
+    }
+    let (group, cpu) = (u16::from_le_bytes([v[0], v[1]]), u32::from(v[2]));
+    if group != 0 || cpu >= MAXIMUM_PROCESSORS {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let previous = t.set_ideal_processor(cpu) as u8;
+    if call.process.write(buffer, &[0, 0, previous, 0]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
 }
@@ -3881,8 +4169,17 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             let session = p.session.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
         }
-        PROCESS_IMAGE_FILE_NAME => {
-            let name = tri!(p.image_nt_path());
+        PROCESS_IMAGE_FILE_NAME | PROCESS_IMAGE_FILE_NAME_WIN32 => {
+            // A UNICODE_STRING and its text: the NT path, or the Win32 one
+            // (`C:\\...`, QueryFullProcessImageNameW's default form).
+            let name = if class == PROCESS_IMAGE_FILE_NAME {
+                tri!(p.image_nt_path())
+            } else {
+                let mut w = Vec::new();
+                tri!(w.try_reserve_exact(p.path.len()).map_err(|_| NtStatus::NO_MEMORY));
+                w.extend(p.path.bytes().map(u16::from));
+                w
+            };
             let Some(info) = super::sysinfo::unicode_string_in_place(&name, buffer) else {
                 return NtStatus::NO_MEMORY;
             };
@@ -3922,9 +4219,13 @@ const PROCESS_HANDLE_COUNT: u64 = 20;
 const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
 const PROCESS_IMAGE_FILE_NAME: u64 = 27;
+const PROCESS_IMAGE_FILE_NAME_WIN32: u64 = 43;
 
 /// SystemProcessInformation for a buffer at user address `buffer`: the
 /// idle process (id 0), then each running process with its threads.
+/// Windows' contents only: a Linux process (a WSL distribution's, the
+/// Linux personality's) is no Windows process, and Windows programs see
+/// it nowhere (GalaTasks lists both: `nt::tasks`).
 fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     use super::sysinfo::{ProcessRecord, ThreadRecord, push_process};
     let no_memory = |_| NtStatus::NO_MEMORY;
@@ -3932,6 +4233,9 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     let idle = ProcessRecord { id: 0, parent_id: 0, create_time: 0, handle_count: 0, name: "" };
     push_process(&mut out, &idle, &[], buffer).map_err(no_memory)?;
     for p in process::running().map_err(no_memory)? {
+        if p.personality != platform::Personality::Nt {
+            continue;
+        }
         let mut threads = Vec::new();
         for t in p.threads().map_err(no_memory)? {
             if let ObjectBody::Thread(t) = &t.body {
@@ -3956,6 +4260,60 @@ fn process_information(buffer: u64) -> Result<Vec<u8>, NtStatus> {
     Ok(out)
 }
 
+/// GalaTasks(op, arg, buffer, length, *returned) (`nt::tasks`): op 0
+/// lists every process of both personalities, op 1 the machine's load
+/// (each into `buffer`, `*returned` the size it takes:
+/// STATUS_BUFFER_TOO_SMALL when it does not fit, as the list changes
+/// between calls); op 2 signals Linux process `arg` with signal
+/// `length`; op 3 ends the WSL distribution named by the
+/// UTF-8 `buffer` (`*returned` how many processes ended).
+/// GalaHotswapProbe(Op, Value, *Out): nt::hotswap_probe.
+fn gala_hotswap_probe(call: &mut Call<'_>) -> NtStatus {
+    let (op, value, out) = (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2));
+    let values = tri!(super::hotswap_probe::probe(op, value));
+    if out != 0 {
+        for (i, v) in values.into_iter().enumerate() {
+            tri!(call.write_u64(out + 8 * i as u64, v));
+        }
+    }
+    NtStatus::SUCCESS
+}
+
+fn gala_tasks(call: &mut Call<'_>) -> NtStatus {
+    let (op, arg, buffer, length, returned) =
+        (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32, arg!(call, 4));
+    let data = match op {
+        0 => tri!(super::tasks::processes(&call.process)),
+        1 => tri!(super::tasks::perf()),
+        2 => return super::tasks::signal(&call.process, arg, length),
+        3 => {
+            let mut name = [0u8; 256];
+            let Some(name) = name.get_mut(..length as usize) else {
+                return NtStatus::INVALID_PARAMETER;
+            };
+            if call.process.read(buffer, name).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let n = tri!(super::tasks::end_distribution(&call.process, name));
+            if returned != 0 {
+                tri!(call.write_u32(returned, n as u32));
+            }
+            return NtStatus::SUCCESS;
+        }
+        _ => return NtStatus::INVALID_PARAMETER,
+    };
+    if returned != 0 {
+        tri!(call.write_u32(returned, data.len() as u32));
+    }
+    if (length as usize) < data.len() {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    match call.process.write(buffer, &data) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
+    }
+}
+
 /// NtQuerySystemInformation(Class, Buffer, Length, *ReturnLength)
 fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
     use super::sysinfo;
@@ -3976,6 +4334,31 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             let info =
                 sysinfo::performance_information(free, committed, super::charge::limit(), peak);
             call.return_info(&info, buffer, length, ret_ptr)
+        }
+        sysinfo::SYSTEM_PAGEFILE_INFORMATION => {
+            // One entry per page file; none: nothing returned.
+            let (total, used, peak) = crate::mm::swap::stats();
+            if total == 0 {
+                if ret_ptr != 0 {
+                    tri!(call.write_u32(ret_ptr, 0));
+                }
+                return NtStatus::SUCCESS;
+            }
+            let name: [u16; 19] = super::pagefile::NT_NAME;
+            let Some(info) = sysinfo::pagefile_information((total, used, peak), &name, buffer)
+            else {
+                return NtStatus::NO_MEMORY;
+            };
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, info.len() as u32));
+            }
+            if (length as usize) < info.len() {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            match call.process.write(buffer, &info) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
         }
         sysinfo::SYSTEM_TIME_OF_DAY_INFORMATION => {
             let info = sysinfo::time_of_day(platform::boot_system_time(), platform::system_time());
@@ -4007,6 +4390,19 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
                 return NtStatus::INFO_LENGTH_MISMATCH;
             }
             match call.process.write(buffer, &info) {
+                Ok(()) => NtStatus::SUCCESS,
+                Err(_) => NtStatus::ACCESS_VIOLATION,
+            }
+        }
+        sysinfo::GALA_SESSIONS => {
+            let records = tri!(sysinfo::sessions());
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, records.len() as u32));
+            }
+            if (length as usize) < records.len() {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            match call.process.write(buffer, &records) {
                 Ok(()) => NtStatus::SUCCESS,
                 Err(_) => NtStatus::ACCESS_VIOLATION,
             }
@@ -4479,7 +4875,7 @@ fn file_section(
             return Err(NtStatus::SECTION_TOO_BIG);
         }
         let now = platform::system_time();
-        file::with_fs(|fs| fs.set_size(f.node, size, now)).map_err(file::fs_status)?;
+        file::set_size(f.node, size, now).map_err(file::fs_status)?;
     }
     section::Section::new_file(entry.object.clone(), f.node, size, protect)
 }
@@ -4656,7 +5052,7 @@ impl Call<'_> {
                     if !f.directory {
                         return Err(NtStatus::INVALID_PARAMETER);
                     }
-                    return Ok(file::FilePath { start: f.node, name });
+                    return Ok(file::FilePath { start: f.node, name, linux: None });
                 }
                 let object = entry.require(DIRECTORY_TRAVERSE)?.clone();
                 if object.as_directory().is_none() {
@@ -4673,10 +5069,32 @@ impl Call<'_> {
         // OBJ_CASE_INSENSITIVE; the object directory part follows the flag.
         let (device, rest) =
             namespace::lookup_parse(attrs.root.as_ref(), &attrs.name, attrs.case_insensitive())?;
+        if matches!(device.body, ObjectBody::MupDevice) {
+            // `\\wsl.localhost\<distro>\...` (nt::wslfs), for the caller's user.
+            return super::wslfs::share_path(&self.user_sid_string()?, &rest);
+        }
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest })
+        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None })
+    }
+
+    /// The string form of the caller's token user's SID (`S-1-5-21-...`):
+    /// the thread's impersonation token's, else the process's.
+    fn user_sid_string(&self) -> Result<Vec<u8>, NtStatus> {
+        let impersonation = super::thread::current().and_then(|me| match &me.body {
+            ObjectBody::Thread(t) => t.impersonation.lock().clone(),
+            _ => None,
+        });
+        let token = impersonation.unwrap_or_else(|| self.process.token.lock().clone());
+        let ObjectBody::Token(t) = &token.body else { return Err(NtStatus::NO_TOKEN) };
+        let sid = t.data.lock().user.sid;
+        let mut binary = [0u8; 68];
+        sid.write(&mut binary);
+        let mut out = Vec::new();
+        super::tasks::sid_string(&binary[..sid.len()], &mut out)
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        Ok(out)
     }
 
     /// Whether OBJECT_ATTRIBUTES name something below `\Device\Afd`.
@@ -4787,7 +5205,17 @@ impl Call<'_> {
     }
 
     fn open_or_create(&self, r: OpenRequest) -> NtStatus {
-        let OpenRequest { out, access, attrs_ptr, iosb, share, disposition, options, ea } = r;
+        let OpenRequest {
+            out,
+            access,
+            attrs_ptr,
+            iosb,
+            share,
+            disposition,
+            options,
+            ea,
+            file_attributes,
+        } = r;
         let mut granted = super::object::FILE_MAPPING.map(access);
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
@@ -4829,12 +5257,17 @@ impl Call<'_> {
             };
             (object, file::FILE_OPENED)
         } else {
-            let path = tri!(self.file_path(attrs_ptr));
+            // Links on the way are followed, and at the end unless the
+            // link itself is opened or created.
+            let follow_final =
+                options & file::FILE_OPEN_REPARSE_POINT == 0 && disposition != file::FILE_CREATE;
+            let path = tri!(file::resolve_links(tri!(self.file_path(attrs_ptr)), follow_final));
             // The access check (docs/SECURITY.md S3).
             granted = tri!(security_calls::file_access(self, &path, access, disposition, options));
             let created = tri!(file::create(&path, granted, share, disposition, options));
             if created.information == file::FILE_CREATED {
                 tri!(security_calls::assign_file(self, &created.object, attrs_ptr));
+                tri!(file::set_created_attributes(&created.object, file_attributes));
             }
             (created.object, created.information)
         };
@@ -4865,6 +5298,8 @@ struct OpenRequest {
     options: u32,
     /// EaBuffer and EaLength (NtCreateFile only; the AFD open packet).
     ea: (u64, u64),
+    /// NtCreateFile's FileAttributes: what a file it creates starts with.
+    file_attributes: u32,
 }
 
 /// NtCreateNamedPipeFile(*FileHandle, DesiredAccess, ObjectAttributes,
@@ -4934,6 +5369,142 @@ const FSCTL_PIPE_IMPERSONATE: u32 = 0x0011_001c;
 /// one message, one message read into the output buffer.
 const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_c017;
 
+/// FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT and
+/// FSCTL_DELETE_REPARSE_POINT: a file's or directory's reparse point
+/// (REPARSE_DATA_BUFFER; REPARSE_GUID_DATA_BUFFER for a tag not
+/// Microsoft's).
+const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00a4;
+const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00a8;
+const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00ac;
+/// MAXIMUM_REPARSE_DATA_BUFFER_SIZE.
+const MAX_REPARSE_BUFFER: usize = 16 * 1024;
+/// REPARSE_GUID_DATA_BUFFER_HEADER_SIZE: a GUID tag's header; also the
+/// exact size FSCTL_DELETE_REPARSE_POINT takes.
+const REPARSE_GUID_HEADER: usize = 24;
+/// sizeof(REPARSE_GUID_DATA_BUFFER): the least FSCTL_GET_REPARSE_POINT
+/// writes into.
+const REPARSE_GUID_BUFFER_SIZE: usize = 28;
+/// SeCreateSymbolicLinkPrivilege.
+const SE_CREATE_SYMBOLIC_LINK_PRIVILEGE: u64 = 35;
+
+/// The reparse point controls on an open file (`code`), as NTFS answers
+/// them (Wine's ntdll test_reparse_points, run on Windows: the statuses
+/// for each malformed buffer).
+fn reparse_fsctl(
+    call: &mut Call<'_>,
+    entry: &HandleEntry,
+    node: crate::fs::ramfs::NodeId,
+    code: u32,
+) -> NtStatus {
+    let (iosb, input, in_len) = (arg!(call, 4), arg!(call, 6), arg!(call, 7) as u32 as usize);
+    let (out, out_len) = (arg!(call, 8), arg!(call, 9) as u32 as usize);
+    let read_input = |call: &Call<'_>| -> Result<Vec<u8>, NtStatus> {
+        if input == 0 || in_len == 0 {
+            return Err(NtStatus::INVALID_BUFFER_SIZE);
+        }
+        if !(8..=MAX_REPARSE_BUFFER).contains(&in_len) {
+            return Err(NtStatus::IO_REPARSE_DATA_INVALID);
+        }
+        let mut b = Vec::new();
+        b.try_reserve_exact(in_len).map_err(|_| NtStatus::NO_MEMORY)?;
+        b.resize(in_len, 0);
+        call.process.read(input, &mut b).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        Ok(b)
+    };
+    let tag_of = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let data_len_of = |b: &[u8]| usize::from(u16::from_le_bytes([b[4], b[5]]));
+    let writable = entry.access & (file::FILE_WRITE_DATA | file::FILE_WRITE_ATTRIBUTES) != 0;
+    match code {
+        FSCTL_SET_REPARSE_POINT => {
+            if !writable {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let b = tri!(read_input(call));
+            let tag = tag_of(&b);
+            if tag <= 1 {
+                return NtStatus::IO_REPARSE_TAG_INVALID;
+            }
+            // A Microsoft tag (bit 31) has no GUID in its header.
+            let header = if tag & 0x8000_0000 != 0 { 8 } else { REPARSE_GUID_HEADER };
+            if b.len() < header || data_len_of(&b) + header != b.len() {
+                return NtStatus::IO_REPARSE_DATA_INVALID;
+            }
+            let reparse = crate::fs::ramfs::Reparse { tag, data: Vec::new() };
+            let is_dir = file::with_fs(|fs| fs.node(node).is_some_and(|n| n.is_dir()));
+            match tag {
+                crate::fs::ramfs::TAG_MOUNT_POINT if !is_dir => return NtStatus::NOT_A_DIRECTORY,
+                crate::fs::ramfs::TAG_SYMLINK | crate::fs::ramfs::TAG_MOUNT_POINT => {
+                    // Its names must lie in the buffer.
+                    let r = crate::fs::ramfs::Reparse { data: tri!(owned(&b[8..])), ..reparse };
+                    tri!(file::link_target(&r).map(drop));
+                }
+                _ => {}
+            }
+            if tag == crate::fs::ramfs::TAG_SYMLINK
+                && !security_calls::effective_privilege(call, SE_CREATE_SYMBOLIC_LINK_PRIVILEGE)
+            {
+                return NtStatus::PRIVILEGE_NOT_HELD;
+            }
+            let set = file::with_fs(|fs| fs.set_reparse(node, tag, &b[8..]));
+            tri!(set.map_err(file::fs_status));
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            NtStatus::SUCCESS
+        }
+        FSCTL_DELETE_REPARSE_POINT => {
+            if !writable {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let b = tri!(read_input(call));
+            if b.len() != REPARSE_GUID_HEADER || data_len_of(&b) != 0 {
+                return NtStatus::IO_REPARSE_DATA_INVALID;
+            }
+            let tag = tag_of(&b);
+            if tag <= 1 {
+                return NtStatus::IO_REPARSE_TAG_INVALID;
+            }
+            let deleted = file::with_fs(|fs| fs.delete_reparse(node, tag));
+            tri!(deleted.map_err(file::fs_status));
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+            NtStatus::SUCCESS
+        }
+        _ => {
+            // FSCTL_GET_REPARSE_POINT.
+            if out == 0 || out_len == 0 {
+                return NtStatus::INVALID_USER_BUFFER;
+            }
+            let found = file::with_fs(|fs| {
+                fs.node(node).and_then(|n| n.reparse()).map(|r| (r.tag, owned(&r.data)))
+            });
+            let Some((tag, data)) = found else { return NtStatus::NOT_A_REPARSE_POINT };
+            let data = tri!(data);
+            if out_len < REPARSE_GUID_BUFFER_SIZE {
+                return NtStatus::BUFFER_TOO_SMALL;
+            }
+            let header_len = if tag & 0x8000_0000 != 0 { 0 } else { REPARSE_GUID_HEADER - 8 };
+            let data_len = (data.len() - header_len.min(data.len())) as u16;
+            let mut b = Vec::new();
+            let built = b
+                .try_extend_from_slice(&tag.to_le_bytes())
+                .and_then(|()| b.try_extend_from_slice(&data_len.to_le_bytes()))
+                .and_then(|()| b.try_extend_from_slice(&[0, 0]))
+                .and_then(|()| b.try_extend_from_slice(&data));
+            tri!(built.map_err(|_| NtStatus::NO_MEMORY));
+            let n = b.len().min(out_len);
+            if call.process.write(out, &b[..n]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let status = if n < b.len() { NtStatus::BUFFER_OVERFLOW } else { NtStatus::SUCCESS };
+            tri!(call.write_iosb(iosb, status, n as u64));
+            status
+        }
+    }
+}
+
+/// A copy of `b`.
+fn owned(b: &[u8]) -> Result<Vec<u8>, NtStatus> {
+    crate::mm::heap::try_to_vec(b).map_err(|_| NtStatus::NO_MEMORY)
+}
+
 /// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
 ///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
 ///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN,
@@ -4942,6 +5513,19 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, code, out, out_len) =
         (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 8), arg!(call, 9) as u32 as usize);
+    if let ObjectBody::File(f) = &entry.object.body
+        && matches!(
+            code,
+            FSCTL_SET_REPARSE_POINT | FSCTL_GET_REPARSE_POINT | FSCTL_DELETE_REPARSE_POINT
+        )
+    {
+        let node = f.node;
+        return reparse_fsctl(call, &entry, node, code);
+    }
+    if matches!(entry.object.body, ObjectBody::VolumeFile(_)) && code == FSCTL_GET_REPARSE_POINT {
+        // A volume cannot be a reparse point.
+        return NtStatus::NOT_A_REPARSE_POINT;
+    }
     let ObjectBody::Pipe(end) = &entry.object.body else {
         super::ledger::record("NtFsControlFile", "file system control", u64::from(code));
         return NtStatus::INVALID_DEVICE_REQUEST;
@@ -5051,6 +5635,7 @@ fn nt_create_file(call: &mut Call<'_>) -> NtStatus {
         disposition,
         options,
         ea,
+        file_attributes: arg!(call, 5) as u32,
     });
     emit_open(call, attrs, out, status);
     status
@@ -5104,6 +5689,7 @@ fn nt_open_file(call: &mut Call<'_>) -> NtStatus {
         disposition: file::FILE_OPEN,
         options,
         ea: (0, 0),
+        file_attributes: 0,
     });
     emit_open(call, attrs, out, status);
     status
@@ -5409,6 +5995,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     // Open and read the image (missing: STATUS_OBJECT_NAME_NOT_FOUND).
     let copy = tri!(crate::mm::heap::try_to_vec(&image).map_err(|_| NtStatus::NO_MEMORY));
     let path = tri!(call.resolve_file_name(0, copy, OBJ_CASE_INSENSITIVE));
+    let path = tri!(file::resolve_links(path, true));
     let opened = tri!(file::create(
         &path,
         file::FILE_READ_DATA,
@@ -5657,16 +6244,39 @@ fn file_write(
     if entry.access & file::FILE_WRITE_DATA == 0 {
         offset = size; // append-only handles always write at the end
     }
+    tri!(unbuffered_check(file, offset, length));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), true));
     let done = tri!(write_range(call, file, buffer, length, offset));
     if file.synchronous {
         *file.position.lock() = offset + done;
+    }
+    // A write-through or unbuffered handle's data is on the disk before
+    // the call returns (CreateFile's FILE_FLAG_WRITE_THROUGH and
+    // FILE_FLAG_NO_BUFFERING).
+    if file.mode & (file::FILE_WRITE_THROUGH | file::FILE_NO_INTERMEDIATE_BUFFERING) != 0 {
+        super::persist::flush(super::persist::Cause::WriteThrough);
     }
     if super::logtee::active() {
         logtee_write(call, file, buffer, done);
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, done));
     NtStatus::SUCCESS
+}
+
+/// A read or write on a handle opened without buffering
+/// (FILE_NO_INTERMEDIATE_BUFFERING) moves whole sectors at sector offsets
+/// (FILE_FLAG_NO_BUFFERING's documented rule, 512-byte logical sectors:
+/// FileFsSectorSizeInformation); anything else is
+/// STATUS_INVALID_PARAMETER (ERROR_INVALID_PARAMETER), as on Windows.
+/// (The buffer's alignment, also documented, is not checked.)
+fn unbuffered_check(file: &file::FileObject, offset: u64, length: u32) -> Result<(), NtStatus> {
+    const SECTOR: u64 = 512;
+    if file.mode & file::FILE_NO_INTERMEDIATE_BUFFERING != 0
+        && (!offset.is_multiple_of(SECTOR) || !u64::from(length).is_multiple_of(SECTOR))
+    {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    Ok(())
 }
 
 /// `logtee=`: a write to a file below the logged directory goes to the
@@ -5689,7 +6299,20 @@ fn write_range(
     length: u32,
     offset: u64,
 ) -> Result<u64, NtStatus> {
-    let mut chunk = [0u8; 512];
+    // On a disk-backed C: a write that cannot have all its clusters
+    // fails as a whole (STATUS_DISK_FULL), as on Windows. Clusters given
+    // up and waiting for the write-back count as free (what free space
+    // reports): a write-back first makes them so.
+    let room = || file::with_fs(|fs| fs.room_for(file.node, offset, u64::from(length)));
+    if room() == Err(crate::fs::ramfs::FsError::DiskFull)
+        && file::with_fs(|fs| fs.area_reclaimable()) > 0
+    {
+        super::persist::flush(super::persist::Cause::Reclaim);
+    }
+    room().map_err(file::fs_status)?;
+    let mut big = Vec::new();
+    let mut small = [0u8; 512];
+    let chunk = io_chunk(&mut big, &mut small, length);
     let mut done = 0u64;
     while done < u64::from(length) {
         let n = (u64::from(length) - done).min(chunk.len() as u64) as usize;
@@ -5697,11 +6320,23 @@ fn write_range(
             return Err(NtStatus::ACCESS_VIOLATION);
         }
         let now = platform::system_time();
-        file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now))
-            .map_err(file::fs_status)?;
+        file::write(file.node, offset + done, &chunk[..n], now).map_err(file::fs_status)?;
         done += n as u64;
     }
     Ok(done)
+}
+
+/// A buffer for moving file data between the caller and the file system:
+/// up to 64 KiB from the heap (a disk-backed file's pages then change a
+/// cluster run at a time, one change record per call), else 512 bytes.
+fn io_chunk<'a>(big: &'a mut Vec<u8>, small: &'a mut [u8; 512], length: u32) -> &'a mut [u8] {
+    let want = (length as usize).clamp(512, 64 * 1024);
+    if want > 512 && big.try_reserve_exact(want).is_ok() {
+        big.resize(want, 0);
+        big
+    } else {
+        small
+    }
 }
 
 /// Reads up to `length` bytes at `offset` into the caller's `buffer`
@@ -5713,12 +6348,14 @@ fn read_range(
     length: u32,
     offset: u64,
 ) -> Result<u64, NtStatus> {
-    let mut chunk = [0u8; 512];
+    let mut big = Vec::new();
+    let mut small = [0u8; 512];
+    let chunk = io_chunk(&mut big, &mut small, length);
     let mut done = 0u64;
     while done < u64::from(length) {
         let want = (u64::from(length) - done).min(chunk.len() as u64) as usize;
-        let n = file::with_fs(|fs| fs.read(file.node, offset + done, &mut chunk[..want]))
-            .map_err(file::fs_status)?;
+        let n =
+            file::read(file.node, offset + done, &mut chunk[..want]).map_err(file::fs_status)?;
         if n == 0 {
             break;
         }
@@ -6143,6 +6780,7 @@ fn file_read(
     }
     let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
     let offset = tri!(io_offset(call, file, offset_ptr, size));
+    tri!(unbuffered_check(file, offset, length));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), false));
     if offset >= size && length > 0 {
         tri!(call.write_iosb(iosb, NtStatus::END_OF_FILE, 0));
@@ -6159,11 +6797,24 @@ fn file_read(
 const FILE_BASIC_INFORMATION: u64 = 4;
 const FILE_STANDARD_INFORMATION: u64 = 5;
 const FILE_INTERNAL_INFORMATION: u64 = 6;
+/// FILE_ID_INFORMATION (GetFileInformationByHandleEx's FileIdInfo).
+const FILE_ID_INFORMATION: u64 = 59;
 const FILE_NAME_INFORMATION: u64 = 9;
 const FILE_ATTRIBUTE_TAG_INFORMATION: u64 = 35;
 const FILE_RENAME_INFORMATION: u64 = 10;
+/// FileRenameInformationEx: FILE_RENAME_INFORMATION with Flags for the
+/// BOOLEAN.
+const FILE_RENAME_INFORMATION_EX: u64 = 65;
+const FILE_LINK_INFORMATION: u64 = 11;
+/// FileLinkInformationEx: FILE_LINK_INFORMATION with Flags.
+const FILE_LINK_INFORMATION_EX: u64 = 72;
 const FILE_DISPOSITION_INFORMATION: u64 = 13;
+/// FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX { Flags }.
+const FILE_DISPOSITION_INFORMATION_EX: u64 = 64;
 const FILE_POSITION_INFORMATION: u64 = 14;
+/// FileStatLxInformation (70): FILE_STAT_LX_INFORMATION, a file's Linux
+/// metadata as WSL's file systems give it (nt::file::stat_lx_information).
+const FILE_STAT_LX_INFORMATION: u64 = 70;
 const FILE_MODE_INFORMATION: u64 = 16;
 const FILE_COMPLETION_INFORMATION: u64 = 30;
 /// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
@@ -6269,8 +6920,26 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if class == FILE_NAME_INFORMATION {
-        let name = tri!(file::volume_path(file.node));
+        let name = tri!(file::handle_path(file));
         return return_file_name(call, &name, buffer, length, iosb);
+    }
+    if class == FILE_PROCESS_IDS_USING_FILE_INFORMATION {
+        return return_processes_using(call, file.node, arg!(call, 0), buffer, length, iosb);
+    }
+    if class == FILE_STAT_LX_INFORMATION {
+        if entry.access & file::FILE_READ_ATTRIBUTES == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let ids = crate::lx::identity::of_process(&call.process);
+        let out = tri!(file::stat_lx_information(file.node, entry.access, (ids.uid, ids.gid)));
+        if length < out.len() {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &out).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, out.len() as u64));
+        return NtStatus::SUCCESS;
     }
     let mut out = [0u8; 40];
     let size = match class {
@@ -6294,10 +6963,21 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
             out[..8].copy_from_slice(&file::index_number(file.node).to_le_bytes());
             8
         }
+        FILE_ID_INFORMATION => {
+            // VolumeSerialNumber (the volume's serial, as
+            // FileFsVolumeInformation gives it), FileId: the 64-bit index
+            // number in a 128-bit id (as an NTFS file's).
+            out[..8].copy_from_slice(&u64::from(file::VOLUME_SERIAL).to_le_bytes());
+            out[8..16].copy_from_slice(&file::index_number(file.node).to_le_bytes());
+            out[16..24].fill(0);
+            24
+        }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
-            // FileAttributes, ReparseTag (no reparse points on this volume).
+            // FileAttributes, ReparseTag.
             let basic = tri!(file::basic_information(file.node));
             out[..4].copy_from_slice(&basic[32..36]);
+            let tag = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.reparse_tag()));
+            out[4..8].copy_from_slice(&tag.to_le_bytes());
             8
         }
         FILE_POSITION_INFORMATION => {
@@ -6313,6 +6993,47 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, size as u64));
+    NtStatus::SUCCESS
+}
+
+/// FileProcessIdsUsingFileInformation (47): FILE_PROCESS_IDS_USING_FILE_
+/// INFORMATION { ULONG NumberOfProcessIdsInList; ULONG_PTR
+/// ProcessIdList[]; } (ntifs.h), what the Restart Manager asks of each
+/// file registered with it (rstrtmgr's RmGetList).
+const FILE_PROCESS_IDS_USING_FILE_INFORMATION: u64 = 47;
+
+/// FileProcessIdsUsingFileInformation for file `node` asked through
+/// `handle`: the processes `file::processes_using` finds, in the caller's
+/// layout (a WOW64 caller's ULONG_PTR is 4 bytes: the 32-bit ntdll passes
+/// the buffer through). STATUS_INFO_LENGTH_MISMATCH when the buffer holds
+/// less than the header and every id.
+fn return_processes_using(
+    call: &mut Call<'_>,
+    node: crate::fs::ramfs::NodeId,
+    handle: u64,
+    buffer: u64,
+    length: usize,
+    iosb: u64,
+) -> NtStatus {
+    let ids = tri!(file::processes_using(node, (call.process.id, handle)));
+    let width = if call.process.wow64.is_some() { 4 } else { 8 };
+    let size = width + width * ids.len().max(1);
+    if length < size {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut out = Vec::new();
+    tri!(out.try_reserve_exact(size).map_err(|_| NtStatus::NO_MEMORY));
+    out.resize(size, 0u8);
+    out[..4].copy_from_slice(&(ids.len() as u32).to_le_bytes());
+    for (i, id) in ids.iter().enumerate() {
+        let at = width * (i + 1);
+        out[at..at + width].copy_from_slice(&id.to_le_bytes()[..width]);
+    }
+    let used = width + width * ids.len();
+    if call.process.write(buffer, &out[..used]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, used as u64));
     NtStatus::SUCCESS
 }
 
@@ -6495,8 +7216,21 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
             Err(e) => file::fs_status(e),
         };
     }
-    if class == FILE_RENAME_INFORMATION {
-        let status = rename_file(call, &entry, file, buffer, length);
+    if matches!(
+        class,
+        FILE_RENAME_INFORMATION
+            | FILE_RENAME_INFORMATION_EX
+            | FILE_LINK_INFORMATION
+            | FILE_LINK_INFORMATION_EX
+    ) {
+        let status = name_file(call, &entry, file, buffer, length, class);
+        if status == NtStatus::SUCCESS {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        }
+        return status;
+    }
+    if class == FILE_DISPOSITION_INFORMATION_EX {
+        let status = dispose_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {
             tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
         }
@@ -6525,7 +7259,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
                 return NtStatus::ACCESS_DENIED;
             }
             let now = platform::system_time();
-            match file::with_fs(|fs| fs.set_size(file.node, value, now)) {
+            match file::set_size(file.node, value, now) {
                 Ok(()) => NtStatus::SUCCESS,
                 Err(e) => file::fs_status(e),
             }
@@ -6535,10 +7269,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
             if entry.access & file::DELETE == 0 {
                 return NtStatus::ACCESS_DENIED;
             }
-            match file::with_fs(|fs| fs.set_delete_pending(file.node, data[0] != 0)) {
-                Ok(()) => NtStatus::SUCCESS,
-                Err(e) => file::fs_status(e),
-            }
+            set_disposition(file, data[0] != 0, false)
         }
     };
     if status == NtStatus::SUCCESS {
@@ -6547,18 +7278,111 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
-/// FileRenameInformation: FILE_RENAME_INFORMATION { BOOLEAN ReplaceIfExists;
-/// HANDLE RootDirectory; ULONG FileNameLength; WCHAR FileName[]; } (24 bytes
-/// with padding). A bare name renames within the same directory.
-fn rename_file(
+/// NT's delete of `file`'s name (`delete`) or its reset: a read-only
+/// file is STATUS_CANNOT_DELETE unless `ignore_readonly`.
+fn set_disposition(file: &file::FileObject, delete: bool, ignore_readonly: bool) -> NtStatus {
+    let readonly = file::with_fs(|fs| {
+        fs.node(file.node).is_some_and(|n| n.attributes & crate::fs::ramfs::ATTRIBUTE_READONLY != 0)
+    });
+    if delete && readonly && !ignore_readonly {
+        return NtStatus::CANNOT_DELETE;
+    }
+    match file::set_delete_pending(file, delete) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => file::fs_status(e),
+    }
+}
+
+/// FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX { ULONG
+/// Flags; }: FILE_DISPOSITION_DELETE (0 resets), POSIX_SEMANTICS (the
+/// name goes when this handle closes: `FileObject::set_posix_delete`),
+/// ON_CLOSE (sets or clears FILE_DELETE_ON_CLOSE instead),
+/// IGNORE_READONLY_ATTRIBUTE; FORCE_IMAGE_SECTION_CHECK changes nothing
+/// here (a mapped image's file is not deleted under it either way).
+fn dispose_file(
     call: &Call<'_>,
     entry: &HandleEntry,
     file: &file::FileObject,
     buffer: u64,
     length: usize,
 ) -> NtStatus {
-    const HEADER: usize = 20;
+    const DELETE: u32 = 0x1;
+    const POSIX_SEMANTICS: u32 = 0x2;
+    const FORCE_IMAGE_SECTION_CHECK: u32 = 0x4;
+    const ON_CLOSE: u32 = 0x8;
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
+    const KNOWN: u32 =
+        DELETE | POSIX_SEMANTICS | FORCE_IMAGE_SECTION_CHECK | ON_CLOSE | IGNORE_READONLY_ATTRIBUTE;
+    if length < 4 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
     if entry.access & file::DELETE == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let mut raw = [0u8; 4];
+    if call.process.read(buffer, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let flags = u32::from_le_bytes(raw);
+    if flags & !KNOWN != 0 {
+        super::ledger::record(
+            "NtSetInformationFile",
+            "FileDispositionInformationEx flags",
+            flags.into(),
+        );
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let delete = flags & DELETE != 0;
+    if flags & ON_CLOSE != 0 {
+        if delete
+            && file::with_fs(|fs| fs.node(file.node).is_some_and(|n| n.is_dir()))
+            && !file::with_fs(|fs| fs.is_empty_dir(file.node)).unwrap_or(false)
+        {
+            return NtStatus::DIRECTORY_NOT_EMPTY;
+        }
+        file.set_delete_on_close(delete);
+        return NtStatus::SUCCESS;
+    }
+    let status = set_disposition(file, delete, flags & IGNORE_READONLY_ATTRIBUTE != 0);
+    if status == NtStatus::SUCCESS {
+        file.set_posix_delete(delete && flags & POSIX_SEMANTICS != 0);
+    }
+    status
+}
+
+/// FileRenameInformation(Ex) and FileLinkInformation(Ex): FILE_RENAME_INFORMATION
+/// and FILE_LINK_INFORMATION share a layout, { BOOLEAN ReplaceIfExists
+/// (the Ex classes: ULONG Flags); HANDLE RootDirectory; ULONG
+/// FileNameLength; WCHAR FileName[]; } (24 bytes with padding). A bare
+/// name without a RootDirectory is in the file's own directory. A rename
+/// moves the name the handle was opened by; a link adds a name to the
+/// file (none to a directory: STATUS_FILE_IS_A_DIRECTORY) and needs no
+/// access to it.
+fn name_file(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    buffer: u64,
+    length: usize,
+    class: u64,
+) -> NtStatus {
+    const HEADER: usize = 20;
+    /// FILE_RENAME_/FILE_LINK_REPLACE_IF_EXISTS.
+    const REPLACE_IF_EXISTS: u32 = 0x1;
+    /// FILE_RENAME_/FILE_LINK_POSIX_SEMANTICS: an open target may be
+    /// replaced.
+    const POSIX_SEMANTICS: u32 = 0x2;
+    /// FILE_RENAME_/FILE_LINK_IGNORE_READONLY_ATTRIBUTE.
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x40;
+    /// The storage-reserve and pin-state bits: about features gala has
+    /// not (no storage reserves, no cloud files), nothing to do.
+    const NO_EFFECT: u32 = 0x4 | 0x8 | 0x10 | 0x20 | 0x80 | 0x100;
+    let link = matches!(class, FILE_LINK_INFORMATION | FILE_LINK_INFORMATION_EX);
+    let ex = matches!(class, FILE_RENAME_INFORMATION_EX | FILE_LINK_INFORMATION_EX);
+    if link && file.directory {
+        return NtStatus::FILE_IS_A_DIRECTORY;
+    }
+    if !link && entry.access & file::DELETE == 0 {
         return NtStatus::ACCESS_DENIED;
     }
     if length < 24 {
@@ -6568,7 +7392,23 @@ fn rename_file(
     if call.process.read(buffer, &mut header).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let replace = header[0] != 0;
+    let flags = if ex {
+        u32::from_le_bytes(header[0..4].try_into().unwrap_or([0; 4]))
+    } else {
+        u32::from(header[0] != 0)
+    };
+    let known = REPLACE_IF_EXISTS | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE | NO_EFFECT;
+    if flags & !known != 0 {
+        super::ledger::record("NtSetInformationFile", "rename/link flags", flags.into());
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if flags & POSIX_SEMANTICS != 0 {
+        // Replacing a target others hold open is not there yet: such a
+        // target is refused as without the flag.
+        super::ledger::record("NtSetInformationFile", "rename/link POSIX_SEMANTICS", class);
+    }
+    let replace = flags & REPLACE_IF_EXISTS != 0;
+    let ignore_readonly = flags & IGNORE_READONLY_ATTRIBUTE != 0;
     let root = u64::from_le_bytes(header[8..16].try_into().unwrap_or([0; 8]));
     let name_len = u32::from_le_bytes(header[16..20].try_into().unwrap_or([0; 4])) as usize;
     if name_len == 0 || !name_len.is_multiple_of(2) || HEADER + name_len > length {
@@ -6590,20 +7430,43 @@ fn rename_file(
         let _ = name.try_push(u16::from_le_bytes([pair[0], pair[1]]));
     }
     let node = file.node;
-    let result = if root == 0 && !name.contains(&u16::from(b'\\')) {
-        file::with_fs(|fs| {
-            let parent = fs.node(node).ok_or(crate::fs::ramfs::FsError::NotFound)?.parent();
-            fs.rename(node, parent, &name, replace)
-        })
+    // The target's directory and last name.
+    let (parent, last) = if root == 0 && !name.contains(&u16::from(b'\\')) {
+        let parent = match file::with_fs(|fs| fs.node(node).map(|n| n.parent())) {
+            Some(p) => p,
+            None => return NtStatus::OBJECT_NAME_NOT_FOUND,
+        };
+        // The handle's own directory when opened by a hard link.
+        let parent = file.via.lock().as_ref().map_or(parent, |(d, _)| *d);
+        (parent, name)
     } else {
         let path = tri!(call.resolve_file_name(root, name, OBJ_CASE_INSENSITIVE));
+        // A link at the end is replaced, not followed.
+        let path = tri!(file::resolve_links(path, false));
         let relative = path.start != crate::fs::ramfs::ROOT;
         let parts = tri!(file::components(&path.name, relative));
         let Some(last) = parts.last() else { return NtStatus::INVALID_PARAMETER };
-        file::with_fs(|fs| {
-            let parent = fs.parent_of(path.start, &parts)?;
-            fs.rename(node, parent, last, replace)
-        })
+        let parent = match file::with_fs(|fs| fs.parent_of(path.start, &parts)) {
+            Ok(p) => p,
+            Err(e) => return file::fs_status(e),
+        };
+        let mut owned = Vec::new();
+        if owned.try_extend_from_slice(last).is_err() {
+            return NtStatus::NO_MEMORY;
+        }
+        (parent, owned)
+    };
+    let result = if link {
+        file::with_fs(|fs| fs.link_replacing(node, parent, &last, replace, ignore_readonly))
+    } else {
+        if ignore_readonly {
+            super::ledger::record(
+                "NtSetInformationFile",
+                "rename IGNORE_READONLY_ATTRIBUTE",
+                class,
+            );
+        }
+        file::rename_open(file, parent, &last, replace)
     };
     match result {
         Ok(()) => NtStatus::SUCCESS,
@@ -6785,18 +7648,21 @@ fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     status
 }
 
-/// NtFlushBuffersFile(FileHandle, *IoStatusBlock): the volume is in memory,
-/// so only the access check remains.
+/// NtFlushBuffersFile(FileHandle, *IoStatusBlock): a file's or the
+/// volume's: what C: has pending is on the disk before it returns
+/// (everything pending, a superset of the file's own data and metadata:
+/// the change log is one sequence).
 fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     if entry.access & (file::FILE_WRITE_DATA | file::FILE_APPEND_DATA) == 0 {
         return NtStatus::ACCESS_DENIED;
     }
     match &entry.object.body {
-        ObjectBody::File(_) => {}
+        ObjectBody::File(_) | ObjectBody::VolumeFile(_) => {
+            super::persist::flush(super::persist::Cause::FlushBuffers);
+        }
         ObjectBody::Pipe(end) => tri!(end.flush()),
         ObjectBody::Disk(_) => tri!(platform::disk_flush().map_err(super::disk::status)),
-        ObjectBody::VolumeFile(_) => {}
         _ => return NtStatus::OBJECT_TYPE_MISMATCH,
     }
     tri!(call.write_iosb(arg!(call, 1), NtStatus::SUCCESS, 0));
@@ -6806,7 +7672,8 @@ fn nt_flush_buffers_file(call: &mut Call<'_>) -> NtStatus {
 /// NtQueryAttributesFile(ObjectAttributes, *FileInformation)
 fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
     let (attrs, out) = (arg!(call, 0), arg!(call, 1));
-    let path = tri!(call.file_path(attrs));
+    // A link's own attributes (FILE_ATTRIBUTE_REPARSE_POINT), as Windows.
+    let path = tri!(file::resolve_links(tri!(call.file_path(attrs)), false));
     let node = {
         let relative = path.start != crate::fs::ramfs::ROOT;
         let parts = tri!(file::components(&path.name, relative));
@@ -6962,3 +7829,12 @@ mod winsta_calls;
 
 #[path = "session_calls.rs"]
 mod session_calls;
+
+#[path = "clipboard_calls.rs"]
+mod clipboard_calls;
+
+#[path = "scm_calls.rs"]
+mod scm_calls;
+
+#[path = "wsl_calls.rs"]
+mod wsl_calls;

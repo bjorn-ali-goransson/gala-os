@@ -1,40 +1,8 @@
 //! Small session-wide queries Chromium's browser makes at start-up: the
-//! clipboard (per process for now) and its listeners (never told
-//! anything yet), the keyboard
-//! layouts (US English only, as GetKeyboardLayout says), the last input
+//! keyboard layouts (US English only, as GetKeyboardLayout says), the last input
 //! time, a message's extra information and GUI resource counts.
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
-static CLIPBOARD_LISTENERS: AtomicU32 = AtomicU32::new(0);
-
-/// AddClipboardFormatListener(hwnd): WM_CLIPBOARDUPDATE would be posted
-/// on changes; there are none.
-#[unsafe(no_mangle)]
-pub extern "system" fn AddClipboardFormatListener(hwnd: usize) -> i32 {
-    if hwnd == 0 {
-        set_error(1400); // ERROR_INVALID_WINDOW_HANDLE
-        return 0;
-    }
-    CLIPBOARD_LISTENERS.fetch_add(1, Ordering::Relaxed);
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn RemoveClipboardFormatListener(hwnd: usize) -> i32 {
-    if hwnd == 0 {
-        set_error(1400);
-        return 0;
-    }
-    CLIPBOARD_LISTENERS.fetch_sub(1, Ordering::Relaxed);
-    1
-}
-
-/// GetClipboardSequenceNumber: the clipboard's changes so far.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClipboardSequenceNumber() -> u32 {
-    clipboard_sequence()
-}
+use core::sync::atomic::Ordering;
 
 /// GetKeyboardLayoutList(nBuff, lpList): one layout, US English.
 #[unsafe(no_mangle)]
@@ -141,7 +109,7 @@ pub extern "system" fn RegisterPointerDeviceNotifications(hwnd: usize, _range: i
 /// devices (0).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetRawInputDeviceList(_list: *mut u8, count: *mut u32, size: u32) -> u32 {
-    if count.is_null() || size != 16 {
+    if count.is_null() || size as usize != RAWINPUTDEVICELIST_SIZE {
         set_error(87);
         return u32::MAX;
     }
@@ -150,11 +118,19 @@ pub extern "system" fn GetRawInputDeviceList(_list: *mut u8, count: *mut u32, si
     0
 }
 
+/// RAWINPUTDEVICE (usUsagePage, usUsage, dwFlags, hwndTarget): 12 bytes
+/// for a 32-bit caller, 16 for a 64-bit one; RAWINPUTDEVICELIST (hDevice,
+/// dwType): 8 and 16. cbSize is checked against the caller's own (ODT's
+/// 32-bit setup.exe destroys its power-notification window when its
+/// registration fails).
+const RAWINPUTDEVICE_SIZE: usize = 8 + core::mem::size_of::<usize>();
+const RAWINPUTDEVICELIST_SIZE: usize = 2 * core::mem::size_of::<usize>();
+
 /// RegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize):
 /// accepted; no WM_INPUT is ever sent (no raw input devices).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegisterRawInputDevices(devices: *const u8, count: u32, size: u32) -> i32 {
-    if (devices.is_null() && count != 0) || size != 16 {
+    if (devices.is_null() && count != 0) || size as usize != RAWINPUTDEVICE_SIZE {
         set_error(87);
         return 0;
     }
@@ -517,203 +493,6 @@ pub extern "system" fn RemovePropW(hwnd: usize, name: *const u16) -> usize {
         }
         None => 0,
     })
-}
-
-// ---- The clipboard -------------------------------------------------------
-//
-// Per process for now (TODO: the session's, in the kernel, so programs
-// share it): the formats set since the last EmptyClipboard with their
-// memory handles (owned by the clipboard once set, as documented), the
-// thread that has it open, and a sequence number that counts changes.
-
-const CLIP_FORMATS: usize = 32;
-const ERROR_CLIPBOARD_NOT_OPEN: u32 = 1418;
-
-struct Clipboard {
-    lock: core::sync::atomic::AtomicBool,
-    state: core::cell::UnsafeCell<ClipState>,
-}
-
-struct ClipState {
-    /// The thread that has it open (0: closed).
-    owner: u32,
-    formats: [(u32, usize); CLIP_FORMATS],
-    count: usize,
-}
-
-// SAFETY: `state` is only used under `lock`.
-unsafe impl Sync for Clipboard {}
-
-static CLIPBOARD: Clipboard = Clipboard {
-    lock: core::sync::atomic::AtomicBool::new(false),
-    state: core::cell::UnsafeCell::new(ClipState {
-        owner: 0,
-        formats: [(0, 0); CLIP_FORMATS],
-        count: 0,
-    }),
-};
-static CLIP_SEQUENCE: AtomicU32 = AtomicU32::new(0);
-
-#[cfg_attr(
-    target_arch = "x86",
-    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
-)]
-#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
-unsafe extern "system" {
-    fn GetCurrentThreadId() -> u32;
-}
-
-fn with_clipboard<R>(f: impl FnOnce(&mut ClipState) -> R) -> R {
-    while CLIPBOARD
-        .lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    // SAFETY: under the lock.
-    let r = f(unsafe { &mut *CLIPBOARD.state.get() });
-    CLIPBOARD.lock.store(false, Ordering::Release);
-    r
-}
-
-fn me() -> u32 {
-    // SAFETY: plain call.
-    unsafe { GetCurrentThreadId() }
-}
-
-/// OpenClipboard(hWndNewOwner): FALSE (ERROR_ACCESS_DENIED) while another
-/// thread has it open.
-#[unsafe(no_mangle)]
-pub extern "system" fn OpenClipboard(_owner: usize) -> i32 {
-    let t = me();
-    let ok = with_clipboard(|c| {
-        if c.owner != 0 && c.owner != t {
-            return false;
-        }
-        c.owner = t;
-        true
-    });
-    if !ok {
-        set_error(5);
-    }
-    i32::from(ok)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn CloseClipboard() -> i32 {
-    let t = me();
-    let ok = with_clipboard(|c| {
-        if c.owner != t {
-            return false;
-        }
-        c.owner = 0;
-        true
-    });
-    if !ok {
-        set_error(ERROR_CLIPBOARD_NOT_OPEN);
-    }
-    i32::from(ok)
-}
-
-/// EmptyClipboard: drops every format (the clipboard must be open).
-#[unsafe(no_mangle)]
-pub extern "system" fn EmptyClipboard() -> i32 {
-    let t = me();
-    let ok = with_clipboard(|c| {
-        if c.owner != t {
-            return false;
-        }
-        c.count = 0;
-        true
-    });
-    if ok {
-        CLIP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    } else {
-        set_error(ERROR_CLIPBOARD_NOT_OPEN);
-    }
-    i32::from(ok)
-}
-
-/// SetClipboardData(uFormat, hMem): keeps the handle for the format.
-#[unsafe(no_mangle)]
-pub extern "system" fn SetClipboardData(format: u32, memory: usize) -> usize {
-    let t = me();
-    let ok = with_clipboard(|c| {
-        if c.owner != t {
-            return Err(ERROR_CLIPBOARD_NOT_OPEN);
-        }
-        if let Some(slot) = c.formats[..c.count].iter_mut().find(|f| f.0 == format) {
-            slot.1 = memory;
-            return Ok(());
-        }
-        if c.count == CLIP_FORMATS {
-            return Err(8);
-        }
-        c.formats[c.count] = (format, memory);
-        c.count += 1;
-        Ok(())
-    });
-    match ok {
-        Ok(()) => {
-            CLIP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            memory
-        }
-        Err(e) => {
-            set_error(e);
-            0
-        }
-    }
-}
-
-/// GetClipboardData(uFormat): the handle set for the format, or NULL.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClipboardData(format: u32) -> usize {
-    let t = me();
-    let r = with_clipboard(|c| {
-        if c.owner != t {
-            return Err(ERROR_CLIPBOARD_NOT_OPEN);
-        }
-        Ok(c.formats[..c.count].iter().find(|f| f.0 == format).map_or(0, |f| f.1))
-    });
-    match r {
-        Ok(h) => h,
-        Err(e) => {
-            set_error(e);
-            0
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn IsClipboardFormatAvailable(format: u32) -> i32 {
-    i32::from(with_clipboard(|c| c.formats[..c.count].iter().any(|f| f.0 == format)))
-}
-
-/// EnumClipboardFormats(format): the format after `format` (0: the
-/// first); 0 at the end.
-#[unsafe(no_mangle)]
-pub extern "system" fn EnumClipboardFormats(format: u32) -> u32 {
-    with_clipboard(|c| {
-        let list = &c.formats[..c.count];
-        let next = if format == 0 {
-            list.first()
-        } else {
-            list.iter().position(|f| f.0 == format).and_then(|i| list.get(i + 1))
-        };
-        next.map_or(0, |f| f.0)
-    })
-}
-
-/// CountClipboardFormats: how many formats the clipboard holds.
-#[unsafe(no_mangle)]
-pub extern "system" fn CountClipboardFormats() -> i32 {
-    with_clipboard(|c| c.count as i32)
-}
-
-/// The clipboard's change count (GetClipboardSequenceNumber).
-fn clipboard_sequence() -> u32 {
-    CLIP_SEQUENCE.load(Ordering::Relaxed)
 }
 
 // ---- Caret, beeps, cursor count, keyboard state, display modes ------------

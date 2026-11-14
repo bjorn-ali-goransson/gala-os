@@ -43,6 +43,12 @@ const CHANGE_LAST_WRITE: u32 = 0x10;
 pub struct Reserved {
     packet: IrqMutex<Option<Slot>>,
     apc: IrqMutex<Option<Slot>>,
+    /// The request as one of its thread's outstanding ones
+    /// (ThreadIsIoPending), for as long as this lives; None for one that
+    /// is not the thread's (thread-agnostic: its file has a completion
+    /// port; registry watches; carried across a kernel handover). Taken
+    /// when the request completes, before anything the caller can see.
+    issuer: IrqMutex<Option<thread::IoPending>>,
 }
 
 /// One reserved slot in a port's queue or a thread's APC queue.
@@ -69,7 +75,11 @@ impl Drop for Slot {
 impl Reserved {
     /// Nothing reserved.
     pub const fn none() -> Reserved {
-        Reserved { packet: IrqMutex::new(None), apc: IrqMutex::new(None) }
+        Reserved {
+            packet: IrqMutex::new(None),
+            apc: IrqMutex::new(None),
+            issuer: IrqMutex::new(None),
+        }
     }
 
     /// Reserves the packet a completion will post to `port` and the APC it
@@ -88,6 +98,21 @@ impl Reserved {
             *r.apc.lock() = Some(Slot { target: t.clone(), apc: true, used: false });
         }
         Ok(r)
+    }
+
+    /// Counts the request as one of `issuer`'s outstanding ones while it
+    /// is (`thread::IoPending`).
+    pub fn issued_by(self, issuer: Option<thread::IoPending>) -> Self {
+        *self.issuer.lock() = issuer;
+        self
+    }
+
+    /// The request is complete: no longer its thread's outstanding I/O.
+    /// Called before its status block, event or packet tells anyone, so a
+    /// thread woken by them never sees it still pending.
+    pub fn retire(&self) {
+        let issuer = self.issuer.lock().take();
+        drop(issuer);
     }
 
     /// Posts `packet` to `port` (and signals it): into the reserved slot
@@ -168,7 +193,10 @@ impl Request {
     /// routine's APC.
     pub fn reserve(mut self) -> Result<Self, NtStatus> {
         let port = self.port.as_ref().filter(|_| self.apc_context != 0).map(|(p, _)| p);
-        let reserved = Reserved::new(port, self.apc.as_ref().map(|(t, _)| t))?;
+        // A request on a file with a completion port is the file's, not
+        // its thread's (thread-agnostic I/O).
+        let issuer = if self.port.is_none() { thread::IoPending::current() } else { None };
+        let reserved = Reserved::new(port, self.apc.as_ref().map(|(t, _)| t))?.issued_by(issuer);
         self.reserved =
             Some(KArc::try_new(reserved).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?);
         Ok(self)
@@ -343,6 +371,9 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
     // Success and warnings (STATUS_BUFFER_OVERFLOW: part of a message)
     // report the bytes.
     let information = if status.0 < 0xc000_0000 { count } else { 0 };
+    if let Some(reserved) = &r.reserved {
+        reserved.retire();
+    }
     if r.iosb != 0 {
         let _ = r.process.write_iosb(r.iosb, status, information);
     }

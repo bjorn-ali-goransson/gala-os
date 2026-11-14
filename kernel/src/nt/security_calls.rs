@@ -7,7 +7,7 @@
 //! Service numbers are gala's until verified (reached through ntdll).
 
 use super::super::file;
-use super::super::object::{FILE_MAPPING, Handle, KObject, ObjectBody, ObjectRef};
+use super::super::object::{FILE_MAPPING, GenericMapping, Handle, KObject, ObjectBody, ObjectRef};
 use super::super::registry::{self, KEY_MAPPING};
 use super::super::security::{
     self, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, Descriptor, GROUP_SECURITY_INFORMATION,
@@ -72,6 +72,34 @@ fn file_default(directory: bool) -> Result<Descriptor, NtStatus> {
     default_for(FILE_ALL_ACCESS, FILE_GENERIC_READ_EXECUTE, flags)
 }
 
+/// NT SERVICE\\TrustedInstaller, the owner of Windows' system files.
+const TRUSTED_INSTALLER: Sid =
+    Sid::new(5, &[80, 956_008_885, 3_418_522_649, 1_831_038_044, 1_853_292_631, 2_271_478_464]);
+
+/// What the boot's program files have (`ramfs::Node::is_program_file`)
+/// while no descriptor was set on them: a Windows system file's (as
+/// `icacls C:\Windows\System32\kernel32.dll` shows it): owner and full
+/// control TrustedInstaller; reading and executing for Administrators,
+/// SYSTEM and Users. Nobody else writes one; deleting one takes
+/// FILE_DELETE_CHILD on its directory, as on Windows. A copy is the
+/// copier's (its descriptor inherited from where it goes).
+fn program_file_default() -> Result<Descriptor, NtStatus> {
+    const FILE_GENERIC_READ_EXECUTE: u32 = 0x0012_00a9;
+    let dacl = security::allow_acl(&[
+        (FILE_ALL_ACCESS, TRUSTED_INSTALLER, 0),
+        (FILE_GENERIC_READ_EXECUTE, ADMINISTRATORS, 0),
+        (FILE_GENERIC_READ_EXECUTE, LOCAL_SYSTEM, 0),
+        (FILE_GENERIC_READ_EXECUTE, USERS, 0),
+    ])?;
+    Ok(Descriptor {
+        control: SE_DACL_PRESENT,
+        owner: Some(TRUSTED_INSTALLER),
+        group: Some(TRUSTED_INSTALLER),
+        dacl: Some(dacl),
+        sacl: None,
+    })
+}
+
 fn key_default() -> Result<Descriptor, NtStatus> {
     const KEY_READ: u32 = 0x0002_0019;
     default_for(KEY_ALL_ACCESS, KEY_READ, CONTAINER_INHERIT_ACE)
@@ -80,11 +108,14 @@ fn key_default() -> Result<Descriptor, NtStatus> {
 /// The descriptor of file system node `node` (its own or the default).
 fn node_descriptor(_token: &TokenData, node: NodeId) -> Result<Descriptor, NtStatus> {
     let stored = file::with_fs(|fs| {
-        fs.node(node).map(|n| (n.security.as_deref().map(Descriptor::parse), n.is_dir()))
+        fs.node(node).map(|n| {
+            (n.security.as_deref().map(Descriptor::parse), n.is_dir(), n.is_program_file())
+        })
     });
     match stored {
-        Some((Some(d), _)) => d,
-        Some((None, directory)) => file_default(directory),
+        Some((Some(d), _, _)) => d,
+        Some((None, _, true)) => program_file_default(),
+        Some((None, directory, false)) => file_default(directory),
         None => Err(NtStatus::FILE_DELETED),
     }
 }
@@ -116,6 +147,14 @@ fn store(object: &ObjectRef, d: &Descriptor) -> Result<(), NtStatus> {
             file::with_fs(|fs| fs.set_security(f.node, bytes)).map_err(|_| NtStatus::FILE_DELETED)
         }
         ObjectBody::Key(k) => registry::with(|r| r.set_security(k.id, bytes)),
+        // A service's descriptor is its key's `Security\Security` value
+        // (SetServiceObjectSecurity), which every later open reads.
+        ObjectBody::Service(s) => {
+            let now = super::super::platform::system_time();
+            registry::with(|r| super::super::scm::store_descriptor(r, &s.name, &bytes, now))?;
+            *object.security.lock() = Some(bytes);
+            Ok(())
+        }
         _ => {
             *object.security.lock() = Some(bytes);
             Ok(())
@@ -389,4 +428,122 @@ pub(super) fn holds_privilege(call: &Call<'_>, luid: u64) -> bool {
 /// Whether privilege `luid` is enabled in the caller's effective token.
 pub(super) fn effective_privilege(call: &Call<'_>, luid: u64) -> bool {
     with_token(call, |t| t.privileges.iter().any(|p| p.luid == luid && p.attributes & 2 != 0))
+}
+
+/// The token a private-object call names (`h`, needing TOKEN_QUERY), or
+/// None for a NULL handle; `f` runs on its data.
+fn with_client_token<R>(
+    call: &Call<'_>,
+    h: u64,
+    f: impl FnOnce(Option<&TokenData>) -> Result<R, NtStatus>,
+) -> Result<R, NtStatus> {
+    if h == 0 {
+        return f(None);
+    }
+    let entry = call.handle(Handle(h))?;
+    let ObjectBody::Token(t) = &entry.object.body else {
+        return Err(NtStatus::OBJECT_TYPE_MISMATCH);
+    };
+    entry.require(super::super::token::TOKEN_QUERY)?;
+    f(Some(&t.data.lock()))
+}
+
+impl Call<'_> {
+    /// A caller's GENERIC_MAPPING (four ULONGs, the same in x86 and x64).
+    fn capture_mapping(&self, ptr: u64) -> Result<GenericMapping, NtStatus> {
+        let mut b = [0u8; 16];
+        self.process.read(ptr, &mut b).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        Ok(GenericMapping { read: at(0), write: at(4), execute: at(8), all: at(12) })
+    }
+
+    /// An optional descriptor argument (0: none).
+    fn optional_descriptor(&self, ptr: u64) -> Result<Option<Descriptor>, NtStatus> {
+        if ptr == 0 { Ok(None) } else { self.capture_descriptor(ptr).map(Some) }
+    }
+
+    /// Writes a private object's new descriptor, self-relative, to the
+    /// caller's buffer (its size to `needed`); STATUS_BUFFER_TOO_SMALL
+    /// when it does not fit.
+    fn put_descriptor(&self, d: &Descriptor, buffer: u64, length: u32, needed: u64) -> NtStatus {
+        let bytes = tri!(d.to_bytes(u32::MAX));
+        if needed != 0 {
+            tri!(self.write_u32(needed, bytes.len() as u32));
+        }
+        if (length as usize) < bytes.len() {
+            return NtStatus::BUFFER_TOO_SMALL;
+        }
+        match self.process.write(buffer, &bytes) {
+            Ok(()) => NtStatus::SUCCESS,
+            Err(_) => NtStatus::ACCESS_VIOLATION,
+        }
+    }
+}
+
+/// The SEF_* flags the private-object calls act on (or need not: no
+/// OWNER RIGHTS restriction is applied to a creator's DACL, so
+/// SEF_AVOID_OWNER_RESTRICTION, 0x1000, changes nothing); others are
+/// recorded (SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT only matters with object
+/// types, the mandatory-label flags are not implemented).
+const SEF_KNOWN: u32 = 0x1000
+    | security::SEF_DACL_AUTO_INHERIT
+    | security::SEF_SACL_AUTO_INHERIT
+    | security::SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT
+    | security::SEF_AVOID_PRIVILEGE_CHECK
+    | security::SEF_AVOID_OWNER_CHECK
+    | security::SEF_DEFAULT_OWNER_FROM_PARENT
+    | security::SEF_DEFAULT_GROUP_FROM_PARENT;
+
+fn record_flags(service: &'static str, flags: u32) {
+    if flags & !SEF_KNOWN != 0 {
+        super::super::ledger::record(service, "SEF flags", u64::from(flags & !SEF_KNOWN));
+    }
+}
+
+/// GalaNewSecurityObject(ParentDescriptor, CreatorDescriptor,
+/// IsContainer, AutoInheritFlags, Token, GenericMapping, Buffer, Length,
+/// *LengthNeeded): advapi32's CreatePrivateObjectSecurity* (gala's
+/// service: Windows computes these in user mode; here the kernel's
+/// inheritance rules serve both). The descriptors may be absolute or
+/// self-relative; the result is self-relative.
+pub(super) fn gala_new_security_object(call: &mut Call<'_>) -> NtStatus {
+    let (parent, creator, container, flags, token) = (
+        arg!(call, 0),
+        arg!(call, 1),
+        arg!(call, 2) as u32 != 0,
+        arg!(call, 3) as u32,
+        arg!(call, 4),
+    );
+    let (mapping, buffer, length, needed) =
+        (arg!(call, 5), arg!(call, 6), arg!(call, 7) as u32, arg!(call, 8));
+    record_flags("GalaNewSecurityObject", flags);
+    let mapping = tri!(call.capture_mapping(mapping));
+    let parent = tri!(call.optional_descriptor(parent));
+    let creator = tri!(call.optional_descriptor(creator));
+    let d = tri!(with_client_token(call, token, |t| {
+        security::new_private(parent.as_ref(), creator, container, flags, t, &mapping)
+    }));
+    call.put_descriptor(&d, buffer, length, needed)
+}
+
+/// GalaSetSecurityObject(SecurityInformation, ModificationDescriptor,
+/// ObjectsDescriptor, AutoInheritFlags, Token, GenericMapping, Buffer,
+/// Length, *LengthNeeded): advapi32's SetPrivateObjectSecurity*: the
+/// object's descriptor with `info`'s parts of the modification merged.
+pub(super) fn gala_set_security_object(call: &mut Call<'_>) -> NtStatus {
+    let (info, modification, object, flags, token) =
+        (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32, arg!(call, 4));
+    let (mapping, buffer, length, needed) =
+        (arg!(call, 5), arg!(call, 6), arg!(call, 7) as u32, arg!(call, 8));
+    record_flags("GalaSetSecurityObject", flags);
+    let mapping = tri!(call.capture_mapping(mapping));
+    if modification == 0 || object == 0 {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let new = tri!(call.capture_descriptor(modification));
+    let current = tri!(call.capture_descriptor(object));
+    let d = tri!(with_client_token(call, token, |t| {
+        security::set_private(current, info, new, flags, t, &mapping)
+    }));
+    call.put_descriptor(&d, buffer, length, needed)
 }

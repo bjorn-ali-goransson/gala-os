@@ -6,6 +6,7 @@ pub struct NtStatus(pub u32);
 impl NtStatus {
     pub const SUCCESS: NtStatus = NtStatus(0x0000_0000);
     pub const IO_DEVICE_ERROR: NtStatus = NtStatus(0xc000_0185);
+    pub const DISK_FULL: NtStatus = NtStatus(0xc000_007f);
     pub const MEDIA_WRITE_PROTECTED: NtStatus = NtStatus(0xc000_00a2);
     pub const TIMEOUT: NtStatus = NtStatus(0x0000_0102);
     pub const ACCESS_DENIED: NtStatus = NtStatus(0xc000_0022);
@@ -20,6 +21,9 @@ impl NtStatus {
     pub const THREAD_IS_TERMINATING: NtStatus = NtStatus(0xc000_004b);
     pub const FILE_LOCK_CONFLICT: NtStatus = NtStatus(0xc000_0054);
     pub const LOCK_NOT_GRANTED: NtStatus = NtStatus(0xc000_0055);
+    /// The clipboard is not open by the calling thread (gala's clipboard
+    /// services; user32 makes it ERROR_CLIPBOARD_NOT_OPEN).
+    pub const INVALID_LOCK_SEQUENCE: NtStatus = NtStatus(0xc000_001e);
     pub const RANGE_NOT_LOCKED: NtStatus = NtStatus(0xc000_007e);
     pub const NOT_MAPPED_VIEW: NtStatus = NtStatus(0xc000_0019);
     pub const UNABLE_TO_DELETE_SECTION: NtStatus = NtStatus(0xc000_001b);
@@ -31,6 +35,7 @@ impl NtStatus {
     pub const INVALID_DEVICE_REQUEST: NtStatus = NtStatus(0xc000_0010);
     pub const SHARING_VIOLATION: NtStatus = NtStatus(0xc000_0043);
     pub const DELETE_PENDING: NtStatus = NtStatus(0xc000_0056);
+    pub const CANNOT_DELETE: NtStatus = NtStatus(0xc000_0121);
     pub const FILE_IS_A_DIRECTORY: NtStatus = NtStatus(0xc000_00ba);
     pub const DIRECTORY_NOT_EMPTY: NtStatus = NtStatus(0xc000_0101);
     pub const NOT_A_DIRECTORY: NtStatus = NtStatus(0xc000_0103);
@@ -78,6 +83,21 @@ impl NtStatus {
     /// link opened without FILE_OPEN_REPARSE_POINT, as Windows answers a
     /// WSL symlink).
     pub const IO_REPARSE_TAG_NOT_HANDLED: NtStatus = NtStatus(0xc000_0279);
+    /// Reparse points (FSCTL_SET/GET/DELETE_REPARSE_POINT, following a
+    /// link): a reserved tag; a tag other than the one there; data that
+    /// does not fit its header or the node; no reparse point; a lookup
+    /// that met too many links (or a loop).
+    pub const IO_REPARSE_TAG_INVALID: NtStatus = NtStatus(0xc000_0276);
+    pub const IO_REPARSE_TAG_MISMATCH: NtStatus = NtStatus(0xc000_0277);
+    pub const IO_REPARSE_DATA_INVALID: NtStatus = NtStatus(0xc000_0278);
+    pub const NOT_A_REPARSE_POINT: NtStatus = NtStatus(0xc000_0275);
+    pub const REPARSE_POINT_NOT_RESOLVED: NtStatus = NtStatus(0xc000_0280);
+    /// A UNC path's server is not reachable (ERROR_BAD_NETPATH).
+    pub const BAD_NETWORK_PATH: NtStatus = NtStatus(0xc000_00be);
+    /// A UNC path's share does not exist (ERROR_BAD_NET_NAME).
+    pub const BAD_NETWORK_NAME: NtStatus = NtStatus(0xc000_00cc);
+    /// FSCTL_GET_REPARSE_POINT without an output buffer.
+    pub const INVALID_USER_BUFFER: NtStatus = NtStatus(0xc000_00e8);
     pub const MAPPED_FILE_SIZE_ZERO: NtStatus = NtStatus(0xc000_011e);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
     pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);

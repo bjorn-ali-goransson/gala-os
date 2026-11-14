@@ -27,6 +27,9 @@ mod arch;
 #[path = "x86.rs"]
 mod arch;
 
+mod address_wait;
+mod avl;
+mod bitmap;
 mod heap;
 mod rtl;
 #[cfg(target_arch = "x86_64")]
@@ -34,6 +37,7 @@ mod seh;
 #[cfg(target_arch = "x86")]
 #[path = "seh_x86.rs"]
 mod seh;
+mod sync;
 mod tls;
 mod unimplemented;
 
@@ -92,6 +96,18 @@ syscall_stubs! {
     NtDeleteKey = 0x7f07, fn(h: usize);
     NtDeleteValueKey = 0x7f08, fn(h: usize, name: *const UnicodeString);
     NtFlushKey = 0x7f09, fn(h: usize);
+    NtSetInformationKey = 0x7fd6, fn(h: usize, class: u32, buf: *const u8, len: u32);
+    // Change notification and rename (gala's numbers, unverified).
+    NtNotifyChangeKey = 0x7f25, fn(
+        h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
+        filter: u32, tree: u8, buffer: *mut u8, length: u32, asynchronous: u8
+    );
+    NtNotifyChangeMultipleKeys = 0x7f26, fn(
+        h: usize, count: u32, subordinate: *const ObjectAttributes, event: usize, apc: usize,
+        apc_context: usize, iosb: *mut [usize; 2], filter: u32, tree: u8, buffer: *mut u8,
+        length: u32, asynchronous: u8
+    );
+    NtRenameKey = 0x7f27, fn(h: usize, name: *const UnicodeString);
     // Job objects (gala's numbers, unverified).
     NtCreateJobObject = 0x7f0a, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes
@@ -155,6 +171,15 @@ syscall_stubs! {
         h: usize, info: u32, sd: *mut u8, length: u32, needed: *mut u32
     );
     NtSetSecurityObject = 0x7f20, fn(h: usize, info: u32, sd: *const u8);
+    // gala's own: advapi32's private-object descriptors (see the kernel).
+    GalaNewSecurityObject = 0x7f28, fn(
+        parent: *const u8, creator: *const u8, container: u32, flags: u32, token: usize,
+        mapping: *const u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaSetSecurityObject = 0x7f29, fn(
+        info: u32, modification: *const u8, object: *const u8, flags: u32, token: usize,
+        mapping: *const u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
     // gala's logon service (LogonUserW).
     GalaLogonUser = 0x7f21, fn(
         user: *const UnicodeString, domain: *const UnicodeString,
@@ -294,6 +319,33 @@ syscall_stubs! {
     GalaUserObjectEnum = 0x7fa5, fn(handle: usize, buffer: *mut u8, length: u32, needed: *mut u32);
     // Sessions' presenters (gala's own; nt::session_calls), for `gala attach`.
     GalaSession = 0x7fb0, fn(op: u64, session: u32, arg: u64, buffer: u64, length: u64);
+    // The window station's clipboard (gala's own; nt::clipboard_calls), for user32.
+    GalaClipboardOpen = 0x7fc0, fn(hwnd: u64);
+    GalaClipboardClose = 0x7fc1, fn(locale: u32);
+    GalaClipboardEmpty = 0x7fc2, fn();
+    GalaClipboardSet = 0x7fc3, fn(format: u32, kind: u32, data: *const u8, length: u32, serial: *mut u32);
+    GalaClipboardGet = 0x7fc4, fn(format: u32, buffer: *mut u8, length: u32, info: *mut u8);
+    GalaClipboardInfo = 0x7fc5, fn(record: *mut u8);
+    GalaClipboardFormats = 0x7fc6, fn(formats: *mut u32, max: u32, count: *mut u32);
+    GalaClipboardListener = 0x7fc7, fn(hwnd: u64, add: u32);
+    // The service control manager (gala's own; nt::scm_calls), for advapi32.
+    GalaScmOpen = 0x7fd0, fn(access: u32, handle: *mut usize);
+    GalaServiceOpen = 0x7fd1, fn(scm: usize, name: *const u16, length: u32, access: u32, handle: *mut usize);
+    GalaServiceCreate = 0x7fd2, fn(scm: usize, record: *const u8, length: u32, access: u32, handle: *mut usize);
+    GalaServiceQuery = 0x7fd3, fn(service: usize, class: u32, buffer: *mut u8, length: u32, needed: *mut u32);
+    GalaServiceEnum = 0x7fd4, fn(
+        scm: usize, kinds: u32, states: u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaServiceControl = 0x7fd5, fn(handle: usize, op: u32, code: u32, status: *mut u32);
+    GalaServiceConfigure = 0x7fd7, fn(service: usize, level: u32, record: *const u8, length: u32);
+    GalaServiceDispatch = 0x7fd8, fn(op: u32, value: u32, buffer: *mut u8, length: u32, needed: *mut u32);
+    // The WSL facade (gala's own; nt::wsl_calls), for wsl.exe.
+    GalaLxNode = 0x7fe0, fn(root: usize, record: *const u8, length: usize);
+    GalaLxSpawn = 0x7fe1, fn(record: *const u8, length: usize, process: *mut usize);
+    GalaLxDistro = 0x7fe2, fn(op: u32, root: usize, name: *const u8, length: usize, count: *mut u64);
+    // The task manager's data (nt::tasks): every process of both
+    // personalities, the machine's load, End task for Linux processes.
+    GalaTasks = 0x7fe8, fn(op: u32, arg: usize, buffer: *mut u8, length: u32, returned: *mut u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
@@ -318,6 +370,8 @@ syscall_stubs! {
     GalaWinEventUnhook = 0x7f71, fn(id: u32);
     GalaWinEventNotify = 0x7f72, fn(event: u32, hwnd: u64, object: i32, child: i32);
     GalaWinEventTake = 0x7f73, fn(records: *mut u8, max: u32, count: *mut u32);
+    // The notification area (Shell_NotifyIcon, Shell_NotifyIconGetRect).
+    GalaTrayIcon = 0x7f74, fn(op: u32, request: *const u8, length: usize, rect: *mut i32);
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);
@@ -552,6 +606,11 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
         return None;
     }
     let target = rd32(functions + 4 * index) as usize;
+    // RVA 0: an ordinal the linker left without an export (a gap in a
+    // DLL's numbering), not an export at the image's base.
+    if target == 0 {
+        return None;
+    }
     if !(rva..rva + size).contains(&target) {
         return Some(base + target);
     }
@@ -1520,9 +1579,10 @@ const CORE_HOSTS: &[(&[u8], &[u8])] = &[
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
 /// implement them (whatever files of those names exist): the core sets to
-/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase;
-/// gala keeps the rest coarse: security, eventing and services are
-/// advapi32; other names are looked up as files.
+/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase,
+/// the app model's runtime sets to kernelbase; gala keeps the rest
+/// coarse: security, eventing and services are advapi32; other names are
+/// looked up as files.
 fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
     let set = name.strip_prefix(b"api-ms-win-")?;
     let host: &[u8] = if set.starts_with(b"crt-") {
@@ -1535,6 +1595,11 @@ fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {
         b"powrprof.dll"
+    } else if set.starts_with(b"appmodel-runtime-") {
+        // The app model's queries (AppPolicy*, GetCurrentPackage*): the
+        // schema's host for l1-1-2 is kernelbase (Wine's
+        // apisetschema.spec), which forwards them to kernel32.
+        b"kernelbase.dll"
     } else {
         // Other sets are looked up as files, except the downlevel ones,
         // which name the DLL that implements them
@@ -1685,7 +1750,10 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         return Ok(());
     }
     let mut desc = base + rva;
-    let mut missing = false;
+    // The status of the first missing import (STATUS_ORDINAL_NOT_FOUND
+    // for one by ordinal, as Windows reports "the ordinal N could not be
+    // located"), once every missing import is reported.
+    let mut missing = None;
     while rd32(desc + 12) != 0 {
         let mut name = [0u8; MAX_NAME];
         let len = normalize(
@@ -1734,7 +1802,11 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
                     report_missing_export(c_str(base + rd32(desc + 12) as usize), name, ordinal);
-                    missing = true;
+                    missing.get_or_insert(if name.is_empty() {
+                        STATUS_ORDINAL_NOT_FOUND
+                    } else {
+                        STATUS_ENTRYPOINT_NOT_FOUND
+                    });
                 }
             }
         }
@@ -1742,7 +1814,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
         desc += 20;
     }
-    if missing { Err(STATUS_ENTRYPOINT_NOT_FOUND) } else { Ok(()) }
+    missing.map_or(Ok(()), Err)
 }
 
 /// Reports `dll!name` (or `dll!#ordinal`) to the kernel's missing-features
@@ -2028,13 +2100,18 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_000d, 87),   // INVALID_PARAMETER
     (0xc000_0054, 33),   // FILE_LOCK_CONFLICT -> ERROR_LOCK_VIOLATION
     (0xc000_0055, 33),   // LOCK_NOT_GRANTED -> ERROR_LOCK_VIOLATION
+    (0xc000_00be, 53),   // BAD_NETWORK_PATH -> ERROR_BAD_NETPATH
+    (0xc000_00cc, 67),   // BAD_NETWORK_NAME -> ERROR_BAD_NET_NAME
     (0xc000_007e, 158),  // RANGE_NOT_LOCKED -> ERROR_NOT_LOCKED
+    (0xc000_007f, 112),  // DISK_FULL -> ERROR_DISK_FULL
+    (0xc000_0185, 1117), // IO_DEVICE_ERROR -> ERROR_IO_DEVICE
     (0xc000_0030, 87),   // INVALID_PARAMETER_MIX -> ERROR_INVALID_PARAMETER
     (0xc000_000f, 2),    // NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND
     (0xc000_0010, 1),    // INVALID_DEVICE_REQUEST -> ERROR_INVALID_FUNCTION
     (0xc000_0011, 38),   // END_OF_FILE -> ERROR_HANDLE_EOF
     (0xc000_0017, 8),    // NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY
     (0xc000_012d, 1455), // COMMITMENT_LIMIT -> ERROR_COMMITMENT_LIMIT
+    (0xc000_0129, 565),  // TOO_MANY_THREADS -> ERROR_TOO_MANY_THREADS
     (0xc000_0018, 487),  // CONFLICTING_ADDRESSES -> ERROR_INVALID_ADDRESS
     (0xc000_001c, 1),    // INVALID_SYSTEM_SERVICE -> ERROR_INVALID_FUNCTION
     (0xc000_0022, 5),    // ACCESS_DENIED
@@ -2066,6 +2143,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_005b, 1308), // INVALID_PRIMARY_GROUP -> ERROR_INVALID_PRIMARY_GROUP
     (0xc000_0077, 1336), // INVALID_ACL -> ERROR_INVALID_ACL
     (0xc000_0079, 1338), // INVALID_SECURITY_DESCR -> ERROR_INVALID_SECURITY_DESCR
+    (0xc000_00e7, 1361), // BAD_DESCRIPTOR_FORMAT -> ERROR_BAD_DESCRIPTOR_FORMAT
     (0xc000_006d, 1326), // LOGON_FAILURE -> ERROR_LOGON_FAILURE
     (0xc000_015b, 1385), // LOGON_TYPE_NOT_GRANTED -> ERROR_LOGON_TYPE_NOT_GRANTED
     (0xc000_00fe, 1364), // NO_SUCH_PACKAGE -> ERROR_NO_SUCH_PACKAGE
@@ -2101,6 +2179,14 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0138, 182),  // ORDINAL_NOT_FOUND -> ERROR_INVALID_ORDINAL
     (0xc000_0139, 127),  // ENTRYPOINT_NOT_FOUND -> ERROR_PROC_NOT_FOUND
     (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND
+    (0xc000_0275, 4390), // NOT_A_REPARSE_POINT -> ERROR_NOT_A_REPARSE_POINT
+    (0xc000_0276, 4393), // IO_REPARSE_TAG_INVALID -> ERROR_REPARSE_TAG_INVALID
+    (0xc000_0277, 4394), // IO_REPARSE_TAG_MISMATCH -> ERROR_REPARSE_TAG_MISMATCH
+    (0xc000_0278, 4392), // IO_REPARSE_DATA_INVALID -> ERROR_INVALID_REPARSE_DATA
+    (0xc000_0279, 1920), // IO_REPARSE_TAG_NOT_HANDLED -> ERROR_CANT_ACCESS_FILE
+    (0xc000_0280, 1921), // REPARSE_POINT_NOT_RESOLVED -> ERROR_CANT_RESOLVE_FILENAME
+    (0xc000_00e8, 1784), // INVALID_USER_BUFFER -> ERROR_INVALID_USER_BUFFER
+    (0xc000_0206, 1784), // INVALID_BUFFER_SIZE -> ERROR_INVALID_USER_BUFFER
 ];
 
 /// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,

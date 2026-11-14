@@ -373,10 +373,23 @@ fn query_thread(a: &Args) -> Res<NtStatus> {
             for (i, byte) in out[8..8 + bytes].iter_mut().enumerate() {
                 *byte = (b[2 + i / 8] >> (8 * (i % 8))) as u8;
             }
-            reply(buffer, length, ret, &out[..8 + bytes])
+            // A buffer of any size that holds it (the caller's is usually
+            // larger: GetThreadDescription's 528 bytes).
+            let data = &out[..8 + bytes];
+            if ret != 0 {
+                mem::put32(ret, data.len() as u32)?;
+            }
+            if (length as usize) < data.len() {
+                return Ok(STATUS_BUFFER_TOO_SMALL);
+            }
+            mem::write(buffer, data)?;
+            Ok(STATUS_SUCCESS)
         }
-        // KERNEL_USER_TIMES, ULONGs.
-        1 | 12 | 20 => pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U]),
+        // KERNEL_USER_TIMES, ULONGs (ThreadAmILastThread, ThreadIsIoPending,
+        // ThreadIsTerminated), PROCESSOR_NUMBER (ThreadIdealProcessorEx).
+        1 | 12 | 16 | 20 | 33 => {
+            pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U])
+        }
         _ => no_class(b"wow64.dll!NtQueryInformationThread(class)", class),
     }
 }
@@ -405,8 +418,13 @@ fn set_thread(a: &Args) -> Res<NtStatus> {
             let args = [thread, class.into(), &raw const us as u64, 16];
             Ok(syscall(NT_SET_INFORMATION_THREAD, &args))
         }
-        // KPRIORITY, ULONGs, ThreadHideFromDebugger (no data).
-        2 | 3 | 17 => pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U]),
+        // KPRIORITY, ULONGs (ThreadIdealProcessor: the previous one is the
+        // status, passed back as it is), PROCESSOR_NUMBER
+        // (ThreadIdealProcessorEx), ThreadHideFromDebugger and gala's
+        // GALA_THREAD_FREE_STACK (no data).
+        2 | 3 | 13 | 17 | 33 | 0x4761_0001 => {
+            pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U])
+        }
         _ => no_class(b"wow64.dll!NtSetInformationThread(class)", class),
     }
 }
@@ -514,8 +532,8 @@ fn query_system(a: &Args) -> Res<NtStatus> {
             convert_processes,
         ),
         // Laid out alike: performance, time of day, the performance
-        // counter's flags, gala's network interfaces.
-        2 | 3 | 124 | 0x6761_0001 => {
+        // counter's flags, gala's network interfaces and sessions.
+        2 | 3 | 124 | 0x6761_0001 | 0x6761_0002 => {
             pass(NT_QUERY_SYSTEM_INFORMATION, a, &[K::U, K::U, K::U, K::U])
         }
         _ => no_class(b"wow64.dll!NtQuerySystemInformation(class)", class),

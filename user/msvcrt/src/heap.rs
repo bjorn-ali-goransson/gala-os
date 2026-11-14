@@ -3,7 +3,8 @@
 //! from 1 MiB regions of VirtualAlloc'd memory and recycled through one
 //! free list per size; larger requests get their own VirtualAlloc. One
 //! spinlock guards it all. Memory is not returned to the system except
-//! for large blocks.
+//! for large blocks. A block's header holds its class (or LARGE) and the
+//! size it was asked with (`_msize`).
 
 use crate::Lock;
 use core::ffi::c_void;
@@ -80,7 +81,10 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
                 return block;
             }
             // SAFETY: a block of at least HEADER + size bytes.
-            unsafe { *block.cast::<u64>() = class as u64 };
+            unsafe {
+                *block.cast::<u64>() = class as u64;
+                *block.add(8).cast::<u64>() = size as u64;
+            }
             block
         }
         None => {
@@ -104,8 +108,15 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
     unsafe { block.add(HEADER) }
 }
 
+/// The size block `p` (from malloc) was last asked with.
+#[cfg_attr(not(ucrt), allow(dead_code))]
+pub(crate) fn requested(p: *mut u8) -> usize {
+    // SAFETY: `p` came from malloc: its header precedes it.
+    unsafe { *p.sub(HEADER).add(8).cast::<u64>() as usize }
+}
+
 /// The caller's usable size of an allocated block.
-fn usable(p: *mut u8) -> usize {
+pub(crate) fn usable(p: *mut u8) -> usize {
     // SAFETY: `p` came from malloc: its header precedes it.
     unsafe {
         let block = p.sub(HEADER);
@@ -159,6 +170,8 @@ pub extern "C" fn realloc(p: *mut u8, size: usize) -> *mut u8 {
     }
     let have = usable(p);
     if size <= have {
+        // SAFETY: the block's header.
+        unsafe { *p.sub(HEADER).add(8).cast::<u64>() = size as u64 };
         return p;
     }
     let q = malloc(size);

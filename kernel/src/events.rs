@@ -38,7 +38,8 @@ pub enum Category {
     /// an HWND asked for from another session, and each key the desktop
     /// delivers (`key`: its window and owner).
     Window = 2048,
-    /// File opens: the name, the handle or the failing status.
+    /// File opens: the name, the handle or the failing status; registry
+    /// key opens (`key`): the name and the status.
     File = 4096,
     /// Interprocess I/O: pipes (create, connect, write and read with byte
     /// offsets, disconnect, close) and I/O completion ports (post and
@@ -55,9 +56,19 @@ pub enum Category {
     /// surfaces given a role and mapped, commits, protocol errors (each
     /// with the client's pid and the object).
     Wayland = 32768,
+    /// The service control manager (nt::scm): connections, service opens
+    /// (granted access or the failure), creations, deletions and state
+    /// changes, each with the caller's pid.
+    Service = 65536,
+    /// The WSL facade (`lx::distro`): a distribution's tree unpacked, its
+    /// processes started, terminated and its tree removed, each with the
+    /// distribution's name and the caller's pid.
+    Wsl = 131072,
 }
 
-const NAMES: [(&str, u32); 16] = [
+const NAMES: [(&str, u32); 18] = [
+    ("wsl", Category::Wsl as u32),
+    ("service", Category::Service as u32),
     ("wayland", Category::Wayland as u32),
     ("sample", Category::Sample as u32),
     ("ipc", Category::Ipc as u32),
@@ -156,6 +167,39 @@ pub fn parse_mask(value: &str) -> u32 {
 pub fn set_mask(mask: u32) {
     MASK.store(mask, Ordering::Relaxed);
 }
+
+/// `events_from=<seconds>`: the mask set so far is put aside and set again
+/// that many seconds after boot by a kernel thread, which logs the start
+/// (`events: the stream starts now`). Events before then are not written,
+/// except those written whatever the mask (`emit_always`).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn start_later(secs: u64) {
+    let mask = MASK.swap(0, Ordering::Relaxed);
+    if mask == 0 {
+        return;
+    }
+    crate::info!("events: the stream starts {secs} s after boot (events_from=)");
+    let arg = ((secs.min(u32::MAX as u64)) << 32 | mask as u64) as usize;
+    if let Err(e) = crate::sched::spawn("eventsfrom", start_at, arg) {
+        MASK.store(mask, Ordering::Relaxed);
+        crate::warn!("events: cannot wait for events_from= ({e:?}): the stream starts now");
+    }
+}
+
+#[cfg(not(any(test, feature = "hosted")))]
+fn start_at(arg: usize) {
+    let (secs, mask) = ((arg as u64) >> 32, arg as u32);
+    let now_ms = crate::time::raw_monotonic_ns() / 1_000_000;
+    crate::sched::sleep_ms((secs * 1000).saturating_sub(now_ms));
+    MASK.store(mask, Ordering::Relaxed);
+    crate::info!(
+        "events: the stream starts now (uptime_ms={})",
+        crate::time::raw_monotonic_ns() / 1_000_000
+    );
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn start_later(_secs: u64) {}
 
 /// Whether events of `category` are wanted (one relaxed load).
 pub fn enabled(category: Category) -> bool {

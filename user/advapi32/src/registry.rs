@@ -1,11 +1,14 @@
 //! The registry functions (Reg*), over ntdll's Nt*Key services.
 //!
 //! The predefined keys open, on first use, the key they stand for:
-//! HKEY_LOCAL_MACHINE `\Registry\Machine`, HKEY_USERS `\Registry\User`,
-//! HKEY_CURRENT_USER `\Registry\User\<the user's SID>`, HKEY_CLASSES_ROOT
-//! `\Registry\Machine\SOFTWARE\Classes` (Windows merges the user's
+//! HKEY_LOCAL_MACHINE `\REGISTRY\MACHINE`, HKEY_USERS `\REGISTRY\USER`,
+//! HKEY_CURRENT_USER `\REGISTRY\USER\<the user's SID>`, HKEY_CLASSES_ROOT
+//! `\REGISTRY\MACHINE\SOFTWARE\Classes` (Windows merges the user's
 //! classes over it; gala has no per-user classes yet), HKEY_CURRENT_CONFIG
-//! the current hardware profile. Their handles are kept for the process
+//! the current hardware profile. Spelled in capitals: a key's
+//! KeyNameInformation echoes the case it was opened with, and a key
+//! opened through RegOpenKeyExW reports `\REGISTRY\MACHINE\...`
+//! (measured on 26200, issue #59). Their handles are kept for the process
 //! (RegCloseKey of a predefined key does nothing). Any other HKEY is the
 //! NT key handle itself.
 //!
@@ -87,6 +90,19 @@ unsafe extern "system" {
     ) -> u32;
     fn NtDeleteKey(key: usize) -> u32;
     fn NtDeleteValueKey(key: usize, name: *const UnicodeString) -> u32;
+    fn NtNotifyChangeKey(
+        key: usize,
+        event: usize,
+        apc: usize,
+        apc_context: usize,
+        iosb: *mut [usize; 2],
+        filter: u32,
+        tree: u8,
+        buffer: *mut u8,
+        length: u32,
+        asynchronous: u8,
+    ) -> u32;
+    fn NtRenameKey(key: usize, name: *const UnicodeString) -> u32;
     fn NtClose(h: usize) -> u32;
     fn RtlNtStatusToDosError(status: u32) -> u32;
 }
@@ -178,19 +194,19 @@ fn error(status: u32) -> i32 {
 // ---- Memory and strings ----
 
 /// A LocalAlloc'd buffer, freed when dropped.
-struct Mem {
-    ptr: *mut u8,
-    len: usize,
+pub(crate) struct Mem {
+    pub(crate) ptr: *mut u8,
+    pub(crate) len: usize,
 }
 
 impl Mem {
-    fn new(len: usize) -> Result<Mem, i32> {
+    pub(crate) fn new(len: usize) -> Result<Mem, i32> {
         // SAFETY: plain call; LMEM_ZEROINIT.
         let ptr = unsafe { LocalAlloc(0x40, len.max(1)) };
         if ptr.is_null() { Err(ERROR_NOT_ENOUGH_MEMORY) } else { Ok(Mem { ptr, len }) }
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: our allocation of `len` bytes.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -222,19 +238,19 @@ impl Drop for Mem {
 }
 
 /// UTF-16 text owned in local memory.
-struct WStr {
+pub(crate) struct WStr {
     mem: Mem,
     len: usize,
 }
 
 impl WStr {
-    fn units(&self) -> &[u16] {
+    pub(crate) fn units(&self) -> &[u16] {
         self.mem.wide(0, 2 * self.len)
     }
 }
 
 /// The caller's NUL-terminated UTF-16 string (empty if null).
-fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
+pub(crate) fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
     if p.is_null() {
         return &[];
     }
@@ -250,7 +266,7 @@ fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
 
 /// The caller's ANSI string (`len` bytes, or NUL-terminated if None) in
 /// UTF-16; None for a null pointer.
-fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
+pub(crate) fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
     if p.is_null() {
         return Ok(None);
     }
@@ -277,7 +293,7 @@ fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
 
 /// `w` in the ANSI code page into `out` (`cap` bytes); returns the bytes
 /// needed (which may exceed `cap`, then nothing is written).
-fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
+pub(crate) fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
     if w.is_empty() {
         return 0;
     }
@@ -335,14 +351,14 @@ fn predefined(key: usize) -> Option<usize> {
         .then(|| low - HKEY_CLASSES_ROOT)
 }
 
-/// `\Registry\User\S-1-5-21-...` of the current user into `out`.
+/// `\REGISTRY\USER\S-1-5-21-...` of the current user into `out`.
 fn current_user_path(out: &mut [u16; 128]) -> usize {
     let mut n = 0;
     let mut push = |c: u8, n: &mut usize| {
         out[*n] = c.into();
         *n += 1;
     };
-    for &c in b"\\Registry\\User\\S-1-5" {
+    for &c in b"\\REGISTRY\\USER\\S-1-5" {
         push(c, &mut n);
     }
     for sub in super::security::USER_SUBS {
@@ -467,13 +483,13 @@ pub(crate) fn resolve(key: usize) -> Result<usize, i32> {
     }
     let mut path = [0u16; 128];
     let n = match index {
-        0 => copy_ascii(&mut path, "\\Registry\\Machine\\SOFTWARE\\Classes"),
+        0 => copy_ascii(&mut path, "\\REGISTRY\\MACHINE\\SOFTWARE\\Classes"),
         1 => current_user_path(&mut path),
-        2 => copy_ascii(&mut path, "\\Registry\\Machine"),
-        3 => copy_ascii(&mut path, "\\Registry\\User"),
+        2 => copy_ascii(&mut path, "\\REGISTRY\\MACHINE"),
+        3 => copy_ascii(&mut path, "\\REGISTRY\\USER"),
         5 => copy_ascii(
             &mut path,
-            "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current",
+            "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Hardware Profiles\\Current",
         ),
         7 => {
             let n = current_user_path(&mut path);
@@ -1692,26 +1708,72 @@ pub extern "system" fn RegQueryValueW(
     }
 }
 
+/// The IO_STATUS_BLOCK of asynchronous notifications: the kernel writes
+/// it when one completes, after the call returned (nothing reads it).
+static NOTIFY_IOSB: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+
 /// RegNotifyChangeKeyValue(hKey, bWatchSubtree, dwNotifyFilter, hEvent,
-/// fAsynchronous): gala's registry has no change notification yet. An
-/// asynchronous request is accepted and never signaled (reported to the
-/// ledger, so a program waiting on it is explained); a synchronous one
-/// would wait for ever and is refused (ERROR_NOT_SUPPORTED).
+/// fAsynchronous): NtNotifyChangeKey (the kernel's nt::regnotify). An
+/// asynchronous request signals hEvent at the change (required:
+/// ERROR_INVALID_PARAMETER without one); a synchronous one returns at the
+/// change. The filter's REG_NOTIFY_THREAD_AGNOSTIC keeps the request
+/// alive when the calling thread exits (without it, the thread's exit
+/// signals the event).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegNotifyChangeKeyValue(
     key: usize,
-    _subtree: i32,
+    subtree: i32,
     filter: u32,
     event: usize,
     asynchronous: i32,
 ) -> i32 {
-    if key == 0 || filter & !0x1000_000f != 0 || (asynchronous != 0 && event == 0) {
-        return 87; // ERROR_INVALID_PARAMETER
+    const REG_LEGAL_CHANGE_FILTER: u32 = 0x1000_000f;
+    const STATUS_PENDING: u32 = 0x103;
+    let h = match resolve(key) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    if filter & !REG_LEGAL_CHANGE_FILTER != 0 || (asynchronous != 0 && event == 0) {
+        return ERROR_INVALID_PARAMETER;
     }
-    if asynchronous == 0 {
-        missing(b"advapi32.dll!RegNotifyChangeKeyValue(synchronous)");
-        return 50; // ERROR_NOT_SUPPORTED
+    let mut iosb = [0usize; 2];
+    let (event, iosb) = if asynchronous != 0 {
+        (event, NOTIFY_IOSB.as_ptr().cast::<[usize; 2]>().cast_mut())
+    } else {
+        (0, &raw mut iosb)
+    };
+    let (tree, wait) = (u8::from(subtree != 0), u8::from(asynchronous != 0));
+    // SAFETY: a key handle and an IO_STATUS_BLOCK that outlives the
+    // request (a static one for an asynchronous request).
+    let status = unsafe {
+        NtNotifyChangeKey(h, event, 0, 0, iosb, filter, tree, core::ptr::null_mut(), 0, wait)
+    };
+    // STATUS_PENDING, the change (STATUS_NOTIFY_ENUM_DIR) or another
+    // success: done.
+    if status == STATUS_PENDING || status < 0x8000_0000 { ERROR_SUCCESS } else { error(status) }
+}
+
+/// RegRenameKey(hKey, lpSubKeyName, lpNewKeyName): NtRenameKey of the key
+/// or of its subkey (opened for KEY_WRITE). An empty or absent new name is
+/// ERROR_INVALID_PARAMETER, before the handle is looked at (Wine's
+/// conformance test, which passes on Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn RegRenameKey(key: usize, sub: *const u16, new_name: *const u16) -> i32 {
+    const KEY_WRITE: u32 = 0x0002_0006;
+    let name = wide_arg(new_name);
+    let name = unicode(name);
+    let opened = if sub.is_null() {
+        // The kernel checks the name first, then the handle (0: invalid).
+        let h = if key == 0 { Ok(0) } else { resolve(key) };
+        h.map(|h| Opened { h, owned: false })
+    } else {
+        resolve(key)
+            .and_then(|base| nt_open(base, wide_arg(sub), KEY_WRITE))
+            .map(|h| Opened { h, owned: true })
+    };
+    match opened {
+        // SAFETY: a key handle and a UNICODE_STRING over the caller's name.
+        Ok(o) => error(unsafe { NtRenameKey(o.h, &name) }),
+        Err(e) => e,
     }
-    missing(b"advapi32.dll!RegNotifyChangeKeyValue(never signaled)");
-    0
 }

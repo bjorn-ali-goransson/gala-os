@@ -1,0 +1,8 @@
+gtk version = 3.24
+display = GdkX11Display
+window drawn
+button clicked: Click me
+close requested
+window destroyed
+gtk_test: ok
+-- exit status 0

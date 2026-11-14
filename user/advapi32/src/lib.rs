@@ -53,8 +53,11 @@ mod layout;
 mod objsec;
 mod perf;
 mod policy;
+mod private;
 mod registry;
 mod security;
+mod service;
+mod service_run;
 mod token;
 mod trustee;
 mod unimplemented;
@@ -307,20 +310,6 @@ macro_rules! no_security {
 
 no_security! {
     AccessCheck(descriptor: *const u8, token: usize, access: u32, mapping: *const u8, privileges: *mut u8, length: *mut u32, granted: *mut u32, status: *mut i32);
-}
-
-/// StartServiceCtrlDispatcherW/A: gala has no service control manager,
-/// so a program is never started as a service; the call fails as it does
-/// for a console program on Windows (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
-/// and programs that run either way (sshd) go on as console programs.
-#[unsafe(no_mangle)]
-pub extern "system" fn StartServiceCtrlDispatcherW(_table: *const c_void) -> i32 {
-    fail(1063, 0)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn StartServiceCtrlDispatcherA(_table: *const c_void) -> i32 {
-    fail(1063, 0)
 }
 
 /// DllMain (the entry point our link flags name).

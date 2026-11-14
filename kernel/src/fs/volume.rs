@@ -11,10 +11,16 @@
 //!
 //! Superblock: `GALAFS\0\x01`, version (u32), active area (u32),
 //! generation (u64), the disk's sectors (u64), CRC-32 of the above.
-//! Version 2 (new volumes) keeps the last CRASH_SECTORS sectors out of the
-//! areas for the crash record (`crate::crash`); version 1 volumes (all of
-//! the disk in the two areas) are still read as they are (ARCHITECTURE
-//! invariant 3).
+//! Version 2 keeps the last CRASH_SECTORS sectors out of the areas for the
+//! crash record (`crate::crash`). Version 3 (new volumes, D4: a
+//! disk-backed C:) makes the two areas small (`area_sectors_of`) and gives
+//! the rest of the disk, from the next 4 KiB boundary to the crash area,
+//! to a data area of 4 KiB clusters that hold files' pages (`data_area`;
+//! the log's Clusters records say which page is in which cluster). Version
+//! 1 and 2 volumes (no data area: files' contents are in the log) are still
+//! read as they are (ARCHITECTURE invariant 3); a kernel from before
+//! version 3 formats a version 3 disk, as one from before version 2 did a
+//! version 2 one.
 //!
 //! The rollback floor (R8, ARCHITECTURE "Chain of trust" step 6) is a block
 //! of its own at byte 64 of the superblock's sector, with its own magic,
@@ -34,8 +40,15 @@ pub const SECTOR: usize = 512;
 /// (1), so another version is not taken for this format (ARCHITECTURE
 /// invariant 3).
 const MAGIC: &[u8; 8] = b"GALAFS\0\x01";
-/// The layout's version: 2 since the crash area. Mounting reads 1 too.
-const VERSION: u32 = 2;
+/// The layout's version: 3 since the data area. Mounting reads 1 and 2
+/// too.
+const VERSION: u32 = 3;
+/// Sectors per cluster of the data area (4 KiB clusters).
+pub const CLUSTER_SECTORS: u64 = 8;
+/// A version 3 log area: 1/32 of the disk, between 1 MiB and 256 MiB
+/// (a quarter of the disk on disks too small for that).
+const MIN_AREA: u64 = 2048;
+const MAX_AREA: u64 = 512 * 1024;
 /// Sectors kept at the end of a version 2 disk for the crash record.
 pub const CRASH_SECTORS: u64 = 16;
 /// How much of an area mounting reads at a time.
@@ -130,7 +143,19 @@ pub struct Volume<B: Blocks> {
     last: [u8; SECTOR],
     /// The rollback floor (R8).
     floor: Floor,
+    /// Where records are encoded on their way to the disk, reserved once
+    /// (`reserve`) so that appending needs no memory: a sync that writes
+    /// what lets memory go must not fail for lack of it.
+    scratch: Vec<u8>,
 }
+
+/// Records are written to the disk as soon as this much is encoded (whole
+/// sectors; the rest waits for the next record).
+const STREAM: usize = CHUNK;
+/// What `reserve` keeps for encoding: a flush's worth, plus the largest
+/// record (a Clusters record of 4096 runs, a 64 KiB Write, a long path,
+/// with headers), plus a sector of the last partial one.
+pub const SCRATCH: usize = STREAM + 160 * 1024 + SECTOR;
 
 /// What mounting found.
 #[derive(Debug, PartialEq, Eq)]
@@ -174,7 +199,7 @@ impl<B: Blocks> Volume<B> {
         let crc = u32::from_le_bytes([s[32], s[33], s[34], s[35]]);
         let found = u32::from_le_bytes([s[8], s[9], s[10], s[11]]);
         let valid = &s[0..8] == MAGIC
-            && (found == 1 || found == VERSION)
+            && (1..=VERSION).contains(&found)
             && crc == log::crc32(0, &s[..32])
             && u64::from_le_bytes(s[24..32].try_into().unwrap_or([0; 8])) == sectors;
         let version = if valid { found } else { VERSION };
@@ -188,6 +213,7 @@ impl<B: Blocks> Volume<B> {
             tail: 0,
             last: [0; SECTOR],
             floor: if valid { Floor::read(&s) } else { Floor::default() },
+            scratch: Vec::new(),
         };
         if !valid {
             // A fresh volume: an empty log of generation 1 in area 0.
@@ -204,7 +230,27 @@ impl<B: Blocks> Volume<B> {
 
     /// Each area's sectors in layout `version` on a disk of `sectors`.
     fn area_sectors_of(version: u32, sectors: u64) -> u64 {
-        if version >= 2 { (sectors - 1 - CRASH_SECTORS) / 2 } else { (sectors - 1) / 2 }
+        match version {
+            1 => (sectors - 1) / 2,
+            2 => (sectors - 1 - CRASH_SECTORS) / 2,
+            _ => {
+                let usable = sectors - 1 - CRASH_SECTORS;
+                let area = (usable / 32).clamp(MIN_AREA, MAX_AREA);
+                if 4 * area > usable { usable / 4 } else { area }
+            }
+        }
+    }
+
+    /// The data area (version 3): its first sector (4 KiB aligned) and its
+    /// clusters.
+    pub fn data_area(&self) -> Option<(u64, u32)> {
+        if self.version < 3 {
+            return None;
+        }
+        let first = (1 + 2 * self.area_sectors).next_multiple_of(CLUSTER_SECTORS);
+        let end = self.dev.sectors() - CRASH_SECTORS;
+        let clusters = end.saturating_sub(first) / CLUSTER_SECTORS;
+        (clusters > 0).then(|| (first, u32::try_from(clusters).unwrap_or(u32::MAX)))
     }
 
     /// The crash record's sectors (first, count): version 2 volumes only.
@@ -264,38 +310,90 @@ impl<B: Blocks> Volume<B> {
         if ops.is_empty() {
             return Ok(());
         }
-        let mut bytes = Vec::new();
-        for op in ops {
-            op.encode(self.generation, &mut bytes)?;
-        }
+        let mut buf = core::mem::take(&mut self.scratch);
+        let generation = self.generation;
         let area_bytes = self.area_sectors * SECTOR as u64;
-        if self.tail + bytes.len() as u64 > area_bytes {
-            return Err(VolumeError::Full);
-        }
-        self.write_at_tail(self.area, &bytes)?;
-        io(self.dev.flush())
+        let r = Self::encoded_len(&mut buf, ops, generation).and_then(|len| {
+            if self.tail + len > area_bytes {
+                return Err(VolumeError::Full);
+            }
+            self.stream(self.area, &mut buf, ops, generation)?;
+            io(self.dev.flush())
+        });
+        buf.clear();
+        self.scratch = buf;
+        r
     }
 
-    /// Writes `bytes` at the tail of area `area` (whole sectors: the
-    /// partial last one is rewritten with what it held).
-    fn write_at_tail(&mut self, area: u32, bytes: &[u8]) -> Result<(), VolumeError> {
-        let partial = (self.tail % SECTOR as u64) as usize;
-        let mut out = Vec::new();
-        out.try_reserve_exact((partial + bytes.len()).next_multiple_of(SECTOR))
-            .map_err(|_| VolumeError::NoMemory)?;
-        out.try_extend_from_slice(&self.last[..partial]).map_err(|_| VolumeError::NoMemory)?;
-        out.try_extend_from_slice(bytes).map_err(|_| VolumeError::NoMemory)?;
-        let end = out.len();
-        out.resize(end.next_multiple_of(SECTOR), 0);
-        let sector = self.area_start(area) + self.tail / SECTOR as u64;
-        // Large writes go in pieces the device takes.
-        for (i, piece) in out.chunks(CHUNK).enumerate() {
-            io(self.dev.write(sector + (i * CHUNK / SECTOR) as u64, piece))?;
+    /// Reserves the memory appending encodes records in (at mount), so
+    /// that `append` and `compact` need none for records up to `SCRATCH`.
+    pub fn reserve(&mut self) -> Result<(), VolumeError> {
+        let more = SCRATCH.saturating_sub(self.scratch.len());
+        self.scratch.try_reserve_exact(more).map_err(|_| VolumeError::NoMemory)
+    }
+
+    /// The bytes `ops` take in the log, encoded one at a time in `buf`
+    /// (left empty).
+    fn encoded_len(buf: &mut Vec<u8>, ops: &[Op], generation: u64) -> Result<u64, VolumeError> {
+        let mut len = 0u64;
+        for op in ops {
+            buf.clear();
+            op.encode(generation, buf)?;
+            len += buf.len() as u64;
         }
-        self.tail += bytes.len() as u64;
+        buf.clear();
+        Ok(len)
+    }
+
+    /// Writes `ops` at the tail of area `area`, encoded into `buf` a few
+    /// at a time: whole sectors go to the disk once `STREAM` bytes wait
+    /// (the partial last sector is rewritten with what it held, then
+    /// with what follows), the rest at the end.
+    fn stream(
+        &mut self,
+        area: u32,
+        buf: &mut Vec<u8>,
+        ops: &[Op],
+        generation: u64,
+    ) -> Result<(), VolumeError> {
+        let partial = (self.tail % SECTOR as u64) as usize;
+        buf.clear();
+        buf.try_extend_from_slice(&self.last[..partial]).map_err(|_| VolumeError::NoMemory)?;
+        // Where buf[0] goes.
+        let mut sector = self.area_start(area) + self.tail / SECTOR as u64;
+        let mut added = 0u64;
+        for op in ops {
+            let before = buf.len();
+            op.encode(generation, buf)?;
+            added += (buf.len() - before) as u64;
+            if buf.len() >= STREAM {
+                let whole = buf.len() / SECTOR * SECTOR;
+                self.write_sectors(sector, &buf[..whole])?;
+                sector += (whole / SECTOR) as u64;
+                buf.drain(..whole);
+            }
+        }
+        let end = buf.len();
+        let padded = end.next_multiple_of(SECTOR);
+        buf.try_reserve(padded - end).map_err(|_| VolumeError::NoMemory)?;
+        buf.resize(padded, 0);
+        if padded > 0 {
+            self.write_sectors(sector, buf)?;
+        }
+        self.tail += added;
         let now_partial = (self.tail % SECTOR as u64) as usize;
         self.last = [0; SECTOR];
-        self.last[..now_partial].copy_from_slice(&out[end - now_partial..end]);
+        let last_start = end - now_partial;
+        self.last[..now_partial].copy_from_slice(&buf[last_start..end]);
+        buf.clear();
+        Ok(())
+    }
+
+    /// Writes whole sectors from `sector` on, in pieces the device takes.
+    fn write_sectors(&mut self, sector: u64, bytes: &[u8]) -> Result<(), VolumeError> {
+        for (i, piece) in bytes.chunks(CHUNK).enumerate() {
+            io(self.dev.write(sector + (i * CHUNK / SECTOR) as u64, piece))?;
+        }
         Ok(())
     }
 
@@ -303,20 +401,23 @@ impl<B: Blocks> Volume<B> {
     /// comment).
     pub fn compact(&mut self, snapshot: &[Op]) -> Result<(), VolumeError> {
         let generation = self.generation + 1;
-        let mut bytes = Vec::new();
-        for op in snapshot {
-            op.encode(generation, &mut bytes)?;
-        }
+        let mut buf = core::mem::take(&mut self.scratch);
+        let len = Self::encoded_len(&mut buf, snapshot, generation);
         let area_bytes = self.area_sectors * SECTOR as u64;
         // Room for the end marker below.
-        if bytes.len() as u64 + SECTOR as u64 > area_bytes {
-            return Err(VolumeError::Full);
+        let fits = len.map(|len| len + SECTOR as u64 <= area_bytes);
+        if fits != Ok(true) {
+            self.scratch = buf;
+            return Err(fits.err().unwrap_or(VolumeError::Full));
         }
         let (old_area, old_tail, old_last) = (self.area, self.tail, self.last);
         let new_area = self.area ^ 1;
         self.tail = 0;
         self.last = [0; SECTOR];
-        let written = self.write_at_tail(new_area, &bytes).and_then(|()| {
+        let streamed = self.stream(new_area, &mut buf, snapshot, generation);
+        buf.clear();
+        self.scratch = buf;
+        let written = streamed.and_then(|()| {
             // The sector after the log must not look like a record of the
             // new generation; the zeros after the last record (in its
             // sector) end it, and so does a zeroed next sector.
@@ -440,6 +541,29 @@ mod tests {
     }
 
     #[test]
+    fn appends_stream_through_the_reserved_buffer_without_growing_it() {
+        // Records past the stream size, in several appends: all read back,
+        // and the reserved buffer never had to grow (no memory needed).
+        let (mut v, _) = Volume::mount(disk(4000)).unwrap();
+        v.reserve().unwrap();
+        let cap = v.scratch.capacity();
+        let mut all = Vec::new();
+        for round in 0..3u8 {
+            let ops: Vec<Op> = (0..7u8).map(|i| write_op(round * 10 + i, 20_000)).collect();
+            v.append(&ops).unwrap();
+            assert_eq!(v.scratch.capacity(), cap);
+            all.extend(ops);
+        }
+        // A one-byte record leaves a partial sector, rewritten by the next.
+        v.append(&[write_op(99, 1)]).unwrap();
+        all.push(write_op(99, 1));
+        v.append(&[write_op(98, 3)]).unwrap();
+        all.push(write_op(98, 3));
+        let (_, m) = remount(v);
+        assert_eq!(m, Mounted::Log(all));
+    }
+
+    #[test]
     fn a_fresh_disk_is_formatted_and_records_survive_remounts() {
         let (mut v, m) = Volume::mount(disk(200)).unwrap();
         assert_eq!(m, Mounted::Formatted);
@@ -457,7 +581,7 @@ mod tests {
 
     #[test]
     fn a_full_area_is_compacted_into_the_other() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap(); // areas of 20 sectors
+        let (mut v, _) = Volume::mount(disk(97)).unwrap(); // areas of 20 sectors
         let mut appended = 0;
         let full = loop {
             match v.append(&[write_op(appended, 1000)]) {
@@ -503,7 +627,7 @@ mod tests {
 
     #[test]
     fn a_too_large_snapshot_is_refused() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap();
+        let (mut v, _) = Volume::mount(disk(97)).unwrap();
         assert_eq!(v.compact(&[write_op(1, 30_000)]), Err(VolumeError::Full));
         let (_, m) = remount(v);
         assert_eq!(m, Mounted::Log(vec![]));
@@ -511,7 +635,7 @@ mod tests {
 
     #[test]
     fn new_volumes_keep_a_crash_area_and_version_1_volumes_still_mount() {
-        // A new volume: layout 2, the last CRASH_SECTORS sectors kept.
+        // A new volume: the last CRASH_SECTORS sectors kept.
         let (mut v, _) = Volume::mount(disk(200)).unwrap();
         assert_eq!(v.crash_area(), Some((200 - CRASH_SECTORS, CRASH_SECTORS)));
         v.append(&[write_op(1, 10)]).unwrap();
@@ -530,6 +654,7 @@ mod tests {
             tail: 0,
             last: [0; SECTOR],
             floor: Floor::default(),
+            scratch: Vec::new(),
         };
         let sb = old.superblock();
         old.dev.write(0, &sb).unwrap();
@@ -537,11 +662,27 @@ mod tests {
         let (v, m) = remount(old);
         assert_eq!(m, Mounted::Log(vec![write_op(2, 20)]));
         assert_eq!(v.crash_area(), None);
+        assert_eq!(v.data_area(), None);
+    }
+
+    #[test]
+    fn new_volumes_have_a_data_area_after_small_log_areas() {
+        // A small disk: areas of a quarter each, the rest is data.
+        let (v, _) = Volume::mount(disk(97)).unwrap();
+        assert_eq!(v.area_bytes(), 20 * SECTOR as u64);
+        // Data from sector 48 (41 rounded up to 8) to the crash area.
+        assert_eq!(v.data_area(), Some((48, (97 - 16 - 48) / 8)));
+        // 16 GiB: two 256 MiB areas (1/32 capped), the rest in clusters.
+        let sectors = 16u64 << 21;
+        let usable = sectors - 1 - CRASH_SECTORS;
+        assert_eq!(Volume::<MemDisk>::area_sectors_of(3, sectors), MAX_AREA.min(usable / 32));
+        // Version 2 volumes have none.
+        assert_eq!(Volume::<MemDisk>::area_sectors_of(2, 200), (200 - 1 - CRASH_SECTORS) / 2);
     }
 
     #[test]
     fn the_rollback_floor_is_kept_and_only_raised() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap();
+        let (mut v, _) = Volume::mount(disk(97)).unwrap();
         assert_eq!(v.floor(), Floor::default());
         let two = Floor { floor: 2, highest: 2 };
         assert_eq!(v.raise_floor(two).unwrap(), two);

@@ -119,3 +119,21 @@ pub fn start_aps(
 ) -> Result<SmpReport, SmpError> {
     unported("smp::start_aps")
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotStopped(pub u64);
+
+pub fn stop_others<R>(
+    _expired: impl Fn() -> bool,
+    _f: impl FnOnce(&[u64; MAX_CPUS]) -> R,
+) -> Result<R, NotStopped> {
+    unported("smp::stop_others")
+}
+
+pub fn interrupt_stacks(_cpu: usize) -> [(u64, u64); 3] {
+    [(0, 0); 3]
+}
+
+pub fn ap_stack_top(_cpu: usize) -> u64 {
+    0
+}

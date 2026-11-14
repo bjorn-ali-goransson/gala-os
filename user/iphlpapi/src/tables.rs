@@ -1,14 +1,23 @@
-//! The interface and unicast address tables (netioapi.h layouts, x64)
-//! over the kernel's GALA_NETWORK_INTERFACES records.
+//! The interface and unicast address tables (netioapi.h layouts: no
+//! pointers in them, so x64's are x86's too, their 64-bit fields 8-byte
+//! aligned on both) over the kernel's GALA_NETWORK_INTERFACES records.
 
 use core::ffi::c_void;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> *mut c_void;
     fn HeapAlloc(heap: *mut c_void, flags: u32, bytes: usize) -> *mut u8;
@@ -22,10 +31,10 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 
 /// The kernel's class and record (kernel/src/nt/sysinfo.rs).
 const GALA_NETWORK_INTERFACES: u32 = 0x6761_0001;
-const RECORD: usize = 36;
+const RECORD: usize = 40;
 
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
-const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+pub const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
 const AF_UNSPEC: u16 = 0;
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 23;
@@ -36,18 +45,35 @@ const ROW2: usize = 1352;
 const UNICAST_ROW: usize = 80;
 
 #[derive(Clone, Copy)]
-struct Interface {
-    index: u32,
-    if_type: u32,
-    mtu: u32,
-    mac_len: u32,
-    mac: [u8; 8],
-    ipv4: [u8; 4],
-    prefix: u32,
-    luid_index: u32,
+pub struct Interface {
+    pub index: u32,
+    pub if_type: u32,
+    pub mtu: u32,
+    pub mac_len: u32,
+    pub mac: [u8; 8],
+    pub ipv4: [u8; 4],
+    pub prefix: u32,
+    pub luid_index: u32,
+    /// The IPv4 default gateway (0.0.0.0: none).
+    pub gateway: [u8; 4],
 }
 
 impl Interface {
+    /// InterfaceGuid: stable per interface (gala's own values), in
+    /// memory order.
+    pub fn guid(&self) -> [u8; 16] {
+        [0x67, 0x61, 0x6c, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, self.index as u8]
+    }
+
+    /// The interface's description (MIB_IF_ROW2, IP_ADAPTER_INFO).
+    pub fn description(&self) -> &'static str {
+        if self.if_type == IF_TYPE_SOFTWARE_LOOPBACK {
+            "Software Loopback Interface 1"
+        } else {
+            "VirtIO Ethernet Adapter"
+        }
+    }
+
     /// NET_LUID: NetLuidIndex in bits 24-47, IfType in 48-63.
     fn luid(&self) -> u64 {
         (u64::from(self.if_type) << 48) | (u64::from(self.luid_index) << 24)
@@ -59,7 +85,7 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
 }
 
 /// The interfaces the kernel reports (at most two).
-fn interfaces() -> ([Option<Interface>; 2], usize) {
+pub fn interfaces() -> ([Option<Interface>; 2], usize) {
     let mut buf = [0u8; 2 * RECORD];
     let mut ret = 0u32;
     // SAFETY: our buffer.
@@ -89,6 +115,7 @@ fn interfaces() -> ([Option<Interface>; 2], usize) {
             ipv4: [r[24], r[25], r[26], r[27]],
             prefix: u32_at(r, 28),
             luid_index: u32_at(r, 32),
+            gateway: [r[36], r[37], r[38], r[39]],
         });
     }
     (list, n)
@@ -109,15 +136,10 @@ fn if_row(i: &Interface, row: &mut [u8]) {
     let loopback = i.if_type == IF_TYPE_SOFTWARE_LOOPBACK;
     put(row, 0, &i.luid().to_le_bytes());
     put(row, 8, &i.index.to_le_bytes());
-    // InterfaceGuid: stable per interface (gala's own values).
-    put(row, 12, &[0x67, 0x61, 0x6c, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, i.index as u8]);
-    let (alias, description) = if loopback {
-        ("Loopback Pseudo-Interface 1", "Software Loopback Interface 1")
-    } else {
-        ("Ethernet", "VirtIO Ethernet Adapter")
-    };
+    put(row, 12, &i.guid());
+    let alias = if loopback { "Loopback Pseudo-Interface 1" } else { "Ethernet" };
     put_wide(row, 28, alias);
-    put_wide(row, 542, description);
+    put_wide(row, 542, i.description());
     put(row, 1056, &i.mac_len.to_le_bytes());
     put(row, 1060, &i.mac[..6]);
     put(row, 1092, &i.mac[..6]);

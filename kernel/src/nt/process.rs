@@ -65,6 +65,13 @@ pub struct Core {
     /// The most it was charged (PeakPagefileUsage).
     pub commit_peak: core::sync::atomic::AtomicU64,
     pub commit_ended: core::sync::atomic::AtomicBool,
+    /// Nanoseconds its ended threads ran (each adds its own at its exit;
+    /// the live ones' are the scheduler's: `cpu_time_ns`).
+    pub cpu_ended_ns: core::sync::atomic::AtomicU64,
+    /// Its command line as it was started (UTF-8; a Linux program's argv
+    /// joined by spaces, replaced by execve), for the task manager
+    /// (`nt::tasks`); empty if there was no memory to keep it.
+    pub command_line: IrqMutex<Vec<u8>>,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
     /// Its session (nt::session): its primary token's TokenSessionId when
@@ -145,6 +152,16 @@ impl Process {
         match &token.body {
             ObjectBody::Token(t) => t.data.lock().integrity_level(),
             _ => super::token::MEDIUM_LEVEL,
+        }
+    }
+
+    /// Its primary token is elevated (TokenElevation: an administrator's
+    /// full token, SYSTEM's).
+    pub fn elevated(&self) -> bool {
+        let token = self.token.lock().clone();
+        match &token.body {
+            ObjectBody::Token(t) => t.data.lock().elevated(),
+            _ => false,
         }
     }
 }
@@ -298,6 +315,16 @@ impl Process {
 /// opened by id as on Windows. `prune` forgets the rest.
 static PROCESSES: IrqMutex<Vec<KArc<Process>>> = IrqMutex::new(Vec::new());
 
+/// Runs `f` on every listed process with the list's lock held (no
+/// process is added or dropped meanwhile; `f` may take each process's
+/// views and address-space locks, in that order: the image trimmer,
+/// `section::trim`).
+pub fn with_each(mut f: impl FnMut(&Process)) {
+    for p in PROCESSES.lock().iter() {
+        f(p);
+    }
+}
+
 /// Drops exited processes that only PROCESSES refers to (outside the lock:
 /// dropping one frees its address space).
 pub fn prune() {
@@ -315,32 +342,100 @@ pub fn prune() {
     }
 }
 
-/// For a leaked address space: whether its process is still known and
-/// what refers to it (its references besides PROCESSES' own: thread
-/// objects, handles in other processes; its live threads).
+/// For a leaked address space: whether its process is still known, what
+/// refers to it (its references besides PROCESSES' own: thread objects,
+/// handles in other processes; its live threads), and the handles that
+/// name it or one of its threads in any listed process's handle table
+/// (an exited process's table is closed at its exit, so one there was
+/// put in after it).
 pub fn describe_holders(space: &SharedUserSpace) -> impl core::fmt::Display {
-    // One lock at a time (the list's, then the process's own).
+    // One lock at a time (the list's, then each process's own).
     let found = PROCESSES.lock().iter().find(|p| KArc::ptr_eq(&p.space, space)).cloned();
-    DescribeHolders(found.map(|p| {
-        // Besides the list's and `found`'s own.
-        let refs = KArc::strong_count(&p) - 2;
-        let exited = *p.exit_time.lock() != 0;
-        (p.id, refs, p.thread_count(), exited)
-    }))
+    let Some(p) = found else { return DescribeHolders(None, Vec::new()) };
+    // Besides the list's and `found`'s own.
+    let refs = KArc::strong_count(&p) - 2;
+    let exited = *p.exit_time.lock() != 0;
+    let mut handles = Vec::new();
+    for holder in listed().unwrap_or_default().iter() {
+        let holder_exited = *holder.exit_time.lock() != 0;
+        for (h, entry) in holder.handles.lock().iter() {
+            let tid = match &entry.object.body {
+                ObjectBody::Process(q) if KArc::ptr_eq(q, &p) => None,
+                ObjectBody::Thread(t) if KArc::ptr_eq(&t.process, &p) => Some(t.id),
+                _ => continue,
+            };
+            let held = Holder {
+                pid: holder.id,
+                name: holder.name,
+                exited: holder_exited,
+                handle: h.0,
+                access: entry.access,
+                tid,
+            };
+            if handles.len() >= MAX_HOLDERS || handles.try_push(held).is_err() {
+                break;
+            }
+        }
+    }
+    DescribeHolders(Some((p.id, refs, p.thread_count(), exited)), handles)
 }
 
-struct DescribeHolders(Option<(u64, usize, usize, bool)>);
+/// The most holding handles `describe_holders` names.
+const MAX_HOLDERS: usize = 8;
+
+/// Every listed process (exited ones too).
+fn listed() -> Result<Vec<KArc<Process>>, AllocError> {
+    let list = PROCESSES.lock();
+    let mut out = Vec::new();
+    out.try_reserve(list.len()).map_err(|_| AllocError)?;
+    for p in list.iter() {
+        out.try_push(p.clone())?;
+    }
+    Ok(out)
+}
+
+/// A handle that names the leaked process (`tid` None) or a thread of it.
+struct Holder {
+    pid: u64,
+    name: &'static str,
+    exited: bool,
+    handle: u64,
+    access: u32,
+    tid: Option<u64>,
+}
+
+struct DescribeHolders(Option<(u64, usize, usize, bool)>, Vec<Holder>);
 
 impl core::fmt::Display for DescribeHolders {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.0 {
-            None => write!(f, "forgotten (not in the process list)"),
-            Some((id, refs, threads, exited)) => write!(
-                f,
-                "pid {id} still listed: {refs} other references, {threads} live threads, \
-                 exited {exited}"
-            ),
+        let Some((id, refs, threads, exited)) = self.0 else {
+            return write!(f, "forgotten (not in the process list)");
+        };
+        write!(
+            f,
+            "pid {id} still listed: {refs} other references, {threads} live threads, \
+             exited {exited}; "
+        )?;
+        if self.1.is_empty() {
+            return write!(f, "no handle in a listed process names it or its threads");
         }
+        write!(f, "handles naming it:")?;
+        for h in &self.1 {
+            write!(
+                f,
+                " pid {} ({}{}) handle {:#x} access {:#x} ",
+                h.pid,
+                h.name,
+                if h.exited { ", exited" } else { "" },
+                h.handle,
+                h.access
+            )?;
+            match h.tid {
+                None => write!(f, "Process;")?,
+                Some(tid) => write!(f, "Thread tid {tid};")?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -464,16 +559,13 @@ fn put_u32(space: &mut UserSpace, addr: u64, value: u32) -> Result<(), UserFault
     space.write_initial(addr, &value.to_le_bytes())
 }
 
-/// Maps the image at its preferred base.
-/// Maps the executable at its preferred base: every page borrows the
-/// layout's shared frame (read-only, or copy-on-write for writable
+/// Maps the executable at its preferred base: its ranges are committed
+/// and each page is mapped at its first touch (`section::frame_for`), to
+/// the layout's shared frame (read-only, or copy-on-write for writable
 /// sections, which a first write makes private: `vm::resolve_fault`), so
-/// processes of the same program share its pages, as image views do.
-fn map_image(
-    space: &mut UserSpace,
-    vad: &mut Vad,
-    image: &super::section::ImageLayout,
-) -> Result<u64, LoadError> {
+/// processes of the same program share its pages, as image views do, and
+/// a page the layout dropped under memory pressure comes back.
+fn map_image(vad: &mut Vad, image: &super::section::ImageLayout) -> Result<u64, LoadError> {
     let base = image.base;
     let size = image.size();
     let end = base.checked_add(size).ok_or(LoadError::BadImageBase)?;
@@ -484,11 +576,13 @@ fn map_image(
     }
     // TODO: relocate when the preferred base is taken.
     vad.reserve(Some(base), size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)?;
-    for (i, &protect) in image.page_protect().iter().enumerate() {
-        let va = base + i as u64 * PAGE_SIZE;
-        vad.commit(va, PAGE_SIZE, protect)?;
-        let frame = image.shared_frame(i).ok_or(LoadError::OutOfMemory)?;
-        space.map_borrowed(va, frame, vm::flags_for(protect)).map_err(LoadError::Paging)?;
+    // One commit per run of equal protection (as an image view's).
+    let protect = image.page_protect();
+    let mut i = 0;
+    while i < protect.len() {
+        let run = protect[i..].iter().take_while(|&&p| p == protect[i]).count();
+        vad.commit(base + i as u64 * PAGE_SIZE, run as u64 * PAGE_SIZE, protect[i])?;
+        i += run;
     }
     Ok(base)
 }
@@ -553,6 +647,55 @@ const ENVIRONMENT: &[&str] = &[
     "windir=C:\\Windows",
 ];
 
+/// What a LocalSystem service's environment has in place of the boot
+/// user's (ENVIRONMENT): SYSTEM's profile, the system's temporary
+/// directory, the machine account as USERNAME (`<COMPUTERNAME>$`) and
+/// PATHEXT, as Windows' SCM gives a LocalSystem own-process service
+/// (measured on 26200, issue #65). The other variables are the boot
+/// environment's (not measured).
+pub const SERVICE_ENVIRONMENT: &[&str] = &[
+    "APPDATA=C:\\Windows\\system32\\config\\systemprofile\\AppData\\Roaming",
+    "LOCALAPPDATA=C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local",
+    "PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC",
+    "TEMP=C:\\Windows\\TEMP",
+    "TMP=C:\\Windows\\TEMP",
+    "USERNAME=GALA$",
+    "USERPROFILE=C:\\Windows\\system32\\config\\systemprofile",
+];
+
+/// The name of variable `var` (`NAME=value`).
+fn variable_name(var: &str) -> &str {
+    var.split('=').next().unwrap_or(var)
+}
+
+/// Orders variable names as Windows sorts an environment block
+/// (case-insensitive).
+fn name_order(a: &str, b: &str) -> core::cmp::Ordering {
+    a.bytes().map(|c| c.to_ascii_uppercase()).cmp(b.bytes().map(|c| c.to_ascii_uppercase()))
+}
+
+/// `base` with `overrides` in place of its variables of the same names and
+/// the others added, in name order, into `out`: the count.
+fn environment_with<'a>(base: &[&'a str], overrides: &[&'a str], out: &mut [&'a str]) -> usize {
+    let mut n = 0;
+    let replaced = |var: &str| {
+        overrides.iter().any(|o| variable_name(o).eq_ignore_ascii_case(variable_name(var)))
+    };
+    let kept = base.iter().filter(|v| !replaced(v));
+    for &var in kept.chain(overrides) {
+        if n == out.len() {
+            break;
+        }
+        let name = variable_name(var);
+        let at =
+            out[..n].iter().position(|o| name_order(variable_name(o), name).is_gt()).unwrap_or(n);
+        out[at..=n].rotate_right(1);
+        out[at] = var;
+        n += 1;
+    }
+    n
+}
+
 /// Opens a directory (`C:\\...`, Win32 form) as a directory file object.
 fn open_directory(win32: &str) -> Option<ObjectRef> {
     use super::file;
@@ -561,7 +704,7 @@ fn open_directory(win32: &str) -> Option<ObjectRef> {
     for c in rest.encode_utf16() {
         name.try_push(c).ok()?;
     }
-    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name, linux: None };
     let share = file::FILE_SHARE_READ | file::FILE_SHARE_WRITE | file::FILE_SHARE_DELETE;
     let options = file::FILE_DIRECTORY_FILE | file::FILE_SYNCHRONOUS_IO_NONALERT;
     file::create(&path, CURDIR_ACCESS, share, file::FILE_OPEN, options).ok().map(|c| c.object)
@@ -734,7 +877,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     if info.x86 {
         vad.set_limit(super::wow64::limit(info.large_address_aware));
     }
-    let base = map_image(&mut space, &mut vad, &image)?;
+    let base = map_image(&mut vad, &image)?;
     let id = thread::next_id();
     crate::events::emit(
         crate::events::Category::Image,
@@ -916,6 +1059,8 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             commit: core::sync::atomic::AtomicU64::new(0),
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1013,18 +1158,23 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         p => (p, crate::events::current_client()),
     };
     crate::events::note_process(id, command_line);
+    set_command_line(process, command_line);
     let (machine, wow64) =
         if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
+    // An elevated primary token (an administrator's full token: SYSTEM's,
+    // or what ShellExecute's "runas" starts) is named on the line.
+    let elevated = process.elevated();
     info!(
         "process {} (pid {id}, session {session}): starting at {rip:#x}, personality \
-         {personality}{wow64}",
-        process.name
+         {personality}{wow64}{}",
+        process.name,
+        if elevated { ", elevated token" } else { "" }
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"elevated":{elevated},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)
@@ -1032,10 +1182,39 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
     );
 }
 
+/// Keeps `process`'s command line (the task manager's; execve's new one
+/// replaces it). Without the memory it stays as it was (logged).
+pub fn set_command_line(process: &Process, command_line: &str) {
+    let mut copy = Vec::new();
+    if copy.try_extend_from_slice(command_line.as_bytes()).is_err() {
+        crate::warn!("process: pid {}: no memory to keep its command line", process.id);
+        return;
+    }
+    *process.command_line.lock() = copy;
+}
+
+impl Core {
+    /// Nanoseconds its threads have run, ended and live.
+    pub fn cpu_time_ns(&self) -> u64 {
+        let mut ns = self.cpu_ended_ns.load(core::sync::atomic::Ordering::Relaxed);
+        for t in self.threads.lock().iter() {
+            if let ObjectBody::Thread(t) = &t.body {
+                ns += t.cpu_time_ns();
+            }
+        }
+        ns
+    }
+
+    /// How many live threads it has.
+    pub fn thread_count(&self) -> usize {
+        self.threads.lock().len()
+    }
+}
+
 /// A process of another personality than NT (`lx::exec`): its address
-/// space laid out by its loader, no PEB, no ntdll, no handles; the boot
-/// user's token. Its threads are created with `thread::create` (which
-/// gives a non-NT thread no TEB).
+/// space laid out by its loader, no PEB, no ntdll, no handles. Its
+/// threads are created with `thread::create` (which gives a non-NT thread
+/// no TEB).
 pub struct Bare {
     pub name: &'static str,
     /// Its path (a Linux program's, as it was executed).
@@ -1045,14 +1224,21 @@ pub struct Bare {
     /// The executable's span: (base, size).
     pub image: (u64, u64),
     pub personality: Personality,
-    /// The process that created it (a Linux fork's parent); 0: none.
+    /// The process that created it (a Linux fork's parent, the NT
+    /// program that started it: `lx::distro`); 0: none.
     pub parent_id: u64,
+    /// The primary token it gets a copy of (its creator's, as
+    /// CreateProcess gives); None: the boot user's.
+    pub token: Option<ObjectRef>,
+    /// Its console session (its creator's), if any.
+    pub console: Option<KArc<super::conhost::Session>>,
 }
 
 /// Creates the process record for `bare` and lists it (no thread yet).
 pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let id = thread::next_id();
-    let token = super::token::for_new_process(None).map_err(|_| LoadError::OutOfMemory)?;
+    let token =
+        super::token::for_new_process(bare.token.as_ref()).map_err(|_| LoadError::OutOfMemory)?;
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
@@ -1078,6 +1264,8 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
             commit: core::sync::atomic::AtomicU64::new(0),
             commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1090,7 +1278,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         apc_dispatcher: core::sync::atomic::AtomicU64::new(0),
         job: IrqMutex::new(None),
         priority_class: core::sync::atomic::AtomicU8::new(PRIORITY_CLASS_NORMAL),
-        console: None,
+        console: bare.console,
         last_exception: IrqMutex::new(None),
         unhandled_exception: IrqMutex::new(None),
         ui: super::winsta::Connection::new(),
@@ -1214,8 +1402,11 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     );
     super::desktop::process_ended(&process.desk.shell, process.id);
     process.desk.windows.process_ended(process.id as u32);
+    super::clipboard::process_ended(process);
     process.desk.hooks.process_ended(process.id as u32);
     super::conhost::process_ended(process.id);
+    // A service it ran that had not stopped: stopped, its process aborted.
+    super::scm_run::process_ended(process);
     super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.
@@ -1278,7 +1469,7 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
                 }
                 return;
             }
-            vm::Fault::Denied | vm::Fault::OutOfMemory => {}
+            vm::Fault::Denied | vm::Fault::OutOfMemory | vm::Fault::PagedOut => {}
         }
     }
     let status = match frame.kind() {
@@ -1321,7 +1512,7 @@ pub(crate) fn open_program(path: &str) -> Result<ObjectRef, NtStatus> {
     for c in rest.encode_utf16() {
         name.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
     }
-    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name };
+    let path = file::FilePath { start: crate::fs::ramfs::ROOT, name, linux: None };
     let opened = file::create(
         &path,
         file::FILE_READ_DATA,
@@ -1391,6 +1582,8 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
             commit: AtomicU64::new(0),
             commit_peak: AtomicU64::new(0),
             commit_ended: AtomicBool::new(false),
+            cpu_ended_ns: core::sync::atomic::AtomicU64::new(0),
+            command_line: IrqMutex::new(Vec::new()),
             token: IrqMutex::new(token),
             session,
             desk,
@@ -1433,12 +1626,66 @@ pub fn program_exists(path: &str) -> bool {
     open_program(path).is_ok()
 }
 
+/// Whether the program at Win32 path `path` is a console program
+/// (IMAGE_SUBSYSTEM_WINDOWS_CUI): started from the start menu, it gets a
+/// console window, as one started from Explorer does.
+pub fn is_console_program(path: &str) -> Result<bool, NtStatus> {
+    const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
+    let object = open_program(path)?;
+    let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    Ok(super::section::image_layout(f.node)?.info.subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
+}
+
+/// `text` with each `%NAME%` of the initial environment (ENVIRONMENT,
+/// names compared case-insensitively, as ExpandEnvironmentStrings does)
+/// replaced by its value, in `buf`; a `%` that starts no known name stays.
+/// None when it does not fit.
+pub fn expand_environment<'b>(text: &str, buf: &'b mut [u8]) -> Option<&'b str> {
+    let mut n = 0;
+    let mut put = |buf: &mut [u8], part: &str| -> Option<()> {
+        buf.get_mut(n..n + part.len())?.copy_from_slice(part.as_bytes());
+        n += part.len();
+        Some(())
+    };
+    let mut rest = text;
+    while let Some(at) = rest.find('%') {
+        put(buf, &rest[..at])?;
+        let after = &rest[at + 1..];
+        let value = after.find('%').and_then(|end| {
+            let name = &after[..end];
+            ENVIRONMENT.iter().find_map(|v| {
+                let (k, value) = v.split_once('=')?;
+                (!name.is_empty() && k.eq_ignore_ascii_case(name)).then_some((value, end))
+            })
+        });
+        match value {
+            Some((value, end)) => {
+                put(buf, value)?;
+                rest = &after[end + 1..];
+            }
+            None => {
+                put(buf, "%")?;
+                rest = after;
+            }
+        }
+    }
+    put(buf, rest)?;
+    core::str::from_utf8(&buf[..n]).ok()
+}
+
 /// Starts the program at Win32 path `path` with arguments `args` (after
 /// the quoted path on its command line) in its own directory, with new
 /// console handles, under primary token `token` (None: the boot user's,
 /// shasha's start menu; GalaDesktopAction's Start passes a copy of the
-/// caller's, as CreateProcess would); its process id.
-pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Result<u64, NtStatus> {
+/// caller's, as CreateProcess would), in console session `console` (a
+/// console window's, `nt::action::start_from_menu`; None: none); its
+/// process id.
+pub fn launch(
+    path: &'static str,
+    args: &str,
+    token: Option<ObjectRef>,
+    console: Option<KArc<super::conhost::Session>>,
+) -> Result<u64, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1466,7 +1713,7 @@ pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Resul
         runtime_data: &[],
         parent_id: 0,
         token,
-        console: None,
+        console,
     })
     .map_err(|e| match e {
         LoadError::Pe(_) => NtStatus::INVALID_IMAGE_FORMAT,
@@ -1475,9 +1722,88 @@ pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Resul
     Ok(process.id)
 }
 
+/// Creates a service's process (nt::scm_run): the executable at Win32
+/// path `path` with `command_line` as given (the service's ImagePath),
+/// in `current_directory` (with a trailing backslash), under primary
+/// token `token`, with new standard handles (they write to the kernel
+/// log) and no console session. Its main thread waits for a resume, so
+/// the SCM knows the process before it runs; the process and that
+/// thread.
+pub fn launch_service(
+    path: &str,
+    command_line: &str,
+    current_directory: &str,
+    token: ObjectRef,
+) -> Result<(KArc<Process>, ObjectRef), NtStatus> {
+    let object = open_program(path)?;
+    let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    let layout = super::section::image_layout(f.node)?;
+    let file_name = path.rsplit('\\').next().unwrap_or(path);
+    let name = intern(file_name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let path = intern(path).map_err(|_| NtStatus::NO_MEMORY)?;
+    // SYSTEM's environment (SERVICE_ENVIRONMENT), and no standard handles:
+    // all three are NULL in a service (measured on 26200, issue #65).
+    let mut cpus = [0u8; 24];
+    let cpus = number_variable(&mut cpus, "NUMBER_OF_PROCESSORS=", platform::online_count());
+    let mut base = [""; ENVIRONMENT.len()];
+    for (slot, var) in base.iter_mut().zip(ENVIRONMENT) {
+        *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus } else { var };
+    }
+    let mut vars = [""; ENVIRONMENT.len() + SERVICE_ENVIRONMENT.len()];
+    let n = environment_with(&base, SERVICE_ENVIRONMENT, &mut vars);
+    spawn(Spawn {
+        name,
+        path,
+        image: layout,
+        command_line,
+        current_directory,
+        environment: Some(&vars[..n]),
+        handles: Some((HandleTable::default(), [0; 3])),
+        suspended: true,
+        runtime_data: &[],
+        parent_id: 0,
+        token: Some(token),
+        console: None,
+    })
+    .map_err(|e| match e {
+        LoadError::Pe(_) | LoadError::NoWow64 => NtStatus::INVALID_IMAGE_FORMAT,
+        _ => NtStatus::NO_MEMORY,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::number_variable;
+    use super::{environment_with, expand_environment, number_variable};
+
+    #[test]
+    fn environment_variables_expand_as_the_boot_users() {
+        let mut buf = [0u8; 96];
+        assert_eq!(
+            expand_environment("%LocalAppData%\\Programs\\x.exe", &mut buf),
+            Some("C:\\Users\\gala\\AppData\\Local\\Programs\\x.exe")
+        );
+        let mut buf = [0u8; 96];
+        assert_eq!(
+            expand_environment("%SystemRoot%\\System32\\cmd.exe", &mut buf),
+            Some("C:\\Windows\\System32\\cmd.exe")
+        );
+        // Unknown names and lone percent signs stay.
+        let mut buf = [0u8; 96];
+        assert_eq!(expand_environment("100% %NoSuch% %%", &mut buf), Some("100% %NoSuch% %%"));
+        let mut buf = [0u8; 8];
+        assert_eq!(expand_environment("%ProgramFiles%", &mut buf), None);
+    }
+
+    #[test]
+    fn a_service_environment_replaces_and_adds_in_name_order() {
+        let base = ["APPDATA=a", "OS=Windows_NT", "Path=p", "USERNAME=gala"];
+        let mut out = [""; 6];
+        let n = environment_with(&base, &["PATHEXT=.COM", "USERNAME=GALA$"], &mut out);
+        assert_eq!(
+            &out[..n],
+            ["APPDATA=a", "OS=Windows_NT", "Path=p", "PATHEXT=.COM", "USERNAME=GALA$"]
+        );
+    }
 
     #[test]
     fn number_variables() {

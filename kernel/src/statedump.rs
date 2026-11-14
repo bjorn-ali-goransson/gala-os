@@ -38,12 +38,22 @@ pub fn take_request() -> bool {
 /// Part 2: everything that needs locks, from a thread that may wait.
 pub fn full_dump() {
     info!("statedump: threads (NT, then scheduler), the ledger, the statistics:");
+    #[cfg(not(feature = "hosted"))]
+    if crate::hotswap::swapped() {
+        info!("statedump: {}", crate::hotswap::Mark);
+    }
     crate::nt::thread::dump();
     // Each process's commit and its pool and handle quotas (nt::quota).
     crate::nt::process::dump();
     #[cfg(not(feature = "hosted"))]
     crate::sched::dump();
     crate::nt::ledger::dump();
+    // Armed registry change notifications and who waits on them.
+    crate::nt::regnotify::dump();
+    // C:'s write-back: what is dirty, the syncs by cause, throttling.
+    if crate::nt::persist::has_area() {
+        info!("statedump: persist: {}", crate::nt::persist::WritebackStats);
+    }
     // Linux threads (masks, pending signals, blocked or not), epoll sets
     // and futex waiters (ROADMAP LX).
     crate::lx::dump();
@@ -54,7 +64,13 @@ pub fn full_dump() {
     crate::nt::session::dump();
     // gala-um: the host's allocator, no frame figures worth printing.
     #[cfg(not(feature = "hosted"))]
-    stats_line(Some(crate::mm::heap::stats()), crate::mm::try_frame_stats());
+    {
+        let heap = crate::mm::heap::stats();
+        stats_line(Some(heap), crate::mm::try_frame_stats());
+        info!("statedump: heap by owner: {}", crate::nt::stats::HeapOwners::now(heap.in_use));
+        info!("statedump: image pages: {}", crate::nt::section::PageStats);
+        info!("statedump: pagefile: {}", crate::nt::pagefile::Summary);
+    }
     info!("statedump: end");
 }
 
@@ -67,10 +83,11 @@ pub fn stats_line(heap: Option<crate::mm::heap::HeapStats>, frames: Option<(u64,
             match self.0 {
                 Some(h) => write!(
                     f,
-                    "statedump: heap {} KiB in use (peak {} KiB, {} large pages)",
+                    "statedump: heap {} KiB in use (peak {} KiB, {} large pages, {} slab pages)",
                     h.in_use / 1024,
                     h.peak_in_use / 1024,
-                    h.large_pages
+                    h.large_pages,
+                    h.slab_pages
                 )?,
                 None => f.write_str("statedump: heap (lock held)")?,
             }
@@ -83,6 +100,15 @@ pub fn stats_line(heap: Option<crate::mm::heap::HeapStats>, frames: Option<(u64,
         }
     }
     crate::console::emergency_line(format_args!("{}", Line(heap, frames)));
+    match crate::mm::try_frame_uses() {
+        Some(uses) => crate::console::emergency_line(format_args!(
+            "statedump: frames in use by {}",
+            crate::mm::FrameUses(uses)
+        )),
+        None => {
+            crate::console::emergency_line(format_args!("statedump: frames by use (lock held)"))
+        }
+    }
 }
 
 #[cfg(not(any(test, feature = "hosted")))]
@@ -151,6 +177,9 @@ mod nmi {
     }
 
     pub fn on_nmi(frame: &TrapFrame) {
+        // Another CPU writing a hot swap's kernel entries (SN step 1e):
+        // nothing runs here until they are whole.
+        crate::hotswap::wait_while_patching();
         // A profiler sample (asked by another CPU's tick) is no dump
         // request. (A dump NMI that arrives while one is pending merges
         // with it: that CPU then misses the dump, which waits for it at
@@ -160,6 +189,13 @@ mod nmi {
         }
         let cpu = me();
         let Some(snap) = SNAPSHOTS.get(cpu) else { return };
+        // A hot swap asked for at a resumed machine's first instruction
+        // (ROADMAP SN step 1d): no dump request (the watchdog's
+        // backtrace requests are not looked at).
+        let traced = TRACE_ONLY.load(Ordering::Acquire) & (1 << cpu) != 0;
+        if !traced && crate::hotswap::on_nmi(frame.from_user_mode()) {
+            return;
+        }
         snap.ip.store(frame.ip(), Ordering::Relaxed);
         snap.sp.store(frame.sp(), Ordering::Relaxed);
         snap.mode.store(frame.mode() as u8, Ordering::Relaxed);

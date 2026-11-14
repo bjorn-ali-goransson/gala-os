@@ -1,0 +1,26 @@
+[package]
+name = "wsl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# gala's wsl.exe (ROADMAP CT, ARCHITECTURE "The WSL facade"): the parts
+# that need no system calls (tar, gzip, the command line, the listing's
+# format, /etc/passwd) are the library, tested on the host with
+# `cargo test -p wsl`; the program is `src/main.rs`.
+
+[lib]
+bench = false
+
+[[bin]]
+name = "wsl"
+test = false
+bench = false
+
+[target.'cfg(windows)'.dependencies]
+# The bin's allocator (the host tests have std's).
+gala_heap = { path = "../gala_heap" }
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
