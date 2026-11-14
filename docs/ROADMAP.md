@@ -2182,11 +2182,14 @@ need gala's.
      under `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
      test first in `sip_test` (Wine's crypt32 sip tests, which pass on
      Windows); integrator.exe registers Office's VBA SIP through it.
-     Next: the same integrator.exe then dies of 0xc06d007f on
-     `WINTRUST.dll!WintrustAddActionID` (an export gala's wintrust
-     lacks): it registers Office's trust provider (the documented
-     entries under `HKLM\Software\Microsoft\Cryptography\Providers\Trust`),
-     test first. Its failure fails the install as before: the service ends with 17002 and setup.exe with
+     The same integrator.exe then died of 0xc06d007f on
+     `WINTRUST.dll!WintrustAddActionID`. Done: wintrust's
+     WintrustAddActionID and WintrustRemoveActionID (ARCHITECTURE
+     "wintrust: Authenticode", trust provider registration), the
+     documented entries under
+     `HKLM\Software\Microsoft\Cryptography\Providers\Trust`, test
+     first in `actionid_test`. Next: the install's next blocker, found
+     from a snapshot taken at integrator.exe's start. A failure there fails the install as before: the service ends with 17002 and setup.exe with
      0x426a (17002, "C2RClient returned a failing exit code"). Seen
      too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
      run time), Office's product key not decoded by gala's sppc

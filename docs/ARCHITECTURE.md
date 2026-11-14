@@ -4484,6 +4484,21 @@ through their public functions.
   Software Publishing state (its default is used), revocation fetching
   (crypt32 is offline; the default state accepts an offline check), the
   catalog functions (CryptCATAdmin*: gala_stubs), any UI.
+- **Trust provider registration** (`register.rs`; `actionid_test`):
+  WintrustAddActionID writes one key per provider function of the
+  CRYPT_REGISTER_ACTIONID, `HKLM\Software\Microsoft\Cryptography\Providers\Trust\<Function>\{GUID}`
+  (Initialization, Message, Signature, Certificate, CertCheck,
+  FinalPolicy, DiagnosticPolicy, Cleanup, the structure's order), with
+  the REG_SZ values `$DLL` and `$Function`, as Windows' own providers
+  are; the 32-bit DLL's keys land in the 32-bit view (advapi32's WOW64
+  redirection). advapi32 is loaded at the first call, not imported. A
+  NULL action or structure is ERROR_INVALID_PARAMETER; an entry without
+  a DLL or function name writes no key; a registry error fails the
+  call. WintrustRemoveActionID deletes every function's key and
+  succeeds whether or not they were there. gala calls no registered
+  provider (WinVerifyTrust implements WINTRUST_ACTION_GENERIC_VERIFY_V2
+  itself): Office's integrator registers its VBA trust provider and only
+  the registry keeps it.
 
 ### secur32: SSPI
 

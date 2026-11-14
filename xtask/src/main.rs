@@ -3863,6 +3863,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sip_test", "advapi32.dll", "Windows/System32"),
     ("sip_test", "bcryptprimitives.dll", "Windows/System32"),
     ("sip_test", "crypt32.dll", "Windows/System32"),
+    // wintrust's trust provider registration in the registry
+    // (user/actionid_test).
+    ("actionid_test", "ntdll.dll", "Windows/System32"),
+    ("actionid_test", "kernel32.dll", "Windows/System32"),
+    ("actionid_test", "advapi32.dll", "Windows/System32"),
+    ("actionid_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("actionid_test", "wintrust.dll", "Windows/System32"),
+    ("actionid_test", "crypt32.dll", "Windows/System32"),
+    ("actionid_test", "bcrypt.dll", "Windows/System32"),
+    ("actionid_test", "ncrypt.dll", "Windows/System32"),
     // The Restart Manager (user/rstrtmgr_test): rstrtmgr and the
     // advapi32 it asks for services.
     ("rstrtmgr_test", "ntdll.dll", "Windows/System32"),
@@ -4131,6 +4141,7 @@ const USER_PROGRAMS: &[&str] = &[
     "wofutil_test",
     "sppc_test",
     "sip_test",
+    "actionid_test",
     "hardlink_test",
     "threadpool_test",
     "imagetrim_test",
@@ -8073,6 +8084,15 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=sip_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["sip_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // wintrust's trust provider registration, as Office's integrator
+        // registers its VBA trust provider (user/actionid_test). As
+        // SYSTEM: it writes HKLM, as an administrator does.
+        name: "actionid_test",
+        cmdline: "qemu_exit as=system run=actionid_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["actionid_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/rstrtmgr_test built for x86).

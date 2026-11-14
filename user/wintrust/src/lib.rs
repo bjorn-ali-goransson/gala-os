@@ -1,7 +1,9 @@
 //! gala's wintrust.dll: WinVerifyTrust with WINTRUST_ACTION_GENERIC_VERIFY_V2
 //! (Authenticode signatures of PE images and cabinets, `verify`), the WTHelper
-//! functions over the provider data it keeps, and the catalog functions
-//! SQL Server LocalDB imports, not implemented (`unimplemented`).
+//! functions over the provider data it keeps, trust provider registration
+//! in the registry (WintrustAddActionID and WintrustRemoveActionID,
+//! `register`), and the catalog functions SQL Server LocalDB imports, not
+//! implemented (`unimplemented`).
 //!
 //! The design (ARCHITECTURE "wintrust: Authenticode"): the PE image hash
 //! and the cabinet digest are wintrust's (`pe`, `cab`, through bcrypt); the PKCS #7 SignedData, its
@@ -18,6 +20,7 @@
 mod cab;
 mod layout;
 mod pe;
+mod register;
 mod unimplemented;
 mod verify;
 
