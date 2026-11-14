@@ -1,0 +1,31 @@
+sizeof(struct sysinfo) = 112
+sysinfo = 0
+  mem_unit = 1
+  totalram > 0 = yes
+  totalram is whole pages = yes
+  freeram <= totalram = yes
+  sharedram <= totalram = yes
+  bufferram <= totalram = yes
+  freeswap <= totalswap = yes
+  no high memory = yes
+  uptime >= 0 = yes
+  procs >= 1 = yes
+  the padding is zero = yes
+a second call: uptime not less = yes
+a second call: the same totalram = yes
+sysinfo(NULL) = -14 (EFAULT)
+sysinfo(bad pointer) = -14 (EFAULT)
+-- sched_getaffinity
+sched_getaffinity(0, 128) > 0 = yes
+  a whole number of longs = yes
+  at most the buffer = yes
+  at least one CPU = yes
+  the rest of the buffer untouched = yes
+our own pid: the same mask = yes
+our own tid: the same mask = yes
+sched_getaffinity(size 4) = -22 (EINVAL)
+sched_getaffinity(size 12) = -22 (EINVAL)
+sched_getaffinity(no such pid) = -3 (ESRCH)
+sched_getaffinity(bad pointer) = -14 (EFAULT)
+sysinfo_test: ok
+-- exit status 0

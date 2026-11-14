@@ -75,6 +75,7 @@ pub mod prctl;
 pub mod pty;
 pub mod resource;
 pub mod session;
+pub mod shm;
 pub mod sigcalls;
 pub mod signal;
 pub mod socket;
@@ -87,6 +88,7 @@ pub mod syscalls;
 #[cfg(target_arch = "aarch64")]
 #[path = "syscalls_aarch64.rs"]
 pub mod syscalls;
+pub mod sysinfo;
 pub mod threads;
 pub mod time;
 pub mod timer;
@@ -140,6 +142,8 @@ pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::s
             e.0
         );
     }
+    // A removed System V segment it was the last to map goes.
+    shm::collect();
     state::ended(process.id, status);
 }
 
@@ -162,8 +166,9 @@ pub fn release_robust_list(process: &crate::nt::process::Process, tid: u64, head
 
 /// The state dump's Linux part: each process's threads (Linux and core
 /// tids, mask, pending, whether blocked), its epoll sets, and the futex
-/// waiters.
+/// waiters, the System V segments.
 pub fn dump() {
     state::dump();
     futex::dump();
+    shm::dump();
 }

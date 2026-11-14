@@ -2139,6 +2139,10 @@ source).
   /usr/share/keyrings/ubuntu-archive-keyring.gpg`, then
   `dists/noble/main/binary-amd64/Packages.xz`, whose hash InRelease
   lists) and add a `Deb` row with the files used; a THIRD_PARTY row too.
+  A file a maintainer script installs under another name
+  (update-alternatives: libblas3's `libblas.so.3` is a link through
+  /etc/alternatives to `blas/libblas.so.3`) is written
+  `"<installed path>=<path in the package>"`.
   The packages are kept in `target/prebuilt/debs/` (shared, checked at
   each use), so a re-assembly or an interrupted fetch downloads only
   what is missing. Assembly runs the host's `update-mime-database`
@@ -2188,6 +2192,38 @@ source).
   before its parent's wait4 returns, so whatever the parent does next
   (sealing a memfd against writing: EBUSY while a writable mapping is
   left) must not see the child's mappings (`lx::process_ended`).
+
+### GIMP (ROADMAP LD step 9)
+
+- Scenario `lx_gimp_batch` (`cargo xtask boot-test 'lx_gimp_batch$'`,
+  about 80 s in the kernel under TCG): `/bin/sh /lx/gimp/batch.sh` runs
+  `gimp-console-2.10` in batch mode on `user/lx/gimp/in.png` (made by
+  `mkpng.py`) with `batch.scm` and `--gimprc=gimprc`, then busybox's
+  sha256sum of the PNG it saved; its transcript is
+  `user/lx/sh/lx_gimp_batch.txt`. Record it on Ubuntu 24.04 with GIMP
+  2.10.36-3build3 (`apt-get install gimp=2.10.36-3build3
+  libgimp2.0t64=2.10.36-3build3 gimp-data=2.10.36-3build3`): `env -i
+  HOME=<an empty directory> PATH=/usr/bin:/bin BB= DIR=$PWD/user/lx/gimp
+  sh user/lx/gimp/batch.sh`, stdout, then `-- stderr:` and stderr, then
+  `-- exit status 0`.
+- **The saved file is compared byte for byte**, so it carries nothing
+  that changes between runs: the gimprc turns off exporting the colour
+  profile, Exif, XMP and IPTC (their dates and document ids), and
+  file-png-save2's arguments every optional chunk. GEGL's and babl's
+  modules come in x86_64 variants picked by the CPU's features; the
+  guest's (QEMU's `-cpu max`) gives the host's bytes.
+- **The root "gimp"** is what `strace -f -e trace=%file,execve` of that
+  run opened on Ubuntu, less what the "gtk3", "x11" and "glibc" roots
+  ship and the host's extras (dconf's GIO module, the caches, GEGL's
+  probes of `dot` and `convert`). A first start queries every plug-in
+  in `/usr/lib/gimp/2.0/plug-ins` (about 120 processes): the root has
+  only those the scenario uses (script-fu and file-png). To find a new
+  plug-in's files, run the host's GIMP with a gimprc whose
+  `(plug-in-path "<dir>")` holds copies of just the plug-ins wanted.
+- Reading a run: `XTASK_EVENTS=ipc` shows GIMP's segment (`lx shm`:
+  gimp-console gets, attaches and removes it; each plug-in attaches and
+  detaches; it is destroyed at the last detach); GLib's criticals and
+  GIMP's own messages are on its stderr in the transcript.
 
 ### The WSL facade's tests (user/wsl_test, ROADMAP CT)
 

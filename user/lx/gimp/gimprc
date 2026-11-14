@@ -1,0 +1,7 @@
+# The user's gimprc for scenario lx_gimp_batch: exported files carry no
+# colour profile, Exif, XMP or IPTC (their dates and document ids differ
+# from run to run), so the PNG can be compared byte for byte.
+(export-color-profile no)
+(export-metadata-exif no)
+(export-metadata-xmp no)
+(export-metadata-iptc no)

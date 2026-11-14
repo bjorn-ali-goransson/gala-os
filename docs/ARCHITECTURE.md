@@ -11787,6 +11787,31 @@ The running parts (milestone 1; `lxrun=`):
   anonymous inode their pseudo file systems' magics, without blocks.
   fontconfig asks whether its cache may be mapped, libselinux whether
   /sys/fs/selinux is there, GLib a file's file system.
+- **sysinfo and sched_getaffinity** (`lx::sysinfo`; sysinfo_test,
+  `lx_sysinfo`): sysinfo counts in bytes (`mem_unit` 1): RAM is the frame
+  allocator's managed frames and free ones (NT's NumberOfPhysicalPages),
+  no swap, shared, buffer or high memory, `procs` the running processes'
+  threads, the uptime the monotonic clock's rounded up to a second; the
+  load averages are 0 (gala keeps none). sched_getaffinity copies the
+  thread's scheduler mask (NT's ThreadAffinityMask; one long, at most 64
+  CPUs) after Linux's size checks (EINVAL below the CPUs or not whole
+  longs), ESRCH for no such thread. glibc's `_SC_PHYS_PAGES` is
+  sysinfo's (GIMP sizes its undo memory from it), GLib's processor count
+  the mask's (GEGL's threads).
+- **System V shared memory** (`lx::shm`; shm_test, `lx_shm`): a segment
+  is a pagefile-backed section held by a registry (ids a slot below
+  SHMMNI plus 32768 times a sequence number, keys, Linux's ipcperms);
+  shmat maps a view of that section (`mm::attach`), so attachments in
+  every process and a fork's child share its pages; `shm_nattch` is the
+  number of views of it in the running processes (Linux's VMAs). IPC_RMID
+  marks it SHM_DEST with the key IPC_PRIVATE; it goes once nothing maps
+  it (`shm::collect` after a detach, an exit or an execve; a shmat
+  between its look-up and its mapping keeps it), and until then shmat by
+  id still works, which GIMP relies on (it removes its tile segment at
+  once and its plug-ins attach it). IPC_STAT, IPC_SET and IPC_RMID;
+  SHM_REMAP, SHM_LOCK and the INFO commands are EINVAL and ledgered.
+  `lx shm` events (`events=ipc`) and `lx: shm segment` lines in the
+  state dump.
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic

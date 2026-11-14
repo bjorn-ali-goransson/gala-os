@@ -759,6 +759,8 @@ fn replace_image(process: &KArc<Process>, p: &Prepared) -> Result<(), ExecError>
     }
     let stack_bottom = STACK_END - STACK_SIZE;
     mm::clear(process).map_err(|s| ExecError::Map("old image", s))?;
+    // Its System V attachments went with it (`shm`).
+    super::shm::collect();
     {
         let mut vad = process.vad.lock();
         for &(start, end, _) in &ranges {

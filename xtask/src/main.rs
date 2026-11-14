@@ -595,6 +595,11 @@ struct Deb {
     /// The files used, by their paths in the package; each lands at the
     /// same path in the root. A symbolic link (a library's soname) is its
     /// target's bytes under the link's path: boot modules carry no links.
+    /// `<installed>=<in the package>` is a file its maintainer script
+    /// installs under another name with update-alternatives (libblas3's
+    /// `usr/lib/x86_64-linux-gnu/libblas.so.3`, a link through
+    /// /etc/alternatives to `blas/libblas.so.3`): the package's file at
+    /// the installed path, which is the one a minimal install has.
     files: &'static [&'static str],
 }
 
@@ -1192,6 +1197,522 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                 pool: "main/libx/libxcb/libxcb-randr0_1.15-1ubuntu2_amd64.deb",
                 sha256: "b5cb519823a05a617b543dc9b6a9289b7648b20048244abe021caa706309835a",
                 files: &["usr/lib/x86_64-linux-gnu/libxcb-randr.so.0"],
+            },
+        ],
+    },
+    LinuxRoot {
+        // GIMP 2.10.36 (ROADMAP LD step 9) as Ubuntu 24.04 builds it: a GTK 2
+        // program (X11 only), with GEGL 0.4.48 and babl 0.1.108 (their
+        // operation and extension modules, each in its x86_64 variants:
+        // they pick one by the CPU's features), gimp-data's script-fu
+        // scripts and system gimprc, and the libraries of theirs the "gtk3"
+        // and "x11" roots lack (shipped with them). Of its plug-ins only
+        // script-fu and file-png: a first start queries every plug-in in
+        // the directory, each a process (about 120), and `lx_gimp_batch`
+        // uses these two. The list is what `gimp-console-2.10` and those
+        // two opened on Ubuntu 24.04 under `strace -f` (WORKFLOW "GIMP").
+        name: "gimp",
+        debs: &[
+            Deb {
+                pool: "universe/g/gimp/gimp_2.10.36-3build3_amd64.deb",
+                sha256: "bebe82526504f00f295be003c9e25a78555d7738eb18dd5309b808fec096cc3d",
+                files: &[
+                    "usr/bin/gimp-console-2.10",
+                    "usr/lib/gimp/2.0/environ/default.env",
+                    "usr/lib/gimp/2.0/interpreters/default.interp",
+                    "usr/lib/gimp/2.0/plug-ins/file-png/file-png",
+                    "usr/lib/gimp/2.0/plug-ins/script-fu/script-fu",
+                ],
+            },
+            Deb {
+                pool: "universe/g/gimp/gimp-data_2.10.36-3build3_all.deb",
+                sha256: "1b9b8a2ce058da45b9af1d459fc64eb32a3e41326c1adc5f363bd9879144d33d",
+                files: &[
+                    "etc/gimp/2.0/gimprc",
+                    "etc/gimp/2.0/menurc",
+                    "etc/gimp/2.0/templaterc",
+                    "etc/gimp/2.0/unitrc",
+                    "usr/share/gimp/2.0/scripts/add-bevel.scm",
+                    "usr/share/gimp/2.0/scripts/addborder.scm",
+                    "usr/share/gimp/2.0/scripts/blend-anim.scm",
+                    "usr/share/gimp/2.0/scripts/burn-in-anim.scm",
+                    "usr/share/gimp/2.0/scripts/carve-it.scm",
+                    "usr/share/gimp/2.0/scripts/chrome-it.scm",
+                    "usr/share/gimp/2.0/scripts/circuit.scm",
+                    "usr/share/gimp/2.0/scripts/clothify.scm",
+                    "usr/share/gimp/2.0/scripts/coffee.scm",
+                    "usr/share/gimp/2.0/scripts/copy-visible.scm",
+                    "usr/share/gimp/2.0/scripts/difference-clouds.scm",
+                    "usr/share/gimp/2.0/scripts/distress-selection.scm",
+                    "usr/share/gimp/2.0/scripts/drop-shadow.scm",
+                    "usr/share/gimp/2.0/scripts/erase-rows.scm",
+                    "usr/share/gimp/2.0/scripts/font-map.scm",
+                    "usr/share/gimp/2.0/scripts/fuzzyborder.scm",
+                    "usr/share/gimp/2.0/scripts/gimp-online.scm",
+                    "usr/share/gimp/2.0/scripts/gradient-example.scm",
+                    "usr/share/gimp/2.0/scripts/grid-system.scm",
+                    "usr/share/gimp/2.0/scripts/guides-from-selection.scm",
+                    "usr/share/gimp/2.0/scripts/guides-new-percent.scm",
+                    "usr/share/gimp/2.0/scripts/guides-new.scm",
+                    "usr/share/gimp/2.0/scripts/guides-remove-all.scm",
+                    "usr/share/gimp/2.0/scripts/images/beavis.jpg",
+                    "usr/share/gimp/2.0/scripts/images/texture.jpg",
+                    "usr/share/gimp/2.0/scripts/images/texture1.jpg",
+                    "usr/share/gimp/2.0/scripts/images/texture2.jpg",
+                    "usr/share/gimp/2.0/scripts/images/texture3.jpg",
+                    "usr/share/gimp/2.0/scripts/lava.scm",
+                    "usr/share/gimp/2.0/scripts/line-nova.scm",
+                    "usr/share/gimp/2.0/scripts/mkbrush.scm",
+                    "usr/share/gimp/2.0/scripts/old-photo.scm",
+                    "usr/share/gimp/2.0/scripts/palette-export.scm",
+                    "usr/share/gimp/2.0/scripts/paste-as-brush.scm",
+                    "usr/share/gimp/2.0/scripts/paste-as-pattern.scm",
+                    "usr/share/gimp/2.0/scripts/perspective-shadow.scm",
+                    "usr/share/gimp/2.0/scripts/plug-in-compat.init",
+                    "usr/share/gimp/2.0/scripts/predator.scm",
+                    "usr/share/gimp/2.0/scripts/reverse-layers.scm",
+                    "usr/share/gimp/2.0/scripts/ripply-anim.scm",
+                    "usr/share/gimp/2.0/scripts/round-corners.scm",
+                    "usr/share/gimp/2.0/scripts/script-fu-compat.init",
+                    "usr/share/gimp/2.0/scripts/script-fu-set-cmap.scm",
+                    "usr/share/gimp/2.0/scripts/script-fu-util.scm",
+                    "usr/share/gimp/2.0/scripts/script-fu.init",
+                    "usr/share/gimp/2.0/scripts/select-to-brush.scm",
+                    "usr/share/gimp/2.0/scripts/select-to-image.scm",
+                    "usr/share/gimp/2.0/scripts/select-to-pattern.scm",
+                    "usr/share/gimp/2.0/scripts/selection-round.scm",
+                    "usr/share/gimp/2.0/scripts/slide.scm",
+                    "usr/share/gimp/2.0/scripts/spinning-globe.scm",
+                    "usr/share/gimp/2.0/scripts/spyrogimp.scm",
+                    "usr/share/gimp/2.0/scripts/tileblur.scm",
+                    "usr/share/gimp/2.0/scripts/unsharp-mask.scm",
+                    "usr/share/gimp/2.0/scripts/waves-anim.scm",
+                    "usr/share/gimp/2.0/scripts/weave.scm",
+                    "usr/share/gimp/2.0/scripts/xach-effect.scm",
+                    "usr/share/gimp/2.0/tags/gimp-tags-default.xml",
+                ],
+            },
+            Deb {
+                pool: "universe/s/suitesparse/libamd3_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "557b88b1688b6ebfb058bd6c621daadb62bbb40059a1e33ed3fd3b7bef744f06",
+                files: &["usr/lib/x86_64-linux-gnu/libamd.so.3"],
+            },
+            Deb {
+                pool: "universe/b/babl/libbabl-0.1-0_0.1.108-1_amd64.deb",
+                sha256: "ec7c6040e86319cf2bcd90433d6632f1018cdf0635f406e8d7c1a6df25c296a3",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/CIE.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/HCY.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/HSL.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/HSV.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/avx2-int8.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/cairo.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/double.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/fast-float.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/float.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/formats.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gegl-fixups.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gggl-lies.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gggl-table-lies.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gggl-table.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gggl.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/gimp-8bit.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/grey.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/half.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/naive-CMYK.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/oklab.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/simple.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/sse-half.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/sse2-float.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/sse2-int16.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/sse2-int8.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/sse4-int8.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/two-table.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/u16.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/u32.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-CIE.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-cairo.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-double.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-float.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-gegl-fixups.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-gggl-lies.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-gggl.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-grey.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-simple.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-u16.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-u32.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v2-ycbcr.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-CIE.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-cairo.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-double.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-float.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-gegl-fixups.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-gggl-lies.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-gggl.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-grey.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-simple.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-u16.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-u32.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/x86-64-v3-ycbcr.so",
+                    "usr/lib/x86_64-linux-gnu/babl-0.1/ycbcr.so",
+                    "usr/lib/x86_64-linux-gnu/libbabl-0.1.so.0",
+                ],
+            },
+            Deb {
+                pool: "main/l/lapack/libblas3_3.12.0-3build1_amd64.deb",
+                sha256: "0a161e527a76597f8b65eff103f3871c6f441a91a8359adbe097015e0af3c154",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libblas.so.3=usr/lib/x86_64-linux-gnu/blas/libblas.so.3",
+                ],
+            },
+            Deb {
+                pool: "universe/s/suitesparse/libcamd3_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "40c209739ede6dde19f1d32428e0ff36f1d6ba9c142762946ac486c2b45e78a8",
+                files: &["usr/lib/x86_64-linux-gnu/libcamd.so.3"],
+            },
+            Deb {
+                pool: "universe/s/suitesparse/libccolamd3_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "002dc5a486cc312aececd7a92c500941a550cae1c5901e15aae2b43504431c9c",
+                files: &["usr/lib/x86_64-linux-gnu/libccolamd.so.3"],
+            },
+            Deb {
+                pool: "universe/s/suitesparse/libcholmod5_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "5766e1c220c315850680c4f19c6bd12b953a20ef1b30754392ef956bd65df94e",
+                files: &["usr/lib/x86_64-linux-gnu/libcholmod.so.5"],
+            },
+            Deb {
+                pool: "main/s/suitesparse/libcolamd3_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "8f4c416275c325b2a14463da0e040b90802e3eb72d7fae4e4a6c3cd497e71e48",
+                files: &["usr/lib/x86_64-linux-gnu/libcolamd.so.3"],
+            },
+            Deb {
+                pool: "main/c/curl/libcurl3t64-gnutls_8.5.0-2ubuntu10_amd64.deb",
+                sha256: "6a5463c3acb9a5a8e1756ba7953a694cc4eb1c02b960f4faf4aa84d1ae7a00c5",
+                files: &["usr/lib/x86_64-linux-gnu/libcurl-gnutls.so.4"],
+            },
+            Deb {
+                pool: "main/libd/libdeflate/libdeflate0_1.19-1build1_amd64.deb",
+                sha256: "63572dbb9002aee49f70b40a451dac6c3dca72c9f36d228aa4d64ba72425b64d",
+                files: &["usr/lib/x86_64-linux-gnu/libdeflate.so.0"],
+            },
+            Deb {
+                pool: "main/e/exiv2/libexiv2-27_0.27.6-1build1_amd64.deb",
+                sha256: "924ed64f663cc20d6f0104f1c93c9e61fa58ce6262466c92d2bba5dbf5eecbdb",
+                files: &["usr/lib/x86_64-linux-gnu/libexiv2.so.27"],
+            },
+            Deb {
+                pool: "main/g/gcc-14/libgcc-s1_14-20240412-0ubuntu1_amd64.deb",
+                sha256: "a39efdcaa2245f026dc3254ce14fcff255fc430a17064632b6ba7c5da974a912",
+                files: &["usr/lib/x86_64-linux-gnu/libgcc_s.so.1"],
+            },
+            Deb {
+                pool: "universe/g/gegl/libgegl-0.4-0t64_0.4.48-2.4build2_amd64.deb",
+                sha256: "0f2898142d6359886866c3b65bcafa192316e2f7e208f86a18074b362d64a977",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/exr-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/exr-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-cxx-x86_64-v2.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-cxx-x86_64-v3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-cxx.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-gpl3-x86_64-v2.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-gpl3-x86_64-v3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-gpl3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-x86_64-v2.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common-x86_64-v3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-common.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-core.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-generated-x86_64-v2.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-generated-x86_64-v3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-generated.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-transformops-x86_64-v2.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gegl-transformops-x86_64-v3.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/gif-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/jpg-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/jpg-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/lcms-from-profile.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/matting-levin.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/npd.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/npy-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/path.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/pdf-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/pixbuf-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/pixbuf-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/png-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/png-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/ppm-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/ppm-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/raw-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/rgbe-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/rgbe-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/seamless-clone-compose.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/seamless-clone.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/svg-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/text.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/tiff-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/tiff-save.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/transformops.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/v4l.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/vector-fill.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/vector-stroke.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/webp-load.so",
+                    "usr/lib/x86_64-linux-gnu/gegl-0.4/webp-save.so",
+                    "usr/lib/x86_64-linux-gnu/libgegl-0.4.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgegl-npd-0.4.so",
+                    "usr/lib/x86_64-linux-gnu/libgegl-sc-0.4.so",
+                ],
+            },
+            Deb {
+                pool: "main/g/gexiv2/libgexiv2-2_0.14.2-2build3_amd64.deb",
+                sha256: "ff0d51bbbd4e6c7bf5423a5c9c070dd57120a402ba47868325e4acfe06d336b7",
+                files: &["usr/lib/x86_64-linux-gnu/libgexiv2.so.2"],
+            },
+            Deb {
+                pool: "main/g/gcc-14/libgfortran5_14-20240412-0ubuntu1_amd64.deb",
+                sha256: "86d85417b95626b45080550fc03c7a83a05f100454987b722901da20fc358682",
+                files: &["usr/lib/x86_64-linux-gnu/libgfortran.so.5"],
+            },
+            Deb {
+                pool: "universe/g/gimp/libgimp2.0t64_2.10.36-3build3_amd64.deb",
+                sha256: "a3a818ca97462946fdde2dc38b89cc48187f6788e15f64b4e87354676f6e5ebc",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgimp-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpbase-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpcolor-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpconfig-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpmath-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpmodule-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpthumb-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpui-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgimpwidgets-2.0.so.0",
+                ],
+            },
+            Deb {
+                pool: "main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6_amd64.deb",
+                sha256: "649a5ee5f74f0aa1e1b9c4f169eabbae56a79aa5aac51ef733eb9e18700bd8fc",
+                files: &["usr/lib/x86_64-linux-gnu/libgmp.so.10"],
+            },
+            Deb {
+                pool: "main/g/gnutls28/libgnutls30t64_3.8.3-1.1ubuntu3_amd64.deb",
+                sha256: "fdaa2c2fd34d7ac4ebd7d62e5b5d94c3cf9322b1fa1760d70b8e86425e9f6c36",
+                files: &["etc/gnutls/config", "usr/lib/x86_64-linux-gnu/libgnutls.so.30"],
+            },
+            Deb {
+                pool: "main/g/gcc-14/libgomp1_14-20240412-0ubuntu1_amd64.deb",
+                sha256: "cc2ca1193d2c11d7383bdb03dd333cc621d128237b82dafeb8d7f2bd8302f3dd",
+                files: &["usr/lib/x86_64-linux-gnu/libgomp.so.1"],
+            },
+            Deb {
+                pool: "main/g/gtk+2.0/libgtk2.0-0t64_2.24.33-4ubuntu1_amd64.deb",
+                sha256: "74fede1b3400014d06ed5f42eb2fafd427cbc54953de960d66552f84c5f6d714",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libgdk-x11-2.0.so.0",
+                    "usr/lib/x86_64-linux-gnu/libgtk-x11-2.0.so.0",
+                ],
+            },
+            Deb {
+                pool: "main/n/nettle/libhogweed6t64_3.9.1-2.2build1_amd64.deb",
+                sha256: "594a82d7b70ecff393753ee0ab6611b0b18226c4f922d27ccb3f66caeae3d5d1",
+                files: &["usr/lib/x86_64-linux-gnu/libhogweed.so.6"],
+            },
+            Deb {
+                pool: "main/i/icu/libicu74_74.2-1ubuntu3_amd64.deb",
+                sha256: "d29c97a21a3e3254731cfac186e4d4e611e5e67d2c9a0430f6acfbd9acaefa2e",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libicudata.so.74",
+                    "usr/lib/x86_64-linux-gnu/libicuuc.so.74",
+                ],
+            },
+            Deb {
+                pool: "main/libi/libidn2/libidn2-0_2.3.7-2build1_amd64.deb",
+                sha256: "f1be32391a2fabf06c27618a2000ae8f9a26c30fad1b482a007049ae8156d19c",
+                files: &["usr/lib/x86_64-linux-gnu/libidn2.so.0"],
+            },
+            Deb {
+                pool: "universe/i/imath/libimath-3-1-29t64_3.1.9-3.1ubuntu2_amd64.deb",
+                sha256: "7b62292db74bab20ccea4db0039b5c7e720aec36aeed4a405d8da4c2c60b29c8",
+                files: &["usr/lib/x86_64-linux-gnu/libImath-3_1.so.29"],
+            },
+            Deb {
+                pool: "main/j/jbigkit/libjbig0_2.1-6.1ubuntu2_amd64.deb",
+                sha256: "074a760a86213a1286ad60f56394c90885cf45af070626a88c480d90b78c175a",
+                files: &["usr/lib/x86_64-linux-gnu/libjbig.so.0"],
+            },
+            Deb {
+                pool: "main/j/json-c/libjson-c5_0.17-1build1_amd64.deb",
+                sha256: "3ac608d78e9e981e14ba7ceb141a46e3dd3ae8d6dbb3a7ecafd2698fe9930584",
+                files: &["usr/lib/x86_64-linux-gnu/libjson-c.so.5"],
+            },
+            Deb {
+                pool: "main/j/json-glib/libjson-glib-1.0-0_1.8.0-2build2_amd64.deb",
+                sha256: "4310fbbd91785adf38d3e0f0d6a94527430c077af8773eb83ec02a1fcbcba089",
+                files: &["usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0"],
+            },
+            Deb {
+                pool: "main/l/lapack/liblapack3_3.12.0-3build1_amd64.deb",
+                sha256: "02fb8be068c4e306a9e8138bfead1bc58f2b3c4d2306b4e0c66f1fbf42d72b73",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/liblapack.so.3=usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3",
+                ],
+            },
+            Deb {
+                pool: "main/l/lcms2/liblcms2-2_2.14-2build1_amd64.deb",
+                sha256: "90ab2d12239581491bb4ca6fe8670f31ac6e11eecc3538bf6156733bf442e198",
+                files: &["usr/lib/x86_64-linux-gnu/liblcms2.so.2"],
+            },
+            Deb {
+                pool: "main/o/openldap/libldap2_2.6.7+dfsg-1~exp1ubuntu8_amd64.deb",
+                sha256: "35294f2750d3601b3f134eb90500e4b542b0f60c7f411e0b024bd00018c80c24",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/liblber.so.2",
+                    "usr/lib/x86_64-linux-gnu/libldap.so.2",
+                ],
+            },
+            Deb {
+                pool: "main/l/lerc/liblerc4_4.0.0+ds-4ubuntu2_amd64.deb",
+                sha256: "f1b9dbfa28c56564f6b544f3757f5f3f4d549ce9962f39e897812c23b0a5d0e7",
+                files: &["usr/lib/x86_64-linux-gnu/libLerc.so.4"],
+            },
+            Deb {
+                pool: "universe/libm/libmypaint/libmypaint-1.5-1_1.6.0-2build2_amd64.deb",
+                sha256: "ae1afd434d513c1b899ac57edcfaec315c6a25b39a575ce8a48ffaec01071a07",
+                files: &["usr/lib/x86_64-linux-gnu/libmypaint-1.5.so.1"],
+            },
+            Deb {
+                pool: "main/n/nettle/libnettle8t64_3.9.1-2.2build1_amd64.deb",
+                sha256: "4cac2064e2984c4bc5a31659d4f00c7efe0c4b691559d536dd726c05d3632a57",
+                files: &["usr/lib/x86_64-linux-gnu/libnettle.so.8"],
+            },
+            Deb {
+                pool: "main/n/nghttp2/libnghttp2-14_1.59.0-1build4_amd64.deb",
+                sha256: "4273c0501841461ab24a5a09017e084c558e5fadc6dc68aee91b6c8fbcb4092f",
+                files: &["usr/lib/x86_64-linux-gnu/libnghttp2.so.14"],
+            },
+            Deb {
+                pool: "main/n/nspr/libnspr4_4.35-1.1build1_amd64.deb",
+                sha256: "e579e72d091f6c7a13f5a756c31065b15aae5b81840d61b069355aa2283c07b4",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libnspr4.so",
+                    "usr/lib/x86_64-linux-gnu/libplc4.so",
+                    "usr/lib/x86_64-linux-gnu/libplds4.so",
+                ],
+            },
+            Deb {
+                pool: "main/n/nss/libnss3_3.98-1build1_amd64.deb",
+                sha256: "88247fe0db5cd4c273b7dd026d9ded4ff9ba828b62437d12a2f1c2abc29468d2",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libnss3.so",
+                    "usr/lib/x86_64-linux-gnu/libnssutil3.so",
+                    "usr/lib/x86_64-linux-gnu/libsmime3.so",
+                ],
+            },
+            Deb {
+                pool: "universe/o/openexr/libopenexr-3-1-30_3.1.5-5.1build3_amd64.deb",
+                sha256: "646d78a860e71d02414df08644f70125e670fb90e8f5d834a7cefd732a9eadfe",
+                files: &[
+                    "usr/lib/x86_64-linux-gnu/libIex-3_1.so.30",
+                    "usr/lib/x86_64-linux-gnu/libIlmThread-3_1.so.30",
+                    "usr/lib/x86_64-linux-gnu/libOpenEXR-3_1.so.30",
+                ],
+            },
+            Deb {
+                pool: "main/o/openjpeg2/libopenjp2-7_2.5.0-2build3_amd64.deb",
+                sha256: "a57475f1fcd6f2a4ec2c427880c37af5b7bf81077d35d6648fe20901d0db6674",
+                files: &["usr/lib/x86_64-linux-gnu/libopenjp2.so.7"],
+            },
+            Deb {
+                pool: "main/p/p11-kit/libp11-kit0_0.25.3-4ubuntu2_amd64.deb",
+                sha256: "2496ec055ee1660b8733e267fa0aa27068869548bc7a898773607024f2df50c3",
+                files: &["usr/lib/x86_64-linux-gnu/libp11-kit.so.0"],
+            },
+            Deb {
+                pool: "main/p/poppler/libpoppler-glib8t64_24.02.0-1ubuntu9_amd64.deb",
+                sha256: "0175aa6af4db54e0d0848bceea27b65b9f09ab9f80887f3a3f4504f31ec63ded",
+                files: &["usr/lib/x86_64-linux-gnu/libpoppler-glib.so.8"],
+            },
+            Deb {
+                pool: "main/p/poppler/libpoppler134_24.02.0-1ubuntu9_amd64.deb",
+                sha256: "8de16f026ec342acda9ad7b53828f2115b1e814c47fc1a4a2eaedabaa8f9d35b",
+                files: &["usr/lib/x86_64-linux-gnu/libpoppler.so.134"],
+            },
+            Deb {
+                pool: "main/libp/libpsl/libpsl5t64_0.21.2-1.1build1_amd64.deb",
+                sha256: "a6c85d1303ae90b6a3209d73c4f047f82c27cdc963c48adfd95dd7abca64f039",
+                files: &["usr/lib/x86_64-linux-gnu/libpsl.so.5"],
+            },
+            Deb {
+                pool: "main/libr/libraw/libraw23t64_0.21.2-2.1build1_amd64.deb",
+                sha256: "2395693ebd8223dccd0617be5ee9285b5dd0f9911172450ff03b77802fa70716",
+                files: &["usr/lib/x86_64-linux-gnu/libraw.so.23"],
+            },
+            Deb {
+                pool: "main/libr/librsvg/librsvg2-2_2.58.0+dfsg-1build1_amd64.deb",
+                sha256: "47178c8632e70a0fd2c620e87c5d4d873b07f76c16e2e3c642693f8176a0af88",
+                files: &["usr/lib/x86_64-linux-gnu/librsvg-2.so.2"],
+            },
+            Deb {
+                pool: "main/r/rtmpdump/librtmp1_2.4+20151223.gitfa8646d.1-2build7_amd64.deb",
+                sha256: "967a39dbc14236d1580ede01d80fd78444668572e716734e1ac66c175052594e",
+                files: &["usr/lib/x86_64-linux-gnu/librtmp.so.1"],
+            },
+            Deb {
+                pool: "main/c/cyrus-sasl2/libsasl2-2_2.1.28+dfsg1-5ubuntu3_amd64.deb",
+                sha256: "9a5b0cf88b19de419e585b91b3837c4d7621df229f78a0a58935761866ca1f4d",
+                files: &["usr/lib/x86_64-linux-gnu/libsasl2.so.2"],
+            },
+            Deb {
+                pool: "main/libw/libwebp/libsharpyuv0_1.3.2-0.4build3_amd64.deb",
+                sha256: "4e1763494e5b9d34192313aa88e38201fc67b3f13ea96ca268d26401a3002791",
+                files: &["usr/lib/x86_64-linux-gnu/libsharpyuv.so.0"],
+            },
+            Deb {
+                pool: "main/libs/libssh/libssh-4_0.10.6-2build2_amd64.deb",
+                sha256: "c0867b203887064777d677e18d4006f9b068a9ff98d361189cb941ab409326dd",
+                files: &["usr/lib/x86_64-linux-gnu/libssh.so.4"],
+            },
+            Deb {
+                pool: "main/o/openssl/libssl3t64_3.0.13-0ubuntu3_amd64.deb",
+                sha256: "6cde53feabd28f26586a4db2ffb9fc84e7b0598aee15b33bee907b6392a92d24",
+                files: &["usr/lib/x86_64-linux-gnu/libcrypto.so.3"],
+            },
+            Deb {
+                pool: "main/g/gcc-14/libstdc++6_14-20240412-0ubuntu1_amd64.deb",
+                sha256: "4863e880d6ee538e4734c430c5579c1ac933b88a42c25bc9980d0f148c54b21e",
+                files: &["usr/lib/x86_64-linux-gnu/libstdc++.so.6"],
+            },
+            Deb {
+                pool: "main/s/suitesparse/libsuitesparseconfig7_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "a27c55b471ebd184136567f0649f2d1425825ec535b0329ea3917c0fe6440471",
+                files: &["usr/lib/x86_64-linux-gnu/libsuitesparseconfig.so.7"],
+            },
+            Deb {
+                pool: "main/libt/libtasn1-6/libtasn1-6_4.19.0-3build1_amd64.deb",
+                sha256: "e30d8b4b7769966185b5acb40ac81205467022c96d7b1688bf06a3eaded2b98c",
+                files: &["usr/lib/x86_64-linux-gnu/libtasn1.so.6"],
+            },
+            Deb {
+                pool: "main/t/tiff/libtiff6_4.5.1+git230720-4ubuntu2_amd64.deb",
+                sha256: "7a334d99e3977b47fc9522ce82bee0e44375c499acaab81d7fa3d3670b30625c",
+                files: &["usr/lib/x86_64-linux-gnu/libtiff.so.6"],
+            },
+            Deb {
+                pool: "universe/s/suitesparse/libumfpack6_7.6.1+dfsg-1build1_amd64.deb",
+                sha256: "5f947859dd49e944c6e8ed3d627cfa99da29045ea301d696c88a4a8affbaf483",
+                files: &["usr/lib/x86_64-linux-gnu/libumfpack.so.6"],
+            },
+            Deb {
+                pool: "main/libu/libunistring/libunistring5_1.1-2build1_amd64.deb",
+                sha256: "78acc4c141a499e0c1e4cc47ca8e9082996f3972662c4d92337669ecc9b0a519",
+                files: &["usr/lib/x86_64-linux-gnu/libunistring.so.5"],
+            },
+            Deb {
+                pool: "main/libw/libwebp/libwebp7_1.3.2-0.4build3_amd64.deb",
+                sha256: "c86f6439f0bbc531f7199794654231f3b29327d6585958511b958795d51c2484",
+                files: &["usr/lib/x86_64-linux-gnu/libwebp.so.7"],
+            },
+            Deb {
+                pool: "main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3_amd64.deb",
+                sha256: "8c4efd7abe155df3cf0f9b64d659f2d866215785f8e8c44234fbb341d58cc967",
+                files: &["usr/lib/x86_64-linux-gnu/libxml2.so.2"],
             },
         ],
     },
@@ -2085,6 +2606,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_pty_pie", "user/lx/bin/pty_test-pie", "lx"),
     ("lx_eventfd", "user/lx/bin/eventfd_test", "lx"),
     ("lx_eventfd_pie", "user/lx/bin/eventfd_test-pie", "lx"),
+    ("lx_shm", "user/lx/bin/shm_test", "lx"),
+    ("lx_shm_pie", "user/lx/bin/shm_test-pie", "lx"),
+    ("lx_sysinfo", "user/lx/bin/sysinfo_test", "lx"),
+    ("lx_sysinfo_pie", "user/lx/bin/sysinfo_test-pie", "lx"),
     ("lx_statfs", "user/lx/bin/statfs_test", "lx"),
     ("lx_statfs_pie", "user/lx/bin/statfs_test-pie", "lx"),
     ("lx_unix", "user/lx/bin/unix_test", "lx"),
@@ -2143,10 +2668,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // /bin/sh (Xwayland runs xkbcomp through it, xterm the user's shell).
     ("x11", "target/prebuilt/x11/usr/", "usr"),
     ("x11", "target/prebuilt/x11/usr/bin/sh", "bin"),
+    ("gimp", "target/prebuilt/gimp/usr/", "usr"),
+    ("gimp", "target/prebuilt/gimp/etc/", "etc"),
     // A distribution's desktop in one window (LD step 6): the session
     // script and twm's configuration.
     ("xdesktop", "user/lx/xdesktop/session.sh", "lx/xdesktop"),
     ("xdesktop", "user/lx/xdesktop/twmrc", "lx/xdesktop"),
+    ("gimp_batch", "target/prebuilt/busybox-linux/busybox", "lx"),
+    ("gimp_batch", "user/lx/gimp/batch.sh", "lx/gimp"),
+    ("gimp_batch", "user/lx/gimp/batch.scm", "lx/gimp"),
+    ("gimp_batch", "user/lx/gimp/gimprc", "lx/gimp"),
+    ("gimp_batch", "user/lx/gimp/in.png", "lx/gimp"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -5461,8 +5993,10 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
         run_quiet(Command::new("dpkg-deb").arg("-x").arg(&deb).arg(&tree))
             .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
         for file in d.files {
-            let from = resolve_in_tree(&tree, file).map_err(|e| format!("{url}: {e}"))?;
-            let to = dir.join(file);
+            // `<installed>=<in the package>`: an alternative (Deb::files).
+            let (installed, packaged) = file.split_once('=').unwrap_or((file, file));
+            let from = resolve_in_tree(&tree, packaged).map_err(|e| format!("{url}: {e}"))?;
+            let to = dir.join(installed);
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
             }
@@ -10971,6 +11505,41 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/eventfd_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/shm_test (LD step 9: GIMP's tiles to its plug-ins, X's
+        // MIT-SHM): System V shared memory, a segment's pages shared by its
+        // attachments and through a fork, the attach count, the removal
+        // deferred to the last detach, keys and the errors; its transcript
+        // must be its expected.txt (real Linux's).
+        name: "lx_shm",
+        cmdline: "qemu_exit lxrun=/lx/shm_test lxargs=./shm_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/shm_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/shm_test as a static-pie.
+        name: "lx_shm_pie",
+        cmdline: "qemu_exit lxrun=/lx/shm_test-pie lxargs=./shm_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/shm_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/sysinfo_test (LD step 9, what GIMP's start reached):
+        // sysinfo (glibc's _SC_PHYS_PAGES) and sched_getaffinity (GLib's
+        // processor count): what holds on any machine, and the errors; its
+        // transcript must be its expected.txt (real Linux's).
+        name: "lx_sysinfo",
+        cmdline: "qemu_exit lxrun=/lx/sysinfo_test lxargs=./sysinfo_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/sysinfo_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/sysinfo_test as a static-pie.
+        name: "lx_sysinfo_pie",
+        cmdline: "qemu_exit lxrun=/lx/sysinfo_test-pie lxargs=./sysinfo_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/sysinfo_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/statfs_test (LD step 3, what GTK's start reached): statfs and fstatfs: what holds on any file system, and the errors;
         // its transcript must be its expected.txt (real Linux's).
         name: "lx_statfs",
@@ -11166,6 +11735,18 @@ const SCENARIOS: &[Scenario] = &[
             "run: end /bin/sh",
             BOOT_OK_MARKER,
         ],
+    },
+    Scenario {
+        // GIMP in batch mode (LD step 9's first part): Ubuntu 24.04's
+        // console GIMP (LINUX_ROOTS "gimp") loads a PNG through its
+        // file-png plug-in, blurs and inverts it with GEGL from script-fu
+        // (another plug-in process; user/lx/gimp/batch.sh and batch.scm)
+        // and saves it; the saved file's SHA-256 in the transcript
+        // (user/lx/sh/lx_gimp_batch.txt) is the one GIMP writes on Ubuntu.
+        name: "lx_gimp_batch",
+        cmdline: "qemu_exit lxrun=/bin/sh lxargs=sh%20/lx/gimp/batch.sh lxenv=HOME=/Users/gala%20PATH=/usr/bin:/bin",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /bin/sh", BOOT_OK_MARKER],
     },
     Scenario {
         // user/lx/gtk_test under X11 (LD step 5): GDK's X11 backend on
@@ -11683,6 +12264,12 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("linux_menu", "gtk3"),
     ("linux_menu", "wayland_client"),
     ("linux_menu", "glibc"),
+    ("lx_gimp_batch", "gimp_batch"),
+    ("lx_gimp_batch", "gimp"),
+    ("lx_gimp_batch", "x11"),
+    ("lx_gimp_batch", "gtk3"),
+    ("lx_gimp_batch", "wayland_client"),
+    ("lx_gimp_batch", "glibc"),
     ("lx_xdesktop", "xdesktop"),
     ("lx_xdesktop", "x11"),
     ("lx_xdesktop", "gtk3"),

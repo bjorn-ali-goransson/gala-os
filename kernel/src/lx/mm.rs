@@ -344,6 +344,57 @@ pub fn mmap(
     mapped
 }
 
+/// Maps `len` bytes of the section `object` (from its start) shared
+/// into `process` with `prot`: at `at` (page-aligned; EINVAL if anything
+/// is mapped there, as shmat(2) without SHM_REMAP), else where there is
+/// room below the mmap top. The address, or an errno. A System V
+/// segment's attachment (`lx::shm`).
+pub fn attach(
+    process: &Process,
+    at: Option<u64>,
+    len: u64,
+    prot: u64,
+    object: crate::nt::object::ObjectRef,
+) -> Result<u64, u16> {
+    let len = round_up(len).filter(|&l| l > 0 && l <= TASK_SIZE).ok_or(EINVAL)?;
+    let protect = match &object.body {
+        ObjectBody::Section(section) => view_protect(prot, section),
+        _ => return Err(EINVAL),
+    };
+    let mut views = process.views.lock();
+    views.try_reserve(1).map_err(|_| ENOMEM)?;
+    let mut vad = process.vad.lock();
+    let start = match at {
+        Some(addr) => {
+            let end = addr.checked_add(len).filter(|&e| e <= vad::USER_MAX).ok_or(EINVAL)?;
+            if addr < vad::USER_MIN || !vad.is_range_free(addr, end) {
+                return Err(EINVAL);
+            }
+            addr
+        }
+        None => vad.find_free_below(len, MMAP_TOP).ok_or(ENOMEM)?,
+    };
+    vad.map_exact(start, start + len, protect, vad::MEM_MAPPED)
+        .map_err(|e| if e == NtStatus::NO_MEMORY { ENOMEM } else { EINVAL })?;
+    // Room reserved above.
+    let _ = views.try_push(View::new(start, len, 0, object));
+    sync(process, &vad, start, start + len);
+    Ok(start)
+}
+
+/// How many views of `process` map the section `object`.
+pub fn count_views(process: &Process, object: &crate::nt::object::ObjectRef) -> u64 {
+    let views = process.views.lock();
+    views.iter().filter(|v| crate::mm::heap::KArc::ptr_eq(&v.section, object)).count() as u64
+}
+
+/// The view of `process` that starts at `addr`: its section, size and
+/// offset.
+pub fn view_at(process: &Process, addr: u64) -> Option<(crate::nt::object::ObjectRef, u64, u64)> {
+    let views = process.views.lock();
+    views.iter().find(|v| v.base == addr).map(|v| (v.section.clone(), v.size, v.offset))
+}
+
 /// munmap(2).
 pub fn munmap(process: &Process, addr: u64, len: u64) -> Result<u64, u16> {
     if !addr.is_multiple_of(PAGE) || len == 0 {

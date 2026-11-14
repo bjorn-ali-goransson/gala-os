@@ -297,6 +297,12 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::EXECVE => super::exec::execve(call, a(0), a(1), a(2)),
         nr::GETPPID => Ok(call.lx.parent),
         nr::UNAME => uname(call, a(0)),
+        nr::SHMGET => super::shm::shmget(call, a(0), a(1), a(2)),
+        nr::SHMAT => super::shm::shmat(call, a(0), a(1), a(2)),
+        nr::SHMDT => super::shm::shmdt(call, a(0)),
+        nr::SHMCTL => super::shm::shmctl(call, a(0), a(1), a(2)),
+        nr::SYSINFO => super::sysinfo::sysinfo(call, a(0)),
+        nr::SCHED_GETAFFINITY => super::sysinfo::sched_getaffinity(call, a(0), a(1), a(2)),
         // The one user: setting the ids it has is allowed, anything else
         // is EPERM (an unprivileged process).
         nr::SETUID => same_id(a(0), super::identity::of_process(&call.process).uid),

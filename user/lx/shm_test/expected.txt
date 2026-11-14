@@ -1,0 +1,74 @@
+sizeof(struct shmid64_ds) = 112
+-- a private segment
+shmget(IPC_PRIVATE, 10000) >= 0 = yes
+IPC_STAT = 0
+  shm_segsz = 10000
+  mode = 0600
+  key = 0
+  shm_nattch = 0
+  shm_cpid is ours = yes
+  shm_lpid = 0
+  shm_atime = 0
+  shm_dtime = 0
+  shm_ctime > 0 = yes
+  uid and cuid ours = yes
+  gid and cgid ours = yes
+shmat(id) is a page = yes
+  a new segment's bytes are zero = yes
+a second shmat: another address = yes
+  the same bytes = yes
+  writes seen through the first = yes
+  shm_nattch = 2
+  shm_lpid is ours = yes
+  shm_atime > 0 = yes
+-- a fork
+the child (it saw shm_nattch 4): exited 0
+its write seen = yes
+shm_nattch after its exit = 2
+-- detaching
+shmdt(the second) = 0
+  shm_nattch = 1
+  shm_dtime > 0 = yes
+shmdt(it again) = -22 (EINVAL)
+shmdt(inside the first) = -22 (EINVAL)
+shmdt(not a page) = -22 (EINVAL)
+-- removed while attached (what GIMP does)
+IPC_RMID = 0
+IPC_STAT = 0
+  SHM_DEST in its mode = yes
+  the permissions = 0600
+  key = 0
+  still usable = yes
+shmat(it) still works = yes
+  shm_nattch = 2
+shmdt = 0
+shmdt(the last) = 0
+IPC_STAT after the last detach = -22 (EINVAL)
+shmat after the last detach = -22 (EINVAL)
+IPC_RMID after the last detach = -22 (EINVAL)
+-- a key
+shmget(key, IPC_CREAT|IPC_EXCL) >= 0 = yes
+again with IPC_EXCL = -17 (EEXIST)
+again without it: the same id = yes
+without IPC_CREAT: the same id = yes
+a smaller size: the same id = yes
+a larger size = -22 (EINVAL)
+IPC_STAT: its key = yes
+  mode = 0640
+  shm_segsz = 8192
+another private segment: another id = yes
+IPC_RMID with no attachment = 0
+IPC_STAT after it = -22 (EINVAL)
+the key after it, without IPC_CREAT = -2 (ENOENT)
+-- errors
+shmget(size 0) = -22 (EINVAL)
+shmget(no such key) = -2 (ENOENT)
+shmat(-1) = -22 (EINVAL)
+shmat(no such id) = -22 (EINVAL)
+shmat(an address not a page) = -22 (EINVAL)
+shmat(the same, SHM_RND): rounded down = yes
+IPC_STAT(bad buffer) = -14 (EFAULT)
+shmctl(unknown command) = -22 (EINVAL)
+shmctl(no such id) = -22 (EINVAL)
+shm_test: ok
+-- exit status 0

@@ -102,6 +102,14 @@ pub fn of_token_object(token: &ObjectRef) -> Ids {
     }
 }
 
+/// Ids of `uid` with the one group `gid` (host tests).
+#[cfg(test)]
+pub fn test_ids(uid: u32, gid: u32) -> Ids {
+    let mut groups = [0; MAX_GROUPS];
+    groups[0] = gid;
+    Ids { uid, gid, groups, count: 1 }
+}
+
 /// The ids process `p` runs as (its primary token's).
 pub fn of_process(p: &Process) -> Ids {
     let token = p.token.lock().clone();
