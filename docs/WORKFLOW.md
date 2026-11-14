@@ -1441,6 +1441,12 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   DLLs loaded at run time (LoadLibrary: the JDK's launcher loads msvcp140
   and jvm.dll) are not in the closure: boot and read the ledger
   (`"what":"missing dll"`, `missing export`).
+- A DLL whose exports carry standard ordinals (ws2_32's Winsock 1.1
+  numbering in `user/ws2_32/build.rs`) leaves an empty slot for every
+  ordinal between two it assigns; a program importing one fails to load
+  (`dll!#N missing export`, LoadLibrary error 182). Give every ordinal
+  in the assigned range its function (ws2_32 #53, #54:
+  getprotobyname/getprotobynumber, which Python's _socket.pyd needs).
 - A DLL Windows names other than `.dll` (`winspool.drv`): its
   USER_DLLS entry's `file` is that name; cargo builds `<package>.dll`
   and xtask's `built_dll` ships it under the right name.

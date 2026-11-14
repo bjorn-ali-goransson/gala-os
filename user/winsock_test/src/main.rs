@@ -17,7 +17,8 @@
 //! connection: a listener holds no fixed share of the stack's sockets),
 //! the extension functions asyncio's _overlapped asks for (DisconnectEx:
 //! a graceful disconnect, overlapped; TransmitFile's pointer),
-//! WSAStringToAddressA/W (IPv4 and IPv6, ports, scopes, refusals)
+//! WSAStringToAddressA/W (IPv4 and IPv6, ports, scopes, refusals),
+//! getprotobyname/getprotobynumber by their ordinals (53, 54)
 //! and a full backlog (listen's documented WSAECONNREFUSED once `backlog`
 //! connections wait unaccepted; room again after an accept).
 //! Prints `winsock_test: ok` or exits with the number of the failing check.
@@ -49,6 +50,24 @@ unsafe extern "system" {
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, done: *mut u32, wait: Bool) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetLastError() -> u32;
+}
+
+// The protocol database, imported by ordinal as programs do (Python's
+// _socket.pyd imports getprotobyname as ws2_32 #53).
+#[link(name = "ws2_32", kind = "raw-dylib")]
+unsafe extern "system" {
+    #[link_ordinal(53)]
+    fn getprotobyname(name: *const u8) -> *const ProtoEnt;
+    #[link_ordinal(54)]
+    fn getprotobynumber(number: i32) -> *const ProtoEnt;
+}
+
+/// PROTOENT (winsock2.h).
+#[repr(C)]
+struct ProtoEnt {
+    name: *const u8,
+    aliases: *const *const u8,
+    proto: i16,
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -184,9 +203,6 @@ struct WsaData {
     system_status: [u8; 129],
 }
 
-/// SOCKADDR_IN: family, port and address in network byte order.
-#[repr(C)]
-#[derive(Clone, Copy)]
 /// fd_set (winsock2.h): a count and up to FD_SETSIZE (64) sockets.
 #[repr(C)]
 struct FdSet {
@@ -801,6 +817,49 @@ fn disconnect_ex(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// Whether the NUL-terminated string at `p` is `want` (compared byte by
+/// byte up to `want`'s length and its NUL, so no strlen is needed).
+///
+/// # Safety
+/// `p` is a NUL-terminated string.
+unsafe fn c_str_is(p: *const u8, want: &[u8]) -> bool {
+    for (i, w) in want.iter().enumerate() {
+        // SAFETY: bytes before the string's NUL (a mismatch stops first).
+        if unsafe { *p.add(i) } != *w {
+            return false;
+        }
+    }
+    // SAFETY: the byte after `want.len()` matching ones is within the
+    // string or its NUL.
+    unsafe { *p.add(want.len()) == 0 }
+}
+
+/// getprotobyname and getprotobynumber over the protocol database
+/// (`%SystemRoot%\System32\drivers\etc\protocol`): tcp is 6 with the
+/// alias TCP, 17 is udp, and an unknown name or number is NULL with
+/// WSANO_DATA.
+fn protocols(c: &mut Checks) -> Result<(), u32> {
+    const WSANO_DATA: u64 = 11004;
+    // SAFETY: NUL-terminated names; the PROTOENTs Winsock returns.
+    unsafe {
+        let tcp = getprotobyname(c"tcp".as_ptr().cast());
+        c.ok(!tcp.is_null(), WSAGetLastError() as u64)?;
+        c.eq((*tcp).proto as u64, 6)?;
+        c.ok(c_str_is((*tcp).name, b"tcp"), 0)?;
+        let alias = *(*tcp).aliases;
+        c.ok(!alias.is_null() && c_str_is(alias, b"TCP"), 0)?;
+        let udp = getprotobynumber(17);
+        c.ok(!udp.is_null(), WSAGetLastError() as u64)?;
+        c.ok(c_str_is((*udp).name, b"udp"), 0)?;
+        c.eq((*udp).proto as u64, 17)?;
+        c.ok(getprotobyname(c"nosuchprotocol".as_ptr().cast()).is_null(), 0)?;
+        c.eq(WSAGetLastError() as u64, WSANO_DATA)?;
+        c.ok(getprotobynumber(250).is_null(), 0)?;
+        c.eq(WSAGetLastError() as u64, WSANO_DATA)?;
+    }
+    Ok(())
+}
+
 /// WSAStringToAddressA/W (asyncio's _overlapped parses addresses with
 /// it): IPv4 with and without a port, IPv6 bracketed with a port and with
 /// a scope; WSAEINVAL for text that is no address of the family,
@@ -944,6 +1003,7 @@ fn run() -> Result<(), u32> {
     listeners(&mut c)?;
     disconnect_ex(&mut c)?;
     string_to_address(&mut c)?;
+    protocols(&mut c)?;
     if wants_serve() {
         serve(&mut c)?;
     }

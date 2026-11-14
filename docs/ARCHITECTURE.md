@@ -6512,7 +6512,11 @@ SOCKET values are the endpoint handles.
   2 s; NXDOMAIN is WSAHOST_NOT_FOUND, no A record WSANO_DATA, no answer
   WSATRY_AGAIN, no network card WSAHOST_NOT_FOUND at once;
   AI_NUMERICHOST skips it; no cache). gethostbyname/gethostbyaddr are
-  recorded as missing.
+  recorded as missing. getprotobyname/getprotobynumber (ordinals 53 and
+  54; Python's _socket.pyd imports #53) answer from a built-in copy of
+  Windows' default `drivers\etc\protocol` (19 entries, name and one
+  alias each, names matched case-insensitively); an unknown name or
+  number is NULL with WSANO_DATA. gala reads no protocol file.
 - Datagram sockets: socket/WSASocketW with SOCK_DGRAM (protocol 0 or
   IPPROTO_UDP) open a `\Device\Udp` endpoint and record SO_TYPE in the
   per-socket options table (what getsockopt(SO_TYPE) and
