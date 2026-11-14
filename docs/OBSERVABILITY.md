@@ -765,23 +765,33 @@ a snapshot (at your own risk)") says so everywhere a result is read:
   `xtask: hot swap <dll>: N patched function(s), ...` with a line per
   patched function (sizes, and why when it changed only through data it
   reads), new function and copied data, and notes (a static's initial
-  value that differs, new exports); a refusal before the boot names the
-  symbol; the resume's line names the plan; the verdict is `hot-swapped
+  value that differs, new exports); per other changed or new module
+  `xtask: hot swap <name>: ... replaced whole` or `new in this build:
+  added as <path>` with why it is not patched; a refusal before the
+  boot names the symbol; the resume's line names the plan; the verdict is `hot-swapped
   (not a real run): ...` and the exit status 3, never a pass.
 - the guest's log: `hotswap: NOT A REAL RUN: ...`, how many threads were
   stopped, per DLL the processes, blob and fixups, the file replaced,
   per process where the image and the blob are, per function its RVA,
-  size and blob offset, then `hotswap: applied: <dll> ...`; or
+  size and blob offset, then `hotswap: applied: <dll> ...`; per file
+  record `hotswap: <path>: replaced whole (<n> bytes, was <m>; no
+  process maps it): <reason>` or `hotswap: <path>: added (<n> bytes
+  ...)`, then `hotswap: applied: <name> (replaced|added whole as
+  <path>; ...)`; or
   `hotswap: refused: <why>` (a changed function on a stack names the
-  thread, the process, the stack slot and the value; a mapping that is
+  thread, the process, the stack slot and the value; a whole file a
+  process maps names the process and xtask's reason; a mapping that is
   not the snapshot's build names its headers; a failed step names the
   process and what failed, then everything done is undone) and `the
   programs go on unpatched`.
 - the event `{"ev":"hotswap","result":"applied","dll":..,"processes":..,
-  "patched":..,"blob":..}` or `"result":"refused"`, whatever the mask;
-- the ledger entry `hotswap` ("DLL hot-swapped into running programs
-  (not a real run)", detail: functions patched), so `target/report/`
-  shows it;
+  "patched":..,"blob":..}`, per file `{"ev":"hotswap","result":
+  "applied","dll":..,"file":"replaced"|"added","bytes":..}`, or
+  `"result":"refused"`, whatever the mask;
+- the ledger entries `hotswap` ("DLL hot-swapped into running programs
+  (not a real run)", detail: functions patched; "file replaced or added
+  whole in a resumed machine (not a real run)", detail: bytes), so
+  `target/report/` shows them;
 - `this run was hot-swapped (<dlls>): not a real run` in every crash
   report and state dump after the swap;
 - triage's second line: `HOT-SWAPPED, NOT A REAL RUN ...` (or `hot swap

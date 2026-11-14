@@ -299,11 +299,13 @@ cargo xtask boot-test --from-snapshot office-merge   # resume, as often as wante
 ```
 
 A snapshot resumes only on the build it was taken from. To try a fix,
-edit the DLL or the kernel (boot-test builds them) and swap the changed
-functions into the resumed machine:
+edit gala's DLLs, programs or the kernel (boot-test builds them) and swap
+the changes into the resumed machine:
 
 ```sh
-# fixed msxml6.dll's replaceChild, or a kernel function, or both:
+# every module that changed or is new since the snapshot:
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe
+# or only these patched (fixed msxml6.dll's replaceChild, a kernel function):
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxml6.dll
@@ -315,16 +317,20 @@ On the Office install, a kernel fix tried this way reaches the
 install's end in about 20 seconds of run time after the resume, where
 the run from boot needs half an hour.
 
-xtask compares the snapshot's build with the new one function by
-function and patches only what changed: the old code stays where it is
-(running programs and the kernel's own data hold addresses into it), the
-new functions go beside it, and each changed function's entry jumps to
-its new version. It is refused, with the reason and the symbol named,
-when it cannot be done safely: a changed function that some thread is
-in (its stack), a static that changed size, assembly (the kernel's entry
-stubs), a function too short for the jump, a new import, any change to
-the build beyond the kernel and the named DLLs. A refusal of one part
-refuses all of it. Take a fresh snapshot when a change is refused. What
+A module no process has mapped at the resume (a DLL loaded only later,
+a program started later) is replaced as a whole file, and a module new
+in the build is added, so one snapshot serves a whole fix loop. Code a
+running process has mapped, and the kernel, are patched instead: xtask
+compares the snapshot's build with the new one function by function and
+patches only what changed: the old code stays where it is (running
+programs and the kernel's own data hold addresses into it), the new
+functions go beside it, and each changed function's entry jumps to its
+new version. It is refused, with the reason and the symbol named, when
+it cannot be done safely: a changed function that some thread is in
+(its stack), a static that changed size or a new import in a DLL a
+process maps, assembly (the kernel's entry stubs), a function too short
+for the jump, a change to the command line or to where a module goes. A
+refusal of one part refuses all of it. Take a fresh snapshot when a change is refused. What
 the checks cannot see (state the old code built that the new code reads
 differently) is why the run is never a real one.
 

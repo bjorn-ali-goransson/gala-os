@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -4464,6 +4464,24 @@ kernel stacks and 6 interrupt stacks with the other CPU stopped for 14
 ms, and every later exit line came from the new code, the install
 reaching its end (msxml6's replaceChild, ROADMAP OF) in 19 s of run
 time, where the run from boot needs 29 minutes to get there.
+
+**Step 1f: whole files and added modules in a hot swap.** Done
+(`xtask/src/hotswap.rs`: `prepare`, plan version 2 with a mode per
+record; `snapshot::check_build_swap`; `kernel/src/hotswap.rs`:
+`file_check`, `apply_file`, `FILE_RECORDS`; `file::processes_mapping`,
+`file::create_with_directories`; scenario `hotswap_files`, the
+`hotswap_machine` layout case refused by the guest; host tests in xtask
+and the kernel). So that one snapshot serves a whole fix loop: a module
+no process maps at the resume (a DLL loaded later, a program started
+later) is replaced as a whole file, with no layout check, and a module
+new in the build is added; Limine's config and the manifest may differ
+by those modules alone. `--hot-swap-unsafe` without a list takes every
+changed module (patched where a process maps it and the diff takes it,
+else whole); with a list, the named DLLs are patched and other changed
+modules replaced whole. A whole file a process maps is refused by the
+guest, naming the process. Each file is logged (`hotswap: <path>:
+replaced whole|added ...: <reason>`, `hotswap: applied: <name>`), with
+the ledger entry and event; the run stays not a real one.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private

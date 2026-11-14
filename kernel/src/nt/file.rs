@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 
 use super::namespace;
 use super::object::{KObject, ObjectBody, ObjectRef};
+use super::process::Process;
 use super::status::NtStatus;
 use crate::fs::ramfs::{self, Access, FsError, NodeId, RamFs, Share};
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
 use crate::sync::IrqMutex;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -272,6 +273,67 @@ pub fn processes_using(node: NodeId, query: (u64, u64)) -> Result<Vec<u64>, NtSt
         }
     }
     Ok(out)
+}
+
+/// The running processes that map file `node`: a view of a section on it
+/// (a loaded DLL, a mapped data file) or it as their executable. A hot
+/// swap does not replace such a file whole (hotswap.rs); a handle alone
+/// does not count.
+pub fn processes_mapping(node: NodeId) -> Result<Vec<KArc<Process>>, NtStatus> {
+    let name = nt_path(node)?;
+    let mut out = Vec::new();
+    for p in super::process::running().map_err(|_| NtStatus::NO_MEMORY)? {
+        let maps = p
+            .views
+            .lock()
+            .iter()
+            .any(|v| v.section().file_name.as_deref().is_some_and(|n| same_path(n, &name)))
+            || p.image_nt_path().is_ok_and(|n| same_path(&n, &name));
+        if maps {
+            out.try_push(p).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Creates file `path` (`\\dir\\name` from the volume root) with
+/// `data`, and its missing directories (a hot swap's added module:
+/// hotswap.rs). An existing file is an error.
+pub fn create_with_directories(path: &str, data: &[u8]) -> Result<NodeId, NtStatus> {
+    let wide_path = wide(path)?;
+    let parts = components(&wide_path, false)?;
+    let (name, dirs) = parts.split_last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+    let now = platform::system_time();
+    let node = with_fs(|fs| {
+        let dir = fs.mkdir_all(dirs, now)?;
+        if fs.find(dir, name)?.is_some() {
+            return Err(FsError::Exists);
+        }
+        fs.create(dir, name, false, now)
+    })
+    .map_err(fs_status)?;
+    match write(node, 0, data, now) {
+        Ok(n) if n == data.len() => Ok(node),
+        other => {
+            let _ = remove(path);
+            Err(match other {
+                Err(e) => fs_status(e),
+                Ok(_) => NtStatus::DISK_FULL,
+            })
+        }
+    }
+}
+
+/// Removes file `path` (`\\dir\\name` from the volume root).
+pub fn remove(path: &str) -> Result<(), NtStatus> {
+    let wide_path = wide(path)?;
+    let parts = components(&wide_path, false)?;
+    let (name, dirs) = parts.split_last().ok_or(NtStatus::OBJECT_NAME_INVALID)?;
+    with_fs(|fs| {
+        let dir = fs.resolve(ramfs::ROOT, dirs)?;
+        fs.unlink(dir, name)
+    })
+    .map_err(fs_status)
 }
 
 /// The path of `node` from the volume root (`\\dir\\name`), as

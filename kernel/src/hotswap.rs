@@ -36,6 +36,16 @@
 //!    - the DLL's file is replaced by the new build, so later loads get
 //!      it whole.
 //!
+//!    A **whole-file record** (plan version 2, SN step 1f: a module that
+//!    changed but is not patched, a program, a DLL whose change a patch
+//!    cannot take) replaces its file, and an **added-file record** (a
+//!    module new in the build) creates it with its directories, but only
+//!    when no process maps the file (a view of a section on it, or it as
+//!    a program's executable): one that does is refused with the reason
+//!    xtask gave (`hotswap: refused: <path> is mapped in process ...`).
+//!    Every file is checked before anything changes, and the files are
+//!    written before the DLLs are patched.
+//!
 //!    Any failure undoes what was done (entries restored, blobs freed,
 //!    the file put back) and refuses with the reason. The programs go on
 //!    either way.
@@ -71,8 +81,18 @@ use crate::nt::{file, platform, process, thread, vad, vm};
 
 /// The plan's first bytes (xtask's `hotswap::MAGIC`).
 pub const MAGIC: &[u8; 8] = b"GALAHSWP";
-/// The plan format this kernel reads.
-pub const VERSION: u32 = 1;
+/// The plan format this kernel reads: 2 (a mode byte in each record:
+/// `MODE_*`), and 1 (patches alone).
+pub const VERSION: u32 = 2;
+/// The oldest plan format this kernel reads.
+const FIRST_VERSION: u32 = 1;
+/// A record that patches a DLL's or the kernel's code.
+pub const MODE_PATCH: u8 = 0;
+/// A record that replaces a file whole (refused while a process maps it).
+pub const MODE_WHOLE: u8 = 1;
+/// A record that adds a file (new in the build; replaced whole if there is
+/// one by then).
+pub const MODE_ADD: u8 = 2;
 /// The fw_cfg file xtask gives the plan as.
 pub const FW_CFG_NAME: &[u8] = b"opt/gala/hotswap";
 const HEADER: usize = 32;
@@ -93,11 +113,13 @@ const STACK_LIMIT: u64 = 8 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanError(pub &'static str);
 
-/// One DLL of the plan (xtask's `hotswap::Patch`).
+/// One DLL of the plan, or a file (xtask's `hotswap::Patch`).
 #[derive(Clone, Copy, Debug)]
 pub struct ImagePlan<'a> {
-    /// 1: x64, 2: x86.
+    /// 1: x64, 2: x86, `KERNEL`; 0 for a file record.
     pub machine: u8,
+    /// `MODE_PATCH`, `MODE_WHOLE` or `MODE_ADD`.
+    pub mode: u8,
     pub old_timestamp: u32,
     pub old_size_of_image: u32,
     /// The file in the guest (`\Windows\System32\x.dll`).
@@ -155,9 +177,11 @@ fn u64_at(b: &[u8], at: usize) -> Result<u64, PlanError> {
 /// A plan's nonce, if `header` (its first 32 bytes) is one this kernel
 /// reads.
 pub fn header_nonce(header: &[u8]) -> Option<u64> {
-    (header.get(..8) == Some(MAGIC) && u32_at(header, 8).ok() == Some(VERSION))
-        .then(|| u64_at(header, 16).ok())
-        .flatten()
+    let version = u32_at(header, 8).ok();
+    (header.get(..8) == Some(MAGIC)
+        && version.is_some_and(|v| (FIRST_VERSION..=VERSION).contains(&v)))
+    .then(|| u64_at(header, 16).ok())
+    .flatten()
 }
 
 impl<'a> Plan<'a> {
@@ -166,7 +190,8 @@ impl<'a> Plan<'a> {
         if b.len() < HEADER || &b[..8] != MAGIC {
             return Err(PlanError("not a hot swap plan"));
         }
-        if u32_at(b, 8)? != VERSION {
+        let version = u32_at(b, 8)?;
+        if !(FIRST_VERSION..=VERSION).contains(&version) {
             return Err(PlanError("a plan format this kernel does not read"));
         }
         if u32_at(b, 24)? as usize != b.len() {
@@ -183,7 +208,8 @@ impl<'a> Plan<'a> {
         for _ in 0..count {
             let len = u32_at(b, at)? as usize;
             let rec = b.get(at..at + len).ok_or(PlanError("an image record is truncated"))?;
-            images.try_push(ImagePlan::parse(rec)?).map_err(|_| PlanError("out of memory"))?;
+            let image = ImagePlan::parse(rec, version)?;
+            images.try_push(image).map_err(|_| PlanError("out of memory"))?;
             at += len;
         }
         if at != b.len() {
@@ -194,8 +220,13 @@ impl<'a> Plan<'a> {
 }
 
 impl<'a> ImagePlan<'a> {
-    fn parse(r: &'a [u8]) -> Result<ImagePlan<'a>, PlanError> {
+    fn parse(r: &'a [u8], version: u32) -> Result<ImagePlan<'a>, PlanError> {
         let machine = *r.get(4).ok_or(PlanError("truncated"))?;
+        // Version 1's byte here is padding (0: a patch).
+        let mode = *r.get(5).ok_or(PlanError("truncated"))?;
+        if version == FIRST_VERSION && mode != MODE_PATCH {
+            return Err(PlanError("a version 1 plan with a file record"));
+        }
         let field = |i: usize| u32_at(r, 8 + i * 4);
         let (old_timestamp, old_size_of_image) = (field(0)?, field(1)?);
         let path_len = field(2)? as usize;
@@ -214,6 +245,7 @@ impl<'a> ImagePlan<'a> {
         let path = core::str::from_utf8(take(path_len)?).map_err(|_| PlanError("path"))?;
         let plan = ImagePlan {
             machine,
+            mode,
             old_timestamp,
             old_size_of_image,
             path,
@@ -226,6 +258,15 @@ impl<'a> ImagePlan<'a> {
         };
         if at != r.len() {
             return Err(PlanError("an image record is longer than its sizes"));
+        }
+        if mode == MODE_WHOLE || mode == MODE_ADD {
+            if machine != 0 || blob_len != 0 || fixups != 0 || entries != 0 {
+                return Err(PlanError("a file record with code to patch"));
+            }
+            return Ok(plan);
+        }
+        if mode != MODE_PATCH {
+            return Err(PlanError("a record mode this kernel does not know"));
         }
         if machine != 1 && machine != 2 && machine != KERNEL {
             return Err(PlanError("a machine other than x64, x86 or the kernel"));
@@ -281,7 +322,22 @@ impl<'a> ImagePlan<'a> {
 
     /// Whether this record is the kernel's.
     pub fn is_kernel(&self) -> bool {
-        self.machine == KERNEL
+        self.mode == MODE_PATCH && self.machine == KERNEL
+    }
+
+    /// Whether this record replaces or adds a file whole.
+    pub fn is_file(&self) -> bool {
+        self.mode != MODE_PATCH
+    }
+
+    /// Whether this record patches a DLL.
+    fn is_dll(&self) -> bool {
+        !self.is_kernel() && !self.is_file()
+    }
+
+    /// A file record's reason (why it is not patched), from xtask.
+    pub fn reason(&self) -> &'a str {
+        if self.is_file() { core::str::from_utf8(self.strings).unwrap_or("?") } else { "" }
     }
 }
 
@@ -633,9 +689,13 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
         }
         kernel = Some(KernelPatch::prepare(image)?);
     }
+    // Every file record: no process maps its file.
+    for image in plan.images.iter().filter(|i| i.is_file()) {
+        file_check(image)?;
+    }
     // Every DLL's processes and stack check before anything changes.
     let mut checked = alloc::vec::Vec::new();
-    for image in plan.images.iter().filter(|i| !i.is_kernel()) {
+    for image in plan.images.iter().filter(|i| i.is_dll()) {
         let targets = targets(image)?;
         info!(
             "hotswap: {} ({}): {} changed function(s), blob {} bytes, {} fixups; mapped in {} \
@@ -652,7 +712,36 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
         }
         checked.try_push((image, targets)).map_err(|_| Refused)?;
     }
-    // All of them or none: a DLL that fails undoes the ones before it.
+    // The files first, then the DLLs. All of them or none: one that fails
+    // undoes the ones before it.
+    let mut files: alloc::vec::Vec<FileDone> = alloc::vec::Vec::new();
+    let undo_files = |files: &[FileDone]| {
+        if !files.is_empty() {
+            info!("hotswap: putting back the {} file(s) replaced or added", files.len());
+        }
+        files.iter().rev().for_each(FileDone::undo);
+    };
+    let file_count = plan.images.iter().filter(|i| i.is_file()).count();
+    if files.try_reserve(file_count).is_err() {
+        info!("hotswap: refused: out of memory for {file_count} file record(s)");
+        return Err(Refused);
+    }
+    for image in plan.images.iter().filter(|i| i.is_file()) {
+        match apply_file(image) {
+            // Reserved above: the push does not allocate.
+            Ok(d) => {
+                if files.try_push(d).is_err() {
+                    info!("hotswap: refused: out of memory; undoing what was done");
+                    undo_files(&files);
+                    return Err(Refused);
+                }
+            }
+            Err(r) => {
+                undo_files(&files);
+                return Err(r);
+            }
+        }
+    }
     let mut applied: alloc::vec::Vec<Applied> = alloc::vec::Vec::new();
     for (image, targets) in &checked {
         match apply_image(image, targets) {
@@ -660,6 +749,7 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
                 if applied.try_push(a).is_err() {
                     info!("hotswap: refused: out of memory; undoing what was done");
                     applied.iter().rev().for_each(Applied::undo);
+                    undo_files(&files);
                     return Err(Refused);
                 }
             }
@@ -668,6 +758,7 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
                     info!("hotswap: undoing the {} DLL(s) swapped before it", applied.len());
                 }
                 applied.iter().rev().for_each(Applied::undo);
+                undo_files(&files);
                 return Err(r);
             }
         }
@@ -681,7 +772,11 @@ fn apply_plan(plan: &Plan) -> Result<(), Refused> {
             info!("hotswap: undoing the {} DLL(s) swapped before the kernel", applied.len());
         }
         applied.iter().rev().for_each(Applied::undo);
+        undo_files(&files);
         return Err(r);
+    }
+    for f in &files {
+        f.report();
     }
     for a in &applied {
         a.report();
@@ -1407,6 +1502,115 @@ fn apply_image<'a>(image: &'a ImagePlan<'a>, targets: &[Target]) -> Result<Appli
     Ok(Applied { image, done, old_file })
 }
 
+/// The files replaced or added whole (`report` reads it; its symbol in the
+/// kernel's map tells xtask this kernel reads whole-file records:
+/// `hotswap::FILE_SUPPORT`).
+static FILE_RECORDS: AtomicU32 = AtomicU32::new(0);
+
+/// A file record's check: no process maps its file (a view of a section
+/// on it, or it as a program's executable). A file not there yet passes.
+fn file_check(image: &ImagePlan) -> Result<(), Refused> {
+    let Ok(node) = file::lookup(image.path) else { return Ok(()) };
+    let Ok(mapping) = file::processes_mapping(node) else {
+        info!("hotswap: refused: no memory to list the processes mapping {}", image.path);
+        return Err(Refused);
+    };
+    if let Some(p) = mapping.first() {
+        info!(
+            "hotswap: refused: {} is mapped in process {} ({}){}: {}; a file a process maps is \
+             not replaced whole (take the snapshot before it is loaded, or make the change one a \
+             patch takes)",
+            image.path,
+            p.id,
+            p.name,
+            if mapping.len() > 1 { " and others" } else { "" },
+            image.reason()
+        );
+        return Err(Refused);
+    }
+    Ok(())
+}
+
+/// A file replaced or added whole (put back if a later step fails).
+struct FileDone<'a> {
+    image: &'a ImagePlan<'a>,
+    /// Its old contents; None when it was added.
+    old: Option<alloc::vec::Vec<u8>>,
+}
+
+impl FileDone<'_> {
+    fn undo(&self) {
+        match &self.old {
+            Some(old) => restore_file(self.image, Some(old)),
+            None => {
+                if file::remove(self.image.path).is_err() {
+                    warn!("hotswap: {}: the added file could not be removed", self.image.path);
+                }
+            }
+        }
+    }
+
+    /// The lines, ledger entry and event of a file that stays.
+    fn report(&self) {
+        let name = self.image.file_name();
+        let how = if self.old.is_some() { "replaced" } else { "added" };
+        FILE_RECORDS.fetch_add(1, Ordering::Relaxed);
+        note_swapped(name);
+        crate::nt::ledger::record(
+            "hotswap",
+            "file replaced or added whole in a resumed machine (not a real run)",
+            self.image.file.len() as u64,
+        );
+        crate::events::emit_always(format_args!(
+            r#""ev":"hotswap","result":"applied","dll":{},"file":"{how}","bytes":{}"#,
+            crate::events::Str(name),
+            self.image.file.len()
+        ));
+        info!(
+            "hotswap: applied: {name} ({how} whole as {}; {} file(s) so far); NOT A REAL RUN",
+            self.image.path,
+            FILE_RECORDS.load(Ordering::Relaxed)
+        );
+    }
+}
+
+/// Replaces or adds a file record's file (`file_check` passed).
+fn apply_file<'a>(image: &'a ImagePlan<'a>) -> Result<FileDone<'a>, Refused> {
+    let len = image.file.len();
+    let Ok(node) = file::lookup(image.path) else {
+        if let Err(e) = file::create_with_directories(image.path, image.file) {
+            info!("hotswap: refused: {}: the file could not be added ({e:?})", image.path);
+            return Err(Refused);
+        }
+        info!(
+            "hotswap: {}: added ({len} bytes; later loads find it): {}",
+            image.path,
+            image.reason()
+        );
+        return Ok(FileDone { image, old: None });
+    };
+    let Ok(old) = file::read_all(node) else {
+        info!("hotswap: refused: {}: its file could not be read", image.path);
+        return Err(Refused);
+    };
+    let now = platform::system_time();
+    let written = file::set_size(node, 0, now)
+        .and_then(|()| file::write(node, 0, image.file, now))
+        .map(|n| n == len);
+    if !matches!(written, Ok(true)) {
+        info!("hotswap: refused: {}: the new file could not be written ({written:?})", image.path);
+        let _ = file::set_size(node, 0, now).and_then(|()| file::write(node, 0, &old, now));
+        return Err(Refused);
+    }
+    info!(
+        "hotswap: {}: replaced whole ({len} bytes, was {}; no process maps it): {}",
+        image.path,
+        old.len(),
+        image.reason()
+    );
+    Ok(FileDone { image, old: Some(old) })
+}
+
 /// Replaces the DLL's file by the new build; its old contents (None when
 /// there was no such file: nothing to put back).
 fn replace_file(image: &ImagePlan) -> Result<Option<alloc::vec::Vec<u8>>, Refused> {
@@ -1537,10 +1741,87 @@ mod tests {
         bad[40] ^= 1;
         assert_eq!(Plan::parse(&bad).err(), Some(PlanError("its CRC-32 does not match")));
         assert!(Plan::parse(&bytes[..bytes.len() - 1]).is_err());
-        let mut v2 = bytes.clone();
-        v2[8] = 2;
-        assert!(Plan::parse(&v2).is_err());
-        assert_eq!(header_nonce(&v2[..32]), None);
+        let mut v3 = bytes.clone();
+        v3[8] = 3;
+        assert!(Plan::parse(&v3).is_err());
+        assert_eq!(header_nonce(&v3[..32]), None);
+    }
+
+    /// A one-record plan of `version` with the record's machine and mode,
+    /// and nothing to patch (a file record's shape).
+    fn file_plan(version: u32, machine: u8, mode: u8, blob: &[u8]) -> Vec<u8> {
+        let path = b"\\Program Files\\x\\a.exe";
+        let reason = b"a changed program (programs are replaced whole)";
+        let mut rec = vec![machine, mode, 0, 0];
+        for v in [0u32, 0, path.len() as u32, blob.len() as u32, 0, 0, 0]
+            .into_iter()
+            .chain([reason.len() as u32, 3])
+        {
+            rec.extend_from_slice(&v.to_le_bytes());
+        }
+        rec.extend_from_slice(path);
+        rec.extend_from_slice(blob);
+        rec.extend_from_slice(reason);
+        rec.extend_from_slice(b"MZ!");
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0x66u64.to_le_bytes());
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&((rec.len() + 4) as u32).to_le_bytes());
+        out.extend_from_slice(&rec);
+        let len = out.len() as u32;
+        out[24..28].copy_from_slice(&len.to_le_bytes());
+        let crc = crate::fs::log::crc32(0, &out);
+        out[28..32].copy_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn whole_file_and_added_records_parse_with_their_reason() {
+        for mode in [MODE_WHOLE, MODE_ADD] {
+            let bytes = file_plan(VERSION, 0, mode, &[]);
+            assert_eq!(header_nonce(&bytes[..32]), Some(0x66));
+            let plan = Plan::parse(&bytes).unwrap();
+            let image = &plan.images[0];
+            assert!(image.is_file() && !image.is_kernel() && !image.is_dll());
+            assert_eq!(image.file_name(), "a.exe");
+            assert_eq!(image.file, b"MZ!");
+            assert_eq!(image.reason(), "a changed program (programs are replaced whole)");
+        }
+        // A patch record has no reason; a version 1 plan reads as before.
+        let patch = plan_bytes(&[0x90; 8], &[], &[(0x1010, 7, 0)]);
+        assert_eq!(Plan::parse(&patch).unwrap().images[0].reason(), "");
+        let mut v1 = patch.clone();
+        v1[8] = 1;
+        v1[28..32].fill(0);
+        let crc = crate::fs::log::crc32(0, &v1);
+        v1[28..32].copy_from_slice(&crc.to_le_bytes());
+        assert!(Plan::parse(&v1).unwrap().images[0].is_dll());
+    }
+
+    #[test]
+    fn malformed_file_records_are_refused() {
+        // A file record in a version 1 plan (its byte there is padding).
+        assert_eq!(
+            Plan::parse(&file_plan(1, 0, MODE_WHOLE, &[])).err(),
+            Some(PlanError("a version 1 plan with a file record"))
+        );
+        // Code to patch, or a machine, in a file record.
+        assert_eq!(
+            Plan::parse(&file_plan(VERSION, 0, MODE_WHOLE, &[0xc3])).err(),
+            Some(PlanError("a file record with code to patch"))
+        );
+        assert_eq!(
+            Plan::parse(&file_plan(VERSION, 1, MODE_ADD, &[])).err(),
+            Some(PlanError("a file record with code to patch"))
+        );
+        // A mode this kernel does not know.
+        assert_eq!(
+            Plan::parse(&file_plan(VERSION, 0, 7, &[])).err(),
+            Some(PlanError("a record mode this kernel does not know"))
+        );
     }
 
     #[test]
