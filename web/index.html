@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gala — a Rust kernel that runs Windows programs</title>
+    <meta
+      name="description"
+      content="gala is a from-scratch x86_64 operating system kernel in Rust that runs unmodified Windows programs on its own clean-room system DLLs, with a Linux personality on the same core."
+    />
+    <link rel="canonical" href="https://gala-os.com/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:title" content="gala — a Rust kernel that runs Windows programs" />
+    <meta
+      property="og:description"
+      content="A from-scratch x86_64 kernel in Rust. Unmodified Windows programs, clean-room system DLLs, a Linux personality on the same core."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://gala-os.com/" />
+    <meta property="og:site_name" content="gala" />
+    <meta property="og:locale" content="en" />
+    <meta property="og:image" content="https://gala-os.com/shots/crash-screen-layout.png" />
+    <meta
+      property="og:image:alt"
+      content="A crashed Windows program on gala's own desktop, with the fault report gala leaves behind."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="gala — a Rust kernel that runs Windows programs" />
+    <meta
+      name="twitter:description"
+      content="A from-scratch x86_64 kernel in Rust. Unmodified Windows programs, clean-room system DLLs, a Linux personality on the same core."
+    />
+    <meta name="twitter:image" content="https://gala-os.com/shots/crash-screen-layout.png" />
+    <!-- Structured data: what the project is, in the form search engines and
+         assistants read directly rather than inferring from the prose. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "gala",
+        "alternateName": "gala-os",
+        "description": "A from-scratch x86_64 operating system kernel written in Rust that runs unmodified Windows programs on its own clean-room system DLLs, with a Linux personality on the same core.",
+        "url": "https://gala-os.com/",
+        "codeRepository": "https://github.com/bjorn-ali-goransson/gala-os",
+        "programmingLanguage": ["Rust", "Assembly"],
+        "runtimePlatform": "x86_64",
+        "applicationCategory": "OperatingSystem",
+        "license": "https://github.com/bjorn-ali-goransson/gala-os/blob/main/LICENSE",
+        "author": { "@type": "Person", "name": "Bjorn Ali Goransson" }
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"><!--app-html--></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
