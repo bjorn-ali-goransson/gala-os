@@ -5,7 +5,7 @@ name: Release
 # bucket as a release (TUF metadata over content-addressed blobs), and
 # schedules keep the feed fresh. Each job pulls the feed's metadata from
 # the bucket's public URL, signs with the keys from the private bucket
-# R2_KEYS_BUCKET (.github/feed-keys.sh; the first publish makes them), checks
+# gala-os-signing-keys (.github/feed-keys.sh; the first publish makes them), checks
 # the result as gala's client does, uploads (blobs, roots, targets,
 # snapshot, timestamp last) and checks the public feed again.
 
@@ -46,8 +46,9 @@ env:
   AWS_REQUEST_CHECKSUM_CALCULATION: when_required
   AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
   FEED_BUCKET: s3://${{ vars.R2_BUCKET }}
-  # The private bucket that holds the signing keys (feed-keys.sh).
-  KEYS_BUCKET: s3://${{ vars.R2_KEYS_BUCKET }}
+  # The private bucket that holds the signing keys (feed-keys.sh; the
+  # only place its name is written).
+  KEYS_BUCKET: s3://gala-os-signing-keys
 
 jobs:
   publish:

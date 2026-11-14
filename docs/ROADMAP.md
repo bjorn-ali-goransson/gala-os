@@ -4256,7 +4256,7 @@ floor in the superblock's sector. Next:
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).
    - The keys live in a private R2 bucket the release jobs make and read
-     (`R2_KEYS_BUCKET`); the feed bucket is public at its custom domain,
+     (`gala-os-signing-keys`); the feed bucket is public at its custom domain,
      `https://updates.gala-os.com` (`FEED_URL` in release.yml). Root keys
      offline and the targets key in a KMS remain the later move above.
 

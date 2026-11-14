@@ -22,12 +22,10 @@ fail() { echo "::error::feed keys: $*"; exit 1; }
   fail "the variable R2_ACCOUNT_ID is not set (Settings, Environments, release)"
 [ "$FEED_BUCKET" != "s3://" ] ||
   fail "the variable R2_BUCKET is not set (the public feed bucket)"
-[ "$KEYS_BUCKET" != "s3://" ] ||
-  fail "the variable R2_KEYS_BUCKET is not set (a private bucket for the keys)"
 [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] ||
   fail "the secrets R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are not set"
 [ "$FEED_BUCKET" != "$KEYS_BUCKET" ] ||
-  fail "R2_KEYS_BUCKET is the public feed bucket: the keys need a private one"
+  fail "KEYS_BUCKET is the public feed bucket: the keys need a private one"
 
 keys=$(mktemp)
 err=$(mktemp)

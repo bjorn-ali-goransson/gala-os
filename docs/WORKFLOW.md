@@ -1175,7 +1175,7 @@ code `xtask/src/trust.rs`).
   each role's expiry. A manual run: Actions, "Release", "Run workflow",
   choose publish (from main), refresh or renew-root.
 - **Keys in CI** (`.github/feed-keys.sh`, a step before each job signs):
-  they live in a second, private R2 bucket (`R2_KEYS_BUCKET`) as the
+  they live in a second, private R2 bucket (`gala-os-signing-keys`, `KEYS_BUCKET` in release.yml) as the
   object `feed-keys`, a `GALA_FEED_KEYS` value; the step reads it, masks
   every seed in the log and hands it to the later steps as
   `GALA_FEED_KEYS`. When it is missing, a publish against an empty feed
@@ -1185,12 +1185,11 @@ code `xtask/src/trust.rs`).
   root but no keys is refused: the keys are lost, and only putting back
   a copy or a new root 1 in a new, empty feed bucket recovers (clients
   trust root 1 or a later root they took).
-- **One-time setup** (the owner): a second, private R2 bucket for the
-  keys, and an R2 API token with read and write on both buckets. In the
+- **One-time setup** (the owner): the private R2 bucket for the keys
+  (`gala-os-signing-keys`), and an R2 API token with read and write on both buckets. In the
   environment `release` (or the repository): the secrets
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and the variables
-  `R2_ACCOUNT_ID`, `R2_BUCKET` (the public feed), `R2_KEYS_BUCKET` (the
-  private one). A missing one fails the job naming it. The first publish
+  `R2_ACCOUNT_ID`, `R2_BUCKET` (the public feed). A missing one fails the job naming it. The first publish
   makes the keys and root 1; keep a copy of `feed-keys`
   offline. GitHub disables the schedules of a public repository without
   activity for 60 days (the feed then freezes within a day): re-enable
