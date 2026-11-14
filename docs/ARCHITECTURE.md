@@ -16060,7 +16060,7 @@ update client will check them with the same `Client`.
   fresh 90 days, signed by all three root keys, and takes it as a
   client at root N would before keeping it.
 - **Keys from the environment**: every role's Ed25519 seed, root's
-  included (ROADMAP R8: all keys in CI's secrets for now), in one
+  included (ROADMAP R8: all keys with CI for now), in one
   variable, `GALA_FEED_KEYS`: a `<role> <64 hex digits>` line for
   `root-1`, `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`
   (`#` comments allowed). When it is set the feed commands use it and
@@ -16072,7 +16072,10 @@ update client will check them with the same `Client`.
   refuses other keys (`root 2 lists other root keys (...) than
   GALA_FEED_KEYS (...)`): what they signed every client would refuse.
   The key ids in use are logged (never the seeds); `feed keygen` makes
-  a value from `/dev/urandom`.
+  a value from `/dev/urandom`. CI keeps the value in a private R2 bucket
+  that only the release jobs' token reads; the first publish against an
+  empty feed makes it there, never over an existing one
+  (`.github/feed-keys.sh`).
 - **Signatures** cover the canonical JSON (OLPC canonical JSON as
   python-tuf and go-tuf sign it: no whitespace, keys sorted by bytes,
   integers only, only `"` and `\` escaped) of the `signed` value; the
@@ -16159,8 +16162,8 @@ update client will check them with the same `Client`.
   `verify_delegate`, `verify_length_and_hashes` over every role and
   blob), and its canonical bytes equal securesystemslib's
   `encode_canonical` (WORKFLOW "The update feed").
-- **Limits**: every key is in CI's secrets (ROADMAP R8: root keys
-  offline, the targets key in a KMS or HSM later); no key rotation
+- **Limits**: every key is with CI, in its private R2 bucket (ROADMAP
+  R8: root keys offline, the targets key in a KMS or HSM later); no key rotation
   command (renew-root keeps the keys); no delegations, no staged
   rollout field yet; files are hashed whole in memory; the bucket's
   old versions and blobs are never deleted.
