@@ -2161,6 +2161,20 @@ need gala's.
      a named stub (GetProcAddress treats stubs as absent). Done:
      ExpandEnvironmentStringsForUserW against the user's environment
      block, test first in `office_api_test` (Microsoft's documentation).
+     Next: with that, the App-V integration runs and the install
+     reaches its fonts task, but its second integrator.exe
+     (`root\Integration\Integrator.exe`, about 2450 s after boot) dies
+     of 0xc06d007e (delay-loaded DLL not found): `osppc.dll!SLOpen`.
+     osppc.dll is not on the disk when the first integrator.exe starts
+     (`disk-files` over the snapshot's image finds no osppc.dll under
+     `C:\Program Files`); first find, from the Click-to-Run service log
+     (`C:\Windows\Temp`, read from a resumed run's kept layer) and the
+     ledger, whether the install lays it down later and where
+     integrator.exe looks for it (its directory, a `vfs` path, a
+     SetDllDirectory/AddDllDirectory path), or whether the task that
+     runs it expects it from an earlier step that failed. Its failure
+     fails the install: the service ends with 17002 and setup.exe with
+     0x426a (17002, "C2RClient returned a failing exit code").
      To measure on Windows (`loader_test`'s `info`
      lines): GetProcAddress for an ordinal in a gap (documented as
      possibly an invalid non-NULL address) and the status of loading a
