@@ -3188,6 +3188,14 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   starts a console switch) checks no pixels: its dump would race the
   change; check them in a step before it, and let a later input (a
   second click) tell the program a check is done.
+- **An X program that closes itself may never show**: under X11 a
+  client's drawing (GTK's "draw") is in the X server, not yet on the
+  desktop; rootless Xwayland commits the window's buffer to its
+  wl_surface later, and a program that closes its window right after
+  drawing can be gone before that (its surface's only commit is the
+  null buffer of the unmap). A scenario that expects `desktop: shown
+  window` of an X program keeps the program open until the screen
+  check's input closes it (`lx_gtk_x11` runs gtk_test `--input`).
 
 #### Fonts, icons and wallpapers
 
