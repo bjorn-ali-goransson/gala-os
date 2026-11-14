@@ -4255,9 +4255,9 @@ floor in the superblock's sector. Next:
    - Out of it: distributions inside LX update themselves (their own
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).
-   - Open: a custom domain or CDN in front of the R2 bucket (the public
-     URL is R2's development URL, rate-limited; `FEED_URL` in
-     release.yml); where the release key lives.
+   - Open: where the release key lives. The bucket is public at its
+     custom domain, `https://updates.gala-os.com` (`FEED_URL` in
+     release.yml).
 
 WORKFLOW "Signed images".
 

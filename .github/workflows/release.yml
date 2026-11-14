@@ -36,9 +36,9 @@ permissions:
   contents: read
 
 env:
-  # The bucket's public read URL (a development URL: a custom domain may
-  # replace it; this is the only place it is written).
-  FEED_URL: https://pub-d0d768e3efcd4e689e036af8c597569a.r2.dev
+  # The bucket's public read URL: its custom domain (this is the only
+  # place it is written).
+  FEED_URL: https://updates.gala-os.com
   # R2's S3 API for the uploads (the aws CLI reads these).
   AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
   AWS_DEFAULT_REGION: auto
