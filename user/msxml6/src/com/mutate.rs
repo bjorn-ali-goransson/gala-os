@@ -268,7 +268,7 @@ pub(super) extern "system" fn replace_child(
 }
 
 /// A variant's value as text (strings and numbers; None for others).
-fn variant_text(v: &Variant) -> Option<String> {
+pub(super) fn variant_text(v: &Variant) -> Option<String> {
     match v.vt {
         VT_BSTR => Some(text(v.value[0] as *const u16).unwrap_or_default()),
         // SAFETY: a VT_BSTR | VT_BYREF variant points at a BSTR.
@@ -284,13 +284,30 @@ fn variant_text(v: &Variant) -> Option<String> {
 }
 
 /// Sets the value of node `i` as put_text and put_nodeValue do: E_FAIL
-/// for a namespace declaration (MSXML will not change one in place).
-fn set_value(d: &mut Doc, i: u32, value: String) -> HResult {
-    if d.tree.node(i).is_xmlns() {
+/// for a namespace declaration on an element (MSXML will not change one
+/// in place); a declaration of no element yet takes its value (Wine's
+/// test_xmlns_attribute, before setAttributeNode).
+pub(super) fn set_value(d: &mut Doc, i: u32, value: String) -> HResult {
+    let n = d.tree.node(i);
+    if n.is_xmlns() && n.parent != NONE {
         return E_FAIL;
     }
     d.tree.nodes[i as usize].value = value;
     S_OK
+}
+
+/// The children of element or fragment `i` become one text node holding
+/// `value` (none for an empty value; the old children are left of no
+/// parent).
+pub(super) fn replace_children(d: &mut Doc, i: u32, value: &str) {
+    let kids = d.tree.node(i).children.clone();
+    for k in kids {
+        d.tree.detach(k);
+    }
+    if !value.is_empty() {
+        let t = d.tree.create(Kind::Text, "", "", value);
+        d.tree.insert(i, t, None);
+    }
 }
 
 /// IXMLDOMNode::put_text: an element's or fragment's children become one
@@ -303,14 +320,7 @@ pub(super) extern "system" fn put_text(this: Obj, s: Bstr) -> HResult {
     let i = idx(this);
     match d.tree.node(i).kind {
         Kind::Element | Kind::Fragment => {
-            let kids = d.tree.node(i).children.clone();
-            for k in kids {
-                d.tree.detach(k);
-            }
-            if !value.is_empty() {
-                let t = d.tree.create(Kind::Text, "", "", &value);
-                d.tree.insert(i, t, None);
-            }
+            replace_children(d, i, &value);
             S_OK
         }
         Kind::Document => {

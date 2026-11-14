@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::dom::{Kind, NONE, Tree};
 
 mod mutate;
+mod typed;
 mod xslt;
 use crate::{
     Bstr, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
@@ -30,6 +31,7 @@ use crate::{
     VT_UNKNOWN, Variant, bstr, free_box, guid, not_implemented, put, record, text, try_box, xpath,
 };
 use mutate::*;
+use typed::{get_data_type, get_node_typed_value, put_data_type, put_node_typed_value};
 use xslt::{transform_node, transform_node_to_object};
 
 type Obj = *mut c_void;
@@ -429,10 +431,6 @@ macro_rules! not_implemented {
 not_implemented! {
     get_specified(*mut i16) = b"IXMLDOMNode::get_specified";
     get_definition(*mut Obj) = b"IXMLDOMNode::get_definition";
-    get_node_typed_value(*mut Variant) = b"IXMLDOMNode::get_nodeTypedValue";
-    put_node_typed_value(Variant) = b"IXMLDOMNode::put_nodeTypedValue";
-    get_data_type(*mut Variant) = b"IXMLDOMNode::get_dataType";
-    put_data_type(Bstr) = b"IXMLDOMNode::put_dataType";
     get_parsed(*mut i16) = b"IXMLDOMNode::get_parsed";
     get_doctype(*mut Obj) = b"IXMLDOMDocument::get_doctype";
     get_implementation(*mut Obj) = b"IXMLDOMDocument::get_implementation";
@@ -702,6 +700,14 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
                 e.url = url.into();
                 d.tree = Tree::new();
                 d.error = e;
+                return false;
+            }
+            if let Some(why) = typed::on_load(d) {
+                d.tree = Tree::new();
+                let mut reason = String::new();
+                reason.push_str(why);
+                d.error =
+                    ParseError { code: E_FAIL, reason, url: url.into(), ..ParseError::default() };
                 return false;
             }
             true

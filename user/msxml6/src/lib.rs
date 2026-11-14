@@ -81,12 +81,23 @@ pub const VT_EMPTY: u16 = 0;
 pub const VT_NULL: u16 = 1;
 pub const VT_I2: u16 = 2;
 pub const VT_I4: u16 = 3;
+pub const VT_R4: u16 = 4;
+pub const VT_R8: u16 = 5;
+pub const VT_CY: u16 = 6;
+pub const VT_DATE: u16 = 7;
 pub const VT_BSTR: u16 = 8;
 pub const VT_DISPATCH: u16 = 9;
 pub const VT_BOOL: u16 = 11;
 pub const VT_UNKNOWN: u16 = 13;
+pub const VT_I1: u16 = 16;
+pub const VT_UI1: u16 = 17;
+pub const VT_UI2: u16 = 18;
 pub const VT_UI4: u16 = 19;
+pub const VT_I8: u16 = 20;
+pub const VT_UI8: u16 = 21;
 pub const VT_INT: u16 = 22;
+pub const VT_UINT: u16 = 23;
+pub const VT_ARRAY: u16 = 0x2000;
 pub const VT_BYREF: u16 = 0x4000;
 
 /// A VARIANT (24 bytes on x64, 16 on x86).
@@ -114,6 +125,16 @@ unsafe extern "system" {
 #[cfg_attr(not(target_arch = "x86"), link(name = "oleaut32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SysAllocStringLen(s: *const u16, len: u32) -> Bstr;
+    // Typed values (com::typed): bin.hex and bin.base64 as byte arrays,
+    // an untyped element's value of any type as text.
+    fn SafeArrayCreateVector(vt: u16, lower: i32, count: u32) -> *mut c_void;
+    fn SafeArrayAccessData(sa: *mut c_void, data: *mut *mut u8) -> HResult;
+    fn SafeArrayUnaccessData(sa: *mut c_void) -> HResult;
+    fn SafeArrayGetDim(sa: *mut c_void) -> u32;
+    fn SafeArrayGetLBound(sa: *mut c_void, dim: u32, bound: *mut i32) -> HResult;
+    fn SafeArrayGetUBound(sa: *mut c_void, dim: u32, bound: *mut i32) -> HResult;
+    fn VariantChangeType(dst: *mut Variant, src: *const Variant, flags: u16, vt: u16) -> HResult;
+    fn VariantClear(v: *mut Variant) -> HResult;
 }
 
 /// The ledger's kinds (GalaRecordMissing's codes).
