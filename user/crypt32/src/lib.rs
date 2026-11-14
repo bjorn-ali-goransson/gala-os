@@ -5,8 +5,8 @@
 //! directories, `roots`; the other system stores open empty),
 //! CryptQueryObject and CryptDecodeObjectEx for alternative names
 //! (`query`) and Authenticode's structures, times and timestamp tokens
-//! (`decode`), decoded PKCS #7 messages (`msg`: CryptMsg*), and smaller
-//! helpers (`misc`).
+//! (`decode`), decoded PKCS #7 messages (`msg`: CryptMsg*), subject
+//! interface package registration (`sip`), and smaller helpers (`misc`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -24,6 +24,7 @@ mod msg;
 mod pfx;
 mod query;
 mod roots;
+mod sip;
 mod store;
 mod unimplemented;
 

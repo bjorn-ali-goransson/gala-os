@@ -150,6 +150,24 @@ Rules for this file:
 | `iced-x86` | 1.21.0 (pinned; default features off, `std` and `decoder`) | MIT | xtask (`xtask/src/hotswap.rs`, ROADMAP SN step 1d): decodes gala's own DLL builds (never a Microsoft binary) to find their rip-relative operands and branches, so `--hot-swap-unsafe` can compare two builds function by function and relocate the changed ones. With `lazy_static` 1.5.1 (MIT OR Apache-2.0). Not linked into gala. Used without modification. |
 | `libc` | 0.2.191 (pinned) | MIT OR Apache-2.0 | gala-um: the kernel crate's optional `hosted` feature (`kernel/src/hosted`, never in the kernel binary): memfd_create, mmap, mprotect, sigaction, sigaltstack, pthread_sigmask, prctl (syscall user dispatch), arch_prctl. xtask (Linux hosts): `lx-expect` closes its inherited descriptors with close_range before it runs the Linux test programs. |
 
+## The website (`web/`, published to gala-os.com)
+
+Nothing here is part of gala, linked into the kernel or shipped in an
+image: it builds the static site in `web/`, and React's runtime is served
+to visitors of gala-os.com as part of the page's JavaScript. The exact
+versions are pinned in `web/package-lock.json` (CI installs with `npm ci`).
+
+| Component | Version | Source | License | How it is used |
+|---|---|---|---|---|
+| React | 19.3.1 | github.com/facebook/react (npm `react`) | MIT | The site is written as React components (`web/src/`), prerendered to HTML at build time by `web/prerender.mjs` and hydrated in the browser. The runtime is served from gala-os.com. |
+| React DOM | 19.3.1 | github.com/facebook/react (npm `react-dom`) | MIT | `react-dom/server` renders the page to static markup during the build; `react-dom/client` hydrates it. |
+| Vite | 7.3.8 | github.com/vitejs/vite (npm `vite`) | MIT | Builds the site: the browser bundle and the server bundle the prerender step imports. Build tool only, nothing of it is served. |
+| `@vitejs/plugin-react` | 5.2.0 | github.com/vitejs/vite-plugin-react | MIT | Vite's React transform (JSX). Build tool only. |
+| TypeScript | 5.9.3 | github.com/microsoft/TypeScript | Apache-2.0 | Typechecks `web/src` (`npm run typecheck`, run in CI). Build tool only; no TypeScript code is emitted by it. |
+| Archivo | the Google Fonts release | github.com/Omnibus-Type/Archivo | SIL Open Font License 1.1 | The site's only typeface, loaded by the page from Google Fonts (not committed, not shipped in gala). |
+| JetBrains Mono | the Google Fonts release | github.com/JetBrains/JetBrainsMono | SIL Open Font License 1.1 | The site's monospace, for identifiers (scenario names, DLL names), loaded from Google Fonts. |
+| Ali Web Services Analytics | the hosted service (no pinned version) | analytics.ali-web-services.com | the service's own terms (a hosted service, no code is vendored) | Page counts for gala-os.com. `web/index.html` loads `a.js` from that host with a `defer` script tag carrying the site's public id; nothing of it is committed, and because the page is prerendered, a blocked or failed script costs the count and nothing else. The site is registered there as `gala-os.com` and `www.gala-os.com`. |
+
 ## Host tools used by the build (not linked or shipped)
 
 | Tool | Version | License | Use |

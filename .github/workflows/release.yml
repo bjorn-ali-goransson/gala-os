@@ -37,8 +37,11 @@ permissions:
   contents: read
 
 env:
-  # The bucket's public read URL: its custom domain (this is the only
-  # place it is written).
+  # The bucket's public read URL, and the only place it is written. It is
+  # a custom domain on the R2 bucket rather than the r2.dev development
+  # URL, which Cloudflare rate-limits and excludes from caching. Clients
+  # that already hold a feed URL keep working: the dev URL still serves
+  # the same bucket.
   FEED_URL: https://updates.gala-os.com
   # R2's S3 API for the uploads (the aws CLI reads these).
   AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

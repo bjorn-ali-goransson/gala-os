@@ -243,7 +243,7 @@ has a section under "Open items".
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
 | EX | A file explorer over every file system | planned | Windows drives, WSL distributions and LX's root in one tree |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
-| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
+| SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -2174,15 +2174,22 @@ need gala's.
      codes; the round trip of an unsigned license is gala's own, which
      Windows refuses). Integrator.exe now installs Office's licenses
      through it (SLInstallLicense, SLGetSLIDList, SLGetLicenseInformation
-     in the ledger) and exits 0.
-     Next: the install's next integrator.exe dies of 0xc06d007f
-     (delay-loaded function not found):
-     `CRYPT32.dll!CryptSIPAddProvider`, a named stub (GetProcAddress
-     treats stubs as absent); it registers Office's subject interface
-     package (CryptSIPAddProvider's documented registry entries under
-     `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
-     Wine's crypt32 sip tests), test first. Its failure fails the
-     install as before: the service ends with 17002 and setup.exe with
+     in the ledger) and exits 0. The next integrator.exe died of
+     0xc06d007f (delay-loaded function not found):
+     `CRYPT32.dll!CryptSIPAddProvider`, a named stub. Done: crypt32's
+     CryptSIPAddProvider and CryptSIPRemoveProvider (ARCHITECTURE
+     "crypt32", SIP registration), the documented registry entries
+     under `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
+     test first in `sip_test` (Wine's crypt32 sip tests, which pass on
+     Windows); integrator.exe registers Office's VBA SIP through it.
+     The same integrator.exe then died of 0xc06d007f on
+     `WINTRUST.dll!WintrustAddActionID`. Done: wintrust's
+     WintrustAddActionID and WintrustRemoveActionID (ARCHITECTURE
+     "wintrust: Authenticode", trust provider registration), the
+     documented entries under
+     `HKLM\Software\Microsoft\Cryptography\Providers\Trust`, test
+     first in `actionid_test`. Next: the install's next blocker, found
+     from a snapshot taken at integrator.exe's start. A failure there fails the install as before: the service ends with 17002 and setup.exe with
      0x426a (17002, "C2RClient returned a failing exit code"). Seen
      too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
      run time), Office's product key not decoded by gala's sppc
@@ -3664,6 +3671,43 @@ surfaces as `winstate` windows wearing shasha's frame through
 xdg-decoration, one socket per session, the limits on client input,
 `events=wayland` and `wayland=trace`.
 
+### WS. The website and the domain
+
+**Goal**: gala-os.com explains what gala is and what runs on it, from the
+same facts the repository holds, and the domain also carries the update
+feed.
+
+**Done**: the site itself (`web/`, WORKFLOW "The website"): a React page
+prerendered to static HTML, with the map of ARCHITECTURE's sections and
+their status, the programs and their boot scenarios, and the design
+decisions; its own pipeline (`website.yml`) publishing to GitHub Pages,
+kept apart from the system's CI in both directions (WORKFLOW "The two
+pipelines stay apart"). GitHub Pages is enabled on the repository with
+"GitHub Actions" as its source, and its custom domain is `gala-os.com`.
+DNS at Cloudflare now serves the apex as four `A` and four `AAAA`
+DNS-only records to GitHub Pages, and `www` as a DNS-only `CNAME` to
+`bjorn-ali-goransson.github.io` (WORKFLOW "The domain"); the proxied
+records to GoDaddy's parking addresses that answered with error 525 are
+gone. What crawlers read is in place too (WORKFLOW "Being found"):
+`robots.txt` naming the search engines and AI crawlers one by one, a
+generated `sitemap.xml` and `llms.txt`, canonical and Open Graph and
+JSON-LD in the page, and an IndexNow submission after each deploy. The
+certificate for the domain has been issued and HTTPS is enforced, so the
+site answers on `https://gala-os.com` and nothing else. The feed has its
+own name as well: `updates.gala-os.com` is a proxied R2 custom domain in
+front of the release bucket, and `FEED_URL` in release.yml points at it
+rather than at R2's rate-limited development URL.
+
+**Next**:
+1. Verify ownership in Google Search Console and Bing Webmaster Tools,
+   which is a sign-in and so is done by hand. Search Console's DNS method
+   wants a TXT record on the apex, in the same Cloudflare zone.
+2. The owner's own screenshots of gala running, replacing the two crash
+   screens the site shows now (`web/public/shots/`, listed in `App.tsx`).
+3. Open: whether the ARCHITECTURE map is generated from the document's
+   headings instead of restated in `web/src/content.ts`, which would stop
+   the two drifting apart.
+
 ### AR. ARM64 port
 
 **Goal**: gala boots and runs on ARM64 (QEMU's `virt` machine first),
@@ -4475,6 +4519,24 @@ kernel stacks and 6 interrupt stacks with the other CPU stopped for 14
 ms, and every later exit line came from the new code, the install
 reaching its end (msxml6's replaceChild, ROADMAP OF) in 19 s of run
 time, where the run from boot needs 29 minutes to get there.
+
+**Step 1f: whole files and added modules in a hot swap.** Done
+(`xtask/src/hotswap.rs`: `prepare`, plan version 2 with a mode per
+record; `snapshot::check_build_swap`; `kernel/src/hotswap.rs`:
+`file_check`, `apply_file`, `FILE_RECORDS`; `file::processes_mapping`,
+`file::create_with_directories`; scenario `hotswap_files`, the
+`hotswap_machine` layout case refused by the guest; host tests in xtask
+and the kernel). So that one snapshot serves a whole fix loop: a module
+no process maps at the resume (a DLL loaded later, a program started
+later) is replaced as a whole file, with no layout check, and a module
+new in the build is added; Limine's config and the manifest may differ
+by those modules alone. `--hot-swap-unsafe` without a list takes every
+changed module (patched where a process maps it and the diff takes it,
+else whole); with a list, the named DLLs are patched and other changed
+modules replaced whole. A whole file a process maps is refused by the
+guest, naming the process. Each file is logged (`hotswap: <path>:
+replaced whole|added ...: <reason>`, `hotswap: applied: <name>`), with
+the ledger entry and event; the run stays not a real one.
 
 **Step 2: single programs, inside gala.** A program snapshot is R9's
 handover state cut down to one process tree: its address space (private

@@ -369,6 +369,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
 | `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots") |
 | `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
+| `XTASK_SNAPSHOTS=<dir>` | where machine snapshots are saved, listed and resumed from instead of `target/snapshots` (a directory on the file system of the scenario's disk image: `/dev/shm/snapshots` for Office; "Machine snapshots") |
 | `XTASK_REUSE_DISK=1` | boot a disk scenario on the image a failed run kept (`<iso>.disk.img`) instead of a fresh one, and keep it after a pass: a later stage of a long run without its earlier ones ("Disk tests") |
 | `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
 | `XTASK_OTEL=1` | write OTLP files for every boot |
@@ -632,12 +633,16 @@ cargo xtask snapshots rm office-merge
   MiB of state plus its 7.6 GB disk; a resume reaches the install's end
   in about 21 s of run time (40 s with the build check), against 1706 s
   from boot. With "Office's fast path"'s link in /dev/shm and
-  `target/snapshots` linked there too, nothing large touches `/`.
-- **Where**: `target/snapshots/<name>/`. Office's are several GB: make
-  `target/snapshots` a symbolic link to a directory on the file system
-  of the scenario's disk image (`/dev/shm` with "Office's fast path"'s
-  link: `ln -s /dev/shm/snapshots target/snapshots`), since the frozen
-  image is moved, not copied; xtask says so when they differ.
+  `XTASK_SNAPSHOTS=/dev/shm/snapshots`, nothing large touches `/`.
+- **Where**: `target/snapshots/<name>/`, or `$XTASK_SNAPSHOTS/<name>/`
+  when that is set. The frozen image is moved into the snapshot, not
+  copied, so the snapshots must be on the file system of the scenario's
+  disk image (a save fails otherwise and says so). Office's are several
+  GB, its image in `/dev/shm` ("Office's fast path"): give every Office
+  command (the save, each resume, `snapshots`, `snapshots rm`)
+  `XTASK_SNAPSHOTS=/dev/shm/snapshots`. Keep `target/snapshots` a real
+  directory: `snapshot_machine`'s image is on `target`, and a symbolic
+  link to `/dev/shm` fails its save.
 - **The guest's clock**: the TSC, HPET, PM timer and LAPIC timer stop
   while the machine is stopped and go on from the saved values after a
   resume, so the kernel sees no jump (measured under TCG; snapshot_test's longest 100 ms wait
@@ -683,19 +688,34 @@ cargo xtask snapshots rm office-merge
 > CI refuses the flag, and **every fix still gets a full run from boot
 > before its pull request.**
 
-It is for trying a fix to one of gala's DLLs or to the kernel in seconds
-from a snapshot taken just before the failure (msxml6.dll during the
-Office install) instead of a 30-minute run from boot (ROADMAP SN steps
-1d and 1e; ARCHITECTURE "Hot swapping DLLs into a resumed machine" and
-"Hot swapping the kernel into a resumed machine"):
+It is for trying a fix to one of gala's DLLs, programs or the kernel in
+seconds from a snapshot taken just before the failure (msxml6.dll during
+the Office install) instead of a 30-minute run from boot, so that one
+snapshot serves a whole fix loop (ROADMAP SN steps 1d to 1f;
+ARCHITECTURE "Hot swapping DLLs into a resumed machine" and "Hot
+swapping the kernel into a resumed machine"). Each changed module gets
+one of three treatments:
+
+- **patched** (functions spliced in): a DLL named in the list, or every
+  changed DLL with the flag alone, when a patch can take its change, and
+  the kernel; this is the only way to change code a running process has
+  mapped;
+- **replaced whole** (the file swapped, no layout checks: new data, new
+  imports and new exports are fine): a changed program, a changed DLL
+  not named in the list, or one whose change a patch cannot take, as
+  long as no process maps the file at the resume;
+- **added** (the file created with its directories): a module new in
+  the build (a DLL a fix adds, a new test program).
 
 ```sh
 cargo xtask boot-test 'office_install_local$' \
     --snapshot-at 'process integrator.exe (pid' --snapshot-name office-merge --snapshot-stop
-# edit user/msxml6 or the kernel, then, as often as wanted:
+# edit gala's DLLs, programs or the kernel, then, as often as wanted:
+cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe   # every changed module
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe msxml6.dll
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel
 cargo xtask boot-test --from-snapshot office-merge --hot-swap-unsafe kernel,msxml6.dll
+
 # what it would patch, without a run (a DLL's maps: target/<target>/release/deps;
 # the kernel's: target/x86_64-unknown-none/<profile>/kernel.map, or a snapshot's modules/boot):
 cargo xtask hotswap-diff old/msxml6.dll old/msxml6.map new/msxml6.dll new/msxml6.map
@@ -710,10 +730,17 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   the build and the resume).
 - **What happens**: xtask prints the banner, then per DLL (and its
   32-bit twin, if that changed too) and for the kernel the functions it
-  patches, the new functions and the data it copies; the guest, at the
-  resumed machine's first instruction, stops every program thread; it
-  checks the kernel's record against itself and maps the kernel's new
-  code beside its image (nothing jumps there yet), then per DLL checks,
+  patches, the new functions and the data it copies, and per other
+  changed or new module `xtask: hot swap <name>: ... replaced whole` or
+  `... added as <path>` with the reason; the guest, at the resumed
+  machine's first instruction, stops every program thread; it checks
+  that no process maps a file to be replaced whole (else `hotswap:
+  refused: <path> is mapped in process <id> (<name>): <reason>`), writes
+  those files and adds the new ones (`hotswap: <path>: replaced whole
+  (...)`, `hotswap: <path>: added (...)`, then `hotswap: applied:
+  <name> (replaced|added whole as <path>; ...)`); it checks the kernel's
+  record against itself and maps the kernel's new code beside its image
+  (nothing jumps there yet), then per DLL checks,
   maps the new code beside the image in every process that has it, makes
   each changed function's old entry jump to its new version and replaces
   the DLL's file for later loads; last it stops every other CPU, scans
@@ -726,8 +753,10 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   <why>` (everything is undone, the programs go on unpatched; xtask
   fails the run with that reason).
 - **What the checks cover** (each refusal names the symbol): the rest of
-  the build is the snapshot's (every other module, the command line, the
-  machine; the kernel too unless it is named); a changed DLL function on
+  the build is the snapshot's (the command line, each module's directory
+  and place in Limine's config, the machine; changed and new modules are
+  the plan's; with a list, the kernel too unless it is named); a file a
+  process maps is not replaced whole; a changed DLL function on
   any thread's stack (its instruction pointer in one, or a return
   address into one: a conservative scan of every word of the stack, so a
   stale value also refuses); a changed kernel function on any kernel
@@ -757,23 +786,27 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   symbols (a backtrace through it shows addresses in the window,
   0xffffffffe0000000 up).
 - **Marks**: the banner (before and after), the verdict and exit status
-  3, the guest's `hotswap:` lines, the `hotswap` ledger entry and event
-  (`"dll":"<name>"` or `"image":"kernel"`), `this run was hot-swapped
+  3, the guest's `hotswap:` lines, the `hotswap` ledger entries and
+  events (`"dll":"<name>"`, with `"file":"replaced"` or `"file":"added"`
+  for a whole file, or `"image":"kernel"`), `this run was hot-swapped
   (...)` in every crash report and state dump, triage's `HOT-SWAPPED,
   NOT A REAL RUN` line. A snapshot whose manifest says `hot_swapped:` is
   refused for a normal resume.
 - **Needs**: a snapshot taken by this version of xtask (it keeps its DLLs
   and kernel with their linker maps in `modules/`; an older one is
   refused with that reason; for the kernel, one whose kernel has the hot
-  swap's support, `kernel::hotswap::PATCHING`), DLLs gala's build made
+  swap's support, `kernel::hotswap::PATCHING`; for a whole or added
+  file, `kernel::hotswap::FILE_RECORDS`), DLLs gala's build made
   (the map: every user build writes `deps/<name>.map`) and the kernel
   gala's build made (`--emit-relocs` and `kernel.map`: kernel/build.rs),
   a `run=` scenario (the swap runs from the boot thread's wait), x64 or
   x86 DLLs.
-- **Pitfalls**: the snapshot pins everything but what is named, so
-  while a long snapshot run goes on, change nothing else that goes into
-  its image (the kernel, any test program, any other DLL) if you mean
-  to resume it with a swap. A 4-byte function cannot take the jump
+- **Pitfalls**: a module some process mapped before the snapshot can
+  only be patched: take the snapshot before the program that loads the
+  DLL starts (an Office fix in a DLL integrator.exe loads: before
+  `process integrator.exe (pid`), or keep the change one a patch takes.
+  With a list, a changed DLL not in it is replaced whole (not patched):
+  the flag alone patches every changed DLL. A 4-byte function cannot take the jump
   (refused: make the old build's function longer, or swap its callers).
   A kernel change inlined into a function that every blocked thread is
   in (the system call dispatcher, `nt::wait`) is refused for the stack:
@@ -785,8 +818,7 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   their inlining), which the diff sees as hundreds of changed functions;
   `XTASK_HOTSWAP_WHY=1` shows why a function counts as changed. A
   release kernel (16 units) has the same problem: iterate on the dev
-  build. `target/snapshots` linked into `/dev/shm` for Office breaks
-  `snapshot_machine` (its disk is on `/`): link it back after. A COM
+  build. A COM
   class a fix registers in `kernel/src/nt/registry.seed` is in the
   kernel's image and in the registry the snapshot's machine already
   built at boot: neither a DLL swap nor a kernel swap adds it, so take
@@ -802,7 +834,13 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   107, global 1042, callback 12` (new code, a new static, an old
   object's vtable reaching new code, an old static kept), with
   `hotswap: applied` and the event; one with the `layout` build must be
-  refused by xtask (`static hotswap_dll::TABLE changed size`).
+  refused by the guest (the DLL cannot be patched, `static
+  hotswap_dll::TABLE changed size`, and hotswap_test maps it).
+  `hotswap_files` (the flag alone): hotswap_test's `files` mode loads
+  `hotswap_late.dll` and `hotswap_added.dll` only after the marker; the
+  resume replaces the first whole by the `layout` build (not patchable,
+  mapped by no process) and adds the second (`v2`, new in the build),
+  and the program must print `late version 2` and `added version 2`.
   `hotswap_stack`: the snapshot is taken inside a callback of the
   changed `hs_call_back`, and the guest must refuse (`is on the stack`).
   `hotswap_wow64`: `hotswap_machine`'s `v2` case in a WOW64 process
@@ -1204,6 +1242,135 @@ code `xtask/src/trust.rs`).
   <dir> && <dir>/bin/pip install tuf==6.0.0`, then load each role with
   `Metadata.from_bytes`, `root.verify_delegate(role, md)` and
   `meta.verify_length_and_hashes(bytes)`.
+
+## The website
+
+gala-os.com is a static site in `web/`: React components prerendered to
+HTML at build time, so the published page is real markup that reads
+without JavaScript. Its content (what gala is, what runs on it, the map of
+ARCHITECTURE's sections, the design decisions) is data in
+`web/src/content.ts`; when a subsystem's status changes, that file is
+where the site learns it.
+
+- `cd web && npm install` once, then `npm run dev` for the dev server,
+  `npm run build` to build (client bundle, server bundle, then
+  `prerender.mjs` renders the page into `dist/index.html` and deletes the
+  server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
+  for `tsc --noEmit`.
+- `web/public/` is copied verbatim into `dist/`. Two files there matter to
+  Pages: `CNAME` (the custom domain; without it Pages serves the site at
+  the project path and the apex domain 404s) and `.nojekyll` (Pages
+  otherwise runs the output through Jekyll, which drops files beginning
+  with an underscore). The Website workflow asserts both survive a build.
+- Screenshots live in `web/public/shots/` and are listed in `App.tsx`.
+- `prerender.mjs` writes three files, not one: `index.html` (the markup),
+  `sitemap.xml` (one URL, `lastmod` taken from the build date rather than
+  written by hand, where it would be wrong the moment the page changed)
+  and `llms.txt` (a plain-text brief of the whole site, generated from
+  `content.ts` by `src/llms.ts`). None of the three is a second copy of
+  the facts: all come from `content.ts`.
+- Page counts come from Ali Web Services: a `defer` script in
+  `web/index.html` carrying the site's public id (THIRD_PARTY "The
+  website"). It is the only third-party request the page makes besides
+  the fonts, it records nothing until it runs, and the page is
+  prerendered, so a visitor who blocks it still reads everything. Query
+  strings are dropped at the service's end, apart from the `utm_*`
+  parameters; no identifiers of gala's own are sent.
+- **CI** (`.github/workflows/website.yml`): a pull request touching
+  `web/` builds and typechecks the site; a merge to main builds it and
+  publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
+  Pages source is "GitHub Actions"). The build asserts what a silent
+  regression would cost: the domain files, real markup rather than an
+  empty shell, the crawler files agreeing with each other, and the
+  analytics script still carrying its site id.
+
+### Being found
+
+The site is one page, so discovery is a small, fixed set of files rather
+than a sitemap tree:
+
+- `web/public/robots.txt` allows everything, and names the search engines
+  and the AI crawlers (GPTBot, OAI-SearchBot, ClaudeBot, PerplexityBot and
+  the rest) one by one rather than leaving them to the wildcard. That is
+  deliberate: the intent is recorded in the file, so a later default that
+  blocks AI crawlers does not quietly apply here. It also carries the
+  `Sitemap:` line, which is how Google finds `sitemap.xml` at all - the
+  old "ping Google with your sitemap" endpoint was withdrawn in 2023.
+- `web/public/<key>.txt`, a 32-hex-character file whose contents are its
+  own name, is the IndexNow key. After a successful deploy the Website
+  workflow submits the page to IndexNow, which reaches Bing, Yandex,
+  Seznam and Naver at once. Google does not take part. A failed
+  submission warns but does not fail the deploy, since the deploy itself
+  already succeeded and the sitemap still gets the page indexed.
+- `index.html` carries the canonical URL, the Open Graph and Twitter
+  cards (pointing at a screenshot, so a shared link is not a blank box)
+  and a JSON-LD `SoftwareSourceCode` block, which is what assistants and
+  search engines read instead of inferring the project from prose.
+- The apex record is **DNS-only** in Cloudflare ("The domain"), so
+  Cloudflare's AI Crawl Control never sees this traffic and cannot block
+  a crawler the site has just invited.
+- Nothing above gets the site into Google or Bing's *console*: verifying
+  ownership in Google Search Console and Bing Webmaster Tools is a
+  sign-in, done by hand. Google Search Console's DNS method wants a TXT
+  record on the apex, which goes in the same Cloudflare zone as the rest.
+
+### The domain
+
+`gala-os.com` is registered at GoDaddy and its DNS is served by
+Cloudflare. What the zone holds, and why:
+
+- The apex carries GitHub Pages' four `A` records
+  (`185.199.108-111.153`) and four `AAAA` records
+  (`2606:50c0:8000-8003::153`), and `www` is a `CNAME` to
+  `bjorn-ali-goransson.github.io`. All of them are **DNS-only**, not
+  proxied. Pages issues its own Let's Encrypt certificate for the domain
+  and has to answer the request itself to do it; with Cloudflare proxying
+  in front, Pages never sees the request. The zone's first state was the
+  other way round - proxied records pointing at GoDaddy's parking
+  addresses, which refuse TLS - and the domain answered with Cloudflare
+  error 525.
+- **Proxying is per record, not per zone.** `updates.gala-os.com`, the
+  custom domain in front of the R2 release bucket, is created by
+  Cloudflare and is proxied, as R2 custom domains must be. That has no
+  bearing on the apex, which stays DNS-only. It is where the update feed
+  is read from: `FEED_URL` in `release.yml` is the only place that URL is
+  written. A custom domain takes a few minutes to leave *Initializing*;
+  while it does, requests answer `403` rather than the `404` an empty
+  bucket gives, which is the state settling and not a misconfiguration.
+- `_domainconnect` and `_dmarc` are the registrar's and the mail setup's,
+  and are left alone.
+
+The repository's Pages custom domain is set to `gala-os.com`
+(`gh api repos/OWNER/REPO/pages`). It is also what `web/public/CNAME`
+says; the deploy applies that file, and the two must not disagree.
+Enforce HTTPS is on, so the site answers only over TLS and `www` and
+plain HTTP both redirect to `https://gala-os.com/`. It can only be turned
+on once the certificate exists, which takes a few minutes after the
+domain first resolves; asking earlier returns *The certificate does not
+exist yet*.
+
+### The two pipelines stay apart
+
+The website and the system never start each other's runs, and the way that
+is arranged is easy to break:
+
+- `website.yml` is filtered to `paths: [web/**, ...]`, so a kernel change
+  never republishes the site.
+- `ci.yml`'s **push** trigger has `paths-ignore: [web/**, ...]`, so a
+  website-only merge starts no QEMU or Windows runner - and publishes no
+  release either, since `release.yml` runs off CI's completion.
+- `ci.yml`'s **pull_request** trigger is deliberately *not* path-filtered.
+  The `linux` and `windows` checks are required by the `main-run-ci`
+  ruleset, and a workflow that a path filter skips never reports its
+  checks: the pull request then waits forever for a status that cannot
+  arrive. Instead ci.yml's first job, `changes`, compares the merge base
+  against the head, and the heavy jobs carry
+  `if: needs.changes.outputs.code == 'true'`, so on a website-only pull
+  request they are skipped (a skipped job reports a conclusion, which the
+  ruleset accepts) and nothing expensive runs.
+
+Adding a required check, or moving the website out of `web/`, means
+revisiting all three.
 
 ## Writing tests and adding functions
 

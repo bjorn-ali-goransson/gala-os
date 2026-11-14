@@ -1,7 +1,19 @@
 //! Hot swapping gala's own DLLs and the kernel into a machine resumed from
-//! a snapshot (ROADMAP SN steps 1d and 1e; WORKFLOW "Hot swapping DLLs and
-//! the kernel into a snapshot (at your own risk)"): `boot-test
-//! --from-snapshot <name> --hot-swap-unsafe [kernel,]<dll>[,<dll>...]`.
+//! a snapshot (ROADMAP SN steps 1d, 1e and 1f; WORKFLOW "Hot swapping DLLs
+//! and the kernel into a snapshot (at your own risk)"): `boot-test
+//! --from-snapshot <name> --hot-swap-unsafe [[kernel,]<module>[,...]]`.
+//!
+//! **What is swapped how** (`prepare`): every boot module that differs
+//! from the snapshot's build, or is new, goes into the plan. A DLL named
+//! (or any, with no list: the automatic mode) is diffed into a patch of
+//! the code running programs map (below); one that cannot be patched,
+//! one not named, a program or a data file becomes a whole-file record
+//! (`Mode::Whole`), a new module an added file (`Mode::Add`). The guest
+//! replaces or adds such a file only when no process maps it (a loaded
+//! DLL, a running program), and refuses otherwise with the reason the
+//! host gave. Limine's config may differ only in its hashes and in the
+//! added modules' lines; a changed archive, registry file or command
+//! line is refused (the kernel unpacks or reads them at boot).
 //!
 //! The kernel is read from its ELF (linked with `--emit-relocs`) and lld's
 //! map of it (`Image::from_elf`) into the same chunks, references and
@@ -64,8 +76,12 @@ type Result<T = ()> = std::result::Result<T, String>;
 
 /// The plan's first bytes (`encode`; `kernel/src/hotswap.rs` reads it).
 pub const MAGIC: &[u8; 8] = b"GALAHSWP";
-/// The plan format's version.
-pub const VERSION: u32 = 1;
+/// The plan format's version: 2 has whole-file and added-file records
+/// (a mode byte in each record). A plan of patches alone is written as
+/// version 1, which kernels from before whole-file records read too.
+pub const VERSION: u32 = 2;
+/// The version of a plan of patches alone.
+pub const VERSION_PATCHES: u32 = 1;
 /// The fw_cfg file the plan is given to the guest as.
 pub const FW_CFG_NAME: &str = "opt/gala/hotswap";
 /// The bytes a patched entry needs: `jmp rel32`.
@@ -76,6 +92,9 @@ pub const KERNEL_MACHINE: u8 = 3;
 /// A static of the kernel's hot swap: a kernel without it cannot take
 /// a kernel record.
 pub const KERNEL_SUPPORT: &str = "kernel::hotswap::PATCHING";
+/// A static of the kernel's whole-file records: a snapshot's kernel
+/// without it reads no version 2 plan.
+pub const FILE_SUPPORT: &str = "kernel::hotswap::FILE_RECORDS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Machine {
@@ -1338,9 +1357,37 @@ pub struct Summary {
     pub notes: Vec<String>,
 }
 
-/// One DLL's patch.
+/// What a plan record does (its mode byte, version 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// Patches the code of the processes that map the DLL (and replaces
+    /// its file for later loads).
+    #[default]
+    Patch,
+    /// Replaces the file whole; refused by the guest while a process maps
+    /// it.
+    Whole,
+    /// Adds the file (new in this build); as `Whole` if the guest has one
+    /// there by then.
+    Add,
+}
+
+impl Mode {
+    pub fn code(self) -> u8 {
+        match self {
+            Mode::Patch => 0,
+            Mode::Whole => 1,
+            Mode::Add => 2,
+        }
+    }
+}
+
+/// One DLL's patch, or a file replaced or added whole (`mode`).
 #[derive(Clone, Debug, Default)]
 pub struct Patch {
+    pub mode: Mode,
+    /// Why a file is replaced whole (the guest's refusal repeats it).
+    pub reason: String,
     pub machine: Option<Machine>,
     /// The kernel's patch (plan record machine 3), not a DLL's.
     pub kernel: bool,
@@ -1751,6 +1798,8 @@ pub fn diff(old: &Image, new: &Image, path: &str, file: &[u8]) -> Result<Patch> 
     summary.patched.sort();
     summary.new_functions.sort();
     Ok(Patch {
+        mode: Mode::Patch,
+        reason: String::new(),
         machine: Some(new.machine),
         kernel: new.kernel,
         path: path.to_string(),
@@ -1816,13 +1865,19 @@ pub fn crc32(data: &[u8]) -> u32 {
 pub fn encode(patches: &[Patch], nonce: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
+    let version =
+        if patches.iter().all(|p| p.mode == Mode::Patch) { VERSION_PATCHES } else { VERSION };
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&(patches.len() as u32).to_le_bytes());
     out.extend_from_slice(&nonce.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // length
     out.extend_from_slice(&0u32.to_le_bytes()); // crc
     for p in patches {
         let mut strings = Vec::new();
+        if p.mode != Mode::Patch {
+            // A whole file's strings: the reason it is not patched.
+            strings.extend(p.reason.bytes().take(400));
+        }
         let mut entries = Vec::new();
         for (rva, size, at, name) in &p.entries {
             let off = strings.len() as u32;
@@ -1845,7 +1900,8 @@ pub fn encode(patches: &[Patch], nonce: u64) -> Vec<u8> {
         let path = p.path.as_bytes();
         let mut rec = Vec::new();
         rec.push(if p.kernel { KERNEL_MACHINE } else { p.machine.map_or(0, Machine::code) });
-        rec.extend_from_slice(&[0; 3]);
+        rec.push(p.mode.code());
+        rec.extend_from_slice(&[0; 2]);
         for v in [
             p.old_timestamp,
             p.old_size_of_image,
@@ -1875,20 +1931,27 @@ pub fn encode(patches: &[Patch], nonce: u64) -> Vec<u8> {
     out
 }
 
+/// What `--hot-swap-unsafe` was given, for people: the list, or the
+/// automatic mode's words.
+pub fn swap_label(dlls: &[String]) -> String {
+    if dlls.is_empty() { "every changed module".into() } else { dlls.join(",") }
+}
+
 /// The banner a hot-swapped run starts with (standard error).
 pub fn banner(dlls: &[String]) -> String {
     let line = "!".repeat(76);
     format!(
         "{line}\n\
          !!  HOT SWAP (--hot-swap-unsafe {}): THIS IS NOT A REAL RUN.\n\
-         !!  Running programs (and the kernel, when named) get code of another\n\
-         !!  build spliced into them. The checks refuse what they can see; logic\n\
-         !!  that depends on state the old code built, and invariants of data\n\
-         !!  whose layout did not change, are not checked. Results are at your\n\
-         !!  own risk and never count as a pass: every fix still gets a full run\n\
-         !!  from boot before its pull request.\n\
+         !!  Running programs (and the kernel, when it changed) get code of another\n\
+         !!  build spliced into them, and files no program maps are replaced or\n\
+         !!  added whole. The checks refuse what they can see; logic that depends\n\
+         !!  on state the old code built, and invariants of data whose layout did\n\
+         !!  not change, are not checked. Results are at your own risk and never\n\
+         !!  count as a pass: every fix still gets a full run from boot before its\n\
+         !!  pull request.\n\
          {line}\n",
-        dlls.join(",")
+        swap_label(dlls)
     )
 }
 
@@ -1902,16 +1965,17 @@ pub const EXIT_HOT_SWAPPED: u8 = 3;
 /// The name `--hot-swap-unsafe` takes for the kernel.
 pub const KERNEL: &str = "kernel";
 
-/// Reads `--hot-swap-unsafe <dll>[,<dll>...]` (only with
-/// `--from-snapshot`; never in CI).
+/// Reads `--hot-swap-unsafe [<module>[,<module>...]]` (only with
+/// `--from-snapshot`; never in CI): the modules (`kernel`, DLL and
+/// program file names) whose changes are patched into running code when
+/// they can be, or an empty list (no value: the automatic mode, every
+/// changed module and the kernel). Changed modules not named are taken
+/// too, as whole files (`prepare`).
 pub fn parse_flag(args: &[String]) -> Result<Option<Vec<String>>> {
     let Some(i) = args.iter().position(|a| a == "--hot-swap-unsafe") else {
         return Ok(None);
     };
-    let value = args
-        .get(i + 1)
-        .filter(|v| !v.starts_with("--"))
-        .ok_or("--hot-swap-unsafe needs the DLLs (a.dll,b.dll)")?;
+    let value = args.get(i + 1).filter(|v| !v.starts_with("--"));
     if !args.iter().any(|a| a == "--from-snapshot") {
         return Err("--hot-swap-unsafe works only on a run resumed with --from-snapshot".into());
     }
@@ -1920,13 +1984,16 @@ pub fn parse_flag(args: &[String]) -> Result<Option<Vec<String>>> {
             "--hot-swap-unsafe is refused in CI: a hot-swapped run is not a real run".into()
         );
     }
+    let Some(value) = value else { return Ok(Some(Vec::new())) };
     let dlls: Vec<String> = value.split(',').map(|d| d.trim().to_ascii_lowercase()).collect();
-    if dlls
-        .iter()
-        .any(|d| (d != KERNEL && !d.ends_with(".dll")) || d.contains('/') || d.contains('\\'))
-    {
+    if dlls.iter().any(|d| {
+        (d != KERNEL && !d.ends_with(".dll") && !d.ends_with(".exe"))
+            || d.contains('/')
+            || d.contains('\\')
+    }) {
         return Err(format!(
-            "--hot-swap-unsafe {value}: give `kernel` and DLL file names (kernel,msxml6.dll)"
+            "--hot-swap-unsafe {value}: give `kernel` and DLL or program file names \
+             (kernel,msxml6.dll,setup.exe), or nothing for every changed module"
         ));
     }
     Ok(Some(dlls))
@@ -1935,15 +2002,17 @@ pub fn parse_flag(args: &[String]) -> Result<Option<Vec<String>>> {
 /// A hot swap made ready for a resumed run.
 #[derive(Debug, Clone)]
 pub struct Prepared {
-    /// The DLLs swapped (those whose build changed).
+    /// The modules swapped (file names, `kernel`): the guest prints
+    /// `hotswap: applied: <name>` for each.
     pub dlls: Vec<String>,
     /// The plan's file, given to QEMU as fw_cfg's `opt/gala/hotswap`.
     pub plan: std::path::PathBuf,
 }
 
 /// The modules of Limine's config: (path under the image root, the
-/// module string: the directory the kernel puts the file in).
-fn conf_modules(conf: &str) -> Vec<(String, Option<String>)> {
+/// module string: the directory the kernel puts the file in, or what it
+/// does with the module).
+pub fn conf_modules(conf: &str) -> Vec<(String, Option<String>)> {
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     for line in conf.lines() {
         let line = line.trim();
@@ -1958,31 +2027,66 @@ fn conf_modules(conf: &str) -> Vec<(String, Option<String>)> {
     out
 }
 
-/// Limine's config without the hashes of `paths`' lines (what a hot swap
-/// of them changes in it).
-fn conf_without(conf: &str, paths: &[String]) -> String {
-    conf.lines()
-        .map(|l| match l.split_once("boot():/") {
-            Some((head, rest)) if paths.iter().any(|p| rest.split('#').next() == Some(p)) => {
-                format!("{head}boot():/{}", rest.split('#').next().unwrap_or(rest))
-            }
-            _ => l.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// The directory (on C:) the kernel puts a module of module string
+/// `string` in as a file (`gala` with none: kernel/src/lib.rs), or what
+/// it is when it is no file: a directory tree it unpacks (`tar:`,
+/// `tarw:`), registry keys it loads, the signed manifest.
+pub fn file_module(string: Option<&str>) -> std::result::Result<String, &'static str> {
+    match string.unwrap_or("") {
+        s if s.starts_with("tar:") || s.starts_with("tarw:") => Err("a directory tree"),
+        "registry" => Err("registry keys"),
+        "manifest" => Err("the signed manifest"),
+        "" => Ok("gala".into()),
+        dir => Ok(dir.into()),
+    }
 }
 
-/// Makes the plan for swapping `dlls` (file names) of the image `iso`'s
-/// build into snapshot `dir` (whose `modules/` hold its build of them);
-/// `differ`: the boot image's files that differ from the snapshot's
-/// (`snapshot::check_build_except`). Prints the banner and what each DLL
-/// gets to standard error.
+/// Limine's config without its hashes and without the lines of the
+/// modules `added`: what a hot swap may not change (the command line,
+/// every other module's path, module string and place).
+fn conf_skeleton(conf: &str, added: &[String]) -> String {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for l in conf.lines() {
+        let t = l.trim_start();
+        let module_line = t.starts_with("module_path:") || t.starts_with("module_string:");
+        let line = match l.split_once("boot():/") {
+            Some((head, rest)) => {
+                let path = rest.split('#').next().unwrap_or(rest);
+                if t.starts_with("module_path:") {
+                    skipping = added.iter().any(|a| a == path);
+                }
+                format!("{head}boot():/{path}")
+            }
+            None => l.to_string(),
+        };
+        if !module_line {
+            skipping = false;
+        }
+        if !(skipping && module_line) {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Makes the plan for swapping this build (the image `iso`, whose
+/// `modules_dir` holds its file modules) into snapshot `dir` (whose
+/// `modules/` hold its build of them): `differ` is what changed and what
+/// is new (`snapshot::check_build_swap`); `swap` the modules named to be
+/// patched (`--hot-swap-unsafe`), empty for every changed one. Prints the
+/// banner and what each module gets to standard error.
 pub fn prepare(
     dir: &std::path::Path,
     iso: &std::path::Path,
-    dlls: &[String],
-    differ: &[String],
+    swap: &[String],
+    differ: &crate::snapshot::Differ,
 ) -> Result<Prepared> {
+    let auto = swap.is_empty();
     let old_dir = dir.join("modules");
     let new_dir = crate::snapshot::modules_dir(iso);
     if !old_dir.is_dir() {
@@ -1998,85 +2102,176 @@ pub fn prepare(
     };
     let old_conf = read_text(&old_dir.join("limine.conf"))?;
     let new_conf = read_text(&new_dir.join("limine.conf"))?;
-    let mut swapped: Vec<String> =
-        dlls.iter().flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")]).collect();
-    swapped.push("boot/gala.manifest".into());
-    if dlls.iter().any(|d| d == KERNEL) {
-        swapped.push(crate::snapshot::KERNEL.into());
-    }
-    if conf_without(&old_conf, &swapped) != conf_without(&new_conf, &swapped) {
+    if conf_skeleton(&old_conf, &[]) != conf_skeleton(&new_conf, &differ.added) {
         return Err(
-            "--hot-swap-unsafe: Limine's config differs in more than the swapped DLLs' hashes \
-             (the command line or the modules changed): not resumable"
+            "--hot-swap-unsafe: Limine's config differs in more than its hashes and the added \
+             modules (the command line, or a module's directory or place changed): not \
+             resumable; take a new snapshot"
                 .into(),
         );
     }
     let modules = conf_modules(&new_conf);
-    let mut patches = Vec::new();
-    let mut names = Vec::new();
-    let mut text = banner(dlls);
-    for dll in dlls {
-        if dll == KERNEL {
-            if !differ.iter().any(|d| d == crate::snapshot::KERNEL) {
-                text += "xtask: hot swap kernel: the same in this build as in the snapshot\n";
-                continue;
-            }
-            let patch = kernel_patch(&old_dir, &new_dir)?;
-            text += &patch.summary.describe(KERNEL);
-            patches.push(patch);
-            names.push(KERNEL.to_string());
-            continue;
+    let mut records: Vec<Patch> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut text = banner(swap);
+    let kernel_changed = differ.changed.iter().any(|d| d == crate::snapshot::KERNEL);
+    if swap.iter().any(|d| d == KERNEL) && !kernel_changed {
+        text += "xtask: hot swap kernel: the same in this build as in the snapshot\n";
+    }
+    if kernel_changed {
+        let patch = kernel_patch(&old_dir, &new_dir)?;
+        text += &patch.summary.describe(KERNEL);
+        records.push(patch);
+        names.push(KERNEL.to_string());
+    }
+    let skip = ["boot/limine/limine.conf", "boot/gala.manifest", crate::snapshot::KERNEL];
+    let mut paths: Vec<&String> = differ
+        .changed
+        .iter()
+        .chain(&differ.added)
+        .filter(|p| !skip.contains(&p.as_str()))
+        .collect();
+    paths.sort();
+    for name in swap.iter().filter(|d| *d != KERNEL) {
+        if !paths.iter().any(|p| file_name(p).eq_ignore_ascii_case(name)) {
+            text += &format!("xtask: hot swap {name}: the same in this build as in the snapshot\n");
         }
-        let mut any = false;
-        for path in [format!("boot/{dll}"), format!("boot/x86/{dll}")] {
-            if !differ.contains(&path) {
-                continue;
+    }
+    for path in paths {
+        let added = differ.added.contains(path);
+        let Some((_, string)) = modules.iter().find(|(p, _)| p == path) else {
+            return Err(format!(
+                "--hot-swap-unsafe: {path} differs but is no module of Limine's config"
+            ));
+        };
+        let guest_dir = file_module(string.as_deref()).map_err(|what| {
+            format!(
+                "--hot-swap-unsafe: {path} {} and it is {what} (module string {:?}) the kernel \
+                 reads at boot, not a file: not resumable; take a new snapshot",
+                if added { "is new," } else { "differs," },
+                string.as_deref().unwrap_or("")
+            )
+        })?;
+        let name = file_name(path).to_string();
+        let lname = name.to_ascii_lowercase();
+        let guest = format!("\\{}\\{name}", guest_dir.replace('/', "\\"));
+        let label = if path.contains("/x86/") { format!("{lname} (x86)") } else { lname.clone() };
+        let new_file = new_dir.join(path);
+        let bytes = std::fs::read(&new_file).map_err(|e| {
+            format!(
+                "{}: {e} (this build's modules are kept beside its image: \
+                 snapshot::keep_modules)",
+                new_file.display()
+            )
+        })?;
+        let whole = |mode: Mode, reason: String| Patch {
+            mode,
+            reason,
+            path: guest.clone(),
+            file: bytes.clone(),
+            ..Patch::default()
+        };
+        let record = if added {
+            text += &format!(
+                "xtask: hot swap {label}: new in this build: added as {guest} ({} bytes)\n",
+                bytes.len()
+            );
+            whole(Mode::Add, "new in this build".into())
+        } else if lname.ends_with(".dll") && (auto || swap.contains(&lname)) {
+            match dll_patch(&old_dir, &new_dir, path, &lname, &guest, &bytes) {
+                Ok(patch) => {
+                    text += &patch.summary.describe(&label);
+                    patch
+                }
+                Err(e) => {
+                    text += &format!(
+                        "xtask: hot swap {label}: not patchable ({e}): {guest} is replaced whole \
+                         if no process maps it, else the guest refuses\n"
+                    );
+                    // The guest's line names the file already.
+                    let why = e.strip_prefix(&format!("{guest}: refused: ")).unwrap_or(&e);
+                    whole(Mode::Whole, format!("not patchable: {why}"))
+                }
             }
-            any = true;
-            let Some((_, Some(guest_dir))) = modules.iter().find(|(p, _)| *p == path) else {
-                return Err(format!("--hot-swap-unsafe: {path} is no module with a directory"));
-            };
-            let guest = format!("\\{}\\{dll}", guest_dir.replace('/', "\\"));
-            let load = |d: &std::path::Path| -> Result<(Vec<u8>, String)> {
-                let file = d.join(&path);
-                let map = file.with_file_name(format!("{dll}.map"));
-                let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-                let map = std::fs::read_to_string(&map).map_err(|e| {
-                    format!(
-                        "{}: {e} (no linker map: a DLL gala's build did not make, or made \
-                         without one, cannot be diffed)",
-                        map.display()
-                    )
-                })?;
-                Ok((bytes, map))
-            };
-            let (old_bytes, old_map) = load(&old_dir)?;
-            let (new_bytes, new_map) = load(&new_dir)?;
-            let old = Image::read(&old_bytes, &old_map)?;
-            let new = Image::read(&new_bytes, &new_map)?;
-            let patch = diff(&old, &new, &guest, &new_bytes)?;
-            let label = if path.contains("/x86/") { format!("{dll} (x86)") } else { dll.clone() };
-            text += &patch.summary.describe(&label);
-            patches.push(patch);
-        }
-        if any {
-            names.push(dll.clone());
         } else {
-            text += &format!("xtask: hot swap {dll}: the same in this build as in the snapshot\n");
+            let reason = if lname.ends_with(".dll") {
+                "changed, not named in --hot-swap-unsafe (not patched)"
+            } else if lname.ends_with(".exe") {
+                "a changed program (programs are replaced whole)"
+            } else {
+                "a changed file"
+            };
+            text += &format!(
+                "xtask: hot swap {label}: {reason}: {guest} is replaced whole ({} bytes) if no \
+                 process maps it, else the guest refuses\n",
+                bytes.len()
+            );
+            whole(Mode::Whole, reason.into())
+        };
+        records.push(record);
+        if !names.contains(&lname) {
+            names.push(lname);
         }
     }
     eprint!("{text}");
-    if patches.is_empty() {
-        return Err("--hot-swap-unsafe: none of the named DLLs differs from the snapshot's".into());
+    if records.is_empty() {
+        return Err(if auto {
+            "--hot-swap-unsafe: nothing differs from the snapshot's build".into()
+        } else {
+            "--hot-swap-unsafe: none of the named modules differs from the snapshot's, and \
+             nothing else does"
+                .into()
+        });
+    }
+    if records.iter().any(|r| r.mode != Mode::Patch) {
+        let map = old_dir.join(crate::snapshot::KERNEL).with_extension("map");
+        let supported = std::fs::read_to_string(&map)
+            .is_ok_and(|m| m.lines().any(|l| l.trim_end().ends_with(FILE_SUPPORT)));
+        if !supported {
+            return Err(format!(
+                "--hot-swap-unsafe: the snapshot's kernel cannot replace or add files whole (its \
+                 map {} has no {FILE_SUPPORT}: it predates SN step 1f), and this swap needs to; \
+                 take the snapshot again",
+                map.display()
+            ));
+        }
     }
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(1, |d| d.as_nanos() as u64)
         ^ u64::from(std::process::id());
     let plan = iso.with_extension("hotswap.plan");
-    std::fs::write(&plan, encode(&patches, nonce.max(1)))
+    std::fs::write(&plan, encode(&records, nonce.max(1)))
         .map_err(|e| format!("{}: {e}", plan.display()))?;
     Ok(Prepared { dlls: names, plan })
+}
+
+/// A DLL's patch: the snapshot's build of module `path` (`old_dir`) against
+/// this build's (`new_dir`, its bytes `new_bytes`), each with its linker
+/// map (`<dll>.map` beside it).
+fn dll_patch(
+    old_dir: &std::path::Path,
+    new_dir: &std::path::Path,
+    path: &str,
+    dll: &str,
+    guest: &str,
+    new_bytes: &[u8],
+) -> Result<Patch> {
+    let map_of = |d: &std::path::Path| -> Result<String> {
+        let map = d.join(path).with_file_name(format!("{dll}.map"));
+        std::fs::read_to_string(&map).map_err(|e| {
+            format!(
+                "{}: {e}: no linker map (a DLL gala's build did not make, or made without one, \
+                 cannot be diffed)",
+                map.display()
+            )
+        })
+    };
+    let old_file = old_dir.join(path);
+    let old_bytes = std::fs::read(&old_file).map_err(|e| format!("{}: {e}", old_file.display()))?;
+    let old = Image::read(&old_bytes, &map_of(old_dir)?)?;
+    let new = Image::read(new_bytes, &map_of(new_dir)?)?;
+    diff(&old, &new, guest, new_bytes)
 }
 
 /// The kernel's patch: the snapshot's kernel (`old_dir`, its modules)
@@ -2151,18 +2346,149 @@ mod tests {
     use super::*;
 
     #[test]
-    fn limine_configs_differ_only_in_the_swapped_hashes() {
+    fn limine_configs_may_differ_in_hashes_and_added_modules() {
         let a = "cmdline: x\n    module_path: boot():/boot/a.dll#11\n    module_string: gala\n    \
-                 module_path: boot():/boot/b.dll#22\n";
-        let b = a.replace("#11", "#33");
-        let swapped = vec!["boot/a.dll".to_string()];
-        assert_eq!(conf_without(a, &swapped), conf_without(&b, &swapped));
-        let c = a.replace("#22", "#44");
-        assert_ne!(conf_without(a, &swapped), conf_without(&c, &swapped));
+                 module_path: boot():/boot/b.exe#22\n";
+        // Other hashes: the same skeleton.
+        let b = a.replace("#11", "#33").replace("#22", "#44");
+        assert_eq!(conf_skeleton(a, &[]), conf_skeleton(&b, &[]));
+        // An added module (with its module string): the same once it is
+        // left out, not otherwise.
+        let c = a.replace(
+            "    module_path: boot():/boot/b.exe",
+            "    module_path: boot():/boot/n.dll#55\n    module_string: Windows/System32\n    \
+             module_path: boot():/boot/b.exe",
+        );
+        assert_eq!(conf_skeleton(a, &[]), conf_skeleton(&c, &["boot/n.dll".into()]));
+        assert_ne!(conf_skeleton(a, &[]), conf_skeleton(&c, &[]));
+        // A changed command line or module string is not.
+        assert_ne!(
+            conf_skeleton(a, &[]),
+            conf_skeleton(&a.replace("cmdline: x", "cmdline: y"), &[])
+        );
+        assert_ne!(conf_skeleton(a, &[]), conf_skeleton(&a.replace(": gala", ": other"), &[]));
         assert_eq!(
             conf_modules(a),
-            vec![("boot/a.dll".to_string(), Some("gala".to_string())), ("boot/b.dll".into(), None)]
+            vec![("boot/a.dll".to_string(), Some("gala".to_string())), ("boot/b.exe".into(), None)]
         );
+        assert_eq!(file_module(None), Ok("gala".into()));
+        assert_eq!(file_module(Some("Windows/System32")), Ok("Windows/System32".into()));
+        for no in ["tar:Program Files", "tarw:ProgramData", "registry", "manifest"] {
+            assert!(file_module(Some(no)).is_err(), "{no}");
+        }
+    }
+
+    /// A temporary directory of its own, removed when dropped.
+    struct Temp(std::path::PathBuf);
+
+    impl Temp {
+        fn new(tag: &str) -> Temp {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("gala-hotswap-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Temp(dir)
+        }
+
+        fn put(&self, path: &str, bytes: &[u8]) {
+            let to = self.0.join(path);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::write(to, bytes).unwrap();
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The records of plan `b`: (machine, mode, path, reason or names,
+    /// file).
+    fn records(b: &[u8]) -> (u32, Vec<(u8, u8, String, String, Vec<u8>)>) {
+        let u = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+        let mut out = Vec::new();
+        let mut at = 32;
+        for _ in 0..u(12) {
+            let len = u(at);
+            let r = &b[at..at + len];
+            let f = |i: usize| u32::from_le_bytes(r[8 + i * 4..12 + i * 4].try_into().unwrap());
+            let mut o = 8 + 36;
+            let path = String::from_utf8(r[o..o + f(2) as usize].to_vec()).unwrap();
+            o += (f(2) + f(3)) as usize + f(5) as usize * 24 + f(6) as usize * 16;
+            let strings = String::from_utf8_lossy(&r[o..o + f(7) as usize]).into_owned();
+            o += f(7) as usize;
+            let file = r[o..o + f(8) as usize].to_vec();
+            out.push((r[4], r[5], path, strings, file));
+            at += len;
+        }
+        (u(8) as u32, out)
+    }
+
+    #[test]
+    fn modules_no_process_maps_are_replaced_or_added_whole() {
+        let snap = Temp::new("snap");
+        let build = Temp::new("build");
+        let iso = build.0.join("x.iso");
+        let old_conf = "cmdline: run=t.exe\n    module_path: boot():/boot/a.dll#11\n    \
+                        module_string: Windows/System32\n    module_path: boot():/boot/t.exe#22\n    \
+                        module_path: boot():/boot/data.tar#33\n    module_string: tar:Program Files/X\n";
+        let new_conf = old_conf.replace("#11", "#44").replace("#22", "#55").replace(
+            "    module_path: boot():/boot/t.exe",
+            "    module_path: boot():/boot/b.dll#66\n    module_string: gala\n    \
+             module_path: boot():/boot/t.exe",
+        );
+        snap.put("modules/limine.conf", old_conf.as_bytes());
+        snap.put("modules/boot/a.dll", b"MZold");
+        snap.put("modules/boot/kernel.map", format!("ffff 0 4 1 {FILE_SUPPORT}\n").as_bytes());
+        build.put("x.modules/limine.conf", new_conf.as_bytes());
+        build.put("x.modules/boot/a.dll", b"MZnew");
+        build.put("x.modules/boot/t.exe", b"MZprogram");
+        build.put("x.modules/boot/b.dll", b"MZadded");
+        let differ = crate::snapshot::Differ {
+            changed: vec![
+                "boot/a.dll".into(),
+                "boot/gala.manifest".into(),
+                "boot/limine/limine.conf".into(),
+                "boot/t.exe".into(),
+            ],
+            added: vec!["boot/b.dll".into()],
+        };
+        // a.dll named but without linker maps (not patchable), t.exe not
+        // named, b.dll new: all three whole files, in a version 2 plan.
+        let p = prepare(&snap.0, &iso, &["a.dll".into()], &differ).unwrap();
+        assert_eq!(p.dlls, vec!["a.dll", "b.dll", "t.exe"]);
+        let (version, recs) = records(&std::fs::read(&p.plan).unwrap());
+        assert_eq!(version, VERSION);
+        let (machine, mode, path, reason, file) = &recs[0];
+        assert_eq!((*machine, *mode, path.as_str()), (0, 1, "\\Windows\\System32\\a.dll"));
+        assert!(reason.starts_with("not patchable: ") && reason.contains("no linker map"));
+        assert_eq!(file, b"MZnew");
+        assert_eq!(
+            (recs[1].1, recs[1].2.as_str(), &recs[1].4[..]),
+            (2, "\\gala\\b.dll", &b"MZadded"[..])
+        );
+        assert_eq!((recs[2].1, recs[2].2.as_str()), (1, "\\gala\\t.exe"));
+        // The automatic mode (no list) takes the same.
+        let p = prepare(&snap.0, &iso, &[], &differ).unwrap();
+        assert_eq!(p.dlls, vec!["a.dll", "b.dll", "t.exe"]);
+        // A snapshot's kernel without whole-file records: refused.
+        snap.put("modules/boot/kernel.map", b"ffff 0 4 1 kernel::hotswap::PATCHING\n");
+        let e = prepare(&snap.0, &iso, &[], &differ).unwrap_err();
+        assert!(e.contains("predates SN step 1f"), "{e}");
+        snap.put("modules/boot/kernel.map", format!("ffff 0 4 1 {FILE_SUPPORT}\n").as_bytes());
+        // A changed archive (unpacked at boot) is refused.
+        let mut tar = differ.clone();
+        tar.changed.push("boot/data.tar".into());
+        build.put("x.modules/boot/data.tar", b"tar");
+        let e = prepare(&snap.0, &iso, &[], &tar).unwrap_err();
+        assert!(e.contains("boot/data.tar differs, and it is a directory tree"), "{e}");
+        // So is a changed command line.
+        build.put("x.modules/limine.conf", new_conf.replace("run=t.exe", "run=u.exe").as_bytes());
+        let e = prepare(&snap.0, &iso, &[], &differ).unwrap_err();
+        assert!(e.contains("Limine's config differs"), "{e}");
     }
 
     #[test]
@@ -2527,6 +2853,23 @@ mod tests {
         zeroed[28..32].fill(0);
         assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), crc32(&zeroed));
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        // Patches alone: version 1 (older kernels read it); a whole file
+        // makes it version 2, its mode byte after the machine.
+        let (version, recs) = records(&bytes);
+        assert_eq!((version, recs[0].0, recs[0].1), (VERSION_PATCHES, 1, 0));
+        let whole = Patch {
+            mode: Mode::Whole,
+            reason: "why".into(),
+            path: "\\gala\\t.exe".into(),
+            file: b"MZ".to_vec(),
+            ..Patch::default()
+        };
+        let (version, recs) = records(&encode(&[whole], 7));
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            (recs[0].0, recs[0].1, recs[0].3.as_str(), &recs[0].4[..]),
+            (0, 1, "why", &b"MZ"[..])
+        );
     }
 
     #[test]
@@ -2534,7 +2877,8 @@ mod tests {
         let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
         assert_eq!(parse_flag(&args("boot-test x")), Ok(None));
         assert!(parse_flag(&args("boot-test x --hot-swap-unsafe a.dll")).is_err());
-        assert!(parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe a.exe")).is_err());
+        assert!(parse_flag(&args("boot-test x --hot-swap-unsafe")).is_err());
+        assert!(parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe a.txt")).is_err());
         if std::env::var_os("CI").is_none() && std::env::var_os("GITHUB_ACTIONS").is_none() {
             assert_eq!(
                 parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe A.dll,b.dll")),
@@ -2544,9 +2888,21 @@ mod tests {
                 parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe kernel,a.dll")),
                 Ok(Some(vec!["kernel".to_string(), "a.dll".to_string()]))
             );
+            assert_eq!(
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe Setup.exe")),
+                Ok(Some(vec!["setup.exe".to_string()]))
+            );
             assert!(
-                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe kernel.exe"))
-                    .is_err()
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe a/b.dll")).is_err()
+            );
+            // No list: the automatic mode (every changed module).
+            assert_eq!(
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe")),
+                Ok(Some(vec![]))
+            );
+            assert_eq!(
+                parse_flag(&args("boot-test --from-snapshot s --hot-swap-unsafe --release")),
+                Ok(Some(vec![]))
             );
         }
     }
