@@ -2153,7 +2153,13 @@ need gala's.
      (#163) and UnRegisterTypeLib (#186), which had bound to the base
      unnoticed; both are exported at their ordinals now and fail with
      TYPE_E_REGISTRYACCESS, recorded (`oleaut32_test`; gala loads no
-     type library). To measure on Windows (`loader_test`'s `info`
+     type library). Then OfficeClickToRun.exe got past the App-V
+     catalog and died of 0xc06d007f (delay-loaded function not found)
+     in AppVIntegration.dll: `USERENV.dll!ExpandEnvironmentStringsForUserW`,
+     a named stub (GetProcAddress treats stubs as absent). Done:
+     ExpandEnvironmentStringsForUserW against the user's environment
+     block, test first in `office_api_test` (Microsoft's documentation).
+     To measure on Windows (`loader_test`'s `info`
      lines): GetProcAddress for an ordinal in a gap (documented as
      possibly an invalid non-NULL address) and the status of loading a
      DLL that imports one. Seen too,

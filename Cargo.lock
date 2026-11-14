@@ -2830,9 +2830,6 @@ dependencies = [
 [[package]]
 name = "userenv"
 version = "0.1.0"
-dependencies = [
- "gala_stubs",
-]
 
 [[package]]
 name = "usvg"

@@ -184,15 +184,16 @@ impl Block {
     }
 
     /// `%NAME%` references expanded against the block (left as they are
-    /// when not set), into `out`; its length.
+    /// when not set), into `out` as far as it holds; the expanded
+    /// length, which may be more than `out` holds.
     fn expand(&self, text: &[u16], out: &mut [u16]) -> usize {
         let pct = u16::from(b'%');
         let (mut i, mut n) = (0, 0);
         let mut put = |c: u16, n: &mut usize| {
-            if *n < out.len() {
-                out[*n] = c;
-                *n += 1;
+            if let Some(slot) = out.get_mut(*n) {
+                *slot = c;
             }
+            *n += 1;
         };
         while i < text.len() {
             if text[i] == pct
@@ -244,7 +245,7 @@ fn reg_value(block: &Block, key: usize, name: &str, out: &mut [u16]) -> Option<u
     let n = (size as usize / 2).min(raw.len());
     let n = raw[..n].iter().position(|&c| c == 0).unwrap_or(n);
     if kind == REG_EXPAND_SZ {
-        Some(block.expand(&raw[..n], out))
+        Some(block.expand(&raw[..n], out).min(out.len()))
     } else {
         out[..n].copy_from_slice(&raw[..n]);
         Some(n)
@@ -473,7 +474,7 @@ fn build(token: usize, inherit: bool) -> Option<Block> {
                 profile_len = n + wide(sub, &mut profile[n..]);
             } else if let Some(n) = listed_profile(sid, &mut profile) {
                 let mut expanded = [0u16; 300];
-                profile_len = block.expand(&profile[..n], &mut expanded);
+                profile_len = block.expand(&profile[..n], &mut expanded).min(expanded.len());
                 profile[..profile_len].copy_from_slice(&expanded[..profile_len]);
             } else if profiles_len > 0 {
                 profile[..profiles_len].copy_from_slice(&profiles[..profiles_len]);
@@ -540,4 +541,40 @@ pub extern "system" fn DestroyEnvironmentBlock(env: *mut u16) -> i32 {
     }
     // SAFETY: a process-heap block CreateEnvironmentBlock made.
     unsafe { HeapFree(GetProcessHeap(), 0, env.cast()) }
+}
+
+/// ExpandEnvironmentStringsForUserW(hToken, lpSrc, lpDest, dwSize):
+/// `%NAME%` references in lpSrc expanded against the environment
+/// CreateEnvironmentBlock gives the token's user without inheriting (no
+/// token: the system's variables), names set nowhere left as written.
+/// dwSize counts characters with the NUL; too small a buffer is FALSE
+/// with ERROR_INSUFFICIENT_BUFFER.
+#[unsafe(no_mangle)]
+pub extern "system" fn ExpandEnvironmentStringsForUserW(
+    token: usize,
+    src: *const u16,
+    dst: *mut u16,
+    size: u32,
+) -> i32 {
+    if src.is_null() || (dst.is_null() && size != 0) {
+        return fail(super::ERROR_INVALID_PARAMETER);
+    }
+    let Some(block) = build(token, false) else {
+        return fail(ERROR_NOT_ENOUGH_MEMORY);
+    };
+    // SAFETY: a NUL-terminated string; the caller's buffer of `size`.
+    let (text, out) = unsafe {
+        let n = (0..).position(|i| *src.add(i) == 0).unwrap_or(0);
+        let out: &mut [u16] =
+            if size == 0 { &mut [] } else { core::slice::from_raw_parts_mut(dst, size as usize) };
+        (core::slice::from_raw_parts(src, n), out)
+    };
+    let n = block.expand(text, out);
+    // SAFETY: the block CreateEnvironmentBlock's way (process heap).
+    unsafe { HeapFree(GetProcessHeap(), 0, block.p.cast()) };
+    if n >= out.len() {
+        return fail(super::ERROR_INSUFFICIENT_BUFFER);
+    }
+    out[n] = 0;
+    1
 }

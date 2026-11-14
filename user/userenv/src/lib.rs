@@ -1,8 +1,8 @@
 //! gala's userenv.dll (user profiles and environment blocks):
-//! GetUserProfileDirectoryW; the other functions programs import are not
-//! implemented yet. Each of those reports itself to the missing-features
-//! ledger and ends the process when called (`gala_stubs`), so the ledger
-//! shows which ones a program uses.
+//! GetUserProfileDirectoryW, LoadUserProfileW and UnloadUserProfile,
+//! CreateEnvironmentBlock, DestroyEnvironmentBlock and
+//! ExpandEnvironmentStringsForUserW (`env.rs`), and the group policy
+//! notifications (`policy.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -10,7 +10,6 @@
 
 mod env;
 mod policy;
-mod unimplemented;
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]

@@ -2714,7 +2714,12 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   directories, then USERNAME, USERPROFILE (ProfileImagePath; the service
   accounts' own; no token: Default), APPDATA, LOCALAPPDATA and the
   user's `Environment` and `Volatile Environment` keys, in name order in
-  a process-heap block. LoadUserProfileW (callers
+  a process-heap block. ExpandEnvironmentStringsForUserW expands
+  `%NAME%` against that block built without inheriting (no token: the
+  system's variables), a name set nowhere left as written, and fails
+  with ERROR_INSUFFICIENT_BUFFER when the result and its NUL do not fit
+  (App-V's AppVIntegration.dll delay-loads it; office_api_test).
+  LoadUserProfileW (callers
   holding SeBackup and SeRestore, as services do; else
   ERROR_PRIVILEGE_NOT_HELD) creates the profile directory
   `C:\Users\<lpUserName>` (full control for the user, SYSTEM and

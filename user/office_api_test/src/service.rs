@@ -22,6 +22,13 @@
 //!   SystemDrive, windir, TEMP, TMP, CommonProgramFiles, ProgramFiles,
 //!   PATH, USERPROFILE and the four x86/x64 program files variables; a
 //!   variable of the process's own only when inheriting.
+//! - userenv's ExpandEnvironmentStringsForUserW (App-V's
+//!   AppVIntegration.dll delay-loads it while the service publishes
+//!   Office; Microsoft's documentation): `%USERPROFILE%\ntuser.dat` with
+//!   the process's token is its own profile's; with no token the
+//!   system's variables (SystemRoot as the process has it); a name set
+//!   nowhere stays as written; a buffer too small fails (the error is
+//!   printed as `info`).
 //! - kernel32's GetFileInformationByHandleEx(FileIdInfo) (repoman
 //!   publishing an install compares files by id): TRUE, the volume's
 //!   serial as GetFileInformationByHandle's dwVolumeSerialNumber, the
@@ -200,6 +207,12 @@ fn relative_descriptor(c: &mut Checks) -> Result<(), u32> {
 unsafe extern "system" {
     fn CreateEnvironmentBlock(env: *mut *mut u16, token: usize, inherit: i32) -> i32;
     fn DestroyEnvironmentBlock(env: *mut u16) -> i32;
+    fn ExpandEnvironmentStringsForUserW(
+        token: usize,
+        src: *const u16,
+        dst: *mut u16,
+        size: u32,
+    ) -> i32;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -258,7 +271,7 @@ fn environment_blocks(c: &mut Checks) -> Result<(), u32> {
         c.ok(rn > 0 && dn > 0 && an > 0, 0)?;
         SetEnvironmentVariableW(wz("SystemRoot").as_ptr(), wz("overwrite").as_ptr());
         SetEnvironmentVariableW(wz("ProgramData").as_ptr(), wz("overwrite").as_ptr());
-        c.eq(OpenProcessToken(GetCurrentProcess(), 8 | 2, &mut token) as u64, 1)?;
+        c.eq(OpenProcessToken(GetCurrentProcess(), 8 | 4 | 2, &mut token) as u64, 1)?;
         let mut env = [core::ptr::null_mut(); 4];
         for (i, (t, inherit)) in [(0, 0), (token, 0), (0, 1), (token, 1)].into_iter().enumerate() {
             c.eq(CreateEnvironmentBlock(&mut env[i], t, inherit) as u64, 1)?;
@@ -300,6 +313,63 @@ fn environment_blocks(c: &mut Checks) -> Result<(), u32> {
         for e in env {
             c.eq(DestroyEnvironmentBlock(e) as u64, 1)?;
         }
+    }
+    expand_for_user(c, token)
+}
+
+/// ExpandEnvironmentStringsForUserW against the user's environment
+/// block: `%USERPROFILE%` is the token's profile (the process's own
+/// user's, as its own variable has it); without a token the system's
+/// variables (SystemRoot as the process has it); an unknown name stays
+/// as written; a buffer too small fails.
+#[cfg(target_arch = "x86_64")]
+fn expand_for_user(c: &mut Checks, token: usize) -> Result<(), u32> {
+    let wz = |s: &str| -> [u16; 64] { super::w(s) };
+    let mut want = [0u16; 300];
+    let mut got = [0u16; 300];
+    // SAFETY: our buffers, sizes in characters as documented.
+    unsafe {
+        let n = GetEnvironmentVariableW(wz("USERPROFILE").as_ptr(), want.as_mut_ptr(), 260);
+        c.ok(n > 0, 0)?;
+        let tail = wz("\\ntuser.dat");
+        want[n as usize..n as usize + 11].copy_from_slice(&tail[..11]);
+        let r = ExpandEnvironmentStringsForUserW(
+            token,
+            wz("%USERPROFILE%\\ntuser.dat").as_ptr(),
+            got.as_mut_ptr(),
+            300,
+        );
+        c.eq(r as u64, 1)?;
+        c.ok(super::units(got.as_ptr()) == &want[..n as usize + 11], 1)?;
+
+        let n = GetEnvironmentVariableW(wz("SystemRoot").as_ptr(), want.as_mut_ptr(), 260);
+        c.ok(n > 0, 0)?;
+        want[n as usize] = u16::from(b'x');
+        let r = ExpandEnvironmentStringsForUserW(
+            0,
+            wz("%SystemRoot%x").as_ptr(),
+            got.as_mut_ptr(),
+            300,
+        );
+        c.eq(r as u64, 1)?;
+        c.ok(super::units(got.as_ptr()) == &want[..n as usize + 1], 2)?;
+
+        let text = wz("a%GALA_NOT_SET_ANYWHERE%b");
+        let r = ExpandEnvironmentStringsForUserW(token, text.as_ptr(), got.as_mut_ptr(), 300);
+        c.eq(r as u64, 1)?;
+        c.ok(super::units(got.as_ptr()) == super::units(text.as_ptr()), 3)?;
+
+        let r = ExpandEnvironmentStringsForUserW(
+            token,
+            wz("%USERPROFILE%").as_ptr(),
+            got.as_mut_ptr(),
+            3,
+        );
+        super::info(
+            "ExpandEnvironmentStringsForUserW(too small) error",
+            u64::from(super::GetLastError()),
+        );
+        c.eq(r as u64, 0)?;
     }
     Ok(())
 }
