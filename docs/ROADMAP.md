@@ -2161,20 +2161,34 @@ need gala's.
      a named stub (GetProcAddress treats stubs as absent). Done:
      ExpandEnvironmentStringsForUserW against the user's environment
      block, test first in `office_api_test` (Microsoft's documentation).
-     Next: with that, the App-V integration runs and the install
-     reaches its fonts task, but its second integrator.exe
-     (`root\Integration\Integrator.exe`, about 2450 s after boot) dies
-     of 0xc06d007e (delay-loaded DLL not found): `osppc.dll!SLOpen`.
-     osppc.dll is not on the disk when the first integrator.exe starts
-     (`disk-files` over the snapshot's image finds no osppc.dll under
-     `C:\Program Files`); first find, from the Click-to-Run service log
-     (`C:\Windows\Temp`, read from a resumed run's kept layer) and the
-     ledger, whether the install lays it down later and where
-     integrator.exe looks for it (its directory, a `vfs` path, a
-     SetDllDirectory/AddDllDirectory path), or whether the task that
-     runs it expects it from an earlier step that failed. Its failure
-     fails the install: the service ends with 17002 and setup.exe with
-     0x426a (17002, "C2RClient returned a failing exit code").
+     With that, the App-V integration runs and the install reaches its
+     fonts task, but its second integrator.exe
+     (`root\Integration\Integrator.exe /I /License ...`, about 2450 s
+     after boot) died of 0xc06d007e (delay-loaded DLL not found):
+     `osppc.dll!SLOpen`. No osppc.dll is laid down: on Windows 8 and
+     later Office's licensing goes to the system's Software Protection
+     client, sppc.dll, which gala lacked. Done: gala's sppc.dll
+     (ARCHITECTURE "Other DLLs", sppc), a file-backed license store
+     with the SL* functions integrator.exe imports, test first in
+     `sppc_test` (failure answers measured against Windows' documented
+     codes; the round trip of an unsigned license is gala's own, which
+     Windows refuses). Integrator.exe now installs Office's licenses
+     through it (SLInstallLicense, SLGetSLIDList, SLGetLicenseInformation
+     in the ledger) and exits 0.
+     Next: the install's next integrator.exe dies of 0xc06d007f
+     (delay-loaded function not found):
+     `CRYPT32.dll!CryptSIPAddProvider`, a named stub (GetProcAddress
+     treats stubs as absent); it registers Office's subject interface
+     package (CryptSIPAddProvider's documented registry entries under
+     `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
+     Wine's crypt32 sip tests), test first. Its failure fails the
+     install as before: the service ends with 17002 and setup.exe with
+     0x426a (17002, "C2RClient returned a failing exit code"). Seen
+     too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
+     run time), Office's product key not decoded by gala's sppc
+     (SLInstallProofOfPurchase answers SL_E_INVALID_PRODUCT_KEY; no
+     run has called it yet), and osppcext.dll!SLActivateProduct
+     (integrator.exe's other delay import, not reached).
      To measure on Windows (`loader_test`'s `info`
      lines): GetProcAddress for an ordinal in a gap (documented as
      possibly an invalid non-NULL address) and the status of loading a
@@ -2294,8 +2308,8 @@ need gala's.
      TRUE and STATUS_SUCCESS;
      then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
-     webservices, cabinet, credui; osppc.dll is
-     Office's own) and the functions its imports lack (shell32's
+     webservices, cabinet, credui, and osppc.dll, which is the system's
+     sppc.dll, gala's being x64 only so far) and the functions its imports lack (shell32's
      SHGetSettings, user32's CheckRadioButton,
      iphlpapi's CreateSortedAddressPairs); BITS (the
      BackgroundCopyManager it asks for: absent, survived); WinINet's

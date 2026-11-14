@@ -270,7 +270,7 @@ fn note_absent(start: KeyId, name: &[u16]) {
     let mut entry = [0u8; 96];
     entry[..PREFIX.len()].copy_from_slice(PREFIX);
     entry[PREFIX.len()..PREFIX.len() + tail.len()].copy_from_slice(tail);
-    super::super::ledger::record_user(&entry[..PREFIX.len() + tail.len()], "absent key", 0);
+    super::super::ledger::record_user_bulk(&entry[..PREFIX.len() + tail.len()], "absent key", 0);
 }
 
 /// NtCreateKey(*KeyHandle, DesiredAccess, ObjectAttributes, TitleIndex,

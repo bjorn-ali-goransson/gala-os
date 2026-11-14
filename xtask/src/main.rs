@@ -1332,6 +1332,10 @@ const USER_DLLS: &[Dll] = &[
     // wofutil.dll: the Windows Overlay Filter's API, no filter attached
     // (wofutil_test; Click-to-Run's staging).
     Dll { package: "wofutil", file: "wofutil.dll", exported_as: "testwofutil.dll" },
+    // sppc.dll: the Software Protection Platform's client over gala's
+    // license store (sppc_test; Click-to-Run's integrator installs
+    // Office's licenses through it).
+    Dll { package: "sppc", file: "sppc.dll", exported_as: "testsppc.dll" },
     // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
     // window with (gdiplus_test).
     Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
@@ -3844,6 +3848,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wofutil_test", "ntdll.dll", "Windows/System32"),
     ("wofutil_test", "kernel32.dll", "Windows/System32"),
     ("wofutil_test", "wofutil.dll", "Windows/System32"),
+    // The Software Protection Platform's client (user/sppc_test).
+    ("sppc_test", "ntdll.dll", "Windows/System32"),
+    ("sppc_test", "kernel32.dll", "Windows/System32"),
+    ("sppc_test", "sppc.dll", "Windows/System32"),
     // The Restart Manager (user/rstrtmgr_test): rstrtmgr and the
     // advapi32 it asks for services.
     ("rstrtmgr_test", "ntdll.dll", "Windows/System32"),
@@ -4110,6 +4118,7 @@ const USER_PROGRAMS: &[&str] = &[
     "msi_test",
     "rstrtmgr_test",
     "wofutil_test",
+    "sppc_test",
     "hardlink_test",
     "threadpool_test",
     "imagetrim_test",
@@ -8010,6 +8019,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wofutil_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wofutil_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Software Protection Platform's client over gala's license
+        // store (user/sppc_test).
+        name: "sppc_test",
+        cmdline: "qemu_exit run=sppc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sppc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/rstrtmgr_test built for x86).

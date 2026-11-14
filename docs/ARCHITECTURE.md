@@ -3136,7 +3136,7 @@ own name).
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
 | COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -9667,6 +9667,45 @@ stations and desktops a program creates are refused until stage 3).
   HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION), the documented answer
   without a driver, recorded (`wofutil.dll!<function>(no overlay
   filter)`). The WIM functions (WofWim*) are absent.
+- sppc (`user/sppc`, x64; `sppc_test`): the Software Protection
+  Platform's client API (slpublic.h's SL* functions), through which
+  Click-to-Run's integrator.exe installs Office's licenses. Integrator
+  delay-loads `osppc.dll` (Office's own platform before Windows 8) and,
+  on Windows 8 and later, is given the system's sppc.dll in its place;
+  without one it dies with 0xc06d007e (the delay load's
+  ERROR_MOD_NOT_FOUND exception) and Click-to-Run reports 17002. Windows'
+  sppc.dll asks the Software Protection service (sppsvc); gala has no
+  such service, so the DLL keeps the store itself, in files under
+  `System32\spp\gala`, which every process reads: `licenses\<license
+  file id>.xrm-ms`, each license file (an XrML `r:license` or an
+  `rg:licenseGroup` of them, read with gala_xml) as installed. A
+  license is known by its `licenseId`, its SKU and application by its
+  `tm:infoStr` `productSkuId` and `applicationId` (a license without an
+  application, an EUL's private half, takes that of another license of
+  its SKU). SLOpen/SLClose (a tagged heap block), SLInstallLicense
+  (refuses what holds no license: HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+  the same bytes installed again give the same id), SLUninstallLicense
+  (SL_E_LICENSE_FILE_NOT_INSTALLED), SLGetSLIDList (the licenses of the
+  application, SKU, license file or license queried, or all of them,
+  mapped to the identifiers asked for; none is SL_E_VALUE_NOT_FOUND),
+  SLGetLicenseInformation (`licenseId`, `fileId` or an infoStr value as
+  SL_DATA_SZ). Invariants and limits: no product key is ever installed
+  (SLInstallProofOfPurchase is SL_E_INVALID_PRODUCT_KEY: product keys
+  are not decoded against a license's key configuration; the product-key
+  queries SL_E_PKEY_NOT_INSTALLED), so no right is granted
+  (SLConsumeRight SL_E_RIGHT_NOT_GRANTED), every SKU is unlicensed in
+  SLGetLicensingStatusInformation (reason SL_E_PKEY_NOT_INSTALLED), no
+  policy has a value (SLGetPolicyInformationDWORD SL_E_VALUE_NOT_FOUND)
+  and SLPersistApplicationPolicies has nothing to keep (S_OK);
+  SLPersistRTSPayloadOverride, undocumented, is E_NOTIMPL. XrML
+  signatures are not verified, where Windows refuses a license that is
+  not signed (`sppc_test` runs its round trip only where its unsigned
+  license is taken). A license file's id is a hash of its bytes (what
+  Windows derives it from is not measured). Every call is recorded,
+  "other", as `sppc.dll!<function>(<case>)` with the HRESULT as detail;
+  a store file that is not a license as `sppc.dll!store: unreadable
+  license file`. No 32-bit build, no sppcext.dll (SLActivateProduct)
+  and no slc.dll yet: nothing has asked for them.
 - gdiplus (`user/gdiplus`, x64 and x86; `gdiplus_test`,
   `wow64_gdiplus_test`): GDI+'s flat API, the part ODT's setup.exe
   draws its window with (Display Level Full): GdiplusStartup (versions
