@@ -2148,7 +2148,12 @@ need gala's.
      (`testdll`'s ordinal gap, `testdll_gap` importing it); shell32's
      ordinal 165, SHCreateDirectory, with SHCreateDirectoryExW, test
      first in `knownfolder_test` (x64 and x86, by ordinal, Wine's
-     shlfileop tests). To measure on Windows (`loader_test`'s `info`
+     shlfileop tests). With the loader fix OfficeClickToRun.exe no
+     longer started (0xc0000138): it imports oleaut32's RegisterTypeLib
+     (#163) and UnRegisterTypeLib (#186), which had bound to the base
+     unnoticed; both are exported at their ordinals now and fail with
+     TYPE_E_REGISTRYACCESS, recorded (`oleaut32_test`; gala loads no
+     type library). To measure on Windows (`loader_test`'s `info`
      lines): GetProcAddress for an ordinal in a gap (documented as
      possibly an invalid non-NULL address) and the status of loading a
      DLL that imports one. Seen too,

@@ -4662,7 +4662,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   Click-to-Run UI imports them by ordinal);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
-  recorded. Type libraries are not registered. Its exports have
+  recorded. Type libraries are neither loaded nor registered:
+  LoadTypeLib(Ex) and LoadRegTypeLib fail, RegisterTypeLib (#163) and
+  UnRegisterTypeLib (#186, which OfficeClickToRun.exe imports by
+  ordinal) fail with TYPE_E_REGISTRYACCESS, recorded (RegisterTypeLib
+  with a NULL library or path is E_INVALIDARG). Its exports have
   Windows' ordinals (build.rs, from Wine's spec); Get/Set/CreateErrorInfo
   forward to ole32.
 

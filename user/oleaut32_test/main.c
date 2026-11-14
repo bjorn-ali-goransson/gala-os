@@ -39,6 +39,9 @@
  * - VarBstrCmp (#314, imported by ordinal by Chromium): VARCMP_LT, _EQ,
  *   _GT by the locale's order; NORM_IGNORECASE makes case equal; a NULL
  *   BSTR is the empty string.
+ * - RegisterTypeLib (#163) and UnRegisterTypeLib (#186), which
+ *   OfficeClickToRun.exe imports by ordinal: at their ordinals;
+ *   unregistering a library that is not registered fails.
  * - What SQL Server LocalDB's msxmlsql.dll imports by ordinal (Wine's
  *   vartype.c vectors; each export at its ordinal): VarR8FromCy (#82)
  *   and VarDateFromCy (#93) divide by 10000; VarR8FromDate (#83) and
@@ -418,6 +421,22 @@ int main(void) {
     SysFreeString(apple2);
     SysFreeString(pear);
     SysFreeString(blank);
+
+    /* What OfficeClickToRun.exe imports by ordinal (Wine's oleaut32.spec):
+     * RegisterTypeLib (#163) and UnRegisterTypeLib (#186). Unregistering
+     * a library nobody registered fails (its key does not open); the
+     * code is printed for a Windows run to record. */
+    {
+        HMODULE m = GetModuleHandleW(L"oleaut32.dll");
+        static const GUID never = {0x6a1c5f0e, 0x2b7d, 0x4c11, {0x9e, 0x3a, 0x51, 0x0f, 0x77, 0x2d, 0x48, 0xc9}};
+        HRESULT hr;
+        CHECK(GetProcAddress(m, (LPCSTR)163) == (FARPROC)RegisterTypeLib);
+        CHECK(GetProcAddress(m, (LPCSTR)186) == (FARPROC)UnRegisterTypeLib);
+        hr = UnRegisterTypeLib(&never, 1, 0, LOCALE_NEUTRAL, sizeof(void *) == 8 ? SYS_WIN64 : SYS_WIN32);
+        printf("oleaut32_test: info UnRegisterTypeLib(not registered) %08lx\n", (unsigned long)hr);
+        fflush(stdout);
+        CHECK(FAILED(hr));
+    }
 
     /* msxmlsql's ordinal imports. */
     {
