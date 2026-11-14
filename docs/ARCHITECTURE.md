@@ -4263,6 +4263,24 @@ definition for both layouts, "Plan: WOW64").
 - **crypt32 misc** (`misc.rs`): CryptMemAlloc/Realloc/Free (the process
   heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER, ContentInfo }; the
   version is not looked at, as on Windows 11 25H2).
+- **SIP registration** (`sip.rs`; `sip_test`): CryptSIPAddProvider
+  writes one key per function the SIP_ADD_NEWPROVIDER names,
+  `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0\CryptSIPDll<Function>\{GUID}`
+  (PutSignedDataMsg, GetSignedDataMsg, RemoveSignedDataMsg,
+  CreateIndirectData, VerifyIndirectData, and IsMyFileType and
+  IsMyFileType2 when given), each with the REG_SZ values `Dll` and
+  `FuncName`; a structure without one of the five required functions,
+  or smaller than Windows 7's, is ERROR_INVALID_PARAMETER. A GetCaps
+  function (Windows 8's field) is recorded as unsupported and not
+  written. CryptSIPRemoveProvider deletes the seven keys and fails with
+  the last error when any was absent (ERROR_FILE_NOT_FOUND after an add
+  without the IsMyFileType functions, as in Wine's sip tests). advapi32
+  is loaded at run time, as for DPAPI. Each call leaves a
+  ledger line, `crypt32.dll!CryptSIPAddProvider {GUID…}` (or
+  RemoveProvider), whose detail is the error (0 on success). Nothing
+  reads the registered providers yet: CryptSIPLoad and the
+  subject-to-SIP dispatch remain stubs (WinVerifyTrust knows its PE and
+  cabinet subjects itself).
 - **PKCS #12** (`pfx.rs`; `cert_test` pfx.rs): PFXImportCertStore reads a
   PFX whose authSafe is `data` (public-key integrity is recorded and
   fails), checks its MAC (HMAC-SHA1/SHA-2, key from the PKCS #12 KDF;
@@ -4466,6 +4484,21 @@ through their public functions.
   Software Publishing state (its default is used), revocation fetching
   (crypt32 is offline; the default state accepts an offline check), the
   catalog functions (CryptCATAdmin*: gala_stubs), any UI.
+- **Trust provider registration** (`register.rs`; `actionid_test`):
+  WintrustAddActionID writes one key per provider function of the
+  CRYPT_REGISTER_ACTIONID, `HKLM\Software\Microsoft\Cryptography\Providers\Trust\<Function>\{GUID}`
+  (Initialization, Message, Signature, Certificate, CertCheck,
+  FinalPolicy, DiagnosticPolicy, Cleanup, the structure's order), with
+  the REG_SZ values `$DLL` and `$Function`, as Windows' own providers
+  are; the 32-bit DLL's keys land in the 32-bit view (advapi32's WOW64
+  redirection). advapi32 is loaded at the first call, not imported. A
+  NULL action or structure is ERROR_INVALID_PARAMETER; an entry without
+  a DLL or function name writes no key; a registry error fails the
+  call. WintrustRemoveActionID deletes every function's key and
+  succeeds whether or not they were there. gala calls no registered
+  provider (WinVerifyTrust implements WINTRUST_ACTION_GENERIC_VERIFY_V2
+  itself): Office's integrator registers its VBA trust provider and only
+  the registry keeps it.
 
 ### secur32: SSPI
 
@@ -15056,9 +15089,9 @@ programs kept running (ROADMAP R8, R9; PROJECT_BRIEF).
 
 ### Hot swapping DLLs into a resumed machine (SN step 1d)
 
-A fix to one of gala's DLLs is tried in seconds from a machine snapshot
-taken before the failure, instead of a run from boot
-(`boot-test --from-snapshot <name> --hot-swap-unsafe <dll>[,<dll>...]`;
+A fix to one of gala's DLLs or programs is tried in seconds from a
+machine snapshot taken before the failure, instead of a run from boot
+(`boot-test --from-snapshot <name> --hot-swap-unsafe [<dll>[,<dll>...]]`;
 WORKFLOW "Hot swapping DLLs into a snapshot (at your own risk)"). **It is
 never a real run**: the programs keep the state the old build made and
 run code of another build; every result is marked and none counts as a
@@ -15066,11 +15099,31 @@ pass. Code: `xtask/src/hotswap.rs` (diff and plan, host side),
 `kernel/src/hotswap.rs` (applying it),
 `kernel/src/arch/x86_64/fwcfg.rs` (the channel).
 
-**Why not replace the image.** The resumed programs hold addresses into
-the DLL: vtables of COM objects point into its `.rdata`, callbacks and
-function pointers are stored, the import address table is bound, its
-statics hold state. The old image stays where it is; changed functions
-are redirected, new code reaches the old image's statics and imports.
+**Why not replace the image** (of a DLL a process maps). The resumed
+programs hold addresses into the DLL: vtables of COM objects point into
+its `.rdata`, callbacks and function pointers are stored, the import
+address table is bound, its statics hold state. The old image stays
+where it is; changed functions are redirected, new code reaches the old
+image's statics and imports.
+
+**Whole files** (SN step 1f). A module no process maps at the resume
+holds no such addresses, so it is replaced as a whole file, with no
+layout check (new data, imports, exports and sections are fine), and a
+module new in the build is added. xtask's choice per changed or new
+file module (`hotswap::prepare`; `snapshot::check_build_swap` lists
+them): the kernel is patched; a DLL named in the list, or any changed
+DLL when the flag has no list, is patched when the diff takes it and
+otherwise gets a whole-file record (reason `not patchable: <why>`); a
+DLL left out of a list, a program, and any other changed file get a
+whole-file record; a new module gets an added-file record. Only Limine's
+config lines of the changed modules (their hashes) and of the added
+ones may differ, and the manifest. The guest refuses a whole-file
+record whose file a process maps (`file::processes_mapping`: a view of
+a section on it, or it as a program's executable), naming the process
+and xtask's reason; this is checked for every record before anything
+changes. It writes the files first (`file::write`, or
+`file::create_with_directories` for an added one) and puts them back
+if a DLL or the kernel is then refused.
 
 **Host side (xtask).**
 - Every user build writes lld's map beside the image (`/lldmap`:
@@ -15118,22 +15171,28 @@ are redirected, new code reaches the old image's statics and imports.
   decode, or has a short branch out of its function; an old function
   shorter than the 5-byte jump; identical code folding that differs
   between the builds (one old function for names that now differ, or
-  the reverse); a reference into no chunk. The build check
-  (`snapshot::check_build_except`) still refuses any other difference:
-  only the named DLLs (64- and 32-bit), Limine's config (only those
-  lines' hashes may differ) and the signed manifest may change.
+  the reverse); a reference into no chunk. A DLL refused here gets a
+  whole-file record instead, which the guest refuses if a process maps
+  it. The build check (`snapshot::check_build_swap`) still refuses any
+  other difference: the command line, a module's directory or place in
+  Limine's config, the machine.
 
 **The plan** (xtask's `hotswap::encode`, the kernel's `hotswap::Plan`), little-endian: a
-32-byte header (`GALAHSWP`, version 1, image count, a nonce, total
-length, CRC-32 of the whole with that field 0), then per DLL a record:
-its length, machine (1 x64, 2 x86, 3 the kernel), the old build's
+32-byte header (`GALAHSWP`, version 2, image count, a nonce, total
+length, CRC-32 of the whole with that field 0), then per module a
+record: its length, machine (1 x64, 2 x86, 3 the kernel, 0 a file
+record), mode (0 a patch, 1 a whole file, 2 an added file; the kernel
+also reads version 1, where the byte is padding and every record a
+patch), two bytes of padding, the old build's
 TimeDateStamp and SizeOfImage (`/Brepro` makes the stamp a content hash;
 for the kernel the CRC-32 and size of its `.text`), the guest path,
 the blob, its fixups (24 bytes: blob offset, anchor or none, target as
 an RVA of the old image or an offset in the blob, width, space, whether
 a 32-bit absolute address is sign-extended), the
 entries (old RVA, old size, blob offset, name), the names, and the new
-build's file.
+build's file. A file record has no blob, fixups or entries; its names
+field holds the reason it is not patched. xtask sends file records only
+to a kernel whose map has `kernel::hotswap::FILE_RECORDS`.
 
 **The channel.** The resumed QEMU gets the plan as fw_cfg file
 `opt/gala/hotswap` (device configuration, not migrated state) and, while
@@ -15176,11 +15235,14 @@ file put back). Then the threads are let go.
 **Invariants**: no user instruction runs between the resume and the end
 of `run`; an old entry is a jump only in a process whose blob is mapped
 and bound; the shared pages of an image layout are never written; a
-plan is acted on once (its nonce).
+file a process maps is never replaced whole; a plan is acted on once
+(its nonce).
 
 **Marked**: `hotswap:` log lines (`NOT A REAL RUN`, per process and
-function, `applied:` or `refused:`), the event `"ev":"hotswap"` whatever
-the mask, the ledger entry `hotswap`, a line in every later crash report
+function, per whole or added file with its reason, `applied:` or
+`refused:`), the event `"ev":"hotswap"` whatever the mask (`"file":
+"replaced"` or `"added"` for a file record), the ledger entry `hotswap`
+(one for patches, one for files), a line in every later crash report
 and state dump (`hotswap::Mark`), triage's second line; xtask's
 banner, verdict `hot-swapped (not a real run)` and exit status 3.
 

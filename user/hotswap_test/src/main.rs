@@ -35,6 +35,18 @@
 //! so the swap is refused, the DLL's with it), then both read (the first
 //! builds' values).
 //!
+//! With `files` (ROADMAP SN step 1f: scenario `hotswap_files`): after
+//! the marker it loads `hotswap_late.dll` and `hotswap_added.dll` by name
+//! (LdrLoadDll; neither is loaded before) and prints `hotswap_test: late
+//! version V` and `hotswap_test: added version V` (`added: not found`
+//! when there is no such file). Booted, the image has hotswap_late.dll
+//! (hotswap_dll's first build under that name) and no hotswap_added.dll:
+//! `late version 1`, `added: not found` (on Windows too). Resumed with
+//! every changed module swapped in, both are files no process maps:
+//! hotswap_late.dll replaced whole by the `layout` build (one a patch
+//! cannot take), hotswap_added.dll added (the `v2` build): `late version
+//! 2`, `added version 2`.
+//!
 //! Prints `hotswap_test: ok` and exits with 0 (the scenarios judge the
 //! values). Built for x86 too (`wow64_hotswap_test`, on hotswap_dll32.dll:
 //! hotswap_dll's source built for x86 under its own name): the same lines
@@ -68,6 +80,65 @@ unsafe extern "C" {
     fn hs_version() -> u32;
     fn hs_calls() -> u64;
     fn hs_call_back(cb: extern "C" fn() -> u32) -> u32;
+}
+
+#[repr(C)]
+struct AnsiString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u8,
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn LdrLoadDll(
+        path: *const u16,
+        characteristics: *const u32,
+        name: *const UnicodeString,
+        base: *mut usize,
+    ) -> i32;
+    fn LdrGetProcedureAddress(
+        module: usize,
+        name: *const AnsiString,
+        ordinal: u32,
+        address: *mut usize,
+    ) -> i32;
+}
+
+/// Loads DLL `name` and prints `hotswap_test: <label> version V` (its
+/// `hs_version`), or `<label>: not found`.
+fn late_load(name: &[u16], label: &str) {
+    let mut base = 0usize;
+    // SAFETY: LdrLoadDll(DllPath, DllCharacteristics, DllName, *DllHandle)
+    // with a name that lives through the call.
+    let st = unsafe {
+        LdrLoadDll(core::ptr::null(), core::ptr::null(), &UnicodeString::new(name), &mut base)
+    };
+    print("hotswap_test: ");
+    print(label);
+    if st != 0 {
+        print(": not found\r\n");
+        return;
+    }
+    let export = b"hs_version";
+    let export = AnsiString { length: 10, maximum_length: 10, buffer: export.as_ptr() };
+    let mut address = 0usize;
+    // SAFETY: LdrGetProcedureAddress(DllHandle, ProcedureName, 0, *Address)
+    // on the module just loaded.
+    let st = unsafe { LdrGetProcedureAddress(base, &export, 0, &mut address) };
+    if st != 0 || address == 0 {
+        print(": no hs_version\r\n");
+        return;
+    }
+    // SAFETY: hotswap_dll's `hs_version` (`extern "C" fn() -> u32`).
+    let version: extern "C" fn() -> u32 = unsafe { core::mem::transmute(address) };
+    print(" version ");
+    print_num(version().into());
+    print("\r\n");
 }
 
 fn print_num(mut n: u64) {
@@ -212,6 +283,14 @@ fn dll_after(obj: &Obj) {
 }
 
 fn main() -> u32 {
+    if has_arg("files") {
+        print("hotswap_test: marker\r\n");
+        wait_two_seconds();
+        late_load(&wide!("hotswap_late.dll"), "late");
+        late_load(&wide!("hotswap_added.dll"), "added");
+        print("hotswap_test: ok\r\n");
+        return 0;
+    }
     #[cfg(not(target_arch = "x86"))]
     {
         let (kernel, both, kstack) = (has_arg("kernel"), has_arg("both"), has_arg("kstack"));

@@ -23,8 +23,8 @@
 //! each difference; nothing else is compared, since nothing else is in the
 //! saved state (the disk is part of the snapshot itself).
 //!
-//! A snapshot is a directory `target/snapshots/<name>/` (a symbolic link
-//! `target/snapshots` to another file system holds them there):
+//! A snapshot is a directory `target/snapshots/<name>/` (or under
+//! `XTASK_SNAPSHOTS`, `root`, to hold them on another file system):
 //! `manifest` (this module's text format), `state.gz` (the migration
 //! stream), `disk.img` (the frozen disk, raw, for disk scenarios),
 //! `serial.log` (the run's log up to the save) and `runs/` (each restored
@@ -141,9 +141,16 @@ pub fn check_name(name: &str) -> Result {
     }
 }
 
-/// `target/snapshots`.
+/// Where snapshots live: `XTASK_SNAPSHOTS` when set (a directory on the
+/// file system of the scenario's disk image, which a save moves into the
+/// snapshot: `/dev/shm/snapshots` for Office's image in `/dev/shm`), else
+/// `target/snapshots`. Per invocation, so the other scenarios' snapshots
+/// (`snapshot_machine`'s, beside its image on `target`) are not moved
+/// with it.
 pub fn root(target: &Path) -> PathBuf {
-    target.join("snapshots")
+    std::env::var_os("XTASK_SNAPSHOTS")
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| target.join("snapshots"), PathBuf::from)
 }
 
 /// What a snapshot holds and needs, its `manifest` file.
@@ -267,43 +274,47 @@ pub struct Machine {
 /// modules and command line, QEMU and machine. The error names every
 /// difference (the accelerator is checked once QEMU runs: `resume`).
 pub fn check_build(m: &Manifest, now: &Machine) -> Result {
-    check_build_except(m, now, &[]).map(drop)
+    compare(m, now, None).map(drop)
 }
 
-/// The files a hot swap of `dlls` may change in the boot image: the DLLs
-/// (64- and 32-bit), Limine's config (their hashes; `hotswap::prepare`
-/// checks that nothing else in it changed) and the signed manifest (their
-/// digests).
-pub fn hotswap_allowed(dlls: &[String]) -> Vec<String> {
-    let mut v: Vec<String> = dlls
-        .iter()
-        .filter(|d| *d != crate::hotswap::KERNEL)
-        .flat_map(|d| [format!("boot/{d}"), format!("boot/x86/{d}")])
-        .collect();
-    v.push("boot/limine/limine.conf".into());
-    v.push("boot/gala.manifest".into());
-    // The kernel too, for `--hot-swap-unsafe kernel` (SN step 1e).
-    if dlls.iter().any(|d| d == crate::hotswap::KERNEL) {
-        v.push(KERNEL.into());
-    }
-    v
+/// What a hot swap (`--hot-swap-unsafe`) takes from this build: the boot
+/// image's files that differ from the snapshot's and those it does not
+/// have (paths in the image: `boot/x.dll`, Limine's config, the signed
+/// manifest, the kernel). `hotswap::prepare` sorts them into patches of
+/// running code and whole files, and refuses what is neither.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Differ {
+    pub changed: Vec<String>,
+    pub added: Vec<String>,
 }
 
-/// `check_build`, but files in `allowed` may differ (`--hot-swap-unsafe`):
-/// the ones that do.
-pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Result<Vec<String>> {
+/// `check_build` for a hot swap: any module may differ or be new; the
+/// kernel may differ only when `kernel` (named in `--hot-swap-unsafe`, or
+/// its automatic mode). Still refused: a module gone, another scenario,
+/// QEMU or machine.
+pub fn check_build_swap(m: &Manifest, now: &Machine, kernel: bool) -> Result<Differ> {
+    compare(m, now, Some(kernel))
+}
+
+/// The comparison of `check_build` (`swap` None: nothing may differ) and
+/// `check_build_swap` (`swap` Some(whether the kernel may)).
+fn compare(m: &Manifest, now: &Machine, swap: Option<bool>) -> Result<Differ> {
     let mut why = Vec::new();
-    let mut differ = Vec::new();
+    let mut differ = Differ::default();
     if m.scenario != now.scenario {
         why.push(format!("it is of scenario {}, not {}", m.scenario, now.scenario));
     }
     let short = |s: &str| s.chars().take(12).collect::<String>();
     let kernel_now = now.boot.iter().find(|(p, _)| p == KERNEL).map(|(_, s)| s.as_str());
-    if m.kernel() != kernel_now && allowed.iter().any(|a| a == KERNEL) && kernel_now.is_some() {
-        differ.push(KERNEL.to_string());
+    if m.kernel() != kernel_now && swap == Some(true) && kernel_now.is_some() {
+        differ.changed.push(KERNEL.to_string());
     } else if m.kernel() != kernel_now {
+        let hint = match swap {
+            Some(_) => " (name `kernel` in --hot-swap-unsafe, or give it no list, to swap it)",
+            None => "",
+        };
         why.push(format!(
-            "the kernel differs (snapshot {}, this build {})",
+            "the kernel differs (snapshot {}, this build {}){hint}",
             m.kernel().map_or("none".into(), short),
             kernel_now.map_or("none".into(), short)
         ));
@@ -311,7 +322,7 @@ pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Re
     let (mut changed, mut gone, mut added) = (Vec::new(), Vec::new(), Vec::new());
     for (path, sha) in m.boot.iter().filter(|(p, _)| p != KERNEL) {
         match now.boot.iter().find(|(p, _)| p == path) {
-            Some((_, s)) if s != sha && allowed.contains(path) => differ.push(path.clone()),
+            Some((_, s)) if s != sha && swap.is_some() => differ.changed.push(path.clone()),
             Some((_, s)) if s != sha => changed.push(path.as_str()),
             Some(_) => {}
             None => gone.push(path.as_str()),
@@ -319,7 +330,10 @@ pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Re
     }
     for (path, _) in now.boot.iter().filter(|(p, _)| p != KERNEL) {
         if !m.boot.iter().any(|(p, _)| p == path) {
-            added.push(path.as_str());
+            match swap {
+                Some(_) => differ.added.push(path.clone()),
+                None => added.push(path.as_str()),
+            }
         }
     }
     let list = |v: &[&str]| {
@@ -349,11 +363,15 @@ pub fn check_build_except(m: &Manifest, now: &Machine, allowed: &[String]) -> Re
     if why.is_empty() {
         Ok(differ)
     } else {
+        let hint = match swap {
+            Some(_) => "",
+            None => "; or resume it with --hot-swap-unsafe (not a real run)",
+        };
         Err(format!(
             "snapshot {} cannot resume on this build: {} (the guest holds the kernel, \
              its boot modules (gala's DLLs among them) and its command line in memory, so a \
              snapshot resumes only on the build it was taken from; rebuild that one, or take a \
-             new snapshot)",
+             new snapshot{hint})",
             m.name,
             why.join("; ")
         ))
@@ -396,20 +414,24 @@ pub fn boot_digests(iso_root: &Path) -> Result<Vec<(String, String)>> {
     Ok(paths.into_iter().zip(sums).collect())
 }
 
-/// Where a boot image keeps a copy of its DLL modules, each with its
-/// linker map (`<path>.map`), and Limine's config: `<image>.modules/`. A
-/// snapshot takes it along (`modules/`): `--hot-swap-unsafe` compares a
-/// new build of a DLL with the one the snapshot's memory holds
-/// (hotswap.rs).
+/// Where a boot image keeps a copy of its file modules (DLLs, programs,
+/// data files: every module the kernel makes a file of), the DLLs each
+/// with its linker map (`<name>.map` beside it), the kernel with its map,
+/// and Limine's config: `<image>.modules/`. A snapshot takes it along
+/// (`modules/`): `--hot-swap-unsafe` compares a new build of a DLL with
+/// the one the snapshot's memory holds, and hands the guest the new
+/// bytes of a file it replaces or adds whole (hotswap.rs).
 pub fn modules_dir(iso: &Path) -> PathBuf {
     iso.with_extension("modules")
 }
 
-/// Fills `modules_dir(iso)` from the image tree `iso_root`: Limine's config
-/// and each DLL module `(path in the tree, the build output it came from)`
+/// Fills `modules_dir(iso)` from the image tree `iso_root`: Limine's config,
+/// each DLL module `(path in the tree, the build output it came from)`
 /// with the map lld wrote beside that output (`deps/<stem>.map`, taken
 /// only when `deps/<stem>.dll` is the very file: a map of another build
-/// would mislead the diff).
+/// would mislead the diff), and every other module the kernel makes a
+/// file of (not the archives, registry files and the signed manifest it
+/// reads at boot: `hotswap::FileModule`).
 pub fn keep_modules(
     iso: &Path,
     iso_root: &Path,
@@ -450,6 +472,17 @@ pub fn keep_modules(
             fs::write(to.with_file_name(format!("{}.map", file_name(path))), map)
                 .map_err(|e| format!("{path}.map: {e}"))?;
         }
+    }
+    let text = fs::read_to_string(iso_root.join(conf)).map_err(|e| format!("{conf}: {e}"))?;
+    for (path, dir_string) in crate::hotswap::conf_modules(&text) {
+        let to = dir.join(&path);
+        if crate::hotswap::file_module(dir_string.as_deref()).is_err() || to.exists() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        fs::copy(iso_root.join(&path), &to).map_err(|e| format!("{path}: {e}"))?;
     }
     Ok(())
 }
@@ -698,7 +731,7 @@ fn save_into(
         fs::rename(&real, &kept).map_err(|e| {
             format!(
                 "moving the disk image {} into {}: {e} (they must be on one file system: \
-                 make target/snapshots a symbolic link to a directory beside the image)",
+                 set XTASK_SNAPSHOTS to a directory beside the image)",
                 real.display(),
                 partial.display()
             )
@@ -789,7 +822,9 @@ pub fn prepare_restore(
             None
         }
         Some((dlls, iso)) => {
-            let differ = check_build_except(&manifest, now, &hotswap_allowed(dlls))?;
+            // The kernel when named, or in the automatic mode (no list).
+            let kernel = dlls.is_empty() || dlls.iter().any(|d| d == crate::hotswap::KERNEL);
+            let differ = check_build_swap(&manifest, now, kernel)?;
             Some(crate::hotswap::prepare(&dir, iso, dlls, &differ)?)
         }
     };
@@ -1086,33 +1121,34 @@ mod tests {
     }
 
     #[test]
-    fn a_hot_swap_allows_only_its_dlls_to_differ() {
+    fn a_hot_swap_lets_modules_change_or_be_added() {
         let m = manifest();
         let mut now = machine(&m);
-        now.boot[1].1 = "1".repeat(64); // limine.conf (the DLL's hash)
+        now.boot[1].1 = "1".repeat(64); // limine.conf (the hashes)
         now.boot[2].1 = "2".repeat(64); // msxml6.dll
-        let allowed = hotswap_allowed(&["msxml6.dll".to_string()]);
+        now.boot.push(("boot/sppc_test.exe".into(), "3".repeat(64))); // new
+        // Any module may differ or be new (hotswap::prepare sorts them
+        // into patches and whole files), whatever DLLs are named.
         assert_eq!(
-            check_build_except(&m, &now, &allowed),
-            Ok(vec!["boot/limine/limine.conf".to_string(), "boot/msxml6.dll".to_string()])
+            check_build_swap(&m, &now, false),
+            Ok(Differ {
+                changed: vec!["boot/limine/limine.conf".into(), "boot/msxml6.dll".into()],
+                added: vec!["boot/sppc_test.exe".into()],
+            })
         );
-        // Another DLL, or the kernel, is still refused.
-        let other = hotswap_allowed(&["xmllite.dll".to_string()]);
-        assert!(check_build_except(&m, &now, &other).unwrap_err().contains("boot/msxml6.dll"));
+        // The kernel only when it may be swapped (named, or automatic).
         now.boot[0].1 = "f".repeat(64);
-        assert!(check_build_except(&m, &now, &allowed).unwrap_err().contains("kernel differs"));
-        // With the kernel named too (SN step 1e), the kernel may differ:
-        // it is one of those that do.
-        let both = hotswap_allowed(&["kernel".to_string(), "msxml6.dll".to_string()]);
-        assert!(both.contains(&KERNEL.to_string()) && !both.contains(&"boot/kernel.dll".into()));
-        assert_eq!(
-            check_build_except(&m, &now, &both),
-            Ok(vec![
-                KERNEL.to_string(),
-                "boot/limine/limine.conf".to_string(),
-                "boot/msxml6.dll".to_string()
-            ])
-        );
+        let e = check_build_swap(&m, &now, false).unwrap_err();
+        assert!(e.contains("the kernel differs") && e.contains("--hot-swap-unsafe"), "{e}");
+        let d = check_build_swap(&m, &now, true).unwrap();
+        assert_eq!(d.changed[0], KERNEL);
+        // A module gone, another scenario or machine: still refused.
+        now.boot.remove(3);
+        let e = check_build_swap(&m, &now, true).unwrap_err();
+        assert!(e.contains("boot image files gone: boot/x86/msxml6.dll"), "{e}");
+        let mut now = machine(&m);
+        now.memory_mib = 512;
+        assert!(check_build_swap(&m, &now, true).unwrap_err().contains("the machine differs"));
         // A snapshot of a hot-swapped run keeps the mark.
         let marked = Manifest { hot_swapped: Some("msxml6.dll".into()), ..m };
         assert_eq!(Manifest::parse(&marked.to_text()), Ok(marked));

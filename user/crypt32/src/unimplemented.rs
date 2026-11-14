@@ -126,13 +126,11 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptRegisterOIDFunction
     CryptRegisterOIDInfo
     CryptRetrieveTimeStamp
-    CryptSIPAddProvider
     CryptSIPCreateIndirectData
     CryptSIPGetCaps
     CryptSIPGetSignedDataMsg
     CryptSIPLoad
     CryptSIPPutSignedDataMsg
-    CryptSIPRemoveProvider
     CryptSIPRemoveSignedDataMsg
     CryptSIPRetrieveSubjectGuid
     CryptSIPRetrieveSubjectGuidForCatalogFile
