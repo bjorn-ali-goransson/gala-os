@@ -12,17 +12,15 @@
 //! dates and times with a zone's offset added, VT_ARRAY|VT_UI1 for
 //! bin.hex and bin.base64, ...), an untyped element its text, a PI,
 //! CDATA section or comment its value, a document or fragment S_FALSE
-//! and VT_NULL; put_dataType takes a type name in any case and is E_FAIL
-//! for an unknown name and on nodes that cannot have a type. Where
+//! and VT_NULL; put_dataType takes a type name in any case. Where
 //! neither settles the value, it is a non-stopping check (`note`, a type
-//! name's spelling, a zone offset's exact value, a text node's type) or
-//! an `info` line (i8, ui8, char, empty and malformed typed content, an
-//! element of white space alone with preserveWhiteSpace turned on after
-//! loading, a type on a text node or attribute).
+//! name's spelling) or MSXML 6's answer on Windows (build 26100), which
+//! differs from Wine's msxml3 numbers where a comment says so; what a
+//! put_dataType MSXML 6 takes leaves is printed as `info` lines.
 
 use core::ptr::null_mut;
 
-use super::mutation::{create, info_hr, new_doc, xml_is};
+use super::mutation::{create, new_doc, xml_is};
 use super::*;
 
 #[cfg_attr(
@@ -281,7 +279,9 @@ fn get_values(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     release(node);
 
     let mut v = value_of(c, doc, "root/string2", VT_BSTR)?;
-    c.var_text(&mut v, "String ")?;
+    // MSXML 6 trims a string type's text as `text` does (Wine's msxml3
+    // test has "String ").
+    c.var_text(&mut v, "String")?;
     let mut v = value_of(c, doc, "root/number", VT_BSTR)?;
     c.var_text(&mut v, "12.44")?;
     let mut v = value_of(c, doc, "root/number2", VT_BSTR)?;
@@ -302,13 +302,16 @@ fn get_values(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     real(c, doc, "root/r8", VT_R8, 0.412, 1e-15)?;
     real(c, doc, "root/float", VT_R8, 41221.421, 1e-9)?;
 
-    // Wine's values are the dates as R4s printed with 7 digits; a zone's
-    // offset is added (11:13:57+03:00 is 14:13:57).
+    // Wine's values are the dates as R4s printed with 7 digits. MSXML 6
+    // takes a zoned time to UTC (11:13:57+03:00 is 08:13:57; Wine's
+    // msxml3 test adds the offset) and drops a fraction of a second.
     date(c, doc, "root/datetime", 40135.14, 0.005, 40135.0 + 12093.0 / 86400.0)?;
-    date(c, doc, "root/datetimetz", 37813.59, 0.005, 37813.0 + 51237.0 / 86400.0)?;
+    let utc = 37813.0 + 29637.0 / 86400.0;
+    date(c, doc, "root/datetimetz", utc, 1e-9, utc)?;
     date(c, doc, "root/date", 665_413.0, 0.5, 665_413.0)?;
     date(c, doc, "root/time", 0.581_388_9, 5e-8, 50232.0 / 86400.0)?;
-    date(c, doc, "root/timetz", 1.112_512, 5e-7, 96121.0 / 86400.0)?;
+    // 23:21:01.13+03:21 is 20:00:01.
+    date(c, doc, "root/timetz", 72001.0 / 86400.0, 1e-9, 72001.0 / 86400.0)?;
 
     let mut v = value_of(c, doc, "root/binhex", VT_BYTES)?;
     bytes(c, &mut v, &[0xff, 0xfc, 0xa0, 0x12, 0x00, 0x3c])?;
@@ -317,14 +320,9 @@ fn get_values(c: &mut Checks, doc: Obj) -> Result<(), u32> {
         bytes(c, &mut v, b"base64 test")?;
     }
 
-    // A text node: the documentation types it as its element.
-    let (hr, node) = select_single(doc, "root/int/text()");
-    c.hr(hr, S_OK)?;
-    let (hr, mut v) = get_typed(node);
-    release(node);
-    c.code(hr, S_OK)?;
-    c.note(v.vt == VT_I4 && v.value[0] as u32 as i32 == -13, u64::from(v.vt))?;
-    v.clear();
+    // A text node in a typed element: its value, untyped (MSXML 6).
+    let mut v = value_of(c, doc, "root/int/text()", VT_BSTR)?;
+    c.var_text(&mut v, "-13")?;
     // An attribute (dt:dt itself): its value, untyped.
     let (hr, node) = select_single(doc, "root/string2/@*");
     c.hr(hr, S_OK)?;
@@ -361,11 +359,7 @@ fn untyped_strings(c: &mut Checks, doc: Obj) -> Result<(), u32> {
             // White space alone: whether loading kept it (Wine's msxml3
             // test has it kept; not settled for MSXML 6, which drops white
             // space between elements).
-            c.eq(u64::from(v.vt), u64::from(VT_BSTR))?;
-            if v.vt == VT_BSTR {
-                info_text("string5 with preserveWhiteSpace", v.value[0] as Bstr);
-            }
-            v.clear();
+            c.var_text(&mut v, "")?;
         } else {
             c.var_text(&mut v, raw)?;
             get_bstr(c, node, GET_TEXT, raw)?;
@@ -548,8 +542,10 @@ fn put_typed_value(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: the BSTR xml_of gave.
     unsafe { SysFreeString(xml) };
     c.note(same, 0)?;
-    // A type the content is not of: not settled.
-    info_hr("put_dataType(boolean) on bin.hex content", put_type(el, Some("boolean")));
+    // A type the content is not of: S_OK (what it leaves is measured
+    // by the info lines).
+    c.hr(put_type(el, Some("boolean")), S_OK)?;
+    after_put("boolean on bin.hex content", el);
     release(el);
     // Typed values of other types are written in the type's form.
     let el = create(c, doc, CREATE_ELEMENT, "b")?;
@@ -561,7 +557,7 @@ fn put_typed_value(c: &mut Checks) -> Result<(), u32> {
 
     // A document or fragment has no value.
     let s = Wide::new("x");
-    c.code(put_typed(doc, Variant::bstr(&s)), E_FAIL)?;
+    c.code(put_typed(doc, Variant::bstr(&s)), E_INVALIDARG)?;
     release(doc);
     Ok(())
 }
@@ -584,7 +580,8 @@ fn put_data_type(c: &mut Checks) -> Result<(), u32> {
     c.hr(call!(doc, APPEND_CHILD, fn(Obj, *mut Obj) -> HResult, root, null_mut()), S_OK)?;
     c.hr(put_type(root, None), E_INVALIDARG)?;
     let names = [
-        ("abcdefg", E_FAIL),
+        // MSXML 6 takes an unknown name (Wine's msxml3 test has E_FAIL).
+        ("abcdefg", S_OK),
         ("Boolean", S_OK),
         ("String", S_OK),
         ("number", S_OK),
@@ -637,19 +634,27 @@ fn put_data_type(c: &mut Checks) -> Result<(), u32> {
         c.hr(hr, S_OK)?;
         c.hr(call!(root, APPEND_CHILD, fn(Obj, *mut Obj) -> HResult, node, null_mut()), S_OK)?;
         c.hr(put_type(node, None), E_INVALIDARG)?;
-        c.hr(put_type(node, Some("string")), E_FAIL)?;
-        c.hr(put_type(node, Some("number")), E_FAIL)?;
+        // MSXML 6: E_INVALIDARG (Wine's msxml3 test has E_FAIL).
+        c.hr(put_type(node, Some("string")), E_INVALIDARG)?;
+        c.hr(put_type(node, Some("number")), E_INVALIDARG)?;
         release(node);
     }
-    // A text node and an attribute: not settled.
+    // A text node: E_INVALIDARG; an attribute: S_OK (what it leaves is
+    // measured by the info lines).
     let mut t: Obj = null_mut();
     let w = Wide::new("text");
     c.hr(call!(doc, CREATE_TEXT_NODE, fn(Bstr, *mut Obj) -> HResult, w.0, &mut t), S_OK)?;
-    info_hr("put_dataType(text node, int)", put_type(t, Some("int")));
+    c.hr(put_type(t, Some("int")), E_INVALIDARG)?;
     release(t);
     let a = create(c, doc, CREATE_ATTRIBUTE, "a")?;
-    info_hr("put_dataType(attribute, int)", put_type(a, Some("int")));
+    c.hr(put_type(a, Some("int")), S_OK)?;
+    after_put("int on an attribute", a);
     release(a);
+    // An unknown name on an element: S_OK (as above).
+    let el = create(c, doc, CREATE_ELEMENT, "u")?;
+    c.hr(put_type(el, Some("abcdefg")), S_OK)?;
+    after_put("abcdefg", el);
+    release(el);
     release(root);
     release(doc);
     Ok(())
@@ -716,45 +721,70 @@ fn xmlns_attribute(c: &mut Checks) -> Result<(), u32> {
 }
 
 /// What neither Wine's tests nor the documentation settle: `info` lines.
+/// What a put_dataType that MSXML 6 takes leaves: `info typed <case>`
+/// lines with the node's dataType and typed value.
+fn after_put(case: &str, node: Obj) {
+    let (hr, mut v) = get_type(node);
+    info(case, "dataType", hr as u32 as u64);
+    if v.vt == VT_BSTR {
+        info_text("dataType", v.value[0] as Bstr);
+    }
+    v.clear();
+    let (hr, mut v) = get_typed(node);
+    info(case, "nodeTypedValue", hr as u32 as u64);
+    info(case, "nodeTypedValue vt", u64::from(v.vt));
+    if v.vt == VT_BSTR {
+        info_text("nodeTypedValue", v.value[0] as Bstr);
+    }
+    v.clear();
+}
+
+/// Typed content Wine's tests do not cover, as MSXML 6 answers on
+/// Windows: i8 and ui8 read as their text, char as a VT_I4, an empty
+/// int as VT_NULL; malformed content and an unknown type fail the load.
 fn unsettled(c: &mut Checks) -> Result<(), u32> {
     let doc = new_doc(c)?;
-    let cases = [
-        ("i8", "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"i8\">5</x>"),
-        ("ui8", "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"ui8\">5</x>"),
-        ("char", "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"char\">u</x>"),
-        ("empty int", "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"int\"/>"),
-        (
-            "malformed int",
-            "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"int\">abc</x>",
-        ),
-        (
-            "unknown type",
-            "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=\"nosuch\">x</x>",
-        ),
-    ];
-    for (name, xml) in cases {
-        let (hr, ok) = load_xml(doc, xml);
-        info(name, "loadXML", hr as u32 as u64);
-        info(name, "loadXML ok", ok as u16 as u64);
-        if ok != VARIANT_TRUE {
-            continue;
-        }
+    const X: &str = "<x xmlns:dt=\"urn:schemas-microsoft-com:datatypes\" dt:dt=";
+    for (ty, xml, vt, text) in [
+        ("i8", "\"i8\">5</x>", VT_BSTR, Some("5")),
+        ("ui8", "\"ui8\">5</x>", VT_BSTR, Some("5")),
+        ("char", "\"char\">u</x>", VT_I4, None),
+        ("int", "\"int\"/>", VT_NULL, None),
+    ] {
+        c.eq(load_xml2(doc, X, xml).1 as u16 as u64, VARIANT_TRUE as u16 as u64)?;
         let (hr, root) = get_obj(doc, GET_DOCUMENT_ELEMENT);
         c.hr(hr, S_OK)?;
         let (hr, mut v) = get_typed(root);
-        info(name, "nodeTypedValue", hr as u32 as u64);
-        info(name, "nodeTypedValue vt", u64::from(v.vt));
-        v.clear();
-        let (hr, mut v) = get_type(root);
-        info(name, "dataType", hr as u32 as u64);
-        if v.vt == VT_BSTR {
-            info_text("dataType", v.value[0] as Bstr);
+        c.hr(hr, S_OK)?;
+        c.eq(u64::from(v.vt), u64::from(vt))?;
+        match text {
+            Some(t) => c.var_text(&mut v, t)?,
+            None if vt == VT_I4 => {
+                info("char", "value", v.value[0] as u32 as u64);
+                v.clear();
+            }
+            None => v.clear(),
         }
-        v.clear();
+        let (hr, mut v) = get_type(root);
+        c.hr(hr, S_OK)?;
+        c.var_text(&mut v, ty)?;
         release(root);
+    }
+    for xml in ["\"int\">abc</x>", "\"nosuch\">x</x>"] {
+        c.eq(load_xml2(doc, X, xml).1 as u16 as u64, VARIANT_FALSE as u16 as u64)?;
     }
     release(doc);
     Ok(())
+}
+
+/// loadXML of `head` and `tail` joined.
+fn load_xml2(doc: Obj, head: &str, tail: &str) -> (HResult, i16) {
+    let mut buf = [0u8; 160];
+    let n = head.len() + tail.len();
+    buf[..head.len()].copy_from_slice(head.as_bytes());
+    buf[head.len()..n].copy_from_slice(tail.as_bytes());
+    // SAFETY: two str's bytes, so UTF-8.
+    load_xml(doc, unsafe { core::str::from_utf8_unchecked(&buf[..n]) })
 }
 
 /// `<name>: info typed <case> <what> <value>`.
