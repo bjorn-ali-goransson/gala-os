@@ -4919,6 +4919,29 @@ built for x64 and x86.
   the validation error codes are the documented ones, the exact code
   for each case and the reasons' text are gala's (`msxml_test`'s `info`
   lines until a Windows run); validation stops at the first error.
+- **Typed values** (`com/typed.rs`): nodeTypedValue and dataType read
+  the element's `dt:dt` attribute (namespace
+  `urn:schemas-microsoft-com:datatypes`, local name `dt`, the name's
+  case ignored); the XDR/DTD data types are the only typed ones, so an
+  element an XSD schema validated reads as a string (VT_BSTR), as in
+  MSXML 6. get on a typed element gives the type's variant (int and the
+  sized integers their VT, number and r8 VT_R8, r4 VT_R4, fixed.14.4
+  VT_CY, boolean VT_BOOL, dates as OLE dates from 1899-12-30 with the
+  zone's offset applied and the fraction of a second dropped, bin.hex
+  and bin.base64 a VT_ARRAY|VT_UI1 SAFEARRAY, uuid, uri and the rest a
+  BSTR); an untyped element gives its text (trimmed unless
+  preserveWhiteSpace), a text or CDATA node its parent's type, other
+  nodes their value, the document and a fragment S_FALSE and VT_NULL.
+  Empty content of a non-string type is VT_NULL with S_OK; content that
+  does not read as its type is E_FAIL with a ledger line (`malformed`).
+  put writes the variant as the type's text (hex lowercase, base64 with
+  no line breaks) and replaces the element's children with it; on the
+  document and a fragment it is E_FAIL. put_dataType checks the content
+  reads as the new type (E_FAIL if not), updates an existing `dt:dt`, or
+  declares `xmlns:dt` (when `dt` is unbound) and adds `dt:dt`; an
+  unknown type name is E_FAIL, a node other than an element E_FAIL.
+  Limits: i8 and ui8 read as VT_NULL (recorded); an unknown type name
+  in a document reads as a string and is recorded in the ledger.
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): the character
   data editors (put_data, substringData, appendData, insertData,
@@ -4926,7 +4949,7 @@ built for x64 and x86.
   put_data), createEntityReference, save to a stream, the XSLT
   processor's addObject and get_readyState, the schema cache's
   getSchema, getDeclaration and
-  enumerator (the Schema Object Model), typed values, the event handlers, abort,
+  enumerator (the Schema Object Model), the event handlers, abort,
   nodeFromID, the selection's own methods and the enumerators
   (`get__newEnum`). Implement them when a program's run reaches one.
 - **To measure on Windows** (`msxml_test`'s `info` lines): what
@@ -4946,7 +4969,12 @@ built for x64 and x86.
   App-V-shaped results (which prefix a namespace gets, where its
   declaration goes: gala makes up `ns<N>` for an attribute's namespace
   no prefix is bound to) and the prefix the alias step's elements get
-  (gala: the one declared on the root).
+  (gala: the one declared on the root); for typed values, put_dataType
+  on a text node or an attribute (gala E_FAIL), the variant of i8 and
+  ui8 (gala VT_NULL) and of char (gala VT_I4), empty content of a
+  non-string type (gala VT_NULL), malformed content (gala E_FAIL), an
+  unknown type name (gala: a string, dataType S_FALSE) and whether
+  loading keeps whitespace-only text.
 
 ### RPC: rpcrt4
 

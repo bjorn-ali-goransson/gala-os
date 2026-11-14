@@ -75,7 +75,7 @@ fn dispatch(obj: Obj) -> Variant {
     Variant { vt: VT_DISPATCH, reserved: [0; 3], value: [obj as usize, 0] }
 }
 
-fn new_doc(c: &mut Checks) -> Result<Obj, u32> {
+pub(super) fn new_doc(c: &mut Checks) -> Result<Obj, u32> {
     let mut doc: Obj = null_mut();
     // SAFETY: valid GUIDs and output.
     let hr = unsafe {
@@ -92,7 +92,7 @@ fn new_doc(c: &mut Checks) -> Result<Obj, u32> {
 }
 
 /// createElement, createTextNode, createComment or createAttribute.
-fn create(c: &mut Checks, doc: Obj, slot: usize, name: &str) -> Result<Obj, u32> {
+pub(super) fn create(c: &mut Checks, doc: Obj, slot: usize, name: &str) -> Result<Obj, u32> {
     let n = Wide::new(name);
     let mut out: Obj = null_mut();
     c.hr(call!(doc, slot, fn(Bstr, *mut Obj) -> HResult, n.0, &mut out), S_OK)?;
@@ -154,7 +154,7 @@ fn has_children(obj: Obj) -> HResult {
     call!(obj, HAS_CHILD_NODES, fn(*mut i16) -> HResult, &mut b)
 }
 
-fn xml_is(c: &mut Checks, obj: Obj, want: &str) -> Result<(), u32> {
+pub(super) fn xml_is(c: &mut Checks, obj: Obj, want: &str) -> Result<(), u32> {
     get_bstr(c, obj, GET_XML, want)
 }
 

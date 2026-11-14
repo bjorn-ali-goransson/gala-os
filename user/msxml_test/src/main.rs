@@ -75,7 +75,10 @@
 //! - XSLT (`xslt`: XSLTemplate60 and its processor, transformNode,
 //!   transformNodeToObject into a document and streams, and transforms
 //!   shaped like the ones App-V runs on a package manifest before it
-//!   validates it).
+//!   validates it);
+//! - typed values (`typed`: nodeTypedValue and dataType of elements
+//!   typed by `dt:dt`, the values Click-to-Run's App-V pieces read from
+//!   a package's deployment configuration).
 //!
 //! The same source builds `wow64_msxml_test`, the 32-bit (x86) program.
 //! Prints `msxml_test: ok` (`wow64_msxml_test: ok`), or `<name>: check N
@@ -321,6 +324,7 @@ macro_rules! call {
 
 mod mutation;
 mod schema;
+mod typed;
 mod xslt;
 
 fn release(obj: Obj) {
@@ -1348,6 +1352,8 @@ fn run() -> Result<(), u32> {
     mutation::mutation(&mut c, doc)?;
     mutation::section("schema");
     schema::schema(&mut c)?;
+    mutation::section("typed");
+    typed::typed(&mut c)?;
     mutation::section("free-threaded");
     free_threaded(&mut c)?;
     xslt::xslt(&mut c)?;
