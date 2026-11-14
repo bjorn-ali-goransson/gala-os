@@ -1215,6 +1215,8 @@ struct Dll {
 const USER_DLLS: &[Dll] = &[
     Dll { package: "testdll", file: "testdll.dll", exported_as: "testdll.dll" },
     Dll { package: "testdll2", file: "testdll2.dll", exported_as: "testdll2.dll" },
+    // Imports testdll's ordinal 2, which has no export (loader_test).
+    Dll { package: "testdll_gap", file: "testdll_gap.dll", exported_as: "testdll_gap.dll" },
     // imagetrim_test's DLL of known contents.
     Dll { package: "imagetrim_dll", file: "imagetrim_dll.dll", exported_as: "imagetrim_dll.dll" },
     Dll { package: "tlsdll", file: "tlsdll.dll", exported_as: "tlsdll.dll" },
@@ -1541,6 +1543,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "ntdll.dll", "Windows/System32"),
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
+    ("loader_test", "testdll_gap.dll", "gala"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
@@ -6391,7 +6394,13 @@ const SCENARIOS: &[Scenario] = &[
         name: "loader_test",
         cmdline: "qemu_exit run=loader_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["loader_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            // testdll's ordinal 2 has no export (RVA 0): asked for, and
+            // imported by testdll_gap.dll, it is a missing export.
+            r#"ledger: {"service":"testdll.dll!#2","what":"missing export""#,
+            "loader_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "smp_test",

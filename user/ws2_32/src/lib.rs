@@ -2760,6 +2760,108 @@ pub extern "system" fn getservbyname(_name: *const u8, _proto: *const u8) -> *co
     core::ptr::null()
 }
 
+/// PROTOENT (winsock2.h).
+#[repr(C)]
+pub struct ProtoEnt {
+    name: *const u8,
+    aliases: *const *const u8,
+    proto: i16,
+}
+
+/// The protocol entries and their NULL-ended alias lists (one alias
+/// each), built at compile time.
+struct Aliases([[*const u8; 2]; 19]);
+struct Entries([ProtoEnt; 19]);
+
+// SAFETY: both hold only pointers to static data and are never written;
+// sharing them between threads is sound.
+unsafe impl Sync for Aliases {}
+// SAFETY: as above.
+unsafe impl Sync for Entries {}
+
+/// The protocol database: the entries of Windows' default
+/// `%SystemRoot%\System32\drivers\etc\protocol` (name, number, alias).
+/// gala reads no protocol file; this table is that file's content.
+const PROTOCOLS: [(&[u8], i16, &[u8]); 19] = [
+    (b"ip\0", 0, b"IP\0"),
+    (b"icmp\0", 1, b"ICMP\0"),
+    (b"ggp\0", 3, b"GGP\0"),
+    (b"tcp\0", 6, b"TCP\0"),
+    (b"egp\0", 8, b"EGP\0"),
+    (b"pup\0", 12, b"PUP\0"),
+    (b"udp\0", 17, b"UDP\0"),
+    (b"hmp\0", 20, b"HMP\0"),
+    (b"xns-idp\0", 22, b"XNS-IDP\0"),
+    (b"rdp\0", 27, b"RDP\0"),
+    (b"ipv6\0", 41, b"IPv6\0"),
+    (b"ipv6-route\0", 43, b"IPv6-Route\0"),
+    (b"ipv6-frag\0", 44, b"IPv6-Frag\0"),
+    (b"esp\0", 50, b"ESP\0"),
+    (b"ah\0", 51, b"AH\0"),
+    (b"ipv6-icmp\0", 58, b"IPv6-ICMP\0"),
+    (b"ipv6-nonxt\0", 59, b"IPv6-NoNxt\0"),
+    (b"ipv6-opts\0", 60, b"IPv6-Opts\0"),
+    (b"rvd\0", 66, b"RVD\0"),
+];
+
+static ALIASES: Aliases = {
+    let mut out = [[core::ptr::null(); 2]; 19];
+    let mut i = 0;
+    while i < PROTOCOLS.len() {
+        out[i][0] = PROTOCOLS[i].2.as_ptr();
+        i += 1;
+    }
+    Aliases(out)
+};
+
+static ENTRIES: Entries = {
+    let mut out =
+        [const { ProtoEnt { name: core::ptr::null(), aliases: core::ptr::null(), proto: 0 } }; 19];
+    let mut i = 0;
+    while i < PROTOCOLS.len() {
+        out[i].name = PROTOCOLS[i].0.as_ptr();
+        out[i].aliases = ALIASES.0[i].as_ptr();
+        out[i].proto = PROTOCOLS[i].1;
+        i += 1;
+    }
+    Entries(out)
+};
+
+fn protoent(i: usize) -> *const ProtoEnt {
+    &ENTRIES.0[i]
+}
+
+/// getprotobyname (ordinal 53): the protocol whose name or alias is
+/// `name` (ASCII case-insensitive), or NULL with WSANO_DATA.
+#[unsafe(no_mangle)]
+pub extern "system" fn getprotobyname(name: *const u8) -> *const ProtoEnt {
+    if !name.is_null() {
+        // SAFETY: the caller's NUL-terminated string.
+        let want = unsafe { core::slice::from_raw_parts(name, strlen(name)) };
+        for (i, (n, _, alias)) in PROTOCOLS.iter().enumerate() {
+            let (n, alias) = (&n[..n.len() - 1], &alias[..alias.len() - 1]);
+            if n.eq_ignore_ascii_case(want) || alias.eq_ignore_ascii_case(want) {
+                return protoent(i);
+            }
+        }
+    }
+    set_last_error(WSANO_DATA);
+    core::ptr::null()
+}
+
+/// getprotobynumber (ordinal 54): the protocol numbered `number`, or NULL
+/// with WSANO_DATA.
+#[unsafe(no_mangle)]
+pub extern "system" fn getprotobynumber(number: i32) -> *const ProtoEnt {
+    match PROTOCOLS.iter().position(|p| i32::from(p.1) == number) {
+        Some(i) => protoent(i),
+        None => {
+            set_last_error(WSANO_DATA);
+            core::ptr::null()
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn getservbyport(_port: i32, _proto: *const u8) -> *const u8 {
     set_last_error(WSANO_DATA);

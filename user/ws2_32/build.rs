@@ -28,6 +28,8 @@ fn main() {
         ("socket", 23),
         ("gethostbyaddr", 51),
         ("gethostbyname", 52),
+        ("getprotobyname", 53),
+        ("getprotobynumber", 54),
         ("getservbyport", 56),
         ("getservbyname", 55),
         ("gethostname", 57),

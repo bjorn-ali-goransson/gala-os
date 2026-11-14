@@ -2714,7 +2714,12 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   directories, then USERNAME, USERPROFILE (ProfileImagePath; the service
   accounts' own; no token: Default), APPDATA, LOCALAPPDATA and the
   user's `Environment` and `Volatile Environment` keys, in name order in
-  a process-heap block. LoadUserProfileW (callers
+  a process-heap block. ExpandEnvironmentStringsForUserW expands
+  `%NAME%` against that block built without inheriting (no token: the
+  system's variables), a name set nowhere left as written, and fails
+  with ERROR_INSUFFICIENT_BUFFER when the result and its NUL do not fit
+  (App-V's AppVIntegration.dll delay-loads it; office_api_test).
+  LoadUserProfileW (callers
   holding SeBackup and SeRestore, as services do; else
   ERROR_PRIVILEGE_NOT_HELD) creates the profile directory
   `C:\Users\<lpUserName>` (full control for the user, SYSTEM and
@@ -3150,9 +3155,17 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   NtCreateSection(SEC_IMAGE) + NtMapViewOfSection, the IAT filled under
   NtProtectVirtualMemory, the entry point called; a real ntdll needs no
   kernel support beyond those calls. When an import cannot be bound the
-  loader reports every missing `dll!function` before failing the process
-  with STATUS_ENTRYPOINT_NOT_FOUND, as Windows does
-  (`missing_import_test`).
+  loader reports every missing `dll!function` (`dll!#N` for an import
+  by ordinal) before failing the process with STATUS_ENTRYPOINT_NOT_FOUND,
+  or STATUS_ORDINAL_NOT_FOUND when the first missing import is by
+  ordinal, as Windows does (`missing_import_test`, `loader_test`).
+  Invariant: an export address table slot holding RVA 0 is no export
+  (the linker leaves one for each unused ordinal below the highest a DLL
+  numbers explicitly), never the module's base: an import of it is
+  missing and LdrGetProcedureAddress fails with STATUS_ORDINAL_NOT_FOUND
+  (`loader_test` over `testdll`'s gap at ordinal 2 and `testdll_gap`,
+  which imports it). The kernel's PE parser (`nt/pe.rs` `find_export`)
+  keeps the same rule, and bounds the ordinal by NumberOfFunctions.
 - **Module table**: `LdrLoadDll`/`LdrGetProcedureAddress`/
   `LdrGetDllHandle`/`LdrUnloadDll`, 256 modules with up to 64
   dependencies each, with reference counts; a DLL not found, a full table
@@ -4654,7 +4667,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   Click-to-Run UI imports them by ordinal);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
-  recorded. Type libraries are not registered. Its exports have
+  recorded. Type libraries are neither loaded nor registered:
+  LoadTypeLib(Ex) and LoadRegTypeLib fail, RegisterTypeLib (#163) and
+  UnRegisterTypeLib (#186, which OfficeClickToRun.exe imports by
+  ordinal) fail with TYPE_E_REGISTRYACCESS, recorded (RegisterTypeLib
+  with a NULL library or path is E_INVALIDARG). Its exports have
   Windows' ordinals (build.rs, from Wine's spec); Get/Set/CreateErrorInfo
   forward to ole32.
 
@@ -5126,7 +5143,15 @@ of their own, clients of it) is the yardstick.
   E_INVALIDARG on a fixed folder); RegisterFolder, UnregisterFolder,
   Redirect, SetPath on another folder, GetShellItem, GetIDList,
   GetFolderType and FindFolderFromIDList return E_NOTIMPL and are
-  recorded (`knownfolder_test`, x64 and x86),
+  recorded (`knownfolder_test`, x64 and x86). SHCreateDirectoryExW and
+  SHCreateDirectory (ordinal 165, which App-V's AppVCatalog.dll imports
+  by number) create a folder and every missing folder above it: a
+  relative path is ERROR_BAD_PATHNAME, MAX_PATH or more
+  ERROR_FILENAME_EXCED_RANGE, an existing folder ERROR_ALREADY_EXISTS,
+  and the error is also the thread's last error; the security
+  attributes apply to the last folder only; a failure with a window is
+  recorded, as gala shows no message box (`knownfolder_test`, from
+  Wine's shlfileop conformance test). Also
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),
@@ -6487,7 +6512,11 @@ SOCKET values are the endpoint handles.
   2 s; NXDOMAIN is WSAHOST_NOT_FOUND, no A record WSANO_DATA, no answer
   WSATRY_AGAIN, no network card WSAHOST_NOT_FOUND at once;
   AI_NUMERICHOST skips it; no cache). gethostbyname/gethostbyaddr are
-  recorded as missing.
+  recorded as missing. getprotobyname/getprotobynumber (ordinals 53 and
+  54; Python's _socket.pyd imports #53) answer from a built-in copy of
+  Windows' default `drivers\etc\protocol` (19 entries, name and one
+  alias each, names matched case-insensitively); an unknown name or
+  number is NULL with WSANO_DATA. gala reads no protocol file.
 - Datagram sockets: socket/WSASocketW with SOCK_DGRAM (protocol 0 or
   IPPROTO_UDP) open a `\Device\Udp` endpoint and record SO_TYPE in the
   per-socket options table (what getsockopt(SO_TYPE) and

@@ -3,7 +3,10 @@
 //! LdrGetDllHandle and LdrUnloadDll. testdll.dll and testdll2.dll (which
 //! imports from testdll) sit next to the exe; neither is imported, so the
 //! loader maps them on demand. Checks reference counting, lookup by name
-//! and by ordinal, the error statuses, that DllMain sees one
+//! and by ordinal, the error statuses (an ordinal inside the range whose
+//! export address table slot is 0, testdll's #2, is no export, and
+//! testdll_gap.dll, which imports it, does not load: checked on gala, the
+//! answers printed as `info` lines on Windows), that DllMain sees one
 //! DLL_PROCESS_ATTACH, and that a DLL's own imports are bound.
 //!
 //! PEB.Ldr (PEB_LDR_DATA, LDR_DATA_TABLE_ENTRY: the layouts winternl.h
@@ -40,6 +43,7 @@ use ntrt::*;
 
 const STATUS_ENTRYPOINT_NOT_FOUND: NtStatus = 0xc000_0139;
 const STATUS_DLL_NOT_FOUND: NtStatus = 0xc000_0135;
+const STATUS_ORDINAL_NOT_FOUND: NtStatus = 0xc000_0138;
 const INITIAL_VALUE: u64 = 0x1234_5678_9abc;
 
 #[repr(C)]
@@ -139,6 +143,16 @@ fn c_str(addr: usize) -> &'static [u8] {
         }
         core::slice::from_raw_parts(addr as *const u8, n)
     }
+}
+
+/// An `info` line: what Windows answers, for the record.
+fn info(what: &str, v: u64) {
+    print("loader_test: info ");
+    print(what);
+    print(" ");
+    write_file(stdout(), &hex32((v >> 32) as u32));
+    write_file(stdout(), &hex32(v as u32));
+    print("\r\n");
 }
 
 /// The ordinal of export `name` of the image at `base` (Base plus its
@@ -489,6 +503,36 @@ fn run() -> Result<(), u32> {
     let (s, _) = api.proc(dll, b"no_such_export");
     // By name: STATUS_ENTRYPOINT_NOT_FOUND (Windows 11 25H2).
     c.eq(s.into(), STATUS_ENTRYPOINT_NOT_FOUND.into())?;
+    // An ordinal past the highest (gala: STATUS_ORDINAL_NOT_FOUND).
+    let (s, _) = api.proc_by_ordinal(dll, 0xfff0);
+    info("ordinal past the highest: status", s.into());
+    if on_gala() {
+        c.eq(s.into(), STATUS_ORDINAL_NOT_FOUND.into())?;
+    }
+    // An ordinal inside the range with no export: testdll numbers gala_add
+    // 1 and gala_get_value 3 (its build.rs), so the export address table's
+    // slot for 2 holds RVA 0. GetProcAddress's documentation warns that
+    // Windows may answer such a gap with a non-NULL address: printed to
+    // measure; gala answers STATUS_ORDINAL_NOT_FOUND, never the image's
+    // base (an import bound there runs the DOS header).
+    c.eq(ordinal_of(dll, b"gala_get_value").map_or(0, u64::from), u64::from(ordinal) + 2)?;
+    let (s, gap) = api.proc_by_ordinal(dll, ordinal + 1);
+    info("ordinal with no export: status", s.into());
+    info("ordinal with no export: address - base", (gap as u64).wrapping_sub(dll as u64));
+    if on_gala() {
+        c.eq(s.into(), STATUS_ORDINAL_NOT_FOUND.into())?;
+    }
+    // A DLL importing that ordinal: on gala the load fails as for any
+    // missing ordinal (and the ledger names `testdll.dll!#2`, the
+    // scenario checks it); Windows' answer is printed.
+    let (s, gap_dll) = api.load(&wide!("testdll_gap.dll"));
+    info("import of an ordinal with no export: load status", s.into());
+    if on_gala() {
+        c.eq(s.into(), STATUS_ORDINAL_NOT_FOUND.into())?;
+    }
+    if s == STATUS_SUCCESS {
+        (api.unload)(gap_dll);
+    }
     let (s, count) = api.proc(dll, b"GALA_ATTACH_COUNT");
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     // SAFETY: testdll's exported counter.

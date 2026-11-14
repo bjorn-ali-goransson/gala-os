@@ -1441,6 +1441,12 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   DLLs loaded at run time (LoadLibrary: the JDK's launcher loads msvcp140
   and jvm.dll) are not in the closure: boot and read the ledger
   (`"what":"missing dll"`, `missing export`).
+- A DLL whose exports carry standard ordinals (ws2_32's Winsock 1.1
+  numbering in `user/ws2_32/build.rs`) leaves an empty slot for every
+  ordinal between two it assigns; a program importing one fails to load
+  (`dll!#N missing export`, LoadLibrary error 182). Give every ordinal
+  in the assigned range its function (ws2_32 #53, #54:
+  getprotobyname/getprotobynumber, which Python's _socket.pyd needs).
 - A DLL Windows names other than `.dll` (`winspool.drv`): its
   USER_DLLS entry's `file` is that name; cargo builds `<package>.dll`
   and xtask's `built_dll` ships it under the right name.
@@ -2831,7 +2837,10 @@ about a minute under TCG. Read, in order:
 - Imports by ordinal (`#N`) need the ordinal pinned in the DLL's
   build.rs (`/EXPORT:name,@N`, the number checked in Wine's .spec, not
   recalled): an unpinned DLL numbers its exports arbitrarily, so `#N`
-  binds to an unrelated function and the survey cannot tell.
+  binds to an unrelated function and the survey cannot tell. An
+  ordinal below the highest pinned one that names nothing is an RVA-0
+  slot in the export table: the loader treats it as missing (ledger
+  `dll!#N`), so a crash at `<dll>+0x0` is not that symptom any more.
 - A `Check failed` with an unresolved backtrace (`Symbols not available.
   Dumping unresolved backtrace`): symbolize it (below). chrome.dll is
   mapped at its system-wide alternative base, the same every run

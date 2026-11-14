@@ -58,6 +58,8 @@ fn main() {
         ("VariantTimeToSystemTime", 185),
         ("LoadTypeLib", 161),
         ("LoadRegTypeLib", 162),
+        ("RegisterTypeLib", 163),
+        ("UnRegisterTypeLib", 186),
         ("QueryPathOfRegTypeLib", 164),
         ("LoadTypeLibEx", 183),
         ("VarCyFromDec", 228),

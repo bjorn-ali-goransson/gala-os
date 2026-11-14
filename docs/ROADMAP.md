@@ -2138,21 +2138,47 @@ need gala's.
      With them (as first written, before that alignment: a run with
      the aligned msxml6 is to confirm) ConfigurePackage succeeds, the service updates
      the App-V configuration and merges and saves the AppX manifests
-     (`ThinAppXManifest.xml`), then OfficeClickToRun.exe dies of an
-     access violation executing shell32.dll+0 from AppVCatalog.dll,
-     about 1735 s after boot; setup then waits until the scenario's
-     timeout. The cause is the loader: AppVCatalog.dll imports
-     `SHELL32.dll!#165` (its import table), gala's shell32 does not
-     export ordinal 165 (its export table has that slot, RVA 0), and
-     `testntdll`'s `export_at_depth` returns base + RVA without
-     checking for 0, so the import binds to the module's base with no
-     `missing export` line. Next: (1) the loader treats an RVA of 0 as
-     no export (an import by it is a missing export, recorded as
-     `shell32.dll!#165`; GetProcAddress fails with
-     STATUS_ORDINAL_NOT_FOUND), test first in `loader_test`; (2)
-     shell32's ordinal 165, SHCreateDirectory (documented: hwnd and a
-     path, the result of SHCreateDirectoryExW), test first in
-     `knownfolder_test` or a shell32 test. Seen too,
+     (`ThinAppXManifest.xml`), then OfficeClickToRun.exe died of an
+     access violation executing shell32.dll+0 from AppVCatalog.dll
+     (about 1735 s after boot): AppVCatalog.dll imports
+     `SHELL32.dll!#165`, which gala's shell32 did not export, and the
+     loader bound the empty ordinal slot (RVA 0) to the module's base.
+     Done: the loader treats an RVA of 0 as no export (an import of it
+     is a missing export, `dll!#N` in the ledger, the load failing with
+     STATUS_ORDINAL_NOT_FOUND; LdrGetProcedureAddress fails the same
+     way; the kernel's `find_export` too), test first in `loader_test`
+     (`testdll`'s ordinal gap, `testdll_gap` importing it); shell32's
+     ordinal 165, SHCreateDirectory, with SHCreateDirectoryExW, test
+     first in `knownfolder_test` (x64 and x86, by ordinal, Wine's
+     shlfileop tests). With the loader fix OfficeClickToRun.exe no
+     longer started (0xc0000138): it imports oleaut32's RegisterTypeLib
+     (#163) and UnRegisterTypeLib (#186), which had bound to the base
+     unnoticed; both are exported at their ordinals now and fail with
+     TYPE_E_REGISTRYACCESS, recorded (`oleaut32_test`; gala loads no
+     type library). Then OfficeClickToRun.exe got past the App-V
+     catalog and died of 0xc06d007f (delay-loaded function not found)
+     in AppVIntegration.dll: `USERENV.dll!ExpandEnvironmentStringsForUserW`,
+     a named stub (GetProcAddress treats stubs as absent). Done:
+     ExpandEnvironmentStringsForUserW against the user's environment
+     block, test first in `office_api_test` (Microsoft's documentation).
+     Next: with that, the App-V integration runs and the install
+     reaches its fonts task, but its second integrator.exe
+     (`root\Integration\Integrator.exe`, about 2450 s after boot) dies
+     of 0xc06d007e (delay-loaded DLL not found): `osppc.dll!SLOpen`.
+     osppc.dll is not on the disk when the first integrator.exe starts
+     (`disk-files` over the snapshot's image finds no osppc.dll under
+     `C:\Program Files`); first find, from the Click-to-Run service log
+     (`C:\Windows\Temp`, read from a resumed run's kept layer) and the
+     ledger, whether the install lays it down later and where
+     integrator.exe looks for it (its directory, a `vfs` path, a
+     SetDllDirectory/AddDllDirectory path), or whether the task that
+     runs it expects it from an earlier step that failed. Its failure
+     fails the install: the service ends with 17002 and setup.exe with
+     0x426a (17002, "C2RClient returned a failing exit code").
+     To measure on Windows (`loader_test`'s `info`
+     lines): GetProcAddress for an ordinal in a gap (documented as
+     possibly an invalid non-NULL address) and the status of loading a
+     DLL that imports one. Seen too,
      not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
      and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
      on Windows (`msxml_test`'s `info` lines): a string output's

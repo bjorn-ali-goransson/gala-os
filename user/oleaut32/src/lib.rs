@@ -18,7 +18,6 @@ mod date;
 mod decimal;
 mod font;
 mod safearray;
-mod unimplemented;
 mod variant;
 
 // The 32-bit build (SysWOW64) takes the memory routines, 64-bit
@@ -78,6 +77,7 @@ pub const E_INVALIDARG: HResult = 0x8007_0057u32 as i32;
 pub const DISP_E_OVERFLOW: HResult = 0x8002_000au32 as i32;
 const TYPE_E_LIBNOTREGISTERED: HResult = 0x8002_801du32 as i32;
 const TYPE_E_CANTLOADLIBRARY: HResult = 0x8002_9c4au32 as i32;
+const TYPE_E_REGISTRYACCESS: HResult = 0x8002_801cu32 as i32;
 
 pub fn missing(function: &[u8], detail: u64) {
     // SAFETY: a valid buffer.
@@ -345,6 +345,39 @@ pub extern "system" fn LoadTypeLibEx(
     clear_out(out);
     missing(b"oleaut32.dll!LoadTypeLibEx", kind.into());
     TYPE_E_CANTLOADLIBRARY
+}
+
+/// Registering a type library writes its `TypeLib` and `Interface` keys
+/// from what the ITypeLib reports. gala loads no type library itself
+/// (LoadTypeLibEx above), and no program so far registers one it built,
+/// so this fails with the documented registry error and is recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterTypeLib(
+    library: *mut c_void,
+    path: *const u16,
+    _help_dir: *const u16,
+) -> HResult {
+    if library.is_null() || path.is_null() {
+        return E_INVALIDARG;
+    }
+    missing(b"oleaut32.dll!RegisterTypeLib(not supported)", 0);
+    TYPE_E_REGISTRYACCESS
+}
+
+/// Unregistering removes the library's `TypeLib\{libid}\major.minor`
+/// key and the `Interface` keys of its interfaces, which needs the
+/// library loaded; as RegisterTypeLib, not supported: the documented
+/// registry error, recorded with the major version.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnRegisterTypeLib(
+    _guid: *const u8,
+    major: u16,
+    _minor: u16,
+    _lcid: u32,
+    _syskind: u32,
+) -> HResult {
+    missing(b"oleaut32.dll!UnRegisterTypeLib(not supported)", major.into());
+    TYPE_E_REGISTRYACCESS
 }
 
 #[unsafe(no_mangle)]

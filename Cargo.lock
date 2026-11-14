@@ -1612,7 +1612,6 @@ dependencies = [
 name = "oleaut32"
 version = "0.1.0"
 dependencies = [
- "gala_stubs",
  "ntrt",
 ]
 
@@ -2624,6 +2623,10 @@ name = "testdll32"
 version = "0.1.0"
 
 [[package]]
+name = "testdll_gap"
+version = "0.1.0"
+
+[[package]]
 name = "testntdll"
 version = "0.1.0"
 
@@ -2827,9 +2830,6 @@ dependencies = [
 [[package]]
 name = "userenv"
 version = "0.1.0"
-dependencies = [
- "gala_stubs",
-]
 
 [[package]]
 name = "usvg"
