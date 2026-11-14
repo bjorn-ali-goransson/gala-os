@@ -1223,10 +1223,20 @@ where the site learns it.
   and `llms.txt` (a plain-text brief of the whole site, generated from
   `content.ts` by `src/llms.ts`). None of the three is a second copy of
   the facts: all come from `content.ts`.
+- Page counts come from Ali Web Services: a `defer` script in
+  `web/index.html` carrying the site's public id (THIRD_PARTY "The
+  website"). It is the only third-party request the page makes besides
+  the fonts, it records nothing until it runs, and the page is
+  prerendered, so a visitor who blocks it still reads everything. Query
+  strings are dropped at the service's end, apart from the `utm_*`
+  parameters; no identifiers of gala's own are sent.
 - **CI** (`.github/workflows/website.yml`): a pull request touching
   `web/` builds and typechecks the site; a merge to main builds it and
   publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
-  Pages source is "GitHub Actions").
+  Pages source is "GitHub Actions"). The build asserts what a silent
+  regression would cost: the domain files, real markup rather than an
+  empty shell, the crawler files agreeing with each other, and the
+  analytics script still carrying its site id.
 
 ### Being found
 
@@ -1276,15 +1286,22 @@ Cloudflare. What the zone holds, and why:
 - **Proxying is per record, not per zone.** `updates.gala-os.com`, the
   custom domain in front of the R2 release bucket, is created by
   Cloudflare and is proxied, as R2 custom domains must be. That has no
-  bearing on the apex, which stays DNS-only.
+  bearing on the apex, which stays DNS-only. It is where the update feed
+  is read from: `FEED_URL` in `release.yml` is the only place that URL is
+  written. A custom domain takes a few minutes to leave *Initializing*;
+  while it does, requests answer `403` rather than the `404` an empty
+  bucket gives, which is the state settling and not a misconfiguration.
 - `_domainconnect` and `_dmarc` are the registrar's and the mail setup's,
   and are left alone.
 
 The repository's Pages custom domain is set to `gala-os.com`
 (`gh api repos/OWNER/REPO/pages`). It is also what `web/public/CNAME`
 says; the deploy applies that file, and the two must not disagree.
-Enforce HTTPS can only be turned on once the certificate exists, which
-takes a few minutes after the domain first resolves.
+Enforce HTTPS is on, so the site answers only over TLS and `www` and
+plain HTTP both redirect to `https://gala-os.com/`. It can only be turned
+on once the certificate exists, which takes a few minutes after the
+domain first resolves; asking earlier returns *The certificate does not
+exist yet*.
 
 ### The two pipelines stay apart
 

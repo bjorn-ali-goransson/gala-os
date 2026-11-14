@@ -166,6 +166,7 @@ versions are pinned in `web/package-lock.json` (CI installs with `npm ci`).
 | TypeScript | 5.9.3 | github.com/microsoft/TypeScript | Apache-2.0 | Typechecks `web/src` (`npm run typecheck`, run in CI). Build tool only; no TypeScript code is emitted by it. |
 | Archivo | the Google Fonts release | github.com/Omnibus-Type/Archivo | SIL Open Font License 1.1 | The site's only typeface, loaded by the page from Google Fonts (not committed, not shipped in gala). |
 | JetBrains Mono | the Google Fonts release | github.com/JetBrains/JetBrainsMono | SIL Open Font License 1.1 | The site's monospace, for identifiers (scenario names, DLL names), loaded from Google Fonts. |
+| Ali Web Services Analytics | the hosted service (no pinned version) | analytics.ali-web-services.com | the service's own terms (a hosted service, no code is vendored) | Page counts for gala-os.com. `web/index.html` loads `a.js` from that host with a `defer` script tag carrying the site's public id; nothing of it is committed, and because the page is prerendered, a blocked or failed script costs the count and nothing else. The site is registered there as `gala-os.com` and `www.gala-os.com`. |
 
 ## Host tools used by the build (not linked or shipped)
 
