@@ -4,3 +4,8 @@
 # Agent worktrees (Claude Code)
 .claude/worktrees/
 __pycache__/
+
+# The website (web/): dependencies and build output
+/web/node_modules
+/web/dist
+/web/dist-ssr

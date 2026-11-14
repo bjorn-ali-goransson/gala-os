@@ -1570,6 +1570,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("khotswap_stack", "hotswap_dll.dll", "gala"),
     ("khotswap_both", "ntdll.dll", "Windows/System32"),
     ("khotswap_both", "hotswap_dll.dll", "gala"),
+    ("hotswap_files", "ntdll.dll", "Windows/System32"),
+    ("hotswap_files", "hotswap_dll.dll", "gala"),
+    // hotswap_dll's first build under another name: a DLL loaded only
+    // after the snapshot (`<source>@<name>`, make_iso).
+    ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
@@ -3852,6 +3857,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sppc_test", "ntdll.dll", "Windows/System32"),
     ("sppc_test", "kernel32.dll", "Windows/System32"),
     ("sppc_test", "sppc.dll", "Windows/System32"),
+    // crypt32's SIP registration in the registry (user/sip_test).
+    ("sip_test", "ntdll.dll", "Windows/System32"),
+    ("sip_test", "kernel32.dll", "Windows/System32"),
+    ("sip_test", "advapi32.dll", "Windows/System32"),
+    ("sip_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("sip_test", "crypt32.dll", "Windows/System32"),
+    // wintrust's trust provider registration in the registry
+    // (user/actionid_test).
+    ("actionid_test", "ntdll.dll", "Windows/System32"),
+    ("actionid_test", "kernel32.dll", "Windows/System32"),
+    ("actionid_test", "advapi32.dll", "Windows/System32"),
+    ("actionid_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("actionid_test", "wintrust.dll", "Windows/System32"),
+    ("actionid_test", "crypt32.dll", "Windows/System32"),
+    ("actionid_test", "bcrypt.dll", "Windows/System32"),
+    ("actionid_test", "ncrypt.dll", "Windows/System32"),
     // The Restart Manager (user/rstrtmgr_test): rstrtmgr and the
     // advapi32 it asks for services.
     ("rstrtmgr_test", "ntdll.dll", "Windows/System32"),
@@ -4119,6 +4140,8 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "sppc_test",
+    "sip_test",
+    "actionid_test",
     "hardlink_test",
     "threadpool_test",
     "imagetrim_test",
@@ -4600,7 +4623,7 @@ fn boot_test_command(release: bool, args: &[String]) -> Result {
                     "{}: the scenario printed what it expects with {} swapped in; this is no \
                      pass (exit status {}): run it from boot before a pull request",
                     hotswap::NOT_A_REAL_RUN,
-                    dlls.join(","),
+                    hotswap::swap_label(&dlls),
                     hotswap::EXIT_HOT_SWAPPED
                 )),
                 (Err(e), false) => Err(format!("{e} (a hot-swapped run: not a real run)")),
@@ -5074,10 +5097,17 @@ fn make_iso_unchecked(
             );
             continue;
         }
+        // `<source>@<name>`: the source (a built DLL or a file) under
+        // another name (a hot swap scenario's copies of hotswap_dll).
+        let (file, renamed) = match file.split_once('@') {
+            Some((source, name)) => (source, Some(name)),
+            None => (*file, None),
+        };
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
-            None => (built_dll(file), *file),
+            None => (built_dll(file), file),
         };
+        let name = renamed.unwrap_or(name);
         copy(&source, &boot.join(name))?;
         if name.ends_with(".dll") {
             dlls.push((format!("boot/{name}"), source.clone()));
@@ -6622,6 +6652,24 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // SN step 1f: modules no process maps, swapped as whole files
+        // (hotswap.rs, SNAPSHOT_SCENARIOS). Saved at the marker, before
+        // hotswap_test loads hotswap_late.dll and hotswap_added.dll by
+        // name (the first is hotswap_dll's first build, the second is not
+        // in the image); resumed with every changed module swapped in
+        // (`--hot-swap-unsafe` with no list): hotswap_late.dll replaced
+        // whole by a build a patch cannot take, hotswap_added.dll added.
+        name: "hotswap_files",
+        cmdline: "qemu_exit run=hotswap_test.exe args=files",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotswap_test: late version 1",
+            "hotswap_test: added: not found",
+            "hotswap_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // SN step 1d in a WOW64 process: the 32-bit hotswap_test on
         // hotswap_dll32 (hotswap_dll's source for x86), saved at its marker; a resume with
         // the `v2` build swapped in (HOTSWAP_SCENARIOS): the 32-bit stack,
@@ -8027,6 +8075,24 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=sppc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["sppc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // crypt32's subject interface package registration, as Office's
+        // integrator registers its VBA SIP (user/sip_test). As SYSTEM: it
+        // writes HKLM, as an administrator does.
+        name: "sip_test",
+        cmdline: "qemu_exit as=system run=sip_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sip_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // wintrust's trust provider registration, as Office's integrator
+        // registers its VBA trust provider (user/actionid_test). As
+        // SYSTEM: it writes HKLM, as an administrator does.
+        name: "actionid_test",
+        cmdline: "qemu_exit as=system run=actionid_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["actionid_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/rstrtmgr_test built for x86).
@@ -19106,10 +19172,14 @@ struct SnapshotScenario {
 
 /// A resume of a hot swap scenario: hotswap_dll's build `dll` swapped in
 /// (`hotswap_variant`), the kernel's build `kernel` (`kernel_variant`),
-/// or both in one plan, and what must come of it.
+/// or both in one plan, and what must come of it. With `files`, the
+/// image's modules (variant, file name in `gala`) are hotswap_dll's
+/// builds, replacing or added to the scenario's, and the resume swaps in
+/// every changed module (`--hot-swap-unsafe` with no list).
 struct HotswapCase {
     dll: Option<&'static str>,
     kernel: Option<&'static str>,
+    files: &'static [(&'static str, &'static str)],
     outcome: HotswapOutcome,
 }
 
@@ -19138,6 +19208,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
             HotswapCase {
                 dll: Some("v2"),
                 kernel: None,
+                files: &[],
                 outcome: HotswapOutcome::Applied(&[
                     "hotswap: NOT A REAL RUN",
                     "hotswap: \\gala\\hotswap_dll.dll: the file is the new build now",
@@ -19147,14 +19218,44 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
                     "exited with status 0x00000000",
                 ]),
             },
+            // A build a patch cannot take: its file is to be replaced
+            // whole, which the guest refuses while hotswap_test maps it.
             HotswapCase {
                 dll: Some("layout"),
                 kernel: None,
-                outcome: HotswapOutcome::RefusedByXtask(
-                    "static hotswap_dll::TABLE changed size (32 -> 64 bytes)",
+                files: &[],
+                outcome: HotswapOutcome::RefusedByGuest(
+                    "\\gala\\hotswap_dll.dll is mapped in process",
+                    &[
+                        "not patchable: static hotswap_dll::TABLE changed size (32 -> 64 bytes)",
+                        "hotswap_test: after: version 1, calls 0, object 7, global 42, callback 11",
+                        "hotswap_test: ok",
+                    ],
                 ),
             },
         ],
+    },
+    SnapshotScenario {
+        name: "hotswap_files",
+        at: "hotswap_test: marker",
+        absent: &["hotswap_test: marker", KERNEL_BANNER],
+        hotswap: &[HotswapCase {
+            dll: None,
+            kernel: None,
+            files: &[("layout", "hotswap_late.dll"), ("v2", "hotswap_added.dll")],
+            outcome: HotswapOutcome::Applied(&[
+                "hotswap: NOT A REAL RUN",
+                "hotswap: \\gala\\hotswap_late.dll: replaced whole (",
+                "no process maps it): not patchable: static hotswap_dll::TABLE changed size",
+                "hotswap: \\gala\\hotswap_added.dll: added (",
+                "hotswap: applied: hotswap_late.dll",
+                "hotswap: applied: hotswap_added.dll",
+                "hotswap_test: late version 2",
+                "hotswap_test: added version 2",
+                "hotswap_test: ok",
+                "exited with status 0x00000000",
+            ]),
+        }],
     },
     SnapshotScenario {
         name: "hotswap_wow64",
@@ -19163,6 +19264,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         hotswap: &[HotswapCase {
             dll: Some("v2"),
             kernel: None,
+            files: &[],
             outcome: HotswapOutcome::Applied(&[
                 "hotswap: hotswap_dll32.dll (x86):",
                 "hotswap: applied: hotswap_dll32.dll in 1 process(es), 5 function(s) patched",
@@ -19180,6 +19282,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
             HotswapCase {
                 dll: None,
                 kernel: Some("hotswap_v2"),
+                files: &[],
                 outcome: HotswapOutcome::Applied(&[
                     "hotswap: NOT A REAL RUN",
                     "hotswap: kernel: blob mapped at 0xffffffffe0000000",
@@ -19195,6 +19298,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
             HotswapCase {
                 dll: None,
                 kernel: Some("hotswap_layout"),
+                files: &[],
                 outcome: HotswapOutcome::RefusedByXtask(
                     "static kernel::nt::hotswap_probe::PROBE_TABLE changed size (32 -> 64 bytes)",
                 ),
@@ -19208,6 +19312,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         hotswap: &[HotswapCase {
             dll: Some("v2"),
             kernel: Some("hotswap_v2"),
+            files: &[],
             outcome: HotswapOutcome::RefusedByGuest(
                 "kernel!kernel::nt::hotswap_probe::wait_in_kernel (changed) is on the kernel \
                  stack of thread",
@@ -19228,6 +19333,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         hotswap: &[HotswapCase {
             dll: Some("v2"),
             kernel: Some("hotswap_v2"),
+            files: &[],
             outcome: HotswapOutcome::Applied(&[
                 "hotswap: applied: hotswap_dll.dll in 1 process(es), 5 function(s) patched",
                 "hotswap: applied: kernel: 4 function(s) patched",
@@ -19245,6 +19351,7 @@ const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
         hotswap: &[HotswapCase {
             dll: Some("v2"),
             kernel: None,
+            files: &[],
             outcome: HotswapOutcome::RefusedByGuest(
                 "hotswap_dll.dll!hs_call_back (changed) is on the stack of thread",
                 &["hotswap_test: callback 11", "hotswap_test: ok"],
@@ -19325,14 +19432,31 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
             None => String::new(),
         };
         let x86_built = format!("x86={built}");
+        // `files`: hotswap_dll's builds under the names given.
+        let mut files = Vec::new();
+        for (variant, file) in case.files {
+            let path = hotswap_variant(variant, target, package)?;
+            files.push((*file, format!("{}@{file}", path.display())));
+        }
+        // A file the snapshot's build has keeps its place in the config (a
+        // moved module is not resumable); a new one goes last.
+        let in_place = |f: &str| files.iter().find(|(n, _)| f.ends_with(&format!("@{n}")));
         let mut extras: Vec<(&str, &str)> = extra_modules(s.name)
             .into_iter()
             .map(|(f, d)| match f {
                 "hotswap_dll.dll" if case.dll.is_some() => (built.as_str(), d),
                 "x86/hotswap_dll32.dll" if case.dll.is_some() => (x86_built.as_str(), d),
-                _ => (f, d),
+                _ => in_place(f).map_or((f, d), |(_, new)| (new.as_str(), d)),
             })
             .collect();
+        extras.extend(
+            files
+                .iter()
+                .filter(|(n, _)| {
+                    !extra_modules(s.name).iter().any(|(f, _)| f.ends_with(&format!("@{n}")))
+                })
+                .map(|(_, f)| (f.as_str(), "gala")),
+        );
         let kernel = match case.kernel {
             Some(variant) => format!("kernel={}", kernel_variant(release, variant)?.display()),
             None => String::new(),
@@ -19350,10 +19474,18 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
             swap.push(hotswap::KERNEL.to_string());
             parts.push(format!("the kernel's {variant} build"));
         }
+        for (variant, file) in case.files {
+            parts.push(format!("{file} as hotswap_dll's {variant} build"));
+        }
+        // With `files`, the automatic mode: every changed module.
+        if !case.files.is_empty() {
+            swap.clear();
+        }
         let image = format!(
-            "{name}-{}-{}",
+            "{name}-{}-{}{}",
             case.dll.unwrap_or("dll1"),
-            case.kernel.map_or("k1", |k| k.trim_start_matches("hotswap_"))
+            case.kernel.map_or("k1", |k| k.trim_start_matches("hotswap_")),
+            if case.files.is_empty() { "" } else { "-files" }
         );
         let iso = make_iso(release, &image, &scenario_cmdline(s), &extras)?;
         let machine = machine_now(s.name, &iso, boot)?;
@@ -19376,6 +19508,9 @@ fn hotswap_cases(s: &Scenario, p: &SnapshotScenario, boot: Boot, timeout: Durati
             )),
             (_, Err(e)) => Err(format!("{label}: {e}")),
             (outcome, Ok(r)) => {
+                // What the plan swaps (the modules that changed), as the
+                // guest names them in `hotswap: applied:`.
+                let swap = r.hotswap.as_ref().map(|h| h.dlls.clone()).unwrap_or_default();
                 let (_, serial, _) = run_vm(
                     &iso,
                     boot,

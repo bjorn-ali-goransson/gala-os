@@ -4,7 +4,8 @@ name: Release
 # feed"): every commit on main whose CI passes is published to the R2
 # bucket as a release (TUF metadata over content-addressed blobs), and
 # schedules keep the feed fresh. Each job pulls the feed's metadata from
-# the bucket's public URL, signs with the keys in GALA_FEED_KEYS, checks
+# the bucket's public URL, signs with the keys from the private bucket
+# gala-os-signing-keys (.github/feed-keys.sh; the first publish makes them), checks
 # the result as gala's client does, uploads (blobs, roots, targets,
 # snapshot, timestamp last) and checks the public feed again.
 
@@ -36,15 +37,21 @@ permissions:
   contents: read
 
 env:
-  # The bucket's public read URL (a development URL: a custom domain may
-  # replace it; this is the only place it is written).
-  FEED_URL: https://pub-d0d768e3efcd4e689e036af8c597569a.r2.dev
+  # The bucket's public read URL, and the only place it is written. It is
+  # a custom domain on the R2 bucket rather than the r2.dev development
+  # URL, which Cloudflare rate-limits and excludes from caching. Clients
+  # that already hold a feed URL keep working: the dev URL still serves
+  # the same bucket.
+  FEED_URL: https://updates.gala-os.com
   # R2's S3 API for the uploads (the aws CLI reads these).
   AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
   AWS_DEFAULT_REGION: auto
   AWS_REQUEST_CHECKSUM_CALCULATION: when_required
   AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
   FEED_BUCKET: s3://${{ vars.R2_BUCKET }}
+  # The private bucket that holds the signing keys (feed-keys.sh; the
+  # only place its name is written).
+  KEYS_BUCKET: s3://gala-os-signing-keys
 
 jobs:
   publish:
@@ -87,10 +94,14 @@ jobs:
       - name: Pull the feed's metadata
         if: steps.head.outputs.current == 'true'
         run: cargo xtask feed pull "$FEED_URL" target/feed
-      - name: Publish (numbered from the last release) and check
+      - name: Feed keys (from the private bucket, made for an empty feed)
         if: steps.head.outputs.current == 'true'
         env:
-          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: .github/feed-keys.sh publish
+      - name: Publish (numbered from the last release) and check
+        if: steps.head.outputs.current == 'true'
         run: |
           cargo xtask feed publish target/release-tree target/feed
           cargo xtask feed check target/feed --over "$FEED_URL"
@@ -117,9 +128,12 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Pull the feed's metadata
         run: cargo xtask feed pull "$FEED_URL" target/feed
-      - name: Refresh (snapshot and timestamp; targets near its expiry) and check
+      - name: Feed keys (from the private bucket)
         env:
-          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: .github/feed-keys.sh sign
+      - name: Refresh (snapshot and timestamp; targets near its expiry) and check
         run: |
           cargo xtask feed refresh target/feed
           cargo xtask feed check target/feed --over "$FEED_URL"
@@ -144,9 +158,12 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Pull the feed's metadata
         run: cargo xtask feed pull "$FEED_URL" target/feed
-      - name: Renew root, refresh and check
+      - name: Feed keys (from the private bucket)
         env:
-          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: .github/feed-keys.sh sign
+      - name: Renew root, refresh and check
         run: |
           cargo xtask feed renew-root target/feed
           cargo xtask feed refresh target/feed
