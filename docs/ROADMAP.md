@@ -3676,22 +3676,31 @@ their status, the programs and their boot scenarios, and the design
 decisions; its own pipeline (`website.yml`) publishing to GitHub Pages,
 kept apart from the system's CI in both directions (WORKFLOW "The two
 pipelines stay apart"). GitHub Pages is enabled on the repository with
-"GitHub Actions" as its source.
+"GitHub Actions" as its source, and its custom domain is `gala-os.com`.
+DNS at Cloudflare now serves the apex as four `A` and four `AAAA`
+DNS-only records to GitHub Pages, and `www` as a DNS-only `CNAME` to
+`bjorn-ali-goransson.github.io` (WORKFLOW "The domain"); the proxied
+records to GoDaddy's parking addresses that answered with error 525 are
+gone. What crawlers read is in place too (WORKFLOW "Being found"):
+`robots.txt` naming the search engines and AI crawlers one by one, a
+generated `sitemap.xml` and `llms.txt`, canonical and Open Graph and
+JSON-LD in the page, and an IndexNow submission after each deploy.
 
 **Next**:
-1. DNS at Cloudflare, where the domain already is: the apex and `www` as
-   DNS-only records to GitHub Pages' addresses, so Pages can issue the
-   certificate and "Enforce HTTPS" holds. Today the apex is a proxied
-   record to an origin that answers nothing (error 525).
+1. Enforce HTTPS on the Pages site, once the certificate for the domain
+   has been issued - it cannot be turned on before then.
 2. `updates.gala-os.com` as an R2 custom domain in front of the feed
    bucket, then `FEED_URL` in release.yml moved to it - which closes R8's
    open item (the public URL is R2's rate-limited development URL). The
    custom domain is proxied, as R2 requires; proxying is per record, so
    the apex stays DNS-only. Flip `FEED_URL` only once the subdomain
    answers, or the release jobs fail on their first pull.
-3. The owner's own screenshots of gala running, replacing the two crash
+3. Verify ownership in Google Search Console and Bing Webmaster Tools,
+   which is a sign-in and so is done by hand. Search Console's DNS method
+   wants a TXT record on the apex, in the same Cloudflare zone.
+4. The owner's own screenshots of gala running, replacing the two crash
    screens the site shows now (`web/public/shots/`, listed in `App.tsx`).
-4. Open: whether the ARCHITECTURE map is generated from the document's
+5. Open: whether the ARCHITECTURE map is generated from the document's
    headings instead of restated in `web/src/content.ts`, which would stop
    the two drifting apart.
 

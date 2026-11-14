@@ -1217,10 +1217,74 @@ where the site learns it.
   otherwise runs the output through Jekyll, which drops files beginning
   with an underscore). The Website workflow asserts both survive a build.
 - Screenshots live in `web/public/shots/` and are listed in `App.tsx`.
+- `prerender.mjs` writes three files, not one: `index.html` (the markup),
+  `sitemap.xml` (one URL, `lastmod` taken from the build date rather than
+  written by hand, where it would be wrong the moment the page changed)
+  and `llms.txt` (a plain-text brief of the whole site, generated from
+  `content.ts` by `src/llms.ts`). None of the three is a second copy of
+  the facts: all come from `content.ts`.
 - **CI** (`.github/workflows/website.yml`): a pull request touching
   `web/` builds and typechecks the site; a merge to main builds it and
   publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
   Pages source is "GitHub Actions").
+
+### Being found
+
+The site is one page, so discovery is a small, fixed set of files rather
+than a sitemap tree:
+
+- `web/public/robots.txt` allows everything, and names the search engines
+  and the AI crawlers (GPTBot, OAI-SearchBot, ClaudeBot, PerplexityBot and
+  the rest) one by one rather than leaving them to the wildcard. That is
+  deliberate: the intent is recorded in the file, so a later default that
+  blocks AI crawlers does not quietly apply here. It also carries the
+  `Sitemap:` line, which is how Google finds `sitemap.xml` at all - the
+  old "ping Google with your sitemap" endpoint was withdrawn in 2023.
+- `web/public/<key>.txt`, a 32-hex-character file whose contents are its
+  own name, is the IndexNow key. After a successful deploy the Website
+  workflow submits the page to IndexNow, which reaches Bing, Yandex,
+  Seznam and Naver at once. Google does not take part. A failed
+  submission warns but does not fail the deploy, since the deploy itself
+  already succeeded and the sitemap still gets the page indexed.
+- `index.html` carries the canonical URL, the Open Graph and Twitter
+  cards (pointing at a screenshot, so a shared link is not a blank box)
+  and a JSON-LD `SoftwareSourceCode` block, which is what assistants and
+  search engines read instead of inferring the project from prose.
+- The apex record is **DNS-only** in Cloudflare ("The domain"), so
+  Cloudflare's AI Crawl Control never sees this traffic and cannot block
+  a crawler the site has just invited.
+- Nothing above gets the site into Google or Bing's *console*: verifying
+  ownership in Google Search Console and Bing Webmaster Tools is a
+  sign-in, done by hand. Google Search Console's DNS method wants a TXT
+  record on the apex, which goes in the same Cloudflare zone as the rest.
+
+### The domain
+
+`gala-os.com` is registered at GoDaddy and its DNS is served by
+Cloudflare. What the zone holds, and why:
+
+- The apex carries GitHub Pages' four `A` records
+  (`185.199.108-111.153`) and four `AAAA` records
+  (`2606:50c0:8000-8003::153`), and `www` is a `CNAME` to
+  `bjorn-ali-goransson.github.io`. All of them are **DNS-only**, not
+  proxied. Pages issues its own Let's Encrypt certificate for the domain
+  and has to answer the request itself to do it; with Cloudflare proxying
+  in front, Pages never sees the request. The zone's first state was the
+  other way round - proxied records pointing at GoDaddy's parking
+  addresses, which refuse TLS - and the domain answered with Cloudflare
+  error 525.
+- **Proxying is per record, not per zone.** `updates.gala-os.com`, the
+  custom domain in front of the R2 release bucket, is created by
+  Cloudflare and is proxied, as R2 custom domains must be. That has no
+  bearing on the apex, which stays DNS-only.
+- `_domainconnect` and `_dmarc` are the registrar's and the mail setup's,
+  and are left alone.
+
+The repository's Pages custom domain is set to `gala-os.com`
+(`gh api repos/OWNER/REPO/pages`). It is also what `web/public/CNAME`
+says; the deploy applies that file, and the two must not disagree.
+Enforce HTTPS can only be turned on once the certificate exists, which
+takes a few minutes after the domain first resolves.
 
 ### The two pipelines stay apart
 
