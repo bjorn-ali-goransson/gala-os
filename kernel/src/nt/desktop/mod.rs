@@ -407,6 +407,24 @@ enum CaptionButton {
     Close,
 }
 
+/// A `window` event `pointer` for each change of the buttons the
+/// desktop takes (`pressed` and `released`: bit 0 left, bit 1 right) at
+/// (x, y), with what got it (`to`: the capturing window, else what was
+/// under the pointer): a screen check that finds the screen behind tells
+/// from these whether the guest saw its click, and where (QEMU's PS/2
+/// mouse merges a press it has no room for with the release after it:
+/// WORKFLOW "Screen checks").
+fn note_buttons(pressed: u8, released: u8, x: i64, y: i64, to: core::fmt::Arguments<'_>) {
+    if pressed | released == 0 {
+        return;
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "pointer",
+        format_args!(r#""pressed":{pressed},"released":{released},"x":{x},"y":{y},"to":"{to}""#),
+    );
+}
+
 /// What is under the pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Hit {
@@ -1439,6 +1457,7 @@ impl Desktop {
             };
             if self.s.outside_popup_grab(target) {
                 self.s.end_popup_grab(x, y);
+                note_buttons(pressed, 0, x, y, format_args!("the end of a popup grab"));
                 self.buttons |= pressed;
                 self.swallowed |= pressed;
             }
@@ -1452,6 +1471,7 @@ impl Desktop {
             let pressed = buttons & !self.buttons;
             let released = self.buttons & !buttons;
             self.buttons = buttons;
+            note_buttons(pressed, released, x, y, format_args!("capture {id}"));
             self.s.pointer_over(Some(id));
             if (dx, dy) != (0, 0) {
                 self.s.send(id, WM_MOUSEMOVE, keys, lp);
@@ -1480,6 +1500,7 @@ impl Desktop {
         let pressed = buttons & !self.buttons;
         let released = self.buttons & !buttons;
         self.buttons = buttons;
+        note_buttons(pressed, released, x, y, format_args!("{hit:?}"));
         let keys = u64::from(buttons & 1) | (u64::from(buttons & 2));
         // The taskbar's context menu takes the next press: its item starts
         // Task Manager, anywhere else only closes it.
@@ -3681,7 +3702,7 @@ fn save_prefs(p: linux::Prefs) {
         crate::events::Category::Window,
         "start menu",
         format_args!(
-            r#""op":"linux prefs","hidden":{},"collapsed":{},"dismissed":"{}","status":{}"#,
+            r#""op":"linux prefs","hidden":{},"collapsed":{},"dismissed":{},"status":{}"#,
             p.hidden,
             p.collapsed,
             crate::events::Str(dismissed),

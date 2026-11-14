@@ -7114,7 +7114,15 @@ session's is shown by nothing unless GalaSession attaches a presenter
   keys. The input thread turns on an IntelliMouse-compatible wheel (the
   sample-rate knock 200, 100, 80, then device id 3: 4-byte packets, the
   fourth byte's low nibble the signed movement, positive towards the
-  user).
+  user). It counts the bytes it reads from each device (`BYTES_READ`:
+  keyboard, mouse) and logs their address once (`input: bytes read at
+  <address> ..., mouse packets of N bytes`): xtask's screen checks send
+  their next input only once the guest has read all they sent, as
+  QEMU's 16-byte PS/2 queues lose what does not fit (WORKFLOW "Screen
+  checks"). The `input:` line at exit counts packets, presses, wheel
+  notches and keys. A shown window that leaves the screen is logged as
+  `desktop: window '<title>' left the screen (hidden | closed | its
+  process ended)`, the counterpart of `desktop: shown window`.
 - **Boot splash** (`console.rs`): from when the kernel takes the
   framebuffer until the desktop does, the screen shows the fortress
   (160 px) over the wordmark (220 px) on a dark gradient, with a

@@ -14204,8 +14204,7 @@ const XDESKTOP_SCREEN: ScreenCheck = ScreenCheck {
 /// 68). The start button at (640, 776) alone on the taskbar, (616, 776)
 /// beside one window. A context menu opens at the pointer, 32-pixel items
 /// from 4 below its top. The pointer starts at (640, 400); each move is
-/// from where the step before left it (few moves: QEMU's PS/2 queue drops
-/// what a busy guest has not read).
+/// from where the step before left it.
 const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
     marker: "linux_menu_test: ready",
     steps: &[
@@ -14332,7 +14331,10 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
         // The menu (beside the console window's button), the context menu,
-        // XTerm: an xterm under the desktop's rootless Xwayland.
+        // XTerm: an xterm under the desktop's rootless Xwayland. Nothing to
+        // wait for after `exit`: the console's window stays (the taskbar
+        // does not change), and the keys are read before these moves
+        // (Ps2Pace).
         ScreenStep {
             after: "",
             input: &[
@@ -14353,19 +14355,25 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         // "application": its window (shasha's frame at (96, 80): the
-        // second Wayland window), white with dash's prompt.
+        // second Wayland window), white with dash's prompt (its client
+        // area from (97, 113), as lx_xterm's from (65, 81)). The window
+        // shows before the shell runs; `exit` waits for the prompt, or
+        // its keys reach Xwayland before the xterm has the X focus.
         ScreenStep {
             after: "desktop: shown window 'xterm'",
             input: &[],
             pixels: &[
                 PixelCheck::AnyIn(104, 90, 40, 16, 0x1b1b1b), // "xterm" in its caption
                 PixelCheck::At(300, 300, 0xffffff),
+                PixelCheck::AnyIn(98, 116, 12, 12, 0x000000), // the prompt "$"
             ],
         },
         ScreenStep { after: "", input: typed!("e", "x", "i", "t"), pixels: &[] },
-        // "Hide": the section goes. "section hidden".
+        // "Hide": the section goes. "section hidden". Once the xterm's
+        // window has gone: until then the taskbar has two buttons beside
+        // the start button, which is then at (570, 776).
         ScreenStep {
-            after: "",
+            after: "desktop: window 'xterm' left the screen",
             input: &[
                 "mouse_move 116 255",
                 "mouse_move 0 29",
@@ -15726,21 +15734,21 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         .iter()
         .find(|(n, _)| *n == iso_scenario(iso))
         .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
+    let mut ps2 = Ps2Pace::default();
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
             wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
         }
         for command in step.input {
-            // Each command, then time for the guest to read the device
-            // (QEMU's PS/2 queue is short: a click queued behind a long
-            // move is dropped).
-            // A press waits longer: under load (the full suite) the guest
-            // drains the queue slowly and a press behind moves is lost.
-            if command.starts_with("mouse_button 1") {
-                thread::sleep(Duration::from_millis(750));
-            }
+            // Each command only once the guest has read what QEMU queued
+            // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
+            // what does not fit is lost (Ps2Pace).
+            ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
-            thread::sleep(Duration::from_millis(250));
+            ps2.sent(command).map_err(|e| format!("step {n}: {e}"))?;
+        }
+        if !step.input.is_empty() {
+            ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
         }
         check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
         // A host-side wait this step's check ends (HELD_DOWNLOADS).
@@ -15750,6 +15758,224 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result {
         }
     }
     Ok(())
+}
+
+/// A screen check's PS/2 input, paced on what the guest has read. QEMU's
+/// PS/2 keyboard and mouse each queue at most 16 bytes for the guest:
+/// a key that does not fit is dropped, and a mouse packet that does not
+/// fit waits for the next input event, which only carries the buttons as
+/// they are then (a press followed by its release before the guest made
+/// room is never seen). A guest busy for a second (a program ending
+/// under the full suite's load) lost keys and clicks that way when input
+/// was paced by time. So each command is sent only once the guest has
+/// read every byte QEMU queued for the commands before it: the queues
+/// are empty when it arrives. The guest counts the bytes its input
+/// thread reads from each device (`input: bytes read at <address>` on
+/// the serial log), read here through the monitor; what QEMU queues for
+/// each command is exact (`ps2_bytes`).
+#[derive(Default)]
+struct Ps2Pace {
+    /// The guest's counters (keyboard, mouse) and its mouse packets'
+    /// size, once found in the serial log.
+    guest: Option<(u64, u64)>,
+    /// The counters when this check began (a resumed snapshot's are not
+    /// 0), plus what this check has sent since.
+    want: (u64, u64),
+    /// The buttons QEMU's monitor last set (`mouse_button` with the same
+    /// state queues nothing).
+    buttons: u8,
+}
+
+/// How long the guest may take to read what a screen check sent: a
+/// give-up only (a guest that stopped reading the controller).
+const PS2_TAKEN_WAIT: Duration = Duration::from_secs(120);
+
+impl Ps2Pace {
+    /// Waits until the guest has read everything sent so far.
+    fn wait_taken(&mut self, monitor: &mut std::os::unix::net::UnixStream, log: &Path) -> Result {
+        let (at, _) = self.find(monitor, log)?;
+        let start = Instant::now();
+        let mut read = guest_ps2_read(monitor, at)?;
+        while read.0 < self.want.0 || read.1 < self.want.1 {
+            if start.elapsed() > PS2_TAKEN_WAIT {
+                return Err(format!(
+                    "the guest read {} of the {} keyboard bytes and {} of the {} mouse bytes sent \
+                     within {} s (its input thread: `input:` lines in the serial log)",
+                    read.0,
+                    self.want.0,
+                    read.1,
+                    self.want.1,
+                    PS2_TAKEN_WAIT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+            read = guest_ps2_read(monitor, at)?;
+        }
+        if read.0 > self.want.0 || read.1 > self.want.1 {
+            return Err(format!(
+                "the guest read more PS/2 bytes than were sent (keyboard {} of {}, mouse {} of {}): \
+                 ps2_bytes no longer matches QEMU",
+                read.0, self.want.0, read.1, self.want.1
+            ));
+        }
+        Ok(())
+    }
+
+    /// The guest's counters' address and its mouse packets' size; the
+    /// first time, also where its counters stand.
+    fn find(
+        &mut self,
+        monitor: &mut std::os::unix::net::UnixStream,
+        log: &Path,
+    ) -> Result<(u64, u64)> {
+        if let Some(g) = self.guest {
+            return Ok(g);
+        }
+        const LINE: &str = "input: bytes read at ";
+        wait_for_line(log, LINE, SCREEN_STEP_WAIT)?;
+        let text =
+            String::from_utf8_lossy(&fs::read(log).map_err(|e| format!("reading {log:?}: {e}"))?)
+                .into_owned();
+        let rest = text
+            .lines()
+            .rev()
+            .find_map(|l| l.split_once(LINE).map(|(_, r)| r.to_string()))
+            .ok_or("no `input: bytes read at` line")?;
+        let at = rest
+            .split_whitespace()
+            .next()
+            .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
+        let packet = rest
+            .split_once("mouse packets of ")
+            .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
+            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
+        self.guest = Some((at, packet));
+        self.want = guest_ps2_read(monitor, at)?;
+        Ok((at, packet))
+    }
+
+    /// `command` was written to the monitor: what it queues is wanted.
+    fn sent(&mut self, command: &str) -> Result {
+        let (_, packet) = self.guest.ok_or("no guest counters")?;
+        let (keyboard, mouse) = ps2_bytes(command, packet, &mut self.buttons)?;
+        self.want.0 += keyboard;
+        self.want.1 += mouse;
+        Ok(())
+    }
+}
+
+/// What QEMU's PS/2 devices queue for monitor command `command`
+/// (keyboard bytes, mouse bytes), with `packet`-byte mouse packets and
+/// `buttons` the monitor's button state (updated). A move is cut into
+/// packets of at most 127 per axis (at least one), a wheel notch adds
+/// one; a change of the buttons is one packet; a key is one byte when
+/// pressed and one when released (the controller translates to set 1),
+/// two each with the E0 prefix. A command that would not fit an empty
+/// queue, or that this does not know, is refused.
+fn ps2_bytes(command: &str, packet: u64, buttons: &mut u8) -> Result<(u64, u64)> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let number = |w: Option<&&str>| -> Result<i64> {
+        w.and_then(|w| w.parse().ok())
+            .ok_or_else(|| format!("unreadable input command {command:?}"))
+    };
+    let (keyboard, mouse) = match words.first().copied() {
+        Some("mouse_move") => {
+            let (dx, dy) = (number(words.get(1))?, number(words.get(2))?);
+            let dz = if words.len() > 3 { number(words.get(3))? } else { 0 };
+            let packets =
+                1.max(dx.unsigned_abs().div_ceil(127)).max(dy.unsigned_abs().div_ceil(127))
+                    + u64::from(dz != 0);
+            (0, packets * packet)
+        }
+        Some("mouse_button") => {
+            let b = u8::try_from(number(words.get(1))?)
+                .map_err(|_| format!("unreadable input command {command:?}"))?;
+            let changed = b != *buttons;
+            *buttons = b;
+            (0, if changed { packet } else { 0 })
+        }
+        Some("sendkey") if words.len() == 2 => {
+            let mut bytes = 0;
+            for key in words[1].split('-') {
+                if matches!(key, "print" | "sysrq" | "pause") {
+                    return Err(format!("{command:?}: {key} has its own scan codes (ps2_bytes)"));
+                }
+                // Keys with the E0 prefix (QEMU's qcode names).
+                let extended = matches!(
+                    key,
+                    "ctrl_r"
+                        | "alt_r"
+                        | "altgr"
+                        | "altgr_r"
+                        | "kp_enter"
+                        | "kp_divide"
+                        | "home"
+                        | "up"
+                        | "pgup"
+                        | "left"
+                        | "right"
+                        | "end"
+                        | "down"
+                        | "pgdn"
+                        | "insert"
+                        | "delete"
+                        | "meta_l"
+                        | "meta_r"
+                        | "menu"
+                );
+                bytes += if extended { 4 } else { 2 };
+            }
+            (bytes, 0)
+        }
+        _ => {
+            return Err(format!(
+                "input command {command:?}: what it queues is not known (ps2_bytes)"
+            ));
+        }
+    };
+    if keyboard > 16 || mouse > 16 {
+        return Err(format!(
+            "input command {command:?} queues more than QEMU's PS/2 queue holds (16 bytes): split it"
+        ));
+    }
+    Ok((keyboard, mouse))
+}
+
+/// The guest's PS/2 counters at `at` (`input: bytes read at`): (keyboard
+/// bytes, mouse bytes) read, through the monitor's `x`.
+fn guest_ps2_read(monitor: &mut std::os::unix::net::UnixStream, at: u64) -> Result<(u64, u64)> {
+    use std::io::{Read, Write};
+    writeln!(monitor, "x /2gx {at:#x}").map_err(|e| e.to_string())?;
+    // The reply: "<address>: 0x<keyboard> 0x<mouse>", after the echo of
+    // whatever was sent before.
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut said = Vec::new();
+    let mut buf = [0u8; 4096];
+    let start = Instant::now();
+    let found = loop {
+        if let Ok(n) = monitor.read(&mut buf) {
+            said.extend_from_slice(&buf[..n]);
+        }
+        let text = String::from_utf8_lossy(&said);
+        let reply = text.lines().find_map(|l| {
+            let (address, values) = l.trim().split_once(": ")?;
+            if u64::from_str_radix(address, 16).ok()? != at {
+                return None;
+            }
+            let mut v = values
+                .split_whitespace()
+                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+            Some((v.next()??, v.next()??))
+        });
+        if reply.is_some() || start.elapsed() > Duration::from_secs(10) {
+            break reply;
+        }
+    };
+    let _ = monitor.set_read_timeout(None);
+    found.ok_or_else(|| {
+        format!("the monitor did not answer `x /2gx {at:#x}`: {:?}", String::from_utf8_lossy(&said))
+    })
 }
 
 /// Downloads `serve-page` holds part-way until a screen step has seen
@@ -20179,6 +20405,52 @@ mod judging {
         // Without the client's line, or after a failure exit, it fails.
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, BOOT_OK_MARKER).is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_FAILURE), false, &ok).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ps2_pace {
+    use super::*;
+
+    /// What QEMU queues: packets of at most 127 per axis, one more for a
+    /// wheel notch, one per change of the buttons, a byte per key press
+    /// and release (two with E0).
+    #[test]
+    fn commands_queue_what_qemu_queues() {
+        let mut b = 0;
+        assert_eq!(ps2_bytes("mouse_move 0 0", 4, &mut b), Ok((0, 4)));
+        assert_eq!(ps2_bytes("mouse_move 127 -127", 4, &mut b), Ok((0, 4)));
+        assert_eq!(ps2_bytes("mouse_move 116 255", 4, &mut b), Ok((0, 12)));
+        assert_eq!(ps2_bytes("mouse_move -201 -255", 3, &mut b), Ok((0, 9)));
+        assert_eq!(ps2_bytes("mouse_move 0 0 1", 4, &mut b), Ok((0, 8)));
+        assert_eq!(ps2_bytes("mouse_button 1", 4, &mut b), Ok((0, 4)));
+        // The same state again queues nothing.
+        assert_eq!(ps2_bytes("mouse_button 1", 4, &mut b), Ok((0, 0)));
+        assert_eq!(ps2_bytes("mouse_button 0", 4, &mut b), Ok((0, 4)));
+        assert_eq!(ps2_bytes("sendkey e", 4, &mut b), Ok((2, 0)));
+        assert_eq!(ps2_bytes("sendkey shift-4", 4, &mut b), Ok((4, 0)));
+        assert_eq!(ps2_bytes("sendkey meta_l-left", 4, &mut b), Ok((8, 0)));
+        assert_eq!(ps2_bytes("sendkey ctrl-shift-esc", 4, &mut b), Ok((6, 0)));
+        // More than an empty queue holds, or unknown: refused.
+        assert!(ps2_bytes("mouse_move 600 0", 4, &mut b).is_err());
+        assert!(ps2_bytes("sendkey print", 4, &mut b).is_err());
+        assert!(ps2_bytes("screendump x", 4, &mut b).is_err());
+    }
+
+    /// Every screen step's input is a command whose bytes are known and
+    /// fit QEMU's queue.
+    #[test]
+    fn every_screen_step_input_is_paced() {
+        for (name, check) in SCREEN_SCENARIOS {
+            let mut b = 0;
+            for (n, step) in check.steps.iter().enumerate() {
+                for command in step.input {
+                    if let Err(e) = ps2_bytes(command, 4, &mut b) {
+                        panic!("{name} step {n}: {e}");
+                    }
+                }
+            }
+        }
     }
 }
 

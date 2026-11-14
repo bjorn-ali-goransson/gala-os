@@ -496,7 +496,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
         crate::events::Category::Window,
         "start menu",
         format_args!(
-            r#""op":"{op}","session":{session},"name":"{}","target":"{}","pid":{pid},"status":{status}"#,
+            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
             crate::events::Str(program.name),
             crate::events::Str(target)
         ),
@@ -539,7 +539,7 @@ fn linux_progress_noted(name: &str, state: i32, percent: i32) {
         crate::events::Category::Window,
         "start menu",
         format_args!(
-            r#""op":"linux progress","name":"{}","state":"{what}","percent":{percent}"#,
+            r#""op":"linux progress","name":{},"state":"{what}","percent":{percent}"#,
             crate::events::Str(name)
         ),
     );
@@ -592,7 +592,7 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
                     crate::events::Category::Window,
                     "start menu",
                     format_args!(
-                        r#""op":"linux desktop","session":{session},"name":"{}","target":"{DESKTOP_SESSION}","pid":0,"status":{}"#,
+                        r#""op":"linux desktop","session":{session},"name":{},"target":"{DESKTOP_SESSION}","pid":0,"status":{}"#,
                         crate::events::Str(name_text),
                         NtStatus::OBJECT_NAME_NOT_FOUND.0
                     ),
@@ -661,7 +661,7 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
         crate::events::Category::Window,
         "start menu",
         format_args!(
-            r#""op":"{op}","session":{session},"name":"{}","target":"{}","pid":{pid},"status":{status}"#,
+            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
             crate::events::Str(name_text),
             crate::events::Str(target.as_str())
         ),

@@ -31,17 +31,39 @@ static PACKETS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 static WHEEL_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static WHEEL_NOTCHES: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
 static KEYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Mouse button presses (a packet with a button down that the packet
+/// before had up).
+static PRESSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The bytes the input thread has read from the controller: the
+/// keyboard's, then the mouse's. Its address is on the serial log
+/// (`input: bytes read at`): xtask's screen checks read it with QEMU's
+/// monitor and send their next input only once the guest has read all
+/// they sent, because QEMU's PS/2 queues hold 16 bytes and what does not
+/// fit is lost (a key dropped, a press merged with its release:
+/// WORKFLOW "Screen checks").
+#[repr(C)]
+struct BytesRead {
+    keyboard: core::sync::atomic::AtomicU64,
+    mouse: core::sync::atomic::AtomicU64,
+}
+
+static BYTES_READ: BytesRead = BytesRead {
+    keyboard: core::sync::atomic::AtomicU64::new(0),
+    mouse: core::sync::atomic::AtomicU64::new(0),
+};
 
 /// The `input:` line (at the end of a run).
 pub fn log_stats() {
     use core::sync::atomic::Ordering::Relaxed;
     let packets = PACKETS.load(Relaxed);
     let keys = KEYS.load(Relaxed);
+    let presses = PRESSES.load(Relaxed);
     if packets == 0 && keys == 0 {
         return;
     }
     crate::info!(
-        "input: {packets} mouse packets, {} with the wheel ({} notches away from the user), {keys} key presses",
+        "input: {packets} mouse packets ({presses} button presses), {} with the wheel ({} notches away from the user), {keys} key presses",
         WHEEL_EVENTS.load(Relaxed),
         WHEEL_NOTCHES.load(Relaxed)
     );
@@ -55,15 +77,23 @@ fn input_thread(_: usize) {
     }
     let wheel = controller.enable_wheel();
     crate::info!("input: PS/2 mouse enabled (wheel: {wheel})");
+    crate::info!(
+        "input: bytes read at {:#x} (keyboard, mouse: two u64), mouse packets of {} bytes",
+        core::ptr::addr_of!(BYTES_READ) as usize,
+        if wheel { 4 } else { 3 }
+    );
     let mut packet = Packet { size: if wheel { 4 } else { 3 }, ..Packet::default() };
     let mut keys = Keys::default();
     let mut mouse = Coalescer::default();
+    let mut held = 0u8;
     let mut rounds = 0u32;
     loop {
         // Moves with the buttons held are summed (one redraw per poll);
         // a press or release is delivered where it happened.
         let mut deliver = |dx, dy, b| deliver(dx, dy, b);
         while let Some((byte, aux)) = controller.poll() {
+            let read = if aux { &BYTES_READ.mouse } else { &BYTES_READ.keyboard };
+            read.fetch_add(1, core::sync::atomic::Ordering::Release);
             if !aux {
                 if let Some((vk, scan, extended, down)) = keys.push(byte) {
                     if down {
@@ -80,6 +110,10 @@ fn input_thread(_: usize) {
             }
             let Some((dx, dy, buttons, dz)) = packet.push(byte) else { continue };
             PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if buttons & !held != 0 {
+                PRESSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            held = buttons;
             if dz != 0 {
                 WHEEL_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 WHEEL_NOTCHES.fetch_add(dz, core::sync::atomic::Ordering::Relaxed);

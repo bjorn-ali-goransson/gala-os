@@ -622,16 +622,15 @@ impl<X: Default> State<X> {
         win.visible = visible;
         win.minimized = false;
         let bounds = win.bounds(shadow);
+        if !visible && was {
+            note_left(&win.title, "hidden");
+        }
         if visible && !was {
-            // The title, ASCII, for the log (screen checks wait for it; not
-            // in host unit tests, which have no console).
+            // Screen checks wait for it (not in host unit tests, which
+            // have no console).
             #[cfg(not(test))]
             {
-                let mut text = [0u8; 64];
-                let n = win.title.len().min(text.len());
-                for (t, &c) in text.iter_mut().zip(&win.title[..n]) {
-                    *t = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
-                }
+                let (text, n) = ascii_title(&win.title);
                 crate::info!(
                     "desktop: shown window '{}'",
                     core::str::from_utf8(&text[..n]).unwrap_or("?")
@@ -845,7 +844,11 @@ impl<X: Default> State<X> {
     pub fn destroy(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
         let i = self.windows.iter().position(|w| w.id == id && w.owner == owner);
         let i = i.ok_or(NtStatus::INVALID_HANDLE)?;
-        let bounds = self.windows.remove(i).bounds(self.shadow);
+        let w = self.windows.remove(i);
+        if w.visible {
+            note_left(&w.title, "closed");
+        }
+        let bounds = w.bounds(self.shadow);
         self.forget(id);
         self.add_damage(bounds);
         Ok(bounds)
@@ -863,6 +866,9 @@ impl<X: Default> State<X> {
                 continue;
             }
             let w = self.windows.remove(i);
+            if w.visible {
+                note_left(&w.title, "its process ended");
+            }
             self.forget(w.id);
             self.add_damage(w.bounds(self.shadow));
         }
@@ -1370,6 +1376,35 @@ impl<X: Default> State<X> {
         self.add_damage(old);
         self.add_damage(new);
     }
+}
+
+/// A window's title for the log: ASCII (other characters as `?`), at
+/// most 64 bytes.
+#[cfg_attr(test, allow(dead_code))]
+fn ascii_title(title: &[u16]) -> ([u8; 64], usize) {
+    let mut text = [0u8; 64];
+    let n = title.len().min(text.len());
+    for (t, &c) in text.iter_mut().zip(&title[..n]) {
+        *t = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
+    }
+    (text, n)
+}
+
+/// A shown window left the screen (and the taskbar): `how` it went.
+/// The counterpart of `desktop: shown window`: a screen check whose
+/// input depends on the taskbar's buttons waits for it (the start button
+/// moves with each window: `linux_menu` after `exit` in an xterm).
+fn note_left(title: &[u16], how: &str) {
+    #[cfg(not(test))]
+    {
+        let (text, n) = ascii_title(title);
+        crate::info!(
+            "desktop: window '{}' left the screen ({how})",
+            core::str::from_utf8(&text[..n]).unwrap_or("?")
+        );
+    }
+    #[cfg(test)]
+    let _ = (title, how);
 }
 
 #[cfg(test)]
