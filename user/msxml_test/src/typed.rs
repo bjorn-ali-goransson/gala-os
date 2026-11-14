@@ -222,6 +222,10 @@ fn bytes(c: &mut Checks, v: &mut Variant, want: &[u8]) -> Result<(), u32> {
     c.eq(u64::from(v.vt), u64::from(VT_BYTES))?;
     let sa = v.value[0] as SafeArray;
     c.ok(!sa.is_null(), 0)?;
+    if v.vt != VT_BYTES || sa.is_null() {
+        v.clear();
+        return Ok(());
+    }
     // SAFETY: the SAFEARRAY of a VARIANT msxml6 gave.
     c.eq(u64::from(unsafe { SafeArrayGetDim(sa) }), 1)?;
     let (mut lower, mut upper) = (-5, -5);
@@ -358,7 +362,9 @@ fn untyped_strings(c: &mut Checks, doc: Obj) -> Result<(), u32> {
             // test has it kept; not settled for MSXML 6, which drops white
             // space between elements).
             c.eq(u64::from(v.vt), u64::from(VT_BSTR))?;
-            info_text("string5 with preserveWhiteSpace", v.value[0] as Bstr);
+            if v.vt == VT_BSTR {
+                info_text("string5 with preserveWhiteSpace", v.value[0] as Bstr);
+            }
             v.clear();
         } else {
             c.var_text(&mut v, raw)?;
@@ -395,8 +401,8 @@ fn data_types(c: &mut Checks, doc: Obj) -> Result<(), u32> {
             c.var_text(&mut v, want)?;
         } else {
             c.eq(u64::from(v.vt), u64::from(VT_BSTR))?;
-            let same = bstr_is(v.value[0] as Bstr, want);
-            if !same {
+            let same = v.vt == VT_BSTR && bstr_is(v.value[0] as Bstr, want);
+            if !same && v.vt == VT_BSTR {
                 info_text("dataType", v.value[0] as Bstr);
             }
             v.clear();

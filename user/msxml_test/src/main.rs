@@ -399,14 +399,19 @@ impl Line {
     }
 }
 
-/// The check counter, and the first check that `code` found wrong (0
-/// when none): an error-code check records its mismatch and goes on, so
-/// one run on Windows reports every code that differs.
-struct Checks(u32, u32);
+/// The check counter, the first check that `code` found wrong (0 when
+/// none), and whether every check records its mismatch and goes on (a
+/// section measuring Windows' answers in one run): an error-code check
+/// records its mismatch and goes on, so one run on Windows reports every
+/// code that differs.
+struct Checks(u32, u32, bool);
 
 impl Checks {
     #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
+        if self.2 {
+            return self.later(cond, got, None);
+        }
         self.0 += 1;
         if cond {
             return Ok(());
@@ -492,6 +497,9 @@ impl Checks {
     fn var_text(&mut self, v: &mut Variant, want: &str) -> Result<(), u32> {
         let same = v.vt == VT_BSTR && bstr_is(v.value[0] as Bstr, want);
         let vt = v.vt;
+        if !same && vt == VT_BSTR {
+            info_text("got", v.value[0] as Bstr);
+        }
         v.clear();
         self.ok(same, u64::from(vt))
     }
@@ -1325,7 +1333,7 @@ fn inherited_namespaces(c: &mut Checks, doc: Obj) -> Result<(), u32> {
 }
 
 fn run() -> Result<(), u32> {
-    let mut c = Checks(0, 0);
+    let mut c = Checks(0, 0, false);
     // SAFETY: plain call.
     c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) }, S_OK)?;
     let mut doc: Obj = null_mut();
@@ -1353,7 +1361,13 @@ fn run() -> Result<(), u32> {
     mutation::section("schema");
     schema::schema(&mut c)?;
     mutation::section("typed");
-    typed::typed(&mut c)?;
+    // Measuring: every typed check records its mismatch and goes on
+    // (MSXML 6's typed values differ from msxml3's, which Wine's tests
+    // record).
+    c.2 = true;
+    let r = typed::typed(&mut c);
+    c.2 = false;
+    r?;
     mutation::section("free-threaded");
     free_threaded(&mut c)?;
     xslt::xslt(&mut c)?;
