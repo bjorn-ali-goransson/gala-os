@@ -62,5 +62,21 @@
   numbers live in `kernel/src/nt/syscalls.rs` and `user/ntrt/src/lib.rs`
   and must match.
 - Locks that may be held while preemptible must be `sync::IrqMutex`.
+- **The website is not the system.** `web/` is the static site published
+  to gala-os.com, and most of the rules above are about the kernel and
+  do not reach it: no test program, no boot scenario, no `cargo xtask
+  test`. What it does have is in WORKFLOW "The website" - `npm run
+  build` and `npm run typecheck` in `web/`, and the guards in
+  `website.yml` that fail a build which quietly stopped publishing the
+  domain files, the markup, the crawler files or the analytics tag. Its
+  content (what gala is, what runs on it, the map of ARCHITECTURE's
+  sections) is data in `web/src/content.ts`: when a subsystem's status
+  changes, that file is where the site learns it. The website's pipeline
+  and the system's never trigger each other, which is what the `paths`
+  filters in `website.yml` and the `changes` job in `ci.yml` are for -
+  breaking that is easy and WORKFLOW "The two pipelines stay apart"
+  says how.
 - Before committing: `cargo fmt --all`, the clippy commands in
-  `.github/workflows/ci.yml`, and `cargo xtask test`.
+  `.github/workflows/ci.yml`, and `cargo xtask test`. A change that
+  touches no Rust - the website, the docs, a workflow file - runs the
+  checks that apply to it instead, and says in the PR which it ran.

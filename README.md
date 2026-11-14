@@ -26,6 +26,11 @@ wget.
 - **Source available, not open source.** The code is public so it can be
   read; no license is granted (see [License](#license)).
 
+The project's website is [gala-os.com](https://gala-os.com): what gala
+is, what runs on it, and the design decisions behind it. It is built from
+`web/` in this repository and published by its own pipeline, separate
+from the system's CI.
+
 ## Documentation
 
 | Document | What it is for |
@@ -649,6 +654,7 @@ flowchart LR
 | `xtask/` | the build and test driver (`cargo xtask ...`) and the scenarios |
 | `docker/` | the Docker image for running the tests anywhere |
 | `fonts/`, `vendor/` | the fonts the screen uses; vendored, patched crates (`smoltcp`, `getrandom`) |
+| `web/` | the gala-os.com website: React components prerendered to static HTML, built by Vite and published to GitHub Pages |
 | `docs/` | the documentation (see [Documentation](#documentation)) |
 
 ## Contributing
