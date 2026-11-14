@@ -3150,9 +3150,17 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   NtCreateSection(SEC_IMAGE) + NtMapViewOfSection, the IAT filled under
   NtProtectVirtualMemory, the entry point called; a real ntdll needs no
   kernel support beyond those calls. When an import cannot be bound the
-  loader reports every missing `dll!function` before failing the process
-  with STATUS_ENTRYPOINT_NOT_FOUND, as Windows does
-  (`missing_import_test`).
+  loader reports every missing `dll!function` (`dll!#N` for an import
+  by ordinal) before failing the process with STATUS_ENTRYPOINT_NOT_FOUND,
+  or STATUS_ORDINAL_NOT_FOUND when the first missing import is by
+  ordinal, as Windows does (`missing_import_test`, `loader_test`).
+  Invariant: an export address table slot holding RVA 0 is no export
+  (the linker leaves one for each unused ordinal below the highest a DLL
+  numbers explicitly), never the module's base: an import of it is
+  missing and LdrGetProcedureAddress fails with STATUS_ORDINAL_NOT_FOUND
+  (`loader_test` over `testdll`'s gap at ordinal 2 and `testdll_gap`,
+  which imports it). The kernel's PE parser (`nt/pe.rs` `find_export`)
+  keeps the same rule, and bounds the ordinal by NumberOfFunctions.
 - **Module table**: `LdrLoadDll`/`LdrGetProcedureAddress`/
   `LdrGetDllHandle`/`LdrUnloadDll`, 256 modules with up to 64
   dependencies each, with reference counts; a DLL not found, a full table
@@ -5121,7 +5129,15 @@ of their own, clients of it) is the yardstick.
   E_INVALIDARG on a fixed folder); RegisterFolder, UnregisterFolder,
   Redirect, SetPath on another folder, GetShellItem, GetIDList,
   GetFolderType and FindFolderFromIDList return E_NOTIMPL and are
-  recorded (`knownfolder_test`, x64 and x86),
+  recorded (`knownfolder_test`, x64 and x86). SHCreateDirectoryExW and
+  SHCreateDirectory (ordinal 165, which App-V's AppVCatalog.dll imports
+  by number) create a folder and every missing folder above it: a
+  relative path is ERROR_BAD_PATHNAME, MAX_PATH or more
+  ERROR_FILENAME_EXCED_RANGE, an existing folder ERROR_ALREADY_EXISTS,
+  and the error is also the thread's last error; the security
+  attributes apply to the last folder only; a failure with a window is
+  recorded, as gala shows no message box (`knownfolder_test`, from
+  Wine's shlfileop conformance test). Also
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),

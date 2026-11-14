@@ -302,7 +302,9 @@ impl PeImage<'_> {
 }
 
 /// The RVA of export `name` in a laid-out image (`image` = SizeOfImage
-/// bytes as mapped). Forwarders are returned as their RVA too.
+/// bytes as mapped). Forwarders are returned as their RVA too. A name
+/// whose ordinal is past NumberOfFunctions, or whose slot holds RVA 0
+/// (the linker's mark for an ordinal with no export), is no export.
 pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
     let u32_at = |off: usize| -> Option<u32> {
         Some(u32::from_le_bytes(image.get(off..off.checked_add(4)?)?.try_into().ok()?))
@@ -315,6 +317,7 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
     if dir == 0 {
         return None;
     }
+    let function_count = u32_at(dir + 20)? as usize;
     let count = u32_at(dir + 24)? as usize;
     let functions = u32_at(dir + 28)? as usize;
     let names = u32_at(dir + 32)? as usize;
@@ -325,8 +328,11 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
         let end = text.iter().position(|&b| b == 0)?;
         if &text[..end] == name {
             let o = ordinals + 2 * i;
-            let ordinal = u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?);
-            return u32_at(functions + 4 * usize::from(ordinal));
+            let ordinal = usize::from(u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?));
+            if ordinal >= function_count {
+                return None;
+            }
+            return u32_at(functions + 4 * ordinal).filter(|&rva| rva != 0);
         }
     }
     None
@@ -788,6 +794,17 @@ mod tests {
         assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
         assert_eq!(find_export(&image, b"Gamma"), None);
         assert_eq!(find_export(&image, b"Alf"), None);
+        // A name whose slot is RVA 0 (an ordinal with no export) or whose
+        // ordinal is past NumberOfFunctions names no export.
+        let functions = 0x1000 + 0x40;
+        let alfa = image[functions + 4..functions + 8].to_vec();
+        image[functions + 4..functions + 8].fill(0);
+        assert_eq!(find_export(&image, b"Alfa"), None);
+        image[functions + 4..functions + 8].copy_from_slice(&alfa);
+        image[0x1000 + 20..0x1000 + 24].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(find_export(&image, b"Alfa"), None, "ordinal 1 of 1 function");
+        assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
+        image[0x1000 + 20..0x1000 + 24].copy_from_slice(&2u32.to_le_bytes());
         // The same in a PE32 image: its data directories start 16 bytes
         // earlier (no 64-bit ImageBase and stack/heap sizes).
         let opt = 0x44 + 24;

@@ -33,7 +33,10 @@
 //!   folder above it with FFFP_NEARESTPARENTMATCH and fails with
 //!   FFFP_EXACTMATCH;
 //! - an unknown id or CSIDL fails (the codes Windows gives are `info`
-//!   lines).
+//!   lines);
+//! - SHCreateDirectory, imported by its ordinal 165 as App-V's
+//!   AppVCatalog.dll imports it, and SHCreateDirectoryExW
+//!   (`create_directory`).
 //!
 //! The same source builds `wow64_knownfolder_test`, the 32-bit (x86)
 //! program (FOLDERID_ProgramFilesX64 and FOLDERID_ProgramFilesCommonX64
@@ -71,6 +74,19 @@ unsafe extern "system" {
     fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
+    fn RemoveDirectoryW(path: *const u16) -> i32;
+    fn DeleteFileW(path: *const u16) -> i32;
+    fn CreateFileW(
+        path: *const u16,
+        access: u32,
+        share: u32,
+        security: usize,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn CloseHandle(h: Handle) -> i32;
 }
 
 #[cfg_attr(
@@ -110,6 +126,11 @@ unsafe extern "system" {
         flags: u32,
         path: *mut u16,
     ) -> HResult;
+    fn SHCreateDirectoryExW(window: Handle, path: *const u16, security: usize) -> i32;
+    // By ordinal, as App-V's AppVCatalog.dll imports it (shell32 has no
+    // name for it): SHCreateDirectory.
+    #[link_ordinal(165)]
+    fn SHCreateDirectory(window: Handle, path: *const u16) -> i32;
 }
 
 const S_OK: HResult = 0;
@@ -932,8 +953,119 @@ fn unknown(c: &mut Checks, manager: Obj) -> Result<(), u32> {
     Ok(())
 }
 
+const ERROR_SUCCESS: u64 = 0;
+const ERROR_BAD_PATHNAME: u64 = 161;
+const ERROR_ALREADY_EXISTS: u64 = 183;
+const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+/// `dir` followed by `tail` (ASCII), NUL-terminated.
+fn join(dir: &[u16], tail: &str) -> [u16; MAX_PATH] {
+    let mut w = [0u16; MAX_PATH];
+    let n = wlen(dir.as_ptr());
+    w[..n].copy_from_slice(&dir[..n]);
+    for (d, c) in w[n..MAX_PATH - 1].iter_mut().zip(tail.encode_utf16()) {
+        *d = c;
+    }
+    w
+}
+
+fn is_dir(path: &[u16]) -> bool {
+    // SAFETY: a NUL-terminated path.
+    let a = unsafe { GetFileAttributesW(path.as_ptr()) };
+    a != INVALID_FILE_ATTRIBUTES && a & FILE_ATTRIBUTE_DIRECTORY != 0
+}
+
+fn exists(path: &[u16]) -> bool {
+    // SAFETY: a NUL-terminated path.
+    unsafe { GetFileAttributesW(path.as_ptr()) != INVALID_FILE_ATTRIBUTES }
+}
+
+/// SHCreateDirectory (shell32's ordinal 165, imported by it) and
+/// SHCreateDirectoryExW, as Microsoft's SHCreateDirectory page documents
+/// them and Wine's shlfileop.c test_sh_create_dir checks them on Windows:
+/// a fully qualified path is created with every missing folder above it
+/// (ERROR_SUCCESS); an existing directory is ERROR_ALREADY_EXISTS; a
+/// relative path is ERROR_BAD_PATHNAME and creates nothing. Under
+/// %TEMP%\gala_shcd_<program>, removed before and after. The answers
+/// for an existing file's name and for a path under a file (the page
+/// lists ERROR_FILE_EXISTS and ERROR_ALREADY_EXISTS) are `info` lines.
+fn create_directory(c: &mut Checks) -> Result<(), u32> {
+    let mut temp = [0u16; MAX_PATH];
+    let name = wide("TEMP");
+    // SAFETY: valid buffers.
+    let n = unsafe { GetEnvironmentVariableW(name.as_ptr(), temp.as_mut_ptr(), MAX_PATH as u32) };
+    c.ok(n > 0 && (n as usize) < MAX_PATH - 64, n.into())?;
+    let mut top = join(&temp, "\\gala_shcd_");
+    top = join(&top, NAME);
+    let a = join(&top, "\\a");
+    let ab = join(&top, "\\a\\b");
+    let cd = join(&top, "\\c\\d");
+    let c_ = join(&top, "\\c");
+    let file = join(&top, "\\file");
+    let under_file = join(&top, "\\file\\x");
+    let clean = || {
+        // SAFETY: NUL-terminated paths; failures (absent) are fine.
+        unsafe {
+            for d in [&ab, &a, &cd, &c_, &under_file] {
+                RemoveDirectoryW(d.as_ptr());
+            }
+            DeleteFileW(file.as_ptr());
+            RemoveDirectoryW(top.as_ptr());
+        }
+    };
+    clean();
+    c.ok(!exists(&top), 0)?;
+
+    // Nested: the top folder and `a` are created on the way to `b`.
+    // SAFETY: a NUL-terminated path.
+    c.eq(unsafe { SHCreateDirectory(0, ab.as_ptr()) } as u32 as u64, ERROR_SUCCESS)?;
+    c.ok(is_dir(&top), 0)?;
+    c.ok(is_dir(&a), 0)?;
+    c.ok(is_dir(&ab), 0)?;
+    // Again: it exists.
+    // SAFETY: as above.
+    c.eq(unsafe { SHCreateDirectory(0, ab.as_ptr()) } as u32 as u64, ERROR_ALREADY_EXISTS)?;
+    // SAFETY: as above.
+    c.eq(unsafe { SHCreateDirectory(0, top.as_ptr()) } as u32 as u64, ERROR_ALREADY_EXISTS)?;
+    // Relative paths: refused, nothing created.
+    for rel in ["gala_shcd_rel", "gala_shcd_rel\\sub", ".\\gala_shcd_rel"] {
+        let w = wide(rel);
+        // SAFETY: a NUL-terminated path.
+        c.eq(unsafe { SHCreateDirectory(0, w.as_ptr()) } as u32 as u64, ERROR_BAD_PATHNAME)?;
+        // SAFETY: as above.
+        c.eq(unsafe { SHCreateDirectoryExW(0, w.as_ptr(), 0) } as u32 as u64, ERROR_BAD_PATHNAME)?;
+    }
+    c.ok(!exists(&wide("gala_shcd_rel")), 0)?;
+    // SHCreateDirectoryExW with no security attributes: the same.
+    // SAFETY: a NUL-terminated path.
+    c.eq(unsafe { SHCreateDirectoryExW(0, cd.as_ptr(), 0) } as u32 as u64, ERROR_SUCCESS)?;
+    c.ok(is_dir(&c_), 0)?;
+    c.ok(is_dir(&cd), 0)?;
+    // SAFETY: as above.
+    c.eq(unsafe { SHCreateDirectoryExW(0, cd.as_ptr(), 0) } as u32 as u64, ERROR_ALREADY_EXISTS)?;
+    // A file's name, and a path under a file.
+    // SAFETY: a NUL-terminated path; CREATE_NEW, GENERIC_WRITE.
+    let h = unsafe { CreateFileW(file.as_ptr(), 0x4000_0000, 0, 0, 1, 0x80, 0) };
+    c.ok(h != usize::MAX, 0)?;
+    // SAFETY: the handle just opened.
+    unsafe { CloseHandle(h) };
+    // SAFETY: a NUL-terminated path.
+    let r = unsafe { SHCreateDirectory(0, file.as_ptr()) } as u32;
+    info().s(b"SHCreateDirectory(an existing file) ").dec(r.into()).s(b"\r\n").print();
+    c.ok(r != 0 && !is_dir(&file), r.into())?;
+    // SAFETY: a NUL-terminated path.
+    let r = unsafe { SHCreateDirectory(0, under_file.as_ptr()) } as u32;
+    info().s(b"SHCreateDirectory(under a file) ").dec(r.into()).s(b"\r\n").print();
+    c.ok(r != 0 && !exists(&under_file), r.into())?;
+    clean();
+    c.ok(!exists(&top), 0)?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0, 0);
+    create_directory(&mut c)?;
     // SAFETY: plain call.
     c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) }, S_OK)?;
     let mut manager: Obj = null_mut();

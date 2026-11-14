@@ -747,6 +747,115 @@ pub extern "system" fn DragAcceptFiles(window: usize, accept: i32) {
     }
 }
 
+// ---- Creating folders ----
+
+const ERROR_FILE_EXISTS: u32 = 80;
+const ERROR_BAD_PATHNAME: u32 = 161;
+const ERROR_ALREADY_EXISTS: u32 = 183;
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+const MAX_PATH: usize = 260;
+
+/// A path shlwapi's PathIsRelativeW calls relative: not `\...` (rooted
+/// or UNC) and not `X:...`.
+fn is_relative(p: &[u16]) -> bool {
+    !(p.first() == Some(&u16::from(b'\\')) || p.get(1) == Some(&u16::from(b':')))
+}
+
+/// How many characters of `p` are its root, which is never created: `X:\`,
+/// `\\server\share\`, or `\`.
+fn root_len(p: &[u16]) -> usize {
+    let sep = u16::from(b'\\');
+    if p.starts_with(&[sep, sep]) {
+        // Past the server and the share.
+        let mut seps = 0;
+        for (i, &c) in p.iter().enumerate().skip(2) {
+            if c == sep {
+                seps += 1;
+                if seps == 2 {
+                    return i + 1;
+                }
+            }
+        }
+        return p.len();
+    }
+    if p.get(1) == Some(&u16::from(b':')) {
+        return if p.get(2) == Some(&sep) { 3 } else { 2 };
+    }
+    usize::from(p.first() == Some(&sep))
+}
+
+/// CreateDirectoryW of the first `n` characters of `buf` (NUL-terminated
+/// there for the call): 0 or its error.
+fn create_dir(buf: &mut [u16; MAX_PATH + 1], n: usize, security: *const c_void) -> u32 {
+    let kept = buf[n];
+    buf[n] = 0;
+    // SAFETY: a NUL-terminated path; the caller's SECURITY_ATTRIBUTES or NULL.
+    let ok = unsafe { CreateDirectoryW(buf.as_ptr(), security) } != 0;
+    buf[n] = kept;
+    // SAFETY: plain call.
+    if ok { 0 } else { unsafe { GetLastError() } }
+}
+
+/// SHCreateDirectoryExW(hwnd, pszPath, psa): creates the folder, and
+/// every missing folder above it (those with no security attributes, the
+/// last with `psa`), as Microsoft's SHCreateDirectoryEx page documents:
+/// ERROR_SUCCESS; ERROR_BAD_PATHNAME for a relative path (nothing made);
+/// ERROR_ALREADY_EXISTS for an existing folder; ERROR_FILENAME_EXCED_RANGE
+/// for a path of MAX_PATH characters or more; else CreateDirectoryW's
+/// error for the folder itself. With a window, Windows reports a failure
+/// in a message box and then answers ERROR_CANCELLED; gala shows none
+/// and answers the error itself (recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn SHCreateDirectoryExW(
+    window: usize,
+    path: *const u16,
+    security: *const c_void,
+) -> i32 {
+    let p = chars(path);
+    let error = if is_relative(p) {
+        ERROR_BAD_PATHNAME
+    } else if p.len() >= MAX_PATH {
+        ERROR_FILENAME_EXCED_RANGE
+    } else {
+        let mut buf = [0u16; MAX_PATH + 1];
+        buf[..p.len()].copy_from_slice(p);
+        let first = create_dir(&mut buf, p.len(), security);
+        if matches!(
+            first,
+            0 | ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS | ERROR_FILENAME_EXCED_RANGE
+        ) {
+            first
+        } else {
+            // A folder above is missing: make each one below the root
+            // (an existing one is fine), then the folder itself.
+            let sep = u16::from(b'\\');
+            let end = p.len() - usize::from(p.last() == Some(&sep));
+            for i in root_len(p)..end {
+                if p[i] == sep && i > 0 && p[i - 1] != sep {
+                    create_dir(&mut buf, i, core::ptr::null());
+                }
+            }
+            create_dir(&mut buf, p.len(), security)
+        }
+    };
+    if error != 0 {
+        if window != 0 && error != ERROR_ALREADY_EXISTS && error != ERROR_CANCELLED {
+            record(b"shell32.dll!SHCreateDirectoryExW(message box for a failure)", error.into());
+        }
+        // SAFETY: plain call.
+        unsafe { SetLastError(error) };
+    }
+    error as i32
+}
+
+/// SHCreateDirectory(hwnd, pszPath), shell32's ordinal 165 (build.rs; App-V
+/// imports it by that number): SHCreateDirectoryExW without security
+/// attributes, as Microsoft's SHCreateDirectory page documents it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SHCreateDirectory(window: usize, path: *const u16) -> i32 {
+    SHCreateDirectoryExW(window, path, core::ptr::null())
+}
+
 // ---- Notifications nothing receives in gala ----
 
 /// SHChangeNotify: tells the shell about a change; gala has no shell

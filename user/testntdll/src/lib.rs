@@ -606,6 +606,11 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
         return None;
     }
     let target = rd32(functions + 4 * index) as usize;
+    // RVA 0: an ordinal the linker left without an export (a gap in a
+    // DLL's numbering), not an export at the image's base.
+    if target == 0 {
+        return None;
+    }
     if !(rva..rva + size).contains(&target) {
         return Some(base + target);
     }
@@ -1745,7 +1750,10 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         return Ok(());
     }
     let mut desc = base + rva;
-    let mut missing = false;
+    // The status of the first missing import (STATUS_ORDINAL_NOT_FOUND
+    // for one by ordinal, as Windows reports "the ordinal N could not be
+    // located"), once every missing import is reported.
+    let mut missing = None;
     while rd32(desc + 12) != 0 {
         let mut name = [0u8; MAX_NAME];
         let len = normalize(
@@ -1794,7 +1802,11 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
                     report_missing_export(c_str(base + rd32(desc + 12) as usize), name, ordinal);
-                    missing = true;
+                    missing.get_or_insert(if name.is_empty() {
+                        STATUS_ORDINAL_NOT_FOUND
+                    } else {
+                        STATUS_ENTRYPOINT_NOT_FOUND
+                    });
                 }
             }
         }
@@ -1802,7 +1814,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
         desc += 20;
     }
-    if missing { Err(STATUS_ENTRYPOINT_NOT_FOUND) } else { Ok(()) }
+    missing.map_or(Ok(()), Err)
 }
 
 /// Reports `dll!name` (or `dll!#ordinal`) to the kernel's missing-features

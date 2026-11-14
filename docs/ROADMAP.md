@@ -2136,21 +2136,22 @@ need gala's.
      Wine's msxml3 typed value tests; ARCHITECTURE "msxml6", Typed
      values). With them ConfigurePackage succeeds, the service updates
      the App-V configuration and merges and saves the AppX manifests
-     (`ThinAppXManifest.xml`), then OfficeClickToRun.exe dies of an
-     access violation executing shell32.dll+0 from AppVCatalog.dll,
-     about 1735 s after boot; setup then waits until the scenario's
-     timeout. The cause is the loader: AppVCatalog.dll imports
-     `SHELL32.dll!#165` (its import table), gala's shell32 does not
-     export ordinal 165 (its export table has that slot, RVA 0), and
-     `testntdll`'s `export_at_depth` returns base + RVA without
-     checking for 0, so the import binds to the module's base with no
-     `missing export` line. Next: (1) the loader treats an RVA of 0 as
-     no export (an import by it is a missing export, recorded as
-     `shell32.dll!#165`; GetProcAddress fails with
-     STATUS_ORDINAL_NOT_FOUND), test first in `loader_test`; (2)
-     shell32's ordinal 165, SHCreateDirectory (documented: hwnd and a
-     path, the result of SHCreateDirectoryExW), test first in
-     `knownfolder_test` or a shell32 test. Seen too,
+     (`ThinAppXManifest.xml`), then OfficeClickToRun.exe died of an
+     access violation executing shell32.dll+0 from AppVCatalog.dll
+     (about 1735 s after boot): AppVCatalog.dll imports
+     `SHELL32.dll!#165`, which gala's shell32 did not export, and the
+     loader bound the empty ordinal slot (RVA 0) to the module's base.
+     Done: the loader treats an RVA of 0 as no export (an import of it
+     is a missing export, `dll!#N` in the ledger, the load failing with
+     STATUS_ORDINAL_NOT_FOUND; LdrGetProcedureAddress fails the same
+     way; the kernel's `find_export` too), test first in `loader_test`
+     (`testdll`'s ordinal gap, `testdll_gap` importing it); shell32's
+     ordinal 165, SHCreateDirectory, with SHCreateDirectoryExW, test
+     first in `knownfolder_test` (x64 and x86, by ordinal, Wine's
+     shlfileop tests). To measure on Windows (`loader_test`'s `info`
+     lines): GetProcAddress for an ordinal in a gap (documented as
+     possibly an invalid non-NULL address) and the status of loading a
+     DLL that imports one. Seen too,
      not fatal so far: `kernelbase.dll!SetSystemFileCacheSize`
      and `ntdll.dll!NtSetSystemInformation` missing exports. To measure
      on Windows (`msxml_test`'s `info` lines): a string output's
