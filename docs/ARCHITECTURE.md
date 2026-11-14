@@ -4263,6 +4263,24 @@ definition for both layouts, "Plan: WOW64").
 - **crypt32 misc** (`misc.rs`): CryptMemAlloc/Realloc/Free (the process
   heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER, ContentInfo }; the
   version is not looked at, as on Windows 11 25H2).
+- **SIP registration** (`sip.rs`; `sip_test`): CryptSIPAddProvider
+  writes one key per function the SIP_ADD_NEWPROVIDER names,
+  `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0\CryptSIPDll<Function>\{GUID}`
+  (PutSignedDataMsg, GetSignedDataMsg, RemoveSignedDataMsg,
+  CreateIndirectData, VerifyIndirectData, and IsMyFileType and
+  IsMyFileType2 when given), each with the REG_SZ values `Dll` and
+  `FuncName`; a structure without one of the five required functions,
+  or smaller than Windows 7's, is ERROR_INVALID_PARAMETER. A GetCaps
+  function (Windows 8's field) is recorded as unsupported and not
+  written. CryptSIPRemoveProvider deletes the seven keys and fails with
+  the last error when any was absent (ERROR_FILE_NOT_FOUND after an add
+  without the IsMyFileType functions, as in Wine's sip tests). advapi32
+  is loaded at run time, as for DPAPI. Each call leaves a
+  ledger line, `crypt32.dll!CryptSIPAddProvider {GUID…}` (or
+  RemoveProvider), whose detail is the error (0 on success). Nothing
+  reads the registered providers yet: CryptSIPLoad and the
+  subject-to-SIP dispatch remain stubs (WinVerifyTrust knows its PE and
+  cabinet subjects itself).
 - **PKCS #12** (`pfx.rs`; `cert_test` pfx.rs): PFXImportCertStore reads a
   PFX whose authSafe is `data` (public-key integrity is recorded and
   fails), checks its MAC (HMAC-SHA1/SHA-2, key from the PKCS #12 KDF;

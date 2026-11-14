@@ -421,6 +421,12 @@ for its name between two dumps.
   license`, `no SKU`, `product keys not decoded`, ...) with the HRESULT
   returned as detail, a successful one included: what a program asked of
   licensing and was answered.
+  Subject interface package registration (crypt32, ARCHITECTURE "SIP
+  registration"): every CryptSIPAddProvider and CryptSIPRemoveProvider,
+  "other", as `crypt32.dll!CryptSIPAddProvider {<GUID>` (the subject's
+  GUID, cut at the ledger's 64 characters) with the error as detail, 0
+  on success; a GetCaps function given is
+  `crypt32.dll!CryptSIPAddProvider(pwszGetCapFuncName)`, unsupported.
   MSXML (msxml6): `msxml6.dll!parse error: <reason>` and
   `msxml6.dll!parse error at: <text>` (40 characters of the line around
   the error), "other", the line << 32 | the column as detail, for each

@@ -2372,6 +2372,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

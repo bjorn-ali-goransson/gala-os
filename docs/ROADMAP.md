@@ -2174,15 +2174,19 @@ need gala's.
      codes; the round trip of an unsigned license is gala's own, which
      Windows refuses). Integrator.exe now installs Office's licenses
      through it (SLInstallLicense, SLGetSLIDList, SLGetLicenseInformation
-     in the ledger) and exits 0.
-     Next: the install's next integrator.exe dies of 0xc06d007f
-     (delay-loaded function not found):
-     `CRYPT32.dll!CryptSIPAddProvider`, a named stub (GetProcAddress
-     treats stubs as absent); it registers Office's subject interface
-     package (CryptSIPAddProvider's documented registry entries under
-     `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
-     Wine's crypt32 sip tests), test first. Its failure fails the
-     install as before: the service ends with 17002 and setup.exe with
+     in the ledger) and exits 0. The next integrator.exe died of
+     0xc06d007f (delay-loaded function not found):
+     `CRYPT32.dll!CryptSIPAddProvider`, a named stub. Done: crypt32's
+     CryptSIPAddProvider and CryptSIPRemoveProvider (ARCHITECTURE
+     "crypt32", SIP registration), the documented registry entries
+     under `HKLM\Software\Microsoft\Cryptography\OID\EncodingType 0`,
+     test first in `sip_test` (Wine's crypt32 sip tests, which pass on
+     Windows); integrator.exe registers Office's VBA SIP through it.
+     Next: the same integrator.exe then dies of 0xc06d007f on
+     `WINTRUST.dll!WintrustAddActionID` (an export gala's wintrust
+     lacks): it registers Office's trust provider (the documented
+     entries under `HKLM\Software\Microsoft\Cryptography\Providers\Trust`),
+     test first. Its failure fails the install as before: the service ends with 17002 and setup.exe with
      0x426a (17002, "C2RClient returned a failing exit code"). Seen
      too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
      run time), Office's product key not decoded by gala's sppc
