@@ -2133,8 +2133,10 @@ need gala's.
      With it ConfigurePackage goes on to read typed values. Done:
      nodeTypedValue and dataType, get and put, over the `dt:dt` data
      types (test first, `msxml_test`'s typed section on x64 and x86:
-     Wine's msxml3 typed value tests; ARCHITECTURE "msxml6", Typed
-     values). With them ConfigurePackage succeeds, the service updates
+     Wine's msxml3 typed value tests, aligned to MSXML 6's answers on
+     Windows where they differ; ARCHITECTURE "msxml6", Typed values).
+     With them (as first written, before that alignment: a run with
+     the aligned msxml6 is to confirm) ConfigurePackage succeeds, the service updates
      the App-V configuration and merges and saves the AppX manifests
      (`ThinAppXManifest.xml`), then OfficeClickToRun.exe dies of an
      access violation executing shell32.dll+0 from AppVCatalog.dll,

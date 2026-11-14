@@ -4928,22 +4928,29 @@ built for x64 and x86.
   element an XSD schema validated reads as a string (VT_BSTR), as in
   MSXML 6. get on a typed element gives the type's variant (int and the
   sized integers their VT, number and r8 VT_R8, r4 VT_R4, fixed.14.4
-  VT_CY, boolean VT_BOOL, dates as OLE dates from 1899-12-30 with the
-  zone's offset applied and the fraction of a second dropped, bin.hex
-  and bin.base64 a VT_ARRAY|VT_UI1 SAFEARRAY, uuid, uri and the rest a
-  BSTR); an untyped element gives its text (trimmed unless
-  preserveWhiteSpace), a text or CDATA node its parent's type, other
-  nodes their value, the document and a fragment S_FALSE and VT_NULL.
-  Empty content of a non-string type is VT_NULL with S_OK; content that
-  does not read as its type is E_FAIL with a ledger line (`malformed`).
+  VT_CY, boolean VT_BOOL, char VT_I4, dates as OLE dates from 1899-12-30
+  taken to UTC (a zone's offset subtracted) with the fraction of a second
+  dropped, bin.hex and bin.base64 a VT_ARRAY|VT_UI1 SAFEARRAY, i8, ui8,
+  uuid, uri and the string types a BSTR of the element's text, trimmed
+  unless preserveWhiteSpace, as `text`); an untyped element gives its
+  text the same way, a text or CDATA node (even in a typed element) and
+  the other nodes their value, the document and a fragment S_FALSE and
+  VT_NULL. These are MSXML 6's answers on Windows (build 26100); Wine's
+  msxml3 tests differ on the string's trailing space, the zone's
+  direction, a text node's type and put_dataType's codes. Empty content
+  of a non-string type is VT_NULL with S_OK; content that does not read
+  as its type is E_FAIL with a ledger line (`malformed`), and a document
+  holding such content, or a `dt:dt` naming no type, fails to load
+  (`typed::on_load`; the parse error's code and text are gala's, E_FAIL).
   put writes the variant as the type's text (hex lowercase, base64 with
   no line breaks) and replaces the element's children with it; on the
-  document and a fragment it is E_FAIL. put_dataType checks the content
-  reads as the new type (E_FAIL if not), updates an existing `dt:dt`, or
-  declares `xmlns:dt` (when `dt` is unbound) and adds `dt:dt`; an
-  unknown type name is E_FAIL, a node other than an element E_FAIL.
-  Limits: i8 and ui8 read as VT_NULL (recorded); an unknown type name
-  in a document reads as a string and is recorded in the ledger.
+  document it is E_INVALIDARG, on a fragment E_FAIL. put_dataType
+  updates an existing `dt:dt`, or declares `xmlns:dt` (when `dt` is
+  unbound) and adds `dt:dt`; it is E_INVALIDARG on text, CDATA, comment,
+  PI and fragment nodes, and S_OK on an attribute, for an unknown type
+  name and on content not of the type. What those three leave is not
+  measured (`msxml_test`'s `info typed` lines): gala ignores the first
+  two and sets the type in the third, recording each.
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): the character
   data editors (put_data, substringData, appendData, insertData,
@@ -4971,12 +4978,10 @@ built for x64 and x86.
   App-V-shaped results (which prefix a namespace gets, where its
   declaration goes: gala makes up `ns<N>` for an attribute's namespace
   no prefix is bound to) and the prefix the alias step's elements get
-  (gala: the one declared on the root); for typed values, put_dataType
-  on a text node or an attribute (gala E_FAIL), the variant of i8 and
-  ui8 (gala VT_NULL) and of char (gala VT_I4), empty content of a
-  non-string type (gala VT_NULL), malformed content (gala E_FAIL), an
-  unknown type name (gala: a string, dataType S_FALSE) and whether
-  loading keeps whitespace-only text.
+  (gala: the one declared on the root); for typed values, what a
+  put_dataType that MSXML 6 takes (on an attribute, an unknown name,
+  content not of the type) leaves, char's value and a failed typed
+  load's parse error.
 
 ### RPC: rpcrt4
 

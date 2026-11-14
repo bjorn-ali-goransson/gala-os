@@ -4,13 +4,16 @@
 //! MSXML's data types; its content then reads as that type's VARIANT
 //! (MSXML's "nodeTypedValue Property" table). Everything else is
 //! untyped: an element gives its text, an attribute, PI, comment, text
-//! or CDATA node its value, the document and a fragment S_FALSE and
-//! VT_NULL. XSD types do not type nodes (MSXML 6 gives VT_BSTR for
+//! or CDATA node its value (a text node inside a typed element too), the
+//! document and a fragment S_FALSE and VT_NULL. A string type's value is
+//! the element's text as `text` gives it (trimmed unless white space is
+//! preserved). A document whose typed element names a type MSXML does
+//! not know, or holds content not of its type, fails to load. XSD types do not type nodes (MSXML 6 gives VT_BSTR for
 //! them), so a schema-validated document reads as strings.
 //!
 //! Dates are OLE dates (days since 1899-12-30) of whole seconds (a
-//! fraction is dropped, as Wine's tests on Windows show), with a zone's
-//! offset added to the time as written (`11:13:57+03:00` is 14:13:57).
+//! fraction is dropped), a zoned one taken to UTC (`11:13:57+03:00` is
+//! 08:13:57), as MSXML 6 answers on Windows (build 26100).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -333,7 +336,7 @@ fn date(ty: Ty, s: &str) -> Option<f64> {
         _ if rest.is_empty() => 0,
         _ => return None,
     };
-    Some(ole_date(days, seconds + zone))
+    Some(ole_date(days, seconds - zone))
 }
 
 /// Whether `s` reads as type `ty` (empty content is no value, allowed).
@@ -431,13 +434,8 @@ fn typed_value(ty: Ty, s: &str, out: *mut Variant) -> HResult {
     }
     let v = match ty {
         Ty::Str | Ty::Number | Ty::Uuid => return variant_str(out, s),
-        Ty::Wide => {
-            // A 64-bit integer's variant is not settled for MSXML 6
-            // (msxml_test's info line): gala answers VT_NULL and says so.
-            record(b"IXMLDOMNode::get_nodeTypedValue(dt:dt i8 or ui8)", LEDGER_UNSUPPORTED, 0);
-            variant_null(out);
-            return S_OK;
-        }
+        // MSXML 6 gives a 64-bit integer as its text.
+        Ty::Wide => return variant_str(out, t),
         Ty::Char => {
             let c = t.chars().next().map_or(0, u32::from);
             Variant { vt: VT_I4, reserved: [0; 3], value: [c as usize, 0] }
@@ -477,8 +475,7 @@ fn typed_value(ty: Ty, s: &str, out: *mut Variant) -> HResult {
 }
 
 /// IXMLDOMNode::get_nodeTypedValue: a typed element's content as its
-/// type's VARIANT, an untyped element's text (as `text`), a text or
-/// CDATA node in a typed element its value as that type, other nodes'
+/// type's VARIANT, an untyped element's text (as `text`), other nodes'
 /// value as a string; the document and a fragment S_FALSE and VT_NULL.
 pub(super) extern "system" fn get_node_typed_value(this: Obj, out: *mut Variant) -> HResult {
     if out.is_null() {
@@ -496,7 +493,8 @@ pub(super) extern "system" fn get_node_typed_value(this: Obj, out: *mut Variant)
             Some((_, ty)) => {
                 let mut s = String::new();
                 d.tree.text(i, &mut s);
-                typed_value(ty, &s, out)
+                let s = if d.preserve { s.as_str() } else { trim(&s) };
+                typed_value(ty, s, out)
             }
             None => {
                 let mut s = String::new();
@@ -504,10 +502,6 @@ pub(super) extern "system" fn get_node_typed_value(this: Obj, out: *mut Variant)
                 let s = if d.preserve { s.as_str() } else { trim(&s) };
                 variant_str(out, s)
             }
-        },
-        Kind::Text | Kind::CData if n.parent != NONE => match type_of(&d.tree, n.parent) {
-            Some((_, ty)) => typed_value(ty, &n.value, out),
-            None => variant_str(out, &n.value),
         },
         _ => variant_str(out, &n.value),
     }
@@ -706,13 +700,15 @@ fn typed_text(ty: Ty, v: &Variant) -> Option<String> {
 /// its type's text (a string kept as written once it reads as the type,
 /// bytes encoded for bin.hex and bin.base64, other values written in the
 /// type's form; E_FAIL when the value is not one of the type); an
-/// untyped element and the other nodes take its text. The document and
-/// a fragment have no value (E_FAIL).
+/// untyped element and the other nodes take its text. The document has
+/// no value (E_INVALIDARG, as on Windows), nor has a fragment (E_FAIL,
+/// not measured).
 pub(super) extern "system" fn put_node_typed_value(this: Obj, v: Variant) -> HResult {
     let d = doc(this);
     let i = idx(this);
     match d.tree.node(i).kind {
-        Kind::Document | Kind::Fragment => E_FAIL,
+        Kind::Document => E_INVALIDARG,
+        Kind::Fragment => E_FAIL,
         Kind::Element => {
             let value = match type_of(&d.tree, i) {
                 Some((_, ty)) => match typed_text(ty, &v) {
@@ -744,21 +740,33 @@ fn unconvertible(vt: u16) -> HResult {
 }
 
 /// IXMLDOMNode::put_dataType: an element's `dt:dt` attribute set to the
-/// type's name (declaring `dt` when it is not), once the element's
-/// content reads as the type. E_INVALIDARG for NULL, E_FAIL for a name
-/// MSXML does not know and on the other nodes.
+/// type's name (declaring `dt` when it is not). E_INVALIDARG for NULL
+/// and on text, CDATA, comment, PI and fragment nodes; S_OK on an
+/// attribute and for a name MSXML does not know, and on content not of
+/// the type (MSXML 6's answers on Windows; what each then leaves is not
+/// measured: gala leaves the node as it was in the first two, sets the
+/// type in the third, and records each).
 pub(super) extern "system" fn put_data_type(this: Obj, name: Bstr) -> HResult {
     let Some(name) = text(name) else { return E_INVALIDARG };
     let d = doc(this);
     let el = idx(this);
-    if d.tree.node(el).kind != Kind::Element {
-        return E_FAIL;
+    match d.tree.node(el).kind {
+        Kind::Element => {}
+        Kind::Attribute => {
+            record(b"IXMLDOMNode::put_dataType(on an attribute: ignored)", LEDGER_OTHER, 0);
+            return S_OK;
+        }
+        Kind::Document => return E_FAIL,
+        _ => return E_INVALIDARG,
     }
-    let Some((canonical, ty)) = by_name(&name) else { return E_FAIL };
+    let Some((canonical, ty)) = by_name(&name) else {
+        record(b"IXMLDOMNode::put_dataType(a type MSXML does not name: ignored)", LEDGER_OTHER, 0);
+        return S_OK;
+    };
     let mut content = String::new();
     d.tree.text(el, &mut content);
     if !reads_as(ty, &content) {
-        return malformed(b"IXMLDOMNode::put_dataType(content not of the type)");
+        record(b"IXMLDOMNode::put_dataType(content not of the type)", LEDGER_OTHER, 0);
     }
     if let Some(a) = type_attr(&d.tree, el) {
         d.tree.nodes[a as usize].value = canonical.into();
@@ -782,4 +790,26 @@ pub(super) extern "system" fn put_data_type(this: Obj, name: Bstr) -> HResult {
     let a = d.tree.create(Kind::Attribute, "dt:dt", DT_NS, canonical);
     d.tree.insert(el, a, None);
     S_OK
+}
+
+/// A loaded document's typed elements: the first whose type MSXML does
+/// not name, or whose content is not of its type, as the reason loading
+/// fails (MSXML 6 fails such a load on Windows; its parse error's code
+/// and text are not measured).
+pub(super) fn on_load(d: &Doc) -> Option<&'static str> {
+    let t = &d.tree;
+    for i in 0..t.nodes.len() as u32 {
+        let Some(a) = type_attr(t, i) else { continue };
+        let Some((_, ty)) = by_name(&t.node(a).value) else {
+            record(b"loadXML: dt:dt names no MSXML type", LEDGER_OTHER, i.into());
+            return Some("dt:dt names no data type");
+        };
+        let mut s = String::new();
+        t.text(i, &mut s);
+        if !reads_as(ty, &s) {
+            record(b"loadXML: content not of its dt:dt type", LEDGER_OTHER, i.into());
+            return Some("content not of its dt:dt type");
+        }
+    }
+    None
 }

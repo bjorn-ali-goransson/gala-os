@@ -702,6 +702,14 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
                 d.error = e;
                 return false;
             }
+            if let Some(why) = typed::on_load(d) {
+                d.tree = Tree::new();
+                let mut reason = String::new();
+                reason.push_str(why);
+                d.error =
+                    ParseError { code: E_FAIL, reason, url: url.into(), ..ParseError::default() };
+                return false;
+            }
             true
         }
         Err(e) => {
