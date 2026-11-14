@@ -363,9 +363,17 @@ opentelemetry-proto's definitions:
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
 information class, unsupported flag or TODO path increments a counter
-keyed by (service, what, detail) in a fixed 64-entry table. When running
-a real program, this list is the work queue, ranked by how often it was
-hit (scenario `ledger_test`).
+keyed by (service, what, detail) in a fixed 512-entry table (hits past
+it only counted as overflow). When running a real program, this list is
+the work queue, ranked by how often it was hit (scenario `ledger_test`).
+Names from user mode (`GalaRecordMissing`, the registry's absent keys)
+live in a second fixed table of 512 names; a name that finds no room is
+`?user`. Invariants (`nt::ledger`): each dump gives back the names no
+entry uses any more, so the table holds the names of the gaps since the
+last dump, not every name of the boot; and bulk reports (the registry's
+`absent key`s, thousands in an Office install) hold at most 384 names
+and 384 entries, so a rarer gap such as a missing DLL still finds room
+for its name between two dumps.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per
@@ -406,6 +414,13 @@ hit (scenario `ledger_test`).
   signed`, `cabinet hash differs`, `signer's signature`, `timestamp`,
   `Authenticode policy`, ...), with crypt32's
   `crypt32.dll!AUTHENTICODE: <error>` naming the chain's error bits.
+  The Software Protection Platform's client (sppc, ARCHITECTURE "Other
+  DLLs"): every call, "other", as `sppc.dll!<function>(<case>)` (the
+  SLIDTYPEs of a SLGetSLIDList, `sku to file`; the value name asked of
+  SLGetLicenseInformation or SLGetPolicyInformationDWORD; `not a
+  license`, `no SKU`, `product keys not decoded`, ...) with the HRESULT
+  returned as detail, a successful one included: what a program asked of
+  licensing and was answered.
   MSXML (msxml6): `msxml6.dll!parse error: <reason>` and
   `msxml6.dll!parse error at: <text>` (40 characters of the line around
   the error), "other", the line << 32 | the column as detail, for each
