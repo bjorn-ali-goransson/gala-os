@@ -1,0 +1,759 @@
+/*
+ * gala-os.com
+ *
+ * The palette is a Najdi mud-brick fort: limestone plaster, burnt umber,
+ * the deep shade of a courtyard, date-palm ochre. One family (Archivo)
+ * carries the page; the monospace is reserved for real identifiers —
+ * scenario names, DLL names, paths — and is never used for decoration.
+ */
+
+:root {
+  --plaster: #e8dfce;
+  --plaster-2: #ded3be;
+  --plaster-3: #d3c6ac;
+  --ink: #211b14;
+  --ink-soft: #574a39;
+  --brick: #8c4a2f;
+  --brick-deep: #6e3721;
+  --courtyard: #2e4a52;
+  --ochre: #c98a2b;
+  --line: rgba(33, 27, 20, 0.16);
+  --line-firm: rgba(33, 27, 20, 0.34);
+
+  --measure: 68ch;
+  --rail-w: 13rem;
+  --gutter: clamp(1.15rem, 4vw, 3rem);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --plaster: #17120e;
+    --plaster-2: #211a14;
+    --plaster-3: #2b221a;
+    --ink: #efe6d6;
+    --ink-soft: #ad9d88;
+    --brick: #c4663f;
+    --brick-deep: #a4512e;
+    --courtyard: #87aeb8;
+    --ochre: #d9a24a;
+    --line: rgba(239, 230, 214, 0.14);
+    --line-firm: rgba(239, 230, 214, 0.32);
+  }
+}
+
+:root[data-theme="dark"] {
+  --plaster: #17120e;
+  --plaster-2: #211a14;
+  --plaster-3: #2b221a;
+  --ink: #efe6d6;
+  --ink-soft: #ad9d88;
+  --brick: #c4663f;
+  --brick-deep: #a4512e;
+  --courtyard: #87aeb8;
+  --ochre: #d9a24a;
+  --line: rgba(239, 230, 214, 0.14);
+  --line-firm: rgba(239, 230, 214, 0.32);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--plaster);
+  color: var(--ink);
+  font-family: Archivo, "Helvetica Neue", Arial, sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.62;
+  font-synthesis-weight: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+code {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+}
+
+a {
+  color: var(--brick);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  color: var(--brick-deep);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ochre);
+  outline-offset: 3px;
+}
+
+.shell {
+  width: 100%;
+  max-width: 76rem;
+  margin: 0 auto;
+  padding-inline: var(--gutter);
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: 1rem;
+  top: 1rem;
+  z-index: 10;
+  background: var(--plaster-2);
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--line-firm);
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  background: color-mix(in srgb, var(--plaster) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+
+.masthead-in {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 3.6rem;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.wordmark-ar {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--brick);
+}
+
+.masthead-nav {
+  display: flex;
+  gap: 1.4rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  padding-block: clamp(2.5rem, 7vw, 5.5rem) clamp(2rem, 5vw, 3.5rem);
+  border-bottom: 1px solid var(--line);
+}
+
+.hero-title {
+  margin: 0;
+  font-size: clamp(2.3rem, 6.4vw, 4.6rem);
+  font-weight: 800;
+  line-height: 0.98;
+  letter-spacing: -0.038em;
+  max-width: 24ch;
+  text-wrap: balance;
+}
+
+.hero-title-sub {
+  display: block;
+  margin-top: 0.35em;
+  font-size: 0.42em;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+  color: var(--brick);
+}
+
+.hero-lede {
+  margin: 1.8rem 0 0;
+  max-width: var(--measure);
+  font-size: 1.1rem;
+  color: var(--ink-soft);
+}
+
+.hero-lede code {
+  color: var(--ink);
+}
+
+/* ---------- the wall ---------- */
+
+.wall {
+  margin: clamp(2.2rem, 6vw, 3.6rem) 0 0;
+  max-width: 58rem;
+}
+
+.wall-parapet {
+  display: block;
+  width: 100%;
+  height: 20px;
+  fill: var(--brick);
+}
+
+.wall .stratum,
+.wall .seam {
+  margin: 0;
+  border: 1px solid var(--line-firm);
+  border-top: none;
+}
+
+.wall .stratum {
+  padding: 0.85rem 1rem 1rem;
+  background: var(--plaster-2);
+}
+
+.stratum-name {
+  margin: 0 0 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+}
+
+.wall .cells {
+  display: grid;
+  grid-template-columns: 2.2fr 1fr;
+  gap: 0.6rem;
+}
+
+.wall .cell {
+  padding: 0.7rem 0.85rem 0.8rem;
+  background: var(--plaster);
+  border: 1px solid var(--line);
+}
+
+.cell-name {
+  margin: 0 0 0.5rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.wall .cell ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wall .cell li {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--line);
+}
+
+/* The heavy course: the one seam where gala imitates NT. */
+.wall .seam {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.7rem;
+  padding: 0.7rem 1rem;
+  background: var(--ochre);
+  border-color: var(--brick-deep);
+  border-width: 2px 1px;
+  color: #241a06;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.wall .seam span {
+  font-weight: 500;
+  font-size: 0.86rem;
+  color: #4a3609;
+}
+
+.wall .s-core {
+  background: var(--plaster-3);
+}
+
+.core-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.core-cells li {
+  padding: 0.55rem 0.7rem;
+  background: var(--plaster);
+  border: 1px solid var(--line);
+  font-size: 0.86rem;
+  font-weight: 500;
+}
+
+.wall .s-hw {
+  padding: 0.7rem 1rem;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 5px,
+    var(--line) 5px,
+    var(--line) 6px
+  );
+  font-size: 0.84rem;
+  color: var(--ink-soft);
+}
+
+.wall figcaption {
+  margin-top: 1rem;
+  max-width: 58ch;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+/* One orchestrated moment: the courses settle into place, bottom up. */
+@media (prefers-reduced-motion: no-preference) {
+  .wall .stratum,
+  .wall .seam {
+    animation: settle 0.62s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    animation-delay: var(--d, 0s);
+  }
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(-0.7rem);
+  }
+}
+
+/* ---------- layout and rail ---------- */
+
+.layout {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  gap: clamp(2rem, 5vw, 4.5rem);
+  align-items: start;
+  padding-block: clamp(2.5rem, 6vw, 4.5rem) 4rem;
+}
+
+.rail {
+  position: sticky;
+  top: 5rem;
+  font-size: 0.9rem;
+  border-left: 1px solid var(--line);
+  padding-left: 1rem;
+}
+
+.rail ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rail li + li {
+  margin-top: 0.42rem;
+}
+
+.rail a {
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.rail a:hover {
+  color: var(--ink);
+}
+
+.rail a.is-active {
+  color: var(--brick);
+  font-weight: 700;
+}
+
+.rail-sub {
+  margin-top: 0.35rem;
+  padding-left: 0.85rem;
+  border-left: 1px solid var(--line);
+}
+
+.rail-sub a {
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+@media (max-width: 62rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    position: static;
+    border-left: none;
+    border-bottom: 1px solid var(--line);
+    padding-left: 0;
+    padding-bottom: 1.2rem;
+  }
+
+  .rail > ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+  }
+
+  .rail li + li {
+    margin-top: 0;
+  }
+
+  .rail-sub {
+    display: none;
+  }
+}
+
+/* ---------- sections ---------- */
+
+.body > .sec + .sec {
+  margin-top: clamp(3.2rem, 7vw, 5rem);
+  padding-top: clamp(3.2rem, 7vw, 5rem);
+  border-top: 1px solid var(--line);
+}
+
+.sec h2 {
+  margin: 0;
+  font-size: clamp(1.7rem, 3.2vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+}
+
+.sec-intro {
+  margin: 0.9rem 0 0;
+  max-width: var(--measure);
+  color: var(--ink-soft);
+}
+
+.sec p {
+  max-width: var(--measure);
+}
+
+.sec > p {
+  margin: 1.1rem 0 0;
+}
+
+.aside {
+  margin-top: 2rem;
+  padding-left: 1.1rem;
+  border-left: 2px solid var(--brick);
+  font-size: 0.97rem;
+  color: var(--ink-soft);
+}
+
+/* ---------- overview pillars ---------- */
+
+.pillars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1.6rem 2rem;
+  margin-top: 2.6rem;
+}
+
+.pillars h3 {
+  margin: 0 0 0.45rem;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  padding-top: 0.7rem;
+  border-top: 2px solid var(--courtyard);
+}
+
+.pillars p {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  max-width: 42ch;
+}
+
+/* ---------- programs ---------- */
+
+.programs {
+  margin: 2.2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.programs > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 13rem;
+  gap: 0.6rem 2rem;
+  padding: 1.15rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.programs > li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.program-head h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.08rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+}
+
+.program-ver {
+  font-weight: 400;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+}
+
+.program-head p {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  max-width: 58ch;
+}
+
+.scenarios {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  gap: 0.3rem;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scenarios code {
+  font-size: 0.73rem;
+  color: var(--courtyard);
+}
+
+@media (max-width: 46rem) {
+  .programs > li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- architecture ---------- */
+
+.layer {
+  margin-top: 2.6rem;
+  scroll-margin-top: 5rem;
+}
+
+.layer-head h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.022em;
+}
+
+.layer-head p {
+  margin: 0.3rem 0 0;
+  font-size: 0.93rem;
+  color: var(--ink-soft);
+  max-width: 56ch;
+}
+
+.entries {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0;
+  margin: 1.2rem 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.entries > li {
+  padding: 1rem 1.3rem 1.1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.entry-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.entry-top h4 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.014em;
+}
+
+.entries p {
+  margin: 0.3rem 0 0;
+  font-size: 0.91rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: 46ch;
+}
+
+/* Status is carried by a filled, half-filled or empty course marker. */
+.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: none;
+  font-size: 0.73rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.mark-glyph {
+  width: 0.62rem;
+  height: 0.62rem;
+  border: 1px solid var(--brick);
+  flex: none;
+}
+
+.mark-works .mark-glyph {
+  background: var(--brick);
+}
+
+.mark-building .mark-glyph {
+  background: linear-gradient(
+    to top,
+    var(--brick) 0 50%,
+    transparent 50% 100%
+  );
+}
+
+.mark-planned .mark-glyph {
+  border-color: var(--line-firm);
+}
+
+.mark-works {
+  color: var(--brick);
+}
+
+@media (max-width: 30rem) {
+  .mark-text {
+    display: none;
+  }
+}
+
+/* ---------- decisions ---------- */
+
+.decisions {
+  margin: 2.2rem 0 0;
+}
+
+.decisions > div {
+  padding: 1.2rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.decisions > div:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.decisions dt {
+  font-size: 1.06rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  max-width: 44ch;
+}
+
+.decisions dd {
+  margin: 0.4rem 0 0;
+  max-width: var(--measure);
+  font-size: 0.96rem;
+  color: var(--ink-soft);
+}
+
+/* ---------- screenshots ---------- */
+
+.shots {
+  display: grid;
+  gap: 2rem;
+  margin-top: 2.2rem;
+}
+
+.shots figure {
+  margin: 0;
+}
+
+.shots img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line-firm);
+  background: var(--plaster-2);
+}
+
+.shots figcaption {
+  margin-top: 0.65rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  max-width: 60ch;
+}
+
+/* ---------- footer ---------- */
+
+.foot {
+  border-top: 1px solid var(--line-firm);
+  background: var(--plaster-2);
+  padding-block: 2.6rem 3.2rem;
+}
+
+.foot-name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.foot-name span {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--brick);
+}
+
+.foot-in nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.4rem;
+  margin-top: 0.9rem;
+  font-size: 0.94rem;
+  font-weight: 500;
+}
+
+.foot-note {
+  margin: 1.4rem 0 0;
+  max-width: 48ch;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+}

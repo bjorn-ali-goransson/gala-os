@@ -1197,6 +1197,54 @@ code `xtask/src/trust.rs`).
   `Metadata.from_bytes`, `root.verify_delegate(role, md)` and
   `meta.verify_length_and_hashes(bytes)`.
 
+## The website
+
+gala-os.com is a static site in `web/`: React components prerendered to
+HTML at build time, so the published page is real markup that reads
+without JavaScript. Its content (what gala is, what runs on it, the map of
+ARCHITECTURE's sections, the design decisions) is data in
+`web/src/content.ts`; when a subsystem's status changes, that file is
+where the site learns it.
+
+- `cd web && npm install` once, then `npm run dev` for the dev server,
+  `npm run build` to build (client bundle, server bundle, then
+  `prerender.mjs` renders the page into `dist/index.html` and deletes the
+  server bundle), `npm run preview` to serve `dist/`, `npm run typecheck`
+  for `tsc --noEmit`.
+- `web/public/` is copied verbatim into `dist/`. Two files there matter to
+  Pages: `CNAME` (the custom domain; without it Pages serves the site at
+  the project path and the apex domain 404s) and `.nojekyll` (Pages
+  otherwise runs the output through Jekyll, which drops files beginning
+  with an underscore). The Website workflow asserts both survive a build.
+- Screenshots live in `web/public/shots/` and are listed in `App.tsx`.
+- **CI** (`.github/workflows/website.yml`): a pull request touching
+  `web/` builds and typechecks the site; a merge to main builds it and
+  publishes it to GitHub Pages (`actions/deploy-pages`; the repository's
+  Pages source is "GitHub Actions").
+
+### The two pipelines stay apart
+
+The website and the system never start each other's runs, and the way that
+is arranged is easy to break:
+
+- `website.yml` is filtered to `paths: [web/**, ...]`, so a kernel change
+  never republishes the site.
+- `ci.yml`'s **push** trigger has `paths-ignore: [web/**, ...]`, so a
+  website-only merge starts no QEMU or Windows runner - and publishes no
+  release either, since `release.yml` runs off CI's completion.
+- `ci.yml`'s **pull_request** trigger is deliberately *not* path-filtered.
+  The `linux` and `windows` checks are required by the `main-run-ci`
+  ruleset, and a workflow that a path filter skips never reports its
+  checks: the pull request then waits forever for a status that cannot
+  arrive. Instead ci.yml's first job, `changes`, compares the merge base
+  against the head, and the heavy jobs carry
+  `if: needs.changes.outputs.code == 'true'`, so on a website-only pull
+  request they are skipped (a skipped job reports a conclusion, which the
+  ruleset accepts) and nothing expensive runs.
+
+Adding a required check, or moving the website out of `web/`, means
+revisiting all three.
+
 ## Writing tests and adding functions
 
 ### Test programs

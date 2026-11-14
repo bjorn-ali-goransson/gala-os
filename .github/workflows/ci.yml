@@ -5,6 +5,17 @@ on:
   # gets no run (each push to a pull request's branch ran twice otherwise).
   push:
     branches: [main]
+    # The website has its own pipeline (website.yml). A merge that only
+    # touches it starts no runner here, and so publishes no release
+    # either (release.yml runs off this workflow's completion).
+    paths-ignore:
+      - web/**
+      - .github/workflows/website.yml
+  # Not filtered by path: the `linux` and `windows` checks are required by
+  # the `main-run-ci` ruleset, and a workflow skipped by a path filter
+  # never reports them, leaving the pull request waiting for a status that
+  # can never arrive. The `changes` job below makes the skip decision
+  # instead, where it is visible and reports a conclusion.
   pull_request:
 
 # A newer push to the same pull request cancels the run of the older one.
@@ -13,10 +24,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which half of the repository a pull request touches: the website
+  # (`web/`, published by website.yml) or the system. A pull request that
+  # only moves the website skips the jobs below rather than spending a
+  # QEMU runner and a Windows runner on it.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.what.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: what
+        name: Is there anything outside web/ in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # A push to main is already filtered by paths-ignore above, and
+          # a manual run means "run everything".
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request: the system jobs run"
+            exit 0
+          fi
+          # The fork point, not the base tip: a base that has moved on
+          # since would otherwise show its own commits as this change's.
+          fork=$(git merge-base "$BASE" "$HEAD")
+          changed=$(git diff --name-only "$fork" "$HEAD")
+          echo "$changed" | sed 's/^/  /'
+          # No files at all means something unexpected about the range, so
+          # run the system jobs rather than silently skipping them.
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "the system is touched: the system jobs run"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "website only: the system jobs are skipped"
+          fi
+
   # gala itself: the kernel and its programs, booted in QEMU. GitHub's Linux
   # runners have hardware virtualization, so the boots run under KVM (xtask
   # passes `-accel kvm` when /dev/kvm exists and falls back to TCG).
   linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -99,6 +154,8 @@ jobs:
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
   # Each shard builds what it boots and fetches the prebuilt programs.
   boot:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -164,6 +221,8 @@ jobs:
   # Server 2025 is build 26100, the pinned build. The report has the schema
   # of `cargo xtask report`, so `cargo xtask compare` reads it.
   windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4

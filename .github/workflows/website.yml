@@ -1,0 +1,79 @@
+name: Website
+
+# gala-os.com (WORKFLOW "The website"): the static site in `web/`, built
+# with Vite and prerendered to HTML, published to GitHub Pages.
+#
+# The website and the system are deliberately separate pipelines: a change
+# under `web/` never starts the kernel's QEMU and Windows runners, and a
+# change to the kernel never republishes the website. The other half of
+# that separation is in ci.yml (its `changes` job).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - web/**
+      - .github/workflows/website.yml
+  pull_request:
+    paths:
+      - web/**
+      - .github/workflows/website.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the older run; pushes to
+# main queue instead, so a publish is never half-applied.
+concurrency:
+  group: website-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install (exactly the locked versions)
+        working-directory: web
+        run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Build and prerender
+        working-directory: web
+        run: npm run build
+      # The two files that make Pages serve the site at the apex domain
+      # instead of the project path, and stop it running the output
+      # through Jekyll. A build that loses them would publish a site that
+      # answers on the wrong host, so it fails here instead.
+      - name: The build carries its domain and bypasses Jekyll
+        run: |
+          test "$(cat web/dist/CNAME)" = gala-os.com
+          test -f web/dist/.nojekyll
+      - name: The page is real markup, not an empty shell
+        run: grep -q "ABI boundary" web/dist/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  # Only main publishes. A pull request is built and checked above, which
+  # is what makes a broken site fail before it is live.
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
