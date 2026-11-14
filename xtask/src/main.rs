@@ -11087,10 +11087,13 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // user/lx/gtk_test under X11 (LD step 5): GDK's X11 backend on
         // display :0, through rootless Xwayland and the server's window
-        // manager; it clicks its own button and closes its window, as on
-        // Linux (its transcript, lx_gtk_x11.txt, is Xvfb's on the host).
+        // manager. Run with --input: the screen check (GTK_X11_SCREEN)
+        // clicks its button and the frame's close button, so its window
+        // shows whatever the timing (self-driven, it may close before
+        // Xwayland commits a buffer). Its transcript, lx_gtk_x11.txt, is
+        // Xvfb's on the host (self-driven; the same lines).
         name: "lx_gtk_x11",
-        cmdline: "qemu_exit presenter=test wayland=on xwayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test lxenv=DISPLAY=:0%20GDK_BACKEND=x11%20HOME=/Users/gala%20PATH=/usr/bin:/bin",
+        cmdline: "qemu_exit presenter=test wayland=on xwayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=DISPLAY=:0%20GDK_BACKEND=x11%20HOME=/Users/gala%20PATH=/usr/bin:/bin",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "personality linux",
@@ -14042,6 +14045,45 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// user/lx/gtk_test under X11 (`lx_gtk_x11`, `--input`): its X window
+/// framed by shasha at (64, 48), the client area (320 x 200) from (65,
+/// 81): GTK's background, its label and its button. A click on the button
+/// (the pointer starts at (640, 400)), then on the frame's close button
+/// at (362, 65), which the window manager turns into WM_DELETE_WINDOW.
+/// The program waits for both, so its window is on the desktop whatever
+/// the timing of Xwayland's first buffer (self-driven, it could close
+/// before Xwayland committed one).
+const GTK_X11_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'gtk_test'",
+    steps: &[
+        ScreenStep {
+            after: "stdout: window drawn",
+            input: &[],
+            pixels: &[
+                PixelCheck::Varied(70, 56, 60, 16, 4), // "gtk_test" in the caption
+                PixelCheck::At(200, 120, 0xf6f5f4),    // GTK's background
+                PixelCheck::AnyIn(140, 145, 170, 20, 0x2e3436), // the label
+                PixelCheck::Varied(190, 230, 70, 16, 16), // "Click me"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -161",
+                "mouse_move -161 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "stdout: button clicked: Click me",
+            input: &["mouse_move 138 -174", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// The start menu (600 x 640 at (340, 100) on the 1280 x 800 screen) and
 /// its tiles: 89 x 84 cells from (372, 216), six to a row, each icon (32 x
 /// 32) 26 px in and 10 down, its name from 48 down. In start_menu's image:
@@ -15182,6 +15224,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),
+    ("lx_gtk_x11", GTK_X11_SCREEN),
     ("lx_xterm", XTERM_SCREEN),
     ("lx_xdesktop", XDESKTOP_SCREEN),
     ("linux_menu", LINUX_MENU_SCREEN),

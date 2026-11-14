@@ -3467,8 +3467,9 @@ the next breakthroughs).
   types `echo hi` and sees its output, drags over it with the mouse
   (xterm's selection) and types `exit`, which ends it. A GTK program
   under X11 (`lx_gtk_x11`: gtk_test with GDK_BACKEND=x11, its
-  transcript Xvfb's on Linux) shows its window, clicks its button and
-  closes it through the window manager. Built for it:
+  transcript Xvfb's on Linux) shows its window; the screen check clicks
+  its button and the frame's close button (WM_DELETE_WINDOW through the
+  window manager). Built for it:
   pseudo-terminals, sessions and process groups (`lx::pty`,
   `lx::session`; user/lx/pty_test's transcript, recorded on Linux, now
   matches: `lx_pty`, `lx_pty_pie`), glibc's fork (clone with
