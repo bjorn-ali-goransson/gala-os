@@ -2106,14 +2106,21 @@ source).
   release alone does not pin them: 26.04 publishes two builds of each
   toolchain package under one version, the plain amd64 one and an
   amd64v3 one optimised for x86-64-v3, and a machine opts into the
-  variant with `APT::Architecture-Variants` (GitHub's runner image does,
-  in `/etc/apt/apt.conf.d/90arch-variant`; `apt-cache policy
-  cpp-15-x86-64-linux-gnu` then names `resolute/main amd64v3
-  Packages`). The amd64v3 gcc defaults to `-march=x86-64-v3` and emits
-  AVX2 where the plain one emits none, so it gives other bytes for the
-  same sources: `build.sh` refuses to build with it and says so, and
+  variant with `APT::Architecture-Variants` (GitHub's runner image does;
+  `apt-cache policy cpp-15-x86-64-linux-gnu` then names `resolute/main
+  amd64v3 Packages`). The amd64v3 gcc defaults to `-march=x86-64-v3` and
+  emits AVX2 where the plain one emits none, so it gives other bytes for
+  the same sources: `build.sh` refuses to build with it and says so, and
   CI's `linux` job takes the toolchain from the plain amd64 archive
-  before it builds.
+  before it builds. Ask for that archive with the option itself --
+  `apt-get -o APT::Architecture-Variants= update`, then the same option
+  on the `install --reinstall` -- rather than by deleting the file that
+  sets it: one runner image keeps it in
+  `/etc/apt/apt.conf.d/90arch-variant` and another does not, and a `-o`
+  outranks every configuration file whatever its name. Then check what
+  came of it (`gcc -Q --help=target`, `-march=`): the toolchain is what
+  the rebuild rests on, and a job that states it names the cause where a
+  byte diff cannot.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
   (`export-tests` copies only the Windows build's outputs); the kernel's
   host tests `include_bytes!` them.

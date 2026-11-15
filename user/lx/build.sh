@@ -50,10 +50,14 @@ for probe in "$gcc" "$cc"; do
 	echo "  This is Ubuntu's amd64v3 build; its binaries are not the" >&2
 	echo "  checked-in ones. Build them in the test image instead:" >&2
 	echo "    cargo xtask docker-test lx-expect" >&2
-	echo "  or take the toolchain from the plain amd64 archive (remove" >&2
-	echo "  /etc/apt/apt.conf.d/90arch-variant, then apt-get install" >&2
-	echo "  --reinstall gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu" >&2
-	echo "  libgcc-15-dev binutils libc6-dev), as .github/workflows/ci.yml does." >&2
+	echo "  or take the toolchain from the plain amd64 archive, which one" >&2
+	echo "  apt option asks for whatever set the variant and wherever it did:" >&2
+	echo "    plain='-o APT::Architecture-Variants='" >&2
+	echo "    sudo apt-get \$plain update" >&2
+	echo "    sudo apt-get install -y --reinstall --allow-downgrades \$plain \\" >&2
+	echo "      gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu \\" >&2
+	echo "      libgcc-15-dev binutils libc6-dev" >&2
+	echo "  as .github/workflows/ci.yml does." >&2
 	exit 1
 done
 for dir in $GLIBC_TESTS; do
