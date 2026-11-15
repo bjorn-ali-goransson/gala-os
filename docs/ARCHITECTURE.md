@@ -5315,8 +5315,9 @@ of their own, clients of it) is the yardstick.
   (`user/<dll>/src/unimplemented.rs`, the `gala_stubs` crate's
   `unimplemented_exports!`; ntdll has its own copy). A stub cannot fail
   in the function's own terms (it does not know the return type), so a
-  call reports `dll!function` ("not implemented") and ends the process
-  with STATUS_NOT_IMPLEMENTED (`unimplemented_test`). The stubs live in a
+  call reports `dll!function` ("stub", the one kind whose line says the
+  process ended) and ends the process with STATUS_NOT_IMPLEMENTED
+  (`unimplemented_test`). The stubs live in a
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
   export resolving there as absent (by name STATUS_ENTRYPOINT_NOT_FOUND,
   by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional

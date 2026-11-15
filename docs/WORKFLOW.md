@@ -1657,8 +1657,9 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   DLL's `src/unimplemented.rs` (`gala_stubs::unimplemented_exports!`)
   to get the program running. The stub logs at once (`[warn ]
   <program>: <dll>!<function> not implemented, ending the process
-  (detail <the number the record carried>)`),
-  records `dll!function` in the ledger and ends the process with
+  (detail <the number the record carried>)`; a gap that is reported and
+  lived with logs the same line without the "ending the process"),
+  records `dll!function` in the ledger ("stub") and ends the process with
   STATUS_NOT_IMPLEMENTED when called. Implementing one means removing it
   from that list.
 - GetProcAddress returns NULL for stubs, so a test that checks a

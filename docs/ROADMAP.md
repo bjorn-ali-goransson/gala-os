@@ -2245,9 +2245,41 @@ need gala's.
      ROW and COLUMN show; test first in `webservices_test` and
      `wow64_webservices_test`, every answer measured on this machine's
      Windows 11 build 26200 in both widths.
-     Where a run with egress gets to after the configuration service is
-     what the next one from boot says. Seen
-     too, not fatal so far: `slc.dll` a missing DLL (loaded by name at
+     With webservices in place, the first run from boot with egress on
+     the owner's Windows machine under KVM (Intel i9-8950HK, 2 vCPUs;
+     2558 s of VM time of the 3600 s limit, nothing waiting for a host
+     CPU) got through the download, STAGEREGISTRY,
+     UNINSTALLCENTENNIAL and APPLYCONFIGURATION's publish, Migrate and
+     Fonts, to 92% of the scenario's progress, with Office's files
+     published on disk: WINWORD.EXE and EXCEL.EXE are among the
+     10 985 files, under `%ProgramFiles%\Microsoft Office\root\Office16`
+     -- and
+     then failed in the integrator's last task, which reads the MSIs it
+     is handed: `C2RManifest::ConfigureMSIs`, "MsiAPICallFailure
+     (MsiOpenDatabase call failed. , Error:0x6e)", ErrorCode 30050, for
+     `Integrator Mode[Install] Scope[Global] Phase[Complete]
+     Scenario[C2R] Actions[Extension Msi ]
+     Msi[C2RInt.16.msi,C2RIntLoc.en-us.16.msi,*]`. 0x6e is
+     ERROR_OPEN_FAILED, which is what gala's MsiOpenDatabaseW answers
+     every database with. integrator.exe exits 30050 twice, the C2R
+     task fails, and the service and setup.exe end with 17002.
+     Next: reading an installer database. What Office asks of one is
+     bounded, from the names Integrator.exe looks up at run time (it
+     imports msi.dll from no import directory): MsiOpenDatabase,
+     MsiDatabaseIsTablePersistentW, MsiDatabaseOpenViewW,
+     MsiViewExecute, MsiViewFetch and MsiRecordGetStringW, and the
+     queries in it are ``SELECT * FROM `Feature` `` and ``SELECT * FROM
+     `Property` `` -- a reader for the container and the two tables, and
+     a query that selects a whole table, not an engine. Test first in
+     `msi_test` and `wow64_msi_test` against this machine's Windows
+     (build 26200) reading `C2RInt.16.msi` itself.
+     Seen too, not fatal so far: `wevtutil.exe` is absent, so the
+     integrator's InstallEtwManifest aborts (ErrorCode 2) and carries
+     on; `schtasks.exe` is absent, so PublishCustomExtension cannot
+     delete the "Office Feature Updates" task and carries on;
+     `InspectorOfficeGadget.exe` cannot start nine times (0xc0000135,
+     no .NET Framework); `OfficeC2RClient.exe` exits 1. And: `slc.dll`
+     a missing DLL (loaded by name at
      run time), Office's product key not decoded by gala's sppc
      (SLInstallProofOfPurchase answers SL_E_INVALID_PRODUCT_KEY; no
      run has called it yet), and osppcext.dll!SLActivateProduct

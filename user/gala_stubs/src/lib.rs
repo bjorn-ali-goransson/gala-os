@@ -6,7 +6,7 @@
 //! stub cannot fail honestly in the function's own terms (it does not know
 //! whether the function returns a BOOL, an HRESULT, a handle or a status),
 //! so it never pretends: it reports `dll!function` to the kernel's
-//! missing-features ledger ("not implemented") and ends the process with
+//! missing-features ledger ("stub") and ends the process with
 //! STATUS_NOT_IMPLEMENTED. The ledger then names the function to implement
 //! next (`unimplemented_test`).
 //!
@@ -32,8 +32,11 @@ unsafe extern "system" {
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
 }
 
-/// GalaRecordMissing's "not implemented".
-const NOT_IMPLEMENTED: u32 = 3;
+/// GalaRecordMissing's "stub": an export that only reports itself and
+/// ends the process, which is what makes its ledger line and the
+/// kernel's warning say the process ended ("not implemented", 3, is a
+/// gap the caller is told about and lives with).
+const STUB: u32 = 6;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xc000_0002;
 
 /// Reports `name` (`dll!function`) to the ledger and ends the process.
@@ -42,7 +45,7 @@ pub fn unimplemented(name: &str) -> ! {
     // SAFETY: gala's ledger service reads `name` (ASCII, its length);
     // NtTerminateProcess(NtCurrentProcess) does not return.
     unsafe {
-        GalaRecordMissing(name.as_ptr(), name.len(), NOT_IMPLEMENTED, 0);
+        GalaRecordMissing(name.as_ptr(), name.len(), STUB, 0);
         NtTerminateProcess(-1, STATUS_NOT_IMPLEMENTED);
     }
     loop {

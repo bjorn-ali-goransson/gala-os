@@ -4,9 +4,10 @@
 //! list ranked by how often each gap was hit (docs/OBSERVABILITY.md).
 //!
 //! Entries live in a fixed table (no allocation, usable anywhere); when it
-//! is full, further new kinds are only counted in `overflow`. Dumped as
-//! JSON lines (`ledger: {...}`) by `dump`, which also clears the table so
-//! that each dump covers one program.
+//! is full, further new kinds are only counted, by kind, in `dropped`, so
+//! that a dump still says what it lost (a `?full` or `?bulk` line per
+//! kind). Dumped as JSON lines (`ledger: {...}`) by `dump`, which also
+//! clears the table so that each dump covers one program.
 //!
 //! Names from user mode are kept in a second fixed table. Invariants: a
 //! dump gives back the names no entry uses any more (`compact`), so the
@@ -14,7 +15,9 @@
 //! every name of the boot; and bulk reports (the registry's absent keys,
 //! thousands in a long install) take at most `BULK_NAMES` names and
 //! `BULK_ENTRIES` entries, so a rarer gap (a missing DLL) still finds
-//! room for its name between two dumps.
+//! room for its name between two dumps. Whether those caps are right is
+//! answered by the dump itself: `?bulk` lines are the caps working,
+//! while a `?full` line of a rarer kind says a gap was lost.
 
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -132,8 +135,30 @@ struct Entry {
     hits: u64,
 }
 
+/// The kinds a dump names the dropped records under. There are more
+/// `what` literals than this; one that finds no slot is only counted in
+/// `overflow`, which a dump reports as the kinds it could not name.
+const DROPPED_KINDS: usize = 32;
+
+/// What a table with no room left dropped, by kind: enough to tell a
+/// gap that was lost (a missing export, say, which the next run needs
+/// the caps raised to see) from the bulk reports whose cap is doing its
+/// job.
+#[derive(Clone, Copy)]
+struct Dropped {
+    what: &'static str,
+    /// Whether the drops came from bulk reports (`record_user_bulk`,
+    /// capped at `BULK_ENTRIES`) rather than from a table that is full.
+    bulk: bool,
+    hits: u64,
+}
+
 struct Ledger {
     entries: [Option<Entry>; ENTRIES],
+    /// Every dropped record, counted by kind.
+    dropped: [Option<Dropped>; DROPPED_KINDS],
+    /// How many records were dropped in all (`dropped`'s hits plus the
+    /// kinds it had no room for).
     overflow: u64,
     /// How many entries bulk reports hold.
     bulk: usize,
@@ -146,18 +171,34 @@ impl Ledger {
         if let Some(entry) = self.entries.iter_mut().flatten().find(|e| e.key == key) {
             entry.hits += 1;
         } else if bulk && self.bulk == BULK_ENTRIES {
-            self.overflow += 1;
+            self.drop_record(key.what, true);
         } else if let Some(slot) = self.entries.iter_mut().find(|e| e.is_none()) {
             *slot = Some(Entry { key, hits: 1 });
             self.bulk += usize::from(bulk);
         } else {
-            self.overflow += 1;
+            self.drop_record(key.what, bulk);
+        }
+    }
+
+    /// Counts one record the table had no room for, under its kind.
+    fn drop_record(&mut self, what: &'static str, bulk: bool) {
+        self.overflow += 1;
+        if let Some(d) =
+            self.dropped.iter_mut().flatten().find(|d| d.what == what && d.bulk == bulk)
+        {
+            d.hits += 1;
+        } else if let Some(slot) = self.dropped.iter_mut().find(|d| d.is_none()) {
+            *slot = Some(Dropped { what, bulk, hits: 1 });
         }
     }
 }
 
-static LEDGER: IrqMutex<Ledger> =
-    IrqMutex::new(Ledger { entries: [None; ENTRIES], overflow: 0, bulk: 0 });
+static LEDGER: IrqMutex<Ledger> = IrqMutex::new(Ledger {
+    entries: [None; ENTRIES],
+    dropped: [None; DROPPED_KINDS],
+    overflow: 0,
+    bulk: 0,
+});
 
 /// Dumps printing their copy of the table (whose user names must keep
 /// their indices until they are done).
@@ -168,13 +209,18 @@ pub fn record(service: &'static str, what: &'static str, detail: u64) {
     add(Key { service: Service::Kernel(service), what, detail }, false);
 }
 
-/// What a user-mode report is about (`GalaRecordMissing`'s code).
+/// What a user-mode report is about (`GalaRecordMissing`'s code). A
+/// "stub" is an export that exists only to report itself and then ends
+/// the process (`gala_stubs`); "not implemented" is a gap the caller is
+/// told about and lives with (a method of an interface, a type the
+/// reader cannot read), so only the first ends a program.
 pub fn user_what(code: u32) -> &'static str {
     match code {
         1 => "missing export",
         2 => "unsupported",
         3 => "not implemented",
         4 => "missing dll",
+        6 => "stub",
         _ => "other",
     }
 }
@@ -187,7 +233,7 @@ pub fn record_user(name: &[u8], what: &'static str, detail: u64) {
 
 /// `record_user` for reports that come in thousands (the registry's
 /// absent keys): they take at most `BULK_NAMES` names and `BULK_ENTRIES`
-/// entries, beyond which they count as `?user` / `ledger full`.
+/// entries, beyond which they count as `?user` / a `?bulk` line.
 pub fn record_user_bulk(name: &[u8], what: &'static str, detail: u64) {
     record_named(name, what, detail, true);
 }
@@ -228,10 +274,11 @@ impl fmt::Display for Json<'_> {
 /// Prints every entry as a `ledger: {...}` line and clears the table.
 pub fn dump() {
     PRINTING.fetch_add(1, Ordering::SeqCst);
-    let (entries, overflow) = {
+    let (entries, dropped, overflow) = {
         let mut ledger = LEDGER.lock();
-        let snapshot = (ledger.entries, ledger.overflow);
+        let snapshot = (ledger.entries, ledger.dropped, ledger.overflow);
         ledger.entries = [None; ENTRIES];
+        ledger.dropped = [None; DROPPED_KINDS];
         ledger.overflow = 0;
         ledger.bulk = 0;
         snapshot
@@ -239,9 +286,23 @@ pub fn dump() {
     for entry in entries.iter().flatten() {
         crate::kprintln!("ledger: {}", Json(entry));
     }
-    if overflow > 0 {
+    // What was dropped, by kind, so that a lost gap is told from the
+    // bulk reports the caps are there to drop: "?full" is a table with
+    // no room left, "?bulk" the bulk cap, "?" the kinds `dropped` itself
+    // had no room to name.
+    let mut named = 0;
+    for d in dropped.iter().flatten() {
+        let service = if d.bulk { "?bulk" } else { "?full" };
+        let (what, hits) = (d.what, d.hits);
+        named += hits;
         crate::kprintln!(
-            r#"ledger: {{"service":"?","what":"ledger full","detail":0,"hits":{overflow}}}"#
+            r#"ledger: {{"service":"{service}","what":"{what}","detail":0,"hits":{hits}}}"#
+        );
+    }
+    if overflow > named {
+        let rest = overflow - named;
+        crate::kprintln!(
+            r#"ledger: {{"service":"?","what":"ledger full","detail":0,"hits":{rest}}}"#
         );
     }
     // The last dump out gives back the names only its copy used. A dump
@@ -347,10 +408,18 @@ mod tests {
         assert!(t.intern(b"registry:one more", true).is_some());
     }
 
+    fn empty() -> alloc::boxed::Box<Ledger> {
+        alloc::boxed::Box::new(Ledger {
+            entries: [None; ENTRIES],
+            dropped: [None; DROPPED_KINDS],
+            overflow: 0,
+            bulk: 0,
+        })
+    }
+
     #[test]
     fn bulk_entries_leave_room() {
-        let mut ledger =
-            alloc::boxed::Box::new(Ledger { entries: [None; ENTRIES], overflow: 0, bulk: 0 });
+        let mut ledger = empty();
         for i in 0..BULK_ENTRIES + 10 {
             ledger.add(
                 Key { service: Service::Kernel("k"), what: "absent key", detail: i as u64 },
@@ -360,6 +429,53 @@ mod tests {
         assert_eq!((ledger.bulk, ledger.overflow), (BULK_ENTRIES, 10));
         ledger.add(Key { service: Service::Kernel("dll"), what: "missing dll", detail: 0 }, false);
         assert_eq!(ledger.entries.iter().flatten().count(), BULK_ENTRIES + 1);
+    }
+
+    /// A dropped record is still counted under its kind, and bulk drops
+    /// are told apart from a table with no room left, so that a dump says
+    /// what it lost.
+    #[test]
+    fn drops_are_counted_by_kind() {
+        let mut ledger = empty();
+        for i in 0..BULK_ENTRIES + 3 {
+            ledger.add(
+                Key { service: Service::Kernel("k"), what: "absent key", detail: i as u64 },
+                true,
+            );
+        }
+        // The bulk reports hold BULK_ENTRIES entries; these fill the rest.
+        for i in 0..ENTRIES - BULK_ENTRIES {
+            ledger
+                .add(Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 }, false);
+        }
+        // The table is full now, so these two find no room of their own.
+        ledger.add(Key { service: Service::Kernel("x"), what: "missing export", detail: 1 }, false);
+        ledger.add(Key { service: Service::Kernel("y"), what: "missing export", detail: 2 }, false);
+        let dropped: alloc::vec::Vec<_> =
+            ledger.dropped.iter().flatten().map(|d| (d.what, d.bulk, d.hits)).collect();
+        assert_eq!(dropped, [("absent key", true, 3), ("missing export", false, 2)]);
+        assert_eq!(ledger.overflow, 5);
+    }
+
+    /// A kind the `dropped` table has no room for is still counted in the
+    /// total, which is what a dump's "ledger full" line reports.
+    #[test]
+    fn kinds_beyond_the_table_still_count() {
+        // A kind is matched by its text, so one letter each is enough.
+        const KINDS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP";
+        assert!(KINDS.len() > DROPPED_KINDS);
+        let mut ledger = empty();
+        for i in 0..ENTRIES {
+            ledger
+                .add(Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 }, false);
+        }
+        for i in 0..DROPPED_KINDS + 1 {
+            let what: &'static str = &KINDS[i..i + 1];
+            ledger.add(Key { service: Service::Kernel("k"), what, detail: 0 }, false);
+        }
+        assert_eq!(ledger.dropped.iter().flatten().count(), DROPPED_KINDS);
+        let named: u64 = ledger.dropped.iter().flatten().map(|d| d.hits).sum();
+        assert_eq!((named, ledger.overflow), (DROPPED_KINDS as u64, DROPPED_KINDS as u64 + 1));
     }
 
     #[test]

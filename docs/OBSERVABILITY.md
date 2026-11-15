@@ -363,9 +363,13 @@ opentelemetry-proto's definitions:
 
 Every STATUS_NOT_IMPLEMENTED, STATUS_INVALID_SYSTEM_SERVICE, unknown
 information class, unsupported flag or TODO path increments a counter
-keyed by (service, what, detail) in a fixed 512-entry table (hits past
-it only counted as overflow). When running a real program, this list is
-the work queue, ranked by how often it was hit (scenario `ledger_test`).
+keyed by (service, what, detail) in a fixed 512-entry table. A record
+the table has no room for is still counted under its kind, so a dump
+says what it lost: one line per kind, `?full` for a table with nothing
+free left and `?bulk` for the bulk cap below, with `?` / `ledger full`
+for the kinds past the 32 the drop table itself names. When running a
+real program, this list is the work queue, ranked by how often it was
+hit (scenario `ledger_test`).
 Names from user mode (`GalaRecordMissing`, the registry's absent keys)
 live in a second fixed table of 512 names; a name that finds no room is
 `?user`. Invariants (`nt::ledger`): each dump gives back the names no
@@ -373,7 +377,9 @@ entry uses any more, so the table holds the names of the gaps since the
 last dump, not every name of the boot; and bulk reports (the registry's
 `absent key`s, thousands in an Office install) hold at most 384 names
 and 384 entries, so a rarer gap such as a missing DLL still finds room
-for its name between two dumps.
+for its name between two dumps. Whether those caps are right is in the
+dump: `?bulk` lines are the caps working as meant, while a `?full` line
+of a rarer kind says a gap was lost and the caps need revisiting.
 
 - The dispatcher records unknown services and, generically, any
   STATUS_INVALID_INFO_CLASS (with the class argument, per
@@ -382,7 +388,13 @@ for its name between two dumps.
 - Lines `ledger: {"service":..,"what":..,"detail":..,"hits":..}` are
   dumped after each program, before `boot ok` and in a state dump.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
-  (`dll!function` names, 64 characters kept). The Windows Runtime's:
+  (`dll!function` names, 64 characters kept). Its kinds: `missing
+  export`, `unsupported`, `not implemented` (a gap the caller is told
+  about and lives with), `missing dll`, `stub` (an export that only
+  reports itself and ends the process, `gala_stubs`) and `other`. Both
+  `stub` and `not implemented` are also logged as they happen, because a
+  run cut short by a snapshot never dumps the ledger; only `stub`'s line
+  says the process ended. The Windows Runtime's:
   `ole32.dll!RoGetActivationFactory(<class>)` for a class it cannot
   activate, with a reason in the name when the registration was found
   (`(server DLL not found)`, `(no DllGetActivationFactory)`, `(the DLL
