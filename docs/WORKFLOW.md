@@ -2096,7 +2096,18 @@ source).
   system calls: what they check is that glibc's programs run. CI's
   rebuild (ubuntu-26.04: gcc 15.2, glibc 2.43) must give the same bytes:
   their start-up files (`crt1.o`, `crti.o`) come from the host's
-  libc6-dev, so the binaries are rebuilt on that Ubuntu release.
+  libc6-dev, so the binaries are rebuilt on that Ubuntu release. The
+  release alone does not pin them: 26.04 publishes two builds of each
+  toolchain package under one version, the plain amd64 one and an
+  amd64v3 one optimised for x86-64-v3, and a machine opts into the
+  variant with `APT::Architecture-Variants` (GitHub's runner image does,
+  in `/etc/apt/apt.conf.d/90arch-variant`; `apt-cache policy
+  cpp-15-x86-64-linux-gnu` then names `resolute/main amd64v3
+  Packages`). The amd64v3 gcc defaults to `-march=x86-64-v3` and emits
+  AVX2 where the plain one emits none, so it gives other bytes for the
+  same sources: `build.sh` refuses to build with it and says so, and
+  CI's `linux` job takes the toolchain from the plain amd64 archive
+  before it builds.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
   (`export-tests` copies only the Windows build's outputs); the kernel's
   host tests `include_bytes!` them.

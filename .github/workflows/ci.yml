@@ -86,8 +86,25 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
+      # user/lx/bin is checked in and rebuilt here byte for byte, so the
+      # toolchain that builds it has to be one every machine can get. Ubuntu
+      # 26.04 publishes two builds of each toolchain package under the same
+      # version: the plain amd64 one and an amd64v3 one, optimised for
+      # x86-64-v3 (apt-cache policy names it "resolute/main amd64v3
+      # Packages"). This image opts into the variant in
+      # /etc/apt/apt.conf.d/90arch-variant, and its gcc defaults to
+      # -march=x86-64-v3 where the plain one defaults to -march=x86-64: the
+      # same sources then give different bytes (AVX2 where the checked-in
+      # binaries have none). user/lx/build.sh refuses to build with such a
+      # gcc; this is where the runner gets the plain one.
+      - name: Take the toolchain from the plain amd64 archive, not amd64v3
+        run: |
+          sudo rm -f /etc/apt/apt.conf.d/90arch-variant
+          sudo apt-get update
+          sudo apt-get install -y --reinstall --allow-downgrades             gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu             libgcc-15-dev binutils libc6-dev
+          apt-cache policy cpp-15-x86-64-linux-gnu | sed -n '1,6p'
       - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools p7zip-full unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       # No distribution QEMU is used: 8.1.0-8.2.5 had the translated-block bug
       # that broke JIT code, and this image's 10.2.1 wedges under KVM before the
       # kernel logs a phase (WORKFLOW "QEMU"); xtask builds the pinned one. The
@@ -147,20 +164,19 @@ jobs:
           cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p clock_test -p handover_test -p handover_k32_test -p handover_net_test -p udp_test -p sshfwd_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p smpcow_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p unimplemented_test -p rpcrt4_test -p rpc_test -p netapi32_test -p pdh_test -p setupapi_test -p clusapi_test -p sspi_test -p dpapi_test -p cert_test -p tds_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p replay_test -p kernel32_env_test -p kernel32_file_test -p pipe_test -p quota_test -p pagefile_test -p lock_test -p seh_test -p kernel32_sync_test -p kernel32_py_test -p kernel32_locale_test -p disk_test -p rtl_test -p gui_test -p persist_test -p volume_test -p kernel32_system_test -p kernel32_clr_test -p com_test -p bcrypt_test -p console_test -p advapi32_test -p token_test -p security_test -p access_test -p logon_test -p system_test -p lsa_test -p restricted_test -p cmd -p cmd_test -p profile_test -p registry_test -p regnotify_test -p actctx_test -p keyed_event_test -p iphlpapi_test -p afd_poll_test -p dirchange_test -p win32_misc_test -p kernel32_pool_test -p tls_test -p manifest_test -p gala -p gala_cli_test -p start_menu_test -p linux_menu_test -p writeback_test -p taskmgr -p taskmgr_test -p pk_install_test -p galapkg -p smpsem_test -p xstate_test -p vmcycle_test -p xmodify_test -p statedump_test -p snapshot_test -p hotswap_test -p conpty_test -p session_test -p presenter_test -p winsta_test -p clipboard_test -p straddle_test -p smprace_test -p browser_api_test -p dwrite_test -p clockcal_test -p safepoint_test -p shootdown_test -p schannel_tls -p schannel -p schannel_test -p ucrt_test -p office_api_test -p office_k32_test -p msi_test -p webservices_test -p rstrtmgr_test -p wofutil_test -p sppc_test -p sip_test -p actionid_test -p hardlink_test -p threadpool_test -p imagetrim_test -p wintrust_test -p cab_probe -p setupcab_test -p combase_test -p svc_test -p svcrun_test -p msxml_test -p knownfolder_test -p winhttp_cb_test -p runas_test -p gdiplus_test -p windowscodecs_test -p d2d1_test -p uisettings_test -p tray_test -p consolerun -p reparse_test -p wsl -p wsl_test -p explorer -p explorer_test -- -D warnings
           cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_hotswap_test -p hotswap_dll32 -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p ucrtbase -p wow64_ucrt_test -p wow64_office_api_test -p wow64_office_k32_test -p wow64_cert_test -p wow64_msi_test -p wow64_webservices_test -p wow64_rstrtmgr_test -p wow64_hardlink_test -p wow64_threadpool_test -p rstrtmgr -p wow64_wintrust_test -p wow64_setupcab_test -p wow64_combase_test -p wow64_svc_test -p wow64_svcrun_test -p wow64_msxml_test -p wow64_knownfolder_test -p wow64_winhttp_cb_test -p wow64_runas_test -p advapi32 -p bcryptprimitives -p wow64_adv_test -p wow64_regnotify_test -p wow64_actctx_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -p crypt32 -p ncrypt -p msi -p webservices -p wintrust -p setupapi -p msxml6 -p combase -p appxdeploymentclient -p normaliz -p powrprof -p wldp -p schannel_tls -p schannel -p urlmon -p wininet -p iphlpapi -p wow64_schannel_test -p gdiplus -p windows_ui -p wow64_gdiplus_test -p wow64_uisettings_test -p wow64_tray_test -- -D warnings
       # The checked-in binaries are bytes, so a mismatch here is a question
-      # about which toolchain made them (user/lx/build.sh): the versions are
-      # printed before the build, and what this runner built is kept.
+      # about which toolchain made them (user/lx/build.sh): the versions and
+      # each compiler's default -march are printed before the build (an
+      # amd64v3 toolchain defaults to x86-64-v3 and gives other bytes), and
+      # what this runner built is kept.
       - name: Linux test programs (user/lx) against real Linux; binaries match their sources
         id: lx
         run: |
           gcc --version | head -1
           ld --version | head -1
           musl-gcc --version | head -1
-          dpkg-query -W gcc gcc-15 libgcc-15-dev binutils libc6-dev musl-tools musl-dev
+          dpkg-query -W gcc gcc-15 cpp-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev musl-tools musl-dev
           gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
           musl-gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
-          gcc -dumpspecs | md5sum
-          ls -l /usr/lib/gcc/x86_64-linux-gnu/15/specs 2>&1 || true
-          env | grep -iE '^(C|CPP|LD|CXX)FLAGS=|^CC=|^GCC' || echo "no compiler env"
           cargo xtask lx-expect && git diff --exit-code user/lx
       - name: The binaries this runner built (when their bytes differ)
         if: failure() && steps.lx.outcome == 'failure'
@@ -199,7 +215,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
       - name: Install QEMU's build dependencies, OVMF, xorriso
-        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools p7zip-full unzip openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       - name: Cache the pinned QEMU
         uses: actions/cache@v4
         with:

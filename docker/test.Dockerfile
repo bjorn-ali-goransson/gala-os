@@ -26,6 +26,11 @@ ARG http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
 # and libglib2.0-bin (glib-compile-schemas) for the desktop ones. They are what CI's runner installs
 # (`.github/workflows/ci.yml`); without one the scenario that needs it
 # fails -- after a full boot where it is a client.
+#
+# The base image takes the plain amd64 archive (it sets no
+# APT::Architecture-Variants), so its gcc is the one user/lx/bin is built
+# with: an amd64v3 toolchain defaults to -march=x86-64-v3 and gives other
+# bytes, which user/lx/build.sh refuses (WORKFLOW "Linux test programs").
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ovmf xorriso git make gcc libc6-dev curl ca-certificates \
