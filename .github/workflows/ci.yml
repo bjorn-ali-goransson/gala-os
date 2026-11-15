@@ -88,34 +88,34 @@ jobs:
           ls -l /dev/kvm
       # user/lx/bin is checked in and rebuilt here byte for byte, so the
       # toolchain that builds it has to be one every machine can get. Ubuntu
-      # 26.04 publishes two builds of each toolchain package under the same
-      # version: the plain amd64 one and an amd64v3 one, optimised for
-      # x86-64-v3 (apt-cache policy names it "resolute/main amd64v3
-      # Packages"). An image opts into the variant with
-      # APT::Architecture-Variants, as this one does, and its gcc then
-      # defaults to -march=x86-64-v3 where the plain one defaults to
-      # -march=x86-64: the same sources give different bytes (AVX2 where the
-      # checked-in binaries have none). user/lx/build.sh refuses to build with
-      # such a gcc; this is where the runner gets the plain one.
+      # 26.04 publishes two builds of each package under the same version: the
+      # plain amd64 one and an amd64v3 one, optimised for x86-64-v3 (apt-cache
+      # policy names it "resolute/main amd64v3 Packages"). An image opts into
+      # the variant with APT::Architecture-Variants, as this one does, and then
+      # every package it installs is that build: gcc defaults to
+      # -march=x86-64-v3 and emits AVX2 where the plain one emits none, and
+      # musl-dev's static libc is compiled that way too (3961 VEX-encoded
+      # instructions against the plain build's none). The same sources then
+      # give different bytes, in the programs' own code and in the libc linked
+      # into them, and user/lx/build.sh refuses to build that way.
       #
-      # The option is cleared on the command line, not by deleting the file
-      # that sets it: where an image keeps that file is the image's business
-      # (deleting /etc/apt/apt.conf.d/90arch-variant worked on one runner and
-      # left amd64v3 in place on another), while -o outranks every
-      # configuration file whatever its name. The last lines state what the
-      # whole rebuild rests on, here, where the cause can still be named -- a
-      # byte diff fifteen minutes later cannot name it. (musl-gcc is a wrapper
-      # around this same gcc and comes with musl-tools in the next step; the
-      # lx step below prints both defaults.)
-      - name: Take the toolchain from the plain amd64 archive, not amd64v3
+      # So the option is cleared for the whole job, in apt's own
+      # configuration, under a name that sorts after the one the image uses:
+      # every apt-get below takes the plain archive, the next step's musl-dev
+      # among them. Clearing the option is not the same as deleting the file
+      # that sets it -- that worked on the Azure runner image it was written
+      # on and left amd64v3 in place on an EC2 one, where the rebuild differed
+      # again -- because where an image keeps that file is the image's
+      # business, while #clear outranks any file whatever its name. What the
+      # rebuild rests on is then stated in the lx step below, where the cause
+      # can still be named: a byte diff cannot name it.
+      - name: Take every package from the plain amd64 archive, not amd64v3
         run: |
-          plain='-o APT::Architecture-Variants='
-          sudo apt-get $plain update
-          sudo apt-get install -y --reinstall --allow-downgrades $plain gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev
-          apt-cache $plain policy cpp-15-x86-64-linux-gnu | sed -n '1,6p'
-          march=$(gcc -Q --help=target | awk '$1 == "-march=" { print $2; exit }')
-          echo "gcc defaults to -march=$march"
-          test "$march" = x86-64 || { echo "::error::gcc is the amd64v3 build; user/lx/bin cannot be rebuilt with it"; exit 1; }
+          printf '#clear APT::Architecture-Variants;\n' | sudo tee /etc/apt/apt.conf.d/99-plain-amd64
+          apt-config dump | grep -i variant || echo "no architecture variant is selected"
+          sudo apt-get update
+          sudo apt-get install -y --reinstall --allow-downgrades gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev
+          apt-cache policy cpp-15-x86-64-linux-gnu | sed -n '1,6p'
       - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       # No distribution QEMU is used: 8.1.0-8.2.5 had the translated-block bug
@@ -190,6 +190,17 @@ jobs:
           dpkg-query -W gcc gcc-15 cpp-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev musl-tools musl-dev
           gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
           musl-gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
+          # -march= alone does not cover musl-dev, whose static libc is
+          # compiled for x86-64-v3 whatever musl-gcc defaults to, so say what
+          # the code itself is (user/lx/build.sh checks its own output for the
+          # same reason).
+          if gcc -dM -E - </dev/null | grep -qE '__AVX2__|__AVX__'; then
+            echo "::error::gcc is the amd64v3 build (it defines __AVX2__): user/lx/bin cannot be rebuilt with it"
+            exit 1
+          fi
+          vex=$(objdump -d /usr/lib/x86_64-linux-musl/libc.a | grep -cE '[[:space:]](vmov|vpxor|vpunpck|vzero)' || true)
+          echo "musl's static libc has $vex VEX-encoded instructions (the plain amd64 build has none)"
+          test "$vex" = 0 || { echo "::error::musl-dev is the amd64v3 build; user/lx/bin cannot be rebuilt with it"; exit 1; }
           cargo xtask lx-expect && git diff --exit-code user/lx
       - name: The binaries this runner built (when their bytes differ)
         if: failure() && steps.lx.outcome == 'failure'
