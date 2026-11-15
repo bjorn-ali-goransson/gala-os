@@ -9,6 +9,7 @@ fn main() {
         ("MsiDatabaseOpenViewW", 32),
         ("MsiEnumComponentQualifiersW", 39),
         ("MsiEnumProductsW", 45),
+        ("MsiInstallProductW", 88),
         ("MsiLocateComponentW", 90),
         ("MsiOpenDatabaseW", 92),
         ("MsiQueryProductStateW", 113),

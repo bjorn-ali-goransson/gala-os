@@ -815,6 +815,11 @@ XTASK_HOTSWAP_WHY=1 cargo xtask hotswap-diff ...   # why each function counts as
   only be patched: take the snapshot before the program that loads the
   DLL starts (an Office fix in a DLL integrator.exe loads: before
   `process integrator.exe (pid`), or keep the change one a patch takes.
+  Some DLLs no Office snapshot can take: setup.exe maps msi.dll as it
+  starts, so every later snapshot has it mapped, and an export the
+  change adds would not be visible to a resolver even if the patch took
+  it ("What they cannot cover"), which is what a delay load by ordinal
+  resolves through -- an msi.dll export goes from boot.
   With a list, a changed DLL not in it is replaced whole (not patched):
   the flag alone patches every changed DLL. A 4-byte function cannot take the jump
   (refused: make the old build's function longer, or swap its callers).
@@ -3157,7 +3162,12 @@ about a minute under TCG. Read, in order:
   has the `amd64-unicode` stubs, so `Target amd64-unicode` gives an x64
   installer, which gala can run: there is no WOW64 for 32-bit ones; it
   has no amd64 plug-ins, so the script uses none). The build is
-  reproducible; without makensis the checked-in installers are written
+  reproducible for one makensis and not across versions, so a host whose
+  nsis is not CI's image's (Ubuntu 26.04's 3.10-2 against 24.04's) makes
+  other bytes and `export-tests` rewrites the installers and the SHA-256s
+  in their manifests: that belongs to no change, so restore
+  `user/pk_install_test/source` (or export in the image: `cargo xtask
+  docker-test`) rather than committing it. Without makensis the checked-in installers are written
   back from the working tree unchanged, so `export-tests` leaves the same
   bytes either way (make_source.py removes and remakes `source/installers`
   on every run, so keeping them means writing them back, not skipping

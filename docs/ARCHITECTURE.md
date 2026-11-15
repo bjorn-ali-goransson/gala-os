@@ -9670,8 +9670,19 @@ stations and desktops a program creates are refused until stage 3).
   (`msi.dll!<function>: nothing installed`, kind other, the ordinal as
   detail). The exports carry Windows' ordinals (build.rs; ODT's
   setup.exe and the integrator.exe it runs both import them by
-  ordinal). Installing (MsiInstallProduct and the rest) is absent:
-  galapkg's MSI reader (ROADMAP PK) installs packages, not msi.dll.
+  ordinal). Installing a package is galapkg's business (its MSI reader,
+  ROADMAP PK), not msi.dll's, so MsiInstallProductW installs nothing --
+  and is exported all the same, because integrator.exe delay-loads it
+  and a delay load that cannot be resolved ends the process with
+  0xc06d007f before it can handle anything, where a refusal it can see
+  it reports. It answers Windows' own code for every path that is no
+  package to begin with: ERROR_INVALID_PARAMETER for a NULL path,
+  ERROR_PATH_NOT_FOUND for an empty one and for a missing directory,
+  ERROR_FILE_NOT_FOUND for a missing file,
+  ERROR_INSTALL_PACKAGE_OPEN_FAILED for a directory and for every other
+  reason an open can fail, ERROR_INSTALL_PACKAGE_INVALID for a file that
+  is no package. The other installing functions stay absent until a run
+  shows one imported.
 
   A database on disk is another matter, since reading one asks nothing
   of an installer: `user/msi/src/db.rs` is the API over galapkg's MSI
@@ -9702,7 +9713,11 @@ stations and desktops a program creates are refused until stage 3).
   wrongly; a query that changes a database runs as
   ERROR_FUNCTION_FAILED, which is Windows' own answer for a database
   opened read-only, and a create mode or persist path is
-  ERROR_CREATE_FAILED, where Windows would create one. Windows also
+  ERROR_CREATE_FAILED, where Windows would create one; and a package
+  gala does read, asked of MsiInstallProductW, is
+  ERROR_INSTALL_FAILURE -- Windows' own code for an install that failed
+  -- with the package named in the ledger, where Windows would install
+  it. Windows also
   keeps bookkeeping per database file that gala does not: while a
   database is open it refuses a second open of the same file, and gala
   opens it.

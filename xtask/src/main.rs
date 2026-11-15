@@ -5964,8 +5964,8 @@ const MANUAL: &[&str] = &[
     // OF: Office's installer: a ~5.4 GB download from Microsoft's CDN
     // onto a disk-backed C: (OFFICE_INSTALL_TIMEOUT).
     "office_install",
-    // OF: the same install with its windows on the console's desktop, to
-    // watch (screenshots: XTASK_SHOTS).
+    // OF: the same install from the host's cache, with its windows on
+    // the console's desktop, to watch (screenshots: XTASK_SHOTS).
     "office_install_gui",
     // OF: office_install from the host's cache of the CDN's files
     // (`cargo xtask office-source`), put on the disk (development's fast
@@ -10611,8 +10611,10 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },
     Scenario {
-        // OF (manual): office_install with its windows shown
-        // (config_full.xml: Display Level Full), to watch the install
+        // OF (manual): office_install_local with its windows shown
+        // (config_full.xml: Display Level Full, and C:\OfficeSource as
+        // SourcePath so the progress to be watched starts at once), to
+        // watch the install
         // (`XTASK_SHOTS=120,300,... cargo xtask boot-test
         // office_install_gui`: screendumps in target/screenshots/). Still
         // as SYSTEM, an administrator, but on the console's desktop:
@@ -16465,10 +16467,13 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
-        // office_install's disk, for the same install shown on the screen.
+        // office_install's disk, for the same install shown on the screen,
+        // with the cached download on it as office_install_local's has
+        // (config_full.xml names it as SourcePath), so it takes what
+        // office_install_local's does on the host.
         name: "office_install_gui",
         size: 16 << 30,
-        host_mib: Some(6 << 10),
+        host_mib: Some(8 << 10),
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -16633,7 +16638,7 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    if name == "office_install_local" {
+    if name == "office_install_local" || name == "office_install_gui" {
         let source = office_source()?;
         let t = Instant::now();
         let (files, bytes) = diskimage::inject(&path, &source, "\\OfficeSource")?;

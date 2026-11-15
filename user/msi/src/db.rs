@@ -30,8 +30,9 @@ use core::cell::UnsafeCell;
 use galapkg::msi::{Package, Value};
 
 use crate::{
+    ERROR_FILE_NOT_FOUND, ERROR_INSTALL_PACKAGE_INVALID, ERROR_INSTALL_PACKAGE_OPEN_FAILED,
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_ITEMS, ERROR_OPEN_FAILED,
-    ERROR_SUCCESS, record_gap,
+    ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, record_gap,
 };
 
 /// ERROR_NOT_ENOUGH_MEMORY, ERROR_MORE_DATA, ERROR_BAD_QUERY_SYNTAX and
@@ -71,6 +72,7 @@ unsafe extern "system" {
     fn GetFileSizeEx(file: usize, size: *mut i64) -> i32;
     fn ReadFile(file: usize, buf: *mut u8, len: u32, read: *mut u32, overlapped: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
+    fn GetLastError() -> u32;
 }
 
 /// A value in a row, as a record holds it.
@@ -232,15 +234,18 @@ pub fn close(handle: u32) -> u32 {
     })
 }
 
-/// Reads a file whole, for a database that is about to be opened.
-/// GENERIC_READ with sharing, since the installer keeps its own handles
-/// on the package.
-fn read_file(path: *const u16) -> Result<Vec<u8>, u32> {
+/// Reads a file whole, for a database or package that is about to be
+/// opened. GENERIC_READ with sharing, since the installer keeps its own
+/// handles on the package. `opening` turns a failure to open the file
+/// into the caller's answer: MsiOpenDatabaseW gives one answer however
+/// the open failed, where MsiInstallProductW tells those apart
+/// (`for_install`).
+fn read_file(path: *const u16, opening: fn() -> u32) -> Result<Vec<u8>, u32> {
     // SAFETY: the caller's NUL-terminated path; FILE_SHARE_READ |
     // FILE_SHARE_WRITE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
     let file = unsafe { CreateFileW(path, 0x8000_0000, 3, 0, 3, 0x80, 0) };
     if file == usize::MAX {
-        return Err(ERROR_OPEN_FAILED);
+        return Err(opening());
     }
     let mut size = 0i64;
     // SAFETY: the handle just opened; our variable.
@@ -278,7 +283,7 @@ fn read_file(path: *const u16) -> Result<Vec<u8>, u32> {
 /// MsiOpenDatabaseW's work once the arguments are known good: the file
 /// read, parsed as far as its catalog, and listed as a handle.
 pub fn open(path: *const u16) -> Result<u32, u32> {
-    let data = read_file(path)?;
+    let data = read_file(path, || ERROR_OPEN_FAILED)?;
     // A file that is not an installer database is ERROR_OPEN_FAILED, as
     // a file that is not there is: the same answer Windows gives, and
     // the reason the parse failed is the caller's to care about, not
@@ -703,4 +708,28 @@ fn unquote(name: &str) -> Option<&str> {
         return None;
     }
     Some(bare)
+}
+
+/// What MsiInstallProductW (#88) makes of the package it is given:
+/// `Ok(())` for one gala read as a package (which it still cannot
+/// install: the caller records that gap), and otherwise Windows' own
+/// answer for why no package could be read there, measured on build
+/// 26200 (`msi_test`). Windows tells those apart where MsiOpenDatabaseW
+/// does not: the file is not there (ERROR_FILE_NOT_FOUND), its
+/// directory is not (ERROR_PATH_NOT_FOUND), it is a directory rather
+/// than a file (ERROR_INSTALL_PACKAGE_OPEN_FAILED: CreateFileW refuses
+/// one without FILE_FLAG_BACKUP_SEMANTICS, and so does every other
+/// reason an open can fail), or it is a file that is not a package
+/// (ERROR_INSTALL_PACKAGE_INVALID).
+pub fn for_install(path: *const u16) -> Result<(), u32> {
+    let data = read_file(path, || {
+        // SAFETY: plain call, for the open that just failed.
+        match unsafe { GetLastError() } {
+            ERROR_FILE_NOT_FOUND => ERROR_FILE_NOT_FOUND,
+            ERROR_PATH_NOT_FOUND => ERROR_PATH_NOT_FOUND,
+            _ => ERROR_INSTALL_PACKAGE_OPEN_FAILED,
+        }
+    })
+    .map_err(|e| if e == ERROR_OPEN_FAILED { ERROR_INSTALL_PACKAGE_INVALID } else { e })?;
+    Package::open(&data).map(|_| ()).map_err(|_| ERROR_INSTALL_PACKAGE_INVALID)
 }

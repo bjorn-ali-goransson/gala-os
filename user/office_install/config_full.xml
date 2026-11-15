@@ -2,9 +2,12 @@
      office_install_gui (ROADMAP OF): config.xml's products with the
      installer's windows shown (Display Level Full), so that the install
      can be watched; AcceptEULA: the owner accepted Microsoft's licence
-     terms for this. -->
+     terms for this. From C:\OfficeSource, as config_local.xml
+     (SourcePath): a download has no window worth watching, and the
+     progress the scenario exists to show begins once the files are
+     there. -->
 <Configuration>
-  <Add OfficeClientEdition="64" Channel="Current">
+  <Add SourcePath="C:\OfficeSource" OfficeClientEdition="64" Channel="Current">
     <Product ID="O365ProPlusRetail">
       <Language ID="en-us" />
       <ExcludeApp ID="Access" />

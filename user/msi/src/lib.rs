@@ -33,8 +33,17 @@
 //! opened read-only. Both are recorded in the ledger as gaps (ROADMAP
 //! OF).
 //!
-//! Installing (MsiInstallProduct and the rest) is not implemented
-//! either: those exports are absent, which the loader records.
+//! Installing a package is not implemented: gala has no installer
+//! engine, that being galapkg's business (ROADMAP PK) rather than
+//! msi.dll's. MsiInstallProductW is exported all the same, because an
+//! absent export is worse than a refusal: it is delay-loaded, and a
+//! delay load that cannot be resolved ends the process with
+//! 0xc06d007f before it can handle anything, which is how Office's
+//! integrator.exe died. It answers Windows' own code for every path
+//! that is no package to begin with, and for one that is, the failure
+//! of an install that cannot be done (ERROR_INSTALL_FAILURE) with the
+//! package named in the ledger. The other installing functions stay
+//! absent until a run shows one imported.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -97,12 +106,17 @@ unsafe extern "system" {
 }
 
 const ERROR_SUCCESS: u32 = 0;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_OPEN_FAILED: u32 = 110;
 const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_UNKNOWN_PRODUCT: u32 = 1605;
 const ERROR_UNKNOWN_COMPONENT: u32 = 1607;
+const ERROR_INSTALL_FAILURE: u32 = 1603;
+const ERROR_INSTALL_PACKAGE_OPEN_FAILED: u32 = 1619;
+const ERROR_INSTALL_PACKAGE_INVALID: u32 = 1620;
 const ERROR_CREATE_FAILED: u32 = 1631;
 
 /// MSIDBOPEN_CREATE, the first of the persistence modes that make a
@@ -209,6 +223,33 @@ pub extern "system" fn MsiOpenDatabaseW(
             ERROR_SUCCESS
         }
         Err(e) => e,
+    }
+}
+
+/// MsiInstallProductW (#88): installs a package, which gala cannot do.
+/// Windows' answers, measured on build 26200, for every path that is no
+/// package: ERROR_INVALID_PARAMETER for a NULL one, ERROR_PATH_NOT_FOUND
+/// for an empty one, and for the rest what the file itself says
+/// (`db::for_install`). A package gala does read is the gap: it answers
+/// ERROR_INSTALL_FAILURE, Windows' own code for an install that failed,
+/// and the ledger carries which package was asked for -- the one answer
+/// here that is not Windows', since Windows would install it
+/// (`msi_test`, ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiInstallProductW(package: *const u16, _command_line: *const u16) -> u32 {
+    if package.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's string, its first unit.
+    if unsafe { *package } == 0 {
+        return ERROR_PATH_NOT_FOUND;
+    }
+    match db::for_install(package) {
+        Err(e) => e,
+        Ok(()) => {
+            record_gap(b"MsiInstallProductW", b": no engine to install a package", 2, 88);
+            ERROR_INSTALL_FAILURE
+        }
     }
 }
 

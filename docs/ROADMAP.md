@@ -2295,6 +2295,46 @@ need gala's.
      stands in for, and any query that changes a database
      (ERROR_FUNCTION_FAILED, which is Windows' own answer for a database
      opened read-only).
+     With the reader in place the run's third integrator.exe got past
+     ConfigureMSIs and died of 0xc06d007f on `msi.dll` ordinal 88,
+     which is MsiInstallProductW, read from Windows' own export
+     directory on this machine as ordinal 92 was (build 26200; the
+     method checked again by reading back all nineteen ordinals msi
+     already carries, all of which matched): it installs a package.
+     Done: msi's MsiInstallProductW, x64 and x86 --
+     ERROR_INVALID_PARAMETER without a path, ERROR_PATH_NOT_FOUND for
+     an empty one, and for a path that is no package Windows' own
+     answer for why not (ERROR_FILE_NOT_FOUND for a missing file,
+     ERROR_PATH_NOT_FOUND for a missing directory,
+     ERROR_INSTALL_PACKAGE_OPEN_FAILED for a directory and for every
+     other reason an open can fail, ERROR_INSTALL_PACKAGE_INVALID for a
+     file that is not a package) -- test first in `msi_test` and
+     `wow64_msi_test` (every answer measured on this machine's Windows
+     11 build 26200, both widths). One answer is deliberately not
+     Windows': a package gala does read it cannot install, an installer
+     engine being galapkg's business (ROADMAP PK), so it answers
+     ERROR_INSTALL_FAILURE, Windows' own code for an install that
+     failed, and the ledger carries which package was asked for. The
+     export is there all the same because the import is delay-loaded:
+     an unresolved one ends the process before it can handle anything,
+     where a refusal it can see leaves it to report the failure.
+     With the export in place the run from boot (the owner's Windows
+     machine under KVM, 2 vCPUs, 1229 s of VM time) gets past the delay
+     load and the blocker moves to the install itself: the third
+     integrator.exe runs its ConfigureMSIs task for 314 s instead of
+     dying, asks MsiInstallProductW for `C:\Program Files\Microsoft
+     Office\root\Integration\C2RInt.16.msi` and
+     C2RIntLoc.en-us.16.msi, and takes ERROR_INSTALL_FAILURE for a
+     retryable error (EnsureMsiNotBusy and InstallMsi eleven times over
+     five minutes, then "Install of MSI encountered a retryable error
+     but no time remains for retry."); ConfigureMSIs then fails 1603 and
+     Integrator::Main ends 0x643, a fourth pass does the same for 302 s,
+     and the service and setup.exe end with 0x426a as before. The
+     registry holds 42 907 keys by then, against 22 291 at the
+     ordinal-88 death. Next: those two integration MSIs have to be
+     installed, which means galapkg's engine behind MsiInstallProductW
+     (ROADMAP PK) and not another answer -- Office retries 1603, so no
+     refusal gets the install further.
      Seen too, not fatal so far: `wevtutil.exe` is absent, so the
      integrator's InstallEtwManifest aborts (ErrorCode 2) and carries
      on; `schtasks.exe` is absent, so PublishCustomExtension cannot
