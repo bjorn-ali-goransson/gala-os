@@ -6,8 +6,12 @@
 //! The ledger's table is finite, so the test also fills it: a record it
 //! has no room for must still be counted under its kind (a `?full` line),
 //! because a dump that only said how many it dropped would hide which gap
-//! was lost. Prints `ledger_test: ok` or exits with the number of the
-//! failing check.
+//! was lost. Filling it is asked of gala only (`ntrt::on_gala`), since it
+//! takes gala's own service number: on Windows such a number reaches
+//! win32k's table and faults the process instead of being refused
+//! (WORKFLOW "Test programs"). The questions above it are Windows' own
+//! and are asked of both. Prints `ledger_test: ok` or exits with the
+//! number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -87,7 +91,11 @@ fn run() -> u32 {
         return 3;
     }
     // Fill the table: the dump says how many `other` records it had no
-    // room for, which is the line the scenario checks for.
+    // room for, which is the line the scenario checks for. gala only: the
+    // number is gala's own (see this program's own doc comment).
+    if !on_gala() {
+        return 0;
+    }
     for detail in 0..FILL_RECORDS {
         let status = raw_syscall4(
             GALA_RECORD_MISSING,
