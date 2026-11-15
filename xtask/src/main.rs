@@ -1912,12 +1912,17 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                 sha256: "db9f11a94f993de589e7d8879664cb371eb8aefc8a2bce100d923951e4ef30c8",
                 files: &[
                     "usr/share/icons/Adwaita/16x16/devices/",
+                    "usr/share/icons/Adwaita/16x16/mimetypes/application-x-generic.png",
                     "usr/share/icons/Adwaita/symbolic/actions/edit-find-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/actions/media-eject-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/categories/system-help-symbolic.svg",
                     "usr/share/icons/Adwaita/symbolic/devices/drive-harddisk-symbolic.svg",
                     "usr/share/icons/Adwaita/symbolic/places/user-desktop-symbolic.svg",
                     "usr/share/icons/Adwaita/symbolic/places/user-home-symbolic.svg",
                     "usr/share/icons/Adwaita/symbolic/places/user-trash-symbolic.svg",
                     "usr/share/icons/Adwaita/symbolic/ui/pan-down-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/ui/pan-end-symbolic.svg",
+                    "usr/share/icons/Adwaita/symbolic/ui/pan-start-symbolic.svg",
                 ],
             },
             Deb {
@@ -1978,6 +1983,7 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                     "usr/lib/x86_64-linux-gnu/gimp/3.0/modules/libdisplay-filter-gamma.so",
                     "usr/lib/x86_64-linux-gnu/gimp/3.0/modules/libdisplay-filter-high-contrast.so",
                     "usr/lib/x86_64-linux-gnu/gimp/3.0/plug-ins/file-png/file-png",
+                    "usr/lib/x86_64-linux-gnu/gimp/3.0/plug-ins/file-pnm/file-pnm",
                     "usr/lib/x86_64-linux-gnu/gimp/3.0/plug-ins/script-fu/script-fu",
                 ],
             },
@@ -2144,7 +2150,6 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                     "usr/share/gimp/3.0/gradients/gimp-obsolete-files/Mexican_flag_smooth.ggr",
                     "usr/share/gimp/3.0/gradients/gimp-obsolete-files/Romanian_flag.ggr",
                     "usr/share/gimp/3.0/gradients/gimp-obsolete-files/Romanian_flag_smooth.ggr",
-                    "usr/share/gimp/3.0/icons/Default/64x64/apps/",
                     "usr/share/gimp/3.0/icons/Default/64x64/apps/gimp-frame.png",
                     "usr/share/gimp/3.0/icons/Default/64x64/apps/gimp-texture.png",
                     "usr/share/gimp/3.0/icons/Default/index.theme",
@@ -3970,11 +3975,6 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                 ],
             },
             Deb {
-                pool: "main/p/python3.14/python3.14_3.14.4-1_amd64.deb",
-                sha256: "243b02ca4ce4008daad2cda307b21e1f39cda04b2e46a087ea6fc41592c2690a",
-                files: &["usr/share/pixmaps/"],
-            },
-            Deb {
                 pool: "main/t/tzdata/tzdata_2026a-3ubuntu1_all.deb",
                 sha256: "88bfe1faddda7b905746429af8ee26ac5ace881c8fb9a994de8b54572445e728",
                 files: &["etc/localtime=usr/share/zoneinfo/Etc/UTC", "usr/share/zoneinfo/Etc/UTC"],
@@ -3988,6 +3988,11 @@ const LINUX_ROOTS: &[LinuxRoot] = &[
                 pool: "main/x/xfonts-utils/xfonts-utils_7.7+7build1_amd64.deb",
                 sha256: "97e8c7ce05e09ea5b766c99f4d77e20cb70db61396c2e83bb43715c6e2f0ac1e",
                 files: &["usr/share/fonts/X11/util/"],
+            },
+            Deb {
+                pool: "universe/x/xterm/xterm_407-1ubuntu1_amd64.deb",
+                sha256: "152cef8061050bb3428e3078208bc94187b57a6885a851094c26ad77e9db9169",
+                files: &["usr/share/pixmaps/"],
             },
         ],
     },
@@ -7058,7 +7063,8 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// (`lx_gimp_batch`: its brushes, patterns and gradients loaded and
 /// babl's conversions measured at a first start, two plug-in processes;
 /// 133 s of run time under TCG, 2.5 s on the host) and its window
-/// (`lx_gimp`: GTK, its UI's data and icons, three plug-ins; 178 s). They
+/// (`lx_gimp`: GTK, its UI's data and icons, its plug-ins; about 180 s
+/// before its screen check). They
 /// get this much instead of BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
     "taskmgr",
@@ -17301,8 +17307,10 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
 
 /// GIMP 3.2's window (`lx_gimp`): GIMP's window, then its "Welcome to
 /// GIMP" dialog (a first start), which has the focus: its picture, then
-/// Escape closes it and Ctrl+Q quits GIMP (the imported image is
-/// unchanged, so it asks nothing).
+/// Escape closes it; in.png on the canvas; Colors > Invert (GIMP's action
+/// search), File > Export As out.ppm, then Ctrl+Q and Discard Changes.
+/// The keys are Ubuntu 26.04's recording's (user/lx/gimp/gui.sh): the
+/// exported file's SHA-256 in the transcript is that run's.
 const GIMP_SCREEN: ScreenCheck = ScreenCheck {
     marker: "desktop: shown window 'GNU Image Manipulation Program'",
     steps: &[
@@ -17328,13 +17336,77 @@ const GIMP_SCREEN: ScreenCheck = ScreenCheck {
         },
         // The image painted on the canvas (screen4.png): in.png's orange
         // rectangle (250, 200, 40; user/lx/gimp/mkpng.py) in the canvas
-        // between the docks. Then Ctrl+Q.
+        // between the docks.
         ScreenStep {
             after: "",
             input: &[],
             pixels: &[PixelCheck::AnyIn(262, 185, 330, 450, 0xfac828)],
         },
+        // Colors > Invert through "/", GIMP's action search: once its
+        // popup shows (screen6.png), "invert" and Enter.
+        ScreenStep { after: "", input: &["sendkey slash"], pixels: &[] },
+        ScreenStep {
+            after: "desktop: shown window 'Search Actions'",
+            input: &[],
+            pixels: &[PixelCheck::Varied(0, 0, 1280, 800, 32)],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "sendkey i",
+                "sendkey n",
+                "sendkey v",
+                "sendkey e",
+                "sendkey r",
+                "sendkey t",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        // Inverted: the title marks the image changed, and the rectangle
+        // is its inverse, blue (5, 55, 215) (screen8.png).
+        ScreenStep {
+            after: "desktop: window titled '*[in]",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(262, 185, 330, 450, 0x0537d7)],
+        },
+        // File > Export As (Ctrl+Shift+E): its file chooser, the name
+        // out.ppm, Enter; then the PPM dialog (raw), Enter.
+        ScreenStep { after: "", input: &["sendkey ctrl-shift-e"], pixels: &[] },
+        ScreenStep {
+            after: "desktop: shown window 'Export Image'",
+            input: &[
+                "sendkey ctrl-a",
+                "sendkey o",
+                "sendkey u",
+                "sendkey t",
+                "sendkey dot",
+                "sendkey p",
+                "sendkey p",
+                "sendkey m",
+                "sendkey ret",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "desktop: shown window 'Export Image as PPM'",
+            input: &["sendkey ret"],
+            pixels: &[],
+        },
+        // Exported: the title names out.ppm once the plug-in is done
+        // (screen13.png). Quit: the image is changed (exported, not
+        // saved), so GIMP asks; Ctrl+D is its "Discard Changes".
+        ScreenStep {
+            after: "desktop: window titled '*[out] (exported)",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(262, 185, 330, 450, 0x0537d7)],
+        },
         ScreenStep { after: "", input: &["sendkey ctrl-q"], pixels: &[] },
+        ScreenStep {
+            after: "desktop: shown window 'Quit GIMP'",
+            input: &["sendkey ctrl-d"],
+            pixels: &[],
+        },
     ],
 };
 

@@ -1,2 +1,3 @@
 gimp-3.2: exit status 0
+5f82c9a94a3280944c0c780333135e773db154bdd28688a8911e3ab82a234b4f  out.ppm
 -- exit status 0

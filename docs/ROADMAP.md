@@ -200,7 +200,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9's first part: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`); next: GIMP's window (step 9) |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -3712,8 +3712,7 @@ the next breakthroughs).
    3.2.2, a GTK 3 program: its window over gala's Wayland server)
    started on the desktop, opening an image, applying a filter and
    saving it, in a boot scenario with a screen check, the saved file
-   compared with the one GIMP writes on real Linux. Done, its first
-   part: GIMP in batch mode (`lx_gimp_batch`, the Linux root "gimp"
+   compared with the one GIMP writes on real Linux. Done: GIMP in batch mode (`lx_gimp_batch`, the Linux root "gimp"
    beside "gtk3" and "x11"; WORKFLOW "GIMP"): the console GIMP 3.2 loads
    its data and a PNG through its file-png plug-in, blurs and inverts it
    with GEGL from script-fu (each plug-in a process, tiles handed over in
@@ -3722,16 +3721,17 @@ the next breakthroughs).
    (`lx_gimp`, `user/lx/gimp/gui.sh`): GIMP 3.2 over gala's Wayland
    server, its window and its welcome dialog shown, the dialog closed with
    Escape, in.png opened (the title names it: `desktop: window titled`)
-   and painted on the canvas (its orange rectangle checked;
-   `test-lx_gimp.screen4.png`), GIMP quit with Ctrl+Q, exit status 0;
-   what it needed:
+   and painted on the canvas (its orange rectangle checked), Colors >
+   Invert (GIMP's action search; the rectangle blue), File > Export As
+   out.ppm, Ctrl+Q and Discard Changes: the exported file's SHA-256 is the
+   one the same keys give on Ubuntu 26.04 (the transcript); what it
+   needed:
    `/proc/<pid>/fd` links (GLib names an icon file by its link for
    glycin), the GSettings schemas compiled at assembly, GIMP's whole icon
-   theme (GTK aborts on a missing icon). Its transcript (the exit status)
-   is written, not recorded on Linux yet. Next: a filter from the menu
-   and File > Export with the saved file compared with Linux's;
-   then all of its plug-ins (about 130 processes queried at a first
-   start); its welcome dialog stays white (not drawn yet). The Linux roots moved to Ubuntu
+   theme (GTK aborts on a missing icon), the file-pnm plug-in and the
+   file chooser. Next: all of its plug-ins (about 130 processes queried
+   at a first start); its welcome dialog stays white (not drawn yet).
+   The Linux roots moved to Ubuntu
    26.04 LTS with it (WORKFLOW "Linux roots from Ubuntu 26.04"): glibc
    2.43, libffi, libwayland-client, weston and the "gtk3", "x11" and
    "gimp" roots are resolute's (traced on 26.04), and the scenarios on
@@ -3751,8 +3751,7 @@ the next breakthroughs).
    (`lx_altstack`: Rust's runtime), and an epoll_wait seeing what another
    thread ADDs or MODs meanwhile (`lx_epoll`: glycin's loader connection,
    armed from one thread while another waits), termios2 (`lx_pty`:
-   glibc 2.43's isatty asks with TCGETS2). Next: GIMP's filter and
-   export; seccomp's probes (GET_ACTION_AVAIL,
+   glibc 2.43's isatty asks with TCGETS2). Next: seccomp's probes (GET_ACTION_AVAIL,
    GET_NOTIF_SIZES; a filter mode's flags checked: EFAULT for a NULL
    program); xterm's setfsuid and setfsgid (ENOSYS now); pidfd_open
    (ENOSYS: GLib watches children with SIGCHLD then). Linux system calls

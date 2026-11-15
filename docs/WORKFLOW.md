@@ -2371,13 +2371,21 @@ A root is what its workload opened on real 26.04, traced:
   `<dir>/` entries. A start queries every plug-in in the plug-ins and
   extensions directories (each a process): the root has only those the
   scenario uses (script-fu and file-png).
-- Scenario `lx_gimp` (about 180 s of run time): `sh /lx/gimp/gui.sh`
-  starts `gimp-3.2` on in.png over the session's Wayland display, its
-  output in `$HOME/gimp.log`; GIMP_SCREEN dumps the screen when the
-  welcome dialog shows (`target/debug/test-lx_gimp.screen0.png`), once
-  it is closed (`screen2.png`), once GIMP's title names the image
-  (`screen3.png`) and once in.png's orange rectangle is on the canvas
-  (`screen4.png`), then Ctrl+Q. A screen step dumps only
+- Scenario `lx_gimp` (about 370 s under TCG, most of it in the screen
+  check): `sh /lx/gimp/gui.sh` starts `gimp-3.2` on a copy of in.png in
+  `$HOME` over the session's Wayland display, its output in
+  `$HOME/gimp.log`. GIMP_SCREEN closes the welcome dialog, waits for the
+  image on the canvas, runs Colors > Invert through `/` (GIMP's action
+  search: keys, not menu positions), exports `out.ppm` (Ctrl+Shift+E, the
+  name, Enter twice: raw PPM, as PNG's interactive export writes the time
+  into the file), then Ctrl+Q and Ctrl+D (Discard Changes). Each step
+  waits for its window's `desktop: shown window` or GIMP's new title
+  (`desktop: window titled`): keys sent before GIMP's popup or after the
+  plug-in has not finished are lost. The transcript is GIMP's exit status
+  and out.ppm's SHA-256, recorded on Ubuntu 26.04 with the same keys:
+  `tools/linux-roots/workloads/gimp-gui.sh` in the "gimp" chroot (with
+  weston, xvfb, xdotool, x11-apps and netpbm; the plug-ins script-fu,
+  file-png and file-pnm). Its screendumps: `test-lx_gimp.screen<n>.png`. A screen step dumps only
   when it has pixels to check (a `Varied` over the screen will do);
   `XTASK_SHOTS` is QEMU's screen, black for a `presenter=test` desktop.
 - Reading a run: `XTASK_EVENTS=ipc` shows GIMP's segment (`lx shm`:
