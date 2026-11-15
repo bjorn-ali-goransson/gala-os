@@ -167,6 +167,44 @@ int main(void)
 	sys1(SYS_close, q[1]);
 	sys1(SYS_close, dot);
 
+	say_text("-- /proc/mounts (GIO's mount monitor reads it)");
+	n = link_of("/proc/mounts", a);
+	say_read("readlink(/proc/mounts)", n, a);
+	n = slurp("/proc/self/mounts", buf, sizeof buf - 1);
+	buf[n > 0 ? n : 0] = 0;
+	{
+		int lines = 0, six = 1, root = 0, proc = 0;
+		for (char *l = buf; *l; ) {
+			char *e = l;
+			while (*e && *e != '\n')
+				e++;
+			char *f[8];
+			int k = 0;
+			for (char *q = l; q < e && k < 8;) {
+				while (q < e && *q == ' ')
+					q++;
+				if (q < e)
+					f[k++] = q;
+				while (q < e && *q != ' ')
+					q++;
+			}
+			lines++;
+			if (k != 6)
+				six = 0;
+			if (k >= 3 && f[1][0] == '/' && f[1][1] == ' ')
+				root = 1;
+			if (k >= 3 && lx_memeq(f[1], "/proc ", 6) && lx_memeq(f[2], "proc ", 5))
+				proc = 1;
+			l = *e ? e + 1 : e;
+		}
+		say_bool("/proc/self/mounts: lines", lines > 1);
+		say_bool("  each of 6 fields", six);
+		say_bool("  one mounted at /", root);
+		say_bool("  /proc of type proc", proc);
+	}
+	i64 m1 = slurp("/proc/mounts", a, sizeof a);
+	say_bool("/proc/mounts reads the same", m1 > 0 && lx_memeq(a, buf, m1 < 128 ? m1 : 128));
+
 	say_text("-- opening /proc");
 	i64 d = sys2(SYS_open, "/proc", O_PATH | O_DIRECTORY);
 	say_bool("open(/proc, O_PATH|O_DIRECTORY)", d >= 0);

@@ -341,6 +341,118 @@ pub fn clone(call: &Call<'_>, flags: u64, stack: u64, ptid: u64, ctid: u64, tls:
 /// they run; ECHILD with no such child. Blocks until one ends (woken by
 /// `state::ended`), EINTR when a signal is to be delivered or the process
 /// is ending.
+/// waitid's id types and options (waitid(2)).
+const P_ALL: u64 = 0;
+const P_PID: u64 = 1;
+const P_PGID: u64 = 2;
+const P_PIDFD: u64 = 3;
+const WEXITED: u64 = 4;
+const WNOWAIT: u64 = 0x0100_0000;
+
+/// waitid(idtype, id, infop, options, rusage) (pidfd_test): a child's end
+/// as wait4 finds it (`Children::ended`), told in a siginfo (si_signo
+/// SIGCHLD, si_code CLD_EXITED or CLD_KILLED, si_pid, si_uid, si_status),
+/// reaped unless WNOWAIT. P_ALL, P_PID, P_PIDFD (the pidfd's process; a
+/// nonblocking pidfd's wait is EAGAIN while it runs, as Linux's). With
+/// WNOHANG and nothing ended, 0 and a siginfo of zeros. EINVAL without
+/// WEXITED (stopped and continued children are not told: ledgered) or
+/// for unknown id types; P_PGID waits for any child (ledgered).
+pub fn waitid(
+    call: &Call<'_>,
+    idtype: u64,
+    id: u64,
+    info: u64,
+    options: u64,
+    rusage: u64,
+) -> Result {
+    let known = WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT | WNOTHREAD | WALL | WCLONE;
+    if options & !known != 0 || options & (WEXITED | WUNTRACED | WCONTINUED) == 0 {
+        return Err(EINVAL);
+    }
+    if options & WEXITED == 0 {
+        ledger::record("waitid", "linux option missing", options);
+        return Err(EINVAL);
+    }
+    let (target, nonblock) = match idtype {
+        P_ALL => (None, false),
+        P_PID if id as i32 > 0 => (Some(u64::from(id as u32)), false),
+        P_PGID => {
+            ledger::record("waitid", "linux option missing", idtype);
+            (None, false)
+        }
+        P_PIDFD => {
+            let (f, p) = super::pidfd::of(call, u64::from(id as u32))?;
+            (Some(p.pid), f.nonblock())
+        }
+        _ => return Err(EINVAL),
+    };
+    let wanted = |child: u64| target.is_none_or(|t| t == child);
+    let me = platform::current();
+    loop {
+        super::timer::fire(call);
+        {
+            let mut c = call.lx.children.lock();
+            c.waiters.retain(|&w| w != me);
+            if let Some(&(child, how)) = c.ended.iter().find(|&&(p, _)| wanted(p)) {
+                if options & WNOWAIT == 0 {
+                    c.ended.retain(|&(p, _)| p != child);
+                }
+                drop(c);
+                let (code, value) = super::signal::child_code(how);
+                let uid = process::by_id(child)
+                    .map_or(super::identity::of_process(&call.process).uid, |p| {
+                        super::identity::of_process(&p).uid
+                    });
+                put_waitid_info(call, info, (code, child as i32, uid, value))?;
+                if rusage != 0 {
+                    ledger::record("waitid", "linux syscall stub", rusage);
+                    let zero = [0u8; core::mem::size_of::<lx_abi::layout::Rusage>()];
+                    call.process.write(rusage, &zero).map_err(|_| EFAULT)?;
+                }
+                return Ok(0);
+            }
+            if !c.running.iter().any(|&p| wanted(p)) {
+                return Err(ECHILD);
+            }
+            if options & WNOHANG != 0 {
+                drop(c);
+                put_waitid_info(call, info, (0, 0, 0, 0)).map(|_| 0)?;
+                return Ok(0);
+            }
+            if nonblock {
+                return Err(EAGAIN);
+            }
+            c.waiters.try_push(me).map_err(|_| ENOMEM)?;
+            super::wait::prepare(call, None);
+        }
+        let r = super::wait::block(call);
+        call.lx.children.lock().waiters.retain(|&w| w != me);
+        r?;
+    }
+}
+
+/// waitid's siginfo fields at `info` (none for a null pointer):
+/// (si_code, si_pid, si_uid, si_status); si_signo SIGCHLD unless all are
+/// 0 (WNOHANG's nothing), si_errno 0.
+fn put_waitid_info(
+    call: &Call<'_>,
+    info: u64,
+    (code, pid, uid, status): (i32, i32, u32, i32),
+) -> Result {
+    if info == 0 {
+        return Ok(0);
+    }
+    let signo = if pid == 0 { 0 } else { lx_abi::signal::SIGCHLD as i32 };
+    let mut b = [0u8; 28];
+    b[0..4].copy_from_slice(&signo.to_le_bytes());
+    b[8..12].copy_from_slice(&code.to_le_bytes());
+    b[16..20].copy_from_slice(&pid.to_le_bytes());
+    b[20..24].copy_from_slice(&uid.to_le_bytes());
+    b[24..28].copy_from_slice(&status.to_le_bytes());
+    call.process.write(info, &b).map_err(|_| EFAULT)?;
+    Ok(0)
+}
+
 pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) -> Result {
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL | WCLONE) != 0 {
         return Err(EINVAL);

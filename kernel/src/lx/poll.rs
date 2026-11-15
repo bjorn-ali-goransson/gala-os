@@ -84,6 +84,21 @@ pub fn readiness(object: &Object) -> u16 {
                 0
             }
         }
+        Object::Inotify(i) => {
+            if i.readable() {
+                POLLIN | POLLRDNORM
+            } else {
+                0
+            }
+        }
+        // Readable once its process has ended (lx::pidfd).
+        Object::PidFd(p) => {
+            if p.ended() {
+                POLLIN | POLLRDNORM
+            } else {
+                0
+            }
+        }
         Object::EventFd(e) => {
             let (readable, writable) = e.ready();
             let mut ev = 0;
@@ -112,6 +127,8 @@ pub fn events_count(object: &Object) -> u64 {
         Object::Epoll(e) => u64::from(e.has_ready()),
         Object::EventFd(e) => e.changes(),
         Object::TimerFd(t) => t.changes(),
+        Object::PidFd(p) => u64::from(p.ended()),
+        Object::Inotify(i) => i.changes(),
         Object::Pty(end) => super::pty::changes(end),
         Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Nt(_) => 0,
     }
@@ -159,6 +176,8 @@ impl Watch {
             Object::Unix(u) => self.add_queue(&u.core.waiters),
             Object::EventFd(e) => self.add_queue(&e.waiters),
             Object::TimerFd(t) => self.add_queue(&t.waiters),
+            Object::PidFd(p) => self.add_queue(&p.life.waiters),
+            Object::Inotify(i) => self.add_queue(&i.waiters),
             Object::Pty(end) => self.add_queue(&end.pty.waiters),
             Object::Socket(_) | Object::Epoll(_) => self.polled = true,
             // Always ready: nothing to wait for.

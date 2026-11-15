@@ -205,6 +205,13 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::SETRLIMIT => super::resource::setrlimit(call, a(0), a(1)),
         nr::GETRANDOM => super::resource::getrandom(call, a(0), a(1), a(2)),
         nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
+        nr::WAITID => super::fork::waitid(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::INOTIFY_INIT => super::inotify::init1(call, 0),
+        nr::INOTIFY_INIT1 => super::inotify::init1(call, a(0)),
+        nr::INOTIFY_ADD_WATCH => super::inotify::add_watch(call, a(0), a(1), a(2)),
+        nr::INOTIFY_RM_WATCH => super::inotify::rm_watch(call, a(0), a(1)),
+        nr::PIDFD_OPEN => super::pidfd::pidfd_open(call, a(0), a(1)),
+        nr::PIDFD_SEND_SIGNAL => super::pidfd::pidfd_send_signal(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
             // What every descriptor answers first (Linux's do_vfs_ioctl).
             Some(f) if matches!(a(1) as u32, FIOCLEX | FIONCLEX | FIONBIO) => {
@@ -217,6 +224,12 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
                 Ok(0)
             }
             None => Err(EBADF),
+            Some(f) if a(1) as u32 == FIONREAD && matches!(&f.object, Object::Inotify(_)) => {
+                let Object::Inotify(i) = &f.object else { return Err(ENOTTY) };
+                let n = i.queued() as i32;
+                call.process.write(a(2), &n.to_le_bytes()).map_err(|_| EFAULT)?;
+                Ok(0)
+            }
             Some(f) if matches!(&f.object, Object::Pty(_)) => {
                 let Object::Pty(end) = &f.object else { return Err(ENOTTY) };
                 super::pty::ioctl(call, &f, end, a(1) as u32, a(2))
@@ -513,6 +526,8 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
         | Object::Epoll(_)
         | Object::EventFd(_)
         | Object::TimerFd(_)
+        | Object::PidFd(_)
+        | Object::Inotify(_)
         | Object::Pty(_)
         | Object::Nt(_) => None,
     };
@@ -539,9 +554,10 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 | Object::Unix(_)
                 | Object::Epoll(_)
                 | Object::EventFd(_)
+                | Object::PidFd(_)
                 | Object::Pty(_) => file::O_RDWR,
                 // O_RDONLY.
-                Object::TimerFd(_) => 0,
+                Object::TimerFd(_) | Object::Inotify(_) => 0,
                 Object::Device(d) => match (d.readable, d.writable) {
                     (true, true) => file::O_RDWR,
                     (false, true) => file::O_WRONLY,
@@ -665,6 +681,8 @@ fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
         | Object::Console(_)
         | Object::EventFd(_)
         | Object::TimerFd(_)
+        | Object::PidFd(_)
+        | Object::Inotify(_)
         | Object::Socket(_)
         | Object::Unix(_)
         | Object::Epoll(_)
@@ -729,6 +747,8 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::Unix(u) => unix::recv(call, fd, &f, u, buf, count, 0),
         Object::EventFd(e) => super::eventfd::read(call, &f, e, buf, count),
         Object::TimerFd(t) => super::timerfd::read(call, &f, t, buf, count),
+        Object::PidFd(_) => Err(EINVAL),
+        Object::Inotify(i) => super::inotify::read(call, &f, i, buf, count),
         Object::Nt(n) => {
             let mut data = Vec::new();
             let want = (count as usize).min(super::ntio::CHUNK);
@@ -792,7 +812,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::Unix(u) => unix::send(call, &f, u, buf, count, 0, 0),
         Object::EventFd(e) => super::eventfd::write(call, &f, e, buf, count),
         // A timerfd has no write.
-        Object::TimerFd(_) => Err(EINVAL),
+        Object::TimerFd(_) | Object::PidFd(_) | Object::Inotify(_) => Err(EINVAL),
         Object::Nt(n) => {
             // A piece at a time, as the console's below.
             let mut done = 0u64;
@@ -1074,7 +1094,7 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
         }),
         Object::Unix(u) => unix::send_bytes(call, &f, u, data),
         Object::EventFd(e) => super::eventfd::write_bytes(call, &f, e, data),
-        Object::TimerFd(_) => Err(EINVAL),
+        Object::TimerFd(_) | Object::PidFd(_) | Object::Inotify(_) => Err(EINVAL),
         Object::Nt(n) => match n.write(call.process.id, data) {
             Ok(w) => Ok(w as u64),
             Err(EPIPE) => {

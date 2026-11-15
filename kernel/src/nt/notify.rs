@@ -242,13 +242,15 @@ pub struct Event {
 
 /// What the ramfs journal holds for the watches (called with the file
 /// system held, by `file::with_fs`).
-pub fn collect(fs: &mut RamFs) -> (Vec<Event>, Vec<KArc<Watch>>) {
+pub fn collect(fs: &mut RamFs) -> Collected {
     let mut events = Vec::new();
     let mut lost = Vec::new();
     if !fs.journal {
-        return (events, lost);
+        return (events, lost, Vec::new());
     }
     let (changes, changes_lost) = fs.take_changes();
+    // The Linux processes' inotify instances see the same changes.
+    let inotify = crate::lx::inotify::collect(fs, &changes);
     let watches = WATCHES.lock();
     if changes_lost {
         for w in watches.iter() {
@@ -271,11 +273,16 @@ pub fn collect(fs: &mut RamFs) -> (Vec<Event>, Vec<KArc<Watch>>) {
             }
         }
     }
-    (events, lost)
+    (events, lost, inotify)
 }
 
+/// What `collect` found: the watches' events, the watches that lost some,
+/// and the inotify instances with new events.
+pub type Collected = (Vec<Event>, Vec<KArc<Watch>>, Vec<KArc<crate::lx::inotify::Inotify>>);
+
 /// Delivers what `collect` found (with the file system released).
-pub fn deliver((events, lost): (Vec<Event>, Vec<KArc<Watch>>)) {
+pub fn deliver((events, lost, inotify): Collected) {
+    crate::lx::inotify::wake(inotify);
     for w in &lost {
         let mut s = w.state.lock();
         s.overflow = true;

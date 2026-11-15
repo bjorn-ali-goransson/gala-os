@@ -32,6 +32,13 @@ struct pfd {
 	int fd;
 	short events, revents;
 };
+
+/* Waits (poll, at most 10 s) until timerfd `fd` is readable. */
+static void expired(i64 fd)
+{
+	struct pfd p = { (int)fd, POLLIN, 0 };
+	sys3(SYS_poll, &p, 1, 10000);
+}
 struct epev {
 	unsigned events;
 	u64 data;
@@ -142,6 +149,10 @@ int main(void)
 	a.value.sec = now / 1000000000;
 	a.value.nsec = now % 1000000000;
 	say_ret("TFD_TIMER_ABSTIME, the time just read", sys4(SYS_timerfd_settime, fd, TFD_TIMER_ABSTIME, &a, 0));
+	/* A time already past expires at once, but on Linux by a timer
+	 * interrupt after the call, not in it: wait for it (as a program
+	 * must) before the non-blocking read. */
+	expired(fd);
 	n = rd(fd, &r);
 	say("  read", r);
 	say("  expirations", n);
@@ -149,6 +160,7 @@ int main(void)
 	now = now_ns(CLOCK_REALTIME);
 	a.value.sec = now / 1000000000 - 1;
 	say_ret("CLOCK_REALTIME, TFD_TIMER_ABSTIME, a second ago", sys4(SYS_timerfd_settime, rt, TFD_TIMER_ABSTIME, &a, 0));
+	expired(rt);
 	n = rd(rt, &r);
 	say("  expirations", n);
 	i64 bt = sys2(SYS_timerfd_create, CLOCK_BOOTTIME, TFD_NONBLOCK);

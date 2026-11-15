@@ -1,0 +1,52 @@
+-- inotify_init1
+inotify_init1(flags 1) = -22 (EINVAL)
+inotify_init1(IN_NONBLOCK|IN_CLOEXEC) = yes
+  close-on-exec = 1
+  O_NONBLOCK = yes
+inotify_init() = yes
+  close-on-exec = 0
+-- inotify_add_watch
+mask 0 = -22 (EINVAL)
+no such path = -2 (ENOENT)
+a bad fd = -9 (EBADF)
+a pipe = -22 (EINVAL)
+the directory = yes
+  again: the same wd = yes
+  through another path: the same wd = yes
+read, nothing yet: -11 (EAGAIN)
+poll, nothing yet = 0
+-- a directory's entries
+FIONREAD after a file is made = yes
+poll = 1
+read(8 bytes) = -22 (EINVAL)
+a made and written:
+  dir CREATE "a" len 16
+  dir MODIFY "a" len 16
+a written again:
+  dir MODIFY "a" len 16
+a renamed b:
+  dir MOVED_FROM "a" len 16, a cookie
+  dir MOVED_TO "b" len 16, the same cookie
+sub made and removed:
+  dir CREATE|ISDIR "sub" len 16
+  dir DELETE|ISDIR "sub" len 16
+b removed:
+  dir DELETE "b" len 16
+-- a file
+c made:
+  dir CREATE "c" len 16
+  dir MODIFY "c" len 16
+watch c = yes
+IN_ONLYDIR on c = -20 (ENOTDIR)
+c written:
+  dir MODIFY "c" len 16
+  file MODIFY
+-- inotify_rm_watch
+rm_watch(the file's) = 0
+rm_watch(it again) = -22 (EINVAL)
+after rm_watch:
+  file IGNORED
+c removed:
+  dir DELETE "c" len 16
+inotify_test: ok
+-- exit status 0

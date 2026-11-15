@@ -17,7 +17,8 @@
 //!   one set), `exe` (a link to the program, set at each execve) and
 //!   `auxv` (its auxiliary vector's pairs up to AT_NULL);
 //! - `self`, which the walk turns into the caller's pid (readlink gives
-//!   the pid).
+//!   the pid), and `mounts`, a link to `self/mounts`: per process, the
+//!   shared tree's mounts (`MOUNTS`: GIO reads them).
 //!
 //! Limits: what changes as a process runs (maps, stat, status, fd) is not
 //! here yet (proc_test has it, for later: files generated when opened);
@@ -33,6 +34,13 @@ use crate::fs::ramfs::{self, FsError, NodeId};
 use crate::mm::heap::TryVec;
 use crate::nt::{ledger, platform};
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// `<pid>/mounts` (proc(5)'s fstab-like lines) for a process rooted at the
+/// shared tree: the tree itself (a tmpfs, as statfs says), /proc and /run
+/// (`lx::file`'s mounts). GIO's mount monitor reads it.
+const MOUNTS: &[u8] = b"none / tmpfs rw 0 0\n\
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n\
+none /run tmpfs rw,nosuid,nodev 0 0\n";
 
 /// No volume made yet.
 const NONE: NodeId = usize::MAX;
@@ -134,6 +142,7 @@ pub fn volume(fs: &mut ramfs::RamFs) -> Result<NodeId, FsError> {
     file_in(fs, kernel, b"overflowgid", b"65534\n", 0o644, now)?;
     let user = dir_in(fs, sys, b"user", now)?;
     file_in(fs, user, b"max_user_namespaces", b"0\n", 0o644, now)?;
+    link_in(fs, v, b"mounts", b"self/mounts", now)?;
     VOLUME.store(v, Ordering::Relaxed);
     Ok(v)
 }
@@ -157,6 +166,7 @@ pub fn image(pid: u64, exe: &[u8], auxv: &[u8]) {
             link_in(fs, ns, kind.as_bytes(), &target, now)?;
         }
         link_in(fs, dir, b"exe", exe, now)?;
+        file_in(fs, dir, b"mounts", MOUNTS, 0o444, now)?;
         file_in(fs, dir, b"auxv", auxv, 0o400, now)
     });
     if made.is_err() {
@@ -180,7 +190,7 @@ pub fn ended(pid: u64) {
             }
             fs.unlink(dir, &wide(b"ns")?)?;
         }
-        for name in [&b"exe"[..], b"auxv"] {
+        for name in [&b"exe"[..], b"auxv", b"mounts"] {
             let _ = fs.unlink(dir, &wide(name)?);
         }
         fs.unlink(v, &w)

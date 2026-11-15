@@ -11871,7 +11871,10 @@ The running parts (milestone 1; `lxrun=`):
   process (made at its first image, removed at its end) `<pid>/ns/<kind>`
   links named as Linux's initial namespaces (`user:[4026531837]`: one set
   for all), `exe` (set at each execve) and `auxv` (the pairs up to
-  AT_NULL); `self` is the caller's pid in the walk and for readlink.
+  AT_NULL), `mounts` (the shared tree as a tmpfs at `/`, `/proc` and
+  `/run`: GIO's mount monitor reads it; `/proc/mounts` is a link to
+  `self/mounts` as on Linux); `self` is the caller's pid in the walk and
+  for readlink.
   readlink of `/proc/<pid>/fd/<n>` (and `self`'s) answers from that
   process's descriptor table (`file::fd_link`): a file's path as it sees
   it, `pipe:[N]`, `socket:[N]`, `anon_inode:[eventfd]` and the like, a
@@ -11940,6 +11943,43 @@ The running parts (milestone 1; `lxrun=`):
   signal a process gets when its parent ends (sent by `state::ended` to
   each child still running; cleared in a fork's child, kept across
   execve: glycin's loaders die with the program that started them).
+- **pidfds and waitid** (`lx::pidfd`, `fork::waitid`; pidfd_test,
+  `lx_pidfd`): pidfd_open (EINVAL for pid 0 or flags but
+  PIDFD_NONBLOCK, ESRCH; always close-on-exec; `anon_inode:[pidfd]`) gives
+  an `Object::PidFd` holding the process's `Life` (an ended flag and a
+  wait queue, shared with the `LxProcess`: not the process, whose
+  descriptors would stay open); `state::ended` ends it before the parent
+  hears, so poll and epoll see the pidfd readable once its process has
+  ended. pidfd_send_signal is kill(2) of its process (flags: the thread,
+  its group or its process group, one at most; EBADF for what is not a
+  pidfd). waitid (P_ALL, P_PID, P_PIDFD; WEXITED with WNOHANG and
+  WNOWAIT) reads wait4's `Children::ended` and fills si_signo SIGCHLD,
+  si_code, si_pid, si_uid, si_status; WNOHANG with nothing ended writes
+  zeros; a nonblocking pidfd's wait is EAGAIN while it runs. A signal to
+  a zombie (ended, in a live process's `Children::ended`) is 0 and does
+  nothing, from kill or a pidfd, as Linux's; ESRCH once reaped
+  (`state::is_zombie`). Limits: stopped and continued children are not
+  told (ledgered), P_PGID waits for any child (ledgered), siginfo given
+  to pidfd_send_signal is unused (ledgered), no PIDFD_THREAD pidfds, no
+  pidfd_getfd.
+- **inotify** (`lx::inotify`; inotify_test, `lx_inotify`): instances
+  (`Object::Inotify`; inotify_init, inotify_init1 with IN_NONBLOCK and
+  IN_CLOEXEC) hold watches on nodes (add_watch resolves the path as stat
+  does: the same wd again for a node watched, its mask replaced or added
+  to with IN_MASK_ADD; IN_ONLYDIR, IN_MASK_CREATE; rm_watch queues
+  IN_IGNORED). Events come from the file system's change journal, NT's
+  directory notifications' (`nt::notify::collect` gives each batch to
+  `inotify::collect` with the file system held, and the instances are
+  woken once it is released): a watched directory's entries made,
+  removed, written or truncated and renamed (IN_CREATE, IN_DELETE,
+  IN_MODIFY, IN_MOVED_FROM and IN_MOVED_TO with one cookie; IN_ISDIR), a
+  watched file written (IN_MODIFY). Queued as `struct inotify_event`, the
+  name NUL-padded to a multiple of 16; an event like the last unread one
+  is not queued again; read gives whole events (EINVAL if the first does
+  not fit), FIONREAD the bytes queued, poll and epoll POLLIN while some
+  are. Limits: no IN_ACCESS, IN_OPEN, IN_CLOSE_*, IN_ATTRIB, IN_*_SELF
+  (the journal has no such changes; asked for: ledgered), no
+  IN_Q_OVERFLOW (the queue stops at a bound, ledgered).
 - **sysinfo and sched_getaffinity** (`lx::sysinfo`; sysinfo_test,
   `lx_sysinfo`): sysinfo counts in bytes (`mem_unit` 1): RAM is the frame
   allocator's managed frames and free ones (NT's NumberOfPhysicalPages),

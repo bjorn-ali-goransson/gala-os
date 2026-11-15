@@ -24,6 +24,13 @@ a directory's: getcwd() = yes
 a pipe's: pipe:[N] = yes
 an eventfd's = 20 "anon_inode:[eventfd]"
 readlink(/proc/self/fd/999) (not open) = -2 (ENOENT)
+-- /proc/mounts (GIO's mount monitor reads it)
+readlink(/proc/mounts) = 11 "self/mounts"
+/proc/self/mounts: lines = yes
+  each of 6 fields = yes
+  one mounted at / = yes
+  /proc of type proc = yes
+/proc/mounts reads the same = yes
 -- opening /proc
 open(/proc, O_PATH|O_DIRECTORY) = yes
 fstatat(it, sys/kernel/overflowuid) = 0

@@ -151,6 +151,10 @@ pub enum Object {
     EventFd(KArc<super::eventfd::EventFd>),
     /// A timerfd's expiries (`lx::timerfd`).
     TimerFd(KArc<super::timerfd::TimerFd>),
+    /// A process's pidfd (`lx::pidfd`).
+    PidFd(KArc<super::pidfd::PidFd>),
+    /// An inotify instance (`lx::inotify`).
+    Inotify(KArc<super::inotify::Inotify>),
     /// A Windows-side object: a standard handle of the NT program that
     /// started the process (`lx::ntio`, `lx::distro`).
     Nt(KArc<super::ntio::NtFile>),
@@ -167,6 +171,8 @@ impl Drop for Fd {
             e.forget(self.id());
         }
         match &self.object {
+            // Its watches see no more changes.
+            Object::Inotify(n) => super::inotify::closed(n),
             Object::PipeRead(p) => {
                 let mut st = p.state.lock();
                 st.readers -= 1;
@@ -192,6 +198,7 @@ impl Drop for Fd {
             | Object::Socket(_)
             | Object::EventFd(_)
             | Object::TimerFd(_)
+            | Object::PidFd(_)
             | Object::Pty(_)
             | Object::Nt(_) => {}
         }
@@ -222,6 +229,8 @@ impl Fd {
             | Object::Epoll(_)
             | Object::EventFd(_)
             | Object::TimerFd(_)
+            | Object::PidFd(_)
+            | Object::Inotify(_)
             | Object::Pty(_)
             | Object::Nt(_) => {}
         }
@@ -356,6 +365,8 @@ pub struct LxProcess {
     /// PR_SET_PDEATHSIG: the signal it gets when its parent ends (0:
     /// none); not a fork's child's, kept across execve.
     pub pdeathsig: core::sync::atomic::AtomicU32,
+    /// Its life as its pidfds see it (`lx::pidfd`): ended when it does.
+    pub life: KArc<super::pidfd::Life>,
     /// The image's auxiliary vector, as its initial stack has it (pairs
     /// up to AT_NULL's): PR_GET_AUXV's answer, as Linux's saved_auxv.
     pub auxv: IrqMutex<Vec<u8>>,
@@ -412,6 +423,7 @@ pub fn create(
         rlimits: IrqMutex::new(super::resource::Limits::default()),
         no_new_privs: core::sync::atomic::AtomicBool::new(false),
         pdeathsig: core::sync::atomic::AtomicU32::new(0),
+        life: super::pidfd::Life::new()?,
         auxv: IrqMutex::new(Vec::new()),
         vfork: IrqMutex::new(Vfork { released: true, waiter: None }),
         alarm: IrqMutex::new(None),
@@ -471,6 +483,7 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
         ),
         auxv: IrqMutex::new(auxv),
         pdeathsig: core::sync::atomic::AtomicU32::new(0),
+        life: super::pidfd::Life::new()?,
         vfork: IrqMutex::new(Vfork { released: !vfork, waiter: None }),
         // A child starts with no timer (setitimer(2)).
         alarm: IrqMutex::new(None),
@@ -533,6 +546,23 @@ pub fn slot(fd: u64) -> u64 {
     u64::from(fd as u32)
 }
 
+/// Whether Linux process `pid` has ended and is not reaped yet: a status
+/// in a live process's `Children::ended`.
+pub fn is_zombie(pid: u64) -> bool {
+    let table: Vec<KArc<LxProcess>> = {
+        let t = TABLE.lock();
+        let mut v = Vec::new();
+        if v.try_reserve_exact(t.len()).is_err() {
+            return false;
+        }
+        for p in t.iter() {
+            let _ = v.try_push(p.clone());
+        }
+        v
+    };
+    table.iter().any(|p| p.children.lock().ended.iter().any(|&(c, _)| c == pid))
+}
+
 pub fn get(pid: u64) -> Option<KArc<LxProcess>> {
     TABLE.lock().iter().find(|p| p.pid == pid).cloned()
 }
@@ -590,6 +620,8 @@ pub fn ended(pid: u64, status: NtStatus) {
     // parent hears of it.
     let fds = core::mem::take(&mut *state.fds.lock());
     drop(fds);
+    // Its pidfds are readable from now on, before its parent hears.
+    state.life.end();
     // Its own children are nobody's now (no reaper yet: they are not
     // waited for); those that asked (PR_SET_PDEATHSIG) get their signal.
     let orphans = {

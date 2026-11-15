@@ -273,7 +273,11 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
         }
         return Ok(0);
     }
-    let target = super::state::get(pid as u64).ok_or(errno::ESRCH)?;
+    let Some(target) = super::state::get(pid as u64) else {
+        // A zombie (ended, not reaped) takes a signal as Linux's does:
+        // nothing happens, 0.
+        return if super::state::is_zombie(pid as u64) { Ok(0) } else { Err(errno::ESRCH) };
+    };
     if sig == 0 {
         return Ok(0);
     }

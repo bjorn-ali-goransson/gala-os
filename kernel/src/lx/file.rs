@@ -749,6 +749,18 @@ pub fn resolve(
     with_fs(|fs| walk_mounted(fs, root, pid, start, &parsed, follow))
 }
 
+/// The node the path at `addr` names (from the cwd), as stat finds it
+/// (following a link at its end if `follow`): inotify_add_watch's.
+pub fn lookup_node(call: &Call<'_>, addr: u64, follow: bool) -> core::result::Result<NodeId, u16> {
+    let path = read_path(&call.process, addr)?;
+    resolve(call, AT_FDCWD, &path, follow)?.existing()
+}
+
+/// Whether node `n` is a directory.
+pub fn node_is_dir(n: NodeId) -> bool {
+    with_fs(|fs| fs.node(n).is_some_and(ramfs::Node::is_dir))
+}
+
 /// Resolves `path` from directory `root` as a process rooted there would
 /// (an absolute path from it too), following a link at its end if
 /// `follow` (`lx::distro`'s unpacking).
@@ -1016,7 +1028,11 @@ fn stat_other(object: &Object, me: (u32, u32)) -> Stat {
         Object::PipeRead(_) | Object::PipeWrite(_) => (abi::S_IFIFO | 0o600, 0),
         Object::Socket(_) | Object::Unix(_) => (abi::S_IFSOCK | 0o777, 0),
         // An anonymous inode: no file type, 0600.
-        Object::Epoll(_) | Object::EventFd(_) | Object::TimerFd(_) => (0o600, 0),
+        Object::Epoll(_)
+        | Object::EventFd(_)
+        | Object::TimerFd(_)
+        | Object::PidFd(_)
+        | Object::Inotify(_) => (0o600, 0),
         Object::Nt(n) if n.kind == super::ntio::Kind::Pipe => (abi::S_IFIFO | 0o600, 0),
         Object::Nt(n) if n.kind == super::ntio::Kind::File => (abi::S_IFREG | 0o644, 0),
         Object::Pty(end) if end.master => return DeviceKind::Ptmx.stat(),
@@ -1088,7 +1104,11 @@ pub fn fstatfs(call: &Call<'_>, fd: u64, buf: u64) -> Result {
         | Object::Pty(_) => TMPFS_MAGIC,
         Object::PipeRead(_) | Object::PipeWrite(_) => PIPEFS_MAGIC,
         Object::Socket(_) | Object::Unix(_) => SOCKFS_MAGIC,
-        Object::Epoll(_) | Object::EventFd(_) | Object::TimerFd(_) => ANON_INODE_FS_MAGIC,
+        Object::Epoll(_)
+        | Object::EventFd(_)
+        | Object::TimerFd(_)
+        | Object::PidFd(_)
+        | Object::Inotify(_) => ANON_INODE_FS_MAGIC,
     };
     put_statfs(call, buf, magic)
 }
@@ -1699,7 +1719,7 @@ fn fill_dirents(
 
 /// A file-system name (UTF-16) as UTF-8 bytes (an unpaired surrogate as
 /// U+FFFD).
-fn utf8_name(
+pub fn utf8_name(
     wide: &[u16],
     out: &mut Vec<u8>,
 ) -> core::result::Result<(), crate::mm::heap::AllocError> {
@@ -2076,6 +2096,8 @@ fn fd_link(call: &Call<'_>, pid: u64, n: u64) -> core::result::Result<Vec<u8>, u
         Object::Epoll(_) => b"anon_inode:[eventpoll]",
         Object::EventFd(_) => b"anon_inode:[eventfd]",
         Object::TimerFd(_) => b"anon_inode:[timerfd]",
+        Object::PidFd(_) => b"anon_inode:[pidfd]",
+        Object::Inotify(_) => b"anon_inode:inotify",
         Object::Device(d) => match d.kind {
             DeviceKind::Ptmx => b"/dev/ptmx",
             DeviceKind::Tty => b"/dev/tty",

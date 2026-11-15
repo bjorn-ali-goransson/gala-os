@@ -3211,9 +3211,10 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
 
 **Next**:
 1. Milestone 2's rest: the rest of signal_test and fork_test
-   (rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
-   through the exception path, delivery to a thread running user code,
-   stop/continue, process groups and sessions, waitid, rusage), vfork
+   (rt_sigqueueinfo, faults as SIGSEGV/SIGBUS/SIGFPE through the
+   exception path, delivery to a thread running user code,
+   stop/continue, process groups and sessions, waitid's stopped and
+   continued children, rusage), vfork
    sharing memory;
    execve ending the other threads first; per-thread CPU time
    for clock_test's CPU clocks; wait queues on sockets instead of their
@@ -3753,8 +3754,10 @@ the next breakthroughs).
    armed from one thread while another waits), termios2 (`lx_pty`:
    glibc 2.43's isatty asks with TCGETS2). Next: seccomp's probes (GET_ACTION_AVAIL,
    GET_NOTIF_SIZES; a filter mode's flags checked: EFAULT for a NULL
-   program); xterm's setfsuid and setfsgid (ENOSYS now); pidfd_open
-   (ENOSYS: GLib watches children with SIGCHLD then). Linux system calls
+   program); xterm's setfsuid and setfsgid (ENOSYS now). Done since:
+   pidfds and waitid (`lx_pidfd`: GLib 2.88 watches each child with a
+   pidfd and reaps it with waitid(P_PIDFD)), /proc/mounts (`lx_procfs`:
+   GIO's mount monitor), inotify (`lx_inotify`: GIO's file monitors). Linux system calls
    are traced with `events=syscall` (`lx syscall`). Open: a Linux process
    keeps its name across execve (the log says `sh (pid N)` for
    gimp-console), and rseq is ENOSYS
