@@ -2125,7 +2125,10 @@ source).
   `SEATED_TESTS`, gtk_test) gets weston's X11 backend instead
   (`--backend=x11 --use-pixman`) in an Xvfb of its own (apt package
   `xvfb`; Xvfb picks a free display and names it with `-displayfd`;
-  its log is `xvfb.log` in the run directory): Xvfb's keyboard and
+  its log is `xvfb.log` in the run directory; under WSL that log says
+  it could bind no socket, because `/tmp/.X11-unix` there is WSLg's own
+  and mounted read-only: record in a namespace that has a writable one,
+  as the `/run` case above): Xvfb's keyboard and
   pointer make weston's seat, and nothing types or clicks there, so
   such a program drives itself when run by lx-expect (gtk_test clicks
   its own button: its header). In gala their scenarios (`lx_wl`) start the kernel's server
@@ -2162,7 +2165,11 @@ source).
   it. Nor may a transcript assert what Linux leaves to timing: a chain of
   exactly 40 symbolic links reads or fails with ELOOP, depending on
   whether the lookup's lockless walk fell back (fs_test asserts 20 and
-  41, and "opens or ELOOP" for 40). lx-expect
+  41, and "opens or ELOOP" for 40); nor that an expiry is readable on
+  the instruction after the timer is armed, even for an absolute time
+  already past, because the expiry is posted by the timer subsystem and
+  a non-blocking read races it (timerfd_test polls before each read of
+  such a timer). lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the

@@ -4,9 +4,13 @@
  * gala).
  *
  * Only what timing cannot change is printed: a timer never expires early
- * (a blocking read takes at least the time armed: a loaded machine only
- * makes it later), a one-shot timer counts one expiry, an interval timer
- * at least one per read, an absolute time already past expires at once,
+ * (a blocking read or a poll takes at least the time armed, measured from
+ * before the arming call so that what is printed in between does not come
+ * off the wait: a loaded machine only makes it later), a one-shot timer
+ * counts one expiry, an interval timer at least one per read, an absolute
+ * time already past expires with no deadline left to wait for (polled
+ * for: the expiry is posted by the timer subsystem, not by the call that
+ * arms it),
  * a disarmed timer reads nothing, the remaining time is at most what was
  * armed, and the errors. */
 #include "../common/lx.h"
@@ -91,11 +95,15 @@ int main(void)
 	rd(nb, &r);
 	say_ret("read(unarmed, non-blocking)", r);
 	t = arm(30, 0);
+	struct pfd p = { (int)nb, POLLIN, 0 };
+	/* Before the arming call, as the 60 ms read above: what the lines in
+	 * between cost comes off the wait otherwise, and a machine whose
+	 * console is slower than the slack polls for less than the 30 ms
+	 * (gala's serial console: lx_timerfd). */
+	start = ms(CLOCK_MONOTONIC);
 	sys4(SYS_timerfd_settime, nb, 0, &t, 0);
 	rd(nb, &r);
 	say_ret("read before it expires", r);
-	struct pfd p = { (int)nb, POLLIN, 0 };
-	start = ms(CLOCK_MONOTONIC);
 	say("poll(10 s)", sys3(SYS_poll, &p, 1, 10000));
 	say("  revents", p.revents);
 	say_bool("  not before 30 ms", ms(CLOCK_MONOTONIC) - start >= 30);
@@ -142,6 +150,15 @@ int main(void)
 	a.value.sec = now / 1000000000;
 	a.value.nsec = now % 1000000000;
 	say_ret("TFD_TIMER_ABSTIME, the time just read", sys4(SYS_timerfd_settime, fd, TFD_TIMER_ABSTIME, &a, 0));
+	/* It expires with no deadline left to wait for, and poll is what says
+	 * so without racing the expiry: fd is non-blocking from here on, and
+	 * a read on the very next instruction can reach the timer before the
+	 * timer subsystem has posted the expiry (EAGAIN, and 0 expirations
+	 * for a time a whole second past). */
+	p.fd = (int)fd;
+	p.revents = 0;
+	say("  poll(10 s)", sys3(SYS_poll, &p, 1, 10000));
+	say("  revents", p.revents);
 	n = rd(fd, &r);
 	say("  read", r);
 	say("  expirations", n);
@@ -149,6 +166,10 @@ int main(void)
 	now = now_ns(CLOCK_REALTIME);
 	a.value.sec = now / 1000000000 - 1;
 	say_ret("CLOCK_REALTIME, TFD_TIMER_ABSTIME, a second ago", sys4(SYS_timerfd_settime, rt, TFD_TIMER_ABSTIME, &a, 0));
+	p.fd = (int)rt;
+	p.revents = 0;
+	say("  poll(10 s)", sys3(SYS_poll, &p, 1, 10000));
+	say("  revents", p.revents);
 	n = rd(rt, &r);
 	say("  expirations", n);
 	i64 bt = sys2(SYS_timerfd_create, CLOCK_BOOTTIME, TFD_NONBLOCK);
