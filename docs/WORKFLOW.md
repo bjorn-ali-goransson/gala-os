@@ -1474,7 +1474,14 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   runs as a non-admin user in session 1, with many CPUs, a battery, its
   own UI language): files and directories go in `%TEMP%` (GetTempPathW),
   not C:\ (a user may not create files there) or C:\gala, and an
-  earlier run's leftovers are removed first; values that depend on the
+  earlier run's leftovers are removed first; a path a test only *names*
+  comes from a directory it knows is there too (its own image's, from
+  GetModuleFileNameW, or `%TEMP%`) whenever the answer turns on that
+  directory existing -- MsiInstallProductW answers ERROR_FILE_NOT_FOUND
+  for a missing package in a directory that is there and
+  ERROR_PATH_NOT_FOUND for one in a directory that is not, so
+  `C:\gala\no-such.msi` passed on gala and on a machine this project
+  had run on and failed on CI's stock runner (`msi_test`); values that depend on the
   machine (the processor count, devices, the system locale, the build,
   the volume's number) are read from another API, not typed in; per-user
   state another process may hold (the clipboard) is skipped, naming the

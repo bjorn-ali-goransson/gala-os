@@ -174,11 +174,12 @@ const MSIDBOPEN_DIRECT: *const u16 = without_provenance(2);
 const MSIDBOPEN_CREATE: *const u16 = without_provenance(3);
 const MSIDBOPEN_CREATEDIRECT: *const u16 = without_provenance(4);
 
-/// A database no machine has, in a directory gala has (`C:\gala`).
-/// A directory that is there on both (gala lays it down; the host's own
-/// is this project's), for the package path that is one.
-const GALA_DIRECTORY: &str = r"C:\gala";
-
+/// A database no machine has. MsiOpenDatabaseW answers
+/// ERROR_OPEN_FAILED whether or not the directory above it is there
+/// (measured on Windows 11 26100: 110 for both of these), so naming a
+/// directory of gala's own costs nothing here. MsiInstallProductW does
+/// tell the two apart, which is why `installs` builds its paths from a
+/// directory it knows is there instead.
 const MISSING_DATABASE: &str = r"C:\gala\no-such-database.msi";
 
 /// A database in a directory no machine has: a create mode cannot make
@@ -290,6 +291,26 @@ fn wide<const N: usize>(text: &str) -> [u16; N] {
         *slot = u16::from(b);
     }
     out
+}
+
+/// A NUL-terminated path: `directory` itself, or `tail` inside it.
+/// `directory` carries no separator of its own; None if the result
+/// would not fit in `N` units, the NUL included.
+fn path_in<const N: usize>(directory: &[u16], tail: Option<&str>) -> Option<[u16; N]> {
+    let tail = tail.unwrap_or("");
+    let end = if tail.is_empty() { directory.len() } else { directory.len() + 1 + tail.len() };
+    if end + 1 > N {
+        return None;
+    }
+    let mut out = [0u16; N];
+    out[..directory.len()].copy_from_slice(directory);
+    if !tail.is_empty() {
+        out[directory.len()] = u16::from(b'\\');
+        for (slot, b) in out[directory.len() + 1..].iter_mut().zip(tail.bytes()) {
+            *slot = u16::from(b);
+        }
+    }
+    Some(out)
 }
 
 /// The eleven ordinals setup.exe and integrator.exe import by name here:
@@ -608,15 +629,31 @@ fn databases(c: &mut Checks) -> Result<(), u32> {
 /// (and of CI's runner) as well as of gala. Windows tells apart what the
 /// path failed on: the file, its directory, that it is a directory, and
 /// that it is a file which is not a package.
+///
+/// They are all built inside the directory this program was loaded
+/// from, which is there wherever the program runs at all. Whether the
+/// directory is there is exactly what tells ERROR_FILE_NOT_FOUND from
+/// ERROR_PATH_NOT_FOUND, so a path under a hard-coded `C:\gala` would
+/// ask the host, not msi.dll: gala lays that directory down and a
+/// machine this project has run on has one, while a stock Windows has
+/// none and answers ERROR_PATH_NOT_FOUND for every path in it.
 fn installs(c: &mut Checks) -> Result<(), u32> {
-    let missing = wide::<29>(MISSING_DATABASE);
-    let missing_directory = wide::<47>(MISSING_DIRECTORY_DATABASE);
-    let directory = wide::<8>(GALA_DIRECTORY);
     let empty = [0u16; 1];
     let mut own = [0u16; 260];
     // SAFETY: our buffer, its length in units.
     let n = unsafe { GetModuleFileNameW(0, own.as_mut_ptr(), own.len() as u32) };
     c.ok(n > 0 && (n as usize) < own.len(), u64::from(n))?;
+    let separator = own[..n as usize].iter().rposition(|&u| u == u16::from(b'\\'));
+    let paths = (
+        separator.and_then(|i| path_in::<320>(&own[..i], Some("no-such-database.msi"))),
+        separator.and_then(|i| {
+            path_in::<320>(&own[..i], Some(r"no-such-directory\no-such-database.msi"))
+        }),
+        separator.and_then(|i| path_in::<320>(&own[..i], None)),
+    );
+    let (Some(missing), Some(missing_directory), Some(directory)) = paths else {
+        return c.ok(false, u64::from(n));
+    };
     // SAFETY: documented calls with our arguments; a NULL command line
     // is a package installed with no properties set.
     unsafe {
