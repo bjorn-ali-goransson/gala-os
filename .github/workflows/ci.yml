@@ -156,6 +156,11 @@ jobs:
           ld --version | head -1
           musl-gcc --version | head -1
           dpkg-query -W gcc gcc-15 libgcc-15-dev binutils libc6-dev musl-tools musl-dev
+          gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
+          musl-gcc -Q --help=target | grep -E '^\s+-m(arch|tune)=' | head -2
+          gcc -dumpspecs | md5sum
+          ls -l /usr/lib/gcc/x86_64-linux-gnu/15/specs 2>&1 || true
+          env | grep -iE '^(C|CPP|LD|CXX)FLAGS=|^CC=|^GCC' || echo "no compiler env"
           cargo xtask lx-expect && git diff --exit-code user/lx
       - name: The binaries this runner built (when their bytes differ)
         if: failure() && steps.lx.outcome == 'failure'
