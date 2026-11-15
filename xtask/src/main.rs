@@ -7530,7 +7530,7 @@ fn user_build_for(target: &str) -> Command {
 /// what a host needs to run the suite outside Docker.
 fn host_package(program: &str) -> Option<&'static str> {
     Some(match program {
-        "7z" => "p7zip-full",
+        "7z" => "7zip",
         "unzip" => "unzip",
         "psql" => "postgresql-client",
         "ssh" | "sftp" | "scp" => "openssh-client",
@@ -8390,8 +8390,8 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
 
 /// What shared-mime-info's installation does (its dpkg trigger): the
 /// MIME database's `mime.cache` made from `usr/share/mime/packages` by
-/// the host's `update-mime-database` (Ubuntu 24.04's shared-mime-info
-/// 2.4, the same version; its output is the same at each run). Only
+/// the host's `update-mime-database` (Ubuntu 26.04's shared-mime-info
+/// 2.4, the root's version too; its output is the same at each run). Only
 /// mime.cache is kept: GIO reads nothing else when it is there. Nothing
 /// to do for a root without the package.
 fn update_mime_database(dir: &Path) -> Result {
@@ -23489,7 +23489,7 @@ fn docker_test(args: &[String]) -> Result {
     // which carries no QEMU, has none to run. It is the container's own
     // cache, not the host's: QEMU links against the glibc and libslirp
     // of whatever built it, so a build made on a host newer than the
-    // image (Ubuntu 24.04) dies 0.1s into the run with `version
+    // image (Ubuntu 26.04) dies 0.1s into the run with `version
     // GLIBC_2.42 not found`, which reads as a QEMU that crashed.
     let qemu_cache = host_home().join(".cache/gala-qemu-docker");
     fs::create_dir_all(&qemu_cache).map_err(|e| format!("{}: {e}", qemu_cache.display()))?;
@@ -23506,6 +23506,12 @@ fn docker_test(args: &[String]) -> Result {
         if Path::new("/dev/kvm").exists() {
             cmd.args(["--device", "/dev/kvm"]);
         }
+        // Docker's default seccomp profile blocks clone3, and the Linux
+        // test programs call it (thread_test's clone3 section then waits
+        // for a thread that was never made, and `cargo xtask docker-test
+        // lx-expect` reads as a hung test): this is our own image running
+        // our own programs, and it already has /dev/kvm.
+        cmd.args(["--security-opt", "seccomp=unconfined"]);
         // Every XTASK_* variable, so that what steers a run on the host
         // steers it in the container too (the timeout, the events, the
         // screenshot times, the kernel command line, the snapshots).

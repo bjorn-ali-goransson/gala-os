@@ -7,9 +7,9 @@
 # <name>_test-pie (a PIE), each of their lib*.c a shared library
 # lib*.so beside them (found through DT_RUNPATH $ORIGIN).
 #
-# Needs musl-gcc (Ubuntu/Debian: apt install musl-tools; musl 1.2.4 and
-# gcc 13 on Ubuntu 24.04, which CI uses) and, for GLIBC_TESTS, gcc with
-# glibc's headers (gcc 13 and glibc 2.39 on Ubuntu 24.04), and for
+# Needs musl-gcc (Ubuntu/Debian: apt install musl-tools; musl 1.2.5 and
+# gcc 15 on Ubuntu 26.04, which CI uses) and, for GLIBC_TESTS, gcc with
+# glibc's headers (gcc 15 and glibc 2.43 on Ubuntu 26.04), and for
 # gtk_test GTK 3's libraries (apt install libgtk-3-0t64). The build is reproducible
 # (stripped, no build id, no file paths), so CI rebuilds and checks the
 # result against the checked-in binaries (`cargo xtask lx-expect`).
@@ -24,7 +24,7 @@ cc=${MUSL_GCC:-musl-gcc}
 gcc=${GLIBC_GCC:-gcc}
 # Linked against glibc, dynamically.
 GLIBC_TESTS="dyn_test gtk_test"
-# Linked against GTK 3 as well (the host's Ubuntu 24.04 libgtk-3-0t64, its
+# Linked against GTK 3 as well (the host's Ubuntu 26.04 libgtk-3-0t64, its
 # libraries by soname: no development package needed; the program
 # declares what it calls). The binary depends only on the sonames and
 # the symbols' names, so any 3.24 build gives the same bytes.

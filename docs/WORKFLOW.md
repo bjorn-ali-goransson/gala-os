@@ -72,7 +72,7 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   request once its checks are green, or by a direct push after the local
   gate (`cargo xtask test`) passed; main's ruleset allows both for now.
   Its jobs:
-  - `linux` (Ubuntu 24.04): the format and clippy lines, `cargo xtask
+  - `linux` (Ubuntu 26.04): the format and clippy lines, `cargo xtask
     lx-expect && git diff --exit-code user/lx`, `cargo xtask test
     --no-boot` (everything but the boots) and `cargo xtask export-tests &&
     git diff --exit-code user/bin` (checked-in binaries and transcripts
@@ -955,13 +955,16 @@ Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
   any other. A fallback on a host that has `/dev/kvm` is called out
   with it, and QEMU's standard error says what it could not open.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
-  `docker/test.Dockerfile` (Ubuntu 24.04, OVMF, xorriso, the pinned
+  `docker/test.Dockerfile` (Ubuntu 26.04, OVMF, xorriso, the pinned
   toolchain, QEMU's build dependencies, and the host-side programs the
   tests run next to the VM: the ssh and sftp clients, psql, 7z, unzip,
   msitools, musl-gcc, weston and Xvfb) and runs `cargo xtask test` (or
   the given arguments) inside it with the repository at /work and build
   output in `target/docker`. It passes `/dev/kvm` through when the host
-  has it, mounts `~/.cache/gala-qemu-docker` at
+  has it, runs the container with `seccomp=unconfined` (the default
+  profile blocks clone3, which the Linux test programs call: thread_test
+  then waits for a thread that was never made and `docker-test
+  lx-expect` reads as a hung test), mounts `~/.cache/gala-qemu-docker` at
   `/root/.cache/gala-qemu` (the container's `HOME` is /root) and builds
   the pinned QEMU there first when it is missing, and forwards every
   `XTASK_*` variable and the proxy settings. That cache is the
@@ -1045,7 +1048,7 @@ networking).
   carries on regardless, so those two are not required; it fails on a
   missing dependency rather than warning, one at a time, so read the
   last line of its output rather than the first.
-- Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
+- Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04's
   8.2.2) keeps running stale translations of code rewritten on a
   translated block's second page, which corrupted JIT-compiled code
   ("Known intermittent"). `straddle_test` (single-threaded TCG) rewrites
@@ -1054,7 +1057,8 @@ networking).
   it is the quick way to tell whether a QEMU build has the bug. On the
   pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
   failed. A newer distribution QEMU is no safer: on 10.2.1 (Ubuntu
-  26.04's) the `hello` scenario wedges **under KVM** before the kernel
+  26.04's, so what CI's runners and the test image carry) the `hello`
+  scenario wedges **under KVM** before the kernel
   logs a phase, three runs of three timing out at 120 s with CPU 1 at
   the reset vector (`EIP=0000fff0 CS=f000`, `HLT=1`) and no state dump,
   while `lx_hello`, `lx_hello_pie` and `go_hello` passed in the same
@@ -2090,7 +2094,7 @@ source).
   dlopen()ed is not DT_NEEDED), found through DT_RUNPATH `$ORIGIN`.
   They use libc as a program does (printf, malloc, dlopen), not raw
   system calls: what they check is that glibc's programs run. CI's
-  rebuild (ubuntu-24.04: gcc 13.3, glibc 2.39) must give the same bytes:
+  rebuild (ubuntu-26.04: gcc 15.2, glibc 2.43) must give the same bytes:
   their start-up files (`crt1.o`, `crti.o`) come from the host's
   libc6-dev, so the binaries are rebuilt on that Ubuntu release.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
@@ -2125,7 +2129,11 @@ source).
   `SEATED_TESTS`, gtk_test) gets weston's X11 backend instead
   (`--backend=x11 --use-pixman`) in an Xvfb of its own (apt package
   `xvfb`; Xvfb picks a free display and names it with `-displayfd`;
-  its log is `xvfb.log` in the run directory): Xvfb's keyboard and
+  its log is `xvfb.log` in the run directory, and under WSL that log
+  reads "Mode of /tmp/.X11-unix should be set to 1777" because WSLg
+  mounts that directory read-only, so no Xvfb there can make its
+  socket and the seated tests run in the test image instead):
+  Xvfb's keyboard and
   pointer make weston's seat, and nothing types or clicks there, so
   such a program drives itself when run by lx-expect (gtk_test clicks
   its own button: its header). In gala their scenarios (`lx_wl`) start the kernel's server
@@ -2858,7 +2866,7 @@ it on first use.
 - Unpackers: unzip for zips (`apt install unzip`; a fresh Ubuntu, WSL's
   included, has none, and the prebuilt fails to spawn it), msitools'
   `msiextract` for an MSI (`apt install msitools`), 7-Zip (`7z` from
-  p7zip-full) for a `.7z` archive (mesa-dist-win's; members are file
+  7zip) for a `.7z` archive (mesa-dist-win's; members are file
   paths such as `x64/opengl32.dll`), an NSIS installer or a 7-Zip
   self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library

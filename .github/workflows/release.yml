@@ -63,7 +63,7 @@ jobs:
         && github.event.workflow_run.event == 'push'
         && github.event.workflow_run.head_repository.full_name == github.repository)
       || (github.event_name == 'workflow_dispatch' && inputs.job == 'publish')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment: release
     timeout-minutes: 60
     env:
@@ -119,7 +119,7 @@ jobs:
     if: >-
       github.event.schedule == '17 */6 * * *'
       || (github.event_name == 'workflow_dispatch' && inputs.job == 'refresh')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment: release
     timeout-minutes: 20
     steps:
@@ -149,7 +149,7 @@ jobs:
     if: >-
       github.event.schedule == '43 4 3 * *'
       || (github.event_name == 'workflow_dispatch' && inputs.job == 'renew-root')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment: release
     timeout-minutes: 20
     steps:

@@ -23,7 +23,7 @@ Nothing of this goes into the repository as notes or message files.
 ## Setting up
 
 - WSL2 with nested virtualization, so that `/dev/kvm` exists inside the
-  distribution (Ubuntu 24.04). Check with `ls -l /dev/kvm`; `xtask`
+  distribution (Ubuntu 26.04). Check with `ls -l /dev/kvm`; `xtask`
   prints `-accel kvm` in each QEMU command line, and a run's triage says
   "waiting for a host CPU" when it is not.
 - Clone github.com/bjorn-ali-goransson/gala-os (branch

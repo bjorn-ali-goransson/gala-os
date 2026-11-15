@@ -29,7 +29,7 @@ jobs:
   # only moves the website skips the jobs below rather than spending a
   # QEMU runner and a Windows runner on it.
   changes:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       code: ${{ steps.what.outputs.code }}
     steps:
@@ -72,7 +72,7 @@ jobs:
   linux:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
@@ -88,13 +88,16 @@ jobs:
           ls -l /dev/kvm
       - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools p7zip-full unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
-      # Ubuntu 24.04's QEMU (8.2.2) has the translated-block bug that broke
-      # JIT code (WORKFLOW "QEMU"); xtask builds and uses the pinned one.
+      # No distribution QEMU is used: 8.1.0-8.2.5 had the translated-block bug
+      # that broke JIT code, and this image's 10.2.1 wedges under KVM before the
+      # kernel logs a phase (WORKFLOW "QEMU"); xtask builds the pinned one. The
+      # key names the image's release: the build links against the image's
+      # libraries, so a build from another release must not be restored here.
       - name: Cache the pinned QEMU
         uses: actions/cache@v4
         with:
           path: ~/.cache/gala-qemu
-          key: gala-qemu-11.1.3
+          key: gala-qemu-11.1.3-ubuntu-26.04
       - name: Build the pinned QEMU
         run: cargo xtask qemu
       # The pinned downloads the host tests and gala-um use (the JDK...),
@@ -156,7 +159,7 @@ jobs:
   boot:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +184,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/gala-qemu
-          key: gala-qemu-11.1.3
+          key: gala-qemu-11.1.3-ubuntu-26.04
       - name: Build the pinned QEMU
         run: cargo xtask qemu
       - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
