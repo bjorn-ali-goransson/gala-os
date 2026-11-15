@@ -1119,9 +1119,15 @@ Run a program directly:
   that process (`handle SIGSYS nostop noprint`, `handle SIGURG nostop
   noprint`), and `thread apply all bt` shows where NT threads are inside
   the NT layer.
-- A run that hangs gets SIGQUIT at its timeout (`timeout -s QUIT`,
-  SIGKILL 5 s later) and prints the threads part of the state dump to
-  stderr; for a live one, `kill -QUIT <pid of exe>`.
+- A run that hangs gets SIGQUIT at its deadline (SIGKILL 5 s later)
+  and prints the threads part of the state dump to stderr; for a live
+  one, `kill -QUIT <pid of exe>`. xtask times the run itself
+  (`run_with_deadline`) rather than through `timeout -s QUIT -k 5`:
+  Ubuntu 26.04's coreutils is uutils (`timeout --version` says which a
+  host has), whose timeout(1) kills the program at the deadline instead
+  of sending the chosen signal first and waiting, which left every hung
+  run without the dump it is read from. A host tool's flavour must not
+  decide whether a hang explains itself.
 - A failure that reproduces in gala-um is in the NT layer or the
   user-mode DLLs; one that does not points at the kernel's machine code
   (paging, switches, interrupts) or at the emulator.
@@ -2269,7 +2275,9 @@ source).
   check; cross-check it with the host's dash and coreutils (shell.sh's
   part after its setup, or httpd.sh behind a `busybox() { "$@"; }`
   shim; busybox is a test subject: it runs inside gala, where its
-  behaviour is what is tested; see "Third-party code on the host"). busybox.net's build has no standalone shell, so `shell.sh`
+  behaviour is what is tested; see "Third-party code on the host"). On
+  Ubuntu 26.04 that cross-check is against uutils coreutils rather than
+  GNU's: where the two differ, POSIX decides. busybox.net's build has no standalone shell, so `shell.sh`
   first makes `/lx/bb.bin/<applet>` symbolic links to busybox and puts
   that directory first in PATH (an applet it needs goes in that list);
   httpd.sh still calls `busybox <applet>`. To try a command line quickly, change `lx_busybox`'s

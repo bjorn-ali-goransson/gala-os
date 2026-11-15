@@ -15621,10 +15621,12 @@ fn um_test(release: bool) -> Result {
         // A program that hangs on purpose gets SIGQUIT (its state dump)
         // after a few seconds.
         let secs = if s.exit_status == XTASK_DUMPS { 3 } else { UM_TIMEOUT_SECS };
-        let (code, mut log) = run_um_with(&um, s, &[], secs)?;
-        if matches!(code, Some(124 | 137)) {
+        let run = run_um_with(&um, s, &[], secs)?;
+        let mut log = run.log;
+        if run.timed_out {
             log += &format!(
-                "\nxtask: gala-um timed out after {secs}s (SIGQUIT asked for a state dump)\n"
+                "\nxtask: gala-um timed out after {secs}s (SIGQUIT asked for a state dump, \
+                 SIGKILL {UM_DUMP_SECS}s later)\n"
             );
         }
         let missing: Vec<_> =
@@ -15670,27 +15672,122 @@ fn build_um(release: bool) -> Result<PathBuf> {
 /// would run: its boot modules from user/bin, its `args=`, two
 /// processors; returns stdout and stderr.
 fn run_um(um: &Path, s: &Scenario) -> Result<String> {
-    run_um_with(um, s, &[], UM_TIMEOUT_SECS).map(|(_, log)| log)
+    run_um_with(um, s, &[], UM_TIMEOUT_SECS).map(|run| run.log)
 }
 
-/// `run_um` with more options for um (`--failpoint=...`) and a timeout;
-/// returns the exit status (None if a signal ended it) and the output.
-fn run_um_with(
-    um: &Path,
-    s: &Scenario,
-    options: &[String],
-    timeout_secs: u32,
-) -> Result<(Option<i32>, String)> {
-    let out = um_command(um, s, options, timeout_secs)?
-        .output()
-        .map_err(|e| format!("running {}: {e}", um.display()))?;
-    let log =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.code(), log))
+/// How one gala-um run ended (`run_um_with`).
+struct UmRun {
+    /// Its exit status; `None` when a signal ended it (the deadline's
+    /// SIGKILL, or a crash).
+    code: Option<i32>,
+    /// Its standard output and then its standard error (the kernel's log).
+    log: String,
+    /// It was still running at its deadline, so SIGQUIT asked it for the
+    /// state dump and SIGKILL ended it `UM_DUMP_SECS` later.
+    timed_out: bool,
 }
 
-/// The command `run_um_with` runs (printed to repeat a failure by hand).
-fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) -> Result<Command> {
+/// `run_um` with more options for um (`--failpoint=...`) and a deadline
+/// in seconds.
+fn run_um_with(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) -> Result<UmRun> {
+    let mut cmd = um_command(um, s, options)?;
+    let deadline = Duration::from_secs(timeout_secs.into());
+    run_with_deadline(&mut cmd, deadline, Duration::from_secs(UM_DUMP_SECS.into()))
+        .map_err(|e| format!("running {}: {e}", um.display()))
+}
+
+/// Seconds between the SIGQUIT that asks a run past its deadline for its
+/// state dump and the SIGKILL that ends it (the dump takes milliseconds).
+const UM_DUMP_SECS: u32 = 5;
+
+/// What a run past its deadline is sent: its state dump, then its end.
+enum AtDeadline {
+    /// SIGQUIT: gala-um prints the threads part of the state dump
+    /// (kernel/src/hosted/entry.rs, kernel/src/statedump.rs).
+    Dump,
+    /// SIGKILL: it did not answer the dump request (or is wedged).
+    End,
+}
+
+/// Sends `what` to the running child `pid`. gala-um runs on Linux only,
+/// and so does this; elsewhere a run has no deadline.
+#[cfg(target_os = "linux")]
+fn at_deadline(pid: u32, what: AtDeadline) {
+    let Ok(pid) = i32::try_from(pid) else { return };
+    let signal = match what {
+        AtDeadline::Dump => libc::SIGQUIT,
+        AtDeadline::End => libc::SIGKILL,
+    };
+    // SAFETY: kill(2) with the pid of xtask's own child, which is not
+    // reaped yet (the thread waiting for it has not returned), and one of
+    // two valid signal numbers.
+    unsafe { libc::kill(pid, signal) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn at_deadline(_pid: u32, _what: AtDeadline) {}
+
+/// Runs `cmd` to its end, or to `deadline`: a run still going then is
+/// asked for its state dump (SIGQUIT) and killed `grace` later. Its
+/// standard output and error are read while it runs, so a program that
+/// fills a pipe reaches its deadline instead of stopping before it.
+///
+/// Not `timeout -s QUIT -k` (what this was until Ubuntu 26.04): that
+/// release's coreutils is uutils, whose timeout(1) kills the program at
+/// the deadline instead of sending the chosen signal first and waiting,
+/// so a hung run left no state dump -- the one thing it is read from
+/// (WORKFLOW "gala-um"). Which coreutils a host has must not decide
+/// whether a hang explains itself.
+fn run_with_deadline(cmd: &mut Command, deadline: Duration, grace: Duration) -> Result<UmRun> {
+    use std::sync::mpsc::RecvTimeoutError::Timeout;
+    let mut child =
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    let mut out = child.stdout.take().ok_or("no pipe for its standard output")?;
+    let mut err = child.stderr.take().ok_or("no pipe for its standard error")?;
+    let reading_out = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        buf
+    });
+    let reading_err = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf);
+        buf
+    });
+    // A thread waits for the run and says over the channel that it is
+    // over: the deadline then needs no polling, and a run of a few
+    // milliseconds is not measured through a poll interval.
+    let (over, is_over) = std::sync::mpsc::channel();
+    let waiting = thread::spawn(move || {
+        let status = child.wait();
+        let _ = over.send(());
+        status
+    });
+    let mut timed_out = false;
+    if matches!(is_over.recv_timeout(deadline), Err(Timeout)) {
+        timed_out = true;
+        at_deadline(pid, AtDeadline::Dump);
+        if matches!(is_over.recv_timeout(grace), Err(Timeout)) {
+            at_deadline(pid, AtDeadline::End);
+        }
+    }
+    let status = waiting
+        .join()
+        .map_err(|_| String::from("the thread waiting for the run panicked"))?
+        .map_err(|e| e.to_string())?;
+    let read = |pipe: thread::JoinHandle<Vec<u8>>| pipe.join().unwrap_or_default();
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&read(reading_out)),
+        String::from_utf8_lossy(&read(reading_err))
+    );
+    Ok(UmRun { code: status.code(), log, timed_out })
+}
+
+/// The command `run_um_with` runs (printed to repeat a failure by hand);
+/// its deadline is `run_with_deadline`'s, not timeout(1)'s.
+fn um_command(um: &Path, s: &Scenario, options: &[String]) -> Result<Command> {
     let name = s.name;
     let program = scenario_program(s).ok_or(format!("{name}: not a program scenario"))?;
     // Never a run without part of its setup (a server `start=` starts, a
@@ -15700,15 +15797,12 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
     }
     // The scenario's `args=` (percent-encoded), as one command-line string.
     let args = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("args=")).unwrap_or("");
-    // A hung program fails instead of hanging the run (Linux only, as
-    // gala-um itself).
-    let mut cmd = Command::new("timeout");
-    // At the timeout SIGQUIT first: gala-um prints a state dump (every
-    // thread's system call and wait, the ledger; kernel/src/statedump.rs),
-    // then SIGKILL 5 s later (exit status 137).
-    cmd.args(["-s", "QUIT", "-k", "5"]).arg(timeout_secs.to_string());
-    // As many processors as the QEMU boot tests (-smp 2).
-    cmd.arg(um).arg("--cpus=2").args(options);
+    // As many processors as the QEMU boot tests (-smp 2). A hung program
+    // fails instead of hanging the run at `run_with_deadline`'s deadline,
+    // which asks it for a state dump first (every thread's system call
+    // and wait, the ledger; kernel/src/statedump.rs).
+    let mut cmd = Command::new(um);
+    cmd.arg("--cpus=2").args(options);
     // Clock control, as the kernel's `clock=`.
     if let Some(spec) = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("clock=")) {
         cmd.arg(format!("--clock={spec}"));
@@ -15828,7 +15922,8 @@ const FAULT_MISREPORTS: &[&str] = &[": Pe(", ": BadImageBase"];
 /// Judges one gala-um run with failures injected: the program ends (any
 /// exit status: 0 or 1 from the program, 2 when um could not start it),
 /// the NT layer neither panics, aborts nor hangs.
-fn judge_fault_run(code: Option<i32>, log: &str) -> Result {
+fn judge_fault_run(run: &UmRun) -> Result {
+    let log = &run.log;
     if let Some(m) = FAULT_CRASH_MARKERS.iter().find(|m| log.contains(**m)) {
         return Err(format!("crashed ({m:?})"));
     }
@@ -15837,11 +15932,13 @@ fn judge_fault_run(code: Option<i32>, log: &str) -> Result {
     if let Some(m) = FAULT_MISREPORTS.iter().find(|m| log.contains(**m)) {
         return Err(format!("out of memory reported as {m:?}"));
     }
-    match code {
+    if run.timed_out {
+        return Err(format!(
+            "hung (killed after {FAULT_TIMEOUT_SECS} s; its state dump is in the log)"
+        ));
+    }
+    match run.code {
         Some(0..=2) => Ok(()),
-        Some(124 | 137) => {
-            Err(format!("hung (killed after {FAULT_TIMEOUT_SECS} s; its state dump is in the log)"))
-        }
         Some(c) if c > 128 => Err(format!("killed by signal {}", c - 128)),
         Some(c) => Err(format!("um exited with {c}")),
         None => Err("killed by a signal".into()),
@@ -15873,7 +15970,7 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
     let sweep_jobs = |s: &'static Scenario, point: &str| -> Result<Vec<(&Scenario, String, u64)>> {
         // Count the occurrences (a rule that never fires).
         let count = vec![format!("--failpoint={point}:nth:{}", u64::MAX)];
-        let (_, log) = run_um_with(&um, s, &count, FAULT_TIMEOUT_SECS)?;
+        let log = run_um_with(&um, s, &count, FAULT_TIMEOUT_SECS)?.log;
         let n: u64 = log
             .split(&format!("failpoint: {point} "))
             .nth(1)
@@ -15904,8 +16001,9 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
     let started = Instant::now();
     let results = run_parallel(&jobs, |(s, rule, seed)| {
         let options = [format!("--failpoint={rule}"), format!("--failseed={seed}")];
-        let (code, log) = run_um_with(&um, s, &options, FAULT_TIMEOUT_SECS)?;
-        Ok(judge_fault_run(code, &log).map_err(|e| (e, log)))
+        let run = run_um_with(&um, s, &options, FAULT_TIMEOUT_SECS)?;
+        let verdict = judge_fault_run(&run);
+        Ok(verdict.map_err(|e| (e, run.log)))
     });
     let mut failed = 0;
     let dir = target_dir().join("failed");
@@ -15966,11 +16064,11 @@ fn replay_test(release: bool) -> Result {
             for run in 0..2 {
                 let mut options = vec![format!("--record={}", file(run).display())];
                 options.extend(sim.map(|seed| format!("--sim={seed}")));
-                let (code, log) = run_um_with(&um, s, &options, UM_TIMEOUT_SECS)?;
-                if code != Some(0) || !log.contains("replay: recorded") {
-                    failed.push(format!("{program} ({label}): recording failed:\n{log}"));
+                let run = run_um_with(&um, s, &options, UM_TIMEOUT_SECS)?;
+                if run.code != Some(0) || !run.log.contains("replay: recorded") {
+                    failed.push(format!("{program} ({label}): recording failed:\n{}", run.log));
                 }
-                recorded.push(wanted(&log));
+                recorded.push(wanted(&run.log));
             }
             // Live inputs differ between runs (the simulation's seed fixes
             // them, so its two recordings agree).
@@ -15981,12 +16079,15 @@ fn replay_test(release: bool) -> Result {
                 failed.push(format!("{program} ({label}): one seed, different runs"));
             }
             let replay = format!("--replay={}", file(0).display());
-            let (code, log) = run_um_with(&um, s, &[replay], UM_TIMEOUT_SECS)?;
-            let replayed = wanted(&log);
-            if code != Some(0) || replayed != recorded[0] || !log.contains("replay: replayed") {
+            let run = run_um_with(&um, s, &[replay], UM_TIMEOUT_SECS)?;
+            let replayed = wanted(&run.log);
+            if run.code != Some(0)
+                || replayed != recorded[0]
+                || !run.log.contains("replay: replayed")
+            {
                 failed.push(format!(
-                    "{program} ({label}): the replay read {replayed:?}, recorded {:?}:\n{log}",
-                    recorded[0]
+                    "{program} ({label}): the replay read {replayed:?}, recorded {:?}:\n{}",
+                    recorded[0], run.log
                 ));
             } else {
                 eprintln!(
@@ -16119,13 +16220,14 @@ fn sim_test(
     let mut traces: std::collections::BTreeMap<(&str, u64), Runs> = Default::default();
     let mut warnings = Vec::new();
     for ((s, seed, run), result) in jobs.iter().zip(results) {
-        let (code, log) = result?;
+        let ended = result?;
+        let (code, log) = (ended.code, ended.log);
         let file = dir.join(format!("sim-{}-{seed}-{run}.log", s.name));
         let mut fail = |why: String| {
             let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&file, &log));
             let tail: Vec<&str> = log.lines().rev().take(30).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            let repeat = um_command(&um, s, &[format!("--sim={seed}")], SIM_TIMEOUT_SECS)
+            let repeat = um_command(&um, s, &[format!("--sim={seed}")])
                 .map_or_else(|e| e, |c| shell_line(&c));
             failures.push(format!(
                 "{} seed {seed}: {why}; log {}; repeat with:\n    {repeat}\n    {}",
@@ -24110,10 +24212,62 @@ mod um_scenarios {
         assert!(!runs_in_um(&s));
         assert!(um_gap(&s).is_some_and(|why| why.contains("start=nginx.exe")), "{:?}", um_gap(&s));
         let um = Path::new("um");
-        assert!(um_command(um, &s, &[], 1).is_err_and(|e| e.contains("start=nginx.exe")));
+        assert!(um_command(um, &s, &[]).is_err_and(|e| e.contains("start=nginx.exe")));
         // Flags gala-um applies keep it in.
         let s = Scenario { cmdline: "qemu_exit clock=pause run=tls_client_test.exe", ..s };
         assert!(runs_in_um(&s), "{:?}", um_gap(&s));
+    }
+
+    /// A run still going at its deadline is asked for its state dump and
+    /// killed only after it (what `timeout -s QUIT -k 5` did until Ubuntu
+    /// 26.04, whose uutils timeout(1) kills at the deadline instead): the
+    /// dump is what a hang is read from, so the run keeps going long
+    /// enough to print it, and what it printed is kept.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_past_its_deadline_prints_its_dump_before_it_is_killed() {
+        let mut cmd = Command::new("sh");
+        let waiting = "while :; do sleep 0.05; done";
+        cmd.args(["-c", &format!("trap 'echo dumped; exit 3' QUIT; echo waiting; {waiting}")]);
+        let run = run_with_deadline(&mut cmd, Duration::from_millis(300), Duration::from_secs(5))
+            .expect("the run");
+        assert!(run.timed_out);
+        assert_eq!(run.code, Some(3), "{}", run.log);
+        assert!(run.log.contains("waiting") && run.log.contains("dumped"), "{}", run.log);
+    }
+
+    /// A run that does not answer the dump request is killed when its
+    /// grace is over (its status is then a signal's, not its own), and
+    /// its output up to there is kept.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_that_does_not_answer_is_killed_when_its_grace_is_over() {
+        let mut cmd = Command::new("sh");
+        let waiting = "while :; do sleep 0.05; done";
+        cmd.args(["-c", &format!("trap '' QUIT; echo stuck; {waiting}")]);
+        let started = Instant::now();
+        let run =
+            run_with_deadline(&mut cmd, Duration::from_millis(300), Duration::from_millis(300))
+                .expect("the run");
+        assert!(run.timed_out);
+        assert_eq!(run.code, None, "{}", run.log);
+        assert!(run.log.contains("stuck"), "{}", run.log);
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    }
+
+    /// A run that ends by itself is not signalled at all: its own status,
+    /// and both of its streams (the program's output, then the kernel's
+    /// log).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_that_ends_by_itself_keeps_its_status_and_both_streams() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo its output; echo its log >&2; exit 7"]);
+        let run = run_with_deadline(&mut cmd, Duration::from_secs(30), Duration::from_secs(5))
+            .expect("the run");
+        assert!(!run.timed_out);
+        assert_eq!(run.code, Some(7));
+        assert_eq!(run.log, "its output\nits log\n");
     }
 
     /// Every scenario gala-um runs is run with all of its kernel flags,

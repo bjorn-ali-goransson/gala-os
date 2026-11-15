@@ -52,8 +52,9 @@ if the program did. Options:
 | `--record=<file>`, `--replay=<file>` | record/replay |
 
 `cargo xtask um-test` builds `um/` and runs every scenario that
-`runs_in_um` (below) under `timeout -s QUIT -k 5` (30 s, `UM_TIMEOUT_SECS`)
-with `--cpus=2` (as the QEMU tests' `-smp 2`), the scenario's
+`runs_in_um` (below) under a deadline of xtask's own (30 s,
+`UM_TIMEOUT_SECS`; `run_with_deadline`, not `timeout -s QUIT -k 5`:
+WORKFLOW "gala-um") with `--cpus=2` (as the QEMU tests' `-smp 2`), the scenario's
 `extra_modules` from `user/bin`, its `args=` (percent-decoded) and its
 `clock=` as `--clock=` (`quota=` as `--quota=`), and checks the scenario's expected lines except
 those only a QEMU boot has (`kernel_only`: the boot marker, the NMI part
@@ -308,7 +309,8 @@ under `--sim`.
 
 SIGQUIT prints the threads part of the kernel's state dump (every NT
 thread's system call and wait, the ledger; docs/OBSERVABILITY.md "State
-dump"); um-test's `timeout -s QUIT` sends it when a program hangs.
+dump"); um-test sends it itself (`run_with_deadline`) to a program still
+running at its deadline, and SIGKILL `UM_DUMP_SECS` later.
 
 ## Limits and open questions
 

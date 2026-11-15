@@ -484,7 +484,7 @@ pub fn init() {
 /// The write end of the state-dump pipe (-1: none).
 static DUMP_PIPE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
 
-/// SIGQUIT (xtask's `timeout -s QUIT` when a run takes too long): wakes
+/// SIGQUIT (xtask sends it at a run's deadline): wakes
 /// the dump thread. Only write(2) here: the signal may land on any
 /// thread, in program code too.
 extern "C" fn on_quit(_sig: i32, _info: *mut libc::siginfo_t, _context: *mut libc::c_void) {

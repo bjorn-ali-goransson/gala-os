@@ -669,7 +669,8 @@ CPU) before killing the VM and waits up to 20 s for the dump:
 xtask's line says how far the dump got (`did not answer the NMI`: the
 machine is wedged or the handler is not installed yet).
 `XTASK_TIMEOUT=<s>` shortens any scenario's timeout to get a hang's dump
-quickly. In gala-um, SIGQUIT (`timeout -s QUIT`) prints part 2. Scenario
+quickly. In gala-um, SIGQUIT (xtask sends it at a run's deadline)
+prints part 2. Scenario
 `statedump_test` (a program that hangs on purpose; also in um-test).
 
 ### Crash reports (programs)

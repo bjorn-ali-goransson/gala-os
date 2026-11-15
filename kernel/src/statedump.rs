@@ -2,7 +2,8 @@
 //! dump"): a boot test that times out used to end with "timed out
 //! after 300s" and nothing else. Now xtask first injects an NMI (QEMU's
 //! monitor command `nmi`, delivered to every CPU) and waits for the dump;
-//! gala-um gets SIGQUIT (`timeout -s QUIT`). The dump has two parts:
+//! gala-um gets SIGQUIT (xtask sends it at the run's deadline). The
+//! dump has two parts:
 //!
 //! 1. From the NMI itself, which may interrupt any code holding any lock:
 //!    each CPU records where it was (rip, kernel backtrace); the first one
