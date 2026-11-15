@@ -1,12 +1,12 @@
 //! gala's msi.dll: the Windows Installer functions programs ask before
-//! (or instead of) installing anything, answered for gala's machine,
-//! where Windows Installer has installed nothing: gala has no installer
-//! database and no installer service, so no product or component is
-//! known. What the Office Deployment Tool's setup.exe and its
-//! integrator.exe import (by ordinal: build.rs), as Windows answers for
-//! products and components it does not have, and for a database it
-//! cannot open (`msi_test`, `wow64_msi_test`; Wine's conformance tests,
-//! and the answers measured on Windows 11 build 26200):
+//! (or instead of) installing anything, and the reading of an installer
+//! database. What Windows Installer has installed, gala has not: there
+//! is no installer database of its own and no installer service, so no
+//! product or component is known. What the Office Deployment Tool's
+//! setup.exe and its integrator.exe import (by ordinal: build.rs), as
+//! Windows answers for products and components it does not have
+//! (`msi_test`, `wow64_msi_test`; Wine's conformance tests, and the
+//! answers measured on Windows 11 build 26200):
 //! - MsiQueryProductStateW, MsiGetComponentPathW, MsiLocateComponentW:
 //!   INSTALLSTATE_UNKNOWN, INSTALLSTATE_INVALIDARG for an argument that
 //!   is missing or not a braced GUID;
@@ -14,35 +14,62 @@
 //! - MsiConfigureProductExW: ERROR_UNKNOWN_PRODUCT;
 //! - MsiProvideQualifiedComponentExW, MsiEnumComponentQualifiersW:
 //!   ERROR_UNKNOWN_COMPONENT;
-//! - MsiSetInternalUI: the process's UI level and window, kept;
-//! - MsiCloseHandle: no MSI handle is ever opened (ERROR_INVALID_HANDLE
-//!   for any but 0);
-//! - MsiOpenDatabaseW: ERROR_OPEN_FAILED, which is Windows' answer both
-//!   for a path that is not there and for a file that is not an
-//!   installer database, since gala has no database engine to open one
-//!   with; ERROR_CREATE_FAILED for the create modes, which is Windows'
-//!   answer when it cannot create one. Windows asked to create a
-//!   database where it can does create it, which gala cannot: the one
-//!   place its answer is not Windows' (ROADMAP OF).
+//! - MsiSetInternalUI: the process's UI level and window, kept.
 //!
 //! Each answer that stands for "Windows Installer has nothing here" is
 //! recorded in the ledger (`msi.dll!<function>: nothing installed`, kind
 //! "other", detail the call's ordinal), so a program that goes on to fail
 //! because it expected an installed product says what it asked.
-//! Installing (MsiInstallProduct and the rest) is not implemented: those
-//! exports are absent, which the loader records.
+//!
+//! A database on disk is a different matter: it is a file in a published
+//! format, and reading one asks nothing of an installer. MsiOpenDatabaseW
+//! opens one for reading and the view, cursor and record functions read
+//! it (`db`, over galapkg's MSI reader) - which is what Office's
+//! integrator.exe does to the Click-to-Run MSIs. Writing one is not
+//! implemented: the create modes answer ERROR_CREATE_FAILED, which is
+//! Windows' answer when it cannot create a database but not what Windows
+//! does where it can, and a query that would change a database runs as
+//! ERROR_FUNCTION_FAILED, which is Windows' own answer for a database
+//! opened read-only. Both are recorded in the ledger as gaps (ROADMAP
+//! OF).
+//!
+//! Installing (MsiInstallProduct and the rest) is not implemented
+//! either: those exports are absent, which the loader records.
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use gala_heap as _;
 
 // The 32-bit build (SysWOW64) takes the memory routines, 64-bit
 // division helpers and unwind personality from ntrt's x86 runtime
 // (ARCHITECTURE "Plan: WOW64").
 #[cfg(target_arch = "x86")]
 use ntrt as _;
+
+mod db;
+
+// The x64 build takes the memory routines from gala's ntdll, which
+// exports them.
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
+}
 
 /// MSVC-target codegen references this marker symbol directly (ntrt's
 /// x86 runtime defines it on x86).
@@ -66,6 +93,7 @@ unsafe extern "system" {
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(code: u32);
+    fn ExitProcess(code: u32) -> !;
 }
 
 const ERROR_SUCCESS: u32 = 0;
@@ -77,13 +105,12 @@ const ERROR_UNKNOWN_PRODUCT: u32 = 1605;
 const ERROR_UNKNOWN_COMPONENT: u32 = 1607;
 const ERROR_CREATE_FAILED: u32 = 1631;
 
-/// MSIDBOPEN_CREATE and MSIDBOPEN_CREATEDIRECT, the persistence modes
-/// that make a database rather than open one; MSIDBOPEN_PATCHFILE is a
-/// flag above them (msiquery.h). A mode is a small integer cast to a
-/// string pointer, so a pointer that is none of them is a path to
-/// persist to, which is no more openable here.
+/// MSIDBOPEN_CREATE, the first of the persistence modes that make a
+/// database rather than open one (MSIDBOPEN_CREATEDIRECT is the other);
+/// MSIDBOPEN_PATCHFILE is a flag above them (msiquery.h). A mode is a
+/// small integer cast to a string pointer, so a pointer above them is a
+/// path to persist to, which is a database to create as well.
 const MSIDBOPEN_CREATE: usize = 3;
-const MSIDBOPEN_CREATEDIRECT: usize = 4;
 const MSIDBOPEN_PATCHFILE: usize = 32;
 const INSTALLSTATE_INVALIDARG: i32 = -2;
 const INSTALLSTATE_UNKNOWN: i32 = -1;
@@ -100,17 +127,25 @@ const INSTALLUILEVEL_FLAGS: u32 = 0x80 | 0x40 | 0x20 | 0x100 | 0x200;
 static UI_LEVEL: AtomicU32 = AtomicU32::new(INSTALLUILEVEL_DEFAULT);
 static UI_WINDOW: AtomicUsize = AtomicUsize::new(0);
 
-/// Records an answer of "nothing installed" (module comment).
-fn nothing_installed(name: &[u8], ordinal: u64) {
+/// Records a gap in the ledger as `msi.dll!<name><tail>`, of the
+/// ledger's kind `what` (2 unsupported, 5 other) with the call's
+/// ordinal as the detail, so a program that fails because of the gap
+/// says what it asked for.
+fn record_gap(name: &[u8], tail: &[u8], what: u32, detail: u64) {
     let mut text = [0u8; 96];
     let mut n = 0;
-    for part in [&b"msi.dll!"[..], name, b": nothing installed"] {
+    for part in [&b"msi.dll!"[..], name, tail] {
         let take = part.len().min(text.len() - n);
         text[n..n + take].copy_from_slice(&part[..take]);
         n += take;
     }
-    // SAFETY: a valid buffer; 5 is the ledger's "other".
-    unsafe { GalaRecordMissing(text.as_ptr(), n, 5, ordinal) };
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(text.as_ptr(), n, what, detail) };
+}
+
+/// Records an answer of "nothing installed" (module comment).
+fn nothing_installed(name: &[u8], ordinal: u64) {
+    record_gap(name, b": nothing installed", 5, ordinal);
 }
 
 /// Whether `p` is a braced GUID string, `{XXXXXXXX-XXXX-XXXX-XXXX-
@@ -138,14 +173,16 @@ fn is_guid(p: *const u16) -> bool {
     true
 }
 
-/// MsiOpenDatabaseW (#92): opens an installer database, which gala has
-/// no engine for, so none opens. Windows' answers, measured: a NULL
-/// path is ERROR_INVALID_PARAMETER and leaves the handle alone; past
-/// that the handle is set to 0 first, and an empty path or no handle at
-/// all is ERROR_INVALID_PARAMETER; a path that is not there and a file
-/// that is not a database are both ERROR_OPEN_FAILED; a create mode
-/// that cannot create one is ERROR_CREATE_FAILED, which is what gala
-/// answers every create with (`msi_test`, `wow64_msi_test`).
+/// MsiOpenDatabaseW (#92): opens an installer database for reading.
+/// Windows' answers, measured: a NULL path is ERROR_INVALID_PARAMETER
+/// and leaves the handle alone; past that the handle is set to 0 first,
+/// and an empty path or no handle at all is ERROR_INVALID_PARAMETER; a
+/// path that is not there and a file that is not a database are both
+/// ERROR_OPEN_FAILED. The read-only modes (MSIDBOPEN_READONLY,
+/// _TRANSACT, _DIRECT) open the file for `db` to read; the create modes,
+/// and a persist path above them, answer ERROR_CREATE_FAILED, since gala
+/// has no engine to write a database with - the one place its answer is
+/// not Windows' (`msi_test`, `wow64_msi_test`, ROADMAP OF).
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiOpenDatabaseW(
     path: *const u16,
@@ -161,19 +198,91 @@ pub extern "system" fn MsiOpenDatabaseW(
     if unsafe { *path } == 0 {
         return ERROR_INVALID_PARAMETER;
     }
-    nothing_installed(b"MsiOpenDatabaseW", 92);
-    let mode = persist.addr() & !MSIDBOPEN_PATCHFILE;
-    if mode == MSIDBOPEN_CREATE || mode == MSIDBOPEN_CREATEDIRECT {
+    if persist.addr() & !MSIDBOPEN_PATCHFILE >= MSIDBOPEN_CREATE {
+        record_gap(b"MsiOpenDatabaseW", b": no engine to create a database", 2, 92);
         return ERROR_CREATE_FAILED;
     }
-    ERROR_OPEN_FAILED
+    match db::open(path) {
+        Ok(handle) => {
+            // SAFETY: the caller's handle, not null.
+            unsafe { *database = handle };
+            ERROR_SUCCESS
+        }
+        Err(e) => e,
+    }
 }
 
-/// MsiCloseHandle (#8): gala's msi opens no handles, so 0 (which closes
-/// nothing) succeeds and any other is invalid.
+/// MsiDatabaseIsTablePersistentW (#165): whether the database holds such
+/// a table (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiDatabaseIsTablePersistentW(database: u32, table: *const u16) -> i32 {
+    db::is_table_persistent(database, table)
+}
+
+/// MsiDatabaseOpenViewW (#32): a view over a query (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiDatabaseOpenViewW(
+    database: u32,
+    query: *const u16,
+    view: *mut u32,
+) -> u32 {
+    db::open_view(database, query, view)
+}
+
+/// MsiViewExecute (#159): runs the view's query, which is where its rows
+/// are read (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiViewExecute(view: u32, record: u32) -> u32 {
+    db::execute(view, record)
+}
+
+/// MsiViewFetch (#160): the next row as a record handle (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiViewFetch(view: u32, record: *mut u32) -> u32 {
+    db::fetch(view, record)
+}
+
+/// MsiViewClose (#158): drops the view's rows, keeping the view (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiViewClose(view: u32) -> u32 {
+    db::close_view(view)
+}
+
+/// MsiRecordGetFieldCount (#115): how many fields the record has (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiRecordGetFieldCount(record: u32) -> u32 {
+    db::field_count(record)
+}
+
+/// MsiRecordGetStringW (#118): a field as text (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiRecordGetStringW(
+    record: u32,
+    field: u32,
+    buf: *mut u16,
+    size: *mut u32,
+) -> u32 {
+    db::get_string(record, field, buf, size)
+}
+
+/// MsiRecordGetInteger (#116): a field as an integer, or
+/// MSI_NULL_INTEGER (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiRecordGetInteger(record: u32, field: u32) -> i32 {
+    db::get_integer(record, field)
+}
+
+/// MsiRecordIsNull (#119): whether a field holds no value (`db`).
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiRecordIsNull(record: u32, field: u32) -> i32 {
+    db::is_null(record, field)
+}
+
+/// MsiCloseHandle (#8): closes a database, view or record handle; 0
+/// closes nothing and succeeds (`db`).
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiCloseHandle(handle: u32) -> u32 {
-    if handle == 0 { ERROR_SUCCESS } else { ERROR_INVALID_HANDLE }
+    db::close(handle)
 }
 
 /// MsiSetInternalUI (#141): sets the process's UI level and returns the
@@ -317,9 +426,26 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
     1
 }
 
+/// A panic cannot be recovered from here: it is recorded (so the run
+/// says which file and line) and the process ends with
+/// STATUS_STACK_BUFFER_OVERRUN (fail-fast), as gala's other DLLs do.
+/// `alloc`'s own failure to allocate ends here too, which is why the
+/// reading of a database reserves what it needs (`db`) instead of
+/// leaving the heap to panic.
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let mut text = [0u8; 80];
+    let mut n = 0;
+    let line = info.location().map_or(0, |l| {
+        for &b in b"panic ".iter().chain(l.file().as_bytes()) {
+            if n < text.len() {
+                text[n] = b;
+                n += 1;
+            }
+        }
+        l.line()
+    });
+    record_gap(&text[..n], b"", 5, line.into());
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0xc000_0409) }
 }

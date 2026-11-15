@@ -2205,20 +2205,24 @@ need gala's.
      read from Windows' own export directory on this machine (build
      26200; the method checked by reading back the nine ordinals msi
      already carries, all of which matched): it opens an installer
-     database, which gala has no engine for. Done: msi's
-     MsiOpenDatabaseW, x64 and x86, answering as Windows does for a
-     database it cannot open -- ERROR_OPEN_FAILED for a path that is not
-     there and for a file that is not a database alike, whichever of the
-     modes that only open is asked; ERROR_CREATE_FAILED for a create
-     mode that cannot create one; ERROR_INVALID_PARAMETER without a path,
-     with an empty one or without a handle; the handle set to 0 except
-     where the NULL path pointer is refused before it is touched -- test
-     first in `msi_test` and `wow64_msi_test` (every answer measured on
-     this machine's Windows 11 build 26200, both widths). Asked to
-     create a database where it can, Windows creates one (16 KiB,
-     measured) and gala does not: the one place msi's answer is
-     deliberately not Windows', a database engine being galapkg's
-     business (ROADMAP PK), not msi.dll's.
+     database. Done: msi's MsiOpenDatabaseW, x64 and x86 -- the modes
+     that only open (READONLY, TRANSACT, DIRECT) open the file for
+     reading; ERROR_OPEN_FAILED for a path that is not there and for a
+     file that is not a database alike; ERROR_CREATE_FAILED for a create
+     mode and for a persist path, recorded in the ledger as the gap it
+     is; ERROR_INVALID_PARAMETER without a path, with an empty one or
+     without a handle; the handle set to 0 except where the NULL path
+     pointer is refused before it is touched -- test first in `msi_test`
+     and `wow64_msi_test` (every answer measured on this machine's
+     Windows 11 build 26200, both widths). Two answers are deliberately
+     not Windows'. Asked to create a database where it can, Windows
+     creates one (16 KiB, measured) and gala does not, a database engine
+     being galapkg's business (ROADMAP PK), not msi.dll's. And Windows
+     keeps bookkeeping per database file which gala does not: while one
+     is open, a second open of the same file is refused
+     (ERROR_CREATE_FAILED for another read-only one, ERROR_OPEN_FAILED
+     for a writing one, both measured) where gala opens it, so the test
+     asks the open modes with no other handle on the file.
      A failure there fails the install as before: the
      service ends with 17002 and setup.exe with 0x426a (17002,
      "C2RClient returned a failing exit code") -- at 90%
@@ -2260,19 +2264,37 @@ need gala's.
      `Integrator Mode[Install] Scope[Global] Phase[Complete]
      Scenario[C2R] Actions[Extension Msi ]
      Msi[C2RInt.16.msi,C2RIntLoc.en-us.16.msi,*]`. 0x6e is
-     ERROR_OPEN_FAILED, which is what gala's MsiOpenDatabaseW answers
-     every database with. integrator.exe exits 30050 twice, the C2R
-     task fails, and the service and setup.exe end with 17002.
-     Next: reading an installer database. What Office asks of one is
+     ERROR_OPEN_FAILED, which is what gala's MsiOpenDatabaseW answered
+     every database with until it could read one. integrator.exe exits
+     30050 twice, the C2R task fails, and the service and setup.exe end
+     with 17002.
+     Done: reading an installer database. What Office asks of one is
      bounded, from the names Integrator.exe looks up at run time (it
      imports msi.dll from no import directory): MsiOpenDatabase,
      MsiDatabaseIsTablePersistentW, MsiDatabaseOpenViewW,
      MsiViewExecute, MsiViewFetch and MsiRecordGetStringW, and the
      queries in it are ``SELECT * FROM `Feature` `` and ``SELECT * FROM
      `Property` `` -- a reader for the container and the two tables, and
-     a query that selects a whole table, not an engine. Test first in
-     `msi_test` and `wow64_msi_test` against this machine's Windows
-     (build 26200) reading `C2RInt.16.msi` itself.
+     a query that selects a whole table, not an engine. That is what
+     msi.dll's `db` is, over galapkg's MSI reader: handles, views with a
+     cursor, records, and SELECTs of a whole table or of named columns
+     (ARCHITECTURE "Other DLLs", msi). Test first in `msi_test` and
+     `wow64_msi_test` over the checked-in fixture
+     (`user/galapkg/testdata/msi/basic.msi`, so the one program runs
+     both on Windows and in gala), every answer measured on this
+     machine's Windows 11 build 26200 in both widths -- three of them
+     answers the documentation does not suggest: a field past the
+     record's last reads as empty rather than failing,
+     MsiRecordGetStringW reports the length it needs when it is given no
+     buffer, and a fetch past the last row returns ERROR_NO_MORE_ITEMS
+     and rewinds the cursor.
+     Not there yet, each recorded in the ledger where a program asks for
+     it: a query with a WHERE or an ORDER BY (Windows runs it, gala
+     refuses it as ERROR_BAD_QUERY_SYNTAX and records that the query was
+     not understood rather than wrong), the query parameters a record
+     stands in for, and any query that changes a database
+     (ERROR_FUNCTION_FAILED, which is Windows' own answer for a database
+     opened read-only).
      Seen too, not fatal so far: `wevtutil.exe` is absent, so the
      integrator's InstallEtwManifest aborts (ErrorCode 2) and carries
      on; `schtasks.exe` is absent, so PublishCustomExtension cannot

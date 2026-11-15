@@ -4,10 +4,14 @@
 //! installed. The expected values are those of Wine's conformance tests
 //! (dlls/msi/tests/msi.c, run against Windows), and of real Windows on
 //! CI's runner (this program's run there):
-//! - the ordinals: #8 MsiCloseHandle, #39 MsiEnumComponentQualifiersW,
-//!   #45 MsiEnumProductsW, #90 MsiLocateComponentW, #92
-//!   MsiOpenDatabaseW, #113 MsiQueryProductStateW, #141
-//!   MsiSetInternalUI, #173 MsiGetComponentPathW, #190
+//! - the ordinals: #8 MsiCloseHandle, #32 MsiDatabaseOpenViewW, #39
+//!   MsiEnumComponentQualifiersW, #45 MsiEnumProductsW, #90
+//!   MsiLocateComponentW, #92 MsiOpenDatabaseW, #113
+//!   MsiQueryProductStateW, #115 MsiRecordGetFieldCount, #116
+//!   MsiRecordGetInteger, #118 MsiRecordGetStringW, #119
+//!   MsiRecordIsNull, #141 MsiSetInternalUI, #158 MsiViewClose, #159
+//!   MsiViewExecute, #160 MsiViewFetch, #165
+//!   MsiDatabaseIsTablePersistentW, #173 MsiGetComponentPathW, #190
 //!   MsiConfigureProductExW, #203 MsiProvideQualifiedComponentExW
 //!   (GetProcAddress by ordinal gives the named export);
 //! - MsiCloseHandle(0) is ERROR_SUCCESS, a handle never opened
@@ -43,6 +47,11 @@
 //!   database, which gala cannot: not checked here, since the two
 //!   answer differently by design (ROADMAP OF).
 //!
+//! Reading a database is in `db`, over a fixture this program writes
+//! beside its own image (`user/galapkg/testdata/msi/basic.msi`, built
+//! with wixl and checked in), so the one program asks Windows and gala
+//! the same questions of the same file.
+//!
 //! The same source builds `wow64_msi_test`, the 32-bit (x86) program.
 //! Prints `msi_test: ok` (`wow64_msi_test: ok`), or `<name>: check N got
 //! X (line L)` and exits with N.
@@ -53,6 +62,8 @@
 use core::ptr::{null, null_mut, without_provenance};
 
 use ntrt as _;
+
+mod db;
 
 #[cfg(target_arch = "x86_64")]
 const NAME: &str = "msi_test";
@@ -282,7 +293,7 @@ fn ordinals(c: &mut Checks) -> Result<(), u32> {
         (190, c"MsiConfigureProductExW"),
         (203, c"MsiProvideQualifiedComponentExW"),
     ];
-    for (ordinal, name) in named {
+    for (ordinal, name) in named.into_iter().chain(db::ORDINALS) {
         // SAFETY: a loaded module; an ordinal (MAKEINTRESOURCE) and a name.
         let (by_ordinal, by_name) = unsafe {
             (
@@ -578,6 +589,7 @@ fn run() -> Result<(), u32> {
     products(&mut c)?;
     components(&mut c)?;
     databases(&mut c)?;
+    db::reading(&mut c)?;
     Ok(())
 }
 

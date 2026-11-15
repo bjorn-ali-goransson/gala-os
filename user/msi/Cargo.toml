@@ -10,5 +10,11 @@ crate-type = ["cdylib"]
 test = false
 bench = false
 
+[dependencies]
+gala_heap = { path = "../gala_heap" }
+# Its MSI reader (the compound file, the string pool, the tables) for
+# the database functions.
+galapkg = { path = "../galapkg" }
+
 [target.'cfg(target_arch = "x86")'.dependencies]
 ntrt = { path = "../ntrt" }
