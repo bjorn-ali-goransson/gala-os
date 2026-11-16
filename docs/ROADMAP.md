@@ -226,6 +226,7 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
+| WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); Word and Excel start without a window yet (`office_word`, `office_excel`) |
 
@@ -1442,6 +1443,80 @@ device tree in the state dump and in `gala devices`.
 **Design**: to be written in ARCHITECTURE with step 2 (the driver,
 the device tree, handover: the controller reset and devices enumerated
 again by the next kernel).
+
+### WF. Wi-Fi: a dynamic interface, 802.11 and the Windows APIs
+
+**Goal**: on a real machine gala joins a Wi-Fi network - the networks
+in range listed from the taskbar, a password typed once and kept, WPA2
+and WPA3, the address and DNS from the network - and Windows programs
+see a connected wireless adapter through the APIs they use (wlanapi,
+the network list manager, NCSI). It is what makes a machine of the
+owner's own useful once USB's HID part lets it be touched at all.
+
+**Today**: nothing of it. The network is one virtio-net card at a fixed
+10.0.2.15/24 with QEMU's 10.0.2.2 as its gateway, polled with no
+interrupts, IPv4 only (N3 step 3 is parked); the interface list is
+static (ARCHITECTURE "Network interfaces"), so there is no DHCP client,
+no address that changes, no GetAdaptersAddresses and no
+NotifyAddrChange (both ERROR_NOT_SUPPORTED, recorded), nothing of
+802.11 and no wlanapi.dll. What the radio's own cryptography needs is
+largely there already, in the primitives TLS brought (SHA-1 and SHA-2,
+HMAC, AES, elliptic curves).
+
+**Next** (four layers, each test first; the first two are weeks of
+work, the third is an item's worth and the fourth is the biggest and
+waits on DR):
+1. **A network that is not fixed**: a DHCP client (QEMU's user
+   networking answers one, so this is testable today over the
+   virtio-net card), the interface's address, prefix, gateway, DNS
+   servers and lease taken from it, the lease renewed, and an
+   interface that comes and goes - which means the dynamic interface
+   list the whole stack and `GALA_NETWORK_INTERFACES` assume away
+   today, GetAdaptersAddresses and NotifyAddrChange over it, and the
+   clock's jump and the renewed lease on a snapshot's resume or a
+   handover (R9, SN). Static addressing stays what the scenarios use.
+2. **What a Windows program sees, before there is a radio**: wlanapi's
+   surface proved against real Windows first (`wlan_test`:
+   WlanOpenHandle, WlanEnumInterfaces, WlanScan,
+   WlanGetAvailableNetworkList, WlanConnect and its notifications,
+   profiles), the network list manager (INetworkListManager and its
+   events), NCSI's connectivity probe and the taskbar's network icon
+   and flyout (item SH's shell, item SD's rule: the `gala` command
+   reaches it first). In gala it runs over a simulated adapter with
+   scripted networks, as USB's host tests run against a fake
+   controller, so every layer above the radio is finished and tested
+   before a card exists.
+3. **802.11 and a supplicant**, from the published IEEE 802.11-2020
+   standard and the RFCs (CLEAN_ROOM): scanning, authentication and
+   association, the WPA2-PSK four-way handshake (PBKDF2 for the PMK,
+   EAPOL-Key, CCMP), WPA3's SAE, protected management frames, roaming
+   between access points. Host tests of the state machines against the
+   test vectors the standard and the RFCs publish; the only real test
+   is hardware with a real access point, since QEMU emulates no
+   wireless card.
+4. **The card**: a laptop's Wi-Fi is an Intel or Qualcomm part with a
+   vendor NDIS miniport and signed firmware, so the route is DR stage
+   2's isolated driver host with the NDIS miniport framework ("Later":
+   a third-party driver never runs unsupervised in gala's kernel
+   address space). gala's own driver for one published card is the
+   alternative where a datasheet exists and no firmware is needed, for
+   one machine rather than for machines in general.
+
+**The cheap way to a network on real hardware** meanwhile, which this
+item does not need: a USB Ethernet adapter over CDC-ECM or NCM on item
+USB's stack, both documented class specifications and no vendor driver
+at all. It gives a real machine a wired network as soon as USB's steps
+1 and 2 are in, and it exercises layer 1 above (a second interface
+that comes and goes).
+
+**Done when** (each layer): its tests pass; the lease, the scan
+results, the supplicant's state machine and every association failure
+in an `events=net` category with the reason, the interfaces and their
+state in the state dump and in `gala devices`; a real machine joins the
+owner's network from the taskbar.
+
+**Design**: to be written in ARCHITECTURE with layer 1 (the dynamic
+interface list, the DHCP client, what a handover carries).
 
 ### BR. A web browser: stock Microsoft Edge
 
@@ -5857,6 +5932,21 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   in QEMU, with the driver host's state in crash reports and the state
   dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE) come with LX
   when it gets device interfaces.
+- **Chrome as well as Edge** (the owner): item BR's goal is stock
+  Edge, and both browsers are the same Chromium underneath, so Chrome
+  is mostly BR's work over again with another vendor's services. Two
+  pieces of its own: **Chrome for Testing** (the published zip with
+  symbols, fetched as BR already fetches the Chromium snapshot) is
+  branded Chrome without an installer, so it finds the
+  Google-service gaps the plain Chromium build has none of
+  (sign-in, Omaha's update checks, Widevine) - a half-step inside BR
+  stage 2 once the window is done; **Chrome as a user installs it**
+  (`mini_installer.exe` or the enterprise MSI) then needs item PK's
+  installer handling, Omaha as a service and a scheduled task, and the
+  COM elevation service for a per-machine install. None of BR's open
+  blockers is vendor-specific (the out-of-memory exceptions
+  0xE0000008, ChromeDriver not exiting, the WPT run), and Widevine and
+  the proprietary codecs are a piece apart for either browser.
 - **gala's own drivers** against published standards: after virtio,
   AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
   item SND).
