@@ -1303,13 +1303,13 @@ the kernel.
    carries every QEMU thread's stack when the monitor gives nothing:
    the next occurrence says which thread holds QEMU, and whether the
    device reset (`gpureset=`) is in it.
-1. G1's rest: shasha's pointer on the hardware cursor,
+2. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-2. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
+3. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
    lavapipe, PREBUILT, beside the programs that use them (System32's
    dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
    screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
@@ -1335,9 +1335,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
