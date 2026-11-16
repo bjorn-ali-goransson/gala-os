@@ -37,6 +37,7 @@
  * calls fn(arg) on stack_top and exits (exit(2), the thread only) with its
  * result. */
 i64 clone_thread(u64 flags, void *stack, int *ptid, int *ctid, void *tls, int (*fn)(void *), void *arg);
+#if defined(__x86_64__)
 __asm__(".text\n"
 	".globl clone_thread\n"
 	"clone_thread:\n"
@@ -79,6 +80,46 @@ __asm__(".text\n"
 	"	syscall\n"
 	"	hlt\n"
 	"1:	ret\n");
+#else
+/* aarch64: clone's tls before child_tid; fn and arg on the new stack. */
+__asm__(".text\n"
+	".globl clone_thread\n"
+	"clone_thread:\n"
+	"	and x1, x1, #-16\n"
+	"	stp x5, x6, [x1, #-16]!\n"
+	"	mov x7, x3\n"
+	"	mov x3, x4\n"
+	"	mov x4, x7\n"
+	"	mov x8, #220\n" /* clone */
+	"	svc #0\n"
+	"	cbnz x0, 1f\n"
+	"	ldp x1, x0, [sp], #16\n"
+	"	mov x29, #0\n"
+	"	blr x1\n"
+	"	mov x8, #93\n" /* exit */
+	"	svc #0\n"
+	"	brk #0\n"
+	"1:	ret\n");
+
+/* clone3: the child gets the parent's registers but x0 and sp, so fn and
+ * arg come through x9 and x10. */
+i64 clone3_thread(void *args, u64 size, int (*fn)(void *), void *arg);
+__asm__(".text\n"
+	".globl clone3_thread\n"
+	"clone3_thread:\n"
+	"	mov x9, x2\n"
+	"	mov x10, x3\n"
+	"	mov x8, #435\n" /* clone3 */
+	"	svc #0\n"
+	"	cbnz x0, 1f\n"
+	"	mov x29, #0\n"
+	"	mov x0, x10\n"
+	"	blr x9\n"
+	"	mov x8, #93\n" /* exit */
+	"	svc #0\n"
+	"	brk #0\n"
+	"1:	ret\n");
+#endif
 
 /* struct clone_args (clone3(2)), version 2. */
 struct clone_args {
@@ -121,12 +162,20 @@ static int first(void *arg)
 	(void)arg;
 	t_pid = sys0(SYS_getpid);
 	t_tid = sys0(SYS_gettid);
+#if defined(__x86_64__)
 	u64 fs = 0;
 	sys2(SYS_arch_prctl, ARCH_GET_FS, &fs);
 	t_fs = fs;
 	u64 w;
 	__asm__ volatile("mov %%fs:0, %0" : "=r"(w));
 	t_fs0 = w;
+#else
+	/* aarch64's thread pointer is TPIDR_EL0 (no arch_prctl). */
+	u64 fs;
+	__asm__ volatile("mrs %0, tpidr_el0" : "=r"(fs));
+	t_fs = fs;
+	t_fs0 = *(volatile u64 *)fs;
+#endif
 	t_ran = 1;
 	return 0;
 }

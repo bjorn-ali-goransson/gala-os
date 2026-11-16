@@ -119,6 +119,7 @@ static i64 ewait(int ep, struct epoll_event *ev, int max, int ms)
 
 /* A raw thread (as thread_test's): writes to a pipe once told to. */
 i64 clone_thread(u64 flags, void *stack, int *ptid, int *ctid, void *tls, int (*fn)(void *), void *arg);
+#if defined(__x86_64__)
 __asm__(".text\n"
 	".globl clone_thread\n"
 	"clone_thread:\n"
@@ -140,6 +141,27 @@ __asm__(".text\n"
 	"	syscall\n"
 	"	hlt\n"
 	"1:	ret\n");
+#else
+/* aarch64: clone's tls before child_tid; fn and arg on the new stack. */
+__asm__(".text\n"
+	".globl clone_thread\n"
+	"clone_thread:\n"
+	"	and x1, x1, #-16\n"
+	"	stp x5, x6, [x1, #-16]!\n"
+	"	mov x7, x3\n"
+	"	mov x3, x4\n"
+	"	mov x4, x7\n"
+	"	mov x8, #220\n"
+	"	svc #0\n"
+	"	cbnz x0, 1f\n"
+	"	ldp x1, x0, [sp], #16\n"
+	"	mov x29, #0\n"
+	"	blr x1\n"
+	"	mov x8, #93\n"
+	"	svc #0\n"
+	"	brk #0\n"
+	"1:	ret\n");
+#endif
 
 #define THREAD_FLAGS (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | \
 		      CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)

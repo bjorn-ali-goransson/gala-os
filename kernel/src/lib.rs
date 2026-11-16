@@ -99,6 +99,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     };
     arch::bootphase::mark("boot_info");
     let cmdline = Cmdline::new(info.cmdline);
+    // Where the event stream goes, where the machine says (aarch64's file).
+    arch::debugcon::configure(&cmdline);
     // `bootstack`: the boot stack's use measured (boot::stack).
     if cmdline.flag("bootstack") {
         boot::stack::mark();

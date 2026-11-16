@@ -11020,6 +11020,15 @@ fn make_iso_unchecked(
     for file in ["limine-uefi-cd.bin", "limine-bios-cd.bin", "limine-bios.sys"] {
         copy(&limine.join(file), &boot.join("limine").join(file))?;
     }
+    // aarch64's event stream: a host file the kernel writes through
+    // semihosting (`arch::aarch64::debugcon`), the one x86-64's debugcon
+    // device writes (`<image>.events.jsonl`, beside the image).
+    let cmdline = if aarch64_image(name) {
+        let events = out.join(format!("{name}.events.jsonl"));
+        format!("{cmdline} events_file={}", events.display())
+    } else {
+        cmdline.to_string()
+    };
     let config = format!(
         "timeout: 0\nquiet: yes\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
@@ -12221,8 +12230,8 @@ const AARCH64_SCENARIOS: &[&str] = &[
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
 /// (it ships Office's x64 setup.exe), the scenarios with screen checks or
-/// an event stream (the aarch64 kernel has neither yet), and those
-/// ROADMAP AR lists as next.
+/// injected input (no PS/2 controller on QEMU `virt`; virtio-input is
+/// ROADMAP AR's next), and those ROADMAP AR lists as next.
 const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
@@ -12389,6 +12398,10 @@ const ARM64_TWINS: &[&str] = &[
     "lx_id",
     "lx_run",
     "lx_poll",
+    "lx_auxv",
+    "lx_epoll",
+    "lx_thread",
+    "session_test",
 ];
 
 /// The x64 scenario an ARM64 twin `arm_<name>` is of.
@@ -20371,7 +20384,7 @@ fn run_vm_once(
     // x86-64's ISA devices: the kernel's event stream (`events=` on its
     // command line) and the exit device. aarch64's virt machine has no ISA
     // bus: its kernel exits through semihosting (`qemu_aarch64`) and has
-    // no event stream yet (ROADMAP AR).
+    // its event stream through semihosting (`events_file=`, `make_iso`).
     if boot != Boot::UefiAarch64 {
         cmd.arg("-debugcon")
             .arg(format!("file:{}", events.display()))

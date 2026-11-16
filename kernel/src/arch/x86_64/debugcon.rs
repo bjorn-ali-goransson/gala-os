@@ -22,3 +22,6 @@ impl core::fmt::Write for DebugCon {
         Ok(())
     }
 }
+
+/// The port needs no configuring (aarch64's file does: `events_file=`).
+pub fn configure(_cmdline: &crate::cmdline::Cmdline<'_>) {}
