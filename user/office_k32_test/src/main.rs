@@ -72,13 +72,13 @@ use core::ptr::{null, null_mut};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "office_k32_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_office_k32_test";
 
 /// MAXIMUM_PROCESSORS of the program's own width.
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const MAXIMUM_PROCESSORS: u32 = 64;
 #[cfg(target_arch = "x86")]
 const MAXIMUM_PROCESSORS: u32 = 32;
@@ -687,6 +687,12 @@ fn deallocation_stack() -> usize {
     // SAFETY: gs:[0x30] is the TEB's self pointer.
     unsafe {
         core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb);
+        *((teb + 0x1478) as *const usize)
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: x18 is the TEB on ARM64 Windows.
+    unsafe {
+        core::arch::asm!("mov {}, x18", out(reg) teb);
         *((teb + 0x1478) as *const usize)
     }
     #[cfg(target_arch = "x86")]

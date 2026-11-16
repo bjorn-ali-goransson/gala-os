@@ -224,6 +224,9 @@ pub struct ConsoleUart {
     pub interface: u8,
     /// The registers' physical base (the GAS at 40: memory space only).
     pub base: u64,
+    /// Its interrupt on the GIC (the Global System Interrupt at 54, when
+    /// the interrupt type at 52 has bit 3, "ARMH GIC interrupt").
+    pub gsiv: Option<u32>,
 }
 
 /// The SPCR's console UART, if its registers are in memory space.
@@ -232,7 +235,10 @@ pub fn parse_spcr(t: &[u8]) -> Option<ConsoleUart> {
         return None;
     }
     let base = u64_at(t, 44).filter(|&a| a != 0)?;
-    Some(ConsoleUart { interface: *t.get(36)?, base })
+    // Interrupt type (52), bit 3: the ARM GIC's; its GSIV (54).
+    let gic = t.get(52).is_some_and(|ty| ty & (1 << 3) != 0);
+    let gsiv = if gic { u32_at(t, 54) } else { None };
+    Some(ConsoleUart { interface: *t.get(36)?, base, gsiv })
 }
 
 /// The ACPI PM timer (FADT PM_TMR_BLK / X_PM_TMR_BLK): an I/O port
@@ -517,7 +523,18 @@ mod tests {
         body[5] = 32;
         body[8..16].copy_from_slice(&0x0900_0000u64.to_le_bytes());
         let spcr = table(b"SPCR", &body);
-        assert_eq!(parse_spcr(&spcr), Some(ConsoleUart { interface: 3, base: 0x0900_0000 }));
+        // No GIC interrupt named (interrupt type 52: none).
+        assert_eq!(
+            parse_spcr(&spcr),
+            Some(ConsoleUart { interface: 3, base: 0x0900_0000, gsiv: None })
+        );
+        // Interrupt type (52) bit 3: the ARM GIC's, its GSIV at 54.
+        body[52 - 36] = 1 << 3;
+        body[54 - 36..58 - 36].copy_from_slice(&33u32.to_le_bytes());
+        assert_eq!(
+            parse_spcr(&table(b"SPCR", &body)),
+            Some(ConsoleUart { interface: 3, base: 0x0900_0000, gsiv: Some(33) })
+        );
         // An I/O port UART (x86's 16550): not a memory base.
         let mut io = body.clone();
         io[0] = 0;

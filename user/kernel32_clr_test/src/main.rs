@@ -663,21 +663,15 @@ fn unhandled(c: &mut Checks) -> Result<(), u32> {
 
 /// This thread's stack reservation: TEB.StackBase - TEB.DeallocationStack.
 fn stack_reservation() -> u64 {
-    let (base, bottom): (u64, u64);
-    // SAFETY: gs:[0x8] is TEB.StackBase, gs:[0x1478] TEB.DeallocationStack.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[0x8]", out(reg) base, options(nostack, readonly));
-        core::arch::asm!("mov {}, gs:[0x1478]", out(reg) bottom, options(nostack, readonly));
-    }
-    base - bottom
+    // TEB+0x8 is StackBase, TEB+0x1478 DeallocationStack.
+    (teb_field(0x8) - teb_field(0x1478)) as u64
 }
 
 /// Whether the page just below this thread's StackLimit is a guard page
 /// (PAGE_READWRITE | PAGE_GUARD), as Windows lays out thread stacks.
 fn guard_below_limit() -> bool {
-    let limit: u64;
-    // SAFETY: gs:[0x10] is TEB.StackLimit.
-    unsafe { core::arch::asm!("mov {}, gs:[0x10]", out(reg) limit, options(nostack, readonly)) };
+    // TEB+0x10 is StackLimit.
+    let limit = teb_field(0x10) as u64;
     let mut mbi = [0u64; 6];
     // SAFETY: a MEMORY_BASIC_INFORMATION buffer (48 bytes).
     let n = unsafe { VirtualQuery((limit - 0x1000) as *const c_void, &mut mbi, 48) };
@@ -791,4 +785,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

@@ -39,6 +39,7 @@ stubs! {
     ntrt_nt_query_system_information = 0x0036;
     ntrt_nt_set_information_thread = 0x000d;
     ntrt_nt_yield_execution = 0x0046;
+    ntrt_nt_get_current_processor_number = 0x00f8;
     ntrt_nt_queue_apc_thread = 0x0045;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
     ntrt_nt_query_object = 0x0010;
@@ -299,6 +300,7 @@ unsafe extern "system" {
     fn ntrt_nt_query_system_time(time: *mut i64) -> NtStatus;
     fn ntrt_nt_set_information_thread(h: Handle, class: u32, buf: *const u8, len: u32) -> NtStatus;
     fn ntrt_nt_yield_execution() -> NtStatus;
+    fn ntrt_nt_get_current_processor_number() -> u32;
     fn ntrt_nt_queue_apc_thread(
         h: Handle,
         routine: extern "system" fn(usize, usize, usize),
@@ -1434,6 +1436,13 @@ pub fn delay_alertable(interval: i64) -> NtStatus {
 pub fn yield_execution() -> NtStatus {
     // SAFETY: no arguments.
     unsafe { ntrt_nt_yield_execution() }
+}
+
+/// NtGetCurrentProcessorNumber(): the caller's processor (it may move
+/// right after).
+pub fn current_processor_number() -> u32 {
+    // SAFETY: no arguments; returns the number, not a status.
+    unsafe { ntrt_nt_get_current_processor_number() }
 }
 
 /// NtQueryInformationProcess with any class: (status, ReturnLength).

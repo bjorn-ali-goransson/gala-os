@@ -53,7 +53,7 @@ use core::ptr::{null, null_mut};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "combase_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_combase_test";
@@ -141,7 +141,7 @@ unsafe extern "system" {
 }
 
 /// HSTRING_HEADER (24 bytes on x64, 20 on x86).
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 type Header = [usize; 3];
 #[cfg(target_arch = "x86")]
 type Header = [usize; 5];

@@ -384,9 +384,9 @@ fn wlen(s: &[u16]) -> usize {
 
 fn peb_session() -> u32 {
     let peb: usize;
-    // SAFETY: gs:[0x60] is the PEB pointer in the TEB.
+    // SAFETY: TEB+0x60 is the PEB pointer.
     unsafe {
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        peb = teb_field(0x60) as _;
         *((peb + PEB_SESSION_ID) as *const u32)
     }
 }
@@ -1137,4 +1137,22 @@ fn line_text(line: u32) -> ([u8; 18], usize) {
     }
     b[7 + len] = b')';
     (b, 8 + len)
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

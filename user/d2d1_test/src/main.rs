@@ -1504,7 +1504,9 @@ fn draw_demo(rt: Obj) {
 /// sin and cos by Taylor series (|a| up to 2 pi, enough for the demo).
 fn sincos(a: f32) -> (f32, f32) {
     let pi = core::f32::consts::PI;
-    let mut x = a % (2.0 * pi);
+    // a mod 2 pi, truncated as fmodf would (no `%` on floats: that is a
+    // call to fmodf, which ARM64's compiler runtime does not have).
+    let mut x = a - (a / (2.0 * pi)) as i32 as f32 * (2.0 * pi);
     if x > pi {
         x -= 2.0 * pi;
     }

@@ -142,7 +142,7 @@ mod appv;
 mod offreg;
 mod service;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "office_api_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_office_api_test";

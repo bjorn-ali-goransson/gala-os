@@ -59,7 +59,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "winhttp_cb_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_winhttp_cb_test";

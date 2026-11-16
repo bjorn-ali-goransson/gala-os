@@ -258,16 +258,12 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         // the current stack pointer.
         let (mut low, mut high) = (0usize, 0usize);
         GetCurrentThreadStackLimits(&mut low, &mut high);
-        let (base, deallocation, sp): (usize, usize, usize);
-        core::arch::asm!(
-            "mov {b}, gs:[0x8]",
-            "mov {d}, gs:[0x1478]",
-            "mov {s}, rsp",
-            b = out(reg) base,
-            d = out(reg) deallocation,
-            s = out(reg) sp,
-            options(nostack, readonly)
-        );
+        let (base, deallocation) = (teb_field(0x8), teb_field(0x1478));
+        let sp: usize;
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack));
         c.eq(high as u64, base as u64)?;
         c.ok(deallocation != 0, 0)?;
         c.eq(low as u64, deallocation as u64)?;
@@ -385,7 +381,7 @@ fn run() -> Result<(), u32> {
         c.ok(TlsSetValue(index, 0x1234 as *mut c_void) != 0, 0)?;
         c.eq(TlsGetValue(index) as u64, 0x1234)?;
         let slot: u64;
-        core::arch::asm!("mov {}, gs:[{}]", out(reg) slot, in(reg) 0x1480 + 8 * index as usize, options(nostack, readonly));
+        slot = teb_field(0x1480 + 8 * index as usize) as _;
         c.eq(slot, 0x1234)?;
 
         // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor,
@@ -605,4 +601,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

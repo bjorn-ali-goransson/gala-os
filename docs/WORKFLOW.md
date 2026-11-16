@@ -1819,17 +1819,34 @@ ARM64's ntdll's, `svc #N; ret`, the pinned build's numbers as x64's),
 the TEB's register (x18), CONTEXT, the memory intrinsics. A new service
 goes in nt64.rs's `stubs!` list once, for both. gala's ntdll
 (`testntdll`) is built for ARM64 too: a scenario that ships it starts
-its program through LdrInitializeThunk (`arm_startup`).
+its program through LdrInitializeThunk (`arm_startup_test`).
 
-- List the program in `USER_PROGRAMS_ARM64` (beside its x64 entry in
-  USER_PROGRAMS): `build_kernel_aarch64` builds that list and USER_DLLS
-  (but NOT_ARM64_DLLS) for ARM64, and the aarch64 kernel's images carry
-  those in place of the x64 builds (a scenario's built DLLs too).
+- An x64 scenario runs on the aarch64 kernel too by naming it in
+  `ARM64_TWINS`: `scenarios()` adds its twin `arm_<name>` with the same
+  command line, expected lines and files (`extra_modules` maps the twin
+  to its x64 scenario), the program's ARM64 build in place of the x64
+  one (`arm64_programs`: the twins' `run=` programs and the test programs
+  they ship as files, `user/bin/<program>.exe`, plus
+  `USER_PROGRAMS_ARM64`). An image refuses another x64 executable from
+  user/bin (xtask's error says so): an ARM64 machine cannot run it.
+- The per-name lists (NET_SCENARIOS, HOST_PAGE_SCENARIOS, SSH_PORT_22,
+  `onecpu_*`'s single CPU) look a twin up by its x64 scenario
+  (`twin_base`); a new list keyed by scenario name does the same.
+- A test's expectations stay real Windows': where ARM64 Windows answers
+  differently (the native machine 0xaa64, PROCESSOR_ARCHITECTURE_ARM64,
+  CONTEXT's offsets), the test picks by `cfg!(target_arch)`. What gala
+  cannot do on ARM64 (x86 code: WOW64, straddle_test's x86 instructions)
+  is x64's part of the test, or the scenario is left out of ARM64_TWINS
+  with the reason beside the list.
+- `build_kernel_aarch64` builds USER_DLLS (but NOT_ARM64_DLLS), then
+  `arm64_programs()`, for ARM64; the aarch64 kernel's images carry those
+  in place of the x64 builds. A program that embeds a DLL embeds its own
+  machine's (`image_test`: `target/<target>/release/testdll.dll`).
 - `export-tests` copies them to `user/bin/arm64/` (CI checks they match
   their sources, as user/bin's); `run-all.ps1` runs only the x64
   programs beside it, an ARM64 Windows runs these.
-- Its scenario is an `arm_<name>` entry in AARCH64_SCENARIOS, with the
-  x64 scenario's expectations (`arm_hello` is `hello`'s).
+- A scenario of the aarch64 kernel's own (no x64 scenario: `arm_boot`,
+  `arm_watchdog`, ...) is an entry in AARCH64_SCENARIOS.
 
 ### 32-bit test programs (WOW64)
 

@@ -1251,8 +1251,10 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
-        if let Some((_, regs)) = *t.in_syscall.lock() {
-            // In a system call: the 64-bit code that made it.
+        if let Some((_, mut regs)) = *t.in_syscall.lock() {
+            // In a system call: the 64-bit code that made it, as it will
+            // return (the result register 0, as `syscalls::caller_regs`).
+            regs.set_syscall_result(0);
             return Ok(Parked { regs, fx: default_fx(), changed: false, compat: false });
         }
         platform::sleep_ms(1);

@@ -928,6 +928,16 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     if info.is_dll {
         return Err(LoadError::Pe(PeError::NotExecutable));
     }
+    // An executable for a machine this architecture does not run (an x64
+    // program on ARM64): STATUS_INVALID_IMAGE_FORMAT, as Windows refuses
+    // one it has no emulation for, rather than running its code.
+    if !platform::runs_machine(info.machine) {
+        warn!(
+            "process {name}: its image is for machine {:#x}, which this kernel does not run",
+            info.machine
+        );
+        return Err(LoadError::Pe(PeError::UnsupportedMachine(info.machine)));
+    }
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
     if info.has_imports && !info.x86 && super::ntdll::get().is_none() {
         return Err(LoadError::ImportsNotSupported);
@@ -1226,8 +1236,9 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
     };
     crate::events::note_process(id, command_line);
     set_command_line(process, command_line);
+    let native = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
     let (machine, wow64) =
-        if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
+        if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { (native, "") };
     // An elevated primary token (an administrator's full token: SYSTEM's,
     // or what ShellExecute's "runas" starts) is named on the line.
     let elevated = process.elevated();

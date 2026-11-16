@@ -458,7 +458,7 @@ fn run() -> Result<(), u32> {
         // this program.
         let line = GetCommandLineW();
         let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        peb = teb_field(0x60) as _;
         let params = *((peb + 0x20) as *const usize);
         c.eq(line as u64, *((params + 0x78) as *const u64))?;
         let len = usize::from(*((params + 0x70) as *const u16)) / 2;
@@ -499,7 +499,7 @@ fn run() -> Result<(), u32> {
         c.eq((uap >> 16) & 0xffff, u64::from(version[3]))?;
         c.eq(family.into(), 3)?;
         let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        peb = teb_field(0x60) as _;
         c.eq(RtlGetCurrentPeb() as u64, peb as u64)?;
 
         // GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime
@@ -567,4 +567,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }
