@@ -200,7 +200,7 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
-| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine; then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop out of scope |
+| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine; then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
 | AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` through its own page tables, GIC, tick, scheduler and second CPU (`arm_boot`, `arm_sched`), its exceptions reported (`arm_fault_*`); next the drivers, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
@@ -3643,11 +3643,9 @@ through `\\.\pipe\docker_engine`, and stock Podman for Windows
 (`podman machine`) through gala's answer to WSL2's interface, the
 distribution running on LX.
 
-**Out of scope**: Docker Desktop for Windows (the owner's decision: the
-engine reached from Windows serves the tools that use Docker, while
-Docker Desktop is closed source, changes often and needs a paid
-subscription at larger organisations; its installer, backend service
-and dashboard are not run). Also running WSL2 itself (a VM with
+**Not in CT**: Docker Desktop for Windows is wanted but not scheduled
+("Later": the engine reached from Windows serves the tools that use
+Docker first). **Out of scope**: running WSL2 itself (a VM with
 Microsoft's Linux kernel), the Hyper-V backends, Docker Desktop for
 Linux (a VM of its own), and Windows containers (HCS, server silos).
 
@@ -5873,6 +5871,22 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   in QEMU, with the driver host's state in crash reports and the state
   dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE) come with LX
   when it gets device interfaces.
+- **Docker Desktop for Windows** (the owner: wanted, not scheduled;
+  CT's engine relay serves Docker's tools first). Stock Docker Desktop
+  installed by its own installer and run unmodified: its installer and
+  the checks it makes (Windows version, virtualization and optional
+  features through WMI and DISM), its backend service and the
+  privileged helper service, the `docker-desktop` distribution it
+  imports and drives through the WSL facade (CT steps 2-3: the WSL
+  service's COM interface, hvsocket and vsock), its own
+  `\\.\pipe\docker_engine` in place of gala's relay, credential
+  helpers on the Windows credential store, then the dashboard
+  (Electron, after BR stage 2) and its bundled Kubernetes. Worth doing
+  for its own sake: everything it needs is standard Windows (services,
+  WMI, installers, COM, named pipes, Electron) that other programs use
+  too. Its licence terms (a paid subscription at larger organisations)
+  govern running it; never committed, fetched by xtask and run only in
+  QEMU.
 - **gala's own drivers** against published standards: after virtio,
   AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
   item SND).

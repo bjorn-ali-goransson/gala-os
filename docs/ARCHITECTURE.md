@@ -13584,8 +13584,10 @@ distribution through `wsl.exe`, the WSL service, named pipes and
 hvsockets, which gala answers itself (a facade, not a VM); Docker's
 Windows CLI and the tools that speak Docker's API reach the
 distribution's dockerd through `\\.\pipe\docker_engine`, which gala
-relays. Docker Desktop, WSL2 itself, the Hyper-V backends and Windows
-containers are out of scope. Sources: CLEAN_ROOM "WSL" and "Linux".
+relays. Docker Desktop is wanted but not scheduled (ROADMAP "Later"; it
+would run on the same facade, its own pipe in place of the relay).
+WSL2 itself, the Hyper-V backends and Windows containers are out of
+scope. Sources: CLEAN_ROOM "WSL" and "Linux".
 
 ```
   Windows side (NT)                     Linux side (LX)
