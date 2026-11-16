@@ -55,11 +55,43 @@ struct ExceptionPointers {
     context: *mut u8,
 }
 
+/// RUNTIME_FUNCTION: x64's (begin, end, unwind info).
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 struct RuntimeFunction {
     begin: u32,
     end: u32,
     unwind: u32,
+}
+
+/// ARM64's (begin, then packed unwind data or an .xdata RVA: the low two
+/// bits say which).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+struct RuntimeFunction {
+    begin: u32,
+    unwind: u32,
+}
+
+impl RuntimeFunction {
+    /// The function's end RVA.
+    #[cfg(target_arch = "x86_64")]
+    fn end(&self, _image: u64) -> u32 {
+        self.end
+    }
+
+    /// ARM64's: the function length in 4-byte units, in the packed data
+    /// (bits 2-12) or the .xdata header (bits 0-17).
+    #[cfg(target_arch = "aarch64")]
+    fn end(&self, image: u64) -> u32 {
+        let words = if self.unwind & 3 != 0 {
+            (self.unwind >> 2) & 0x7ff
+        } else {
+            // SAFETY: the .xdata header of an entry of this image.
+            unsafe { ((image + u64::from(self.unwind)) as *const u32).read() & 0x3_ffff }
+        };
+        self.begin + 4 * words
+    }
 }
 
 type VectoredHandler = extern "system" fn(*mut ExceptionPointers) -> i32;
@@ -217,7 +249,16 @@ const TIMER_ALL_ACCESS: u32 = 0x1f_0003;
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-const CTX_RIP: usize = 0xf8;
+/// The CONTEXT's program counter (x64's Rip, ARM64's Pc) and the
+/// breakpoint instruction's length (int3, brk #0xf000).
+#[cfg(target_arch = "x86_64")]
+const CTX_PC: usize = 0xf8;
+#[cfg(target_arch = "x86_64")]
+const BREAKPOINT_LEN: u64 = 1;
+#[cfg(target_arch = "aarch64")]
+const CTX_PC: usize = 0x108;
+#[cfg(target_arch = "aarch64")]
+const BREAKPOINT_LEN: u64 = 4;
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -299,8 +340,9 @@ extern "system" fn on_exception(pointers: *mut ExceptionPointers) -> i32 {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         BREAKPOINTS.fetch_add(1, Ordering::SeqCst);
-        let rip = (*pointers).context.add(CTX_RIP) as *mut u64;
-        *rip += 1;
+        // Past the breakpoint (the CONTEXT's pc is at it).
+        let pc = (*pointers).context.add(CTX_PC) as *mut u64;
+        *pc += BREAKPOINT_LEN;
     }
     EXCEPTION_CONTINUE_EXECUTION
 }
@@ -325,8 +367,7 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
     // sizes.
     unsafe {
         let process = GetProcessHeap();
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let peb = teb_field(0x60);
         c.ok(!process.is_null(), 0)?;
         c.eq(process as u64, *((peb + 0x30) as *const u64))?; // PEB.ProcessHeap
         let p = HeapAlloc(process, HEAP_ZERO_MEMORY, 100);
@@ -523,7 +564,10 @@ fn run() -> Result<(), u32> {
         // Vectored handlers: a breakpoint handled, execution continues.
         c.ok(!AddVectoredExceptionHandler(1, on_exception).is_null(), 0)?;
         c.ok(!AddVectoredContinueHandler(1, on_continue).is_null(), 0)?;
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("int3");
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("brk #0xf000");
         c.eq(BREAKPOINTS.load(Ordering::SeqCst), 1)?;
 
         // RaiseException: the record as given (more than
@@ -555,7 +599,7 @@ fn run() -> Result<(), u32> {
         c.ok(!entry.is_null(), 0)?;
         c.eq(base, image)?;
         let rva = (pc - image) as u32;
-        c.ok((*entry).begin <= rva && rva < (*entry).end, (*entry).begin.into())?;
+        c.ok((*entry).begin <= rva && rva < (*entry).end(image), (*entry).begin.into())?;
         c.eq(some_function(), 7)?;
 
         // FormatMessageW: system messages.
@@ -822,4 +866,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

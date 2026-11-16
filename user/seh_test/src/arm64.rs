@@ -248,6 +248,34 @@ pub fn table_checks(c: &mut Checks, ntdll: usize, fns: &Fns) -> Result<(), u32> 
     c.ok(delete(table.as_ptr()) != 0, 0)?;
     c.ok((fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
 
+    // A link record (Flag 3: a jump island at 0x100, its upper 30 bits the
+    // RVA of its parent .pdata record): the lookup returns the parent, and
+    // unwinding from the island is unwinding from the parent's body. The
+    // parent (0x10, 0x20 bytes) allocates 32 bytes (packed: FrameSize 2,
+    // CR 0: `sub sp, sp, #32`). The table sits in the region, so the
+    // parent's RVA is inside it.
+    let island_table = (region + 0x800) as *mut Entry;
+    let parent = [0x10, 1 | ((0x20 / 4) << 2) | (2 << 13)];
+    // SAFETY: the region's own memory, read-write.
+    unsafe {
+        island_table.write(parent);
+        island_table.add(1).write([0x100, 0x800 | 3]);
+    }
+    c.ok(add(island_table, 2, region) != 0, 0)?;
+    let entry = (fns.lookup)(region + 0x104, &mut base64, core::ptr::null_mut());
+    c.eq(entry as u64, island_table as u64)?;
+    c.eq(base64, region)?;
+    let mut stack = [0u64; 8];
+    let mut ctx = Context([0; CONTEXT_SIZE]);
+    let (handler, _, frame) =
+        super::virtual_unwind(fns, region + 0x104, stack.as_mut_ptr(), 0x7777, &mut ctx)?;
+    let cp = ctx.0.as_ptr();
+    c.eq(handler, 0)?;
+    c.eq(frame, stack.as_ptr() as u64 + 32)?;
+    c.eq(rd(cp, CTX_SP), stack.as_ptr() as u64 + 32)?;
+    c.eq(rd(cp, CTX_PC), 0x7777)?;
+    c.ok(delete(island_table) != 0, 0)?;
+
     // A growable table: entries relative to RangeBase, only the counted
     // ones searched, more after RtlGrowFunctionTable, none after
     // RtlDeleteGrowableFunctionTable.

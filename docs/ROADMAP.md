@@ -202,7 +202,7 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, exceptions to vectored handlers and APCs (`arm_*` scenarios); next more test programs, then Linux's aarch64 ABI |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 131 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (34 `arm_lx_*` twins); next the remaining test programs |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -4456,49 +4456,90 @@ on the seams item PT prepared: native ARM64 Windows programs
   faults (demand paging), ARM64 PE images (`arch::runs_machine`);
   xtask's aarch64 images carry the ARM64 builds of the DLLs and of
   USER_PROGRAMS_ARM64 (exported to `user/bin/arm64`).
-- Programs through gala's ntdll (`arm_startup`, `arm_import`): its ARM64
+- Programs through gala's ntdll (`arm_startup_test`, `arm_import_test`): its ARM64
   build's stubs make `svc #N`; a process starts at LdrInitializeThunk
   with ARM64's CONTEXT (`nt::abi::arm64::context`, host-tested), which
   NtContinue resumes (floating-point part included); NtCreateThread
   reads it; imports bind from ARM64 DLLs. Threads, the synchronization
-  objects and waits run as on x64 (`arm_thread`, `arm_sync`,
-  `arm_wait`).
+  objects and waits run as on x64 (`arm_thread_test`, `arm_sync_test`,
+  `arm_wait_test`).
 - Exceptions and APCs in ARM64 user mode: faults, `brk` (its immediate
   the exception, as Windows ARM64 assigns them) and `udf` reach gala's
   ntdll's dispatcher and its vectored handlers, which may continue
-  (`arm_exception`); RtlRaiseException and RtlCaptureContext; the
+  (`arm_exception_test`); RtlRaiseException and RtlCaptureContext; the
   top-level filter and the crash report (`arm_crash`,
   `arm_crash_dispatched`, `arm_crash_filtered`); user APCs from alertable
-  waits and NtContinue's TestAlert (`arm_apc`); kernel32 loads (`arm_tls`).
-- Frame-based exception handling on ARM64 (`arm_seh`, seh_test's ARM64
+  waits and NtContinue's TestAlert (`arm_apc_test`); kernel32 loads (`arm_tls_test`).
+- Frame-based exception handling on ARM64 (`arm_seh_test`, seh_test's ARM64
   part): .pdata and .xdata, packed unwind data, partial prologues and
   epilogues, RtlLookupFunctionEntry, RtlVirtualUnwind, frame handlers in
   dispatch and RtlUnwindEx, unwind consolidation, the dispatcher's
   MSFT_OP_CONTEXT frame.
-- NtGetContextThread and NtSetContextThread on ARM64 (`arm_context`:
-  suspended threads, the caller; `arm_threadinfo`).
+- NtGetContextThread and NtSetContextThread on ARM64 (`arm_context_test`:
+  suspended threads, the caller; `arm_threadinfo_test`).
 - Function tables registered at run time on ARM64 (RtlAddFunctionTable,
   the growable tables, callbacks): gala's ntdll keeps one registry for
-  x64 and ARM64 (`ftable.rs`); `arm_seh` checks a table and a growable
+  x64 and ARM64 (`ftable.rs`); `arm_seh_test` checks a table and a growable
   one. ntrt's 64-bit runtime is one
   for x64 and ARM64 (`nt64.rs`), so the x64 test programs build for
   ARM64 as they are.
 - Devices where the firmware says: the console's PL011 from the SPCR,
   the GIC's distributor and redistributors from the MADT's GICD and GICR
   entries (host-tested parsers; `arm_boot` checks the log says so).
+- xtask's state dump at an aarch64 timeout: a break on the console
+  (`chardev-send-break`), the PL011's interrupt taken at the
+  pseudo-NMI's priority and turned into the NMI on every CPU
+  (`arm_statedump_test`); the thread dump reads a waiting thread's
+  arguments (the registers it made the call with: ARM64's x0 is both
+  the first argument and the result).
+- The x64 test programs run on ARM64 as twins (`ARM64_TWINS`:
+  `arm_<name>`, the x64 scenario's expectations; 131 of them, with the
+  network, single-CPU and shipped-program cases): ProcessPrng from the
+  kernel (RNDR), RtlCaptureStackBackTrace, NdrClientCall2 and rpcrt4's
+  guarded calls, the native machine (KUSER_SHARED_DATA, IsWow64Process2)
+  on ARM64; the kernel refuses an executable of a machine it does not
+  run. The programs' x64-only parts have ARM64 ones (the TEB through
+  x18, the processor number through NtGetCurrentProcessorNumber, `svc
+  #N` stubs, `brk #0xf000`, ARM64's RUNTIME_FUNCTION and CONTEXT;
+  fpu_test's d0-d31 and FPCR, xmodify_test's cache maintenance).
+  What they found missing on ARM64, done: user mode reads the virtual
+  counter and runs cache maintenance by address (CNTKCTL_EL1,
+  SCTLR_EL1.UCT/UCI); FlushInstructionCache cleans and invalidates;
+  KUSER_SHARED_DATA's ARM64 processor features; kernel32's context and
+  XState functions (ARM64's CONTEXT, no XState feature), its processor
+  number; msvcrt's `_controlfp` and floating-point status on
+  FPCR/FPSR; the Win32 start address from x0; an EL0 system-register
+  trap is an illegal instruction.
+- `.pdata` link records (Flag 3: jump islands) in the ARM64 unwinder
+  (`arm_seh_test`: the lookup returns the parent, the island unwinds as
+  its body).
+- Linux's aarch64 ABI: the generic system-call table, restarts, clone's
+  argument order, the open flags, `struct stat` and `struct
+  epoll_event`, AT_HWCAP, seccomp's architecture and strict mode, the
+  signal frame (fpsimd_context), the thread pointer kept across
+  switches; the Linux test programs built for aarch64 (34 `arm_lx_*`
+  twins, their transcripts real Linux's). Copy-on-write fork now works
+  wherever frames are numbered above the managed count (QEMU `virt`'s
+  memory starts at 1 GiB).
+- Code the kernel writes for user mode (image pages, a loader's,
+  WriteProcessMemory's) is cleaned and invalidated for instruction fetch
+  before it runs (a real ARM64 machine's caches need it; QEMU's do not).
+- CI runs the aarch64 scenarios in its boot shards, under QEMU's
+  emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
-1. xtask's state dump at an aarch64 timeout: QEMU `virt` has no NMI
-   for the monitor's `nmi`, so the request needs another way in (the
-   console's receive line, its interrupt at the NMI's priority, is the
-   candidate).
-2. User mode, the rest: more test programs in USER_PROGRAMS_ARM64 (the
-   x64 ones that build unchanged first, then those with x64 assembly);
-   `.pdata` link records (jump islands); Linux's aarch64 ABI (`lx::machine::aarch64`, its
-   system call table).
-3. CI: the aarch64 boot scenarios on GitHub's ARM64 runners (free for
-   public repositories) or under QEMU's emulation.
-4. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+1. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
+   load, HotSpot's on ARM64); the handover programs (no handover on
+   aarch64 yet); the Linux test programs not built for aarch64 yet
+   (arch_prctl_test is x86_64's; auxv_test, epoll_test, fork_test,
+   thread_test and signal_test have x86 assembly or x86 sigcontext
+   fields), glibc's dynamic programs on aarch64 (dyn_test, gtk_test),
+   and the event stream's scenarios (`events=`, wl_input_test).
+   xstate_test stays x64's (AVX; ARM64's SVE state is not in
+   gala's ARM64 context). rpcrt4's server routine call puts every
+   argument in integer registers: ARM64 passes floating-point ones in
+   v0-v7 apart, which needs the format string's types.
+2. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick
    with nothing held for it (gdb's record: `interrupt_request` 0, the

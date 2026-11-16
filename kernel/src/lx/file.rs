@@ -108,9 +108,9 @@ const O_TRUNC: u64 = 0o1000;
 pub const O_APPEND: u64 = 0o2000;
 pub const O_NONBLOCK: u64 = 0o4000;
 const O_DSYNC: u64 = 0o10000;
-const O_LARGEFILE: u64 = 0o100000;
-pub const O_DIRECTORY: u64 = 0o200000;
-const O_NOFOLLOW: u64 = 0o400000;
+// The three whose values are the architecture's (`machine`).
+pub use super::machine::O_DIRECTORY;
+use super::machine::{O_LARGEFILE, O_NOFOLLOW};
 const O_NOATIME: u64 = 0o1000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 const O_SYNC: u64 = 0o4010000;
@@ -1053,7 +1053,7 @@ fn stat_other(object: &Object, me: (u32, u32)) -> Stat {
 }
 
 fn put_stat(call: &Call<'_>, addr: u64, st: &Stat) -> Result {
-    call.process.write(addr, &st.to_bytes()).map_err(|_| EFAULT)?;
+    call.process.write(addr, &super::machine::stat_bytes(st)).map_err(|_| EFAULT)?;
     Ok(0)
 }
 

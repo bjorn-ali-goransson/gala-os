@@ -18,6 +18,6 @@ NestedInstallerFiles:
 Installers:
 - Architecture: x64
   InstallerUrl: https://packages.gala.invalid/pkhello-1.0.0.zip
-  InstallerSha256: CA25E9AC91333DAEF30D9F84D8DC6EDDEDABE18F6D00DA4DA07181AA34467CC1
+  InstallerSha256: 7330185827F46B913AA3FB043AD9CC4CB70DC85D8F5BD8100481523961861C76
 ManifestType: singleton
 ManifestVersion: 1.6.0

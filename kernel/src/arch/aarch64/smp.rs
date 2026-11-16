@@ -254,6 +254,7 @@ extern "C" fn ap_main(index: u64) -> ! {
     let index = index as u32;
     super::percpu::install(index);
     super::entry::install_vectors();
+    super::cpu::allow_user_access();
     if let Err(e) = super::gic::init_cpu() {
         crate::warn!("smp: CPU {index}: no interrupt controller ({e:?}): it stays offline");
         super::cpu::halt_forever();

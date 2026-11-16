@@ -53,8 +53,11 @@ const EPOLL_CLOEXEC: u64 = 0o2000000;
 const CTL_ADD: u64 = 1;
 const CTL_DEL: u64 = 2;
 const CTL_MOD: u64 = 3;
-/// struct epoll_event is packed on x86_64: events (u32), data (u64).
-const EVENT_SIZE: usize = 12;
+/// struct epoll_event: events (u32), then data (u64) at the
+/// architecture's offset (`machine::EPOLL_DATA_AT`: packed on x86_64, 4;
+/// naturally aligned elsewhere, 8), the whole that many bytes and 8 more.
+const DATA_AT: usize = super::machine::EPOLL_DATA_AT;
+const EVENT_SIZE: usize = DATA_AT + 8;
 /// epoll_wait's maxevents limit (INT_MAX / sizeof(struct epoll_event)).
 const MAX_EVENTS: u64 = i32::MAX as u64 / EVENT_SIZE as u64;
 /// How deep epolls may watch epolls (Linux's limit).
@@ -274,7 +277,7 @@ pub fn epoll_ctl(call: &Call<'_>, epfd: u64, op: u64, fd: u64, event: u64) -> Re
         let mut b = [0u8; EVENT_SIZE];
         call.process.read(event, &mut b).map_err(|_| EFAULT)?;
         let events = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-        let data = u64::from_le_bytes([b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]]);
+        let data = u64::from_le_bytes(b[DATA_AT..DATA_AT + 8].try_into().unwrap_or([0; 8]));
         Some(Interest::new(events, data))
     } else {
         None
@@ -379,6 +382,7 @@ fn wait_events(
     out.try_reserve_exact(got.len() * EVENT_SIZE).map_err(|_| ENOMEM)?;
     for (ev, data) in &got {
         out.try_extend_from_slice(&ev.to_le_bytes()).map_err(|_| ENOMEM)?;
+        out.try_extend_from_slice(&[0; DATA_AT - 4]).map_err(|_| ENOMEM)?;
         out.try_extend_from_slice(&data.to_le_bytes()).map_err(|_| ENOMEM)?;
     }
     if !out.is_empty() {

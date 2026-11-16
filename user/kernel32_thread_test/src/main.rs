@@ -140,6 +140,7 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 }
 
 /// CONTEXT (x64), 16-byte aligned as the API requires.
+#[cfg(target_arch = "x86_64")]
 #[repr(C, align(16))]
 struct Context {
     home: [u64; 6],
@@ -154,7 +155,54 @@ struct Context {
     rest: [u8; 0x4d0 - 0x100],
 }
 
+#[cfg(target_arch = "x86_64")]
+impl Context {
+    fn pc(&self) -> u64 {
+        self.rip
+    }
+    fn sp(&self) -> u64 {
+        self.gpr[4]
+    }
+    /// Resumes at `f` as if called there: x64's rsp % 16 == 8 at entry.
+    fn redirect(&mut self, f: u64) {
+        self.rip = f;
+        self.gpr[4] = (self.gpr[4] & !0xf) - 8;
+    }
+}
+
+/// CONTEXT (ARM64): flags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, then the
+/// floating-point and debug parts (0x390 bytes).
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+struct Context {
+    context_flags: u32,
+    cpsr: u32,
+    x: [u64; 31],
+    sp: u64,
+    pc: u64,
+    rest: [u8; 0x390 - 0x110],
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Context {
+    fn pc(&self) -> u64 {
+        self.pc
+    }
+    fn sp(&self) -> u64 {
+        self.sp
+    }
+    /// Resumes at `f` as if called there: sp 16-byte aligned.
+    fn redirect(&mut self, f: u64) {
+        self.pc = f;
+        self.sp &= !0xf;
+    }
+}
+
+/// CONTEXT_CONTROL | CONTEXT_INTEGER, with the architecture's flag.
+#[cfg(target_arch = "x86_64")]
 const CONTEXT_CONTROL_INTEGER: u32 = 0x10_0003;
+#[cfg(target_arch = "aarch64")]
+const CONTEXT_CONTROL_INTEGER: u32 = 0x40_0003;
 const CREATE_SUSPENDED: u32 = 4;
 const TLS_OUT_OF_INDEXES: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
@@ -247,8 +295,17 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(DecodePointer(EncodePointer(p)) as u64, p as u64)?;
         c.eq(DecodePointer(EncodePointer(core::ptr::null_mut())) as u64, 0)?;
         c.eq(IsDebuggerPresent() as u64, 0)?;
-        c.ok(IsProcessorFeaturePresent(10) != 0, 0)?; // PF_XMMI64 (SSE2)
-        c.ok(IsProcessorFeaturePresent(8) != 0, 0)?; // PF_RDTSC
+        #[cfg(target_arch = "x86_64")]
+        {
+            c.ok(IsProcessorFeaturePresent(10) != 0, 0)?; // PF_XMMI64 (SSE2)
+            c.ok(IsProcessorFeaturePresent(8) != 0, 0)?; // PF_RDTSC
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            c.ok(IsProcessorFeaturePresent(19) != 0, 0)?; // PF_ARM_NEON
+            c.ok(IsProcessorFeaturePresent(29) != 0, 0)?; // PF_ARM_V8
+            c.eq(IsProcessorFeaturePresent(10) as u64, 0)?; // no SSE2
+        }
         c.eq(IsProcessorFeaturePresent(1000) as u64, 0)?;
         c.ok(GetCurrentProcessorNumber() < 64, GetCurrentProcessorNumber().into())?;
         FlushProcessWriteBuffers();
@@ -258,16 +315,12 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         // the current stack pointer.
         let (mut low, mut high) = (0usize, 0usize);
         GetCurrentThreadStackLimits(&mut low, &mut high);
-        let (base, deallocation, sp): (usize, usize, usize);
-        core::arch::asm!(
-            "mov {b}, gs:[0x8]",
-            "mov {d}, gs:[0x1478]",
-            "mov {s}, rsp",
-            b = out(reg) base,
-            d = out(reg) deallocation,
-            s = out(reg) sp,
-            options(nostack, readonly)
-        );
+        let (base, deallocation) = (teb_field(0x8), teb_field(0x1478));
+        let sp: usize;
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack));
         c.eq(high as u64, base as u64)?;
         c.ok(deallocation != 0, 0)?;
         c.eq(low as u64, deallocation as u64)?;
@@ -384,8 +437,7 @@ fn run() -> Result<(), u32> {
         c.eq(TlsGetValue(index) as u64, 0)?;
         c.ok(TlsSetValue(index, 0x1234 as *mut c_void) != 0, 0)?;
         c.eq(TlsGetValue(index) as u64, 0x1234)?;
-        let slot: u64;
-        core::arch::asm!("mov {}, gs:[{}]", out(reg) slot, in(reg) 0x1480 + 8 * index as usize, options(nostack, readonly));
+        let slot = teb_field(0x1480 + 8 * index as usize) as u64;
         c.eq(slot, 0x1234)?;
 
         // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor,
@@ -535,9 +587,8 @@ fn run() -> Result<(), u32> {
         Sleep(20);
         c.eq(SPINS.load(Ordering::SeqCst), spins)?; // still suspended (count 1)
         c.ok(GetThreadContext(h, &mut ctx) != 0, 0)?;
-        c.ok(ctx.rip != 0 && ctx.gpr[4] != 0, ctx.rip)?;
-        ctx.rip = redirected as *const () as u64;
-        ctx.gpr[4] = (ctx.gpr[4] & !0xf) - 8; // as if called
+        c.ok(ctx.pc() != 0 && ctx.sp() != 0, ctx.pc())?;
+        ctx.redirect(redirected as *const () as u64);
         c.ok(SetThreadContext(h, &ctx) != 0, 0)?;
         c.eq(ResumeThread(h).into(), 1)?;
         c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
@@ -605,4 +656,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

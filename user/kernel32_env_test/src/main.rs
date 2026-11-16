@@ -208,8 +208,7 @@ fn run() -> Result<(), u32> {
 
         // Current directory: the PEB's, with its trailing backslash.
         let n = GetCurrentDirectoryW(300, buf.as_mut_ptr()) as usize;
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let peb = teb_field(0x60);
         let params = *((peb + 0x20) as *const usize);
         let dos_len = usize::from(*((params + 0x38) as *const u16)) / 2;
         let dos = core::slice::from_raw_parts(*((params + 0x40) as *const *const u16), dos_len);
@@ -298,4 +297,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

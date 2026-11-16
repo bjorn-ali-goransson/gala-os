@@ -52,6 +52,12 @@ impl TableMemory for HhdmTables {
         // through the `Mapper` that owns this `HhdmTables`, one at a time.
         unsafe { &mut *core::ptr::with_exposed_provenance_mut::<PageTable>(virt as usize) }
     }
+
+    /// Through the frame's HHDM address (`cpu::sync_code`).
+    fn sync_code(&mut self, phys: u64, bytes: u64) {
+        super::cpu::sync_code(self.offset + phys, bytes);
+    }
+    const SYNCS_CODE: bool = true;
 }
 
 static KERNEL_SPACE: IrqMutex<Option<Mapper<HhdmTables, Vmsa>>> = IrqMutex::new(None);

@@ -400,6 +400,16 @@ impl Format for Vmsa {
 /// Access to page-table frames by physical frame.
 pub trait TableMemory {
     fn table(&mut self, frame: Frame) -> &mut PageTable;
+    /// Makes what the kernel wrote to `[phys, phys + bytes)` visible to
+    /// instruction fetch, before a user mapping makes it executable (the
+    /// `Mapper` calls it for every user leaf that is or becomes
+    /// executable). Nothing to do where instruction fetch is coherent
+    /// with data stores (x86-64); aarch64's cleans the data cache to the
+    /// point of unification and invalidates the instruction cache.
+    fn sync_code(&mut self, _phys: u64, _bytes: u64) {}
+    /// Whether `sync_code` does anything (false: callers skip the walk
+    /// that would find what to sync).
+    const SYNCS_CODE: bool = false;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +550,10 @@ impl<M: TableMemory, F: Format> Mapper<M, F> {
         if F::present(slot.0) {
             return Err(MapError::AlreadyMapped);
         }
+        if flags.user && flags.executable {
+            self.mem.sync_code(phys, bytes);
+        }
+        let slot = &mut self.mem.table(table).0[index(virt, size.level())];
         *slot = Entry(F::leaf(phys, flags, size != PageSize::Size4K));
         Ok(())
     }
@@ -576,6 +590,23 @@ impl<M: TableMemory, F: Format> Mapper<M, F> {
         Ok(counts)
     }
 
+    /// After the kernel wrote into the page at `virt` (through another
+    /// view of its frame: a loader filling code, WriteProcessMemory): if a
+    /// user mapping makes it executable, what was written reaches
+    /// instruction fetch (`TableMemory::sync_code`). Nothing where the
+    /// memory needs no sync.
+    pub fn sync_written_code(&mut self, virt: u64) {
+        if !M::SYNCS_CODE {
+            return;
+        }
+        if let Some(t) = self.translate(virt / 4096 * 4096)
+            && t.flags.user
+            && t.flags.executable
+        {
+            self.mem.sync_code(t.phys / 4096 * 4096, 4096);
+        }
+    }
+
     /// Replaces the flags of the existing 4 KiB mapping at `virt`, keeping
     /// its frame. The caller must flush the TLB.
     pub fn update_flags_4k(&mut self, virt: u64, flags: PageFlags) -> Result<(), MapError> {
@@ -598,7 +629,15 @@ impl<M: TableMemory, F: Format> Mapper<M, F> {
         // so are the accessed and dirty bits (the page-out's tests of a
         // page written since it was copied: `UserSpace::page_out`).
         let kept = slot.0 & (F::BORROWED | F::ACCESSED | F::DIRTY);
-        *slot = Entry(F::leaf(F::leaf_addr(slot.0, false), flags, false) | kept);
+        let phys = F::leaf_addr(slot.0, false);
+        let was = F::leaf_flags(slot.0, false);
+        // A user page that becomes executable: what was written to it
+        // reaches instruction fetch first.
+        if flags.user && flags.executable && !(was.user && was.executable) {
+            self.mem.sync_code(phys, 4096);
+        }
+        let slot = &mut self.mem.table(table).0[index(virt, 1)];
+        *slot = Entry(F::leaf(phys, flags, false) | kept);
         Ok(())
     }
 
@@ -919,6 +958,50 @@ mod tests {
     }
 
     const KVIRT: u64 = 0xffff_ffff_8000_0000;
+
+    /// Records `sync_code`'s calls.
+    #[derive(Default)]
+    struct SyncMemory(FakeMemory, Vec<(u64, u64)>);
+
+    impl TableMemory for SyncMemory {
+        fn table(&mut self, frame: Frame) -> &mut PageTable {
+            self.0.table(frame)
+        }
+        fn sync_code(&mut self, phys: u64, bytes: u64) {
+            self.1.push((phys, bytes));
+        }
+        const SYNCS_CODE: bool = true;
+    }
+
+    /// Code the kernel wrote reaches instruction fetch before a user page
+    /// maps it executable (a new mapping, or a protection change to
+    /// executable); data pages and kernel pages are left alone.
+    #[test]
+    fn user_code_is_synced_before_it_is_executable() {
+        let mut next = 100;
+        let mut alloc = move || {
+            next += 1;
+            Some(Frame::from_number(next))
+        };
+        let mut m: Mapper<SyncMemory> = Mapper::new(SyncMemory::default(), &mut alloc).unwrap();
+        let data = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        let code = PageFlags { executable: true, writable: false, ..data };
+        m.map(0x40_0000, 0x5000, PageSize::Size4K, data, &mut alloc).unwrap();
+        m.map(0x40_1000, 0x6000, PageSize::Size4K, code, &mut alloc).unwrap();
+        m.map(KVIRT, 0x7000, PageSize::Size4K, PageFlags::KERNEL_RX, &mut alloc).unwrap();
+        assert_eq!(m.mem.1, [(0x6000, 4096)]);
+        // mprotect(PROT_EXEC) of the data page; again of the code page:
+        // nothing new.
+        m.update_flags_4k(0x40_0000, code).unwrap();
+        m.update_flags_4k(0x40_1000, code).unwrap();
+        assert_eq!(m.mem.1, [(0x6000, 4096), (0x5000, 4096)]);
+        // Written afterwards through another view (a loader filling code):
+        // the executable page again, a data page not.
+        m.sync_written_code(0x40_0010);
+        m.map(0x40_2000, 0x8000, PageSize::Size4K, data, &mut alloc).unwrap();
+        m.sync_written_code(0x40_2000);
+        assert_eq!(m.mem.1, [(0x6000, 4096), (0x5000, 4096), (0x5000, 4096)]);
+    }
 
     #[test]
     fn next_mapped_skips_absent_tables() {

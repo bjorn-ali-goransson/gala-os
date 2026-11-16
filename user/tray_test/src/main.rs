@@ -41,7 +41,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "tray_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_tray_test";
@@ -646,7 +646,7 @@ fn icons(c: &mut Checks) -> Result<Handle, u32> {
 
 // ---- gala's named actions (64-bit) ----------------------------------------
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 mod cli {
     use super::{CloseHandle, GetStdHandle, Handle, W};
 
@@ -754,7 +754,7 @@ mod cli {
 
 /// The checks on gala's named actions: the listing, a click and a right
 /// click through `gala tray click`, each callback in version 4's layout.
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 fn named_actions(c: &mut Checks, hwnd: Handle, middle: usize) -> Result<(), u32> {
     say(b"gala tray");
     let (code, out) = cli::gala(b"tray");

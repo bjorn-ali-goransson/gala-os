@@ -62,11 +62,11 @@ use core::ptr::{null, null_mut};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "actctx_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_actctx_test";
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const ARCH: &str = "amd64";
 #[cfg(target_arch = "x86")]
 const ARCH: &str = "x86";

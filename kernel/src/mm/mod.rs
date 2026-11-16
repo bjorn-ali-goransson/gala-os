@@ -183,12 +183,15 @@ pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
 }
 
 /// Gives the frame allocator its owner counts (`frame::FrameAllocator::
-/// share`): one `u16` per tracked frame from the heap, once it is up.
-/// Without them (no memory) nothing is shared: a fork copies its pages,
-/// as the log line says.
+/// share`): one `u16` per frame number the bitmap spans (frames are
+/// numbered by physical address: QEMU `virt`'s memory starts at 1 GiB,
+/// and an x86-64 machine's continues above the PCI hole, so a table of
+/// the managed frames' count would leave the frames above it unshareable),
+/// from the heap, once it is up. Without them (no memory) nothing is
+/// shared: a fork copies its pages, as the log line says.
 pub fn init_sharing() {
     init_uses();
-    let Some(frames) = with_frames(|a| a.total_frames()) else { return };
+    let Some(frames) = with_frames(|a| a.span()) else { return };
     let Ok(count) = usize::try_from(frames) else { return };
     let mut table: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
     if table.try_reserve_exact(count).is_err() {

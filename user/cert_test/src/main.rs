@@ -414,11 +414,12 @@ mod pfx;
 mod vectors;
 
 // On x86 the compiler's runtime symbols (memcpy, the 64-bit division
-// helpers, _fltused) come from ntrt's x86 runtime.
+// helpers, _fltused) come from ntrt's x86 runtime; on x64 and ARM64 the
+// memory and string ones from ntdll.
 #[cfg(target_arch = "x86")]
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -428,11 +429,11 @@ unsafe extern "C" {
     fn strlen(s: *const u8) -> usize;
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn __CxxFrameHandler3() -> ! {
     // SAFETY: ends the process.
@@ -440,7 +441,7 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 }
 
 /// The program's name, which its lines start with.
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &[u8] = b"cert_test";
 #[cfg(target_arch = "x86")]
 const NAME: &[u8] = b"wow64_cert_test";

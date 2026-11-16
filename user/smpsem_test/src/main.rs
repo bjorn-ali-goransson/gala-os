@@ -33,15 +33,25 @@ const STATUS_TIMEOUT: NtStatus = 0x102;
 /// Iterations per thread in each round.
 const ROUNDS: u32 = 20_000;
 
-// NtReleaseSemaphore, whose x64 number (0x0a) is long-stable, in ntdll's
-// stub shape; NtCreateSemaphore and NtQuerySemaphore change between builds
-// and are ntrt's (through ntdll's exports).
+// NtReleaseSemaphore, whose number (0x0a) is long-stable, in ntdll's
+// stub shape (x64's `syscall`, ARM64's `svc #N`); NtCreateSemaphore and
+// NtQuerySemaphore change between builds and are ntrt's (through ntdll's
+// exports).
+#[cfg(target_arch = "x86_64")]
 global_asm!(
     ".globl smpsem_release_semaphore",
     "smpsem_release_semaphore:",
     "mov r10, rcx",
     "mov eax, 0x0a",
     "syscall",
+    "ret",
+);
+#[cfg(target_arch = "aarch64")]
+global_asm!(
+    ".globl smpsem_release_semaphore",
+    ".p2align 2",
+    "smpsem_release_semaphore:",
+    "svc #0x0a",
     "ret",
 );
 

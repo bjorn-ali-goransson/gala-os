@@ -441,8 +441,7 @@ fn tests() {
         // 8. Session.
         let mut session = 0xffff_ffffu32;
         check(ProcessIdToSessionId(GetCurrentProcessId(), &mut session) != 0, 8);
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
+        let peb = teb_field(0x60);
         check(session == *((peb + 0x2c0) as *const u32), 8);
 
         // 9. Processors.
@@ -644,8 +643,7 @@ fn tests() {
         let lock = *((peb + 0x110) as *const usize);
         check(lock != 0, 22);
         let owner = *((lock + 0x10) as *const usize);
-        let me_id: usize;
-        core::arch::asm!("mov {}, gs:[0x48]", out(reg) me_id);
+        let me_id = teb_field(0x48);
         check(owner != me_id, 22);
 
         // 23. Trustees and descriptors built from explicit access entries.
@@ -1061,4 +1059,22 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

@@ -1,6 +1,8 @@
 //! CONTEXT records in caller buffers (InitializeContext, InitializeContext2,
-//! CopyContext) and the XState functions, as documented for x64 (and x86:
-//! the layout's constants are the architecture's, `x64.rs`/`x86.rs`). The
+//! CopyContext) and the XState functions, as documented for x64 (and x86
+//! and ARM64: the layout's constants are the architecture's,
+//! `x64.rs`/`x86.rs`/`aarch64.rs`; ARM64's CONTEXT holds no XState feature
+//! itself, its floating-point part being CONTEXT_FLOATING_POINT's). The
 //! features come from KUSER_SHARED_DATA's XState configuration (the
 //! kernel enables x87, SSE, AVX and, where the CPU has it, AVX-512). A
 //! context with CONTEXT_XSTATE is the CONTEXT, its CONTEXT_EX right after
@@ -11,9 +13,12 @@
 //! ExtendedRegisters). The standard (non-compacted) format
 //! only: the configuration says CompactionEnabled = 0.
 
+// ARM64's LEGACY_FEATURES is 0: the masks with it are empty by design.
+#![cfg_attr(target_arch = "aarch64", allow(clippy::bad_bit_mask))]
+
 use super::arch::{
-    CONTEXT_ARCH, CONTEXT_FLAGS_AT, CONTEXT_FXSAVE, CONTEXT_LEGACY_STATE, CONTEXT_PARTS,
-    CONTEXT_SIZE, CONTEXT_XSTATE,
+    CONTEXT_ARCH, CONTEXT_FLAGS_AT, CONTEXT_FXSAVE, CONTEXT_LEGACY_FEATURES, CONTEXT_LEGACY_STATE,
+    CONTEXT_PARTS, CONTEXT_SIZE, CONTEXT_XSTATE,
 };
 use super::{Bool, FALSE, TRUE, fail_with, unsupported};
 
@@ -23,7 +28,7 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 
 /// sizeof(CONTEXT_EX).
 const CONTEXT_EX_SIZE: usize = 0x18;
-const LEGACY_FEATURES: u64 = 3;
+const LEGACY_FEATURES: u64 = CONTEXT_LEGACY_FEATURES;
 /// The XSAVE header at the start of the XSTATE area.
 const XSAVE_HEADER: usize = 64;
 const LEGACY_SIZE: u32 = 512;
@@ -240,10 +245,10 @@ pub extern "system" fn LocateXStateFeature(
     if context.is_null() {
         return core::ptr::null_mut();
     }
-    let (at, size) = match feature_id {
-        0 => (context.wrapping_add(CONTEXT_FXSAVE), 160),
-        1 => (context.wrapping_add(CONTEXT_FXSAVE + 160), 256),
-        2..64 => {
+    let (at, size) = match (feature_id, CONTEXT_FXSAVE) {
+        (0, Some(fx)) => (context.wrapping_add(fx), 160),
+        (1, Some(fx)) => (context.wrapping_add(fx + 160), 256),
+        (2..64, _) => {
             if extended() & (1 << feature_id) == 0 {
                 return core::ptr::null_mut();
             }

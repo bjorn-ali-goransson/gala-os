@@ -73,6 +73,30 @@ impl Stat {
         }
         b
     }
+
+    /// The generic `struct stat` (asm-generic/stat.h, which aarch64 uses;
+    /// musl's `arch/aarch64/bits/stat.h`): dev, ino, mode, a 32-bit nlink,
+    /// uid, gid, rdev, a pad word, size, a 32-bit blksize and a pad, blocks,
+    /// the three times, two unused words: 128 bytes.
+    pub fn to_generic_bytes(&self) -> [u8; 128] {
+        let mut b = [0u8; 128];
+        let mut put = |at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(0, &self.dev.to_le_bytes());
+        put(8, &self.ino.to_le_bytes());
+        put(16, &self.mode.to_le_bytes());
+        put(20, &(self.nlink as u32).to_le_bytes());
+        put(24, &self.uid.to_le_bytes());
+        put(28, &self.gid.to_le_bytes());
+        put(32, &self.rdev.to_le_bytes());
+        put(48, &self.size.to_le_bytes());
+        put(56, &(self.blksize as i32).to_le_bytes());
+        put(64, &self.blocks.to_le_bytes());
+        for (at, t) in [(72, self.atime), (88, self.mtime), (104, self.ctime)] {
+            put(at, &t.sec.to_le_bytes());
+            put(at + 8, &t.nsec.to_le_bytes());
+        }
+        b
+    }
 }
 
 // st_mode's file types (inode(7)).
@@ -367,6 +391,42 @@ mod tests {
         assert_eq!(u64_at(off("st_mtim") + 8), 6);
         // Padding and unused words stay zero.
         assert_eq!(u32_at(36), 0);
+        assert!(b[120..].iter().all(|&x| x == 0));
+    }
+
+    /// The generic layout (aarch64's: asm-generic/stat.h, as musl's
+    /// `arch/aarch64/bits/stat.h` declares it): mode then a 32-bit nlink,
+    /// a 32-bit blksize, 128 bytes.
+    #[test]
+    fn generic_stat_bytes_put_fields_where_aarch64_has_them() {
+        let st = Stat {
+            dev: 1,
+            ino: 2,
+            nlink: 3,
+            mode: 0o100644,
+            uid: 1000,
+            gid: 1001,
+            rdev: 7,
+            size: 10,
+            blksize: 4096,
+            blocks: 8,
+            atime: Timespec { sec: 3, nsec: 4 },
+            mtime: Timespec { sec: 5, nsec: 6 },
+            ctime: Timespec { sec: 9, nsec: 10 },
+            ..Stat::default()
+        };
+        let b = st.to_generic_bytes();
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        assert_eq!(b.len(), 128);
+        assert_eq!((u64_at(0), u64_at(8)), (1, 2));
+        assert_eq!((u32_at(16), u32_at(20)), (0o100644, 3));
+        assert_eq!((u32_at(24), u32_at(28), u64_at(32)), (1000, 1001, 7));
+        assert_eq!((u64_at(40), u64_at(48)), (0, 10));
+        assert_eq!((u32_at(56), u32_at(60), u64_at(64)), (4096, 0, 8));
+        assert_eq!((u64_at(72), u64_at(80)), (3, 4));
+        assert_eq!((u64_at(88), u64_at(96)), (5, 6));
+        assert_eq!((u64_at(104), u64_at(112)), (9, 10));
         assert!(b[120..].iter().all(|&x| x == 0));
     }
 
