@@ -7470,14 +7470,28 @@ session's is shown by nothing unless GalaSession attaches a presenter
     again; a click while it installs does nothing). "Done" lists the
     programs again, so the tile is drawn installed and its bar goes.
     Each state is logged once (`desktop: start menu: install <id>:
-    <state> (<percent>%)`, a failure as `failed (gala exit N: <what it
-    stands for>)`) with a `window` event, since there is no window to
-    show it in; gala's own output is in the log too (a process without
-    a console writes there). Whatever ends the command, the tile hears:
-    `galapkg::install::install` reports Done or Failed around the whole
-    install, and gala.exe reports a failure with its exit code for
-    anything that ends it earlier. A gala.exe that dies without a word
-    leaves the bar waiting for the next listing (ROADMAP SM).
+    <state> (<percent>%)`, a failure as `failed (gala exit N)` and,
+    where the code says more than that it failed, `(gala exit N: <that>)`
+    - `pkg::install_failure`, whose None is galapkg's own `Failed` (4),
+    the step being named by gala's own line above) with a `window`
+    event, since there is no window to show it in; gala's own output is
+    in the log too (a process without a console writes there). Whatever
+    ends the command, the tile hears: `galapkg::install::install`
+    reports Done or Failed around the whole install, and gala.exe
+    reports a failure with its exit code for anything that ends it
+    earlier. A gala.exe that dies without a word leaves the bar waiting
+    for the next listing (ROADMAP SM).
+  - **An install that ends is told above the notification area**, since
+    the tile it ran on is out of sight as soon as the menu is closed:
+    the program's name over "Installed. Its tile starts it now." or
+    "The install failed[: <what the exit code says>]." on the card a
+    program's balloon uses ("The notification area"). It is told once
+    and always: the listing that draws the tile installed is what tells
+    it, the install's own last word tells it when the listing has not
+    caught up with it, and a failure reported twice is told once (a
+    click that tries again and fails is told again). A distribution's
+    install is told the same way (`set_linux`, `linux_progress`), with
+    no reason: `wsl --import` gives no code to say one.
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
   `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned
@@ -7586,6 +7600,13 @@ through the screen check).
   (recorded); no sound is played. The same card shows the tip of the
   icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
   line.
+- **The shell's own balloon** (`Tray::announce`): what the shell itself
+  has to say (an install that ended, "The start menu") belongs to no
+  window, so no icon is told that it shows, goes or was clicked, and it
+  does not go with a process; it replaces the balloon on show and times
+  out as any other. The card is drawn in front of the start menu where
+  the two meet, and a click there is the balloon's - the menu closes
+  too, as it does for any click outside it.
 - **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
   one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
   full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,

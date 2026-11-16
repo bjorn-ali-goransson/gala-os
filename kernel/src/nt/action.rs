@@ -252,7 +252,7 @@ pub fn run(
             let id = ascii(&r.text, &mut id).ok_or(NtStatus::INVALID_PARAMETER)?;
             let [state, percent, exit, _] = r.args;
             install_progress_noted(id, state, percent, exit);
-            desktop::install_progress(&caller.desk.shell, id.as_bytes(), state, percent)?;
+            desktop::install_progress(&caller.desk.shell, id.as_bytes(), state, percent, exit)?;
         }
         _ => return Err(NtStatus::INVALID_PARAMETER),
     }
@@ -586,10 +586,14 @@ fn install_progress_noted(id: &str, state: i32, percent: i32, exit: i32) {
         _ => "unknown state",
     };
     if state == 4 {
-        crate::info!(
-            "desktop: start menu: install {id}: failed (gala exit {exit}: {})",
-            install_failure(exit)
-        );
+        // What the code stands for when it stands for something; gala's
+        // own line above says which step failed either way.
+        match desktop::pkg::install_failure(exit) {
+            Some(why) => {
+                crate::info!("desktop: start menu: install {id}: failed (gala exit {exit}: {why})");
+            }
+            None => crate::info!("desktop: start menu: install {id}: failed (gala exit {exit})"),
+        }
     } else {
         crate::info!("desktop: start menu: install {id}: {what} ({percent}%)");
     }
@@ -601,19 +605,6 @@ fn install_progress_noted(id: &str, state: i32, percent: i32, exit: i32) {
             crate::events::Str(id)
         ),
     );
-}
-
-/// What a `gala install` exit code stands for (galapkg's `Kind`).
-fn install_failure(exit: i32) -> &'static str {
-    match exit {
-        1 => "its command line",
-        2 => "no such package or version in the source",
-        3 => "an installer or source gala cannot handle yet",
-        4 => "the install itself",
-        5 => "the download is not what the manifest says",
-        6 => "it needs administrator rights",
-        _ => "an unknown reason",
-    }
 }
 
 /// What the start menu's Linux section asked for: an install (`gala

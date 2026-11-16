@@ -720,12 +720,15 @@ the machine's). Not installed, a tile is dimmed with a download badge
 and a click installs it on the tile: `gala install <id>` with no window,
 the menu open and a progress bar on the tile (the states gala reports
 through GalaDesktopAction's InstallProgress), red if it fails and
-installed when it is done; installed, a click starts the program. A
-console program started from the menu gets its own console window.
-Tests: the desktop's, `nt::action`'s and galapkg's host tests, scenario
-`start_menu` (start_menu_test and a screen check: the tiles, the Command
-Prompt clicked, 7-Zip's install started with no console window of its
-own and its tile's bar red when it failed).
+installed when it is done; installed, a click starts the program. An
+install that ends, either way, is also told above the notification area
+(the program's name, and what the exit code says when it says more than
+that it failed). A console program started from the menu gets its own
+console window. Tests: the desktop's, `nt::action`'s and galapkg's host
+tests, scenario `start_menu` (start_menu_test and a screen check: the
+tiles, the Command Prompt clicked, 7-Zip's install started with no
+console window of its own, its tile's bar red when it failed and its
+notification above the notification area).
 TimKosse.FileZilla.Client is not in winget-pkgs today: its tile's bar
 turns red and `gala install`'s "no package" is in the log (the portable
 C:\filezilla placement of the FileZilla scenarios still counts as

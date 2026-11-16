@@ -17,22 +17,23 @@ pub enum Progress {
     /// Writing it to the machine: an installer run, or a portable
     /// package unpacked.
     Installing,
-    /// It failed. The bar stays, in red; a click tries again. Why is in
-    /// the log (`nt::action`: gala's exit code), not on the tile.
-    Failed,
+    /// It failed, with gala's exit code (`install_failure` says what it
+    /// stands for). The bar stays, in red; a click tries again. Why is
+    /// in the log and in the tile's notification, not on the tile.
+    Failed(i32),
 }
 
 impl Progress {
     /// What `gala install` reports: `state` 0 resolving, 1 downloading
-    /// (`percent`), 2 installing, 4 failed. None for a state no tile
-    /// draws (3, done: the install's progress goes away) or one this
-    /// kernel does not know.
-    pub fn from_state(state: i32, percent: i32) -> Option<Progress> {
+    /// (`percent`), 2 installing, 4 failed (`exit`: what gala ended
+    /// with). None for a state no tile draws (3, done: the install's
+    /// progress goes away) or one this kernel does not know.
+    pub fn from_state(state: i32, percent: i32, exit: i32) -> Option<Progress> {
         match state {
             0 => Some(Progress::Resolving),
             1 => Some(Progress::Downloading(percent.clamp(0, 100) as u8)),
             2 => Some(Progress::Installing),
-            4 => Some(Progress::Failed),
+            4 => Some(Progress::Failed(exit)),
             _ => None,
         }
     }
@@ -46,8 +47,28 @@ impl Progress {
             Progress::Resolving => 5,
             Progress::Downloading(p) => (10 + u32::from(p.min(100)) * 3 / 5) as u8,
             Progress::Installing => 85,
-            Progress::Failed => 100,
+            Progress::Failed(_) => 100,
         }
+    }
+}
+
+/// What a `gala install` exit code says beyond the install having
+/// failed (galapkg's `Kind`), as a clause: the log says `failed (gala
+/// exit N: <this>)` and the tile's notification `The install failed:
+/// <this>.` None when the code says no more than that, so that neither
+/// says it twice over.
+pub fn install_failure(exit: i32) -> Option<&'static str> {
+    match exit {
+        1 => Some("gala was asked for it wrongly"),
+        2 => Some("the source has no such package or version"),
+        3 => Some("gala cannot handle that installer or source yet"),
+        5 => Some("the download is not what the manifest says"),
+        6 => Some("it needs administrator rights"),
+        // 4 is galapkg's `Failed`: a step of the install did not go
+        // through and gala's own line says which, in the log where a
+        // windowless install's output goes. Any other code is a gala
+        // this kernel does not know.
+        _ => None,
     }
 }
 
@@ -55,20 +76,37 @@ impl Progress {
 mod tests {
     use super::*;
 
+    /// Each code galapkg exits with says something of its own; the one
+    /// that says only that it failed (4), and a code from a newer gala,
+    /// say nothing more rather than guess.
+    #[test]
+    fn every_exit_code_says_what_it_knows() {
+        let said: alloc::vec::Vec<Option<&str>> = (1..=6).map(install_failure).collect();
+        for (i, s) in said.iter().enumerate() {
+            assert!(s.is_none_or(|s| !s.is_empty()));
+            assert!(s.is_none() || !said[..i].contains(s), "exit {} says what another does", i + 1);
+        }
+        assert_eq!(install_failure(4), None);
+        assert_eq!(install_failure(7), None);
+        assert_eq!(install_failure(-1), None);
+    }
+
     #[test]
     fn the_states_gala_reports_fill_the_bar_in_order() {
-        assert_eq!(Progress::from_state(0, 0), Some(Progress::Resolving));
-        assert_eq!(Progress::from_state(1, 50), Some(Progress::Downloading(50)));
-        assert_eq!(Progress::from_state(2, 0), Some(Progress::Installing));
-        assert_eq!(Progress::from_state(4, 0), Some(Progress::Failed));
+        assert_eq!(Progress::from_state(0, 0, 0), Some(Progress::Resolving));
+        assert_eq!(Progress::from_state(1, 50, 0), Some(Progress::Downloading(50)));
+        assert_eq!(Progress::from_state(2, 0, 0), Some(Progress::Installing));
+        // A failure keeps the code gala ended with, for the tile's
+        // notification and the log.
+        assert_eq!(Progress::from_state(4, 0, 4), Some(Progress::Failed(4)));
         // Done takes the bar away, and a state from a newer gala.exe is
         // not drawn rather than drawn wrongly.
-        assert_eq!(Progress::from_state(3, 0), None);
-        assert_eq!(Progress::from_state(9, 0), None);
+        assert_eq!(Progress::from_state(3, 0, 0), None);
+        assert_eq!(Progress::from_state(9, 0, 0), None);
         // A percentage outside 0..100 (a host that counted wrongly) is
         // clamped, not wrapped.
-        assert_eq!(Progress::from_state(1, -5), Some(Progress::Downloading(0)));
-        assert_eq!(Progress::from_state(1, 1000), Some(Progress::Downloading(100)));
+        assert_eq!(Progress::from_state(1, -5, 0), Some(Progress::Downloading(0)));
+        assert_eq!(Progress::from_state(1, 1000, 0), Some(Progress::Downloading(100)));
         // The bar never goes backwards as an install goes on.
         let steps = [
             Progress::Resolving,
@@ -79,6 +117,6 @@ mod tests {
         ];
         assert!(steps.windows(2).all(|w| w[0].percent() < w[1].percent()), "{steps:?}");
         assert_eq!(Progress::Downloading(100).percent(), 70);
-        assert_eq!(Progress::Failed.percent(), 100);
+        assert_eq!(Progress::Failed(4).percent(), 100);
     }
 }

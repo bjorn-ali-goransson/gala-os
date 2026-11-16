@@ -294,11 +294,9 @@ impl Tray {
         let gone = self.icons.len() != before;
         if gone {
             let icons = &self.icons;
-            if self
-                .balloon
-                .as_ref()
-                .is_some_and(|b| !icons.iter().any(|i| i.hwnd == b.hwnd && i.uid == b.uid))
-            {
+            if self.balloon.as_ref().is_some_and(|b| {
+                b.hwnd != 0 && !icons.iter().any(|i| i.hwnd == b.hwnd && i.uid == b.uid)
+            }) {
                 self.balloon = None;
             }
         }
@@ -310,7 +308,7 @@ impl Tray {
     pub fn drop_window(&mut self, hwnd: u64) -> bool {
         let before = self.icons.len();
         self.icons.retain(|i| i.hwnd != hwnd);
-        if self.balloon.as_ref().is_some_and(|b| b.hwnd == hwnd) {
+        if self.balloon.as_ref().is_some_and(|b| b.hwnd != 0 && b.hwnd == hwnd) {
             self.balloon = None;
         }
         self.icons.len() != before
@@ -366,6 +364,22 @@ impl Tray {
             let then = if button == Button::Left { NIN_SELECT } else { WM_CONTEXTMENU };
             self.notify_id(key.0, key.1, then, x, y);
         }
+    }
+
+    /// A balloon the shell itself raises (an install that ended): no
+    /// window owns it, so no icon is told it is shown, nothing is posted
+    /// when it goes, and a click only takes it away. It replaces the
+    /// balloon on show, as a program's does.
+    pub fn announce(&mut self, title: &[u16], text: &[u16]) {
+        let (mut t, mut x) = (Vec::new(), Vec::new());
+        if t.try_extend_from_slice(title).is_err() || x.try_extend_from_slice(text).is_err() {
+            return;
+        }
+        if let Some(old) = self.balloon.take() {
+            self.notify_id(old.hwnd, old.uid, NIN_BALLOONHIDE, 0, 0);
+        }
+        self.balloon =
+            Some(Balloon { hwnd: 0, uid: 0, title: t, text: x, seconds_left: BALLOON_SECONDS });
     }
 
     /// The balloon was clicked: its icon is told, and it goes.
@@ -467,6 +481,26 @@ mod tests {
         assert!(t.tick());
         assert_eq!(t.posts[1].lparam, u64::from(NIN_BALLOONTIMEOUT));
         assert!(t.balloon.is_none());
+    }
+
+    /// The shell's own balloon tells no window, stays as long as a
+    /// program's and goes with no process.
+    #[test]
+    fn the_shells_own_balloon_belongs_to_no_window() {
+        let mut t = Tray::new();
+        t.add(5, &data(NIF_MESSAGE, 1)).unwrap();
+        t.announce(&[b'7' as u16], &[b'o' as u16, b'k' as u16]);
+        let b = t.balloon.as_ref().unwrap();
+        assert_eq!((b.hwnd, b.uid), (0, 0));
+        assert!(t.posts.is_empty());
+        t.drop_window(0x20010);
+        t.drop_owned(5);
+        assert!(t.balloon.is_some(), "it belongs to no window of theirs");
+        for _ in 1..BALLOON_SECONDS {
+            assert!(!t.tick());
+        }
+        assert!(t.tick());
+        assert!(t.balloon.is_none() && t.posts.is_empty());
     }
 
     #[test]

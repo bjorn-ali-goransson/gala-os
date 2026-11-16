@@ -1322,7 +1322,16 @@ impl Desktop {
     /// The tiles the start menu lists (`list_programs` of PROGRAMS).
     pub fn set_programs(&mut self, programs: &[Entry]) {
         let was = self.installs.len();
-        self.installs.retain(|(p, _)| !programs.iter().any(|e| e.program == *p && e.installed));
+        let mut done: Vec<usize> = Vec::new();
+        self.installs.retain(|(p, s)| {
+            if !programs.iter().any(|e| e.program == *p && e.installed) {
+                return true;
+            }
+            if !matches!(s, pkg::Progress::Failed(_)) {
+                let _ = done.try_push(*p);
+            }
+            false
+        });
         if self.installs.len() != was {
             self.menu_dirty = true;
         }
@@ -1330,6 +1339,13 @@ impl Desktop {
             self.programs.clear();
             let _ = self.programs.try_extend_from_slice(programs);
             self.menu_dirty = true;
+        }
+        // This listing is what tells an install that worked, since it
+        // comes before the install's own last word (`install_progress`).
+        for p in done {
+            if let Some(name) = PROGRAMS.get(p).map(|p| p.name) {
+                self.install_done(name);
+            }
         }
     }
 
@@ -1342,6 +1358,12 @@ impl Desktop {
         {
             let item = Rect { x: r.x + 4, y: r.y + 4, w: r.w - 8, h: BAR_MENU_ITEM };
             return if item.contains(x, y) { Hit::BarMenuItem } else { Hit::BarMenu };
+        }
+        if self.tray.balloon.is_some()
+            && let Some((r, _)) = &self.card
+            && r.contains(x, y)
+        {
+            return Hit::Balloon;
         }
         if self.menu.is_some()
             && let Some(r) = self.context_rect()
@@ -1380,12 +1402,6 @@ impl Desktop {
                 }
             }
             return Hit::Menu;
-        }
-        if self.tray.balloon.is_some()
-            && let Some((r, _)) = &self.card
-            && r.contains(x, y)
-        {
-            return Hit::Balloon;
         }
         if self.taskbar_rect().contains(x, y) {
             if self.start_rect().contains(x, y) {
@@ -1623,11 +1639,15 @@ impl Desktop {
 
     fn left_down(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         self.pressed = hit;
-        // A click outside the open menu closes it (and does nothing else).
+        // A click outside the open menu closes it and does nothing
+        // else - except on a notification, which is drawn in front of
+        // the menu and so is what the click was aimed at.
         if self.menu.is_some() && !hit.in_menu() && hit != Hit::Start {
             self.close_menu();
-            self.pressed = Hit::Nothing;
-            return;
+            if hit != Hit::Balloon {
+                self.pressed = Hit::Nothing;
+                return;
+            }
         }
         // A click beside the open context menu closes it (and does nothing
         // else).
@@ -1911,7 +1931,7 @@ impl Desktop {
         let busy = self
             .installs
             .iter()
-            .any(|(p, s)| *p == e.program && !matches!(s, pkg::Progress::Failed));
+            .any(|(p, s)| *p == e.program && !matches!(s, pkg::Progress::Failed(_)));
         if busy {
             return;
         }
@@ -1968,21 +1988,81 @@ impl Desktop {
         }
         self.linux = listing;
         let installed = &self.linux.installed;
-        self.progress.retain(|(n, _)| !installed.iter().any(|d| d.name == *n));
+        let mut done: Vec<linux::Name> = Vec::new();
+        self.progress.retain(|(n, p)| {
+            if !installed.iter().any(|d| d.name == *n) {
+                return true;
+            }
+            if *p != linux::Progress::Failed {
+                let _ = done.try_push(*n);
+            }
+            false
+        });
         let tiles = linux::entries(&self.linux);
         if tiles != self.linux_tiles {
             self.linux_tiles = tiles;
             self.menu_dirty = true;
         }
+        // As a package's listing does, this tells an install that
+        // worked (before `linux_progress`'s own last word).
+        for n in done {
+            self.install_done(n.as_str());
+        }
+    }
+
+    /// A notification above the notification area, on the card a
+    /// program's balloon uses: `title` over `text`'s pieces, run
+    /// together and wrapped. Nothing is told when the words do not fit
+    /// in what can be allocated (the tile still shows where it is).
+    fn announce(&mut self, title: &str, text: &[&str]) {
+        fn push(out: &mut Vec<u16>, s: &str) -> bool {
+            s.encode_utf16().all(|c| out.try_push(c).is_ok())
+        }
+        let (mut t, mut x) = (Vec::new(), Vec::new());
+        if !push(&mut t, title) || !text.iter().all(|s| push(&mut x, s)) {
+            return;
+        }
+        self.tray.announce(&t, &x);
+        self.tray_changed();
+    }
+
+    /// An install that is over is told there: the tile it ran on is out
+    /// of sight as soon as the menu is closed, and the notification is
+    /// where Windows says the same.
+    fn install_done(&mut self, name: &str) {
+        self.announce(name, &["Installed. Its tile starts it now."]);
+    }
+
+    /// The same for one that failed, with what gala's exit code stands
+    /// for when there is one (`pkg::install_failure`).
+    fn install_failed(&mut self, name: &str, why: Option<&str>) {
+        match why {
+            Some(why) => self.announce(name, &["The install failed: ", why, "."]),
+            None => self.announce(name, &["The install failed."]),
+        }
     }
 
     /// Where a tile's install is (`gala install <id>` through
     /// GalaDesktopAction): None when it is over (the program list that
-    /// follows shows it installed).
+    /// follows shows it installed). An install that ends, either way, is
+    /// told above the notification area - once: a listing that already
+    /// told it leaves nothing to tell, and a failure that repeats itself
+    /// is not told again (a click that tries again and fails is).
     pub fn install_progress(&mut self, program: usize, progress: Option<pkg::Progress>) {
+        let before = self.installs.iter().find(|(p, _)| *p == program).map(|&(_, s)| s);
+        let failed = |s: Option<pkg::Progress>| matches!(s, Some(pkg::Progress::Failed(_)));
         self.installs.retain(|(p, _)| *p != program);
         if let Some(p) = progress {
             let _ = self.installs.try_push((program, p));
+        }
+        if let Some(name) = PROGRAMS.get(program).map(|p| p.name) {
+            match progress {
+                None if before.is_some() && !failed(before) => self.install_done(name),
+                Some(pkg::Progress::Failed(exit)) if !failed(before) => {
+                    self.install_failed(name, pkg::install_failure(exit));
+                }
+                _ => {}
+            }
         }
         self.menu_dirty = true;
         self.refresh();
@@ -1992,9 +2072,21 @@ impl Desktop {
     /// GalaDesktopAction): None when it is over (the listing that follows
     /// shows the distribution installed).
     pub fn linux_progress(&mut self, name: linux::Name, progress: Option<linux::Progress>) {
+        let before = self.progress.iter().find(|(n, _)| *n == name).map(|&(_, p)| p);
         self.progress.retain(|(n, _)| *n != name);
         if let Some(p) = progress {
             let _ = self.progress.try_push((name, p));
+        }
+        // Told as a package's install is, without a reason: `wsl
+        // --import` says why in the log, not in a code.
+        match progress {
+            None if before.is_some_and(|p| p != linux::Progress::Failed) => {
+                self.install_done(name.as_str());
+            }
+            Some(linux::Progress::Failed) if before != Some(linux::Progress::Failed) => {
+                self.install_failed(name.as_str(), None);
+            }
+            _ => {}
         }
         self.menu_dirty = true;
         self.refresh();
@@ -2404,7 +2496,7 @@ impl Desktop {
             }
             tile_name(&mut c, r, program.name, if installing.is_some() { 1 } else { 2 });
             if let Some(s) = installing {
-                progress_bar(&mut c, r, s.percent(), s == pkg::Progress::Failed);
+                progress_bar(&mut c, r, s.percent(), matches!(s, pkg::Progress::Failed(_)));
             }
         }
         if listed.is_empty() {
@@ -2613,16 +2705,6 @@ impl Desktop {
         {
             c = over(c, bar.get(x - t.x, y - t.y));
         }
-        if let Some((r, card)) = &self.card
-            && shadow_bounds(*r).contains(x, y)
-        {
-            let layer = card.get(x - r.x, y - r.y);
-            if layer >> 24 < 255 {
-                let rect = (r.x + 4, r.y + SHADOW_DROP, r.x + r.w - 4, r.y + r.h + SHADOW_DROP - 2);
-                c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_INACTIVE));
-            }
-            c = over(c, layer);
-        }
         if let Some(menu) = &self.menu
             && self.menu_bounds().contains(x, y)
         {
@@ -2631,6 +2713,16 @@ impl Desktop {
             if layer >> 24 < 255 {
                 let rect = (m.x + 4, m.y + SHADOW_DROP, m.x + m.w - 4, m.y + m.h + SHADOW_DROP - 2);
                 c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_ACTIVE));
+            }
+            c = over(c, layer);
+        }
+        if let Some((r, card)) = &self.card
+            && shadow_bounds(*r).contains(x, y)
+        {
+            let layer = card.get(x - r.x, y - r.y);
+            if layer >> 24 < 255 {
+                let rect = (r.x + 4, r.y + SHADOW_DROP, r.x + r.w - 4, r.y + r.h + SHADOW_DROP - 2);
+                c = blend(c, 0, shadow_alpha(x, y, rect, SHADOW_REACH, SHADOW_INACTIVE));
             }
             c = over(c, layer);
         }
@@ -3811,7 +3903,8 @@ fn save_prefs(p: linux::Prefs) {
 /// Where a tile's install is for `shell`'s start menu
 /// (GalaDesktopAction's InstallProgress from `gala install <id>`):
 /// `state` 0 resolving, 1 downloading (`percent`), 2 installing, 3 done
-/// (the tile is installed now: its bar goes), 4 failed.
+/// (the tile is installed now: its bar goes), 4 failed (`exit`: what
+/// gala ended with).
 /// STATUS_INVALID_PARAMETER when no tile's package is `id`, so that an
 /// install of something the catalog does not list is told so and goes on.
 pub fn install_progress(
@@ -3819,6 +3912,7 @@ pub fn install_progress(
     id: &[u8],
     state: i32,
     percent: i32,
+    exit: i32,
 ) -> Result<(), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
@@ -3826,7 +3920,9 @@ pub fn install_progress(
     let program = program_with_package(id).ok_or(NtStatus::INVALID_PARAMETER)?;
     let progress = match state {
         3 => None,
-        _ => Some(pkg::Progress::from_state(state, percent).ok_or(NtStatus::INVALID_PARAMETER)?),
+        _ => Some(
+            pkg::Progress::from_state(state, percent, exit).ok_or(NtStatus::INVALID_PARAMETER)?,
+        ),
     };
     // The list again once it is installed (the disk is read outside the
     // lock), so that the tile is drawn installed and no longer dimmed.

@@ -13439,7 +13439,7 @@ const SCENARIOS: &[Scenario] = &[
             // the log, which is where a windowless install's output goes,
             // and the tile's bar turns red (the screen check).
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
-            "desktop: start menu: install 7zip.7zip: failed (gala exit 4: the install itself)",
+            "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
             "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
@@ -21787,8 +21787,20 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             // and 4 high (kernel/src/nt/desktop). The bar is drawn by
             // the menu, so it is also what says the menu stayed open on
             // the click; the wallpaper is there otherwise.
+            //
+            // The install ended, so it is told above the notification
+            // area too: a card 360 wide, 12 from the right edge and 12
+            // above the taskbar (908, 740 at its bottom right), in
+            // front of the menu. Its light background and the grey of
+            // "The install failed." are in the band that holds the text
+            // whether it takes one line or two. The balloon goes after
+            // BALLOON_SECONDS, which is many tries of this check.
             input: &[],
-            pixels: &[PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c)],
+            pixels: &[
+                PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0xf2f4f8),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0x5d5d5d),
+            ],
         },
     ],
 };
