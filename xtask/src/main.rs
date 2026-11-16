@@ -12389,6 +12389,9 @@ const ARM64_TWINS: &[&str] = &[
     "lx_id",
     "lx_run",
     "lx_poll",
+    "lx_auxv",
+    "lx_epoll",
+    "lx_thread",
 ];
 
 /// The x64 scenario an ARM64 twin `arm_<name>` is of.

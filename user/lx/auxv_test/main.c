@@ -213,11 +213,17 @@ int main(int argc, char **argv, char **envp)
 	say_bool("AT_EGID is getegid()", at[AT_EGID] == (u64)sys0(NR_getegid));
 	say("AT_SECURE", at[AT_SECURE]);
 	say("AT_CLKTCK", at[AT_CLKTCK]);
+#if defined(__x86_64__)
 	{
 		unsigned a = 1, b, c = 0, d;
 		__asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
 		say_bool("AT_HWCAP is CPUID(1).EDX", at[AT_HWCAP] == d);
 	}
+#else
+	/* aarch64: HWCAP_FP and HWCAP_ASIMD, which every ARMv8-A processor
+	 * has (the other bits are the processor's). */
+	say_bool("AT_HWCAP has FP and ASIMD", (at[AT_HWCAP] & 3) == 3);
+#endif
 
 	say_text("auxv_test: ok");
 	exit_group(0);

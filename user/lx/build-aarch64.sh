@@ -19,7 +19,7 @@ root=$(cd "$here/../.." && pwd)
 out=${1:-$here/bin/aarch64}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-AARCH64_TESTS="altstack_test poll_test brk_test caps_test clock_test eventfd_test exec_test fdbits_test fdioctl_test fileio_test forkmem_test fs_test fsid_test hello_test id_test inotify_test memfd_test mmap_test pidfd_test pipe_test prctl_test proc_test procfs_test pty_test run_test seccomp_test shm_test socket_test statfs_test sysinfo_test timerfd_test unix_test wl_input_test wl_maximize_test wl_popup_test wl_test write_exit_test"
+AARCH64_TESTS="altstack_test poll_test auxv_test epoll_test thread_test brk_test caps_test clock_test eventfd_test exec_test fdbits_test fdioctl_test fileio_test forkmem_test fs_test fsid_test hello_test id_test inotify_test memfd_test mmap_test pidfd_test pipe_test prctl_test proc_test procfs_test pty_test run_test seccomp_test shm_test socket_test statfs_test sysinfo_test timerfd_test unix_test wl_input_test wl_maximize_test wl_popup_test wl_test write_exit_test"
 MUSL=musl-1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 cache=$root/target/lx-aarch64-musl
@@ -37,7 +37,9 @@ if [ ! -f "$musl/lib/libc.a" ]; then
 		AR=llvm-ar RANLIB=llvm-ranlib CFLAGS=-O2 >/dev/null &&
 		make -j"$(nproc)" >/dev/null && make install >/dev/null)
 fi
-flags="-O2 -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -Wall -Wextra -Werror -Wno-unused-function"
+# build.sh's flags; clang also warns of an unused static volatile, which
+# gcc does not (thread_test has one): not an error here either.
+flags="-O2 -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 for t in $AARCH64_TESTS; do
