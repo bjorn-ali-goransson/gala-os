@@ -1841,11 +1841,11 @@ need gala's.
      ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
      (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
      is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. Both ends are the next step,
-     the server first, and the ledger needs the endpoint it failed to
-     reach: gala's rpcrt4 turns ERROR_FILE_NOT_FOUND into
-     RPC_S_SERVER_UNAVAILABLE (`transport.rs`) without recording the
-     name, so nothing today says which endpoint is missing.
+     client has nothing to reach. The server is the next step; the
+     client side of the diagnosis is in place: a connect that finds no
+     pipe records the name (`rpcrt4.dll!no server at pipe(<name>)`, the
+     Win32 error as the detail, `rpc_test`), so a run says which
+     endpoint a program could not reach.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own

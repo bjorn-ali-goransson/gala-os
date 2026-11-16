@@ -13300,7 +13300,15 @@ const SCENARIOS: &[Scenario] = &[
         name: "rpc_test",
         cmdline: "qemu_exit run=rpc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["rpc_test: ok", "exited with status 0x00000000"],
+        // The last two: a binding to an endpoint no server has leaves the
+        // pipe's name in the ledger, which is all that says which server
+        // a program could not reach (ROADMAP OF: Office's AppV ISV API).
+        expect: &[
+            "rpc_test: ok",
+            "exited with status 0x00000000",
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-no_such_endpoint)""#,
+            r#""service":"rpcrt4.dll!no server at pipe(no_such_pipe)""#,
+        ],
     },
     Scenario {
         name: "unimplemented_test",
