@@ -5340,7 +5340,11 @@ of their own, clients of it) is the yardstick.
   fragments up to 34240 bytes; no authentication trailers). ncacn_np's
   endpoint `\pipe\x` is `\\.\pipe\x`; ncalrpc's endpoint `x` is the
   runtime's private pipe `\\.\pipe\LRPC-x` (Windows carries ncalrpc
-  over ALPC ports, which gala has not; both ends here are gala's). The
+  over ALPC ports, which gala has not; both ends here are gala's). A
+  connect that finds no pipe is RPC_S_SERVER_UNAVAILABLE, which says
+  nothing about which server, so the name is recorded (`no server at
+  pipe(<name>)`, the Win32 error as the detail): for a program whose
+  server gala has not, that name is the whole of the diagnosis. The
   network protocol sequences are RPC_S_PROTSEQ_NOT_SUPPORTED, recorded;
   there is no endpoint mapper (a binding without an endpoint is
   EPT_S_NOT_REGISTERED, recorded).

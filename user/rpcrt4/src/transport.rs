@@ -24,8 +24,6 @@ const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 const QUOTA: u32 = 0x1_0000;
 const GENERIC_READ_WRITE: u32 = 0xc000_0000;
 const OPEN_EXISTING: u32 = 3;
-const ERROR_FILE_NOT_FOUND: u32 = 2;
-const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_PIPE_BUSY: u32 = 231;
 const ERROR_MORE_DATA: u32 = 234;
 const ERROR_PIPE_CONNECTED: u32 = 535;
@@ -85,6 +83,16 @@ pub fn accept(pipe: Handle) -> bool {
     unsafe { sys::ConnectNamedPipe(pipe, 0) != 0 || sys::GetLastError() == ERROR_PIPE_CONNECTED }
 }
 
+/// The pipe's own name: `path` without the `\\.\pipe\` every endpoint
+/// shares and without the NUL, for a ledger line. An ncalrpc endpoint
+/// keeps its `LRPC-` prefix, which is what tells the two apart.
+fn pipe_name(path: &[u16]) -> &[u16] {
+    const PREFIX: &str = "\\\\.\\pipe\\";
+    let named = &path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())];
+    let n = PREFIX.len();
+    if named.len() > n && sys::eq_ignore_case(&named[..n], PREFIX) { &named[n..] } else { named }
+}
+
 /// Connects to the server at `path`.
 pub fn connect(path: &[u16]) -> Result<Handle, u32> {
     // SAFETY: a NUL-terminated name.
@@ -92,11 +100,19 @@ pub fn connect(path: &[u16]) -> Result<Handle, u32> {
         unsafe { sys::CreateFileW(path.as_ptr(), GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0) };
     if h == INVALID_HANDLE {
         // SAFETY: plain call.
-        return Err(match unsafe { sys::GetLastError() } {
-            ERROR_PIPE_BUSY => RPC_S_SERVER_TOO_BUSY,
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => RPC_S_SERVER_UNAVAILABLE,
-            _ => RPC_S_SERVER_UNAVAILABLE,
-        });
+        let error = unsafe { sys::GetLastError() };
+        if error == ERROR_PIPE_BUSY {
+            return Err(RPC_S_SERVER_TOO_BUSY);
+        }
+        // Nothing answers on the name (ERROR_FILE_NOT_FOUND and
+        // ERROR_PATH_NOT_FOUND among the reasons). The caller is told
+        // RPC_S_SERVER_UNAVAILABLE, which says nothing about which
+        // server: the name is the whole of the diagnosis for a program
+        // whose RPC server gala does not have, so the ledger keeps it
+        // (ROADMAP OF: Office's AppV ISV API), with the Win32 error as
+        // the detail.
+        sys::note_with(b"rpcrt4.dll!no server at pipe(", pipe_name(path), true, error.into());
+        return Err(RPC_S_SERVER_UNAVAILABLE);
     }
     let mode = PIPE_READMODE_MESSAGE;
     // SAFETY: our pipe.
