@@ -3563,10 +3563,22 @@ name (`missing dll`), never silently.
   (`kernel32.dll!GetModuleHandle(<name>)`, "other", the NTSTATUS as
   detail; `kernel32_test`): the answer is no gap of gala's -- a program
   probing for an optional module gets the same NULL on Windows -- but it
-  is the only record of the name, where a missing export leaves `missing
-  export` and a failed load `missing dll` or `load failed`, so a program
-  that gives up over a module nobody could name is not invisible
+  is the only record of the name, where an export a program looks up at
+  run time leaves `missing export`, an import that does not bind
+  `missing import` and a failed load `missing dll` or `load failed`, so a
+  program that gives up over a module nobody could name is not invisible
   ("Gaps are never silent").
+- **An import that does not bind** is reported with the module whose
+  import it is (`<dll>!<export>(imported by <module>)`, "missing
+  import"), and every missing import of an image is reported before the
+  load fails, not just the first. The importer is what makes the record
+  actionable: the same export may be probed at run time by a program that
+  lives without it (`missing export`) and imported by a DLL that cannot
+  load without it, and only the second stops anything. The executable has
+  no module table entry of its own, so its name comes from its path
+  (`missing_import_test`); a DLL's comes from the table (`loader_test`,
+  where testdll's ordinal 2 is both, from the program and from
+  testdll_gap.dll).
 - **Search** (`map_dll`): the executable's directory, SetDllDirectoryW's
   directory (LdrSetDllDirectory, kept under the loader lock), then
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A bare name is

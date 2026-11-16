@@ -397,7 +397,12 @@ of a rarer kind says a gap was lost and the caps need revisiting.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
   (`dll!function` names, 96 characters kept, the ledger's own
   length). Its kinds: `missing
-  export`, `unsupported`, `not implemented` (a gap the caller is told
+  export` (one a program asked for at run time and lives with,
+  GetProcAddress), `missing import` (one the loader could not bind,
+  which ends the load: named `<dll>!<export>(imported by <module>)`, so
+  the module that cannot run for it is in the record and a program's
+  probes are not mistaken for it; `missing_import_test`, `loader_test`),
+  `unsupported`, `not implemented` (a gap the caller is told
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export

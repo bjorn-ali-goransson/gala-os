@@ -1772,6 +1772,18 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
     // for one by ordinal, as Windows reports "the ordinal N could not be
     // located"), once every missing import is reported.
     let mut missing = None;
+    // Whose imports these are, for the report of one that does not bind:
+    // the executable is not in the module table, so its name comes from
+    // its path.
+    let mut who = [0u8; MAX_NAME];
+    let who_len = match slot {
+        Some(slot) => with_modules(|m| {
+            let n = m[slot].name_len;
+            who[..n].copy_from_slice(&m[slot].name[..n]);
+            n
+        }),
+        None => normalize(image_path().iter().copied(), &mut who)?,
+    };
     while rd32(desc + 12) != 0 {
         let mut name = [0u8; MAX_NAME];
         let len = normalize(
@@ -1819,7 +1831,12 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                 None => {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
-                    report_missing_export(c_str(base + rd32(desc + 12) as usize), name, ordinal);
+                    report_missing_export(
+                        c_str(base + rd32(desc + 12) as usize),
+                        name,
+                        ordinal,
+                        Some(&who[..who_len]),
+                    );
                     missing.get_or_insert(if name.is_empty() {
                         STATUS_ORDINAL_NOT_FOUND
                     } else {
@@ -1836,9 +1853,12 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
 }
 
 /// Reports `dll!name` (or `dll!#ordinal`) to the kernel's missing-features
-/// ledger (gala's own service; see `GalaRecordMissing`).
-fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32) {
-    let mut text = [0u8; 64];
+/// ledger (gala's own service; see `GalaRecordMissing`). With `importer`
+/// it is an import that did not bind, which ends the load and is named
+/// with the module whose import it is; without, a program's own lookup at
+/// run time, which the program is told about and lives with.
+fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option<&[u8]>) {
+    let mut text = [0u8; 128];
     let mut n = 0;
     let mut push = |bytes: &[u8]| {
         for &b in bytes {
@@ -1866,7 +1886,13 @@ fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32) {
     } else {
         push(name);
     }
-    GalaRecordMissing(text.as_ptr(), n, 1, u64::from(ordinal));
+    if let Some(importer) = importer {
+        push(b"(imported by ");
+        push(importer);
+        push(b")");
+    }
+    let what = if importer.is_some() { 8 } else { 1 };
+    GalaRecordMissing(text.as_ptr(), n, what, u64::from(ordinal));
 }
 
 /// The normalized name in a UNICODE_STRING.
@@ -2039,7 +2065,7 @@ unsafe extern "system" fn ldr_get_procedure_address(
             // SAFETY: the caller passes a valid ANSI_STRING.
             unsafe { core::slice::from_raw_parts((*name).buffer, usize::from((*name).length)) }
         };
-        report_missing_export(&dll[..len], wanted, ordinal);
+        report_missing_export(&dll[..len], wanted, ordinal, None);
     }
     match found {
         Ok(target) => {

@@ -12943,11 +12943,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=loader_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            // testdll's ordinal 2 has no export (RVA 0): asked for, and
-            // imported by testdll_gap.dll, it is a missing export. The
-            // DLL that could not load for it is named too, with the
-            // status (STATUS_ORDINAL_NOT_FOUND, 0xc0000138).
+            // testdll's ordinal 2 has no export (RVA 0). Asked for by
+            // the program it is a missing export, which the program is
+            // told about and lives with; imported by testdll_gap.dll it
+            // is a missing import, which ends that load -- and the two
+            // are told apart in the ledger. The DLL that could not load
+            // is named too, with the status (STATUS_ORDINAL_NOT_FOUND,
+            // 0xc0000138).
             r#"ledger: {"service":"testdll.dll!#2","what":"missing export""#,
+            r#"ledger: {"service":"testdll.dll!#2(imported by testdll_gap.dll)","what":"missing import""#,
             r#"ledger: {"service":"testdll_gap.dll","what":"load failed","detail":3221225784"#,
             "loader_test: ok",
             "exited with status 0x00000000",
@@ -13401,8 +13405,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "missing_import_test.exe finished with status 0xc0000139",
-            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
-            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
+            // An import that does not bind is a "missing import", named
+            // with the module whose import it is -- here the executable,
+            // which has no module table entry of its own.
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne(imported by missing_import_test.exe)","what":"missing import""#,
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo(imported by missing_import_test.exe)","what":"missing import""#,
         ],
     },
     Scenario {
