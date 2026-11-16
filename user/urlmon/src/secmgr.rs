@@ -21,7 +21,7 @@
 //!   asked; ProcessUrlAction without a URL is E_INVALIDARG, as Windows'.
 //!
 //! Every zone a caller asks for is recorded too ("other",
-//! `urlmon.dll!MapUrlToZone(<url>)=<zone>`), as much as the ledger's 64
+//! `urlmon.dll!MapUrlToZone(<url>)=<zone>`), as much as the ledger's 96
 //! characters keep.
 
 use core::ffi::c_void;

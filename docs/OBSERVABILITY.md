@@ -392,7 +392,8 @@ of a rarer kind says a gap was lost and the caps need revisiting.
 - Lines `ledger: {"service":..,"what":..,"detail":..,"hits":..}` are
   dumped after each program, before `boot ok` and in a state dump.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
-  (`dll!function` names, 64 characters kept). Its kinds: `missing
+  (`dll!function` names, 96 characters kept, the ledger's own
+  length). Its kinds: `missing
   export`, `unsupported`, `not implemented` (a gap the caller is told
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
@@ -467,7 +468,7 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   <what>` (unsupported: xsi:type, xsi:nil, a name no schema declares)
   and `validation: schema default attribute values not added to the
   tree` (unsupported; detail: how many); `load(res: URL)` for each
-  resource loaded. A value too long for the ledger's 64 characters keeps
+  resource loaded. A value too long for the ledger's 96 characters keeps
   its end after `..` (a namespace's last part). XSLT ("other" unless
   named): `XSLT transform (output: a string|a document|a stream)` for
   each transform (detail: how many parameters it was given); a

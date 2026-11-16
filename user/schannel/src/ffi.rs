@@ -67,12 +67,12 @@ pub fn missing(name: &[u8], detail: u64) {
 /// Records why a context failed (`schannel.dll!<what>: <reason>`, kind
 /// "other", the SSPI status as detail): the reason is rustls' error, so
 /// that a failed handshake says why (`what` is short: ISC, ASC,
-/// EncryptMessage...; the ledger keeps 64 characters).
+/// EncryptMessage...; the ledger keeps 96 characters).
 pub fn failed(what: &str, reason: &dyn core::fmt::Debug, status: u32) {
     use core::fmt::Write;
     let mut text = String::new();
     let _ = write!(text, "schannel.dll!{what}: {reason:?}");
-    // The ledger keeps 64 characters: drop the wrapper of certificate
+    // The ledger keeps 96 characters: drop the wrapper of certificate
     // errors (InvalidCertificate(UnknownIssuer) -> UnknownIssuer).
     let text = text.replacen("InvalidCertificate(", "", 1);
     let clean: Vec<u8> = text
