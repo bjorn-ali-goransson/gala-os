@@ -114,7 +114,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     let process = t.process.clone();
     let tid = t.id;
     drop(me);
-    crate::flight::record(crate::flight::Kind::Syscall, number | (process.id << 32), tid);
+    crate::flight::record(
+        crate::flight::Kind::Syscall,
+        number | crate::flight::LINUX | (process.id << 32),
+        tid,
+    );
     let Some(lx) = state::get(process.id) else {
         crate::warn!("lx: pid {}: system call {number} with no Linux state", process.id);
         frame.set_result(errno::to_return(ENOSYS));
@@ -161,7 +165,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     }
     // An expired timer's SIGALRM is delivered with the others below.
     super::timer::fire(&call);
-    crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
+    crate::flight::record(crate::flight::Kind::SyscallDone, number | crate::flight::LINUX, rax);
     let Call { process, lx, resume, .. } = call;
     frame.set_result(rax);
     let resume = resume.take();

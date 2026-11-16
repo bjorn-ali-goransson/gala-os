@@ -579,9 +579,11 @@ last 256 records, kept whether the event stream is on or not. A record
 is three words (time << 8 | kind, two values): one atomic increment and
 three stores. Kinds: `syscall` (number | pid << 32, thread id),
 `syscall-done` (number, status), `process-exit` (pid, status),
-`watchdog` (the CPU found stuck). Printed merged by time as `flight:`
-lines (service names, pid and tid on system calls) after a panic, in a
-watchdog report and in the state dump.
+`watchdog` (the CPU found stuck). A Linux call's number carries bit 31
+(`flight::LINUX`) and is named from the machine's Linux table (x86-64's
+or aarch64's), an NT call's from NT's. Printed merged by time as
+`flight:` lines (service names, pid and tid on system calls) after a
+panic, in a watchdog report and in the state dump.
 
 ### Hang watchdog
 
@@ -674,9 +676,12 @@ a new line, since QEMU's end can cut the guest's last one off):
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:
    Q queued, shutdown F, peer open|gone), W waiting`), the Wayland
-   server's clients and their objects (`statedump: wayland client N (pid
-   P): K objects, R requests, B bytes of events waiting`, then a line per
-   object: a surface's window, size and pending frame callbacks, a
+   server's clients and their objects (`statedump: wayland on PATH: N
+   clients; a round would find work: true|false`: true while its thread
+   waits is a wakeup it missed, false with a client blocked reading is a
+   request it answered with nothing; `statedump: wayland client N (pid
+   P): K objects, R requests, B bytes of events waiting`, its socket as
+   the unix lines show one, then a line per object: a surface's window, size and pending frame callbacks, a
    buffer's size and stride, an xdg_surface's configure state, a
    toplevel's title and decoration, a decoration's mode asked for, a
    positioner's rules, a popup's parent, rules, configured and applied

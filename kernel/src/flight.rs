@@ -13,9 +13,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
-    /// A system call starts: a = number | pid << 32, b = thread id.
+    /// A system call starts: a = number | pid << 32, b = thread id
+    /// (a Linux call's number carries [`LINUX`]).
     Syscall = 1,
-    /// It ends: a = number, b = its status.
+    /// It ends: a = number (with [`LINUX`] for a Linux call), b = its
+    /// status (a Linux call's return value).
     SyscallDone = 2,
     /// A process ended: a = pid, b = exit status.
     ProcessExit = 3,
@@ -35,6 +37,10 @@ impl Kind {
         }
     }
 }
+
+/// In a system call record's number: a Linux call (its number in the
+/// machine's Linux table, not NT's).
+pub const LINUX: u64 = 1 << 31;
 
 /// Records kept per CPU.
 pub const PER_CPU: usize = 256;
@@ -125,7 +131,14 @@ pub fn dump(cpus: u64, max: usize, mut print: impl FnMut(core::fmt::Arguments)) 
     for &(t, kind, a, b, cpu) in &last[..n] {
         // System calls by name, with the caller (xtask's triage reads
         // these to show each thread's last calls).
-        let service = |number: u64| crate::nt::syscalls::service_name(number as u32);
+        // A Linux call is named from the machine's Linux table.
+        let service = |number: u64| {
+            if number & LINUX != 0 {
+                crate::lx::syscalls::name(number & !LINUX).unwrap_or("an unknown Linux call")
+            } else {
+                crate::nt::syscalls::service_name(number as u32)
+            }
+        };
         match kind {
             1 => print(format_args!(
                 "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} pid {} tid {b})",

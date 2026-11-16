@@ -908,7 +908,10 @@ pub fn dump() {
     }
 }
 
-struct Described<'a>(&'a Socket);
+/// A socket as the state dump shows it: kind, owner, name, phase (a
+/// connection's records queued to this side, shutdown, the peer), the
+/// threads waiting on it.
+pub struct Described<'a>(pub &'a Socket);
 
 impl fmt::Display for Described<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

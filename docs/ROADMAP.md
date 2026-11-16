@@ -4536,7 +4536,13 @@ on the seams item PT prepared: native ARM64 Windows programs
   emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
-1. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
+1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
+   reading its socket in a roundtrip after the "anchor bottom" popup's
+   commit while the server's thread waited too (a wakeup lost, or a
+   request answered with nothing); not reproduced locally, loaded or
+   not. The state dump now says which (`a round would find work`, each
+   client's socket) and names Linux calls in the flight records.
+2. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
    load, HotSpot's on ARM64); the handover programs (no handover on
    aarch64 yet); glibc's dynamic programs on aarch64 (dyn_test,
    gtk_test); injected input (QEMU `virt` has no PS/2 controller: a
@@ -4549,7 +4555,7 @@ on the seams item PT prepared: native ARM64 Windows programs
    gala's ARM64 context). rpcrt4's server routine call puts every
    argument in integer registers: ARM64 passes floating-point ones in
    v0-v7 apart, which needs the format string's types.
-2. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+3. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick
    with nothing held for it (gdb's record: `interrupt_request` 0, the
