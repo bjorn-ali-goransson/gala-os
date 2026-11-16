@@ -200,7 +200,7 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
-| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine; then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
+| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
 | AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` through its own page tables, GIC, tick, scheduler and second CPU (`arm_boot`, `arm_sched`), its exceptions reported (`arm_fault_*`); next the drivers, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
@@ -3670,7 +3670,8 @@ Linux (a VM of its own), and Windows containers (HCS, server silos).
 
 **Next** (each step test first; step 1's recordings are the spec). Order:
 the Linux side first (steps 4, 7 and 8, with step 1's Linux
-recordings), then the Windows side (steps 2, 3, 6, then 5).
+recordings), then the Windows side (steps 2, 3, 6, then 5); Kubernetes
+(step 9) after step 8, alongside the Windows side.
 1. Spec. On real Linux (Ubuntu 26.04): `strace -f` of `podman run --rm
    hello-world` rootless and rootful (podman, conmon, crun, pasta) and
    of `docker run --rm hello-world` (dockerd, containerd, runc, started
@@ -3746,11 +3747,28 @@ recordings), then the Windows side (steps 2, 3, 6, then 5).
    likewise; then both without `--privileged`. The sibling pattern
    (the host's `/var/run/docker.sock` mounted into a container) comes
    with step 7.
+9. Kubernetes, on step 7's engines: single-node k3s first (containerd
+   built in), a Deployment's pods running and a Service reached by its
+   cluster IP and by DNS (CoreDNS); then kind (Kubernetes nodes as
+   Docker containers: step 8's nesting with systemd inside). Beyond
+   Docker it needs cgroup v2's statistics as exact as Linux's, since
+   the kubelet evicts and schedules by them (`memory.current`,
+   `memory.events`, `memory.stat`, `cpu.stat`, the pressure files,
+   pids), kube-proxy's Service NAT (iptables or nftables with
+   conntrack and its netlink interface, hairpin NAT, bridged traffic
+   through the firewall: `br_netfilter`'s sysctls), mount propagation
+   (shared and slave mounts), `/proc/<pid>/mountinfo`, `/proc/net`,
+   `/dev/kmsg` and inotify at scale. Multi-node clusters across gala
+   machines (flannel's VXLAN) after that. Observability: the cgroup
+   figures the kubelet read and the NAT rules a Service installed,
+   both in the state dump, so a wrong eviction or an unreachable
+   Service can be explained after the fact.
 
 **Done when**: from a shell in a Linux distribution on gala, its own
 `podman run --rm hello-world` and `docker run --rm hello-world` print
 their greeting, rootless and rootful, and the same from inside a
-`docker:dind` container; from a gala command prompt, Docker's Windows
+`docker:dind` container, and a single-node k3s serves a Deployment
+through a Service; from a gala command prompt, Docker's Windows
 CLI runs `docker run --rm hello-world` against that engine and `podman
 run --rm hello-world` works with Podman for Windows installed by its
 own installer; then a container serving HTTP reached from the Windows
@@ -3759,8 +3777,8 @@ each step: the facade's and the relay's calls as events (`events=wsl`),
 each distribution's console and the engines' logs copied into the
 serial log, missing Linux calls in the ledger by distribution.
 
-**Licensing**: Podman and Docker Engine (Moby, containerd, runc) are
-Apache-2.0, as is Docker's CLI. None is committed; xtask fetches them
+**Licensing**: Podman, Docker Engine (Moby, containerd, runc),
+Docker's CLI, Kubernetes, k3s and kind are Apache-2.0. None is committed; xtask fetches them
 and runs them only in QEMU. WSL's source (MIT) is an allowed source
 (CLEAN_ROOM "WSL").
 
