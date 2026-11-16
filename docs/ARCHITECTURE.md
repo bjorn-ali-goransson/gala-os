@@ -5134,7 +5134,18 @@ built for x64 and x86.
   with XPath's conversions and comparison rules, the core function
   library. Prefixes resolve through SelectionNamespaces only (an
   undeclared one is E_FAIL, as in MSXML 6); an unprefixed name is in no
-  namespace; namespace declarations are not attributes. Node-sets are in
+  namespace; namespace declarations are not attributes. A prefixed
+  function name resolves through the same declarations: MSXML's
+  `ms:string-compare(s1, s2, language?, options?)` in
+  `urn:schemas-microsoft-com:xslt` answers -1, 0 or 1 in a selection as
+  well as in a stylesheet (Click-to-Run's AppV selects its opaque
+  directories with it), while `msxsl:node-set()` is XSLT's alone (it
+  takes a result tree fragment) and every other extension function is
+  E_FAIL, recorded with its name. gala has one collation: character by
+  character with the case ignored first, the lower case first where only
+  the case differs (what Windows' default locale gives for ASCII text);
+  the option `i` ignores case, and any other option is recorded and
+  compared without, as Windows takes them without failing. Node-sets are in
   document order (attributes after their element). selectNodes and
   selectSingleNode fail with E_FAIL on an expression that is not a
   node-set. Numbers print as Rust's shortest round-trip form (XPath
@@ -5458,8 +5469,20 @@ of their own, clients of it) is the yardstick.
   sized and fixed strings, simple and complex structures, fixed,
   conformant, conformant varying and complex arrays, ranges, context
   handles (client: NDR_CCONTEXT records with a copy of the binding;
-  server: the group's table). Embedded pointers' referents follow the
-  outermost construct (deferral). NdrClientCall2 is an assembly entry
+  server: the group's table), and arrays whose elements are themselves
+  complex, where the element description refers to its type instead of
+  holding it (FC_EMBEDDED_COMPLEX). Embedded pointers' referents follow
+  the construct that holds them (deferral), each referent's own
+  deferrals right behind it and each walked in the correlation base its
+  pointer was found under: an array behind a pointer in a structure is
+  sized by a field of that structure, which is no longer being walked
+  when its referent is read. The interpreter never faults on a
+  program's data: a conformance read through a NULL pointer fails the
+  call, with the descriptor recorded. A conformant array the server
+  frees is counted again from where its conformance names it (the
+  call's stack, or a constant); a count that lived in a structure's
+  field is gone by then, so that array's elements keep what they point
+  to (recorded). NdrClientCall2 is an assembly entry
   that spills the variadic arguments and raises the returned status
   itself (RpcRaiseException), so no Rust frame is unwound; a float
   argument comes as a double. The server allocates [in] referents and

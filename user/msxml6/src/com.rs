@@ -28,7 +28,8 @@ use crate::{
     Bstr, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult,
     IID_IUNKNOWN, LEDGER_OTHER, LEDGER_UNSUPPORTED, S_FALSE, S_OK, VARIANT_FALSE, VARIANT_TRUE,
     VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_I2, VT_I4, VT_INT, VT_NULL, VT_UI4,
-    VT_UNKNOWN, Variant, bstr, free_box, guid, not_implemented, put, record, text, try_box, xpath,
+    VT_UNKNOWN, Variant, bstr, free_box, guid, not_implemented, put, record, record_head,
+    record_tail, text, try_box, xpath,
 };
 use mutate::*;
 use typed::{get_data_type, get_node_typed_value, put_data_type, put_node_typed_value};
@@ -607,25 +608,50 @@ extern "system" fn get_xml(this: Obj, out: *mut Bstr) -> HResult {
 }
 
 /// Compiles and evaluates `expr` from this node: the node-set, or the
-/// failure (E_FAIL).
+/// failure (E_FAIL, named in the ledger by `record_xpath`).
 fn select(this: Obj, expr: Bstr) -> Result<Vec<u32>, HResult> {
     let d = doc(this);
     let Some(e) = text(expr) else { return Err(E_INVALIDARG) };
     let empty: Vec<(String, String)> = Vec::new();
     let ns = d.ns.as_ref().unwrap_or(&empty);
     let q = xpath::compile(&e, ns).map_err(|why| {
-        if why.contains("not supported") || why.contains("namespace axis") {
-            record(
-                b"selectNodes(XPath: id(), lang() or the namespace axis)",
-                LEDGER_UNSUPPORTED,
-                0,
-            );
-        }
+        record_xpath(why, &e);
         E_FAIL
     })?;
     match q.eval(&d.tree, idx(this)) {
         Ok(xpath::Value::Nodes(n)) => Ok(n),
-        _ => Err(E_FAIL),
+        Ok(_) => {
+            record_xpath("a value that is no node-set", &e);
+            Err(E_FAIL)
+        }
+        Err(why) => {
+            record_xpath(why, &e);
+            Err(E_FAIL)
+        }
+    }
+}
+
+/// Records a selection that failed, with its reason and its expression:
+/// the program sees nothing but E_FAIL, and one that reads XML through a
+/// wrapper of its own (Click-to-Run's AppV) turns that into an error of
+/// its own, with a file and line of its own, so the ledger is the only
+/// place the expression gala could not answer is named. What gala's
+/// XPath lacks is "unsupported", an expression at fault "other".
+fn record_xpath(why: &str, expr: &str) {
+    let kind = if why.contains("not supported") || why.contains("namespace axis") {
+        LEDGER_UNSUPPORTED
+    } else {
+        LEDGER_OTHER
+    };
+    let mut value = String::from(why);
+    value.push_str(": ");
+    value.push_str(expr);
+    record_head("selectNodes:", &value, kind, 0);
+    // A name holds 96 characters: when the expression did not fit, a
+    // second record keeps its end, where the predicate and its
+    // functions are (a parse error records `at:` the same way).
+    if 11 + "selectNodes: ".len() + value.chars().count() > 96 {
+        record_tail("selectNodes at:", expr, kind, 0);
     }
 }
 
@@ -1128,39 +1154,73 @@ extern "system" fn set_property(this: Obj, name: Bstr, value: Variant) -> HResul
         // MSXML 6 selects in XPath only.
         return match as_text() {
             Some(s) if s.eq_ignore_ascii_case("XPath") => S_OK,
-            Some(_) => {
-                record(
-                    b"IXMLDOMDocument2::setProperty(SelectionLanguage other than XPath)",
+            Some(s) => {
+                record_head(
+                    "IXMLDOMDocument2::setProperty(SelectionLanguage other than XPath):",
+                    &s,
                     LEDGER_OTHER,
                     0,
                 );
                 E_FAIL
             }
-            None => E_FAIL,
+            None => {
+                record(
+                    b"IXMLDOMDocument2::setProperty(SelectionLanguage: not a string)",
+                    LEDGER_OTHER,
+                    0,
+                );
+                E_FAIL
+            }
         };
     }
     if name.eq_ignore_ascii_case("SelectionNamespaces") {
-        let Some(s) = as_text() else { return E_FAIL };
+        let Some(s) = as_text() else {
+            record(
+                b"IXMLDOMDocument2::setProperty(SelectionNamespaces: not a string)",
+                LEDGER_OTHER,
+                0,
+            );
+            return E_FAIL;
+        };
         // A text that does not parse is kept, and prefixes stop
         // resolving (Wine's tests show Windows doing so).
         d.ns = xpath::parse_namespaces(&s);
         d.ns_text = s;
-        return if d.ns.is_some() { S_OK } else { E_FAIL };
+        return if d.ns.is_some() {
+            S_OK
+        } else {
+            record_head(
+                "IXMLDOMDocument2::setProperty(SelectionNamespaces does not parse):",
+                &d.ns_text,
+                LEDGER_OTHER,
+                0,
+            );
+            E_FAIL
+        };
     }
     let Some(default) = default_prop(&name) else {
-        record(b"IXMLDOMDocument2::setProperty(unknown property)", LEDGER_OTHER, 0);
+        record_head("IXMLDOMDocument2::setProperty(unknown property):", &name, LEDGER_OTHER, 0);
         return E_FAIL;
+    };
+    // A value of a type the property does not take (a string for a flag,
+    // say): E_FAIL as Windows gives, named all the same.
+    let wrong_type = |what: &str| {
+        let mut value = String::from(&name);
+        value.push_str(": not ");
+        value.push_str(what);
+        record_head("IXMLDOMDocument2::setProperty:", &value, LEDGER_OTHER, 0);
+        E_FAIL
     };
     let v = match default {
         Prop::Bool(_) => match variant_int(&value) {
             Some(x) => Prop::Bool(x != 0),
-            None => return E_FAIL,
+            None => return wrong_type("a boolean or a number"),
         },
         Prop::Int(_) => match variant_int(&value) {
             Some(x) => Prop::Int(x as i32),
-            None => return E_FAIL,
+            None => return wrong_type("a number"),
         },
-        Prop::Str(_) => return E_FAIL,
+        Prop::Str(_) => return wrong_type("settable"),
     };
     if name.eq_ignore_ascii_case("ProhibitDTD") && matches!(v, Prop::Bool(false)) {
         // gala's reader takes no DTD: documents with one still fail.
@@ -1196,6 +1256,7 @@ extern "system" fn get_property(this: Obj, name: Bstr, out: *mut Variant) -> HRe
     } else if let Some(v) = default_prop(&name) {
         v
     } else {
+        record_head("IXMLDOMDocument2::getProperty(unknown property):", &name, LEDGER_OTHER, 0);
         return E_FAIL;
     };
     match v {

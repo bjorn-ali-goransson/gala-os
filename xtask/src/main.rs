@@ -14666,10 +14666,23 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
         // attributes, XPath selection, parse errors (user/msxml_test).
+        // Every E_FAIL the test asks for names itself in the ledger, with
+        // the expression or the property it is about: all a program that
+        // reads XML through a wrapper of its own leaves behind is that
+        // E_FAIL (OBSERVABILITY "MSXML").
         name: "msxml_test",
         cmdline: "qemu_exit run=msxml_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["msxml_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "msxml_test: ok",
+            r#"ledger: {"service":"msxml6.dll!selectNodes: an undeclared prefix: //y:Item","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!selectNodes: a step expected: //[","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!selectNodes: a value that is no node-set: count(//ExcludeApp)","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::getProperty(unknown property): askldhfaklsdf","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(unknown property): askldhfaklsdf","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(SelectionLanguage: not a string)","what":"other""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the

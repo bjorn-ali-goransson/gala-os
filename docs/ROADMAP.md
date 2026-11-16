@@ -228,7 +228,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); Word and Excel start without a window yet (`office_word`, `office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD runs its own code, whose libraries (wwlib, oart, dbghelp) fail to load on exports gala has not, so it exits 1 (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1852,25 +1852,49 @@ need gala's.
      and a connect that finds no pipe with the endpoint's
      (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
      detail, `rpc_test`).
-     The service names the next gap itself:
-     `AppVEvents::VirtualProcessCreateFailed`, `[AppV Error:
-     Code(0x3e507325-0x80004005) ... Module(Shared Component - 5)
-     File(xmlutils.cpp : 920)]`, 13 times every 15 s, then
-     `isv_process_notifier.cpp : 64` "Max retry limit reached" after
-     59 s -- the shim waits for a virtual process environment the
-     service cannot build, and what fails is reading XML. What the
-     service reads right before it, from the event stream: the AppV
-     package catalog under
+     The virtual process environment the shim waits for now comes
+     up: the service's `AppVEvents::VirtualProcessCreateFailed` and the
+     `xmlutils.cpp` failures under it are gone, the ISV calls are
+     answered, and `appvisvsubsystems64.dll` loads. Two engines were
+     short of what the AppV package catalog under
      `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
-     and `C:\Program Files\Microsoft Office\FilesystemMetadata.xml`,
-     through msxml6's DOMDocument (CLSIDs 88D96A05 to 88D96A08);
-     nothing else in the service fails in between. Either gala's msxml6
-     cannot read something in those files, or the install wrote them
-     incompletely (the integration step that fails, above). The run
-     cannot say which, because msxml6 records nothing in it: so the
-     next step is to make msxml6 name what it cannot do, in the ledger
-     ("Gaps are never silent"), rerun `office_word`, and close what it
-     names.
+     and the deployment configuration need. msxml6 had none of the
+     MSXML extension functions a selection may call, where the
+     configuration compares strings with `ms:string-compare`
+     (ARCHITECTURE "msxml6"). rpcrt4's NDR engine had two defects on
+     the ISV interface's own parameters, each reproduced first in
+     `rpc_test` against Windows' engine before it was fixed: a complex
+     array's element is not a format character in place but a reference
+     to the element's own description (FC_EMBEDDED_COMPLEX), and the
+     unmarshal side dropped the referents that a deferred referent
+     defers itself, where the marshal side wrote them.
+     WINWORD.EXE runs its own code now: it maps WWLIB.DLL (59 MiB) and
+     OART.DLL and exits with status 1 after 27 s, where it ended at
+     0xC0000142 before reaching them. gala's loader names the gap that
+     stops it: `dbghelp.dll`, `oart.dll` and `wwlib.dll` each fail to
+     load with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139), and the
+     `missing export` records around those three failures name the
+     candidates in the order the loader bound them -- ntdll's
+     NtDeleteFile, NtQueryDirectoryFileEx, NtQueryFullAttributesFile
+     and RtlUTF8ToUnicodeN; kernel32's GetCurrentDirectoryA and
+     FindCloseChangeNotification; OpenThreadToken through
+     `api-ms-win-core-processthreads-l1-1-0`; ole32's
+     CoRegisterClassObject, CoRevokeClassObject, CoGetInstanceFromFile
+     and OleRegEnumFormatEtc; oleaut32's RegisterActiveObject and
+     RevokeActiveObject; msi's MsiGetProductCodeW. So the next step is
+     to read which of them those three DLLs import (their import
+     tables, which the clean-room rules allow), implement them with
+     their tests, and rerun `office_word`.
+     One gap in the NDR engine stands, recorded rather than guessed at:
+     freeing a conformant array of pointers leaks its referents,
+     because the count that sized it is not kept with the object
+     (`rpcrt4.dll!NDR(free: conformant array of pointers)`, 4 hits in
+     the run). The lesson of the attempt that is not the fix:
+     recomputing the count at free time from the stack or a constant is
+     unsound -- the stack frame the conformance was read from is gone
+     by then, and freeing by the count it yields corrupted
+     OfficeClickToRun's heap -- so the count has to be kept when the
+     array is unmarshalled.
      Pitfalls, measured, not worth chasing again: the module names the
      run probes for and does not find (`sftldr.dll`,
      `sftldr_wow64.dll`, `mso20win32client`, `mscoree.dll`,

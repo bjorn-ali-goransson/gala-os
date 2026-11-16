@@ -20,8 +20,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::cmp::Ordering;
 
 use crate::dom::{Kind, NONE, Tree};
+use crate::{LEDGER_UNSUPPORTED, record_head};
 
 /// The namespace of MSXML's XSLT extension functions (`msxsl:`).
 pub const MSXSL_NS: &str = "urn:schemas-microsoft-com:xslt";
@@ -621,19 +623,50 @@ impl Parser<'_> {
     }
 
     /// A function's name: a prefixed one resolved through the
-    /// declarations, MSXML's `node-set` as `msxsl:node-set` whatever its
-    /// prefix.
+    /// declarations, MSXML's `node-set` as `msxsl:node-set` and its
+    /// `string-compare` as `ms:string-compare` whatever their prefix.
+    /// MSXML's own functions work in a selection as well as in a
+    /// stylesheet (`node-set` is XSLT's alone, taking a result tree
+    /// fragment).
     fn function_name(&self, f: String) -> Result<String, Error> {
         let Some((p, local)) = f.split_once(':') else { return Ok(f) };
-        if !self.xslt {
-            return Err("an unknown function");
-        }
         let uri = self.ns.iter().find(|(q, _)| q == p).map(|(_, u)| u.as_str());
         match (uri, local) {
             (None, _) => Err("an undeclared prefix"),
-            (Some(MSXSL_NS), "node-set") => Ok(String::from("msxsl:node-set")),
-            (Some(MSXSL_NS), _) => Err("msxsl: functions but node-set() are not supported"),
-            _ => Err("extension functions are not supported"),
+            (Some(MSXSL_NS), "node-set") if self.xslt => Ok(String::from("msxsl:node-set")),
+            (Some(MSXSL_NS), "string-compare") => Ok(String::from("ms:string-compare")),
+            (Some(MSXSL_NS), _) => {
+                record_head("XPath: an MSXML function gala has not", &f, LEDGER_UNSUPPORTED, 0);
+                Err("msxsl: functions but node-set() and string-compare() are not supported")
+            }
+            _ => {
+                record_head("XPath: an extension function", &f, LEDGER_UNSUPPORTED, 0);
+                Err("extension functions are not supported")
+            }
+        }
+    }
+}
+
+/// MSXML's `ms:string-compare`: -1, 0 or 1 (`a` before, the same as or
+/// after `b`). Windows compares with the locale's collation; gala
+/// compares character by character, ignoring case first and putting the
+/// lower case first where only the case differs -- what Windows'
+/// default locale gives for ASCII text (ARCHITECTURE "MSXML 6").
+fn string_compare(a: &str, b: &str, ignore_case: bool) -> i32 {
+    let fold = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<Vec<char>>();
+    match fold(a).cmp(&fold(b)) {
+        Ordering::Less => -1,
+        Ordering::Greater => 1,
+        Ordering::Equal if ignore_case => 0,
+        Ordering::Equal => {
+            // The same text in another case: the first character that
+            // differs decides, its lower case first.
+            for (x, y) in a.chars().zip(b.chars()) {
+                if x != y {
+                    return if x.is_lowercase() { -1 } else { 1 };
+                }
+            }
+            0
         }
     }
 }
@@ -648,6 +681,8 @@ fn check_call(name: &str, n: usize, xslt: bool) -> Result<(), Error> {
     let (lo, hi) = match name {
         "current" if xslt => (0, 0),
         "msxsl:node-set" if xslt => (1, 1),
+        // string-compare(string, string, language?, options?).
+        "ms:string-compare" => (2, 4),
         "key" if xslt => return Err("key() is not supported"),
         "document" if xslt => return Err("document() is not supported"),
         "format-number" if xslt => return Err("format-number() is not supported"),
@@ -1394,6 +1429,30 @@ impl Eval<'_> {
             } else {
                 self.number(arg(0)?)
             }),
+            // MSXML's string-compare: the language is the locale's
+            // (gala has one collation), the options "i" to ignore case.
+            "ms:string-compare" => {
+                let (a, b) = (str_arg(0)?, str_arg(1)?);
+                let options = if args.len() > 3 { str_arg(3)? } else { String::new() };
+                let mut ignore_case = false;
+                for o in options.chars() {
+                    if o == 'i' {
+                        ignore_case = true;
+                    } else {
+                        // Windows takes the rest of its options (the
+                        // width and kana of Japanese text) without
+                        // failing, and so does gala, comparing without
+                        // them.
+                        record_head(
+                            "XPath: string-compare option",
+                            &options,
+                            LEDGER_UNSUPPORTED,
+                            0,
+                        );
+                    }
+                }
+                Value::Num(f64::from(string_compare(&a, &b, ignore_case)))
+            }
             "sum" => match arg(0)? {
                 Value::Nodes(n) => {
                     Value::Num(n.iter().map(|&m| to_number(&self.string_of(m))).sum())

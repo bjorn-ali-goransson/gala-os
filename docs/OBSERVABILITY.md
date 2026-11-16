@@ -468,8 +468,19 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   <what>` (unsupported: xsi:type, xsi:nil, a name no schema declares)
   and `validation: schema default attribute values not added to the
   tree` (unsupported; detail: how many); `load(res: URL)` for each
-  resource loaded. A value too long for the ledger's 96 characters keeps
-  its end after `..` (a namespace's last part). XSLT ("other" unless
+  resource loaded. Selections ("other", or "unsupported" for XPath gala
+  has not): `selectNodes: <reason>: <expression>` for every expression
+  that does not compile or answers no node-set, with `selectNodes at:
+  <the expression's end>` beside it when the expression did not fit, and
+  `XPath: an extension function <name>` (or `an MSXML function gala has
+  not`) for a prefixed function MSXML answers and gala does not; the
+  properties name their own refusals
+  (`IXMLDOMDocument2::setProperty(SelectionLanguage other than XPath):
+  <text>`, `setProperty(SelectionNamespaces does not parse): <text>`,
+  `set/getProperty(unknown property): <name>`, `setProperty: <name>: not
+  a number`). A value too long for the ledger's 96 characters keeps
+  whichever end names the gap: its start, ending in `..` (an
+  expression), or its end, after `..` (a namespace, a path). XSLT ("other" unless
   named): `XSLT transform (output: a string|a document|a stream)` for
   each transform (detail: how many parameters it was given); a
   stylesheet or transform that fails, `XSLT: <reason>` (`XSLT not
@@ -490,9 +501,12 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   `rpcrt4.dll!server: call answered with a fault` (detail: the opnum <<
   32 | the status) for each fault a server sends; `rpcrt4.dll!bind:
   interface not registered` when a client binds an interface no server
-  registered; `rpcrt4.dll!NDR(<what>)` with the format character as
-  detail for a format the interpreter does not handle (the call fails
-  with RPC_X_BAD_STUB_DATA); `rpcrt4.dll!protocol sequence(<name>)` and
+  registered; `rpcrt4.dll!NDR(<what>)` with the format character or the
+  correlation descriptor as detail for a format the interpreter does not
+  handle, for a conformance read through a NULL pointer (the call fails
+  with RPC_X_BAD_STUB_DATA instead of faulting on the program's data)
+  and for a conformant array whose count no longer exists when the
+  server frees it (its elements keep what they point to); `rpcrt4.dll!protocol sequence(<name>)` and
   `rpcrt4.dll!endpoint mapper (binding without endpoint)` for what local
   RPC does not reach.
   Modules (kernel32's `mapping.rs`), "other":

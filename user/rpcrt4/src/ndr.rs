@@ -192,6 +192,17 @@ fn pointee(pf: *const u8) -> *const u8 {
     }
 }
 
+/// The type a member or element description names: a complex one is
+/// not described in place but referred to (FC_EMBEDDED_COMPLEX, whose
+/// offset is counted from the offset field itself).
+fn resolve(t: *const u8) -> *const u8 {
+    if rd8(t, 0) == FC_EMBEDDED_COMPLEX {
+        t.wrapping_add(2).wrapping_offset(rdi16(t, 2))
+    } else {
+        t
+    }
+}
+
 fn is_conformant(fmt: *const u8) -> bool {
     match rd8(fmt, 0) {
         FC_C_CSTRING | FC_C_WSTRING | FC_CARRAY | FC_CVARRAY => true,
@@ -212,9 +223,16 @@ struct Engine {
     input: *const u8,
     len: usize,
     pos: usize,
-    deferred: Vec<(*const u8, *mut u8)>,
+    /// Pointers whose referents follow the object being walked, each
+    /// with the correlation base in force where the pointer was found: an
+    /// array behind a pointer is sized by a field of the structure that
+    /// holds the pointer, which is no longer being walked when its
+    /// referent is.
+    deferred: Vec<(*const u8, *mut u8, *const u8)>,
     next_ref: u32,
-    /// The memory of the structure being walked (normal conformance).
+    /// The memory the conformance of an array is counted from: the
+    /// structure being walked, or, for a referent, the structure that
+    /// holds the pointer to it (`deferred`).
     corr_base: *const u8,
     /// The binding the client call goes over (new client context handles
     /// keep a copy).
@@ -382,9 +400,10 @@ impl Engine {
         })
     }
 
-    /// A complex array's element description.
+    /// A complex array's element description (resolved, so an element
+    /// that is itself complex is the type it refers to).
     fn array_element(&self, fmt: *const u8) -> *const u8 {
-        fmt.wrapping_add(4 + 2 * self.corr_len())
+        resolve(fmt.wrapping_add(4 + 2 * self.corr_len()))
     }
 
     // ---- Marshaling ----
@@ -489,11 +508,7 @@ impl Engine {
             // SAFETY: the array's memory.
             return self.put(unsafe { core::slice::from_raw_parts(mem, total) });
         }
-        let t = if fc == FC_EMBEDDED_COMPLEX {
-            elem.wrapping_add(2).wrapping_offset(rdi16(elem, 2))
-        } else {
-            elem
-        };
+        let t = resolve(elem);
         let size = match size {
             Some(s) => s,
             None => self.mem_size(t)?,
@@ -564,7 +579,7 @@ impl Engine {
         }
         if embedded {
             self.deferred.try_reserve(1).map_err(|_| RPC_S_OUT_OF_MEMORY)?;
-            self.deferred.push((pf, slot as *mut u8));
+            self.deferred.push((pf, slot as *mut u8, self.corr_base));
             return Ok(());
         }
         self.marshal_construct(pointee(pf), ptr as *const u8)
@@ -577,8 +592,11 @@ impl Engine {
         let r = self.marshal(fmt, mem, false);
         let mine = core::mem::replace(&mut self.deferred, saved);
         r?;
-        for (pf, slot) in mine {
-            self.marshal_construct(pointee(pf), rdptr(slot, 0) as *const u8)?;
+        for (pf, slot, base) in mine {
+            let outer = core::mem::replace(&mut self.corr_base, base);
+            let r = self.marshal_construct(pointee(pf), rdptr(slot, 0) as *const u8);
+            self.corr_base = outer;
+            r?;
         }
         Ok(())
     }
@@ -674,11 +692,7 @@ impl Engine {
             unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), mem, total) };
             return Ok(());
         }
-        let t = if fc == FC_EMBEDDED_COMPLEX {
-            elem.wrapping_add(2).wrapping_offset(rdi16(elem, 2))
-        } else {
-            elem
-        };
+        let t = resolve(elem);
         let size = match size {
             Some(s) => s,
             None => self.mem_size(t)?,
@@ -797,10 +811,10 @@ impl Engine {
         }
         if embedded {
             self.deferred.try_reserve(1).map_err(|_| RPC_S_OUT_OF_MEMORY)?;
-            self.deferred.push((pf, slot));
+            self.deferred.push((pf, slot, self.corr_base));
             return Ok(());
         }
-        self.unmarshal_into(pointee(pf), slot)
+        self.unmarshal_referent(pointee(pf), slot)
     }
 
     fn unmarshal_construct(&mut self, fmt: *const u8, mem: *mut u8) -> Res<()> {
@@ -808,8 +822,28 @@ impl Engine {
         let r = self.unmarshal(fmt, mem, false);
         let mine = core::mem::replace(&mut self.deferred, saved);
         r?;
-        for (pf, slot) in mine {
-            self.unmarshal_into(pointee(pf), slot)?;
+        self.drain(mine)
+    }
+
+    /// Unmarshals a referent block, then the referents it defers itself:
+    /// the mirror of `marshal_construct`, which writes each deferred
+    /// referent with its own deferrals right behind it.
+    fn unmarshal_referent(&mut self, t: *const u8, slot: *mut u8) -> Res<()> {
+        let saved = core::mem::take(&mut self.deferred);
+        let r = self.unmarshal_into(t, slot);
+        let mine = core::mem::replace(&mut self.deferred, saved);
+        r?;
+        self.drain(mine)
+    }
+
+    /// Unmarshals the referents `mine` defers, each in the correlation
+    /// base its pointer was found under.
+    fn drain(&mut self, mine: Vec<(*const u8, *mut u8, *const u8)>) -> Res<()> {
+        for (pf, slot, base) in mine {
+            let outer = core::mem::replace(&mut self.corr_base, base);
+            let r = self.unmarshal_referent(pointee(pf), slot);
+            self.corr_base = outer;
+            r?;
         }
         Ok(())
     }
@@ -857,7 +891,7 @@ impl Engine {
                 }
                 FC_EMBEDDED_COMPLEX => {
                     m += usize::from(rd8(fmt, at + 1));
-                    let t = fmt.wrapping_add(at + 2).wrapping_offset(rdi16(fmt, at + 2));
+                    let t = resolve(fmt.wrapping_add(at));
                     match walk {
                         Walk::Marshal => self.marshal(t, mem.wrapping_add(m), true)?,
                         Walk::Unmarshal => self.unmarshal(t, mem.wrapping_add(m), true)?,
@@ -1328,7 +1362,7 @@ impl Engine {
             if p.attributes & IS_BY_VALUE != 0 {
                 return unsupported(b"[out] by value", p.fc);
             }
-            return self.unmarshal_into(p.fmt, slot);
+            return self.unmarshal_referent(p.fmt, slot);
         }
         match p.fc {
             FC_RP | FC_UP | FC_OP | FC_FP => {
