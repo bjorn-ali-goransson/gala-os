@@ -454,6 +454,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             super::session::CONSOLE
         );
         super::ledger::record("start menu", "session without a user", session.into());
+        desktop::install_started(session, program, None);
         return;
     }
     // Existence again, now: an install may have finished since the menu
@@ -467,6 +468,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
                 .and_then(|p| super::process::intern(p).ok());
             let Some(path) = path else {
                 crate::warn!("desktop: start menu: no memory to start {}", program.name);
+                desktop::install_started(session, program, None);
                 return;
             };
             crate::info!("desktop: start menu starts {}: {path}", program.name);
@@ -479,6 +481,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
                     program.name,
                     GALA_EXE[0]
                 );
+                desktop::install_started(session, program, None);
                 return;
             };
             crate::info!(
@@ -518,6 +521,13 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             crate::events::Str(target)
         ),
     );
+    // The tile hears what became of the install it asked for: a pid to
+    // wait for a word from, or nothing to wait for at all (a program
+    // that is not on this machine and has no package, `MenuRequest`'s
+    // Missing, ends here too).
+    if op != "start" {
+        desktop::install_started(session, program, (status == 0).then_some(pid));
+    }
 }
 
 /// wsl.exe, where Windows has it.
@@ -728,6 +738,10 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
             crate::events::Str(target.as_str())
         ),
     );
+    // As a package's install does, the tile hears what became of it.
+    if matches!(r, Request::Install(..)) {
+        desktop::linux_install_started(session, name, (status == 0).then_some(pid));
+    }
 }
 
 /// Starts the program at `path` with `args` as the boot user (`start_path`)

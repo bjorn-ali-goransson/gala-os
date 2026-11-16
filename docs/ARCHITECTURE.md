@@ -7479,8 +7479,39 @@ session's is shown by nothing unless GalaSession attaches a presenter
     ends the command, the tile hears: `galapkg::install::install`
     reports Done or Failed around the whole install, and gala.exe
     reports a failure with its exit code for anything that ends it
-    earlier. A gala.exe that dies without a word leaves the bar waiting
-    for the next listing (ROADMAP SM).
+    earlier.
+  - **An install whose installer is gone goes quiet**, rather than
+    waiting for a word that is not coming: a gala.exe killed outright,
+    or faulting before it can report, says nothing at all.
+    `start_from_menu` reports the installer's pid to the desktop
+    (`install_started`, None when it never started: no gala.exe, no
+    memory for the command line, a session with no user, or a program
+    that is neither on the machine nor in the catalog), and the
+    desktop keeps one pid per install under way, packages and
+    distributions alike. A process that ends is the word that no word
+    will come: `process_ended` asks the desktop about that pid
+    (`installers_gone`), and the install goes to `Progress::Lost(at)`,
+    which keeps the bar where it got to, in grey, and draws the icon
+    grey under a white question mark where the download badge sits. A
+    click tries again, as on a tile whose install failed, and it is
+    told above the notification area like any end ("The install went
+    quiet: its installer is gone with no word. A click tries again.",
+    or "The install never started. A click tries again."). The watch is
+    on the process and not on a silence: an install may say nothing for
+    half an hour (Office's does), so a timeout would call a working
+    install dead. The pid is forgotten with the install it belongs to
+    (`watch_only_waiting`, called wherever an install ends), since a
+    stale pid would turn a tile grey for a stranger's process ending;
+    at most MAX_INSTALLERS installs are watched at once (more than a
+    user can start), one past that is logged and left to the next
+    listing as before. Logged as `desktop: start menu: <name>'s install
+    went quiet at <at>%: <why>` with a `window` event (op "install
+    quiet") and a ledger entry ("install gone quiet"). A `Desktop`
+    method cannot write any of that itself - host unit tests build
+    without the `hosted` feature, where the console writes to COM1 with
+    `out`, which faults in user mode - so the desktop keeps what is to
+    be told (`Quieted`, as it keeps `launch`) and the module's free
+    functions drain it (`tell_quiet`).
   - **An install that ends is told above the notification area**, since
     the tile it ran on is out of sight as soon as the menu is closed:
     the program's name over "Installed. Its tile starts it now." or

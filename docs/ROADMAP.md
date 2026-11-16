@@ -724,8 +724,13 @@ through GalaDesktopAction's InstallProgress), red if it fails and
 installed when it is done; installed, a click starts the program. An
 install that ends, either way, is also told above the notification area
 (the program's name, and what the exit code says when it says more than
-that it failed). A console program started from the menu gets its own
-console window. Tests: the desktop's, `nt::action`'s and galapkg's host
+that it failed). An install whose `gala install` is gone without a word
+(killed, or faulting before it can report) or never started goes quiet
+instead of waiting for ever: the desktop watches the installer's pid,
+which `start_from_menu` reports, and the process ending leaves the tile
+grey under a question mark with its bar where it got to, a click trying
+again and the same notification. A console program started from the menu
+gets its own console window. Tests: the desktop's, `nt::action`'s and galapkg's host
 tests, scenario `start_menu` (start_menu_test and a screen check: the
 tiles, the Command Prompt clicked, 7-Zip's install started with no
 console window of its own, its tile's bar red when it failed and its
@@ -754,12 +759,6 @@ a screenshot):
    states. Installs that fail on gala (Office until OF is done, an
    installer needing elevation without UAC's prompt) leave the tile's
    bar red, with `gala install`'s own message in the log.
-4. A tile's bar waits for a word from `gala install` that a gala.exe
-   killed outright (or faulting before it can report) never sends. The
-   desktop should watch the installer's process instead:
-   `start_from_menu` has its pid, so a tile whose installer is gone
-   without a last word can be drawn failed. Until then such a tile
-   keeps its bar until the menu lists the programs again.
 
 ### SH. The shell in user mode
 

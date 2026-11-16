@@ -293,6 +293,11 @@ fn file_explorer() -> Option<usize> {
 const BAR_MENU_W: i64 = 220;
 const BAR_MENU_ITEM: i64 = 36;
 
+/// A tile whose install went quiet is drawn in this grey instead of
+/// the program's own colours (`pkg::Progress::Lost`).
+const QUIET_TOP: u32 = 0x00_9a_a0_a6;
+const QUIET_BOTTOM: u32 = 0x00_6e_74_7a;
+
 /// How many tiles the start menu's grid holds (four rows).
 pub const MAX_TILES: usize = GRID_COLUMNS * 4;
 
@@ -311,6 +316,72 @@ impl Launch {
         match self {
             Launch::Program(p) => Some(p),
             Launch::Linux(_) => None,
+        }
+    }
+}
+
+/// Whose install an installer is running (`Desktop::installers`): a
+/// catalog package's tile, or a Linux distribution's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Installing {
+    Package(usize),
+    Linux(linux::Name),
+}
+
+/// How many installs are watched at once. The catalog has fewer
+/// programs than this and the Linux section fewer tiles, so every
+/// install a user can start is watched; one past it is not (logged),
+/// and its tile waits for the next listing as it did before the watch.
+const MAX_INSTALLERS: usize = 32;
+
+/// Why a tile's install has no word left to come (`install_quiet`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quiet {
+    /// Its installer never started: no gala.exe, no memory for the
+    /// command line, or the program is not on this machine and has no
+    /// package to install.
+    NeverStarted,
+    /// Its installer is gone without a last word: killed outright, or
+    /// it faulted before it could report.
+    Gone,
+}
+
+/// An install that went quiet, as the log and the event tell it
+/// (`Desktop::take_quiet`): whose it was, how far the bar got, and why
+/// no word is coming. Whose, rather than the name: a distribution's
+/// name is in its `Name`, not a static string.
+struct Quieted {
+    who: Installing,
+    at: u8,
+    why: Quiet,
+}
+
+impl Installing {
+    /// The name on the tile, for what is told of it.
+    fn name(&self) -> &str {
+        match self {
+            Installing::Package(p) => PROGRAMS.get(*p).map(|e| e.name).unwrap_or("A program"),
+            Installing::Linux(n) => n.as_str(),
+        }
+    }
+}
+
+impl Quiet {
+    /// What the log and the ledger say.
+    fn as_str(self) -> &'static str {
+        match self {
+            Quiet::NeverStarted => "its installer never started",
+            Quiet::Gone => "its installer is gone with no word",
+        }
+    }
+
+    /// What the notification says under the program's name.
+    fn told(self) -> &'static str {
+        match self {
+            Quiet::NeverStarted => "The install never started. A click tries again.",
+            Quiet::Gone => {
+                "The install went quiet: its installer is gone with no word. A click tries again."
+            }
         }
     }
 }
@@ -652,6 +723,17 @@ pub struct Desktop {
     /// The installs a tile asked for (`gala install <id>`, no window),
     /// each a PROGRAMS index and where its install is.
     installs: Vec<(usize, pkg::Progress)>,
+    /// The installer each install is waiting for a word from, by pid
+    /// (`install_started`), packages and distributions alike: a process
+    /// that ends without a word (`installers_gone`) leaves its tile
+    /// quiet instead of waiting for ever.
+    installers: Vec<(Installing, u64)>,
+    /// The installs that went quiet, for the log and the event the free
+    /// functions write (`take_quiet`): a `Desktop` method must not log,
+    /// since host unit tests build without the `hosted` feature, where
+    /// the console writes to the serial port. Every caller drains it in
+    /// the same breath, so it holds one call's worth.
+    quieted: Vec<Quieted>,
     /// What the "Linux distributions" section lists (registered
     /// distributions and the user's choices), its tiles, the installs
     /// under way, the context menu open in the start menu, what it asked
@@ -722,6 +804,8 @@ impl Desktop {
             linux: linux::Listing { installed: Vec::new(), prefs: EMPTY_PREFS },
             linux_tiles: Vec::new(),
             installs: Vec::new(),
+            installers: Vec::new(),
+            quieted: Vec::new(),
             progress: Vec::new(),
             context: None,
             linux_launch: None,
@@ -1348,6 +1432,7 @@ impl Desktop {
                 self.install_done(name);
             }
         }
+        self.watch_only_waiting();
     }
 
     fn hit(&self, x: i64, y: i64) -> Hit {
@@ -1929,10 +2014,7 @@ impl Desktop {
             self.close_menu();
             return;
         }
-        let busy = self
-            .installs
-            .iter()
-            .any(|(p, s)| *p == e.program && !matches!(s, pkg::Progress::Failed(_)));
+        let busy = self.installs.iter().any(|(p, s)| *p == e.program && !s.ended());
         if busy {
             return;
         }
@@ -1953,10 +2035,7 @@ impl Desktop {
             self.close_menu();
             return;
         }
-        let busy = self
-            .progress
-            .iter()
-            .any(|(n, p)| *n == d.name && !matches!(p, linux::Progress::Failed));
+        let busy = self.progress.iter().any(|(n, p)| *n == d.name && !p.ended());
         if busy {
             return;
         }
@@ -2009,6 +2088,7 @@ impl Desktop {
         for n in done {
             self.install_done(n.as_str());
         }
+        self.watch_only_waiting();
     }
 
     /// A notification above the notification area, on the card a
@@ -2036,6 +2116,10 @@ impl Desktop {
 
     /// The same for one that failed, with what gala's exit code stands
     /// for when there is one (`pkg::install_failure`).
+    fn announce_quiet(&mut self, name: &str, why: Quiet) {
+        self.announce(name, &[why.told()]);
+    }
+
     fn install_failed(&mut self, name: &str, why: Option<&str>) {
         match why {
             Some(why) => self.announce(name, &["The install failed: ", why, "."]),
@@ -2065,8 +2149,96 @@ impl Desktop {
                 _ => {}
             }
         }
+        self.watch_only_waiting();
         self.menu_dirty = true;
         self.refresh();
+    }
+
+    /// What became of the `gala install` a tile asked for, as
+    /// `nt::action::start_from_menu` reports it: the pid to wait for a
+    /// word from, or None when it never started. False when the pid is
+    /// not watched (MAX_INSTALLERS, or no memory for it): the caller
+    /// logs that, since a method may not.
+    pub fn install_started(&mut self, program: usize, pid: Option<u64>) -> bool {
+        self.installer_started(Installing::Package(program), pid)
+    }
+
+    /// The same for a distribution's `gala linux-install`.
+    pub fn linux_install_started(&mut self, name: linux::Name, pid: Option<u64>) -> bool {
+        self.installer_started(Installing::Linux(name), pid)
+    }
+
+    fn installer_started(&mut self, who: Installing, pid: Option<u64>) -> bool {
+        self.installers.retain(|(w, _)| *w != who);
+        let Some(pid) = pid else {
+            self.install_quiet(who, Quiet::NeverStarted);
+            return true;
+        };
+        self.installers.len() < MAX_INSTALLERS && self.installers.try_push((who, pid)).is_ok()
+    }
+
+    /// Those processes have ended (`process_ended`, for every process):
+    /// an install waiting for a word from one of them will get none.
+    pub fn installers_gone(&mut self, gone: &[u64]) {
+        self.watch_only_waiting();
+        // `install_quiet` takes the entry out, so this ends.
+        while let Some(who) =
+            self.installers.iter().find(|(_, pid)| gone.contains(pid)).map(|&(w, _)| w)
+        {
+            self.install_quiet(who, Quiet::Gone);
+        }
+    }
+
+    /// A tile's install has no word left to come: its bar stays where
+    /// it got to, in grey under a question mark, a click tries again,
+    /// and it is told above the notification area as any end is. The
+    /// tile of an install that already ended is left as it is.
+    fn install_quiet(&mut self, who: Installing, why: Quiet) {
+        self.installers.retain(|(w, _)| *w != who);
+        let at = match who {
+            Installing::Package(p) => {
+                let at = self.installs.iter().find(|(q, _)| *q == p).map(|&(_, s)| s);
+                let Some(at) = at.filter(|s| !s.ended()).map(pkg::Progress::percent) else {
+                    return;
+                };
+                self.installs.retain(|(q, _)| *q != p);
+                let _ = self.installs.try_push((p, pkg::Progress::Lost(at)));
+                at
+            }
+            Installing::Linux(n) => {
+                let at = self.progress.iter().find(|(m, _)| *m == n).map(|&(_, p)| p);
+                let Some(at) = at.filter(|p| !p.ended()).map(linux::Progress::percent) else {
+                    return;
+                };
+                self.progress.retain(|(m, _)| *m != n);
+                let _ = self.progress.try_push((n, linux::Progress::Lost(at)));
+                at
+            }
+        };
+        if self.quieted.len() < MAX_INSTALLERS {
+            let _ = self.quieted.try_push(Quieted { who, at, why });
+        }
+        self.announce_quiet(who.name(), why);
+        self.menu_dirty = true;
+        self.refresh();
+    }
+
+    /// The next install that went quiet and has not been told in the
+    /// log yet (`Quieted`): the free functions drain this, since they
+    /// may log and a method may not.
+    fn take_quiet(&mut self) -> Option<Quieted> {
+        (!self.quieted.is_empty()).then(|| self.quieted.remove(0))
+    }
+
+    /// The watch holds the installs that are still waiting for a word
+    /// and no others: a pid kept past its install would turn a tile
+    /// grey for a stranger's process ending.
+    fn watch_only_waiting(&mut self) {
+        let (installs, progress) = (&self.installs, &self.progress);
+        self.installers.retain(|(w, _)| match w {
+            Installing::Package(p) => installs.iter().any(|(q, s)| q == p && !s.ended()),
+            Installing::Linux(n) => progress.iter().any(|(m, p)| m == n && !p.ended()),
+        });
     }
 
     /// An install's progress (`gala linux-install` through
@@ -2089,6 +2261,7 @@ impl Desktop {
             }
             _ => {}
         }
+        self.watch_only_waiting();
         self.menu_dirty = true;
         self.refresh();
     }
@@ -2478,9 +2651,17 @@ impl Desktop {
                 c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
             }
             // Not installed yet: the icon dimmed, with a download badge.
+            // An install gone quiet: grey, with a question mark.
+            let installing = self.installs.iter().find(|(p, _)| *p == e.program).map(|&(_, s)| s);
+            let quiet = matches!(installing, Some(pkg::Progress::Lost(_)));
             let alpha = if e.installed { 255 } else { 120 };
             let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
-            c.round_rect(ix, iy, 32, 32, 6, program.colors.0, program.colors.1, alpha);
+            let (top, bottom) = if quiet {
+                (QUIET_TOP, QUIET_BOTTOM)
+            } else {
+                (program.colors.0, program.colors.1)
+            };
+            c.round_rect(ix, iy, 32, 32, 6, top, bottom, alpha);
             let letter = program.name.chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
             let lw = Font::Ui14Semibold.measure(core::iter::once(letter));
             c.text(
@@ -2491,13 +2672,15 @@ impl Desktop {
                 Font::Ui14Semibold,
                 ix + 32,
             );
-            let installing = self.installs.iter().find(|(p, _)| *p == e.program).map(|&(_, s)| s);
             if !e.installed && installing.is_none() {
                 download_badge(&mut c, ix + 20, iy + 20);
             }
+            if quiet {
+                question_badge(&mut c, ix + 20, iy + 20);
+            }
             tile_name(&mut c, r, program.name, if installing.is_some() { 1 } else { 2 });
             if let Some(s) = installing {
-                progress_bar(&mut c, r, s.percent(), matches!(s, pkg::Progress::Failed(_)));
+                progress_bar(&mut c, r, s.percent(), bar_color(s));
             }
         }
         if listed.is_empty() {
@@ -2614,8 +2797,10 @@ impl Desktop {
                 c.round_rect(r.x, r.y, r.w, r.h, 4, 0x00ff_ffff, 0x00ff_ffff, lit);
             }
             let progress = self.progress.iter().find(|(n, _)| *n == d.name).map(|&(_, p)| p);
+            let quiet = matches!(progress, Some(linux::Progress::Lost(_)));
             let alpha = if d.installed { 255 } else { 120 };
-            let (colors_top, colors_bottom) = d.colors();
+            let (colors_top, colors_bottom) =
+                if quiet { (QUIET_TOP, QUIET_BOTTOM) } else { d.colors() };
             let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
             c.round_rect(ix, iy, 32, 32, 6, colors_top, colors_bottom, alpha);
             let letter = d.name.as_str().chars().find(|c| c.is_alphanumeric()).unwrap_or('?');
@@ -2630,9 +2815,12 @@ impl Desktop {
             );
             tile_name(c, r, d.name.as_str(), if progress.is_some() { 1 } else { 2 });
             match progress {
-                Some(p) => progress_bar(c, r, p.percent(), p == linux::Progress::Failed),
+                Some(p) => progress_bar(c, r, p.percent(), linux_bar_color(p)),
                 None if !d.installed => download_badge(c, ix + 20, iy + 20),
                 None => {}
+            }
+            if quiet {
+                question_badge(c, ix + 20, iy + 20);
             }
             if !d.installed && d.suggestion.is_some() && progress.is_none() {
                 let x = self.linux_dismiss_rect(k).offset(-m.x, -m.y);
@@ -3427,13 +3615,17 @@ pub fn read_frame(shell: &Shell, r: Rect, out: &mut [u32]) -> Result<((u32, u32)
     Ok((f.size(), f.flushes()))
 }
 
-/// A process ended: its windows go (shown or not).
+/// A process ended: its windows go (shown or not), and a tile waiting
+/// for a word from it will get none (`installers_gone`: the install's
+/// `gala install` was killed, or faulted before it could report).
 pub fn process_ended(shell: &Shell, owner: u64) {
     let mut d = shell.d.lock();
     if !d.s.live {
         return;
     }
     d.destroy_owned(owner);
+    d.installers_gone(&[owner]);
+    tell_quiet(&mut d);
     redraw_damage(&mut d);
     let wakes = d.take_wakes();
     drop(d);
@@ -3562,14 +3754,59 @@ fn tile_name(c: &mut Canvas, r: Rect, name: &str, lines: usize) {
 /// A tile's progress bar, in the row under its name: the track, and
 /// `percent` of it filled (red when the install failed, so that a tile
 /// waiting for another click says so).
-fn progress_bar(c: &mut Canvas, r: Rect, percent: u8, failed: bool) {
+fn progress_bar(c: &mut Canvas, r: Rect, percent: u8, color: u32) {
     let (bx, by, bw) = (r.x + 12, r.y + 68, r.w - 24);
     c.round_rect(bx, by, bw, 4, 2, 0x00_d0_d5_dc, 0x00_d0_d5_dc, 255);
     let fill = bw * i64::from(percent) / 100;
-    let color = if failed { CLOSE_HOVER } else { ACCENT };
     if fill > 0 {
         c.round_rect(bx, by, fill.max(4), 4, 2, color, color, 255);
     }
+}
+
+/// The colour of a tile's bar: the accent while the install is going
+/// on, red when it failed, grey when it went quiet (the question-mark
+/// badge on the icon says which of the two).
+fn bar_color(s: pkg::Progress) -> u32 {
+    match s {
+        pkg::Progress::Failed(_) => CLOSE_HOVER,
+        pkg::Progress::Lost(_) => TEXT_DIM,
+        _ => ACCENT,
+    }
+}
+
+/// The same for a distribution's install.
+fn linux_bar_color(p: linux::Progress) -> u32 {
+    match p {
+        linux::Progress::Failed => CLOSE_HOVER,
+        linux::Progress::Lost(_) => TEXT_DIM,
+        _ => ACCENT,
+    }
+}
+
+/// The mark of an install that went quiet (`pkg::Progress::Lost`): a
+/// round grey badge with a white question mark, where the download
+/// badge sits, over an icon drawn grey. Drawn by hand: no font is read
+/// at this size.
+fn question_badge(c: &mut Canvas, x: i64, y: i64) {
+    c.round_rect(x - 1, y - 1, 18, 18, 9, MENU_COLOR, MENU_COLOR, 255);
+    c.round_rect(x, y, 16, 16, 8, TEXT_DIM, TEXT_DIM, 255);
+    let white = 0x00ff_ffff;
+    // The hook over the stem, then the dot under it.
+    for i in 5..11 {
+        c.put(x + i, y + 4, white, 255);
+    }
+    for j in 5..7 {
+        c.put(x + 9, y + j, white, 255);
+        c.put(x + 10, y + j, white, 255);
+    }
+    c.put(x + 8, y + 7, white, 255);
+    c.put(x + 9, y + 7, white, 255);
+    for j in 8..10 {
+        c.put(x + 7, y + j, white, 255);
+        c.put(x + 8, y + j, white, 255);
+    }
+    c.put(x + 7, y + 11, white, 255);
+    c.put(x + 8, y + 11, white, 255);
 }
 
 /// The mark of a catalog entry not installed yet: a round accent badge
@@ -3935,6 +4172,67 @@ pub fn install_progress(
     d.install_progress(program, progress);
     redraw_damage(&mut d);
     Ok(())
+}
+
+/// What became of the `gala install` a tile asked for: its pid, or
+/// None when it never started (`nt::action::start_from_menu`). A tile
+/// whose installer never started, or whose installer later ends without
+/// a word (`process_ended`), goes quiet instead of waiting for ever.
+pub fn install_started(session: u32, program: &'static Program, pid: Option<u64>) {
+    let Some(desk) = super::session::desk(session) else { return };
+    let Some(k) = PROGRAMS.iter().position(|p| core::ptr::eq(p, program)) else { return };
+    let mut d = desk.shell.d.lock();
+    let watched = d.install_started(k, pid);
+    tell_quiet(&mut d);
+    not_watched(watched, pid);
+    redraw_damage(&mut d);
+}
+
+/// What an install that went quiet leaves behind: a log line and a
+/// `window` event with the program, how far its bar got and why, and a
+/// ledger entry (a tile left waiting for a word that never came is a
+/// gap worth counting). Written here and not in `install_quiet`,
+/// because a `Desktop` method may not log: host unit tests build
+/// without the `hosted` feature, where `console::print` writes to COM1
+/// with `out`, which faults in user mode.
+/// An installer the desktop has no room to watch (more installs at
+/// once than MAX_INSTALLERS, or no memory for the pid): its tile keeps
+/// its bar until the menu lists the programs again, as every tile did
+/// before the watch, and the log says which install that is.
+fn not_watched(watched: bool, pid: Option<u64>) {
+    if let (false, Some(pid)) = (watched, pid) {
+        crate::warn!(
+            "desktop: start menu: the install in pid {pid} is not watched (at most              {MAX_INSTALLERS} are): its tile waits for the next listing"
+        );
+        super::ledger::record("start menu", "install not watched", 0);
+    }
+}
+
+fn tell_quiet(d: &mut Desktop) {
+    while let Some(q) = d.take_quiet() {
+        let (name, at, why) = (q.who.name(), q.at, q.why);
+        crate::warn!("desktop: start menu: {name}'s install went quiet at {at}%: {}", why.as_str());
+        crate::events::emit(
+            crate::events::Category::Window,
+            "start menu",
+            format_args!(
+                r#""op":"install quiet","name":{},"percent":{at},"why":"{}""#,
+                crate::events::Str(name),
+                why.as_str()
+            ),
+        );
+        super::ledger::record("start menu", "install gone quiet", 0);
+    }
+}
+
+/// The same for a distribution's `gala linux-install`.
+pub fn linux_install_started(session: u32, name: linux::Name, pid: Option<u64>) {
+    let Some(desk) = super::session::desk(session) else { return };
+    let mut d = desk.shell.d.lock();
+    let watched = d.linux_install_started(name, pid);
+    tell_quiet(&mut d);
+    not_watched(watched, pid);
+    redraw_damage(&mut d);
 }
 
 /// The catalog entry whose package is `id`: winget's ids, matched without

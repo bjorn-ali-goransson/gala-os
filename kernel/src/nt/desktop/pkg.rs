@@ -21,13 +21,22 @@ pub enum Progress {
     /// stands for). The bar stays, in red; a click tries again. Why is
     /// in the log and in the tile's notification, not on the tile.
     Failed(i32),
+    /// Its `gala install` is gone (or never started) without saying how
+    /// it went, so no word is coming: this far it had got (percent of
+    /// the bar). The bar stays there, in grey under a question mark; a
+    /// click tries again. gala never reports this - the desktop
+    /// concludes it when the installer's process ends
+    /// (`Desktop::installers_gone`).
+    Lost(u8),
 }
 
 impl Progress {
     /// What `gala install` reports: `state` 0 resolving, 1 downloading
     /// (`percent`), 2 installing, 4 failed (`exit`: what gala ended
     /// with). None for a state no tile draws (3, done: the install's
-    /// progress goes away) or one this kernel does not know.
+    /// progress goes away) or one this kernel does not know. `Lost` is
+    /// not among them: it is what the desktop makes of an installer
+    /// that said nothing at all.
     pub fn from_state(state: i32, percent: i32, exit: i32) -> Option<Progress> {
         match state {
             0 => Some(Progress::Resolving),
@@ -48,7 +57,14 @@ impl Progress {
             Progress::Downloading(p) => (10 + u32::from(p.min(100)) * 3 / 5) as u8,
             Progress::Installing => 85,
             Progress::Failed(_) => 100,
+            Progress::Lost(at) => at.min(100),
         }
+    }
+
+    /// The install is over, one way or another: its bar stays where it
+    /// is and a click tries again.
+    pub fn ended(self) -> bool {
+        matches!(self, Progress::Failed(_) | Progress::Lost(_))
     }
 }
 
@@ -75,6 +91,21 @@ pub fn install_failure(exit: i32) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An install whose installer is gone keeps its bar where it got
+    /// to, and is over as a failure is.
+    #[test]
+    fn an_install_gone_quiet_keeps_the_bar_where_it_got_to() {
+        let at = Progress::Downloading(50).percent();
+        assert_eq!(Progress::Lost(at).percent(), at);
+        assert!(Progress::Lost(at).ended() && Progress::Failed(4).ended());
+        assert!(!Progress::Resolving.ended() && !Progress::Installing.ended());
+        assert!(!Progress::Downloading(50).ended());
+        // gala reports no such state: the desktop concludes it.
+        for state in 0..10 {
+            assert!(!matches!(Progress::from_state(state, 0, 0), Some(Progress::Lost(_))));
+        }
+    }
 
     /// Each code galapkg exits with says something of its own; the one
     /// that says only that it failed (4), and a code from a newer gala,
