@@ -11670,6 +11670,10 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         .arg("-drive")
         .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
         .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0"]);
+    // The keyboard and mouse (`virt` has no PS/2 controller): what the
+    // monitor's sendkey, mouse_move and mouse_button reach
+    // (kernel/src/input/virtio.rs; `VirtioPace`).
+    cmd.args(["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]);
     cmd.args(extra.split_whitespace());
     Ok(cmd)
 }
@@ -12229,9 +12233,10 @@ const AARCH64_SCENARIOS: &[&str] = &[
 ///
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
-/// (it ships Office's x64 setup.exe), the scenarios with screen checks or
-/// injected input (no PS/2 controller on QEMU `virt`; virtio-input is
-/// ROADMAP AR's next), and those ROADMAP AR lists as next.
+/// (it ships Office's x64 setup.exe), the scenarios whose screen checks
+/// take screendumps (no framebuffer on QEMU `virt` yet: ROADMAP AR's
+/// next; those presented to memory, `presenter=test`, are twins, their
+/// input through virtio-input), and those ROADMAP AR lists as next.
 const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
@@ -12394,6 +12399,8 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl",
     "lx_wl_maximize",
     "lx_wl_popup",
+    "lx_wl_input",
+    "gui_test_headless",
     "lx_fs",
     "lx_id",
     "lx_run",
@@ -21903,7 +21910,7 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
         // XTerm: an xterm under the desktop's rootless Xwayland. Nothing to
         // wait for after `exit`: the console's window stays (the taskbar
         // does not change), and the keys are read before these moves
-        // (Ps2Pace).
+        // (InputPace).
         ScreenStep {
             after: "",
             input: &[
@@ -23344,6 +23351,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
 ];
 
 fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
+    // A twin is checked as its x64 scenario is.
+    let name = twin_base(name).unwrap_or(name);
     SCREEN_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, c)| c)
 }
 
@@ -23366,7 +23375,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
         .iter()
         .find(|(n, _)| *n == iso_scenario(iso))
         .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
-    let mut ps2 = Ps2Pace::default();
+    let mut ps2 = InputPace::default();
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
             wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
@@ -23374,7 +23383,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
         for command in step.input {
             // Each command only once the guest has read what QEMU queued
             // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
-            // what does not fit is lost (Ps2Pace).
+            // what does not fit is lost (InputPace).
             ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
             ps2.sent(command).map_err(|e| format!("step {n}: {e}"))?;
@@ -23427,7 +23436,7 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
     closed
 }
 
-/// A screen check's PS/2 input, paced on what the guest has read. QEMU's
+/// A screen check's input, paced on what the guest has read. QEMU's
 /// PS/2 keyboard and mouse each queue at most 16 bytes for the guest:
 /// a key that does not fit is dropped, and a mouse packet that does not
 /// fit waits for the next input event, which only carries the buttons as
@@ -23439,12 +23448,16 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
 /// are empty when it arrives. The guest counts the bytes its input
 /// thread reads from each device (`input: bytes read at <address>` on
 /// the serial log), read here through the monitor; what QEMU queues for
-/// each command is exact (`ps2_bytes`).
+/// each command is exact (`ps2_bytes`). On aarch64 (`virt`, no PS/2)
+/// the input goes to virtio-input devices, whose queue the guest also
+/// empties as it polls: there the guest counts the events it reads
+/// (`input: virtio events read at <address>`), and what QEMU queues for
+/// each command is `virtio_events`.
 #[derive(Default)]
-struct Ps2Pace {
-    /// The guest's counters (keyboard, mouse) and its mouse packets'
-    /// size, once found in the serial log.
-    guest: Option<(u64, u64)>,
+struct InputPace {
+    /// The guest's counters' address and the devices they count, once
+    /// found in the serial log.
+    guest: Option<(u64, Counted)>,
     /// The counters when this check began (a resumed snapshot's are not
     /// 0), plus what this check has sent since.
     want: (u64, u64),
@@ -23457,7 +23470,16 @@ struct Ps2Pace {
 /// give-up only (a guest that stopped reading the controller).
 const PS2_TAKEN_WAIT: Duration = Duration::from_secs(120);
 
-impl Ps2Pace {
+/// What the guest's input counters count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Counted {
+    /// PS/2 bytes, with mouse packets of this many bytes.
+    Ps2Bytes(u64),
+    /// virtio-input events.
+    VirtioEvents,
+}
+
+impl InputPace {
     /// Waits until the guest has read everything sent so far.
     fn wait_taken(&mut self, monitor: &mut std::os::unix::net::UnixStream, log: &Path) -> Result {
         let (at, _) = self.find(monitor, log)?;
@@ -23466,12 +23488,13 @@ impl Ps2Pace {
         while read.0 < self.want.0 || read.1 < self.want.1 {
             if start.elapsed() > PS2_TAKEN_WAIT {
                 return Err(format!(
-                    "the guest read {} of the {} keyboard bytes and {} of the {} mouse bytes sent \
+                    "the guest read {} of the {} keyboard and {} of the {} mouse {} sent \
                      within {} s (its input thread: `input:` lines in the serial log)",
                     read.0,
                     self.want.0,
                     read.1,
                     self.want.1,
+                    self.unit(),
                     PS2_TAKEN_WAIT.as_secs()
                 ));
             }
@@ -23480,55 +23503,121 @@ impl Ps2Pace {
         }
         if read.0 > self.want.0 || read.1 > self.want.1 {
             return Err(format!(
-                "the guest read more PS/2 bytes than were sent (keyboard {} of {}, mouse {} of {}): \
-                 ps2_bytes no longer matches QEMU",
-                read.0, self.want.0, read.1, self.want.1
+                "the guest read more {} than were sent (keyboard {} of {}, mouse {} of {}): \
+                 {} no longer matches QEMU",
+                self.unit(),
+                read.0,
+                self.want.0,
+                read.1,
+                self.want.1,
+                if self.unit() == "bytes" { "ps2_bytes" } else { "virtio_events" }
             ));
         }
         Ok(())
     }
 
-    /// The guest's counters' address and its mouse packets' size; the
-    /// first time, also where its counters stand.
+    /// What the counters count, for messages.
+    fn unit(&self) -> &'static str {
+        match self.guest {
+            Some((_, Counted::VirtioEvents)) => "events",
+            _ => "bytes",
+        }
+    }
+
+    /// The guest's counters' address and what they count; the first
+    /// time, also where they stand.
     fn find(
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
         log: &Path,
-    ) -> Result<(u64, u64)> {
+    ) -> Result<(u64, Counted)> {
         if let Some(g) = self.guest {
             return Ok(g);
         }
-        const LINE: &str = "input: bytes read at ";
-        wait_for_line(log, LINE, SCREEN_STEP_WAIT)?;
-        let text =
-            String::from_utf8_lossy(&fs::read(log).map_err(|e| format!("reading {log:?}: {e}"))?)
-                .into_owned();
-        let rest = text
-            .lines()
-            .rev()
-            .find_map(|l| l.split_once(LINE).map(|(_, r)| r.to_string()))
-            .ok_or("no `input: bytes read at` line")?;
+        // The input thread logs one of the two once its devices are set up.
+        const PS2: &str = "input: bytes read at ";
+        const VIRTIO: &str = "input: virtio events read at ";
+        let start = Instant::now();
+        let (rest, virtio) = loop {
+            let text = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
+            let found = text.lines().rev().find_map(|l| {
+                l.split_once(VIRTIO)
+                    .map(|(_, r)| (r.to_string(), true))
+                    .or_else(|| l.split_once(PS2).map(|(_, r)| (r.to_string(), false)))
+            });
+            if let Some(f) = found {
+                break f;
+            }
+            if start.elapsed() > SCREEN_STEP_WAIT {
+                return Err(format!(
+                    "no {PS2:?} or {VIRTIO:?} in the serial log within {} s",
+                    SCREEN_STEP_WAIT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
         let at = rest
             .split_whitespace()
             .next()
             .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok())
-            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
-        let packet = rest
-            .split_once("mouse packets of ")
-            .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
-            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
-        self.guest = Some((at, packet));
+            .ok_or_else(|| format!("unreadable input counters line `{rest}`"))?;
+        let counted = if virtio {
+            Counted::VirtioEvents
+        } else {
+            Counted::Ps2Bytes(
+                rest.split_once("mouse packets of ")
+                    .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
+                    .ok_or_else(|| format!("unreadable `{PS2}{rest}`"))?,
+            )
+        };
+        self.guest = Some((at, counted));
         self.want = guest_ps2_read(monitor, at)?;
-        Ok((at, packet))
+        Ok((at, counted))
     }
 
     /// `command` was written to the monitor: what it queues is wanted.
     fn sent(&mut self, command: &str) -> Result {
-        let (_, packet) = self.guest.ok_or("no guest counters")?;
-        let (keyboard, mouse) = ps2_bytes(command, packet, &mut self.buttons)?;
+        let (_, counted) = self.guest.ok_or("no guest counters")?;
+        let (keyboard, mouse) = match counted {
+            Counted::Ps2Bytes(packet) => ps2_bytes(command, packet, &mut self.buttons)?,
+            Counted::VirtioEvents => virtio_events(command, &mut self.buttons)?,
+        };
         self.want.0 += keyboard;
         self.want.1 += mouse;
         Ok(())
+    }
+}
+
+/// What QEMU's virtio-input keyboard and mouse queue for monitor command
+/// `command` (keyboard events, mouse events), with `buttons` the
+/// monitor's button state (updated), as measured (black-box, QEMU 11.1):
+/// a move is REL_X, REL_Y and SYN_REPORT whatever its size and with an
+/// axis 0, and a wheel notch three more; a change of the buttons is a
+/// key event per button changed and a SYN_REPORT; a key is pressed and
+/// released, each with its SYN_REPORT (E0 keys the same). A command this
+/// does not know is refused.
+fn virtio_events(command: &str, buttons: &mut u8) -> Result<(u64, u64)> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let number = |w: Option<&&str>| -> Result<i64> {
+        w.and_then(|w| w.parse().ok())
+            .ok_or_else(|| format!("unreadable input command {command:?}"))
+    };
+    match words.first().copied() {
+        Some("mouse_move") => {
+            number(words.get(1))?;
+            number(words.get(2))?;
+            let dz = if words.len() > 3 { number(words.get(3))? } else { 0 };
+            Ok((0, 3 + if dz != 0 { 3 } else { 0 }))
+        }
+        Some("mouse_button") => {
+            let b = u8::try_from(number(words.get(1))?)
+                .map_err(|_| format!("unreadable input command {command:?}"))?;
+            let changed = u64::from((b ^ *buttons).count_ones());
+            *buttons = b;
+            Ok((0, if changed > 0 { changed + 1 } else { 0 }))
+        }
+        Some("sendkey") if words.len() == 2 => Ok((4 * words[1].split('-').count() as u64, 0)),
+        _ => Err(format!("input command {command:?}: what it queues is not known (virtio_events)")),
     }
 }
 
@@ -28389,6 +28478,26 @@ mod ps2_pace {
     /// wheel notch, one per change of the buttons, a byte per key press
     /// and release (two with E0).
     #[test]
+    fn virtio_events_are_what_qemu_queues() {
+        // Measured against QEMU 11.1's virtio-keyboard-pci and
+        // virtio-mouse-pci (the guest's counters around each command).
+        let mut b = 0;
+        assert_eq!(virtio_events("mouse_move 0 0", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_move -240 -122", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_move 0 0 -1", &mut b), Ok((0, 6)));
+        assert_eq!(virtio_events("mouse_move 5 0 2", &mut b), Ok((0, 6)));
+        assert_eq!(virtio_events("mouse_button 3", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_button 1", &mut b), Ok((0, 2)));
+        assert_eq!(virtio_events("mouse_button 6", &mut b), Ok((0, 4)));
+        assert_eq!(virtio_events("mouse_button 0", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_button 0", &mut b), Ok((0, 0)));
+        assert_eq!(virtio_events("sendkey a", &mut b), Ok((4, 0)));
+        assert_eq!(virtio_events("sendkey ctrl-alt-delete", &mut b), Ok((12, 0)));
+        assert_eq!(virtio_events("sendkey kp_enter", &mut b), Ok((4, 0)));
+        assert!(virtio_events("screendump x", &mut b).is_err());
+    }
+
+    #[test]
     fn commands_queue_what_qemu_queues() {
         let mut b = 0;
         assert_eq!(ps2_bytes("mouse_move 0 0", 4, &mut b), Ok((0, 4)));
@@ -28415,11 +28524,17 @@ mod ps2_pace {
     #[test]
     fn every_screen_step_input_is_paced() {
         for (name, check) in SCREEN_SCENARIOS {
-            let mut b = 0;
+            // A scenario with an ARM64 twin is also driven through
+            // virtio-input (aarch64's `virt` has no PS/2).
+            let twin = ARM64_TWINS.contains(name);
+            let (mut b, mut v) = (0, 0);
             for (n, step) in check.steps.iter().enumerate() {
                 for command in step.input {
                     if let Err(e) = ps2_bytes(command, 4, &mut b) {
                         panic!("{name} step {n}: {e}");
+                    }
+                    if twin && let Err(e) = virtio_events(command, &mut v) {
+                        panic!("arm_{name} step {n}: {e}");
                     }
                 }
             }

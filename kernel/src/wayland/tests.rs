@@ -2092,3 +2092,22 @@ fn an_override_redirect_x_window_is_a_popup_where_it_is() {
     t.ok(11, "commit", &[]);
     assert!(!t.h.windows[0].alive);
 }
+
+#[test]
+fn scan_code_inverts_evdev_key() {
+    // Every key with an evdev code maps back to its set 1 code and E0 flag
+    // (what a virtio-input keyboard's events become).
+    let mut keys = 0;
+    for scan in 0..=0x7fu8 {
+        for ext in [false, true] {
+            if let Some(k) = input::evdev_key(scan, ext) {
+                assert_eq!(input::scan_code(k), Some((scan, ext)), "evdev {k}");
+                keys += 1;
+            }
+        }
+    }
+    assert!(keys > 90, "{keys} keys");
+    // Codes the keymap does not have: none.
+    assert_eq!(input::scan_code(0), None);
+    assert_eq!(input::scan_code(0x110), None); // BTN_LEFT is a button
+}

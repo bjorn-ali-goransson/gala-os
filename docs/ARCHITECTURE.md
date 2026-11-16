@@ -382,7 +382,11 @@ faults, its exit).
   (`events_file=<host path>`, which xtask gives every aarch64 image: its
   `<image>.events.jsonl`), opened at the first write, nothing without it;
   no phase port (`bootphase` marks are no-ops). No PS/2 controller on
-  `virt`: injected input waits for a virtio-input driver.
+  `virt`: the keyboard and mouse are virtio-input devices (xtask gives
+  every aarch64 machine `virtio-keyboard-pci` and `virtio-mouse-pci`;
+  the input thread, "Input"). No framebuffer yet (the firmware's GOP on
+  `virt` has none to give): screen checks run where the desktop is
+  presented to memory (`presenter=test`).
 - **Threads** (`context.rs`, `percpu.rs`): kernel stacks in a window of
   guard-paged slots, as x86-64's. The switch saves x19-x30 on the
   outgoing stack and its SP in the context, and the FP/SIMD registers
@@ -7543,6 +7547,22 @@ session's is shown by nothing unless GalaSession attaches a presenter
   notches and keys. A shown window that leaves the screen is logged as
   `desktop: window '<title>' left the screen (hidden | closed | its
   process ended)`, the counterpart of `desktop: shown window`.
+  virtio-input (`input/virtio.rs`): the input thread also drives every
+  virtio-input keyboard and relative mouse it finds (PCI 1af4:1052, the
+  modern interface), polled with the PS/2 controller where there is one.
+  A device is classified by the events its configuration says it
+  reports (EV_BITS: REL_X makes a mouse, absolute axes a tablet, which
+  is named and not driven, KEY_A a keyboard) and logged with its name
+  (`input: virtio-input Keyboard 'QEMU Virtio Keyboard' at 00:02.0`).
+  Its event queue holds 64 one-event buffers, each posted back once
+  read. A key's evdev code becomes the set 1 code it stands for
+  (`wayland::input::scan_code`, `evdev_key`'s inverse) and then the
+  same virtual key as PS/2's; a mouse's events gather until
+  SYN_REPORT into a report (moves, wheel, buttons) that goes the PS/2
+  packet's way (`Report`, `Coalescer`). The thread counts the events it
+  reads (`EVENTS_READ`, every event, SYN_REPORT included) and logs
+  their address (`input: virtio events read at <address>`) for xtask's
+  pacing, as `BYTES_READ`.
 - **Boot splash** (`console.rs`): from when the kernel takes the
   framebuffer until the desktop does, the screen shows the fortress
   (160 px) over the wordmark (220 px) on a dark gradient, with a

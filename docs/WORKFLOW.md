@@ -3761,7 +3761,7 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   30 s) before it fails: a redraw under load can outlast the first
   dump, and a step may wait for the program.
 - **Input is paced on what the guest has read, never on time**
-  (`Ps2Pace` in xtask). QEMU's PS/2 keyboard and mouse each queue at
+  (`InputPace` in xtask). QEMU's PS/2 keyboard and mouse each queue at
   most 16 bytes: a key that does not fit is dropped, and a mouse packet
   that does not fit waits for the next input event, which carries only
   the buttons as they are then, so a press followed by its release
@@ -3776,7 +3776,15 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   that does not read within 120 s fails the step with the counts ("the
   guest read N of the M mouse bytes sent"); a command `ps2_bytes` does
   not know, or one that would not fit an empty queue, is refused by the
-  host test `every_screen_step_input_is_paced`. Under the
+  host test `every_screen_step_input_is_paced`. An aarch64 twin's input
+  goes to virtio-input (no PS/2 on `virt`): the guest counts the events
+  it reads (`input: virtio events read at <address>`) and
+  `virtio_events` knows what QEMU queues for each command (measured
+  black-box: a move is REL_X, REL_Y and SYN whatever its size, a wheel
+  notch three more, a button change one event per button changed and a
+  SYN, a key four: down, SYN, up, SYN); the same host test refuses a
+  twin's command it does not know. A twin is screen-checked as its x64
+  scenario (`screen_check` looks through `twin_base`). Under the
   `events=window` mask, each button change the desktop takes is an
   event `pointer` (where, and what got it: `Start`, `LinuxEntry(0)`,
   `capture <window>`), and the exit's `input:` line counts the presses.

@@ -14,8 +14,12 @@
 //! (`nt::desktop::start_clock`), so a machine with no PS/2 mouse still
 //! has a taskbar whose minute changes.
 
+mod virtio;
+
 use crate::arch::ps2;
+use crate::mm::heap::TryVec;
 use crate::sched;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -60,6 +64,15 @@ static BYTES_READ: BytesRead = BytesRead {
     mouse: core::sync::atomic::AtomicU64::new(0),
 };
 
+/// The events the input thread has read from virtio-input devices: the
+/// keyboards', then the mice's (every event, SYN_REPORT included). Its
+/// address is on the serial log (`input: virtio events read at`): xtask
+/// paces a screen check's input on it as on `BYTES_READ`.
+static EVENTS_READ: BytesRead = BytesRead {
+    keyboard: core::sync::atomic::AtomicU64::new(0),
+    mouse: core::sync::atomic::AtomicU64::new(0),
+};
+
 /// The `input:` line (at the end of a run).
 pub fn log_stats() {
     use core::sync::atomic::Ordering::Relaxed;
@@ -76,10 +89,12 @@ pub fn log_stats() {
     );
 }
 
-fn input_thread(_: usize) {
+/// The PS/2 controller, set up, with its mouse packets' size; None when
+/// the machine has none or nothing on it answered (each case logged).
+fn ps2_setup() -> Option<(ps2::I8042, usize)> {
     let Some(mut controller) = ps2::claim() else {
         crate::info!("input: no PS/2 controller on this machine");
-        return;
+        return None;
     };
     // Which devices are on the controller is the machine's own business,
     // and a machine with none at all is a machine whose input this kernel
@@ -89,7 +104,7 @@ fn input_thread(_: usize) {
         crate::warn!(
             "input: the PS/2 controller (ports 0x60 and 0x64) never answered: no local keyboard or mouse (a machine whose keyboard and mouse are USB alone has none until USB HID is driven)"
         );
-        return;
+        return None;
     };
     if found.keyboard {
         crate::info!("input: PS/2 keyboard scanning (set 1, the controller translating)");
@@ -106,55 +121,194 @@ fn input_thread(_: usize) {
         );
     }
     if !found.keyboard && !found.mouse {
-        crate::warn!("input: no PS/2 device answered: nothing to read, the input thread stops");
-        return;
+        crate::warn!("input: no PS/2 device answered");
+        return None;
     }
     crate::info!(
         "input: bytes read at {:#x} (keyboard, mouse: two u64), mouse packets of {} bytes",
         core::ptr::addr_of!(BYTES_READ) as usize,
         if found.wheel { 4 } else { 3 }
     );
-    let mut packet = Packet { size: if found.wheel { 4 } else { 3 }, ..Packet::default() };
+    Some((controller, if found.wheel { 4 } else { 3 }))
+}
+
+/// The virtio-input devices this thread drives (keyboards and mice), each
+/// logged; the others are named as not driven.
+fn virtio_setup() -> Vec<virtio::VirtioInput> {
+    let mut driven = Vec::new();
+    for d in virtio::VirtioInput::probe_all() {
+        match d.kind {
+            virtio::Kind::Keyboard | virtio::Kind::Mouse => {
+                crate::info!("input: virtio-input {:?} '{}' at {}", d.kind, d.name(), d.at);
+                if driven.try_push(d).is_err() {
+                    crate::warn!("input: no memory to drive a virtio-input device");
+                }
+            }
+            kind => crate::warn!(
+                "input: virtio-input '{}' at {} is a {kind:?}: not driven (keyboards and relative mice are)",
+                d.name(),
+                d.at
+            ),
+        }
+    }
+    if !driven.is_empty() {
+        crate::info!(
+            "input: virtio events read at {:#x} (keyboard, mouse: two u64)",
+            core::ptr::addr_of!(EVENTS_READ) as usize
+        );
+    }
+    driven
+}
+
+fn input_thread(_: usize) {
+    let mut ps2 = ps2_setup();
+    let mut devices = virtio_setup();
+    if ps2.is_none() && devices.is_empty() {
+        crate::warn!(
+            "input: no PS/2 device and no virtio-input keyboard or mouse: nothing to read, the input thread stops"
+        );
+        return;
+    }
+    let mut packet = Packet { size: ps2.as_ref().map_or(3, |p| p.1), ..Packet::default() };
     let mut keys = Keys::default();
     let mut mouse = Coalescer::default();
+    let mut report = Report::default();
     let mut held = 0u8;
     loop {
         // Moves with the buttons held are summed (one redraw per poll);
         // a press or release is delivered where it happened.
         let mut deliver = |dx, dy, b| deliver(dx, dy, b);
-        while let Some((byte, aux)) = controller.poll() {
+        while let Some((byte, aux)) = ps2.as_mut().and_then(|p| p.0.poll()) {
             let read = if aux { &BYTES_READ.mouse } else { &BYTES_READ.keyboard };
             read.fetch_add(1, core::sync::atomic::Ordering::Release);
             if !aux {
                 if let Some((vk, scan, extended, down)) = keys.push(byte) {
-                    if down {
-                        KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    }
-                    mouse.flush(&mut deliver);
-                    if let Some((session, program)) =
-                        crate::nt::desktop::key_event(vk, scan, extended, down)
-                    {
-                        crate::nt::action::start_from_menu(session, program);
-                    }
+                    key(vk, scan, extended, down, &mut mouse, &mut deliver);
                 }
                 continue;
             }
             let Some((dx, dy, buttons, dz)) = packet.push(byte) else { continue };
-            PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if buttons & !held != 0 {
-                PRESSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-            held = buttons;
-            if dz != 0 {
-                WHEEL_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                WHEEL_NOTCHES.fetch_add(dz, core::sync::atomic::Ordering::Relaxed);
-                mouse.flush(&mut deliver);
-                crate::nt::desktop::wheel_event(dz);
-            }
-            mouse.packet(dx, dy, buttons, &mut deliver);
+            pointer(dx, dy, buttons, dz, &mut held, &mut mouse, &mut deliver);
+        }
+        for d in &mut devices {
+            let keyboard = d.kind == virtio::Kind::Keyboard;
+            d.poll(|e| {
+                let read = if keyboard { &EVENTS_READ.keyboard } else { &EVENTS_READ.mouse };
+                read.fetch_add(1, core::sync::atomic::Ordering::Release);
+                if keyboard {
+                    if let Some((vk, scan, extended, down)) = virtio_key(e) {
+                        key(vk, scan, extended, down, &mut mouse, &mut deliver);
+                    }
+                } else if let Some((dx, dy, buttons, dz)) = report.push(e) {
+                    pointer(dx, dy, buttons, dz, &mut held, &mut mouse, &mut deliver);
+                }
+            });
         }
         mouse.flush(&mut deliver);
         sched::sleep_ms(5);
+    }
+}
+
+/// A key event to the desktop (the pointer's moves before it first).
+fn key(
+    vk: u8,
+    scan: u8,
+    extended: bool,
+    down: bool,
+    mouse: &mut Coalescer,
+    deliver: &mut impl FnMut(i64, i64, u8),
+) {
+    if down {
+        KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    mouse.flush(deliver);
+    if let Some((session, program)) = crate::nt::desktop::key_event(vk, scan, extended, down) {
+        crate::nt::action::start_from_menu(session, program);
+    }
+}
+
+/// A mouse report (a PS/2 packet, a virtio-input report) to the desktop.
+fn pointer(
+    dx: i64,
+    dy: i64,
+    buttons: u8,
+    dz: i64,
+    held: &mut u8,
+    mouse: &mut Coalescer,
+    deliver: &mut impl FnMut(i64, i64, u8),
+) {
+    PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if buttons & !*held != 0 {
+        PRESSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    *held = buttons;
+    if dz != 0 {
+        WHEEL_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        WHEEL_NOTCHES.fetch_add(dz, core::sync::atomic::Ordering::Relaxed);
+        mouse.flush(deliver);
+        crate::nt::desktop::wheel_event(dz);
+    }
+    mouse.packet(dx, dy, buttons, deliver);
+}
+
+/// A virtio-input keyboard's event as (virtual key, set 1 scan code,
+/// extended, down): its evdev code through the set 1 code it stands for
+/// (an autorepeat, value 2, is another press, as PS/2's typematic make).
+fn virtio_key(e: virtio::Event) -> Option<(u8, u8, bool, bool)> {
+    if e.kind != virtio::EV_KEY {
+        return None;
+    }
+    let (scan, extended) = crate::wayland::input::scan_code(u32::from(e.code))?;
+    let vk = vk_of(scan, extended);
+    (vk != 0).then_some((vk, scan, extended, e.value != 0))
+}
+
+/// A virtio-input mouse's events gathered into reports: relative moves,
+/// the wheel and the buttons, until SYN_REPORT ends one.
+#[derive(Default)]
+struct Report {
+    dx: i64,
+    dy: i64,
+    dz: i64,
+    buttons: u8,
+    /// Whether anything changed since the last report.
+    pending: bool,
+}
+
+impl Report {
+    /// An event; a whole report gives (dx, dy screen-down, buttons, wheel
+    /// notches away from the user), as `Packet::push`.
+    fn push(&mut self, e: virtio::Event) -> Option<(i64, i64, u8, i64)> {
+        let value = i64::from(e.value);
+        match (e.kind, e.code) {
+            (virtio::EV_REL, virtio::REL_X) => self.dx += value,
+            (virtio::EV_REL, virtio::REL_Y) => self.dy += value,
+            (virtio::EV_REL, virtio::REL_WHEEL) => self.dz += value,
+            (virtio::EV_KEY, code) => {
+                let bit = match code {
+                    virtio::BTN_LEFT => 1,
+                    virtio::BTN_RIGHT => 2,
+                    virtio::BTN_MIDDLE => 4,
+                    _ => return None,
+                };
+                if e.value != 0 {
+                    self.buttons |= bit;
+                } else {
+                    self.buttons &= !bit;
+                }
+            }
+            (virtio::EV_SYN, virtio::SYN_REPORT) => {
+                if !core::mem::take(&mut self.pending) {
+                    return None;
+                }
+                let r = (self.dx, self.dy, self.buttons, self.dz);
+                (self.dx, self.dy, self.dz) = (0, 0, 0);
+                return Some(r);
+            }
+            _ => return None,
+        }
+        self.pending = true;
+        None
     }
 }
 
@@ -295,18 +449,57 @@ impl Keys {
         }
         let extended = core::mem::take(&mut self.extended);
         let (code, down) = (byte & 0x7f, byte & 0x80 == 0);
-        let vk = if extended {
-            vk_extended(code)
-        } else {
-            VK.get(usize::from(code)).copied().unwrap_or(0)
-        };
+        let vk = vk_of(code, extended);
         (vk != 0).then_some((vk, code, extended, down))
     }
 }
 
+/// The virtual key of set 1 make code `code` (`extended`: E0-prefixed);
+/// 0 for none.
+fn vk_of(code: u8, extended: bool) -> u8 {
+    if extended { vk_extended(code) } else { VK.get(usize::from(code)).copied().unwrap_or(0) }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Coalescer, Keys, Packet};
+    use super::virtio::{self, Event};
+    use super::{Coalescer, Keys, Packet, Report, virtio_key};
+
+    fn ev(kind: u16, code: u16, value: i32) -> Event {
+        Event { kind, code, value }
+    }
+
+    #[test]
+    fn virtio_mouse_events_become_reports_at_syn() {
+        let mut r = Report::default();
+        // A move: x, y, then the report (y as the screen goes: down).
+        assert_eq!(r.push(ev(virtio::EV_REL, virtio::REL_X, 5)), None);
+        assert_eq!(r.push(ev(virtio::EV_REL, virtio::REL_Y, -3)), None);
+        assert_eq!(r.push(ev(virtio::EV_SYN, virtio::SYN_REPORT, 0)), Some((5, -3, 0, 0)));
+        // A press, then its release: the buttons as each report ends.
+        assert_eq!(r.push(ev(virtio::EV_KEY, virtio::BTN_LEFT, 1)), None);
+        assert_eq!(r.push(ev(virtio::EV_SYN, virtio::SYN_REPORT, 0)), Some((0, 0, 1, 0)));
+        assert_eq!(r.push(ev(virtio::EV_KEY, virtio::BTN_RIGHT, 1)), None);
+        assert_eq!(r.push(ev(virtio::EV_KEY, virtio::BTN_LEFT, 0)), None);
+        assert_eq!(r.push(ev(virtio::EV_SYN, virtio::SYN_REPORT, 0)), Some((0, 0, 2, 0)));
+        // The wheel; an empty report is none.
+        assert_eq!(r.push(ev(virtio::EV_REL, virtio::REL_WHEEL, 1)), None);
+        assert_eq!(r.push(ev(virtio::EV_SYN, virtio::SYN_REPORT, 0)), Some((0, 0, 2, 1)));
+        assert_eq!(r.push(ev(virtio::EV_SYN, virtio::SYN_REPORT, 0)), None);
+    }
+
+    #[test]
+    fn virtio_keys_become_virtual_keys() {
+        // KEY_H (35 = set 1 0x23) down, up; autorepeat is a press.
+        assert_eq!(virtio_key(ev(virtio::EV_KEY, 35, 1)), Some((b'H', 0x23, false, true)));
+        assert_eq!(virtio_key(ev(virtio::EV_KEY, 35, 0)), Some((b'H', 0x23, false, false)));
+        assert_eq!(virtio_key(ev(virtio::EV_KEY, 35, 2)), Some((b'H', 0x23, false, true)));
+        // KEY_UP (103): E0 48, VK_UP.
+        assert_eq!(virtio_key(ev(virtio::EV_KEY, 103, 1)), Some((0x26, 0x48, true, true)));
+        // Not a key event, or a button: none.
+        assert_eq!(virtio_key(ev(virtio::EV_SYN, 0, 0)), None);
+        assert_eq!(virtio_key(ev(virtio::EV_KEY, virtio::BTN_LEFT, 1)), None);
+    }
 
     #[test]
     fn a_release_is_delivered_where_it_happened() {
