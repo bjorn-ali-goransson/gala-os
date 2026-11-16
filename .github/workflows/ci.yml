@@ -127,8 +127,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --reinstall --allow-downgrades gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev
           apt-cache policy cpp-15-x86-64-linux-gnu | sed -n '1,6p'
-      - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+      - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3, gdb
+        # gdb, and Yama letting it attach to a process it did not start:
+        # a QEMU whose monitor stops answering gets its threads' stacks
+        # taken into the failed log (OBSERVABILITY "State dump").
+        run: |
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+          sudo apt-get update && sudo apt-get install -y gdb qemu-system-x86 ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       # No distribution QEMU is used: 8.1.0-8.2.5 had the translated-block bug
       # that broke JIT code, and this image's 10.2.1 wedges under KVM before the
       # kernel logs a phase (WORKFLOW "QEMU"); xtask builds the pinned one. The

@@ -610,14 +610,17 @@ watchdog report and in the state dump.
 A read-only "what are you doing" with no channel of its own
 (`kernel/src/statedump.rs`; cheap: nothing runs until asked). When a
 boot test times out, xtask injects an NMI (QEMU monitor `nmi`, every
-CPU) before killing the VM and waits up to 20 s for the dump (x86-64:
-QEMU's aarch64 `virt` has no NMI to inject, so an aarch64 boot that
-times out has no dump yet; the kernel's own NMIs, the GIC's pseudo-NMI,
-do work there: the watchdog's backtraces, the profiler's samples). Every
-timeout's failed log also has QEMU's view of each CPU (`xtask: QEMU's
-CPU#n: PC=... PSTATE=...`, read from the monitor before the NMI), and
-with `XTASK_QEMU_GDB=1` QEMU's own record of each vCPU and every QEMU
-thread's stack (WORKFLOW "Hunting a rare hang"). The run's end says
+CPU) before killing the VM and waits up to 20 s for the dump (aarch64:
+QEMU's `virt` has no NMI to inject, so xtask sends a break on the
+console, whose interrupt the kernel takes at its pseudo-NMI's priority).
+Every timeout's failed log also has QEMU's view of each CPU (`xtask:
+QEMU's CPU#n: PC=... PSTATE=...`, read from the monitor before the
+NMI). When the monitor gives nothing, QEMU is stuck in itself, not the
+guest: xtask then attaches gdb to it and adds QEMU's own record of each
+vCPU and every QEMU thread's stack (`xtask: gdb: ...`; what gdb said
+when it could not attach); `XTASK_QEMU_GDB=1` takes that at every
+timeout (WORKFLOW "Hunting a rare hang"). CI installs gdb and lets it
+attach (`kernel.yama.ptrace_scope=0`). The run's end says
 itself: `qemu: ending the run (Success|Failure)` before the exit, and
 on aarch64 `qemu: the run did not end: ...` if the semihosting exit
 returned (x86-64's exit device asks QEMU for the end and the CPU runs on

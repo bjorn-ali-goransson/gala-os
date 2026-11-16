@@ -20977,7 +20977,7 @@ fn end_qemu(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// `XTASK_QEMU_GDB=1`: QEMU's own record of each vCPU (halted, PC and the
+/// `XTASK_QEMU_GDB=1`, or a monitor that did not answer: QEMU's own record of each vCPU (halted, PC and the
 /// registers that say how it got there, the exception registers, the
 /// power state) and every QEMU thread's stack, read by attaching gdb to
 /// the QEMU process of a timed-out boot (WORKFLOW "A boot that hangs"):
@@ -21041,27 +21041,41 @@ fn qemu_gdb_state(pid: u32, log: &Path) -> String {
             format!("printf \"vcpu %d {name} %#lx\\n\", $c->cpu_index, (unsigned long)({expr})\n")
         })
         .collect();
+    // The vCPU loop only reads memory. The threads' stacks come first and
+    // the calls into QEMU (the clock, fflush) last, each its own `-ex`:
+    // gdb stops a sourced file at its first error, and a call into a
+    // wedged or stopped QEMU can fail; neither may cost the stacks.
     let script = format!(
-        "set pagination off\n\
-         printf \"clock virtual %ld\\n\", (long)qemu_clock_get_ns(1)\n\
-         set $c = cpus_queue.tqh_first\nwhile $c\n{cpu}\
-         set $c = $c->node.tqe_next\nend\nthread apply all bt 20\n\
-         call (int)fflush(0)\n"
+        "set $c = cpus_queue.tqh_first\nwhile $c\n{cpu}\
+         set $c = $c->node.tqe_next\nend\n"
     );
     let script_path = log.with_extension("gdb");
     if let Err(e) = fs::write(&script_path, script) {
         return format!("xtask: QEMU's own state (gdb): cannot write the script: {e}\n");
     }
     let out = Command::new("gdb")
-        .args(["-p", &pid.to_string(), "-batch", "-x"])
+        .args(["-p", &pid.to_string(), "-batch"])
+        .args(["-ex", "set pagination off", "-ex", "thread apply all bt 20", "-x"])
         .arg(&script_path)
+        .args([
+            "-ex",
+            "printf \"clock virtual %ld\\n\", (long)qemu_clock_get_ns(1)",
+            "-ex",
+            "call (int)fflush(0)",
+        ])
         .stdin(Stdio::null())
         .output();
     match out {
         Err(e) => format!("xtask: QEMU's own state (gdb): {e} (is gdb installed?)\n"),
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
-            let mut lines = String::from("xtask: QEMU's own state (gdb, XTASK_QEMU_GDB):\n");
+            let mut lines = String::from("xtask: QEMU's own state (gdb):\n");
+            if !o.status.success() || !text.contains("Thread ") {
+                // ptrace refused (Yama's ptrace_scope), no symbols, ...
+                for line in String::from_utf8_lossy(&o.stderr).lines().take(5) {
+                    lines += &format!("xtask: gdb said: {line}\n");
+                }
+            }
             for line in text
                 .lines()
                 .filter(|l| ["vcpu ", "clock ", "Thread ", "#"].iter().any(|p| l.starts_with(p)))
@@ -21131,7 +21145,11 @@ fn ask_for_state_dump(
     use std::io::Write as _;
     // Before the NMI changes what the CPUs do.
     let mut registers = cpu_registers(socket);
-    if env::var_os("XTASK_QEMU_GDB").is_some() {
+    // A monitor that gives nothing is QEMU stuck in itself (its main loop
+    // or a lock), which no guest-side dump can explain: QEMU's own
+    // threads' stacks are then taken whether asked for or not.
+    let monitor_silent = !registers.contains("xtask: QEMU's CPU#");
+    if monitor_silent || env::var_os("XTASK_QEMU_GDB").is_some() {
         registers += &qemu_gdb_state(child.id(), log);
     }
     let seen = |mark: &str| {
