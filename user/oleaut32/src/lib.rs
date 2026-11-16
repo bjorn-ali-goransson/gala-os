@@ -55,6 +55,24 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+// rpcrt4.dll, which Windows' oleaut32 imports (RpcRaiseException,
+// NdrClientCall2 and the proxy and stub helpers for typelib-driven
+// marshalling; its import table, measured on 26100). gala's oleaut32 calls
+// nothing in it, but the dependency is part of what a program sees: rpcrt4
+// is mapped in every process that loads oleaut32, and programs read the
+// module graph -- Click-to-Run's AppV ISV server takes rpcrt4's handle with
+// GetModuleHandle and gives up with ERROR_MOD_NOT_FOUND when it is NULL
+// (ARCHITECTURE "The module graph", ROADMAP OF; `kernel32_test`). gala has
+// no 32-bit rpcrt4 yet, so the 32-bit build goes without it.
+// Nothing here calls it: build.rs pins the import on the link command
+// line, so the linker keeps it.
+#[cfg(not(target_arch = "x86"))]
+#[allow(dead_code)]
+#[link(name = "rpcrt4", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RpcRaiseException(status: u32) -> !;
+}
+
 #[cfg_attr(
     target_arch = "x86",
     link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")

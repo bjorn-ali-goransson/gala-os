@@ -495,6 +495,16 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   with RPC_X_BAD_STUB_DATA); `rpcrt4.dll!protocol sequence(<name>)` and
   `rpcrt4.dll!endpoint mapper (binding without endpoint)` for what local
   RPC does not reach.
+  Modules (kernel32's `mapping.rs`), "other":
+  `kernel32.dll!GetModuleHandle(<name>)` with the NTSTATUS as detail for
+  a handle asked by name for a module that is not loaded (the name is
+  kept printable: backslashes become `/`, so a module asked for by path
+  keeps its shape), and
+  `kernel32.dll!GetModuleHandleEx(address in no module)` with the
+  address as detail for the FROM_ADDRESS form, which has no name to
+  record. Neither is a gap of gala's: the answer is Windows' own
+  (NULL, ERROR_MOD_NOT_FOUND), and the line is there because nothing
+  else says which module a program wanted.
   Activation contexts (kernel32's `actctx.rs`), "other": every manifest
   CreateActCtxW refuses, `kernel32.dll!CreateActCtxW: <reason>` (`root is
   not asm.v1 <assembly>`, `unknown element in <file>`, `<file> hash is

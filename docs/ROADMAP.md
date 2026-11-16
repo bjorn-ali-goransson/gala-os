@@ -1785,7 +1785,8 @@ need gala's.
    with the app's own status, 0.
    Both runs end the same way today: the process starts, asks the SCM
    to start `ClickToRunSvc`, and dies 0xc0000142
-   (STATUS_DLL_INIT_FAILED) after 85 s without a window. The ledger's
+   (STATUS_DLL_INIT_FAILED) without a window (228 s into Word's run,
+   which is where the ladder below has got to). The ledger's
    25 missing `c2r64.dll!` exports are not the reason: they are the
    AppV ISV shim's optional hooks (`EnsureFile`, `LoadRange`,
    `StreamFault`, `HandleLoadIconW`, ...), and the real `C2R64.dll` the
@@ -1831,52 +1832,65 @@ need gala's.
      DrawStateW, GetDCEx, GetKeyNameTextW, HideCaret and
      TranslateMDISysAccel. None is reached yet, and neither is
      ChildWindowFromPointEx, which user32 does not export at all.
-     What the shim's DllMain does instead, with the kernel's `trace`
-     flag on (every system call logged): 171 NtCreateFile calls that
-     end 0xc0000034 (STATUS_OBJECT_NAME_NOT_FOUND), each raising
-     `rpcrt4.dll!NdrClientCall2` 1722 (RPC_S_SERVER_UNAVAILABLE) into
-     the ledger and retried after a wait, then a registry value read
-     and FALSE. There is no endpoint to open, and the service's own log
-     says why (`C2R::Orchestration::Initialize` in the dump):
-     `OISVAPI::Initialize Failed: [AppV Error: Code(0xc804525-0x7e)
-     ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
-     (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
-     is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. The client side of the diagnosis is
-     in place: a connect that finds no pipe records the name
+     What the shim's DllMain waits for is the AppV ISV RPC server in
+     the service, and that comes up: it registers
+     `APPV-VIRTMAN-NOTIFICATIONS`, `APPV-jitv_server`,
+     `APPV-VREG_SERVER` and `LRPC-C2RClientAPI_Server_System16` at
+     34.3-36.4 s of the run, and the shim connects to two of them (the
+     `no server at pipe` records before that -- 87 for the C2R client
+     API, one every 0.25 s -- are the shim retrying while the service
+     starts, and they end in a connect at 34.44 s). The lesson of the
+     0x7e that stood here before: the server's setup takes
+     `GetModuleHandle("Rpcrt4.dll")` and gave up with
+     ERROR_MOD_NOT_FOUND (126) because nothing in that process had
+     loaded rpcrt4, where Windows' advapi32, oleaut32, msi and combase
+     all import it statically. gala's system DLLs carry Windows' own
+     dependencies where a program can see them (ARCHITECTURE "The
+     module graph", `kernel32_test`), and the two records that found it
+     stay: a handle asked for a module that is not loaded is recorded
+     with the name asked for (`kernel32.dll!GetModuleHandle(<name>)`),
+     and a connect that finds no pipe with the endpoint's
      (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
-     detail, `rpc_test`), so a run says which endpoint a program could
-     not reach -- for Word, `LRPC-AppV-ISV-<GUID>APPV-VIRTMAN-NOT`,
-     14 times over the 59 s the service's own log counts
-     (`isv_process_notifier.cpp : 64`, 0x800706ba, RetryCount 13).
-     Of every file the service looked for and did not find, one was
-     gala's own gap and is now closed: slc.dll (ARCHITECTURE "slc",
-     `slc_test`, Windows' answers measured), which it loads from
-     System32 and asks one thing,
+     detail, `rpc_test`).
+     The service names the next gap itself:
+     `AppVEvents::VirtualProcessCreateFailed`, `[AppV Error:
+     Code(0x3e507325-0x80004005) ... Module(Shared Component - 5)
+     File(xmlutils.cpp : 920)]`, 13 times every 15 s, then
+     `isv_process_notifier.cpp : 64` "Max retry limit reached" after
+     59 s -- the shim waits for a virtual process environment the
+     service cannot build, and what fails is reading XML. What the
+     service reads right before it, from the event stream: the AppV
+     package catalog under
+     `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
+     and `C:\Program Files\Microsoft Office\FilesystemMetadata.xml`,
+     through msxml6's DOMDocument (CLSIDs 88D96A05 to 88D96A08);
+     nothing else in the service fails in between. Either gala's msxml6
+     cannot read something in those files, or the install wrote them
+     incompletely (the integration step that fails, above). The run
+     cannot say which, because msxml6 records nothing in it: so the
+     next step is to make msxml6 name what it cannot do, in the ledger
+     ("Gaps are never silent"), rerun `office_word`, and close what it
+     names.
+     Pitfalls, measured, not worth chasing again: the module names the
+     run probes for and does not find (`sftldr.dll`,
+     `sftldr_wow64.dll`, `mso20win32client`, `mscoree.dll`,
+     `c2r64.dll`, `AppVEntSubsystems32/64.dll`) and the five files it
+     looks for by full path in `ClickToRun` (`AppVISVStream32.dll`,
+     `AppVISVStream64.dll`, `Mso20win32client.dll`,
+     `Mso30win32client.dll`, `Mso40UIwin32client.dll`) are absent on
+     Windows too (measured on the Windows machine; the three Mso ones
+     live under the Office root's
+     `vfs\ProgramFilesCommonX64\Microsoft Shared\Office16`, and no
+     Click-to-Run binary imports slc.dll or any of the five: 165 files
+     read). Of those misses one was gala's own gap and is closed:
+     slc.dll (ARCHITECTURE "slc", `slc_test`, Windows' answers
+     measured), which the service loads from System32 and asks one
+     thing,
      `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`
-     (SL_E_VALUE_NOT_FOUND, in the ledger). The 0x7e did not move, so
-     that absence was not its cause. What the run shows before it: the
-     App-V DLL set (AppVOrchestration, AppVIsvStreamingManager,
-     AppVManifest, AppVCatalog, AppVIsvVirtualization, AppVIntegration,
-     AppVIsvSubsystemController, AppVFileSystemMetadata) maps twice,
-     then five files are looked for by full path in `ClickToRun` and
-     are not there -- `AppVISVStream32.dll`, `AppVISVStream64.dll`,
-     `Mso20win32client.dll`, `Mso30win32client.dll`,
-     `Mso40UIwin32client.dll` -- and 1.5 s later the error is logged.
-     None of those five is in Windows' own `ClickToRun` either
-     (measured on the Windows machine; the three Mso ones live under
-     the Office root's `vfs\ProgramFilesCommonX64\Microsoft
-     Shared\Office16`, and no Click-to-Run binary imports slc.dll or
-     any of the five: 165 files read), so the misses are what Windows
-     has too. No DLL load failed in the service in the whole run: the
-     ledger has neither a `missing dll` nor a `load failed` for it, and
-     gala's loader records both ("Gaps are never silent", `load_module`
-     in `user/testntdll`). So the 126 is not a load of gala's --
-     ERROR_MOD_NOT_FOUND is also what GetModuleHandle answers for a
-     module that is not loaded, where GetProcAddress answers the 127
-     this ladder has already climbed, and that miss is recorded
-     nowhere. Making it say the name asked for is the next step; the
-     name is what the server needs.
+     (SL_E_VALUE_NOT_FOUND, in the ledger). No DLL load failed in the
+     service in the whole run: the ledger has neither a `missing dll`
+     nor a `load failed` for it, and gala's loader records both
+     ("Gaps are never silent", `load_module` in `user/testntdll`).
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own

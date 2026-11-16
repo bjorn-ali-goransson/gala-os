@@ -7269,6 +7269,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_test", "kernel32.dll", "Windows/System32"),
+    // It loads these three and reads their imports: the module graph a
+    // program sees (ARCHITECTURE "The module graph"). rpcrt4, which they
+    // import, comes with them (`extra_modules` closes the set).
+    ("kernel32_test", "advapi32.dll", "Windows/System32"),
+    ("kernel32_test", "oleaut32.dll", "Windows/System32"),
+    ("kernel32_test", "msi.dll", "Windows/System32"),
+    ("kernel32_test", "combase.dll", "Windows/System32"),
     ("kernel32_test", "testdll.dll", "gala"),
     ("kernel32_test", "testdll2.dll", "gala/lib"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
@@ -13246,6 +13253,10 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "kernel32_test: hello from kernel32",
             "kernel32_test: ok",
+            // The name a GetModuleHandle miss asks for is in the ledger
+            // (three hits: W, A and Ex), which is how a run says which
+            // module a program wanted and did not get.
+            r#"ledger: {"service":"kernel32.dll!GetModuleHandle(no_such_module.dll)","what":"other""#,
             "exited with status 0x00000000",
         ],
     },
@@ -18588,9 +18599,99 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     if FULL_SYSTEM_SCENARIOS.contains(&name) {
         modules.extend(system_modules());
     }
+    // What those modules import, so the set is closed: a DLL whose
+    // dependency is not in the image does not load, and the program dies
+    // of a module nobody listed. gala's DLLs carry Windows' own
+    // dependencies where a program can see them (ARCHITECTURE "The
+    // module graph"), so this follows the import tables of the DLLs just
+    // built rather than a second list to keep in step with them. The
+    // 32-bit set (`x86/`, SysWOW64) stays as listed: its names are
+    // written with the prefix. A dependency whose file is not built yet
+    // is left out; the load then fails in the guest, where the loader
+    // records the name (`missing dll`).
+    let mut i = 0;
+    while i < modules.len() {
+        let (file, _) = modules[i];
+        i += 1;
+        if file.contains('/') {
+            continue;
+        }
+        for dep in static_imports(file) {
+            // Dependencies live where the system's DLLs do, whatever
+            // directory the importer was put in (a test DLL in C:\gala
+            // imports kernel32 from System32).
+            if !modules.contains(&(dep, "Windows/System32")) {
+                modules.push((dep, "Windows/System32"));
+            }
+        }
+    }
     modules.sort_unstable();
     modules.dedup();
     modules
+}
+
+/// The DLLs of `file`'s import table that gala builds itself (by their
+/// USER_DLLS names): what has to be in the image for it to load. Empty if
+/// the file is not built yet or is no PE.
+fn static_imports(file: &str) -> Vec<&'static str> {
+    let Ok(image) = fs::read(built_dll(file)) else {
+        return Vec::new();
+    };
+    let names = import_names(&image);
+    USER_DLLS
+        .iter()
+        .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
+        .map(|d| d.file)
+        .collect()
+}
+
+/// The DLL names in a PE's import directory (empty if it has none or the
+/// file is not one: every read is checked, so a truncated or odd file
+/// gives nothing instead of a panic).
+fn import_names(image: &[u8]) -> Vec<String> {
+    let at32 = |o: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(image.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let at16 = |o: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?))
+    };
+    let names = || -> Option<Vec<String>> {
+        let pe = at32(0x3c)?;
+        if image.get(pe..pe + 4)? != b"PE\0\0" {
+            return None;
+        }
+        let sections = pe + 24 + usize::from(at16(pe + 20)?);
+        // DataDirectory[1] (imports) of a PE32+ or PE32 optional header.
+        let dirs = pe + 24 + if at16(pe + 24)? == 0x20b { 112 } else { 96 };
+        let rva = at32(dirs + 8)?;
+        if rva == 0 {
+            return None;
+        }
+        // A section's file offset for an address in it (the image on disk
+        // is not laid out as it is in memory).
+        let offset = |rva: usize| -> Option<usize> {
+            (0..usize::from(at16(pe + 6)?)).find_map(|i| {
+                let s = sections + i * 40;
+                let (va, vs) = (at32(s + 12)?, at32(s + 8)?);
+                let (raw, rs) = (at32(s + 20)?, at32(s + 16)?);
+                if va <= rva && rva < va + vs.max(rs) { Some(raw + (rva - va)) } else { None }
+            })
+        };
+        let mut out = Vec::new();
+        let mut desc = offset(rva)?;
+        loop {
+            // The Name of an IMPORT_DESCRIPTOR (20 bytes); 0 ends the table.
+            let name = at32(desc + 12)?;
+            if name == 0 {
+                return Some(out);
+            }
+            let at = offset(name)?;
+            let end = at + image.get(at..)?.iter().position(|&b| b == 0)?;
+            out.push(String::from_utf8_lossy(&image[at..end]).into_owned());
+            desc += 20;
+        }
+    };
+    names().unwrap_or_default()
 }
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one

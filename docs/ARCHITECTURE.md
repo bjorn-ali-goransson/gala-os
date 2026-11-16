@@ -3443,6 +3443,36 @@ own name).
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
 
+### The module graph
+
+A program can read which DLLs are loaded -- GetModuleHandle,
+EnumProcessModules, the PEB's loader lists -- and some decide what to do
+by the answer, so gala's system DLLs carry Windows' own dependencies
+where a program can see them, even where gala's code calls nothing in
+them. Windows' advapi32, oleaut32, msi and combase import rpcrt4.dll
+statically (their import tables, measured on 26100: 19 functions, 13, 30
+and 118), so rpcrt4 is mapped in every process that loads one of those
+four, before anything asks for its handle; ole32 and sechost only delay-
+import it, and user32, kernelbase, secur32, imm32 and gdi32 not at all.
+gala's four import it too, and `kernel32_test` holds the measurement: it
+reads their import directories after loading each, then takes rpcrt4's
+handle, which is not NULL. Nothing in gala's DLLs calls the imported
+function, so each crate's `build.rs` pins the name on the link command
+line (`/INCLUDE:__imp_<function>`); the linker drops an import whose only
+reference is a static it also drops.
+
+gala has no 32-bit rpcrt4 yet, so the 32-bit (SysWOW64) builds go without
+it and a 32-bit program finds no rpcrt4 in the graph until that DLL is
+built (ROADMAP OF).
+
+A DLL whose dependency is not in the boot image does not load, so an
+edge like this one belongs in every scenario that ships the importer:
+`extra_modules` in `xtask/src/main.rs` closes each scenario's module set
+under the import tables of the DLLs just built, rather than a second list
+to keep in step with them. A dependency whose file is not built yet is
+left out; the load then fails in the guest, where the loader records the
+name (`missing dll`), never silently.
+
 ### ntdll: the loader
 
 `user/testntdll` (`loader_test`, `import_test`, `tls_test`).
@@ -3477,7 +3507,16 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   LdrAddRefDll takes a reference (or pins); GetModuleHandleEx takes one
   unless GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT is given (the JVM
   pairs it with FreeLibrary). A recursive loader lock serializes
-  loading, unloading and thread notifications.
+  loading, unloading and thread notifications. A handle asked for a
+  module that is not loaded is NULL with ERROR_MOD_NOT_FOUND, as on
+  Windows, and kernel32 records the name asked for
+  (`kernel32.dll!GetModuleHandle(<name>)`, "other", the NTSTATUS as
+  detail; `kernel32_test`): the answer is no gap of gala's -- a program
+  probing for an optional module gets the same NULL on Windows -- but it
+  is the only record of the name, where a missing export leaves `missing
+  export` and a failed load `missing dll` or `load failed`, so a program
+  that gives up over a module nobody could name is not invisible
+  ("Gaps are never silent").
 - **Search** (`map_dll`): the executable's directory, SetDllDirectoryW's
   directory (LdrSetDllDirectory, kept under the loader lock), then
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A bare name is
