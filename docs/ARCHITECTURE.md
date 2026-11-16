@@ -252,7 +252,19 @@ faults, its exit).
   sets the result itself. User-mode randomness (`gala_random`,
   bcryptprimitives' ProcessPrng): the kernel's entropy, which on ARM64
   includes RNDR where FEAT_RNG has it (`cpu::hw_random`); x86-64's user
-  mode has RDRAND itself (`USER_HW_RANDOM`).
+  mode has RDRAND itself (`USER_HW_RANDOM`). What EL0 may do
+  (`cpu::allow_user_access`, every CPU): read the virtual counter
+  (CNTKCTL_EL1.EL0VCTEN; Windows ARM64's QueryPerformanceCounter and
+  kernel32 read it) and CTR_EL0, and clean and invalidate caches by
+  address (SCTLR_EL1.UCT, UCI: FlushInstructionCache, a JIT); a trapped
+  system register or instruction (ESR class 0x18) is an illegal
+  instruction. KUSER_SHARED_DATA's processor features are ARM64's
+  PF_ARM_* (the ARMv8 baseline, then ID_AA64ISAR0/1_EL1's crypto, CRC32,
+  LSE atomics, dot product, JSCVT, LRCPC). NtCreateThread's Win32 start
+  address (ThreadQuerySetWin32StartAddress) is x0 when set, else the pc:
+  x64's rule (the return register, where kernel32's thunk passes the
+  routine). Limit: the kernel's own writes of user code (image pages,
+  WriteProcessMemory) do no instruction cache maintenance yet.
 - **Windows' ARM64 ABI** (`nt/abi/arm64`): ARM64's CONTEXT
   (`context.rs`, plain data the host's tests build on any machine:
   ContextFlags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, V0-V31, Fpcr, Fpsr, the
@@ -285,7 +297,10 @@ faults, its exit).
   Frame-based handlers on ARM64 (`testntdll/src/seh_arm64.rs`, from
   Microsoft's "ARM64 exception handling"): an image's 8-byte .pdata
   entries; packed unwind data expanded into its canonical prologue's and
-  epilogue's unwind codes; a pc in a prologue undoes only what ran, one in
+  epilogue's unwind codes; a link record (Flag 3, a jump island) names
+  its parent entry, which the lookup returns, and a pc outside the
+  parent's range (the island) unwinds as its body; an island reaches the
+  next entry; a pc in a prologue undoes only what ran, one in
   an epilogue only what had not (its scope, or the one the header packs);
   the pc is lr afterwards unless a machine-frame or CONTEXT code restored
   it; the establisher frame is the sp the unwind ends with, and a handler
@@ -402,13 +417,10 @@ faults, its exit).
   `virt`'s addresses); the PL031 RTC's address is QEMU `virt`'s (no ACPI
   table names an RTC: ACPI machines give the time through UEFI's runtime
   services); a CPU started by PSCI must enter at EL1; SGIs reach an
-  Aff0 below 16 only; xtask cannot ask for a state dump at a timeout
-  (QEMU `virt` has no NMI for its monitor's `nmi`: "machine does not
-  provide NMIs"); no `stop_others` (its one user, the hot swap, is
-  x86-64's); in user mode the unwinder does not read `.pdata` link
-  records (jump islands), SVE state or the trap-frame and x64-context
-  codes (a frame that needs one
-  ends the walk, the ledger names the code); the page file's aging is not safe
+  Aff0 below 16 only; no `stop_others` (its one user, the hot swap, is
+  x86-64's); in user mode the unwinder does not read SVE state or
+  the trap-frame and x64-context codes (a frame that needs one ends the
+  walk, the ledger names the code); the page file's aging is not safe
   here (it relies on hardware-set accessed and dirty bits: FEAT_HAFDBS
   is not turned on); entered at EL2 with VHE the timer would
   be EL2's (PPI 28); the image is not sealed for BOOTAA64.EFI (R8's
@@ -4108,7 +4120,10 @@ runtime of mingw-w64 programs.
   `setjmp`), whose longjmp first unwinds the SEH frames registered since
   the setjmp (RtlUnwind to the saved registration: their handlers see
   EXCEPTION_UNWINDING) and runs the buffer's unwind function. The
-  floating-point control: `_controlfp` is MXCSR on x64; on x86
+  floating-point control: `_controlfp` is MXCSR on x64 and FPCR on
+  ARM64 (exception masks as trap enables, a trap the processor does not
+  implement reading back as masked, rounding, flush-to-zero; the status
+  flags FPSR's); on x86
   `_control87` sets the x87 control word (masks, rounding, precision,
   infinity control) and MXCSR (masks, rounding, flush-to-zero) together
   and answers the x87 form with `_EM_AMBIGUOUS` when they disagree,

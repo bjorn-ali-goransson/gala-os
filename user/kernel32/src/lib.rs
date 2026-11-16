@@ -44,9 +44,7 @@ mod atom;
 mod buf;
 mod calendar;
 mod console;
-// CONTEXT buffers and the XState functions as x64 and x86 have them
-// (FXSAVE, XSAVE); ARM64's come with the port (ROADMAP AR).
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// CONTEXT buffers and the XState functions (the architecture's layout).
 mod context;
 mod files;
 mod global;

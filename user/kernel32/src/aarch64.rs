@@ -1,17 +1,39 @@
-//! The ARM64 parts of kernel32: a stub that compiles (ROADMAP PT; the
-//! port is item AR), so code outside the per-architecture modules that
-//! assumes x86 fails the ARM64 check (CI's Clippy step,
-//! `--target aarch64-pc-windows-msvc`). The names are `x64.rs`'s.
+//! The ARM64 parts of kernel32 (ROADMAP AR); code outside the
+//! per-architecture modules that assumes x86 fails the ARM64 check (CI's
+//! Clippy step, `--target aarch64-pc-windows-msvc`). The names are
+//! `x64.rs`'s.
 //!
 //! What the public documents say plainly is filled in: the TEB through
 //! x18 (Microsoft's "Overview of ARM64 ABI conventions": in user mode x18
 //! points to the TEB), the 64-bit layouts (`win64.rs`), ARM64's CONTEXT
 //! (winnt.h), PROCESSOR_ARCHITECTURE_ARM64, and what is the processor's
-//! own (the virtual counter, an exclusive pair for SLIST_HEADER). What
-//! the kernel has not defined for ARM64 yet records the gap in the ledger
-//! and ends the process (`unported`).
+//! own (the virtual counter, an exclusive pair for SLIST_HEADER), the
+//! processor number from the kernel (NtGetCurrentProcessorNumber).
 
 pub use super::win64::*;
+
+/// CONTEXT (ARM64, 0x390 bytes, winnt.h): ContextFlags first;
+/// CONTEXT_ARM64; CONTEXT_ARM64_XSTATE; no FXSAVE area and no XState
+/// feature in the CONTEXT itself (its floating-point part is
+/// CONTEXT_FLOATING_POINT's V0-V31, Fpcr, Fpsr); the byte ranges of each
+/// part flag.
+pub const CONTEXT_SIZE: usize = 0x390;
+pub const CONTEXT_FLAGS_AT: usize = 0;
+pub const CONTEXT_ARCH: u32 = 0x40_0000;
+pub const CONTEXT_LEGACY_STATE: u32 = 0x40_0004; // CONTEXT_FLOATING_POINT
+pub const CONTEXT_XSTATE: u32 = 0x40_0020;
+pub const CONTEXT_FXSAVE: Option<usize> = None;
+pub const CONTEXT_LEGACY_FEATURES: u64 = 0;
+pub const CONTEXT_PARTS: &[(u32, &[(usize, usize)])] = &[
+    // CONTEXT_CONTROL: Cpsr; Fp, Lr, Sp, Pc.
+    (0x1, &[(0x4, 0x8), (0xf0, 0x110)]),
+    // CONTEXT_INTEGER: X0-X28.
+    (0x2, &[(0x8, 0xf0)]),
+    // CONTEXT_FLOATING_POINT: V0-V31, Fpcr, Fpsr.
+    (0x4, &[(0x110, 0x318)]),
+    // CONTEXT_DEBUG_REGISTERS: Bcr, Bvr, Wcr, Wvr.
+    (0x8, &[(0x318, 0x390)]),
+];
 
 /// PROCESSOR_ARCHITECTURE_ARM64: what GetSystemInfo reports. The
 /// processor type GetSystemInfo gives on ARM64 is to be recorded on ARM64
@@ -24,14 +46,6 @@ pub const NATIVE_PROCESSOR_TYPE: u32 = PROCESSOR_TYPE;
 
 /// The native system directory: System32.
 pub const NATIVE_SYSTEM_DIRECTORY: &[u8] = b"\\system32";
-
-/// Where the port has not been written yet: recorded, then the process
-/// ends (the panic handler's ExitProcess).
-#[track_caller]
-fn unported(what: &[u8]) -> ! {
-    super::unsupported(what, 0);
-    panic!("kernel32 on ARM64: not ported yet")
-}
 
 /// Reads the pointer-sized field of the current TEB at `offset`.
 pub fn teb_read(offset: usize) -> usize {
@@ -69,10 +83,59 @@ pub fn cycles() -> u64 {
     v
 }
 
-/// The processor running this thread: where the kernel tells it on ARM64
-/// is the port's.
+/// Makes code written to [base, base + size) visible to instruction
+/// fetch on every processor (Arm's "Concurrent modification and execution
+/// of instructions", the cache maintenance sequence): each data cache line
+/// cleaned to the point of unification, then each instruction cache line
+/// invalidated, with the barriers between; the line sizes from CTR_EL0
+/// (DminLine, IminLine), whose IDC and DIC bits say a step is not needed.
+pub fn sync_code(base: usize, size: usize) {
+    let ctr: u64;
+    // SAFETY: reads CTR_EL0 (the kernel lets user mode: SCTLR_EL1.UCT).
+    unsafe {
+        core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags))
+    };
+    let dline = 4usize << ((ctr >> 16) & 0xf);
+    let iline = 4usize << (ctr & 0xf);
+    let end = base + size;
+    if ctr & (1 << 28) == 0 {
+        let mut at = base & !(dline - 1);
+        while at < end {
+            // SAFETY: cleans a line of this process's code (readable).
+            unsafe {
+                core::arch::asm!("dc cvau, {}", in(reg) at, options(nostack, preserves_flags))
+            };
+            at += dline;
+        }
+    }
+    // SAFETY: a barrier.
+    unsafe { core::arch::asm!("dsb ish", options(nostack, preserves_flags)) };
+    if ctr & (1 << 29) == 0 {
+        let mut at = base & !(iline - 1);
+        while at < end {
+            // SAFETY: invalidates a line of this process's code.
+            unsafe {
+                core::arch::asm!("ic ivau, {}", in(reg) at, options(nostack, preserves_flags))
+            };
+            at += iline;
+        }
+    }
+    // SAFETY: barriers: the invalidation completes, this processor
+    // refetches.
+    unsafe { core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags)) };
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtGetCurrentProcessorNumber() -> u32;
+}
+
+/// The processor running this thread, as the kernel tells it
+/// (NtGetCurrentProcessorNumber: ARM64 has no user-readable equivalent of
+/// x64's TSC_AUX).
 pub fn current_processor() -> u32 {
-    unported(b"kernel32.dll!GetCurrentProcessorNumber(ARM64)")
+    // SAFETY: no arguments; returns the number.
+    unsafe { NtGetCurrentProcessorNumber() }
 }
 
 /// CONTEXT (ARM64 layout, winnt.h's ARM64_NT_CONTEXT: 0x390 bytes,
@@ -102,8 +165,9 @@ const CONTEXT_FULL: u32 = 0x40_0007;
 
 /// The CONTEXT a new thread starts with: at `entry(args[0], args[1])`
 /// (x0, x1) with its stack ending at `top` (16-byte aligned), no return
-/// address (lr 0). Where NtCreateThread takes the Win32 start address on
-/// ARM64 (x64's rax) is the kernel's port.
+/// address (lr 0). NtCreateThread takes the Win32 start address
+/// (ThreadQuerySetWin32StartAddress) from x0, the start routine here, as
+/// x64's from rax.
 pub fn thread_context(entry: usize, args: [usize; 2], top: usize) -> Context {
     // SAFETY: an all-zero CONTEXT is a valid bit pattern.
     let mut context: Context = unsafe { core::mem::zeroed() };

@@ -566,13 +566,29 @@ pub extern "system" fn WerUnregisterRuntimeExceptionModule(
 }
 
 /// FlushInstructionCache: x86 keeps instruction caches coherent with
-/// stores; nothing to do.
+/// stores, nothing to do; ARM64 does not: for this process's code the
+/// range is cleaned to the point of unification and invalidated in the
+/// instruction cache (`arch::sync_code`). Another process's code is
+/// written by the kernel (WriteProcessMemory), whose writes on ARM64 do no
+/// such maintenance yet (ROADMAP AR): recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn FlushInstructionCache(
-    _process: Handle,
-    _base: *const c_void,
-    _size: usize,
+    process: Handle,
+    base: *const c_void,
+    size: usize,
 ) -> Bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let current = process as isize == super::CURRENT_PROCESS
+            || super::process::GetProcessId(process) == super::GetCurrentProcessId();
+        if !current {
+            super::unsupported(b"kernel32.dll!FlushInstructionCache(another process, ARM64)", 0);
+        } else if !base.is_null() && size != 0 {
+            super::arch::sync_code(base as usize, size);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = (process, base, size);
     TRUE
 }
 

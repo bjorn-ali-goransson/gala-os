@@ -12324,6 +12324,14 @@ const ARM64_TWINS: &[&str] = &[
     "msxml_test",
     "d2d1_test",
     "knownfolder_test",
+    "ucrt_test",
+    "kernel32_thread_test",
+    "threadpool_test",
+    "kernel32_sys_test",
+    "kernel32_test",
+    "kernel32_clr_test",
+    "fpu_test",
+    "xmodify_test",
 ];
 
 /// The x64 scenario an ARM64 twin `arm_<name>` is of.

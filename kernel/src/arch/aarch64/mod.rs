@@ -61,12 +61,13 @@ pub fn runs_machine(machine: u16) -> bool {
     machine == crate::nt::pe::IMAGE_FILE_MACHINE_ARM64
 }
 
-/// The boot CPU's own state: its per-CPU block (TPIDR_EL1) and its
-/// exception vectors (`entry`).
+/// The boot CPU's own state: its per-CPU block (TPIDR_EL1), its
+/// exception vectors (`entry`) and what user mode may do (`cpu::allow_user_access`).
 pub fn init_boot_cpu() {
     serial::report();
     percpu::init_bsp();
     entry::install_vectors();
+    cpu::allow_user_access();
 }
 
 /// The boot CPU's traps: FP/SIMD is on since the entry and the vectors

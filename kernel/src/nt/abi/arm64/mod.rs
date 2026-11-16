@@ -5,8 +5,8 @@
 //! ntdll reads: an exception's (`deliver_to_user`: the CONTEXT and the
 //! EXCEPTION_RECORD) and a user APC's (`deliver_apc`: the CONTEXT and the
 //! routine with its arguments); NtGetContextThread and NtSetContextThread
-//! (a suspended thread's parked state, or the caller's). Not yet (ROADMAP
-//! AR): the KUSER_SHARED_DATA processor features.
+//! (a suspended thread's parked state, or the caller's); the
+//! KUSER_SHARED_DATA machine and processor features.
 
 use super::ArgSlot;
 use crate::nt::crashreport::Note;
@@ -104,12 +104,14 @@ pub fn ldr_thunk_regs(
 }
 
 /// What a new thread's CONTEXT says (NtCreateThread): its registers and
-/// the start address ThreadQuerySetWin32StartAddress reports (its Pc).
-/// Its floating-point part is ignored: a new thread starts with the reset
-/// FP/SIMD state, as on x64.
+/// the start address ThreadQuerySetWin32StartAddress reports: as x64's
+/// rule, the return register (x0, where kernel32's thunk gets the Win32
+/// start routine), else its Pc. Its floating-point part is ignored: a new
+/// thread starts with the reset FP/SIMD state, as on x64.
 pub fn thread_start(ctx: &[u8]) -> (UserRegs, u64) {
     let regs = user_regs(&context::from_bytes(ctx));
-    (regs, regs.ip())
+    let x0 = regs.gpr(Gpr::X0);
+    (regs, if x0 != 0 { x0 } else { regs.ip() })
 }
 
 /// gala's ARM64 dispatcher frame on the user stack: the CONTEXT at the new
@@ -235,15 +237,64 @@ pub fn report_registers<T: core::fmt::Display>(note: &Note, stack: &[Option<T>])
     }
 }
 
-/// The page's machine fields (ARM64); its processor features are not
-/// written yet.
+/// The page's machine fields (ARM64) and processor features: the
+/// ProcessorFeatures[] entries Microsoft documents for ARM64
+/// (IsProcessorFeaturePresent's PF_ARM_*), those every ARMv8-A processor
+/// has always set, the optional ones from ID_AA64ISAR0/1_EL1.
 pub fn write_kuser_processor(page: &SharedPage) {
     use crate::nt::kuser::{IMAGE_NUMBER_HIGH, IMAGE_NUMBER_LOW, NATIVE_PROCESSOR_ARCHITECTURE};
     const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
     const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;
+    const PROCESSOR_FEATURES: usize = 0x274;
     page.write(IMAGE_NUMBER_LOW, &IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
     page.write(IMAGE_NUMBER_HIGH, &IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
     page.write(NATIVE_PROCESSOR_ARCHITECTURE, &PROCESSOR_ARCHITECTURE_ARM64.to_le_bytes());
+    let (isar0, isar1) = crate::arch::cpu::id_isar();
+    let field = |reg: u64, at: u32| (reg >> at) & 0xf;
+    for (pf, present) in
+        arm64_features(field(isar0, 4), field(isar0, 16), field(isar0, 20)).into_iter().chain([
+            (PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE, field(isar0, 44) != 0),
+            (PF_ARM_V83_JSCVT_INSTRUCTIONS_AVAILABLE, field(isar1, 12) != 0),
+            (PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE, field(isar1, 20) != 0),
+        ])
+    {
+        if present {
+            page.write(PROCESSOR_FEATURES + pf, &[1]);
+        }
+    }
+}
+
+// ProcessorFeatures[] indices (PF_* in winnt.h) for ARM64.
+const PF_NX_ENABLED: usize = 12;
+const PF_ARM_VFP_32_REGISTERS_AVAILABLE: usize = 18;
+const PF_ARM_NEON_INSTRUCTIONS_AVAILABLE: usize = 19;
+const PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE: usize = 24;
+const PF_ARM_64BIT_LOADSTORE_ATOMIC: usize = 25;
+const PF_ARM_FMAC_INSTRUCTIONS_AVAILABLE: usize = 27;
+const PF_ARM_V8_INSTRUCTIONS_AVAILABLE: usize = 29;
+const PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE: usize = 30;
+const PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE: usize = 31;
+const PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE: usize = 34;
+const PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE: usize = 43;
+const PF_ARM_V83_JSCVT_INSTRUCTIONS_AVAILABLE: usize = 44;
+const PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE: usize = 45;
+
+/// The features every ARMv8-A processor has, and those its ID fields
+/// (ID_AA64ISAR0_EL1's AES, CRC32 and Atomic) say: (PF_ index, present).
+fn arm64_features(aes: u64, crc32: u64, atomic: u64) -> [(usize, bool); 10] {
+    [
+        (PF_NX_ENABLED, true),
+        (PF_ARM_VFP_32_REGISTERS_AVAILABLE, true),
+        (PF_ARM_NEON_INSTRUCTIONS_AVAILABLE, true),
+        (PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE, true),
+        (PF_ARM_64BIT_LOADSTORE_ATOMIC, true),
+        (PF_ARM_FMAC_INSTRUCTIONS_AVAILABLE, true),
+        (PF_ARM_V8_INSTRUCTIONS_AVAILABLE, true),
+        (PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE, aes != 0),
+        (PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE, crc32 != 0),
+        // LSE atomics: Atomic 0b0010.
+        (PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE, atomic >= 2),
+    ]
 }
 
 pub fn processor() -> Processor {

@@ -202,7 +202,7 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 123 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; next the remaining test programs, then Linux's aarch64 ABI |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 131 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; next the remaining test programs, then Linux's aarch64 ABI |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -4321,33 +4321,41 @@ on the seams item PT prepared: native ARM64 Windows programs
   arguments (the registers it made the call with: ARM64's x0 is both
   the first argument and the result).
 - The x64 test programs run on ARM64 as twins (`ARM64_TWINS`:
-  `arm_<name>`, the x64 scenario's expectations; 123 of them, with the
+  `arm_<name>`, the x64 scenario's expectations; 131 of them, with the
   network, single-CPU and shipped-program cases): ProcessPrng from the
   kernel (RNDR), RtlCaptureStackBackTrace, NdrClientCall2 and rpcrt4's
   guarded calls, the native machine (KUSER_SHARED_DATA, IsWow64Process2)
   on ARM64; the kernel refuses an executable of a machine it does not
   run. The programs' x64-only parts have ARM64 ones (the TEB through
   x18, the processor number through NtGetCurrentProcessorNumber, `svc
-  #N` stubs, `brk #0xf000`, ARM64's RUNTIME_FUNCTION).
+  #N` stubs, `brk #0xf000`, ARM64's RUNTIME_FUNCTION and CONTEXT;
+  fpu_test's d0-d31 and FPCR, xmodify_test's cache maintenance).
+  What they found missing on ARM64, done: user mode reads the virtual
+  counter and runs cache maintenance by address (CNTKCTL_EL1,
+  SCTLR_EL1.UCT/UCI); FlushInstructionCache cleans and invalidates;
+  KUSER_SHARED_DATA's ARM64 processor features; kernel32's context and
+  XState functions (ARM64's CONTEXT, no XState feature), its processor
+  number; msvcrt's `_controlfp` and floating-point status on
+  FPCR/FPSR; the Win32 start address from x0; an EL0 system-register
+  trap is an illegal instruction.
+- `.pdata` link records (Flag 3: jump islands) in the ARM64 unwinder
+  (`arm_seh_test`: the lookup returns the parent, the island unwinds as
+  its body).
+- CI runs the aarch64 scenarios in its boot shards, under QEMU's
+  emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
-1. User mode, the rest: the twins that fail on ARM64 (kernel32's
-   context and XState exports, InitializeContext and CopyContext, for
-   kernel32_test and kernel32_clr_test; msvcrt's `_controlfp` on FPCR
-   for ucrt_test; kernel32_thread_test's fault in kernel32;
-   threadpool_test's check 6; kernel32_sys_test's processor
-   architecture); the programs whose checks are x86 instructions
-   (fpu_test, xstate_test, xmodify_test, safepoint_test: their ARM64
-   counterparts, NEON and FPCR state, FlushInstructionCache, a poll
-   load); the handover programs (no handover on aarch64 yet);
-   `.pdata` link records (jump islands); Linux's aarch64 ABI
-   (`lx::machine::aarch64`, its system call table). rpcrt4's server
-   routine call puts every argument in integer registers: ARM64 passes
-   floating-point ones in v0-v7 apart, which needs the format string's
-   types.
-2. CI: the aarch64 boot scenarios on GitHub's ARM64 runners (free for
-   public repositories) or under QEMU's emulation.
-3. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+1. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
+   load, HotSpot's on ARM64); the handover programs (no handover on
+   aarch64 yet); Linux's aarch64 ABI (`lx::machine::aarch64`, its system
+   call table). xstate_test stays x64's (AVX; ARM64's SVE state is not in
+   gala's ARM64 context). rpcrt4's server routine call puts every
+   argument in integer registers: ARM64 passes floating-point ones in
+   v0-v7 apart, which needs the format string's types. The kernel's own
+   writes of user code (image pages, WriteProcessMemory) do no
+   instruction cache maintenance yet: QEMU's TCG does not need it, a
+   real ARM64 machine does.
+2. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick
    with nothing held for it (gdb's record: `interrupt_request` 0, the

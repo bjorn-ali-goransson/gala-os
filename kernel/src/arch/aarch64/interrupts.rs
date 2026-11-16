@@ -10,6 +10,9 @@ pub use crate::arch::trap::{CpuMode, Fault, FaultAccess, TrapKind};
 /// ESR_EL1.EC values the accessors read.
 const EC_UNKNOWN: u64 = 0x00;
 const EC_ILLEGAL_STATE: u64 = 0x0e;
+/// An MSR, MRS or system instruction EL0 may not use (a register the
+/// kernel keeps from it): an illegal instruction, as an undefined one.
+const EC_SYSREG: u64 = 0x18;
 const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
 const EC_INSTRUCTION_ABORT_SAME: u64 = 0x21;
@@ -104,7 +107,7 @@ impl TrapFrame {
                 0xf004 => TrapKind::DivideError,
                 _ => TrapKind::InvalidOpcode,
             },
-            EC_UNKNOWN => TrapKind::InvalidOpcode,
+            EC_UNKNOWN | EC_SYSREG => TrapKind::InvalidOpcode,
             EC_ILLEGAL_STATE => TrapKind::Protection,
             EC_INSTRUCTION_ABORT_LOWER | EC_DATA_ABORT_LOWER => TrapKind::PageFault,
             _ => TrapKind::Other,
@@ -259,6 +262,7 @@ pub fn breakpoint_count() -> u64 {
 pub fn exception_name(vector: u8) -> &'static str {
     match u64::from(vector) {
         EC_UNKNOWN => "unknown reason (undefined instruction)",
+        EC_SYSREG => "system register or instruction not allowed",
         EC_ILLEGAL_STATE => "illegal execution state",
         EC_INSTRUCTION_ABORT_LOWER => "instruction abort from EL0",
         EC_DATA_ABORT_LOWER => "data abort from EL0",

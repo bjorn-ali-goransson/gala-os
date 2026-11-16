@@ -124,15 +124,62 @@ pub fn cycles() -> u64 {
     v
 }
 
+/// What user mode may do on ARM64, as Windows ARM64 and Linux let it:
+/// read the virtual counter (CNTVCT_EL0, and CNTFRQ_EL0 with it:
+/// CNTKCTL_EL1.EL0VCTEN; QueryPerformanceCounter and kernel32's pointer
+/// encoding read it), read CTR_EL0 (SCTLR_EL1.UCT) and clean and
+/// invalidate caches by address to the point of unification
+/// (SCTLR_EL1.UCI: `dc cvau`, `ic ivau`, what code that writes code runs
+/// before it executes it: FlushInstructionCache, a JIT). The physical
+/// counter and the timers stay the kernel's. Once per CPU
+/// (`init_boot_cpu`, `smp::ap_main`).
+pub fn allow_user_access() {
+    const EL0VCTEN: u64 = 1 << 1;
+    const UCT: u64 = 1 << 15;
+    const UCI: u64 = 1 << 26;
+    // SAFETY: CNTKCTL_EL1 only controls EL0's access to the generic
+    // timer; SCTLR_EL1's UCT and UCI only let EL0 read the cache type and
+    // run cache maintenance by address (which faults like a load where
+    // the page is not readable). The other bits keep their values.
+    unsafe {
+        core::arch::asm!(
+            "mrs {t}, cntkctl_el1",
+            "orr {t}, {t}, {vct}",
+            "msr cntkctl_el1, {t}",
+            "mrs {t}, sctlr_el1",
+            "orr {t}, {t}, {sct}",
+            "msr sctlr_el1, {t}",
+            "isb",
+            t = out(reg) _,
+            vct = in(reg) EL0VCTEN,
+            sct = in(reg) UCT | UCI,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
 /// Whether the processor has a random number generator (FEAT_RNG:
 /// ID_AA64ISAR0_EL1.RNDR, bits 63:60, nonzero).
 fn has_rndr() -> bool {
-    let isar0: u64;
-    // SAFETY: reads an ID register (always readable at EL1).
+    id_isar().0 >> 60 != 0
+}
+
+/// The instruction set attribute registers ID_AA64ISAR0_EL1 and
+/// ID_AA64ISAR1_EL1 (what the processor implements: crypto, CRC32, LSE
+/// atomics, dot product, JSCVT, LRCPC, RNDR, ...).
+pub fn id_isar() -> (u64, u64) {
+    let (isar0, isar1): (u64, u64);
+    // SAFETY: reads ID registers (always readable at EL1).
     unsafe {
-        core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack, preserves_flags))
+        core::arch::asm!(
+            "mrs {}, id_aa64isar0_el1",
+            "mrs {}, id_aa64isar1_el1",
+            out(reg) isar0,
+            out(reg) isar1,
+            options(nomem, nostack, preserves_flags)
+        )
     };
-    isar0 >> 60 != 0
+    (isar0, isar1)
 }
 
 /// One random word from the processor's generator (RNDR, FEAT_RNG), with

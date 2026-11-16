@@ -353,7 +353,7 @@ export const focus: Focus[] = [
       {
         label: "User mode",
         status: "building",
-        detail: "123 of the x64 test programs pass as ARM64 builds",
+        detail: "131 of the x64 test programs pass as ARM64 builds",
       },
       {
         label: "x64 programs on ARM",
