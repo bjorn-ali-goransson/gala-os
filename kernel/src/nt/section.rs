@@ -208,6 +208,9 @@ pub struct ImageInfo {
     pub stack_commit: u64,
     /// A 32-bit (x86) image: an executable runs through WOW64.
     pub x86: bool,
+    /// The COFF header's machine (an executable of a machine the
+    /// architecture does not run is refused: `platform::runs_machine`).
+    pub machine: u16,
     /// IMAGE_FILE_LARGE_ADDRESS_AWARE (a 32-bit process's 4 GiB limit).
     pub large_address_aware: bool,
 }
@@ -487,6 +490,7 @@ impl ImageLayout {
             stack_reserve: image.stack_reserve,
             stack_commit: image.stack_commit,
             x86: image.pe32,
+            machine: image.machine,
             large_address_aware: image.large_address_aware,
         };
         Ok(ImageLayout {

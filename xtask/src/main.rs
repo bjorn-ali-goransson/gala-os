@@ -7199,20 +7199,7 @@ const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
 /// string).
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
-    ("arm_startup", "ntdll.dll", "Windows/System32"),
-    ("arm_import", "ntdll.dll", "Windows/System32"),
-    ("arm_import", "testdll.dll", "gala"),
-    ("arm_sync", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
-    ("arm_exception", "ntdll.dll", "Windows/System32"),
-    ("arm_tls", "ntdll.dll", "Windows/System32"),
-    ("arm_tls", "kernel32.dll", "Windows/System32"),
-    ("arm_tls", "tlsdll.dll", "gala"),
-    ("arm_apc", "ntdll.dll", "Windows/System32"),
-    ("arm_crash_dispatched", "ntdll.dll", "Windows/System32"),
-    ("arm_crash_filtered", "ntdll.dll", "Windows/System32"),
-    ("arm_seh", "ntdll.dll", "Windows/System32"),
-    ("arm_context", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
@@ -9940,24 +9927,11 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_schannel_test",
 ];
 
-/// Test programs built for ARM64 too (`user/<name>`, ntrt's ARM64
-/// runtime), shipped in the aarch64 kernel's images in place of the x64
-/// ones and exported to user/bin/arm64.
-const USER_PROGRAMS_ARM64: &[&str] = &[
-    "hello",
-    "startup_test",
-    "import_test",
-    "thread_test",
-    "sync_test",
-    "wait_test",
-    "exception_test",
-    "tls_test",
-    "apc_test",
-    "crash",
-    "seh_test",
-    "context_test",
-    "threadinfo_test",
-];
+/// Test programs built for ARM64 for the hand-written aarch64 scenarios
+/// (`user/<name>`); the ARM64_TWINS' programs join them
+/// (`arm64_programs`). Shipped in the aarch64 kernel's images in place of
+/// the x64 ones and exported to user/bin/arm64.
+const USER_PROGRAMS_ARM64: &[&str] = &["hello", "crash"];
 
 /// Where the build puts the ARM64 build of test program `program`.
 fn built_program_arm64(program: &str) -> PathBuf {
@@ -10067,7 +10041,7 @@ fn scenario_timeout(name: &str) -> Duration {
     if let Some(secs) = env::var("XTASK_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
         return Duration::from_secs(secs);
     }
-    let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
+    let limit = if scenarios().iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
@@ -10668,7 +10642,7 @@ fn build_kernel_aarch64(release: bool) -> Result {
 /// USER_PROGRAMS_ARM64, built for ARM64.
 fn build_arm64_programs() -> Result {
     let mut cmd = user_build_for(USER_TARGET_ARM64);
-    for program in USER_PROGRAMS_ARM64 {
+    for program in arm64_programs() {
         cmd.args(["--package", program]);
     }
     run_cmd(&mut cmd)
@@ -10919,7 +10893,7 @@ fn make_iso_unchecked(
         copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
-    let arm64_programs = if arm64 && tree.is_none() { USER_PROGRAMS_ARM64 } else { &[][..] };
+    let arm64_programs = if arm64 && tree.is_none() { arm64_programs() } else { &[][..] };
     for program in arm64_programs {
         copy(&built_program_arm64(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
@@ -10991,6 +10965,17 @@ fn make_iso_unchecked(
             None => (*file, None),
         };
         let (source, name) = match file.rsplit_once('/') {
+            // A test program: its ARM64 build there.
+            Some((_, name)) if arm64 && shipped_program(file).is_some() => {
+                (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
+            }
+            // Any other executable is x64 code, which an ARM64 machine
+            // cannot run.
+            Some(_) if arm64 && file.ends_with(".exe") => {
+                return Err(format!(
+                    "{name}: ships {file}, an x64 executable, in an ARM64 image (only USER_PROGRAMS have ARM64 builds)"
+                ));
+            }
             Some((_, name)) => (root().join(file), name),
             None if arm64 => {
                 // A DLL with no ARM64 build is not shipped there.
@@ -12104,7 +12089,7 @@ const STOPPED_LINE: &str = "xtask: stopped the VM after the client";
 /// The guest's port a net scenario's host port is forwarded to: sshd's
 /// own (22) for the sshd server scenarios, else 7.
 fn guest_port(name: &str) -> u16 {
-    if SSH_PORT_22.contains(&name) { 22 } else { 7 }
+    if SSH_PORT_22.contains(&twin_base(name).unwrap_or(name)) { 22 } else { 7 }
 }
 
 /// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`,
@@ -12125,9 +12110,17 @@ fn iso_scenario(iso: &Path) -> &str {
 const SSH_PORT_22: &[&str] =
     &["sshd_server", "sshd_shell", "sshd_sftp", "sshd_scp", "sshd_forward", "sshd_client"];
 
-/// The listening marker and client of a NET_SCENARIOS entry.
+/// The listening marker and client of a NET_SCENARIOS entry (a twin's:
+/// its x64 scenario's).
 fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
+    let name = twin_base(name).unwrap_or(name);
     NET_SCENARIOS.iter().find(|(n, ..)| *n == name).map(|&(_, m, c)| (m, c))
+}
+
+/// Whether scenario `name` (or a twin's x64 scenario) is one of the
+/// HOST_PAGE_SCENARIOS.
+fn host_page_scenario(name: &str) -> bool {
+    HOST_PAGE_SCENARIOS.contains(&twin_base(name).unwrap_or(name))
 }
 
 /// The page go_http serves (user/go_http/main.go).
@@ -12147,7 +12140,7 @@ const NET_ECHO_BYTES: usize = 65536;
 /// The firmware for scenario `name` (`XTASK_FIRMWARE=bios|uefi` overrides).
 fn scenario_boot(name: &str) -> Boot {
     // The architecture first: XTASK_FIRMWARE chooses among x86-64's.
-    if AARCH64_SCENARIOS.contains(&name) {
+    if is_aarch64_scenario(name) {
         return Boot::UefiAarch64;
     }
     match env::var("XTASK_FIRMWARE").as_deref() {
@@ -12191,28 +12184,219 @@ const AARCH64_SCENARIOS: &[&str] = &[
     "arm_smp_missed",
     "arm_watchdog",
     "arm_hello",
-    "arm_startup",
-    "arm_import",
-    "arm_thread",
-    "arm_sync",
-    "arm_wait",
-    "arm_exception",
-    "arm_tls",
-    "arm_apc",
     "arm_crash",
-    "arm_crash_dispatched",
-    "arm_crash_filtered",
-    "arm_seh",
-    "arm_context",
-    "arm_threadinfo",
     "arm_sched",
     "arm_fault_ud",
     "arm_fault_pagefault",
 ];
 
-/// Whether the image `name` (`test-<scenario>`) is an aarch64 scenario's.
+/// x64 scenarios that also run on the aarch64 kernel, as `arm_<name>`
+/// (their ARM64 twins, `scenarios()`): the same command line, expected
+/// lines and files, the programs' and DLLs' ARM64 builds. The programs
+/// are built for ARM64 from the same sources (`arm64_programs`).
+///
+/// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
+/// are four bytes and aligned, so none straddles a page), wintrust_test
+/// (it ships Office's x64 setup.exe), the scenarios with screen checks or
+/// an event stream (the aarch64 kernel has neither yet), and those
+/// ROADMAP AR lists as next.
+const ARM64_TWINS: &[&str] = &[
+    "startup_test",
+    "import_test",
+    "thread_test",
+    "sync_test",
+    "wait_test",
+    "exception_test",
+    "tls_test",
+    "apc_test",
+    "crash_dispatched",
+    "crash_filtered",
+    "seh_test",
+    "context_test",
+    "threadinfo_test",
+    "timer_test",
+    "clock_off",
+    "smpmem_test",
+    "smpcow_test",
+    "vmcycle_test",
+    "statedump_test",
+    "smprace_test",
+    "sshfwd_test",
+    "winsock_test",
+    "ipv6_test",
+    "hostnet",
+    "bench",
+    "missing_import_test",
+    "dpapi_test",
+    "sspi_test",
+    "clusapi_test",
+    "netapi32_test",
+    "pdh_test",
+    "setupapi_test",
+    "rpcrt4_test",
+    "rpc_test",
+    "unimplemented_test",
+    "manifest_test",
+    "kernel32_pool_test",
+    "win32_misc_test",
+    "advapi32_test",
+    "token_test",
+    "security_test",
+    "access_test",
+    "logon_test",
+    "cmd_test",
+    "dirchange_test",
+    "afd_poll_test",
+    "iphlpapi_test",
+    "keyed_event_test",
+    "registry_test",
+    "console_test",
+    "bcrypt_test",
+    "kernel32_system_test",
+    "gpu_stub_test",
+    "dwrite_test",
+    "conpty_test",
+    "rtl_test",
+    "kernel32_locale_test",
+    "kernel32_sync_test",
+    "kernel32_py_test",
+    "shootdown_test",
+    "reparse_test_user",
+    "cab_probe",
+    "writeback_test",
+    "imagetrim_test",
+    "wofutil_test",
+    "sppc_test",
+    "windowscodecs_test",
+    "prng_test",
+    "replay_test",
+    "commit_test",
+    "process_test",
+    "udp_test",
+    "udp_echo",
+    "onecpu_bench",
+    "kernel32_file_test",
+    "pipe_test",
+    "lock_test",
+    "iocp_test",
+    "symlink_test",
+    "ioapc_test",
+    "async_test",
+    "cow_test",
+    "filemap_test",
+    "sysinfo_test",
+    "guard_test",
+    "peb_test",
+    "dir_test",
+    "image_test",
+    "file_test",
+    "section_test",
+    "kuser_test",
+    "object_test",
+    "vm_test",
+    "abi_test",
+    "loader_test",
+    "smpsched_test",
+    "cert_test",
+    "kernel32_misc_test",
+    "onecpu_smp",
+    "kernel32_env_test",
+    "ledger_test",
+    "smpsem_test",
+    "regnotify_test",
+    "actctx_test",
+    "com_test",
+    "browser_api_test",
+    "office_api_test",
+    "office_k32_test",
+    "runas_test",
+    "runas_declined",
+    "setupcab_test",
+    "msi_test",
+    "webservices_test",
+    "rstrtmgr_test",
+    "gdiplus_test",
+    "uisettings_test",
+    "hardlink_test",
+    "combase_test",
+    "svc_test",
+    "svcrun_test",
+    "msxml_test",
+    "d2d1_test",
+    "knownfolder_test",
+];
+
+/// The x64 scenario an ARM64 twin `arm_<name>` is of.
+fn twin_base(name: &str) -> Option<&'static str> {
+    let base = name.strip_prefix("arm_")?;
+    ARM64_TWINS.iter().copied().find(|t| *t == base)
+}
+
+/// Whether scenario `name` runs on the aarch64 kernel.
+fn is_aarch64_scenario(name: &str) -> bool {
+    AARCH64_SCENARIOS.contains(&name) || twin_base(name).is_some()
+}
+
+/// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
+/// twin `arm_<name>`.
+fn scenarios() -> &'static [Scenario] {
+    static ALL: std::sync::OnceLock<Vec<Scenario>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = BASE_SCENARIOS.to_vec();
+        for twin in ARM64_TWINS {
+            let Some(base) = BASE_SCENARIOS.iter().find(|s| s.name == *twin) else {
+                panic!("ARM64_TWINS names {twin}, which is no scenario");
+            };
+            let name: &'static str = Box::leak(format!("arm_{twin}").into_boxed_str());
+            all.push(Scenario { name, ..*base });
+        }
+        all
+    })
+}
+
+/// The test programs the aarch64 kernel's images carry, built for ARM64:
+/// USER_PROGRAMS_ARM64 (the hand-written aarch64 scenarios') and the
+/// programs the twins run.
+fn arm64_programs() -> &'static [&'static str] {
+    static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all: Vec<&'static str> = USER_PROGRAMS_ARM64.to_vec();
+        for s in scenarios().iter().filter(|s| twin_base(s.name).is_some()) {
+            for word in s.cmdline.split_whitespace() {
+                if let Some(run) = word.strip_prefix("run=") {
+                    for program in run.split(',').filter_map(|p| p.strip_suffix(".exe")) {
+                        if !all.contains(&program) {
+                            all.push(program);
+                        }
+                    }
+                }
+            }
+            // The test programs it ships as files (cmd.exe, conhost.exe).
+            for (file, _) in extra_modules(s.name) {
+                if let Some(program) = shipped_program(file)
+                    && !all.contains(&program)
+                {
+                    all.push(program);
+                }
+            }
+        }
+        all
+    })
+}
+
+/// The test program a module `user/bin/<program>.exe` ships (one of
+/// USER_PROGRAMS), if it is one: an ARM64 image ships its ARM64 build.
+fn shipped_program(file: &str) -> Option<&'static str> {
+    let program = file.strip_prefix("user/bin/")?.strip_suffix(".exe")?;
+    USER_PROGRAMS.iter().copied().find(|p| *p == program)
+}
+
+/// Whether the image `name` (`test-<scenario>`, or `batch-<first
+/// scenario>` for a shared VM) is the aarch64 kernel's.
 fn aarch64_image(name: &str) -> bool {
-    name.strip_prefix("test-").is_some_and(|s| AARCH64_SCENARIOS.contains(&s))
+    name.strip_prefix("test-")
+        .or_else(|| name.strip_prefix("batch-"))
+        .is_some_and(is_aarch64_scenario)
 }
 
 fn single_thread_tcg(name: &str) -> bool {
@@ -12397,6 +12581,7 @@ fn run(iso: &Path, headless: bool) -> Result {
 }
 
 /// A boot test: a kernel command line and the expected outcome.
+#[derive(Clone, Copy)]
 struct Scenario {
     name: &'static str,
     cmdline: &'static str,
@@ -12405,7 +12590,8 @@ struct Scenario {
     expect: &'static [&'static str],
 }
 
-const SCENARIOS: &[Scenario] = &[
+/// The scenarios written out; `scenarios()` adds their ARM64 twins.
+const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // The aarch64 kernel (ROADMAP AR) on QEMU's `virt` machine,
         // booted by UEFI and Limine's BOOTAA64.EFI (`AARCH64_SCENARIOS`):
@@ -12458,72 +12644,6 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // An ARM64 process started through gala's ntdll (startup_test's
-        // ARM64 build, as `startup_test`): the kernel enters
-        // LdrInitializeThunk with the program's ARM64 CONTEXT, the
-        // thunk binds imports and resumes it with NtContinue.
-        name: "arm_startup",
-        cmdline: "qemu_exit run=startup_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["startup_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // An ARM64 program importing an ARM64 DLL (import_test's ARM64
-        // build, as `import_test`): gala's ntdll binds its imports by name
-        // and ordinal, forwarders included, and runs testdll's DllMain.
-        name: "arm_import",
-        cmdline: "qemu_exit run=import_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["import_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // thread_test's ARM64 build (as `thread_test`).
-        name: "arm_thread",
-        cmdline: "qemu_exit run=thread_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["thread_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // sync_test's ARM64 build (as `sync_test`).
-        name: "arm_sync",
-        cmdline: "qemu_exit run=sync_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["sync_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // wait_test's ARM64 build (as `wait_test`).
-        name: "arm_wait",
-        cmdline: "qemu_exit run=wait_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["wait_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // exception_test's ARM64 build (as `exception_test`): faults,
-        // `brk` and `udf` reach a vectored handler with ARM64's record
-        // and CONTEXT, and it continues execution.
-        name: "arm_exception",
-        cmdline: "qemu_exit run=exception_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["exception_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // tls_test's ARM64 build (as `tls_test`): static TLS of the program
-        // and of a DLL loaded later, through kernel32 and gala's ntdll.
-        name: "arm_tls",
-        cmdline: "qemu_exit run=tls_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["tls_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // apc_test's ARM64 build (as `apc_test`): user APCs run in FIFO
-        // order from alertable waits and delays (STATUS_USER_APC), through
-        // gala's ntdll's KiUserApcDispatcher.
-        name: "arm_apc",
-        cmdline: "qemu_exit run=apc_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["apc_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
         // crash's ARM64 build (as `crash`): with no ntdll the kernel ends
         // the process and its crash report has ARM64's registers.
         name: "arm_crash",
@@ -12542,65 +12662,6 @@ const SCENARIOS: &[Scenario] = &[
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
-    },
-    Scenario {
-        // As `crash_dispatched`: the exception goes to gala's ntdll's ARM64
-        // dispatcher, no frame has a handler, and the process ends.
-        name: "arm_crash_dispatched",
-        cmdline: "qemu_exit run=crash.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "crash: writing to address 0",
-            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
-             (access violation) in thread",
-            "(crash.exe+0x",
-            "writing address 0x0",
-            "process crash.exe (pid 4) exited with status 0xc0000005",
-            BOOT_OK_MARKER,
-        ],
-    },
-    Scenario {
-        // As `crash_filtered`: a top-level filter ends the process with its
-        // own code; the report still describes the exception.
-        name: "arm_crash_filtered",
-        cmdline: "qemu_exit run=crash.exe args=filter",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "crash: the top-level filter ends the process",
-            "crash report: crash.exe (pid 4) ended with status 0xffff7002 after an unhandled \
-             exception 0xc0000005 (access violation) in thread",
-            "(crash.exe+0x",
-            "writing address 0x0",
-            "process crash.exe (pid 4) exited with status 0xffff7002",
-            BOOT_OK_MARKER,
-        ],
-    },
-    Scenario {
-        // seh_test's ARM64 build (as `seh_test`): ARM64 unwind data (.pdata
-        // and .xdata, packed and full) read by gala's ntdll: lookups,
-        // RtlVirtualUnwind in a body, prologue and epilogue, frame
-        // handlers in dispatch and unwind, a hardware exception through
-        // KiUserExceptionDispatcher's frame, unwind consolidation.
-        name: "arm_seh",
-        cmdline: "qemu_exit run=seh_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["seh_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // context_test's ARM64 build (as `context_test`): suspended threads'
-        // ARM64 CONTEXT through NtGetContextThread, a new one through
-        // NtSetContextThread, the caller's own.
-        name: "arm_context",
-        cmdline: "qemu_exit run=context_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["context_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // threadinfo_test's ARM64 build (as `threadinfo_test`).
-        name: "arm_threadinfo",
-        cmdline: "qemu_exit run=threadinfo_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["threadinfo_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
     },
     Scenario {
         // The hang watchdog on aarch64 (as `watchdog`): CPU 1 spins in its
@@ -18535,6 +18596,8 @@ fn scenario_cmdline(s: &Scenario) -> String {
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
+    // A twin ships its x64 scenario's files (their ARM64 builds).
+    let name = twin_base(name).unwrap_or(name);
     let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
     if sets.is_empty() {
         sets.push(name);
@@ -18560,17 +18623,19 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
 }
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one
-/// program (no other kernel flags), expects success, boots by BIOS, and
+/// program (no other kernel flags), expects success, boots by BIOS (or is
+/// the aarch64 kernel's: those share VMs of their own), and
 /// expects nothing that depends on running first (process ids, a
 /// session's desktop going live: logged once per boot).
 fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
-        || scenario_boot(s.name) != Boot::Bios
+        || !matches!(scenario_boot(s.name), Boot::Bios | Boot::UefiAarch64)
         || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
         || net_marker(s.name).is_some()
-        || HOST_PAGE_SCENARIOS.contains(&s.name)
+        || host_page_scenario(s.name)
         || disk_scenario(s.name).is_some()
         || s.name.starts_with("onecpu_")
+        || s.name.starts_with("arm_onecpu_")
         // A scenario that snapshots and resumes itself is one machine's
         // (in a batch it would take no snapshot and run none of its
         // resumes, and still pass).
@@ -18594,15 +18659,19 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
 /// boot modules share VMs (spread over the host CPUs), the rest boot alone.
 fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     use std::collections::BTreeMap;
-    let mut groups: BTreeMap<Vec<(&str, &str)>, Vec<&Scenario>> = BTreeMap::new();
+    // Grouped by architecture (aarch64 or not) and boot modules: a VM is
+    // one kernel's.
+    type Group = (bool, Vec<(&'static str, &'static str)>);
+    let mut groups: BTreeMap<Group, Vec<&Scenario>> = BTreeMap::new();
     let mut vms = Vec::new();
     for &s in selected {
         match batchable(s) {
             // Its own image, whose name picks the emulation (`qemu`).
             Some(_) if single_thread_tcg(s.name) => vms.push(Vm::Single(s)),
-            Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => {
-                groups.entry(extra_modules(s.name)).or_default().push(s)
-            }
+            Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => groups
+                .entry((is_aarch64_scenario(s.name), extra_modules(s.name)))
+                .or_default()
+                .push(s),
             _ => vms.push(Vm::Single(s)),
         }
     }
@@ -18657,8 +18726,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     // repeats one scenario: handover_upgrade's name is part of
     // handover_upgrade_uefi's); otherwise the filter is a substring.
     let exact = env::var_os("XTASK_REPEAT").is_some()
-        && filter.is_some_and(|f| SCENARIOS.iter().any(|s| s.name == f.as_str()));
-    let selected: Vec<&Scenario> = SCENARIOS
+        && filter.is_some_and(|f| scenarios().iter().any(|s| s.name == f.as_str()));
+    let selected: Vec<&Scenario> = scenarios()
         .iter()
         .filter(|s| match filter {
             // Pending and manual scenarios run only when named exactly.
@@ -18676,7 +18745,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    if selected.iter().any(|s| AARCH64_SCENARIOS.contains(&s.name)) {
+    if selected.iter().any(|s| is_aarch64_scenario(s.name)) {
         build_kernel_aarch64(release)?;
     }
     if snapshot::request().is_some() && selected.len() != 1 {
@@ -19211,7 +19280,7 @@ fn um_gap(s: &Scenario) -> Option<String> {
     if scenario_program(s).is_none() {
         return Some("not a program's own scenario".into());
     }
-    if net_marker(s.name).is_some() || HOST_PAGE_SCENARIOS.contains(&s.name) {
+    if net_marker(s.name).is_some() || host_page_scenario(s.name) {
         return Some("network scenario (needs a network card and xtask's client)".into());
     }
     if disk_scenario(s.name).is_some() {
@@ -19255,7 +19324,7 @@ fn um_test(release: bool) -> Result {
     let um = build_um(release)?;
     let mut failed = Vec::new();
     let all = Instant::now();
-    let selected: Vec<&Scenario> = SCENARIOS.iter().filter(|s| runs_in_um(s)).collect();
+    let selected: Vec<&Scenario> = scenarios().iter().filter(|s| runs_in_um(s)).collect();
     for s in &selected {
         let started = Instant::now();
         // A program that hangs on purpose gets SIGQUIT (its state dump)
@@ -19289,7 +19358,7 @@ fn um_test(release: bool) -> Result {
     );
     // What it left out, each with its reason (um_gap), so that a program
     // missing here is explained rather than silently absent.
-    for s in SCENARIOS.iter().filter(|s| scenario_program(s).is_some()) {
+    for s in scenarios().iter().filter(|s| scenario_program(s).is_some()) {
         if let Some(why) = um_gap(s) {
             eprintln!("xtask: um-test: not run: {:<20} {why}", s.name);
         }
@@ -19597,7 +19666,7 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
         .iter()
         .filter(|p| filter.is_none_or(|f| p.contains(f.as_str())))
         .map(|p| {
-            SCENARIOS
+            scenarios()
                 .iter()
                 .find(|s| s.name == *p && runs_in_um(s))
                 .ok_or(format!("fault test: {p} is not a gala-um scenario"))
@@ -19687,7 +19756,7 @@ fn replay_test(release: bool) -> Result {
     let started = Instant::now();
     let mut failed = Vec::new();
     for (program, prefix) in REPLAY_PROGRAMS {
-        let s = SCENARIOS
+        let s = scenarios()
             .iter()
             .find(|s| s.name == *program && runs_in_um(s))
             .ok_or(format!("replay-test: {program} is not a gala-um scenario"))?;
@@ -19823,7 +19892,7 @@ fn sim_test(
     let mut programs: Vec<(&Scenario, bool)> = SIM_PROGRAMS
         .iter()
         .map(|&(p, threaded)| {
-            SCENARIOS
+            scenarios()
                 .iter()
                 .find(|s| s.name == p && runs_in_um(s))
                 .map(|s| (s, threaded))
@@ -19832,7 +19901,7 @@ fn sim_test(
         .collect::<Result<_>>()?;
     if all {
         // Every gala-um program (traces need not differ across seeds).
-        let more = SCENARIOS.iter().filter(|s| runs_in_um(s));
+        let more = scenarios().iter().filter(|s| runs_in_um(s));
         let more: Vec<_> =
             more.filter(|s| !programs.iter().any(|(p, _)| p.name == s.name)).collect();
         programs.extend(more.into_iter().map(|s| (s, false)));
@@ -19987,7 +20056,7 @@ fn report_dir() -> PathBuf {
 /// Runs every test program's scenario and records each outcome.
 fn gala_report(release: bool) -> Result {
     build_kernel(release)?;
-    let selected: Vec<(&Scenario, &str)> = SCENARIOS
+    let selected: Vec<(&Scenario, &str)> = scenarios()
         .iter()
         .filter(|s| s.exit_status != XTASK_DUMPS)
         .filter_map(|s| scenario_program(s).map(|p| (s, p)))
@@ -20256,7 +20325,7 @@ fn run_vm_once(
     let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
-        if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+        if host_page_scenario(iso_scenario(iso)) {
             // Both: the forwarded port and the host's pages (chromium_wpt).
             let _ = fs::remove_file(iso.with_extension("serve.log"));
             let guestfwd = host_page_fwd(&mut cmd, &iso.with_extension("serve.log"))?;
@@ -20264,7 +20333,7 @@ fn run_vm_once(
         } else {
             add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
         }
-    } else if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+    } else if host_page_scenario(iso_scenario(iso)) {
         let _ = fs::remove_file(iso.with_extension("serve.log"));
         add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
     } else if CARD_SCENARIOS.contains(&iso_scenario(iso)) {
@@ -20381,7 +20450,7 @@ fn run_vm_once(
             if let Some(e) = failed {
                 let why = format!("stopped: the screen check failed ({e})");
                 dump_note =
-                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why, boot));
                 end_qemu(&mut child);
                 break None;
             }
@@ -20466,7 +20535,8 @@ fn run_vm_once(
                 ),
             };
             let why = format!("timed out after {what}; {}", now.describe());
-            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+            dump_note =
+                Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why, boot));
             end_qemu(&mut child);
             break None;
         }
@@ -20935,13 +21005,17 @@ fn cpu_register_lines(text: &str) -> String {
 /// `nmi` reaches every CPU; the kernel prints a state dump: each CPU's
 /// rip and backtrace, held locks, memory, the flight recorder, then every
 /// thread's system call and wait), waits for it to end, and says so in a
-/// line for the log (docs/OBSERVABILITY.md, "State dump").
+/// line for the log (docs/OBSERVABILITY.md, "State dump"). QEMU `virt`
+/// (aarch64) has no NMI to inject: a break on the console asks instead
+/// (`chardev-send-break`; the kernel takes the UART's interrupt at its
+/// pseudo-NMI's priority and sends that NMI to every CPU).
 fn ask_for_state_dump(
     socket: &Path,
     log: &Path,
     child: &mut std::process::Child,
     vm_clock: &mut vmtime::VmClock,
     why: &str,
+    boot: Boot,
 ) -> String {
     use std::io::Write as _;
     // Before the NMI changes what the CPUs do.
@@ -20955,7 +21029,10 @@ fn ask_for_state_dump(
     // Kept open while the guest dumps (QEMU may drop a command whose
     // connection closed before it read it).
     let monitor = std::os::unix::net::UnixStream::connect(socket).and_then(|mut m| {
-        m.write_all(b"nmi\n")?;
+        // `-serial file:` is the first serial port's chardev, serial0.
+        let ask: &[u8] =
+            if boot == Boot::UefiAarch64 { b"chardev-send-break serial0\n" } else { b"nmi\n" };
+        m.write_all(ask)?;
         m.flush()?;
         Ok(m)
     });
@@ -23485,7 +23562,7 @@ fn check_screen_step(
 /// guest's memory (`presenter=test` on its command line) rather than a
 /// screen QEMU shows.
 fn headless_screen(name: &str) -> bool {
-    SCENARIOS
+    scenarios()
         .iter()
         .find(|s| s.name == name)
         .is_some_and(|s| s.cmdline.split_whitespace().any(|w| w == "presenter=test"))
@@ -24351,7 +24428,7 @@ fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &P
     // R8: earlier boots of another release (its own image, signed so).
     let earlier = match trust::EARLIER_SIGNING.iter().find(|(n, _)| *n == name) {
         Some((_, signing)) => {
-            let s = SCENARIOS.iter().find(|s| s.name == name).ok_or("no such scenario")?;
+            let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
             let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
             let cmdline = format!("{} noscreen", s.cmdline);
             let earlier_name = format!("earlier-{name}");
@@ -24409,7 +24486,7 @@ fn serve(release: bool, args: &[String]) -> Result {
         "sshd" => ("sshd_server", if port == 8080 { 2222 } else { port }),
         n => (n, port),
     };
-    let s = SCENARIOS
+    let s = scenarios()
         .iter()
         .find(|s| s.name == name && net_marker(s.name).is_some())
         .ok_or_else(|| format!("{name} is not a network scenario"))?;
@@ -27436,7 +27513,7 @@ fn iso(release: bool, args: &[String]) -> Result {
     }
     if let Some(s) = scenario.as_deref().filter(|_| cmdline.is_empty()) {
         // The scenario's own command line, without the test-only exit.
-        let found = SCENARIOS.iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
+        let found = scenarios().iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
         cmdline.extend(found.cmdline.split_whitespace().filter(|w| *w != "qemu_exit"));
     }
     build_kernel(release)?;
@@ -27760,7 +27837,7 @@ fn export_tests() -> Result {
     // it; an ARM64 Windows runs these).
     let arm64 = dir.join("arm64");
     fs::create_dir_all(&arm64).map_err(|e| format!("creating {arm64:?}: {e}"))?;
-    for program in USER_PROGRAMS_ARM64 {
+    for program in arm64_programs() {
         copy(&built_program_arm64(program), &arm64.join(format!("{program}.exe")))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
@@ -27960,14 +28037,14 @@ mod constants {
         use super::*;
         for name in SIM_PROGRAMS.iter().map(|(p, _)| *p) {
             assert!(
-                SCENARIOS.iter().any(|s| s.name == name && runs_in_um(s)),
+                scenarios().iter().any(|s| s.name == name && runs_in_um(s)),
                 "{name} is not a gala-um scenario"
             );
         }
         // Every Go program gala-um runs is simulated and must repeat from
         // its seed (Go's runtime is our most demanding threaded program).
         for name in GO_PROGRAMS {
-            if SCENARIOS.iter().any(|s| s.name == *name && runs_in_um(s)) {
+            if scenarios().iter().any(|s| s.name == *name && runs_in_um(s)) {
                 assert!(
                     SIM_PROGRAMS.iter().any(|(p, threaded)| p == name && *threaded),
                     "{name} runs in gala-um but is not in SIM_PROGRAMS"
@@ -28368,10 +28445,10 @@ mod um_scenarios {
     /// that rule, not by a list.
     #[test]
     fn um_scenarios_have_only_flags_um_applies() {
-        for s in SCENARIOS.iter().filter(|s| runs_in_um(s)) {
+        for s in scenarios().iter().filter(|s| runs_in_um(s)) {
             assert_eq!(um_unapplied_flag(s), None, "{}", s.name);
         }
-        let schannel = SCENARIOS.iter().find(|s| s.name == "schannel_test").unwrap();
+        let schannel = scenarios().iter().find(|s| s.name == "schannel_test").unwrap();
         assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
     }
 }
@@ -28387,10 +28464,10 @@ mod snapshot_scenarios {
     #[test]
     fn snapshot_scenarios_are_never_batched() {
         for p in SNAPSHOT_SCENARIOS {
-            let s = SCENARIOS.iter().find(|s| s.name == p.name).expect("its scenario");
+            let s = scenarios().iter().find(|s| s.name == p.name).expect("its scenario");
             assert_eq!(batchable(s), None, "{} would be batched", p.name);
         }
-        let pair: Vec<&Scenario> = SCENARIOS
+        let pair: Vec<&Scenario> = scenarios()
             .iter()
             .filter(|s| s.name == "hotswap_machine" || s.name == "khotswap_both")
             .collect();

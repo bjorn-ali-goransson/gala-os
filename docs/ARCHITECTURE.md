@@ -240,7 +240,19 @@ faults, its exit).
   thread's x18 its TEB), whatever set the registers: NtContinue's
   CONTEXT, an exception handler, the hook. A process's image must be
   the architecture's machine (`arch::runs_machine`: ARM64 here; x64 and
-  x86 wait for XT).
+  x86 wait for XT): the program's own (`PeImage::parse`) and a process
+  made from an image section (`process::spawn`, `ImageInfo::machine`:
+  STATUS_INVALID_IMAGE_FORMAT, logged `its image is for machine ...`),
+  so x64 code is never jumped into. Invariant: a thread's saved
+  registers while it is in a system call (`thread::set_in_syscall`) are
+  those it made the call with, arguments included: ARM64's result
+  register is x0, its first argument, so the registers it returns with
+  (`syscalls::caller_regs`) would lose the handle a wait is on (the
+  thread dump's `on handle`); the context reported for such a thread
+  sets the result itself. User-mode randomness (`gala_random`,
+  bcryptprimitives' ProcessPrng): the kernel's entropy, which on ARM64
+  includes RNDR where FEAT_RNG has it (`cpu::hw_random`); x86-64's user
+  mode has RDRAND itself (`USER_HW_RANDOM`).
 - **Windows' ARM64 ABI** (`nt/abi/arm64`): ARM64's CONTEXT
   (`context.rs`, plain data the host's tests build on any machine:
   ContextFlags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, V0-V31, Fpcr, Fpsr, the
@@ -252,7 +264,7 @@ faults, its exit).
   part straight into V0-V31 (`xstate::restore`: the kernel never uses
   them); NtCreateThread starts a thread from a CONTEXT's registers.
   gala's ntdll and ntrt make `svc #N` as Windows ARM64's ntdll does
-  (`arm_startup`, `arm_import`: a program bound to an ARM64 DLL).
+  (`arm_startup_test`, `arm_import_test`: a program bound to an ARM64 DLL).
   Exceptions reach user mode (`deliver_to_user`): gala's ARM64
   dispatcher frame is the CONTEXT of the fault (CONTEXT_FULL, its pc the
   faulting instruction's, a `brk`'s too) at sp and the EXCEPTION_RECORD
@@ -267,7 +279,7 @@ faults, its exit).
   the CONTEXT to resume at sp and the routine with its three arguments
   above it (`deliver_apc`: ARM64's CONTEXT has no home area to carry
   them, as x64's does); KiUserApcDispatcher calls the routine and
-  NtContinues with TestAlert (`arm_exception`, `arm_apc`, `arm_tls`:
+  NtContinues with TestAlert (`arm_exception_test`, `arm_apc_test`, `arm_tls_test`:
   kernel32 loads, the APC a TLS callback queues runs before the entry).
   Crash reports show x0-x30, sp, pc and pstate (`arm_crash*`).
   Frame-based handlers on ARM64 (`testntdll/src/seh_arm64.rs`, from
@@ -281,13 +293,13 @@ faults, its exit).
   is MSFT_OP_CONTEXT (`.seh_context`), so a walk continues into the
   faulting function; RtlUnwindEx resumes the target with x0 the return
   value, after a consolidation callback run in a frame described the same
-  way (`arm_seh`). Function tables (an image's and those registered at
+  way (`arm_seh_test`). Function tables (an image's and those registered at
   run time: RtlAddFunctionTable, the growable ones, callbacks) are one
   registry for both architectures (`testntdll/src/ftable.rs`), each
   `seh` module giving its entry format. NtGetContextThread and NtSetContextThread exchange
   the parts ContextFlags names with the caller's registers or a
   suspended thread's parked state (`context::fill`, `context::apply`;
-  `arm_context`, `arm_threadinfo`).
+  `arm_context_test`, `arm_threadinfo_test`).
 - **Interrupt masking and the pseudo-NMI** (`cpu.rs`, `gic.rs`):
   interrupts are masked by priority (ICC_PMR_EL1), not PSTATE.I: "off"
   (`PMR_OFF`, 0xa0) lets only the NMI's priority (0x80) through, "on"
@@ -302,6 +314,15 @@ faults, its exit).
   switched from inside a handler resumes with the same state (off, I
   clear), as one switched from anywhere else. Scenario `arm_watchdog`:
   the watchdog's backtrace of CPU 1 spinning in its tick handler.
+  The state dump's request (x86-64's NMI from QEMU's monitor; `virt`
+  has none to inject) is a break on the console: the PL011's receive and
+  break interrupts are on (`serial::listen`), its SPI (the SPCR's GSIV;
+  QEMU `virt`'s 33 without one) routed to the boot CPU at the NMI's
+  priority (`gic::enable_console`, logged: `serial: a break on the
+  console asks for a state dump`); its handler drains the FIFO
+  (`serial::take_input`, no lock) and, for a break, sends the NMI SGI to
+  every online CPU, its own included. xtask sends the break at a timeout
+  (`chardev-send-break serial0`); `arm_statedump_test`.
   Backtraces walk AArch64's frame records (`[x29]`, `[x29 + 8]`; the
   kernel is built with frame pointers, as x86-64's).
 - **Time** (`timer.rs`): the generic timer's virtual channel (PPI 27).

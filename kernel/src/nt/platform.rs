@@ -18,11 +18,11 @@ pub use crate::arch::interrupts::{FaultAccess, IP_NAME, SP_NAME, TrapFrame, Trap
 pub use crate::arch::paging::{PagingError, UserFault};
 #[cfg(not(feature = "hosted"))]
 pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
-/// Whether a process of a PE machine runs on this architecture.
-pub use crate::arch::runs_machine;
 pub use crate::arch::syscall::{Gpr, SyscallFrame, UserRegs};
 /// The XSAVE layout (components, sizes) and the state as a value.
 pub use crate::arch::xstate::{self, XState};
+/// Whether a process of a PE machine runs on this architecture.
+pub use crate::arch::{USER_HW_RANDOM, runs_machine};
 pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 #[cfg(feature = "hosted")]
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};

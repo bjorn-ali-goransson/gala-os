@@ -1313,6 +1313,28 @@ fn inno_startup(c: &mut Checks) -> Result<(), u32> {
 /// native (IsWow64Process FALSE; IsWow64Process2 UNKNOWN on AMD64) and a
 /// 32-bit child (wow64_test.exe, started suspended) runs through WOW64
 /// (TRUE; I386 on AMD64).
+///
+/// ARM64's build checks only that this process is native on an ARM64
+/// machine (IsWow64Process FALSE; IsWow64Process2 UNKNOWN on ARM64
+/// 0xaa64): gala has no x86 emulation on ARM64, so the guest machine and
+/// the x86 child are x64's checks.
+#[cfg(target_arch = "aarch64")]
+fn wow64(c: &mut Checks) -> Result<(), u32> {
+    const ARM64: u64 = 0xaa64;
+    // SAFETY: plain calls with our outputs.
+    unsafe {
+        let mut wow = 7;
+        c.ok(IsWow64Process(GetCurrentProcess(), &mut wow) != 0, 0)?;
+        c.eq(wow as u64, 0)?;
+        let (mut machine, mut native) = (7u16, 7u16);
+        c.ok(IsWow64Process2(GetCurrentProcess(), &mut machine, &mut native) != 0, 0)?;
+        c.eq(machine.into(), 0)?;
+        c.eq(native.into(), ARM64)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
 fn wow64(c: &mut Checks) -> Result<(), u32> {
     const I386: u64 = 0x14c;
     const AMD64: u64 = 0x8664;

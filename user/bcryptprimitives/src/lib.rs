@@ -8,8 +8,9 @@
 //! When the kernel's random source is mocked (a recording or a replay,
 //! gala-um's simulation; ARCHITECTURE "Record/replay") the bytes come
 //! from the kernel instead (GalaRandom), so a run's random numbers can
-//! be recorded and replayed or follow the simulation's seed. The first
-//! call asks; the answer holds for the process.
+//! be recorded and replayed or follow the simulation's seed; on ARM64 they
+//! always do (the kernel reads RNDR). The first call asks; the answer
+//! holds for the process.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -85,8 +86,9 @@ type Word = u64;
 #[cfg(target_arch = "x86")]
 type Word = u32;
 
-/// ARM64: no processor source yet (RNDR, FEAT_RNG, comes with the port,
-/// ROADMAP AR); the kernel's (`from_kernel`) is used before this.
+/// ARM64: no source of its own (RNDR's presence is in an ID register user
+/// mode cannot read); the kernel serves (`from_kernel`, which reads RNDR),
+/// so this is reached only on a processor without FEAT_RNG.
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 type Word = u64;
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]

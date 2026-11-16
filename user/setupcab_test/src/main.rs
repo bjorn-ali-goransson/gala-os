@@ -37,7 +37,7 @@ use core::ffi::c_void;
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "setupcab_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_setupcab_test";

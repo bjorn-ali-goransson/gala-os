@@ -257,8 +257,9 @@ pub extern "system" fn QueryMemoryResourceNotification(h: Handle, state: *mut Bo
 }
 
 /// IsWow64GuestMachineSupported(machine, *supported): whether WOW64 runs
-/// programs of that machine type: x86 (IMAGE_FILE_MACHINE_I386), as on
-/// 64-bit Windows on x64 (ARCHITECTURE "Plan: WOW64"); no other.
+/// programs of that machine type: x86 (IMAGE_FILE_MACHINE_I386) on an x64
+/// machine, as on 64-bit Windows on x64 (ARCHITECTURE "Plan: WOW64"); no
+/// other, and none on ARM64 (gala has no x86 emulation there).
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWow64GuestMachineSupported(machine: u16, supported: *mut Bool) -> i32 {
     const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
@@ -266,16 +267,28 @@ pub extern "system" fn IsWow64GuestMachineSupported(machine: u16, supported: *mu
         return E_INVALIDARG;
     }
     // SAFETY: the caller's output.
-    unsafe { *supported = Bool::from(machine == IMAGE_FILE_MACHINE_I386) };
+    unsafe {
+        *supported = Bool::from(
+            machine == IMAGE_FILE_MACHINE_I386 && native_machine() == IMAGE_FILE_MACHINE_AMD64,
+        )
+    };
     0
 }
 
 const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 
+/// The machine the system runs on: KUSER_SHARED_DATA's ImageNumberLow
+/// (0x7ffe0000 + 0x2c; AMD64 0x8664, ARM64 0xaa64).
+fn native_machine() -> u16 {
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+    unsafe { (0x7ffe_002c as *const u16).read_volatile() }
+}
+
 /// IsWow64Process2(process, *processMachine, *nativeMachine): the
 /// process's machine if it runs through WOW64 (x86), else
-/// IMAGE_FILE_MACHINE_UNKNOWN; the native machine is AMD64.
+/// IMAGE_FILE_MACHINE_UNKNOWN; the native machine is the system's
+/// (`native_machine`).
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWow64Process2(
     process: Handle,
@@ -293,7 +306,7 @@ pub extern "system" fn IsWow64Process2(
     unsafe {
         *machine = if wow64 { IMAGE_FILE_MACHINE_I386 } else { 0 };
         if !native.is_null() {
-            *native = IMAGE_FILE_MACHINE_AMD64;
+            *native = native_machine();
         }
     }
     TRUE

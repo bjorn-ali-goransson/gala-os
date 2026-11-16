@@ -1353,7 +1353,7 @@ static FOLDERS: &[Def] = &[
         flags: 0x0,
         root: Some(Folder::Env("CommonProgramFiles", "")),
     },
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(target_pointer_width = "64")]
     Def {
         // FOLDERID_ProgramFilesCommonX64
         id: guid(0x6365d5a7, 0x0f0d, 0x45e5, [0x87, 0xf6, 0x0d, 0xa5, 0x6b, 0x6a, 0x4f, 0x7d]),
@@ -1380,7 +1380,7 @@ static FOLDERS: &[Def] = &[
         flags: 0x0,
         root: Some(Folder::Env("CommonProgramFiles(x86)", "")),
     },
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(target_pointer_width = "64")]
     Def {
         // FOLDERID_ProgramFilesX64
         id: guid(0x6d809377, 0x6af0, 0x444b, [0x89, 0x57, 0xa3, 0x77, 0x3f, 0x02, 0x20, 0x0e]),

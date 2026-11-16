@@ -79,15 +79,22 @@ fn expected_cpus() -> Option<u64> {
     (digits > 0).then_some(n)
 }
 
-/// IA32_TSC_AUX through `rdtscp`.
+/// The processor this runs on, as the system reports it to user mode:
+/// x64's IA32_TSC_AUX through `rdtscp` (Windows keeps the processor
+/// number there); ARM64's NtGetCurrentProcessorNumber.
+#[cfg(target_arch = "x86_64")]
 fn tsc_aux() -> u32 {
     let aux: u32;
-    // SAFETY: rdtscp only reads the TSC and TSC_AUX (x64 Windows requires
-    // it on 24H2-capable CPUs).
+    // SAFETY: rdtscp only reads the TSC and IA32_TSC_AUX.
     unsafe {
         core::arch::asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") aux, options(nomem, nostack))
     };
     aux
+}
+
+#[cfg(target_arch = "aarch64")]
+fn tsc_aux() -> u32 {
+    current_processor_number()
 }
 
 fn run() -> Result<(), u32> {

@@ -77,9 +77,13 @@ fn run() -> Result<(), u32> {
     c.eq(mbi.protect.into(), PAGE_READONLY.into())?;
     c.eq(mbi.region_size as u64, 0x1000)?;
 
-    // Version and platform.
-    c.eq(u16_at(0x2c).into(), 0x8664)?; // ImageNumberLow
-    c.eq(u16_at(0x2e).into(), 0x8664)?; // ImageNumberHigh
+    // Version and platform: the native machine (AMD64: 0x8664 and
+    // PROCESSOR_ARCHITECTURE_AMD64 9; ARM64: 0xaa64 and
+    // PROCESSOR_ARCHITECTURE_ARM64 12).
+    let (machine, arch): (u64, u64) =
+        if cfg!(target_arch = "aarch64") { (0xaa64, 12) } else { (0x8664, 9) };
+    c.eq(u16_at(0x2c).into(), machine)?; // ImageNumberLow
+    c.eq(u16_at(0x2e).into(), machine)?; // ImageNumberHigh
     c.eq(u32_at(0x26c).into(), 10)?; // NtMajorVersion
     c.eq(u32_at(0x270).into(), 0)?; // NtMinorVersion
     // NtBuildNumber: gala's pinned 26100 or a newer build (a real machine
@@ -90,7 +94,7 @@ fn run() -> Result<(), u32> {
     c.eq(unsafe { (peb().add(0x120) as *const u16).read() }.into(), build.into())?;
     c.eq(u32_at(0x264).into(), 1)?; // NtProductType = NtProductWinNt
     c.eq(u8_at(0x268).into(), 1)?; // ProductTypeIsValid
-    c.eq(u16_at(0x26a).into(), 9)?; // NativeProcessorArchitecture = AMD64
+    c.eq(u16_at(0x26a).into(), arch)?; // NativeProcessorArchitecture
     // NtSystemRoot, compared without case: setup and upgrades often
     // leave it "C:\WINDOWS" on a real machine.
     let lower = |ch: u16| if (0x41..=0x5a).contains(&ch) { ch | 0x20 } else { ch };

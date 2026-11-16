@@ -1,5 +1,5 @@
 //! The processor: interrupt masking, halting (WFI), the free-running
-//! counter (CNTVCT_EL0). The random generator (RNDR) is not read yet.
+//! counter (CNTVCT_EL0), the random generator (RNDR, `hw_random`).
 //!
 //! Interrupts are masked by priority, at the GIC's CPU interface
 //! (ICC_PMR_EL1), not by PSTATE.I: "off" lets only the pseudo-NMI's
@@ -124,8 +124,40 @@ pub fn cycles() -> u64 {
     v
 }
 
-/// One random word from the processor's generator (RNDR): not read yet
-/// (FEAT_RNG is optional; the port checks ID_AA64ISAR0_EL1 first).
+/// Whether the processor has a random number generator (FEAT_RNG:
+/// ID_AA64ISAR0_EL1.RNDR, bits 63:60, nonzero).
+fn has_rndr() -> bool {
+    let isar0: u64;
+    // SAFETY: reads an ID register (always readable at EL1).
+    unsafe {
+        core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack, preserves_flags))
+    };
+    isar0 >> 60 != 0
+}
+
+/// One random word from the processor's generator (RNDR, FEAT_RNG), with
+/// the retries the architecture allows for (RNDR reports a failure by
+/// setting the Z flag); None without FEAT_RNG or if it keeps failing.
 pub fn hw_random() -> Option<u64> {
+    if !has_rndr() {
+        return None;
+    }
+    for _ in 0..10 {
+        let (value, failed): (u64, u64);
+        // SAFETY: RNDR exists (FEAT_RNG); it writes the register and the
+        // condition flags only.
+        unsafe {
+            core::arch::asm!(
+                "mrs {v}, s3_3_c2_c4_0",
+                "cset {f}, eq",
+                v = out(reg) value,
+                f = out(reg) failed,
+                options(nomem, nostack),
+            )
+        };
+        if failed == 0 {
+            return Some(value);
+        }
+    }
     None
 }

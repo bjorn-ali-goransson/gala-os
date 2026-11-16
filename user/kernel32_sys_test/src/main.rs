@@ -318,7 +318,9 @@ fn run() -> Result<(), u32> {
         let mut info = SystemInfo::default();
         GetSystemInfo(&mut info);
         let cpus = core::ptr::read_volatile(0x7ffe_03c0 as *const u32); // KUSER ActiveProcessorCount
-        c.eq(info.processor_architecture.into(), 9)?; // AMD64
+        // PROCESSOR_ARCHITECTURE_AMD64 (9), ARM64's (12).
+        let arch = if cfg!(target_arch = "aarch64") { 12 } else { 9 };
+        c.eq(info.processor_architecture.into(), arch)?;
         c.eq(info.page_size.into(), 4096)?;
         c.eq(info.allocation_granularity.into(), 0x10000)?;
         c.eq(info.minimum_application_address as u64, 0x10000)?;
@@ -457,8 +459,7 @@ fn run() -> Result<(), u32> {
         // GetCommandLineW: the PEB's command line, NUL-terminated, naming
         // this program.
         let line = GetCommandLineW();
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let peb = teb_field(0x60);
         let params = *((peb + 0x20) as *const usize);
         c.eq(line as u64, *((params + 0x78) as *const u64))?;
         let len = usize::from(*((params + 0x70) as *const u16)) / 2;
@@ -498,8 +499,7 @@ fn run() -> Result<(), u32> {
         c.eq((uap >> 32) & 0xffff, 0)?;
         c.eq((uap >> 16) & 0xffff, u64::from(version[3]))?;
         c.eq(family.into(), 3)?;
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let peb = teb_field(0x60);
         c.eq(RtlGetCurrentPeb() as u64, peb as u64)?;
 
         // GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime
@@ -567,4 +567,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

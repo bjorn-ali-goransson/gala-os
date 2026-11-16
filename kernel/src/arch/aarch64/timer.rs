@@ -134,6 +134,8 @@ pub fn start_periodic(c: &Calibration, hz: u64, handler: interrupts::Handler) {
     if let Err(e) = super::gic::init() {
         panic!("timer: no interrupt controller: {e:?}");
     }
+    // The console's break (a state dump's request) from now on.
+    super::gic::enable_console();
     *HANDLER.lock() = Some(handler);
     let period = (c.timer_hz() / hz.max(1)).max(1);
     PERIOD.store(period, Ordering::Relaxed);

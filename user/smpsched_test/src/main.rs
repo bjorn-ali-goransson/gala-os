@@ -53,6 +53,10 @@ impl Checks {
     }
 }
 
+/// The processor this runs on: x64's IA32_TSC_AUX through `rdtscp`
+/// (Windows keeps the processor number there), ARM64's
+/// NtGetCurrentProcessorNumber.
+#[cfg(target_arch = "x86_64")]
 fn processor() -> u32 {
     let aux: u32;
     // SAFETY: rdtscp only reads the TSC and IA32_TSC_AUX.
@@ -60,6 +64,11 @@ fn processor() -> u32 {
         core::arch::asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") aux, options(nomem, nostack))
     };
     aux & 0xfff
+}
+
+#[cfg(target_arch = "aarch64")]
+fn processor() -> u32 {
+    current_processor_number()
 }
 
 fn pin(h: Handle, mask: u64) -> NtStatus {

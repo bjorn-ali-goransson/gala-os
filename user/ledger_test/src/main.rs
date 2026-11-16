@@ -35,7 +35,11 @@ const FILL_RECORDS: u64 = 600;
 const FILL_NAME: &[u8] = b"ledger_test.exe!fill";
 const UNKNOWN_PROCESS_CLASS: u32 = 0x7f00;
 
-fn raw_syscall(number: u32) -> NtStatus {
+/// System service `N` with no arguments, made directly: x64's `syscall`
+/// (the number in eax), ARM64's `svc #N` (Windows ARM64's ntdll puts the
+/// number in the immediate).
+#[cfg(target_arch = "x86_64")]
+fn raw_syscall<const N: u32>() -> NtStatus {
     let status: u64;
     // SAFETY: a system call with no arguments; the kernel only reads the
     // number and returns a status in rax.
@@ -43,7 +47,7 @@ fn raw_syscall(number: u32) -> NtStatus {
         core::arch::asm!(
             "mov r10, rcx",
             "syscall",
-            inlateout("rax") u64::from(number) => status,
+            inlateout("rax") u64::from(N) => status,
             out("rcx") _,
             out("r10") _,
             out("r11") _,
@@ -53,9 +57,18 @@ fn raw_syscall(number: u32) -> NtStatus {
     status as NtStatus
 }
 
-/// Four arguments, in the x64 system-call convention (rcx moved to r10
-/// by the caller, as ntdll does, then rdx, r8, r9).
-fn raw_syscall4(number: u32, a: u64, b: u64, c: u64, d: u64) -> NtStatus {
+#[cfg(target_arch = "aarch64")]
+fn raw_syscall<const N: u32>() -> NtStatus {
+    let status: u64;
+    // SAFETY: a system call with no arguments; the status comes in x0.
+    unsafe { core::arch::asm!("svc #{n}", n = const N, lateout("x0") status, options(nostack)) };
+    status as NtStatus
+}
+
+/// Four arguments, in the system-call convention: x64's (rcx moved to r10
+/// by the caller, as ntdll does, then rdx, r8, r9), ARM64's (x0-x3).
+#[cfg(target_arch = "x86_64")]
+fn raw_syscall4<const N: u32>(a: u64, b: u64, c: u64, d: u64) -> NtStatus {
     let status: u64;
     // SAFETY: GalaRecordMissing reads `a` for `b` bytes and returns a
     // status in rax; the pointer is a slice this program owns.
@@ -63,7 +76,7 @@ fn raw_syscall4(number: u32, a: u64, b: u64, c: u64, d: u64) -> NtStatus {
         core::arch::asm!(
             "mov r10, rcx",
             "syscall",
-            inlateout("rax") u64::from(number) => status,
+            inlateout("rax") u64::from(N) => status,
             in("rcx") a,
             in("rdx") b,
             in("r8") c,
@@ -76,8 +89,26 @@ fn raw_syscall4(number: u32, a: u64, b: u64, c: u64, d: u64) -> NtStatus {
     status as NtStatus
 }
 
+#[cfg(target_arch = "aarch64")]
+fn raw_syscall4<const N: u32>(a: u64, b: u64, c: u64, d: u64) -> NtStatus {
+    let status: u64;
+    // SAFETY: as x64's; the status comes in x0.
+    unsafe {
+        core::arch::asm!(
+            "svc #{n}",
+            n = const N,
+            inlateout("x0") a => status,
+            in("x1") b,
+            in("x2") c,
+            in("x3") d,
+            options(nostack)
+        )
+    };
+    status as NtStatus
+}
+
 fn run() -> u32 {
-    if raw_syscall(UNKNOWN_SERVICE) != STATUS_INVALID_SYSTEM_SERVICE {
+    if raw_syscall::<UNKNOWN_SERVICE>() != STATUS_INVALID_SYSTEM_SERVICE {
         return 1;
     }
     let mut buf = [0u8; 64];
@@ -97,8 +128,7 @@ fn run() -> u32 {
         return 0;
     }
     for detail in 0..FILL_RECORDS {
-        let status = raw_syscall4(
-            GALA_RECORD_MISSING,
+        let status = raw_syscall4::<GALA_RECORD_MISSING>(
             FILL_NAME.as_ptr() as u64,
             FILL_NAME.len() as u64,
             WHAT_OTHER,

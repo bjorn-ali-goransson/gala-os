@@ -826,6 +826,63 @@ fn frame_ok(frame: u64, stack_base: u64) -> bool {
     frame & 0xf == 0 && frame < stack_base && frame != 0
 }
 
+// --- Stack back traces -------------------------------------------------
+
+unsafe extern "system" {
+    /// The assembly RtlCaptureContext below.
+    fn RtlCaptureContext(context: *mut u8);
+}
+
+/// RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace,
+/// BackTraceHash): the return addresses of the frames above this one, the
+/// caller's first, after skipping `skip`; the hash is their sum
+/// (truncated). Returns how many were captured.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "system" fn RtlCaptureStackBackTrace(
+    skip: u32,
+    count: u32,
+    frames: *mut usize,
+    hash: *mut u32,
+) -> u16 {
+    let mut ctx = Context([0; CONTEXT_SIZE]);
+    // SAFETY: a 16-byte aligned CONTEXT of ours.
+    unsafe { RtlCaptureContext(ctx.0.as_mut_ptr()) };
+    // The captured Pc is the return address of that call, in this function.
+    ctx.set_unwound(true);
+    let (_, stack_base) = stack_bounds();
+    let (mut n, mut skipped, mut sum) = (0u32, 0u32, 0u32);
+    let mut last = (ctx.get(CTX_PC), ctx.get(CTX_SP));
+    for _ in 0..1024 {
+        if n >= count.min(u32::from(u16::MAX)) {
+            break;
+        }
+        if unwind_frame(&mut ctx).is_none() {
+            break;
+        }
+        let (pc, sp) = (ctx.get(CTX_PC), ctx.get(CTX_SP));
+        // A frame without unwind data whose Lr is its own return address
+        // (no progress) ends the walk as the stack's end does.
+        if pc == 0 || sp >= stack_base || (pc, sp) == last {
+            break;
+        }
+        last = (pc, sp);
+        if skipped < skip {
+            skipped += 1;
+            continue;
+        }
+        // SAFETY: the caller's array of `count` entries.
+        unsafe { *frames.add(n as usize) = pc as usize };
+        sum = sum.wrapping_add(pc as u32);
+        n += 1;
+    }
+    if !hash.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *hash = sum };
+    }
+    n as u16
+}
+
 /// DISPATCHER_CONTEXT (ARM64's: DISPATCHER_CONTEXT_ARM64).
 #[repr(C)]
 struct DispatcherContext {
