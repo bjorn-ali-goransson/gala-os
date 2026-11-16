@@ -384,7 +384,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_CMDLINE="words"` | add kernel command-line words to every boot (the kernel takes the last `args=`, so this can replace a scenario's arguments) |
 | `XTASK_QEMU_ARGS="..."` | extra QEMU arguments; an `-accel` here replaces xtask's own |
 | `XTASK_QEMU_LOG=int,cpu_reset` | QEMU's `-d` log into `<image>.qemu.log` |
-| `XTASK_QEMU_GDB=1` | at a boot's timeout, attach gdb to its QEMU and add QEMU's own record of each vCPU and every QEMU thread's stack to the failed log ("Hunting a rare hang") |
+| `XTASK_QEMU_GDB=1` | at every boot timeout, attach gdb to its QEMU and add QEMU's own record of each vCPU and every QEMU thread's stack to the failed log ("Hunting a rare hang"); a timeout whose monitor gives nothing gets it without this |
 | `XTASK_QEMU=<path>` | the QEMU binary to use |
 | `XTASK_FIRMWARE=uefi\|bios` | force one firmware for every boot |
 | `XTASK_NO_BATCH=1` | every scenario in its own VM |
@@ -4218,10 +4218,11 @@ before blaming CI:
   late still show.
 - In gala-um, catch a hung instance live and `gdb -p` the `exe` process
   (`thread apply all bt`).
-- **A guest that stops with no state dump** (aarch64's `virt` has no NMI
-  for the dump; a wedged guest answers none): the failed log has QEMU's
+- **A guest that stops with no state dump** (a wedged guest, or a
+  wedged QEMU, answers none): the failed log has QEMU's
   view of each CPU at the timeout (`xtask: QEMU's CPU#n: PC=...
-  PSTATE=...`, from the monitor). `XTASK_QEMU_GDB=1` adds QEMU's own
+  PSTATE=...`, from the monitor). `XTASK_QEMU_GDB=1` (or a monitor
+  that gave nothing: `QEMU's CPU registers: none read`) adds QEMU's own
   record (`xtask: gdb: vcpu <n> <field> <value>` lines: halted, PC,
   x0/x1/x29/x30/SP, ELR, ESR, VBAR, TTBR0, the power state, the
   interrupts QEMU holds for it (`interrupt_request`), each generic

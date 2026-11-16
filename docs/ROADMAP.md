@@ -1297,13 +1297,19 @@ the kernel.
   through VK_KHR_win32_surface and checked on the screen).
 
 **Next**:
-1. G1's rest: shasha's pointer on the hardware cursor,
+1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
+   answering its monitor (no `x`, no `info registers`, no NMI) after the
+   guest started its program; not reproduced locally. A failed log now
+   carries every QEMU thread's stack when the monitor gives nothing:
+   the next occurrence says which thread holds QEMU, and whether the
+   device reset (`gpureset=`) is in it.
+2. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-2. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
+3. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
    lavapipe, PREBUILT, beside the programs that use them (System32's
    dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
    screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
@@ -1329,9 +1335,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
@@ -4530,7 +4536,13 @@ on the seams item PT prepared: native ARM64 Windows programs
   emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
-1. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
+1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
+   reading its socket in a roundtrip after the "anchor bottom" popup's
+   commit while the server's thread waited too (a wakeup lost, or a
+   request answered with nothing); not reproduced locally, loaded or
+   not. The state dump now says which (`a round would find work`, each
+   client's socket) and names Linux calls in the flight records.
+2. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
    load, HotSpot's on ARM64); the handover programs (no handover on
    aarch64 yet); glibc's dynamic programs on aarch64 (dyn_test,
    gtk_test); injected input (QEMU `virt` has no PS/2 controller: a
@@ -4543,7 +4555,7 @@ on the seams item PT prepared: native ARM64 Windows programs
    gala's ARM64 context). rpcrt4's server routine call puts every
    argument in integer registers: ARM64 passes floating-point ones in
    v0-v7 apart, which needs the format string's types.
-2. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+3. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick
    with nothing held for it (gdb's record: `interrupt_request` 0, the

@@ -579,9 +579,11 @@ last 256 records, kept whether the event stream is on or not. A record
 is three words (time << 8 | kind, two values): one atomic increment and
 three stores. Kinds: `syscall` (number | pid << 32, thread id),
 `syscall-done` (number, status), `process-exit` (pid, status),
-`watchdog` (the CPU found stuck). Printed merged by time as `flight:`
-lines (service names, pid and tid on system calls) after a panic, in a
-watchdog report and in the state dump.
+`watchdog` (the CPU found stuck). A Linux call's number carries bit 31
+(`flight::LINUX`) and is named from the machine's Linux table (x86-64's
+or aarch64's), an NT call's from NT's. Printed merged by time as
+`flight:` lines (service names, pid and tid on system calls) after a
+panic, in a watchdog report and in the state dump.
 
 ### Hang watchdog
 
@@ -610,14 +612,17 @@ watchdog report and in the state dump.
 A read-only "what are you doing" with no channel of its own
 (`kernel/src/statedump.rs`; cheap: nothing runs until asked). When a
 boot test times out, xtask injects an NMI (QEMU monitor `nmi`, every
-CPU) before killing the VM and waits up to 20 s for the dump (x86-64:
-QEMU's aarch64 `virt` has no NMI to inject, so an aarch64 boot that
-times out has no dump yet; the kernel's own NMIs, the GIC's pseudo-NMI,
-do work there: the watchdog's backtraces, the profiler's samples). Every
-timeout's failed log also has QEMU's view of each CPU (`xtask: QEMU's
-CPU#n: PC=... PSTATE=...`, read from the monitor before the NMI), and
-with `XTASK_QEMU_GDB=1` QEMU's own record of each vCPU and every QEMU
-thread's stack (WORKFLOW "Hunting a rare hang"). The run's end says
+CPU) before killing the VM and waits up to 20 s for the dump (aarch64:
+QEMU's `virt` has no NMI to inject, so xtask sends a break on the
+console, whose interrupt the kernel takes at its pseudo-NMI's priority).
+Every timeout's failed log also has QEMU's view of each CPU (`xtask:
+QEMU's CPU#n: PC=... PSTATE=...`, read from the monitor before the
+NMI). When the monitor gives nothing, QEMU is stuck in itself, not the
+guest: xtask then attaches gdb to it and adds QEMU's own record of each
+vCPU and every QEMU thread's stack (`xtask: gdb: ...`; what gdb said
+when it could not attach); `XTASK_QEMU_GDB=1` takes that at every
+timeout (WORKFLOW "Hunting a rare hang"). CI installs gdb and lets it
+attach (`kernel.yama.ptrace_scope=0`). The run's end says
 itself: `qemu: ending the run (Success|Failure)` before the exit, and
 on aarch64 `qemu: the run did not end: ...` if the semihosting exit
 returned (x86-64's exit device asks QEMU for the end and the CPU runs on
@@ -671,9 +676,12 @@ a new line, since QEMU's end can cut the guest's last one off):
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:
    Q queued, shutdown F, peer open|gone), W waiting`), the Wayland
-   server's clients and their objects (`statedump: wayland client N (pid
-   P): K objects, R requests, B bytes of events waiting`, then a line per
-   object: a surface's window, size and pending frame callbacks, a
+   server's clients and their objects (`statedump: wayland on PATH: N
+   clients; a round would find work: true|false`: true while its thread
+   waits is a wakeup it missed, false with a client blocked reading is a
+   request it answered with nothing; `statedump: wayland client N (pid
+   P): K objects, R requests, B bytes of events waiting`, its socket as
+   the unix lines show one, then a line per object: a surface's window, size and pending frame callbacks, a
    buffer's size and stride, an xdg_surface's configure state, a
    toplevel's title and decoration, a decoration's mode asked for, a
    positioner's rules, a popup's parent, rules, configured and applied
