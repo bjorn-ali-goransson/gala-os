@@ -4524,6 +4524,8 @@ on the seams item PT prepared: native ARM64 Windows programs
 - Code the kernel writes for user mode (image pages, a loader's,
   WriteProcessMemory's) is cleaned and invalidated for instruction fetch
   before it runs (a real ARM64 machine's caches need it; QEMU's do not).
+- The event stream on aarch64: a host file written through semihosting
+  (`events_file=`); session_test runs there.
 - CI runs the aarch64 scenarios in its boot shards, under QEMU's
   emulation (TCG on GitHub's x86-64 runners).
 
@@ -4531,8 +4533,9 @@ on the seams item PT prepared: native ARM64 Windows programs
 1. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
    load, HotSpot's on ARM64); the handover programs (no handover on
    aarch64 yet); glibc's dynamic programs on aarch64 (dyn_test,
-   gtk_test) and the event stream's scenarios (`events=`,
-   wl_input_test). arch_prctl_test and signal_test stay x86_64's (the
+   gtk_test); injected input (QEMU `virt` has no PS/2 controller: a
+   virtio-input driver, keyboard and mouse or tablet, for wl_input_test
+   and the scenarios that click and type). arch_prctl_test and signal_test stay x86_64's (the
    call and the sigcontext fields they check are x86's; the aarch64
    signal frame is pipe_test's, id_test's, altstack_test's and
    seccomp_test's).

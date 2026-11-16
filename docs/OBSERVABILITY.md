@@ -210,7 +210,10 @@ real path has.
 
 A second output channel for tools: QEMU's `isa-debugcon` on port 0xe9
 (`arch::debugcon`; one `out` per byte, no UART handshake), which xtask
-always writes to `<iso>.events.jsonl` next to the serial log. One JSON
+always writes to `<iso>.events.jsonl` next to the serial log. On aarch64
+(QEMU `virt`, no ISA bus) the kernel writes the same file itself through
+Arm semihosting, its path on the command line (`events_file=`, which
+xtask adds to every aarch64 image). One JSON
 object per line, starting with `"t"` (ns since boot), `"cpu"`, `"by"`
 (the client id of the thread whose work emitted it: an NT thread id, a
 Linux tid, 0 for a kernel thread; the scheduler keeps it per CPU, so

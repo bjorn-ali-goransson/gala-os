@@ -376,8 +376,13 @@ faults, its exit).
   (TTBR0) are not ported.
 - **Exit**: semihosting's SYS_EXIT_EXTENDED (`hlt #0xf000`; xtask runs
   QEMU with `-semihosting-config enable=on`), with x86-64's statuses (33
-  success, 35 failure). There is no ISA bus: no debug console (no event
-  stream yet) and no phase port (`bootphase` marks are no-ops).
+  success, 35 failure). There is no ISA bus: the debug console (the event
+  stream) is a host file written through semihosting too (SYS_OPEN,
+  SYS_WRITE; `debugcon`): the one the command line names
+  (`events_file=<host path>`, which xtask gives every aarch64 image: its
+  `<image>.events.jsonl`), opened at the first write, nothing without it;
+  no phase port (`bootphase` marks are no-ops). No PS/2 controller on
+  `virt`: injected input waits for a virtio-input driver.
 - **Threads** (`context.rs`, `percpu.rs`): kernel stacks in a window of
   guard-paged slots, as x86-64's. The switch saves x19-x30 on the
   outgoing stack and its SP in the context, and the FP/SIMD registers
