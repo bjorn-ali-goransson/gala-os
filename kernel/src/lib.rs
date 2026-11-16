@@ -1385,7 +1385,7 @@ fn start_program(
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("start: no boot module named {name:?}");
     };
-    match nt::process::spawn_from_pe(file_name, directory, data, args, None, console) {
+    match nt::process::spawn_from_pe(file_name, directory, data, args, None, console, false) {
         Ok((process, _thread)) => {
             info!(
                 "start: {} (pid {}, as {})",
@@ -1578,22 +1578,36 @@ fn run_program(
     let started = match handover::carry::resumed(file_name) {
         Some(process) => {
             info!("run: {file_name} goes on from the previous kernel (pid {})", process.id);
-            Ok(process)
+            Ok((process, None))
         }
         None => {
             info!("run: {directory}/{file_name} ({} bytes)", data.len());
-            nt::process::spawn_from_pe(file_name, directory, data, args, cwd, console)
-                .map(|(process, _main)| process)
+            // Suspended, so the address space below is taken before the
+            // program can run: see `await_program`.
+            nt::process::spawn_from_pe(file_name, directory, data, args, cwd, console, true)
+                .map(|(process, main)| (process, Some(main)))
         }
     };
-    let process = match started {
-        Ok(process) => process,
+    let (process, main) = match started {
+        Ok(started) => started,
         Err(e) => {
             error!("run: cannot start {name}: {e:?}");
             return;
         }
     };
-    await_program(info, cmdline, process, wait_all, handover_requests, free_before);
+    // The address space, held from here: the process gives its own
+    // reference up at its exit (`nt::process::finish`), so this is the
+    // one `await_program`'s teardown check watches go. It is taken while
+    // the main thread is still suspended, because a program that ends in
+    // a few milliseconds (`unimplemented_test`, which ntdll ends in its
+    // init) would otherwise be gone before this line.
+    let space = process.space_now();
+    if let Some(main) = &main
+        && nt::thread::resume(main) != 1
+    {
+        warn!("run: {file_name}'s main thread was not suspended as asked");
+    }
+    await_program(info, cmdline, process, space, wait_all, handover_requests, free_before);
 }
 
 /// `lxrun=/lx/a,/lx/b`: Linux programs (static ELF; ROADMAP LX), run one
@@ -1655,7 +1669,19 @@ fn run_linux_programs(
         let (free_before, _) = mm::frame_stats();
         match lx::exec::spawn(path, &argv, &envp) {
             Ok(process) => {
-                await_program(info, cmdline, process, wait_all, handover_requests, free_before)
+                // A Linux program runs from its first instruction
+                // (`lx::exec::spawn` has no suspended start), so a very
+                // short one may be gone before this line.
+                let space = process.space_now();
+                await_program(
+                    info,
+                    cmdline,
+                    process,
+                    space,
+                    wait_all,
+                    handover_requests,
+                    free_before,
+                )
             }
             Err(e) => error!("run: cannot start {path}: {e}"),
         }
@@ -1664,23 +1690,29 @@ fn run_linux_programs(
     }
 }
 
-/// Waits for `process` (a `run=` or `lxrun=` program) to end, then checks
-/// that its address space is freed.
+/// Waits for `process` (a `run=` or `lxrun=` program) to end, reports its
+/// exit status, then checks that its address space is freed.
+///
+/// `space` is the caller's reference to that address space, taken before
+/// the program could exit (`run_program` starts it suspended for this).
+/// None where the caller could not take one in time: the status is still
+/// reported, and only the teardown check goes.
 fn await_program(
     info: &BootInfo,
     cmdline: &Cmdline,
     process: mm::heap::KArc<nt::process::Process>,
+    space: Option<nt::platform::SharedUserSpace>,
     wait_all: bool,
     handover_requests: Option<&nt::object::ObjectRef>,
     free_before: u64,
 ) {
-    // The address space, held from here: the process gives its own
-    // reference up at its exit (`nt::process::finish`), so this is the
-    // one the teardown check below watches go.
-    let Some(space) = process.space_now() else {
-        warn!("run: {} has no address space", process.name);
-        return;
-    };
+    if space.is_none() {
+        warn!(
+            "run: {} gave its address space up before it could be held: \
+             no teardown check for this run",
+            process.name
+        );
+    }
     {
         // Wait for the whole process (all threads) to end.
         match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
@@ -1750,8 +1782,17 @@ fn await_program(
     }
     // Only `space` may hold the address space now.
     drop(process);
-    // Teardown check: once the exiting threads are reaped, ours must be the
-    // last reference to the address space; then its memory is returned.
+    if let Some(space) = space {
+        teardown_check(space);
+    }
+    let (free_after, _) = mm::frame_stats();
+    // Heap slab pages are kept by design, so a few frames remain in use.
+    info!("run: {} frames not returned", free_before.saturating_sub(free_after));
+}
+
+/// Once the exiting threads are reaped, ours must be the last reference to
+/// the address space; then its memory is returned.
+fn teardown_check(space: nt::platform::SharedUserSpace) {
     // A leak is a second without progress: the teardown itself takes time
     // (dropping the process frees its sections, ~0.5 s for pwsh under TCG,
     // several times that on a loaded host), so the deadline moves on each
@@ -1784,7 +1825,4 @@ fn await_program(
         warn!("run: address space still referenced {} times after exit", count() - 1);
     }
     drop(space);
-    let (free_after, _) = mm::frame_stats();
-    // Heap slab pages are kept by design, so a few frames remain in use.
-    info!("run: {} frames not returned", free_before.saturating_sub(free_after));
 }

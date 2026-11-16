@@ -434,7 +434,7 @@ pub fn run(
     threads::arm_clock_control();
     let started = nt_code(|| {
         let (process, main_thread) =
-            crate::nt::process::spawn_from_pe(name, directory, data, args, None, None)
+            crate::nt::process::spawn_from_pe(name, directory, data, args, None, None, false)
                 .map_err(Ok)?;
         drop(main_thread);
         let body = crate::nt::object::ObjectBody::Process(process.clone());

@@ -43,6 +43,8 @@ struct Fake {
     sleeps: u32,
     /// URLs fetched, in order.
     fetches: Vec<String>,
+    /// Where the install said it was, in order (Host::progress).
+    progress: Vec<Progress>,
     /// The caller is an administrator (Host::is_admin).
     admin: bool,
     /// GalaTest.InnoSetup's stand-in fails as Inno does, writing its log.
@@ -78,6 +80,7 @@ impl Fake {
             pending: None,
             sleeps: 0,
             fetches: Vec::new(),
+            progress: Vec::new(),
             admin: false,
             inno_fails: false,
         };
@@ -334,6 +337,9 @@ impl Host for Fake {
         self.mutate()?;
         self.m.keys.remove(&(root_n(root), lc(key)));
         Ok(())
+    }
+    fn progress(&mut self, p: Progress) {
+        self.progress.push(p);
     }
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
         self.fetches.push(url.into());
@@ -646,6 +652,33 @@ fn every_test_package_manifest_parses() {
         let m = s.manifest(&mut f, id, v).unwrap_or_else(|e| panic!("{id} {v}: {e}"));
         assert!(m.warnings.is_empty(), "{id} {v}: {:?}", m.warnings);
     }
+}
+
+#[test]
+fn an_install_says_where_it_is() {
+    let mut f = Fake::new();
+    install_id(&mut f, "galatest.pkhello", Some("1.0.0")).unwrap();
+    // Resolving while the manifests are read, then the installer's
+    // download, then the writing, then Done. The percentage is the
+    // host's to report while it downloads (gala.exe: winhttp's chunks);
+    // this one fetches in one piece, so the only one here is the 0 the
+    // install itself reports before the download.
+    assert_eq!(
+        f.progress,
+        vec![Progress::Resolving, Progress::Downloading(0), Progress::Installing, Progress::Done]
+    );
+    // A failure ends in Failed, with the kind gala exits with.
+    let mut f = Fake::new();
+    let e = install_id(&mut f, "galatest.badhash", Some("1.0.0")).unwrap_err();
+    assert_eq!(e.kind, Kind::HashMismatch);
+    assert_eq!(
+        f.progress,
+        vec![Progress::Resolving, Progress::Downloading(0), Progress::Failed(Kind::HashMismatch)]
+    );
+    // A package that is not in the source fails while resolving.
+    let mut f = Fake::new();
+    assert!(install_id(&mut f, "no.such", None).is_err());
+    assert_eq!(f.progress, vec![Progress::Resolving, Progress::Failed(Kind::NotFound)]);
 }
 
 #[test]

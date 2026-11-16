@@ -161,6 +161,16 @@ pub trait Host {
     /// host cannot fetch is ERROR_NOT_SUPPORTED; an HTTP status other
     /// than 200 is `HTTP_STATUS_ERROR | status`.
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError>;
+    /// Downloads the installer itself, which is the bulk of an install
+    /// and the only part whose own progress is known: a host that shows
+    /// progress reports it as it reads (`Host::progress` with
+    /// Downloading). The default is a plain `fetch`.
+    fn fetch_installer(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
+        self.fetch(url)
+    }
+    /// Where the install is, for a host that shows it (gala.exe: the
+    /// start menu's tile). The default shows nothing.
+    fn progress(&mut self, _p: Progress) {}
     fn env(&mut self, name: &str) -> Option<String>;
     /// The path of the running `gala.exe` (copied as command shims).
     fn self_exe(&mut self) -> String;
@@ -206,6 +216,25 @@ pub enum Kind {
     /// portable install or uninstall; winget's
     /// APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN, 0x8A150019).
     RequiresAdmin,
+}
+
+/// Where an install is, for a host that shows it (`Host::progress`).
+/// gala.exe passes it to the start menu, whose tile draws a bar
+/// (kernel/src/nt/desktop/pkg.rs); a console install ignores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// Reading the source's manifests: the package, its version, its
+    /// installer.
+    Resolving,
+    /// Downloading the installer, this much of it (percent, from the
+    /// host as it reads: `Host::fetch_installer`).
+    Downloading(u8),
+    /// Writing it to the machine.
+    Installing,
+    /// Installed (or installed already).
+    Done,
+    /// It failed, with the kind gala exits with.
+    Failed(Kind),
 }
 
 impl Kind {
@@ -1393,7 +1422,15 @@ fn plan_dependencies(
 /// its own, as winget does: a later failure leaves them installed), then
 /// the package.
 pub fn install(host: &mut dyn Host, source: &Source, req: &Request) -> Result<Outcome, Error> {
-    install_inner(host, source, req, false)
+    host.progress(Progress::Resolving);
+    let r = install_inner(host, source, req, false);
+    // Always a last word, so that a tile does not wait for an install
+    // that is over.
+    host.progress(match &r {
+        Ok(_) => Progress::Done,
+        Err(e) => Progress::Failed(e.kind),
+    });
+    r
 }
 
 /// `planned`: a dependency of a package whose plan already covers its
@@ -1459,7 +1496,9 @@ fn install_inner(
             dependencies.push(format!("{} {}", step.id, step.version));
         }
     }
+    host.progress(Progress::Downloading(0));
     let p = prepare(host, source, package, index, &req.options, req.location, false)?;
+    host.progress(Progress::Installing);
     if !is_portable(&p.installer) {
         let location = exe::install_program(host, &p, req.source_location, None)?;
         host.log(&format!("installed id={} version={}", p.package.id, p.package.version));

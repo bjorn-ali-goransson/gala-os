@@ -331,13 +331,19 @@ pub struct Win32 {
     reg: Option<Reg>,
     verbose: bool,
     log_path: Option<String>,
+    /// The package being installed, whose start menu tile shows where
+    /// the install is (None: not an install, so nothing to tell).
+    installing: Option<String>,
+    /// Whether the tile has been told the install is over (so that a
+    /// failure outside `install::install` still ends its bar).
+    ended: bool,
 }
 
 impl Win32 {
     pub fn new(verbose: bool) -> Win32 {
         let log_path = env_var("LOCALAPPDATA")
             .map(|l| format!("{}\\gala\\logs\\install.log", l.trim_end_matches('\\')));
-        Win32 { reg: Reg::load(), verbose, log_path }
+        Win32 { reg: Reg::load(), verbose, log_path, installing: None, ended: false }
     }
 
     fn reg(&self) -> Result<&Reg, HostError> {
@@ -670,6 +676,36 @@ impl Host for Win32 {
         if e != 0 { Err(HostError { code: e }) } else { Ok(()) }
     }
 
+    fn progress(&mut self, p: install::Progress) {
+        let Some(id) = self.installing.clone() else { return };
+        let (state, percent, exit) = match p {
+            install::Progress::Resolving => (RESOLVING, 0, 0),
+            install::Progress::Downloading(n) => (DOWNLOADING, i32::from(n), 0),
+            install::Progress::Installing => (INSTALLING, 0, 0),
+            install::Progress::Done => (DONE, 100, 0),
+            install::Progress::Failed(k) => (FAILED, 0, k.exit_code() as i32),
+        };
+        self.ended = matches!(p, install::Progress::Done | install::Progress::Failed(_));
+        tell_tile(&id, state, percent, exit);
+    }
+
+    fn fetch_installer(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
+        // The percentage as the bytes come in, for the tile's bar; the
+        // rest is a plain fetch (a file, or no tile to tell).
+        let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+        let http = lower.starts_with("https://") || lower.starts_with("http://");
+        let Some(id) = self.installing.clone().filter(|_| http) else { return self.fetch(url) };
+        let mut last = -1i32;
+        let mut tell = |read: u64, length: Option<u64>| {
+            let percent = length.filter(|&l| l > 0).map_or(0, |l| (read * 100 / l).min(100) as i32);
+            if percent != last {
+                last = percent;
+                tell_tile(&id, DOWNLOADING, percent, 0);
+            }
+        };
+        crate::fetch::get_with_progress(url, &mut |line| self.log(line), &mut tell)
+    }
+
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
         // http(s) over winhttp (crate::fetch); file:///C:/dir/x.zip and
         // plain paths are read.
@@ -957,6 +993,28 @@ fn source(o: &Options) -> Result<Source, install::Error> {
     Source::open(&location)
 }
 
+/// ACTION_INSTALL_PROGRESS's states (kernel/src/nt/action.rs).
+const RESOLVING: i32 = 0;
+const DOWNLOADING: i32 = 1;
+const INSTALLING: i32 = 2;
+const DONE: i32 = 3;
+const FAILED: i32 = 4;
+
+/// Tells the start menu where the install of `id` is. Nothing comes of it
+/// where no tile has that package, or where no shell shows a start menu
+/// (STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED): an install from a
+/// console goes on all the same.
+fn tell_tile(id: &str, state: i32, percent: i32, exit: i32) {
+    let text: Vec<u16> = id.encode_utf16().collect();
+    let _ = crate::request(
+        crate::ACTION_INSTALL_PROGRESS,
+        0,
+        [state, percent, exit, 0],
+        &text,
+        &mut [],
+    );
+}
+
 fn report(host: &mut Win32, e: &install::Error) -> u32 {
     host.log(&format!("failed exit={} {}", e.kind.exit_code(), e.message));
     error(e.kind.exit_code(), &e.message)
@@ -973,6 +1031,21 @@ pub fn run(a: &Args) -> u32 {
         Err(code) => return code,
     };
     let mut host = Win32::new(o.verbose);
+    if a.is(1, "install") || a.is(1, "add") {
+        // What the start menu's tile is waiting for (`gala install <id>`
+        // from a tile has no window): from here on, however this command
+        // ends, the tile is told.
+        host.installing = named(&o);
+    }
+    let code = command(&mut host, a, &o);
+    if let Some(id) = host.installing.clone().filter(|_| code != 0 && !host.ended) {
+        tell_tile(&id, FAILED, 0, code as i32);
+    }
+    code
+}
+
+/// The command itself (`run` tells the tile how it ended).
+fn command(host: &mut Win32, a: &Args, o: &Options) -> u32 {
     if host.reg.is_none() {
         return error(
             EXIT_FAILED,
@@ -980,19 +1053,19 @@ pub fn run(a: &Args) -> u32 {
         );
     }
     let r = if a.is(1, "install") || a.is(1, "add") {
-        cmd_install(&mut host, &o)
+        cmd_install(host, o)
     } else if a.is(1, "search") || a.is(1, "find") {
-        cmd_search(&mut host, &o)
+        cmd_search(host, o)
     } else if a.is(1, "list") || a.is(1, "ls") {
-        cmd_list(&mut host, &o)
+        cmd_list(host, o)
     } else if a.is(1, "uninstall") || a.is(1, "remove") || a.is(1, "rm") {
-        cmd_uninstall(&mut host, &o)
+        cmd_uninstall(host, o)
     } else {
-        cmd_upgrade(&mut host, &o)
+        cmd_upgrade(host, o)
     };
     match r {
         Ok(code) => code,
-        Err(e) => report(&mut host, &e),
+        Err(e) => report(host, &e),
     }
 }
 

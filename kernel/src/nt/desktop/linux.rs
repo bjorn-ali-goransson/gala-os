@@ -235,6 +235,10 @@ pub enum Progress {
     Importing,
     /// It failed (the tile shows a red bar until the menu lists again).
     Failed,
+    /// Its `gala linux-install` is gone (or never started) without a
+    /// word: this far it had got. Grey, under a question mark, as a
+    /// package's `pkg::Progress::Lost` is.
+    Lost(u8),
 }
 
 impl Progress {
@@ -256,7 +260,13 @@ impl Progress {
             Progress::Downloading(p) => (u16::from(p.min(100)) * 4 / 5) as u8,
             Progress::Importing => 90,
             Progress::Failed => 100,
+            Progress::Lost(at) => at.min(100),
         }
+    }
+
+    /// The install is over, one way or another (as `pkg::Progress`).
+    pub fn ended(self) -> bool {
+        matches!(self, Progress::Failed | Progress::Lost(_))
     }
 }
 

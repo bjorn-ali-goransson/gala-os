@@ -13728,8 +13728,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
         // console window) and an install-on-click tile (7-Zip, not
-        // installed: `gala install 7zip.7zip` in a console window);
-        // START_MENU_SCREEN clicks them.
+        // installed: `gala install 7zip.7zip` without a window, its
+        // progress on the tile); START_MENU_SCREEN clicks them.
         name: "start_menu",
         cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -13739,12 +13739,16 @@ const SCENARIOS: &[Scenario] = &[
             "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
             "gala's cmd.exe has no interactive prompt yet",
             "start_menu_test: command prompt window",
-            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip",
+            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip \
+             (no window)",
             "desktop: started C:\\gala\\gala.exe (pid",
+            "desktop: start menu: install 7zip.7zip: resolving (0%)",
             // Offline (no network card, no winhttp.dll): gala says why in
-            // the window.
+            // the log, which is where a windowless install's output goes,
+            // and the tile's bar turns red (the screen check).
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
-            "start_menu_test: install window closed",
+            "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
+            "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
             "exited with status 0x00000000",
@@ -22267,9 +22271,12 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
-            after: "",
+            // After the line the test program prints when it has the
+            // Command Prompt's window, so that its watch for a second
+            // console window covers this click.
+            after: "start_menu_test: command prompt window",
             // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
-            // in a console window.
+            // without a window, the tile showing where the install is.
             input: &[
                 "mouse_move -23 -255",
                 "mouse_move 0 -195",
@@ -22279,19 +22286,27 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            after: "desktop: shown window 'gala.exe'",
-            // Its console window, with gala's output in it.
+            after: "desktop: start menu: install 7zip.7zip: failed",
+            // 7-Zip's tile has its bar, red (the install failed:
+            // offline), in the row under the name: the tile is
+            // (550, 300, 85, 80), so the bar is at (562, 368), 61 wide
+            // and 4 high (kernel/src/nt/desktop). The bar is drawn by
+            // the menu, so it is also what says the menu stayed open on
+            // the click; the wallpaper is there otherwise.
+            //
+            // The install ended, so it is told above the notification
+            // area too: a card 360 wide, 12 from the right edge and 12
+            // above the taskbar (908, 740 at its bottom right), in
+            // front of the menu. Its light background and the grey of
+            // "The install failed." are in the band that holds the text
+            // whether it takes one line or two. The balloon goes after
+            // BALLOON_SECONDS, which is many tries of this check.
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
-                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+                PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0xf2f4f8),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0x5d5d5d),
             ],
-        },
-        ScreenStep {
-            after: "start_menu_test: install window",
-            // Alt+F4 closes it (the active window): its conhost.exe ends.
-            input: &["sendkey alt-f4"],
-            pixels: &[],
         },
     ],
 };

@@ -1123,7 +1123,17 @@ current process, -2 = current thread.
   before the program starts (the process gives its up at the exit),
   checks that the space is freed and logs
   "address space still referenced" otherwise, which fails the boot
-  scenario. A leak is a second without progress (each reference that
+  scenario. "Before the program starts" is exact: the main thread is
+  created suspended and resumed once the reference is in hand, because a
+  program that ends in a few milliseconds (`unimplemented_test`, which
+  ntdll ends in its init) would otherwise have given the space up first.
+  Where the reference cannot be taken that early — a Linux program
+  (`lxrun=`: `lx::exec::spawn` runs it from its first instruction) or one
+  the previous kernel handed over — `await_program` logs "gave its
+  address space up before it could be held" and skips the check alone:
+  the exit status is still reported, which is what the scenarios read
+  ("finished with status"), and an early return used to lose it to a fast
+  program at random. A leak is a second without progress (each reference that
   goes restarts the second); the message is preceded by who holds the
   space (`sched::dump_space_holders`: unreaped threads with state and
   CPU; `sched::held_by_reaps`: references a reap in progress holds;
@@ -7562,17 +7572,86 @@ session's is shown by nothing unless GalaSession attaches a presenter
   first tile) hands the program to `nt::action::start_from_menu`, which
   checks again outside the lock (`menu_request`): a program that exists
   starts (`process::launch`: the boot user, its directory current, new
-  console handles), else `C:\gala\gala.exe install <id>` runs. A console
-  program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a console window, as one
-  started from Explorer does: a console session hosted by conhost.exe
-  (System32's, else C:\gala's), started first with the session's id and
-  the program's name; that window stays after the program ends (an
-  install's output and errors stay in view). Logged (`desktop: start
-  menu starts <name>: <path>`, `desktop: start menu: <name> is not
-  installed: <gala> install <id>`, `desktop: started <path> (pid N) in
-  a console window`) and a `window` event `start menu` (op start,
-  install or missing; session, name, target, pid, status). Scenario
-  `start_menu` (start_menu_test, screen check).
+  console handles) and the menu closes, else `C:\gala\gala.exe install
+  <id>` runs. A console program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a
+  console window, as one started from Explorer does: a console session
+  hosted by conhost.exe (System32's, else C:\gala's), started first with
+  the session's id and the program's name; that window stays after the
+  program ends. Logged (`desktop: start menu starts <name>: <path>`,
+  `desktop: start menu: <name> is not installed: <gala> install <id>
+  (no window)`, `desktop: started <path> (pid N) in a console window`)
+  and a `window` event `start menu` (op start, install or missing;
+  session, name, target, pid, status). Scenario `start_menu`
+  (start_menu_test, screen check).
+  - **An install happens on the tile**, as a Linux distribution's does:
+    the install runs with no window at all, the menu stays open and the
+    tile keeps the click's place with a progress bar in the row under
+    its name (the name then has one line, the badge goes). gala.exe
+    tells the menu where the install is through GalaDesktopAction's
+    InstallProgress (ACTION 15: the winget id as the text, the state,
+    the percent downloaded and, on failure, the exit code it fails
+    with): `desktop::install_progress` matches the id against the
+    catalog's (without case, as `gala install` matches it) and
+    `desktop/pkg.rs` turns the state into the bar's fill - resolving
+    the manifests 5%, the installer's download 10% to 70% (galapkg's
+    `Host::fetch_installer` reports it as the bytes come in),
+    installing 85%, and on failure a full red bar (a click then tries
+    again; a click while it installs does nothing). "Done" lists the
+    programs again, so the tile is drawn installed and its bar goes.
+    Each state is logged once (`desktop: start menu: install <id>:
+    <state> (<percent>%)`, a failure as `failed (gala exit N)` and,
+    where the code says more than that it failed, `(gala exit N: <that>)`
+    - `pkg::install_failure`, whose None is galapkg's own `Failed` (4),
+    the step being named by gala's own line above) with a `window`
+    event, since there is no window to show it in; gala's own output is
+    in the log too (a process without a console writes there). Whatever
+    ends the command, the tile hears: `galapkg::install::install`
+    reports Done or Failed around the whole install, and gala.exe
+    reports a failure with its exit code for anything that ends it
+    earlier.
+  - **An install whose installer is gone goes quiet**, rather than
+    waiting for a word that is not coming: a gala.exe killed outright,
+    or faulting before it can report, says nothing at all.
+    `start_from_menu` reports the installer's pid to the desktop
+    (`install_started`, None when it never started: no gala.exe, no
+    memory for the command line, a session with no user, or a program
+    that is neither on the machine nor in the catalog), and the
+    desktop keeps one pid per install under way, packages and
+    distributions alike. A process that ends is the word that no word
+    will come: `process_ended` asks the desktop about that pid
+    (`installers_gone`), and the install goes to `Progress::Lost(at)`,
+    which keeps the bar where it got to, in grey, and draws the icon
+    grey under a white question mark where the download badge sits. A
+    click tries again, as on a tile whose install failed, and it is
+    told above the notification area like any end ("The install went
+    quiet: its installer is gone with no word. A click tries again.",
+    or "The install never started. A click tries again."). The watch is
+    on the process and not on a silence: an install may say nothing for
+    half an hour (Office's does), so a timeout would call a working
+    install dead. The pid is forgotten with the install it belongs to
+    (`watch_only_waiting`, called wherever an install ends), since a
+    stale pid would turn a tile grey for a stranger's process ending;
+    at most MAX_INSTALLERS installs are watched at once (more than a
+    user can start), one past that is logged and left to the next
+    listing as before. Logged as `desktop: start menu: <name>'s install
+    went quiet at <at>%: <why>` with a `window` event (op "install
+    quiet") and a ledger entry ("install gone quiet"). A `Desktop`
+    method cannot write any of that itself - host unit tests build
+    without the `hosted` feature, where the console writes to COM1 with
+    `out`, which faults in user mode - so the desktop keeps what is to
+    be told (`Quieted`, as it keeps `launch`) and the module's free
+    functions drain it (`tell_quiet`).
+  - **An install that ends is told above the notification area**, since
+    the tile it ran on is out of sight as soon as the menu is closed:
+    the program's name over "Installed. Its tile starts it now." or
+    "The install failed[: <what the exit code says>]." on the card a
+    program's balloon uses ("The notification area"). It is told once
+    and always: the listing that draws the tile installed is what tells
+    it, the install's own last word tells it when the listing has not
+    caught up with it, and a failure reported twice is told once (a
+    click that tries again and fails is told again). A distribution's
+    install is told the same way (`set_linux`, `linux_progress`), with
+    no reason: `wsl --import` gives no code to say one.
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
   `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned
@@ -7681,6 +7760,13 @@ through the screen check).
   (recorded); no sound is played. The same card shows the tip of the
   icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
   line.
+- **The shell's own balloon** (`Tray::announce`): what the shell itself
+  has to say (an install that ended, "The start menu") belongs to no
+  window, so no icon is told that it shows, goes or was clicked, and it
+  does not go with a process; it replaces the balloon on show and times
+  out as any other. The card is drawn in front of the start menu where
+  the two meet, and a click there is the balloon's - the menu closes
+  too, as it does for any click outside it.
 - **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
   one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
   full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,

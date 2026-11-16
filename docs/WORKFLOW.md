@@ -4813,8 +4813,11 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   --lib` build the test binary dies with SIGSEGV and no test name
   ("process didn't exit successfully ... signal: 11"). Gate the log
   lines with `#[cfg(not(test))]` or a wrapper compiled out under
-  `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`);
-  events are fine (`events::emit` is a no-op in tests). Find the test
+  `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`), or
+  keep what is to be told in the state and let the module's free
+  functions write it, which the tests do not reach (`nt::desktop`'s
+  `Quieted` and `tell_quiet`); events are fine (`events::emit` is a
+  no-op in tests). Find the test
   with `--test-threads=1` or by filtering module names.
 - **Window behaviour belongs in `nt::winstate`**: what a window is
   (rectangles, Z order, focus, capture, client pixels, input for
