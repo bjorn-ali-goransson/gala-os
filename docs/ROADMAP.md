@@ -1297,6 +1297,12 @@ the kernel.
   through VK_KHR_win32_surface and checked on the screen).
 
 **Next**:
+1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
+   answering its monitor (no `x`, no `info registers`, no NMI) after the
+   guest started its program; not reproduced locally. A failed log now
+   carries every QEMU thread's stack when the monitor gives nothing:
+   the next occurrence says which thread holds QEMU, and whether the
+   device reset (`gpureset=`) is in it.
 1. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
