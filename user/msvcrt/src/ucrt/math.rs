@@ -224,7 +224,7 @@ fn abstract_status(flags: u32) -> u32 {
     MAP.iter().filter(|(hw, _)| flags & hw != 0).fold(0, |s, (_, a)| s | a)
 }
 
-/// The raised-exception flags: ARM64's are the port's.
+/// The raised-exception flags (FPSR's, `aarch64.rs`).
 #[cfg(target_arch = "aarch64")]
 fn status(clear: bool) -> u32 {
     crate::arch::fp_status(clear)
@@ -258,10 +258,10 @@ fn status(clear: bool) -> u32 {
     abstract_status(flags)
 }
 
-/// Clears the raised-exception flags: ARM64's are the port's.
+/// Clears the raised-exception flags of `abstract_mask` (_SW_* bits).
 #[cfg(target_arch = "aarch64")]
-pub(crate) fn clear_flags(_abstract_mask: u32) {
-    crate::arch::fp_status(true);
+pub(crate) fn clear_flags(abstract_mask: u32) {
+    crate::arch::fp_clear(abstract_mask);
 }
 
 /// Clears the raised-exception flags of `abstract_mask` (_SW_* bits; the

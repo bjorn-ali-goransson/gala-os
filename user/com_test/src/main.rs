@@ -77,11 +77,10 @@ extern "system" fn implicit_thread(_: *mut c_void) -> u32 {
 /// base::win::GetComApartmentTypeForThread reads them): 0x80 STA, 0x140
 /// MTA; 0 with no OLE data.
 fn ole_flags() -> u32 {
-    let teb: usize;
-    // SAFETY: gs:[0x30] is the TEB's self pointer; the OLE data, when
+    let teb = teb_field(0x30);
+    // SAFETY: TEB+0x30 is the TEB's self pointer; the OLE data, when
     // there is some, is ole32's block of at least 24 bytes.
     unsafe {
-        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly));
         let ole = *((teb + 0x1758) as *const usize);
         if ole == 0 { 0 } else { *((ole + 20) as *const u32) }
     }
@@ -879,4 +878,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

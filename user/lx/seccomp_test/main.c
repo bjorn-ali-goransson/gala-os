@@ -25,7 +25,13 @@
 #define SECCOMP_RET_TRACE 0x7ff00000u
 #define SECCOMP_RET_LOG 0x7ffc0000u
 #define SECCOMP_RET_ALLOW 0x7fff0000u
+#if defined(__x86_64__)
 #define AUDIT_ARCH_X86_64 0xc000003eu
+#else
+/* The filter's architecture check is aarch64's there (AUDIT_ARCH_AARCH64:
+ * EM_AARCH64 with the 64-bit and little-endian bits). */
+#define AUDIT_ARCH_X86_64 0xc00000b7u
+#endif
 #define SIGSYS 31
 
 /* Classic BPF (linux/filter.h). */

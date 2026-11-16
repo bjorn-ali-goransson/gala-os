@@ -10,7 +10,7 @@
 //!   SetThreadAffinityMask (the previous mask), Get/SetThreadIdealProcessorEx,
 //!   GetNumaProcessorNodeEx, GetLogicalProcessorInformation(Ex) (one core
 //!   entry per processor here, sizes, ERROR_INSUFFICIENT_BUFFER first).
-//! - Contexts: GetEnabledXStateFeatures (x87 and SSE at least),
+//! - Contexts: GetEnabledXStateFeatures (x87 and SSE at least, on x64),
 //!   InitializeContext (size query, aligned, flags set), CopyContext,
 //!   LocateXStateFeature and SetXStateFeaturesMask without CONTEXT_XSTATE.
 //! - Code: FlushInstructionCache, RtlInstallFunctionTableCallback (ntdll's
@@ -113,6 +113,7 @@ unsafe extern "system" {
     fn GetNumaProcessorNodeEx(n: *const ProcessorNumber, node: *mut u16) -> Bool;
     fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) -> Bool;
     fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, len: *mut u32) -> Bool;
+    #[cfg(target_arch = "x86_64")]
     fn GetEnabledXStateFeatures() -> u64;
     fn InitializeContext(buf: *mut u8, flags: u32, context: *mut *mut u8, len: *mut u32) -> Bool;
     fn CopyContext(dst: *mut u8, flags: u32, src: *const u8) -> Bool;
@@ -203,7 +204,24 @@ const WAIT_TIMEOUT: u64 = 0x102;
 const WAIT_IO_COMPLETION: u64 = 0xc0;
 const ERROR_INSUFFICIENT_BUFFER: u64 = 122;
 const ERROR_NOT_LOCKED: u64 = 158;
+/// CONTEXT_FULL, ContextFlags' offset, the first integer register's
+/// (x64's Rax, ARM64's X0) and the CONTEXT's size, by architecture.
+#[cfg(target_arch = "x86_64")]
 const CONTEXT_FULL: u32 = 0x10_000b;
+#[cfg(target_arch = "x86_64")]
+const CTX_FLAGS: usize = 0x30;
+#[cfg(target_arch = "x86_64")]
+const CTX_INT0: usize = 0x78;
+#[cfg(target_arch = "x86_64")]
+const CONTEXT_SIZE: u32 = 0x4d0;
+#[cfg(target_arch = "aarch64")]
+const CONTEXT_FULL: u32 = 0x40_0007;
+#[cfg(target_arch = "aarch64")]
+const CTX_FLAGS: usize = 0;
+#[cfg(target_arch = "aarch64")]
+const CTX_INT0: usize = 0x8;
+#[cfg(target_arch = "aarch64")]
+const CONTEXT_SIZE: u32 = 0x390;
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -382,24 +400,27 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
 fn contexts(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain calls with buffers of ours.
     unsafe {
+        // x87 and SSE are XState features on x64; ARM64's floating-point
+        // state is CONTEXT_FLOATING_POINT's, no feature.
+        #[cfg(target_arch = "x86_64")]
         c.eq(GetEnabledXStateFeatures() & 3, 3)?;
         let mut len = 0u32;
         let mut ctx = core::ptr::null_mut();
         c.eq(InitializeContext(core::ptr::null_mut(), CONTEXT_FULL, &mut ctx, &mut len) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER)?;
-        c.ok((1232..=4096).contains(&len), len.into())?;
+        c.ok((CONTEXT_SIZE..=4096).contains(&len), len.into())?;
         let mut a = [0u64; 512];
         let mut b = [0u64; 512];
         let mut len = 4096u32;
         c.ok(InitializeContext(a.as_mut_ptr().cast(), CONTEXT_FULL, &mut ctx, &mut len) != 0, 0)?;
         c.ok((ctx as usize).is_multiple_of(16) && ctx as usize >= a.as_ptr() as usize, ctx as u64)?;
-        c.eq((*(ctx.add(0x30) as *const u32)).into(), CONTEXT_FULL.into())?; // ContextFlags
-        *(ctx.add(0x78) as *mut u64) = 0x1234; // Rax
+        c.eq((*(ctx.add(CTX_FLAGS) as *const u32)).into(), CONTEXT_FULL.into())?;
+        *(ctx.add(CTX_INT0) as *mut u64) = 0x1234;
         let mut other = core::ptr::null_mut();
         let mut len = 4096u32;
         InitializeContext(b.as_mut_ptr().cast(), CONTEXT_FULL, &mut other, &mut len);
         c.ok(CopyContext(other, CONTEXT_FULL, ctx) != 0, GetLastError().into())?;
-        c.eq(*(other.add(0x78) as *const u64), 0x1234)?;
+        c.eq(*(other.add(CTX_INT0) as *const u64), 0x1234)?;
         // No extended state in this context.
         let mut flen = 0u32;
         c.ok(LocateXStateFeature(ctx, 2, &mut flen).is_null(), 0)?; // XSTATE_AVX
@@ -504,7 +525,9 @@ fn threads_memory(c: &mut Checks) -> Result<(), u32> {
 
         let (mut machine, mut native) = (7u16, 7u16);
         c.ok(IsWow64Process2(GetCurrentProcess(), &mut machine, &mut native) != 0, 0)?;
-        c.ok(machine == 0 && native == 0x8664, native.into())?; // IMAGE_FILE_MACHINE_AMD64
+        // Native: IMAGE_FILE_MACHINE_AMD64, or ARM64's 0xaa64.
+        let want: u16 = if cfg!(target_arch = "aarch64") { 0xaa64 } else { 0x8664 };
+        c.ok(machine == 0 && native == want, native.into())?;
         let mut in_job = 7;
         c.ok(IsProcessInJob(GetCurrentProcess(), core::ptr::null_mut(), &mut in_job) != 0, 0)?;
         c.ok(in_job == 0 || in_job == 1, in_job as u64)?;
@@ -663,21 +686,15 @@ fn unhandled(c: &mut Checks) -> Result<(), u32> {
 
 /// This thread's stack reservation: TEB.StackBase - TEB.DeallocationStack.
 fn stack_reservation() -> u64 {
-    let (base, bottom): (u64, u64);
-    // SAFETY: gs:[0x8] is TEB.StackBase, gs:[0x1478] TEB.DeallocationStack.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[0x8]", out(reg) base, options(nostack, readonly));
-        core::arch::asm!("mov {}, gs:[0x1478]", out(reg) bottom, options(nostack, readonly));
-    }
-    base - bottom
+    // TEB+0x8 is StackBase, TEB+0x1478 DeallocationStack.
+    (teb_field(0x8) - teb_field(0x1478)) as u64
 }
 
 /// Whether the page just below this thread's StackLimit is a guard page
 /// (PAGE_READWRITE | PAGE_GUARD), as Windows lays out thread stacks.
 fn guard_below_limit() -> bool {
-    let limit: u64;
-    // SAFETY: gs:[0x10] is TEB.StackLimit.
-    unsafe { core::arch::asm!("mov {}, gs:[0x10]", out(reg) limit, options(nostack, readonly)) };
+    // TEB+0x10 is StackLimit.
+    let limit = teb_field(0x10) as u64;
     let mut mbi = [0u64; 6];
     // SAFETY: a MEMORY_BASIC_INFORMATION buffer (48 bytes).
     let n = unsafe { VirtualQuery((limit - 0x1000) as *const c_void, &mut mbi, 48) };
@@ -791,4 +808,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

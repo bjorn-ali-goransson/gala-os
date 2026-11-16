@@ -38,7 +38,7 @@ use super::syscalls::nr;
 use super::wait;
 use crate::mm::heap::KArc;
 use crate::nt::ledger;
-use crate::nt::platform::{self, UserRegs, XState, xstate};
+use crate::nt::platform::{self, UserRegs, XState};
 use crate::nt::process::{self, Process};
 
 /// An `lx signal` event.
@@ -499,10 +499,10 @@ pub fn sigaltstack(call: &Call<'_>, ss: u64, old: u64) -> Result {
 
 pub fn rt_sigreturn(call: &Call<'_>) -> Result {
     let sp = call.frame.sp();
-    // The alternate stack the frame's uc_stack holds (the ucontext is at
-    // sp, its uc_stack 16 bytes in), set back as Linux's restore_altstack
+    // The alternate stack the frame's uc_stack holds (`machine::
+    // UC_STACK_AT` past sp), set back as Linux's restore_altstack
     // does, what it refuses ignored.
-    if let Ok(saved) = read_stack(call, sp + 16) {
+    if let Ok(saved) = read_stack(call, sp + machine::UC_STACK_AT) {
         let _ = set_altstack(&call.lx, call.tid, sp, saved);
     }
     let (regs, fp, mask) = match machine::read_sigframe(&call.process, sp) {
@@ -512,14 +512,7 @@ pub fn rt_sigreturn(call: &Call<'_>) -> Result {
     if !regs.is_valid() {
         return bad_frame(call, sp, "rip or rsp outside user space");
     }
-    let mut fx = XState::initial();
-    if fp != 0 {
-        let len = xstate::size();
-        if call.process.read(fp, &mut fx.bytes_mut()[..len]).is_err() {
-            return bad_frame(call, sp, "the FPU state is not readable");
-        }
-    }
-    platform::xrstor(&fx);
+    platform::xrstor(&fp.unwrap_or_else(XState::initial));
     call.lx.signals.lock().restore_mask(call.tid, mask);
     call.resume.set(Some(regs));
     Ok(regs.syscall_result())
@@ -577,12 +570,14 @@ fn restartable(number: u64) -> bool {
     )
 }
 
-/// Makes the interrupted call `number` again when it returns to `regs`.
-fn restart(regs: &mut UserRegs, number: u64) {
-    machine::restart(regs, number);
+/// Makes the interrupted call `number` (its first argument `arg0`) again
+/// when it returns to `regs`.
+fn restart(regs: &mut UserRegs, number: u64, arg0: u64) {
+    machine::restart(regs, number, arg0);
 }
 
-/// On the way back to user mode from system call `number` (`resumed`:
+/// On the way back to user mode from system call `number` (first
+/// argument `arg0`; `resumed`:
 /// rt_sigreturn put back a saved context): delivers the signals pending
 /// and not blocked, lowest first. Ignored ones go; a terminating one ends
 /// the process; a handler gets a frame on the user stack and `regs`
@@ -593,6 +588,7 @@ pub fn deliver(
     lx: &LxProcess,
     tid: u64,
     number: u64,
+    arg0: u64,
     resumed: bool,
     regs: &mut UserRegs,
 ) -> bool {
@@ -622,7 +618,7 @@ pub fn deliver(
                 }
                 event(process.id, tid, &info, "ignored");
                 if interrupted && !changed && restartable(number) {
-                    restart(regs, number);
+                    restart(regs, number, arg0);
                     changed = true;
                 }
             }
@@ -637,7 +633,7 @@ pub fn deliver(
                 drop(sigs);
                 if interrupted && !changed && action.flags & SA_RESTART != 0 && restartable(number)
                 {
-                    restart(regs, number);
+                    restart(regs, number, arg0);
                 }
                 match push_frame(process, lx, tid, regs, sig, &info, &action, old) {
                     Ok(handler) => {
@@ -707,10 +703,15 @@ fn push_frame(
         regs.sp()
     };
     let fx = platform::xsave();
-    let fp_len = xstate::size();
-    let frame = machine::build_frame(regs, sp, saved, sig, info, action, old_mask, fp_len as u64)
+    let frame = machine::build_frame(regs, sp, saved, sig, info, action, old_mask, &fx)
         .ok_or("no room below the stack pointer")?;
-    process.write(frame.fpstate, &fx.bytes()[..fp_len]).map_err(|_| "the stack is not writable")?;
-    process.write(frame.addr, &frame.bytes).map_err(|_| "the stack is not writable")?;
+    // The FPU state beside the frame where the architecture puts it there
+    // (x86_64's fpstate; aarch64's is inside the frame).
+    if frame.fp_len != 0 {
+        process
+            .write(frame.fpstate, &fx.bytes()[..frame.fp_len])
+            .map_err(|_| "the stack is not writable")?;
+    }
+    process.write(frame.addr, &frame.bytes[..]).map_err(|_| "the stack is not writable")?;
     Ok(frame.regs)
 }

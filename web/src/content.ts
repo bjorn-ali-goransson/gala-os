@@ -353,7 +353,7 @@ export const focus: Focus[] = [
       {
         label: "User mode",
         status: "building",
-        detail: "ARM64 Windows programs through ntdll, with DLLs",
+        detail: "133 x64 test programs and 38 Linux ones pass as ARM64 builds",
       },
       {
         label: "x64 programs on ARM",
@@ -623,7 +623,7 @@ export const planned: Planned[] = [
   },
   {
     name: "Docker and Podman",
-    what: "Docker Desktop and Podman for Windows, running their Linux side on gala's WSL interface",
+    what: "Podman, Docker and Kubernetes in a Linux distribution on gala, used from Windows through Docker's own CLI and Podman for Windows, with no virtual machine",
   },
   {
     name: "x64 Windows programs on ARM64",

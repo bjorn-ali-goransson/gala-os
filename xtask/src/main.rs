@@ -7204,20 +7204,7 @@ const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
 /// string).
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
-    ("arm_startup", "ntdll.dll", "Windows/System32"),
-    ("arm_import", "ntdll.dll", "Windows/System32"),
-    ("arm_import", "testdll.dll", "gala"),
-    ("arm_sync", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
-    ("arm_exception", "ntdll.dll", "Windows/System32"),
-    ("arm_tls", "ntdll.dll", "Windows/System32"),
-    ("arm_tls", "kernel32.dll", "Windows/System32"),
-    ("arm_tls", "tlsdll.dll", "gala"),
-    ("arm_apc", "ntdll.dll", "Windows/System32"),
-    ("arm_crash_dispatched", "ntdll.dll", "Windows/System32"),
-    ("arm_crash_filtered", "ntdll.dll", "Windows/System32"),
-    ("arm_seh", "ntdll.dll", "Windows/System32"),
-    ("arm_context", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
@@ -9958,24 +9945,11 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_schannel_test",
 ];
 
-/// Test programs built for ARM64 too (`user/<name>`, ntrt's ARM64
-/// runtime), shipped in the aarch64 kernel's images in place of the x64
-/// ones and exported to user/bin/arm64.
-const USER_PROGRAMS_ARM64: &[&str] = &[
-    "hello",
-    "startup_test",
-    "import_test",
-    "thread_test",
-    "sync_test",
-    "wait_test",
-    "exception_test",
-    "tls_test",
-    "apc_test",
-    "crash",
-    "seh_test",
-    "context_test",
-    "threadinfo_test",
-];
+/// Test programs built for ARM64 for the hand-written aarch64 scenarios
+/// (`user/<name>`); the ARM64_TWINS' programs join them
+/// (`arm64_programs`). Shipped in the aarch64 kernel's images in place of
+/// the x64 ones and exported to user/bin/arm64.
+const USER_PROGRAMS_ARM64: &[&str] = &["hello", "crash"];
 
 /// Where the build puts the ARM64 build of test program `program`.
 fn built_program_arm64(program: &str) -> PathBuf {
@@ -10085,7 +10059,7 @@ fn scenario_timeout(name: &str) -> Duration {
     if let Some(secs) = env::var("XTASK_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
         return Duration::from_secs(secs);
     }
-    let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
+    let limit = if scenarios().iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
@@ -10686,7 +10660,7 @@ fn build_kernel_aarch64(release: bool) -> Result {
 /// USER_PROGRAMS_ARM64, built for ARM64.
 fn build_arm64_programs() -> Result {
     let mut cmd = user_build_for(USER_TARGET_ARM64);
-    for program in USER_PROGRAMS_ARM64 {
+    for program in arm64_programs() {
         cmd.args(["--package", program]);
     }
     run_cmd(&mut cmd)
@@ -10937,7 +10911,7 @@ fn make_iso_unchecked(
         copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
-    let arm64_programs = if arm64 && tree.is_none() { USER_PROGRAMS_ARM64 } else { &[][..] };
+    let arm64_programs = if arm64 && tree.is_none() { arm64_programs() } else { &[][..] };
     for program in arm64_programs {
         copy(&built_program_arm64(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
@@ -11009,6 +10983,29 @@ fn make_iso_unchecked(
             None => (*file, None),
         };
         let (source, name) = match file.rsplit_once('/') {
+            // A test program: its ARM64 build there.
+            Some((_, name)) if arm64 && shipped_program(file).is_some() => {
+                (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
+            }
+            // A Linux test program: its aarch64 build
+            // (user/lx/build-aarch64.sh), which must exist.
+            Some((_, name)) if arm64 && file.starts_with("user/lx/bin/") => {
+                let a64 = root().join("user/lx/bin/aarch64").join(name);
+                if !a64.exists() {
+                    return Err(format!(
+                        "{file}: no aarch64 build at {} (user/lx/build-aarch64.sh)",
+                        a64.display()
+                    ));
+                }
+                (a64, name)
+            }
+            // Any other executable is x64 code, which an ARM64 machine
+            // cannot run.
+            Some(_) if arm64 && file.ends_with(".exe") => {
+                return Err(format!(
+                    "{name}: ships {file}, an x64 executable, in an ARM64 image (only USER_PROGRAMS have ARM64 builds)"
+                ));
+            }
             Some((_, name)) => (root().join(file), name),
             None if arm64 => {
                 // A DLL with no ARM64 build is not shipped there.
@@ -11030,6 +11027,15 @@ fn make_iso_unchecked(
     for file in ["limine-uefi-cd.bin", "limine-bios-cd.bin", "limine-bios.sys"] {
         copy(&limine.join(file), &boot.join("limine").join(file))?;
     }
+    // aarch64's event stream: a host file the kernel writes through
+    // semihosting (`arch::aarch64::debugcon`), the one x86-64's debugcon
+    // device writes (`<image>.events.jsonl`, beside the image).
+    let cmdline = if aarch64_image(name) {
+        let events = out.join(format!("{name}.events.jsonl"));
+        format!("{cmdline} events_file={}", events.display())
+    } else {
+        cmdline.to_string()
+    };
     let config = format!(
         "timeout: 0\nquiet: yes\n\n/gala-os\n    protocol: limine\n    path: boot():/boot/kernel\n    cmdline: {cmdline}\n{modules}"
     );
@@ -11671,6 +11677,10 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
         .arg("-drive")
         .arg(format!("if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={}", iso.display()))
         .args(["-device", "scsi-cd,drive=cd0,bus=scsi0.0"]);
+    // The keyboard and mouse (`virt` has no PS/2 controller): what the
+    // monitor's sendkey, mouse_move and mouse_button reach
+    // (kernel/src/input/virtio.rs; `VirtioPace`).
+    cmd.args(["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]);
     cmd.args(extra.split_whitespace());
     Ok(cmd)
 }
@@ -12122,7 +12132,7 @@ const STOPPED_LINE: &str = "xtask: stopped the VM after the client";
 /// The guest's port a net scenario's host port is forwarded to: sshd's
 /// own (22) for the sshd server scenarios, else 7.
 fn guest_port(name: &str) -> u16 {
-    if SSH_PORT_22.contains(&name) { 22 } else { 7 }
+    if SSH_PORT_22.contains(&twin_base(name).unwrap_or(name)) { 22 } else { 7 }
 }
 
 /// The scenario an ISO was made for (`test-<name>.iso`, `serve-<name>.iso`,
@@ -12143,9 +12153,17 @@ fn iso_scenario(iso: &Path) -> &str {
 const SSH_PORT_22: &[&str] =
     &["sshd_server", "sshd_shell", "sshd_sftp", "sshd_scp", "sshd_forward", "sshd_client"];
 
-/// The listening marker and client of a NET_SCENARIOS entry.
+/// The listening marker and client of a NET_SCENARIOS entry (a twin's:
+/// its x64 scenario's).
 fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
+    let name = twin_base(name).unwrap_or(name);
     NET_SCENARIOS.iter().find(|(n, ..)| *n == name).map(|&(_, m, c)| (m, c))
+}
+
+/// Whether scenario `name` (or a twin's x64 scenario) is one of the
+/// HOST_PAGE_SCENARIOS.
+fn host_page_scenario(name: &str) -> bool {
+    HOST_PAGE_SCENARIOS.contains(&twin_base(name).unwrap_or(name))
 }
 
 /// The page go_http serves (user/go_http/main.go).
@@ -12165,7 +12183,7 @@ const NET_ECHO_BYTES: usize = 65536;
 /// The firmware for scenario `name` (`XTASK_FIRMWARE=bios|uefi` overrides).
 fn scenario_boot(name: &str) -> Boot {
     // The architecture first: XTASK_FIRMWARE chooses among x86-64's.
-    if AARCH64_SCENARIOS.contains(&name) {
+    if is_aarch64_scenario(name) {
         return Boot::UefiAarch64;
     }
     match env::var("XTASK_FIRMWARE").as_deref() {
@@ -12209,28 +12227,268 @@ const AARCH64_SCENARIOS: &[&str] = &[
     "arm_smp_missed",
     "arm_watchdog",
     "arm_hello",
-    "arm_startup",
-    "arm_import",
-    "arm_thread",
-    "arm_sync",
-    "arm_wait",
-    "arm_exception",
-    "arm_tls",
-    "arm_apc",
     "arm_crash",
-    "arm_crash_dispatched",
-    "arm_crash_filtered",
-    "arm_seh",
-    "arm_context",
-    "arm_threadinfo",
     "arm_sched",
     "arm_fault_ud",
     "arm_fault_pagefault",
 ];
 
-/// Whether the image `name` (`test-<scenario>`) is an aarch64 scenario's.
+/// x64 scenarios that also run on the aarch64 kernel, as `arm_<name>`
+/// (their ARM64 twins, `scenarios()`): the same command line, expected
+/// lines and files, the programs' and DLLs' ARM64 builds. The programs
+/// are built for ARM64 from the same sources (`arm64_programs`).
+///
+/// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
+/// are four bytes and aligned, so none straddles a page), wintrust_test
+/// (it ships Office's x64 setup.exe), the scenarios whose screen checks
+/// take screendumps (no framebuffer on QEMU `virt` yet: ROADMAP AR's
+/// next; those presented to memory, `presenter=test`, are twins, their
+/// input through virtio-input), and those ROADMAP AR lists as next.
+const ARM64_TWINS: &[&str] = &[
+    "startup_test",
+    "import_test",
+    "thread_test",
+    "sync_test",
+    "wait_test",
+    "exception_test",
+    "tls_test",
+    "apc_test",
+    "crash_dispatched",
+    "crash_filtered",
+    "seh_test",
+    "context_test",
+    "threadinfo_test",
+    "timer_test",
+    "clock_off",
+    "smpmem_test",
+    "smpcow_test",
+    "vmcycle_test",
+    "statedump_test",
+    "smprace_test",
+    "sshfwd_test",
+    "winsock_test",
+    "ipv6_test",
+    "hostnet",
+    "bench",
+    "missing_import_test",
+    "dpapi_test",
+    "sspi_test",
+    "clusapi_test",
+    "netapi32_test",
+    "pdh_test",
+    "setupapi_test",
+    "rpcrt4_test",
+    "rpc_test",
+    "unimplemented_test",
+    "manifest_test",
+    "kernel32_pool_test",
+    "win32_misc_test",
+    "advapi32_test",
+    "token_test",
+    "security_test",
+    "access_test",
+    "logon_test",
+    "cmd_test",
+    "dirchange_test",
+    "afd_poll_test",
+    "iphlpapi_test",
+    "keyed_event_test",
+    "registry_test",
+    "console_test",
+    "bcrypt_test",
+    "kernel32_system_test",
+    "gpu_stub_test",
+    "dwrite_test",
+    "conpty_test",
+    "rtl_test",
+    "kernel32_locale_test",
+    "kernel32_sync_test",
+    "kernel32_py_test",
+    "shootdown_test",
+    "reparse_test_user",
+    "cab_probe",
+    "writeback_test",
+    "imagetrim_test",
+    "wofutil_test",
+    "sppc_test",
+    "windowscodecs_test",
+    "prng_test",
+    "replay_test",
+    "commit_test",
+    "process_test",
+    "udp_test",
+    "udp_echo",
+    "onecpu_bench",
+    "kernel32_file_test",
+    "pipe_test",
+    "lock_test",
+    "iocp_test",
+    "symlink_test",
+    "ioapc_test",
+    "async_test",
+    "cow_test",
+    "filemap_test",
+    "sysinfo_test",
+    "guard_test",
+    "peb_test",
+    "dir_test",
+    "image_test",
+    "file_test",
+    "section_test",
+    "kuser_test",
+    "object_test",
+    "vm_test",
+    "abi_test",
+    "loader_test",
+    "smpsched_test",
+    "cert_test",
+    "kernel32_misc_test",
+    "onecpu_smp",
+    "kernel32_env_test",
+    "ledger_test",
+    "smpsem_test",
+    "regnotify_test",
+    "actctx_test",
+    "com_test",
+    "browser_api_test",
+    "office_api_test",
+    "office_k32_test",
+    "runas_test",
+    "runas_declined",
+    "setupcab_test",
+    "msi_test",
+    "webservices_test",
+    "rstrtmgr_test",
+    "gdiplus_test",
+    "uisettings_test",
+    "hardlink_test",
+    "combase_test",
+    "svc_test",
+    "svcrun_test",
+    "msxml_test",
+    "d2d1_test",
+    "knownfolder_test",
+    "ucrt_test",
+    "kernel32_thread_test",
+    "threadpool_test",
+    "kernel32_sys_test",
+    "kernel32_test",
+    "kernel32_clr_test",
+    "fpu_test",
+    "xmodify_test",
+    "lx_hello",
+    "lx_write_exit",
+    "lx_brk",
+    "lx_pipe",
+    "lx_forkmem",
+    "lx_mmap",
+    "lx_fileio",
+    "lx_exec",
+    "lx_socket",
+    "lx_memfd",
+    "lx_prctl",
+    "lx_eventfd",
+    "lx_pty",
+    "lx_procfs",
+    "lx_altstack",
+    "lx_pidfd",
+    "lx_inotify",
+    "lx_fsid",
+    "lx_seccomp",
+    "lx_fdbits",
+    "lx_timerfd",
+    "lx_caps",
+    "lx_fdioctl",
+    "lx_shm",
+    "lx_sysinfo",
+    "lx_statfs",
+    "lx_unix",
+    "lx_wl",
+    "lx_wl_maximize",
+    "lx_wl_popup",
+    "lx_wl_input",
+    "gui_test_headless",
+    "lx_fs",
+    "lx_id",
+    "lx_run",
+    "lx_poll",
+    "lx_auxv",
+    "lx_epoll",
+    "lx_thread",
+    "session_test",
+];
+
+/// The x64 scenario an ARM64 twin `arm_<name>` is of.
+fn twin_base(name: &str) -> Option<&'static str> {
+    let base = name.strip_prefix("arm_")?;
+    ARM64_TWINS.iter().copied().find(|t| *t == base)
+}
+
+/// Whether scenario `name` runs on the aarch64 kernel.
+fn is_aarch64_scenario(name: &str) -> bool {
+    AARCH64_SCENARIOS.contains(&name) || twin_base(name).is_some()
+}
+
+/// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
+/// twin `arm_<name>`.
+fn scenarios() -> &'static [Scenario] {
+    static ALL: std::sync::OnceLock<Vec<Scenario>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = BASE_SCENARIOS.to_vec();
+        for twin in ARM64_TWINS {
+            let Some(base) = BASE_SCENARIOS.iter().find(|s| s.name == *twin) else {
+                panic!("ARM64_TWINS names {twin}, which is no scenario");
+            };
+            let name: &'static str = Box::leak(format!("arm_{twin}").into_boxed_str());
+            all.push(Scenario { name, ..*base });
+        }
+        all
+    })
+}
+
+/// The test programs the aarch64 kernel's images carry, built for ARM64:
+/// USER_PROGRAMS_ARM64 (the hand-written aarch64 scenarios') and the
+/// programs the twins run.
+fn arm64_programs() -> &'static [&'static str] {
+    static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all: Vec<&'static str> = USER_PROGRAMS_ARM64.to_vec();
+        for s in scenarios().iter().filter(|s| twin_base(s.name).is_some()) {
+            for word in s.cmdline.split_whitespace() {
+                if let Some(run) = word.strip_prefix("run=") {
+                    for program in run.split(',').filter_map(|p| p.strip_suffix(".exe")) {
+                        if !all.contains(&program) {
+                            all.push(program);
+                        }
+                    }
+                }
+            }
+            // The test programs it ships as files (cmd.exe, conhost.exe).
+            for (file, _) in extra_modules(s.name) {
+                if let Some(program) = shipped_program(file)
+                    && !all.contains(&program)
+                {
+                    all.push(program);
+                }
+            }
+        }
+        all
+    })
+}
+
+/// The test program a module `user/bin/<program>.exe` ships (one of
+/// USER_PROGRAMS), if it is one: an ARM64 image ships its ARM64 build.
+fn shipped_program(file: &str) -> Option<&'static str> {
+    let program = file.strip_prefix("user/bin/")?.strip_suffix(".exe")?;
+    USER_PROGRAMS.iter().copied().find(|p| *p == program)
+}
+
+/// Whether the image `name` (`test-<scenario>`, or `batch-<first
+/// scenario>` for a shared VM) is the aarch64 kernel's.
 fn aarch64_image(name: &str) -> bool {
-    name.strip_prefix("test-").is_some_and(|s| AARCH64_SCENARIOS.contains(&s))
+    name.strip_prefix("test-")
+        .or_else(|| name.strip_prefix("batch-"))
+        .is_some_and(is_aarch64_scenario)
 }
 
 fn single_thread_tcg(name: &str) -> bool {
@@ -12415,6 +12673,7 @@ fn run(iso: &Path, headless: bool) -> Result {
 }
 
 /// A boot test: a kernel command line and the expected outcome.
+#[derive(Clone, Copy)]
 struct Scenario {
     name: &'static str,
     cmdline: &'static str,
@@ -12423,7 +12682,8 @@ struct Scenario {
     expect: &'static [&'static str],
 }
 
-const SCENARIOS: &[Scenario] = &[
+/// The scenarios written out; `scenarios()` adds their ARM64 twins.
+const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // The aarch64 kernel (ROADMAP AR) on QEMU's `virt` machine,
         // booted by UEFI and Limine's BOOTAA64.EFI (`AARCH64_SCENARIOS`):
@@ -12476,72 +12736,6 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // An ARM64 process started through gala's ntdll (startup_test's
-        // ARM64 build, as `startup_test`): the kernel enters
-        // LdrInitializeThunk with the program's ARM64 CONTEXT, the
-        // thunk binds imports and resumes it with NtContinue.
-        name: "arm_startup",
-        cmdline: "qemu_exit run=startup_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["startup_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // An ARM64 program importing an ARM64 DLL (import_test's ARM64
-        // build, as `import_test`): gala's ntdll binds its imports by name
-        // and ordinal, forwarders included, and runs testdll's DllMain.
-        name: "arm_import",
-        cmdline: "qemu_exit run=import_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["import_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // thread_test's ARM64 build (as `thread_test`).
-        name: "arm_thread",
-        cmdline: "qemu_exit run=thread_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["thread_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // sync_test's ARM64 build (as `sync_test`).
-        name: "arm_sync",
-        cmdline: "qemu_exit run=sync_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["sync_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // wait_test's ARM64 build (as `wait_test`).
-        name: "arm_wait",
-        cmdline: "qemu_exit run=wait_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["wait_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // exception_test's ARM64 build (as `exception_test`): faults,
-        // `brk` and `udf` reach a vectored handler with ARM64's record
-        // and CONTEXT, and it continues execution.
-        name: "arm_exception",
-        cmdline: "qemu_exit run=exception_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["exception_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // tls_test's ARM64 build (as `tls_test`): static TLS of the program
-        // and of a DLL loaded later, through kernel32 and gala's ntdll.
-        name: "arm_tls",
-        cmdline: "qemu_exit run=tls_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["tls_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // apc_test's ARM64 build (as `apc_test`): user APCs run in FIFO
-        // order from alertable waits and delays (STATUS_USER_APC), through
-        // gala's ntdll's KiUserApcDispatcher.
-        name: "arm_apc",
-        cmdline: "qemu_exit run=apc_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["apc_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
         // crash's ARM64 build (as `crash`): with no ntdll the kernel ends
         // the process and its crash report has ARM64's registers.
         name: "arm_crash",
@@ -12560,65 +12754,6 @@ const SCENARIOS: &[Scenario] = &[
             "process crash.exe (pid 4) exited with status 0xc0000005",
             BOOT_OK_MARKER,
         ],
-    },
-    Scenario {
-        // As `crash_dispatched`: the exception goes to gala's ntdll's ARM64
-        // dispatcher, no frame has a handler, and the process ends.
-        name: "arm_crash_dispatched",
-        cmdline: "qemu_exit run=crash.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "crash: writing to address 0",
-            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
-             (access violation) in thread",
-            "(crash.exe+0x",
-            "writing address 0x0",
-            "process crash.exe (pid 4) exited with status 0xc0000005",
-            BOOT_OK_MARKER,
-        ],
-    },
-    Scenario {
-        // As `crash_filtered`: a top-level filter ends the process with its
-        // own code; the report still describes the exception.
-        name: "arm_crash_filtered",
-        cmdline: "qemu_exit run=crash.exe args=filter",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "crash: the top-level filter ends the process",
-            "crash report: crash.exe (pid 4) ended with status 0xffff7002 after an unhandled \
-             exception 0xc0000005 (access violation) in thread",
-            "(crash.exe+0x",
-            "writing address 0x0",
-            "process crash.exe (pid 4) exited with status 0xffff7002",
-            BOOT_OK_MARKER,
-        ],
-    },
-    Scenario {
-        // seh_test's ARM64 build (as `seh_test`): ARM64 unwind data (.pdata
-        // and .xdata, packed and full) read by gala's ntdll: lookups,
-        // RtlVirtualUnwind in a body, prologue and epilogue, frame
-        // handlers in dispatch and unwind, a hardware exception through
-        // KiUserExceptionDispatcher's frame, unwind consolidation.
-        name: "arm_seh",
-        cmdline: "qemu_exit run=seh_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["seh_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // context_test's ARM64 build (as `context_test`): suspended threads'
-        // ARM64 CONTEXT through NtGetContextThread, a new one through
-        // NtSetContextThread, the caller's own.
-        name: "arm_context",
-        cmdline: "qemu_exit run=context_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["context_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
-    },
-    Scenario {
-        // threadinfo_test's ARM64 build (as `threadinfo_test`).
-        name: "arm_threadinfo",
-        cmdline: "qemu_exit run=threadinfo_test.exe",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["threadinfo_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
     },
     Scenario {
         // The hang watchdog on aarch64 (as `watchdog`): CPU 1 spins in its
@@ -18593,6 +18728,8 @@ fn scenario_cmdline(s: &Scenario) -> String {
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
+    // A twin ships its x64 scenario's files (their ARM64 builds).
+    let name = twin_base(name).unwrap_or(name);
     let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
     if sets.is_empty() {
         sets.push(name);
@@ -18708,17 +18845,19 @@ fn import_names(image: &[u8]) -> Vec<String> {
 }
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one
-/// program (no other kernel flags), expects success, boots by BIOS, and
+/// program (no other kernel flags), expects success, boots by BIOS (or is
+/// the aarch64 kernel's: those share VMs of their own), and
 /// expects nothing that depends on running first (process ids, a
 /// session's desktop going live: logged once per boot).
 fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
-        || scenario_boot(s.name) != Boot::Bios
+        || !matches!(scenario_boot(s.name), Boot::Bios | Boot::UefiAarch64)
         || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
         || net_marker(s.name).is_some()
-        || HOST_PAGE_SCENARIOS.contains(&s.name)
+        || host_page_scenario(s.name)
         || disk_scenario(s.name).is_some()
         || s.name.starts_with("onecpu_")
+        || s.name.starts_with("arm_onecpu_")
         // A scenario that snapshots and resumes itself is one machine's
         // (in a batch it would take no snapshot and run none of its
         // resumes, and still pass).
@@ -18742,15 +18881,19 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
 /// boot modules share VMs (spread over the host CPUs), the rest boot alone.
 fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     use std::collections::BTreeMap;
-    let mut groups: BTreeMap<Vec<(&str, &str)>, Vec<&Scenario>> = BTreeMap::new();
+    // Grouped by architecture (aarch64 or not) and boot modules: a VM is
+    // one kernel's.
+    type Group = (bool, Vec<(&'static str, &'static str)>);
+    let mut groups: BTreeMap<Group, Vec<&Scenario>> = BTreeMap::new();
     let mut vms = Vec::new();
     for &s in selected {
         match batchable(s) {
             // Its own image, whose name picks the emulation (`qemu`).
             Some(_) if single_thread_tcg(s.name) => vms.push(Vm::Single(s)),
-            Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => {
-                groups.entry(extra_modules(s.name)).or_default().push(s)
-            }
+            Some(_) if env::var_os("XTASK_NO_BATCH").is_none() => groups
+                .entry((is_aarch64_scenario(s.name), extra_modules(s.name)))
+                .or_default()
+                .push(s),
             _ => vms.push(Vm::Single(s)),
         }
     }
@@ -18805,8 +18948,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     // repeats one scenario: handover_upgrade's name is part of
     // handover_upgrade_uefi's); otherwise the filter is a substring.
     let exact = env::var_os("XTASK_REPEAT").is_some()
-        && filter.is_some_and(|f| SCENARIOS.iter().any(|s| s.name == f.as_str()));
-    let selected: Vec<&Scenario> = SCENARIOS
+        && filter.is_some_and(|f| scenarios().iter().any(|s| s.name == f.as_str()));
+    let selected: Vec<&Scenario> = scenarios()
         .iter()
         .filter(|s| match filter {
             // Pending and manual scenarios run only when named exactly.
@@ -18824,7 +18967,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    if selected.iter().any(|s| AARCH64_SCENARIOS.contains(&s.name)) {
+    if selected.iter().any(|s| is_aarch64_scenario(s.name)) {
         build_kernel_aarch64(release)?;
     }
     if snapshot::request().is_some() && selected.len() != 1 {
@@ -19359,7 +19502,7 @@ fn um_gap(s: &Scenario) -> Option<String> {
     if scenario_program(s).is_none() {
         return Some("not a program's own scenario".into());
     }
-    if net_marker(s.name).is_some() || HOST_PAGE_SCENARIOS.contains(&s.name) {
+    if net_marker(s.name).is_some() || host_page_scenario(s.name) {
         return Some("network scenario (needs a network card and xtask's client)".into());
     }
     if disk_scenario(s.name).is_some() {
@@ -19403,7 +19546,7 @@ fn um_test(release: bool) -> Result {
     let um = build_um(release)?;
     let mut failed = Vec::new();
     let all = Instant::now();
-    let selected: Vec<&Scenario> = SCENARIOS.iter().filter(|s| runs_in_um(s)).collect();
+    let selected: Vec<&Scenario> = scenarios().iter().filter(|s| runs_in_um(s)).collect();
     for s in &selected {
         let started = Instant::now();
         // A program that hangs on purpose gets SIGQUIT (its state dump)
@@ -19437,7 +19580,7 @@ fn um_test(release: bool) -> Result {
     );
     // What it left out, each with its reason (um_gap), so that a program
     // missing here is explained rather than silently absent.
-    for s in SCENARIOS.iter().filter(|s| scenario_program(s).is_some()) {
+    for s in scenarios().iter().filter(|s| scenario_program(s).is_some()) {
         if let Some(why) = um_gap(s) {
             eprintln!("xtask: um-test: not run: {:<20} {why}", s.name);
         }
@@ -19745,7 +19888,7 @@ fn fault_test(release: bool, filter: Option<&String>, sweep: Option<&str>) -> Re
         .iter()
         .filter(|p| filter.is_none_or(|f| p.contains(f.as_str())))
         .map(|p| {
-            SCENARIOS
+            scenarios()
                 .iter()
                 .find(|s| s.name == *p && runs_in_um(s))
                 .ok_or(format!("fault test: {p} is not a gala-um scenario"))
@@ -19835,7 +19978,7 @@ fn replay_test(release: bool) -> Result {
     let started = Instant::now();
     let mut failed = Vec::new();
     for (program, prefix) in REPLAY_PROGRAMS {
-        let s = SCENARIOS
+        let s = scenarios()
             .iter()
             .find(|s| s.name == *program && runs_in_um(s))
             .ok_or(format!("replay-test: {program} is not a gala-um scenario"))?;
@@ -19971,7 +20114,7 @@ fn sim_test(
     let mut programs: Vec<(&Scenario, bool)> = SIM_PROGRAMS
         .iter()
         .map(|&(p, threaded)| {
-            SCENARIOS
+            scenarios()
                 .iter()
                 .find(|s| s.name == p && runs_in_um(s))
                 .map(|s| (s, threaded))
@@ -19980,7 +20123,7 @@ fn sim_test(
         .collect::<Result<_>>()?;
     if all {
         // Every gala-um program (traces need not differ across seeds).
-        let more = SCENARIOS.iter().filter(|s| runs_in_um(s));
+        let more = scenarios().iter().filter(|s| runs_in_um(s));
         let more: Vec<_> =
             more.filter(|s| !programs.iter().any(|(p, _)| p.name == s.name)).collect();
         programs.extend(more.into_iter().map(|s| (s, false)));
@@ -20135,7 +20278,7 @@ fn report_dir() -> PathBuf {
 /// Runs every test program's scenario and records each outcome.
 fn gala_report(release: bool) -> Result {
     build_kernel(release)?;
-    let selected: Vec<(&Scenario, &str)> = SCENARIOS
+    let selected: Vec<(&Scenario, &str)> = scenarios()
         .iter()
         .filter(|s| s.exit_status != XTASK_DUMPS)
         .filter_map(|s| scenario_program(s).map(|p| (s, p)))
@@ -20310,7 +20453,17 @@ fn run_vm(
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let mut tries = 0;
     loop {
-        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap)?;
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap);
+        // The firmware's variable store copied for this boot (`qemu`,
+        // `qemu_aarch64`: 64 MiB for AAVMF's) goes with it, or a suite of
+        // aarch64 boots fills the disk; a boot that takes or resumes a
+        // machine snapshot keeps it with the snapshot.
+        if snap.is_none() {
+            for vars in ["ovmf-vars.fd", "aavmf-vars.fd"] {
+                let _ = fs::remove_file(iso.with_extension(vars));
+            }
+        }
+        let run = run?;
         let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
         tries += 1;
         if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {
@@ -20352,7 +20505,7 @@ fn run_vm_once(
     // x86-64's ISA devices: the kernel's event stream (`events=` on its
     // command line) and the exit device. aarch64's virt machine has no ISA
     // bus: its kernel exits through semihosting (`qemu_aarch64`) and has
-    // no event stream yet (ROADMAP AR).
+    // its event stream through semihosting (`events_file=`, `make_iso`).
     if boot != Boot::UefiAarch64 {
         cmd.arg("-debugcon")
             .arg(format!("file:{}", events.display()))
@@ -20404,7 +20557,7 @@ fn run_vm_once(
     let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
-        if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+        if host_page_scenario(iso_scenario(iso)) {
             // Both: the forwarded port and the host's pages (chromium_wpt).
             let _ = fs::remove_file(iso.with_extension("serve.log"));
             let guestfwd = host_page_fwd(&mut cmd, &iso.with_extension("serve.log"))?;
@@ -20412,7 +20565,7 @@ fn run_vm_once(
         } else {
             add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
         }
-    } else if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+    } else if host_page_scenario(iso_scenario(iso)) {
         let _ = fs::remove_file(iso.with_extension("serve.log"));
         add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
     } else if CARD_SCENARIOS.contains(&iso_scenario(iso)) {
@@ -20529,7 +20682,7 @@ fn run_vm_once(
             if let Some(e) = failed {
                 let why = format!("stopped: the screen check failed ({e})");
                 dump_note =
-                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why, boot));
                 end_qemu(&mut child);
                 break None;
             }
@@ -20614,7 +20767,8 @@ fn run_vm_once(
                 ),
             };
             let why = format!("timed out after {what}; {}", now.describe());
-            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+            dump_note =
+                Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why, boot));
             end_qemu(&mut child);
             break None;
         }
@@ -20944,7 +21098,7 @@ fn end_qemu(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// `XTASK_QEMU_GDB=1`: QEMU's own record of each vCPU (halted, PC and the
+/// `XTASK_QEMU_GDB=1`, or a monitor that did not answer: QEMU's own record of each vCPU (halted, PC and the
 /// registers that say how it got there, the exception registers, the
 /// power state) and every QEMU thread's stack, read by attaching gdb to
 /// the QEMU process of a timed-out boot (WORKFLOW "A boot that hangs"):
@@ -21008,27 +21162,41 @@ fn qemu_gdb_state(pid: u32, log: &Path) -> String {
             format!("printf \"vcpu %d {name} %#lx\\n\", $c->cpu_index, (unsigned long)({expr})\n")
         })
         .collect();
+    // The vCPU loop only reads memory. The threads' stacks come first and
+    // the calls into QEMU (the clock, fflush) last, each its own `-ex`:
+    // gdb stops a sourced file at its first error, and a call into a
+    // wedged or stopped QEMU can fail; neither may cost the stacks.
     let script = format!(
-        "set pagination off\n\
-         printf \"clock virtual %ld\\n\", (long)qemu_clock_get_ns(1)\n\
-         set $c = cpus_queue.tqh_first\nwhile $c\n{cpu}\
-         set $c = $c->node.tqe_next\nend\nthread apply all bt 20\n\
-         call (int)fflush(0)\n"
+        "set $c = cpus_queue.tqh_first\nwhile $c\n{cpu}\
+         set $c = $c->node.tqe_next\nend\n"
     );
     let script_path = log.with_extension("gdb");
     if let Err(e) = fs::write(&script_path, script) {
         return format!("xtask: QEMU's own state (gdb): cannot write the script: {e}\n");
     }
     let out = Command::new("gdb")
-        .args(["-p", &pid.to_string(), "-batch", "-x"])
+        .args(["-p", &pid.to_string(), "-batch"])
+        .args(["-ex", "set pagination off", "-ex", "thread apply all bt 20", "-x"])
         .arg(&script_path)
+        .args([
+            "-ex",
+            "printf \"clock virtual %ld\\n\", (long)qemu_clock_get_ns(1)",
+            "-ex",
+            "call (int)fflush(0)",
+        ])
         .stdin(Stdio::null())
         .output();
     match out {
         Err(e) => format!("xtask: QEMU's own state (gdb): {e} (is gdb installed?)\n"),
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
-            let mut lines = String::from("xtask: QEMU's own state (gdb, XTASK_QEMU_GDB):\n");
+            let mut lines = String::from("xtask: QEMU's own state (gdb):\n");
+            if !o.status.success() || !text.contains("Thread ") {
+                // ptrace refused (Yama's ptrace_scope), no symbols, ...
+                for line in String::from_utf8_lossy(&o.stderr).lines().take(5) {
+                    lines += &format!("xtask: gdb said: {line}\n");
+                }
+            }
             for line in text
                 .lines()
                 .filter(|l| ["vcpu ", "clock ", "Thread ", "#"].iter().any(|p| l.starts_with(p)))
@@ -21083,18 +21251,26 @@ fn cpu_register_lines(text: &str) -> String {
 /// `nmi` reaches every CPU; the kernel prints a state dump: each CPU's
 /// rip and backtrace, held locks, memory, the flight recorder, then every
 /// thread's system call and wait), waits for it to end, and says so in a
-/// line for the log (docs/OBSERVABILITY.md, "State dump").
+/// line for the log (docs/OBSERVABILITY.md, "State dump"). QEMU `virt`
+/// (aarch64) has no NMI to inject: a break on the console asks instead
+/// (`chardev-send-break`; the kernel takes the UART's interrupt at its
+/// pseudo-NMI's priority and sends that NMI to every CPU).
 fn ask_for_state_dump(
     socket: &Path,
     log: &Path,
     child: &mut std::process::Child,
     vm_clock: &mut vmtime::VmClock,
     why: &str,
+    boot: Boot,
 ) -> String {
     use std::io::Write as _;
     // Before the NMI changes what the CPUs do.
     let mut registers = cpu_registers(socket);
-    if env::var_os("XTASK_QEMU_GDB").is_some() {
+    // A monitor that gives nothing is QEMU stuck in itself (its main loop
+    // or a lock), which no guest-side dump can explain: QEMU's own
+    // threads' stacks are then taken whether asked for or not.
+    let monitor_silent = !registers.contains("xtask: QEMU's CPU#");
+    if monitor_silent || env::var_os("XTASK_QEMU_GDB").is_some() {
         registers += &qemu_gdb_state(child.id(), log);
     }
     let seen = |mark: &str| {
@@ -21103,7 +21279,10 @@ fn ask_for_state_dump(
     // Kept open while the guest dumps (QEMU may drop a command whose
     // connection closed before it read it).
     let monitor = std::os::unix::net::UnixStream::connect(socket).and_then(|mut m| {
-        m.write_all(b"nmi\n")?;
+        // `-serial file:` is the first serial port's chardev, serial0.
+        let ask: &[u8] =
+            if boot == Boot::UefiAarch64 { b"chardev-send-break serial0\n" } else { b"nmi\n" };
+        m.write_all(ask)?;
         m.flush()?;
         Ok(m)
     });
@@ -21845,7 +22024,7 @@ const LINUX_MENU_SCREEN: ScreenCheck = ScreenCheck {
         // XTerm: an xterm under the desktop's rootless Xwayland. Nothing to
         // wait for after `exit`: the console's window stays (the taskbar
         // does not change), and the keys are read before these moves
-        // (Ps2Pace).
+        // (InputPace).
         ScreenStep {
             after: "",
             input: &[
@@ -23286,6 +23465,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
 ];
 
 fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
+    // A twin is checked as its x64 scenario is.
+    let name = twin_base(name).unwrap_or(name);
     SCREEN_SCENARIOS.iter().find(|(n, _)| *n == name).map(|(_, c)| c)
 }
 
@@ -23308,7 +23489,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
         .iter()
         .find(|(n, _)| *n == iso_scenario(iso))
         .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
-    let mut ps2 = Ps2Pace::default();
+    let mut ps2 = InputPace::default();
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
             wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
@@ -23316,7 +23497,7 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
         for command in step.input {
             // Each command only once the guest has read what QEMU queued
             // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
-            // what does not fit is lost (Ps2Pace).
+            // what does not fit is lost (InputPace).
             ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
             ps2.sent(command).map_err(|e| format!("step {n}: {e}"))?;
@@ -23369,7 +23550,7 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
     closed
 }
 
-/// A screen check's PS/2 input, paced on what the guest has read. QEMU's
+/// A screen check's input, paced on what the guest has read. QEMU's
 /// PS/2 keyboard and mouse each queue at most 16 bytes for the guest:
 /// a key that does not fit is dropped, and a mouse packet that does not
 /// fit waits for the next input event, which only carries the buttons as
@@ -23381,12 +23562,16 @@ fn monitor_closed(monitor: &std::os::unix::net::UnixStream) -> bool {
 /// are empty when it arrives. The guest counts the bytes its input
 /// thread reads from each device (`input: bytes read at <address>` on
 /// the serial log), read here through the monitor; what QEMU queues for
-/// each command is exact (`ps2_bytes`).
+/// each command is exact (`ps2_bytes`). On aarch64 (`virt`, no PS/2)
+/// the input goes to virtio-input devices, whose queue the guest also
+/// empties as it polls: there the guest counts the events it reads
+/// (`input: virtio events read at <address>`), and what QEMU queues for
+/// each command is `virtio_events`.
 #[derive(Default)]
-struct Ps2Pace {
-    /// The guest's counters (keyboard, mouse) and its mouse packets'
-    /// size, once found in the serial log.
-    guest: Option<(u64, u64)>,
+struct InputPace {
+    /// The guest's counters' address and the devices they count, once
+    /// found in the serial log.
+    guest: Option<(u64, Counted)>,
     /// The counters when this check began (a resumed snapshot's are not
     /// 0), plus what this check has sent since.
     want: (u64, u64),
@@ -23399,7 +23584,16 @@ struct Ps2Pace {
 /// give-up only (a guest that stopped reading the controller).
 const PS2_TAKEN_WAIT: Duration = Duration::from_secs(120);
 
-impl Ps2Pace {
+/// What the guest's input counters count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Counted {
+    /// PS/2 bytes, with mouse packets of this many bytes.
+    Ps2Bytes(u64),
+    /// virtio-input events.
+    VirtioEvents,
+}
+
+impl InputPace {
     /// Waits until the guest has read everything sent so far.
     fn wait_taken(&mut self, monitor: &mut std::os::unix::net::UnixStream, log: &Path) -> Result {
         let (at, _) = self.find(monitor, log)?;
@@ -23408,12 +23602,13 @@ impl Ps2Pace {
         while read.0 < self.want.0 || read.1 < self.want.1 {
             if start.elapsed() > PS2_TAKEN_WAIT {
                 return Err(format!(
-                    "the guest read {} of the {} keyboard bytes and {} of the {} mouse bytes sent \
+                    "the guest read {} of the {} keyboard and {} of the {} mouse {} sent \
                      within {} s (its input thread: `input:` lines in the serial log)",
                     read.0,
                     self.want.0,
                     read.1,
                     self.want.1,
+                    self.unit(),
                     PS2_TAKEN_WAIT.as_secs()
                 ));
             }
@@ -23422,55 +23617,121 @@ impl Ps2Pace {
         }
         if read.0 > self.want.0 || read.1 > self.want.1 {
             return Err(format!(
-                "the guest read more PS/2 bytes than were sent (keyboard {} of {}, mouse {} of {}): \
-                 ps2_bytes no longer matches QEMU",
-                read.0, self.want.0, read.1, self.want.1
+                "the guest read more {} than were sent (keyboard {} of {}, mouse {} of {}): \
+                 {} no longer matches QEMU",
+                self.unit(),
+                read.0,
+                self.want.0,
+                read.1,
+                self.want.1,
+                if self.unit() == "bytes" { "ps2_bytes" } else { "virtio_events" }
             ));
         }
         Ok(())
     }
 
-    /// The guest's counters' address and its mouse packets' size; the
-    /// first time, also where its counters stand.
+    /// What the counters count, for messages.
+    fn unit(&self) -> &'static str {
+        match self.guest {
+            Some((_, Counted::VirtioEvents)) => "events",
+            _ => "bytes",
+        }
+    }
+
+    /// The guest's counters' address and what they count; the first
+    /// time, also where they stand.
     fn find(
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
         log: &Path,
-    ) -> Result<(u64, u64)> {
+    ) -> Result<(u64, Counted)> {
         if let Some(g) = self.guest {
             return Ok(g);
         }
-        const LINE: &str = "input: bytes read at ";
-        wait_for_line(log, LINE, SCREEN_STEP_WAIT)?;
-        let text =
-            String::from_utf8_lossy(&fs::read(log).map_err(|e| format!("reading {log:?}: {e}"))?)
-                .into_owned();
-        let rest = text
-            .lines()
-            .rev()
-            .find_map(|l| l.split_once(LINE).map(|(_, r)| r.to_string()))
-            .ok_or("no `input: bytes read at` line")?;
+        // The input thread logs one of the two once its devices are set up.
+        const PS2: &str = "input: bytes read at ";
+        const VIRTIO: &str = "input: virtio events read at ";
+        let start = Instant::now();
+        let (rest, virtio) = loop {
+            let text = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
+            let found = text.lines().rev().find_map(|l| {
+                l.split_once(VIRTIO)
+                    .map(|(_, r)| (r.to_string(), true))
+                    .or_else(|| l.split_once(PS2).map(|(_, r)| (r.to_string(), false)))
+            });
+            if let Some(f) = found {
+                break f;
+            }
+            if start.elapsed() > SCREEN_STEP_WAIT {
+                return Err(format!(
+                    "no {PS2:?} or {VIRTIO:?} in the serial log within {} s",
+                    SCREEN_STEP_WAIT.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
         let at = rest
             .split_whitespace()
             .next()
             .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok())
-            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
-        let packet = rest
-            .split_once("mouse packets of ")
-            .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
-            .ok_or_else(|| format!("unreadable `{LINE}{rest}`"))?;
-        self.guest = Some((at, packet));
+            .ok_or_else(|| format!("unreadable input counters line `{rest}`"))?;
+        let counted = if virtio {
+            Counted::VirtioEvents
+        } else {
+            Counted::Ps2Bytes(
+                rest.split_once("mouse packets of ")
+                    .and_then(|(_, r)| r.split_whitespace().next()?.parse().ok())
+                    .ok_or_else(|| format!("unreadable `{PS2}{rest}`"))?,
+            )
+        };
+        self.guest = Some((at, counted));
         self.want = guest_ps2_read(monitor, at)?;
-        Ok((at, packet))
+        Ok((at, counted))
     }
 
     /// `command` was written to the monitor: what it queues is wanted.
     fn sent(&mut self, command: &str) -> Result {
-        let (_, packet) = self.guest.ok_or("no guest counters")?;
-        let (keyboard, mouse) = ps2_bytes(command, packet, &mut self.buttons)?;
+        let (_, counted) = self.guest.ok_or("no guest counters")?;
+        let (keyboard, mouse) = match counted {
+            Counted::Ps2Bytes(packet) => ps2_bytes(command, packet, &mut self.buttons)?,
+            Counted::VirtioEvents => virtio_events(command, &mut self.buttons)?,
+        };
         self.want.0 += keyboard;
         self.want.1 += mouse;
         Ok(())
+    }
+}
+
+/// What QEMU's virtio-input keyboard and mouse queue for monitor command
+/// `command` (keyboard events, mouse events), with `buttons` the
+/// monitor's button state (updated), as measured (black-box, QEMU 11.1):
+/// a move is REL_X, REL_Y and SYN_REPORT whatever its size and with an
+/// axis 0, and a wheel notch three more; a change of the buttons is a
+/// key event per button changed and a SYN_REPORT; a key is pressed and
+/// released, each with its SYN_REPORT (E0 keys the same). A command this
+/// does not know is refused.
+fn virtio_events(command: &str, buttons: &mut u8) -> Result<(u64, u64)> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let number = |w: Option<&&str>| -> Result<i64> {
+        w.and_then(|w| w.parse().ok())
+            .ok_or_else(|| format!("unreadable input command {command:?}"))
+    };
+    match words.first().copied() {
+        Some("mouse_move") => {
+            number(words.get(1))?;
+            number(words.get(2))?;
+            let dz = if words.len() > 3 { number(words.get(3))? } else { 0 };
+            Ok((0, 3 + if dz != 0 { 3 } else { 0 }))
+        }
+        Some("mouse_button") => {
+            let b = u8::try_from(number(words.get(1))?)
+                .map_err(|_| format!("unreadable input command {command:?}"))?;
+            let changed = u64::from((b ^ *buttons).count_ones());
+            *buttons = b;
+            Ok((0, if changed > 0 { changed + 1 } else { 0 }))
+        }
+        Some("sendkey") if words.len() == 2 => Ok((4 * words[1].split('-').count() as u64, 0)),
+        _ => Err(format!("input command {command:?}: what it queues is not known (virtio_events)")),
     }
 }
 
@@ -23644,7 +23905,7 @@ fn check_screen_step(
 /// guest's memory (`presenter=test` on its command line) rather than a
 /// screen QEMU shows.
 fn headless_screen(name: &str) -> bool {
-    SCENARIOS
+    scenarios()
         .iter()
         .find(|s| s.name == name)
         .is_some_and(|s| s.cmdline.split_whitespace().any(|w| w == "presenter=test"))
@@ -24510,7 +24771,7 @@ fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &P
     // R8: earlier boots of another release (its own image, signed so).
     let earlier = match trust::EARLIER_SIGNING.iter().find(|(n, _)| *n == name) {
         Some((_, signing)) => {
-            let s = SCENARIOS.iter().find(|s| s.name == name).ok_or("no such scenario")?;
+            let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
             let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
             let cmdline = format!("{} noscreen", s.cmdline);
             let earlier_name = format!("earlier-{name}");
@@ -24568,7 +24829,7 @@ fn serve(release: bool, args: &[String]) -> Result {
         "sshd" => ("sshd_server", if port == 8080 { 2222 } else { port }),
         n => (n, port),
     };
-    let s = SCENARIOS
+    let s = scenarios()
         .iter()
         .find(|s| s.name == name && net_marker(s.name).is_some())
         .ok_or_else(|| format!("{name} is not a network scenario"))?;
@@ -27595,7 +27856,7 @@ fn iso(release: bool, args: &[String]) -> Result {
     }
     if let Some(s) = scenario.as_deref().filter(|_| cmdline.is_empty()) {
         // The scenario's own command line, without the test-only exit.
-        let found = SCENARIOS.iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
+        let found = scenarios().iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
         cmdline.extend(found.cmdline.split_whitespace().filter(|w| *w != "qemu_exit"));
     }
     build_kernel(release)?;
@@ -27919,7 +28180,7 @@ fn export_tests() -> Result {
     // it; an ARM64 Windows runs these).
     let arm64 = dir.join("arm64");
     fs::create_dir_all(&arm64).map_err(|e| format!("creating {arm64:?}: {e}"))?;
-    for program in USER_PROGRAMS_ARM64 {
+    for program in arm64_programs() {
         copy(&built_program_arm64(program), &arm64.join(format!("{program}.exe")))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
@@ -28119,14 +28380,14 @@ mod constants {
         use super::*;
         for name in SIM_PROGRAMS.iter().map(|(p, _)| *p) {
             assert!(
-                SCENARIOS.iter().any(|s| s.name == name && runs_in_um(s)),
+                scenarios().iter().any(|s| s.name == name && runs_in_um(s)),
                 "{name} is not a gala-um scenario"
             );
         }
         // Every Go program gala-um runs is simulated and must repeat from
         // its seed (Go's runtime is our most demanding threaded program).
         for name in GO_PROGRAMS {
-            if SCENARIOS.iter().any(|s| s.name == *name && runs_in_um(s)) {
+            if scenarios().iter().any(|s| s.name == *name && runs_in_um(s)) {
                 assert!(
                     SIM_PROGRAMS.iter().any(|(p, threaded)| p == name && *threaded),
                     "{name} runs in gala-um but is not in SIM_PROGRAMS"
@@ -28331,6 +28592,26 @@ mod ps2_pace {
     /// wheel notch, one per change of the buttons, a byte per key press
     /// and release (two with E0).
     #[test]
+    fn virtio_events_are_what_qemu_queues() {
+        // Measured against QEMU 11.1's virtio-keyboard-pci and
+        // virtio-mouse-pci (the guest's counters around each command).
+        let mut b = 0;
+        assert_eq!(virtio_events("mouse_move 0 0", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_move -240 -122", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_move 0 0 -1", &mut b), Ok((0, 6)));
+        assert_eq!(virtio_events("mouse_move 5 0 2", &mut b), Ok((0, 6)));
+        assert_eq!(virtio_events("mouse_button 3", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_button 1", &mut b), Ok((0, 2)));
+        assert_eq!(virtio_events("mouse_button 6", &mut b), Ok((0, 4)));
+        assert_eq!(virtio_events("mouse_button 0", &mut b), Ok((0, 3)));
+        assert_eq!(virtio_events("mouse_button 0", &mut b), Ok((0, 0)));
+        assert_eq!(virtio_events("sendkey a", &mut b), Ok((4, 0)));
+        assert_eq!(virtio_events("sendkey ctrl-alt-delete", &mut b), Ok((12, 0)));
+        assert_eq!(virtio_events("sendkey kp_enter", &mut b), Ok((4, 0)));
+        assert!(virtio_events("screendump x", &mut b).is_err());
+    }
+
+    #[test]
     fn commands_queue_what_qemu_queues() {
         let mut b = 0;
         assert_eq!(ps2_bytes("mouse_move 0 0", 4, &mut b), Ok((0, 4)));
@@ -28357,11 +28638,17 @@ mod ps2_pace {
     #[test]
     fn every_screen_step_input_is_paced() {
         for (name, check) in SCREEN_SCENARIOS {
-            let mut b = 0;
+            // A scenario with an ARM64 twin is also driven through
+            // virtio-input (aarch64's `virt` has no PS/2).
+            let twin = ARM64_TWINS.contains(name);
+            let (mut b, mut v) = (0, 0);
             for (n, step) in check.steps.iter().enumerate() {
                 for command in step.input {
                     if let Err(e) = ps2_bytes(command, 4, &mut b) {
                         panic!("{name} step {n}: {e}");
+                    }
+                    if twin && let Err(e) = virtio_events(command, &mut v) {
+                        panic!("arm_{name} step {n}: {e}");
                     }
                 }
             }
@@ -28527,10 +28814,10 @@ mod um_scenarios {
     /// that rule, not by a list.
     #[test]
     fn um_scenarios_have_only_flags_um_applies() {
-        for s in SCENARIOS.iter().filter(|s| runs_in_um(s)) {
+        for s in scenarios().iter().filter(|s| runs_in_um(s)) {
             assert_eq!(um_unapplied_flag(s), None, "{}", s.name);
         }
-        let schannel = SCENARIOS.iter().find(|s| s.name == "schannel_test").unwrap();
+        let schannel = scenarios().iter().find(|s| s.name == "schannel_test").unwrap();
         assert!(um_gap(schannel).is_some_and(|why| why.starts_with("kernel flag start=nginx.exe")));
     }
 }
@@ -28546,10 +28833,10 @@ mod snapshot_scenarios {
     #[test]
     fn snapshot_scenarios_are_never_batched() {
         for p in SNAPSHOT_SCENARIOS {
-            let s = SCENARIOS.iter().find(|s| s.name == p.name).expect("its scenario");
+            let s = scenarios().iter().find(|s| s.name == p.name).expect("its scenario");
             assert_eq!(batchable(s), None, "{} would be batched", p.name);
         }
-        let pair: Vec<&Scenario> = SCENARIOS
+        let pair: Vec<&Scenario> = scenarios()
             .iter()
             .filter(|s| s.name == "hotswap_machine" || s.name == "khotswap_both")
             .collect();

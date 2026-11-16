@@ -14,15 +14,19 @@
 //! become trait-associated or NT-owned types when `nt/` leaves the kernel
 //! crate (see "Remaining" in docs/GALA_UM.md).
 
+/// ARM64's instruction set attribute registers (ID_AA64ISAR0/1_EL1): the
+/// processor features user mode is told of.
+#[cfg(all(target_arch = "aarch64", not(feature = "hosted")))]
+pub use crate::arch::cpu::id_isar;
 pub use crate::arch::interrupts::{FaultAccess, IP_NAME, SP_NAME, TrapFrame, TrapKind};
 pub use crate::arch::paging::{PagingError, UserFault};
 #[cfg(not(feature = "hosted"))]
 pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
-/// Whether a process of a PE machine runs on this architecture.
-pub use crate::arch::runs_machine;
 pub use crate::arch::syscall::{Gpr, SyscallFrame, UserRegs};
 /// The XSAVE layout (components, sizes) and the state as a value.
 pub use crate::arch::xstate::{self, XState};
+/// Whether a process of a PE machine runs on this architecture.
+pub use crate::arch::{USER_HW_RANDOM, runs_machine};
 pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
 #[cfg(feature = "hosted")]
 pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};

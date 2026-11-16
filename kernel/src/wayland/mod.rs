@@ -1091,10 +1091,14 @@ pub fn dump() {
         return;
     };
     let Some(s) = server.as_ref() else { return };
+    // Whether a round would find work now: with the server's thread
+    // waiting, true is a wakeup it missed; false with a client waiting
+    // for events is a request it answered with none.
     crate::info!(
-        "statedump: wayland on {}: {} clients",
+        "statedump: wayland on {}: {} clients; a round would find work: {}",
         core::str::from_utf8(&s.path[..s.path_len]).unwrap_or("?"),
-        s.clients.len()
+        s.clients.len(),
+        s.ready()
     );
     for c in &s.clients {
         crate::info!(
@@ -1109,6 +1113,7 @@ pub fn dump() {
             runtime::ticks(),
             c.client.output().len()
         );
+        crate::info!("statedump:   socket: {}", crate::unix::Described(&c.sock));
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));
     }
     s.x_dump();

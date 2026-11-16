@@ -741,7 +741,10 @@ fn dispatch(frame: &mut SyscallFrame) {
         t.id,
     );
     let mut call = Call { frame, process };
-    thread::set_in_syscall(&me, Some((number, caller_regs(&call))));
+    // The registers as the call was made: its arguments where the ABI
+    // put them (ARM64's first is x0, which `caller_regs` sets to the
+    // result), for the thread dump and a restart.
+    thread::set_in_syscall(&me, Some((number, call.frame.return_regs())));
     // A wait may never return: its event is written when it starts too
     // ("wait", status 0), so a thread blocked for good shows in the log.
     if let Some(&(_, name, argc, _)) = service
@@ -3967,11 +3970,6 @@ fn gala_clock_control(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// GalaRandom(*Buffer, Length): random bytes from the kernel when its
-/// random source is mocked (gala-um's simulation: from the seed; a
-/// recording: recorded; a replay: from the recording);
-/// STATUS_NOT_SUPPORTED otherwise, and the caller (gala's ProcessPrng)
-/// uses the CPU's generator itself. At most 1 MiB per call.
 /// Set when programs may ask for a kernel handover: the event that tells
 /// the kernel one did (`allow_handover_requests`).
 static HANDOVER_REQUEST: IrqMutex<Option<ObjectRef>> = IrqMutex::new(None);
@@ -4085,9 +4083,17 @@ fn gala_handover_pause(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// GalaRandom(*Buffer, Length): random bytes from the kernel when its
+/// random source is mocked (gala-um's simulation: from the seed; a
+/// recording: recorded; a replay: from the recording), or when user mode
+/// has no generator of its own (ARM64: from RNDR); STATUS_NOT_SUPPORTED
+/// otherwise, and the caller (gala's ProcessPrng) uses the CPU's
+/// generator itself. At most 1 MiB per call.
 fn gala_random(call: &mut Call<'_>) -> NtStatus {
     use crate::replay::{self, Kind};
-    if !(platform::entropy_seeded() || replay::on()) {
+    // Served when the source is the kernel's to give (seeded, recorded or
+    // replayed), or when user mode has no generator of its own (ARM64).
+    if !(platform::entropy_seeded() || replay::on() || !platform::USER_HW_RANDOM) {
         return NtStatus::NOT_SUPPORTED;
     }
     let (buffer, length) = (arg!(call, 0), arg!(call, 1) as usize);

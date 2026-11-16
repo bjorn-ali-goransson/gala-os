@@ -240,7 +240,39 @@ faults, its exit).
   thread's x18 its TEB), whatever set the registers: NtContinue's
   CONTEXT, an exception handler, the hook. A process's image must be
   the architecture's machine (`arch::runs_machine`: ARM64 here; x64 and
-  x86 wait for XT).
+  x86 wait for XT): the program's own (`PeImage::parse`) and a process
+  made from an image section (`process::spawn`, `ImageInfo::machine`:
+  STATUS_INVALID_IMAGE_FORMAT, logged `its image is for machine ...`),
+  so x64 code is never jumped into. Invariant: a thread's saved
+  registers while it is in a system call (`thread::set_in_syscall`) are
+  those it made the call with, arguments included: ARM64's result
+  register is x0, its first argument, so the registers it returns with
+  (`syscalls::caller_regs`) would lose the handle a wait is on (the
+  thread dump's `on handle`); the context reported for such a thread
+  sets the result itself. User-mode randomness (`gala_random`,
+  bcryptprimitives' ProcessPrng): the kernel's entropy, which on ARM64
+  includes RNDR where FEAT_RNG has it (`cpu::hw_random`); x86-64's user
+  mode has RDRAND itself (`USER_HW_RANDOM`). What EL0 may do
+  (`cpu::allow_user_access`, every CPU): read the virtual counter
+  (CNTKCTL_EL1.EL0VCTEN; Windows ARM64's QueryPerformanceCounter and
+  kernel32 read it) and CTR_EL0, and clean and invalidate caches by
+  address (SCTLR_EL1.UCT, UCI: FlushInstructionCache, a JIT); a trapped
+  system register or instruction (ESR class 0x18) is an illegal
+  instruction. KUSER_SHARED_DATA's processor features are ARM64's
+  PF_ARM_* (the ARMv8 baseline, then ID_AA64ISAR0/1_EL1's crypto, CRC32,
+  LSE atomics, dot product, JSCVT, LRCPC). NtCreateThread's Win32 start
+  address (ThreadQuerySetWin32StartAddress) is x0 when set, else the pc:
+  x64's rule (the return register, where kernel32's thunk passes the
+  routine). Invariant: code the kernel writes for user mode reaches
+  instruction fetch before user mode runs it. The `Mapper` asks its
+  memory to sync a user leaf that is or becomes executable
+  (`TableMemory::sync_code`), and `UserSpace::copy_in` an executable page
+  it wrote into (a loader filling code after mapping it,
+  WriteProcessMemory): aarch64's cleans the frame's data cache lines to
+  the point of unification and invalidates its instruction cache lines
+  through the HHDM (`cpu::sync_code`); x86-64 needs nothing and skips the
+  walk (`TableMemory::SYNCS_CODE`). QEMU's TCG would not show a missed
+  one: the host test `user_code_is_synced_before_it_is_executable` does.
 - **Windows' ARM64 ABI** (`nt/abi/arm64`): ARM64's CONTEXT
   (`context.rs`, plain data the host's tests build on any machine:
   ContextFlags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, V0-V31, Fpcr, Fpsr, the
@@ -252,7 +284,7 @@ faults, its exit).
   part straight into V0-V31 (`xstate::restore`: the kernel never uses
   them); NtCreateThread starts a thread from a CONTEXT's registers.
   gala's ntdll and ntrt make `svc #N` as Windows ARM64's ntdll does
-  (`arm_startup`, `arm_import`: a program bound to an ARM64 DLL).
+  (`arm_startup_test`, `arm_import_test`: a program bound to an ARM64 DLL).
   Exceptions reach user mode (`deliver_to_user`): gala's ARM64
   dispatcher frame is the CONTEXT of the fault (CONTEXT_FULL, its pc the
   faulting instruction's, a `brk`'s too) at sp and the EXCEPTION_RECORD
@@ -267,13 +299,16 @@ faults, its exit).
   the CONTEXT to resume at sp and the routine with its three arguments
   above it (`deliver_apc`: ARM64's CONTEXT has no home area to carry
   them, as x64's does); KiUserApcDispatcher calls the routine and
-  NtContinues with TestAlert (`arm_exception`, `arm_apc`, `arm_tls`:
+  NtContinues with TestAlert (`arm_exception_test`, `arm_apc_test`, `arm_tls_test`:
   kernel32 loads, the APC a TLS callback queues runs before the entry).
   Crash reports show x0-x30, sp, pc and pstate (`arm_crash*`).
   Frame-based handlers on ARM64 (`testntdll/src/seh_arm64.rs`, from
   Microsoft's "ARM64 exception handling"): an image's 8-byte .pdata
   entries; packed unwind data expanded into its canonical prologue's and
-  epilogue's unwind codes; a pc in a prologue undoes only what ran, one in
+  epilogue's unwind codes; a link record (Flag 3, a jump island) names
+  its parent entry, which the lookup returns, and a pc outside the
+  parent's range (the island) unwinds as its body; an island reaches the
+  next entry; a pc in a prologue undoes only what ran, one in
   an epilogue only what had not (its scope, or the one the header packs);
   the pc is lr afterwards unless a machine-frame or CONTEXT code restored
   it; the establisher frame is the sp the unwind ends with, and a handler
@@ -281,13 +316,13 @@ faults, its exit).
   is MSFT_OP_CONTEXT (`.seh_context`), so a walk continues into the
   faulting function; RtlUnwindEx resumes the target with x0 the return
   value, after a consolidation callback run in a frame described the same
-  way (`arm_seh`). Function tables (an image's and those registered at
+  way (`arm_seh_test`). Function tables (an image's and those registered at
   run time: RtlAddFunctionTable, the growable ones, callbacks) are one
   registry for both architectures (`testntdll/src/ftable.rs`), each
   `seh` module giving its entry format. NtGetContextThread and NtSetContextThread exchange
   the parts ContextFlags names with the caller's registers or a
   suspended thread's parked state (`context::fill`, `context::apply`;
-  `arm_context`, `arm_threadinfo`).
+  `arm_context_test`, `arm_threadinfo_test`).
 - **Interrupt masking and the pseudo-NMI** (`cpu.rs`, `gic.rs`):
   interrupts are masked by priority (ICC_PMR_EL1), not PSTATE.I: "off"
   (`PMR_OFF`, 0xa0) lets only the NMI's priority (0x80) through, "on"
@@ -302,6 +337,15 @@ faults, its exit).
   switched from inside a handler resumes with the same state (off, I
   clear), as one switched from anywhere else. Scenario `arm_watchdog`:
   the watchdog's backtrace of CPU 1 spinning in its tick handler.
+  The state dump's request (x86-64's NMI from QEMU's monitor; `virt`
+  has none to inject) is a break on the console: the PL011's receive and
+  break interrupts are on (`serial::listen`), its SPI (the SPCR's GSIV;
+  QEMU `virt`'s 33 without one) routed to the boot CPU at the NMI's
+  priority (`gic::enable_console`, logged: `serial: a break on the
+  console asks for a state dump`); its handler drains the FIFO
+  (`serial::take_input`, no lock) and, for a break, sends the NMI SGI to
+  every online CPU, its own included. xtask sends the break at a timeout
+  (`chardev-send-break serial0`); `arm_statedump_test`.
   Backtraces walk AArch64's frame records (`[x29]`, `[x29 + 8]`; the
   kernel is built with frame pointers, as x86-64's).
 - **Time** (`timer.rs`): the generic timer's virtual channel (PPI 27).
@@ -332,8 +376,17 @@ faults, its exit).
   (TTBR0) are not ported.
 - **Exit**: semihosting's SYS_EXIT_EXTENDED (`hlt #0xf000`; xtask runs
   QEMU with `-semihosting-config enable=on`), with x86-64's statuses (33
-  success, 35 failure). There is no ISA bus: no debug console (no event
-  stream yet) and no phase port (`bootphase` marks are no-ops).
+  success, 35 failure). There is no ISA bus: the debug console (the event
+  stream) is a host file written through semihosting too (SYS_OPEN,
+  SYS_WRITE; `debugcon`): the one the command line names
+  (`events_file=<host path>`, which xtask gives every aarch64 image: its
+  `<image>.events.jsonl`), opened at the first write, nothing without it;
+  no phase port (`bootphase` marks are no-ops). No PS/2 controller on
+  `virt`: the keyboard and mouse are virtio-input devices (xtask gives
+  every aarch64 machine `virtio-keyboard-pci` and `virtio-mouse-pci`;
+  the input thread, "Input"). No framebuffer yet (the firmware's GOP on
+  `virt` has none to give): screen checks run where the desktop is
+  presented to memory (`presenter=test`).
 - **Threads** (`context.rs`, `percpu.rs`): kernel stacks in a window of
   guard-paged slots, as x86-64's. The switch saves x19-x30 on the
   outgoing stack and its SP in the context, and the FP/SIMD registers
@@ -381,13 +434,10 @@ faults, its exit).
   `virt`'s addresses); the PL031 RTC's address is QEMU `virt`'s (no ACPI
   table names an RTC: ACPI machines give the time through UEFI's runtime
   services); a CPU started by PSCI must enter at EL1; SGIs reach an
-  Aff0 below 16 only; xtask cannot ask for a state dump at a timeout
-  (QEMU `virt` has no NMI for its monitor's `nmi`: "machine does not
-  provide NMIs"); no `stop_others` (its one user, the hot swap, is
-  x86-64's); in user mode the unwinder does not read `.pdata` link
-  records (jump islands), SVE state or the trap-frame and x64-context
-  codes (a frame that needs one
-  ends the walk, the ledger names the code); the page file's aging is not safe
+  Aff0 below 16 only; no `stop_others` (its one user, the hot swap, is
+  x86-64's); in user mode the unwinder does not read SVE state or
+  the trap-frame and x64-context codes (a frame that needs one ends the
+  walk, the ledger names the code); the page file's aging is not safe
   here (it relies on hardware-set accessed and dirty bits: FEAT_HAFDBS
   is not turned on); entered at EL2 with VHE the timer would
   be EL2's (PPI 28); the image is not sealed for BOOTAA64.EFI (R8's
@@ -4136,7 +4186,10 @@ runtime of mingw-w64 programs.
   `setjmp`), whose longjmp first unwinds the SEH frames registered since
   the setjmp (RtlUnwind to the saved registration: their handlers see
   EXCEPTION_UNWINDING) and runs the buffer's unwind function. The
-  floating-point control: `_controlfp` is MXCSR on x64; on x86
+  floating-point control: `_controlfp` is MXCSR on x64 and FPCR on
+  ARM64 (exception masks as trap enables, a trap the processor does not
+  implement reading back as masked, rounding, flush-to-zero; the status
+  flags FPSR's); on x86
   `_control87` sets the x87 control word (masks, rounding, precision,
   infinity control) and MXCSR (masks, rounding, flush-to-zero) together
   and answers the x87 form with `_EM_AMBIGUOUS` when they disagree,
@@ -7556,6 +7609,22 @@ session's is shown by nothing unless GalaSession attaches a presenter
   notches and keys. A shown window that leaves the screen is logged as
   `desktop: window '<title>' left the screen (hidden | closed | its
   process ended)`, the counterpart of `desktop: shown window`.
+  virtio-input (`input/virtio.rs`): the input thread also drives every
+  virtio-input keyboard and relative mouse it finds (PCI 1af4:1052, the
+  modern interface), polled with the PS/2 controller where there is one.
+  A device is classified by the events its configuration says it
+  reports (EV_BITS: REL_X makes a mouse, absolute axes a tablet, which
+  is named and not driven, KEY_A a keyboard) and logged with its name
+  (`input: virtio-input Keyboard 'QEMU Virtio Keyboard' at 00:02.0`).
+  Its event queue holds 64 one-event buffers, each posted back once
+  read. A key's evdev code becomes the set 1 code it stands for
+  (`wayland::input::scan_code`, `evdev_key`'s inverse) and then the
+  same virtual key as PS/2's; a mouse's events gather until
+  SYN_REPORT into a report (moves, wheel, buttons) that goes the PS/2
+  packet's way (`Report`, `Coalescer`). The thread counts the events it
+  reads (`EVENTS_READ`, every event, SYN_REPORT included) and logs
+  their address (`input: virtio events read at <address>`) for xtask's
+  pacing, as `BYTES_READ`.
 - **Boot splash** (`console.rs`): from when the kernel takes the
   framebuffer until the desktop does, the screen shows the fortress
   (160 px) over the wordmark (220 px) on a dark gradient, with a
@@ -12100,8 +12169,26 @@ called by their own names through symbolic links to busybox;
 the `unsafe` allow-list). Allocation is fallible (`TryVec`,
 `try_reserve_exact`). The plain-data parts:
 
-- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
-  ET_EXEC or ET_DYN image and never panics (host tests: truncation at
+- **The architecture's ABI** (`lx::machine`, `lx::syscalls` on x86_64,
+  `lx::syscalls_aarch64` on aarch64): where the arguments are, the
+  system-call numbers (aarch64's generic table; a name it has no number
+  for, as open or fork, gets a number no call has), a restart (aarch64:
+  the pc back on the `svc` and x0 its first argument again, which the
+  dispatcher keeps: x0 is also the result), clone's argument order
+  (aarch64 passes tls before child_tid), the open flags whose values
+  differ (O_DIRECTORY, O_NOFOLLOW, O_LARGEFILE), `struct stat` (aarch64's
+  generic layout, 128 bytes), `struct epoll_event` (packed on x86_64
+  only), AT_HWCAP, seccomp's AUDIT_ARCH and the signal frame. aarch64's
+  frame: siginfo, the ucontext (its sigcontext with x0-x30, sp, pc and
+  pstate, and in its reserved area an fpsimd_context: FPSR, FPCR,
+  V0-V31), then the frame record the handler's x29 points at; x30 is
+  sa_restorer; rt_sigreturn reads it back at sp. User mode writes the
+  thread pointer (TPIDR_EL0) itself, so the scheduler records it at each
+  switch away and loads the next thread's (`percpu::live_user_fs_base`).
+  Scenarios: the `arm_lx_*` twins (ROADMAP AR).
+- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 image of
+  the kernel's own machine (EM_X86_64, EM_AARCH64 on aarch64), ET_EXEC
+  or ET_DYN image and never panics (host tests: truncation at
   every length, every header byte mutated, synthetic bad images).
   Invariants (listed in the module's doc):
   - program headers inside the file and at most 64 KiB; at least one
@@ -13900,27 +13987,40 @@ discipline):
   a group that is not orphaned: it is raised, but a stop is not
   implemented).
 
-## Plan: Linux containers through a WSL facade
+## Plan: Linux containers
 
-Docker Desktop and Podman for Windows run their Linux side (dockerd,
-containerd and runc; podman, conmon and crun) in a WSL2 distribution and
-drive it from Windows through `wsl.exe`, the WSL service, named pipes
-and hvsockets. gala runs both unmodified (ROADMAP CT) by answering
-WSL2's interface itself, with the distribution running on the Linux
-personality: a facade, not a VM. WSL2 itself, the Hyper-V backends and
-Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
-"Linux".
+Podman and Docker Engine (podman, conmon and crun; dockerd, containerd
+and runc) run unmodified in a Linux distribution on the Linux
+personality, from the distribution's own packages (ROADMAP CT). Windows
+reaches them without a virtual machine: Podman for Windows drives its
+distribution through `wsl.exe`, the WSL service, named pipes and
+hvsockets, which gala answers itself (a facade, not a VM); Docker's
+Windows CLI and the tools that speak Docker's API reach the
+distribution's dockerd through `\\.\pipe\docker_engine`, which gala
+relays. Docker Desktop is wanted but not scheduled (ROADMAP "Later"; it
+would run on the same facade, its own pipe in place of the relay).
+WSL2 itself, the Hyper-V backends and Windows containers are out of
+scope. Sources: CLEAN_ROOM "WSL" and "Linux".
 
 ```
   Windows side (NT)                     Linux side (LX)
-  Docker Desktop / podman.exe           the distribution: init or systemd,
+  podman.exe, docker.exe, IDEs          the distribution: init or systemd,
      |  wsl.exe, WSL service API           dockerd / podman, runc / crun
      |  \\.\pipe\..., AF_HYPERV            AF_VSOCK, /mnt/c, interop
-  gala's wsl.exe + WSL service  ---->   LX processes in a container object
+  gala's wsl.exe + WSL service,  ---->  LX processes in a container object
+  the docker_engine relay
   ------------------------------------------------------------------------
   core: one file system, one network stack, socket pairs, container objects
 ```
 
+- **The engine relay** (CT step 6): a gala service owns
+  `\\.\pipe\docker_engine` and connects each client to the chosen
+  distribution's `/var/run/docker.sock` through the core (no TCP, no
+  network between). It reads Docker Engine's HTTP API rather than
+  passing bytes blindly, because Windows paths in bind mounts (`Binds`,
+  `Mounts`) must become the distribution's `/mnt/<drive>` paths; every
+  rewrite is an `events=wsl` event. Streams after an upgrade (attach,
+  exec, logs) are passed through untouched.
 - **The facade** is user-mode programs and services of gala's (its
   `wsl.exe` and WSL service, behaving as recorded on Windows) plus a
   few kernel pieces; nothing in it depends on a hypervisor. A
@@ -13947,10 +14047,10 @@ Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
   terminate, interop launches, hvsocket connects with service ids), the
   container id in process events and crash reports, each distribution's
   console in the serial log.
-- **Limits** (planned work, ROADMAP CT): step 2 is built ("The WSL
-  facade" below); the plumbing (step 3), container objects and the
-  distributions' Linux needs (glibc, systemd, the container system
-  calls: step 4) are not.
+- **Limits** (planned work, ROADMAP CT): step 2's core is built ("The
+  WSL facade" below); the plumbing (step 3), container objects and the
+  engines' Linux needs (systemd, the container system calls: step 4)
+  and the engine relay (step 6) are not.
 
 ### The WSL facade
 
@@ -13995,7 +14095,7 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   first import and moved to the first one left when the default is
   unregistered. wsl.exe is the registry's only writer (no WSL service
   yet: two imports at once can race on the default; the service comes
-  with the COM interface Docker Desktop uses, step 6).
+  with the COM interface Podman for Windows uses, step 2).
 - **One tree per distribution**: `<BasePath>\rootfs` (WSL 1's layout:
   no ext4.vhdx, no VM), made by the kernel node by node as wsl.exe
   reads the tarball (ustar, GNU long names and base-256, pax; gzip

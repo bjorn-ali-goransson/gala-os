@@ -10,7 +10,7 @@ use lx_abi::signal::{
     self as abi, KSigaction, RtSigframe, SigSet, Sigcontext, Siginfo, Stack, Ucontext,
 };
 
-use crate::nt::platform::{self, Gpr::*, SyscallFrame, UserRegs};
+use crate::nt::platform::{self, Gpr::*, SyscallFrame, UserRegs, XState, xstate};
 use crate::nt::process::Process;
 
 /// System call argument `i` (0-based, below 6).
@@ -19,12 +19,17 @@ pub fn syscall_arg(frame: &SyscallFrame, i: usize) -> u64 {
         [i]
 }
 
+/// clone(2)'s argument positions for (flags, stack, parent_tid,
+/// child_tid, tls): x86_64's order.
+pub const CLONE_ARGS: [usize; 5] = [0, 1, 2, 3, 4];
+
 /// The `syscall` instruction's length: a restarted call goes back to it.
 const SYSCALL_LEN: u64 = 2;
 
 /// Makes the interrupted call `number` again when it returns to `regs`:
-/// the number back in rax, rip back on the `syscall` instruction.
-pub fn restart(regs: &mut UserRegs, number: u64) {
+/// the number back in rax, rip back on the `syscall` instruction (the
+/// arguments are where they were: `_arg0` is aarch64's need).
+pub fn restart(regs: &mut UserRegs, number: u64, _arg0: u64) {
     regs.set_gpr(Rax, number);
     regs.set_ip(regs.ip() - SYSCALL_LEN);
 }
@@ -44,6 +49,23 @@ pub fn reset_fp_control() {
     platform::set_mxcsr(0x1f80);
 }
 
+/// The open flags whose values differ between architectures (x86_64's,
+/// asm-generic/fcntl.h's defaults).
+pub const O_LARGEFILE: u64 = 0o100000;
+pub const O_DIRECTORY: u64 = 0o200000;
+pub const O_NOFOLLOW: u64 = 0o400000;
+
+/// `struct stat` as x86_64 lays it out (144 bytes).
+pub fn stat_bytes(st: &lx_abi::layout::Stat) -> [u8; 144] {
+    st.to_bytes()
+}
+
+/// seccomp_data's and SIGSYS's architecture: AUDIT_ARCH_X86_64 (EM_X86_64 with the 64-bit and little-endian bits).
+pub const AUDIT_ARCH: u32 = 0xc000_003e;
+
+/// struct epoll_event's data offset: packed on x86_64 (the kernel's EPOLL_PACKED).
+pub const EPOLL_DATA_AT: usize = 4;
+
 /// AT_PLATFORM's string on x86_64 (auxv_test).
 pub const PLATFORM: &[u8] = b"x86_64";
 
@@ -55,14 +77,32 @@ pub fn hwcap() -> u64 {
 
 /// What rt_sigreturn finds at the stack pointer `sp` (the handler
 /// returned to sa_restorer, which popped the return address: `sp` is the
-/// ucontext): the registers, where the FPU state is (0: none) and the
-/// signal mask the frame saved.
-pub fn read_sigframe(process: &Process, sp: u64) -> Result<(UserRegs, u64, SigSet), &'static str> {
+/// ucontext): the registers, the FPU state (None: the frame has none)
+/// and the signal mask the frame saved.
+pub fn read_sigframe(
+    process: &Process,
+    sp: u64,
+) -> Result<(UserRegs, Option<XState>, SigSet), &'static str> {
     let mut b = [0u8; abi::UCONTEXT_SIZE];
     process.read(sp, &mut b).map_err(|_| "the ucontext is not readable")?;
     let uc = Ucontext::from_bytes(&b);
-    Ok((regs_of(&uc.uc_mcontext), uc.uc_mcontext.fpstate, SigSet(uc.uc_sigmask)))
+    let fp = uc.uc_mcontext.fpstate;
+    let fx = if fp != 0 {
+        let mut fx = XState::initial();
+        let len = xstate::size();
+        process
+            .read(fp, &mut fx.bytes_mut()[..len])
+            .map_err(|_| "the FPU state is not readable")?;
+        Some(fx)
+    } else {
+        None
+    };
+    Ok((regs_of(&uc.uc_mcontext), fx, SigSet(uc.uc_sigmask)))
 }
+
+/// Where rt_sigreturn finds the frame's uc_stack: 16 bytes into the
+/// ucontext at its sp.
+pub const UC_STACK_AT: u64 = 16;
 
 /// Bytes below the stack pointer a function may use without moving it
 /// (the psABI's red zone): a frame starts below them.
@@ -129,14 +169,17 @@ pub fn regs_of(m: &Sigcontext) -> UserRegs {
 pub struct Frame {
     pub addr: u64,
     pub bytes: [u8; abi::RT_SIGFRAME_SIZE],
-    /// Where the FPU state goes (the ucontext's fpstate).
+    /// Where the FPU state goes (the ucontext's fpstate), beside the frame.
     pub fpstate: u64,
+    /// How much of it (xstate::size()).
+    pub fp_len: usize,
     pub regs: UserRegs,
 }
 
 /// Builds the rt_sigframe for `sig` (`info`, handled by `action`) that
-/// interrupts `regs`, whose mask was `old_mask`; `fp_len` bytes of FPU
-/// state go with it. None if the stack pointer leaves no room.
+/// interrupts `regs`, whose mask was `old_mask`; the FPU state `_fx`
+/// goes beside it (xstate::size() bytes at `fpstate`, which the caller
+/// writes). None if the stack pointer leaves no room.
 ///
 /// The handler starts with rip = sa_handler, rsp = the frame (its first
 /// word: sa_restorer, the return address), rdi = sig, rsi = &siginfo,
@@ -154,9 +197,10 @@ pub fn build_frame(
     info: &Siginfo,
     action: &KSigaction,
     old_mask: SigSet,
-    fp_len: u64,
+    _fx: &XState,
 ) -> Option<Frame> {
-    let (addr, fpstate) = frame_layout(sp, fp_len)?;
+    let fp_len = xstate::size();
+    let (addr, fpstate) = frame_layout(sp, fp_len as u64)?;
     let frame = RtSigframe {
         pretcode: action.restorer,
         uc: Ucontext {
@@ -178,7 +222,7 @@ pub fn build_frame(
     handler.set_gpr(Rsi, si);
     handler.set_gpr(Rdx, uc);
     handler.set_flags(handler.flags() & !(DF | TF));
-    Some(Frame { addr, bytes: frame.to_bytes(), fpstate, regs: handler })
+    Some(Frame { addr, bytes: frame.to_bytes(), fpstate, fp_len, regs: handler })
 }
 
 #[cfg(test)]
@@ -217,12 +261,12 @@ mod tests {
             &info,
             &a,
             SigSet::of(SIGUSR1),
-            832,
+            &XState::initial(),
         )
         .unwrap();
         assert_eq!((f.addr + 8) % 16, 0);
         assert_eq!(f.fpstate % 64, 0);
-        assert!(f.fpstate + 832 <= regs.sp() - RED_ZONE);
+        assert!(f.fpstate + f.fp_len as u64 <= regs.sp() - RED_ZONE);
         assert!(f.addr + abi::RT_SIGFRAME_SIZE as u64 <= f.fpstate);
         let r = &f.regs;
         assert_eq!((r.ip(), r.sp(), r.gpr(Rdi)), (0x40_3000, f.addr, 13));
@@ -247,7 +291,7 @@ mod tests {
                 &info,
                 &a,
                 SigSet::EMPTY,
-                0
+                &XState::initial(),
             )
             .is_none()
         );

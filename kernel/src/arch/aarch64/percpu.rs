@@ -113,9 +113,30 @@ pub fn set_user_gs_base(base: u64) {
     block().user_gs_base.store(base, Ordering::Relaxed);
 }
 
-/// The other thread-pointer base (x86-64's FS base: a Linux thread's TLS).
+/// The other thread-pointer base (x86-64's FS base: a Linux thread's
+/// TLS), loaded into TPIDR_EL0 at once, as x86-64 loads IA32_FS_BASE (the
+/// scheduler's switch, `set_user_bases`).
 pub fn set_user_fs_base(base: u64) {
     block().user_fs_base.store(base, Ordering::Relaxed);
+    // SAFETY: TPIDR_EL0 is user mode's thread pointer; the kernel does not
+    // use it.
+    unsafe {
+        core::arch::asm!("msr tpidr_el0, {}", in(reg) base, options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// The thread pointer as user mode last set it: TPIDR_EL0, which EL0
+/// writes itself (musl's `__set_thread_area` is an `msr`), so the record
+/// the scheduler keeps is refreshed from it (`sched::user_bases`, the
+/// switch away from a thread). x86-64's FS base only changes through the
+/// kernel: None there.
+pub fn live_user_fs_base() -> Option<u64> {
+    let v: u64;
+    // SAFETY: reads TPIDR_EL0.
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack, preserves_flags))
+    };
+    Some(v)
 }
 
 pub fn user_fs_base() -> u64 {

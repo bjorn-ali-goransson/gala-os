@@ -384,7 +384,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_CMDLINE="words"` | add kernel command-line words to every boot (the kernel takes the last `args=`, so this can replace a scenario's arguments) |
 | `XTASK_QEMU_ARGS="..."` | extra QEMU arguments; an `-accel` here replaces xtask's own |
 | `XTASK_QEMU_LOG=int,cpu_reset` | QEMU's `-d` log into `<image>.qemu.log` |
-| `XTASK_QEMU_GDB=1` | at a boot's timeout, attach gdb to its QEMU and add QEMU's own record of each vCPU and every QEMU thread's stack to the failed log ("Hunting a rare hang") |
+| `XTASK_QEMU_GDB=1` | at every boot timeout, attach gdb to its QEMU and add QEMU's own record of each vCPU and every QEMU thread's stack to the failed log ("Hunting a rare hang"); a timeout whose monitor gives nothing gets it without this |
 | `XTASK_QEMU=<path>` | the QEMU binary to use |
 | `XTASK_FIRMWARE=uefi\|bios` | force one firmware for every boot |
 | `XTASK_NO_BATCH=1` | every scenario in its own VM |
@@ -1819,17 +1819,34 @@ ARM64's ntdll's, `svc #N; ret`, the pinned build's numbers as x64's),
 the TEB's register (x18), CONTEXT, the memory intrinsics. A new service
 goes in nt64.rs's `stubs!` list once, for both. gala's ntdll
 (`testntdll`) is built for ARM64 too: a scenario that ships it starts
-its program through LdrInitializeThunk (`arm_startup`).
+its program through LdrInitializeThunk (`arm_startup_test`).
 
-- List the program in `USER_PROGRAMS_ARM64` (beside its x64 entry in
-  USER_PROGRAMS): `build_kernel_aarch64` builds that list and USER_DLLS
-  (but NOT_ARM64_DLLS) for ARM64, and the aarch64 kernel's images carry
-  those in place of the x64 builds (a scenario's built DLLs too).
+- An x64 scenario runs on the aarch64 kernel too by naming it in
+  `ARM64_TWINS`: `scenarios()` adds its twin `arm_<name>` with the same
+  command line, expected lines and files (`extra_modules` maps the twin
+  to its x64 scenario), the program's ARM64 build in place of the x64
+  one (`arm64_programs`: the twins' `run=` programs and the test programs
+  they ship as files, `user/bin/<program>.exe`, plus
+  `USER_PROGRAMS_ARM64`). An image refuses another x64 executable from
+  user/bin (xtask's error says so): an ARM64 machine cannot run it.
+- The per-name lists (NET_SCENARIOS, HOST_PAGE_SCENARIOS, SSH_PORT_22,
+  `onecpu_*`'s single CPU) look a twin up by its x64 scenario
+  (`twin_base`); a new list keyed by scenario name does the same.
+- A test's expectations stay real Windows': where ARM64 Windows answers
+  differently (the native machine 0xaa64, PROCESSOR_ARCHITECTURE_ARM64,
+  CONTEXT's offsets), the test picks by `cfg!(target_arch)`. What gala
+  cannot do on ARM64 (x86 code: WOW64, straddle_test's x86 instructions)
+  is x64's part of the test, or the scenario is left out of ARM64_TWINS
+  with the reason beside the list.
+- `build_kernel_aarch64` builds USER_DLLS (but NOT_ARM64_DLLS), then
+  `arm64_programs()`, for ARM64; the aarch64 kernel's images carry those
+  in place of the x64 builds. A program that embeds a DLL embeds its own
+  machine's (`image_test`: `target/<target>/release/testdll.dll`).
 - `export-tests` copies them to `user/bin/arm64/` (CI checks they match
   their sources, as user/bin's); `run-all.ps1` runs only the x64
   programs beside it, an ARM64 Windows runs these.
-- Its scenario is an `arm_<name>` entry in AARCH64_SCENARIOS, with the
-  x64 scenario's expectations (`arm_hello` is `hello`'s).
+- A scenario of the aarch64 kernel's own (no x64 scenario: `arm_boot`,
+  `arm_watchdog`, ...) is an entry in AARCH64_SCENARIOS.
 
 ### 32-bit test programs (WOW64)
 
@@ -2213,6 +2230,27 @@ source).
   check made before `prepare` and not repeated after loses the wake
   that comes between (the thread then sleeps until its deadline or for
   ever).
+- **aarch64 builds** (ROADMAP AR): `user/lx/build-aarch64.sh` builds the
+  tests in its `AARCH64_TESTS` into `user/lx/bin/aarch64/` (static
+  ET_EXEC) with clang `--target=aarch64-linux-musl` and ld.lld against
+  musl 1.2.5, which it fetches (checksum checked) and builds for aarch64
+  into `target/lx-aarch64-musl` once. The same sources: `lx.h`'s
+  aarch64 branch makes `svc #0` calls and turns the calls aarch64 has
+  no number for (open, stat, poll, pipe, dup2, select, ...) into the
+  ones musl makes there (openat(AT_FDCWD, ...), ppoll, pipe2, dup3,
+  pselect6, ...), so the x86_64 preprocessed source stays the same
+  (check it with `musl-gcc -E -P` against the committed one when you
+  touch `lx.h` or `more.h`). Structures whose layout is the
+  architecture's are declared per architecture (a test's own `struct
+  stat`; `LX_EPOLL_PACKED`). The binaries depend on clang's version
+  (built with Ubuntu clang 18.1.3), so CI does not rebuild them: rerun
+  the script and commit its output when a source changes. An ARM64 image
+  ships `user/lx/bin/aarch64/<name>` for a twin's `user/lx/bin/<name>`
+  (xtask refuses one with no aarch64 build). A twin's transcript is the
+  test's `expected.txt`; where aarch64 Linux answers otherwise by its ABI
+  (structure sizes and offsets, O_LARGEFILE's value), the test has
+  `arm_<scenario>.txt` beside it, `expected.txt` with only those lines
+  changed.
 - **Build**: `user/lx/build.sh` builds each as `user/lx/bin/<name>_test`
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the
@@ -3723,7 +3761,7 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   30 s) before it fails: a redraw under load can outlast the first
   dump, and a step may wait for the program.
 - **Input is paced on what the guest has read, never on time**
-  (`Ps2Pace` in xtask). QEMU's PS/2 keyboard and mouse each queue at
+  (`InputPace` in xtask). QEMU's PS/2 keyboard and mouse each queue at
   most 16 bytes: a key that does not fit is dropped, and a mouse packet
   that does not fit waits for the next input event, which carries only
   the buttons as they are then, so a press followed by its release
@@ -3738,7 +3776,15 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   that does not read within 120 s fails the step with the counts ("the
   guest read N of the M mouse bytes sent"); a command `ps2_bytes` does
   not know, or one that would not fit an empty queue, is refused by the
-  host test `every_screen_step_input_is_paced`. Under the
+  host test `every_screen_step_input_is_paced`. An aarch64 twin's input
+  goes to virtio-input (no PS/2 on `virt`): the guest counts the events
+  it reads (`input: virtio events read at <address>`) and
+  `virtio_events` knows what QEMU queues for each command (measured
+  black-box: a move is REL_X, REL_Y and SYN whatever its size, a wheel
+  notch three more, a button change one event per button changed and a
+  SYN, a key four: down, SYN, up, SYN); the same host test refuses a
+  twin's command it does not know. A twin is screen-checked as its x64
+  scenario (`screen_check` looks through `twin_base`). Under the
   `events=window` mask, each button change the desktop takes is an
   event `pointer` (where, and what got it: `Start`, `LinuxEntry(0)`,
   `capture <window>`), and the exit's `input:` line counts the presses.
@@ -4180,10 +4226,11 @@ before blaming CI:
   late still show.
 - In gala-um, catch a hung instance live and `gdb -p` the `exe` process
   (`thread apply all bt`).
-- **A guest that stops with no state dump** (aarch64's `virt` has no NMI
-  for the dump; a wedged guest answers none): the failed log has QEMU's
+- **A guest that stops with no state dump** (a wedged guest, or a
+  wedged QEMU, answers none): the failed log has QEMU's
   view of each CPU at the timeout (`xtask: QEMU's CPU#n: PC=...
-  PSTATE=...`, from the monitor). `XTASK_QEMU_GDB=1` adds QEMU's own
+  PSTATE=...`, from the monitor). `XTASK_QEMU_GDB=1` (or a monitor
+  that gave nothing: `QEMU's CPU registers: none read`) adds QEMU's own
   record (`xtask: gdb: vcpu <n> <field> <value>` lines: halted, PC,
   x0/x1/x29/x30/SP, ELR, ESR, VBAR, TTBR0, the power state, the
   interrupts QEMU holds for it (`interrupt_request`), each generic

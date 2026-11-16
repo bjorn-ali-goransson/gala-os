@@ -14,7 +14,10 @@ pub const CONTEXT_FLAGS_AT: usize = 0x30;
 pub const CONTEXT_ARCH: u32 = 0x10_0000;
 pub const CONTEXT_LEGACY_STATE: u32 = 0x10_0008; // CONTEXT_FLOATING_POINT
 pub const CONTEXT_XSTATE: u32 = 0x10_0040;
-pub const CONTEXT_FXSAVE: usize = 0x100;
+pub const CONTEXT_FXSAVE: Option<usize> = Some(0x100);
+/// The XState features the CONTEXT itself holds (x87 and SSE, in its
+/// FXSAVE area).
+pub const CONTEXT_LEGACY_FEATURES: u64 = 3;
 pub const CONTEXT_PARTS: &[(u32, &[(usize, usize)])] = &[
     // CONTEXT_CONTROL: SegCs, SegSs, EFlags; Rsp; Rip.
     (0x1, &[(0x38, 0x3a), (0x42, 0x48), (0x98, 0xa0), (0xf8, 0x100)]),

@@ -9,9 +9,16 @@
 
 use ntrt::*;
 
+/// The test DLL of this program's own machine (it runs code of it).
+#[cfg(target_arch = "x86_64")]
 static TEST_DLL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/x86_64-pc-windows-msvc/release/testdll.dll"
+));
+#[cfg(target_arch = "aarch64")]
+static TEST_DLL: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/aarch64-pc-windows-msvc/release/testdll.dll"
 ));
 
 /// A 32-bit (PE32, i386) IL-only .NET assembly: 64-bit Windows maps such

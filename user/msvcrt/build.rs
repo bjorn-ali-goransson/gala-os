@@ -5,7 +5,8 @@
 //! `_setjmp`/`longjmp`, written with `global_asm!` (`x64.rs`), are
 //! exported by name.
 //!
-//! ARM64 (a stub, ROADMAP PT): ntdll's primitives only.
+//! ARM64: ntdll's primitives only (its variadic functions and setjmp are
+//! not written yet, ROADMAP AR).
 //!
 //! x86: those primitives come from ntrt's x86 runtime, which msvcrt links
 //! (the compiler calls them; `memcmp` and `strlen` are Rust functions
@@ -47,8 +48,8 @@ fn main() {
             }
         }
         Ok("aarch64") => {
-            // A stub (ROADMAP PT): ntdll's primitives; the variadic
-            // functions and setjmp come with the port.
+            // ntdll's primitives; the variadic functions and setjmp are
+            // not written for ARM64 yet.
             for name in ["memcmp", "memcpy", "memmove", "memset", "strlen"] {
                 println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
             }

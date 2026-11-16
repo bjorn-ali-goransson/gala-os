@@ -178,10 +178,8 @@ fn usize_at(addr: usize) -> usize {
 
 /// The loader's data (PEB.Ldr).
 fn ldr_data() -> usize {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is the PEB.
-    unsafe { core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly)) };
-    usize_at(peb + 0x18)
+    // TEB+0x60 is the PEB.
+    usize_at(ntrt::teb_field(0x60) + 0x18)
 }
 
 /// The DllBase of each entry of the PEB.Ldr list whose head is at `head`

@@ -257,6 +257,7 @@ struct k_sigaction {
 /* sa_restorer as musl's: rt_sigreturn(2) on the frame the handler
  * returned to. */
 void lx_restorer(void);
+#if defined(__x86_64__)
 __asm__(".text\n"
 	".globl lx_restorer\n"
 	".type lx_restorer,@function\n"
@@ -264,6 +265,15 @@ __asm__(".text\n"
 	"	mov $15, %eax\n"
 	"	syscall\n"
 	"	hlt\n");
+#else
+__asm__(".text\n"
+	".globl lx_restorer\n"
+	".type lx_restorer,%function\n"
+	"lx_restorer:\n"
+	"	mov x8, #139\n"
+	"	svc #0\n"
+	"	brk #0\n");
+#endif
 
 /* rt_sigaction(2) with SA_RESTORER and lx_restorer, as musl's sigaction
  * does; `handler` 0 is SIG_DFL, 1 SIG_IGN. */
@@ -283,9 +293,15 @@ static void lx_init(void)
 	sys1(SYS_umask, 022);
 }
 
+/* fork(): aarch64 has no fork system call; clone(SIGCHLD, 0, ...) is
+ * what fork does there (and on x86_64). */
 static i64 lx_fork(void)
 {
+#ifdef SYS_fork
 	return sys0(SYS_fork);
+#else
+	return sys6(SYS_clone, LX_SIGCHLD, 0, 0, 0, 0, 0);
+#endif
 }
 
 /* wait4(pid, &status, options, 0): the status, or the error. */

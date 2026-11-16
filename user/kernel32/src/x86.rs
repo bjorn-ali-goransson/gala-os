@@ -53,7 +53,10 @@ pub const CONTEXT_FLAGS_AT: usize = 0;
 pub const CONTEXT_ARCH: u32 = 0x1_0000;
 pub const CONTEXT_LEGACY_STATE: u32 = 0x1_0020; // CONTEXT_EXTENDED_REGISTERS
 pub const CONTEXT_XSTATE: u32 = 0x1_0040;
-pub const CONTEXT_FXSAVE: usize = 0xcc;
+pub const CONTEXT_FXSAVE: Option<usize> = Some(0xcc);
+/// The XState features the CONTEXT itself holds (x87 and SSE, in its
+/// FXSAVE area).
+pub const CONTEXT_LEGACY_FEATURES: u64 = 3;
 pub const CONTEXT_PARTS: &[(u32, &[(usize, usize)])] = &[
     // CONTEXT_CONTROL: Ebp, Eip, SegCs, EFlags, Esp, SegSs.
     (0x1, &[(0xb4, 0xcc)]),

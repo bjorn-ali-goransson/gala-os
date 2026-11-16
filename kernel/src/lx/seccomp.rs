@@ -75,8 +75,8 @@ const FLAGS: u64 = FLAG_TSYNC
     | FLAG_TSYNC_ESRCH
     | FLAG_WAIT_KILLABLE_RECV;
 
-/// AUDIT_ARCH_X86_64: seccomp_data's arch.
-pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+/// seccomp_data's arch: the architecture's AUDIT_ARCH (`machine`).
+use super::machine::AUDIT_ARCH;
 /// struct seccomp_data's size.
 const DATA_SIZE: u32 = 64;
 /// The most instructions in one filter (BPF_MAXINSNS) and on a chain
@@ -309,7 +309,8 @@ fn verdict(mut f: Option<&KArc<Filter>>, data: &[u8; 64]) -> u32 {
 
 /// strict mode's calls (read, write, exit, rt_sigreturn).
 fn strict_allows(number: u64) -> bool {
-    matches!(number, 0 | 1 | 60 | 15)
+    use super::syscalls::nr;
+    matches!(u32::try_from(number), Ok(nr::READ | nr::WRITE | nr::EXIT | nr::RT_SIGRETURN))
 }
 
 /// Before system call `number` of a thread with seccomp state: None to
@@ -329,7 +330,7 @@ pub fn check(call: &Call<'_>, number: u64) -> Option<Result> {
     let filter = s.filter.as_ref()?;
     let mut data = [0u8; 64];
     data[0..4].copy_from_slice(&(number as u32).to_le_bytes());
-    data[4..8].copy_from_slice(&AUDIT_ARCH_X86_64.to_le_bytes());
+    data[4..8].copy_from_slice(&AUDIT_ARCH.to_le_bytes());
     let ip = call.frame.ip();
     data[8..16].copy_from_slice(&ip.to_le_bytes());
     for i in 0..6 {
@@ -486,7 +487,7 @@ pub fn set_mode(call: &Call<'_>, mode: u64, filter: u64) -> Result {
 /// SIGSYS's siginfo for a trap: SYS_SECCOMP, the filter's data as
 /// si_errno, the call's address, number and architecture.
 pub fn trap_info(nr: i32, data: i32, ip: u64) -> lx_abi::signal::Siginfo {
-    lx_abi::signal::Siginfo::sys(SYS_SECCOMP, data, ip, nr, AUDIT_ARCH_X86_64)
+    lx_abi::signal::Siginfo::sys(SYS_SECCOMP, data, ip, nr, AUDIT_ARCH)
 }
 
 #[cfg(test)]
@@ -514,7 +515,7 @@ mod tests {
         // ERRNO(42) for nr 110 on x86_64, ALLOW otherwise.
         let mut prog = [
             stmt(LD | W | ABS, 4),
-            Insn { code: JMP | JEQ | K, jt: 1, jf: 0, k: AUDIT_ARCH_X86_64 },
+            Insn { code: JMP | JEQ | K, jt: 1, jf: 0, k: AUDIT_ARCH },
             stmt(RET | K, RET_KILL_PROCESS),
             stmt(LD | W | ABS, 0),
             Insn { code: JMP | JEQ | K, jt: 0, jf: 1, k: 110 },
@@ -523,7 +524,7 @@ mod tests {
         ];
         validate(&mut prog).unwrap();
         let mut data = [0u8; 64];
-        data[4..8].copy_from_slice(&AUDIT_ARCH_X86_64.to_le_bytes());
+        data[4..8].copy_from_slice(&AUDIT_ARCH.to_le_bytes());
         data[0..4].copy_from_slice(&110u32.to_le_bytes());
         assert_eq!(run(&prog, &data), RET_ERRNO | 42);
         data[0..4].copy_from_slice(&39u32.to_le_bytes());

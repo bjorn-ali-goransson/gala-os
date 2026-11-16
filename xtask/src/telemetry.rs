@@ -114,7 +114,8 @@ pub fn cpus_online(serial: &str) -> Option<u32> {
 /// vCPUs a boot test asks QEMU for: one for `onecpu_*` scenarios, else two.
 pub fn vm_cpus(iso: &Path) -> u32 {
     let stem = iso.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    if stem.starts_with("test-onecpu_") { 1 } else { 2 }
+    // An ARM64 twin (`arm_onecpu_*`) as its x64 scenario.
+    if stem.starts_with("test-onecpu_") || stem.starts_with("test-arm_onecpu_") { 1 } else { 2 }
 }
 
 #[cfg(test)]

@@ -94,12 +94,7 @@ const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_INVALID_ADDRESS: u32 = 487;
 
 fn teb_u32(offset: usize) -> u32 {
-    let v: u64;
-    // SAFETY: gs:[offset] reads the current TEB (x64 Windows layout).
-    unsafe {
-        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
-    };
-    v as u32
+    teb_field(offset) as u32
 }
 
 fn out(text: &[u8]) {
@@ -452,4 +447,22 @@ fn check_line(line: u32) {
     }
     b[7 + len] = b')';
     out(&b[..8 + len]);
+}
+
+/// A pointer-sized field of the current thread's TEB (x64: `gs:[offset]`;
+/// ARM64: x18 is the TEB).
+fn teb_field(offset: usize) -> usize {
+    let v: usize;
+    // SAFETY: the TEB is mapped for the thread's life; `offset` is one of
+    // its pointer-sized fields.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    // SAFETY: as above (x18 holds the TEB on ARM64 Windows).
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, {}]", out(reg) v, in(reg) offset, options(nostack, readonly))
+    };
+    v
 }

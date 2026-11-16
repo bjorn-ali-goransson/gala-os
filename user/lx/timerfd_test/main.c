@@ -42,7 +42,7 @@ static void expired(i64 fd)
 struct epev {
 	unsigned events;
 	u64 data;
-} __attribute__((packed));
+} LX_EPOLL_PACKED;
 
 static i64 ms(int clock)
 {

@@ -200,9 +200,9 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
-| CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
+| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, exceptions to vectored handlers and APCs (`arm_*` scenarios); next more test programs, then Linux's aarch64 ABI |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 133 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (38 `arm_lx_*` twins); virtio-input keyboard and mouse; next the remaining test programs |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -1297,13 +1297,19 @@ the kernel.
   through VK_KHR_win32_surface and checked on the screen).
 
 **Next**:
-1. G1's rest: shasha's pointer on the hardware cursor,
+1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
+   answering its monitor (no `x`, no `info registers`, no NMI) after the
+   guest started its program; not reproduced locally. A failed log now
+   carries every QEMU thread's stack when the monitor gives nothing:
+   the next occurrence says which thread holds QEMU, and whether the
+   device reset (`gpureset=`) is in it.
+2. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-2. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
+3. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
    lavapipe, PREBUILT, beside the programs that use them (System32's
    dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
    screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
@@ -1329,9 +1335,9 @@ the kernel.
    expects Windows' S_OK on Windows). It is replaced by a real compiler
    with DXVK: vkd3d-shader's HLSL compiler (Wine's d3dcompiler is built
    on it) behind this DLL's exports, PREBUILT.
-3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
@@ -3802,17 +3808,23 @@ runs as a boot scenario whose transcript equals its `expected.txt`.
 seams", "The Linux layer's milestones", "The lx module", "The lx_abi
 crate"; WORKFLOW "Linux test programs".
 
-### CT. Linux containers: Docker Desktop and Podman over a WSL facade
+### CT. Linux containers: Podman and Docker on Linux, reached from Windows
 
-**Goal**: stock Docker Desktop for Windows and stock Podman for Windows
-(`podman machine`, later Podman Desktop) install and run Linux
-containers on gala, unmodified. On Windows both run their Linux side in
-a WSL2 distribution; gala answers WSL2's interface itself and runs that
-distribution on the Linux personality (LX), with no virtual machine.
+**Goal**: stock Podman and Docker Engine (dockerd, containerd, runc or
+crun), installed from a Linux distribution's own packages, run Linux
+containers in that distribution on gala's Linux personality (LX),
+unmodified. Windows programs reach the same engines without a virtual
+machine: Docker's own Windows CLI and the tools that speak Docker's API
+(VS Code Dev Containers, Visual Studio, JetBrains IDEs, Testcontainers)
+through `\\.\pipe\docker_engine`, and stock Podman for Windows
+(`podman machine`) through gala's answer to WSL2's interface, the
+distribution running on LX.
 
-**Out of scope**: running WSL2 itself (a VM with Microsoft's Linux
-kernel), the Hyper-V backends of both products, and Windows containers
-(Docker Desktop's "Windows containers" mode: HCS, server silos).
+**Not in CT**: Docker Desktop for Windows is wanted but not scheduled
+("Later": the engine reached from Windows serves the tools that use
+Docker first). **Out of scope**: running WSL2 itself (a VM with
+Microsoft's Linux kernel), the Hyper-V backends, Docker Desktop for
+Linux (a VM of its own), and Windows containers (HCS, server silos).
 
 **Done so far**:
 - Step 2's core (`wsl` with user/wsl_test, the screen scenario
@@ -3833,36 +3845,45 @@ kernel), the Hyper-V backends of both products, and Windows containers
   command, a terminated wsl.exe's exit code) are `info` lines to record
   on Windows; real WSL's transcripts (step 1) are still to be recorded.
 
-**Next** (each step test first; the recordings of step 1 are the spec):
-1. Spec: on real Windows 11 24H2, record what each product does to set
-   up and to run `hello-world`: every `wsl.exe` command line and its
-   output, the WSL service calls, named pipes and sockets (hvsocket and
-   localhost TCP) between the Windows and Linux sides, registry keys,
-   WMI queries and optional-feature checks, files under `%LOCALAPPDATA%`
-   and `%ProgramData%`; inside the distribution, `strace -f` of its
-   init, dockerd/containerd/runc and podman/conmon/crun. The ranked
-   result (Windows side, facade, Linux system calls) goes in this
-   section, like AG's blocker list.
+**Next** (each step test first; step 1's recordings are the spec). Order:
+the Linux side first (steps 4, 7 and 8, with step 1's Linux
+recordings), then the Windows side (steps 2, 3, 6, then 5); Kubernetes
+(step 9) after step 8, alongside the Windows side.
+1. Spec. On real Linux (Ubuntu 26.04): `strace -f` of `podman run --rm
+   hello-world` rootless and rootful (podman, conmon, crun, pasta) and
+   of `docker run --rm hello-world` (dockerd, containerd, runc, started
+   by systemd), what each reads in `/proc`, `/sys` and cgroupfs, and
+   the netlink and nftables traffic. On real Windows 11 24H2: what
+   Podman for Windows does to set up and run `hello-world` (every
+   `wsl.exe` command line and its output, the WSL service calls, named
+   pipes and sockets (hvsocket and localhost TCP) between the two
+   sides, registry keys, WMI queries and optional-feature checks, files
+   under `%LOCALAPPDATA%` and `%ProgramData%`), and what Docker's
+   Windows CLI and the tools above send over `\\.\pipe\docker_engine`
+   (Docker Engine's API is documented; the recordings show which calls
+   and which path forms the tools use). The ranked result (Linux system
+   calls, facade, Windows side) goes in this section, like AG's blocker
+   list.
 2. The facade's core's rest: wsl_test checked on Windows (its `info`
-   lines become checks); the WSL service (the COM interface Docker
-   Desktop and Podman call, the registry's one writer), a
-   distribution's init as an LX process (an instance that outlives its
-   last command, as WSL's), DefaultUid applied (root inside the
-   distribution), `-u`, `--cd`, `--export`, ptys and process groups
-   for the terminal (LX "Next" 2-3: job control, Ctrl+C as SIGINT).
+   lines become checks); the WSL service (the COM interface Podman
+   calls, the registry's one writer), a distribution's init as an LX
+   process (an instance that outlives its last command, as WSL's),
+   DefaultUid applied (root inside the distribution), `-u`, `--cd`,
+   `--export`, ptys and process groups for the terminal (LX "Next" 2-3:
+   job control, Ctrl+C as SIGINT).
 3. The facade's plumbing: `/mnt/<drive>` inside the distribution
    (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
    (Windows programs started from Linux and back), `wsl.conf`, hvsocket
    (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
    side as one core socket pair, localhost forwarding over one shared
    network stack.
-4. LX up to the distributions' needs (beyond milestone 5): glibc,
-   systemd as PID 1 (Podman's machine), namespaces (mount, PID, UTS,
-   IPC, network, user), cgroup v2, overlayfs, bind mounts and
-   `pivot_root`, netlink, veth and bridges, nftables/iptables, seccomp,
-   `/proc` and `/sys` as these programs read them. Namespaces and
-   cgroups are core objects (ARCHITECTURE "Plan: Linux containers
-   through a WSL facade"), not LX-only state.
+4. LX up to the engines' needs (beyond milestone 5): systemd as PID 1
+   (a distribution's dockerd and Podman's machine), namespaces (mount,
+   PID, UTS, IPC, network, user), cgroup v2, overlayfs, bind mounts and
+   `pivot_root`, TUN/TAP (pasta, slirp4netns), netlink, veth and
+   bridges, nftables/iptables, seccomp, `/proc` and `/sys` as these
+   programs read them. Namespaces and cgroups are core objects
+   (ARCHITECTURE "Plan: Linux containers"), not LX-only state.
    Nesting is a requirement, not an afterthought: namespaces and
    cgroups are trees whose every level carries its own limits (a
    cgroup subtree delegated to a container is divided again inside
@@ -3871,41 +3892,74 @@ kernel), the Hyper-V backends of both products, and Windows containers
    volume there). Goal beyond Linux: a nested container runtime
    without `--privileged`, an inner root fully contained (as Sysbox
    does on Linux).
-5. Podman: `podman machine init`, `start`, then `podman run` from the
-   Windows side; Podman Desktop after BR stage 2 (Electron).
-6. Docker Desktop: install, the backend service, its distribution, the
-   `docker` CLI over `\\.\pipe\docker_engine` running containers; then
-   the dashboard (Electron, after BR stage 2).
-7. Container engines on Linux itself, with no Windows side: in a
-   distribution on gala (a WSL one or LD's desktop), the distribution's
-   own `podman` and `docker` (dockerd, containerd, runc or crun) run
-   containers, rootless Podman first (user namespaces with
-   newuidmap/newgidmap and /etc/subuid, rootless networking through
-   pasta or slirp4netns, overlay in a user namespace, cgroup v2
-   delegated by systemd's user instance), then rootful Podman and
+5. Podman for Windows: `podman machine init`, `start`, then `podman run`
+   from the Windows side; Podman Desktop after BR stage 2 (Electron).
+6. Docker from Windows, without Docker Desktop: gala serves
+   `\\.\pipe\docker_engine` and relays it to the Docker Engine of a
+   chosen distribution (its `/var/run/docker.sock`), so Docker's
+   standalone Windows CLI (`docker.exe`, with the compose plugin;
+   fetched by xtask, not committed) and the tools above work
+   unmodified; `docker context` and `DOCKER_HOST` as on Windows. Windows
+   paths in bind mounts (`docker run -v C:\src:/app`, the API's `Binds`
+   and `Mounts`, compose files) are translated to the distribution's
+   `/mnt/<drive>` paths (step 3) by the relay, which reads the API's
+   requests rather than passing bytes blindly; what it rewrites is in
+   `events=wsl`. Then VS Code Dev Containers and Testcontainers for
+   .NET and Java running a container from the Windows side.
+7. Container engines on Linux, with no Windows side: in a distribution
+   on gala (a WSL one or LD's desktop), the distribution's own `podman`
+   and `docker` run containers, in tiers: rootless Podman first with no
+   network and no limits (`--network=none --cgroups=disabled`: user
+   namespaces with newuidmap/newgidmap and /etc/subuid, overlay in a
+   user namespace, `pivot_root`); then cgroup v2 delegated by systemd's
+   user instance, its limits enforced; then rootless networking through
+   pasta or slirp4netns; then rootful Podman, and Docker Engine from
+   the distribution's packages (`apt install docker.io`, or Docker's
+   `docker-ce`) as the distribution starts it (`docker.service` and
+   `docker.socket` under systemd, the `docker` group, its iptables
+   variant), with bridge networking and published ports; then rootless
    Docker.
 8. Nesting: the official `docker:dind` image runs `docker run --rm
    hello-world` inside it; Podman in Podman (`quay.io/podman/stable`)
    likewise; then both without `--privileged`. The sibling pattern
    (the host's `/var/run/docker.sock` mounted into a container) comes
-   with step 6 or 7.
+   with step 7.
+9. Kubernetes, on step 7's engines: single-node k3s first (containerd
+   built in), a Deployment's pods running and a Service reached by its
+   cluster IP and by DNS (CoreDNS); then kind (Kubernetes nodes as
+   Docker containers: step 8's nesting with systemd inside). Beyond
+   Docker it needs cgroup v2's statistics as exact as Linux's, since
+   the kubelet evicts and schedules by them (`memory.current`,
+   `memory.events`, `memory.stat`, `cpu.stat`, the pressure files,
+   pids), kube-proxy's Service NAT (iptables or nftables with
+   conntrack and its netlink interface, hairpin NAT, bridged traffic
+   through the firewall: `br_netfilter`'s sysctls), mount propagation
+   (shared and slave mounts), `/proc/<pid>/mountinfo`, `/proc/net`,
+   `/dev/kmsg` and inotify at scale. Multi-node clusters across gala
+   machines (flannel's VXLAN) after that. Observability: the cgroup
+   figures the kubelet read and the NAT rules a Service installed,
+   both in the state dump, so a wrong eviction or an unreachable
+   Service can be explained after the fact.
 
-**Done when**: from a gala command prompt, `podman run --rm hello-world`
-and `docker run --rm hello-world` print their greeting with both
-products installed by their own installers; the same from a shell in a Linux
-distribution on gala with its own Podman and Docker, and from inside a
-`docker:dind` container; then a container serving
-HTTP reached from the Windows side (`-p 8080:80`). Observability with
-each step: the facade's calls as events (`events=wsl`), each
-distribution's console and the products' logs copied into the serial
-log, missing Linux calls in the ledger by distribution.
+**Done when**: from a shell in a Linux distribution on gala, its own
+`podman run --rm hello-world` and `docker run --rm hello-world` print
+their greeting, rootless and rootful, and the same from inside a
+`docker:dind` container, and a single-node k3s serves a Deployment
+through a Service; from a gala command prompt, Docker's Windows
+CLI runs `docker run --rm hello-world` against that engine and `podman
+run --rm hello-world` works with Podman for Windows installed by its
+own installer; then a container serving HTTP reached from the Windows
+side (`-p 8080:80`) and a bind mount of a Windows directory. Observability with
+each step: the facade's and the relay's calls as events (`events=wsl`),
+each distribution's console and the engines' logs copied into the
+serial log, missing Linux calls in the ledger by distribution.
 
-**Licensing**: Podman is Apache-2.0; Docker Desktop's licence terms
-(a paid subscription for larger organisations) govern running it.
-Neither is committed; xtask fetches them and runs them only in QEMU.
-WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
+**Licensing**: Podman, Docker Engine (Moby, containerd, runc),
+Docker's CLI, Kubernetes, k3s and kind are Apache-2.0. None is committed; xtask fetches them
+and runs them only in QEMU. WSL's source (MIT) is an allowed source
+(CLEAN_ROOM "WSL").
 
-**Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
+**Design**: ARCHITECTURE "Plan: Linux containers".
 
 ### LD. Desktop Linux applications
 
@@ -4446,49 +4500,105 @@ on the seams item PT prepared: native ARM64 Windows programs
   faults (demand paging), ARM64 PE images (`arch::runs_machine`);
   xtask's aarch64 images carry the ARM64 builds of the DLLs and of
   USER_PROGRAMS_ARM64 (exported to `user/bin/arm64`).
-- Programs through gala's ntdll (`arm_startup`, `arm_import`): its ARM64
+- Programs through gala's ntdll (`arm_startup_test`, `arm_import_test`): its ARM64
   build's stubs make `svc #N`; a process starts at LdrInitializeThunk
   with ARM64's CONTEXT (`nt::abi::arm64::context`, host-tested), which
   NtContinue resumes (floating-point part included); NtCreateThread
   reads it; imports bind from ARM64 DLLs. Threads, the synchronization
-  objects and waits run as on x64 (`arm_thread`, `arm_sync`,
-  `arm_wait`).
+  objects and waits run as on x64 (`arm_thread_test`, `arm_sync_test`,
+  `arm_wait_test`).
 - Exceptions and APCs in ARM64 user mode: faults, `brk` (its immediate
   the exception, as Windows ARM64 assigns them) and `udf` reach gala's
   ntdll's dispatcher and its vectored handlers, which may continue
-  (`arm_exception`); RtlRaiseException and RtlCaptureContext; the
+  (`arm_exception_test`); RtlRaiseException and RtlCaptureContext; the
   top-level filter and the crash report (`arm_crash`,
   `arm_crash_dispatched`, `arm_crash_filtered`); user APCs from alertable
-  waits and NtContinue's TestAlert (`arm_apc`); kernel32 loads (`arm_tls`).
-- Frame-based exception handling on ARM64 (`arm_seh`, seh_test's ARM64
+  waits and NtContinue's TestAlert (`arm_apc_test`); kernel32 loads (`arm_tls_test`).
+- Frame-based exception handling on ARM64 (`arm_seh_test`, seh_test's ARM64
   part): .pdata and .xdata, packed unwind data, partial prologues and
   epilogues, RtlLookupFunctionEntry, RtlVirtualUnwind, frame handlers in
   dispatch and RtlUnwindEx, unwind consolidation, the dispatcher's
   MSFT_OP_CONTEXT frame.
-- NtGetContextThread and NtSetContextThread on ARM64 (`arm_context`:
-  suspended threads, the caller; `arm_threadinfo`).
+- NtGetContextThread and NtSetContextThread on ARM64 (`arm_context_test`:
+  suspended threads, the caller; `arm_threadinfo_test`).
 - Function tables registered at run time on ARM64 (RtlAddFunctionTable,
   the growable tables, callbacks): gala's ntdll keeps one registry for
-  x64 and ARM64 (`ftable.rs`); `arm_seh` checks a table and a growable
+  x64 and ARM64 (`ftable.rs`); `arm_seh_test` checks a table and a growable
   one. ntrt's 64-bit runtime is one
   for x64 and ARM64 (`nt64.rs`), so the x64 test programs build for
   ARM64 as they are.
 - Devices where the firmware says: the console's PL011 from the SPCR,
   the GIC's distributor and redistributors from the MADT's GICD and GICR
   entries (host-tested parsers; `arm_boot` checks the log says so).
+- xtask's state dump at an aarch64 timeout: a break on the console
+  (`chardev-send-break`), the PL011's interrupt taken at the
+  pseudo-NMI's priority and turned into the NMI on every CPU
+  (`arm_statedump_test`); the thread dump reads a waiting thread's
+  arguments (the registers it made the call with: ARM64's x0 is both
+  the first argument and the result).
+- The x64 test programs run on ARM64 as twins (`ARM64_TWINS`:
+  `arm_<name>`, the x64 scenario's expectations; 133 of them, with the
+  network, single-CPU and shipped-program cases): ProcessPrng from the
+  kernel (RNDR), RtlCaptureStackBackTrace, NdrClientCall2 and rpcrt4's
+  guarded calls, the native machine (KUSER_SHARED_DATA, IsWow64Process2)
+  on ARM64; the kernel refuses an executable of a machine it does not
+  run. The programs' x64-only parts have ARM64 ones (the TEB through
+  x18, the processor number through NtGetCurrentProcessorNumber, `svc
+  #N` stubs, `brk #0xf000`, ARM64's RUNTIME_FUNCTION and CONTEXT;
+  fpu_test's d0-d31 and FPCR, xmodify_test's cache maintenance).
+  What they found missing on ARM64, done: user mode reads the virtual
+  counter and runs cache maintenance by address (CNTKCTL_EL1,
+  SCTLR_EL1.UCT/UCI); FlushInstructionCache cleans and invalidates;
+  KUSER_SHARED_DATA's ARM64 processor features; kernel32's context and
+  XState functions (ARM64's CONTEXT, no XState feature), its processor
+  number; msvcrt's `_controlfp` and floating-point status on
+  FPCR/FPSR; the Win32 start address from x0; an EL0 system-register
+  trap is an illegal instruction.
+- `.pdata` link records (Flag 3: jump islands) in the ARM64 unwinder
+  (`arm_seh_test`: the lookup returns the parent, the island unwinds as
+  its body).
+- Linux's aarch64 ABI: the generic system-call table, restarts, clone's
+  argument order, the open flags, `struct stat` and `struct
+  epoll_event`, AT_HWCAP, seccomp's architecture and strict mode, the
+  signal frame (fpsimd_context), the thread pointer kept across
+  switches; the Linux test programs built for aarch64 (38 `arm_lx_*`
+  twins, their transcripts real Linux's). Copy-on-write fork now works
+  wherever frames are numbered above the managed count (QEMU `virt`'s
+  memory starts at 1 GiB).
+- Code the kernel writes for user mode (image pages, a loader's,
+  WriteProcessMemory's) is cleaned and invalidated for instruction fetch
+  before it runs (a real ARM64 machine's caches need it; QEMU's do not).
+- Input on aarch64: virtio-input keyboards and relative mice
+  (`input/virtio.rs`), xtask's input pacing on the events the guest
+  reads (`virtio_events`, measured against QEMU); `arm_lx_wl_input` and
+  `arm_gui_test_headless` are twins.
+- The event stream on aarch64: a host file written through semihosting
+  (`events_file=`); session_test runs there.
+- CI runs the aarch64 scenarios in its boot shards, under QEMU's
+  emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
-1. xtask's state dump at an aarch64 timeout: QEMU `virt` has no NMI
-   for the monitor's `nmi`, so the request needs another way in (the
-   console's receive line, its interrupt at the NMI's priority, is the
-   candidate).
-2. User mode, the rest: more test programs in USER_PROGRAMS_ARM64 (the
-   x64 ones that build unchanged first, then those with x64 assembly);
-   `.pdata` link records (jump islands); Linux's aarch64 ABI (`lx::machine::aarch64`, its
-   system call table).
-3. CI: the aarch64 boot scenarios on GitHub's ARM64 runners (free for
-   public repositories) or under QEMU's emulation.
-4. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
+   reading its socket in a roundtrip after the "anchor bottom" popup's
+   commit while the server's thread waited too (a wakeup lost, or a
+   request answered with nothing); not reproduced locally, loaded or
+   not. The state dump now says which (`a round would find work`, each
+   client's socket) and names Linux calls in the flight records.
+2. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
+   load, HotSpot's on ARM64); the handover programs (no handover on
+   aarch64 yet); glibc's dynamic programs on aarch64 (dyn_test,
+   gtk_test); a framebuffer on aarch64 (ramfb, which the firmware gives
+   as a linear GOP, or the kernel's virtio-gpu) for the twins of the
+   scenarios whose screen checks take screendumps (gui_test,
+   start_menu, taskmgr, explorer, tray_test, d2d1_window). arch_prctl_test and signal_test stay x86_64's (the
+   call and the sigcontext fields they check are x86's; the aarch64
+   signal frame is pipe_test's, id_test's, altstack_test's and
+   seccomp_test's).
+   xstate_test stays x64's (AVX; ARM64's SVE state is not in
+   gala's ARM64 context). rpcrt4's server routine call puts every
+   argument in integer registers: ARM64 passes floating-point ones in
+   v0-v7 apart, which needs the format string's types.
+3. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick
    with nothing held for it (gdb's record: `interrupt_request` 0, the
@@ -4550,6 +4660,18 @@ x86_64 Android images (AOSP's emulator builds) first, ARM64 after AR.
    renderer), SurfaceFlinger's output as a shasha window.
 4. A first application: an APK from AOSP's samples, its window and input
    checked on the screen.
+
+**Out of scope**: the Google Play Store and Google Play Services
+(proprietary, licensed by Google only to certified devices; a licence
+would be a business decision, not a roadmap step) and Play Integrity's
+device verdicts, which gala cannot pass honestly: applications that
+require them (many banking, payment, DRM and game titles) do not run,
+and the README's "Not there yet" will say so once AN runs
+applications. They come from AOSP, F-Droid and APKs the user
+installs; microG (Apache-2.0), an open
+reimplementation of Play Services' common APIs (push messaging,
+location, sign-in), is the route for applications that need those.
+AOSP's CTS (open source) is AN's conformance suite.
 
 AOSP is open source (Apache-2.0; the kernel GPL-2.0; CLEAN_ROOM
 "Linux"). Needs LD's dynamic linking and most of LX.
@@ -6181,6 +6303,22 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   in QEMU, with the driver host's state in crash reports and the state
   dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE) come with LX
   when it gets device interfaces.
+- **Docker Desktop for Windows** (the owner: wanted, not scheduled;
+  CT's engine relay serves Docker's tools first). Stock Docker Desktop
+  installed by its own installer and run unmodified: its installer and
+  the checks it makes (Windows version, virtualization and optional
+  features through WMI and DISM), its backend service and the
+  privileged helper service, the `docker-desktop` distribution it
+  imports and drives through the WSL facade (CT steps 2-3: the WSL
+  service's COM interface, hvsocket and vsock), its own
+  `\\.\pipe\docker_engine` in place of gala's relay, credential
+  helpers on the Windows credential store, then the dashboard
+  (Electron, after BR stage 2) and its bundled Kubernetes. Worth doing
+  for its own sake: everything it needs is standard Windows (services,
+  WMI, installers, COM, named pipes, Electron) that other programs use
+  too. Its licence terms (a paid subscription at larger organisations)
+  govern running it; never committed, fetched by xtask and run only in
+  QEMU.
 - **Chrome as well as Edge** (the owner): item BR's goal is stock
   Edge, and both browsers are the same Chromium underneath, so Chrome
   is mostly BR's work over again with another vendor's services. Two

@@ -398,9 +398,12 @@ impl UserSpace {
         // Written through the HHDM, not the user mapping: the processor
         // set no dirty bit, which a page out in progress tests
         // (`page_out`).
+        // Code written this way (a loader's, WriteProcessMemory's) reaches
+        // instruction fetch where that needs maintenance (aarch64).
         let mut page = virt / PAGE_SIZE * PAGE_SIZE;
         while page < virt + data.len() as u64 {
             self.mapper.set_dirty_4k(page, true);
+            self.mapper.sync_written_code(page);
             page += PAGE_SIZE;
         }
         Ok(())

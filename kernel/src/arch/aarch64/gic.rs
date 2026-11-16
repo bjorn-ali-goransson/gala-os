@@ -16,6 +16,10 @@
 //! (ICC_EOIR1_EL1), then runs its handler (which may switch threads).
 //! SGIs are the CPUs' IPIs (`send_sgi`, ICC_SGI1R_EL1).
 //!
+//! The console's UART interrupt (an SPI, routed to the boot CPU) is taken
+//! at `NMI_PRIORITY` too (`enable_console`): a break on the line asks for
+//! a state dump, which its handler turns into the NMI on every CPU.
+//!
 //! The pseudo-NMI: SGI `NMI_SGI` at `NMI_PRIORITY`, above the others'
 //! `IRQ_PRIORITY`, which `cpu::PMR_OFF` lets through while interrupts are
 //! off. Taken, it runs `interrupts::nmi` with PSTATE.I set (NMIs do not
@@ -24,7 +28,7 @@
 //! of a CPU stuck in its tick handler); its exit sets PSTATE.I and the
 //! mask back to "on" (it was taken only with interrupts on).
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::interrupts::{Handler, TrapFrame};
 use crate::sync::IrqMutex;
@@ -37,6 +41,14 @@ const VIRT_GICR_SPAN: u64 = 0x00f6_0000;
 const GICR_STRIDE: u64 = 0x2_0000;
 
 const GICD_CTLR: u64 = 0x0000;
+/// Per SPI: group (a bit), enable (a bit), priority (a byte), route (64
+/// bits: the target's affinity, IRM clear).
+const GICD_IGROUPR: u64 = 0x0080;
+const GICD_ISENABLER: u64 = 0x0100;
+const GICD_IPRIORITYR: u64 = 0x0400;
+const GICD_IROUTER: u64 = 0x6000;
+/// The SPIs' INTIDs.
+const SPIS: core::ops::Range<u32> = 32..1020;
 const GICD_CTLR_RWP: u32 = 1 << 31;
 /// EnableGrp0, EnableGrp1, ARE (single security state: DS).
 const GICD_CTLR_ENABLE: u32 = (1 << 0) | (1 << 1) | (1 << 4);
@@ -69,6 +81,10 @@ static GICR: AtomicU64 = AtomicU64::new(0);
 static GICR_PHYS: AtomicU64 = AtomicU64::new(0);
 static GICR_SPAN: AtomicU64 = AtomicU64::new(0);
 static GICD_PHYS: AtomicU64 = AtomicU64::new(0);
+/// The distributor, mapped (0: not up).
+static GICD: AtomicU64 = AtomicU64::new(0);
+/// The console UART's SPI once enabled (0: none).
+static CONSOLE: AtomicU32 = AtomicU32::new(0);
 /// Each CPU's redistributor's RD_base, virtual (0: not up), by CPU index.
 static RD_BASE: [AtomicU64; super::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; super::smp::MAX_CPUS];
@@ -151,6 +167,7 @@ pub fn init() -> Result<(), GicError> {
             }
             core::hint::spin_loop();
         }
+        GICD.store(gicd, Ordering::Release);
         let gicr = super::paging::map_mmio(gicr_phys, span).map_err(GicError::Map)?;
         GICR.store(gicr, Ordering::Release);
     }
@@ -256,6 +273,38 @@ pub fn send_sgi(intid: u32, target: u64) {
     };
 }
 
+/// Routes the console UART's SPI to this CPU at `NMI_PRIORITY`, group 1,
+/// and enables it (after `init`); its interrupts then go to
+/// `serial::take_input`. Logs what it did, or why not.
+pub fn enable_console() {
+    let gicd = GICD.load(Ordering::Acquire);
+    let intid = super::serial::interrupt();
+    if gicd == 0 || !SPIS.contains(&intid) {
+        crate::warn!(
+            "serial: no state dump on a break: the console's interrupt {intid} is not an SPI \
+             (or the GIC is not up)"
+        );
+        return;
+    }
+    let (word, bit) = (u64::from(intid / 32) * 4, 1u32 << (intid % 32));
+    write32(gicd + GICD_IGROUPR + word, read32(gicd + GICD_IGROUPR + word) | bit);
+    // SAFETY: one byte of GICD_IPRIORITYR per interrupt; GICD_IROUTER is
+    // 64 bits per SPI (in the mapped distributor).
+    unsafe {
+        ((gicd + GICD_IPRIORITYR + u64::from(intid)) as *mut u8).write_volatile(NMI_PRIORITY);
+        // `affinity`'s form is GICD_IROUTER's: Aff3 at 32, Aff2-Aff0 below.
+        ((gicd + GICD_IROUTER + 8 * u64::from(intid)) as *mut u64).write_volatile(affinity());
+    }
+    CONSOLE.store(intid, Ordering::Release);
+    write32(gicd + GICD_ISENABLER + word, bit);
+    super::serial::listen();
+    crate::info!(
+        "serial: a break on the console asks for a state dump (interrupt {intid} at the NMI's \
+         priority, to CPU {})",
+        super::percpu::cpu_index()
+    );
+}
+
 /// This CPU's MPIDR affinity in `affinity`'s form (its hardware id).
 pub fn my_affinity() -> u64 {
     affinity()
@@ -304,6 +353,16 @@ pub fn dispatch(frame: &mut TrapFrame) -> Taken {
     if intid == u64::from(NMI_SGI) {
         // PSTATE.I stays set (the vector's): no NMI within an NMI.
         super::interrupts::nmi(frame);
+        return Taken::Nmi;
+    }
+    if intid == u64::from(CONSOLE.load(Ordering::Relaxed)) && intid != 0 {
+        // At the NMI's priority, PSTATE.I set: a break asks every CPU for
+        // its part of a state dump (this one's SGI is taken on return).
+        if super::serial::take_input() {
+            for (_, hw_id) in super::smp::online_cpus() {
+                send_sgi(NMI_SGI, u64::from(hw_id));
+            }
+        }
         return Taken::Nmi;
     }
     // An ordinary IRQ is taken only with interrupts on; its handler runs

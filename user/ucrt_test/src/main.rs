@@ -84,7 +84,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "ucrt_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_ucrt_test";
@@ -604,8 +604,9 @@ fn w<const N: usize>(s: &str) -> [u16; N] {
 }
 
 /// A C `va_list` built from Rust values, laid out as the architecture's
-/// calling convention passes variadic arguments (x64: one 8-byte slot
-/// each; x86: 4-byte words, a double or __int64 taking two).
+/// calling convention passes variadic arguments (x64 and ARM64: one
+/// 8-byte slot each, as a va_list holds them; x86: 4-byte words, a double
+/// or __int64 taking two).
 struct Va {
     words: [usize; 24],
     n: usize,
@@ -640,7 +641,7 @@ impl Va {
     }
 
     fn i64(self, v: i64) -> Self {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(not(target_arch = "x86"))]
         {
             self.push(v as usize)
         }
@@ -916,7 +917,7 @@ fn printf(c: &mut Checks) -> Result<(), u32> {
     sprintf(STANDARD_ROUNDING, &mut buf, 100, b"%.0f %.0f %.0f %.2f\0", &ties);
     c.str(buf.as_ptr(), b"0 2 2 0.12")?;
     sprintf(0, &mut buf, 100, b"%zx %d\0", &Va::new().size(usize::MAX).int(1));
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(not(target_arch = "x86"))]
     c.str(buf.as_ptr(), b"ffffffffffffffff 1")?;
     #[cfg(target_arch = "x86")]
     c.str(buf.as_ptr(), b"ffffffff 1")?;

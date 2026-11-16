@@ -1104,8 +1104,6 @@ pub extern "system" fn RpcSsDestroyClientContext(ctx: *mut usize) {
     }
 }
 
-// x64's; ARM64's variadic convention is the port's (build.rs exports it
-// for x64 only).
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     // NdrClientCall2(desc, format, ...): spills the variadic arguments to
@@ -1135,6 +1133,43 @@ core::arch::global_asm!(
     ".Lrpc_client_raise:",
     "call RpcRaiseException",
     "int3",
+    ".seh_endproc",
+);
+
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    // NdrClientCall2(desc, format, ...): ARM64's variadic arguments come in
+    // x2-x7, then on the stack at the entry sp. Spilling x2-x7 to the six
+    // slots right below the entry sp makes the procedure's arguments
+    // contiguous from there, as x64's home slots do; the interpreter
+    // returns the call's value and a status to raise (RpcRaiseException,
+    // from here: no Rust frame is unwound). Frame: fp/lr, the status at
+    // +16, x2-x7 at +32..+80 (= the entry sp).
+    ".globl NdrClientCall2",
+    ".p2align 2",
+    "NdrClientCall2:",
+    ".seh_proc NdrClientCall2",
+    "stp x29, x30, [sp, #-80]!",
+    ".seh_save_fplr_x 80",
+    ".seh_endprologue",
+    "stp x2, x3, [sp, #32]",
+    "stp x4, x5, [sp, #48]",
+    "stp x6, x7, [sp, #64]",
+    "str wzr, [sp, #16]",
+    "add x2, sp, #32",
+    "add x3, sp, #16",
+    "bl rpcrt4_client_call",
+    "ldr w1, [sp, #16]",
+    "cbnz w1, .Lrpc_client_raise",
+    ".seh_startepilogue",
+    "ldp x29, x30, [sp], #80",
+    ".seh_save_fplr_x 80",
+    ".seh_endepilogue",
+    "ret",
+    ".Lrpc_client_raise:",
+    "mov w0, w1",
+    "bl RpcRaiseException",
+    "brk #0xf000",
     ".seh_endproc",
 );
 

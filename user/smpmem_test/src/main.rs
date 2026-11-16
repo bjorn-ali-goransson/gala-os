@@ -24,8 +24,16 @@ const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 /// Exit status of a thread whose access faulted.
 const FAULTED: NtStatus = 0x0fa1_7ed0;
 const PATTERN: u64 = 0x5a5a_1234_8765_a5a5;
-const CTX_RSP: usize = 0x98;
-const CTX_RIP: usize = 0xf8;
+// The CONTEXT's stack pointer and program counter: x64's Rsp and Rip,
+// ARM64's Sp and Pc.
+#[cfg(target_arch = "x86_64")]
+const CTX_SP: usize = 0x98;
+#[cfg(target_arch = "x86_64")]
+const CTX_PC: usize = 0xf8;
+#[cfg(target_arch = "aarch64")]
+const CTX_SP: usize = 0x100;
+#[cfg(target_arch = "aarch64")]
+const CTX_PC: usize = 0x108;
 
 struct Checks(u32);
 
@@ -68,16 +76,19 @@ extern "C" fn fault_exit() -> ! {
 /// Turns an access violation into `fault_exit` on the faulting thread.
 extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
     // SAFETY: the dispatcher passes valid EXCEPTION_POINTERS; the offsets
-    // are those of the public x64 EXCEPTION_RECORD and CONTEXT.
+    // are those of the public EXCEPTION_RECORD and CONTEXT.
     unsafe {
         let (record, context) = ((*pointers).record, (*pointers).context);
         if (record as *const u32).read_unaligned() != STATUS_ACCESS_VIOLATION {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        let rsp = (context.add(CTX_RSP) as *const u64).read_unaligned();
-        // As if `fault_exit` had been called: rsp % 16 == 8 at its entry.
-        (context.add(CTX_RSP) as *mut u64).write_unaligned((rsp & !0xf) - 0x108);
-        (context.add(CTX_RIP) as *mut u64).write_unaligned(fault_exit as *const () as u64);
+        let sp = (context.add(CTX_SP) as *const u64).read_unaligned();
+        // As if `fault_exit` had been called, below the faulting frame:
+        // x64's rsp % 16 == 8 at a function's entry, ARM64's sp % 16 == 0.
+        let entry_sp =
+            if cfg!(target_arch = "x86_64") { (sp & !0xf) - 0x108 } else { (sp & !0xf) - 0x100 };
+        (context.add(CTX_SP) as *mut u64).write_unaligned(entry_sp);
+        (context.add(CTX_PC) as *mut u64).write_unaligned(fault_exit as *const () as u64);
     }
     EXCEPTION_CONTINUE_EXECUTION
 }

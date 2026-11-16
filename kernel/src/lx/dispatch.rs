@@ -114,13 +114,20 @@ fn dispatch(frame: &mut SyscallFrame) {
     let process = t.process.clone();
     let tid = t.id;
     drop(me);
-    crate::flight::record(crate::flight::Kind::Syscall, number | (process.id << 32), tid);
+    crate::flight::record(
+        crate::flight::Kind::Syscall,
+        number | crate::flight::LINUX | (process.id << 32),
+        tid,
+    );
     let Some(lx) = state::get(process.id) else {
         crate::warn!("lx: pid {}: system call {number} with no Linux state", process.id);
         frame.set_result(errno::to_return(ENOSYS));
         return;
     };
     let call = Call { process, lx, frame, tid, resume: Cell::new(None) };
+    // The first argument as entered: aarch64's result register is x0, so
+    // a restarted call needs it back (`machine::restart`).
+    let arg0 = call.arg(0);
     let traced = crate::events::enabled(crate::events::Category::Syscall)
         && crate::events::syscall_pid_wanted(call.process.id);
     let args = if traced { core::array::from_fn(|i| call.arg(i)) } else { [0; 6] };
@@ -158,12 +165,13 @@ fn dispatch(frame: &mut SyscallFrame) {
     }
     // An expired timer's SIGALRM is delivered with the others below.
     super::timer::fire(&call);
-    crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
+    crate::flight::record(crate::flight::Kind::SyscallDone, number | crate::flight::LINUX, rax);
     let Call { process, lx, resume, .. } = call;
     frame.set_result(rax);
     let resume = resume.take();
     let mut regs = resume.unwrap_or_else(|| return_regs(frame));
-    let delivered = sigcalls::deliver(&process, &lx, tid, number, resume.is_some(), &mut regs);
+    let delivered =
+        sigcalls::deliver(&process, &lx, tid, number, arg0, resume.is_some(), &mut regs);
     if delivered || resume.is_some() {
         platform::continue_with(regs);
     }
@@ -200,7 +208,12 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::ALARM => super::timer::alarm(call, a(0)),
         nr::FORK => super::fork::fork(call, None, false),
         nr::VFORK => super::fork::fork(call, None, true),
-        nr::CLONE => super::fork::clone(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::CLONE => {
+            // (flags, stack, parent_tid, child_tid, tls) in the
+            // architecture's order (`machine::CLONE_ARGS`).
+            let [f, st, p, c, t] = super::machine::CLONE_ARGS.map(a);
+            super::fork::clone(call, f, st, p, c, t)
+        }
         nr::CLONE3 => super::threads::clone3(call, a(0), a(1)),
         nr::SET_ROBUST_LIST => super::threads::set_robust_list(call, a(0), a(1)),
         nr::GET_ROBUST_LIST => super::threads::get_robust_list(call, a(0), a(1), a(2)),

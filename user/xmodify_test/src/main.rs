@@ -19,6 +19,12 @@
 //! after rewriting it: code translated while it changed (an emulator's
 //! cache of translated code) must not outlive the next change.
 //!
+//! ARM64: `movz w0; movk w0; ret`, and after each rewrite the writer
+//! runs the cache maintenance Arm requires for modified code (clean to
+//! the point of unification, invalidate the instruction cache: the kernel
+//! lets user mode, as FlushInstructionCache and a JIT need); phase 2's
+//! serializing instruction is ISB; no phase 3 (`LIVE_ROUNDS`).
+//!
 //! Prints `xmodify_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -34,8 +40,12 @@ const PAGES: usize = 4;
 const STRIDE: usize = 256;
 const FUNCS: usize = PAGES * 0x1000 / STRIDE;
 const ROUNDS: u32 = 3000;
-/// Phase 3: rounds while the runner keeps calling.
-const LIVE_ROUNDS: u32 = 40_000;
+/// Phase 3: rounds while the runner keeps calling. None on ARM64: code
+/// changed while another processor runs it is architecturally defined
+/// there only for a few instructions (B, BL, NOP, BRK, SVC, ...; Arm's
+/// "Concurrent modification and execution of instructions"), not the
+/// MOVZ/MOVK pair a JIT patches, which it changes with the runner stopped.
+const LIVE_ROUNDS: u32 = if cfg!(target_arch = "x86_64") { 40_000 } else { 0 };
 /// Phase 4's first round.
 const FINAL: u32 = 2 * ROUNDS + LIVE_ROUNDS + 1;
 
@@ -77,8 +87,9 @@ fn value(i: usize, round: u32) -> u32 {
     round << 8 | i as u32
 }
 
-/// Function `i`: three NOPs, `mov eax, imm32` (the immediate 4-byte
+/// Function `i` (x64): three NOPs, `mov eax, imm32` (the immediate 4-byte
 /// aligned), `ret`.
+#[cfg(target_arch = "x86_64")]
 fn write_function(base: usize, i: usize, imm: u32) {
     let f = base + i * STRIDE;
     let mut bytes = [0x90u8, 0x90, 0x90, 0xb8, 0, 0, 0, 0, 0xc3];
@@ -89,6 +100,7 @@ fn write_function(base: usize, i: usize, imm: u32) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn patch(base: usize, i: usize, imm: u32) {
     let at = base + i * STRIDE + 4;
     // SAFETY: the aligned immediate of function `i`; one 4-byte store, as
@@ -96,16 +108,82 @@ fn patch(base: usize, i: usize, imm: u32) {
     unsafe { (*(at as *const AtomicU32)).store(imm, Ordering::Release) };
 }
 
-fn call(base: usize, i: usize) -> u32 {
-    let f = base + i * STRIDE;
-    // SAFETY: function `i` is `mov eax, imm32; ret`.
-    let f: extern "C" fn() -> u32 = unsafe { core::mem::transmute(f) };
-    f()
-}
+/// x64 keeps instruction fetch coherent with stores: nothing to do after
+/// patching.
+#[cfg(target_arch = "x86_64")]
+fn publish(_base: usize) {}
 
+#[cfg(target_arch = "x86_64")]
 fn serialize() {
     // CPUID serializes instruction fetch (and has no other effect).
     core::arch::x86_64::__cpuid(0);
+}
+
+/// Function `i` (ARM64): `movz w0, #lo; movk w0, #hi, lsl #16` (one
+/// 8-byte aligned pair), `ret`.
+#[cfg(target_arch = "aarch64")]
+fn write_function(base: usize, i: usize, imm: u32) {
+    patch(base, i, imm);
+    // SAFETY: inside the committed RWX pages.
+    unsafe { ((base + i * STRIDE + 8) as *mut u32).write_volatile(0xd65f_03c0) }; // ret
+}
+
+/// One 8-byte store of the instruction pair, as a JIT patches a constant
+/// it materializes.
+#[cfg(target_arch = "aarch64")]
+fn patch(base: usize, i: usize, imm: u32) {
+    let movz = 0x5280_0000 | ((imm & 0xffff) << 5); // movz w0, #lo
+    let movk = 0x72a0_0000 | ((imm >> 16) << 5); // movk w0, #hi, lsl #16
+    let pair = u64::from(movz) | u64::from(movk) << 32;
+    // SAFETY: the 8-byte aligned pair of function `i`.
+    unsafe {
+        (*((base + i * STRIDE) as *const core::sync::atomic::AtomicU64))
+            .store(pair, Ordering::Release)
+    };
+}
+
+/// ARM64 does not keep instruction fetch coherent with stores: after
+/// patching, the code's data cache lines are cleaned to the point of
+/// unification and its instruction cache lines invalidated (Arm's
+/// sequence for modified code; lines of 4 << CTR_EL0's minimum sizes).
+#[cfg(target_arch = "aarch64")]
+fn publish(base: usize) {
+    let ctr: u64;
+    // SAFETY: reads CTR_EL0 (the kernel lets user mode).
+    unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let (dline, iline) = (4usize << ((ctr >> 16) & 0xf), 4usize << (ctr & 0xf));
+    let end = base + PAGES * 0x1000;
+    let mut at = base;
+    while at < end {
+        // SAFETY: cleans a line of this program's code pages.
+        unsafe { core::arch::asm!("dc cvau, {}", in(reg) at, options(nostack)) };
+        at += dline;
+    }
+    // SAFETY: a barrier.
+    unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+    let mut at = base;
+    while at < end {
+        // SAFETY: invalidates a line of this program's code pages.
+        unsafe { core::arch::asm!("ic ivau, {}", in(reg) at, options(nostack)) };
+        at += iline;
+    }
+    // SAFETY: barriers.
+    unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
+}
+
+/// ISB: this processor fetches the instructions again (what a thread
+/// that runs modified code without entering the kernel needs).
+#[cfg(target_arch = "aarch64")]
+fn serialize() {
+    // SAFETY: a barrier only.
+    unsafe { core::arch::asm!("isb", options(nostack)) };
+}
+
+fn call(base: usize, i: usize) -> u32 {
+    let f = base + i * STRIDE;
+    // SAFETY: function `i` returns its immediate.
+    let f: extern "C" fn() -> u32 = unsafe { core::mem::transmute(f) };
+    f()
 }
 
 fn note(phase: usize, i: usize, round: u32, got: u32) {
@@ -195,6 +273,7 @@ fn run() -> Result<(), u32> {
     for i in 0..FUNCS {
         write_function(base, i, value(i, 0));
     }
+    publish(base);
     for i in 0..FUNCS {
         check(4, call(base, i) == value(i, 0), 0)?;
     }
@@ -216,6 +295,7 @@ fn run() -> Result<(), u32> {
         for i in 0..FUNCS {
             patch(base, i, value(i, round));
         }
+        publish(base);
         set_event(go);
         status(7, wait(done, Some(-100_000_000)))?;
         let bad = BAD.load(Ordering::Relaxed);
@@ -226,6 +306,7 @@ fn run() -> Result<(), u32> {
         for i in 0..FUNCS {
             patch(base, i, value(i, round));
         }
+        publish(base);
         GO.store(round as usize, Ordering::Release);
         while DONE.load(Ordering::Acquire) < round as usize {
             core::hint::spin_loop();
@@ -234,7 +315,7 @@ fn run() -> Result<(), u32> {
         check(9, bad == 0, bad as u64)?;
     }
     // Phase 3.
-    for round in 2 * ROUNDS + 1..=2 * ROUNDS + LIVE_ROUNDS {
+    for round in (2 * ROUNDS + 1..).take(LIVE_ROUNDS as usize) {
         ROUND.store(round, Ordering::Relaxed);
         for i in 0..FUNCS {
             patch(base, i, value(i, round));
@@ -254,6 +335,7 @@ fn run() -> Result<(), u32> {
         for i in (0..FUNCS).filter(|_| round >= FINAL) {
             patch(base, i, value(i, round));
         }
+        publish(base);
         for i in 0..FUNCS {
             let got = call(base, i);
             check(12, got == value(i, round), (i as u64) << 32 | u64::from(got))?;

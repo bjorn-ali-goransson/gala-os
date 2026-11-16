@@ -31,6 +31,11 @@ pub mod xstate;
 /// The architecture's name in logs ("firmware: UEFI x86_64").
 pub const NAME: &str = "x86_64";
 
+/// Whether user mode has a random number generator of its own to use
+/// without the kernel: x86-64's RDRAND/RDSEED, which CPUID reports to user
+/// mode (gala's ProcessPrng reads them itself).
+pub const USER_HW_RANDOM: bool = true;
+
 /// Whether a process of PE machine `machine` runs here: x64, and x86
 /// through WOW64 (`nt::pe`).
 pub fn runs_machine(machine: u16) -> bool {

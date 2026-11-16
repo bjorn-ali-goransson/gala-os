@@ -63,7 +63,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use ntrt as _;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86"))]
 const NAME: &str = "threadpool_test";
 #[cfg(target_arch = "x86")]
 const NAME: &str = "wow64_threadpool_test";
@@ -387,7 +387,7 @@ fn pools(c: &mut Checks) -> Result<(), u32> {
         let image = GetModuleHandleW(core::ptr::null());
         let nt = image + (image as *const u8).add(0x3c).cast::<u32>().read_unaligned() as usize;
         let opt = (nt + 24) as *const u8;
-        let (reserve, commit) = if cfg!(target_arch = "x86_64") {
+        let (reserve, commit) = if cfg!(target_pointer_width = "64") {
             let r = opt.add(72).cast::<u64>().read_unaligned();
             (r as usize, opt.add(80).cast::<u64>().read_unaligned() as usize)
         } else {
@@ -397,7 +397,7 @@ fn pools(c: &mut Checks) -> Result<(), u32> {
         let mut stack = [0usize; 2];
         c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
         c.ok(stack == [reserve, commit], stack[0] as u64)?;
-        if cfg!(target_arch = "x86_64") {
+        if cfg!(target_pointer_width = "64") {
             c.eq(SetThreadpoolStackInformation(pool, &[1, 1]) as u32, 1)?;
             c.eq(QueryThreadpoolStackInformation(pool, &mut stack) as u32, 1)?;
             c.ok(stack == [1, 1], stack[0] as u64)?;

@@ -32,8 +32,13 @@
 //! - `RtlCaptureContext`, `RtlRaiseException`, `RtlUnwindEx` and
 //!   `RtlUnwind` start from their caller's registers.
 //!
-//! Not yet: `.pdata` link records (Flag 3: jump islands),
-//! SVE state (alloc_z, save_zreg, save_preg), trap frames
+//! `.pdata` link records (Flag 3): a jump island's entry names its
+//! parent's (the RVA in its upper 30 bits); the lookup returns the parent,
+//! and a pc outside the parent's range unwinds as its body (the island
+//! is part of it). An island's entry has no length: it reaches the next
+//! entry (the last one, ISLAND_MAX bytes).
+//!
+//! Not yet: SVE state (alloc_z, save_zreg, save_preg), trap frames
 //! (MSFT_OP_TRAP_FRAME) and x64 contexts (MSFT_OP_EC_CONTEXT); a frame
 //! that needs one ends the walk, which the ledger records. Nested
 //! exceptions and collided unwinds, as on x64.
@@ -147,7 +152,7 @@ fn rd64(addr: u64) -> u64 {
 // --- Lookup ------------------------------------------------------------
 
 /// The length in bytes of the function `f` describes (0: a link record,
-/// which is not followed yet).
+/// whose extent the table gives: `search`).
 fn function_length(base: usize, f: &RuntimeFunction) -> u32 {
     match f.unwind & 3 {
         1 | 2 => ((f.unwind >> 2) & 0x7ff) * 4,
@@ -155,6 +160,20 @@ fn function_length(base: usize, f: &RuntimeFunction) -> u32 {
         _ => 0,
     }
 }
+
+/// A link record (Flag 3: a jump island).
+fn is_link(f: &RuntimeFunction) -> bool {
+    f.unwind & 3 == 3
+}
+
+/// How far the last entry's jump island reaches, when it is a link
+/// record (no next entry ends it): a branch through a register needs at
+/// most four instructions (`adrp`, `add`, `br`, and a pad).
+const ISLAND_MAX: u32 = 16;
+
+/// How many link records `resolve` follows before giving up (a cycle in
+/// a bad table).
+const MAX_LINKS: usize = 8;
 
 // The tables themselves (an image's, and those registered at run time)
 // are `ftable.rs`'s, shared with x64; these are ARM64's entry format.
@@ -175,9 +194,17 @@ pub(crate) fn search(
         let mid = (lo + hi) / 2;
         // SAFETY: mid < count entries of the table.
         let f = unsafe { &*table.add(mid) };
+        // A jump island reaches the next entry.
+        let end = if is_link(f) {
+            // SAFETY: mid + 1 < count entries of the table.
+            let next = (mid + 1 < count).then(|| unsafe { (*table.add(mid + 1)).begin });
+            next.unwrap_or(f.begin.saturating_add(ISLAND_MAX))
+        } else {
+            f.begin + function_length(base as usize, f)
+        };
         if rva < f.begin {
             hi = mid;
-        } else if rva >= f.begin + function_length(base as usize, f) {
+        } else if rva >= end {
             lo = mid + 1;
         } else {
             return f;
@@ -186,10 +213,21 @@ pub(crate) fn search(
     core::ptr::null()
 }
 
-/// The entry the lookup returns for `f`: itself (a link record, which
-/// would name its parent, is not followed yet).
-pub(crate) fn resolve(_base: u64, f: *const RuntimeFunction) -> *const RuntimeFunction {
-    f
+/// The entry the lookup returns for `f`: itself, or for a link record
+/// its parent's (followed while the parent is a link too, at most
+/// MAX_LINKS times; a longer chain is a bad table: no entry).
+pub(crate) fn resolve(base: u64, f: *const RuntimeFunction) -> *const RuntimeFunction {
+    let mut f = f;
+    for _ in 0..=MAX_LINKS {
+        // SAFETY: an entry of a table, or a parent a link record names in
+        // the same image.
+        let entry = unsafe { &*f };
+        if !is_link(entry) {
+            return f;
+        }
+        f = (base as usize + (entry.unwind & !3) as usize) as *const RuntimeFunction;
+    }
+    core::ptr::null()
 }
 
 // --- Unwind codes ------------------------------------------------------
@@ -612,11 +650,12 @@ fn packed_codes(unwind: u32) -> (Codes, Codes) {
 }
 
 /// Unwinds a function with packed unwind data at instruction `offset`.
-fn unwind_packed(unwind: u32, offset: u32, ctx: &mut Context) -> Result<bool, UnwindError> {
+fn unwind_packed(unwind: u32, offset: Option<u32>, ctx: &mut Context) -> Result<bool, UnwindError> {
     let (pro, epi) = packed_codes(unwind);
     let length = (unwind >> 2) & 0x7ff;
-    // Flag 2: a fragment with no prologue or epilogue of its own.
-    if unwind & 3 == 1 {
+    // Flag 2: a fragment with no prologue or epilogue of its own; outside
+    // the function (a jump island): the body.
+    if let (1, Some(offset)) = (unwind & 3, offset) {
         let plen = pro.count as u32;
         if offset < plen {
             return run_codes(&pro.bytes[..pro.len], ctx, (plen - offset) as usize);
@@ -645,7 +684,7 @@ struct Unwound {
 fn unwind_full(
     base: usize,
     xdata: usize,
-    offset: u32,
+    offset: Option<u32>,
     ctx: &mut Context,
 ) -> Result<Unwound, UnwindError> {
     let w0 = rd32(xdata);
@@ -667,31 +706,34 @@ fn unwind_full(
     // SAFETY: the record's unwind code bytes, `words` words long.
     let codes = unsafe { core::slice::from_raw_parts(at as *const u8, 4 * words as usize) };
     let none = |pc_from_lr| Ok(Unwound { handler: 0, data: 0, pc_from_lr });
-    // In the prologue: only what ran is undone.
-    let plen = sequence_len(codes) as u32;
-    if offset < plen {
-        return none(run_codes(codes, ctx, (plen - offset) as usize)?);
-    }
-    // In an epilogue: only what had not run.
-    if epilog_in_header {
-        let index = epilogs as usize;
-        if let Some(seq) = codes.get(index..) {
-            let elen = sequence_len(seq) as u32 + 1;
-            if length >= elen && offset >= length - elen {
-                return none(run_codes(seq, ctx, (offset - (length - elen)) as usize)?);
-            }
+    // Outside the function (a jump island, `offset` None): the body.
+    if let Some(offset) = offset {
+        // In the prologue: only what ran is undone.
+        let plen = sequence_len(codes) as u32;
+        if offset < plen {
+            return none(run_codes(codes, ctx, (plen - offset) as usize)?);
         }
-    } else {
-        for s in 0..epilogs as usize {
-            let scope = rd32(scopes + 4 * s);
-            let start = scope & 0x3_ffff;
-            let index = (scope >> 22) as usize;
-            if offset < start {
-                break;
+        // In an epilogue: only what had not run.
+        if epilog_in_header {
+            let index = epilogs as usize;
+            if let Some(seq) = codes.get(index..) {
+                let elen = sequence_len(seq) as u32 + 1;
+                if length >= elen && offset >= length - elen {
+                    return none(run_codes(seq, ctx, (offset - (length - elen)) as usize)?);
+                }
             }
-            let Some(seq) = codes.get(index..) else { continue };
-            if offset <= start + sequence_len(seq) as u32 {
-                return none(run_codes(seq, ctx, (offset - start) as usize)?);
+        } else {
+            for s in 0..epilogs as usize {
+                let scope = rd32(scopes + 4 * s);
+                let start = scope & 0x3_ffff;
+                let index = (scope >> 22) as usize;
+                if offset < start {
+                    break;
+                }
+                let Some(seq) = codes.get(index..) else { continue };
+                if offset <= start + sequence_len(seq) as u32 {
+                    return none(run_codes(seq, ctx, (offset - start) as usize)?);
+                }
             }
         }
     }
@@ -717,11 +759,23 @@ fn virtual_unwind(
     ctx: &mut Context,
 ) -> Result<Unwound, UnwindError> {
     ctx.set_unwound(true);
-    let offset = ((pc as usize - base) as u32).wrapping_sub(f.begin) / 4;
+    let f = if is_link(f) {
+        let parent = resolve(base as u64, f);
+        if parent.is_null() {
+            return Err(UnwindError::Unsupported(0));
+        }
+        // SAFETY: the parent entry `resolve` found.
+        unsafe { &*parent }
+    } else {
+        f
+    };
+    // The instruction's offset in the function; None outside it (a jump
+    // island, which unwinds as the body).
+    let rva = (pc as usize - base) as u32;
+    let offset = rva.checked_sub(f.begin).filter(|&d| d < function_length(base, f)).map(|d| d / 4);
     let unwound = match f.unwind & 3 {
         1 | 2 => Unwound { handler: 0, data: 0, pc_from_lr: unwind_packed(f.unwind, offset, ctx)? },
-        0 => unwind_full(base, base + f.unwind as usize, offset, ctx)?,
-        _ => return Err(UnwindError::Unsupported(0)),
+        _ => unwind_full(base, base + f.unwind as usize, offset, ctx)?,
     };
     if unwound.pc_from_lr {
         ctx.set(CTX_PC, ctx.get(CTX_LR));
@@ -824,6 +878,63 @@ fn stack_bounds() -> (u64, u64) {
 /// below the base.
 fn frame_ok(frame: u64, stack_base: u64) -> bool {
     frame & 0xf == 0 && frame < stack_base && frame != 0
+}
+
+// --- Stack back traces -------------------------------------------------
+
+unsafe extern "system" {
+    /// The assembly RtlCaptureContext below.
+    fn RtlCaptureContext(context: *mut u8);
+}
+
+/// RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace,
+/// BackTraceHash): the return addresses of the frames above this one, the
+/// caller's first, after skipping `skip`; the hash is their sum
+/// (truncated). Returns how many were captured.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "system" fn RtlCaptureStackBackTrace(
+    skip: u32,
+    count: u32,
+    frames: *mut usize,
+    hash: *mut u32,
+) -> u16 {
+    let mut ctx = Context([0; CONTEXT_SIZE]);
+    // SAFETY: a 16-byte aligned CONTEXT of ours.
+    unsafe { RtlCaptureContext(ctx.0.as_mut_ptr()) };
+    // The captured Pc is the return address of that call, in this function.
+    ctx.set_unwound(true);
+    let (_, stack_base) = stack_bounds();
+    let (mut n, mut skipped, mut sum) = (0u32, 0u32, 0u32);
+    let mut last = (ctx.get(CTX_PC), ctx.get(CTX_SP));
+    for _ in 0..1024 {
+        if n >= count.min(u32::from(u16::MAX)) {
+            break;
+        }
+        if unwind_frame(&mut ctx).is_none() {
+            break;
+        }
+        let (pc, sp) = (ctx.get(CTX_PC), ctx.get(CTX_SP));
+        // A frame without unwind data whose Lr is its own return address
+        // (no progress) ends the walk as the stack's end does.
+        if pc == 0 || sp >= stack_base || (pc, sp) == last {
+            break;
+        }
+        last = (pc, sp);
+        if skipped < skip {
+            skipped += 1;
+            continue;
+        }
+        // SAFETY: the caller's array of `count` entries.
+        unsafe { *frames.add(n as usize) = pc as usize };
+        sum = sum.wrapping_add(pc as u32);
+        n += 1;
+    }
+    if !hash.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *hash = sum };
+    }
+    n as u16
 }
 
 /// DISPATCHER_CONTEXT (ARM64's: DISPATCHER_CONTEXT_ARM64).
