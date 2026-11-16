@@ -1005,7 +1005,17 @@ current process, -2 = current thread.
   before the program starts (the process gives its up at the exit),
   checks that the space is freed and logs
   "address space still referenced" otherwise, which fails the boot
-  scenario. A leak is a second without progress (each reference that
+  scenario. "Before the program starts" is exact: the main thread is
+  created suspended and resumed once the reference is in hand, because a
+  program that ends in a few milliseconds (`unimplemented_test`, which
+  ntdll ends in its init) would otherwise have given the space up first.
+  Where the reference cannot be taken that early — a Linux program
+  (`lxrun=`: `lx::exec::spawn` runs it from its first instruction) or one
+  the previous kernel handed over — `await_program` logs "gave its
+  address space up before it could be held" and skips the check alone:
+  the exit status is still reported, which is what the scenarios read
+  ("finished with status"), and an early return used to lose it to a fast
+  program at random. A leak is a second without progress (each reference that
   goes restarts the second); the message is preceded by who holds the
   space (`sched::dump_space_holders`: unreaped threads with state and
   CPU; `sched::held_by_reaps`: references a reap in progress holds;

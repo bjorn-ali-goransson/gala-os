@@ -4245,8 +4245,13 @@ the next breakthroughs).
    full parallel run of the `lx_` scenarios, `lx_gimp_batch`'s file-png
    plug-in (the load of in.png, its result right) printed "gimp_flush():
    error: Broken pipe" at its end: it wrote after GIMP had closed its
-   pipe. Not seen again in 7 runs (5 beside `lx_gimp`, `linux_menu` and
-   `lx_gtk_x11` with `XTASK_EVENTS=syscall`); the cause is not found yet.
+   pipe. Seen once more, in CI on a host at load 5.9 for 4 CPUs: that
+   time two plug-ins at once, file-png and script-fu, each of which had
+   taken far longer than on an idle host (521 ms and 1670 ms), while
+   gimp-console was still running (it exited 5.7 s later). Both sightings
+   are a slow plug-in on a loaded host, which puts the question at the
+   plug-in's last write and not at a reader that had gone; the cause is
+   not found yet.
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
    "inkscape"), first in batch mode (`lx_inkscape_batch`: in.svg rendered
    to a PNG Ubuntu's byte for byte; WORKFLOW "Inkscape") and its window
