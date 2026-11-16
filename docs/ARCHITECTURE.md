@@ -3438,7 +3438,7 @@ own name).
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
 | COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), slc (the Software Licensing Client, sppc's API under its older name, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -10276,8 +10276,43 @@ stations and desktops a program creates are refused until stage 3).
   Windows derives it from is not measured). Every call is recorded,
   "other", as `sppc.dll!<function>(<case>)` with the HRESULT as detail;
   a store file that is not a license as `sppc.dll!store: unreadable
-  license file`. No 32-bit build, no sppcext.dll (SLActivateProduct)
-  and no slc.dll yet: nothing has asked for them.
+  license file`. No 32-bit build and no sppcext.dll
+  (SLActivateProduct): nothing has asked for them. slc.dll, the name
+  this API had before Windows 8, is a DLL of its own over these
+  functions ("slc").
+- slc (`user/slc`, x64; `slc_test`): the Software Licensing Client, the
+  name sppc's API had before Windows 8. Click-to-Run's service loads it
+  by name (a LoadLibrary: no Click-to-Run binary imports it, measured
+  over the 165 files of `ClickToRun`, `root\Client` and
+  `root\Integration`) while it brings up the App-V ISV API, and asks it
+  one thing,
+  `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`.
+  Its absence was a gap of gala's own and is closed; it was not the
+  cause of the `OISVAPI::Initialize Failed ... Error:0x7e`
+  (`swrpcserver.cpp : 552`) that leaves the ISV RPC endpoints unserved,
+  which the run with slc.dll in System32 logs unchanged (ROADMAP OF).
+  Windows' slc.dll is 40 exports: 31 forwarders to SPPC.dll and 9 of
+  its own code (its export table). gala's has that shape, one line per
+  name in
+  `user/slc/exports.txt`, which build.rs turns into
+  `/EXPORT:<name>=sppc.<name>` for the 31, so a license, SKU or policy
+  asked of slc is answered from the store sppc keeps; the 18 of them
+  sppc does not implement resolve to nothing, as an absent export does,
+  and start working when sppc has the function. Of the 9:
+  SLGetWindowsInformation and SLGetWindowsInformationDWORD answer
+  SL_E_VALUE_NOT_FOUND for every name (gala keeps no Windows licensing
+  information, as sppc keeps no policy) and E_INVALIDARG for a NULL
+  name or output, both as Windows answers; SLIsWindowsGenuineLocal is
+  S_OK with SL_GEN_STATE_IS_GENUINE, gala having no activation state
+  (the Windows machine measured answers that state too). The six whose
+  parameters are in no public header (SLConsumeWindowsRight,
+  SLReArmWindows, SLRegisterWindowsEvent, SLUnregisterWindowsEvent,
+  SLpCheckProductKey, SLpUpdateComponentTokens) are not exported: gala
+  does not guess a signature, so GetProcAddress gives NULL and the
+  ledger says `slc.dll!<name>` "missing export" (the one place
+  `slc_test` reads differently on Windows, where all six are present).
+  Every call is recorded, "other", as `slc.dll!<function>(<case>)` with
+  the HRESULT as detail. No 32-bit build: nothing has asked for one.
 - webservices (`user/webservices`, x64 and x86; `webservices_test`,
   `wow64_webservices_test`): Windows Web Services' XML reader, the part
   of WWSAPI the Office Deployment Tool's setup.exe delay-loads to read

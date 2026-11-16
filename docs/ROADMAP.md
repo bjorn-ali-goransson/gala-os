@@ -1841,11 +1841,41 @@ need gala's.
      ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
      (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
      is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. The server is the next step; the
-     client side of the diagnosis is in place: a connect that finds no
-     pipe records the name (`rpcrt4.dll!no server at pipe(<name>)`, the
-     Win32 error as the detail, `rpc_test`), so a run says which
-     endpoint a program could not reach.
+     client has nothing to reach. The client side of the diagnosis is
+     in place: a connect that finds no pipe records the name
+     (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
+     detail, `rpc_test`), so a run says which endpoint a program could
+     not reach -- for Word, `LRPC-AppV-ISV-<GUID>APPV-VIRTMAN-NOT`,
+     14 times over the 59 s the service's own log counts
+     (`isv_process_notifier.cpp : 64`, 0x800706ba, RetryCount 13).
+     Of every file the service looked for and did not find, one was
+     gala's own gap and is now closed: slc.dll (ARCHITECTURE "slc",
+     `slc_test`, Windows' answers measured), which it loads from
+     System32 and asks one thing,
+     `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`
+     (SL_E_VALUE_NOT_FOUND, in the ledger). The 0x7e did not move, so
+     that absence was not its cause. What the run shows before it: the
+     App-V DLL set (AppVOrchestration, AppVIsvStreamingManager,
+     AppVManifest, AppVCatalog, AppVIsvVirtualization, AppVIntegration,
+     AppVIsvSubsystemController, AppVFileSystemMetadata) maps twice,
+     then five files are looked for by full path in `ClickToRun` and
+     are not there -- `AppVISVStream32.dll`, `AppVISVStream64.dll`,
+     `Mso20win32client.dll`, `Mso30win32client.dll`,
+     `Mso40UIwin32client.dll` -- and 1.5 s later the error is logged.
+     None of those five is in Windows' own `ClickToRun` either
+     (measured on the Windows machine; the three Mso ones live under
+     the Office root's `vfs\ProgramFilesCommonX64\Microsoft
+     Shared\Office16`, and no Click-to-Run binary imports slc.dll or
+     any of the five: 165 files read), so the misses are what Windows
+     has too. No DLL load failed in the service in the whole run: the
+     ledger has neither a `missing dll` nor a `load failed` for it, and
+     gala's loader records both ("Gaps are never silent", `load_module`
+     in `user/testntdll`). So the 126 is not a load of gala's --
+     ERROR_MOD_NOT_FOUND is also what GetModuleHandle answers for a
+     module that is not loaded, where GetProcAddress answers the 127
+     this ladder has already climbed, and that miss is recorded
+     nowhere. Making it say the name asked for is the next step; the
+     name is what the server needs.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
