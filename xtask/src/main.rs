@@ -9495,6 +9495,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tray_test", "gdi32.dll", "Windows/System32"),
     ("tray_test", "shell32.dll", "Windows/System32"),
     ("tray_test", "comctl32.dll", "Windows/System32"),
+    ("no_i8042", "ntdll.dll", "Windows/System32"),
+    ("no_i8042", "kernel32.dll", "Windows/System32"),
+    ("no_i8042", "user32.dll", "Windows/System32"),
+    ("no_i8042", "gdi32.dll", "Windows/System32"),
+    ("no_i8042", "shell32.dll", "Windows/System32"),
+    ("no_i8042", "comctl32.dll", "Windows/System32"),
     ("wow64_tray_test", "wow64.dll", "Windows/System32"),
     ("wow64_tray_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -12234,7 +12240,11 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
     let cpus = telemetry::vm_cpus(iso).to_string();
-    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
+    // A machine with no PS/2 controller at all (NO_I8042_SCENARIOS), as
+    // laptops whose keyboard and mouse are USB alone are built.
+    let machine =
+        if NO_I8042_SCENARIOS.contains(&iso_scenario(iso)) { "q35,i8042=off" } else { "q35" };
+    cmd.args(["-machine", machine, "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -14066,6 +14076,27 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "desktop: notification-area icon added: window",
             "wow64_tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A machine with no PS/2 controller at all (`-machine
+        // q35,i8042=off`: NO_I8042_SCENARIOS), as a laptop whose keyboard
+        // and mouse are USB alone: the input thread must say so and stop
+        // (and not spin on a status port that always reports a byte
+        // waiting), and the desktop must keep its clock, which is a
+        // thread of its own and not the input thread's passenger.
+        // tray_test is the desktop program here because it needs no
+        // input: on a Test presenter it adds its icon, talks to the
+        // notification area and ends by itself.
+        name: "no_i8042",
+        cmdline: "qemu_exit presenter=test run=tray_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "input: the PS/2 controller (ports 0x60 and 0x64) never answered",
+            "desktop: notification-area icon added: window",
+            "desktop: clock: ",
+            "tray_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -18834,6 +18865,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("no_i8042", "a machine with no PS/2 controller: gala-um has no I/O ports and no input thread"),
 ];
 
 /// The kernel flags gala-um applies to a scenario's run (`um_command`),
@@ -23158,6 +23190,11 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
         ))
         .args(["-device", "virtio-net-pci,netdev=n0"]);
 }
+
+/// Scenarios booted on a machine with no i8042 (`-machine
+/// q35,i8042=off`): every read of port 0x64 is 0xff, as on a machine
+/// whose keyboard and mouse are USB alone.
+const NO_I8042_SCENARIOS: &[&str] = &["no_i8042"];
 
 /// Scenarios that get a virtio-net card on QEMU's user network and no
 /// client: the card is found and set up, nothing connects

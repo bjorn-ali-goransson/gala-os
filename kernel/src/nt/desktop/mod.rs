@@ -4096,7 +4096,52 @@ fn listen_with(shell: &Shell, owner: u64, listener: Listener) -> Result<(), NtSt
     Ok(())
 }
 
-/// The clock: called now and then (the input thread), for every live
+/// The clock thread has been started (`start_clock`), and how many times
+/// it has ticked (the `desktop: clock:` line at the end of a run).
+static CLOCK_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static CLOCK_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How long the clock thread sleeps between ticks.
+const CLOCK_MS: u64 = 1000;
+
+/// Starts the desktop's clock (once; later calls do nothing): [`tick`] at
+/// once, then every second, on a thread of its own.
+///
+/// Its own, because the clock is not input: it used to run every two
+/// hundred rounds of the input thread's poll loop, which meant that a
+/// machine with no PS/2 mouse -- the input thread stopped at one -- had a
+/// desktop whose taskbar minute never changed, whose tray never ticked
+/// and which never noticed the host's window being resized.
+pub fn start_clock() {
+    if CLOCK_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    if crate::sched::spawn("desktop clock", clock_thread, 0).is_err() {
+        crate::warn!(
+            "desktop: no clock thread: the taskbar's minute, the tray and a display change will not be noticed"
+        );
+    }
+}
+
+fn clock_thread(_: usize) {
+    loop {
+        tick();
+        CLOCK_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::sched::sleep_ms(CLOCK_MS);
+    }
+}
+
+/// The `desktop: clock:` line at the end of a run; nothing when no
+/// desktop went live (the clock starts with the first one).
+pub fn log_clock_stats() {
+    let ticks = CLOCK_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+    if ticks == 0 {
+        return;
+    }
+    crate::info!("desktop: clock: {ticks} ticks, one every {CLOCK_MS} ms on its own thread");
+}
+
+/// The clock: called by the clock thread (`start_clock`), for every live
 /// desktop. Also notices a display change (virtio-gpu: the host's window
 /// resized), which the desktop the screen shows follows.
 pub fn tick() {

@@ -436,6 +436,7 @@ xtask that change how a scenario boots:
 | `CARD_SCENARIOS` | a network card and nothing connecting to it (the driver's set-up alone: `arm_boot`) |
 | `DISK_SCENARIOS` | a virtio-blk disk, sparse, with the most it may take on the host ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
+| `NO_I8042_SCENARIOS` | `-machine q35,i8042=off`: no PS/2 controller at all, as on a machine whose keyboard and mouse are USB alone (`no_i8042`) |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
 | `SINGLE_THREAD_TCG` | `-accel tcg,thread=single` without KVM ("Known intermittent") |
 | `HOST_LOAD_SCENARIOS` | run with a busy thread on every host CPU |

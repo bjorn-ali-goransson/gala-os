@@ -211,19 +211,28 @@ static SCREEN: crate::sync::IrqMutex<Option<crate::boot::Framebuffer>> =
 /// The desktop has taken the screen (once: the console stops drawing).
 static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// The desktop's threads of its own: the one that reads the local
+/// keyboard and mouse, and the one that runs its clock. Separate,
+/// because the clock must go on where this kernel cannot read the
+/// machine's input (no PS/2 controller, or USB devices alone).
+fn start_local_input() {
+    crate::input::start();
+    crate::nt::desktop::start_clock();
+}
+
 /// The desktop takes the screen: the console stops drawing on the
 /// framebuffer (with virtio-gpu it is not what is shown, and it is
-/// dropped), the input thread starts.
+/// dropped), the input and clock threads start.
 fn take_screen() {
     if TAKEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
     let fb = crate::console::take_framebuffer();
     if crate::display::present() {
-        crate::input::start();
+        start_local_input();
     } else if let Some(fb) = fb {
         *SCREEN.lock() = Some(fb);
-        crate::input::start();
+        start_local_input();
     }
 }
 
@@ -251,6 +260,6 @@ impl Display for Kernel {
     /// The PS/2 input thread (also without a screen: a headless desktop,
     /// `presenter=`).
     fn local_input() {
-        crate::input::start();
+        start_local_input();
     }
 }

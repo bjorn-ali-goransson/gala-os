@@ -46,7 +46,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/net/              virtio-net, loopback, smoltcp TCP/UDP
   src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
-  src/input.rs          PS/2 mouse polling for the desktop
+  src/input.rs          PS/2 keyboard and mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/nt/abi/           Windows' ABI on this architecture (x64/: CONTEXT, frames, ...)
@@ -7316,7 +7316,8 @@ session's is shown by nothing unless GalaSession attaches a presenter
   `screen_write_row`, `screen_flush` (a damaged rectangle's rows are
   written: a GPU shows them), `screen_changed` (a new size) and
   `local_input` (the console session's desktop went live: the kernel
-  starts the PS/2 thread, also without a screen). The Console presenter
+  starts the PS/2 input thread and the desktop's clock thread, also
+  without a screen). The Console presenter
   is what uses it. The
   screen is the bootloader's framebuffer, or with `display=virtio` a
   virtio-gpu ("Plan: graphics and GPU", G1). The kernel takes the
@@ -7330,7 +7331,20 @@ session's is shown by nothing unless GalaSession attaches a presenter
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms
   from a kernel thread (IRQ 1 and 12 are not routed); the configuration
   turns both ports on and translation to scan code set 1; mouse
-  0xF6/0xF4, keyboard 0xF4. Mouse packets with the buttons held are
+  0xF6/0xF4, keyboard 0xF4. The keyboard and the mouse are looked for
+  separately (`Controller::enable` -> `Devices { keyboard, mouse,
+  wheel }`, each from its device's ACK) and what answered is logged by
+  name, because a machine often has one and not the other: the input
+  thread goes on for either, and only no device at all ends it. Every
+  wait in the setup is bounded in *time* (`time::SpinDeadline`: 10 ms
+  for the input buffer to empty, 50 ms for a device's answer), not in
+  reads of the status port, and the first drain is bounded in bytes:
+  where no controller answers, port 0x64 reads 0xff -- every bit set,
+  so a byte looks ready forever -- and each read is a VM exit a hundred
+  times slower than a real one. A machine with no controller is left in
+  milliseconds with `input: the PS/2 controller (ports 0x60 and 0x64)
+  never answered`, which names USB HID (ROADMAP USB) as what such a
+  machine needs. Mouse packets with the buttons held are
   summed per poll (`Coalescer`); a packet that changes the buttons goes
   to the desktop at once with its own move, so a press or release taken
   late still lands where it happened (a later move is never folded into
@@ -7406,7 +7420,7 @@ session's is shown by nothing unless GalaSession attaches a presenter
   average from what user32 hands over, or else a letter tile; an accent
   pill under the active one, a grey one under the others); at the right
   a UTC clock over the date in 12-hour M/D/YYYY form (`tick` every
-  second from the input thread); left of the clock, the notification
+  second from the desktop's clock thread); left of the clock, the notification
   area (below).
 - **Start menu** (600 x 640, centred above the taskbar): a search box
   (typing filters the programs, Enter starts the first, Esc or the
@@ -11371,9 +11385,15 @@ alone in `winstate/tests.rs`.
   (the same `Desktop::pointer`, `key`, `wheel`): screen checks inside
   the guest, without the devices. A desktop shown by the console or by
   nothing takes none (STATUS_INVALID_DEVICE_STATE).
-- **The clock** (`tick`, from the input thread every second) updates
-  every live desktop; a display change resizes the desktop the Console
-  presenter shows.
+- **The clock** (`tick`, from the desktop's clock thread every second:
+  `desktop::start_clock`, started with the input thread by
+  `platform::local_input`, counted in `desktop: clock: <n> ticks` at
+  exit) updates every live desktop; a display change resizes the
+  desktop the Console presenter shows. Its own thread, because the
+  clock is not input: riding the input thread's poll loop, it stopped
+  wherever that thread stopped -- a machine with no PS/2 mouse had a
+  desktop whose minute never changed and which never noticed a display
+  change.
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
   session that does not exist; a bare desktop's answers are in "Server
@@ -14270,7 +14290,7 @@ The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
 - **Seam** (`nt::platform::Display`): `screen_flush(x, y, w, h)` after
   the desktop writes a damaged rectangle's rows (nothing for a
   framebuffer); `screen_changed()`, polled by `desktop::tick` every
-  second from the input thread: a new size re-lays out the desktop
+  second from the desktop's clock thread: a new size re-lays out the desktop
   (`Desktop::set_screen`) and redraws it. The console stops drawing on
   the framebuffer when the desktop takes the screen.
 - **Scenarios**: `virtio_gpu` (gui_test with `display=virtio`; QEMU gets

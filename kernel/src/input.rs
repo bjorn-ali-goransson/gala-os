@@ -6,6 +6,13 @@
 //! (a console switch moves them). Started when the desktop takes the
 //! screen, or when the console session's desktop goes live without one
 //! (`presenter=`: a headless desktop still takes the local input).
+//!
+//! The keyboard and the mouse are found separately (`ps2::Devices`) and
+//! each is reported, because a machine may have one, the other, both or
+//! neither: this thread polls for as long as either answered. Nothing
+//! else rides on it -- the desktop's clock is its own thread
+//! (`nt::desktop::start_clock`), so a machine with no PS/2 mouse still
+//! has a taskbar whose minute changes.
 
 use crate::arch::ps2;
 use crate::sched;
@@ -70,23 +77,47 @@ pub fn log_stats() {
 }
 
 fn input_thread(_: usize) {
-    let Some(mut controller) = ps2::claim() else { return };
-    if !controller.enable_mouse() {
-        crate::warn!("input: no PS/2 mouse");
+    let Some(mut controller) = ps2::claim() else {
+        crate::info!("input: no PS/2 controller on this machine");
+        return;
+    };
+    // Which devices are on the controller is the machine's own business,
+    // and a machine with none at all is a machine whose input this kernel
+    // cannot read: each case says so, because the alternative is a desktop
+    // that silently ignores the keyboard.
+    let Some(found) = controller.enable() else {
+        crate::warn!(
+            "input: the PS/2 controller (ports 0x60 and 0x64) never answered: no local keyboard or mouse (a machine whose keyboard and mouse are USB alone has none until USB HID is driven)"
+        );
+        return;
+    };
+    if found.keyboard {
+        crate::info!("input: PS/2 keyboard scanning (set 1, the controller translating)");
+    } else {
+        crate::warn!(
+            "input: no PS/2 keyboard: nothing on the controller's first port acknowledged 0xf4 (enable scanning), so keys will not reach the desktop (a USB keyboard is not driven yet)"
+        );
+    }
+    if found.mouse {
+        crate::info!("input: PS/2 mouse reporting (wheel: {})", found.wheel);
+    } else {
+        crate::warn!(
+            "input: no PS/2 mouse: nothing on the controller's auxiliary port acknowledged 0xf6/0xf4 (defaults, enable reporting), so the pointer will not move (a USB mouse is not driven yet)"
+        );
+    }
+    if !found.keyboard && !found.mouse {
+        crate::warn!("input: no PS/2 device answered: nothing to read, the input thread stops");
         return;
     }
-    let wheel = controller.enable_wheel();
-    crate::info!("input: PS/2 mouse enabled (wheel: {wheel})");
     crate::info!(
         "input: bytes read at {:#x} (keyboard, mouse: two u64), mouse packets of {} bytes",
         core::ptr::addr_of!(BYTES_READ) as usize,
-        if wheel { 4 } else { 3 }
+        if found.wheel { 4 } else { 3 }
     );
-    let mut packet = Packet { size: if wheel { 4 } else { 3 }, ..Packet::default() };
+    let mut packet = Packet { size: if found.wheel { 4 } else { 3 }, ..Packet::default() };
     let mut keys = Keys::default();
     let mut mouse = Coalescer::default();
     let mut held = 0u8;
-    let mut rounds = 0u32;
     loop {
         // Moves with the buttons held are summed (one redraw per poll);
         // a press or release is delivered where it happened.
@@ -123,10 +154,6 @@ fn input_thread(_: usize) {
             mouse.packet(dx, dy, buttons, &mut deliver);
         }
         mouse.flush(&mut deliver);
-        rounds = rounds.wrapping_add(1);
-        if rounds.is_multiple_of(200) {
-            crate::nt::desktop::tick();
-        }
         sched::sleep_ms(5);
     }
 }

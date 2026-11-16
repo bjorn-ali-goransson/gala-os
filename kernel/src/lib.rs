@@ -552,6 +552,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     display::log_stats();
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
+    nt::desktop::log_clock_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);

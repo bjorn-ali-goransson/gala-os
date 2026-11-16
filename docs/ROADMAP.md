@@ -225,7 +225,7 @@ has a section under "Open items".
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
-| USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; not urgent |
+| USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); Word and Excel start without a window yet (`office_word`, `office_excel`) |
 
@@ -1376,12 +1376,22 @@ reset, streams restart).
 **Goal**: gala drives USB through its own xHCI driver, so USB
 keyboards, mice and sticks work, first on QEMU's `qemu-xhci`, then on
 real machines; Windows programs see USB devices through the APIs they
-use. Not urgent (the owner): after the current focus.
+use. Wanted next (the owner), its HID part first: it is what stands
+between gala and a machine of the owner's own, where the desktop comes
+up and cannot be touched.
 
 **Today**: nothing. The keyboard and mouse are PS/2, every device is
 polled, and xHCI is only listed among gala's own drivers under
 "Later". (The image boots from a USB stick through the firmware, not
-through gala.)
+through gala.) What a machine without PS/2 devices gets is the
+diagnosis and nothing more: the input thread says `input: the PS/2
+controller (ports 0x60 and 0x64) never answered` (or which of the two
+devices answered, when one did) and stops, while the desktop keeps its
+clock, its windows and whatever input a presenter brings (scenario
+`no_i8042`, QEMU's `-machine q35,i8042=off`; ARCHITECTURE "Screen,
+devices and boot splash"). A laptop is the usual case: many have a
+PS/2 keyboard and touchpad behind the firmware's emulation, and the
+newest have neither.
 
 **Next** (each step test first):
 1. Device interrupts: MSI/MSI-X for PCI devices, the virtio devices
@@ -1396,7 +1406,11 @@ through gala.)
 3. HID: the boot protocol for `usb-kbd` and `usb-mouse`, then report
    descriptors; `usb-tablet` gives an absolute pointer, into the
    desktop's input as the PS/2 driver's events are (scripted screen
-   tests can then click by position).
+   tests can then click by position). With steps 1 and 2 this is all a
+   real machine needs to be used: it comes before storage, and the
+   first test on hardware is the owner's own laptop (its internal
+   keyboard and touchpad are USB on the newest machines, and an
+   external keyboard and mouse are USB on every machine).
 4. Mass storage (bulk-only transport, SCSI commands) as a disk under
    gala's file systems; `usb-storage` in a scenario.
 5. What Windows programs see: `hid.dll` and HID collections, device
