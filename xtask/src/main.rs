@@ -7001,6 +7001,11 @@ const USER_DLLS: &[Dll] = &[
     // license store (sppc_test; Click-to-Run's integrator installs
     // Office's licenses through it).
     Dll { package: "sppc", file: "sppc.dll", exported_as: "testsppc.dll" },
+    // slc.dll: the Software Licensing Client, the name that API had
+    // before Windows 8: 31 forwarders to sppc.dll and three Windows
+    // licensing functions (slc_test; Click-to-Run's service loads it
+    // by name while it brings up the App-V ISV API).
+    Dll { package: "slc", file: "slc.dll", exported_as: "testslc.dll" },
     // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
     // window with (gdiplus_test).
     Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
@@ -9594,6 +9599,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sppc_test", "ntdll.dll", "Windows/System32"),
     ("sppc_test", "kernel32.dll", "Windows/System32"),
     ("sppc_test", "sppc.dll", "Windows/System32"),
+    // The Software Licensing Client, over sppc.dll (user/slc_test).
+    ("slc_test", "ntdll.dll", "Windows/System32"),
+    ("slc_test", "kernel32.dll", "Windows/System32"),
+    ("slc_test", "slc.dll", "Windows/System32"),
+    ("slc_test", "sppc.dll", "Windows/System32"),
     // crypt32's SIP registration in the registry (user/sip_test).
     ("sip_test", "ntdll.dll", "Windows/System32"),
     ("sip_test", "kernel32.dll", "Windows/System32"),
@@ -9878,6 +9888,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "sppc_test",
+    "slc_test",
     "sip_test",
     "actionid_test",
     "hardlink_test",
@@ -14527,6 +14538,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=sppc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["sppc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Software Licensing Client, whose exports are sppc's
+        // (user/slc_test).
+        name: "slc_test",
+        cmdline: "qemu_exit run=slc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["slc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // crypt32's subject interface package registration, as Office's

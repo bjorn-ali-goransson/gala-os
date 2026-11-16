@@ -244,6 +244,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
@@ -1841,11 +1842,41 @@ need gala's.
      ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
      (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
      is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. The server is the next step; the
-     client side of the diagnosis is in place: a connect that finds no
-     pipe records the name (`rpcrt4.dll!no server at pipe(<name>)`, the
-     Win32 error as the detail, `rpc_test`), so a run says which
-     endpoint a program could not reach.
+     client has nothing to reach. The client side of the diagnosis is
+     in place: a connect that finds no pipe records the name
+     (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
+     detail, `rpc_test`), so a run says which endpoint a program could
+     not reach -- for Word, `LRPC-AppV-ISV-<GUID>APPV-VIRTMAN-NOT`,
+     14 times over the 59 s the service's own log counts
+     (`isv_process_notifier.cpp : 64`, 0x800706ba, RetryCount 13).
+     Of every file the service looked for and did not find, one was
+     gala's own gap and is now closed: slc.dll (ARCHITECTURE "slc",
+     `slc_test`, Windows' answers measured), which it loads from
+     System32 and asks one thing,
+     `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`
+     (SL_E_VALUE_NOT_FOUND, in the ledger). The 0x7e did not move, so
+     that absence was not its cause. What the run shows before it: the
+     App-V DLL set (AppVOrchestration, AppVIsvStreamingManager,
+     AppVManifest, AppVCatalog, AppVIsvVirtualization, AppVIntegration,
+     AppVIsvSubsystemController, AppVFileSystemMetadata) maps twice,
+     then five files are looked for by full path in `ClickToRun` and
+     are not there -- `AppVISVStream32.dll`, `AppVISVStream64.dll`,
+     `Mso20win32client.dll`, `Mso30win32client.dll`,
+     `Mso40UIwin32client.dll` -- and 1.5 s later the error is logged.
+     None of those five is in Windows' own `ClickToRun` either
+     (measured on the Windows machine; the three Mso ones live under
+     the Office root's `vfs\ProgramFilesCommonX64\Microsoft
+     Shared\Office16`, and no Click-to-Run binary imports slc.dll or
+     any of the five: 165 files read), so the misses are what Windows
+     has too. No DLL load failed in the service in the whole run: the
+     ledger has neither a `missing dll` nor a `load failed` for it, and
+     gala's loader records both ("Gaps are never silent", `load_module`
+     in `user/testntdll`). So the 126 is not a load of gala's --
+     ERROR_MOD_NOT_FOUND is also what GetModuleHandle answers for a
+     module that is not loaded, where GetProcAddress answers the 127
+     this ladder has already climbed, and that miss is recorded
+     nowhere. Making it say the name asked for is the next step; the
+     name is what the server needs.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
@@ -5378,6 +5409,100 @@ among the slowest hand-offs.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
 "OpenTelemetry".
+
+### GR. Gap reports from real runs, straight to GitHub
+
+**Goal** (the owner): a gap a user finds by running an application is
+caught where it happens and reaches the repository by itself, as a
+GitHub issue, so the work queue is fed by real runs and not only by
+ours. Nothing leaves a machine without its owner's consent.
+
+**Today**: the ledger is already the work queue and already names what
+was asked for: every gap a run hits is counted by (service, what,
+detail), with the names gala's own DLLs record through
+`GalaRecordMissing`, and dumped after each program, before `boot ok`
+and in a state dump (OBSERVABILITY "Missing-features ledger"). On a
+developer's machine `cargo xtask report` merges those lines over every
+scenario and real program into `target/report/ledger.md`, ranked by
+programs and hits. Everything after that is missing: on a machine that
+is not ours the dump is in a serial log nobody reads, nothing is kept
+across boots, nothing notices that a program died of a gap, and
+nothing can send one anywhere.
+
+**Next** (each step test first; the CLI before the desktop,
+priority 7):
+1. **A gap report on the machine.** The system writes the ledger's
+   lines as one report when a program had gaps or did not end well (a
+   nonzero exit, a crash report, a DLL that failed to load), into
+   `C:\gala\reports` as a bounded ring (a count and a byte budget,
+   the oldest dropped and the drop counted). A report holds the
+   program (name, its PE's version, its SHA-256), the gala build
+   (version, commit, channel), the outcome (exit status or crash code,
+   and the module the loader named if it named one), the ledger's lines
+   since that program started, and the machine's shape (CPU count,
+   memory, firmware, real or virtual; no name). Scenario: a program
+   that hits a gap and exits nonzero leaves exactly one report, whose
+   lines are the dump's.
+2. **Redaction, then consent.** A ledger name can carry the user's own
+   name (`C:\Users\<name>\...` in a path a program asked for), so a
+   report is redacted when it is written, not when it is sent:
+   `C:\Users\<name>` becomes `C:\Users\<user>`, and machine and
+   domain names, volume GUIDs and IP addresses go the same way, each
+   case fed through a test. Sending stays off until the machine's owner
+   turns it on (`gala gaps consent on`, or the question asked once by
+   the desktop), with the whole bundle readable first (`gala gaps show
+   <id>`, `--json` for exactly what would be posted).
+3. **The CLI.** `gala gaps` lists this machine's reports ranked as
+   `ledger.md` ranks them (what, how often, which programs), with
+   `show <id>`, `send [<id>]`, `consent on|off` and `prune`. It sends
+   through the intake (step 4) or, with `--github`, straight to the
+   GitHub API with a token from the environment or `gh auth token`:
+   that path is how we use it before the intake exists, and the
+   fallback when the intake is down.
+4. **The intake.** No credential belongs on a user's machine, so the
+   device posts to a small service of ours beside the update feed
+   (`reports.gala-os.com`, a worker in front of the same account, WS
+   and R8), which holds the GitHub App's key and nothing else. It
+   fingerprints a gap (its kind, its name, the program it came from),
+   searches the open `gap` issues for that fingerprint in a
+   machine-readable block, and either opens one -- title `gap:
+   <dll>!<what>`, body with the counts, the programs and versions that
+   hit it and the gala builds -- or adds the new counts to the issue
+   that exists, at most once a day per fingerprint, labelled by kind
+   (`missing export`, `missing dll`, `unsupported`, `not
+   implemented`, ...) and by program. It answers with the issue's
+   number, which `gala gaps` shows beside the gap, so the user can
+   follow what they reported. Bounded like every other sender here:
+   gzipped, a size cap, a few reports a day per machine, a bounded
+   queue when offline, retried with backoff and `Retry-After` (OT's
+   `Batcher`).
+5. **In the desktop.** The gray question-mark tile of a program that
+   stopped answering and the notification a tile sends (SM) get
+   "Report this", which is step 3's send with the report already
+   chosen; so do the recovery notification after a kernel restart and
+   the crash screen's link (CS step 3). One place lists what this
+   machine has reported and what became of it.
+6. **Back into the work queue.** `cargo xtask gaps` reads the open
+   `gap` issues, so the ranked list AG and OF work from is the real
+   one, and a fix closes its issue by naming it in the commit. A gap
+   whose name says nothing cannot be an issue, which is what the
+   ledger's own rule is for (ARCHITECTURE "Gaps are never silent"):
+   a module miss has to record the name asked for and not only its
+   error code (OF's next step).
+
+**Tests**: a scenario that runs a program into a gap and checks the
+report on disk; one that sends it to a fake intake on the host (as
+`hostnet`'s and H11's scenarios reach the host), with the redaction
+cases and the offline queue; the GitHub side against recorded API
+answers, replayed as PK's GitHub tests are, and one real run by hand
+before the first release.
+
+**Open** (the owner decides): whether the intake is ours or the device
+talks to GitHub with a token the user pastes once (no service of ours
+to run, but a user without a GitHub account cannot report); whether
+consent is asked on first boot or only when something fails; and
+whether a report may carry a crash dump itself, which is large and can
+hold the user's data, or only its summary.
 
 ### SU. Security updates
 
