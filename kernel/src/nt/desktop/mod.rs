@@ -4116,7 +4116,7 @@ pub fn start_clock() {
     if CLOCK_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    if crate::sched::spawn("desktop clock", clock_thread, 0).is_err() {
+    if platform::spawn("desktop clock", clock_thread, 0).is_err() {
         crate::warn!(
             "desktop: no clock thread: the taskbar's minute, the tray and a display change will not be noticed"
         );
@@ -4127,7 +4127,7 @@ fn clock_thread(_: usize) {
     loop {
         tick();
         CLOCK_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        crate::sched::sleep_ms(CLOCK_MS);
+        platform::sleep_ms(CLOCK_MS);
     }
 }
 
