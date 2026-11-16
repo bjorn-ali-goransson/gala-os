@@ -1322,16 +1322,17 @@ impl Desktop {
     /// The tiles the start menu lists (`list_programs` of PROGRAMS).
     pub fn set_programs(&mut self, programs: &[Entry]) {
         let was = self.installs.len();
+        // Which of them the listing ends, before it ends them: a
+        // `retain` closure must not allocate, since `Vec::retain` itself
+        // is infallible either way (`cargo xtask alloc-audit`).
+        let listed = |p: usize| programs.iter().any(|e| e.program == p && e.installed);
         let mut done: Vec<usize> = Vec::new();
-        self.installs.retain(|(p, s)| {
-            if !programs.iter().any(|e| e.program == *p && e.installed) {
-                return true;
-            }
-            if !matches!(s, pkg::Progress::Failed(_)) {
+        for (p, s) in self.installs.iter() {
+            if listed(*p) && !matches!(s, pkg::Progress::Failed(_)) {
                 let _ = done.try_push(*p);
             }
-            false
-        });
+        }
+        self.installs.retain(|(p, _)| !listed(*p));
         if self.installs.len() != was {
             self.menu_dirty = true;
         }
@@ -1988,16 +1989,16 @@ impl Desktop {
         }
         self.linux = listing;
         let installed = &self.linux.installed;
+        // As `set_programs` does, and for the same reason: nothing is
+        // allocated inside the `retain` closure.
+        let listed = |n: &linux::Name| installed.iter().any(|d| d.name == *n);
         let mut done: Vec<linux::Name> = Vec::new();
-        self.progress.retain(|(n, p)| {
-            if !installed.iter().any(|d| d.name == *n) {
-                return true;
-            }
-            if *p != linux::Progress::Failed {
+        for (n, p) in self.progress.iter() {
+            if listed(n) && *p != linux::Progress::Failed {
                 let _ = done.try_push(*n);
             }
-            false
-        });
+        }
+        self.progress.retain(|(n, _)| !listed(n));
         let tiles = linux::entries(&self.linux);
         if tiles != self.linux_tiles {
             self.linux_tiles = tiles;
