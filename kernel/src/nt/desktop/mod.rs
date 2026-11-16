@@ -30,6 +30,7 @@
 
 pub mod linux;
 mod paint;
+pub mod pkg;
 mod present;
 pub mod tray;
 
@@ -648,6 +649,9 @@ pub struct Desktop {
     minute: u64,
     /// A program the start menu asked to start (index into PROGRAMS).
     launch: Option<usize>,
+    /// The installs a tile asked for (`gala install <id>`, no window),
+    /// each a PROGRAMS index and where its install is.
+    installs: Vec<(usize, pkg::Progress)>,
     /// What the "Linux distributions" section lists (registered
     /// distributions and the user's choices), its tiles, the installs
     /// under way, the context menu open in the start menu, what it asked
@@ -717,6 +721,7 @@ impl Desktop {
             launch: None,
             linux: linux::Listing { installed: Vec::new(), prefs: EMPTY_PREFS },
             linux_tiles: Vec::new(),
+            installs: Vec::new(),
             progress: Vec::new(),
             context: None,
             linux_launch: None,
@@ -1113,10 +1118,7 @@ impl Desktop {
             if down {
                 match vk {
                     0x1b => self.close_menu(),
-                    0x0d => {
-                        self.launch = self.listed().first().map(|e| e.program);
-                        self.close_menu();
-                    }
+                    0x0d => self.tile_click(0),
                     0x08 => self.search_len = self.search_len.saturating_sub(1),
                     b'A'..=b'Z' | b'0'..=b'9' | b' ' if self.search_len < self.search.len() => {
                         self.search[self.search_len] = vk.to_ascii_lowercase();
@@ -1319,6 +1321,11 @@ impl Desktop {
 
     /// The tiles the start menu lists (`list_programs` of PROGRAMS).
     pub fn set_programs(&mut self, programs: &[Entry]) {
+        let was = self.installs.len();
+        self.installs.retain(|(p, _)| !programs.iter().any(|e| e.program == *p && e.installed));
+        if self.installs.len() != was {
+            self.menu_dirty = true;
+        }
         if self.programs.as_slice() != programs {
             self.programs.clear();
             let _ = self.programs.try_extend_from_slice(programs);
@@ -1803,10 +1810,7 @@ impl Desktop {
             {
                 let _ = self.act(a, Action::Minimize);
             }
-            (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => {
-                self.launch = self.listed().get(a).map(|e| e.program);
-                self.close_menu();
-            }
+            (Hit::MenuItem(a), Hit::MenuItem(b)) if a == b => self.tile_click(a),
             (Hit::LinuxHeading, Hit::LinuxHeading) => {
                 self.linux.prefs.collapsed = !self.linux.prefs.collapsed;
                 self.prefs_changed = true;
@@ -1892,6 +1896,32 @@ impl Desktop {
         }
     }
 
+    /// Pinned tile `k` clicked: an installed program starts and the menu
+    /// closes; one that is not installed asks for its package's install
+    /// (`gala install <id>`, no window) and the menu stays, the tile
+    /// showing where the install is; one installing does nothing more,
+    /// and one whose install failed tries again.
+    fn tile_click(&mut self, k: usize) {
+        let Some(e) = self.listed().get(k).copied() else { return };
+        if e.installed {
+            self.launch = Some(e.program);
+            self.close_menu();
+            return;
+        }
+        let busy = self
+            .installs
+            .iter()
+            .any(|(p, s)| *p == e.program && !matches!(s, pkg::Progress::Failed));
+        if busy {
+            return;
+        }
+        self.installs.retain(|(p, _)| *p != e.program);
+        if self.installs.try_push((e.program, pkg::Progress::Resolving)).is_ok() {
+            self.launch = Some(e.program);
+        }
+        self.menu_dirty = true;
+    }
+
     /// Distribution tile `k` clicked: an installed one starts its desktop
     /// (the menu closes); a suggestion installs (the menu stays, the
     /// tile shows the progress); one installing does nothing more.
@@ -1944,6 +1974,18 @@ impl Desktop {
             self.linux_tiles = tiles;
             self.menu_dirty = true;
         }
+    }
+
+    /// Where a tile's install is (`gala install <id>` through
+    /// GalaDesktopAction): None when it is over (the program list that
+    /// follows shows it installed).
+    pub fn install_progress(&mut self, program: usize, progress: Option<pkg::Progress>) {
+        self.installs.retain(|(p, _)| *p != program);
+        if let Some(p) = progress {
+            let _ = self.installs.try_push((program, p));
+        }
+        self.menu_dirty = true;
+        self.refresh();
     }
 
     /// An install's progress (`gala linux-install` through
@@ -2356,10 +2398,14 @@ impl Desktop {
                 Font::Ui14Semibold,
                 ix + 32,
             );
-            if !e.installed {
+            let installing = self.installs.iter().find(|(p, _)| *p == e.program).map(|&(_, s)| s);
+            if !e.installed && installing.is_none() {
                 download_badge(&mut c, ix + 20, iy + 20);
             }
-            tile_name(&mut c, r, program.name);
+            tile_name(&mut c, r, program.name, if installing.is_some() { 1 } else { 2 });
+            if let Some(s) = installing {
+                progress_bar(&mut c, r, s.percent(), s == pkg::Progress::Failed);
+            }
         }
         if listed.is_empty() {
             let text =
@@ -2489,18 +2535,9 @@ impl Desktop {
                 Font::Ui14Semibold,
                 ix + 32,
             );
-            tile_name(c, r, d.name.as_str());
+            tile_name(c, r, d.name.as_str(), if progress.is_some() { 1 } else { 2 });
             match progress {
-                Some(p) => {
-                    // The bar under the name.
-                    let (bx, by, bw) = (r.x + 12, r.y + 68, r.w - 24);
-                    c.round_rect(bx, by, bw, 4, 2, 0x00_d0_d5_dc, 0x00_d0_d5_dc, 255);
-                    let fill = bw * i64::from(p.percent()) / 100;
-                    let color = if p == linux::Progress::Failed { CLOSE_HOVER } else { ACCENT };
-                    if fill > 0 {
-                        c.round_rect(bx, by, fill.max(4), 4, 2, color, color, 255);
-                    }
-                }
+                Some(p) => progress_bar(c, r, p.percent(), p == linux::Progress::Failed),
                 None if !d.installed => download_badge(c, ix + 20, iy + 20),
                 None => {}
             }
@@ -3404,10 +3441,11 @@ pub fn inject(shell: &Shell, input: Injected) -> Result<Option<Launch>, NtStatus
     })
 }
 
-/// A tile's name under its icon, centred: on two lines, broken at a
-/// space, when it is wider than the tile (Windows' start menu does the
-/// same); what still does not fit ends with "...".
-fn tile_name(c: &mut Canvas, r: Rect, name: &str) {
+/// A tile's name under its icon, centred: on `lines` lines (2, broken
+/// at a space, when it is wider than the tile, as Windows' start menu
+/// does; 1 while a progress bar has the second line, which cuts a long
+/// name short); what still does not fit ends with "...".
+fn tile_name(c: &mut Canvas, r: Rect, name: &str, lines: usize) {
     let room = r.w - 8;
     let fits = |t: &str| Font::Ui12.measure(t.chars()) <= room;
     let (first, second) = match name.find(' ') {
@@ -3419,12 +3457,25 @@ fn tile_name(c: &mut Canvas, r: Rect, name: &str) {
         }
         _ => (name, ""),
     };
-    for (line, y) in [(first, r.y + 48), (second, r.y + 63)] {
+    for &(line, y) in [(first, r.y + 48), (second, r.y + 63)].iter().take(lines) {
         if line.is_empty() {
             continue;
         }
         let w = Font::Ui12.measure(line.chars()).min(room);
         c.text(r.x + (r.w - w) / 2, y, line.chars(), TEXT, Font::Ui12, r.x + r.w - 4);
+    }
+}
+
+/// A tile's progress bar, in the row under its name: the track, and
+/// `percent` of it filled (red when the install failed, so that a tile
+/// waiting for another click says so).
+fn progress_bar(c: &mut Canvas, r: Rect, percent: u8, failed: bool) {
+    let (bx, by, bw) = (r.x + 12, r.y + 68, r.w - 24);
+    c.round_rect(bx, by, bw, 4, 2, 0x00_d0_d5_dc, 0x00_d0_d5_dc, 255);
+    let fill = bw * i64::from(percent) / 100;
+    let color = if failed { CLOSE_HOVER } else { ACCENT };
+    if fill > 0 {
+        c.round_rect(bx, by, fill.max(4), 4, 2, color, color, 255);
     }
 }
 
@@ -3755,6 +3806,45 @@ fn save_prefs(p: linux::Prefs) {
             saved.err().map_or(0, |e| e.0)
         ),
     );
+}
+
+/// Where a tile's install is for `shell`'s start menu
+/// (GalaDesktopAction's InstallProgress from `gala install <id>`):
+/// `state` 0 resolving, 1 downloading (`percent`), 2 installing, 3 done
+/// (the tile is installed now: its bar goes), 4 failed.
+/// STATUS_INVALID_PARAMETER when no tile's package is `id`, so that an
+/// install of something the catalog does not list is told so and goes on.
+pub fn install_progress(
+    shell: &Shell,
+    id: &[u8],
+    state: i32,
+    percent: i32,
+) -> Result<(), NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let program = program_with_package(id).ok_or(NtStatus::INVALID_PARAMETER)?;
+    let progress = match state {
+        3 => None,
+        _ => Some(pkg::Progress::from_state(state, percent).ok_or(NtStatus::INVALID_PARAMETER)?),
+    };
+    // The list again once it is installed (the disk is read outside the
+    // lock), so that the tile is drawn installed and no longer dimmed.
+    let listed = if progress.is_none() { Some(available_programs()) } else { None };
+    let mut d = shell.d.lock();
+    if let Some((tiles, n)) = &listed {
+        d.set_programs(&tiles[..*n]);
+    }
+    d.install_progress(program, progress);
+    redraw_damage(&mut d);
+    Ok(())
+}
+
+/// The catalog entry whose package is `id`: winget's ids, matched without
+/// case as `gala install` matches them.
+fn program_with_package(id: &[u8]) -> Option<usize> {
+    let id = core::str::from_utf8(id).ok()?;
+    PROGRAMS.iter().position(|p| p.package.is_some_and(|w| w.eq_ignore_ascii_case(id)))
 }
 
 /// An install's progress for `shell`'s start menu (GalaDesktopAction's

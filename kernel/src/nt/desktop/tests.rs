@@ -211,7 +211,60 @@ fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
     let dark = |c: u32| (c & 0xff) < 0x80 && (c >> 8 & 0xff) < 0x80 && (c >> 16 & 0xff) < 0x80;
     let second = (r.x..r.x + r.w).any(|x| (r.y + 63..r.y + 78).any(|y| dark(d.pixel(x, y))));
     assert!(second);
-    // A click hands the program to the caller, which installs it.
+    // A click hands the program to the caller, which installs it; the
+    // menu stays open, the tile showing where the install is
+    // (a_package_tile_installs_with_a_bar_on_the_tile).
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+}
+
+#[test]
+fn a_package_tile_installs_with_a_bar_on_the_tile() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: false },
+    ]);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    let r = d.menu_item_rect(1);
+    // A click on a tile that is not installed asks for its install and
+    // keeps the menu open: the tile shows where the install is, as a
+    // distribution's does, instead of a console window.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    let (bx, by) = (r.x + 13, r.y + 69);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    // A second click while it installs asks for nothing.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.take_launch().is_none());
+    // What the install reports moves the bar: half the download is 40%
+    // of the bar (the download is its middle three fifths), so its right
+    // half is still the track's grey.
+    d.install_progress(office, Some(pkg::Progress::Downloading(50)));
+    assert_eq!(d.pixel(bx + 20, by), ACCENT);
+    assert_ne!(d.pixel(bx + 50, by), ACCENT);
+    // A failure turns the bar red, and a click tries again.
+    d.install_progress(office, Some(pkg::Progress::Failed));
+    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
+    assert_eq!(d.pixel(bx + 50, by), CLOSE_HOVER);
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    // Installed: the list again and the install's last word (state 3),
+    // as `install_progress` has it from gala; the bar goes with the
+    // badge, and a click starts the program (the menu closes).
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: true },
+    ]);
+    d.install_progress(office, None);
+    assert!(d.installs.is_empty());
+    assert_ne!(d.pixel(bx, by), ACCENT);
+    assert_ne!(d.pixel(bx + 50, by), ACCENT);
     click(&mut d, r.x + 20, r.y + 10);
     assert!(!d.menu_open());
     assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));

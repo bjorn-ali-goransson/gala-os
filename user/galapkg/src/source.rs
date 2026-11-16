@@ -407,7 +407,7 @@ impl Source {
             }
         }
         host.log(&format!("download url={}", installer.url));
-        let fetched = host.fetch(&installer.url);
+        let fetched = host.fetch_installer(&installer.url);
         match &fetched {
             Ok(data) => host.log(&format!("download bytes={}", data.len())),
             Err(e) => host.log(&format!("error download code={} ({e})", e.code)),

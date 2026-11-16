@@ -7443,17 +7443,41 @@ session's is shown by nothing unless GalaSession attaches a presenter
   first tile) hands the program to `nt::action::start_from_menu`, which
   checks again outside the lock (`menu_request`): a program that exists
   starts (`process::launch`: the boot user, its directory current, new
-  console handles), else `C:\gala\gala.exe install <id>` runs. A console
-  program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a console window, as one
-  started from Explorer does: a console session hosted by conhost.exe
-  (System32's, else C:\gala's), started first with the session's id and
-  the program's name; that window stays after the program ends (an
-  install's output and errors stay in view). Logged (`desktop: start
-  menu starts <name>: <path>`, `desktop: start menu: <name> is not
-  installed: <gala> install <id>`, `desktop: started <path> (pid N) in
-  a console window`) and a `window` event `start menu` (op start,
-  install or missing; session, name, target, pid, status). Scenario
-  `start_menu` (start_menu_test, screen check).
+  console handles) and the menu closes, else `C:\gala\gala.exe install
+  <id>` runs. A console program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a
+  console window, as one started from Explorer does: a console session
+  hosted by conhost.exe (System32's, else C:\gala's), started first with
+  the session's id and the program's name; that window stays after the
+  program ends. Logged (`desktop: start menu starts <name>: <path>`,
+  `desktop: start menu: <name> is not installed: <gala> install <id>
+  (no window)`, `desktop: started <path> (pid N) in a console window`)
+  and a `window` event `start menu` (op start, install or missing;
+  session, name, target, pid, status). Scenario `start_menu`
+  (start_menu_test, screen check).
+  - **An install happens on the tile**, as a Linux distribution's does:
+    the install runs with no window at all, the menu stays open and the
+    tile keeps the click's place with a progress bar in the row under
+    its name (the name then has one line, the badge goes). gala.exe
+    tells the menu where the install is through GalaDesktopAction's
+    InstallProgress (ACTION 15: the winget id as the text, the state,
+    the percent downloaded and, on failure, the exit code it fails
+    with): `desktop::install_progress` matches the id against the
+    catalog's (without case, as `gala install` matches it) and
+    `desktop/pkg.rs` turns the state into the bar's fill - resolving
+    the manifests 5%, the installer's download 10% to 70% (galapkg's
+    `Host::fetch_installer` reports it as the bytes come in),
+    installing 85%, and on failure a full red bar (a click then tries
+    again; a click while it installs does nothing). "Done" lists the
+    programs again, so the tile is drawn installed and its bar goes.
+    Each state is logged once (`desktop: start menu: install <id>:
+    <state> (<percent>%)`, a failure as `failed (gala exit N: <what it
+    stands for>)`) with a `window` event, since there is no window to
+    show it in; gala's own output is in the log too (a process without
+    a console writes there). Whatever ends the command, the tile hears:
+    `galapkg::install::install` reports Done or Failed around the whole
+    install, and gala.exe reports a failure with its exit code for
+    anything that ends it earlier. A gala.exe that dies without a word
+    leaves the bar waiting for the next listing (ROADMAP SM).
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
   `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned

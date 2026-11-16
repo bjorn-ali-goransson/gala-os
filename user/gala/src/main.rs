@@ -181,6 +181,7 @@ const ACTION_PROGRAMS: u32 = 11;
 const ACTION_TRAY: u32 = 12;
 const ACTION_TRAY_CLICK: u32 = 13;
 const ACTION_LINUX_PROGRESS: u32 = 14;
+const ACTION_INSTALL_PROGRESS: u32 = 15;
 /// A notification-area icon's entry (kernel/src/nt/action.rs TRAY_ENTRY).
 const TRAY_ENTRY: usize = 44 + 2 * 128;
 const MAX_TRAY: usize = 64;

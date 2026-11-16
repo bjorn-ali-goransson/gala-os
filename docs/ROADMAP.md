@@ -717,13 +717,17 @@ Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
 a winget id and where its installer puts the program (checked against
 the winget-pkgs manifests: user scope under %LOCALAPPDATA% first, then
 the machine's). Not installed, a tile is dimmed with a download badge
-and a click runs `gala install <id>` in a console window; installed, it
-starts the program. A console program started from the menu gets its own
-console window. Tests: the desktop's and `nt::action`'s host tests,
-scenario `start_menu` (start_menu_test and a screen check: the tiles,
-the Command Prompt clicked, 7-Zip's install started and its window
-closed). TimKosse.FileZilla.Client is not in winget-pkgs today: its tile
-shows `gala install`'s "no package" in the window (the portable
+and a click installs it on the tile: `gala install <id>` with no window,
+the menu open and a progress bar on the tile (the states gala reports
+through GalaDesktopAction's InstallProgress), red if it fails and
+installed when it is done; installed, a click starts the program. A
+console program started from the menu gets its own console window.
+Tests: the desktop's, `nt::action`'s and galapkg's host tests, scenario
+`start_menu` (start_menu_test and a screen check: the tiles, the Command
+Prompt clicked, 7-Zip's install started with no console window of its
+own and its tile's bar red when it failed).
+TimKosse.FileZilla.Client is not in winget-pkgs today: its tile's bar
+turns red and `gala install`'s "no package" is in the log (the portable
 C:\filezilla placement of the FileZilla scenarios still counts as
 installed).
 
@@ -741,10 +745,17 @@ a screenshot):
    console, the internal commands it has) makes the tile useful.
 3. A scenario that installs a catalog package on a click from a source
    the test serves (needs a way to give the boot user's environment
-   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed).
-   Installs that fail on gala (Office until OF is done, an installer
-   needing elevation without UAC's prompt) fail in their window with
-   `gala install`'s own message.
+   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed),
+   so that a bar filling over a download is tested and not only its
+   states. Installs that fail on gala (Office until OF is done, an
+   installer needing elevation without UAC's prompt) leave the tile's
+   bar red, with `gala install`'s own message in the log.
+4. A tile's bar waits for a word from `gala install` that a gala.exe
+   killed outright (or faulting before it can report) never sends. The
+   desktop should watch the installer's process instead:
+   `start_from_menu` has its pid, so a tile whose installer is gone
+   without a last word can be drawn failed. Until then such a tile
+   keeps its bar until the menu lists the programs again.
 
 ### SH. The shell in user mode
 
