@@ -131,6 +131,17 @@ pub fn evdev_key(scan: u8, extended: bool) -> Option<u32> {
     }
 }
 
+/// The set 1 make code and E0 flag of evdev key code `key` (what a
+/// virtio-input keyboard reports): `evdev_key`'s inverse, None for a key
+/// gala's keymap does not have.
+pub fn scan_code(key: u32) -> Option<(u8, bool)> {
+    match key {
+        0x01..=0x53 | 0x56..=0x58 => u8::try_from(key).ok().map(|s| (s, false)),
+        127 => Some((0x5d, true)),
+        _ => E0_KEYS.iter().find(|(_, k)| *k == key).map(|(s, _)| (*s, true)),
+    }
+}
+
 /// A modifier a key holds (its bit in the depressed mask) or toggles (in
 /// the locked mask).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

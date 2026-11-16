@@ -683,6 +683,20 @@ impl ModernDevice {
         unsafe { addr.read_volatile() }
     }
 
+    /// Writes the byte at `offset` of the device configuration (nothing
+    /// outside it): virtio-input selects what its configuration shows by
+    /// its `select` and `subsel` bytes.
+    pub fn set_config_u8(&mut self, offset: u16, value: u8) {
+        if self.device == 0 || u32::from(offset) + 1 > self.device_len.max(1) {
+            return;
+        }
+        let addr = core::ptr::with_exposed_provenance_mut::<u8>(
+            (self.device + u64::from(offset)) as usize,
+        );
+        // SAFETY: as in `config_u8`.
+        unsafe { addr.write_volatile(value) }
+    }
+
     pub fn set_config_u32(&mut self, offset: u16, value: u32) {
         if self.device == 0 || u32::from(offset) + 4 > self.device_len.max(4) {
             return;
