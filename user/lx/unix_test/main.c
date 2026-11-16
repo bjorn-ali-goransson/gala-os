@@ -96,6 +96,7 @@ struct lx_pollfd {
 	short events, revents;
 };
 
+#if defined(__x86_64__)
 struct lx_stat {
 	u64 dev, ino, nlink;
 	unsigned mode, uid, gid, pad;
@@ -104,6 +105,19 @@ struct lx_stat {
 	u64 times[6];
 	i64 reserved[3];
 };
+#else
+/* The generic layout (aarch64's: musl's arch/aarch64/bits/stat.h). */
+struct lx_stat {
+	u64 dev, ino;
+	unsigned mode, nlink, uid, gid;
+	u64 rdev, pad;
+	i64 size;
+	int blksize, pad2;
+	i64 blocks;
+	u64 times[6];
+	unsigned reserved[2];
+};
+#endif
 
 /* A sockaddr_un for `path` and its length (family + path + NUL). */
 static unsigned path_addr(struct lx_sockaddr_un *a, const char *path)
@@ -613,7 +627,7 @@ int main(void)
 		struct {
 			unsigned events;
 			unsigned long data;
-		} __attribute__((packed)) ev = { EPOLLIN_, 7 }, out[2];
+		} LX_EPOLL_PACKED ev = { EPOLLIN_, 7 }, out[2];
 		sys4(SYS_epoll_ctl, ep, EPOLL_CTL_ADD_, conn, &ev);
 		i64 n = sys4(SYS_epoll_wait, ep, out, 2, -1);
 		say_ret("epoll_wait", n);

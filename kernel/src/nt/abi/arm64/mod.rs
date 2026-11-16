@@ -249,7 +249,7 @@ pub fn write_kuser_processor(page: &SharedPage) {
     page.write(IMAGE_NUMBER_LOW, &IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
     page.write(IMAGE_NUMBER_HIGH, &IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
     page.write(NATIVE_PROCESSOR_ARCHITECTURE, &PROCESSOR_ARCHITECTURE_ARM64.to_le_bytes());
-    let (isar0, isar1) = crate::arch::cpu::id_isar();
+    let (isar0, isar1) = crate::nt::platform::id_isar();
     let field = |reg: u64, at: u32| (reg >> at) & 0xf;
     for (pf, present) in
         arm64_features(field(isar0, 4), field(isar0, 16), field(isar0, 20)).into_iter().chain([

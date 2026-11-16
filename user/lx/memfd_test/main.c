@@ -36,6 +36,7 @@
 #define SEEK_END_ 2
 #define PAGE 4096L
 
+#if defined(__x86_64__)
 struct lx_stat {
 	u64 dev, ino, nlink;
 	unsigned mode, uid, gid, pad;
@@ -44,6 +45,19 @@ struct lx_stat {
 	u64 times[6];
 	i64 reserved[3];
 };
+#else
+/* The generic layout (aarch64's: musl's arch/aarch64/bits/stat.h). */
+struct lx_stat {
+	u64 dev, ino;
+	unsigned mode, nlink, uid, gid;
+	u64 rdev, pad;
+	i64 size;
+	int blksize, pad2;
+	i64 blocks;
+	u64 times[6];
+	unsigned reserved[2];
+};
+#endif
 
 static i64 map(u64 len, int prot, int flags, i64 fd, i64 off)
 {

@@ -43,7 +43,7 @@ int main(void)
 	say_ret("lseek", sys3(SYS_lseek, g(f), 0, 2 /* SEEK_END */));
 	say_ret("unlinkat(AT_FDCWD)", sys3(SYS_unlinkat, g(AT_FDCWD), "fdbits.tmp", 0));
 	i64 ep = sys1(SYS_epoll_create1, 0);
-	struct { unsigned events; u64 data; } __attribute__((packed)) ev = { 1, 0 };
+	struct { unsigned events; u64 data; } LX_EPOLL_PACKED ev = { 1, 0 };
 	say_ret("epoll_ctl(both descriptors)", sys4(SYS_epoll_ctl, g(ep), 1, g(p[0]), &ev));
 	say_ret("close", sys1(SYS_close, g(d)));
 	say_ret("close(the same) again", sys1(SYS_close, d));

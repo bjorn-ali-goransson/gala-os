@@ -2230,6 +2230,27 @@ source).
   check made before `prepare` and not repeated after loses the wake
   that comes between (the thread then sleeps until its deadline or for
   ever).
+- **aarch64 builds** (ROADMAP AR): `user/lx/build-aarch64.sh` builds the
+  tests in its `AARCH64_TESTS` into `user/lx/bin/aarch64/` (static
+  ET_EXEC) with clang `--target=aarch64-linux-musl` and ld.lld against
+  musl 1.2.5, which it fetches (checksum checked) and builds for aarch64
+  into `target/lx-aarch64-musl` once. The same sources: `lx.h`'s
+  aarch64 branch makes `svc #0` calls and turns the calls aarch64 has
+  no number for (open, stat, poll, pipe, dup2, select, ...) into the
+  ones musl makes there (openat(AT_FDCWD, ...), ppoll, pipe2, dup3,
+  pselect6, ...), so the x86_64 preprocessed source stays the same
+  (check it with `musl-gcc -E -P` against the committed one when you
+  touch `lx.h` or `more.h`). Structures whose layout is the
+  architecture's are declared per architecture (a test's own `struct
+  stat`; `LX_EPOLL_PACKED`). The binaries depend on clang's version
+  (built with Ubuntu clang 18.1.3), so CI does not rebuild them: rerun
+  the script and commit its output when a source changes. An ARM64 image
+  ships `user/lx/bin/aarch64/<name>` for a twin's `user/lx/bin/<name>`
+  (xtask refuses one with no aarch64 build). A twin's transcript is the
+  test's `expected.txt`; where aarch64 Linux answers otherwise by its ABI
+  (structure sizes and offsets, O_LARGEFILE's value), the test has
+  `arm_<scenario>.txt` beside it, `expected.txt` with only those lines
+  changed.
 - **Build**: `user/lx/build.sh` builds each as `user/lx/bin/<name>_test`
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the

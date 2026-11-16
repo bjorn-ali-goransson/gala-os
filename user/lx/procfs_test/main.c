@@ -23,6 +23,7 @@
 #define PR_GET_AUXV 0x41555856
 #define CLONE_NEWUSER 0x10000000
 
+#if defined(__x86_64__)
 struct st {
 	u64 dev, ino, nlink;
 	unsigned mode, uid, gid, pad;
@@ -31,6 +32,19 @@ struct st {
 	u64 times[6];
 	i64 unused[3];
 };
+#else
+/* The generic layout (aarch64's: musl's arch/aarch64/bits/stat.h). */
+struct st {
+	u64 dev, ino;
+	unsigned mode, nlink, uid, gid;
+	u64 rdev, pad;
+	i64 size;
+	int blksize, pad2;
+	i64 blocks;
+	u64 times[6];
+	unsigned unused[2];
+};
+#endif
 
 static unsigned mode_of(const char *path, int follow)
 {

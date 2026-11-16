@@ -11949,8 +11949,26 @@ called by their own names through symbolic links to busybox;
 the `unsafe` allow-list). Allocation is fallible (`TryVec`,
 `try_reserve_exact`). The plain-data parts:
 
-- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 x86-64
-  ET_EXEC or ET_DYN image and never panics (host tests: truncation at
+- **The architecture's ABI** (`lx::machine`, `lx::syscalls` on x86_64,
+  `lx::syscalls_aarch64` on aarch64): where the arguments are, the
+  system-call numbers (aarch64's generic table; a name it has no number
+  for, as open or fork, gets a number no call has), a restart (aarch64:
+  the pc back on the `svc` and x0 its first argument again, which the
+  dispatcher keeps: x0 is also the result), clone's argument order
+  (aarch64 passes tls before child_tid), the open flags whose values
+  differ (O_DIRECTORY, O_NOFOLLOW, O_LARGEFILE), `struct stat` (aarch64's
+  generic layout, 128 bytes), `struct epoll_event` (packed on x86_64
+  only), AT_HWCAP, seccomp's AUDIT_ARCH and the signal frame. aarch64's
+  frame: siginfo, the ucontext (its sigcontext with x0-x30, sp, pc and
+  pstate, and in its reserved area an fpsimd_context: FPSR, FPCR,
+  V0-V31), then the frame record the handler's x29 points at; x30 is
+  sa_restorer; rt_sigreturn reads it back at sp. User mode writes the
+  thread pointer (TPIDR_EL0) itself, so the scheduler records it at each
+  switch away and loads the next thread's (`percpu::live_user_fs_base`).
+  Scenarios: the `arm_lx_*` twins (ROADMAP AR).
+- **`lx::elf`**: `ElfImage::parse(&[u8])` validates an ELF64 image of
+  the kernel's own machine (EM_X86_64, EM_AARCH64 on aarch64), ET_EXEC
+  or ET_DYN image and never panics (host tests: truncation at
   every length, every header byte mutated, synthetic bad images).
   Invariants (listed in the module's doc):
   - program headers inside the file and at most 64 KiB; at least one

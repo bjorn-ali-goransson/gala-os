@@ -515,10 +515,16 @@ pub fn current() -> ThreadId {
 }
 
 /// The current thread's user (FS, GS) bases; (0, 0) for a kernel thread.
+/// Where user mode sets the thread pointer itself (aarch64's TPIDR_EL0:
+/// `percpu::live_user_fs_base`), the record is refreshed from it first.
 pub fn user_bases() -> (u64, u64) {
     with(|s| {
         let id = s.current();
-        s.thread(id).user.as_ref().map_or((0, 0), |u| (u.fs_base, u.gs_base))
+        let Some(u) = s.thread(id).user.as_mut() else { return (0, 0) };
+        if let Some(live) = percpu::live_user_fs_base() {
+            u.fs_base = live;
+        }
+        (u.fs_base, u.gs_base)
     })
 }
 
@@ -769,6 +775,13 @@ fn schedule() {
         let has_contexts = s.thread(cur).context.is_some() && s.thread(next).context.is_some();
         (next != cur && has_contexts).then_some(()).and_then(|()| {
             s.cpus[here].prev = Some(cur);
+            // The thread pointer user mode set itself goes with the
+            // thread (aarch64's TPIDR_EL0), as its context does.
+            if let (Some(live), Some(u)) =
+                (percpu::live_user_fs_base(), s.thread(cur).user.as_mut())
+            {
+                u.fs_base = live;
+            }
             let from: *const Context =
                 s.thread(cur).context.as_ref().map_or(core::ptr::null(), |c| c as *const Context);
             let n = s.thread(next);

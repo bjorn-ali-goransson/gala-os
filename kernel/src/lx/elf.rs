@@ -10,7 +10,8 @@
 //!
 //! Invariants of an [`ElfImage`] (checked by [`ElfImage::parse`], which
 //! never panics on any input):
-//! - ELFCLASS64, little-endian, EV_CURRENT, EM_X86_64, ET_EXEC or ET_DYN;
+//! - ELFCLASS64, little-endian, EV_CURRENT, the kernel's own machine
+//!   (EM_X86_64; EM_AARCH64 on aarch64), ET_EXEC or ET_DYN;
 //!   the program headers lie inside the file and are at most 64 KiB.
 //! - At least one PT_LOAD; each one's file bytes lie inside the file,
 //!   `filesz <= memsz`, its alignment is 0, 1 or a power of two of at most
@@ -65,6 +66,13 @@ const MAX_ALIGN: u64 = 1 << 30;
 pub const ET_EXEC: u16 = 2;
 pub const ET_DYN: u16 = 3;
 pub const EM_X86_64: u16 = 62;
+/// EM_AARCH64.
+pub const EM_AARCH64: u16 = 183;
+/// The machine the kernel runs programs of: its own architecture's.
+#[cfg(not(target_arch = "aarch64"))]
+pub const EM_NATIVE: u16 = EM_X86_64;
+#[cfg(target_arch = "aarch64")]
+pub const EM_NATIVE: u16 = EM_AARCH64;
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
 pub const PT_INTERP: u32 = 3;
@@ -93,7 +101,7 @@ pub enum ElfError {
     BadVersion {
         version: u32,
     },
-    NotX86_64 {
+    WrongMachine {
         machine: u16,
     },
     NotExecutable {
@@ -173,7 +181,9 @@ impl fmt::Display for ElfError {
             Self::NotElf64 { class } => write!(f, "EI_CLASS {class}: not ELFCLASS64"),
             Self::NotLittleEndian { data } => write!(f, "EI_DATA {data}: not little-endian"),
             Self::BadVersion { version } => write!(f, "ELF version {version}"),
-            Self::NotX86_64 { machine } => write!(f, "e_machine {machine}: not x86-64 (62)"),
+            Self::WrongMachine { machine } => {
+                write!(f, "e_machine {machine}: not this kernel's machine ({EM_NATIVE})")
+            }
             Self::NotExecutable { kind } => write!(f, "e_type {kind}: not ET_EXEC or ET_DYN"),
             Self::BadHeaderSize { ehsize } => write!(f, "e_ehsize {ehsize}"),
             Self::BadPhentsize { phentsize } => write!(f, "e_phentsize {phentsize}, not 56"),
@@ -462,8 +472,8 @@ impl ElfImage {
             kind => return Err(ElfError::NotExecutable { kind }),
         };
         let machine = u16_at(file, 18);
-        if machine != EM_X86_64 {
-            return Err(ElfError::NotX86_64 { machine });
+        if machine != EM_NATIVE {
+            return Err(ElfError::WrongMachine { machine });
         }
         let entry = u64_at(file, 24);
         let phoff = u64_at(file, 32);
@@ -824,7 +834,7 @@ mod tests {
         f[5] = 1;
         f[6] = 1;
         f[16..18].copy_from_slice(&kind.to_le_bytes());
-        f[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        f[18..20].copy_from_slice(&EM_NATIVE.to_le_bytes());
         f[20..24].copy_from_slice(&1u32.to_le_bytes());
         f[24..32].copy_from_slice(&entry.to_le_bytes());
         f[32..40].copy_from_slice(&64u64.to_le_bytes());
@@ -895,7 +905,7 @@ mod tests {
         assert_eq!(with(6, &[0]), Err(ElfError::BadVersion { version: 0 }));
         assert_eq!(with(16, &1u16.to_le_bytes()), Err(ElfError::NotExecutable { kind: 1 }));
         assert_eq!(with(16, &4u16.to_le_bytes()), Err(ElfError::NotExecutable { kind: 4 }));
-        assert_eq!(with(18, &183u16.to_le_bytes()), Err(ElfError::NotX86_64 { machine: 183 }));
+        assert_eq!(with(18, &183u16.to_le_bytes()), Err(ElfError::WrongMachine { machine: 183 }));
         assert_eq!(with(52, &32u16.to_le_bytes()), Err(ElfError::BadHeaderSize { ehsize: 32 }));
         assert_eq!(with(54, &32u16.to_le_bytes()), Err(ElfError::BadPhentsize { phentsize: 32 }));
         assert_eq!(with(56, &0u16.to_le_bytes()), Err(ElfError::TooManyPhdrs { phnum: 0 }));

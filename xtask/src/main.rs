@@ -10969,6 +10969,18 @@ fn make_iso_unchecked(
             Some((_, name)) if arm64 && shipped_program(file).is_some() => {
                 (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
             }
+            // A Linux test program: its aarch64 build
+            // (user/lx/build-aarch64.sh), which must exist.
+            Some((_, name)) if arm64 && file.starts_with("user/lx/bin/") => {
+                let a64 = root().join("user/lx/bin/aarch64").join(name);
+                if !a64.exists() {
+                    return Err(format!(
+                        "{file}: no aarch64 build at {} (user/lx/build-aarch64.sh)",
+                        a64.display()
+                    ));
+                }
+                (a64, name)
+            }
             // Any other executable is x64 code, which an ARM64 machine
             // cannot run.
             Some(_) if arm64 && file.ends_with(".exe") => {
@@ -12332,6 +12344,40 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_clr_test",
     "fpu_test",
     "xmodify_test",
+    "lx_hello",
+    "lx_write_exit",
+    "lx_brk",
+    "lx_pipe",
+    "lx_forkmem",
+    "lx_mmap",
+    "lx_fileio",
+    "lx_exec",
+    "lx_socket",
+    "lx_memfd",
+    "lx_prctl",
+    "lx_eventfd",
+    "lx_pty",
+    "lx_procfs",
+    "lx_altstack",
+    "lx_pidfd",
+    "lx_inotify",
+    "lx_fsid",
+    "lx_seccomp",
+    "lx_fdbits",
+    "lx_timerfd",
+    "lx_caps",
+    "lx_fdioctl",
+    "lx_shm",
+    "lx_sysinfo",
+    "lx_statfs",
+    "lx_unix",
+    "lx_wl",
+    "lx_wl_maximize",
+    "lx_wl_popup",
+    "lx_fs",
+    "lx_id",
+    "lx_run",
+    "lx_poll",
 ];
 
 /// The x64 scenario an ARM64 twin `arm_<name>` is of.
@@ -20239,7 +20285,17 @@ fn run_vm(
 ) -> Result<(Option<std::process::ExitStatus>, String, BootTime)> {
     let mut tries = 0;
     loop {
-        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap)?;
+        let run = run_vm_once(iso, boot, timeout, net, stop_after_client, disk, screen, snap);
+        // The firmware's variable store copied for this boot (`qemu`,
+        // `qemu_aarch64`: 64 MiB for AAVMF's) goes with it, or a suite of
+        // aarch64 boots fills the disk; a boot that takes or resumes a
+        // machine snapshot keeps it with the snapshot.
+        if snap.is_none() {
+            for vars in ["ovmf-vars.fd", "aavmf-vars.fd"] {
+                let _ = fs::remove_file(iso.with_extension(vars));
+            }
+        }
+        let run = run?;
         let stderr = fs::read_to_string(iso.with_extension("qemu.stderr")).unwrap_or_default();
         tries += 1;
         if net.is_none() || tries == 3 || !stderr.contains(QEMU_FORWARD_FAILED) {

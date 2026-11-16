@@ -124,7 +124,7 @@ int main(void)
 	struct {
 		unsigned events;
 		u64 data;
-	} __attribute__((packed)) ev = { POLLIN, 77 }, got = { 0, 0 };
+	} LX_EPOLL_PACKED ev = { POLLIN, 77 }, got = { 0, 0 };
 	say_ret("epoll_ctl ADD", sys4(SYS_epoll_ctl, ep, 1, fd, &ev));
 	say("epoll_wait before a write", sys4(SYS_epoll_wait, ep, &got, 1, 0));
 	pid = lx_fork();

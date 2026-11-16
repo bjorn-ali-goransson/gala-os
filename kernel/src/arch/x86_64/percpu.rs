@@ -219,6 +219,13 @@ pub fn load_teb32(teb32: u32) {
     }
 }
 
+/// The FS base as user mode last set it, when user mode can set it
+/// itself: never here (arch_prctl goes through the kernel, which keeps
+/// the record). aarch64's TPIDR_EL0 is user mode's to write.
+pub fn live_user_fs_base() -> Option<u64> {
+    None
+}
+
 /// Sets the FS base user mode sees (the kernel does not use FS; a Linux
 /// thread's TLS pointer). Written to the MSR only when it changes.
 /// Called with interrupts disabled (a context switch, or under the
