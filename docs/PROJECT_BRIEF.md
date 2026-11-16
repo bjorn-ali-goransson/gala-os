@@ -103,9 +103,10 @@ Windows, are a primary specification; real programs (Go, Nginx, the JDK,
   virtio first. Windows drivers are a later, staged goal (UMDF, then KMDF
   in a driver host, then the class frameworks), isolated and never in the
   kernel's address space unsupervised, and never WDDM (ROADMAP DR).
-- **Virtual machines, WSL2 itself and Windows containers.** Linux
-  containers (Docker Desktop, Podman) run through a WSL facade on the
-  Linux personality instead (ROADMAP CT).
+- **Virtual machines, WSL2 itself, Docker Desktop and Windows
+  containers.** Linux containers run on the Linux personality instead:
+  Podman and Docker Engine in a distribution, reached from Windows
+  through a WSL facade and a relayed Docker API pipe (ROADMAP CT).
 
 ## Licensing and reuse
 

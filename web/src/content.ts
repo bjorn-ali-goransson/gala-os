@@ -623,7 +623,7 @@ export const planned: Planned[] = [
   },
   {
     name: "Docker and Podman",
-    what: "Docker Desktop and Podman for Windows, running their Linux side on gala's WSL interface",
+    what: "Podman and Docker in a Linux distribution on gala, used from Windows through Docker's own CLI and Podman for Windows, with no virtual machine",
   },
   {
     name: "x64 Windows programs on ARM64",
