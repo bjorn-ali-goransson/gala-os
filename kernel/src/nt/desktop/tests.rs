@@ -211,10 +211,303 @@ fn a_tile_not_installed_shows_a_download_badge_and_a_click_asks_for_it() {
     let dark = |c: u32| (c & 0xff) < 0x80 && (c >> 8 & 0xff) < 0x80 && (c >> 16 & 0xff) < 0x80;
     let second = (r.x..r.x + r.w).any(|x| (r.y + 63..r.y + 78).any(|y| dark(d.pixel(x, y))));
     assert!(second);
-    // A click hands the program to the caller, which installs it.
+    // A click hands the program to the caller, which installs it; the
+    // menu stays open, the tile showing where the install is
+    // (a_package_tile_installs_with_a_bar_on_the_tile).
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+}
+
+#[test]
+fn a_package_tile_installs_with_a_bar_on_the_tile() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: false },
+    ]);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    let r = d.menu_item_rect(1);
+    // A click on a tile that is not installed asks for its install and
+    // keeps the menu open: the tile shows where the install is, as a
+    // distribution's does, instead of a console window.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    let (bx, by) = (r.x + 13, r.y + 69);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    // A second click while it installs asks for nothing.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.take_launch().is_none());
+    // What the install reports moves the bar: half the download is 40%
+    // of the bar (the download is its middle three fifths), so its right
+    // half is still the track's grey.
+    d.install_progress(office, Some(pkg::Progress::Downloading(50)));
+    assert_eq!(d.pixel(bx + 20, by), ACCENT);
+    assert_ne!(d.pixel(bx + 50, by), ACCENT);
+    // A failure turns the bar red, and a click tries again.
+    d.install_progress(office, Some(pkg::Progress::Failed(4)));
+    assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
+    assert_eq!(d.pixel(bx + 50, by), CLOSE_HOVER);
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    // Installed: the list again and the install's last word (state 3),
+    // as `install_progress` has it from gala; the bar goes with the
+    // badge, and a click starts the program (the menu closes).
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: true },
+    ]);
+    d.install_progress(office, None);
+    assert!(d.installs.is_empty());
+    assert_ne!(d.pixel(bx, by), ACCENT);
+    assert_ne!(d.pixel(bx + 50, by), ACCENT);
     click(&mut d, r.x + 20, r.y + 10);
     assert!(!d.menu_open());
     assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+}
+
+/// A tile whose install went quiet: its `gala install` ended without
+/// saying how it went (killed, or it faulted before it could report),
+/// so no word is coming. The watch is on the installer's process, not
+/// on a silence: an install may say nothing for half an hour (Office's
+/// does), and `process_ended` is the word that it never will.
+#[test]
+fn an_installer_gone_without_a_word_leaves_the_tile_grey_with_a_question_mark() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: false },
+    ]);
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    let r = d.menu_item_rect(1);
+    click(&mut d, r.x + 20, r.y + 10);
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    // The installer's pid, as `start_from_menu` reports it, and half a
+    // download.
+    d.install_started(office, Some(7));
+    d.install_progress(office, Some(pkg::Progress::Downloading(50)));
+    let (bx, by) = (r.x + 13, r.y + 69);
+    let (ix, iy) = (r.x + (r.w - 32) / 2, r.y + 10);
+    let icon = d.pixel(ix + 4, iy + 4);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    // Another process ending is not this install's.
+    d.installers_gone(&[8]);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    assert!(d.tray.balloon.is_none());
+    // Its own: the bar stays where it got to, in grey, the icon turns
+    // grey under a question mark, and it is told above the notification
+    // area as any install that ends is.
+    d.installers_gone(&[7]);
+    assert_eq!(d.pixel(bx, by), TEXT_DIM);
+    assert_ne!(d.pixel(bx + 50, by), TEXT_DIM, "the bar says how far it got");
+    assert_ne!(d.pixel(ix + 4, iy + 4), icon, "the icon is grey");
+    let (qx, qy) = (ix + 20, iy + 20);
+    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
+    assert_eq!(d.pixel(qx + 8, qy + 2), TEXT_DIM, "its badge");
+    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    assert_eq!(
+        said,
+        Some((
+            title("Microsoft Office"),
+            title(
+                "The install went quiet: its installer is gone with no word. A click tries again."
+            )
+        ))
+    );
+    // Told once, however often the word comes.
+    for _ in 0..tray::BALLOON_SECONDS {
+        d.tray.tick();
+    }
+    d.tray_changed();
+    d.refresh();
+    d.installers_gone(&[7]);
+    assert!(d.tray.balloon.is_none(), "told twice");
+    // A click tries again, as it does on a tile whose install failed.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(d.menu_open());
+    assert_eq!(d.take_launch().and_then(Launch::program).map(|p| p.name), Some("Microsoft Office"));
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    // An installer that never started leaves the tile the same way:
+    // there is no word to wait for either, and it says so.
+    d.install_started(office, None);
+    assert_eq!(d.pixel(bx, by), TEXT_DIM);
+    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff);
+    assert_eq!(
+        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        Some(title("The install never started. A click tries again."))
+    );
+    // Installed after all (the install got that far before its
+    // installer died): the listing draws the tile installed and says so.
+    d.set_programs(&[
+        Entry { program: 0, installed: true },
+        Entry { program: office, installed: true },
+    ]);
+    assert!(d.installs.is_empty());
+    assert_eq!(
+        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        Some(title("Installed. Its tile starts it now."))
+    );
+}
+
+/// A distribution's install is watched the same way: one watch list for
+/// both (`installers`), one badge, one notification.
+#[test]
+fn a_distributions_installer_gone_without_a_word_is_told_the_same_way() {
+    let mut d = menu_with_linux(linux::Listing::default());
+    let tile = d.linux_tile_rect(0);
+    click(&mut d, tile.x + 20, tile.y + 20);
+    let ubuntu = linux::Name::new(b"Ubuntu").unwrap();
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
+    d.linux_install_started(ubuntu, Some(11));
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
+    let (bx, by) = (tile.x + 13, tile.y + 69);
+    assert_eq!(d.pixel(bx, by), ACCENT);
+    d.installers_gone(&[11]);
+    assert_eq!(d.pixel(bx, by), TEXT_DIM);
+    let (ix, iy) = (tile.x + (tile.w - 32) / 2, tile.y + 10);
+    let (qx, qy) = (ix + 20, iy + 20);
+    assert_eq!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark");
+    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    assert_eq!(
+        said,
+        Some((
+            title("Ubuntu"),
+            title(
+                "The install went quiet: its installer is gone with no word. A click tries again."
+            )
+        ))
+    );
+    // A click tries again: the tile stops being quiet at once, and its
+    // bar starts over where `wsl --import` starts, at nothing
+    // downloaded, so there is nothing to fill it with until the bytes
+    // come in.
+    click(&mut d, tile.x + 20, tile.y + 20);
+    assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
+    assert_ne!(d.pixel(qx + 8, qy + 9), 0x00ff_ffff, "the question mark is gone");
+    assert_ne!(d.pixel(bx, by), TEXT_DIM, "and the grey bar with it");
+    d.linux_progress(ubuntu, Some(linux::Progress::Downloading(50)));
+    assert_eq!(d.pixel(bx, by), ACCENT);
+}
+
+/// The watch holds the installs that are still waiting for a word and
+/// no others: a pid is known only once `start_from_menu` has reported
+/// it, and it is forgotten with the install it belongs to (every
+/// process that ends is asked about, so a stale pid would be a tile
+/// turned grey for a stranger's process).
+#[test]
+fn the_watch_holds_only_the_installs_still_waiting_for_a_word() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    let listed =
+        |installed| [Entry { program: 0, installed: true }, Entry { program: office, installed }];
+    d.set_programs(&listed(false));
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    let r = d.menu_item_rect(1);
+    let watched = |d: &Desktop| d.installers.iter().map(|&(_, pid)| pid).collect::<Vec<u64>>();
+    // Clicked, but `start_from_menu` has not run yet: no pid to watch.
+    click(&mut d, r.x + 20, r.y + 10);
+    assert!(watched(&d).is_empty());
+    d.install_started(office, Some(7));
+    assert_eq!(watched(&d), [7]);
+    // An install that ended waits for nothing: a failure, a tile gone
+    // quiet, the install's own last word, the listing that draws it
+    // installed.
+    d.install_progress(office, Some(pkg::Progress::Failed(4)));
+    assert!(watched(&d).is_empty());
+    click(&mut d, r.x + 20, r.y + 10);
+    d.install_started(office, Some(8));
+    d.installers_gone(&[8]);
+    assert!(watched(&d).is_empty());
+    click(&mut d, r.x + 20, r.y + 10);
+    d.install_started(office, Some(9));
+    d.install_progress(office, None);
+    assert!(watched(&d).is_empty());
+    click(&mut d, r.x + 20, r.y + 10);
+    d.install_started(office, Some(10));
+    assert_eq!(watched(&d), [10]);
+    d.set_programs(&listed(true));
+    assert!(watched(&d).is_empty());
+}
+
+/// An install that ends says so above the notification area, as
+/// Windows does: the name on the balloon a program's icon would raise,
+/// and whether it worked. The tile is out of sight as soon as the menu
+/// is closed, so the tile's bar alone is not enough.
+#[test]
+fn an_install_that_ends_is_told_above_the_notification_area() {
+    let (mut d, _) = desktop_with_window();
+    let office = PROGRAMS.iter().position(|p| p.name == "Microsoft Office").unwrap();
+    let listed =
+        |installed| [Entry { program: 0, installed: true }, Entry { program: office, installed }];
+    d.set_programs(&listed(false));
+    // Nothing is told while it is going on: the tile shows that.
+    d.install_progress(office, Some(pkg::Progress::Resolving));
+    d.install_progress(office, Some(pkg::Progress::Downloading(50)));
+    assert!(d.tray.balloon.is_none() && d.card.is_none());
+    // It failed: the program's name, what gala's exit code stands for,
+    // on a card above the notification area.
+    d.install_progress(office, Some(pkg::Progress::Failed(2)));
+    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    assert_eq!(
+        said,
+        Some((
+            title("Microsoft Office"),
+            title("The install failed: the source has no such package or version.")
+        ))
+    );
+    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
+    assert_eq!(card.x + card.w, 1024 - 12);
+    assert_eq!(card.y + card.h, 768 - i64::from(TASKBAR) - 12);
+    // It goes when its time is up, as a program's balloon does, and the
+    // same failure reported again does not tell it twice.
+    for _ in 0..tray::BALLOON_SECONDS {
+        d.tray.tick();
+    }
+    d.tray_changed();
+    d.refresh();
+    assert!(d.card.is_none());
+    d.install_progress(office, Some(pkg::Progress::Failed(2)));
+    assert!(d.tray.balloon.is_none(), "told twice");
+    // A click tries again and it works: the listing that draws the tile
+    // installed is what tells it, and the install's own last word then
+    // has nothing to add.
+    d.install_progress(office, Some(pkg::Progress::Resolving));
+    d.set_programs(&listed(true));
+    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    assert_eq!(
+        said,
+        Some((title("Microsoft Office"), title("Installed. Its tile starts it now.")))
+    );
+    d.tray.balloon = None;
+    d.install_progress(office, None);
+    assert!(d.tray.balloon.is_none(), "told twice");
+    // An install whose last word comes before the listing catches up is
+    // told by that last word instead, so it is never missed.
+    d.set_programs(&listed(false));
+    d.install_progress(office, Some(pkg::Progress::Installing));
+    d.install_progress(office, None);
+    assert_eq!(
+        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        Some(title("Installed. Its tile starts it now."))
+    );
+    // It is the newest thing on the screen: in front of the start menu
+    // where they meet, and it is what a click there takes away (the
+    // menu's foot is under it, and keeps its click).
+    let start = d.start_rect();
+    click(&mut d, start.x + 10, start.y + 10);
+    let card = d.card.as_ref().map(|(r, _)| *r).unwrap();
+    let under = (card.x + 8, card.y + card.h - 4);
+    assert!(d.menu_rect().contains(under.0, under.1), "nothing to be in front of");
+    click(&mut d, under.0, under.1);
+    assert!(d.card.is_none() && d.tray.balloon.is_none());
+    assert!(!d.menu_open() && d.take_launch().is_none());
 }
 
 #[test]
@@ -1279,6 +1572,11 @@ fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
     assert_eq!(d.pixel(bx, by), ACCENT);
     d.linux_progress(ubuntu, Some(linux::Progress::Failed));
     assert_eq!(d.pixel(bx, by), CLOSE_HOVER);
+    // An install that ends is told above the notification area, as a
+    // package's is (`an_install_that_ends_is_told_above_the_notification_area`);
+    // `wsl --import` gives no code to say why, so it is not said.
+    let said = d.tray.balloon.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+    assert_eq!(said, Some((title("Ubuntu"), title("The install failed."))));
     // A failed install may be tried again.
     click(&mut d, tile.x + 20, tile.y + 20);
     assert!(matches!(d.take_launch(), Some(Launch::Linux(linux::Request::Install(..)))));
@@ -1287,6 +1585,10 @@ fn a_suggestion_installs_with_progress_and_then_starts_its_desktop() {
     listing.installed.push(installed("Ubuntu", &[("XTerm", "xterm")]));
     d.set_linux(listing);
     assert!(d.progress.is_empty());
+    assert_eq!(
+        d.tray.balloon.as_ref().map(|b| b.text.clone()),
+        Some(title("Installed. Its tile starts it now."))
+    );
     assert_ne!(d.pixel(bx, by), ACCENT);
     assert!(d.linux_tiles()[0].installed);
     // A click starts its desktop; the menu closes.

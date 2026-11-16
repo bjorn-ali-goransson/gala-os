@@ -804,6 +804,7 @@ pub fn spawn_from_pe(
     args: &str,
     cwd: Option<&str>,
     console: Option<KArc<super::conhost::Session>>,
+    suspended: bool,
 ) -> Result<(KArc<Process>, ObjectRef), LoadError> {
     // The current directory with backslashes and a trailing one, as the
     // process parameters keep it.
@@ -864,7 +865,7 @@ pub fn spawn_from_pe(
         current_directory,
         environment: None,
         handles: None,
-        suspended: false,
+        suspended,
         runtime_data: &[],
         parent_id: 0,
         token: None,

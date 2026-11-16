@@ -35,7 +35,7 @@ enum Service {
 }
 
 const USER_NAMES: usize = 512;
-const USER_NAME_LEN: usize = 96;
+pub(super) const USER_NAME_LEN: usize = 96;
 /// The most names and entries bulk reports (`record_user_bulk`) may hold;
 /// the rest are kept for every other gap.
 const BULK_NAMES: usize = 384;

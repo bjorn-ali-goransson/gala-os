@@ -253,6 +253,22 @@ fn wait_for(secs: u32, done: impl Fn(&Output) -> bool) -> (bool, Output) {
     (done(&last), last)
 }
 
+/// Polls `gala ps` every half second for `secs` seconds: whether `stays`
+/// held in every listing (the last one is its own witness when it does
+/// not).
+fn wait_while(secs: u32, stays: impl Fn(&Output) -> bool) -> (bool, Output) {
+    let mut last = gala("ps").1;
+    for _ in 0..secs * 2 {
+        if !stays(&last) {
+            return (false, last);
+        }
+        // SAFETY: plain call.
+        unsafe { Sleep(500) };
+        last = gala("ps").1;
+    }
+    (stays(&last), last)
+}
+
 /// Whether this is gala (its ntdll has gala's own exports).
 fn on_gala() -> bool {
     // SAFETY: NUL-terminated names.
@@ -288,19 +304,20 @@ pub extern "C" fn mainCRTStartup() -> ! {
         fail(3, 0, &o);
     }
     out(b"start_menu_test: command prompt window\r\n");
-    // 4: 7-Zip's tile: `gala install 7zip.7zip` in a second console
-    // window, which stays when gala ends.
-    let (seen, o) = wait_for(240, |o| o.count_lines_ending(b"conhost.exe") >= 2);
-    if !seen {
+    // 4: 7-Zip's tile, which the screen check clicks once it has read
+    // the line above: `gala install 7zip.7zip` without a console window
+    // (the tile shows where the install is instead). A console window
+    // would be created in the click's own handling and would stay when
+    // gala ends (check 3's does), so watching the Command Prompt's one
+    // console for a while after the click is enough to see that no
+    // second one was made; that the click arrived at all, that gala ran
+    // and how its install ended are the scenario's serial
+    // expectations, and the bar on the tile is the screen check's.
+    let (none, o) = wait_while(10, |o| o.count_lines_ending(b"conhost.exe") < 2);
+    if !none {
         fail(4, 0, &o);
     }
-    out(b"start_menu_test: install window\r\n");
-    // 5: the screen check closes it (Alt+F4): its conhost.exe ends.
-    let (seen, o) = wait_for(240, |o| o.count_lines_ending(b"conhost.exe") < 2);
-    if !seen {
-        fail(5, 0, &o);
-    }
-    out(b"start_menu_test: install window closed\r\n");
+    out(b"start_menu_test: no install window\r\n");
     out(b"start_menu_test: ok\r\n");
     // SAFETY: ends the process.
     unsafe { ExitProcess(0) }

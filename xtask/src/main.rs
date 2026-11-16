@@ -7001,6 +7001,11 @@ const USER_DLLS: &[Dll] = &[
     // license store (sppc_test; Click-to-Run's integrator installs
     // Office's licenses through it).
     Dll { package: "sppc", file: "sppc.dll", exported_as: "testsppc.dll" },
+    // slc.dll: the Software Licensing Client, the name that API had
+    // before Windows 8: 31 forwarders to sppc.dll and three Windows
+    // licensing functions (slc_test; Click-to-Run's service loads it
+    // by name while it brings up the App-V ISV API).
+    Dll { package: "slc", file: "slc.dll", exported_as: "testslc.dll" },
     // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
     // window with (gdiplus_test).
     Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
@@ -9581,6 +9586,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sppc_test", "ntdll.dll", "Windows/System32"),
     ("sppc_test", "kernel32.dll", "Windows/System32"),
     ("sppc_test", "sppc.dll", "Windows/System32"),
+    // The Software Licensing Client, over sppc.dll (user/slc_test).
+    ("slc_test", "ntdll.dll", "Windows/System32"),
+    ("slc_test", "kernel32.dll", "Windows/System32"),
+    ("slc_test", "slc.dll", "Windows/System32"),
+    ("slc_test", "sppc.dll", "Windows/System32"),
     // crypt32's SIP registration in the registry (user/sip_test).
     ("sip_test", "ntdll.dll", "Windows/System32"),
     ("sip_test", "kernel32.dll", "Windows/System32"),
@@ -9865,6 +9875,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "sppc_test",
+    "slc_test",
     "sip_test",
     "actionid_test",
     "hardlink_test",
@@ -13415,7 +13426,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "rpc_test",
         cmdline: "qemu_exit run=rpc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["rpc_test: ok", "exited with status 0x00000000"],
+        // The last two: a binding to an endpoint no server has leaves the
+        // pipe's name in the ledger, which is all that says which server
+        // a program could not reach (ROADMAP OF: Office's AppV ISV API).
+        expect: &[
+            "rpc_test: ok",
+            "exited with status 0x00000000",
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-no_such_endpoint)""#,
+            r#""service":"rpcrt4.dll!no server at pipe(no_such_pipe)""#,
+            // 80 characters: a name is kept to the ledger's own length,
+            // not to a shorter buffer on the way in.
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-AppV-ISV-f98d543e-a688-4582-b4a1-0e2c5e3d6b77)""#,
+        ],
     },
     Scenario {
         name: "unimplemented_test",
@@ -13843,8 +13865,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
         // console window) and an install-on-click tile (7-Zip, not
-        // installed: `gala install 7zip.7zip` in a console window);
-        // START_MENU_SCREEN clicks them.
+        // installed: `gala install 7zip.7zip` without a window, its
+        // progress on the tile); START_MENU_SCREEN clicks them.
         name: "start_menu",
         cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -13854,12 +13876,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
             "gala's cmd.exe has no interactive prompt yet",
             "start_menu_test: command prompt window",
-            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip",
+            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip \
+             (no window)",
             "desktop: started C:\\gala\\gala.exe (pid",
+            "desktop: start menu: install 7zip.7zip: resolving (0%)",
             // Offline (no network card, no winhttp.dll): gala says why in
-            // the window.
+            // the log, which is where a windowless install's output goes,
+            // and the tile's bar turns red (the screen check).
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
-            "start_menu_test: install window closed",
+            "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
+            "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
             "exited with status 0x00000000",
@@ -14627,6 +14653,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=sppc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["sppc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Software Licensing Client, whose exports are sppc's
+        // (user/slc_test).
+        name: "slc_test",
+        cmdline: "qemu_exit run=slc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["slc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // crypt32's subject interface package registration, as Office's
@@ -22408,9 +22442,12 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
-            after: "",
+            // After the line the test program prints when it has the
+            // Command Prompt's window, so that its watch for a second
+            // console window covers this click.
+            after: "start_menu_test: command prompt window",
             // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
-            // in a console window.
+            // without a window, the tile showing where the install is.
             input: &[
                 "mouse_move -23 -255",
                 "mouse_move 0 -195",
@@ -22420,19 +22457,27 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            after: "desktop: shown window 'gala.exe'",
-            // Its console window, with gala's output in it.
+            after: "desktop: start menu: install 7zip.7zip: failed",
+            // 7-Zip's tile has its bar, red (the install failed:
+            // offline), in the row under the name: the tile is
+            // (550, 300, 85, 80), so the bar is at (562, 368), 61 wide
+            // and 4 high (kernel/src/nt/desktop). The bar is drawn by
+            // the menu, so it is also what says the menu stayed open on
+            // the click; the wallpaper is there otherwise.
+            //
+            // The install ended, so it is told above the notification
+            // area too: a card 360 wide, 12 from the right edge and 12
+            // above the taskbar (908, 740 at its bottom right), in
+            // front of the menu. Its light background and the grey of
+            // "The install failed." are in the band that holds the text
+            // whether it takes one line or two. The balloon goes after
+            // BALLOON_SECONDS, which is many tries of this check.
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
-                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+                PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0xf2f4f8),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0x5d5d5d),
             ],
-        },
-        ScreenStep {
-            after: "start_menu_test: install window",
-            // Alt+F4 closes it (the active window): its conhost.exe ends.
-            input: &["sendkey alt-f4"],
-            pixels: &[],
         },
     ],
 };

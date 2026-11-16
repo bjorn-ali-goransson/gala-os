@@ -13,10 +13,10 @@
 //! | 0..4   | version (1) |
 //! | 4..8   | action (ACTION_*) |
 //! | 8..16  | the window's HWND (the registry's) |
-//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height; TrayClick's icon id and button (0 left, 1 right); LinuxProgress's state and percent |
+//! | 16..32 | four i32 arguments: Snap's side (0 left, 1 right, 2 up, 3 down); Move's x, y, width, height; TrayClick's icon id and button (0 left, 1 right); LinuxProgress's state and percent; InstallProgress's state, percent and gala's exit code |
 //! | 32..36 | the text's length in UTF-16 units (at most MAX_TEXT) |
 //! | 36..40 | zero |
-//! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name, LinuxProgress's distribution |
+//! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name, LinuxProgress's distribution, InstallProgress's package id |
 //!
 //! The output: Start writes the new process id (u64). Windows, Programs
 //! and Tray write a header (u32 version 1, u32 how many there are), then
@@ -54,6 +54,12 @@ pub const ACTION_TRAY_CLICK: u32 = 13;
 /// (0 downloading, 1 importing, 2 done, 3 failed), args[1] the percent
 /// downloaded.
 pub const ACTION_LINUX_PROGRESS: u32 = 14;
+/// Where the install of a catalog package is, for its start menu tile
+/// (`gala install <id>`, which a tile runs without a window): the text
+/// the winget id, args[0] the state (0 resolving, 1 downloading, 2
+/// installing, 3 done, 4 failed), args[1] the percent downloaded,
+/// args[2] the exit code gala fails with (galapkg's `Kind`).
+pub const ACTION_INSTALL_PROGRESS: u32 = 15;
 
 /// The list outputs' version and header size.
 pub const LIST_VERSION: u32 = 1;
@@ -240,6 +246,13 @@ pub fn run(
             let [state, percent, ..] = r.args;
             linux_progress_noted(name, state, percent);
             desktop::linux_progress(&caller.desk.shell, name.as_bytes(), state, percent)?;
+        }
+        ACTION_INSTALL_PROGRESS => {
+            let mut id = [0u8; MAX_ID];
+            let id = ascii(&r.text, &mut id).ok_or(NtStatus::INVALID_PARAMETER)?;
+            let [state, percent, exit, _] = r.args;
+            install_progress_noted(id, state, percent, exit);
+            desktop::install_progress(&caller.desk.shell, id.as_bytes(), state, percent, exit)?;
         }
         _ => return Err(NtStatus::INVALID_PARAMETER),
     }
@@ -441,6 +454,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             super::session::CONSOLE
         );
         super::ledger::record("start menu", "session without a user", session.into());
+        desktop::install_started(session, program, None);
         return;
     }
     // Existence again, now: an install may have finished since the menu
@@ -454,6 +468,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
                 .and_then(|p| super::process::intern(p).ok());
             let Some(path) = path else {
                 crate::warn!("desktop: start menu: no memory to start {}", program.name);
+                desktop::install_started(session, program, None);
                 return;
             };
             crate::info!("desktop: start menu starts {}: {path}", program.name);
@@ -466,15 +481,20 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
                     program.name,
                     GALA_EXE[0]
                 );
+                desktop::install_started(session, program, None);
                 return;
             };
             crate::info!(
-                "desktop: start menu: {} is not installed: {gala} install {id}",
+                "desktop: start menu: {} is not installed: {gala} install {id} (no window)",
                 program.name
             );
+            // No console window: the install says where it is through
+            // ACTION_INSTALL_PROGRESS and the tile draws it, as a Linux
+            // distribution's install does. Its output is still in the
+            // log (a process without a console writes there).
             let mut buf = [0u8; 160];
             let started = match join(&mut buf, &[b"install ", id.as_bytes()]) {
-                Some(args) => start_in_window(gala, args),
+                Some(args) => start_path(gala, args, None),
                 None => Err(NtStatus::BUFFER_TOO_SMALL),
             };
             ("install", id, started)
@@ -501,6 +521,13 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             crate::events::Str(target)
         ),
     );
+    // The tile hears what became of the install it asked for: a pid to
+    // wait for a word from, or nothing to wait for at all (a program
+    // that is not on this machine and has no package, `MenuRequest`'s
+    // Missing, ends here too).
+    if op != "start" {
+        desktop::install_started(session, program, (status == 0).then_some(pid));
+    }
 }
 
 /// wsl.exe, where Windows has it.
@@ -541,6 +568,51 @@ fn linux_progress_noted(name: &str, state: i32, percent: i32) {
         format_args!(
             r#""op":"linux progress","name":{},"state":"{what}","percent":{percent}"#,
             crate::events::Str(name)
+        ),
+    );
+}
+
+/// The longest package id a progress report carries (winget's ids are
+/// `Publisher.Package[.Variant]`; the catalog's longest is far shorter).
+const MAX_ID: usize = 128;
+
+/// InstallProgress logged when its state changes (and each tenth of a
+/// download), with a `window` event. The failure says gala's exit code
+/// and what it stands for; which step failed is in gala's own line
+/// above it, since a tile's install has no window to show it in.
+fn install_progress_noted(id: &str, state: i32, percent: i32, exit: i32) {
+    use core::sync::atomic::{AtomicI32, Ordering};
+    static LAST: AtomicI32 = AtomicI32::new(-1);
+    let key = state * 1000 + if state == 1 { percent / 10 } else { 0 };
+    if LAST.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+    let what = match state {
+        0 => "resolving",
+        1 => "downloading",
+        2 => "installing",
+        3 => "installed",
+        4 => "failed",
+        _ => "unknown state",
+    };
+    if state == 4 {
+        // What the code stands for when it stands for something; gala's
+        // own line above says which step failed either way.
+        match desktop::pkg::install_failure(exit) {
+            Some(why) => {
+                crate::info!("desktop: start menu: install {id}: failed (gala exit {exit}: {why})");
+            }
+            None => crate::info!("desktop: start menu: install {id}: failed (gala exit {exit})"),
+        }
+    } else {
+        crate::info!("desktop: start menu: install {id}: {what} ({percent}%)");
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"install progress","name":{},"state":"{what}","percent":{percent},"exit":{exit}"#,
+            crate::events::Str(id)
         ),
     );
 }
@@ -666,6 +738,10 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
             crate::events::Str(target.as_str())
         ),
     );
+    // As a package's install does, the tile hears what became of it.
+    if matches!(r, Request::Install(..)) {
+        desktop::linux_install_started(session, name, (status == 0).then_some(pid));
+    }
 }
 
 /// Starts the program at `path` with `args` as the boot user (`start_path`)
