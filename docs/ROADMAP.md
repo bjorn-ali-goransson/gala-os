@@ -200,7 +200,7 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
-| CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
+| CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
 | AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, exceptions to vectored handlers and APCs (`arm_*` scenarios); next more test programs, then Linux's aarch64 ABI |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
@@ -3764,17 +3764,23 @@ runs as a boot scenario whose transcript equals its `expected.txt`.
 seams", "The Linux layer's milestones", "The lx module", "The lx_abi
 crate"; WORKFLOW "Linux test programs".
 
-### CT. Linux containers: Docker Desktop and Podman over a WSL facade
+### CT. Linux containers: Podman and Docker on Linux, reached from Windows
 
-**Goal**: stock Docker Desktop for Windows and stock Podman for Windows
-(`podman machine`, later Podman Desktop) install and run Linux
-containers on gala, unmodified. On Windows both run their Linux side in
-a WSL2 distribution; gala answers WSL2's interface itself and runs that
-distribution on the Linux personality (LX), with no virtual machine.
+**Goal**: stock Podman and Docker Engine (dockerd, containerd, runc or
+crun), installed from a Linux distribution's own packages, run Linux
+containers in that distribution on gala's Linux personality (LX),
+unmodified. Windows programs reach the same engines without a virtual
+machine: Docker's own Windows CLI and the tools that speak Docker's API
+(VS Code Dev Containers, Visual Studio, JetBrains IDEs, Testcontainers)
+through `\\.\pipe\docker_engine`, and stock Podman for Windows
+(`podman machine`) through gala's answer to WSL2's interface, the
+distribution running on LX.
 
-**Out of scope**: running WSL2 itself (a VM with Microsoft's Linux
-kernel), the Hyper-V backends of both products, and Windows containers
-(Docker Desktop's "Windows containers" mode: HCS, server silos).
+**Not in CT**: Docker Desktop for Windows is wanted but not scheduled
+("Later": the engine reached from Windows serves the tools that use
+Docker first). **Out of scope**: running WSL2 itself (a VM with
+Microsoft's Linux kernel), the Hyper-V backends, Docker Desktop for
+Linux (a VM of its own), and Windows containers (HCS, server silos).
 
 **Done so far**:
 - Step 2's core (`wsl` with user/wsl_test, the screen scenario
@@ -3795,36 +3801,45 @@ kernel), the Hyper-V backends of both products, and Windows containers
   command, a terminated wsl.exe's exit code) are `info` lines to record
   on Windows; real WSL's transcripts (step 1) are still to be recorded.
 
-**Next** (each step test first; the recordings of step 1 are the spec):
-1. Spec: on real Windows 11 24H2, record what each product does to set
-   up and to run `hello-world`: every `wsl.exe` command line and its
-   output, the WSL service calls, named pipes and sockets (hvsocket and
-   localhost TCP) between the Windows and Linux sides, registry keys,
-   WMI queries and optional-feature checks, files under `%LOCALAPPDATA%`
-   and `%ProgramData%`; inside the distribution, `strace -f` of its
-   init, dockerd/containerd/runc and podman/conmon/crun. The ranked
-   result (Windows side, facade, Linux system calls) goes in this
-   section, like AG's blocker list.
+**Next** (each step test first; step 1's recordings are the spec). Order:
+the Linux side first (steps 4, 7 and 8, with step 1's Linux
+recordings), then the Windows side (steps 2, 3, 6, then 5); Kubernetes
+(step 9) after step 8, alongside the Windows side.
+1. Spec. On real Linux (Ubuntu 26.04): `strace -f` of `podman run --rm
+   hello-world` rootless and rootful (podman, conmon, crun, pasta) and
+   of `docker run --rm hello-world` (dockerd, containerd, runc, started
+   by systemd), what each reads in `/proc`, `/sys` and cgroupfs, and
+   the netlink and nftables traffic. On real Windows 11 24H2: what
+   Podman for Windows does to set up and run `hello-world` (every
+   `wsl.exe` command line and its output, the WSL service calls, named
+   pipes and sockets (hvsocket and localhost TCP) between the two
+   sides, registry keys, WMI queries and optional-feature checks, files
+   under `%LOCALAPPDATA%` and `%ProgramData%`), and what Docker's
+   Windows CLI and the tools above send over `\\.\pipe\docker_engine`
+   (Docker Engine's API is documented; the recordings show which calls
+   and which path forms the tools use). The ranked result (Linux system
+   calls, facade, Windows side) goes in this section, like AG's blocker
+   list.
 2. The facade's core's rest: wsl_test checked on Windows (its `info`
-   lines become checks); the WSL service (the COM interface Docker
-   Desktop and Podman call, the registry's one writer), a
-   distribution's init as an LX process (an instance that outlives its
-   last command, as WSL's), DefaultUid applied (root inside the
-   distribution), `-u`, `--cd`, `--export`, ptys and process groups
-   for the terminal (LX "Next" 2-3: job control, Ctrl+C as SIGINT).
+   lines become checks); the WSL service (the COM interface Podman
+   calls, the registry's one writer), a distribution's init as an LX
+   process (an instance that outlives its last command, as WSL's),
+   DefaultUid applied (root inside the distribution), `-u`, `--cd`,
+   `--export`, ptys and process groups for the terminal (LX "Next" 2-3:
+   job control, Ctrl+C as SIGINT).
 3. The facade's plumbing: `/mnt/<drive>` inside the distribution
    (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
    (Windows programs started from Linux and back), `wsl.conf`, hvsocket
    (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
    side as one core socket pair, localhost forwarding over one shared
    network stack.
-4. LX up to the distributions' needs (beyond milestone 5): glibc,
-   systemd as PID 1 (Podman's machine), namespaces (mount, PID, UTS,
-   IPC, network, user), cgroup v2, overlayfs, bind mounts and
-   `pivot_root`, netlink, veth and bridges, nftables/iptables, seccomp,
-   `/proc` and `/sys` as these programs read them. Namespaces and
-   cgroups are core objects (ARCHITECTURE "Plan: Linux containers
-   through a WSL facade"), not LX-only state.
+4. LX up to the engines' needs (beyond milestone 5): systemd as PID 1
+   (a distribution's dockerd and Podman's machine), namespaces (mount,
+   PID, UTS, IPC, network, user), cgroup v2, overlayfs, bind mounts and
+   `pivot_root`, TUN/TAP (pasta, slirp4netns), netlink, veth and
+   bridges, nftables/iptables, seccomp, `/proc` and `/sys` as these
+   programs read them. Namespaces and cgroups are core objects
+   (ARCHITECTURE "Plan: Linux containers"), not LX-only state.
    Nesting is a requirement, not an afterthought: namespaces and
    cgroups are trees whose every level carries its own limits (a
    cgroup subtree delegated to a container is divided again inside
@@ -3833,41 +3848,74 @@ kernel), the Hyper-V backends of both products, and Windows containers
    volume there). Goal beyond Linux: a nested container runtime
    without `--privileged`, an inner root fully contained (as Sysbox
    does on Linux).
-5. Podman: `podman machine init`, `start`, then `podman run` from the
-   Windows side; Podman Desktop after BR stage 2 (Electron).
-6. Docker Desktop: install, the backend service, its distribution, the
-   `docker` CLI over `\\.\pipe\docker_engine` running containers; then
-   the dashboard (Electron, after BR stage 2).
-7. Container engines on Linux itself, with no Windows side: in a
-   distribution on gala (a WSL one or LD's desktop), the distribution's
-   own `podman` and `docker` (dockerd, containerd, runc or crun) run
-   containers, rootless Podman first (user namespaces with
-   newuidmap/newgidmap and /etc/subuid, rootless networking through
-   pasta or slirp4netns, overlay in a user namespace, cgroup v2
-   delegated by systemd's user instance), then rootful Podman and
+5. Podman for Windows: `podman machine init`, `start`, then `podman run`
+   from the Windows side; Podman Desktop after BR stage 2 (Electron).
+6. Docker from Windows, without Docker Desktop: gala serves
+   `\\.\pipe\docker_engine` and relays it to the Docker Engine of a
+   chosen distribution (its `/var/run/docker.sock`), so Docker's
+   standalone Windows CLI (`docker.exe`, with the compose plugin;
+   fetched by xtask, not committed) and the tools above work
+   unmodified; `docker context` and `DOCKER_HOST` as on Windows. Windows
+   paths in bind mounts (`docker run -v C:\src:/app`, the API's `Binds`
+   and `Mounts`, compose files) are translated to the distribution's
+   `/mnt/<drive>` paths (step 3) by the relay, which reads the API's
+   requests rather than passing bytes blindly; what it rewrites is in
+   `events=wsl`. Then VS Code Dev Containers and Testcontainers for
+   .NET and Java running a container from the Windows side.
+7. Container engines on Linux, with no Windows side: in a distribution
+   on gala (a WSL one or LD's desktop), the distribution's own `podman`
+   and `docker` run containers, in tiers: rootless Podman first with no
+   network and no limits (`--network=none --cgroups=disabled`: user
+   namespaces with newuidmap/newgidmap and /etc/subuid, overlay in a
+   user namespace, `pivot_root`); then cgroup v2 delegated by systemd's
+   user instance, its limits enforced; then rootless networking through
+   pasta or slirp4netns; then rootful Podman, and Docker Engine from
+   the distribution's packages (`apt install docker.io`, or Docker's
+   `docker-ce`) as the distribution starts it (`docker.service` and
+   `docker.socket` under systemd, the `docker` group, its iptables
+   variant), with bridge networking and published ports; then rootless
    Docker.
 8. Nesting: the official `docker:dind` image runs `docker run --rm
    hello-world` inside it; Podman in Podman (`quay.io/podman/stable`)
    likewise; then both without `--privileged`. The sibling pattern
    (the host's `/var/run/docker.sock` mounted into a container) comes
-   with step 6 or 7.
+   with step 7.
+9. Kubernetes, on step 7's engines: single-node k3s first (containerd
+   built in), a Deployment's pods running and a Service reached by its
+   cluster IP and by DNS (CoreDNS); then kind (Kubernetes nodes as
+   Docker containers: step 8's nesting with systemd inside). Beyond
+   Docker it needs cgroup v2's statistics as exact as Linux's, since
+   the kubelet evicts and schedules by them (`memory.current`,
+   `memory.events`, `memory.stat`, `cpu.stat`, the pressure files,
+   pids), kube-proxy's Service NAT (iptables or nftables with
+   conntrack and its netlink interface, hairpin NAT, bridged traffic
+   through the firewall: `br_netfilter`'s sysctls), mount propagation
+   (shared and slave mounts), `/proc/<pid>/mountinfo`, `/proc/net`,
+   `/dev/kmsg` and inotify at scale. Multi-node clusters across gala
+   machines (flannel's VXLAN) after that. Observability: the cgroup
+   figures the kubelet read and the NAT rules a Service installed,
+   both in the state dump, so a wrong eviction or an unreachable
+   Service can be explained after the fact.
 
-**Done when**: from a gala command prompt, `podman run --rm hello-world`
-and `docker run --rm hello-world` print their greeting with both
-products installed by their own installers; the same from a shell in a Linux
-distribution on gala with its own Podman and Docker, and from inside a
-`docker:dind` container; then a container serving
-HTTP reached from the Windows side (`-p 8080:80`). Observability with
-each step: the facade's calls as events (`events=wsl`), each
-distribution's console and the products' logs copied into the serial
-log, missing Linux calls in the ledger by distribution.
+**Done when**: from a shell in a Linux distribution on gala, its own
+`podman run --rm hello-world` and `docker run --rm hello-world` print
+their greeting, rootless and rootful, and the same from inside a
+`docker:dind` container, and a single-node k3s serves a Deployment
+through a Service; from a gala command prompt, Docker's Windows
+CLI runs `docker run --rm hello-world` against that engine and `podman
+run --rm hello-world` works with Podman for Windows installed by its
+own installer; then a container serving HTTP reached from the Windows
+side (`-p 8080:80`) and a bind mount of a Windows directory. Observability with
+each step: the facade's and the relay's calls as events (`events=wsl`),
+each distribution's console and the engines' logs copied into the
+serial log, missing Linux calls in the ledger by distribution.
 
-**Licensing**: Podman is Apache-2.0; Docker Desktop's licence terms
-(a paid subscription for larger organisations) govern running it.
-Neither is committed; xtask fetches them and runs them only in QEMU.
-WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
+**Licensing**: Podman, Docker Engine (Moby, containerd, runc),
+Docker's CLI, Kubernetes, k3s and kind are Apache-2.0. None is committed; xtask fetches them
+and runs them only in QEMU. WSL's source (MIT) is an allowed source
+(CLEAN_ROOM "WSL").
 
-**Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
+**Design**: ARCHITECTURE "Plan: Linux containers".
 
 ### LD. Desktop Linux applications
 
@@ -4512,6 +4560,18 @@ x86_64 Android images (AOSP's emulator builds) first, ARM64 after AR.
    renderer), SurfaceFlinger's output as a shasha window.
 4. A first application: an APK from AOSP's samples, its window and input
    checked on the screen.
+
+**Out of scope**: the Google Play Store and Google Play Services
+(proprietary, licensed by Google only to certified devices; a licence
+would be a business decision, not a roadmap step) and Play Integrity's
+device verdicts, which gala cannot pass honestly: applications that
+require them (many banking, payment, DRM and game titles) do not run,
+and the README's "Not there yet" will say so once AN runs
+applications. They come from AOSP, F-Droid and APKs the user
+installs; microG (Apache-2.0), an open
+reimplementation of Play Services' common APIs (push messaging,
+location, sign-in), is the route for applications that need those.
+AOSP's CTS (open source) is AN's conformance suite.
 
 AOSP is open source (Apache-2.0; the kernel GPL-2.0; CLEAN_ROOM
 "Linux"). Needs LD's dynamic linking and most of LX.
@@ -6143,6 +6203,22 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   in QEMU, with the driver host's state in crash reports and the state
   dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE) come with LX
   when it gets device interfaces.
+- **Docker Desktop for Windows** (the owner: wanted, not scheduled;
+  CT's engine relay serves Docker's tools first). Stock Docker Desktop
+  installed by its own installer and run unmodified: its installer and
+  the checks it makes (Windows version, virtualization and optional
+  features through WMI and DISM), its backend service and the
+  privileged helper service, the `docker-desktop` distribution it
+  imports and drives through the WSL facade (CT steps 2-3: the WSL
+  service's COM interface, hvsocket and vsock), its own
+  `\\.\pipe\docker_engine` in place of gala's relay, credential
+  helpers on the Windows credential store, then the dashboard
+  (Electron, after BR stage 2) and its bundled Kubernetes. Worth doing
+  for its own sake: everything it needs is standard Windows (services,
+  WMI, installers, COM, named pipes, Electron) that other programs use
+  too. Its licence terms (a paid subscription at larger organisations)
+  govern running it; never committed, fetched by xtask and run only in
+  QEMU.
 - **Chrome as well as Edge** (the owner): item BR's goal is stock
   Edge, and both browsers are the same Chromium underneath, so Chrome
   is mostly BR's work over again with another vendor's services. Two

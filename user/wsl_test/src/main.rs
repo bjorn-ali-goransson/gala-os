@@ -1,5 +1,5 @@
 //! `wsl.exe` as Windows' WSL answers it (ROADMAP CT step 2), driven from
-//! outside as Docker Desktop and Podman drive it: each command line run
+//! outside as Podman for Windows drives it: each command line run
 //! with its standard output and error on pipes, its exit code and output
 //! checked. Spec: Microsoft's WSL documentation and the messages and
 //! formats of its published source (THIRD_PARTY.md, CLEAN_ROOM "WSL").

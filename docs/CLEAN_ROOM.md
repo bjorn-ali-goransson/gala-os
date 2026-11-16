@@ -29,8 +29,8 @@ can be licensed, so it is not used as a source.
 Allowed: Microsoft's published WSL source (github.com/microsoft/WSL,
 MIT) as reference and borrowable code, recorded in `THIRD_PARTY.md` like
 any borrowed code; WSL's documentation on learn.microsoft.com; black-box
-behaviour of WSL on real Windows (`wsl.exe` transcripts, what Docker
-Desktop and Podman do through it). Parts of WSL that are not published
+behaviour of WSL on real Windows (`wsl.exe` transcripts, what Podman
+for Windows and Docker Desktop do through it). Parts of WSL that are not published
 stay black-box: the "Never" rules above apply to them.
 
 ## How work flows

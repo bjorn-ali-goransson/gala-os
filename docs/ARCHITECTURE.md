@@ -13838,27 +13838,40 @@ discipline):
   a group that is not orphaned: it is raised, but a stop is not
   implemented).
 
-## Plan: Linux containers through a WSL facade
+## Plan: Linux containers
 
-Docker Desktop and Podman for Windows run their Linux side (dockerd,
-containerd and runc; podman, conmon and crun) in a WSL2 distribution and
-drive it from Windows through `wsl.exe`, the WSL service, named pipes
-and hvsockets. gala runs both unmodified (ROADMAP CT) by answering
-WSL2's interface itself, with the distribution running on the Linux
-personality: a facade, not a VM. WSL2 itself, the Hyper-V backends and
-Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
-"Linux".
+Podman and Docker Engine (podman, conmon and crun; dockerd, containerd
+and runc) run unmodified in a Linux distribution on the Linux
+personality, from the distribution's own packages (ROADMAP CT). Windows
+reaches them without a virtual machine: Podman for Windows drives its
+distribution through `wsl.exe`, the WSL service, named pipes and
+hvsockets, which gala answers itself (a facade, not a VM); Docker's
+Windows CLI and the tools that speak Docker's API reach the
+distribution's dockerd through `\\.\pipe\docker_engine`, which gala
+relays. Docker Desktop is wanted but not scheduled (ROADMAP "Later"; it
+would run on the same facade, its own pipe in place of the relay).
+WSL2 itself, the Hyper-V backends and Windows containers are out of
+scope. Sources: CLEAN_ROOM "WSL" and "Linux".
 
 ```
   Windows side (NT)                     Linux side (LX)
-  Docker Desktop / podman.exe           the distribution: init or systemd,
+  podman.exe, docker.exe, IDEs          the distribution: init or systemd,
      |  wsl.exe, WSL service API           dockerd / podman, runc / crun
      |  \\.\pipe\..., AF_HYPERV            AF_VSOCK, /mnt/c, interop
-  gala's wsl.exe + WSL service  ---->   LX processes in a container object
+  gala's wsl.exe + WSL service,  ---->  LX processes in a container object
+  the docker_engine relay
   ------------------------------------------------------------------------
   core: one file system, one network stack, socket pairs, container objects
 ```
 
+- **The engine relay** (CT step 6): a gala service owns
+  `\\.\pipe\docker_engine` and connects each client to the chosen
+  distribution's `/var/run/docker.sock` through the core (no TCP, no
+  network between). It reads Docker Engine's HTTP API rather than
+  passing bytes blindly, because Windows paths in bind mounts (`Binds`,
+  `Mounts`) must become the distribution's `/mnt/<drive>` paths; every
+  rewrite is an `events=wsl` event. Streams after an upgrade (attach,
+  exec, logs) are passed through untouched.
 - **The facade** is user-mode programs and services of gala's (its
   `wsl.exe` and WSL service, behaving as recorded on Windows) plus a
   few kernel pieces; nothing in it depends on a hypervisor. A
@@ -13885,10 +13898,10 @@ Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
   terminate, interop launches, hvsocket connects with service ids), the
   container id in process events and crash reports, each distribution's
   console in the serial log.
-- **Limits** (planned work, ROADMAP CT): step 2 is built ("The WSL
-  facade" below); the plumbing (step 3), container objects and the
-  distributions' Linux needs (glibc, systemd, the container system
-  calls: step 4) are not.
+- **Limits** (planned work, ROADMAP CT): step 2's core is built ("The
+  WSL facade" below); the plumbing (step 3), container objects and the
+  engines' Linux needs (systemd, the container system calls: step 4)
+  and the engine relay (step 6) are not.
 
 ### The WSL facade
 
@@ -13933,7 +13946,7 @@ terminal), host tests in `user/wsl` (tar, gzip, the command line, the
   first import and moved to the first one left when the default is
   unregistered. wsl.exe is the registry's only writer (no WSL service
   yet: two imports at once can race on the default; the service comes
-  with the COM interface Docker Desktop uses, step 6).
+  with the COM interface Podman for Windows uses, step 2).
 - **One tree per distribution**: `<BasePath>\rootfs` (WSL 1's layout:
   no ext4.vhdx, no VM), made by the kernel node by node as wsl.exe
   reads the tarball (ustar, GNU long names and base-256, pax; gzip
