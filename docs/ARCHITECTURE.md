@@ -263,8 +263,16 @@ faults, its exit).
   LSE atomics, dot product, JSCVT, LRCPC). NtCreateThread's Win32 start
   address (ThreadQuerySetWin32StartAddress) is x0 when set, else the pc:
   x64's rule (the return register, where kernel32's thunk passes the
-  routine). Limit: the kernel's own writes of user code (image pages,
-  WriteProcessMemory) do no instruction cache maintenance yet.
+  routine). Invariant: code the kernel writes for user mode reaches
+  instruction fetch before user mode runs it. The `Mapper` asks its
+  memory to sync a user leaf that is or becomes executable
+  (`TableMemory::sync_code`), and `UserSpace::copy_in` an executable page
+  it wrote into (a loader filling code after mapping it,
+  WriteProcessMemory): aarch64's cleans the frame's data cache lines to
+  the point of unification and invalidates its instruction cache lines
+  through the HHDM (`cpu::sync_code`); x86-64 needs nothing and skips the
+  walk (`TableMemory::SYNCS_CODE`). QEMU's TCG would not show a missed
+  one: the host test `user_code_is_synced_before_it_is_executable` does.
 - **Windows' ARM64 ABI** (`nt/abi/arm64`): ARM64's CONTEXT
   (`context.rs`, plain data the host's tests build on any machine:
   ContextFlags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, V0-V31, Fpcr, Fpsr, the

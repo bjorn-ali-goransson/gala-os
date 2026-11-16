@@ -4349,6 +4349,9 @@ on the seams item PT prepared: native ARM64 Windows programs
   twins, their transcripts real Linux's). Copy-on-write fork now works
   wherever frames are numbered above the managed count (QEMU `virt`'s
   memory starts at 1 GiB).
+- Code the kernel writes for user mode (image pages, a loader's,
+  WriteProcessMemory's) is cleaned and invalidated for instruction fetch
+  before it runs (a real ARM64 machine's caches need it; QEMU's do not).
 - CI runs the aarch64 scenarios in its boot shards, under QEMU's
   emulation (TCG on GitHub's x86-64 runners).
 
@@ -4363,10 +4366,7 @@ on the seams item PT prepared: native ARM64 Windows programs
    xstate_test stays x64's (AVX; ARM64's SVE state is not in
    gala's ARM64 context). rpcrt4's server routine call puts every
    argument in integer registers: ARM64 passes floating-point ones in
-   v0-v7 apart, which needs the format string's types. The kernel's own
-   writes of user code (image pages, WriteProcessMemory) do no
-   instruction cache maintenance yet: QEMU's TCG does not need it, a
-   real ARM64 machine does.
+   v0-v7 apart, which needs the format string's types.
 2. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
    about one aarch64 boot in 150 under multi-threaded TCG on a loaded
    host, before the boot loader ran: CPU 0 kept taking its timer tick

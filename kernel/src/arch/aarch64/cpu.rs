@@ -158,6 +158,49 @@ pub fn allow_user_access() {
     };
 }
 
+/// Makes code written to `[virt, virt + bytes)` (a kernel address: the
+/// HHDM's view of a user frame) visible to instruction fetch on every
+/// processor, before a user mapping makes it executable: each data cache
+/// line cleaned to the point of unification, then each instruction cache
+/// line invalidated (by this address: ARMv8's instruction caches behave as
+/// physically indexed), with the barriers Arm's sequence for modified
+/// code asks for. The line sizes are CTR_EL0's; its IDC and DIC bits say
+/// when a step is not needed.
+pub fn sync_code(virt: u64, bytes: u64) {
+    let ctr: u64;
+    // SAFETY: reads CTR_EL0.
+    unsafe {
+        core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags))
+    };
+    let end = virt + bytes;
+    if ctr & (1 << 28) == 0 {
+        let line = 4u64 << ((ctr >> 16) & 0xf);
+        let mut at = virt & !(line - 1);
+        while at < end {
+            // SAFETY: cleans a line of mapped kernel memory (the HHDM).
+            unsafe {
+                core::arch::asm!("dc cvau, {}", in(reg) at, options(nostack, preserves_flags))
+            };
+            at += line;
+        }
+    }
+    // SAFETY: a barrier.
+    unsafe { core::arch::asm!("dsb ish", options(nostack, preserves_flags)) };
+    if ctr & (1 << 29) == 0 {
+        let line = 4u64 << (ctr & 0xf);
+        let mut at = virt & !(line - 1);
+        while at < end {
+            // SAFETY: invalidates instruction cache lines; no data changes.
+            unsafe {
+                core::arch::asm!("ic ivau, {}", in(reg) at, options(nostack, preserves_flags))
+            };
+            at += line;
+        }
+    }
+    // SAFETY: barriers: the invalidation completes everywhere.
+    unsafe { core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags)) };
+}
+
 /// Whether the processor has a random number generator (FEAT_RNG:
 /// ID_AA64ISAR0_EL1.RNDR, bits 63:60, nonzero).
 fn has_rndr() -> bool {
