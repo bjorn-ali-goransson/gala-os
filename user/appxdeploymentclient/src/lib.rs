@@ -24,7 +24,7 @@
 //!   FindUsers) whose iterator has no current item; FindPackage by full
 //!   name gives NULL. Each query is recorded to the ledger ("other",
 //!   `appxdeploymentclient.dll!<method>(<the name asked>)`, as much as
-//!   the ledger's 64 characters keep), so a run shows what it asked
+//!   the ledger's 96 characters keep), so a run shows what it asked
 //!   and was answered "none". The all-users queries
 //!   answer so for any caller (Windows wants an administrator: not
 //!   checked).
@@ -210,7 +210,7 @@ fn record(parts: &[&[u8]], what: u32) {
 
 /// Reports an interface asked of `object` that it does not have
 /// (ledger "other", `appxdeploymentclient.dll!QI <iid> <object>`, the
-/// object past the ledger's 64 characters often cut off): a
+/// object past the ledger's 96 characters often cut off): a
 /// caller that goes on without checking crashes there, and the IID
 /// names what to implement.
 fn record_no_interface(object: &[u8], iid: &Guid) {

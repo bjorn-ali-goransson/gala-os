@@ -3889,7 +3889,11 @@ fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer
 /// not implemented) in the missing-features ledger.
 fn gala_record_missing(call: &mut Call<'_>) -> NtStatus {
     let (ptr, len) = (arg!(call, 0), arg!(call, 1) as usize);
-    let mut name = [0u8; 64];
+    // As long as the ledger itself keeps: a shorter buffer here would
+    // cut names the ledger had room for -- an endpoint's GUID
+    // (`rpcrt4.dll!no server at pipe(...)`), a long interface name --
+    // and the name is what the entry is about.
+    let mut name = [0u8; super::ledger::USER_NAME_LEN];
     let len = len.min(name.len());
     if call.process.read(ptr, &mut name[..len]).is_err() {
         return NtStatus::ACCESS_VIOLATION;

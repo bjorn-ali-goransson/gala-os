@@ -13308,6 +13308,9 @@ const SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             r#""service":"rpcrt4.dll!no server at pipe(LRPC-no_such_endpoint)""#,
             r#""service":"rpcrt4.dll!no server at pipe(no_such_pipe)""#,
+            // 80 characters: a name is kept to the ledger's own length,
+            // not to a shorter buffer on the way in.
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-AppV-ISV-f98d543e-a688-4582-b4a1-0e2c5e3d6b77)""#,
         ],
     },
     Scenario {
