@@ -144,12 +144,26 @@ extern "system" fn early_apc(data: usize) {
     EARLY_APC.store(data as u32, Ordering::SeqCst);
 }
 
+/// TEB.ThreadLocalStoragePointer (TEB+0x58: gs's on x64, x18's on ARM64).
+fn tls_pointer() -> usize {
+    let array: usize;
+    // SAFETY: reads the running thread's TEB field.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x58]", out(reg) array, options(nostack, readonly))
+    };
+    // SAFETY: reads the running thread's TEB field.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("ldr {}, [x18, #0x58]", out(reg) array, options(nostack, readonly))
+    };
+    array
+}
+
 /// This thread's copy of slot `i` (0 TLS_START, 1-2 the values, 3-4 the
 /// zero fill).
 fn slot(i: usize) -> *mut u64 {
-    let array: usize;
-    // SAFETY: gs:[0x58] is TEB.ThreadLocalStoragePointer.
-    unsafe { core::arch::asm!("mov {}, gs:[0x58]", out(reg) array, options(nostack, readonly)) };
+    let array = tls_pointer();
     // SAFETY: the loader set the index and this thread's block.
     unsafe {
         let index = core::ptr::read_volatile(&raw const _tls_index) as usize;

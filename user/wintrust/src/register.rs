@@ -201,7 +201,7 @@ fn wlen(s: *const u16) -> usize {
 }
 
 /// One ledger line naming the call, the action (its GUID's first group:
-/// the ledger keeps 64 characters) and its result.
+/// the ledger keeps 96 characters) and its result.
 fn note(add: bool, guid: &[u16; 38], error: u32) {
     let prefix: &[u8] = if add {
         b"wintrust.dll!WintrustAddActionID("

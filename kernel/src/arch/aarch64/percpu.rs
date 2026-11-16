@@ -118,6 +118,10 @@ pub fn set_user_fs_base(base: u64) {
     block().user_fs_base.store(base, Ordering::Relaxed);
 }
 
+pub fn user_fs_base() -> u64 {
+    block().user_fs_base.load(Ordering::Relaxed)
+}
+
 /// No 32-bit code here.
 pub fn load_teb32(_teb32: u32) {
     unported("percpu::load_teb32")

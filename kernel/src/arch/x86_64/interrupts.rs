@@ -157,6 +157,12 @@ impl TrapFrame {
         self.rip.wrapping_sub(1)
     }
 
+    /// A fast fail's code (`__fastfail`'s argument: rcx). x86-64's `int
+    /// 0x29` is not told apart yet (it raises #GP: TrapKind::Protection).
+    pub fn fast_fail_code(&self) -> u64 {
+        self.rcx
+    }
+
     /// A page fault's access (the error code's bits: 1 write, 4
     /// instruction fetch); None for other traps.
     pub fn page_fault_access(&self) -> Option<FaultAccess> {
@@ -353,6 +359,11 @@ static NMI_HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// with every interrupt blocked, possibly while this CPU holds any lock:
 /// it may only use atomics and `try_lock`.
 pub type NmiHandler = fn(&TrapFrame);
+
+/// The names of the instruction and stack pointers in the state dump's
+/// lines.
+pub const IP_NAME: &str = "rip";
+pub const SP_NAME: &str = "rsp";
 
 /// Routes NMIs to `handler` (without one they are ignored).
 pub fn set_nmi_handler(handler: NmiHandler) {

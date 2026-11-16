@@ -16,6 +16,11 @@ pub enum TrapKind {
     InvalidOpcode,
     /// A protection fault (#GP: a privileged instruction among others).
     Protection,
+    /// A failed assertion the code raised itself (ARM64: `brk #0xf001`).
+    Assertion,
+    /// A fast fail (`__fastfail`; ARM64: `brk #0xf003`, the code in x0):
+    /// the process ends at once, no exception handler runs.
+    FastFail,
     /// A page fault (#PF).
     PageFault,
     /// Anything else.

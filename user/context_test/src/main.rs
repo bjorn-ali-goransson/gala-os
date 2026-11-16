@@ -8,7 +8,6 @@
 #![no_std]
 #![no_main]
 
-use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use ntrt::*;
@@ -16,27 +15,76 @@ use ntrt::*;
 const STATUS_THREAD_IS_TERMINATING: NtStatus = 0xc000_004b;
 const MARK: u64 = 0x5eed_0000_c0de_0002;
 const SECOND: i64 = -10_000_000;
-const CTX_FLAGS: usize = 0x30;
-const CTX_RCX: usize = 0x80;
-const CTX_RSP: usize = 0x98;
-const CTX_R12: usize = 0xd8;
-const CTX_RIP: usize = 0xf8;
-const CONTEXT_SIZE: usize = 0x4d0;
+
+/// x64: the CONTEXT's offsets (the pc, sp, the register holding MARK and
+/// the first argument's) and the spinning loop.
+#[cfg(target_arch = "x86_64")]
+mod arch {
+    use core::arch::global_asm;
+
+    pub const CTX_FLAGS: usize = 0x30;
+    pub const CTX_ARG: usize = 0x80; // rcx
+    pub const CTX_SP: usize = 0x98;
+    pub const CTX_MARK: usize = 0xd8; // r12
+    pub const CTX_PC: usize = 0xf8;
+    pub const CONTEXT_SIZE: usize = 0x4d0;
+
+    /// The stack pointer a function entered by a call has: below a
+    /// 16-byte boundary by its return address.
+    pub fn entry_sp(sp: u64) -> u64 {
+        (sp & !0xf) - 8
+    }
+
+    // A loop that only increments a counter, with r12 = the marker. Its
+    // bounds are known, so a captured pc can be checked against them.
+    global_asm!(
+        ".globl gala_spin",
+        "gala_spin:",
+        "mov r12, rdx",
+        "2:",
+        "lock inc qword ptr [rcx]",
+        "jmp 2b",
+        ".globl gala_spin_end",
+        "gala_spin_end:",
+    );
+}
+
+/// ARM64: as x64's, with the marker in x20 and the argument in x0.
+#[cfg(target_arch = "aarch64")]
+mod arch {
+    use core::arch::global_asm;
+
+    pub const CTX_FLAGS: usize = 0;
+    pub const CTX_ARG: usize = 0x08; // x0
+    pub const CTX_MARK: usize = 0x08 + 8 * 20; // x20
+    pub const CTX_SP: usize = 0x100;
+    pub const CTX_PC: usize = 0x108;
+    pub const CONTEXT_SIZE: usize = 0x390;
+
+    /// The stack pointer a function is entered with: 16-byte aligned.
+    pub fn entry_sp(sp: u64) -> u64 {
+        sp & !0xf
+    }
+
+    // The counter has one writer: a plain load, add and store.
+    global_asm!(
+        ".globl gala_spin",
+        ".p2align 2",
+        "gala_spin:",
+        "mov x20, x1",
+        "2:",
+        "ldr x9, [x0]",
+        "add x9, x9, #1",
+        "str x9, [x0]",
+        "b 2b",
+        ".globl gala_spin_end",
+        "gala_spin_end:",
+    );
+}
+
+use arch::*;
 const TEB_STACK_BASE: usize = 0x08;
 const TEB_STACK_LIMIT: usize = 0x10;
-
-// A loop that only increments a counter, with r12 = the marker. Its bounds
-// are known, so a captured Rip can be checked against them.
-global_asm!(
-    ".globl gala_spin",
-    "gala_spin:",
-    "mov r12, rdx",
-    "2:",
-    "lock inc qword ptr [rcx]",
-    "jmp 2b",
-    ".globl gala_spin_end",
-    "gala_spin_end:",
-);
 
 unsafe extern "C" {
     fn gala_spin(counter: *const AtomicU64, marker: u64) -> !;
@@ -56,7 +104,7 @@ extern "C" fn spinner(_: usize) -> ! {
     unsafe { gala_spin(&COUNTER, MARK) }
 }
 
-/// Where the spinner is sent by NtSetContextThread (rcx = its argument).
+/// Where the spinner is sent by NtSetContextThread (its argument: rcx, x0).
 extern "C" fn redirected(arg: usize) -> ! {
     REDIRECTED.store(arg as u64, Ordering::SeqCst);
     exit_thread(0)
@@ -166,12 +214,12 @@ fn run() -> Result<(), u32> {
     let mut ctx = Ctx::full();
     c.st(get_context(t, ctx.0.as_mut_ptr()), ok)?;
     let (start, end) = (gala_spin as *const () as u64, &raw const gala_spin_end as u64);
-    let rip = ctx.get(CTX_RIP);
+    let rip = ctx.get(CTX_PC);
     c.ok((start..end).contains(&rip), rip)?;
-    c.eq(ctx.get(CTX_R12), MARK)?;
+    c.eq(ctx.get(CTX_MARK), MARK)?;
     let teb = thread_basic_info(t).2;
     let (limit, base) = stack_of(teb);
-    let rsp = ctx.get(CTX_RSP);
+    let rsp = ctx.get(CTX_SP);
     c.ok(rsp < base && rsp + 0x1_0000 > limit, rsp)?;
 
     // It makes no progress while suspended, and continues once resumed.
@@ -189,9 +237,9 @@ fn run() -> Result<(), u32> {
     c.st(suspend(t, &mut prev), ok)?;
     let mut ctx = Ctx::full();
     c.st(get_context(t, ctx.0.as_mut_ptr()), ok)?;
-    ctx.set(CTX_RIP, redirected as *const () as u64);
-    ctx.set(CTX_RCX, 0x1234);
-    ctx.set(CTX_RSP, (ctx.get(CTX_RSP) & !0xf) - 8);
+    ctx.set(CTX_PC, redirected as *const () as u64);
+    ctx.set(CTX_ARG, 0x1234);
+    ctx.set(CTX_SP, entry_sp(ctx.get(CTX_SP)));
     c.st(set_context(t, ctx.0.as_ptr()), ok)?;
     c.eq(resume_thread(t).1.into(), 1)?;
     c.st(wait(t, Some(5 * SECOND)), ok)?;
@@ -205,10 +253,10 @@ fn run() -> Result<(), u32> {
     let mut me = Ctx::full();
     c.st(get_context(CURRENT_THREAD, me.0.as_mut_ptr()), ok)?;
     let (limit, base) = stack_of(teb_field(0x30));
-    let rsp = me.get(CTX_RSP);
+    let rsp = me.get(CTX_SP);
     c.ok(rsp < base && rsp + 0x10_0000 > limit, rsp)?;
     let image = &raw const __ImageBase as u64;
-    let rip = me.get(CTX_RIP);
+    let rip = me.get(CTX_PC);
     c.ok(rip > image && rip < image + 0x10_0000 || rip > 0x1_8000_0000, rip)?; // ours or ntdll's
 
     // A thread suspended in a wait keeps the wait's result and only runs on.
@@ -224,10 +272,10 @@ fn run() -> Result<(), u32> {
     delay(SECOND / 50);
     c.st(suspend(w, &mut prev), ok)?;
     // Its context while blocked in the wait: the user state at the system
-    // call (rip in our image, after ntrt's `syscall`).
+    // call (the pc in our image, after ntrt's stub's `syscall` or `svc`).
     let mut wc = Ctx::full();
     c.st(get_context(w, wc.0.as_mut_ptr()), ok)?;
-    let rip = wc.get(CTX_RIP);
+    let rip = wc.get(CTX_PC);
     c.ok(rip > image && rip < image + 0x10_0000, rip)?;
     c.st(set_event(event).0, ok)?;
     delay(SECOND / 50);

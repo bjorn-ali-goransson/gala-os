@@ -104,8 +104,27 @@ pub fn last_user_rip(thread: crate::sched::ThreadId) -> Option<u64> {
 /// timer starts (the hang watchdog's scenario).
 static HANG_TEST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Set once the hang test's CPU went on.
+static HANG_TEST_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn set_hang_test(on: bool) {
     HANG_TEST.store(on, Ordering::Relaxed);
+}
+
+/// `hangtest`: the boot's end waits (up to 30 s) for the hang to be over,
+/// so the watchdog's report does not depend on how long the programs run.
+pub fn wait_hang_test(on: bool) {
+    if !on {
+        return;
+    }
+    let until = raw_monotonic_ns() + 30_000_000_000;
+    while !HANG_TEST_DONE.load(Ordering::Acquire) {
+        if raw_monotonic_ns() >= until {
+            crate::warn!("hangtest: CPU 1 did not go on within 30 s of the boot's end");
+            return;
+        }
+        crate::sched::sleep_ms(100);
+    }
 }
 
 /// `sample_hz=`: profiler samples per second and CPU (`sample` events).
@@ -483,6 +502,7 @@ fn on_tick(frame: &mut TrapFrame) {
                 core::hint::spin_loop();
             }
             crate::info!("hangtest: CPU 1 goes on");
+            HANG_TEST_DONE.store(true, Ordering::Release);
         }
     }
     if frame.from_user_mode() {

@@ -458,6 +458,7 @@ pub fn exception_name(status: NtStatus) -> &'static str {
         0xc000_0096 => "privileged instruction",
         0xc000_00fd => "stack overflow",
         0xc000_0409 => "stack buffer overrun (fail fast)",
+        0xc000_0420 => "assertion failure",
         0xc000_0374 => "heap corruption",
         0xc000_0025 => "noncontinuable exception",
         0xc000_008e..=0xc000_0093 | 0xc000_02b4 | 0xc000_02b5 => "floating-point exception",
@@ -667,8 +668,8 @@ fn report_memory(process: &Process, note: &Note) {
     for (i, &v) in note.deep[..note.deep_len].iter().enumerate() {
         if let Some(m) = module_at(process, v) {
             info!(
-                "crash report:   [{}sp+{:#05x}] {}",
-                if note.wow64 { "e" } else { "r" },
+                "crash report:   [{}+{:#05x}] {}",
+                if note.wow64 { "esp" } else { super::platform::SP_NAME },
                 width * (STACK_WORDS + i),
                 At(v, Some(m))
             );

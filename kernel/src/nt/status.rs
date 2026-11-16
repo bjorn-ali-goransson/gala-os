@@ -60,6 +60,9 @@ impl NtStatus {
     pub const INTEGER_DIVIDE_BY_ZERO: NtStatus = NtStatus(0xc000_0094);
     pub const PRIVILEGED_INSTRUCTION: NtStatus = NtStatus(0xc000_0096);
     pub const BREAKPOINT: NtStatus = NtStatus(0x8000_0003);
+    pub const ASSERTION_FAILURE: NtStatus = NtStatus(0xc000_0420);
+    /// A fast fail's (`__fastfail`) status.
+    pub const STACK_BUFFER_OVERRUN: NtStatus = NtStatus(0xc000_0409);
     pub const USER_APC: NtStatus = NtStatus(0x0000_00c0);
     pub const MORE_ENTRIES: NtStatus = NtStatus(0x0000_0105);
     pub const NO_MORE_ENTRIES: NtStatus = NtStatus(0x8000_001a);

@@ -254,7 +254,7 @@ const IID_ICLASSFACTORY: Guid = guid(1, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 
 /// Records an interface a QueryInterface did not answer:
 /// `QI? <object> {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}` (the whole IID:
-/// its first dword alone does not name it; short, as the ledger keeps 64
+/// its first dword alone does not name it; short, as the ledger keeps 96
 /// characters of a name), the first dword as detail.
 pub fn record_iid(what: &str, g: &Guid) {
     let mut s = String::from(what);

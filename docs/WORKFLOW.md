@@ -384,6 +384,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_CMDLINE="words"` | add kernel command-line words to every boot (the kernel takes the last `args=`, so this can replace a scenario's arguments) |
 | `XTASK_QEMU_ARGS="..."` | extra QEMU arguments; an `-accel` here replaces xtask's own |
 | `XTASK_QEMU_LOG=int,cpu_reset` | QEMU's `-d` log into `<image>.qemu.log` |
+| `XTASK_QEMU_GDB=1` | at a boot's timeout, attach gdb to its QEMU and add QEMU's own record of each vCPU and every QEMU thread's stack to the failed log ("Hunting a rare hang") |
 | `XTASK_QEMU=<path>` | the QEMU binary to use |
 | `XTASK_FIRMWARE=uefi\|bios` | force one firmware for every boot |
 | `XTASK_NO_BATCH=1` | every scenario in its own VM |
@@ -436,6 +437,7 @@ xtask that change how a scenario boots:
 | `CARD_SCENARIOS` | a network card and nothing connecting to it (the driver's set-up alone: `arm_boot`) |
 | `DISK_SCENARIOS` | a virtio-blk disk, sparse, with the most it may take on the host ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
+| `NO_I8042_SCENARIOS` | `-machine q35,i8042=off`: no PS/2 controller at all, as on a machine whose keyboard and mouse are USB alone (`no_i8042`) |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
 | `SINGLE_THREAD_TCG` | `-accel tcg,thread=single` without KVM ("Known intermittent") |
 | `HOST_LOAD_SCENARIOS` | run with a busy thread on every host CPU |
@@ -1806,6 +1808,29 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   rebuild them, as for the other third-party-tool builds. FlaUI tests:
   "FlaUI".
 
+### ARM64 test programs (the aarch64 kernel)
+
+The aarch64 kernel's scenarios (`AARCH64_SCENARIOS`) run ARM64 builds:
+the same program sources, built for `aarch64-pc-windows-msvc` on ntrt.
+ntrt's 64-bit runtime (`user/ntrt/src/nt64.rs`: the services' wrappers,
+the 64-bit PEB) is x64's and ARM64's alike; what differs is each one's
+own file (`x64.rs`, `arm64.rs`): the stub's shape (ARM64's is Windows
+ARM64's ntdll's, `svc #N; ret`, the pinned build's numbers as x64's),
+the TEB's register (x18), CONTEXT, the memory intrinsics. A new service
+goes in nt64.rs's `stubs!` list once, for both. gala's ntdll
+(`testntdll`) is built for ARM64 too: a scenario that ships it starts
+its program through LdrInitializeThunk (`arm_startup`).
+
+- List the program in `USER_PROGRAMS_ARM64` (beside its x64 entry in
+  USER_PROGRAMS): `build_kernel_aarch64` builds that list and USER_DLLS
+  (but NOT_ARM64_DLLS) for ARM64, and the aarch64 kernel's images carry
+  those in place of the x64 builds (a scenario's built DLLs too).
+- `export-tests` copies them to `user/bin/arm64/` (CI checks they match
+  their sources, as user/bin's); `run-all.ps1` runs only the x64
+  programs beside it, an ARM64 Windows runs these.
+- Its scenario is an `arm_<name>` entry in AARCH64_SCENARIOS, with the
+  x64 scenario's expectations (`arm_hello` is `hello`'s).
+
 ### 32-bit test programs (WOW64)
 
 32-bit (x86) programs test WOW64 (ARCHITECTURE "Plan: WOW64"): no_std
@@ -2216,14 +2241,18 @@ source).
   default `-march`, musl's libc by what comes out of the first program
   it builds -- and CI's `linux` job clears the variant for its whole
   job, before it installs anything, by writing `#clear
-  APT::Architecture-Variants;` into `/etc/apt/apt.conf.d/99-plain-amd64`
-  (a name that sorts after the image's). A file of one's own that clears
-  the option, rather than the deletion of the image's file that sets it:
-  one runner image keeps that file in
-  `/etc/apt/apt.conf.d/90arch-variant` and another does not, while
-  `#clear` -- or `-o APT::Architecture-Variants=` on a single command --
-  outranks any file whatever its name. `apt-config dump | grep -i
-  variant` then shows it empty. Check what came of it in the code, not
+  APT::Architecture-Variants;` into `/etc/apt/apt.conf.d/zz-plain-amd64`
+  and dropping any line setting it from `/etc/apt/apt.conf`. apt reads
+  its configuration in order (`apt.conf.d` by name, then `apt.conf`),
+  and a `#clear` clears only what was read before it: a later file
+  selects the variant again (one runner image's dump still said amd64v3
+  right after a clear written to `99-plain-amd64`). A file of one's own
+  read last, rather than the deletion of the image's file that sets it:
+  one runner image keeps that file in `/etc/apt/apt.conf.d/90arch-variant`
+  and another elsewhere. The step lists the files that set the option
+  and fails if `apt-config dump` still selects a variant (`-o
+  APT::Architecture-Variants=` on a single command also outranks every
+  file). Check what came of it in the code, not
   in `-march=` alone, which says nothing about musl-dev: no `__AVX2__`
   from `gcc -dM -E -`, and no VEX-encoded instruction in
   `/usr/lib/x86_64-linux-musl/libc.a` or in a binary the build produced.
@@ -4151,6 +4180,33 @@ before blaming CI:
   late still show.
 - In gala-um, catch a hung instance live and `gdb -p` the `exe` process
   (`thread apply all bt`).
+- **A guest that stops with no state dump** (aarch64's `virt` has no NMI
+  for the dump; a wedged guest answers none): the failed log has QEMU's
+  view of each CPU at the timeout (`xtask: QEMU's CPU#n: PC=...
+  PSTATE=...`, from the monitor). `XTASK_QEMU_GDB=1` adds QEMU's own
+  record (`xtask: gdb: vcpu <n> <field> <value>` lines: halted, PC,
+  x0/x1/x29/x30/SP, ELR, ESR, VBAR, TTBR0, the power state, the
+  interrupts QEMU holds for it (`interrupt_request`), each generic
+  timer's control, compare value and QEMU expiry against `clock
+  virtual`; RIP/RFLAGS on x86-64) and every QEMU thread's stack: a
+  halted vCPU says the guest stopped (where, and what last called), a
+  thread inside `exit()` or a lock says QEMU did; a halted vCPU with an
+  interrupt held is a wakeup QEMU lost, one whose timer keeps being
+  re-armed is a guest still ticking while it waits. The monitor's PC
+  under TCG can be a stale value; gdb's halted flag is not.
+  Pitfall: xtask's timeout handling (the NMI request, the monitor, gdb's
+  attach) can wake a stalled guest, which then runs on until QEMU is
+  killed, so the serial log of a timed-out boot can hold lines printed
+  after the timeout, above xtask's lines: a log that reaches the
+  kernel's end with a pre-kernel CPU state in gdb's record is such a
+  guest. Read where the guest was from gdb's record, not the log's last
+  line.
+  With `XTASK_REPEAT`, catching a 1-in-100 hang takes a few hundred
+  boots; `XTASK_QEMU_LOG=int` adds every exception taken (the last ones
+  before the stop). The kernel says each step of its exit (`qemu: ending
+  the run (...)`, and on aarch64 `qemu: the run did not end: ...` if
+  the semihosting exit returned), and `bootstack` on the command line adds how deep the
+  boot stack was ever used.
 - **A program hangs without a ledger** (it never exits, so the ledger is
   not printed): add `events=syscall,thread` to its scenario's command
   line and read `target/debug/test-<name>.events.jsonl` while QEMU still
@@ -4757,8 +4813,11 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   --lib` build the test binary dies with SIGSEGV and no test name
   ("process didn't exit successfully ... signal: 11"). Gate the log
   lines with `#[cfg(not(test))]` or a wrapper compiled out under
-  `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`);
-  events are fine (`events::emit` is a no-op in tests). Find the test
+  `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`), or
+  keep what is to be told in the state and let the module's free
+  functions write it, which the tests do not reach (`nt::desktop`'s
+  `Quieted` and `tell_quiet`); events are fine (`events::emit` is a
+  no-op in tests). Find the test
   with `--test-threads=1` or by filtering module names.
 - **Window behaviour belongs in `nt::winstate`**: what a window is
   (rectangles, Z order, focus, capture, client pixels, input for

@@ -25,14 +25,23 @@ const ADP_STOPPED_APPLICATION_EXIT: u64 = 0x2_0026;
 /// exception reports it), so other machines never get here.
 pub fn exit(code: QemuExitCode) -> ! {
     let block = [ADP_STOPPED_APPLICATION_EXIT, u64::from(code as u32) << 1 | 1];
+    let result: u64;
     // SAFETY: the semihosting call reads the two words; QEMU ends.
     unsafe {
         core::arch::asm!(
             "hlt #0xf000",
-            in("x0") SYS_EXIT_EXTENDED,
+            inout("x0") SYS_EXIT_EXTENDED => result,
             in("x1") block.as_ptr(),
             options(nostack, readonly, preserves_flags)
         )
     };
+    // Only when the host did not end the run (it could not read the
+    // block, or there is no semihosting host): said, rather than a silent
+    // halt the harness can only time out on.
+    crate::console::emergency_line(format_args!(
+        "qemu: the run did not end: the semihosting exit returned {result:#x} (its block at \
+         {:#x}); halting",
+        block.as_ptr() as u64
+    ));
     cpu::halt_forever()
 }

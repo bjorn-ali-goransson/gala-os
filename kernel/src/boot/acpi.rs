@@ -10,6 +10,9 @@
 //! "Interrupts and time"): the HPET table's base address and the FADT's
 //! ACPI PM timer port.
 //!
+//! And aarch64's devices: the GIC's addresses (the MADT's GICD and GICR
+//! entries) and the console UART's (SPCR).
+//!
 //! And PCI's configuration space: the MCFG's ECAM window ("PCI Firmware
 //! Specification", MCFG), how aarch64 reaches it.
 //!
@@ -118,20 +121,35 @@ pub fn root_entries(root: &[u8], xsdt: bool) -> Result<impl Iterator<Item = u64>
     }))
 }
 
+/// A MADT's entries after its header: (type, the entry's bytes), up to
+/// the first truncated or zero-length one.
+fn madt_entries(madt: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+    let mut at = MADT_ENTRIES;
+    core::iter::from_fn(move || {
+        let (&kind, &len) = (madt.get(at)?, madt.get(at + 1)?);
+        let len = usize::from(len);
+        if len < 2 {
+            return None;
+        }
+        let entry = madt.get(at..at + len)?;
+        at += len;
+        Some((kind, entry))
+    })
+}
+
+fn madt_ok(madt: &[u8]) -> bool {
+    madt.get(..4) == Some(b"APIC") && checksum_ok(madt)
+}
+
 /// The enabled processors of a MADT (types 0, local APIC, 9, local
 /// x2APIC, and 0x0b, GIC CPU interface).
 pub fn parse_madt(madt: &[u8]) -> Result<FirmwareCpus, AcpiError> {
-    if madt.get(..4) != Some(b"APIC") || !checksum_ok(madt) {
+    if !madt_ok(madt) {
         return Err(AcpiError::BadTable("MADT"));
     }
     let mut cpus = FirmwareCpus::empty();
-    let mut at = MADT_ENTRIES;
-    while let (Some(&kind), Some(&len)) = (madt.get(at), madt.get(at + 1)) {
-        let len = usize::from(len);
-        if len < 2 {
-            break;
-        }
-        let Some(entry) = madt.get(at..at + len) else { break };
+    for (kind, entry) in madt_entries(madt) {
+        let len = entry.len();
         match kind {
             // Processor UID (1), APIC id (1), flags (4).
             0 if len >= 8 => {
@@ -158,9 +176,63 @@ pub fn parse_madt(madt: &[u8]) -> Result<FirmwareCpus, AcpiError> {
             }
             _ => {}
         }
-        at += len;
     }
     Ok(cpus)
+}
+
+/// Where a GICv3 is, from the MADT (aarch64).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GicAddresses {
+    /// The distributor's physical base (a GICD entry).
+    pub distributor: Option<u64>,
+    /// The redistributors' discovery range: base and length (a GICR
+    /// entry).
+    pub redistributors: Option<(u64, u32)>,
+}
+
+/// The MADT's first GIC distributor entry (type 0x0c: reserved (2), GIC
+/// id (4), the base (8) at 8) and first redistributor range (type 0x0e:
+/// reserved (2), the base (8) at 4, the length (4) at 12); None for a bad
+/// table.
+pub fn parse_madt_gic(madt: &[u8]) -> Option<GicAddresses> {
+    if !madt_ok(madt) {
+        return None;
+    }
+    let mut gic = GicAddresses::default();
+    for (kind, entry) in madt_entries(madt) {
+        match kind {
+            0x0c if entry.len() >= 24 && gic.distributor.is_none() => {
+                gic.distributor = u64_at(entry, 8).filter(|&a| a != 0);
+            }
+            0x0e if entry.len() >= 16 && gic.redistributors.is_none() => {
+                gic.redistributors = u64_at(entry, 4)
+                    .zip(u32_at(entry, 12))
+                    .filter(|&(base, len)| base != 0 && len != 0);
+            }
+            _ => {}
+        }
+    }
+    Some(gic)
+}
+
+/// The serial console the firmware names (SPCR, "Serial Port Console
+/// Redirection Table").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsoleUart {
+    /// The interface type (byte 36): 0x03 an Arm PL011, 0x0d and 0x0e
+    /// Arm's SBSA generic UART (PL011-compatible registers).
+    pub interface: u8,
+    /// The registers' physical base (the GAS at 40: memory space only).
+    pub base: u64,
+}
+
+/// The SPCR's console UART, if its registers are in memory space.
+pub fn parse_spcr(t: &[u8]) -> Option<ConsoleUart> {
+    if t.get(..4) != Some(b"SPCR") || !checksum_ok(t) || *t.get(40)? != 0 {
+        return None;
+    }
+    let base = u64_at(t, 44).filter(|&a| a != 0)?;
+    Some(ConsoleUart { interface: *t.get(36)?, base })
 }
 
 /// The ACPI PM timer (FADT PM_TMR_BLK / X_PM_TMR_BLK): an I/O port
@@ -257,6 +329,41 @@ pub fn read_clock_tables(hhdm_offset: u64, rsdp_virt: u64) -> ClockTables {
     }
 }
 
+/// How PSCI is called (aarch64), from the FADT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Psci {
+    /// HVC, else SMC.
+    pub hvc: bool,
+}
+
+/// The FADT's ARM_BOOT_ARCH flags (u16 at 129, ACPI 5.1 and later):
+/// PSCI_COMPLIANT (bit 0), PSCI_USE_HVC (bit 1). None when the firmware
+/// does not offer PSCI.
+pub fn parse_fadt_psci(t: &[u8]) -> Option<Psci> {
+    const PSCI_COMPLIANT: u16 = 1;
+    const PSCI_USE_HVC: u16 = 2;
+    if t.get(..4) != Some(b"FACP") || !checksum_ok(t) {
+        return None;
+    }
+    let flags = u16::from_le_bytes([*t.get(129)?, *t.get(130)?]);
+    (flags & PSCI_COMPLIANT != 0).then_some(Psci { hvc: flags & PSCI_USE_HVC != 0 })
+}
+
+/// PSCI's conduit, from the RSDP at virtual `rsdp` (HHDM).
+pub fn read_psci(hhdm_offset: u64, rsdp_virt: u64) -> Option<Psci> {
+    read_table(hhdm_offset, rsdp_virt, b"FACP").ok().flatten().and_then(parse_fadt_psci)
+}
+
+/// The MADT's GIC addresses, from the RSDP at virtual `rsdp` (HHDM).
+pub fn read_gic(hhdm_offset: u64, rsdp_virt: u64) -> Option<GicAddresses> {
+    read_table(hhdm_offset, rsdp_virt, b"APIC").ok().flatten().and_then(parse_madt_gic)
+}
+
+/// The SPCR's console UART, from the RSDP at virtual `rsdp` (HHDM).
+pub fn read_spcr(hhdm_offset: u64, rsdp_virt: u64) -> Option<ConsoleUart> {
+    read_table(hhdm_offset, rsdp_virt, b"SPCR").ok().flatten().and_then(parse_spcr)
+}
+
 /// The MCFG's segment-0 ECAM window, from the RSDP at virtual `rsdp`
 /// (HHDM); none without the table (or without a readable one).
 pub fn read_mcfg(hhdm_offset: u64, rsdp_virt: u64) -> Option<Ecam> {
@@ -345,22 +452,79 @@ mod tests {
     }
 
     /// GICC entries (aarch64): enabled ones' MPIDR affinity.
+    /// A MADT GICC entry (type 0x0b, 80 bytes).
+    fn gicc(mpidr: u64, flags: u32) -> Vec<u8> {
+        let mut e = vec![0u8; 80];
+        e[0] = 0x0b;
+        e[1] = 80;
+        e[12..16].copy_from_slice(&flags.to_le_bytes());
+        e[68..76].copy_from_slice(&mpidr.to_le_bytes());
+        e
+    }
+
     #[test]
     fn madt_lists_enabled_gic_cpu_interfaces() {
-        let gicc = |mpidr: u64, flags: u32| {
-            let mut e = vec![0u8; 80];
-            e[0] = 0x0b;
-            e[1] = 80;
-            e[12..16].copy_from_slice(&flags.to_le_bytes());
-            e[68..76].copy_from_slice(&mpidr.to_le_bytes());
-            e
-        };
         let mut body = vec![0u8; 8];
         body.extend(gicc(0, 1));
         body.extend(gicc(0x1_0000_0101, 1)); // Aff3 1, Aff1 1, Aff0 1
         body.extend(gicc(2, 0)); // disabled
         let madt = table(b"APIC", &body);
         assert_eq!(parse_madt(&madt).unwrap().ids(), &[0, 0x1_0000_0101]);
+    }
+
+    #[test]
+    fn madt_gic_addresses() {
+        let mut body = vec![0u8; 8];
+        let mut gicd = vec![0x0c, 24, 0, 0, 0, 0, 0, 0];
+        gicd.extend_from_slice(&0x0800_0000u64.to_le_bytes());
+        gicd.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0]); // vectors, version 3
+        let mut gicr = vec![0x0e, 16, 0, 0];
+        gicr.extend_from_slice(&0x080a_0000u64.to_le_bytes());
+        gicr.extend_from_slice(&0x00f6_0000u32.to_le_bytes());
+        body.extend(gicc(0, 1));
+        body.extend(&gicd);
+        body.extend(&gicr);
+        let gic = parse_madt_gic(&table(b"APIC", &body)).unwrap();
+        assert_eq!(gic.distributor, Some(0x0800_0000));
+        assert_eq!(gic.redistributors, Some((0x080a_0000, 0x00f6_0000)));
+        // Neither: an x86 MADT; a bad checksum: none at all.
+        let x86 = table(b"APIC", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(parse_madt_gic(&x86), Some(GicAddresses::default()));
+        let mut bad = table(b"APIC", &body);
+        bad[50] ^= 1;
+        assert_eq!(parse_madt_gic(&bad), None);
+    }
+
+    #[test]
+    fn fadt_psci() {
+        let mut body = vec![0u8; 276 - SDT_HEADER_LEN];
+        body[129 - 36] = 3; // compliant, HVC
+        assert_eq!(parse_fadt_psci(&table(b"FACP", &body)), Some(Psci { hvc: true }));
+        body[129 - 36] = 1; // compliant, SMC
+        assert_eq!(parse_fadt_psci(&table(b"FACP", &body)), Some(Psci { hvc: false }));
+        body[129 - 36] = 2; // HVC without PSCI: none
+        assert_eq!(parse_fadt_psci(&table(b"FACP", &body)), None);
+        // An ACPI 1 FADT (116 bytes, x86's): none.
+        assert_eq!(parse_fadt_psci(&table(b"FACP", &[0u8; 80])), None);
+    }
+
+    #[test]
+    fn spcr_console() {
+        // Interface type (36), reserved (3), base address GAS (40).
+        let mut body = vec![0u8; 80 - SDT_HEADER_LEN];
+        body[0] = 3; // PL011
+        body[4] = 0; // memory space
+        body[5] = 32;
+        body[8..16].copy_from_slice(&0x0900_0000u64.to_le_bytes());
+        let spcr = table(b"SPCR", &body);
+        assert_eq!(parse_spcr(&spcr), Some(ConsoleUart { interface: 3, base: 0x0900_0000 }));
+        // An I/O port UART (x86's 16550): not a memory base.
+        let mut io = body.clone();
+        io[0] = 0;
+        io[4] = 1;
+        io[8..16].copy_from_slice(&0x3f8u64.to_le_bytes());
+        assert_eq!(parse_spcr(&table(b"SPCR", &io)), None);
+        assert_eq!(parse_spcr(&table(b"SPCX", &body)), None);
     }
 
     #[test]

@@ -100,19 +100,30 @@ jobs:
       # into them, and user/lx/build.sh refuses to build that way.
       #
       # So the option is cleared for the whole job, in apt's own
-      # configuration, under a name that sorts after the one the image uses:
-      # every apt-get below takes the plain archive, the next step's musl-dev
-      # among them. Clearing the option is not the same as deleting the file
-      # that sets it -- that worked on the Azure runner image it was written
-      # on and left amd64v3 in place on an EC2 one, where the rebuild differed
-      # again -- because where an image keeps that file is the image's
-      # business, while #clear outranks any file whatever its name. What the
-      # rebuild rests on is then stated in the lx step below, where the cause
-      # can still be named: a byte diff cannot name it.
+      # configuration: every apt-get below takes the plain archive, the next
+      # step's musl-dev among them. apt reads its configuration in order
+      # (apt.conf.d by name, then apt.conf), and a #clear clears only what
+      # was read before it: a file read later selects the variant again
+      # (runner image 20261111.82: "#clear" written to 99-plain-amd64, and
+      # the dump right after still said amd64v3). Where an image sets the
+      # option is the image's business, so the clear goes in the file read
+      # last of apt.conf.d (zz-), apt.conf loses any line setting it, and the
+      # step fails, naming the files that set it, if apt still selects a
+      # variant: the gcc check below would only see the consequence. What
+      # the rebuild rests on is then stated in the lx step below, where the
+      # cause can still be named: a byte diff cannot name it.
       - name: Take every package from the plain amd64 archive, not amd64v3
         run: |
-          printf '#clear APT::Architecture-Variants;\n' | sudo tee /etc/apt/apt.conf.d/99-plain-amd64
-          apt-config dump | grep -i variant || echo "no architecture variant is selected"
+          echo "where the image sets an architecture variant:"
+          sudo grep -rn 'Architecture-Variants' /etc/apt/ || echo "  nowhere"
+          printf '#clear APT::Architecture-Variants;\n' | sudo tee /etc/apt/apt.conf.d/zz-plain-amd64
+          if [ -f /etc/apt/apt.conf ]; then sudo sed -i '/Architecture-Variants/d' /etc/apt/apt.conf; fi
+          # Cleared, the dump shows the option empty (`... "";`).
+          if apt-config dump | grep -i 'Architecture-Variants "[^"]'; then
+            echo "::error::apt still selects an architecture variant (above) after the clear; the files that set it are listed above"
+            exit 1
+          fi
+          echo "no architecture variant is selected"
           sudo apt-get update
           sudo apt-get install -y --reinstall --allow-downgrades gcc-15 cpp-15-x86-64-linux-gnu gcc-15-x86-64-linux-gnu libgcc-15-dev binutils libc6-dev
           apt-cache policy cpp-15-x86-64-linux-gnu | sed -n '1,6p'

@@ -241,15 +241,18 @@ mod nmi {
         super::request();
     }
 
-    /// One CPU's snapshot: `<prefix> N user|kernel rip .. rsp ..`, then
+    /// One CPU's snapshot: `<prefix> N user|kernel rip .. rsp ..` (aarch64:
+    /// `pc .. sp ..`, `interrupts::IP_NAME`), then
     /// `<prefix> N backtrace: ..` for kernel code (xtask symbolizes it).
     fn print_cpu(prefix: &str, cpu: usize, snap: &Snapshot) {
         let rip = snap.ip.load(Ordering::Relaxed);
         // 32-bit code (a WOW64 thread): its eip and esp.
         let mode = CpuMode::from_u8(snap.mode.load(Ordering::Relaxed));
         emergency_line(format_args!(
-            "{prefix} {cpu} {} rip {rip:#x} rsp {:#x}",
+            "{prefix} {cpu} {} {} {rip:#x} {} {:#x}",
             mode.name(),
+            crate::arch::interrupts::IP_NAME,
+            crate::arch::interrupts::SP_NAME,
             snap.sp.load(Ordering::Relaxed)
         ));
         if mode != CpuMode::Kernel {

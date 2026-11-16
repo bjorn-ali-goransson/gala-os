@@ -6,6 +6,10 @@ xtask = "run --quiet --package xtask --"
 # Frame pointers make panic backtraces possible (arch::backtrace).
 rustflags = ["-C", "relocation-model=static", "-C", "force-frame-pointers=yes"]
 
+[target.aarch64-unknown-none-softfloat]
+# As x86-64's kernel: frame pointers for backtraces (arch::backtrace).
+rustflags = ["-C", "force-frame-pointers=yes"]
+
 [target.x86_64-pc-windows-msvc]
 # Freestanding test programs: link with LLVM's lld-link, no CRT or libraries.
 linker = "rust-lld"

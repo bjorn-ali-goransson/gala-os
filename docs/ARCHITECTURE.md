@@ -46,7 +46,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/net/              virtio-net, loopback, smoltcp TCP/UDP
   src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
-  src/input.rs          PS/2 mouse polling for the desktop
+  src/input.rs          PS/2 keyboard and mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
   src/nt/abi/           Windows' ABI on this architecture (x64/: CONTEXT, frames, ...)
@@ -183,7 +183,9 @@ read back by the second), `arm_clock` (the counter's rate made wrong by
 `calwrong`, caught by the RTC check against the PL031, taken again),
 `arm_sched` (`schedtest`: kernel threads
 switched, woken, joined), `arm_fault_ud` and `arm_fault_pagefault` (the
-vectors' report). User mode is the next step: no program runs yet.
+vectors' report). The first program runs: `arm_hello` (hello.exe built
+for ARM64: its NtWriteFile through `svc #8`, its stack's demand-paging
+faults, its exit).
 
 - **Soft-float**: the kernel is built for
   `aarch64-unknown-none-softfloat`, as x86-64's kernel uses no SSE: it
@@ -202,9 +204,10 @@ vectors' report). User mode is the next step: no program runs yet.
   layout, then ESR and FAR; 288 bytes), runs `gic::dispatch` and returns
   with `eret`. Every other exception is reported for now (the vector's
   kind and origin, ESR's class named, ELR, FAR, SPSR) and ends the kernel.
-- **Interrupts** (`gic.rs`): a GICv3 (QEMU `virt`'s distributor at
-  0x0800_0000, redistributors from 0x080a_0000: the board's layout),
-  brought up with its first source: the distributor (affinity routing,
+- **Interrupts** (`gic.rs`): a GICv3, where the firmware's MADT says
+  (its GICD entry, the distributor, and GICR entry, the redistributors'
+  range: `gic: GICv3 distributor at ... (the firmware's MADT)`; without
+  them QEMU `virt`'s layout, logged as such), brought up with its first source: the distributor (affinity routing,
   group 1), this CPU's redistributor (found by GICR_TYPER's affinity,
   woken), the CPU interface by its system registers (ICC_SRE, PMR,
   IGRPEN1). An IRQ is acknowledged (ICC_IAR1) and ended (ICC_EOIR1)
@@ -213,6 +216,94 @@ vectors' report). User mode is the next step: no program runs yet.
   the CPU's running priority holds back every interrupt of that priority:
   the thread switched to would run without ticks (`schedtest`'s second
   spin caught it). Private interrupts (SGIs, PPIs) have handlers.
+- **User mode** (`entry.rs`, `syscall.rs`, `interrupts.rs`;
+  `arch::user_space`): a user space is a TTBR0 root of its own (the
+  kernel's half is TTBR1's, in no user root), its pages tagged ASID 0
+  and not global; loading one drops this CPU's ASID-0 entries (`tlbi
+  aside1`) and a kernel thread loads an empty root, so the walker never
+  reaches a freed space's tables; a changed page is dropped on every CPU
+  by a broadcast `tlbi vale1is` under the space's lock (no shootdown at
+  its release). The synchronous vector from EL0 saves the same
+  `TrapFrame` as the IRQ's, at the top of the thread's kernel stack:
+  SP_EL1 is set there before every return to EL0, by
+  `syscall::enter_user_regs`, which builds that frame and takes the
+  vectors' `eret` tail. An SVC's number is the personality's: NT's in
+  the instruction's immediate (ESR's ISS: Windows ARM64's ntdll makes
+  `svc #N`, the numbers the pinned build's, the same as x64's), Linux's
+  in x8; it runs with interrupts on, then the pending `NtContinue` and
+  the user-return hook, as x86-64's. Aborts and other exceptions from
+  EL0 go to the user-exception handler (an abort's address from FAR),
+  then the hook; an IRQ from EL0 runs the hook too. An NT thread's x18
+  is its TEB (`percpu::user_gs_base`), a Linux thread's TPIDR_EL0 its
+  TLS base. Invariant: every return to EL0 goes through
+  `syscall::for_user` (EL0t, the condition flags only, and an NT
+  thread's x18 its TEB), whatever set the registers: NtContinue's
+  CONTEXT, an exception handler, the hook. A process's image must be
+  the architecture's machine (`arch::runs_machine`: ARM64 here; x64 and
+  x86 wait for XT).
+- **Windows' ARM64 ABI** (`nt/abi/arm64`): ARM64's CONTEXT
+  (`context.rs`, plain data the host's tests build on any machine:
+  ContextFlags, Cpsr, X0-X28, Fp, Lr, Sp, Pc, V0-V31, Fpcr, Fpsr, the
+  control, integer and floating-point parts). A process's first thread
+  starts at gala's ntdll's LdrInitializeThunk with x0 the program's
+  CONTEXT (CONTEXT_FULL, written at the top of its stack) and x1
+  ntdll's base (`ldr_thunk_regs`); NtContinue applies the parts its
+  flags name over the caller's registers and loads the floating-point
+  part straight into V0-V31 (`xstate::restore`: the kernel never uses
+  them); NtCreateThread starts a thread from a CONTEXT's registers.
+  gala's ntdll and ntrt make `svc #N` as Windows ARM64's ntdll does
+  (`arm_startup`, `arm_import`: a program bound to an ARM64 DLL).
+  Exceptions reach user mode (`deliver_to_user`): gala's ARM64
+  dispatcher frame is the CONTEXT of the fault (CONTEXT_FULL, its pc the
+  faulting instruction's, a `brk`'s too) at sp and the EXCEPTION_RECORD
+  right above it; ntdll's KiUserExceptionDispatcher hands both to the
+  dispatch x64 shares (`testntdll/src/dispatch.rs`: vectored handlers,
+  frames, continue handlers, the top-level filter). A `brk`'s immediate
+  is its exception, as Windows ARM64 assigns them (`TrapFrame::kind`:
+  0xf000 breakpoint, 0xf001 assertion failure, 0xf003 fast fail, 0xf004
+  integer divide by zero, which AArch64's division never raises itself;
+  any other an illegal instruction); a fast fail ends the process with
+  STATUS_STACK_BUFFER_OVERRUN and runs no handler. A user APC's frame is
+  the CONTEXT to resume at sp and the routine with its three arguments
+  above it (`deliver_apc`: ARM64's CONTEXT has no home area to carry
+  them, as x64's does); KiUserApcDispatcher calls the routine and
+  NtContinues with TestAlert (`arm_exception`, `arm_apc`, `arm_tls`:
+  kernel32 loads, the APC a TLS callback queues runs before the entry).
+  Crash reports show x0-x30, sp, pc and pstate (`arm_crash*`).
+  Frame-based handlers on ARM64 (`testntdll/src/seh_arm64.rs`, from
+  Microsoft's "ARM64 exception handling"): an image's 8-byte .pdata
+  entries; packed unwind data expanded into its canonical prologue's and
+  epilogue's unwind codes; a pc in a prologue undoes only what ran, one in
+  an epilogue only what had not (its scope, or the one the header packs);
+  the pc is lr afterwards unless a machine-frame or CONTEXT code restored
+  it; the establisher frame is the sp the unwind ends with, and a handler
+  is reported from a body only. KiUserExceptionDispatcher's unwind data
+  is MSFT_OP_CONTEXT (`.seh_context`), so a walk continues into the
+  faulting function; RtlUnwindEx resumes the target with x0 the return
+  value, after a consolidation callback run in a frame described the same
+  way (`arm_seh`). Function tables (an image's and those registered at
+  run time: RtlAddFunctionTable, the growable ones, callbacks) are one
+  registry for both architectures (`testntdll/src/ftable.rs`), each
+  `seh` module giving its entry format. NtGetContextThread and NtSetContextThread exchange
+  the parts ContextFlags names with the caller's registers or a
+  suspended thread's parked state (`context::fill`, `context::apply`;
+  `arm_context`, `arm_threadinfo`).
+- **Interrupt masking and the pseudo-NMI** (`cpu.rs`, `gic.rs`):
+  interrupts are masked by priority (ICC_PMR_EL1), not PSTATE.I: "off"
+  (`PMR_OFF`, 0xa0) lets only the NMI's priority (0x80) through, "on"
+  (0xf0) every one; the entries turn the GIC's system-register interface
+  on and set "off" first thing. The NMI is SGI 1 (`gic::NMI_SGI`,
+  `smp::send_nmi`), taken with PSTATE.I set (no nesting) and handed to
+  `interrupts::nmi` (the state dump's and the profiler's handler, kept
+  in an atomic: it may interrupt any lock's holder). An ordinary IRQ is
+  taken only with interrupts on; its handler runs with them off by
+  priority and PSTATE.I clear, so an NMI reaches it too; its exit sets
+  PSTATE.I and the mask back to "on" before the `eret`. A thread
+  switched from inside a handler resumes with the same state (off, I
+  clear), as one switched from anywhere else. Scenario `arm_watchdog`:
+  the watchdog's backtrace of CPU 1 spinning in its tick handler.
+  Backtraces walk AArch64's frame records (`[x29]`, `[x29 + 8]`; the
+  kernel is built with frame pointers, as x86-64's).
 - **Time** (`timer.rs`): the generic timer's virtual channel (PPI 27).
   Its counter's rate is CNTFRQ_EL0's, architected: nothing is calibrated
   (`timer: generic timer ... counter at <n> kHz`). The tick is periodic by
@@ -223,8 +314,11 @@ vectors' report). User mode is the next step: no program runs yet.
   device. A device page is added to its TTBR1 tables, in the 2 MiB below
   the kernel image, with MAIR_EL1's slot 2 set to Device-nGnRE (slots
   2-7 are guaranteed unused); missing tables come from a pool in .bss.
-  The console's PL011 (QEMU `virt`'s at 0x0900_0000, the board's fixed
-  layout) is mapped this way by `serial::init`.
+  The console's PL011 is mapped this way by `serial::init`, at the
+  address the firmware's SPCR names (`boot::early_rsdp`: the tables are
+  in the HHDM before `BootInfo`; a PL011 or an SBSA generic UART, same
+  registers; without an SPCR QEMU `virt`'s 0x0900_0000, logged as such:
+  `serial: PL011 at ... (the firmware's SPCR)`).
 - **Page tables** (`arch/aarch64/paging.rs`): the kernel's higher half
   (TTBR1_EL1) is `mm::paging::Mapper` with the `Vmsa` encoding, built as
   x86-64's (the HHDM of the regions Limine maps, the image per segment,
@@ -262,17 +356,40 @@ vectors' report). User mode is the next step: no program runs yet.
   affinity fields everywhere (Limine's MP response, the MADT's GICC
   entries, `smp::online_cpus`); the GIC packs them for GICR_TYPER and
   ICC_SGI1R itself.
+- **CPUs the bootloader did not start** (`smp.rs`, `psci.rs`): the MADT's
+  others are started with PSCI CPU_ON, through the conduit the FADT's
+  ARM_BOOT_ARCH flags name (HVC or SMC; `psci: version ... through ...`).
+  Such a CPU enters at a physical address with its MMU off: the
+  trampoline `gala_aarch64_psci_entry` (a page of its own) reads its
+  `PsciStart` (in .bss, cleaned to memory first: with the MMU off its
+  loads bypass the caches), loads the kernel's MAIR, TCR (TTBR0's walks
+  on), TTBR1 and a TTBR0 that maps the trampoline's page at its own
+  address (`paging::identity_root`: not global, so a later user space at
+  that address never meets a stale entry), turns the MMU on with the boot
+  CPU's SCTLR and jumps to the AP entry's virtual address with its index.
+  A CPU that does not come online is reported with CPU_ON's result
+  (named) and how far it got (`PsciStart::state`: not reached, reached
+  at EL1, or at another EL, which is not handled). `smptest=hide` tests
+  it (`arm_smp_missed`): the APs Limine started power themselves off
+  (PSCI CPU_OFF), are seen off (AFFINITY_INFO), and are started again so.
 - **What the NT layer registers at its start**: the personalities'
   system call dispatchers (`syscall::set_handler`, the neutral
   `personality::Dispatchers`), the user-return hook and the user
   exception handler are kept for user mode's paths; KUSER_SHARED_DATA is
   a kernel frame written through the HHDM (`paging::SharedPage`).
-- **Limits**: the UART's and the GIC's addresses are the board's, not read
-  from the firmware (SPCR, the MADT's GICD/GICR entries or the device
-  tree: the port); CPUs the bootloader did not start are not started
-  (PSCI CPU_ON); SGIs reach an Aff0 below 16 only; no NMI (the GIC's
-  pseudo-NMI: no state dump at a timeout, no `stop_others`); no user
-  mode; the PL031 RTC's address is the board's too; entered at EL2 with VHE the timer would
+- **Limits**: boots by ACPI only (a device-tree boot falls back to QEMU
+  `virt`'s addresses); the PL031 RTC's address is QEMU `virt`'s (no ACPI
+  table names an RTC: ACPI machines give the time through UEFI's runtime
+  services); a CPU started by PSCI must enter at EL1; SGIs reach an
+  Aff0 below 16 only; xtask cannot ask for a state dump at a timeout
+  (QEMU `virt` has no NMI for its monitor's `nmi`: "machine does not
+  provide NMIs"); no `stop_others` (its one user, the hot swap, is
+  x86-64's); in user mode the unwinder does not read `.pdata` link
+  records (jump islands), SVE state or the trap-frame and x64-context
+  codes (a frame that needs one
+  ends the walk, the ledger names the code); the page file's aging is not safe
+  here (it relies on hardware-set accessed and dirty bits: FEAT_HAFDBS
+  is not turned on); entered at EL2 with VHE the timer would
   be EL2's (PPI 28); the image is not sealed for BOOTAA64.EFI (R8's
   enrollment is BOOTX64.EFI's).
 
@@ -365,7 +482,8 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `gpureset=<n>` | the virtio-gpu is reset under the driver after the n-th flush (driver recovery test) |
 | `crashtest` | with `persist`: panic on purpose after mounting when the disk holds no crash record (the crash record's scenario) |
 | `spintest` | the boot thread spins in the kernel for 25 s (the kernel-thread watchdog's scenario) |
-| `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts (the hang watchdog's scenario) |
+| `bootstack` | the boot thread's stack painted early and its deepest use reported at the run's end (`qemu: ending the run (...); boot stack N bytes deep (deepest K KiB of 64 KiB)`: `boot::stack`) |
+| `hangtest` | CPU 1 spins with interrupts off for 9 s, 3 s after its timer starts, and the boot's end waits for it to go on (the hang watchdog's scenarios, `watchdog` and `arm_watchdog`) |
 | `checkuser` | every return to user mode checks that the CPU is set up for the thread (its kernel stack, CR3, user GS base; no other CPU running it) and panics if not |
 | `tlbparanoid` | every change to a user address space flushes every CPU's whole TLB and every context switch reloads CR3 (tells TLB bugs from others) |
 | `nomigrate` | a thread that runs user code stays on the CPU it first ran on (tells migration bugs from others) |
@@ -1005,7 +1123,17 @@ current process, -2 = current thread.
   before the program starts (the process gives its up at the exit),
   checks that the space is freed and logs
   "address space still referenced" otherwise, which fails the boot
-  scenario. A leak is a second without progress (each reference that
+  scenario. "Before the program starts" is exact: the main thread is
+  created suspended and resumed once the reference is in hand, because a
+  program that ends in a few milliseconds (`unimplemented_test`, which
+  ntdll ends in its init) would otherwise have given the space up first.
+  Where the reference cannot be taken that early — a Linux program
+  (`lxrun=`: `lx::exec::spawn` runs it from its first instruction) or one
+  the previous kernel handed over — `await_program` logs "gave its
+  address space up before it could be held" and skips the check alone:
+  the exit status is still reported, which is what the scenarios read
+  ("finished with status"), and an early return used to lose it to a fast
+  program at random. A leak is a second without progress (each reference that
   goes restarts the second); the message is preceded by who holds the
   space (`sched::dump_space_holders`: unreaped threads with state and
   CPU; `sched::held_by_reaps`: references a reap in progress holds;
@@ -3310,7 +3438,7 @@ own name).
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs"), gdiplus (GDI+'s flat API: bitmaps, PNG, solid fills, "Other DLLs"), windows.ui (Windows.UI.ViewManagement.UISettings, "Other DLLs") |
 | COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices (Windows Web Services' XML reader, "Other DLLs"), wintrust, clusapi, resutils, msi (Windows Installer: nothing installed, and reading a database, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), sppc (the Software Protection Platform's client over gala's license store, "Other DLLs"), slc (the Software Licensing Client, sppc's API under its older name, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -5222,7 +5350,11 @@ of their own, clients of it) is the yardstick.
   fragments up to 34240 bytes; no authentication trailers). ncacn_np's
   endpoint `\pipe\x` is `\\.\pipe\x`; ncalrpc's endpoint `x` is the
   runtime's private pipe `\\.\pipe\LRPC-x` (Windows carries ncalrpc
-  over ALPC ports, which gala has not; both ends here are gala's). The
+  over ALPC ports, which gala has not; both ends here are gala's). A
+  connect that finds no pipe is RPC_S_SERVER_UNAVAILABLE, which says
+  nothing about which server, so the name is recorded (`no server at
+  pipe(<name>)`, the Win32 error as the detail): for a program whose
+  server gala has not, that name is the whole of the diagnosis. The
   network protocol sequences are RPC_S_PROTSEQ_NOT_SUPPORTED, recorded;
   there is no endpoint mapper (a binding without an endpoint is
   EPT_S_NOT_REGISTERED, recorded).
@@ -6162,7 +6294,8 @@ requester while it waits.
 
 `arch::x86_64::apboot`; scenarios `smp_missed`, `smp_late`, `onecpu_*`;
 `smptest=hide|late` on the kernel command line makes an AP miss Limine
-or answer it late.
+or answer it late (aarch64: `hide` only, "The aarch64 port"; this
+section is x86-64's).
 
 The failure this handles: Limine sends each AP INIT and two startup
 IPIs and waits a bounded time (100 x 10 ms of its delay loop; on a BIOS
@@ -7316,7 +7449,8 @@ session's is shown by nothing unless GalaSession attaches a presenter
   `screen_write_row`, `screen_flush` (a damaged rectangle's rows are
   written: a GPU shows them), `screen_changed` (a new size) and
   `local_input` (the console session's desktop went live: the kernel
-  starts the PS/2 thread, also without a screen). The Console presenter
+  starts the PS/2 input thread and the desktop's clock thread, also
+  without a screen). The Console presenter
   is what uses it. The
   screen is the bootloader's framebuffer, or with `display=virtio` a
   virtio-gpu ("Plan: graphics and GPU", G1). The kernel takes the
@@ -7330,7 +7464,20 @@ session's is shown by nothing unless GalaSession attaches a presenter
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms
   from a kernel thread (IRQ 1 and 12 are not routed); the configuration
   turns both ports on and translation to scan code set 1; mouse
-  0xF6/0xF4, keyboard 0xF4. Mouse packets with the buttons held are
+  0xF6/0xF4, keyboard 0xF4. The keyboard and the mouse are looked for
+  separately (`Controller::enable` -> `Devices { keyboard, mouse,
+  wheel }`, each from its device's ACK) and what answered is logged by
+  name, because a machine often has one and not the other: the input
+  thread goes on for either, and only no device at all ends it. Every
+  wait in the setup is bounded in *time* (`time::SpinDeadline`: 10 ms
+  for the input buffer to empty, 50 ms for a device's answer), not in
+  reads of the status port, and the first drain is bounded in bytes:
+  where no controller answers, port 0x64 reads 0xff -- every bit set,
+  so a byte looks ready forever -- and each read is a VM exit a hundred
+  times slower than a real one. A machine with no controller is left in
+  milliseconds with `input: the PS/2 controller (ports 0x60 and 0x64)
+  never answered`, which names USB HID (ROADMAP USB) as what such a
+  machine needs. Mouse packets with the buttons held are
   summed per poll (`Coalescer`); a packet that changes the buttons goes
   to the desktop at once with its own move, so a press or release taken
   late still lands where it happened (a later move is never folded into
@@ -7406,7 +7553,7 @@ session's is shown by nothing unless GalaSession attaches a presenter
   average from what user32 hands over, or else a letter tile; an accent
   pill under the active one, a grey one under the others); at the right
   a UTC clock over the date in 12-hour M/D/YYYY form (`tick` every
-  second from the input thread); left of the clock, the notification
+  second from the desktop's clock thread); left of the clock, the notification
   area (below).
 - **Start menu** (600 x 640, centred above the taskbar): a search box
   (typing filters the programs, Enter starts the first, Esc or the
@@ -7429,17 +7576,86 @@ session's is shown by nothing unless GalaSession attaches a presenter
   first tile) hands the program to `nt::action::start_from_menu`, which
   checks again outside the lock (`menu_request`): a program that exists
   starts (`process::launch`: the boot user, its directory current, new
-  console handles), else `C:\gala\gala.exe install <id>` runs. A console
-  program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a console window, as one
-  started from Explorer does: a console session hosted by conhost.exe
-  (System32's, else C:\gala's), started first with the session's id and
-  the program's name; that window stays after the program ends (an
-  install's output and errors stay in view). Logged (`desktop: start
-  menu starts <name>: <path>`, `desktop: start menu: <name> is not
-  installed: <gala> install <id>`, `desktop: started <path> (pid N) in
-  a console window`) and a `window` event `start menu` (op start,
-  install or missing; session, name, target, pid, status). Scenario
-  `start_menu` (start_menu_test, screen check).
+  console handles) and the menu closes, else `C:\gala\gala.exe install
+  <id>` runs. A console program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a
+  console window, as one started from Explorer does: a console session
+  hosted by conhost.exe (System32's, else C:\gala's), started first with
+  the session's id and the program's name; that window stays after the
+  program ends. Logged (`desktop: start menu starts <name>: <path>`,
+  `desktop: start menu: <name> is not installed: <gala> install <id>
+  (no window)`, `desktop: started <path> (pid N) in a console window`)
+  and a `window` event `start menu` (op start, install or missing;
+  session, name, target, pid, status). Scenario `start_menu`
+  (start_menu_test, screen check).
+  - **An install happens on the tile**, as a Linux distribution's does:
+    the install runs with no window at all, the menu stays open and the
+    tile keeps the click's place with a progress bar in the row under
+    its name (the name then has one line, the badge goes). gala.exe
+    tells the menu where the install is through GalaDesktopAction's
+    InstallProgress (ACTION 15: the winget id as the text, the state,
+    the percent downloaded and, on failure, the exit code it fails
+    with): `desktop::install_progress` matches the id against the
+    catalog's (without case, as `gala install` matches it) and
+    `desktop/pkg.rs` turns the state into the bar's fill - resolving
+    the manifests 5%, the installer's download 10% to 70% (galapkg's
+    `Host::fetch_installer` reports it as the bytes come in),
+    installing 85%, and on failure a full red bar (a click then tries
+    again; a click while it installs does nothing). "Done" lists the
+    programs again, so the tile is drawn installed and its bar goes.
+    Each state is logged once (`desktop: start menu: install <id>:
+    <state> (<percent>%)`, a failure as `failed (gala exit N)` and,
+    where the code says more than that it failed, `(gala exit N: <that>)`
+    - `pkg::install_failure`, whose None is galapkg's own `Failed` (4),
+    the step being named by gala's own line above) with a `window`
+    event, since there is no window to show it in; gala's own output is
+    in the log too (a process without a console writes there). Whatever
+    ends the command, the tile hears: `galapkg::install::install`
+    reports Done or Failed around the whole install, and gala.exe
+    reports a failure with its exit code for anything that ends it
+    earlier.
+  - **An install whose installer is gone goes quiet**, rather than
+    waiting for a word that is not coming: a gala.exe killed outright,
+    or faulting before it can report, says nothing at all.
+    `start_from_menu` reports the installer's pid to the desktop
+    (`install_started`, None when it never started: no gala.exe, no
+    memory for the command line, a session with no user, or a program
+    that is neither on the machine nor in the catalog), and the
+    desktop keeps one pid per install under way, packages and
+    distributions alike. A process that ends is the word that no word
+    will come: `process_ended` asks the desktop about that pid
+    (`installers_gone`), and the install goes to `Progress::Lost(at)`,
+    which keeps the bar where it got to, in grey, and draws the icon
+    grey under a white question mark where the download badge sits. A
+    click tries again, as on a tile whose install failed, and it is
+    told above the notification area like any end ("The install went
+    quiet: its installer is gone with no word. A click tries again.",
+    or "The install never started. A click tries again."). The watch is
+    on the process and not on a silence: an install may say nothing for
+    half an hour (Office's does), so a timeout would call a working
+    install dead. The pid is forgotten with the install it belongs to
+    (`watch_only_waiting`, called wherever an install ends), since a
+    stale pid would turn a tile grey for a stranger's process ending;
+    at most MAX_INSTALLERS installs are watched at once (more than a
+    user can start), one past that is logged and left to the next
+    listing as before. Logged as `desktop: start menu: <name>'s install
+    went quiet at <at>%: <why>` with a `window` event (op "install
+    quiet") and a ledger entry ("install gone quiet"). A `Desktop`
+    method cannot write any of that itself - host unit tests build
+    without the `hosted` feature, where the console writes to COM1 with
+    `out`, which faults in user mode - so the desktop keeps what is to
+    be told (`Quieted`, as it keeps `launch`) and the module's free
+    functions drain it (`tell_quiet`).
+  - **An install that ends is told above the notification area**, since
+    the tile it ran on is out of sight as soon as the menu is closed:
+    the program's name over "Installed. Its tile starts it now." or
+    "The install failed[: <what the exit code says>]." on the card a
+    program's balloon uses ("The notification area"). It is told once
+    and always: the listing that draws the tile installed is what tells
+    it, the install's own last word tells it when the listing has not
+    caught up with it, and a failure reported twice is told once (a
+    click that tries again and fails is told again). A distribution's
+    install is told the same way (`set_linux`, `linux_progress`), with
+    no reason: `wsl --import` gives no code to say one.
 - **Linux distributions** (ROADMAP LD step 7; `desktop/linux.rs` the
   model and `.desktop` parsing, host tests there and in
   `desktop/tests.rs`; scenario `linux_menu`): a section below the pinned
@@ -7548,6 +7764,13 @@ through the screen check).
   (recorded); no sound is played. The same card shows the tip of the
   icon under the pointer (a version 4 icon's only with NIF_SHOWTIP), one
   line.
+- **The shell's own balloon** (`Tray::announce`): what the shell itself
+  has to say (an install that ended, "The start menu") belongs to no
+  window, so no icon is told that it shows, goes or was clicked, and it
+  does not go with a process; it replaces the balloon on show and times
+  out as any other. The card is drawn in front of the start menu where
+  the two meet, and a click there is the balloon's - the menu closes
+  too, as it does for any click outside it.
 - **NOTIFYICONDATA** (shell32): the counted bytes are cbSize when it is
   one of the four documented sizes (V1 168/152, V2 952/936, V3 968/952,
   full 976/956 bytes for x64/x86; A: 104/88, 504/488, 520/504,
@@ -10053,8 +10276,43 @@ stations and desktops a program creates are refused until stage 3).
   Windows derives it from is not measured). Every call is recorded,
   "other", as `sppc.dll!<function>(<case>)` with the HRESULT as detail;
   a store file that is not a license as `sppc.dll!store: unreadable
-  license file`. No 32-bit build, no sppcext.dll (SLActivateProduct)
-  and no slc.dll yet: nothing has asked for them.
+  license file`. No 32-bit build and no sppcext.dll
+  (SLActivateProduct): nothing has asked for them. slc.dll, the name
+  this API had before Windows 8, is a DLL of its own over these
+  functions ("slc").
+- slc (`user/slc`, x64; `slc_test`): the Software Licensing Client, the
+  name sppc's API had before Windows 8. Click-to-Run's service loads it
+  by name (a LoadLibrary: no Click-to-Run binary imports it, measured
+  over the 165 files of `ClickToRun`, `root\Client` and
+  `root\Integration`) while it brings up the App-V ISV API, and asks it
+  one thing,
+  `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`.
+  Its absence was a gap of gala's own and is closed; it was not the
+  cause of the `OISVAPI::Initialize Failed ... Error:0x7e`
+  (`swrpcserver.cpp : 552`) that leaves the ISV RPC endpoints unserved,
+  which the run with slc.dll in System32 logs unchanged (ROADMAP OF).
+  Windows' slc.dll is 40 exports: 31 forwarders to SPPC.dll and 9 of
+  its own code (its export table). gala's has that shape, one line per
+  name in
+  `user/slc/exports.txt`, which build.rs turns into
+  `/EXPORT:<name>=sppc.<name>` for the 31, so a license, SKU or policy
+  asked of slc is answered from the store sppc keeps; the 18 of them
+  sppc does not implement resolve to nothing, as an absent export does,
+  and start working when sppc has the function. Of the 9:
+  SLGetWindowsInformation and SLGetWindowsInformationDWORD answer
+  SL_E_VALUE_NOT_FOUND for every name (gala keeps no Windows licensing
+  information, as sppc keeps no policy) and E_INVALIDARG for a NULL
+  name or output, both as Windows answers; SLIsWindowsGenuineLocal is
+  S_OK with SL_GEN_STATE_IS_GENUINE, gala having no activation state
+  (the Windows machine measured answers that state too). The six whose
+  parameters are in no public header (SLConsumeWindowsRight,
+  SLReArmWindows, SLRegisterWindowsEvent, SLUnregisterWindowsEvent,
+  SLpCheckProductKey, SLpUpdateComponentTokens) are not exported: gala
+  does not guess a signature, so GetProcAddress gives NULL and the
+  ledger says `slc.dll!<name>` "missing export" (the one place
+  `slc_test` reads differently on Windows, where all six are present).
+  Every call is recorded, "other", as `slc.dll!<function>(<case>)` with
+  the HRESULT as detail. No 32-bit build: nothing has asked for one.
 - webservices (`user/webservices`, x64 and x86; `webservices_test`,
   `wow64_webservices_test`): Windows Web Services' XML reader, the part
   of WWSAPI the Office Deployment Tool's setup.exe delay-loads to read
@@ -11371,9 +11629,15 @@ alone in `winstate/tests.rs`.
   (the same `Desktop::pointer`, `key`, `wheel`): screen checks inside
   the guest, without the devices. A desktop shown by the console or by
   nothing takes none (STATUS_INVALID_DEVICE_STATE).
-- **The clock** (`tick`, from the input thread every second) updates
-  every live desktop; a display change resizes the desktop the Console
-  presenter shows.
+- **The clock** (`tick`, from the desktop's clock thread every second:
+  `desktop::start_clock`, started with the input thread by
+  `platform::local_input`, counted in `desktop: clock: <n> ticks` at
+  exit) updates every live desktop; a display change resizes the
+  desktop the Console presenter shows. Its own thread, because the
+  clock is not input: riding the input thread's poll loop, it stopped
+  wherever that thread stopped -- a machine with no PS/2 mouse had a
+  desktop whose minute never changed and which never noticed a display
+  change.
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
   session that does not exist; a bare desktop's answers are in "Server
@@ -14283,7 +14547,7 @@ The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
 - **Seam** (`nt::platform::Display`): `screen_flush(x, y, w, h)` after
   the desktop writes a damaged rectangle's rows (nothing for a
   framebuffer); `screen_changed()`, polled by `desktop::tick` every
-  second from the input thread: a new size re-lays out the desktop
+  second from the desktop's clock thread: a new size re-lays out the desktop
   (`Desktop::set_screen`) and redraws it. The console stops drawing on
   the framebuffer when the desktop takes the screen.
 - **Scenarios**: `virtio_gpu` (gui_test with `display=virtio`; QEMU gets

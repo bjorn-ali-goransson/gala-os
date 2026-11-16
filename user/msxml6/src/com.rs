@@ -738,7 +738,7 @@ fn parse_into(d: &mut Doc, src: Result<String, ParseError>, url: &str) -> bool {
                     u64::from(e.line) << 32 | u64::from(e.column),
                 );
             }
-            // And the text there (the ledger keeps 64 characters of a
+            // And the text there (the ledger keeps 96 characters of a
             // name: 40 of the line, up to a few past the error), so the
             // input a program built is seen without a debugger.
             let mut near = String::new();

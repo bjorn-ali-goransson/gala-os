@@ -2,11 +2,15 @@
 //! specification. Only parses and validates; mapping is done by the loader.
 //! Image sections also take 32-bit (PE32, i386) images, as 64-bit Windows
 //! maps them (WOW64, IL-only .NET assemblies); processes run only PE32+.
+//! Machines: x64 (AMD64), x86 (I386) and ARM64; which an executable may
+//! be is the architecture's (`platform::runs_machine`: x86-64 runs x64 and,
+//! through WOW64, x86; aarch64 runs ARM64).
 
 use core::fmt;
 
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
 const PE32_MAGIC: u16 = 0x10b;
 const PE32_PLUS_MAGIC: u16 = 0x20b;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002;
@@ -110,18 +114,23 @@ pub struct PeImage<'a> {
     /// A 32-bit (PE32, x86) image: an executable runs through WOW64
     /// (ARCHITECTURE "Plan: WOW64").
     pub pe32: bool,
+    /// The COFF header's machine (AMD64, I386 or ARM64).
+    pub machine: u16,
     /// IMAGE_FILE_LARGE_ADDRESS_AWARE: a 32-bit process may use addresses
     /// up to 4 GiB rather than 2.
     pub large_address_aware: bool,
 }
 
 impl<'a> PeImage<'a> {
-    /// Parses an executable (.exe) image: x64 (PE32+) or x86 (PE32, run
-    /// through WOW64).
+    /// Parses an executable (.exe) image of a machine this architecture
+    /// runs (`platform::runs_machine`).
     pub fn parse(data: &'a [u8]) -> Result<Self, PeError> {
         let image = Self::parse_image(data)?;
         if image.is_dll {
             return Err(PeError::NotExecutable);
+        }
+        if !super::platform::runs_machine(image.machine) {
+            return Err(PeError::UnsupportedMachine(image.machine));
         }
         Ok(image)
     }
@@ -154,7 +163,9 @@ impl<'a> PeImage<'a> {
         }
         let coff = pe + 4;
         let machine = u16_at(data, coff)?;
-        if machine != IMAGE_FILE_MACHINE_AMD64 && machine != IMAGE_FILE_MACHINE_I386 {
+        if ![IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_ARM64]
+            .contains(&machine)
+        {
             return Err(PeError::UnsupportedMachine(machine));
         }
         let section_count = usize::from(u16_at(data, coff + 2)?);
@@ -170,7 +181,7 @@ impl<'a> PeImage<'a> {
         // PE32 has a 4-byte ImageBase and stack/heap sizes and BaseOfData,
         // so its data directories start at +96 rather than +112.
         let pe32 = match (u16_at(data, opt)?, machine) {
-            (PE32_PLUS_MAGIC, IMAGE_FILE_MACHINE_AMD64) => false,
+            (PE32_PLUS_MAGIC, IMAGE_FILE_MACHINE_AMD64 | IMAGE_FILE_MACHINE_ARM64) => false,
             (PE32_MAGIC, IMAGE_FILE_MACHINE_I386) => true,
             _ => return Err(PeError::NotPe32Plus),
         };
@@ -224,6 +235,7 @@ impl<'a> PeImage<'a> {
             is_dll,
             relocatable: false,
             pe32,
+            machine,
             large_address_aware: characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE != 0,
         };
         let mut prev_end = size_of_headers;
@@ -717,6 +729,25 @@ mod tests {
         assert_eq!(pe.section_data(&s[0]), &[0x90, 0x90, 0xc3]);
         assert_eq!(pe.section_data(&s[1]), &[1; 4]);
         assert!(!pe.has_imports());
+    }
+
+    #[test]
+    fn arm64_images() {
+        let mut d = build(&[(".text", 0x1000, 1, &[0xc3], TEXT)], 0x1000);
+        d[0x44..0x46].copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        let image = PeImage::parse_image(&d).unwrap();
+        assert_eq!(image.machine, IMAGE_FILE_MACHINE_ARM64);
+        assert!(!image.pe32);
+        // Run only where the architecture runs ARM64 (aarch64; the host
+        // tests are x86-64's).
+        assert_eq!(
+            PeImage::parse(&d).map(|i| i.machine),
+            if crate::nt::platform::runs_machine(IMAGE_FILE_MACHINE_ARM64) {
+                Ok(IMAGE_FILE_MACHINE_ARM64)
+            } else {
+                Err(PeError::UnsupportedMachine(IMAGE_FILE_MACHINE_ARM64))
+            }
+        );
     }
 
     #[test]

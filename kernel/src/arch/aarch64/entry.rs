@@ -13,9 +13,13 @@
 //! names reach the EL2 registers, so the same code serves both.
 //!
 //! The vectors (`VBAR_EL1`, 16 entries of 128 bytes): the IRQ entries
-//! (each origin's second) save a `TrapFrame` on the stack, call
-//! `interrupts::irq` and return to the interrupted code (`eret`); every
-//! other exception is reported and stops the kernel for now (`trap`).
+//! (each origin's second) and the synchronous one from EL0 (an SVC, an
+//! abort) save a `TrapFrame` on the stack, call `interrupts::irq` or
+//! `interrupts::lower_sync` and return through `gala_aarch64_frame_return`
+//! (`eret`), which `syscall::enter_user_regs` also takes; every other
+//! exception (a synchronous one at EL1: a kernel bug) is reported and
+//! stops the kernel (`trap`). From EL0 the frame is at the top of the
+//! thread's kernel stack: SP_EL1 is set there before every return to EL0.
 
 core::arch::global_asm!(
     ".section .text.entry, \"ax\"",
@@ -31,29 +35,25 @@ core::arch::global_asm!(
     "mov x9, sp",
     "msr spsel, #1",
     "mov sp, x9",
+    // The GIC's system-register interface (ICC_SRE_EL1.SRE) and its
+    // priority mask at "interrupts off" (`cpu::PMR_OFF`): interrupts are
+    // masked by priority from here on.
+    "mrs x9, S3_0_C12_C12_5",
+    "orr x9, x9, #1",
+    "msr S3_0_C12_C12_5, x9",
+    "isb",
+    "mov x9, #{pmr_off}",
+    "msr S3_0_C4_C6_0, x9",
     "mov x0, xzr",
     "mov x1, xzr",
     "mov x2, xzr",
     "b kmain",
     "",
     ".section .text.vectors, \"ax\"",
-    ".balign 2048",
-    ".global gala_aarch64_vectors",
-    "gala_aarch64_vectors:",
-    ".irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
-    ".balign 128",
-    ".if (\\n % 4) == 1",
-    "b gala_aarch64_irq_entry",
-    ".else",
-    "mov x0, #\\n",
-    "b gala_aarch64_trap_entry",
-    ".endif",
-    ".endr",
-    "",
-    // An IRQ: the frame (`TrapFrame`, 288 bytes) below the interrupted
-    // SP_EL1; the interrupted SP is SP_EL0 from EL0, else the one above
-    // the frame.
-    "gala_aarch64_irq_entry:",
+    // A `TrapFrame` (288 bytes) below the current SP_EL1: x0-x30, the
+    // interrupted SP (SP_EL0 from EL0, else the one above the frame),
+    // ELR, SPSR, ESR, FAR; x0 points at it.
+    ".macro GALA_SAVE_FRAME",
     "sub sp, sp, #288",
     "stp x0, x1, [sp, #0]",
     "stp x2, x3, [sp, #16]",
@@ -83,8 +83,39 @@ core::arch::global_asm!(
     "mrs x4, far_el1",
     "stp x3, x4, [sp, #272]",
     "mov x0, sp",
+    ".endm",
+    ".balign 2048",
+    ".global gala_aarch64_vectors",
+    "gala_aarch64_vectors:",
+    ".irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+    ".balign 128",
+    ".if \\n == 8",
+    "b gala_aarch64_lower_sync_entry",
+    ".elseif (\\n % 4) == 1",
+    "b gala_aarch64_irq_entry",
+    ".else",
+    "mov x0, #\\n",
+    "b gala_aarch64_trap_entry",
+    ".endif",
+    ".endr",
+    "",
+    "gala_aarch64_irq_entry:",
+    "GALA_SAVE_FRAME",
     "bl {irq}",
-    // Back: ELR, SPSR and (to EL0) SP_EL0 as the frame now holds them.
+    "b gala_aarch64_frame_return",
+    "",
+    // A synchronous exception from EL0 (AArch64): an SVC, an abort, an
+    // undefined instruction.
+    "gala_aarch64_lower_sync_entry:",
+    "GALA_SAVE_FRAME",
+    "bl {lower_sync}",
+    "b gala_aarch64_frame_return",
+    "",
+    // Returns with the `TrapFrame` at SP: ELR, SPSR and (to EL0) SP_EL0 as
+    // it holds them, the registers, then `eret` (PSTATE.I set since the
+    // handler's exit; SPSR's state taken).
+    ".global gala_aarch64_frame_return",
+    "gala_aarch64_frame_return:",
     "ldp x1, x2, [sp, #256]",
     "msr elr_el1, x1",
     "msr spsr_el1, x2",
@@ -120,6 +151,8 @@ core::arch::global_asm!(
     "bl {trap}",
     trap = sym trap,
     irq = sym super::interrupts::irq,
+    lower_sync = sym super::interrupts::lower_sync,
+    pmr_off = const super::cpu::PMR_OFF,
 );
 
 const _: () = assert!(super::interrupts::TRAP_FRAME_SIZE == 288);

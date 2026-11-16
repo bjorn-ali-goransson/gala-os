@@ -6862,6 +6862,12 @@ const USER_TARGET: &str = "x86_64-pc-windows-msvc";
 /// 32-bit (x86) test programs, run through WOW64 (ARCHITECTURE "Plan:
 /// WOW64"): USER_PROGRAMS_X86.
 const USER_TARGET_X86: &str = "i686-pc-windows-msvc";
+/// ARM64 builds for the aarch64 kernel's images (ROADMAP AR): the test
+/// programs of USER_PROGRAMS_ARM64 and every USER_DLLS DLL but
+/// NOT_ARM64_DLLS.
+const USER_TARGET_ARM64: &str = "aarch64-pc-windows-msvc";
+/// USER_DLLS packages with no ARM64 build: wow64 runs x86 code on x64.
+const NOT_ARM64_DLLS: &[&str] = &["wow64"];
 /// A test DLL: its package, the file it builds, and its name in user/bin.
 struct Dll {
     package: &'static str,
@@ -6995,6 +7001,11 @@ const USER_DLLS: &[Dll] = &[
     // license store (sppc_test; Click-to-Run's integrator installs
     // Office's licenses through it).
     Dll { package: "sppc", file: "sppc.dll", exported_as: "testsppc.dll" },
+    // slc.dll: the Software Licensing Client, the name that API had
+    // before Windows 8: 31 forwarders to sppc.dll and three Windows
+    // licensing functions (slc_test; Click-to-Run's service loads it
+    // by name while it brings up the App-V ISV API).
+    Dll { package: "slc", file: "slc.dll", exported_as: "testslc.dll" },
     // gdiplus.dll: GDI+'s flat API, the part ODT's setup.exe draws its
     // window with (gdiplus_test).
     Dll { package: "gdiplus", file: "gdiplus.dll", exported_as: "testgdiplus.dll" },
@@ -7193,7 +7204,20 @@ const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
 /// string).
 const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("startup_test", "ntdll.dll", "Windows/System32"),
+    ("arm_startup", "ntdll.dll", "Windows/System32"),
+    ("arm_import", "ntdll.dll", "Windows/System32"),
+    ("arm_import", "testdll.dll", "gala"),
+    ("arm_sync", "ntdll.dll", "Windows/System32"),
     ("exception_test", "ntdll.dll", "Windows/System32"),
+    ("arm_exception", "ntdll.dll", "Windows/System32"),
+    ("arm_tls", "ntdll.dll", "Windows/System32"),
+    ("arm_tls", "kernel32.dll", "Windows/System32"),
+    ("arm_tls", "tlsdll.dll", "gala"),
+    ("arm_apc", "ntdll.dll", "Windows/System32"),
+    ("arm_crash_dispatched", "ntdll.dll", "Windows/System32"),
+    ("arm_crash_filtered", "ntdll.dll", "Windows/System32"),
+    ("arm_seh", "ntdll.dll", "Windows/System32"),
+    ("arm_context", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
@@ -9495,6 +9519,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tray_test", "gdi32.dll", "Windows/System32"),
     ("tray_test", "shell32.dll", "Windows/System32"),
     ("tray_test", "comctl32.dll", "Windows/System32"),
+    ("no_i8042", "ntdll.dll", "Windows/System32"),
+    ("no_i8042", "kernel32.dll", "Windows/System32"),
+    ("no_i8042", "user32.dll", "Windows/System32"),
+    ("no_i8042", "gdi32.dll", "Windows/System32"),
+    ("no_i8042", "shell32.dll", "Windows/System32"),
+    ("no_i8042", "comctl32.dll", "Windows/System32"),
     ("wow64_tray_test", "wow64.dll", "Windows/System32"),
     ("wow64_tray_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -9569,6 +9599,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("sppc_test", "ntdll.dll", "Windows/System32"),
     ("sppc_test", "kernel32.dll", "Windows/System32"),
     ("sppc_test", "sppc.dll", "Windows/System32"),
+    // The Software Licensing Client, over sppc.dll (user/slc_test).
+    ("slc_test", "ntdll.dll", "Windows/System32"),
+    ("slc_test", "kernel32.dll", "Windows/System32"),
+    ("slc_test", "slc.dll", "Windows/System32"),
+    ("slc_test", "sppc.dll", "Windows/System32"),
     // crypt32's SIP registration in the registry (user/sip_test).
     ("sip_test", "ntdll.dll", "Windows/System32"),
     ("sip_test", "kernel32.dll", "Windows/System32"),
@@ -9853,6 +9888,7 @@ const USER_PROGRAMS: &[&str] = &[
     "rstrtmgr_test",
     "wofutil_test",
     "sppc_test",
+    "slc_test",
     "sip_test",
     "actionid_test",
     "hardlink_test",
@@ -9914,6 +9950,39 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_combase_test",
     "wow64_schannel_test",
 ];
+
+/// Test programs built for ARM64 too (`user/<name>`, ntrt's ARM64
+/// runtime), shipped in the aarch64 kernel's images in place of the x64
+/// ones and exported to user/bin/arm64.
+const USER_PROGRAMS_ARM64: &[&str] = &[
+    "hello",
+    "startup_test",
+    "import_test",
+    "thread_test",
+    "sync_test",
+    "wait_test",
+    "exception_test",
+    "tls_test",
+    "apc_test",
+    "crash",
+    "seh_test",
+    "context_test",
+    "threadinfo_test",
+];
+
+/// Where the build puts the ARM64 build of test program `program`.
+fn built_program_arm64(program: &str) -> PathBuf {
+    target_dir().join(USER_TARGET_ARM64).join("release").join(format!("{program}.exe"))
+}
+
+/// Where the build puts the ARM64 build of the USER_DLLS file `file`.
+fn built_dll_arm64(file: &str) -> PathBuf {
+    let release = target_dir().join(USER_TARGET_ARM64).join("release");
+    match USER_DLLS.iter().find(|d| d.file == file) {
+        Some(d) if !plain_dll_name(d.file) => release.join(format!("{}.dll", d.package)),
+        _ => release.join(file),
+    }
+}
 
 /// Where the build puts test program `program` (x64 or x86).
 fn built_program(program: &str) -> PathBuf {
@@ -10177,7 +10246,9 @@ fn main() -> ExitCode {
             Some("boot-test") => boot_test_command(release, &args),
             Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
             Some("hotswap-diff") => hotswap_diff(&args[1..]),
-            Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
+            Some("export-tests") => build_kernel(release)
+                .and_then(|()| build_arm64_programs())
+                .and_then(|()| export_tests()),
             Some("report") => gala_report(release),
             Some("docker-test") => docker_test(&args[1..]),
             Some("screenshot") => screenshot(release, &args[1..]),
@@ -10594,7 +10665,24 @@ fn build_kernel_aarch64(release: bool) -> Result {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    drop_debug_relocations(&target_dir().join(KERNEL_TARGET_AARCH64).join(profile).join("kernel"))
+    drop_debug_relocations(&target_dir().join(KERNEL_TARGET_AARCH64).join(profile).join("kernel"))?;
+    // Its images' programs and DLLs, built for ARM64 (always optimized,
+    // as the x64 ones).
+    let mut cmd = user_build_for(USER_TARGET_ARM64);
+    for dll in USER_DLLS.iter().filter(|d| !NOT_ARM64_DLLS.contains(&d.package)) {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    build_arm64_programs()
+}
+
+/// USER_PROGRAMS_ARM64, built for ARM64.
+fn build_arm64_programs() -> Result {
+    let mut cmd = user_build_for(USER_TARGET_ARM64);
+    for program in USER_PROGRAMS_ARM64 {
+        cmd.args(["--package", program]);
+    }
+    run_cmd(&mut cmd)
 }
 
 fn build_kernel(release: bool) -> Result {
@@ -10832,11 +10920,19 @@ fn make_iso_unchecked(
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
-    let programs = if tree.is_some() { &[][..] } else { USER_PROGRAMS };
-    let others = if tree.is_some() { &[][..] } else { GO_PROGRAMS };
-    let x86 = if tree.is_some() { &[][..] } else { USER_PROGRAMS_X86 };
+    // The aarch64 kernel's images carry the ARM64 builds alone.
+    let arm64 = aarch64_image(name);
+    let none = tree.is_some() || arm64;
+    let programs = if none { &[][..] } else { USER_PROGRAMS };
+    let others = if none { &[][..] } else { GO_PROGRAMS };
+    let x86 = if none { &[][..] } else { USER_PROGRAMS_X86 };
     for program in programs.iter().chain(others).chain(x86) {
         copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
+        modules += &format!("    module_path: boot():/boot/{program}.exe\n");
+    }
+    let arm64_programs = if arm64 && tree.is_none() { USER_PROGRAMS_ARM64 } else { &[][..] };
+    for program in arm64_programs {
+        copy(&built_program_arm64(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
@@ -10907,6 +11003,13 @@ fn make_iso_unchecked(
         };
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
+            None if arm64 => {
+                // A DLL with no ARM64 build is not shipped there.
+                if USER_DLLS.iter().any(|d| d.file == file && NOT_ARM64_DLLS.contains(&d.package)) {
+                    continue;
+                }
+                (built_dll_arm64(file), file)
+            }
             None => (built_dll(file), file),
         };
         let name = renamed.unwrap_or(name);
@@ -11542,6 +11645,13 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     }
     cmd.args(["-no-reboot", "-nic", "none"]);
     cmd.args(["-semihosting-config", "enable=on,target=native"]);
+    // No boot-menu countdown: the firmware's (ArmVirtQemu's `Timeout`,
+    // 5 s by default) is taken from QEMU's splash time when the menu is
+    // on (QemuBootOrderLib's GetFrontPageTimeoutFromQemu), and 0 skips
+    // BdsWait. Nothing presses a key in a test boot; the countdown only
+    // cost each boot 5 s, and it is where the rare pre-kernel stall
+    // (ROADMAP AR) sat.
+    cmd.args(["-boot", "menu=on,splash-time=0"]);
     let fw = find_aavmf()?;
     cmd.arg("-drive")
         .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", fw.code.display()));
@@ -12089,6 +12199,23 @@ const AARCH64_SCENARIOS: &[&str] = &[
     "arm_net_echo",
     "arm_persist",
     "arm_clock",
+    "arm_smp_missed",
+    "arm_watchdog",
+    "arm_hello",
+    "arm_startup",
+    "arm_import",
+    "arm_thread",
+    "arm_sync",
+    "arm_wait",
+    "arm_exception",
+    "arm_tls",
+    "arm_apc",
+    "arm_crash",
+    "arm_crash_dispatched",
+    "arm_crash_filtered",
+    "arm_seh",
+    "arm_context",
+    "arm_threadinfo",
     "arm_sched",
     "arm_fault_ud",
     "arm_fault_pagefault",
@@ -12234,7 +12361,11 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     let mut cmd = Command::new(qemu_binary());
     // Two processors (one for `onecpu_*` scenarios: telemetry::vm_cpus).
     let cpus = telemetry::vm_cpus(iso).to_string();
-    cmd.args(["-machine", "q35", "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
+    // A machine with no PS/2 controller at all (NO_I8042_SCENARIOS), as
+    // laptops whose keyboard and mouse are USB alone are built.
+    let machine =
+        if NO_I8042_SCENARIOS.contains(&iso_scenario(iso)) { "q35,i8042=off" } else { "q35" };
+    cmd.args(["-machine", machine, "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -12302,11 +12433,13 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gala-os kernel",
+            "serial: PL011 at 0x9000000 (the firmware's SPCR)",
             "firmware: UEFI aarch64",
             "memory map (",
             "frames: ",
             "paging: own tables at ",
             "timer: generic timer (virtual channel, PPI 27), counter at ",
+            "gic: GICv3 distributor at 0x8000000, redistributors from 0x80a0000 (0xf60000 bytes) (the firmware's MADT)",
             "gic: CPU 0: GICv3",
             "interrupts enabled, tick ",
             "smp: bootloader: 2 CPU(s), BSP MPIDR 0: 0 1",
@@ -12320,6 +12453,202 @@ const SCENARIOS: &[Scenario] = &[
             "net: link up, ",
             "manifest: release ",
             "boot: stopping after boot phase manifest (stop_after), the tick running",
+        ],
+    },
+    Scenario {
+        // User mode on aarch64 (ROADMAP AR): hello.exe built for ARM64
+        // (ntrt's ARM64 runtime: `svc #N` stubs, the TEB in x18) prints
+        // through NtWriteFile and exits, as x86-64's `hello`.
+        name: "arm_hello",
+        cmdline: "qemu_exit run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "Hello from user mode!",
+            "process hello.exe (pid 4) exited with status 0x00000000",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // An ARM64 process started through gala's ntdll (startup_test's
+        // ARM64 build, as `startup_test`): the kernel enters
+        // LdrInitializeThunk with the program's ARM64 CONTEXT, the
+        // thunk binds imports and resumes it with NtContinue.
+        name: "arm_startup",
+        cmdline: "qemu_exit run=startup_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["startup_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // An ARM64 program importing an ARM64 DLL (import_test's ARM64
+        // build, as `import_test`): gala's ntdll binds its imports by name
+        // and ordinal, forwarders included, and runs testdll's DllMain.
+        name: "arm_import",
+        cmdline: "qemu_exit run=import_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["import_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // thread_test's ARM64 build (as `thread_test`).
+        name: "arm_thread",
+        cmdline: "qemu_exit run=thread_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["thread_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // sync_test's ARM64 build (as `sync_test`).
+        name: "arm_sync",
+        cmdline: "qemu_exit run=sync_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sync_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // wait_test's ARM64 build (as `wait_test`).
+        name: "arm_wait",
+        cmdline: "qemu_exit run=wait_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wait_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // exception_test's ARM64 build (as `exception_test`): faults,
+        // `brk` and `udf` reach a vectored handler with ARM64's record
+        // and CONTEXT, and it continues execution.
+        name: "arm_exception",
+        cmdline: "qemu_exit run=exception_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["exception_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // tls_test's ARM64 build (as `tls_test`): static TLS of the program
+        // and of a DLL loaded later, through kernel32 and gala's ntdll.
+        name: "arm_tls",
+        cmdline: "qemu_exit run=tls_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["tls_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // apc_test's ARM64 build (as `apc_test`): user APCs run in FIFO
+        // order from alertable waits and delays (STATUS_USER_APC), through
+        // gala's ntdll's KiUserApcDispatcher.
+        name: "arm_apc",
+        cmdline: "qemu_exit run=apc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["apc_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // crash's ARM64 build (as `crash`): with no ntdll the kernel ends
+        // the process and its crash report has ARM64's registers.
+        name: "arm_crash",
+        cmdline: "qemu_exit run=crash.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to address 0",
+            "user exception: data abort from EL0",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
+            "crash report:   x0 =",
+            "crash report:   sp =",
+            "crash report:   [sp+0x00]",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // As `crash_dispatched`: the exception goes to gala's ntdll's ARM64
+        // dispatcher, no frame has a handler, and the process ends.
+        name: "arm_crash_dispatched",
+        cmdline: "qemu_exit run=crash.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: writing to address 0",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
+            "process crash.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // As `crash_filtered`: a top-level filter ends the process with its
+        // own code; the report still describes the exception.
+        name: "arm_crash_filtered",
+        cmdline: "qemu_exit run=crash.exe args=filter",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: the top-level filter ends the process",
+            "crash report: crash.exe (pid 4) ended with status 0xffff7002 after an unhandled \
+             exception 0xc0000005 (access violation) in thread",
+            "(crash.exe+0x",
+            "writing address 0x0",
+            "process crash.exe (pid 4) exited with status 0xffff7002",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // seh_test's ARM64 build (as `seh_test`): ARM64 unwind data (.pdata
+        // and .xdata, packed and full) read by gala's ntdll: lookups,
+        // RtlVirtualUnwind in a body, prologue and epilogue, frame
+        // handlers in dispatch and unwind, a hardware exception through
+        // KiUserExceptionDispatcher's frame, unwind consolidation.
+        name: "arm_seh",
+        cmdline: "qemu_exit run=seh_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["seh_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // context_test's ARM64 build (as `context_test`): suspended threads'
+        // ARM64 CONTEXT through NtGetContextThread, a new one through
+        // NtSetContextThread, the caller's own.
+        name: "arm_context",
+        cmdline: "qemu_exit run=context_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["context_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // threadinfo_test's ARM64 build (as `threadinfo_test`).
+        name: "arm_threadinfo",
+        cmdline: "qemu_exit run=threadinfo_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["threadinfo_test: ok", "exited with status 0x00000000", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // The hang watchdog on aarch64 (as `watchdog`): CPU 1 spins in its
+        // tick handler, interrupts off, for 9 s; the watchdog reports it
+        // and gets its backtrace by the GIC's pseudo-NMI, which reaches a
+        // CPU whose interrupts are off; `hangtest` holds the boot's end
+        // until the CPU goes on.
+        name: "arm_watchdog",
+        cmdline: "qemu_exit hangtest",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hangtest: CPU 1 spins with interrupts off",
+            "watchdog: CPU 1 has taken no timer interrupt for 5 s",
+            "flight: the last",
+            "watchdog: CPU 1 kernel pc 0xffff",
+            "watchdog: CPU 1 backtrace: 0xffff",
+            "hangtest: CPU 1 goes on",
+            "gala: boot ok",
+        ],
+    },
+    Scenario {
+        // A CPU the bootloader did not start (ARCHITECTURE "The aarch64
+        // port"): `smptest=hide` sends the AP Limine started to power
+        // itself off (PSCI CPU_OFF), and the kernel starts it from the
+        // MADT with PSCI CPU_ON (its trampoline turning the MMU on): its
+        // GIC part and tick up, the boot run to its end.
+        name: "arm_smp_missed",
+        cmdline: "qemu_exit smptest=hide",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "psci: version 1.",
+            "smp: MADT: 2 enabled CPU(s): 0 1",
+            "smptest: the bootloader's AP (MPIDR 0x1) powered itself off (PSCI CPU_OFF)",
+            "gic: CPU 1: GICv3",
+            "smp: 2 CPUs online (1 reported by the bootloader, 2 in the MADT",
+            "the kernel started 1 itself",
+            "gala: boot ok",
         ],
     },
     Scenario {
@@ -12982,7 +13311,18 @@ const SCENARIOS: &[Scenario] = &[
         name: "rpc_test",
         cmdline: "qemu_exit run=rpc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["rpc_test: ok", "exited with status 0x00000000"],
+        // The last two: a binding to an endpoint no server has leaves the
+        // pipe's name in the ledger, which is all that says which server
+        // a program could not reach (ROADMAP OF: Office's AppV ISV API).
+        expect: &[
+            "rpc_test: ok",
+            "exited with status 0x00000000",
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-no_such_endpoint)""#,
+            r#""service":"rpcrt4.dll!no server at pipe(no_such_pipe)""#,
+            // 80 characters: a name is kept to the ledger's own length,
+            // not to a shorter buffer on the way in.
+            r#""service":"rpcrt4.dll!no server at pipe(LRPC-AppV-ISV-f98d543e-a688-4582-b4a1-0e2c5e3d6b77)""#,
+        ],
     },
     Scenario {
         name: "unimplemented_test",
@@ -13410,8 +13750,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
         // console window) and an install-on-click tile (7-Zip, not
-        // installed: `gala install 7zip.7zip` in a console window);
-        // START_MENU_SCREEN clicks them.
+        // installed: `gala install 7zip.7zip` without a window, its
+        // progress on the tile); START_MENU_SCREEN clicks them.
         name: "start_menu",
         cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -13421,12 +13761,16 @@ const SCENARIOS: &[Scenario] = &[
             "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
             "gala's cmd.exe has no interactive prompt yet",
             "start_menu_test: command prompt window",
-            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip",
+            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip \
+             (no window)",
             "desktop: started C:\\gala\\gala.exe (pid",
+            "desktop: start menu: install 7zip.7zip: resolving (0%)",
             // Offline (no network card, no winhttp.dll): gala says why in
-            // the window.
+            // the log, which is where a windowless install's output goes,
+            // and the tile's bar turns red (the screen check).
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
-            "start_menu_test: install window closed",
+            "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
+            "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
             "exited with status 0x00000000",
@@ -14070,6 +14414,27 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A machine with no PS/2 controller at all (`-machine
+        // q35,i8042=off`: NO_I8042_SCENARIOS), as a laptop whose keyboard
+        // and mouse are USB alone: the input thread must say so and stop
+        // (and not spin on a status port that always reports a byte
+        // waiting), and the desktop must keep its clock, which is a
+        // thread of its own and not the input thread's passenger.
+        // tray_test is the desktop program here because it needs no
+        // input: on a Test presenter it adds its icon, talks to the
+        // notification area and ends by itself.
+        name: "no_i8042",
+        cmdline: "qemu_exit presenter=test run=tray_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "input: the PS/2 controller (ports 0x60 and 0x64) never answered",
+            "desktop: notification-area icon added: window",
+            "desktop: clock: ",
+            "tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
         // weak references, the theme's and accent's colours, the classic
         // elements' system colours (user/uisettings_test).
@@ -14173,6 +14538,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=sppc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["sppc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Software Licensing Client, whose exports are sppc's
+        // (user/slc_test).
+        name: "slc_test",
+        cmdline: "qemu_exit run=slc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["slc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // crypt32's subject interface package registration, as Office's
@@ -18671,6 +19044,11 @@ fn repeat_boots(vms: &[Vm], isos: &[PathBuf], times: usize) -> Result {
         let (_, verdicts) = boot_vm(vm, copy);
         let verdict = verdicts.into_iter().next().map_or(Ok(()), |(_, v)| v);
         let _ = fs::remove_file(copy);
+        // Each copy's firmware variable store (64 MiB for AAVMF's): many
+        // copies fill a small disk, and booting one again makes its own.
+        for vars in ["ovmf-vars.fd", "aavmf-vars.fd"] {
+            let _ = fs::remove_file(copy.with_extension(vars));
+        }
         match &verdict {
             Ok(()) => {
                 let _ = fs::remove_file(copy.with_extension("serial.log"));
@@ -18834,6 +19212,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("no_i8042", "a machine with no PS/2 controller: gala-um has no I/O ports and no input thread"),
 ];
 
 /// The kernel flags gala-um applies to a scenario's run (`um_command`),
@@ -20037,8 +20416,7 @@ fn run_vm_once(
                 let why = format!("stopped: the screen check failed ({e})");
                 dump_note =
                     Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
-                let _ = child.kill();
-                let _ = child.wait();
+                end_qemu(&mut child);
                 break None;
             }
         }
@@ -20123,8 +20501,7 @@ fn run_vm_once(
             };
             let why = format!("timed out after {what}; {}", now.describe());
             dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
-            let _ = child.kill();
-            let _ = child.wait();
+            end_qemu(&mut child);
             break None;
         }
         thread::sleep(Duration::from_millis(50));
@@ -20147,6 +20524,13 @@ fn run_vm_once(
     let total = start.elapsed();
     let vm_time = vm_clock.sample();
     let mut serial = read_log(&log);
+    // xtask's own lines start on a line of their own: a guest whose last
+    // line QEMU's end cut off (its exit requests are asynchronous, so the
+    // guest runs on briefly) would otherwise take the first of them into
+    // that line, where nothing tells it from the guest's output.
+    if !serial.is_empty() && !serial.ends_with('\n') {
+        serial.push('\n');
+    }
     serial += &snap_note;
     if let Some(note) = dump_note {
         serial += &note;
@@ -20399,6 +20783,188 @@ const STATEDUMP_END: &str = "statedump: end";
 /// loaded host prints slowly).
 const STATEDUMP_WAIT: Duration = Duration::from_secs(20);
 
+/// Every CPU's instruction pointer and state as QEMU sees it (the
+/// monitor's `info registers -a`), one line each for the log: what a
+/// timed-out guest that cannot answer was doing (aarch64's `virt` has no
+/// NMI to ask it; a wedged x86-64 guest does not answer either).
+fn cpu_registers(socket: &Path) -> String {
+    use std::io::{Read as _, Write as _};
+    let Ok(mut m) = std::os::unix::net::UnixStream::connect(socket) else {
+        return "xtask: QEMU's CPU registers: the monitor did not answer\n".into();
+    };
+    let _ = m.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = m.write_all(b"info registers -a\n");
+    let mut text = Vec::new();
+    let mut buf = [0u8; 65536];
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        match m.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => text.extend_from_slice(&buf[..n]),
+            Err(_) if !text.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    cpu_register_lines(&String::from_utf8_lossy(&text))
+}
+
+/// Ends a QEMU that will not end itself (a timeout, a failed screen
+/// check): SIGTERM first, which QEMU takes as a shutdown and so writes out
+/// what its `-d` log still buffers (a SIGKILL loses the log's last lines:
+/// the events just before a hang), then SIGKILL if it has not ended
+/// within 3 s.
+fn end_qemu(child: &mut std::process::Child) {
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `XTASK_QEMU_GDB=1`: QEMU's own record of each vCPU (halted, PC and the
+/// registers that say how it got there, the exception registers, the
+/// power state) and every QEMU thread's stack, read by attaching gdb to
+/// the QEMU process of a timed-out boot (WORKFLOW "A boot that hangs"):
+/// what tells a guest that stopped (a halted vCPU, where) from QEMU
+/// stuck in itself (a thread in exit(), a lock), which the monitor's
+/// registers cannot. It also flushes QEMU's buffered `-d` log
+/// (XTASK_QEMU_LOG), whose last lines a killed QEMU would lose. The gdb
+/// script goes beside `log`.
+fn qemu_gdb_state(pid: u32, log: &Path) -> String {
+    let exe = fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default();
+    let arm = exe.to_string_lossy().contains("aarch64");
+    // One `vcpu` line per field, named: the guest's registers, then what
+    // decides whether a halted vCPU wakes: the interrupts QEMU holds for
+    // it (interrupt_request, CPU_INTERRUPT_HARD is 0x2) and, on aarch64,
+    // each generic timer's control and compare value and when QEMU's timer
+    // for it fires, against the virtual clock's now (`clock`, ns). A vCPU
+    // halted with an interrupt held is a wakeup QEMU lost; one halted
+    // with none held waits for a timer that never fires.
+    let fields: &[(&str, &str)] = if arm {
+        &[
+            ("pc", "((ARMCPU*)$c)->env.pc"),
+            ("pstate", "((ARMCPU*)$c)->env.pstate"),
+            ("daif", "((ARMCPU*)$c)->env.daif"),
+            ("x0", "((ARMCPU*)$c)->env.xregs[0]"),
+            ("x1", "((ARMCPU*)$c)->env.xregs[1]"),
+            ("x29", "((ARMCPU*)$c)->env.xregs[29]"),
+            ("x30", "((ARMCPU*)$c)->env.xregs[30]"),
+            ("sp", "((ARMCPU*)$c)->env.xregs[31]"),
+            ("elr_el1", "((ARMCPU*)$c)->env.elr_el[1]"),
+            ("esr_el1", "((ARMCPU*)$c)->env.cp15.esr_el[1]"),
+            ("vbar_el1", "((ARMCPU*)$c)->env.cp15.vbar_el[1]"),
+            ("ttbr0_el1", "((ARMCPU*)$c)->env.cp15.ttbr0_el[1]"),
+            ("power_state", "((ARMCPU*)$c)->power_state"),
+            ("cntp_ctl", "((ARMCPU*)$c)->env.cp15.c14_timer[0].ctl"),
+            ("cntp_cval", "((ARMCPU*)$c)->env.cp15.c14_timer[0].cval"),
+            ("cntv_ctl", "((ARMCPU*)$c)->env.cp15.c14_timer[1].ctl"),
+            ("cntv_cval", "((ARMCPU*)$c)->env.cp15.c14_timer[1].cval"),
+            ("cntp_timer_expires", "((ARMCPU*)$c)->gt_timer[0]->expire_time"),
+            ("cntv_timer_expires", "((ARMCPU*)$c)->gt_timer[1]->expire_time"),
+        ]
+    } else {
+        &[
+            ("rip", "((X86CPU*)$c)->env.eip"),
+            ("rflags", "((X86CPU*)$c)->env.eflags"),
+            ("rsp", "((X86CPU*)$c)->env.regs[4]"),
+            ("hflags", "((X86CPU*)$c)->env.hflags"),
+        ]
+    };
+    let common = [
+        ("halted", "$c->halted"),
+        ("stopped", "$c->stopped"),
+        ("exception_index", "$c->exception_index"),
+        ("interrupt_request", "$c->interrupt_request"),
+        ("exit_request", "$c->exit_request"),
+        ("thread_kicked", "$c->thread_kicked"),
+    ];
+    let cpu: String = common
+        .iter()
+        .chain(fields)
+        .map(|(name, expr)| {
+            format!("printf \"vcpu %d {name} %#lx\\n\", $c->cpu_index, (unsigned long)({expr})\n")
+        })
+        .collect();
+    let script = format!(
+        "set pagination off\n\
+         printf \"clock virtual %ld\\n\", (long)qemu_clock_get_ns(1)\n\
+         set $c = cpus_queue.tqh_first\nwhile $c\n{cpu}\
+         set $c = $c->node.tqe_next\nend\nthread apply all bt 20\n\
+         call (int)fflush(0)\n"
+    );
+    let script_path = log.with_extension("gdb");
+    if let Err(e) = fs::write(&script_path, script) {
+        return format!("xtask: QEMU's own state (gdb): cannot write the script: {e}\n");
+    }
+    let out = Command::new("gdb")
+        .args(["-p", &pid.to_string(), "-batch", "-x"])
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .output();
+    match out {
+        Err(e) => format!("xtask: QEMU's own state (gdb): {e} (is gdb installed?)\n"),
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut lines = String::from("xtask: QEMU's own state (gdb, XTASK_QEMU_GDB):\n");
+            for line in text
+                .lines()
+                .filter(|l| ["vcpu ", "clock ", "Thread ", "#"].iter().any(|p| l.starts_with(p)))
+            {
+                lines += &format!("xtask: gdb: {line}\n");
+            }
+            lines
+        }
+    }
+}
+
+/// `info registers -a`'s output reduced to a line per CPU: its number,
+/// the instruction pointer (aarch64 `PC=`, x86-64 `RIP=`) and its state
+/// (`PSTATE=` with the exception level; x86-64's `RFL=` and `HLT=`).
+fn cpu_register_lines(text: &str) -> String {
+    let mut out = String::new();
+    let mut cpu: Option<String> = None;
+    let mut fields: Vec<String> = Vec::new();
+    let flush = |cpu: &Option<String>, fields: &mut Vec<String>, out: &mut String| {
+        if let Some(c) = cpu
+            && !fields.is_empty()
+        {
+            *out += &format!("xtask: QEMU's {c}: {}\n", fields.join(" "));
+        }
+        fields.clear();
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("CPU#") {
+            flush(&cpu, &mut fields, &mut out);
+            cpu = Some(format!("CPU#{}", rest.split_whitespace().next().unwrap_or("")));
+            continue;
+        }
+        for word in line.split_whitespace() {
+            if ["PC=", "RIP=", "RFL=", "HLT="].iter().any(|k| word.starts_with(k)) {
+                fields.push(word.to_string());
+            }
+        }
+        if let Some(at) = line.find("PSTATE=") {
+            // PSTATE=<hex> <flags> <EL and SP>, e.g. "-Z-- EL1h".
+            fields.push(line[at..].split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+        }
+    }
+    flush(&cpu, &mut fields, &mut out);
+    if out.is_empty() {
+        out = "xtask: QEMU's CPU registers: none read from the monitor\n".into();
+    }
+    out
+}
+
 /// A boot that timed out: injects an NMI through the monitor (QEMU's
 /// `nmi` reaches every CPU; the kernel prints a state dump: each CPU's
 /// rip and backtrace, held locks, memory, the flight recorder, then every
@@ -20412,6 +20978,11 @@ fn ask_for_state_dump(
     why: &str,
 ) -> String {
     use std::io::Write as _;
+    // Before the NMI changes what the CPUs do.
+    let mut registers = cpu_registers(socket);
+    if env::var_os("XTASK_QEMU_GDB").is_some() {
+        registers += &qemu_gdb_state(child.id(), log);
+    }
     let seen = |mark: &str| {
         fs::read(log).is_ok_and(|b| b.windows(mark.len()).any(|w| w == mark.as_bytes()))
     };
@@ -20440,7 +21011,7 @@ fn ask_for_state_dump(
         }
     }
     let wait = STATEDUMP_WAIT.as_secs();
-    match sent {
+    let said = match sent {
         Err(e) => format!("\nxtask: {why}; no state dump (monitor: {e})\n"),
         Ok(()) if seen(STATEDUMP_END) => format!(
             "\nxtask: {why}; the guest's state dump (NMI) took {:.1}s\n",
@@ -20457,7 +21028,8 @@ fn ask_for_state_dump(
             "\nxtask: {why}; the guest did not answer the NMI within {wait}s of run time \
              (no NMI handler yet: early boot, or the machine is wedged)\n"
         ),
-    }
+    };
+    said + &registers
 }
 
 /// Joins the `{"ev":"rec","hex":...}` lines of an event stream into the
@@ -21729,9 +22301,12 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
-            after: "",
+            // After the line the test program prints when it has the
+            // Command Prompt's window, so that its watch for a second
+            // console window covers this click.
+            after: "start_menu_test: command prompt window",
             // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
-            // in a console window.
+            // without a window, the tile showing where the install is.
             input: &[
                 "mouse_move -23 -255",
                 "mouse_move 0 -195",
@@ -21741,19 +22316,27 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            after: "desktop: shown window 'gala.exe'",
-            // Its console window, with gala's output in it.
+            after: "desktop: start menu: install 7zip.7zip: failed",
+            // 7-Zip's tile has its bar, red (the install failed:
+            // offline), in the row under the name: the tile is
+            // (550, 300, 85, 80), so the bar is at (562, 368), 61 wide
+            // and 4 high (kernel/src/nt/desktop). The bar is drawn by
+            // the menu, so it is also what says the menu stayed open on
+            // the click; the wallpaper is there otherwise.
+            //
+            // The install ended, so it is told above the notification
+            // area too: a card 360 wide, 12 from the right edge and 12
+            // above the taskbar (908, 740 at its bottom right), in
+            // front of the menu. Its light background and the grey of
+            // "The install failed." are in the band that holds the text
+            // whether it takes one line or two. The balloon goes after
+            // BALLOON_SECONDS, which is many tries of this check.
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
-                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+                PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0xf2f4f8),
+                PixelCheck::AnyIn(960, 700, 300, 36, 0x5d5d5d),
             ],
-        },
-        ScreenStep {
-            after: "start_menu_test: install window",
-            // Alt+F4 closes it (the active window): its conhost.exe ends.
-            input: &["sendkey alt-f4"],
-            pixels: &[],
         },
     ],
 };
@@ -23158,6 +23741,11 @@ fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
         ))
         .args(["-device", "virtio-net-pci,netdev=n0"]);
 }
+
+/// Scenarios booted on a machine with no i8042 (`-machine
+/// q35,i8042=off`): every read of port 0x64 is 0xff, as on a machine
+/// whose keyboard and mouse are USB alone.
+const NO_I8042_SCENARIOS: &[&str] = &["no_i8042"];
 
 /// Scenarios that get a virtio-net card on QEMU's user network and no
 /// client: the card is found and set up, nothing connects
@@ -27213,6 +27801,13 @@ fn export_tests() -> Result {
     for (file, exported_as) in EXPORTED_TEST_DATA {
         copy(&root().join(file), &dir.join(exported_as))?;
     }
+    // ARM64 builds under arm64/ (run-all.ps1 runs only the x64 ones beside
+    // it; an ARM64 Windows runs these).
+    let arm64 = dir.join("arm64");
+    fs::create_dir_all(&arm64).map_err(|e| format!("creating {arm64:?}: {e}"))?;
+    for program in USER_PROGRAMS_ARM64 {
+        copy(&built_program_arm64(program), &arm64.join(format!("{program}.exe")))?;
+    }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     // pk_install_test's package source zips user/bin/hello.exe, so it is
     // derived from what was just exported: remake it (deterministic), or
@@ -27566,6 +28161,23 @@ fn bake_icons() -> Result {
 
 #[cfg(test)]
 mod judging {
+    #[test]
+    fn cpu_register_lines_name_each_cpu() {
+        let arm = "CPU#0\n PC=ffffffff80001234 X00=0\nPSTATE=600003c5 -ZC- EL1h  SVCR=0\n\
+                   CPU#1\n PC=0000000000000000 X00=0\nPSTATE=400003c5 -Z-- EL1h BTYPE=0\n";
+        assert_eq!(
+            super::cpu_register_lines(arm),
+            "xtask: QEMU's CPU#0: PC=ffffffff80001234 PSTATE=600003c5 -ZC- EL1h\n\
+             xtask: QEMU's CPU#1: PC=0000000000000000 PSTATE=400003c5 -Z-- EL1h\n"
+        );
+        let x86 = "CPU#0\nRAX=0 RBX=0\nRIP=ffffffff80001000 RFL=00000246 [---Z-P-] CPL=0 HLT=1\n";
+        assert_eq!(
+            super::cpu_register_lines(x86),
+            "xtask: QEMU's CPU#0: RIP=ffffffff80001000 RFL=00000246 HLT=1\n"
+        );
+        assert!(super::cpu_register_lines("").contains("none read"));
+    }
+
     use super::*;
 
     /// A log with a byte that is not UTF-8 is still read whole (the

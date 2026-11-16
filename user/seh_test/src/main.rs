@@ -1,8 +1,12 @@
-//! Frame-based exception handling (x64 SEH), as documented in "x64
-//! exception handling" (Microsoft Learn): unwind information in .pdata and
-//! .xdata, language-specific handlers and the ntdll functions that use
-//! them. The functions under test are written in assembly with explicit
-//! unwind directives, so that their prologues and frames are known:
+//! Frame-based exception handling, as documented in "x64 exception
+//! handling" and "ARM64 exception handling" (Microsoft Learn): unwind
+//! information in .pdata and .xdata, language-specific handlers and the
+//! ntdll functions that use them. The functions under test are written in
+//! assembly with explicit unwind directives, so that their prologues and
+//! frames are known; each architecture's are its module's (`x64.rs`,
+//! `arm64.rs`, with the same contracts), and so are the checks of its own
+//! unwind format (the function tables, RtlVirtualUnwind in a prologue and
+//! an epilogue). The rest is shared:
 //!
 //! - RtlPcToFileHeader and RtlLookupFunctionEntry find this image and the
 //!   function's RUNTIME_FUNCTION.
@@ -26,7 +30,7 @@
 //!   an outer handler calls RtlUnwindEx to its own frame: the inner
 //!   handler runs again with EXCEPTION_UNWINDING, the outer one with
 //!   EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND, and execution resumes
-//!   at the target with rax = the return value and the target frame's
+//!   at the target with the return value (rax, x0) and the target frame's
 //!   nonvolatile registers.
 //! - The same for a hardware exception (an access violation).
 //! - DISPATCHER_CONTEXT.ControlPcIsUnwound: TRUE for a frame whose
@@ -37,14 +41,17 @@
 //!   blocks run): after the unwind the callback in ExceptionInformation[0]
 //!   runs while the stack below the target is still intact, a walk from it
 //!   reaches the target frame, and execution continues at the address it
-//!   returns with rax = the return value.
+//!   returns with the return value in rax (x0).
+//!
+//! The function tables' checks are each architecture's (x64's: an indirect
+//! entry and a growable table; ARM64's: a table and a growable one, in its
+//! 8-byte entries; ARM64 has no indirect entries).
 //!
 //! Prints `seh_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
 
-use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use ntrt::*;
@@ -62,26 +69,29 @@ const CODE_UNWIND: u32 = 0xe000_0002;
 /// Unwound by the outer handler with a consolidation callback.
 const CODE_CONSOLIDATE: u32 = 0xe000_0003;
 const STATUS_UNWIND_CONSOLIDATE: u64 = 0x8000_0029;
-/// rbx in seh_outer's body, and in seh_inner's.
+/// The first nonvolatile register (rbx, x19) in seh_outer's body, and in
+/// seh_inner's.
 const OUTER_RBX: u64 = 0x1111_0000_0000_1111;
 const INNER_RBX: u64 = 0x2222_0000_0000_2222;
 
-// EXCEPTION_RECORD, CONTEXT and DISPATCHER_CONTEXT (public x64 layouts).
+#[cfg(target_arch = "x86_64")]
+#[path = "x64.rs"]
+mod arch;
+#[cfg(target_arch = "aarch64")]
+#[path = "arm64.rs"]
+mod arch;
+use arch::*;
+
+// EXCEPTION_RECORD and DISPATCHER_CONTEXT (the 64-bit layouts, x64's and
+// ARM64's alike); the CONTEXT's offsets are the architecture's
+// (`arch::CTX_*`: the pc, sp, and three nonvolatile registers: rbx, rsi
+// and r12 on x64, x19, x20 and x21 on ARM64).
 const ER_CODE: usize = 0x00;
 const ER_FLAGS: usize = 0x04;
 const ER_ADDRESS: usize = 0x10;
 const ER_NUMBER_PARAMETERS: usize = 0x18;
 const ER_INFORMATION: usize = 0x20;
 const RECORD_SIZE: usize = 0x98;
-const CTX_FLAGS: usize = 0x30;
-const CTX_SEG_CS: usize = 0x38;
-const CTX_RBX: usize = 0x90;
-const CTX_RSP: usize = 0x98;
-const CTX_RSI: usize = 0xa8;
-const CTX_R12: usize = 0xd8;
-const CTX_RIP: usize = 0xf8;
-const CONTEXT_SIZE: usize = 0x4d0;
-const CONTEXT_FULL: u64 = 0x10_000b;
 const DC_CONTROL_PC: usize = 0x00;
 const DC_IMAGE_BASE: usize = 0x08;
 const DC_CONTEXT_RECORD: usize = 0x28;
@@ -89,122 +99,6 @@ const DC_LANGUAGE_HANDLER: usize = 0x30;
 const DC_HISTORY_TABLE: usize = 0x40;
 /// ControlPcIsUnwound (BOOLEAN after ScopeIndex).
 const DC_CONTROL_PC_IS_UNWOUND: usize = 0x4c;
-
-// seh_outer(f, arg): pushes rbx and rsi, allocates 0x28 bytes, sets rbx,
-// records its rsp (its establisher frame) and calls seh_inner(f, arg);
-// seh_outer_resume is the return point and the unwind target. Its handler
-// is outer_handler. seh_inner(f, arg): pushes rbx, allocates 0x20, sets
-// rbx and calls f(arg); its handler is inner_handler. seh_raise(record)
-// calls RtlRaiseException; seh_raise_ret is the return address.
-// seh_capture(context) calls RtlCaptureContext with known rbx and r12.
-global_asm!(
-    ".text",
-    ".globl seh_outer",
-    ".globl seh_outer_resume",
-    ".globl seh_outer_epilogue",
-    ".def seh_outer; .scl 2; .type 32; .endef",
-    "seh_outer:",
-    ".seh_proc seh_outer",
-    "push rbx",
-    ".seh_pushreg rbx",
-    "push rsi",
-    ".seh_pushreg rsi",
-    "sub rsp, 0x28",
-    ".seh_stackalloc 0x28",
-    ".seh_endprologue",
-    ".seh_handler {outer_handler}, @except, @unwind",
-    "mov [rip + {outer_rsp}], rsp",
-    "mov rbx, {outer_rbx}",
-    "mov rsi, rbx",
-    "call seh_inner",
-    "seh_outer_resume:",
-    "mov [rip + {resume_rbx}], rbx",
-    "mov [rip + {resume_rsi}], rsi",
-    "seh_outer_epilogue:",
-    "add rsp, 0x28",
-    "pop rsi",
-    "pop rbx",
-    "ret",
-    ".seh_endproc",
-    "",
-    ".def seh_inner; .scl 3; .type 32; .endef",
-    "seh_inner:",
-    ".seh_proc seh_inner",
-    "push rbx",
-    ".seh_pushreg rbx",
-    "sub rsp, 0x20",
-    ".seh_stackalloc 0x20",
-    ".seh_endprologue",
-    ".seh_handler {inner_handler}, @except, @unwind",
-    "mov rbx, {inner_rbx}",
-    "mov rax, rcx",
-    "mov rcx, rdx",
-    "call rax",
-    "nop",
-    "add rsp, 0x20",
-    "pop rbx",
-    "ret",
-    ".seh_endproc",
-    "",
-    ".globl seh_raise",
-    ".globl seh_raise_ret",
-    ".def seh_raise; .scl 2; .type 32; .endef",
-    "seh_raise:",
-    ".seh_proc seh_raise",
-    "sub rsp, 0x28",
-    ".seh_stackalloc 0x28",
-    ".seh_endprologue",
-    "call qword ptr [rip + {raise}]",
-    "seh_raise_ret:",
-    "mov eax, 5",
-    "add rsp, 0x28",
-    "ret",
-    ".seh_endproc",
-    "",
-    ".globl seh_capture",
-    ".globl seh_capture_ret",
-    ".def seh_capture; .scl 2; .type 32; .endef",
-    "seh_capture:",
-    ".seh_proc seh_capture",
-    "push rbx",
-    ".seh_pushreg rbx",
-    "push r12",
-    ".seh_pushreg r12",
-    "sub rsp, 0x28",
-    ".seh_stackalloc 0x28",
-    ".seh_endprologue",
-    "mov rbx, {outer_rbx}",
-    "mov r12, {inner_rbx}",
-    "mov [rip + {capture_rsp}], rsp",
-    "call qword ptr [rip + {capture}]",
-    "seh_capture_ret:",
-    "nop",
-    "add rsp, 0x28",
-    "pop r12",
-    "pop rbx",
-    "ret",
-    ".seh_endproc",
-    outer_handler = sym outer_handler,
-    inner_handler = sym inner_handler,
-    outer_rsp = sym OUTER_RSP,
-    resume_rbx = sym RESUME_RBX,
-    resume_rsi = sym RESUME_RSI,
-    capture_rsp = sym CAPTURE_RSP,
-    raise = sym RTL_RAISE,
-    capture = sym RTL_CAPTURE,
-    outer_rbx = const OUTER_RBX,
-    inner_rbx = const INNER_RBX,
-);
-
-unsafe extern "C" {
-    fn seh_outer(f: extern "system" fn(u64) -> u64, arg: u64) -> u64;
-    fn seh_outer_resume();
-    fn seh_outer_epilogue();
-    fn seh_raise(record: *mut u8) -> u64;
-    fn seh_raise_ret();
-    fn seh_capture(context: *mut u8);
-    fn seh_capture_ret();
-}
 
 static OUTER_RSP: AtomicU64 = AtomicU64::new(0);
 static RESUME_RBX: AtomicU64 = AtomicU64::new(0);
@@ -277,7 +171,7 @@ extern "system" fn inner_handler(
         u64::from(rd32(record, ER_NUMBER_PARAMETERS)),
         rd(record, ER_INFORMATION),
         rd(record, ER_INFORMATION + 8),
-        rd(context, CTX_RIP),
+        rd(context, CTX_PC),
     ];
     for (slot, v) in INNER[3..].iter().zip(values) {
         slot.store(v, Ordering::SeqCst);
@@ -371,27 +265,25 @@ extern "system" fn consolidate_callback(record: *mut u8) -> u64 {
     let mut ctx = Context([0; CONTEXT_SIZE]);
     let c = ctx.0.as_mut_ptr();
     capture(c);
-    let target = OUTER_RSP.load(Ordering::SeqCst);
+    // seh_outer's body: its stack pointer is the establisher frame less
+    // what its prologue allocated after it (the architecture's).
+    let target = OUTER_RSP.load(Ordering::SeqCst) - OUTER_FRAME_ABOVE_BODY;
     for _ in 0..8 {
-        if rd(c, CTX_RSP) >= target {
+        if rd(c, CTX_SP) >= target {
             break;
         }
-        let pc = rd(c, CTX_RIP);
+        let pc = rd(c, CTX_PC);
         let mut base = 0u64;
         let entry = lookup(pc, &mut base, core::ptr::null_mut());
         if entry.is_null() {
-            // A leaf: the return address is at rsp.
-            let rsp = rd(c, CTX_RSP);
-            // SAFETY: a return address on this thread's stack.
-            wr(c, CTX_RIP, unsafe { *(rsp as *const u64) });
-            wr(c, CTX_RSP, rsp + 8);
+            leaf_step(c);
             continue;
         }
         let (mut data, mut frame) = (0u64, 0u64);
         unwind(0, base, pc, entry, c, &mut data, &mut frame, core::ptr::null_mut());
     }
-    CONSOLIDATED[3].store(rd(c, CTX_RSP), Ordering::SeqCst);
-    CONSOLIDATED[4].store(rd(c, CTX_RBX), Ordering::SeqCst);
+    CONSOLIDATED[3].store(rd(c, CTX_SP) + OUTER_FRAME_ABOVE_BODY, Ordering::SeqCst);
+    CONSOLIDATED[4].store(rd(c, CTX_NV1), Ordering::SeqCst);
     seh_outer_resume as *const () as u64
 }
 
@@ -447,34 +339,23 @@ fn outer(i: usize) -> u64 {
 }
 
 type PcToFileHeader = extern "system" fn(usize, *mut usize) -> usize;
-/// A fake code region with a function table at 0x100: an indirect entry,
-/// then the entry it names (its unwind data at 0x180, never read).
-static INDIRECT: [u32; 0x50] = {
-    let mut r = [0u32; 0x50];
-    r[0x40] = 0x10;
-    r[0x41] = 0x20;
-    r[0x42] = 0x10c | 1;
-    r[0x43] = 0x40;
-    r[0x44] = 0x50;
-    r[0x45] = 0x180;
-    r
-};
-
-type LookupFunctionEntry = extern "system" fn(u64, *mut u64, *mut u8) -> *const [u32; 3];
+type LookupFunctionEntry = extern "system" fn(u64, *mut u64, *mut u8) -> *const Entry;
 type VirtualUnwind =
-    extern "system" fn(u32, u64, u64, *const [u32; 3], *mut u8, *mut u64, *mut u64, *mut u8) -> u64;
+    extern "system" fn(u32, u64, u64, *const Entry, *mut u8, *mut u64, *mut u64, *mut u8) -> u64;
 
 /// A CONTEXT, 16-byte aligned.
 #[repr(C, align(16))]
-struct Context([u8; CONTEXT_SIZE]);
+pub(crate) struct Context([u8; CONTEXT_SIZE]);
 
-/// Unwinds seh_outer at `pc` with rsp = `stack`, rbx = rsi = 0; returns
-/// (handler, handler data, establisher frame) and leaves the result in
-/// `ctx`.
+/// Unwinds seh_outer at `pc` with the stack pointer `stack`, the other
+/// registers 0 but for `lr` (ARM64's link register, the return address
+/// before the prologue saved it); returns (handler, handler data,
+/// establisher frame) and leaves the result in `ctx`.
 fn virtual_unwind(
     ntdll: &Fns,
     pc: u64,
     stack: *mut u64,
+    lr: u64,
     ctx: &mut Context,
 ) -> Result<(u64, u64, u64), u32> {
     let mut base = 0u64;
@@ -484,9 +365,10 @@ fn virtual_unwind(
     }
     ctx.0 = [0; CONTEXT_SIZE];
     let c = ctx.0.as_mut_ptr();
-    wr(c, CTX_FLAGS, CONTEXT_FULL);
-    wr(c, CTX_RIP, pc);
-    wr(c, CTX_RSP, stack as u64);
+    wr(c, CTX_FLAGS, CTX_FULL);
+    wr(c, CTX_PC, pc);
+    wr(c, CTX_SP, stack as u64);
+    set_lr(c, lr);
     let (mut data, mut frame) = (0u64, 0u64);
     let handler = (ntdll.unwind)(
         UNW_FLAG_EHANDLER,
@@ -556,132 +438,25 @@ fn run() -> Result<(), u32> {
     let begin = unsafe { (*entry)[0] };
     c.eq(u64::from(begin), (outer_fn - image) as u64)?;
 
-    // An indirect entry in a registered table: [0x10, 0x20) names the
-    // entry at 0x10c ([0x40, 0x50)); a lookup inside it returns that one.
-    let (Some(add), Some(delete)) =
-        (find_export(ntdll, b"RtlAddFunctionTable"), find_export(ntdll, b"RtlDeleteFunctionTable"))
-    else {
-        return c.ok(false, 0);
-    };
-    // SAFETY: the documented signatures.
-    let (add, delete) = unsafe {
-        (
-            core::mem::transmute::<usize, extern "system" fn(*const [u32; 3], u32, u64) -> u8>(add),
-            core::mem::transmute::<usize, extern "system" fn(*const [u32; 3]) -> u8>(delete),
-        )
-    };
-    // The region is memory of its own (as a JIT's code is), not inside
-    // this image: a PC in an image is looked up in its .pdata.
-    let (s, region, _) = allocate(0, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    c.ok(s == STATUS_SUCCESS && region != 0, s.into())?;
-    // SAFETY: the page just committed holds INDIRECT.
-    unsafe {
-        core::ptr::copy_nonoverlapping(INDIRECT.as_ptr(), region as *mut u32, INDIRECT.len())
-    };
-    let region = region as u64;
-    let table = (region + 0x100) as *const [u32; 3];
-    c.ok(add(table, 2, region) != 0, 0)?;
-    let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
-    c.eq(entry as u64, region + 0x10c)?;
-    c.eq(base64, region)?;
-    c.ok(delete(table) != 0, 0)?;
+    // Function tables registered at run time (the architecture's format).
+    table_checks(&mut c, ntdll, &fns)?;
 
-    // A growable table (RtlAddGrowableFunctionTable: V8 registers its
-    // code space's with it): entries relative to RangeBase, covering
-    // [RangeBase, RangeEnd); only the first EntryCount are searched until
-    // RtlGrowFunctionTable counts more; none after
-    // RtlDeleteGrowableFunctionTable.
-    let (Some(add), Some(grow), Some(delete)) = (
-        find_export(ntdll, b"RtlAddGrowableFunctionTable"),
-        find_export(ntdll, b"RtlGrowFunctionTable"),
-        find_export(ntdll, b"RtlDeleteGrowableFunctionTable"),
-    ) else {
-        return c.ok(false, 0);
-    };
-    type AddGrowable = extern "system" fn(*mut usize, *mut [u32; 3], u32, u32, usize, usize) -> u32;
-    // SAFETY: the documented signatures.
-    let (add, grow, delete) = unsafe {
-        (
-            core::mem::transmute::<usize, AddGrowable>(add),
-            core::mem::transmute::<usize, extern "system" fn(usize, u32)>(grow),
-            core::mem::transmute::<usize, extern "system" fn(usize)>(delete),
-        )
-    };
-    let mut entries = [[0x10u32, 0x20, 0x80], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
-    let table = entries.as_mut_ptr();
-    let region = 0x7_0000_0000u64;
-    let mut handle = 0usize;
-    c.eq(add(&mut handle, table, 1, 4, region as usize, region as usize + 0x100).into(), 0)?;
-    c.ok(handle != 0, 0)?;
-    let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
-    c.eq(entry as u64, table as u64)?;
-    c.eq(base64, region)?;
-    c.ok((fns.lookup)(region + 0x38, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
-    // SAFETY: the table's second slot, written before it is counted.
-    unsafe { table.add(1).write_volatile([0x30, 0x40, 0x90]) };
-    grow(handle, 2);
-    let entry = (fns.lookup)(region + 0x38, &mut base64, core::ptr::null_mut());
-    c.eq(entry as u64, table as u64 + 12)?;
-    c.ok((fns.lookup)(region + 0x48, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
-    delete(handle);
-    c.ok((fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut()).is_null(), 0)?;
-
-    // RtlVirtualUnwind from seh_outer's body: a fake stack with the saved
-    // rsi at +0x28, the saved rbx at +0x30 and a return address at +0x38.
-    let mut stack = [0u64; 16];
-    let sp = stack.as_mut_ptr();
-    let put = |i: usize, v: u64| {
-        // SAFETY: inside `stack`.
-        unsafe { sp.add(i).write_volatile(v) }
-    };
-    put(5, 0x5151); // rsi
-    put(6, 0xb0b0); // rbx
-    put(7, 0x1234_5678); // return address
-    let mut ctx = Context([0; CONTEXT_SIZE]);
-    let (handler, data, frame) =
-        virtual_unwind(&fns, seh_outer_resume as *const () as u64, sp, &mut ctx)?;
-    let cp = ctx.0.as_ptr();
-    c.eq(handler, outer_handler as *const () as u64)?;
-    c.ok(data != 0, data)?;
-    c.eq(frame, sp as u64)?;
-    c.eq(rd(cp, CTX_RIP), 0x1234_5678)?;
-    c.eq(rd(cp, CTX_RSP), sp as u64 + 0x40)?;
-    c.eq(rd(cp, CTX_RBX), 0xb0b0)?;
-    c.eq(rd(cp, CTX_RSI), 0x5151)?;
-
-    // From inside the prologue, after `push rbx` (1 byte): only that push
-    // is undone, and no handler is reported.
-    put(0, 0xb1b1); // rbx
-    put(1, 0x4321); // return address
-    let (handler, _, _) = virtual_unwind(&fns, outer_fn as u64 + 1, sp, &mut ctx)?;
-    let cp = ctx.0.as_ptr();
-    c.eq(handler, 0)?;
-    c.eq(rd(cp, CTX_RIP), 0x4321)?;
-    c.eq(rd(cp, CTX_RSP), sp as u64 + 0x10)?;
-    c.eq(rd(cp, CTX_RBX), 0xb1b1)?;
-
-    // From the epilogue (at `add rsp, 0x28`): emulated, no handler.
-    let (handler, _, _) =
-        virtual_unwind(&fns, seh_outer_epilogue as *const () as u64, sp, &mut ctx)?;
-    let cp = ctx.0.as_ptr();
-    c.eq(handler, 0)?;
-    c.eq(rd(cp, CTX_RIP), 0x1234_5678)?;
-    c.eq(rd(cp, CTX_RSP), sp as u64 + 0x40)?;
-    c.eq(rd(cp, CTX_RBX), 0xb0b0)?;
-    c.eq(rd(cp, CTX_RSI), 0x5151)?;
+    // RtlVirtualUnwind from seh_outer's body, its prologue and its
+    // epilogue (the architecture's frame).
+    unwind_checks(&mut c, &fns)?;
 
     // RtlCaptureContext: the caller's registers, its return address and
-    // its rsp after the return.
+    // its stack pointer after the return.
     let mut ctx = Context([0; CONTEXT_SIZE]);
     // SAFETY: seh_capture fills the CONTEXT.
     unsafe { seh_capture(ctx.0.as_mut_ptr()) };
     let cp = ctx.0.as_ptr();
-    c.eq(rd(cp, CTX_RIP), seh_capture_ret as *const () as u64)?;
-    c.eq(rd(cp, CTX_RSP), CAPTURE_RSP.load(Ordering::SeqCst))?;
-    c.eq(rd(cp, CTX_RBX), OUTER_RBX)?;
-    c.eq(rd(cp, CTX_R12), INNER_RBX)?;
-    c.eq(rd(cp, CTX_FLAGS) & CONTEXT_FULL, CONTEXT_FULL)?;
-    c.eq(rd(cp, CTX_SEG_CS) & 0xffff, 0x33)?;
+    c.eq(rd(cp, CTX_PC), seh_capture_ret as *const () as u64)?;
+    c.eq(rd(cp, CTX_SP), CAPTURE_RSP.load(Ordering::SeqCst))?;
+    c.eq(rd(cp, CTX_NV1), OUTER_RBX)?;
+    c.eq(rd(cp, CTX_NV3), INNER_RBX)?;
+    c.eq(rd(cp, CTX_FLAGS) & CTX_FULL, CTX_FULL)?;
+    capture_checks(&mut c, cp)?;
 
     // RtlRaiseException, continued by the inner handler: seh_raise returns
     // 5 through raise_it, seh_inner and seh_outer.

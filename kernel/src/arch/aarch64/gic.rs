@@ -1,30 +1,39 @@
 //! The interrupt controller: a GICv3 (Arm's GIC Architecture
-//! Specification, v3 and v4). QEMU `virt`'s (with `gic-version=3`): the
-//! distributor at 0x0800_0000 and the redistributors from 0x080a_0000, the
-//! board's fixed layout like the UART's (the firmware's MADT names them
-//! on other machines: the port reads it). One security state (QEMU's
-//! `virt` without `secure=on`): GICD_CTLR's DS is set, group 1 is the
-//! kernel's.
+//! Specification, v3 and v4), where the firmware's MADT says: its GICD
+//! entry (the distributor) and GICR entry (the redistributors' range).
+//! Without them, QEMU `virt`'s layout (with `gic-version=3`: the
+//! distributor at 0x0800_0000, the redistributors from 0x080a_0000), which
+//! the log says. One security state (QEMU's `virt` without `secure=on`):
+//! GICD_CTLR's DS is set, group 1 is the kernel's.
 //!
 //! Brought up with its first interrupt source (`timer::start_periodic`):
 //! the distributor once (affinity routing, group 1 on), then on each CPU
 //! (`init_cpu`: the boot CPU's then, an AP's at its start) its
 //! redistributor (awake; its private interrupts, SGIs and PPIs, enabled
 //! one by one) and its CPU interface through the system registers
-//! (`ICC_*`: enabled, every priority let through). `dispatch`
-//! acknowledges an IRQ (ICC_IAR1_EL1), ends it (ICC_EOIR1_EL1), then runs
-//! its handler (which may switch threads). SGIs are the CPUs' IPIs (`send_sgi`, ICC_SGI1R_EL1).
+//! (`ICC_*`: enabled; its priority mask is `cpu`'s, interrupts' on and
+//! off). `dispatch` acknowledges an IRQ (ICC_IAR1_EL1), ends it
+//! (ICC_EOIR1_EL1), then runs its handler (which may switch threads).
+//! SGIs are the CPUs' IPIs (`send_sgi`, ICC_SGI1R_EL1).
+//!
+//! The pseudo-NMI: SGI `NMI_SGI` at `NMI_PRIORITY`, above the others'
+//! `IRQ_PRIORITY`, which `cpu::PMR_OFF` lets through while interrupts are
+//! off. Taken, it runs `interrupts::nmi` with PSTATE.I set (NMIs do not
+//! nest). An ordinary IRQ's handler runs with interrupts off by priority
+//! and PSTATE.I clear, so an NMI reaches it too (the watchdog's backtrace
+//! of a CPU stuck in its tick handler); its exit sets PSTATE.I and the
+//! mask back to "on" (it was taken only with interrupts on).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::interrupts::{Handler, TrapFrame};
 use crate::sync::IrqMutex;
 
-const GICD_PHYS: u64 = 0x0800_0000;
-const GICR_PHYS: u64 = 0x080a_0000;
-/// How much of the redistributor region is searched for this CPU's (one
-/// redistributor is 128 KiB: its RD_base frame, then its SGI_base frame).
-const GICR_SPAN: u64 = 0x00f6_0000;
+/// QEMU `virt`'s layout, without the MADT's entries.
+const VIRT_GICD: u64 = 0x0800_0000;
+const VIRT_GICR: u64 = 0x080a_0000;
+const VIRT_GICR_SPAN: u64 = 0x00f6_0000;
+/// One redistributor: its RD_base frame, then its SGI_base frame.
 const GICR_STRIDE: u64 = 0x2_0000;
 
 const GICD_CTLR: u64 = 0x0000;
@@ -43,13 +52,23 @@ const GICR_IGROUPR0: u64 = SGI_BASE + 0x0080;
 const GICR_ISENABLER0: u64 = SGI_BASE + 0x0100;
 const GICR_IPRIORITYR: u64 = SGI_BASE + 0x0400;
 
+/// The pseudo-NMI's SGI and the two priorities (lower is more urgent;
+/// QEMU's GIC keeps 5 bits of priority: multiples of 8).
+pub const NMI_SGI: u32 = 1;
+pub const NMI_PRIORITY: u8 = 0x80;
+pub const IRQ_PRIORITY: u8 = 0xa0;
+
 /// INTIDs 1020-1023 are special: nothing to handle (spurious).
 const SPURIOUS: u64 = 1020;
 /// The private interrupts (SGIs 0-15, PPIs 16-31) handled here.
 const PRIVATE: usize = 32;
 
-/// The redistributors' region, mapped (0: the distributor is not up).
+/// The redistributors' region, mapped (0: the distributor is not up),
+/// its physical base and its length (searched for each CPU's).
 static GICR: AtomicU64 = AtomicU64::new(0);
+static GICR_PHYS: AtomicU64 = AtomicU64::new(0);
+static GICR_SPAN: AtomicU64 = AtomicU64::new(0);
+static GICD_PHYS: AtomicU64 = AtomicU64::new(0);
 /// Each CPU's redistributor's RD_base, virtual (0: not up), by CPU index.
 static RD_BASE: [AtomicU64; super::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; super::smp::MAX_CPUS];
@@ -102,7 +121,29 @@ fn packed(affinity: u64) -> u64 {
 /// Brings the GIC up: the distributor (once), then this CPU's part.
 pub fn init() -> Result<(), GicError> {
     if GICR.load(Ordering::Acquire) == 0 {
-        let gicd = super::paging::map_mmio(GICD_PHYS, 0x1_0000).map_err(GicError::Map)?;
+        let madt = crate::boot::early_addresses()
+            .and_then(|(hhdm, _)| crate::boot::acpi::read_gic(hhdm, crate::boot::early_rsdp()))
+            .unwrap_or_default();
+        let (gicd_phys, (gicr_phys, span)) = match (madt.distributor, madt.redistributors) {
+            (Some(d), Some((r, len))) => {
+                crate::info!(
+                    "gic: GICv3 distributor at {d:#x}, redistributors from {r:#x} ({len:#x} bytes) \
+                     (the firmware's MADT)"
+                );
+                (d, (r, u64::from(len)))
+            }
+            _ => {
+                crate::warn!(
+                    "gic: GICv3 distributor at {VIRT_GICD:#x}, redistributors from {VIRT_GICR:#x} \
+                     (QEMU virt's: the firmware's MADT names no GICD and GICR)"
+                );
+                (VIRT_GICD, (VIRT_GICR, VIRT_GICR_SPAN))
+            }
+        };
+        GICD_PHYS.store(gicd_phys, Ordering::Relaxed);
+        GICR_PHYS.store(gicr_phys, Ordering::Relaxed);
+        GICR_SPAN.store(span, Ordering::Relaxed);
+        let gicd = super::paging::map_mmio(gicd_phys, 0x1_0000).map_err(GicError::Map)?;
         write32(gicd + GICD_CTLR, GICD_CTLR_ENABLE);
         for _ in 0..1_000_000 {
             if read32(gicd + GICD_CTLR) & GICD_CTLR_RWP == 0 {
@@ -110,7 +151,7 @@ pub fn init() -> Result<(), GicError> {
             }
             core::hint::spin_loop();
         }
-        let gicr = super::paging::map_mmio(GICR_PHYS, GICR_SPAN).map_err(GicError::Map)?;
+        let gicr = super::paging::map_mmio(gicr_phys, span).map_err(GicError::Map)?;
         GICR.store(gicr, Ordering::Release);
     }
     init_cpu()
@@ -124,10 +165,11 @@ pub fn init_cpu() -> Result<(), GicError> {
         return Ok(());
     }
     let gicr = GICR.load(Ordering::Acquire);
+    let span = GICR_SPAN.load(Ordering::Relaxed);
     let me = packed(affinity());
     let mut rd = None;
     let mut at = gicr;
-    while gicr != 0 && at < gicr + GICR_SPAN {
+    while gicr != 0 && at + GICR_STRIDE <= gicr + span {
         let typer = read64(at + GICR_TYPER);
         if typer >> 32 == me {
             rd = Some(at);
@@ -150,17 +192,16 @@ pub fn init_cpu() -> Result<(), GicError> {
     // Every private interrupt in group 1 (none enabled yet).
     write32(rd + GICR_IGROUPR0, u32::MAX);
     // SAFETY: the CPU interface's system registers (ICC_SRE_EL1,
-    // ICC_PMR_EL1, ICC_BPR1_EL1, ICC_IGRPEN1_EL1 by their encodings):
-    // system register access on, every priority unmasked, no preemption
-    // grouping, group 1 on.
+    // ICC_BPR1_EL1, ICC_IGRPEN1_EL1 by their encodings): system register
+    // access on (the entry turned it on already), every priority bit a
+    // group priority (the NMI preempts an IRQ's handler), group 1 on. The
+    // priority mask (ICC_PMR_EL1) is `cpu`'s.
     unsafe {
         core::arch::asm!(
             "mrs {t}, S3_0_C12_C12_5",
             "orr {t}, {t}, #1",
             "msr S3_0_C12_C12_5, {t}",
             "isb",
-            "mov {t}, #0xff",
-            "msr S3_0_C4_C6_0, {t}",
             "msr S3_0_C12_C12_3, xzr",
             "mov {t}, #1",
             "msr S3_0_C12_C12_7, {t}",
@@ -172,24 +213,26 @@ pub fn init_cpu() -> Result<(), GicError> {
     if let Some(slot) = RD_BASE.get(cpu) {
         slot.store(rd, Ordering::Release);
     }
-    // Private interrupts already handled (the reschedule SGI, the timer)
-    // are enabled here too.
+    // The pseudo-NMI on every CPU; private interrupts already handled
+    // (the reschedule SGI, the timer) are enabled here too.
+    enable_here(rd, NMI_SGI, NMI_PRIORITY);
     let handlers = *HANDLERS.lock();
     for (intid, h) in handlers.iter().enumerate() {
         if h.is_some() {
-            enable_here(rd, intid as u32);
+            enable_here(rd, intid as u32, IRQ_PRIORITY);
         }
     }
     crate::info!(
-        "gic: CPU {cpu}: GICv3 redistributor (affinity {me:#x}) at {:#x}, distributor at {GICD_PHYS:#x}",
-        GICR_PHYS + (rd - gicr)
+        "gic: CPU {cpu}: GICv3 redistributor (affinity {me:#x}) at {:#x}, distributor at {:#x}",
+        GICR_PHYS.load(Ordering::Relaxed) + (rd - gicr),
+        GICD_PHYS.load(Ordering::Relaxed)
     );
     Ok(())
 }
 
-fn enable_here(rd: u64, intid: u32) {
+fn enable_here(rd: u64, intid: u32, priority: u8) {
     // SAFETY: one byte of GICR_IPRIORITYR per interrupt.
-    unsafe { ((rd + GICR_IPRIORITYR + u64::from(intid)) as *mut u8).write_volatile(0x80) };
+    unsafe { ((rd + GICR_IPRIORITYR + u64::from(intid)) as *mut u8).write_volatile(priority) };
     write32(rd + GICR_ISENABLER0, 1 << intid);
 }
 
@@ -218,24 +261,26 @@ pub fn my_affinity() -> u64 {
     affinity()
 }
 
-/// Enables private interrupt `intid` (an SGI or PPI) on this CPU, at the
-/// middle priority, with `handler` (the same on every CPU: the others
+/// Enables private interrupt `intid` (an SGI or PPI) on this CPU, at
+/// `IRQ_PRIORITY`, with `handler` (the same on every CPU: the others
 /// enable it when they start, `init_cpu`).
 pub fn enable_private(intid: u32, handler: Handler) {
     let rd = my_rd();
     let i = intid as usize;
-    if rd == 0 || i >= PRIVATE {
+    if rd == 0 || i >= PRIVATE || intid == NMI_SGI {
         crate::warn!("gic: interrupt {intid} not enabled (GIC up here: {})", rd != 0);
         return;
     }
     HANDLERS.lock()[i] = Some(handler);
-    enable_here(rd, intid);
+    enable_here(rd, intid, IRQ_PRIORITY);
 }
 
-/// Handles one IRQ (the IRQ vector's): acknowledged, ended, then its
-/// handler run with the interrupted state. An interrupt without a handler is
-/// logged once per INTID.
-pub fn dispatch(frame: &mut TrapFrame) {
+/// Handles one IRQ (the IRQ vector's): acknowledged, ended, then the NMI
+/// or its handler run with the interrupted state. An interrupt without a
+/// handler is logged once per INTID. What it took: the caller ends an
+/// ordinary IRQ (`cpu::irq_exit`, after the user-return hook for one from
+/// EL0); an NMI or a spurious interrupt leaves the mask as it found it.
+pub fn dispatch(frame: &mut TrapFrame) -> Taken {
     let iar: u64;
     // SAFETY: ICC_IAR1_EL1: acknowledges the highest pending group 1 IRQ.
     unsafe {
@@ -243,7 +288,7 @@ pub fn dispatch(frame: &mut TrapFrame) {
     };
     let intid = iar & 0xff_ffff;
     if intid >= SPURIOUS {
-        return;
+        return Taken::Nothing;
     }
     // Ended before its handler runs: a handler may switch threads (the
     // tick's preemption), and until the EOI the CPU's running priority
@@ -256,6 +301,15 @@ pub fn dispatch(frame: &mut TrapFrame) {
     unsafe {
         core::arch::asm!("msr S3_0_C12_C12_1, {}", in(reg) iar, options(nomem, nostack, preserves_flags))
     };
+    if intid == u64::from(NMI_SGI) {
+        // PSTATE.I stays set (the vector's): no NMI within an NMI.
+        super::interrupts::nmi(frame);
+        return Taken::Nmi;
+    }
+    // An ordinary IRQ is taken only with interrupts on; its handler runs
+    // with them off by priority, the NMI let through.
+    super::cpu::pmr_off();
+    super::cpu::unmask_daif_irq();
     let handler = HANDLERS.lock().get(intid as usize).copied().flatten();
     match handler {
         Some(h) => h(frame),
@@ -266,4 +320,17 @@ pub fn dispatch(frame: &mut TrapFrame) {
             }
         }
     }
+    Taken::Irq
+}
+
+/// What `dispatch` took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taken {
+    /// None (spurious): nothing changed.
+    Nothing,
+    /// The NMI: run with PSTATE.I set, the mask untouched.
+    Nmi,
+    /// An ordinary IRQ: its handler ran with the mask "off" and PSTATE.I
+    /// clear; the caller exits it.
+    Irq,
 }

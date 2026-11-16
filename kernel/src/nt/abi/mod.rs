@@ -25,3 +25,9 @@ pub use x64::*;
 mod arm64;
 #[cfg(target_arch = "aarch64")]
 pub use arm64::*;
+
+// ARM64's CONTEXT layout is plain data: the host's tests build it whatever
+// the host is.
+#[cfg(all(test, not(target_arch = "aarch64")))]
+#[path = "arm64/context.rs"]
+mod arm64_context;

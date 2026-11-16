@@ -14,10 +14,10 @@ Installers:
 - Architecture: x64
   Scope: machine
   InstallerUrl: https://packages.gala.invalid/pkscoped-1.1.0-machine.zip
-  InstallerSha256: BAF0359B8E18801F5C6465FF1E8A19B866D9CF1EABF00103A69A89AD991C82C8
+  InstallerSha256: E56104C66676C5B7898F4C544F94005D97514E2223F8883C5F307276C146B736
 - Architecture: x64
   Scope: user
   InstallerUrl: https://packages.gala.invalid/pkscoped-1.1.0-user.zip
-  InstallerSha256: BAF0359B8E18801F5C6465FF1E8A19B866D9CF1EABF00103A69A89AD991C82C8
+  InstallerSha256: E56104C66676C5B7898F4C544F94005D97514E2223F8883C5F307276C146B736
 ManifestType: singleton
 ManifestVersion: 1.6.0

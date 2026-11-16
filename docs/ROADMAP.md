@@ -202,7 +202,7 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` through its own page tables, GIC, tick, scheduler and second CPU (`arm_boot`, `arm_sched`), its exceptions reported (`arm_fault_*`); next the drivers, then ARM64 Windows and Linux user mode |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, exceptions to vectored handlers and APCs (`arm_*` scenarios); next more test programs, then Linux's aarch64 ABI |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -225,7 +225,8 @@ has a section under "Open items".
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
-| USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; not urgent |
+| USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
+| WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); Word and Excel start without a window yet (`office_word`, `office_excel`) |
 
@@ -243,6 +244,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
 | TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
@@ -717,13 +719,25 @@ Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
 a winget id and where its installer puts the program (checked against
 the winget-pkgs manifests: user scope under %LOCALAPPDATA% first, then
 the machine's). Not installed, a tile is dimmed with a download badge
-and a click runs `gala install <id>` in a console window; installed, it
-starts the program. A console program started from the menu gets its own
-console window. Tests: the desktop's and `nt::action`'s host tests,
-scenario `start_menu` (start_menu_test and a screen check: the tiles,
-the Command Prompt clicked, 7-Zip's install started and its window
-closed). TimKosse.FileZilla.Client is not in winget-pkgs today: its tile
-shows `gala install`'s "no package" in the window (the portable
+and a click installs it on the tile: `gala install <id>` with no window,
+the menu open and a progress bar on the tile (the states gala reports
+through GalaDesktopAction's InstallProgress), red if it fails and
+installed when it is done; installed, a click starts the program. An
+install that ends, either way, is also told above the notification area
+(the program's name, and what the exit code says when it says more than
+that it failed). An install whose `gala install` is gone without a word
+(killed, or faulting before it can report) or never started goes quiet
+instead of waiting for ever: the desktop watches the installer's pid,
+which `start_from_menu` reports, and the process ending leaves the tile
+grey under a question mark with its bar where it got to, a click trying
+again and the same notification. A console program started from the menu
+gets its own console window. Tests: the desktop's, `nt::action`'s and galapkg's host
+tests, scenario `start_menu` (start_menu_test and a screen check: the
+tiles, the Command Prompt clicked, 7-Zip's install started with no
+console window of its own, its tile's bar red when it failed and its
+notification above the notification area).
+TimKosse.FileZilla.Client is not in winget-pkgs today: its tile's bar
+turns red and `gala install`'s "no package" is in the log (the portable
 C:\filezilla placement of the FileZilla scenarios still counts as
 installed).
 
@@ -741,10 +755,11 @@ a screenshot):
    console, the internal commands it has) makes the tile useful.
 3. A scenario that installs a catalog package on a click from a source
    the test serves (needs a way to give the boot user's environment
-   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed).
-   Installs that fail on gala (Office until OF is done, an installer
-   needing elevation without UAC's prompt) fail in their window with
-   `gala install`'s own message.
+   `%GALA_WINGET_SOURCE%`; the kernel's initial environment is fixed),
+   so that a bar filling over a download is tested and not only its
+   states. Installs that fail on gala (Office until OF is done, an
+   installer needing elevation without UAC's prompt) leave the tile's
+   bar red, with `gala install`'s own message in the log.
 
 ### SH. The shell in user mode
 
@@ -1376,12 +1391,22 @@ reset, streams restart).
 **Goal**: gala drives USB through its own xHCI driver, so USB
 keyboards, mice and sticks work, first on QEMU's `qemu-xhci`, then on
 real machines; Windows programs see USB devices through the APIs they
-use. Not urgent (the owner): after the current focus.
+use. Wanted next (the owner), its HID part first: it is what stands
+between gala and a machine of the owner's own, where the desktop comes
+up and cannot be touched.
 
 **Today**: nothing. The keyboard and mouse are PS/2, every device is
 polled, and xHCI is only listed among gala's own drivers under
 "Later". (The image boots from a USB stick through the firmware, not
-through gala.)
+through gala.) What a machine without PS/2 devices gets is the
+diagnosis and nothing more: the input thread says `input: the PS/2
+controller (ports 0x60 and 0x64) never answered` (or which of the two
+devices answered, when one did) and stops, while the desktop keeps its
+clock, its windows and whatever input a presenter brings (scenario
+`no_i8042`, QEMU's `-machine q35,i8042=off`; ARCHITECTURE "Screen,
+devices and boot splash"). A laptop is the usual case: many have a
+PS/2 keyboard and touchpad behind the firmware's emulation, and the
+newest have neither.
 
 **Next** (each step test first):
 1. Device interrupts: MSI/MSI-X for PCI devices, the virtio devices
@@ -1396,7 +1421,11 @@ through gala.)
 3. HID: the boot protocol for `usb-kbd` and `usb-mouse`, then report
    descriptors; `usb-tablet` gives an absolute pointer, into the
    desktop's input as the PS/2 driver's events are (scripted screen
-   tests can then click by position).
+   tests can then click by position). With steps 1 and 2 this is all a
+   real machine needs to be used: it comes before storage, and the
+   first test on hardware is the owner's own laptop (its internal
+   keyboard and touchpad are USB on the newest machines, and an
+   external keyboard and mouse are USB on every machine).
 4. Mass storage (bulk-only transport, SCSI commands) as a disk under
    gala's file systems; `usb-storage` in a scenario.
 5. What Windows programs see: `hid.dll` and HID collections, device
@@ -1414,6 +1443,80 @@ device tree in the state dump and in `gala devices`.
 **Design**: to be written in ARCHITECTURE with step 2 (the driver,
 the device tree, handover: the controller reset and devices enumerated
 again by the next kernel).
+
+### WF. Wi-Fi: a dynamic interface, 802.11 and the Windows APIs
+
+**Goal**: on a real machine gala joins a Wi-Fi network - the networks
+in range listed from the taskbar, a password typed once and kept, WPA2
+and WPA3, the address and DNS from the network - and Windows programs
+see a connected wireless adapter through the APIs they use (wlanapi,
+the network list manager, NCSI). It is what makes a machine of the
+owner's own useful once USB's HID part lets it be touched at all.
+
+**Today**: nothing of it. The network is one virtio-net card at a fixed
+10.0.2.15/24 with QEMU's 10.0.2.2 as its gateway, polled with no
+interrupts, IPv4 only (N3 step 3 is parked); the interface list is
+static (ARCHITECTURE "Network interfaces"), so there is no DHCP client,
+no address that changes, no GetAdaptersAddresses and no
+NotifyAddrChange (both ERROR_NOT_SUPPORTED, recorded), nothing of
+802.11 and no wlanapi.dll. What the radio's own cryptography needs is
+largely there already, in the primitives TLS brought (SHA-1 and SHA-2,
+HMAC, AES, elliptic curves).
+
+**Next** (four layers, each test first; the first two are weeks of
+work, the third is an item's worth and the fourth is the biggest and
+waits on DR):
+1. **A network that is not fixed**: a DHCP client (QEMU's user
+   networking answers one, so this is testable today over the
+   virtio-net card), the interface's address, prefix, gateway, DNS
+   servers and lease taken from it, the lease renewed, and an
+   interface that comes and goes - which means the dynamic interface
+   list the whole stack and `GALA_NETWORK_INTERFACES` assume away
+   today, GetAdaptersAddresses and NotifyAddrChange over it, and the
+   clock's jump and the renewed lease on a snapshot's resume or a
+   handover (R9, SN). Static addressing stays what the scenarios use.
+2. **What a Windows program sees, before there is a radio**: wlanapi's
+   surface proved against real Windows first (`wlan_test`:
+   WlanOpenHandle, WlanEnumInterfaces, WlanScan,
+   WlanGetAvailableNetworkList, WlanConnect and its notifications,
+   profiles), the network list manager (INetworkListManager and its
+   events), NCSI's connectivity probe and the taskbar's network icon
+   and flyout (item SH's shell, item SD's rule: the `gala` command
+   reaches it first). In gala it runs over a simulated adapter with
+   scripted networks, as USB's host tests run against a fake
+   controller, so every layer above the radio is finished and tested
+   before a card exists.
+3. **802.11 and a supplicant**, from the published IEEE 802.11-2020
+   standard and the RFCs (CLEAN_ROOM): scanning, authentication and
+   association, the WPA2-PSK four-way handshake (PBKDF2 for the PMK,
+   EAPOL-Key, CCMP), WPA3's SAE, protected management frames, roaming
+   between access points. Host tests of the state machines against the
+   test vectors the standard and the RFCs publish; the only real test
+   is hardware with a real access point, since QEMU emulates no
+   wireless card.
+4. **The card**: a laptop's Wi-Fi is an Intel or Qualcomm part with a
+   vendor NDIS miniport and signed firmware, so the route is DR stage
+   2's isolated driver host with the NDIS miniport framework ("Later":
+   a third-party driver never runs unsupervised in gala's kernel
+   address space). gala's own driver for one published card is the
+   alternative where a datasheet exists and no firmware is needed, for
+   one machine rather than for machines in general.
+
+**The cheap way to a network on real hardware** meanwhile, which this
+item does not need: a USB Ethernet adapter over CDC-ECM or NCM on item
+USB's stack, both documented class specifications and no vendor driver
+at all. It gives a real machine a wired network as soon as USB's steps
+1 and 2 are in, and it exercises layer 1 above (a second interface
+that comes and goes).
+
+**Done when** (each layer): its tests pass; the lease, the scan
+results, the supplicant's state machine and every association failure
+in an `events=net` category with the reason, the interfaces and their
+state in the state dump and in `gala devices`; a real machine joins the
+owner's network from the taskbar.
+
+**Design**: to be written in ARCHITECTURE with layer 1 (the dynamic
+interface list, the DHCP client, what a handover carries).
 
 ### BR. A web browser: stock Microsoft Edge
 
@@ -1739,11 +1842,41 @@ need gala's.
      ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
      (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
      is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. Both ends are the next step,
-     the server first, and the ledger needs the endpoint it failed to
-     reach: gala's rpcrt4 turns ERROR_FILE_NOT_FOUND into
-     RPC_S_SERVER_UNAVAILABLE (`transport.rs`) without recording the
-     name, so nothing today says which endpoint is missing.
+     client has nothing to reach. The client side of the diagnosis is
+     in place: a connect that finds no pipe records the name
+     (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
+     detail, `rpc_test`), so a run says which endpoint a program could
+     not reach -- for Word, `LRPC-AppV-ISV-<GUID>APPV-VIRTMAN-NOT`,
+     14 times over the 59 s the service's own log counts
+     (`isv_process_notifier.cpp : 64`, 0x800706ba, RetryCount 13).
+     Of every file the service looked for and did not find, one was
+     gala's own gap and is now closed: slc.dll (ARCHITECTURE "slc",
+     `slc_test`, Windows' answers measured), which it loads from
+     System32 and asks one thing,
+     `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`
+     (SL_E_VALUE_NOT_FOUND, in the ledger). The 0x7e did not move, so
+     that absence was not its cause. What the run shows before it: the
+     App-V DLL set (AppVOrchestration, AppVIsvStreamingManager,
+     AppVManifest, AppVCatalog, AppVIsvVirtualization, AppVIntegration,
+     AppVIsvSubsystemController, AppVFileSystemMetadata) maps twice,
+     then five files are looked for by full path in `ClickToRun` and
+     are not there -- `AppVISVStream32.dll`, `AppVISVStream64.dll`,
+     `Mso20win32client.dll`, `Mso30win32client.dll`,
+     `Mso40UIwin32client.dll` -- and 1.5 s later the error is logged.
+     None of those five is in Windows' own `ClickToRun` either
+     (measured on the Windows machine; the three Mso ones live under
+     the Office root's `vfs\ProgramFilesCommonX64\Microsoft
+     Shared\Office16`, and no Click-to-Run binary imports slc.dll or
+     any of the five: 165 files read), so the misses are what Windows
+     has too. No DLL load failed in the service in the whole run: the
+     ledger has neither a `missing dll` nor a `load failed` for it, and
+     gala's loader records both ("Gaps are never silent", `load_module`
+     in `user/testntdll`). So the 126 is not a load of gala's --
+     ERROR_MOD_NOT_FOUND is also what GetModuleHandle answers for a
+     module that is not loaded, where GetProcAddress answers the 127
+     this ladder has already climbed, and that miss is recorded
+     nowhere. Making it say the name asked for is the next step; the
+     name is what the server needs.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
@@ -4191,8 +4324,13 @@ the next breakthroughs).
    full parallel run of the `lx_` scenarios, `lx_gimp_batch`'s file-png
    plug-in (the load of in.png, its result right) printed "gimp_flush():
    error: Broken pipe" at its end: it wrote after GIMP had closed its
-   pipe. Not seen again in 7 runs (5 beside `lx_gimp`, `linux_menu` and
-   `lx_gtk_x11` with `XTASK_EVENTS=syscall`); the cause is not found yet.
+   pipe. Seen once more, in CI on a host at load 5.9 for 4 CPUs: that
+   time two plug-ins at once, file-png and script-fu, each of which had
+   taken far longer than on an idle host (521 ms and 1670 ms), while
+   gimp-console was still running (it exited 5.7 s later). Both sightings
+   are a slow plug-in on a loaded host, which puts the question at the
+   plug-in's last write and not at a reader that had gone; the cause is
+   not found yet.
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
    "inkscape"), first in batch mode (`lx_inkscape_batch`: in.svg rendered
    to a PNG Ubuntu's byte for byte; WORKFLOW "Inkscape") and its window
@@ -4302,19 +4440,75 @@ on the seams item PT prepared: native ARM64 Windows programs
   `calwrong`): the PL031 RTC, the check's verdict and the recalibration
   (CNTFRQ_EL0's rate read again; the RTC's measurement wins over it when
   they disagree), the log naming the architecture's counter and timer.
+- The GIC's pseudo-NMI: interrupts masked by priority (ICC_PMR_EL1),
+  the NMI an SGI above it, an IRQ handler running with NMIs let through;
+  frame-pointer backtraces (`arm_watchdog`: `hangtest`, the watchdog's
+  backtrace of a CPU stuck in its tick handler; `hangtest` now holds the
+  boot's end until the hang is over).
+- CPUs the bootloader did not start, started with PSCI CPU_ON (the
+  conduit from the FADT; a trampoline that turns the MMU on from a
+  TTBR0 identity page): `arm_smp_missed` (`smptest=hide`: the
+  bootloader's AP powers itself off first).
+- User mode, its first program (`arm_hello`: hello.exe built for ARM64,
+  ntrt's ARM64 runtime): user spaces on TTBR0 (`arch::user_space`, one
+  for both architectures), EL0 entry and return, SVC system calls (NT's
+  number in the immediate, as Windows ARM64's ntdll makes them), user
+  faults (demand paging), ARM64 PE images (`arch::runs_machine`);
+  xtask's aarch64 images carry the ARM64 builds of the DLLs and of
+  USER_PROGRAMS_ARM64 (exported to `user/bin/arm64`).
+- Programs through gala's ntdll (`arm_startup`, `arm_import`): its ARM64
+  build's stubs make `svc #N`; a process starts at LdrInitializeThunk
+  with ARM64's CONTEXT (`nt::abi::arm64::context`, host-tested), which
+  NtContinue resumes (floating-point part included); NtCreateThread
+  reads it; imports bind from ARM64 DLLs. Threads, the synchronization
+  objects and waits run as on x64 (`arm_thread`, `arm_sync`,
+  `arm_wait`).
+- Exceptions and APCs in ARM64 user mode: faults, `brk` (its immediate
+  the exception, as Windows ARM64 assigns them) and `udf` reach gala's
+  ntdll's dispatcher and its vectored handlers, which may continue
+  (`arm_exception`); RtlRaiseException and RtlCaptureContext; the
+  top-level filter and the crash report (`arm_crash`,
+  `arm_crash_dispatched`, `arm_crash_filtered`); user APCs from alertable
+  waits and NtContinue's TestAlert (`arm_apc`); kernel32 loads (`arm_tls`).
+- Frame-based exception handling on ARM64 (`arm_seh`, seh_test's ARM64
+  part): .pdata and .xdata, packed unwind data, partial prologues and
+  epilogues, RtlLookupFunctionEntry, RtlVirtualUnwind, frame handlers in
+  dispatch and RtlUnwindEx, unwind consolidation, the dispatcher's
+  MSFT_OP_CONTEXT frame.
+- NtGetContextThread and NtSetContextThread on ARM64 (`arm_context`:
+  suspended threads, the caller; `arm_threadinfo`).
+- Function tables registered at run time on ARM64 (RtlAddFunctionTable,
+  the growable tables, callbacks): gala's ntdll keeps one registry for
+  x64 and ARM64 (`ftable.rs`); `arm_seh` checks a table and a growable
+  one. ntrt's 64-bit runtime is one
+  for x64 and ARM64 (`nt64.rs`), so the x64 test programs build for
+  ARM64 as they are.
+- Devices where the firmware says: the console's PL011 from the SPCR,
+  the GIC's distributor and redistributors from the MADT's GICD and GICR
+  entries (host-tested parsers; `arm_boot` checks the log says so).
 
 **Next**:
-1. The rest of the kernel's `arch` for aarch64: the GIC's pseudo-NMI
-   (state dumps, `stop_others`), PSCI CPU_ON for CPUs the bootloader did
-   not start; the UART's and the GIC's addresses from the firmware (SPCR,
-   MADT or the device tree, and the PL031's). Then
-   `hello` reaching its kernel line, which needs step 2's ntdll and the
-   ABI.
-2. User mode: Windows' ARM64 ABI (`nt::abi::arm64`: CONTEXT, the system
-   call convention, unwinding) and gala's DLLs built for ARM64; Linux's
-   aarch64 ABI (`lx::machine::aarch64`, its system call table).
+1. xtask's state dump at an aarch64 timeout: QEMU `virt` has no NMI
+   for the monitor's `nmi`, so the request needs another way in (the
+   console's receive line, its interrupt at the NMI's priority, is the
+   candidate).
+2. User mode, the rest: more test programs in USER_PROGRAMS_ARM64 (the
+   x64 ones that build unchanged first, then those with x64 assembly);
+   `.pdata` link records (jump islands); Linux's aarch64 ABI (`lx::machine::aarch64`, its
+   system call table).
 3. CI: the aarch64 boot scenarios on GitHub's ARM64 runners (free for
    public repositories) or under QEMU's emulation.
+4. The firmware's boot-menu countdown (EDK2's BdsWait, 5 s) stalled
+   about one aarch64 boot in 150 under multi-threaded TCG on a loaded
+   host, before the boot loader ran: CPU 0 kept taking its timer tick
+   with nothing held for it (gdb's record: `interrupt_request` 0, the
+   virtual timer re-armed), the countdown did not end, and xtask's
+   timeout handling later woke it. Stopgap: xtask skips the countdown
+   (`-boot menu=on,splash-time=0`; 0 stalls in 1000 boots, and each
+   boot is 5 s shorter). Not found: why the countdown's timer event
+   stops firing (EDK2's TimerDxe and DXE core timer list against QEMU's
+   virtual timer); a debug build of the firmware with its DEBUG_INFO
+   log is the way in.
 
 **Done when**: the boot scenarios of the native ARM64 test programs pass
 on aarch64 in CI.
@@ -5276,6 +5470,100 @@ among the slowest hand-offs.
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
 "OpenTelemetry".
 
+### GR. Gap reports from real runs, straight to GitHub
+
+**Goal** (the owner): a gap a user finds by running an application is
+caught where it happens and reaches the repository by itself, as a
+GitHub issue, so the work queue is fed by real runs and not only by
+ours. Nothing leaves a machine without its owner's consent.
+
+**Today**: the ledger is already the work queue and already names what
+was asked for: every gap a run hits is counted by (service, what,
+detail), with the names gala's own DLLs record through
+`GalaRecordMissing`, and dumped after each program, before `boot ok`
+and in a state dump (OBSERVABILITY "Missing-features ledger"). On a
+developer's machine `cargo xtask report` merges those lines over every
+scenario and real program into `target/report/ledger.md`, ranked by
+programs and hits. Everything after that is missing: on a machine that
+is not ours the dump is in a serial log nobody reads, nothing is kept
+across boots, nothing notices that a program died of a gap, and
+nothing can send one anywhere.
+
+**Next** (each step test first; the CLI before the desktop,
+priority 7):
+1. **A gap report on the machine.** The system writes the ledger's
+   lines as one report when a program had gaps or did not end well (a
+   nonzero exit, a crash report, a DLL that failed to load), into
+   `C:\gala\reports` as a bounded ring (a count and a byte budget,
+   the oldest dropped and the drop counted). A report holds the
+   program (name, its PE's version, its SHA-256), the gala build
+   (version, commit, channel), the outcome (exit status or crash code,
+   and the module the loader named if it named one), the ledger's lines
+   since that program started, and the machine's shape (CPU count,
+   memory, firmware, real or virtual; no name). Scenario: a program
+   that hits a gap and exits nonzero leaves exactly one report, whose
+   lines are the dump's.
+2. **Redaction, then consent.** A ledger name can carry the user's own
+   name (`C:\Users\<name>\...` in a path a program asked for), so a
+   report is redacted when it is written, not when it is sent:
+   `C:\Users\<name>` becomes `C:\Users\<user>`, and machine and
+   domain names, volume GUIDs and IP addresses go the same way, each
+   case fed through a test. Sending stays off until the machine's owner
+   turns it on (`gala gaps consent on`, or the question asked once by
+   the desktop), with the whole bundle readable first (`gala gaps show
+   <id>`, `--json` for exactly what would be posted).
+3. **The CLI.** `gala gaps` lists this machine's reports ranked as
+   `ledger.md` ranks them (what, how often, which programs), with
+   `show <id>`, `send [<id>]`, `consent on|off` and `prune`. It sends
+   through the intake (step 4) or, with `--github`, straight to the
+   GitHub API with a token from the environment or `gh auth token`:
+   that path is how we use it before the intake exists, and the
+   fallback when the intake is down.
+4. **The intake.** No credential belongs on a user's machine, so the
+   device posts to a small service of ours beside the update feed
+   (`reports.gala-os.com`, a worker in front of the same account, WS
+   and R8), which holds the GitHub App's key and nothing else. It
+   fingerprints a gap (its kind, its name, the program it came from),
+   searches the open `gap` issues for that fingerprint in a
+   machine-readable block, and either opens one -- title `gap:
+   <dll>!<what>`, body with the counts, the programs and versions that
+   hit it and the gala builds -- or adds the new counts to the issue
+   that exists, at most once a day per fingerprint, labelled by kind
+   (`missing export`, `missing dll`, `unsupported`, `not
+   implemented`, ...) and by program. It answers with the issue's
+   number, which `gala gaps` shows beside the gap, so the user can
+   follow what they reported. Bounded like every other sender here:
+   gzipped, a size cap, a few reports a day per machine, a bounded
+   queue when offline, retried with backoff and `Retry-After` (OT's
+   `Batcher`).
+5. **In the desktop.** The gray question-mark tile of a program that
+   stopped answering and the notification a tile sends (SM) get
+   "Report this", which is step 3's send with the report already
+   chosen; so do the recovery notification after a kernel restart and
+   the crash screen's link (CS step 3). One place lists what this
+   machine has reported and what became of it.
+6. **Back into the work queue.** `cargo xtask gaps` reads the open
+   `gap` issues, so the ranked list AG and OF work from is the real
+   one, and a fix closes its issue by naming it in the commit. A gap
+   whose name says nothing cannot be an issue, which is what the
+   ledger's own rule is for (ARCHITECTURE "Gaps are never silent"):
+   a module miss has to record the name asked for and not only its
+   error code (OF's next step).
+
+**Tests**: a scenario that runs a program into a gap and checks the
+report on disk; one that sends it to a fake intake on the host (as
+`hostnet`'s and H11's scenarios reach the host), with the redaction
+cases and the offline queue; the GitHub side against recorded API
+answers, replayed as PK's GitHub tests are, and one real run by hand
+before the first release.
+
+**Open** (the owner decides): whether the intake is ours or the device
+talks to GitHub with a token the user pastes once (no service of ours
+to run, but a user without a GitHub account cannot report); whether
+consent is asked on first boot or only when something fails; and
+whether a report may carry a crash dump itself, which is large and can
+hold the user's data, or only its summary.
+
 ### SU. Security updates
 
 **Goal**: every vulnerability that can reach a gala machine has a named
@@ -5860,6 +6148,32 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   `fpu_test` failed in gala-um; the cause was elsewhere (a new thread's
   first entry took the host's SSE registers: docs/GALA_UM.md).
 
+- **gala on Windows, without virtualization** (the owner): gala-um's
+  shape on a Windows host: the kernel as an ordinary Windows process
+  (a hosted platform beside `kernel/src/hosted`'s Linux one), Windows
+  programs run inside it, their memory in its address space. The hard
+  part is the system calls: Linux gives gala-um the program's system
+  calls (seccomp's SIGSYS), Windows has no such interception, so a raw
+  `syscall` instruction would reach the host's own kernel. Programs
+  that enter the kernel through ntdll only (most do) reach gala with
+  gala's ntdll in the host's place (calls, not traps); the rest need
+  their `syscall` instructions found and redirected, by patching
+  decoded code or by translation (XT's machinery). Other questions:
+  address-space layout (the host's DLLs and gala's programs in one
+  process; fixed-base images), exceptions (vectored handlers for the
+  program's faults), threads (host threads as gala's), and the host's
+  window for the desktop (as U5's on Linux). Today gala-um already
+  runs on Windows through WSL2 (a lightweight VM).
+- **gala in a web browser (WebAssembly)** (the owner): the kernel built
+  for `wasm32` on a hosted platform of its own (no MMU: user memory
+  through the CPU emulator's own translation; threads as Web Workers
+  over shared memory; the screen a canvas; storage in the browser), and
+  the programs' x86-64 code run by XT's step 1 interpreter built for
+  wasm, then a JIT that emits WebAssembly modules per hot block (as
+  browser-based x86 emulators do). The interpreter is the shared piece:
+  written once for XT (x64 on ARM64), it serves here unchanged.
+  Interpreted speed first; correctness against the existing x64 test
+  programs, as XT's.
 - **Self-hosting**: building gala's own test programs (then Nginx) on
   gala. H1-H10 built the base (pipes, child processes, busybox, TinyCC
   building itself, make, Lua and SQLite built on gala); what is left is
@@ -5905,6 +6219,21 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   too. Its licence terms (a paid subscription at larger organisations)
   govern running it; never committed, fetched by xtask and run only in
   QEMU.
+- **Chrome as well as Edge** (the owner): item BR's goal is stock
+  Edge, and both browsers are the same Chromium underneath, so Chrome
+  is mostly BR's work over again with another vendor's services. Two
+  pieces of its own: **Chrome for Testing** (the published zip with
+  symbols, fetched as BR already fetches the Chromium snapshot) is
+  branded Chrome without an installer, so it finds the
+  Google-service gaps the plain Chromium build has none of
+  (sign-in, Omaha's update checks, Widevine) - a half-step inside BR
+  stage 2 once the window is done; **Chrome as a user installs it**
+  (`mini_installer.exe` or the enterprise MSI) then needs item PK's
+  installer handling, Omaha as a service and a scheduled task, and the
+  COM elevation service for a per-machine install. None of BR's open
+  blockers is vendor-specific (the out-of-memory exceptions
+  0xE0000008, ChromeDriver not exiting, the WPT run), and Widevine and
+  the proprietary codecs are a piece apart for either browser.
 - **gala's own drivers** against published standards: after virtio,
   AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
   item SND).

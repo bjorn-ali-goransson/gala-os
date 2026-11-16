@@ -31,6 +31,12 @@ pub mod xstate;
 /// The architecture's name in logs ("firmware: UEFI x86_64").
 pub const NAME: &str = "x86_64";
 
+/// Whether a process of PE machine `machine` runs here: x64, and x86
+/// through WOW64 (`nt::pe`).
+pub fn runs_machine(machine: u16) -> bool {
+    machine == 0x8664 || machine == 0x14c
+}
+
 /// The boot CPU's own state, first thing (before lock-order checking,
 /// which needs the CPU's index): x86-64's GDT and TSS, the per-CPU block.
 pub fn init_boot_cpu() {

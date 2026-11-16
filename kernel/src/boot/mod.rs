@@ -9,6 +9,7 @@
 pub mod acpi;
 mod framebuffer;
 mod limine;
+pub mod stack;
 
 use core::fmt;
 use core::ops::Range;
@@ -40,6 +41,13 @@ pub struct KernelAddress {
 /// straight from Limine's responses: for what must run before
 /// [`collect`] (aarch64's console maps its UART into the bootloader's
 /// page tables with them). None after a kernel handover, or without them.
+/// The RSDP's virtual (HHDM) address from the bootloader, 0 without one:
+/// for what reads the firmware's tables before `BootInfo` (aarch64's
+/// console and GIC).
+pub fn early_rsdp() -> u64 {
+    REQUESTS.rsdp.response().map_or(0, |r| r.address)
+}
+
 pub fn early_addresses() -> Option<(u64, KernelAddress)> {
     let hhdm = REQUESTS.hhdm.response()?.offset;
     let kernel = REQUESTS.executable_address.response()?;
@@ -273,6 +281,9 @@ pub struct BootInfo {
     /// PCI segment 0's ECAM window, from the MCFG (Limine boots only):
     /// aarch64's way to PCI configuration space (`arch::pci_config`).
     pub pci_ecam: Option<acpi::Ecam>,
+    /// How PSCI is called, from the FADT (Limine boots on aarch64):
+    /// starting the CPUs the bootloader did not.
+    pub psci: Option<acpi::Psci>,
     pub framebuffer_facts: Option<FramebufferFacts>,
     /// The kernel's own executable file (ELF), to hand over to next time.
     pub kernel_file: Option<&'static [u8]>,
@@ -425,6 +436,7 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
         firmware_cpus: None,
         clock_tables: acpi::ClockTables::default(),
         pci_ecam: None,
+        psci: None,
         framebuffer_facts,
         kernel_file,
         handover: Some(Received {
@@ -563,6 +575,7 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
             REQUESTS.rsdp.response().map_or(0, |r| r.address),
         ),
         pci_ecam: acpi::read_mcfg(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
+        psci: acpi::read_psci(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
         framebuffer_facts,
         kernel_file,
         handover: None,

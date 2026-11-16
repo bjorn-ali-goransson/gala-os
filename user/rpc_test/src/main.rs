@@ -1045,7 +1045,8 @@ fn start_server(c: &mut Checks) -> Result<(), u32> {
 /// A binding to the server's endpoint over `protseq`.
 fn bind(c: &mut Checks, protseq: &str, endpoint: &str, want: &str) -> Result<Handle, u32> {
     let protseq = wide::<16>(protseq);
-    let endpoint = wide::<32>(endpoint);
+    // 64: an endpoint may carry a GUID, as Office's AppV ISV API does.
+    let endpoint = wide::<64>(endpoint);
     let mut text = null_mut();
     let mut handle: Handle = 0;
     // SAFETY: documented calls with our arguments.
@@ -1201,6 +1202,14 @@ fn no_server(c: &mut Checks) -> Result<(), u32> {
     for (protseq, endpoint, want) in [
         ("ncalrpc", "no_such_endpoint", "ncalrpc:[no_such_endpoint]"),
         ("ncacn_np", "\\pipe\\no_such_pipe", "ncacn_np:[\\\\pipe\\\\no_such_pipe]"),
+        // As long as the endpoints Office's AppV ISV API makes (a name
+        // and a GUID): the ledger must keep the whole of it, since the
+        // name is all that says which server a program could not reach.
+        (
+            "ncalrpc",
+            "AppV-ISV-f98d543e-a688-4582-b4a1-0e2c5e3d6b77",
+            "ncalrpc:[AppV-ISV-f98d543e-a688-4582-b4a1-0e2c5e3d6b77]",
+        ),
     ] {
         let mut h = bind(c, protseq, endpoint, want)?;
         // SAFETY: a binding of ours.

@@ -29,18 +29,16 @@
 //! - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, C++ catch blocks):
 //!   `consolidate_if_asked`.
 //!
-//! - An unhandled exception goes to the top-level filter
-//!   (RtlSetUnhandledExceptionFilter); unless it continues execution, the
-//!   process ends with the exception code.
+//! - The vectored handlers, the order of the steps and the unhandled
+//!   exception's filter are `dispatch.rs`'s, shared with ARM64.
 //!
 //! Not yet: nested exceptions and collided unwinds (dispositions 2 and 3
 //! are treated as ExceptionContinueSearch), the history table.
 
 use core::arch::global_asm;
 
-use crate::{
-    ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, image_of, rd32, with_handlers,
-};
+use crate::ftable::lookup;
+use crate::{NtContinue, NtTerminateProcess, rd32};
 
 const UNW_FLAG_EHANDLER: u32 = 1;
 const UNW_FLAG_UHANDLER: u32 = 2;
@@ -68,7 +66,7 @@ const CTX_RIP: usize = 0xf8;
 /// CONTEXT.ContextFlags, and the flag RtlVirtualUnwind sets when it
 /// unwound a call (the new Rip is a return address), as Windows does
 /// since 8: DISPATCHER_CONTEXT.ControlPcIsUnwound comes from it.
-const CTX_FLAGS: usize = 0x30;
+pub(crate) const CTX_FLAGS: usize = 0x30;
 const CONTEXT_UNWOUND_TO_CALL: u32 = 0x2000_0000;
 /// Integer register `n` in unwind-code numbering (rax, rcx, rdx, rbx,
 /// rsp, rbp, rsi, rdi, r8..r15): the CONTEXT keeps them in that order.
@@ -178,95 +176,20 @@ fn stack64(addr: u64) -> u64 {
     unsafe { (addr as *const u64).read_unaligned() }
 }
 
-// --- Function tables ---------------------------------------------------
+// --- The function table format -----------------------------------------
+// (The tables themselves, an image's and those registered at run time,
+// are `ftable.rs`'s, shared with ARM64.)
 
-/// Function tables registered with RtlAddFunctionTable: (first entry,
-/// entry count, base address).
-const MAX_TABLES: usize = 32;
-
-/// A table registered with RtlInstallFunctionTableCallback: its id (the
-/// low two bits set; 0: free slot), base, length, callback and context.
-#[derive(Clone, Copy)]
-struct Callback {
-    id: u64,
-    base: u64,
-    length: u32,
-    callback: usize,
-    context: usize,
-}
-
-const NO_CALLBACK: Callback = Callback { id: 0, base: 0, length: 0, callback: 0, context: 0 };
-
-/// A table registered with RtlAddGrowableFunctionTable: its entries
-/// (0: free slot), how many are in use and may be, and the range
-/// [base, end) they describe (relative to base). Its handle is
-/// `growable_handle(slot)`.
-#[derive(Clone, Copy)]
-struct Growable {
-    table: usize,
-    count: u32,
-    max: u32,
-    base: u64,
-    end: u64,
-}
-
-const NO_GROWABLE: Growable = Growable { table: 0, count: 0, max: 0, base: 0, end: 0 };
-
-/// The opaque handle of growable slot `i` (never null).
-fn growable_handle(i: usize) -> usize {
-    0x6700_0000 + i * 16
-}
-
-fn growable_slot(handle: usize) -> Option<usize> {
-    let i = handle.checked_sub(0x6700_0000)?;
-    (i % 16 == 0 && i / 16 < MAX_TABLES).then_some(i / 16)
-}
-
-struct State {
-    tables: [(usize, u32, u64); MAX_TABLES],
-    callbacks: [Callback; MAX_TABLES],
-    growable: [Growable; MAX_TABLES],
-}
-
-struct Tables {
-    lock: core::sync::atomic::AtomicBool,
-    state: core::cell::UnsafeCell<State>,
-}
-
-// SAFETY: the state is only touched with `lock` held (a spin lock: the
-// critical sections are a few loads and stores, and callbacks run outside).
-unsafe impl Sync for Tables {}
-
-static TABLES: Tables = Tables {
-    lock: core::sync::atomic::AtomicBool::new(false),
-    state: core::cell::UnsafeCell::new(State {
-        tables: [(0, 0, 0); MAX_TABLES],
-        callbacks: [NO_CALLBACK; MAX_TABLES],
-        growable: [NO_GROWABLE; MAX_TABLES],
-    }),
-};
-
-fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    use core::sync::atomic::Ordering;
-    while TABLES
-        .lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    // SAFETY: the lock is held.
-    let r = f(unsafe { &mut *TABLES.state.get() });
-    TABLES.lock.store(false, Ordering::Release);
-    r
-}
-
-fn with_tables<R>(f: impl FnOnce(&mut [(usize, u32, u64); MAX_TABLES]) -> R) -> R {
-    with_state(|s| f(&mut s.tables))
-}
+/// sizeof(RUNTIME_FUNCTION): BeginAddress, EndAddress, UnwindData.
+pub(crate) const ENTRY_SIZE: usize = 12;
 
 /// Binary search of a sorted RUNTIME_FUNCTION table for `rva`.
-fn search(table: *const RuntimeFunction, count: usize, rva: u32) -> *const RuntimeFunction {
+pub(crate) fn search(
+    _base: u64,
+    table: *const RuntimeFunction,
+    count: usize,
+    rva: u32,
+) -> *const RuntimeFunction {
     let (mut low, mut high) = (0, count);
     while low < high {
         let mid = (low + high) / 2;
@@ -283,33 +206,12 @@ fn search(table: *const RuntimeFunction, count: usize, rva: u32) -> *const Runti
     core::ptr::null()
 }
 
-/// RtlLookupFunctionEntry(ControlPc, *ImageBase, HistoryTable): the
-/// RUNTIME_FUNCTION covering `pc` in the loaded module containing it (from
-/// its exception directory, sorted by address) or in a registered
-/// function table; null for leaf code and addresses outside both.
-///
-/// # Safety
-/// `image_base` must be null or writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlLookupFunctionEntry(
-    pc: u64,
-    image_base: *mut u64,
-    _history: *mut core::ffi::c_void,
-) -> *const RuntimeFunction {
-    let (base, entry) = lookup(pc);
-    if !entry.is_null() && !image_base.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *image_base = base };
-    }
-    entry
-}
-
 /// The entry an indirect RUNTIME_FUNCTION names (its unwind field with
 /// bit 0 set is that entry's RVA), followed to a direct one: what the
 /// lookup returns, as on Wine (handlers read the unwind information
 /// through DISPATCHER_CONTEXT.FunctionEntry: SQL Server's GS and C++
 /// handlers in code split from its function end the process otherwise).
-fn resolve(base: u64, mut f: *const RuntimeFunction) -> *const RuntimeFunction {
+pub(crate) fn resolve(base: u64, mut f: *const RuntimeFunction) -> *const RuntimeFunction {
     for _ in 0..8 {
         // SAFETY: an entry of the image's (or registered) table.
         let unwind = unsafe { (*f).unwind };
@@ -319,187 +221,6 @@ fn resolve(base: u64, mut f: *const RuntimeFunction) -> *const RuntimeFunction {
         f = (base + u64::from(unwind & !1)) as *const RuntimeFunction;
     }
     f
-}
-
-fn lookup(pc: u64) -> (u64, *const RuntimeFunction) {
-    if let Some(base) = image_of(pc as usize) {
-        let (rva, size) = crate::directory(base, 3); // IMAGE_DIRECTORY_ENTRY_EXCEPTION
-        if rva != 0 {
-            let table = (base + rva) as *const RuntimeFunction;
-            let f = search(table, size / 12, (pc as usize - base) as u32);
-            if !f.is_null() {
-                return (base as u64, resolve(base as u64, f));
-            }
-        }
-    }
-    let found = with_state(|s| {
-        let fixed = s.tables.iter().find_map(|&(table, count, base)| {
-            if table == 0 || pc < base || pc - base > u64::from(u32::MAX) {
-                return None;
-            }
-            let f = search(table as *const RuntimeFunction, count as usize, (pc - base) as u32);
-            (!f.is_null()).then(|| (base, resolve(base, f)))
-        });
-        fixed.or_else(|| {
-            s.growable.iter().find_map(|g| {
-                if g.table == 0 || pc < g.base || pc >= g.end || pc - g.base > u64::from(u32::MAX) {
-                    return None;
-                }
-                let f = search(
-                    g.table as *const RuntimeFunction,
-                    g.count as usize,
-                    (pc - g.base) as u32,
-                );
-                (!f.is_null()).then(|| (g.base, resolve(g.base, f)))
-            })
-        })
-    });
-    if let Some(found) = found {
-        return found;
-    }
-    // A callback covering `pc`, called without the lock held.
-    let cb = with_state(|s| {
-        s.callbacks
-            .iter()
-            .copied()
-            .find(|c| c.id != 0 && pc >= c.base && pc - c.base < u64::from(c.length))
-    });
-    if let Some(cb) = cb {
-        // SAFETY: a PGET_RUNTIME_FUNCTION_CALLBACK the program registered.
-        let f: extern "system" fn(u64, usize) -> *const RuntimeFunction =
-            unsafe { core::mem::transmute(cb.callback) };
-        let entry = f(pc, cb.context);
-        if !entry.is_null() {
-            return (cb.base, entry);
-        }
-    }
-    (0, core::ptr::null())
-}
-
-/// RtlInstallFunctionTableCallback(TableIdentifier, BaseAddress, Length,
-/// Callback, Context, OutOfProcessCallbackDll): unwind data for
-/// [BaseAddress, +Length) comes from Callback(pc, Context). The id must
-/// have its low two bits set (it is what RtlDeleteFunctionTable takes).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlInstallFunctionTableCallback(
-    id: u64,
-    base: u64,
-    length: u32,
-    callback: usize,
-    context: usize,
-    _dll: *const u16,
-) -> u8 {
-    if id & 3 != 3 || callback == 0 {
-        return 0;
-    }
-    with_state(|s| match s.callbacks.iter_mut().find(|c| c.id == 0) {
-        Some(slot) => {
-            *slot = Callback { id, base, length, callback, context };
-            1
-        }
-        None => 0,
-    })
-}
-
-/// RtlAddFunctionTable(FunctionTable, EntryCount, BaseAddress): registers
-/// unwind data for code outside images (JIT compilers). The entries must
-/// be sorted, as for an image.
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlAddFunctionTable(
-    table: *const RuntimeFunction,
-    count: u32,
-    base: u64,
-) -> u8 {
-    with_tables(|t| match t.iter_mut().find(|e| e.0 == 0) {
-        Some(slot) => {
-            *slot = (table as usize, count, base);
-            1
-        }
-        None => 0,
-    })
-}
-
-/// RtlAddGrowableFunctionTable(*DynamicTable, FunctionTable, EntryCount,
-/// MaximumEntryCount, RangeBase, RangeEnd): registers a table for code in
-/// [RangeBase, RangeEnd) whose first EntryCount entries (sorted, relative
-/// to RangeBase) are in use; RtlGrowFunctionTable counts more. V8
-/// registers its code space with it. STATUS_SUCCESS and the table's
-/// handle; STATUS_INVALID_PARAMETER for a count over the maximum or an
-/// empty range; STATUS_NO_MEMORY when all slots are taken.
-///
-/// # Safety
-/// `handle` must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlAddGrowableFunctionTable(
-    handle: *mut usize,
-    table: *const RuntimeFunction,
-    count: u32,
-    max: u32,
-    base: usize,
-    end: usize,
-) -> u32 {
-    if handle.is_null() || table.is_null() || count > max || end <= base {
-        return 0xc000_000d; // STATUS_INVALID_PARAMETER
-    }
-    let slot = with_state(|s| {
-        let i = s.growable.iter().position(|g| g.table == 0)?;
-        s.growable[i] =
-            Growable { table: table as usize, count, max, base: base as u64, end: end as u64 };
-        Some(i)
-    });
-    match slot {
-        Some(i) => {
-            // SAFETY: the caller's output pointer.
-            unsafe { *handle = growable_handle(i) };
-            0
-        }
-        None => {
-            let what = b"ntdll.dll!RtlAddGrowableFunctionTable(table slots full)";
-            crate::GalaRecordMissing(what.as_ptr(), what.len(), 2, MAX_TABLES as u64);
-            0xc000_0017 // STATUS_NO_MEMORY
-        }
-    }
-}
-
-/// RtlGrowFunctionTable(DynamicTable, NewEntryCount): the first
-/// NewEntryCount entries are in use now (the caller has written them; at
-/// most the maximum, and never fewer than before).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlGrowFunctionTable(handle: usize, count: u32) {
-    let Some(i) = growable_slot(handle) else { return };
-    with_state(|s| {
-        let g = &mut s.growable[i];
-        if g.table != 0 && count <= g.max && count >= g.count {
-            g.count = count;
-        }
-    });
-}
-
-/// RtlDeleteGrowableFunctionTable(DynamicTable).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlDeleteGrowableFunctionTable(handle: usize) {
-    if let Some(i) = growable_slot(handle) {
-        with_state(|s| s.growable[i] = NO_GROWABLE);
-    }
-}
-
-/// RtlDeleteFunctionTable(FunctionTable).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlDeleteFunctionTable(table: *const RuntimeFunction) -> u8 {
-    let id = table as usize;
-    with_state(|s| {
-        if let Some(slot) = s.tables.iter_mut().find(|e| e.0 == id && id != 0) {
-            *slot = (0, 0, 0);
-            return 1;
-        }
-        match s.callbacks.iter_mut().find(|c| c.id == id as u64 && id != 0) {
-            Some(slot) => {
-                *slot = NO_CALLBACK;
-                1
-            }
-            None => 0,
-        }
-    })
 }
 
 // --- Virtual unwinding -------------------------------------------------
@@ -885,7 +606,7 @@ pub extern "system" fn RtlCaptureStackBackTrace(
 /// dispatcher's own frame, which runs on what is left of an overflowed
 /// stack (the vectored handlers get a stack overflow first).
 #[inline(never)]
-fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
+pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
     let (_, stack_base) = stack_bounds();
     let mut ctx = Context::from_ptr(context);
     for _ in 0..4096 {
@@ -928,74 +649,6 @@ fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
         }
     }
     false
-}
-
-/// Exception dispatch: the vectored exception handlers, then the frames'
-/// handlers; the vectored continue handlers run both when an exception
-/// handler continued execution and when none did (assumed from the
-/// documented contract and how Go uses them: its last continue handler
-/// reports unhandled crashes; to be checked against Windows). Unhandled:
-/// the process ends with the exception code.
-pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
-    let mut pointers = ExceptionPointers { record, context };
-    // Snapshots, so that handlers may (un)register handlers themselves.
-    let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
-    let handled = call_handlers(&exception, &mut pointers) || dispatch_frames(record, context);
-    if call_handlers(&continue_, &mut pointers) || handled {
-        NtContinue(context, 0);
-    }
-    // Unhandled: the top-level filter (kernel32's UnhandledExceptionFilter,
-    // which calls SetUnhandledExceptionFilter's) may continue execution;
-    // otherwise the process ends.
-    let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
-    if filter != 0 {
-        // The kernel keeps it for the crash report: the filter may end
-        // the process with a status of its own (Crashpad's 0xffff7002).
-        crate::GalaUnhandledException(record, context);
-        // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
-        let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
-            unsafe { core::mem::transmute(filter) };
-        if f(&mut pointers) == -1 {
-            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null());
-            NtContinue(context, 0);
-        }
-    }
-    // SAFETY: the record starts with its ExceptionCode; ExceptionAddress
-    // is at +0x10 and the parameters at +0x20.
-    let (code, address, info) = unsafe {
-        (
-            (record as *const u32).read_unaligned(),
-            record.add(0x10).cast::<u64>().read_unaligned(),
-            record.add(0x28).cast::<u64>().read_unaligned(),
-        )
-    };
-    // Gaps are never silent: the ledger has the code and where it was
-    // raised (and for access violations, the address accessed).
-    let what = b"ntdll.dll!unhandled exception";
-    crate::GalaRecordMissing(
-        what.as_ptr(),
-        what.len(),
-        2,
-        u64::from(code) << 32 | (address & 0xffff_ffff),
-    );
-    if code == 0xc000_0005 {
-        let what = b"ntdll.dll!unhandled access violation at";
-        crate::GalaRecordMissing(what.as_ptr(), what.len(), 2, info);
-    }
-    NtTerminateProcess(-1, code);
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-/// The top-level unhandled exception filter (0: none).
-static TOP_FILTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-/// RtlSetUnhandledExceptionFilter: the filter unhandled exceptions go to
-/// (kernel32 sets its UnhandledExceptionFilter).
-#[unsafe(no_mangle)]
-pub extern "system" fn RtlSetUnhandledExceptionFilter(filter: usize) {
-    TOP_FILTER.store(filter, core::sync::atomic::Ordering::Release);
 }
 
 // --- Unwinding ---------------------------------------------------------
@@ -1090,25 +743,6 @@ extern "system" fn unwind_to(
     loop {
         core::hint::spin_loop();
     }
-}
-
-/// RtlRaiseException's work: dispatch the record raised with `context`
-/// (its caller's registers); resume it if a handler continued execution.
-extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
-    // Its Rip is the return address of the call that raised: unwound to a
-    // call (a hardware exception's context, from the kernel, is not).
-    // SAFETY: the caller's CONTEXT (ContextFlags at 0x30).
-    unsafe {
-        let flags = context.add(CTX_FLAGS).cast::<u32>();
-        flags.write_unaligned(flags.read_unaligned() | CONTEXT_UNWOUND_TO_CALL);
-        // The record is marked EXCEPTION_SOFTWARE_ORIGINATE (0x80), with
-        // whatever flags the caller set: Windows 25H2's 64-bit
-        // RtlRaiseException does so itself (a record raised with flags 0
-        // reaches the handlers with 0x80; the 32-bit one leaves them).
-        let er = record.add(ER_FLAGS).cast::<u32>();
-        er.write_unaligned(er.read_unaligned() | EXCEPTION_SOFTWARE_ORIGINATE);
-    }
-    dispatch_exception(record, context)
 }
 
 /// RtlRestoreContext(ContextRecord, ExceptionRecord): resumes the context
@@ -1363,10 +997,10 @@ global_asm!(
     "call {nt_continue}",
     "int3",
     ".seh_endproc",
-    raise = sym raise,
+    raise = sym crate::dispatch::raise,
     nt_continue = sym crate::NtContinue,
     unwind_to = sym unwind_to,
-    dispatch = sym dispatch_exception,
+    dispatch = sym crate::dispatch::dispatch_exception,
     record = const RECORD_OFFSET,
     machine_frame = const MACHINE_FRAME_OFFSET,
 );

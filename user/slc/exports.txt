@@ -1,0 +1,47 @@
+# slc.dll's exports, as Windows' own slc.dll has them (its export table,
+# build 26200: 40 names, 31 of them forwarders to SPPC and 9 its own
+# code). One per line: `<name> sppc` is a forwarder to gala's sppc.dll,
+# `<name> code` is implemented here, `<name> absent` is a name Windows
+# has that gala does not export (its parameters are in no public header,
+# so gala does not guess: a program asking for one gets NULL from
+# GetProcAddress and the ledger says so, ARCHITECTURE "slc").
+SLClose sppc
+SLConsumeRight sppc
+SLConsumeWindowsRight absent
+SLDepositOfflineConfirmationId sppc
+SLDepositOfflineConfirmationIdEx sppc
+SLFireEvent sppc
+SLGenerateOfflineInstallationId sppc
+SLGenerateOfflineInstallationIdEx sppc
+SLGetApplicationInformation sppc
+SLGetGenuineInformation sppc
+SLGetInstalledProductKeyIds sppc
+SLGetLicense sppc
+SLGetLicenseFileId sppc
+SLGetLicenseInformation sppc
+SLGetLicensingStatusInformation sppc
+SLGetPKeyId sppc
+SLGetPKeyInformation sppc
+SLGetPolicyInformation sppc
+SLGetPolicyInformationDWORD sppc
+SLGetProductSkuInformation sppc
+SLGetSLIDList sppc
+SLGetServiceInformation sppc
+SLGetWindowsInformation code
+SLGetWindowsInformationDWORD code
+SLInstallLicense sppc
+SLInstallProofOfPurchase sppc
+SLIsWindowsGenuineLocal code
+SLOpen sppc
+SLReArmWindows absent
+SLRegisterEvent sppc
+SLRegisterWindowsEvent absent
+SLSetCurrentProductKey sppc
+SLSetGenuineInformation sppc
+SLUninstallLicense sppc
+SLUninstallProofOfPurchase sppc
+SLUnregisterEvent sppc
+SLUnregisterWindowsEvent absent
+SLpCheckProductKey absent
+SLpGetGenuineLocal sppc
+SLpUpdateComponentTokens absent

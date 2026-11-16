@@ -13,6 +13,7 @@
 
 pub mod pci;
 pub mod trap;
+pub mod user_space;
 pub mod virtio;
 
 #[cfg(target_arch = "x86_64")]

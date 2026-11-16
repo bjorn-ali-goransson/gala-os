@@ -34,9 +34,16 @@ mod arch;
 mod address_wait;
 mod avl;
 mod bitmap;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod dispatch;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod ftable;
 mod heap;
 mod rtl;
 #[cfg(target_arch = "x86_64")]
+mod seh;
+#[cfg(target_arch = "aarch64")]
+#[path = "seh_arm64.rs"]
 mod seh;
 #[cfg(target_arch = "x86")]
 #[path = "seh_x86.rs"]
@@ -2505,8 +2512,7 @@ pub struct ExceptionPointers {
     context: *mut u8,
 }
 
-// The exception dispatchers' (seh.rs, seh_x86.rs; ARM64's is the port's).
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// The exception dispatchers' (dispatch.rs, seh_x86.rs).
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const MAX_HANDLERS: usize = 16;
 
@@ -2616,7 +2622,6 @@ pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::
 
 /// Calls the handlers of one table in order; whether one of them returned
 /// EXCEPTION_CONTINUE_EXECUTION. The exception dispatchers'.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
     for &(cookie, raw) in table {
         if cookie == 0 {

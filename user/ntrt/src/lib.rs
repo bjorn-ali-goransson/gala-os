@@ -3,16 +3,32 @@
 //! Programs written against it run unchanged on real Windows of the pinned
 //! build, which is what differential testing needs.
 //!
-//! Built for x64 (`x64.rs`, every test program) and for x86 (`x86.rs`, a
-//! smaller runtime for 32-bit programs run through WOW64: ARCHITECTURE
-//! "Plan: WOW64").
+//! Built for x64 and ARM64 (`nt64.rs`, the 64-bit runtime they share,
+//! with each one's own part in `x64.rs` and `arm64.rs`: the system call
+//! stub's shape, the TEB's register, CONTEXT, the memory intrinsics) and
+//! for x86 (`x86.rs`, a smaller runtime for 32-bit programs run through
+//! WOW64: ARCHITECTURE "Plan: WOW64").
 
 #![no_std]
 
+// The architecture's own part comes first: it defines the `stubs!` macro
+// the shared 64-bit runtime (`nt64.rs`) lists its services with.
 #[cfg(target_arch = "x86_64")]
+#[macro_use]
 mod x64;
 #[cfg(target_arch = "x86_64")]
 pub use x64::*;
+
+#[cfg(target_arch = "aarch64")]
+#[macro_use]
+mod arm64;
+#[cfg(target_arch = "aarch64")]
+pub use arm64::*;
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod nt64;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub use nt64::*;
 
 #[cfg(target_arch = "x86")]
 mod x86;

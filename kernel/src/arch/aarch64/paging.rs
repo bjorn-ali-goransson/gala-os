@@ -8,7 +8,6 @@
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::unported;
 use crate::mm::PAGE_SIZE;
 use crate::mm::frame::Frame;
 use crate::mm::memmap::{MemoryRegion, RegionKind};
@@ -92,7 +91,7 @@ pub struct BuildStats {
     pub kernel_pages: u64,
 }
 
-fn alloc_table() -> Option<Frame> {
+pub(in crate::arch) fn alloc_table() -> Option<Frame> {
     crate::mm::allocate_frame(crate::mm::Use::PageTable)
 }
 
@@ -252,10 +251,23 @@ pub fn unmap_kernel_page(virt: u64) -> Option<Frame> {
     Some(frame)
 }
 
-/// Frames kept forever because their deferred free could not be recorded
-/// (none yet here: no user spaces).
+/// Frames leaked because their deferred free could not be recorded.
 pub fn leaked_frames() -> u64 {
-    0
+    crate::arch::user_space::leaked_frames()
+}
+
+/// A TTBR0 root mapping the code page at physical `page` at its own
+/// address (executable, not global: a TLB entry of it never outlives a
+/// `tlbi vmalle1`): what a CPU started by PSCI runs the instruction after
+/// turning its MMU on from. Its tables are kept (one root serves every
+/// CPU the kernel starts).
+pub fn identity_root(page: u64) -> Result<u64, PagingError> {
+    let mut mapper: Mapper<HhdmTables, Vmsa> =
+        Mapper::new(HhdmTables { offset: crate::mm::hhdm_offset() }, &mut alloc_table)?;
+    let flags = PageFlags { global: false, ..PageFlags::KERNEL_RX };
+    let frame = Frame::containing(page);
+    mapper.map(frame.start(), frame.start(), PageSize::Size4K, flags, &mut alloc_table)?;
+    Ok(mapper.root().start())
 }
 
 /// The kernel's TTBR1 root (0 before `init`).
@@ -263,234 +275,104 @@ pub fn kernel_root() -> u64 {
     KERNEL_ROOT.load(Ordering::Acquire)
 }
 
-/// Loads an address space: on aarch64 the kernel half is TTBR1's, always
-/// loaded; a user space's (TTBR0) comes with the port's user mode.
+/// TTBR0's root while no user space is loaded (a kernel thread): an empty
+/// table, so the walker never reaches a freed space's tables (0: not
+/// made yet).
+static EMPTY_USER_ROOT: AtomicU64 = AtomicU64::new(0);
+
+fn empty_user_root() -> u64 {
+    let root = EMPTY_USER_ROOT.load(Ordering::Acquire);
+    if root != 0 {
+        return root;
+    }
+    let Some(frame) = alloc_table() else { return 0 };
+    // SAFETY: a fresh frame, HHDM-mapped: zeroed, it is an empty table.
+    unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
+    match EMPTY_USER_ROOT.compare_exchange(0, frame.start(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => frame.start(),
+        Err(other) => {
+            let _ = crate::mm::free_frame(frame);
+            other
+        }
+    }
+}
+
+/// Loads an address space on this CPU: a user space's root in TTBR0 (the
+/// kernel's root, TTBR1's, stands for no user space: an empty TTBR0).
+/// Every user space is tagged ASID 0 (not global), so a switch drops this
+/// CPU's ASID-0 entries (`tlbi aside1`); the kernel's are global and stay.
 ///
 /// # Safety
-/// `root` is a complete address space's (as x86-64's).
+/// `root` is the kernel's root or a live `UserSpace`'s, which stays alive
+/// while loaded.
 pub unsafe fn activate(root: u64) {
-    if root != kernel_root() {
-        unported("paging::activate (a user address space)")
+    let ttbr0 = if root == kernel_root() { empty_user_root() } else { root };
+    if ttbr0 == 0 {
+        return;
     }
+    let current: u64;
+    // SAFETY: reads TTBR0_EL1.
+    unsafe {
+        core::arch::asm!("mrs {}, ttbr0_el1", out(reg) current, options(nomem, nostack, preserves_flags))
+    };
+    if current & ADDRESS_BITS == ttbr0 {
+        return;
+    }
+    // SAFETY: forwarded to the caller: the kernel (TTBR1's) is unchanged,
+    // so the code, stack and data in use stay mapped.
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {root}",
+            "isb",
+            "tlbi aside1, xzr",
+            "dsb nsh",
+            "isb",
+            root = in(reg) ttbr0,
+            options(nostack, preserves_flags)
+        )
+    };
 }
 
-pub type SharedUserSpace = crate::mm::heap::KArc<SpaceLock>;
+/// TTBR0's and TTBR1's table address field.
+const ADDRESS_BITS: u64 = 0x0000_ffff_ffff_f000;
 
-/// A user address space and its lock.
-pub struct SpaceLock(IrqMutex<UserSpace>);
+pub use crate::arch::user_space::{
+    SharedPage, SharedUserSpace, SpaceGuard, SpaceLock, UserFault, UserSpace,
+};
 
-impl SpaceLock {
-    pub fn new(space: UserSpace) -> Self {
-        SpaceLock(IrqMutex::new(space))
-    }
+/// A user space's tables (`arch::user_space`): VMSAv8-64's encoding.
+pub(in crate::arch) type UserMapper = Mapper<HhdmTables, Vmsa>;
 
-    pub fn lock(&self) -> crate::sync::IrqGuard<'_, UserSpace> {
-        self.0.lock()
-    }
+pub(in crate::arch) fn hhdm_tables() -> HhdmTables {
+    HhdmTables { offset: crate::mm::hhdm_offset() }
 }
 
-/// A user address space.
-pub struct UserSpace {
-    root: u64,
+/// A new user space's tables: a TTBR0 root of its own (the kernel's half
+/// is TTBR1's, in no user root).
+pub(in crate::arch) fn user_mapper() -> Result<UserMapper, PagingError> {
+    if kernel_root() == 0 {
+        return Err(PagingError::NotInitialized);
+    }
+    Ok(Mapper::new(hhdm_tables(), &mut alloc_table)?)
+}
+
+/// Drops every CPU's TLB entry for user page `virt` (ASID 0) after a
+/// change: a broadcast to the inner shareable domain, complete when the
+/// DSB is (so `smp::flush_user_space` has nothing left to do).
+pub(in crate::arch) fn invalidate_user_page(virt: u64) {
+    // SAFETY: TLB maintenance only.
+    unsafe {
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vale1is, {page}",
+            "dsb ish",
+            "isb",
+            page = in(reg) (virt >> 12) & 0xfff_ffff_ffff,
+            options(nostack, preserves_flags)
+        )
+    };
 }
 
 fn hhdm_ptr(phys: u64) -> *mut u8 {
     core::ptr::with_exposed_provenance_mut((crate::mm::hhdm_offset() + phys) as usize)
-}
-
-/// A kernel-owned page also mapped into user address spaces
-/// (KUSER_SHARED_DATA), written through the HHDM with volatile stores
-/// since user threads read it concurrently (as x86-64's).
-pub struct SharedPage {
-    frame: Frame,
-}
-
-impl SharedPage {
-    pub fn new() -> Result<Self, PagingError> {
-        let frame = crate::mm::allocate_frame(crate::mm::Use::SectionPage)
-            .ok_or(PagingError::Map(MapError::OutOfMemory))?;
-        // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us.
-        unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
-        Ok(Self { frame })
-    }
-
-    pub fn frame(&self) -> Frame {
-        self.frame
-    }
-
-    /// Writes `bytes` at `offset`; out-of-range writes are dropped.
-    pub fn write(&self, offset: usize, bytes: &[u8]) {
-        if offset.checked_add(bytes.len()).is_none_or(|end| end > PAGE_SIZE as usize) {
-            return;
-        }
-        let base = hhdm_ptr(self.frame.start());
-        for (i, &b) in bytes.iter().enumerate() {
-            // SAFETY: in bounds of the owned frame; volatile because user
-            // mode reads the page concurrently through its own mapping.
-            unsafe { base.add(offset + i).write_volatile(b) };
-        }
-    }
-
-    pub fn write_u32(&self, offset: usize, value: u32) {
-        if !offset.is_multiple_of(4) || offset + 4 > PAGE_SIZE as usize {
-            return;
-        }
-        // SAFETY: aligned and in bounds of the owned frame; one volatile
-        // store, so readers never see a torn value.
-        unsafe { hhdm_ptr(self.frame.start()).add(offset).cast::<u32>().write_volatile(value) };
-    }
-}
-
-/// A user access that faulted, at `address`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UserFault {
-    pub address: u64,
-}
-
-impl UserSpace {
-    pub fn new() -> Result<Self, PagingError> {
-        Err(PagingError::NotInitialized)
-    }
-
-    pub fn root(&self) -> u64 {
-        self.root
-    }
-
-    pub fn map_zero_page(&mut self, _virt: u64, _flags: PageFlags) -> Result<(), PagingError> {
-        unported("UserSpace::map_zero_page")
-    }
-
-    pub fn is_mapped(&mut self, _virt: u64) -> bool {
-        false
-    }
-
-    pub fn next_mapped(&mut self, _virt: u64, _end: u64) -> Option<u64> {
-        None
-    }
-
-    pub fn set_flags(&mut self, _virt: u64, _flags: PageFlags) -> Result<(), PagingError> {
-        unported("UserSpace::set_flags")
-    }
-
-    pub fn unmap_page(&mut self, _virt: u64) -> bool {
-        false
-    }
-
-    pub fn map_zeroed(
-        &mut self,
-        _virt: u64,
-        _pages: u64,
-        _flags: PageFlags,
-    ) -> Result<(), PagingError> {
-        unported("UserSpace::map_zeroed")
-    }
-
-    pub fn read(&mut self, virt: u64, _buf: &mut [u8]) -> Result<(), UserFault> {
-        Err(UserFault { address: virt })
-    }
-
-    pub fn write(&mut self, virt: u64, _data: &[u8]) -> Result<(), UserFault> {
-        Err(UserFault { address: virt })
-    }
-
-    pub fn write_initial(&mut self, virt: u64, _data: &[u8]) -> Result<(), UserFault> {
-        Err(UserFault { address: virt })
-    }
-
-    pub fn map_shared(
-        &mut self,
-        _virt: u64,
-        _page: &SharedPage,
-        _flags: PageFlags,
-    ) -> Result<(), PagingError> {
-        unported("UserSpace::map_shared")
-    }
-
-    pub fn map_borrowed(
-        &mut self,
-        _virt: u64,
-        _frame: Frame,
-        _flags: PageFlags,
-    ) -> Result<(), PagingError> {
-        unported("UserSpace::map_borrowed")
-    }
-
-    pub fn map_adopted(
-        &mut self,
-        _virt: u64,
-        _frame: Frame,
-        _flags: PageFlags,
-    ) -> Result<(), PagingError> {
-        unported("UserSpace::map_adopted")
-    }
-
-    pub fn for_each_page(&mut self, _f: impl FnMut(u64, Frame, PageFlags)) {}
-
-    /// The page file (`nt::pagefile`) needs a disk: not ported yet. Nothing ages.
-    pub fn age_page(&mut self, _virt: u64) -> crate::mm::paging::Age {
-        crate::mm::paging::Age::Absent
-    }
-
-    pub fn copy_page(&mut self, _virt: u64, _frame: Frame, _buf: &mut [u8]) -> bool {
-        false
-    }
-
-    pub fn reserve_frees(&mut self, _n: usize) -> bool {
-        false
-    }
-
-    pub fn page_out(&mut self, _virt: u64, _frame: Frame, _token: u64) -> bool {
-        false
-    }
-
-    pub fn swapped(&mut self, _virt: u64) -> Option<u64> {
-        None
-    }
-
-    pub fn page_in(
-        &mut self,
-        _virt: u64,
-        _token: u64,
-        _data: &[u8],
-        _flags: PageFlags,
-    ) -> Result<bool, PagingError> {
-        Ok(false)
-    }
-
-    pub fn mapping(&mut self, _virt: u64) -> Option<(Frame, bool)> {
-        None
-    }
-
-    pub fn move_page(&mut self, _from: u64, _to: u64) -> Result<bool, PagingError> {
-        unported("UserSpace::move_page")
-    }
-
-    pub fn make_writable(&mut self, _virt: u64, _flags: PageFlags) -> Result<bool, PagingError> {
-        unported("UserSpace::make_writable")
-    }
-
-    pub fn share_into(
-        &mut self,
-        _child: &mut UserSpace,
-        _virt: u64,
-    ) -> Result<crate::mm::paging::ForkedPage, PagingError> {
-        unported("UserSpace::share_into")
-    }
-
-    pub fn map_private_copy(
-        &mut self,
-        _virt: u64,
-        _source: Frame,
-        _flags: PageFlags,
-    ) -> Result<(), PagingError> {
-        unported("UserSpace::map_private_copy")
-    }
-
-    pub fn frame_with(_data: &[u8]) -> Option<Frame> {
-        None
-    }
-
-    pub fn zeroed_frame() -> Option<Frame> {
-        None
-    }
 }

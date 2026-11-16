@@ -215,6 +215,30 @@ versions are pinned in `web/package-lock.json` (CI installs with `npm ci`).
   WSL's default environment, how the default moves on unregister and
   that an empty install directory is removed. No code copied; the
   numbers and strings are restated in gala's code.
+- ARM64 exceptions in user mode (`kernel/src/arch/aarch64/interrupts.rs`'s
+  `TrapFrame::kind`, `kernel/src/nt/abi/arm64`'s records,
+  `user/exception_test`'s ARM64 part): which `brk` immediate is which
+  exception on Windows ARM64 (0xf000 breakpoint, 0xf001 assertion
+  failure, 0xf003 fast fail, 0xf004 integer divide by zero, any other an
+  illegal instruction; the pc left on the `brk`) and an access
+  violation's parameters (execute for an instruction abort, else write or
+  read by the syndrome's WnR bit) from Wine's
+  `dlls/ntdll/unix/signal_arm64.c` (github.com/wine-mirror/wine master as
+  of 2026-11-16, LGPL-2.1+) as a description of Windows' behaviour;
+  `brk #0xf000` for `__debugbreak` also from Microsoft's documentation of
+  that intrinsic. The ARM64 CONTEXT's layout from winnt.h's
+  ARM64_NT_CONTEXT. No code copied.
+- gala's ARM64 unwinder (`user/testntdll/src/seh_arm64.rs`): the formats,
+  the canonical prologue of packed unwind data and the partial
+  prologue/epilogue rules from Microsoft's "ARM64 exception handling";
+  the choices that document leaves open (the establisher frame is the sp
+  the unwind ends with; a handler only from a function's body; the
+  custom-stack codes' effect on the pc and CONTEXT_UNWOUND_TO_CALL; a
+  frame's pc 4 bytes back when it was reached by unwinding a call) from
+  Wine's `dlls/ntdll/unwind.c` and `signal_arm64.c`
+  (github.com/wine-mirror/wine master as of 2026-11-16, LGPL-2.1+) as a
+  description of Windows' behaviour; DISPATCHER_CONTEXT_ARM64's layout
+  from winnt.h. No code copied.
 - The tar reader of `user/wsl` (`src/tar.rs`): POSIX.1-2008's pax
   description of the ustar and pax formats and GNU tar's manual (long
   names, base-256 numbers). gzip's member header: RFC 1952 (the
@@ -365,7 +389,7 @@ versions are pinned in `web/package-lock.json` (CI installs with `npm ci`).
 | `kernel/src/nt/desktop/` | The days-to-civil-date algorithm from Howard Hinnant's "chrono-Compatible Low-Level Date Algorithms" (the clock's date); Bhaskara I's sine approximation (the dunes) | public domain / mathematics |
 | `xtask/src/snapshot.rs` (machine snapshots, SN) | QEMU's QMP reference (qemu.org/docs: `stop`, `cont`, `blockdev-snapshot-sync`, `migrate`, `query-migrate`, `query-status`, `query-kvm`) and its `-incoming` option, used as a program; the days-to-civil-date algorithm from Howard Hinnant's "chrono-Compatible Low-Level Date Algorithms" (the listing's dates) | GPL-2.0 documentation of a tool run, not linked; public domain |
 | `xtask/src/diskimage.rs` qcow2 reading (`disk-files` on a resumed run's kept layer) | The qcow2 image format as QEMU's specification describes it (`docs/interop/qcow2.txt`: the header fields, L1 and L2 tables, the compressed and all-zeros flags, the backing file name): a read-only reader written from it, no QEMU code copied | GPL-2.0 documentation; format facts only |
-| `kernel/src/arch/x86_64/ps2.rs`, `kernel/src/input.rs` | The IBM PC/AT and PS/2 i8042 controller and PS/2 mouse protocol (status bits, commands 0x20/0x60/0xA8/0xD4, mouse 0xF6/0xF4, 3-byte packets), PS/2 scan code set 1 and Windows' virtual-key codes, as publicly documented (OSDev wiki, Microsoft's virtual-key code list) | n/a |
+| `kernel/src/arch/x86_64/ps2.rs`, `kernel/src/input.rs` | The IBM PC/AT and PS/2 i8042 controller and PS/2 keyboard and mouse protocols (status bits, controller commands 0x20/0x60/0xA8/0xAE/0xD4, keyboard 0xF4 and the ACK 0xFA, mouse 0xF6/0xF4, 3-byte packets), PS/2 scan code set 1 and Windows' virtual-key codes, as publicly documented (OSDev wiki, Microsoft's virtual-key code list) | n/a |
 | `kernel/src/lx/` (the Linux personality's groundwork, ROADMAP LX) | The ELF specification (System V gABI) and the System V AMD64 psABI (program headers, PT_LOAD/PT_INTERP/PT_TLS/PT_GNU_STACK, the initial process stack and auxiliary vector); Linux x86_64 system-call numbers from musl 1.2.4's `arch/x86_64/bits/syscall.h` (0..=446, read as data) and strace 6.8's names for 443 and 447..=461 (observed: each number called under `strace -n` on Linux 6.18); errno values from musl's `bits/errno.h` (read as data); the stack layout and auxv order as `user/lx/auxv_test` observes them on Linux 6.18; signals, fork and wait4 (`lx::signal`, `lx::sigcalls`, `lx::fork`) from signal(7), sigaction(2), sigprocmask(2), sigpending(2), sigtimedwait(2), rt_sigreturn(2), fork(2), clone(2), wait(2), the psABI (call alignment, red zone) and the user/lx transcripts recorded on Linux (CLEAN_ROOM.md "Linux"; the Linux kernel source was not used) | MIT (musl); observed behaviour |
 | `kernel/lx_abi` (the Linux personality's ABI data, ROADMAP LX) | The man-pages (signal(7), sigaction(2), sigaltstack(2), rt_sigreturn(2), termios(3), ioctl_tty(2), pty(7), inode(7), stat(2), statx(2), getdents64(2), epoll_ctl(2), poll(2), getrusage(2)), the System V AMD64 psABI, musl 1.2.4's headers read as data (above); every layout and default checked against transcripts of `user/lx/*_test` recorded on Linux 6.18 (the signal frame observed with register markers, sizes observed by what the kernel writes, a fresh pty's termios, each signal's default action applied to a child). gVisor was not consulted; the Linux kernel source was not used | MIT (musl); observed behaviour |
 | `kernel/wl_abi` (the Wayland wire format, ROADMAP LD step 2) | The Wayland protocol's documentation ("Wire Format": header, argument encoding, fd passing) and its XML, read as specifications; the tables are generated from `kernel/wl_abi/protocol/*.xml` (below). libwayland, weston and GTK were not used | MIT (the XML) |

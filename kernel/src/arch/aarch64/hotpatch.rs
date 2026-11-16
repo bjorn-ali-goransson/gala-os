@@ -4,10 +4,6 @@
 pub const WINDOW: u64 = 0;
 pub const WINDOW_SIZE: u64 = 0;
 
-pub fn current_sp() -> u64 {
-    0
-}
-
 pub fn current_ip() -> u64 {
     0
 }
@@ -48,8 +44,31 @@ pub fn read_kernel(_va: u64, _buf: &mut [u8]) -> bool {
     false
 }
 
-pub fn note_boot_stack() {}
+/// The top of the stack the boot thread runs on (the bootloader's), as
+/// x86-64's: `note_boot_stack`.
+static BOOT_STACK_TOP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Records the boot thread's stack top: called first thing by `kmain`,
+/// whose stack pointer then lies within a page of it (Limine's stack ends
+/// at a page boundary).
+pub fn note_boot_stack() {
+    const PAGE: u64 = 4096;
+    let top = (current_sp() + PAGE) & !(PAGE - 1);
+    BOOT_STACK_TOP.store(top, core::sync::atomic::Ordering::Release);
+}
+
+/// The boot thread's stack top (`note_boot_stack`; 0 before).
 pub fn boot_stack_top() -> u64 {
-    0
+    BOOT_STACK_TOP.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// This CPU's stack pointer.
+#[inline(always)]
+pub fn current_sp() -> u64 {
+    let sp: u64;
+    // SAFETY: reads a register.
+    unsafe {
+        core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags))
+    };
+    sp
 }

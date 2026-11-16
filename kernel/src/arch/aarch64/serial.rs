@@ -1,7 +1,7 @@
-//! The serial console: a PL011 UART (polled, transmit only), the first one
-//! of QEMU's `virt` machine at physical 0x0900_0000 (the board's fixed
-//! layout, as x86-64's COM1 is at port 0x3f8; the firmware's SPCR or the
-//! device tree name it on other machines: the port reads them).
+//! The serial console: a PL011 UART (polled, transmit only), the one the
+//! firmware's SPCR names (a PL011 or an SBSA generic UART, whose
+//! registers are a PL011's); without an SPCR, QEMU `virt`'s first one at
+//! physical 0x0900_0000 (the board's layout), which `report` says.
 //!
 //! The UART is memory-mapped, and the bootloader maps no device, so
 //! `init` maps its page first (`early_map`); until then, and if that
@@ -9,12 +9,19 @@
 //! boot messages came out of it), so `init` changes no setting.
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sync::IrqMutex;
 
-/// QEMU `virt`'s first PL011.
+/// QEMU `virt`'s first PL011, without an SPCR.
 const UART0_PHYS: u64 = 0x0900_0000;
+/// SPCR interface types with a PL011's registers: the PL011, the SBSA
+/// generic UART (32-bit access and its older form).
+const PL011_INTERFACES: [u8; 3] = [0x03, 0x0d, 0x0e];
+
+/// The UART's physical address, and whether the SPCR named it.
+static PHYS: AtomicU64 = AtomicU64::new(0);
+static FROM_SPCR: AtomicBool = AtomicBool::new(false);
 
 /// PL011 registers: data, flags (TXFF: the transmit FIFO is full).
 const DR: u64 = 0x00;
@@ -43,8 +50,13 @@ impl SerialPort {
             return;
         }
         let Some((hhdm, kernel)) = crate::boot::early_addresses() else { return };
-        if let Ok(va) = super::early_map::map_device(UART0_PHYS, hhdm, kernel) {
-            BASE.store(va, Ordering::Relaxed);
+        let spcr = crate::boot::acpi::read_spcr(hhdm, crate::boot::early_rsdp())
+            .filter(|u| PL011_INTERFACES.contains(&u.interface));
+        let phys = spcr.map_or(UART0_PHYS, |u| u.base);
+        FROM_SPCR.store(spcr.is_some(), Ordering::Relaxed);
+        PHYS.store(phys, Ordering::Relaxed);
+        if let Ok(va) = super::early_map::map_device(phys & !0xfff, hhdm, kernel) {
+            BASE.store(va + (phys & 0xfff), Ordering::Relaxed);
         }
     }
 
@@ -64,6 +76,16 @@ impl SerialPort {
         }
         // SAFETY: the UART's mapped data register.
         unsafe { ((base + DR) as *mut u32).write_volatile(u32::from(byte)) };
+    }
+}
+
+/// Says which UART the console is and where its address came from.
+pub fn report() {
+    let phys = PHYS.load(Ordering::Relaxed);
+    if FROM_SPCR.load(Ordering::Relaxed) {
+        crate::info!("serial: PL011 at {phys:#x} (the firmware's SPCR)");
+    } else {
+        crate::warn!("serial: PL011 at {phys:#x} (QEMU virt's: no SPCR from the firmware)");
     }
 }
 

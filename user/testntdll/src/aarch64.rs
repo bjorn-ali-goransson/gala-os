@@ -1,17 +1,15 @@
-//! The ARM64 parts of gala's ntdll: a stub that compiles (ROADMAP PT; the
-//! port is item AR), with `x64.rs`'s names.
+//! The ARM64 parts of gala's ntdll (ROADMAP AR), with `x64.rs`'s names.
 //!
 //! Filled in where the public documents or gala's own design say it: the
 //! TEB through x18 (Microsoft's "Overview of ARM64 ABI conventions"), the
 //! 64-bit PEB and process parameters, ARM64's CONTEXT.Pc (winnt.h), the
 //! memory routines and `__chkstk` (x15 = bytes / 16; only x16 and x17
-//! change, as the ABI documents). The system call stubs follow the
-//! kernel's aarch64 stub (`kernel/src/arch/aarch64/syscall.rs`: arguments
-//! in x0-x7, the number in x8, `svc #0`, the result in x0), gala's own
-//! convention between its ntdll and kernel until the port settles it.
-//! The APC dispatcher's frame is the kernel's to define: it traps
-//! (`udf`). Exception dispatch and unwinding (`seh.rs`, x64's unwind
-//! format) are not built for ARM64: ARM64's .pdata format is the port's.
+//! change, as the ABI documents). The system call stubs are shaped like
+//! Windows ARM64's ntdll: the service number in the SVC's immediate
+//! (`svc #N`), the arguments in x0-x7 and on the stack, the result in x0
+//! (the kernel's `kernel/src/arch/aarch64/syscall.rs`). The APC
+//! dispatcher reads the kernel's ARM64 APC frame; exception dispatch is
+//! `seh_arm64.rs`'s.
 
 /// NtContinue on the pinned build (to be verified, like all numbers).
 const NT_CONTINUE: u32 = 0x43;
@@ -91,17 +89,17 @@ pub fn set_last_status(status: u32) {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "system" fn NtContinue(_context: *const u8, _test_alert: u8) -> i32 {
-    core::arch::naked_asm!("mov x8, {n}", "svc #0", "ret", n = const NT_CONTINUE)
+    core::arch::naked_asm!("svc #{n}", "ret", n = const NT_CONTINUE)
 }
 
-/// System call stubs: the number in x8, `svc #0` (the arguments stay in
-/// x0-x7 and on the stack, where the kernel expects them).
+/// System call stubs: `svc #N` (the arguments stay in x0-x7 and on the
+/// stack, where the kernel expects them).
 macro_rules! syscall_stubs {
     ($($name:ident = $n:expr, fn($($arg:ident: $ty:ty),*);)*) => {$(
         #[unsafe(naked)]
         #[unsafe(no_mangle)]
         pub extern "system" fn $name($(_: $ty),*) -> u32 {
-            core::arch::naked_asm!("mov x8, {n}", "svc #0", "ret", n = const $n)
+            core::arch::naked_asm!("svc #{n}", "ret", n = const $n)
         }
     )*};
 }
@@ -113,15 +111,31 @@ const NT_TERMINATE_PROCESS: u32 = 0x2c;
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "system" fn NtTerminateProcess(_process: isize, _status: u32) -> i32 {
-    core::arch::naked_asm!("mov x8, {n}", "svc #0", "ret", n = const NT_TERMINATE_PROCESS)
+    core::arch::naked_asm!("svc #{n}", "ret", n = const NT_TERMINATE_PROCESS)
 }
 
-/// Where the kernel resumes a thread to run a user APC: the frame it
-/// leaves is the port's to define, so this traps.
+/// Where the kernel resumes a thread to run a user APC, with sp at the
+/// CONTEXT to return to and NormalRoutine, NormalContext,
+/// SystemArgument1 and SystemArgument2 right above it (the kernel's
+/// `nt::abi::arm64` APC frame): calls the routine with the three
+/// arguments, then NtContinues the CONTEXT with TestAlert set (the next
+/// APC, if any, runs the same way).
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "system" fn KiUserApcDispatcher() -> ! {
-    core::arch::naked_asm!("udf #0")
+    core::arch::naked_asm!(
+        "add x17, sp, #{args}",
+        "ldr x16, [x17]",
+        "ldp x0, x1, [x17, #8]",
+        "ldr x2, [x17, #24]",
+        "blr x16",
+        "mov x0, sp",
+        "mov w1, #1",
+        "bl {continue}",
+        "brk #0xf000",
+        args = const 0x390,
+        continue = sym NtContinue,
+    )
 }
 
 // Memory routines (ntdll exports them; the compiler also calls them).

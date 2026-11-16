@@ -145,8 +145,13 @@ fn run() -> Result<(), u32> {
         core::ptr::write_volatile((teb_field(0x30) + TEB_TLS_SLOTS + 8 * 5) as *mut u64, 0x77)
     };
     let entry = worker as *const () as usize;
+    #[cfg_attr(target_arch = "aarch64", allow(unused_mut))]
     let mut ctx = Context::for_thread(worker, entry, 0);
-    ctx.gpr[0] = entry as u64;
+    // x64: rax too (ARM64: x0 is the argument, the entry already).
+    #[cfg(target_arch = "x86_64")]
+    {
+        ctx.gpr[0] = entry as u64;
+    }
     let (s, t, _) = create_thread_with_context(&mut ctx);
     c.eq(s.into(), ok)?;
     while WORKER_SLOT.load(Ordering::SeqCst) == 0 {
