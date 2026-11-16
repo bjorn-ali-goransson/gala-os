@@ -9944,6 +9944,11 @@ const USER_PROGRAMS_X86: &[&str] = &[
 /// the x64 ones and exported to user/bin/arm64.
 const USER_PROGRAMS_ARM64: &[&str] = &["hello", "crash"];
 
+/// The system's own programs every ARM64 image ships, as every x64 image
+/// ships every USER_PROGRAMS one: gala.exe (`C:\gala\gala.exe`, which the
+/// start menu and the tray's actions run).
+const ARM64_SYSTEM_PROGRAMS: &[&str] = &["gala"];
+
 /// Where the build puts the ARM64 build of test program `program`.
 fn built_program_arm64(program: &str) -> PathBuf {
     target_dir().join(USER_TARGET_ARM64).join("release").join(format!("{program}.exe"))
@@ -11674,6 +11679,9 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     // monitor's sendkey, mouse_move and mouse_button reach
     // (kernel/src/input/virtio.rs; `VirtioPace`).
     cmd.args(["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]);
+    if aarch64_display(iso_scenario(iso)) {
+        cmd.args(["-device", "virtio-gpu-pci,xres=1280,yres=800,edid=on"]);
+    }
     cmd.args(extra.split_whitespace());
     Ok(cmd)
 }
@@ -12233,10 +12241,11 @@ const AARCH64_SCENARIOS: &[&str] = &[
 ///
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
-/// (it ships Office's x64 setup.exe), the scenarios whose screen checks
-/// take screendumps (no framebuffer on QEMU `virt` yet: ROADMAP AR's
-/// next; those presented to memory, `presenter=test`, are twins, their
-/// input through virtio-input), and those ROADMAP AR lists as next.
+/// (it ships Office's x64 setup.exe), taskmgr and explorer (their WSL
+/// distribution is x86-64 busybox: an aarch64 one is ROADMAP AR's next),
+/// and those ROADMAP AR lists as next. Screen-checked twins are driven
+/// through virtio-input and, where the check takes screendumps, shown on
+/// a virtio-gpu (`aarch64_display`).
 const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
@@ -12400,6 +12409,10 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl_maximize",
     "lx_wl_popup",
     "lx_wl_input",
+    "gui_test",
+    "start_menu",
+    "tray_test",
+    "d2d1_window",
     "gui_test_headless",
     "lx_fs",
     "lx_id",
@@ -12446,6 +12459,7 @@ fn arm64_programs() -> &'static [&'static str] {
     static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
         let mut all: Vec<&'static str> = USER_PROGRAMS_ARM64.to_vec();
+        all.extend(ARM64_SYSTEM_PROGRAMS);
         for s in scenarios().iter().filter(|s| twin_base(s.name).is_some()) {
             for word in s.cmdline.split_whitespace() {
                 if let Some(run) = word.strip_prefix("run=") {
@@ -18697,8 +18711,28 @@ const FULL_SYSTEM_SCENARIOS: &[&str] = &[
 
 /// A scenario's kernel command line as its image has it.
 fn scenario_cmdline(s: &Scenario) -> String {
-    let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+    let screen = match scenario_boot(s.name) {
+        Boot::Uefi => "",
+        // The firmware gives no framebuffer on `virt`: the kernel drives
+        // the virtio-gpu (`aarch64_display`).
+        Boot::UefiAarch64 if aarch64_display(s.name) => " display=virtio",
+        _ => " noscreen",
+    };
     format!("{}{screen}{}", s.cmdline, events_flag())
+}
+
+/// Whether aarch64 scenario `name` needs a screen: its screen check takes
+/// screendumps (a desktop presented to memory, `presenter=test`, needs
+/// none). QEMU `virt`'s firmware gives no framebuffer to take (and Limine
+/// refuses ramfb's: it lies in memory the firmware will not let go), so
+/// such a machine gets a virtio-gpu and its kernel `display=virtio`.
+fn aarch64_display(name: &str) -> bool {
+    scenario_boot(name) == Boot::UefiAarch64
+        && screen_check(name).is_some()
+        && scenarios()
+            .iter()
+            .find(|s| s.name == name)
+            .is_some_and(|s| !s.cmdline.contains("presenter=test"))
 }
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -18739,6 +18773,8 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
         || !matches!(scenario_boot(s.name), Boot::Bios | Boot::UefiAarch64)
         || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
+        // A screen check drives and reads its own machine.
+        || screen_check(s.name).is_some()
         || net_marker(s.name).is_some()
         || host_page_scenario(s.name)
         || disk_scenario(s.name).is_some()

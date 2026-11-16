@@ -384,9 +384,12 @@ faults, its exit).
   no phase port (`bootphase` marks are no-ops). No PS/2 controller on
   `virt`: the keyboard and mouse are virtio-input devices (xtask gives
   every aarch64 machine `virtio-keyboard-pci` and `virtio-mouse-pci`;
-  the input thread, "Input"). No framebuffer yet (the firmware's GOP on
-  `virt` has none to give): screen checks run where the desktop is
-  presented to memory (`presenter=test`).
+  the input thread, "Input"). No framebuffer from the firmware (its GOP
+  on `virt` has none, and Limine refuses ramfb's: "Framebuffer
+  page-level overlap with non-trimmable memory type"): a machine that
+  shows a screen gets a virtio-gpu and the kernel drives it
+  (`display=virtio`; xtask's `aarch64_display` for the screen-checked
+  twins).
 - **Threads** (`context.rs`, `percpu.rs`): kernel stacks in a window of
   guard-paged slots, as x86-64's. The switch saves x19-x30 on the
   outgoing stack and its SP in the context, and the FP/SIMD registers
