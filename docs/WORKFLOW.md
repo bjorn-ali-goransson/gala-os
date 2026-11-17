@@ -4001,6 +4001,40 @@ XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
   trace. Convert a shorter run, or filter the stream first (`grep -v
   '"ev":"syscall"'` keeps lifetimes and events only).
 
+**Querying in otel-desktop-viewer** (traces, logs and metrics; run
+with v0.7.0 on `events_ipc`). The standard way to read a run until
+ROADMAP OT6's `cargo xtask observe` and `cargo xtask query` exist
+(OBSERVABILITY "Querying a run"):
+
+```sh
+GOBIN=$PWD/bin go install github.com/CtrlSpice/otel-desktop-viewer@v0.7.0
+./bin/otel-desktop-viewer --open-browser=false --db run.duckdb &   # UI :8000, OTLP :4318
+cargo xtask otel events_ipc --endpoint http://localhost:4318
+./bin/otel-desktop-viewer traces --since 24h
+./bin/otel-desktop-viewer query "SELECT name, status_message, count(*) AS n
+  FROM spans WHERE status_code = 2 GROUP BY ALL ORDER BY n DESC"
+./bin/otel-desktop-viewer query "SELECT name, count(*) AS calls,
+  round(sum(end_time - start_time) / 1e6, 1) AS total_ms,
+  round(quantile_cont(end_time - start_time, 0.95) / 1e3) AS p95_us
+  FROM spans WHERE name LIKE 'Nt%' GROUP BY name ORDER BY total_ms DESC"
+```
+
+- The viewer has no profiles endpoint: `otel` reports `POST
+  /v1development/profiles ... HTTP 404`, `1 FAILED`, and exits with an
+  error after traces, logs and metrics were accepted (the `otel: sent
+  to` line counts them). Profiles go to Perfetto.
+- A system call's span has status 2 (error) when its NTSTATUS is an
+  error; `status_message` and the `gala.syscall.status` attribute
+  (`attributes."gala.syscall.status"`) hold the NTSTATUS. Times are
+  nanoseconds (`start_time`, `end_time`).
+- `query` returns 25 rows unless `--limit`; `--json` gives exact types.
+  `query 'SHOW TABLES'` and `query 'DESCRIBE spans'` show the layout;
+  `otel-desktop-viewer skills` prints the tool's own guide for agents.
+- Without `--db` it keeps the data in memory (512 MB, pruned). The
+  client commands talk to a running viewer (`--endpoint`, default
+  :8000); start one only if none answers, and stop only the one you
+  started.
+
 **Viewing in Jaeger** (traces only; Jaeger 1.35+ takes OTLP by default).
 This recipe has not yet been run against a real Jaeger (the output was
 checked against the OTLP protobuf messages with python's strict

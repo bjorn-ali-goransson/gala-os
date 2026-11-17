@@ -243,7 +243,7 @@ has a section under "Open items".
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
-| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; next OT6's one query path for every session (`xtask observe`, `xtask query`) |
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
@@ -5534,8 +5534,25 @@ among the slowest hand-offs.
    (OBSERVABILITY "Volume").
 5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
-   flows, samples); next a live view (`cargo xtask
-   observe`: streaming OTLP into a collector and Grafana's stack with
+   flows, samples). Next, one way to query a run for every session,
+   people's and agents' alike (OBSERVABILITY "Querying a run"):
+   otel-desktop-viewer pinned (recorded in THIRD_PARTY); every
+   boot-test, locally and in CI, leaving its run's DuckDB file beside
+   its log; `cargo xtask observe <scenario | file>` (the UI) and
+   `cargo xtask query <scenario | file> '<sql>' | --std <name>` (no UI);
+   named standard queries (errors by NTSTATUS, system calls by time
+   with p95, a span's subtree, slowest hand-offs, a thread's
+   timeline); then WORKFLOW's recipe moves to the commands and
+   CLAUDE.md points every session at them, with the rule that a
+   conclusion from a run's data quotes its query. Its first tests: the
+   commands on `events_ipc`, each standard query against known
+   answers. Its follow-ups, which make the data worth querying: a
+   metrics registry in the kernel (counters and histograms kept at the
+   source, OBSERVABILITY "Volume", instead of derived from events) and
+   kernel time accounting (TM's statistics; ThreadTimes returns zeros
+   today); a failure becoming span status wherever it happens, as
+   system calls' NTSTATUS does. After that a live view (`cargo xtask
+   observe --stack`: streaming OTLP into a collector and Grafana's stack with
    provisioned dashboards: overview, system (Task Manager's Performance
    tab: per-CPU user, kernel and interrupt time, per-process CPU and
    memory, from kernel time accounting that ThreadTimes and

@@ -970,15 +970,53 @@ way state-of-the-art observability dashboards show a distributed
 system: where the time goes (hot paths, impact = time x occurrences),
 over time, and which "transactions" (causal chains across threads and
 processes) are slow, with each step's owner and caller. Three layers,
-standard tools first, gala's own views only where gala knows more:
+standard tools first, gala's own views only where gala knows more,
+and under them one way to query a run.
 
-1. **Live, on the standard stack** (ROADMAP OT6): a streaming export
+**Querying a run: one path for people and agents** (ROADMAP OT6,
+next). Every session working on gala, a person's or an agent's, reads
+a run's data the same way, so a finding is a query anyone can rerun
+against the same run instead of a one-off script over the serial log:
+
+- **The tool**: otel-desktop-viewer (Apache-2.0, one Go binary with
+  DuckDB inside), pinned. It takes OTLP traces, logs and metrics on
+  :4318/:4317, keeps them in one DuckDB file (`--db`), shows them on
+  :8000, and answers from the command line: `services`, `traces`,
+  `trace`, `span`, `logs`, `metrics`, `attributes`, and `query <sql>`
+  (read-only SQL over its `spans`, `logs`, `metrics`, `events` and
+  `links` tables); `skills` prints its own guide for agents. It does
+  not take profiles (HTTP 404 on `/v1development/profiles`): profiles
+  stay with Perfetto and, later, Pyroscope.
+- **Every run leaves a database**: a boot-test, locally and in CI,
+  writes its run's DuckDB file next to its log
+  (`target/events/<scenario>.duckdb`), kept with a failed run like its
+  log, so querying needs no setup and a CI failure is queried on the
+  developer's machine.
+- **Two commands**: `cargo xtask observe <scenario | file.duckdb>`
+  opens the viewer's UI on a run; `cargo xtask query <scenario |
+  file.duckdb> '<sql>' | --std <name>` answers without a UI (what an
+  agent uses). Standard queries are named and documented: errors by
+  NTSTATUS, system calls by total time with p95, one span's subtree,
+  the slowest hand-offs, a thread's timeline.
+- **The rule**: a conclusion drawn from a run's data quotes the query
+  that gave it (in the PR, the ROADMAP item or the ledger entry).
+  Reading the serial log stays the fallback for when the export itself
+  is what failed (the triage block, `target/failed/`).
+- **OTLP is the contract, not the tool**: xtask sends standard OTLP
+  and the viewer is one reader of it; replacing it (it is young, one
+  maintainer) changes the two commands, not the kernel or the
+  exporter.
+
+1. **Live, on the standard stack** (ROADMAP OT6, after the query
+   path): a streaming export
    (xtask follows the debug console, or the kernel's per-CPU rings,
    and posts OTLP batches every second) into an OpenTelemetry
    Collector feeding Grafana's stack: Tempo (traces), Pyroscope
-   (profiles), Loki (logs), Prometheus (metrics). `cargo xtask observe
-   <scenario>` starts the stack (a compose file in `tools/observe/`,
-   pinned images) and the boot, with provisioned dashboards:
+   (profiles), Loki (logs), Prometheus (metrics), for what the viewer
+   does not do: long runs, trends across runs, profiles, dashboards.
+   `cargo xtask observe --stack <scenario>` starts the stack (a compose
+   file in `tools/observe/`, pinned images) and the boot, with
+   provisioned dashboards:
    - **Overview**: processes and threads alive, CPU by process (the
      samples), system calls and waits per second, the ledger's new
      entries, crash reports, IPC throughput.
