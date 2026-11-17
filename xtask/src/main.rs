@@ -12475,6 +12475,7 @@ const ARM64_TWINS: &[&str] = &[
     "lx_dyn",
     "lx_dyn_pie",
     "lx_wl_input",
+    "safepoint_test",
     "gui_test",
     "start_menu",
     "tray_test",
