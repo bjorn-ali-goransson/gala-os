@@ -11742,6 +11742,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     let mut cmd = Command::new(qemu_binary_aarch64());
     let cpus = telemetry::vm_cpus(iso).to_string();
     cmd.args(["-machine", "virt,gic-version=3", "-cpu", "max", "-m", "512M", "-smp", &cpus]);
+    cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
     if !extra.split_whitespace().any(|a| a == "-accel") {
         cmd.args(["-accel", "tcg"]);
     }
@@ -12770,6 +12771,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     let machine =
         if NO_I8042_SCENARIOS.contains(&iso_scenario(iso)) { "q35,i8042=off" } else { "q35" };
     cmd.args(["-machine", machine, "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
+    cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -18549,6 +18551,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "wsl: bb: imported",
+            "taskmgr_test: an ending Linux process is still itself",
             "taskmgr_test: ready",
             "(taskmgr_test.exe) is not responding: its input has waited untaken",
             "taskmgr_test: frozen window not responding",
@@ -21052,6 +21055,14 @@ fn run_vm_once(
         vm_time.describe(),
         timeout.as_secs()
     );
+    // Timed by the wall clock: the limit is then the host's load as
+    // much as the guest's work, which is worth saying where the run's
+    // own lines are rather than leaving to be noticed (vmtime.rs).
+    if vm_time.starved_ms.is_none() {
+        serial += "xtask: warning: QEMU named no vCPU thread (`CPU n/TCG`), so this run was \
+                   timed by the wall clock: is `-name <scenario>,debug-threads=on` still on \
+                   its command line?\n";
+    }
     // A `record` boot's recording (kernel/src/replay.rs), from the debug
     // console's `"ev":"rec"` lines.
     if let Some(line) = extract_recording(&events, &iso.with_extension("rec")) {
@@ -23737,6 +23748,12 @@ fn check_screen(
         thread::sleep(Duration::from_millis(20));
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+    // This run's screendumps only: an earlier run of the scenario may
+    // have reached a later step, and its pictures would be kept with a
+    // failed log as if they were this run's.
+    for n in 0..check.steps.len() {
+        let _ = fs::remove_file(iso.with_extension(format!("screen{n}.png")));
+    }
     let log = iso.with_extension("serial.log");
     let mut ps2 = InputPace::default();
     // What the steps waited for their lines, where it is a part of the
@@ -26558,13 +26575,16 @@ fn judge(
         let dir = target_dir().join("failed");
         // A repeat's boot (`test-<name>.r<i>.iso`) keeps its own: boots
         // at once must not overwrite each other's.
-        let name = match run.events.as_deref().and_then(repeat_index) {
+        let name = match run.iso.as_deref().and_then(repeat_index) {
             Some(i) => format!("{}.r{i}", scenario.name),
             None => scenario.name.to_string(),
         };
         let path = dir.join(format!("{name}.log"));
         let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
-        let events = run.events.as_deref().and_then(|p| fs::read_to_string(p).ok());
+        let events = run
+            .iso
+            .as_deref()
+            .and_then(|p| fs::read_to_string(p.with_extension("events.jsonl")).ok());
         // The event stream (when it was on) next to the log.
         if let Some(text) = events.as_deref().filter(|t| !t.is_empty()) {
             let _ = fs::create_dir_all(&dir)
@@ -26584,13 +26604,53 @@ fn judge(
             0 => String::new(),
             n => format!("; {n} guest files in {}", dir.join(format!("{name}.dump")).display()),
         };
+        // The screen check's screendumps, beside the log: CI uploads
+        // `target/failed/` alone, and a wrong screen is read from the
+        // picture, not guessed from the serial log.
+        let shots = save_screens(run.iso.as_deref(), &dir, &name);
+        let shots = match shots.len() {
+            0 => String::new(),
+            n => format!(
+                "; {n} screendump(s) as {}",
+                dir.join(format!("{name}.screen*.png")).display()
+            ),
+        };
         match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
             Ok(()) => {
-                format!("{e} (serial log: {}; it ends with a triage{dumps})", path.display())
+                format!("{e} (serial log: {}; it ends with a triage{dumps}{shots})", path.display())
             }
             Err(_) => e,
         }
     })
+}
+
+/// The screendumps a scenario's screen check wrote
+/// (`<iso>.screen<n>.png`), copied next to a failed boot's log as
+/// `<name>.screen<n>.png`.
+fn save_screens(iso: Option<&Path>, dir: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(iso) = iso else { return Vec::new() };
+    let (Some(parent), Some(stem)) = (iso.parent(), iso.file_stem().and_then(|s| s.to_str()))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(parent) else { return Vec::new() };
+    let mut saved = Vec::new();
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(rest) = file.to_str().and_then(|f| f.strip_prefix(&format!("{stem}.screen")))
+        else {
+            continue;
+        };
+        if !rest.ends_with(".png") {
+            continue;
+        }
+        let to = dir.join(format!("{name}.screen{rest}"));
+        if fs::create_dir_all(dir).and_then(|()| fs::copy(entry.path(), &to)).is_ok() {
+            saved.push(to);
+        }
+    }
+    saved.sort();
+    saved
 }
 
 /// A serial log as text. Not `read_to_string`: a program's bytes need
@@ -26611,7 +26671,10 @@ fn repeat_index(path: &Path) -> Option<usize> {
 /// What xtask knows of a boot besides its log (for the triage).
 #[derive(Default)]
 struct RunFacts {
-    events: Option<PathBuf>,
+    /// The run's ISO: its name says the scenario and the repeat, and
+    /// the run's other files are beside it (the event stream, the
+    /// screen check's screendumps).
+    iso: Option<PathBuf>,
     secs: Option<f64>,
 }
 
@@ -27303,10 +27366,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     }
     let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
     let code = status.and_then(|s| s.code());
-    let facts = RunFacts {
-        events: Some(iso.with_extension("events.jsonl")),
-        secs: Some(time.total.as_secs_f64()),
-    };
+    let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
     let verdicts: Vec<(&Scenario, Result)> = match vm {
         Vm::Single(s) => {
             let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
@@ -27933,10 +27993,7 @@ fn restore_pair(
         )?;
         let kept = iso.with_extension(format!("restore{i}.serial.log"));
         let _ = fs::write(&kept, &serial);
-        let facts = RunFacts {
-            events: Some(iso.with_extension("events.jsonl")),
-            secs: Some(time.total.as_secs_f64()),
-        };
+        let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
         judge(s, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)
             .map_err(|e| format!("resumed run {i}: {e}"))?;
         // The guest's lines (xtask's own name the snapshot's line).
@@ -28035,10 +28092,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         screen_check(scenario.name),
         None,
     )?;
-    let facts = RunFacts {
-        events: Some(iso.with_extension("events.jsonl")),
-        secs: Some(time.total.as_secs_f64()),
-    };
+    let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)?;
     disk.as_deref().map_or(Ok(()), |d| check_disk(scenario.name, d))
 }

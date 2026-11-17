@@ -566,6 +566,11 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   up).
 - **Symbolized backtraces** (panic, state dump, watchdog), each block
   saying whose backtrace it is.
+- **A failed screen check's screendumps**:
+  `target/failed/<name>.screen<n>.png`, one per step the check reached,
+  the screens as it saw them (the same pictures as `<iso>.screen<n>.png`
+  beside the ISO, which CI does not upload). A wrong screen is read from
+  the picture; the verdict line says how many were kept.
 - **A triage block** (`xtask/src/triage.rs`, also printed on the
   console): scenario, verdict, duration, host CPUs/load/free disk, guest
   CPUs, heap (peak) and frames (fewest free), warning/error counts and

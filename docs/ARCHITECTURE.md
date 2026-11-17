@@ -14548,6 +14548,17 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   the commit charge, disk and network bytes, the process, thread and
   handle counts. Both answer STATUS_BUFFER_TOO_SMALL with the size
   needed (the list changes between calls).
+- **Only processes that are still themselves**: the list leaves out a
+  process whose exit status is set. `terminate` records it before the
+  threads unwind, and from then on a Linux process's `comm` and root
+  are being dismantled, so its image would be the one its NT process
+  was created from (`sh` for one that had exec'd `sleep`) and its
+  distribution empty. Task Manager showed such a row and "End task" on
+  it reached a pid the kernel no longer had (STATUS_INVALID_CID).
+  `process::running` keeps them, since the state dump must still show a
+  process stuck in teardown; this list drops them. `taskmgr_test` ends
+  a Linux process of its own and watches what the list says of it while
+  it goes.
 - **Windows' contents stay Windows'**: NtQuerySystemInformation's
   SystemProcessInformation (and so Toolhelp and psapi) lists NT
   processes only; a Linux process is no Windows process. `/proc` inside
