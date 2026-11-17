@@ -16451,10 +16451,16 @@ the magic, x1 the record and x2 the HHDM offset, which the entry keeps
 for `kmain` (Limine's zeros otherwise). The next kernel reads its
 HHDM offset, load address and RSDP from the record before the console
 (`boot::note_handover`: its UART comes from the SPCR) and its firmware
-facts from FIRMWARE. Scenarios: the twins of `handover_same`,
-`handover_refused`, `handover_unsigned_refused`, `handover_park_late`,
-`handover_disk`, `onecpu_handover`, `handover_idle`,
-`handover_idle_twice`.
+facts from FIRMWARE. Scenarios: the twins of every milestone's
+(`handover_same`, `handover_refused`, `handover_unsigned_refused`,
+`handover_park_late`, `handover_disk`, `onecpu_handover`;
+`handover_idle`, `handover_idle_twice`; `handover_k32`,
+`handover_k32_twice`; `handover_upgrade`, `handover_downgrade_refused`,
+with the `handover_next` build for aarch64; `handover_net`,
+`handover_net_self`); the `_uefi` variants have none (every aarch64 boot
+is UEFI's). The test programs' gala services are `svc #0x7f5a` and
+`#0x7f5b` there; a twin expects aarch64's extended state (0x1, FP/SIMD)
+where x64's says 0xe7 (xtask `TWIN_MACHINE_FACTS`).
 
 #### The sequence
 

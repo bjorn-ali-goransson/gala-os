@@ -220,6 +220,7 @@ fn request_handover() -> u32 {
     // SAFETY: a system call with no arguments; the registers it may
     // change are declared.
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!(
             "syscall",
             inout("eax") 0x7f5au32 => status,
@@ -230,7 +231,15 @@ fn request_handover() -> u32 {
             lateout("r9") _,
             lateout("r11") _,
             options(nostack),
-        )
+        );
+        // ARM64: the number in the SVC's immediate, the result in x0, the
+        // other volatile registers the kernel's to change (ntrt's stubs).
+        #[cfg(target_arch = "aarch64")]
+        {
+            let x0: u64;
+            core::arch::asm!("svc #0x7f5a", inlateout("x0") 0u64 => x0, clobber_abi("C"));
+            status = x0 as u32;
+        }
     };
     status
 }
