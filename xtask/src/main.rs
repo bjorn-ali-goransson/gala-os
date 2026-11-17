@@ -436,6 +436,17 @@ const PREBUILT: &[Prebuilt] = &[
     // no published checksum, the SHA-256 pinned at the first fetch). The
     // Linux personality's milestone 2 target (ROADMAP LX); it runs only
     // inside gala.
+    // aarch64's: Alpine's static busybox (musl, static PIE; busybox.net
+    // has no aarch64 build), from the release's pinned package (an apk:
+    // gzipped tar streams), for the WSL distribution of the aarch64
+    // images (make_wsl_rootfs).
+    Prebuilt {
+        name: "busybox-linux-aarch64",
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk",
+        checksum: "965777e06b94bf11981d5f4ecdfcd577879f4b0dda544294d1dd3f72b217bc75",
+        members: &["bin/busybox.static"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "busybox-linux",
         url: "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox",
@@ -10985,6 +10996,10 @@ fn make_iso_unchecked(
             Some((_, name)) if arm64 && shipped_program(file).is_some() => {
                 (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
             }
+            // The WSL distribution: its aarch64 busybox's (make_wsl_rootfs).
+            Some((_, name)) if arm64 && file.starts_with("target/wsl/") => {
+                (root().join("target/wsl/aarch64").join(name), name)
+            }
             // A Linux test program: its aarch64 build
             // (user/lx/build-aarch64.sh), which must exist.
             Some((_, name)) if arm64 && file.starts_with("user/lx/bin/") => {
@@ -11128,10 +11143,16 @@ fn make_wsl_rootfs() -> Result {
     if *made {
         return Ok(());
     }
-    let busybox = "target/prebuilt/busybox-linux/busybox";
-    fetch_prebuilt(busybox)?;
-    let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
-    wsl_rootfs::make(&root(), &data)?;
+    // x86-64's in target/wsl, aarch64's (an ARM64 image ships it in its
+    // place, under the same names) in target/wsl/aarch64.
+    for (busybox, dir) in [
+        ("target/prebuilt/busybox-linux/busybox", "wsl"),
+        ("target/prebuilt/busybox-linux-aarch64/busybox.static", "wsl/aarch64"),
+    ] {
+        fetch_prebuilt(busybox)?;
+        let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
+        wsl_rootfs::make(&root(), dir, &data)?;
+    }
     *made = true;
     Ok(())
 }
@@ -11306,6 +11327,8 @@ fn fetch_prebuilt(path: &str) -> Result {
         unpack_msi(p, &zip, &dir)?;
     } else if p.url.ends_with(".deb") {
         unpack_deb(p, &zip, &dir)?;
+    } else if p.url.ends_with(".apk") {
+        unpack_apk(p, &zip, &dir)?;
     } else if p.url.ends_with(".7z")
         || p.url.ends_with(".7z.exe")
         || p.url.ends_with("-setup.exe")
@@ -11529,6 +11552,33 @@ fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
             from = from.parent().map(|d| d.join(&target)).unwrap_or(target);
         }
         fs::rename(&from, dir.join(last)).map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
+}
+
+/// Unpacks the Alpine package `apk` (gzipped tar streams one after the
+/// other: signature, control, data; tar reads them as one) and moves
+/// `p`'s members into `dir` by their file names.
+fn unpack_apk(p: &Prebuilt, apk: &Path, dir: &Path) -> Result {
+    let tree = dir.join("apk");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    // Its PAX headers carry APK-TOOLS keywords tar does not know (a
+    // warning each).
+    run_quiet(
+        Command::new("tar")
+            .args(["--warning=no-unknown-keyword", "-xzf"])
+            .arg(apk)
+            .arg("-C")
+            .arg(&tree)
+            .args(p.members),
+    )?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        fs::rename(tree.join(member), dir.join(last))
+            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
     }
     fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
@@ -12241,9 +12291,9 @@ const AARCH64_SCENARIOS: &[&str] = &[
 ///
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
-/// (it ships Office's x64 setup.exe), taskmgr and explorer (their WSL
-/// distribution is x86-64 busybox: an aarch64 one is ROADMAP AR's next),
-/// and those ROADMAP AR lists as next. Screen-checked twins are driven
+/// (it ships Office's x64 setup.exe), and those ROADMAP AR lists as
+/// next. The WSL scenarios' twins ship an aarch64 busybox's distribution
+/// (`make_wsl_rootfs`). Screen-checked twins are driven
 /// through virtio-input and, where the check takes screendumps, shown on
 /// a virtio-gpu (`aarch64_display`).
 const ARM64_TWINS: &[&str] = &[
@@ -12413,6 +12463,10 @@ const ARM64_TWINS: &[&str] = &[
     "start_menu",
     "tray_test",
     "d2d1_window",
+    "taskmgr",
+    "explorer",
+    "wsl",
+    "wsl_terminal",
     "gui_test_headless",
     "lx_fs",
     "lx_id",

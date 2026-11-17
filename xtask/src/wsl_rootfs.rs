@@ -64,9 +64,10 @@ fn member(out: &mut Vec<u8>, path: &str, m: &Member<'_>) {
     }
 }
 
-/// Makes `target/wsl/bb-rootfs.tar` and `bb-rootfs.tar.gz` (again each
-/// time: they are cheap and follow the busybox download).
-pub fn make(root: &std::path::Path, busybox: &[u8]) -> Result<PathBuf, String> {
+/// Makes `bb-rootfs.tar` and `bb-rootfs.tar.gz` in `target/<dir>` (again
+/// each time: they are cheap and follow the busybox download): x86-64's
+/// in `wsl`, aarch64's in `wsl/aarch64`.
+pub fn make(root: &std::path::Path, dir: &str, busybox: &[u8]) -> Result<PathBuf, String> {
     let mut tar = Vec::new();
     member(&mut tar, ".", &Member::Dir(0o755));
     member(&mut tar, "./bin", &Member::Dir(0o755));
@@ -78,11 +79,14 @@ pub fn make(root: &std::path::Path, busybox: &[u8]) -> Result<PathBuf, String> {
     member(&mut tar, "./etc", &Member::Dir(0o755));
     member(&mut tar, "./etc/passwd", &Member::File(0o644, b"root:x:0:0:root:/root:/bin/sh\n"));
     member(&mut tar, "./etc/group", &Member::File(0o644, b"root:x:0:\n"));
-    member(&mut tar, "./etc/profile", &Member::File(0o644, b"export PS1='root@bb:\\w# '\n"));
+    // The directory as $PWD, not `\w`: busybox 1.37 shortens $HOME to
+    // `~` there and 1.35 does not, and the two machines' distributions
+    // carry those two (x86-64 busybox.net's, aarch64 Alpine's).
+    member(&mut tar, "./etc/profile", &Member::File(0o644, b"export PS1='root@bb:$PWD# '\n"));
     member(&mut tar, "./root", &Member::Dir(0o700));
     member(&mut tar, "./tmp", &Member::Dir(0o1777));
     tar.extend_from_slice(&[0u8; 1024]);
-    let dir = root.join("target/wsl");
+    let dir = root.join("target").join(dir);
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let plain = dir.join("bb-rootfs.tar");
     fs::write(&plain, &tar).map_err(|e| format!("writing {plain:?}: {e}"))?;
