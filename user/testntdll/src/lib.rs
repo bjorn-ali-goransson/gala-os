@@ -66,6 +66,12 @@ mod unimplemented;
 ///   unwind data was not found, not that the code had no handler. (On
 ///   ARM64 such a frame ends the search instead, so the count stays 0
 ///   there; for 32-bit code it has no meaning.)
+/// - `ips`, `kept`, `no_data`, `asked`: the chain itself, the first
+///   `WALK_FRAMES` frames, so the report can name the frame the unwind
+///   data was missing for rather than only count it. 32-bit code leaves
+///   these empty: its registration list is reported from the TEB32.
+/// - `ended`: why the walk stopped, which tells the stack's end from a
+///   chain that derailed.
 ///
 /// A raise nothing handles is what Office's shared code ends a process
 /// with (0xe0000002, ROADMAP OF), where which of the three it is decides
@@ -73,9 +79,54 @@ mod unimplemented;
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct Walk {
+    /// Each frame the search reached, innermost first: its instruction
+    /// pointer, `kept` of them filled (u64 first, so the record's layout
+    /// is the same whatever the word size).
+    pub ips: [u64; WALK_FRAMES],
     pub frames: u32,
     pub handlers: u32,
     pub no_entry: u32,
+    pub kept: u32,
+    /// Bit i: no function entry was found for `ips[i]`.
+    pub no_data: u32,
+    /// Bit i: `ips[i]`'s handler was asked, and passed the exception on.
+    pub asked: u32,
+    /// Why the search stopped: `END_*`.
+    pub ended: u32,
+}
+
+/// Frames of the walk kept in the record (the rest are counted only).
+pub const WALK_FRAMES: usize = 12;
+
+/// The walk ran to its own limit (4096 frames).
+pub const END_LIMIT: u32 = 0;
+/// The frame the unwind data established is not on the thread's stack.
+pub const END_OFF_STACK: u32 = 1;
+/// The unwound return address is 0: the stack's end.
+pub const END_NO_RETURN: u32 = 2;
+/// The unwound stack pointer reached the stack's base: the stack's end.
+pub const END_STACK_BASE: u32 = 3;
+/// No unwind data for the frame, which ends the search on ARM64.
+pub const END_NO_DATA: u32 = 4;
+
+impl Walk {
+    /// Record a frame the search reached and what was found for it.
+    pub fn frame(&mut self, ip: u64, entry: bool, asked: bool) {
+        let i = self.frames as usize;
+        self.frames += 1;
+        self.no_entry += u32::from(!entry);
+        self.handlers += u32::from(asked);
+        if i < WALK_FRAMES {
+            self.ips[i] = ip;
+            self.kept = self.frames;
+            if !entry {
+                self.no_data |= 1 << i;
+            }
+            if asked {
+                self.asked |= 1 << i;
+            }
+        }
+    }
 }
 
 pub use arch::*;

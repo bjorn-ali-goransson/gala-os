@@ -613,12 +613,11 @@ pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8, walk: &mut crat
         let frame_ctx = ctx;
         let (handler, data, frame, base, entry) = unwind_frame(UNW_FLAG_EHANDLER, &mut ctx);
         if !frame_ok(frame, stack_base) {
+            walk.ended = crate::END_OFF_STACK;
             break;
         }
-        walk.frames += 1;
-        walk.no_entry += u32::from(entry.is_null());
+        walk.frame(frame_ctx.get(CTX_RIP), !entry.is_null(), handler != 0);
         if handler != 0 {
-            walk.handlers += 1;
             let mut frame_ctx = frame_ctx;
             let mut dc = DispatcherContext {
                 control_pc: frame_ctx.get(CTX_RIP),
@@ -647,7 +646,12 @@ pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8, walk: &mut crat
             }
         }
         let (rip, rsp) = (ctx.get(CTX_RIP), ctx.get(CTX_RSP));
-        if rip == 0 || rsp >= stack_base {
+        if rip == 0 {
+            walk.ended = crate::END_NO_RETURN;
+            break;
+        }
+        if rsp >= stack_base {
+            walk.ended = crate::END_STACK_BASE;
             break;
         }
     }

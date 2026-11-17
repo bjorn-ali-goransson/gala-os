@@ -800,6 +800,18 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
   asked`. On ARM64 such a frame ends the search instead, so M stays 0
   there; in 32-bit code every registration names a handler, so the two
   counts are equal. Scenario `crash_raise`.
+- Then the chain itself, for 64-bit code: `the walk stopped at <why>`
+  (the stack's end -- no return address or the stack's base -- or where
+  it could go no further: a frame off the stack, no unwind data) and
+  `frame <i>: <module>+<offset>` for the first 12, innermost first, each
+  saying whether no unwind data was found for it and whether its handler
+  was asked and passed the exception on. This is ntdll's own unwind, not
+  the report's guess from stack values, so it tells a derailed walk (a
+  frame whose "return address" is a stack address) from a sound one, and
+  names the image whose unwind data was missed. Word's 0xe0000002 reads
+  as 12 frames to the stack's end with four of WWLIB's own handlers
+  asked and declining, which is what moved ROADMAP OF's blocker from
+  "our unwinder" to "what MSO decided to raise".
 - The exception's parameters, when nothing below explains them (an
   access violation, a delay load and a C++ throw have lines of their
   own saying what theirs mean): `3 parameters: 0x8007000e, 0x140001060

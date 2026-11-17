@@ -34,6 +34,45 @@ const REG_WORDS: usize = 8;
 /// sp skipped, bp, si, di).
 const REG_DUMPED: [usize; 7] = [0, 1, 2, 3, 5, 6, 7];
 
+/// ntdll's own account of its search for a handler, as
+/// `GalaUnhandledException` passes it (`Walk` in gala's ntdll, which
+/// fills it as it walks; the kernel only reads it).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Walk {
+    /// Each frame the search reached, innermost first, `kept` filled.
+    pub ips: [u64; WALK_FRAMES],
+    /// Frames unwound (for 32-bit code, registrations walked).
+    pub frames: u32,
+    /// Frames whose unwind data named a language handler, which was
+    /// asked and passed the exception on.
+    pub handlers: u32,
+    /// Frames no function entry was found for: they can name no
+    /// handler, so a walk that asked none and found no entries says the
+    /// unwind data was not found, not that the code had none.
+    pub no_entry: u32,
+    pub kept: u32,
+    /// Bit i: no function entry was found for `ips[i]`.
+    pub no_data: u32,
+    /// Bit i: `ips[i]`'s handler was asked.
+    pub asked: u32,
+    /// Why the walk stopped, as gala's ntdll's `END_*` number it.
+    pub ended: u32,
+}
+
+impl Walk {
+    /// Why the walk stopped, in words: the stack's end, or where it
+    /// could go no further.
+    pub fn ending(&self) -> &'static str {
+        match self.ended {
+            1 => "a frame off the stack",
+            2 => "no return address: the stack's end",
+            3 => "the stack's base: the stack's end",
+            4 => "no unwind data for the frame",
+            _ => "the walk's own limit",
+        }
+    }
+}
+
 /// The last exception a process's thread took.
 #[derive(Clone, Copy, Debug)]
 pub struct Note {
@@ -77,11 +116,8 @@ pub struct Note {
     pub seh_head: Option<u32>,
     /// How ntdll's search for a handler went, when ntdll is what
     /// reported the exception (None: the kernel saw the fault itself, or
-    /// ntdll gave no record of the walk): the frames unwound, the
-    /// handlers asked, and the frames no function entry was found for
-    /// (`Walk` in gala's ntdll). No handler asked and no entry found
-    /// means the unwind data was not found, not that the code had none.
-    pub walk: Option<(u32, u32, u32)>,
+    /// ntdll gave no record of the walk).
+    pub walk: Option<Walk>,
     /// The exception's parameters as its EXCEPTION_RECORD carried them,
     /// `params_len` of them read (at most `PARAMS`) and `params_count`
     /// claimed: for a code nothing here decodes they are all it says.
@@ -96,6 +132,10 @@ pub const PARAMS: usize = 15;
 
 /// SEH registrations kept for a 32-bit crash report.
 pub const SEH_FRAMES: usize = 12;
+
+/// Frames of ntdll's walk the report names (`WALK_FRAMES` in gala's
+/// ntdll, which fills them).
+pub const WALK_FRAMES: usize = 12;
 
 impl Note {
     /// A note for an exception `status` at `regs`' instruction pointer,
@@ -603,7 +643,8 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             }
         );
     }
-    if let Some((frames, handlers, no_entry)) = note.walk {
+    if let Some(walk) = &note.walk {
+        let (frames, handlers, no_entry) = (walk.frames, walk.handlers, walk.no_entry);
         let plural = |n: u32| if n == 1 { "" } else { "s" };
         // A frame with no function entry can name no handler, so the two
         // counts together say whether the unwind data was found at all.
@@ -621,6 +662,21 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
                 plural(frames),
                 plural(handlers)
             );
+        }
+        if walk.kept > 0 {
+            info!(
+                "crash report:     the walk stopped at {}{}",
+                walk.ending(),
+                if frames > walk.kept { ", frames past the first 12 not kept" } else { "" }
+            );
+            for (i, &ip) in walk.ips.iter().take(walk.kept as usize).enumerate() {
+                info!(
+                    "crash report:     frame {i}: {}{}{}",
+                    At::of(process, ip),
+                    if walk.no_data >> i & 1 != 0 { " (no unwind data found)" } else { "" },
+                    if walk.asked >> i & 1 != 0 { " (its handler passed it on)" } else { "" }
+                );
+            }
         }
     }
     if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {

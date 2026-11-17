@@ -17580,6 +17580,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
              (exception) in thread",
             "crash report:   no handler took it: ",
             "frames unwound, 0 handlers asked",
+            "crash report:     the walk stopped at ",
+            "crash report:     frame 0: ",
             "crash report:   3 parameters: 0x8007000e, 0x",
             "(crash.exe+0x",
             ", 0xfeedface",
