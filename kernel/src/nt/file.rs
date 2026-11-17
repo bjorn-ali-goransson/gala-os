@@ -1128,6 +1128,33 @@ pub const FILE_NAMES_INFORMATION: u32 = 12;
 pub const FILE_ID_BOTH_DIRECTORY_INFORMATION: u32 = 37;
 pub const FILE_ID_FULL_DIRECTORY_INFORMATION: u32 = 38;
 
+/// The characters a file name may not hold (NT's, the wildcards among
+/// them: a name cannot have one either).
+const FORBIDDEN: &[u8] = b"\"*/:<>?\\|";
+
+/// Whether `name` has the shape of an 8.3 short name: a base of one to
+/// eight characters and, after a single dot, an extension of one to
+/// three, neither holding a space, a control character or one of
+/// [`FORBIDDEN`]. Windows refuses anything else as a short name with
+/// STATUS_INVALID_PARAMETER (measured: `office_k32_test`'s
+/// SetFileShortNameW with "toolongname.ini"); which characters beyond
+/// these it would refuse is not measured, so a name of the right shape is
+/// taken as it comes.
+pub fn is_short_name(name: &[u16]) -> bool {
+    let mut parts = name.split(|&c| c == u16::from(b'.'));
+    let base = parts.next().unwrap_or_default();
+    let extension = parts.next();
+    if parts.next().is_some() {
+        // More than one dot: not an 8.3 name.
+        return false;
+    }
+    let plain = |s: &[u16], most: usize| {
+        (1..=most).contains(&s.len())
+            && s.iter().all(|&c| c > 0x20 && !FORBIDDEN.iter().any(|&bad| u16::from(bad) == c))
+    };
+    plain(base, 8) && extension.is_none_or(|e| plain(e, 3))
+}
+
 /// (fixed size, FileName offset) of a directory information class.
 pub fn directory_class_layout(class: u32) -> Option<(usize, usize)> {
     match class {
@@ -1179,6 +1206,20 @@ fn encode_entry(out: &mut [u8], class: u32, e: &Entry<'_>, name_at: usize) -> bo
         if class != FILE_DIRECTORY_INFORMATION && n.attributes & ramfs::ATTRIBUTE_REPARSE_POINT != 0
         {
             put(out, 64, &n.reparse_tag().to_le_bytes());
+        }
+    }
+    // The Both classes carry the entry's 8.3 short name after the EaSize
+    // (CCHAR ShortNameLength, its length in bytes, then WCHAR
+    // ShortName[12]): the one a program set, where it set one. Windows
+    // leaves it empty on a volume that generates none, as gala does for
+    // every other name (`ramfs::Node::short`).
+    if matches!(class, FILE_BOTH_DIRECTORY_INFORMATION | FILE_ID_BOTH_DIRECTORY_INFORMATION)
+        && let Some(short) = n.short_name_of(e.name)
+    {
+        let units = short.len().min(12);
+        put(out, 68, &[(units * 2) as u8]);
+        for (i, c) in short.iter().take(units).enumerate() {
+            put(out, 70 + 2 * i, &c.to_le_bytes());
         }
     }
     let room = (out.len() - name_at) / 2;
@@ -1413,6 +1454,31 @@ pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_8_3_name_is_a_base_of_eight_and_an_extension_of_three() {
+        let w = |s: &str| s.encode_utf16().collect::<alloc::vec::Vec<u16>>();
+        // What Windows took and what it refused (`office_k32_test`'s
+        // SetFileShortNameW).
+        assert!(is_short_name(&w("GALASH~1.INI")));
+        assert!(!is_short_name(&w("toolongname.ini")));
+        // The shape: a base, at most one dot, an optional extension.
+        assert!(is_short_name(&w("README")));
+        assert!(is_short_name(&w("A.B")));
+        assert!(is_short_name(&w("12345678.123")));
+        assert!(!is_short_name(&w("")));
+        assert!(!is_short_name(&w("123456789")));
+        assert!(!is_short_name(&w(".INI")));
+        assert!(!is_short_name(&w("NAME.")));
+        assert!(!is_short_name(&w("NAME.INIT")));
+        assert!(!is_short_name(&w("NAME.A.B")));
+        // Characters a name cannot hold (a separator, a wildcard, a
+        // space, a control character).
+        assert!(!is_short_name(&w("A\\B")));
+        assert!(!is_short_name(&w("A*B")));
+        assert!(!is_short_name(&w("A B")));
+        assert!(!is_short_name(&[u16::from(b'A'), 1]));
+    }
 
     #[test]
     fn mode_information_keeps_mode_options_only() {

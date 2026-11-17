@@ -4465,6 +4465,7 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
                 Err(_) => NtStatus::ACCESS_VIOLATION,
             }
         }
+        sysinfo::SYSTEM_FIRMWARE_TABLE_INFORMATION => firmware_table(call, buffer, length, ret_ptr),
         sysinfo::GALA_SESSIONS => {
             let records = tri!(sysinfo::sessions());
             if ret_ptr != 0 {
@@ -4492,6 +4493,48 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             }
         }
         _ => NtStatus::INVALID_INFO_CLASS,
+    }
+}
+
+/// SystemFirmwareTableInformation: a firmware table, in and out through
+/// one buffer — the caller writes the provider, the action, the table's id
+/// and the room it has, and reads back the length the table needs and,
+/// where it fits, the table. gala has one provider, SMBIOS ('RSMB') with
+/// one table (id 0), from the machine's firmware (ARCHITECTURE "Firmware
+/// tables"); any other provider, action or id is STATUS_NOT_IMPLEMENTED
+/// with the provider in the ledger, which kernel32 reports as
+/// ERROR_INVALID_FUNCTION — Windows' answer for a provider nobody has.
+fn firmware_table(call: &mut Call<'_>, buffer: u64, length: u64, ret_ptr: u64) -> NtStatus {
+    use super::sysinfo::{FIRMWARE_PROVIDER_RSMB, FIRMWARE_TABLE_GET, FIRMWARE_TABLE_HEADER};
+    if (length as usize) < FIRMWARE_TABLE_HEADER {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut head = [0u8; FIRMWARE_TABLE_HEADER];
+    if call.process.read(buffer, &mut head).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let word = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().unwrap_or([0; 4]));
+    let (provider, action, id, room) = (word(0), word(4), word(8), word(12) as usize);
+    let table = super::platform::smbios()
+        .filter(|_| provider == FIRMWARE_PROVIDER_RSMB && action == FIRMWARE_TABLE_GET && id == 0);
+    let Some(table) = table else {
+        super::ledger::record("NtQuerySystemInformation", "firmware table", u64::from(provider));
+        return NtStatus::NOT_IMPLEMENTED;
+    };
+    let data =
+        tri!(super::sysinfo::raw_smbios((table.major, table.minor, table.docrev), table.table));
+    // The length the table needs, whether or not it fits: the caller's
+    // own field, which is what GetSystemFirmwareTable answers with.
+    tri!(call.write_u32(buffer + 12, data.len() as u32));
+    if ret_ptr != 0 {
+        tri!(call.write_u32(ret_ptr, (FIRMWARE_TABLE_HEADER + data.len()) as u32));
+    }
+    if room < data.len() || (length as usize) < FIRMWARE_TABLE_HEADER + data.len() {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    match call.process.write(buffer + FIRMWARE_TABLE_HEADER as u64, &data) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
     }
 }
 
@@ -6905,6 +6948,8 @@ const FILE_COMPLETION_INFORMATION: u64 = 30;
 /// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
 const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: u64 = 41;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
+/// FileShortNameInformation (kernel32's SetFileShortNameW).
+const FILE_SHORT_NAME_INFORMATION: u64 = 40;
 
 /// FILE_NAME_INFORMATION { FileNameLength, FileName[] } for `name`: what
 /// fits, with STATUS_BUFFER_OVERFLOW.
@@ -7314,6 +7359,13 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
         }
         return status;
     }
+    if class == FILE_SHORT_NAME_INFORMATION {
+        let status = short_name_file(call, &entry, file, buffer, length);
+        if status == NtStatus::SUCCESS {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        }
+        return status;
+    }
     if class == FILE_DISPOSITION_INFORMATION_EX {
         let status = dispose_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {
@@ -7433,6 +7485,62 @@ fn dispose_file(
         file.set_posix_delete(delete && flags & POSIX_SEMANTICS != 0);
     }
     status
+}
+
+/// FileShortNameInformation: FILE_NAME_INFORMATION { ULONG
+/// FileNameLength; WCHAR FileName[]; } -- the 8.3 name the file is to
+/// have in its directory beside its long one (`ramfs::Node::short`), or
+/// no name at all (a length of 0) to take the one it has away. The handle
+/// must have DELETE access, as a rename does, and nothing more: Windows
+/// sets a short name without SeRestorePrivilege (measured unelevated,
+/// `office_k32_test`'s SetFileShortNameW). A name that is not 8.3 is
+/// STATUS_INVALID_PARAMETER, and one another entry of the directory
+/// holds STATUS_OBJECT_NAME_COLLISION (both measured).
+fn short_name_file(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    buffer: u64,
+    length: usize,
+) -> NtStatus {
+    const HEADER: usize = 4;
+    if entry.access & file::DELETE == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    if length < HEADER {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut header = [0u8; HEADER];
+    if call.process.read(buffer, &mut header).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let name_len = u32::from_le_bytes(header) as usize;
+    if !name_len.is_multiple_of(2) || HEADER + name_len > length {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(name_len).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    bytes.resize(name_len, 0u8);
+    if call.process.read(buffer + HEADER as u64, &mut bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut short = Vec::new();
+    if short.try_reserve_exact(name_len / 2).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    for pair in bytes.chunks_exact(2) {
+        let _ = short.try_push(u16::from_le_bytes([pair[0], pair[1]]));
+    }
+    if !short.is_empty() && !file::is_short_name(&short) {
+        super::ledger::record("NtSetInformationFile", "short name not 8.3", short.len() as u64);
+        return NtStatus::INVALID_PARAMETER;
+    }
+    match file::with_fs(|fs| fs.set_short_name(file.node, &short)) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => file::fs_status(e),
+    }
 }
 
 /// FileRenameInformation(Ex) and FileLinkInformation(Ex): FILE_RENAME_INFORMATION

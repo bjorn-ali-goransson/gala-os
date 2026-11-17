@@ -482,6 +482,59 @@ exceptions are fatal (panic with a register dump) except #BP, which is
 counted and returns; the #BP gate has DPL 3 so `int3` works from user
 mode. Vectors 32..255 go to handlers registered with `set_handler`.
 
+## Firmware tables
+
+What the firmware says about the machine it booted, which programs read
+through GetSystemFirmwareTable: Office's shared code (mso) asks the
+SMBIOS provider for the machine it runs on, and a program that does not
+get an answer there is told the machine has no such provider, not that
+the call is missing.
+
+- **At boot** (`boot::smbios`, Limine's SMBIOS request): the bootloader
+  gives the entry point's address, the 64-bit `_SM3_` one or the 32-bit
+  `_SM_`. `boot::read_smbios` reads 0x20 bytes of it through the HHDM
+  while the bootloader's memory is still there and parses it; both
+  checksums must hold, or these are not the firmware's bytes and there is
+  no table. It keeps the version, the document revision (0 for the
+  32-bit entry point, which has none, as Windows reports it) and where
+  the structure table is.
+- **The table itself** is copied into the heap once the heap is up and
+  before the NT layer needs it (`boot::copy_smbios_table`,
+  `platform::init_firmware`), because the bootloader's memory is
+  reclaimed. The copy stops where the end-of-table structure (type 127)
+  ends (`smbios::table_end`): the 64-bit entry point declares the room
+  the table may take, not its length. The boot log says what was kept
+  (`smbios: <n> bytes of table kept`) or why nothing was (`smbios: no
+  table kept (<why>)`).
+- **The system call**: NtQuerySystemInformation's
+  SystemFirmwareTableInformation (class 76) takes and gives one buffer —
+  SYSTEM_FIRMWARE_TABLE_INFORMATION in front (the provider's signature,
+  the action, the table's id, the room after it) and the table behind it.
+  gala has one provider, SMBIOS (`RSMB`), with the Get action and one
+  table (id 0); it answers RawSMBIOSData, the head Windows gives (the
+  2.0 calling method, never used here, the version, the DMI revision and
+  the length) and then the table. The length the table needs goes back
+  into the caller's own field whether or not it fitted, and a buffer too
+  short is STATUS_BUFFER_TOO_SMALL. Another provider, action or id is
+  STATUS_NOT_IMPLEMENTED with the provider in the ledger, which
+  kernel32 reports as ERROR_INVALID_FUNCTION: Windows' answer for a
+  provider nobody has. A 32-bit process needs no conversion (the header
+  is four ULONGs in both worlds), so WOW64 passes the class straight
+  through.
+- **kernel32's GetSystemFirmwareTable** (`firmware.rs`) puts the request
+  and the caller's room in one buffer of its own, hands back as much of
+  the table as fits and answers the length the table needs either way,
+  which is how a caller asks for the size first (a null buffer and 0).
+  A provider or table the machine has not got answers 0 with
+  ERROR_INVALID_FUNCTION (both measured on Windows:
+  `office_k32_test`'s `firmware`).
+- **Limits**: one provider and one table; no Enumerate action, no ACPI or
+  `FIRM` provider (each goes in the ledger with the provider asked for).
+  There is no table at all where no firmware left one -- gala-um, and a
+  kernel that came up through a handover (`Firmware::smbios` is None
+  there) -- and GetSystemFirmwareTable then answers as it does for a
+  provider nobody has.
+
 ## Testing
 
 - Host unit tests: `cargo test -p kernel --lib` for hardware-independent
@@ -2379,6 +2432,30 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   path); FILE_LINK/RENAME_POSIX_SEMANTICS (replacing an open target;
   recorded, refused as without it); IGNORE_READONLY_ATTRIBUTE on a rename
   (recorded, ignored).
+- **Short names** (FileShortNameInformation 40; kernel32's
+  SetFileShortNameW, which Office's mso.dll imports;
+  `office_k32_test`'s SetFileShortNameW, measured on Windows first): the
+  8.3 name a program gives a file beside its long one
+  (`ramfs::Node::short`), which then is a name of its directory like any
+  other -- an open under it finds the file, and `find` matches it after
+  the long names and the hard links, one name space as on NTFS. A name
+  another entry of the directory holds is
+  STATUS_OBJECT_NAME_COLLISION (kernel32: ERROR_ALREADY_EXISTS), a name
+  that is not 8.3 (a base of one to eight characters, an optional
+  extension of one to three, no space, control character or forbidden
+  character: `file::is_short_name`) STATUS_INVALID_PARAMETER and
+  recorded. The empty name takes the short name away. The handle needs
+  DELETE access, as a rename does, and nothing else: Windows sets a short
+  name unelevated, without SeRestorePrivilege. A rename takes the short
+  name away too, where Windows makes a new one. The name belongs to the
+  node's first name, not to its hard links; the Both directory classes
+  report it in their ShortName field; the change log's SetShortName
+  record keeps it across a reboot (record version 6, "The disk"), and a
+  snapshot carries it. gala never generates one, where Windows gives
+  every long name a short name of its own, so a file has one only if a
+  program set it: a program that needs an 8.3 path for a file it did not
+  name itself does not get one (recorded when it asks, and the generator
+  goes in with the first program that depends on it).
 - **Volume**: reports itself as an NTFS disk (FileFs* classes), sized by
   the disk's data area (by RAM without a disk). Its
   FILE_FS_ATTRIBUTE_INFORMATION flags (`file::VOLUME_ATTRIBUTES`) are the
@@ -4264,7 +4341,9 @@ ntdll imports.
   error reporting (ROADMAP OF), so a registration goes in the ledger —
   a program that waited to be recovered leaves a trace — and
   ApplicationRecoveryInProgress is E_FAIL, which is Windows' answer
-  outside a recovery.
+  outside a recovery. GetSystemFirmwareTable (`firmware.rs`) gives the
+  machine's SMBIOS table ("Firmware tables") and SetFileShortNameW
+  (`files.rs`) the file system's 8.3 names ("Files", **Short names**).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA

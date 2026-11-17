@@ -384,6 +384,7 @@ unsafe extern "system" {
     ) -> i32;
     fn OpenFile(name: *const u8, of: *mut OfStruct, style: u32) -> i32;
     fn SetFileShortNameW(h: Handle, name: *const u16) -> i32;
+    fn GetFileAttributesA(path: *const u8) -> u32;
     fn FindPackagesByPackageFamily(
         family: *const u16,
         flags: u32,
@@ -427,6 +428,7 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_BUSY: u32 = 170;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_INVALID_FLAGS: u32 = 1004;
 const ERROR_NO_UNICODE_TRANSLATION: u32 = 1113;
 const LGRPID_INSTALLED: u32 = 1;
@@ -448,6 +450,7 @@ const DELETE: u32 = 0x1_0000;
 const FILE_SHARE_READ: u32 = 1;
 const CREATE_ALWAYS: u32 = 2;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 /// OpenFile's styles and its failure.
 const OF_READ: u32 = 0;
 const OF_CREATE: u32 = 0x1000;
@@ -2125,6 +2128,47 @@ fn short_name(c: &mut Checks) -> Result<(), u32> {
         let r = SetFileShortNameW(h, short.as_ptr());
         c.ok(r != 0, u64::from(GetLastError()))?;
         c.eq(u64::from(GetLastError()), 0)?;
+        // What a short name is for: the file is reachable under it, and
+        // it is the same file (the same attributes).
+        let mut sp = [0u8; 300];
+        let mut wsp = [0u16; 300];
+        c.ok(temp_path(b"sht", b"\\GALASH~1.INI", &mut sp, &mut wsp), 0)?;
+        SetLastError(0);
+        let by_short = GetFileAttributesA(sp.as_ptr());
+        c.ok(by_short != INVALID_FILE_ATTRIBUTES, u64::from(GetLastError()))?;
+        c.eq(u64::from(by_short), u64::from(GetFileAttributesA(path.as_ptr())))?;
+        // A name another entry of the directory holds: the long names and
+        // the short ones share one name space (ERROR_ALREADY_EXISTS).
+        let mut other = [0u8; 300];
+        let mut wother = [0u16; 300];
+        c.ok(temp_path(b"sht", b"\\GALASH~2.INI", &mut other, &mut wother), 0)?;
+        let oh = CreateFileA(
+            other.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            0,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+        );
+        c.ok(oh != usize::MAX, u64::from(GetLastError()))?;
+        SetLastError(0);
+        let taken = SetFileShortNameW(h, w::<16>("GALASH~2.INI").as_ptr());
+        c.fails(i64::from(taken), ERROR_ALREADY_EXISTS)?;
+        // A name that is not 8.3 (eleven characters before the dot):
+        // ERROR_INVALID_PARAMETER.
+        SetLastError(0);
+        let longer = SetFileShortNameW(h, w::<24>("toolongname.ini").as_ptr());
+        c.fails(i64::from(longer), ERROR_INVALID_PARAMETER)?;
+        // The empty name takes the short name away: the file is not
+        // reachable under it any more.
+        SetLastError(0);
+        c.ok(SetFileShortNameW(h, w::<4>("").as_ptr()) != 0, u64::from(GetLastError()))?;
+        SetLastError(0);
+        c.eq(u64::from(GetFileAttributesA(sp.as_ptr())), u64::from(INVALID_FILE_ATTRIBUTES))?;
+        c.eq(u64::from(GetLastError()), u64::from(ERROR_FILE_NOT_FOUND))?;
+        CloseHandle(oh);
+        DeleteFileA(other.as_ptr());
         CloseHandle(h);
         DeleteFileA(path.as_ptr());
         RemoveDirectoryA(dir.as_ptr());

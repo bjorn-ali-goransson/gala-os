@@ -3,9 +3,9 @@
 
 use crate::arch::{cpu, interrupts, paging, smp, syscall, xstate};
 use crate::nt::platform::{
-    Clock, DiskError, Display, Frame, Personality, SharedUserSpace, SpawnError, Storage,
-    SyscallFrame, ThreadId, Threads, TrapFrame, UserEntry, UserMemory, UserRegs, WakeReason,
-    XState,
+    Clock, DiskError, Display, Firmware, Frame, Personality, SharedUserSpace, Smbios, SpawnError,
+    Storage, SyscallFrame, ThreadId, Threads, TrapFrame, UserEntry, UserMemory, UserRegs,
+    WakeReason, XState,
 };
 use crate::{mm, sched, time};
 
@@ -202,6 +202,22 @@ impl Storage for Kernel {
     }
     fn disk_flush() -> Result<(), DiskError> {
         crate::disk::flush()
+    }
+}
+
+/// The firmware's SMBIOS table, as `init_firmware` left it at boot.
+static SMBIOS: crate::sync::IrqMutex<Option<Smbios>> = crate::sync::IrqMutex::new(None);
+
+/// Keeps the firmware's SMBIOS table for the NT layer to hand out
+/// (GetSystemFirmwareTable). Called once, after the heap is up and while
+/// the boot information is still at hand.
+pub fn init_firmware(table: Smbios) {
+    *SMBIOS.lock() = Some(table);
+}
+
+impl Firmware for Kernel {
+    fn smbios() -> Option<Smbios> {
+        *SMBIOS.lock()
     }
 }
 

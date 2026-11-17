@@ -302,6 +302,15 @@ pub extern "system" fn CreateDirectoryA(path: *const u8, security: *mut c_void) 
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn RemoveDirectoryA(path: *const u8) -> Bool {
+    let mut buf = [0u16; MAX];
+    match wide(path, &mut buf) {
+        Ok(p) => RemoveDirectoryW(p),
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
 /// An ANSI result from a W function that returns a length (`f` fills a
 /// UTF-16 buffer): the length without the NUL, or the size needed (with
 /// it) if `size` is too small.

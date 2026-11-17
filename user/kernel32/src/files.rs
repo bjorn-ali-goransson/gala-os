@@ -4,6 +4,41 @@
 
 use super::*;
 
+/// SetFileShortNameW(hFile, lpShortName): the 8.3 short name the file is
+/// to have beside its long one, or no short name at all where the name is
+/// empty (NtSetInformationFile's FileShortNameInformation,
+/// ARCHITECTURE "Short names"). The handle must have been opened with
+/// DELETE access; Windows asks for no privilege beyond it. A name longer
+/// than an 8.3 name can be is ERROR_INVALID_PARAMETER, the kernel's
+/// answer for a name that is not 8.3 (both measured:
+/// `office_k32_test`'s SetFileShortNameW).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetFileShortNameW(h: Handle, name: *const u16) -> Bool {
+    /// FILE_NAME_INFORMATION: ULONG FileNameLength, then the name.
+    const HEADER: usize = 4;
+    /// The longest an 8.3 name can be: eight, a dot and three.
+    const LONGEST: usize = 12;
+    const FILE_SHORT_NAME_INFORMATION: u32 = 40;
+    // No name at all: nothing to set it from (Windows' answer to a
+    // missing argument; not measured).
+    if name.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let short = wide_slice(name);
+    if short.len() > LONGEST {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut info = [0u8; HEADER + 2 * LONGEST];
+    info[..HEADER].copy_from_slice(&((short.len() * 2) as u32).to_le_bytes());
+    for (i, c) in short.iter().enumerate() {
+        info[HEADER + 2 * i..HEADER + 2 * i + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    match set_file(h, FILE_SHORT_NAME_INFORMATION, &info[..HEADER + 2 * short.len()]) {
+        Ok(()) => TRUE,
+        Err(e) => fail_with(e, FALSE),
+    }
+}
+
 /// GetFileSize(hFile, *lpFileSizeHigh): the low half, the high half
 /// through the pointer.
 #[unsafe(no_mangle)]

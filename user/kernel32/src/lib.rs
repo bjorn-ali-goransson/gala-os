@@ -47,6 +47,7 @@ mod console;
 // CONTEXT buffers and the XState functions (the architecture's layout).
 mod context;
 mod files;
+mod firmware;
 mod global;
 mod heap;
 mod idn;

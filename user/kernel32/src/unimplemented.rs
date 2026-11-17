@@ -29,7 +29,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     OpenJobObjectW
     PrepareTape
     ReadConsoleOutputA
-    RemoveDirectoryA
     ScrollConsoleScreenBufferA
     SetFileIoOverlappedRange
     SetFileValidData

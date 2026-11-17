@@ -1,8 +1,9 @@
 //! The seam between the NT layer and what runs it (docs/GALA_UM.md).
 //!
-//! The NT layer reaches the machine only through this module: seven traits
+//! The NT layer reaches the machine only through this module: eight traits
 //! say what it needs (time, threads and waits, entering and leaving user
-//! mode, user memory, random numbers, the disk, the screen), `P` names the implementation (the kernel today,
+//! mode, user memory, random numbers, the disk, the screen, the firmware's
+//! tables), `P` names the implementation (the kernel today,
 //! `crate::platform::Kernel`; gala-um's host process in U2), and the
 //! functions below are the NT layer's way to call it. No other file in
 //! `nt/` names `crate::arch`, `crate::sched`, `crate::time`, `crate::disk`
@@ -243,6 +244,29 @@ pub trait Display {
     /// desktop (it went live; with a screen they started when it was
     /// taken, with `presenter=` this starts them). None by default.
     fn local_input() {}
+}
+
+/// The machine's SMBIOS tables, as the firmware left them: the version it
+/// reports and the structure table itself, which
+/// [`sysinfo::raw_smbios`](super::sysinfo::raw_smbios) wraps the way
+/// Windows hands it to a program.
+#[derive(Clone, Copy)]
+pub struct Smbios {
+    pub major: u8,
+    pub minor: u8,
+    pub docrev: u8,
+    pub table: &'static [u8],
+}
+
+/// The firmware's tables (NtQuerySystemInformation's
+/// SystemFirmwareTableInformation, kernel32's GetSystemFirmwareTable).
+pub trait Firmware {
+    /// The SMBIOS table the machine booted with, or None where there is no
+    /// firmware to have left one (gala-um, and a kernel that came up
+    /// through a handover).
+    fn smbios() -> Option<Smbios> {
+        None
+    }
 }
 
 // The NT layer's calls. Thin and inlined: the kernel implementation costs
@@ -504,4 +528,9 @@ pub fn screen_changed() -> Option<(u32, u32)> {
 #[inline]
 pub fn local_input() {
     <P as Display>::local_input()
+}
+
+#[inline]
+pub fn smbios() -> Option<Smbios> {
+    <P as Firmware>::smbios()
 }

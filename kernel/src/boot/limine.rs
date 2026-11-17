@@ -262,6 +262,17 @@ pub struct RsdpResponse {
     pub address: u64,
 }
 
+/// `struct limine_smbios_response`: the SMBIOS entry points, 32-bit and
+/// 64-bit, either of them null. The pointers are HHDM-virtual at every
+/// base revision but 3 and 4 (where they are physical), so at
+/// [`REQUESTED_BASE_REVISION`] they can be read as they are.
+#[repr(C)]
+pub struct SmbiosResponse {
+    pub revision: u64,
+    pub entry_32: *const u8,
+    pub entry_64: *const u8,
+}
+
 pub const MP_INFO_EXTRA_ARGUMENT: usize = core::mem::offset_of!(MpInfo, extra_argument);
 
 #[repr(C)]
@@ -280,6 +291,7 @@ pub struct Requests {
     pub mp: MpRequest,
     pub executable_file: Request<ExecutableFileResponse>,
     pub rsdp: Request<RsdpResponse>,
+    pub smbios: Request<SmbiosResponse>,
     end_marker: [u64; 2],
 }
 
@@ -308,6 +320,7 @@ pub static REQUESTS: Requests = Requests {
     mp: MpRequest { request: Request::new([0x95a67b819a1b857e, 0xa0b61b723b6a73e0]), flags: 0 },
     executable_file: Request::new([0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69]),
     rsdp: Request::new([0xc5e77b6b397e7b43, 0x27637845accdcf3c]),
+    smbios: Request::new([0x9e9046f11e095391, 0xaa4a520fefbde5ee]),
     end_marker: REQUESTS_END_MARKER,
 };
 
