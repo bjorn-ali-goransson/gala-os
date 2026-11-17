@@ -1974,10 +1974,15 @@ need gala's.
      `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
      over and over, a runtime class gala has none of -- so the traced
      run is a different path, not a slower one, and the raise has to be
-     read from an untraced run. Whether the raise and the missing
-     device are one failure is still not known; the next step is the
-     rerun with those two gaps closed, and what its ledger names at the
-     end of it.
+     read from an untraced run. With those two closed, the run from
+     boot leaves nothing else between the device and the raise: in the
+     200 ms before it the ledger names D3D11CreateDevice once, the
+     d2d1 factory's QueryInterface three times and D3D10CreateDevice1
+     twenty times, and otherwise only Word's own settings keys, absent
+     and defaulted. So the raise follows the refusals with nothing in
+     between, and the next step is a rendering device (G0), not another
+     export: until one answers, Word draws its untitled window and ends
+     there.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew
