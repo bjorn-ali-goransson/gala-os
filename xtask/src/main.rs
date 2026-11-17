@@ -595,6 +595,19 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // DXVK 3.1.1 for x64 (github.com/doitsujin/dxvk, zlib/libpng;
+    // THIRD_PARTY.md): Direct3D over Vulkan. It ships beside the program
+    // that uses it, never in System32, so that System32's dxgi stays
+    // gala's -- the Vulkan loader calls that one (GPU G2, `d3d11_test`).
+    // d3d9, d3d8 and d3d10core are in the release too and follow with
+    // the programs that want them.
+    Prebuilt {
+        name: "dxvk",
+        url: "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz",
+        checksum: "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608",
+        members: &["dxvk-3.1.1/x64/d3d11.dll", "dxvk-3.1.1/x64/dxgi.dll"],
+        excludes: &[],
+    },
 ];
 
 /// A Linux root file system assembled from a distribution's packages
@@ -7369,6 +7382,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gui_test", "user32.dll", "Windows/System32"),
     ("gui_test", "gdi32.dll", "Windows/System32"),
     ("gui_test", "comctl32.dll", "Windows/System32"),
+    ("paint_thread_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("paint_thread_test", "ntdll.dll", "Windows/System32"),
+    ("paint_thread_test", "kernel32.dll", "Windows/System32"),
+    ("paint_thread_test", "user32.dll", "Windows/System32"),
+    ("paint_thread_test", "gdi32.dll", "Windows/System32"),
     ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("sshd_server", "user/sshd/logs-placeholder.txt", "ProgramData/ssh/logs"),
     ("sshd_sftp", "target/prebuilt/openssh/OpenSSH-Win64/sftp-server.exe", "Windows/System32"),
@@ -7689,6 +7707,39 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("vk_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("vk_test", "user/mesa/lavapipe.regseed", "registry"),
     ("vk_test", "user/bin/vk_test.exe", "gala"),
+    // d3d11_test (GPU G2): Direct3D 11 through DXVK (PREBUILT dxvk) over
+    // the same Vulkan stack as vk_test. DXVK's d3d11.dll and dxgi.dll go
+    // beside the program, where a game ships them, not into System32:
+    // System32's dxgi stays gala's, which is the one the Vulkan loader
+    // calls (ARCHITECTURE "The loader needs a DXGI factory").
+    ("d3d11_test", "ntdll.dll", "Windows/System32"),
+    ("d3d11_test", "kernel32.dll", "Windows/System32"),
+    ("d3d11_test", "msvcrt.dll", "Windows/System32"),
+    // DXVK's CRT is the UCRT, through the api-ms-win-crt-* sets.
+    ("d3d11_test", "ucrtbase.dll", "Windows/System32"),
+    ("d3d11_test", "user32.dll", "Windows/System32"),
+    ("d3d11_test", "gdi32.dll", "Windows/System32"),
+    ("d3d11_test", "advapi32.dll", "Windows/System32"),
+    ("d3d11_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d3d11_test", "version.dll", "Windows/System32"),
+    // DXVK reads the adapter's devnode properties through setupapi.
+    ("d3d11_test", "setupapi.dll", "Windows/System32"),
+    ("d3d11_test", "cfgmgr32.dll", "Windows/System32"),
+    ("d3d11_test", "dxgi.dll", "Windows/System32"),
+    ("d3d11_test", "shell32.dll", "Windows/System32"),
+    ("d3d11_test", "shlwapi.dll", "Windows/System32"),
+    ("d3d11_test", "ole32.dll", "Windows/System32"),
+    (
+        "d3d11_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("d3d11_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("d3d11_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("d3d11_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d11_test", "user/bin/d3d11_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -9847,6 +9898,7 @@ const USER_PROGRAMS: &[&str] = &[
     "disk_test",
     "rtl_test",
     "gui_test",
+    "paint_thread_test",
     "conhost",
     "console_window_test",
     "wsl",
@@ -10909,6 +10961,46 @@ fn tree_size(dir: &Path) -> u64 {
 /// sealed config and manifest) and makes the ISO from it; with `tree`,
 /// stages into that directory without the test programs and stops there
 /// (`release-tree`: what a release publishes).
+/// The name a plain-file module is copied under in the ISO's `boot/`
+/// directory, or None when it is not a plain file: a kernel (`kernel=`),
+/// a directory tree (a trailing slash) or a 32-bit DLL (`x86=` and the
+/// SysWOW64 set), each of which names its own file.
+fn module_file_name(file: &str) -> Option<&str> {
+    if file.starts_with("kernel=") || file.starts_with("x86=") || file.ends_with('/') {
+        return None;
+    }
+    if x86_dll(file).is_some() {
+        return None;
+    }
+    // `<source>@<name>`: the source under another name.
+    let (source, renamed) = match file.split_once('@') {
+        Some((source, name)) => (source, Some(name)),
+        None => (file, None),
+    };
+    Some(renamed.unwrap_or_else(|| source.rsplit('/').next().unwrap_or(source)))
+}
+
+/// Where in `boot/` the module `(file, dir)` of the set `extra` goes
+/// (None: not a plain file).
+fn boot_path(extra: &[(&str, &str)], file: &str, dir: &str) -> Option<String> {
+    let name = module_file_name(file)?;
+    // Another entry ships a different file under this name: each goes in
+    // a subdirectory named after its destination. One flat boot/ would
+    // hold whichever was copied last and the guest would be given that
+    // one at both of its paths -- gala's `dxgi.dll` in System32 and
+    // DXVK's beside the program are such a pair (`d3d11_test`,
+    // ARCHITECTURE "Direct3D 11 is DXVK"), and the Vulkan loader, which
+    // calls System32's, re-entered DXVK through it. The kernel names the
+    // guest file after the path's last part, as the 32-bit set's
+    // `boot/x86/` shows, so the name in the guest is the same either way.
+    let shared =
+        extra.iter().any(|(other, _)| *other != file && module_file_name(other) == Some(name));
+    if shared {
+        return Some(format!("{}/{name}", dir.replace('/', "_").to_lowercase()));
+    }
+    Some(name.to_string())
+}
+
 fn make_iso_unchecked(
     release: bool,
     name: &str,
@@ -11035,13 +11127,15 @@ fn make_iso_unchecked(
             );
             continue;
         }
+        // Where under boot/ it goes: its own name, or a directory of its
+        // destination's when another entry ships a different file of
+        // that name (`boot_path`).
+        let rel = boot_path(extra, file, dir).unwrap_or_default();
         // `<source>@<name>`: the source (a built DLL or a file) under
-        // another name (a hot swap scenario's copies of hotswap_dll).
-        let (file, renamed) = match file.split_once('@') {
-            Some((source, name)) => (source, Some(name)),
-            None => (*file, None),
-        };
-        let (source, name) = match file.rsplit_once('/') {
+        // another name (a hot swap scenario's copies of hotswap_dll);
+        // the name is `rel`'s, so only the source is read here.
+        let file = file.split_once('@').map_or(*file, |(source, _)| source);
+        let (source, _) = match file.rsplit_once('/') {
             // A test program: its ARM64 build there.
             Some((_, name)) if arm64 && shipped_program(file).is_some() => {
                 (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
@@ -11079,12 +11173,15 @@ fn make_iso_unchecked(
             }
             None => (built_dll(file), file),
         };
-        let name = renamed.unwrap_or(name);
-        copy(&source, &boot.join(name))?;
-        if name.ends_with(".dll") {
-            dlls.push((format!("boot/{name}"), source.clone()));
+        let dest = boot.join(&rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
         }
-        modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
+        copy(&source, &dest)?;
+        if rel.ends_with(".dll") {
+            dlls.push((format!("boot/{rel}"), source.clone()));
+        }
+        modules += &format!("    module_path: boot():/boot/{rel}\n    module_string: {dir}\n");
     }
     copy(&limine.join("BOOTX64.EFI"), &efi_boot.join("BOOTX64.EFI"))?;
     for file in ["limine-uefi-cd.bin", "limine-bios-cd.bin", "limine-bios.sys"] {
@@ -11381,6 +11478,15 @@ fn fetch_prebuilt(path: &str) -> Result {
         unpack_deb(p, &zip, &dir)?;
     } else if p.url.ends_with(".apk") {
         unpack_apk(p, &zip, &dir)?;
+    } else if p.url.ends_with(".tar.gz") {
+        // A gzip tarball (DXVK's release): members are paths inside it.
+        let mut cmd = Command::new("tar");
+        cmd.args(["-xzf"]).arg(&zip).arg("-C").arg(&dir);
+        for exclude in p.excludes {
+            cmd.arg(format!("--exclude={exclude}"));
+        }
+        cmd.args(p.members);
+        run_cmd(&mut cmd)?;
     } else if p.url.ends_with(".7z")
         || p.url.ends_with(".7z.exe")
         || p.url.ends_with("-setup.exe")
@@ -12073,6 +12179,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "selftest",
     "fault-pagefault",
     "gui_test",
+    "paint_thread_test",
     "virtio_gpu",
     "virtio_gpu_reset",
     "filezilla",
@@ -14005,6 +14112,26 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // GPU G2: Direct3D 11 through DXVK over the Vulkan stack vk_test
+        // uses (Mesa's lavapipe): a device and a DXGI swap chain on a
+        // window, the back buffer cleared and a second render target
+        // copied into it, read back, then presented, on a headless
+        // desktop whose frame the screen check reads. The frame needs no
+        // shader, so no HLSL compiler: D3D11's clears and copies are not
+        // the pipeline (a drawn triangle, and d3dcompiler_47, come later).
+        name: "d3d11_test",
+        cmdline: "qemu_exit presenter=test run=d3d11_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3d11_test: device llvmpipe",
+            "d3d11_test: read back 0x336699 0xffcc00",
+            "d3d11_test: presented",
+            "xtask: screen ok",
+            "d3d11_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // GPU G2: OpenGL on Mesa's llvmpipe (WGL: a pixel format, a
         // context, a frame read back and presented), on a headless desktop
         // (`presenter=test`, BIOS) whose frame the screen check reads.
@@ -14102,6 +14229,24 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: combo picked Blue",
             "xtask: screen ok",
             "gui_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // What a thread other than the window's draws on a window DC
+        // shows on the desktop while the window's thread waits for a
+        // message (user/paint_thread_test): the shape of a swapchain's
+        // presenter, which blits each frame from a thread of its own
+        // (GPU G2, `d3d11_test`). SCREEN_SCENARIOS checks the screen.
+        name: "paint_thread_test",
+        // The night wallpaper, so the screen check knows its colours.
+        cmdline: "qemu_exit wallpaper=night run=paint_thread_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "paint_thread_test: painted",
+            "paint_thread_test: drew from another thread",
+            "xtask: screen ok",
+            "paint_thread_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -19753,6 +19898,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("busybox", "child processes (pipelines are child processes)"),
     ("cmd_test", "child processes (one NT process per Linux process)"),
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
+    ("paint_thread_test", "needs a screen (the square must reach the desktop)"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
@@ -23294,6 +23440,39 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     ("gui_test", GUI_TEST_SCREEN),
+    (
+        // The square a second thread drew on the window's DC, orange at
+        // client (40, 180) - (120, 260) of the 398 x 266 client area from
+        // (101, 133), on the blue the window's own thread painted: it is
+        // on the desktop although that thread has done nothing since
+        // (user/paint_thread_test). Then a click in the client area
+        // (client (199, 173)) ends the program.
+        "paint_thread_test",
+        ScreenCheck {
+            marker: "paint_thread_test: drew from another thread",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(101 + 60, 133 + 200, 0xff8000),
+                        PixelCheck::At(101 + 4, 133 + 4, 0x336699),
+                        PixelCheck::At(101 + 300, 133 + 200, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
     ("office_word", OFFICE_WORD_SCREEN),
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
@@ -23339,6 +23518,50 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::At(101 + 4, 133 + 4, 0x336699),
                         PixelCheck::At(101 + 199, 133 + 173, 0xffcc00),
                         PixelCheck::At(101 + 30, 133 + 240, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
+        // GPU G2: d3d11_test's frame (DXVK on lavapipe), presented through
+        // a DXGI swap chain into its 400 x 300 window at (100, 100),
+        // client 398 x 266 from (101, 133) like vk_test's: the clear
+        // colour in the corner and below the copied block, the block's
+        // colour in the middle (it covers the client's middle half, from
+        // (99, 66) to (298, 199)); then a click there ends the program.
+        "d3d11_test",
+        ScreenCheck {
+            marker: "d3d11_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    // Red and blue arrive swapped (0x336699 reaches the
+                    // screen as 0x996633) and these are the swapped
+                    // colours: a stopgap expectation, ROADMAP "Known
+                    // issues and stopgaps". DXVK asks for a
+                    // VK_FORMAT_R8G8B8A8_UNORM swapchain whatever the back
+                    // buffer's format is, Mesa's Win32 WSI advertises that
+                    // format, and its GDI present path -- the only one a
+                    // software driver is given -- copies the image into a
+                    // BI_RGB (so BGRA) DIB without swizzling it. The
+                    // window path itself is sound: vk_test, which asks for
+                    // BGRA, gets its colours right through the same one.
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x996633),
+                        PixelCheck::At(101 + 199, 133 + 133, 0x00ccff),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x996633),
                     ],
                 },
                 ScreenStep {
@@ -28762,6 +28985,29 @@ mod module_sets {
                         s.name
                     );
                 }
+            }
+        }
+    }
+
+    /// No scenario ships two different files under one name in `boot/`,
+    /// the ISO's flat module directory: one would overwrite the other and
+    /// the guest would be given that one binary at both of its paths.
+    /// gala's `dxgi.dll` in System32 and DXVK's beside the program are
+    /// such a pair (`d3d11_test`), and the Vulkan loader, which calls
+    /// System32's, is the one that pays for it.
+    #[test]
+    fn no_two_modules_share_a_file_in_boot() {
+        for s in scenarios() {
+            let modules = extra_modules(s.name);
+            let mut placed: Vec<(String, &str)> = Vec::new();
+            for (file, dir) in &modules {
+                let Some(path) = boot_path(&modules, file, dir) else {
+                    continue;
+                };
+                if let Some((_, other)) = placed.iter().find(|(p, o)| *p == path && o != file) {
+                    panic!("{}: {file} and {other} are both boot/{path}", s.name);
+                }
+                placed.push((path, file));
             }
         }
     }

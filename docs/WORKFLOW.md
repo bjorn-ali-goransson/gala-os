@@ -940,7 +940,11 @@ Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
 OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
 `glslangValidator`, apt `glslang-tools`, and clones the pinned
 Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
-`vulkan-runtime`), about 10 s each under TCG. When one fails:
+`vulkan-runtime`), about 10 s each under TCG. `d3d11_test`
+(user/d3d11_test, C, `build.sh`: mingw-w64's own Direct3D headers,
+nothing fetched) is Direct3D 11 on the same stack through DXVK
+(PREBUILT `dxvk`), whose `d3d11.dll` and `dxgi.dll` the scenario puts
+beside the program, never in System32. When one fails:
 
 - Read the ledger first: `missing export` stops a load; `missing dll`
   for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
@@ -950,6 +954,11 @@ Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
   0x180000000+<offset>` names the loader's source line (its PDB is
   unpacked beside it; the loader's source is
   github.com/KhronosGroup/Vulkan-Loader at the same version).
+- `d3d11_test: skipped (no device, hr ...)` means DXVK found no Vulkan
+  device: read the Vulkan points below first, since DXVK is above the
+  same loader. DXVK's own messages are in the serial log, and its
+  `d3d11.dll`/`dxgi.dll` must be beside the program, with System32's
+  `dxgi.dll` still gala's (the loader calls that one).
 - vk_test printing `skipped (no Vulkan driver)` means the loader found
   no driver: the Drivers key (the scenario's `registry` module), the
   manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader

@@ -48,6 +48,57 @@ pub extern "C" fn __pwctype_func() -> *const u16 {
     (&raw const WCTYPE).cast()
 }
 
+/// Whether the NUL-terminated `name` is exactly `want`.
+///
+/// # Safety
+/// `name` points at a NUL-terminated string.
+unsafe fn named(name: *const u8, want: &[u8]) -> bool {
+    for (i, b) in want.iter().enumerate() {
+        // SAFETY: the caller's string. The first byte that differs ends
+        // the loop, so a shorter name stops at its own terminator.
+        if unsafe { *name.add(i) } != *b {
+            return false;
+        }
+    }
+    // SAFETY: `want.len()` bytes matched, so this one is inside the string.
+    unsafe { *name.add(want.len()) == 0 }
+}
+
+/// `wctype(name)`: the mask `iswctype` takes for one of the twelve class
+/// names C defines, or 0 for any other name and for "", as the pinned
+/// build answers (`ucrt_test`). ucrtbase exports it; msvcrt.dll does not,
+/// which is why it is here.
+#[unsafe(no_mangle)]
+pub extern "C" fn wctype(name: *const u8) -> u16 {
+    use crate::wide::{ALPHA, BLANK, CONTROL, DIGIT, HEX, LOWER, PUNCT, SPACE, UPPER};
+    const ALNUM: u16 = ALPHA | UPPER | LOWER | DIGIT;
+    const GRAPH: u16 = ALNUM | PUNCT;
+    if name.is_null() {
+        return 0;
+    }
+    let classes: [(&[u8], u16); 12] = [
+        (b"alnum", ALNUM),
+        (b"alpha", ALPHA | UPPER | LOWER),
+        (b"blank", BLANK),
+        (b"cntrl", CONTROL),
+        (b"digit", DIGIT),
+        (b"graph", GRAPH),
+        (b"lower", LOWER),
+        (b"print", GRAPH | BLANK),
+        (b"punct", PUNCT),
+        (b"space", SPACE),
+        (b"upper", UPPER),
+        (b"xdigit", HEX),
+    ];
+    for (want, mask) in classes {
+        // SAFETY: the caller's NUL-terminated name.
+        if unsafe { named(name, want) } {
+            return mask;
+        }
+    }
+    0
+}
+
 /// The "C" locale's names: six NULLs (LC_ALL to LC_TIME).
 static LOCALE_NAMES: [usize; 6] = [0; 6];
 

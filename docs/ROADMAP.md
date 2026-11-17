@@ -1297,6 +1297,14 @@ the kernel.
   loader needs it; `gpu_stub_test`); ntdll resolves `.` and `..` in DLL
   paths (`loader_test`); `vk_test` (a triangle read back, then presented
   through VK_KHR_win32_surface and checked on the screen).
+- G2, Direct3D 11: DXVK 3.1.1 (PREBUILT `dxvk`) over that Vulkan stack,
+  its `d3d11.dll` and `dxgi.dll` beside the program (System32's dxgi
+  stays gala's, the one the Vulkan loader calls); gdi32's 19 `D3DKMT*`
+  thunks (STATUS_NOT_SUPPORTED, in the ledger) and ucrtbase's
+  `mbsrtowcs` and `wctype`, which its import tables need; `d3d11_test`
+  (a device and a swap chain, a cleared back buffer with a copied
+  block, read back, presented and checked on the screen). No shader,
+  so no HLSL compiler yet.
 
 **Next**:
 1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
@@ -1311,22 +1319,16 @@ the kernel.
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
-   lavapipe, PREBUILT, beside the programs that use them (System32's
-   dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
-   screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
-   stays the fallback should lavapipe fall short. WARP is ruled out (not
-   redistributable). gdi32's GetGlyphOutline (Mesa's
-   wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
-   (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
-   STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
-   resources); everything else it imports gala has. d3d11_test needs
-   DXBC shaders, and the host has no HLSL compiler (Ubuntu's
-   vkd3d-compiler 1.2 predates vkd3d's HLSL): build a current
-   vkd3d-shader compiler for `build.sh`, or assemble the two shaders
-   with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
-   beside the program the same way.
+3. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
+   nothing is drawn through the pipeline yet), then DXVK's d3d9 and
+   d3d10core and its own tests, then vkd3d-proton 3.1 (d3d12,
+   d3d12core) beside the program the same way. Drawing needs DXBC
+   shaders, and the host has no HLSL compiler (Ubuntu's vkd3d-compiler
+   1.2 predates vkd3d's HLSL): build a current vkd3d-shader compiler
+   for `build.sh`, or assemble the two shaders with their checksum.
+   SwiftShader stays the fallback should lavapipe fall short. WARP is
+   ruled out (not redistributable). gdi32's GetGlyphOutline (Mesa's
+   wglUseFontOutlines) is still GDI_ERROR.
    `d3dcompiler_47.dll` (the decision, for Office's Click-to-Run UI,
    which imports D3DCompile): gala's own DLL with a working
    D3DCreateBlob and no HLSL compiler: D3DCompile, D3DCompile2 and
@@ -6180,6 +6182,22 @@ a refresh.
 Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
+
+- **`d3d11_test`'s screen check expects red and blue swapped**
+  (`0x336699` reaches the screen as `0x996633`): DXVK asks for a
+  `VK_FORMAT_R8G8B8A8_UNORM` swapchain for any 8-bit UNORM back buffer,
+  Mesa's win32 WSI advertises that format, and the GDI present path --
+  the only one Mesa gives a software driver -- copies the image into a
+  BI_RGB (so BGRA) DIB section without swizzling it. The swap is in the
+  prebuilt stack, not in gala: it is the same on Windows with lavapipe,
+  and `vk_test`, which asks for `VK_FORMAT_B8G8R8A8_UNORM` itself, gets
+  its colours right through the same window path. Expecting what the
+  stack does keeps presentation covered and fails loudly when the stack
+  changes; what the frame should be is in the comment beside it.
+  Structural fix: a Vulkan driver whose present path matches what it
+  advertises -- Mesa's WSI fixed upstream (gala builds no Mesa today,
+  only fetches the release), or the GPU-backed driver of G3, which
+  presents through DXGI and not GDI. Item G2.
 
 - **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
   `lx_httpd.txt`): every other Linux transcript is recorded on real
