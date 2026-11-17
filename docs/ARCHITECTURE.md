@@ -2085,7 +2085,7 @@ access, as Windows does. Handle values are `(slot + 1) * 4`.
 `\` with `\BaseNamedObjects`, `\KernelObjects`, `\Sessions\0`,
 `\Sessions\1\BaseNamedObjects` and `\Sessions\BNOLINKS` created at boot
 (permanent; the sessions' part by `nt::session`, "Plan: sessions and
-remote shasha"). NtCreateDirectoryObject (0x7f24) makes further
+remote desktops"). NtCreateDirectoryObject (0x7f24) makes further
 directories (Cygwin keeps its shared objects in one).
 
 - Named objects record their parent and name; each object counts its
@@ -7865,7 +7865,7 @@ desktop may never do to a server), "Console windows" (conhost),
 "Plan: windows across processes" (the kernel window registry
 `nt::window`, HWNDs shared by all processes, cross-process messages),
 "UI Automation", "Plan: graphics and GPU" (virtio-gpu), "Plan:
-sessions and remote shasha" (one desktop per session).
+sessions and remote desktops" (one desktop per session).
 
 ### The kernel side: `nt::desktop`
 
@@ -7885,7 +7885,7 @@ desktop keeps its windows and their pixels whether or not anything shows
 it; the console session's (`session::CONSOLE`) is shown by the screen
 (or what `presenter=` names) and gets the keyboard and mouse; another
 session's is shown by nothing unless GalaSession attaches a presenter
-("Plan: sessions and remote shasha", "Presenters (B3a)").
+("Plan: sessions and remote desktops", "Presenters (B3a)").
 
 #### Screen, devices and boot splash
 
@@ -11701,17 +11701,17 @@ under their own names: `testdll32.dll`).
 - A kernel handover refuses a WOW64 process ("32-bit code (WOW64)").
 - gala-um cannot run 32-bit code (the segments are the host kernel's).
 
-## Plan: sessions and remote shasha
+## Plan: sessions and remote desktops
 
 One design covers remote shell access, a remote graphical desktop
-(shasha running on the client, talking to gala) and several sessions on
-one machine: **sessions own desktops, and a desktop is shown by a
-presenter** (the local console, a remote shasha client, or none).
-ROADMAP RS tracks it: B1 (session ids, per-session named objects) and
-B2 (a desktop per session) are built, and B3a's window station and
-desktop objects, its presenters (None, Console, Test) and the console
-switch; B3b (remote shasha), B4 (session manager) and B5 (sessions
-across a handover) are the planned design below. Test
+(Windows' own Remote Desktop clients connecting to gala over RDP) and
+several sessions on one machine: **sessions own desktops, and a
+desktop is shown by a presenter** (the local console, an RDP client,
+or none). ROADMAP RS tracks it: B1 (session ids, per-session named
+objects) and B2 (a desktop per session) are built, and B3a's window
+station and desktop objects, its presenters (None, Console, Test) and
+the console switch; B3b (the RDP server), B4 (session manager) and B5
+(sessions across a handover) are the planned design below. Test
 programs: `user/session_test`, `user/winsta_test`,
 `user/presenter_test`.
 
@@ -12185,7 +12185,7 @@ alone in `winstate/tests.rs`.
   `never shown: <why>`). A failed headless screen check leaves its frames as
   `test-<scenario>.screen<n>.png` and quotes the monitor's reply to
   `memsave`.
-- **Limits**: no remote presenter (B3b); no console switch without a
+- **Limits**: no remote presenter (B3b, RDP); no console switch without a
   screen (`presenter=test|none` keep session 1 on the console); no
   WM_WTSSESSION_CHANGE notifications (WTSRegisterSessionNotification)
   and no keys released by WM_KEYUP when the console leaves; `gala
@@ -12213,13 +12213,14 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    are kept whether or not anything shows them; the compositor (frames,
    taskbar, start menu, wallpaper, fonts) is a presenter. So a server
    (`profile=server`, ROADMAP SD) can serve GUI programs to a remote
-   shasha client without composing anything itself, and a desktop with no presenter keeps its
+   client without composing anything itself (RDP's RemoteApp sends
+   windows, not a screen), and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
 2. **Presenters** (B3a; Console, None and Test and the console switch
    are built, "Presenters (B3a)"), at most one per desktop at a time:
    - **Console**: the framebuffer through `platform::Display`, PS/2
      input routed to the session the console shows;
-   - **Remote**: a shasha client over the network;
+   - **Remote**: an RDP client over the network (B3b);
    - **None**: disconnected;
    - **Test** (gala's addition): a headless in-kernel presenter that
      renders to memory for screen checks and records frames, replacing
@@ -12227,35 +12228,53 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    A console switch or a remote reconnect attaches a presenter. The
    Display seam's `screen_flush` (damaged area) and `screen_changed`
    (new size), added for virtio-gpu, are what a presenter needs too.
-3. **Remote shasha protocol** (B3b; gala's own, no clean-room concern):
-   essentially the existing system-call surface over a socket.
-   - Server -> client: window create/show/place/title/icon/destroy,
-     capture, screen info, damaged rectangles of client pixels
-     (compressed: a pure-Rust LZ4 or similar, recorded in
-     THIRD_PARTY.md).
-   - Client -> server: input records in client coordinates, named
-     actions (Activate, Minimize, Maximize, Restore, Close, Snap, Place,
-     Start), the client's screen size.
-   - **The server owns window state** (Win32 programs ask for geometry
-     synchronously: GetWindowRect, ScreenToClient, menus and tooltips in
-     screen coordinates, the work area, Z order, FindWindow); **the
-     client owns presentation** (composition, chrome, hover, the
-     pointer; a caption drag moves the window locally and sends Place at
-     the end or throttled); only input inside client areas round-trips.
-   - On connect the server sends the full state and every window's last
-     pixels, which also gives reconnect.
-   - Versioned (invariant 3); its messages are the same records the
-     kernel handover carries for windows (R9), so a GUI survives a
-     handover by the client reconnecting (B5).
-4. **The client** (B3b): shasha's compositor factored into a crate that
-   builds for the kernel and the host; a host app (winit plus a software
-   framebuffer; Linux, macOS, Windows), later wasm in a browser.
-   Wallpapers and fonts live on the client. Later: a seamless mode (each
-   gala window a native host window, RemoteApp-like; the same per-window
-   protocol), clipboard, cursor shapes, sound.
-5. **Transport and authentication**: first listens on 127.0.0.1 inside
-   gala, reached through `ssh -L` (SSH's authentication and encryption
-   carry it); later TLS with logon through LSA.
+3. **RDP, the remote presenter** (B3b): gala serves Remote Desktop, so
+   the clients people already have connect unchanged: mstsc and the
+   Windows App on Windows, macOS, iOS and Android, FreeRDP and Remmina
+   on Linux.
+   - **Sources**: Microsoft's Open Specifications, public documentation
+     (CLEAN_ROOM): [MS-RDPBCGR] (connection, capabilities, fast-path
+     input, bitmap updates, licensing's "no license needed" answer),
+     [MS-CSSP] (network level authentication), [MS-RDPEDYC] (dynamic
+     channels), [MS-RDPEGFX] (the graphics pipeline), [MS-RDPEDISP]
+     (resizing), [MS-RDPERP] (RemoteApp), [MS-RDPECLIP] (clipboard),
+     [MS-RDPEA] (audio), [MS-RDPEFS] (drives); Microsoft's Open
+     Specifications Promise is checked per specification before it is
+     relied on. Implementation: IronRDP's crates (Rust, MIT/Apache-2.0;
+     its server crate) where they fit gala's rules (fallible
+     allocation), recorded in THIRD_PARTY.md, else written from the
+     specifications.
+   - **Where it runs**: a user-mode service in session 0 (the
+     termsrv role) listening on TCP 3389; it reads a session's desktop
+     through GalaSession (the Test presenter's frame and damage today)
+     and injects input through SESSION_INPUT, so the kernel gains a
+     Remote presenter and no protocol code.
+   - **Security**: TLS through gala's Schannel (its server side) and
+     network level authentication through CredSSP over gala's NTLM
+     server side (secur32), the logon through LSA as any logon; RDP's
+     own legacy RC4 security is never offered. A certificate made on
+     first start, kept in the machine's store.
+   - **Order of features**: first a whole desktop with planar and
+     bitmap updates, fast-path keyboard and mouse, disconnect and
+     reconnect to the same session, resizing; then the graphics
+     pipeline (EGFX, H.264 later: an encoder and its licence are their
+     own decision), clipboard, RemoteApp (each window a window on the
+     client: the server profile's GUI with no compositor), audio,
+     drives, several monitors.
+   - **Testing**: an xtask client (IronRDP's client crates on the host)
+     through a forwarded port; real Windows' mstsc as the reference
+     client in the Windows test lab.
+4. **Remote shasha** (later, only for what RDP cannot carry): gala's
+   own protocol, in which the server owns window state and the client
+   owns presentation (composition, chrome, hover; only input inside
+   client areas round-trips), its messages the same records the kernel
+   handover carries for windows (R9). Its case is a GUI that survives
+   a kernel handover with no visible reconnect (B5) and a client that
+   draws gala's own chrome; until a need like that is shown, RDP is the
+   remote desktop and this is not built.
+5. **Transport and authentication**: RDP's TLS and CredSSP (above);
+   for anything else, first listening on 127.0.0.1 inside gala, reached
+   through `ssh -L` (SSH's authentication and encryption carry it).
 6. **Session manager** (B4): a gala call `GalaSession` (create, attach a
    presenter, detach, logoff, list; SeTcbPrivilege); a user-mode service
    in the termsrv/winlogon role (accepts a remote client, authenticates
@@ -12266,10 +12285,12 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    <id>` (`gala attach <id>`, the console switch, is built: "Presenters
    (B3a)"; B4 adds who may attach where).
 7. **Observability**: session events (create, logon, attach, detach,
-   logoff); per-session counts on the `stats:` line; a protocol trace
-   (`remote=trace`) and a recording of a client's input and the server's
-   output for replay (R7); the client shows connection quality (latency,
-   frames, bytes).
+   logoff); per-session counts on the `stats:` line; an RDP connection's
+   phases each logged with the client's name, build and the channels
+   and capabilities agreed (what a client asked for and was refused is
+   in the ledger), its PDUs traced on demand (`remote=trace`), frames,
+   bytes and round-trip time as metrics, and a recording of a client's
+   input and the server's output for replay (R7).
 8. **Resources and security**: per-session charging (R6: commit,
    handles, pixel memory per desktop); a session's processes and windows
    isolated as in B2; logons audited in the event stream.
@@ -12279,9 +12300,7 @@ on Windows too), 1 for the local console, 2+ for remote logons.
 
 Later: several window stations and desktops per session (CreateDesktop,
 OpenDesktop, SetThreadDesktop, SwitchDesktop, a secure desktop for
-credential prompts), atom tables per window station, and
-Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
-crate is a candidate) if mstsc compatibility is wanted. Without any gala
+credential prompts), atom tables per window station. Without any gala
 work, QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
 
 ## Plan: a second personality (Linux)
@@ -14009,7 +14028,7 @@ One socket for the boot user today. Next, each session's desktop has
 its own Wayland socket, under its user's `/run/user/<uid>`, and a Linux
 program started in a session gets `WAYLAND_DISPLAY` and
 `XDG_RUNTIME_DIR` for it, its windows on that session's desktop, shown
-by whatever presents it ("Plan: sessions and remote shasha"). Server
+by whatever presents it ("Plan: sessions and remote desktops"). Server
 and bare desktops ("Server and desktop workloads") keep Wayland windows
 as they keep Windows ones: the pixels are kept and nothing draws them
 (the `lx_wl` scenario's desktop is such a one).
@@ -14875,7 +14894,7 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
 ## Plan: graphics and GPU
 
 GPU support serves the browser first (ROADMAP BR stages 2 and 5), then
-remote shasha (RS), then programs in general; it is ordered for the
+remote desktops (RS: RDP's graphics pipeline), then programs in general; it is ordered for the
 shortest path to a rendered web page and nothing needs a GPU to work
 (every VM, servers, CI). ROADMAP GPU tracks it: G0 and G1 (virtio-gpu 2D) are
 built, G2 (software 3D) is being built ("Software 3D (G2)"), G3 and G4
