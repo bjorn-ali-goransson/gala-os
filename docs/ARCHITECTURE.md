@@ -4633,7 +4633,13 @@ redistributable (the owner's decision).
 - **Strings, locale, math, time** (`string.rs`, `locale.rs`, `math.rs`,
   `time.rs`, `compat.rs`, `c99.rs`): the `_s` string and number functions, the
   restartable multibyte functions (UTF-8; a character beyond the BMP
-  does not fit one wchar_t: U+FFFD, recorded); one locale, "C", with
+  does not fit one wchar_t: U+FFFD, recorded), `mbsrtowcs` among them
+  (with `dst` NULL it counts the whole string and leaves `*src` and
+  `len` alone; otherwise it leaves `*src` past the bytes it took, or
+  NULL once it wrote the terminator, which it does not count);
+  `wctype`, which ucrtbase exports and msvcrt.dll does not, giving
+  `iswctype`'s mask for each of C's twelve class names and 0 for any
+  other name; one locale, "C", with
   UTF-8 as the multibyte code page (`_create_locale` returns it and
   records any other name; `_configthreadlocale` is kept per process);
   `_dclass` and the classification functions with the UCRT's FP_*
@@ -8650,8 +8656,24 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   or MsgWaitForMultipleObjects about to wait) or once drawing has gone
   on for 50 ms without a break. One change (a resize repaints every
   child; wx calls GetDC/ReleaseDC to measure text) is then one copy, not
-  hundreds. TODO: a thread that draws and then blocks outside user32
-  shows its last 50 ms only when it next draws or pumps.
+  hundreds.
+  **What a thread that is not the window's draws on a DC of it shows as
+  it is drawn**, with no idle moment to wait for: user32 tells gdi32
+  which thread each window DC was handed out for
+  (`GalaSetDcThread`, from `client_dc`) and registers what to call when
+  another one draws on it (`GalaSetPresentHook`); gdi32 calls that hook
+  from `with_dc`, after its object table's lock is free, and user32
+  copies the window's area to the desktop then and there (no batching:
+  one copy per such call). A swapchain's presenter is this case -- Mesa's
+  win32 WSI blits each frame into the window's DC, and DXVK does that
+  blit from a presenter thread of its own while the program's thread
+  waits for a message, so nothing of that thread's would ever show it --
+  and it is what Windows does, where GDI drawing on a window DC reaches
+  the device as it is drawn. Tests: `paint_thread_test` (a second
+  thread's square must be on the screen while the window's thread waits
+  for a message), `d3d11_test` (DXVK's frame). TODO: a thread that draws
+  on its own window and then blocks outside user32 shows its last 50 ms
+  only when it next draws or pumps.
 - **Activation** (`activate`): one active (foreground) top-level window
   per process. Activating one sends the one it replaces WM_NCACTIVATE
   (FALSE) and WM_ACTIVATE (WA_INACTIVE, lParam the new one; the focus
@@ -9370,7 +9392,13 @@ then riched20.dll).
   metafiles (NULL/FALSE/0), printing (no DC is a printer DC: SP_ERROR),
   OpenGL pixel formats (no ICD: 0/FALSE), GetICMProfileW,
   GetOutlineTextMetricsW, EnumFontFamiliesExA, ExtEscape (0, the escape
-  not implemented), GdiComment.
+  not implemented), GdiComment, and the kernel-mode display thunks
+  DXVK imports (19 `D3DKMT*` functions: STATUS_NOT_SUPPORTED, recorded;
+  DXVK calls them only for resources shared between devices).
+  `D3DKMTEnumAdapters2` and `D3DKMTQueryAdapterInfo` are deliberately
+  not among them: the Vulkan loader asks for them by GetProcAddress and
+  skips that path when the answer is NULL ("The loader needs a DXGI
+  factory"), which it would not do if they existed and failed.
 
 ### shell32, ole32, dbghelp and normaliz helpers
 
@@ -14932,7 +14960,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 | G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`, and for Office's shared code `d3d10_1.dll` (D3D10CreateDevice1, D3D10CreateStateBlock) and `d3d10.dll` (D3D10CreateEffectFromMemory), as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
-| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
+| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL, Vulkan and Direct3D 11 built (`gl_test`, `vk_test`, `d3d11_test`); d3d12 and shaders to come |
 | G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |
 | G4 (GPU presentation) | DXGI flip-model swap chains presented as resources (no readback through GDI), shasha composing resources, then BR stage 5 (Chromium `--use-angle=vulkan` on Venus) | planned |
 
@@ -15170,7 +15198,44 @@ GPU or a screen (`presenter=test`).
   read back from the swapchain image and presented, checked on the
   screen. About 10 s each under TCG; on a Windows machine without a
   Vulkan driver vk_test says `skipped`.
-- **TODO** (ROADMAP GPU): DXVK, vkd3d-proton.
+- **Direct3D 11 is DXVK** (PREBUILT `dxvk`, zlib/libpng;
+  THIRD_PARTY.md) over that same Vulkan stack. Its `d3d11.dll` and
+  `dxgi.dll` ship **beside the program**, where a game ships them, not
+  in System32: System32's `dxgi.dll` stays gala's, the one the Vulkan
+  loader calls, and the loader loads it by its full path, so the two
+  are separate modules in one process ("Search" under the loader;
+  `loader_test`). DXVK's d3d11 finds its own dxgi first because a bare
+  name is searched in the executable's directory before System32. Its
+  CRT is the UCRT through the `api-ms-win-crt-*` sets (gala's
+  ucrtbase), and it reads the adapter's devnode through setupapi and
+  cfgmgr32, which have no device tree to show; everything else it
+  imports gala had already, beyond gdi32's `D3DKMT*` thunks (above).
+  `d3d9`, `d3d8` and `d3d10core` are in the same release and follow
+  with the programs that want them; DXVK ships no `d3d10`/`d3d10_1`
+  front-end, so Office's shared code keeps G0's stubs there.
+- **Test**: `d3d11_test` (user/d3d11_test, C): d3d11.dll loaded at run
+  time, D3D11CreateDeviceAndSwapChain at feature level 11_0 with a
+  swap chain on a 400 x 300 window, the adapter behind the device named
+  through IDXGIDevice (`llvmpipe ...`), the back buffer cleared and a
+  second render target half its size cleared and copied into the middle
+  with CopySubresourceRegion, the frame read back through a staging
+  texture (0x336699 in the corner, 0xffcc00 in the middle), Present,
+  the screen checked, a click to end. It needs no shader, and so no
+  HLSL compiler: D3D11's clears and copies are not the pipeline. On a
+  Windows machine with no Direct3D device it says `skipped`.
+- **Red and blue arrive swapped in the presented frame**, so the screen
+  check expects the swapped colours (a stopgap, ROADMAP "Known issues
+  and stopgaps"). DXVK asks for a `VK_FORMAT_R8G8B8A8_UNORM` swapchain
+  for any 8-bit UNORM back buffer; Mesa's win32 WSI advertises that
+  format; and the GDI present path, the only one Mesa gives a software
+  driver, copies the image into a BI_RGB (so BGRA) DIB section without
+  swizzling it. The swap is in the prebuilt stack, not in gala: it is
+  the same on Windows with lavapipe, and `vk_test`, which asks for
+  `VK_FORMAT_B8G8R8A8_UNORM` itself, gets its colours right through the
+  same window path. Read back inside D3D11 the frame is correct, which
+  is what the test asserts of the stack it drives.
+- **TODO** (ROADMAP GPU): vkd3d-proton; a drawn triangle (shaders) and
+  `d3dcompiler_47`.
 
 ## UI Automation
 

@@ -34,7 +34,7 @@ mod unimplemented;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use font::LogFont;
 use surface::Surface;
 
@@ -101,6 +101,7 @@ unsafe extern "system" {
         size: usize,
     ) -> *mut c_void;
     fn UnmapViewOfFile(at: *const c_void) -> i32;
+    fn GetCurrentThreadId() -> u32;
 }
 
 type Handle = *mut c_void;
@@ -139,6 +140,11 @@ pub(crate) struct Dc {
     pub surface: Surface,
     /// A memory DC's bitmap (slot).
     pub bitmap: usize,
+    /// A window DC: the thread user32 handed it out for, whose idle
+    /// moments show what is drawn on it (`GalaSetDcThread`; 0 until it
+    /// says). Another thread's drawing shows as it is drawn
+    /// (`present_hook`).
+    pub thread: u32,
     pub text: u32,
     pub background: u32,
     /// TRANSPARENT (1) or OPAQUE (2).
@@ -412,20 +418,48 @@ pub(crate) fn pixel(color: u32) -> u32 {
     (color & 0xff) << 16 | (color & 0xff00) | (color >> 16) & 0xff
 }
 
-/// Runs `f` on DC `h`'s state, if it is one.
+/// Runs `f` on DC `h`'s state, if it is one. A window DC drawn on by a
+/// thread that is not the window's shows what it drew at once
+/// (`present_hook`), which is the one thing a caller never does for
+/// itself: the window's own thread shows its drawing at ReleaseDC,
+/// EndPaint or its next idle moment, none of which a thread waiting for a
+/// message reaches again.
 pub(crate) fn with_dc<R>(
     h: Handle,
     f: impl FnOnce(&mut Dc, &mut [Object; SLOTS]) -> R,
 ) -> Option<R> {
     let i = slot_of(h)?;
-    with(|slots, _| {
+    let (r, foreign) = with(|slots, _| {
         let Object::Dc(mut dc) = slots[i] else { return None };
         let r = f(&mut dc, slots);
+        // SAFETY: a plain call.
+        let foreign = matches!(dc.kind, DcKind::Window)
+            && dc.thread != 0
+            && dc.thread != unsafe { GetCurrentThreadId() };
         if let Object::Dc(_) = slots[i] {
             slots[i] = Object::Dc(dc);
         }
-        Some(r)
-    })
+        Some((r, foreign))
+    })?;
+    if foreign {
+        // Outside the table's lock, so the hook may use gdi32 itself.
+        present_hook(h);
+    }
+    Some(r)
+}
+
+/// What user32 registered to show a window DC's drawing on the desktop
+/// (`GalaSetPresentHook`), or 0.
+static PRESENT_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+fn present_hook(hdc: Handle) {
+    let hook = PRESENT_HOOK.load(Ordering::Acquire);
+    if hook == 0 {
+        return;
+    }
+    // SAFETY: user32 registered a function of this signature (its `drew`).
+    let hook: extern "system" fn(Handle) = unsafe { core::mem::transmute(hook) };
+    hook(hdc);
 }
 
 pub(crate) fn unsupported(what: &[u8], detail: u64) {
@@ -452,6 +486,7 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         kind,
         surface,
         bitmap,
+        thread: 0,
         text: 0,
         background: 0xffffff,
         mode: 2,
@@ -539,6 +574,22 @@ pub extern "system" fn GalaCreateChildDC(
 #[unsafe(no_mangle)]
 pub extern "system" fn GalaDeleteSurfaceDC(hdc: Handle) -> i32 {
     DeleteDC(hdc)
+}
+
+/// The thread user32 handed this window DC out for: the one whose idle
+/// moments show what is drawn on it. Any other thread's drawing on it
+/// shows as it is drawn (`with_dc`).
+#[unsafe(no_mangle)]
+pub extern "system" fn GalaSetDcThread(hdc: Handle, thread: u32) -> i32 {
+    i32::from(with_dc(hdc, |dc, _| dc.thread = thread).is_some())
+}
+
+/// What gdi32 calls to show at once what a thread that is not the
+/// window's drew on its DC (user32's: it copies the window's pixels to
+/// the desktop). One hook for the process.
+#[unsafe(no_mangle)]
+pub extern "system" fn GalaSetPresentHook(hook: *const c_void) {
+    PRESENT_HOOK.store(hook as usize, Ordering::Release);
 }
 
 // ---- Device contexts ----
