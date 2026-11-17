@@ -6248,6 +6248,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   the next failure says. Item W3.
 - **Fault-injection leftovers**: out-of-memory reported as
   STATUS_DLL_NOT_FOUND / STATUS_INVALID_IMAGE_FORMAT. Item R2.
+- **`clock_test`'s simulated rate measures the host's scheduling**: the
+  last check of the `control` step divides the program time a 30 s
+  simulated delay produced by the raw time it cost and asks for at
+  least 500 of the 1000 it set, so a host that leaves the VM off a CPU
+  for a few of those 30 ms fails it (1 of the scenario's last 24 runs;
+  its triage line read `5.4s run of 11.2s wall (5.4s waiting for a host
+  CPU)`, and it passes 3 of 3 alone). Nothing inside the VM can tell
+  that time apart: the raw clock is the TSC, which runs while the vCPU
+  does not. Fix: either the kernel accounts for the time it was not
+  running (a gap between timer ticks, steal time) and the check measures
+  against that, or the check keeps only what is gala's own -- the
+  program clock ran no faster than it was asked to, and 30 s of it cost
+  less than 30 s of raw time. Item R7.
 - **Seen once, unexplained**: sshd_password's sshd.exe ended with an
   unhandled access violation at 0xffffd0000013f948 (a kernel-half
   address read from user mode) after `ReadFileEx ERROR 38` lines, under
