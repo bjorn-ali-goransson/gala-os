@@ -52,14 +52,17 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     if call_handlers(&continue_, &mut pointers) || handled {
         NtContinue(context, 0);
     }
-    // Unhandled: the top-level filter (kernel32's UnhandledExceptionFilter,
-    // which calls SetUnhandledExceptionFilter's) may continue execution;
+    // Unhandled: the kernel keeps it for the crash report, whether or
+    // not anything registered a filter (a process that loads ntdll
+    // alone has none, and its crash is the one worth describing), and
+    // whatever status the process ends with: a filter such as
+    // Crashpad's ends it with one of its own (0xffff7002).
+    crate::GalaUnhandledException(record, context);
+    // The top-level filter (kernel32's UnhandledExceptionFilter, which
+    // calls SetUnhandledExceptionFilter's) may continue execution;
     // otherwise the process ends.
     let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
     if filter != 0 {
-        // The kernel keeps it for the crash report: the filter may end
-        // the process with a status of its own (Crashpad's 0xffff7002).
-        crate::GalaUnhandledException(record, context);
         // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
         let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
             unsafe { core::mem::transmute(filter) };

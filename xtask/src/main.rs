@@ -7279,6 +7279,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
+    ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
@@ -12349,6 +12350,7 @@ const ARM64_TWINS: &[&str] = &[
     "apc_test",
     "crash_dispatched",
     "crash_filtered",
+    "crash_raise",
     "seh_test",
     "context_test",
     "threadinfo_test",
@@ -17560,6 +17562,26 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "(crash.exe+0x",
             "writing address 0x0",
             "process crash.exe (pid 4) exited with status 0xffff7002",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // An exception the program raises itself, with a code nothing
+        // decodes and three parameters, which no handler takes (what
+        // Office's shared code does with 0xe0000002, ROADMAP OF): the
+        // report has only the parameters to go on, so it names them,
+        // with the image any of them points into.
+        name: "crash_raise",
+        cmdline: "qemu_exit run=crash.exe args=raise",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: raising 0xe0000042 with three parameters",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000042 \
+             (exception) in thread",
+            "crash report:   3 parameters: 0x8007000e, 0x",
+            "(crash.exe+0x",
+            ", 0xfeedface",
+            "process crash.exe (pid 4) exited with status 0xe0000042",
             BOOT_OK_MARKER,
         ],
     },

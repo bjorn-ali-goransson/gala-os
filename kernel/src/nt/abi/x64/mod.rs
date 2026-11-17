@@ -492,21 +492,25 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let x86 = u32::from(u16::from_le_bytes(cs)) == crate::nt::layout::wow64::CS32;
     let mut note =
         crate::nt::crashreport::Note::new(&call.process, NtStatus(code), access, regs, x86);
+    // The parameters, read once: the decoders below take theirs from
+    // the note, and a code none of them knows shows them as they are.
+    note.params_count = count as usize;
+    note.params_len = note.params_count.min(crate::nt::crashreport::PARAMS);
+    let kept = note.params_len;
+    for (i, p) in note.params.iter_mut().take(kept).enumerate() {
+        *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
+    }
     // A C++ throw: what was thrown, read now (the object and the
     // runtime's type data are gone once the process has ended).
     if code == crate::nt::crashreport::CXX_EXCEPTION {
-        let mut params = [0u64; 4];
-        for (i, p) in params.iter_mut().enumerate().take(count.min(4) as usize) {
-            *p = tri!(call.read_u64(record + 0x20 + 8 * i as u64));
-        }
         let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
-        let params = &params[..count.min(4) as usize];
+        let params = &note.params[..note.params_len.min(4)];
         note.cxx = crate::nt::crashreport::CxxThrow::decode(params, x86, &read);
     }
     // A delay-load failure: the DLL and function it was looking for.
     use crate::nt::crashreport::{DELAY_DLL, DELAY_PROC, DelayLoad};
-    if matches!(code, DELAY_DLL | DELAY_PROC) && count >= 1 {
-        let info = tri!(call.read_u64(record + 0x20));
+    if matches!(code, DELAY_DLL | DELAY_PROC) && note.params_len >= 1 {
+        let info = note.params[0];
         let read = |addr: u64, out: &mut [u8]| call.process.read(addr, out).is_ok();
         note.delay = DelayLoad::decode(info, x86, &read);
     }

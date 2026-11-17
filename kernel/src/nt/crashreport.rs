@@ -11,10 +11,11 @@
 //! status (the unhandled exception ended it: from the kernel when there
 //! is no dispatcher, from ntdll's unhandled-exception path otherwise),
 //! `report` prints it as `crash report:` lines. ntdll also reports an
-//! exception no handler took before it calls the top-level filter
-//! (GalaUnhandledException): the process's report then comes whatever
-//! status it ends with (Chromium's Crashpad ends it with 0xffff7002 when
-//! its handler fails), unless the filter continued execution.
+//! exception no handler took, whether or not a top-level filter was
+//! registered (GalaUnhandledException): the process's report then comes
+//! whatever status it ends with (Chromium's Crashpad ends it with
+//! 0xffff7002 when its handler fails), unless the filter continued
+//! execution.
 
 use core::fmt;
 
@@ -74,7 +75,17 @@ pub struct Note {
     /// For one in 32-bit code: the TEB32's ExceptionList itself (None:
     /// unread), shown when the list could not be walked.
     pub seh_head: Option<u32>,
+    /// The exception's parameters as its EXCEPTION_RECORD carried them,
+    /// `params_len` of them read (at most `PARAMS`) and `params_count`
+    /// claimed: for a code nothing here decodes they are all it says.
+    pub params: [u64; PARAMS],
+    pub params_len: usize,
+    pub params_count: usize,
 }
+
+/// Exception parameters a report keeps (EXCEPTION_MAXIMUM_PARAMETERS,
+/// all a record has room for).
+pub const PARAMS: usize = 15;
 
 /// SEH registrations kept for a 32-bit crash report.
 pub const SEH_FRAMES: usize = 12;
@@ -173,6 +184,9 @@ impl Note {
             seh_len: 0,
             seh_end: false,
             seh_head: None,
+            params: [0; PARAMS],
+            params_len: 0,
+            params_count: 0,
         }
     }
 }
@@ -581,6 +595,18 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             }
         );
     }
+    if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {
+        let shown = Params(process, &note.params[..note.params_len]);
+        if note.params_count > note.params_len {
+            info!("crash report:   {} parameters, the first {PARAMS}: {shown}", note.params_count);
+        } else {
+            info!(
+                "crash report:   {} parameter{}: {shown}",
+                note.params_count,
+                if note.params_count == 1 { "" } else { "s" }
+            );
+        }
+    }
     if note.seh_len == 0
         && !note.seh_end
         && let Some(head) = note.seh_head
@@ -700,6 +726,22 @@ impl fmt::Display for Words<'_> {
 }
 
 /// Bytes shown as text: printable ASCII as is, others as `\xNN`.
+/// An exception's parameters: each value, and the image it points into
+/// when it points into one.
+struct Params<'a>(&'a Process, &'a [u64]);
+
+impl fmt::Display for Params<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, &v) in self.1.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", At::of(self.0, v))?;
+        }
+        Ok(())
+    }
+}
+
 struct Lossy<'a>(&'a [u8]);
 
 impl fmt::Display for Lossy<'_> {

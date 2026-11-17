@@ -789,6 +789,13 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 
 - `record flags` when not 0 (noncontinuable; EXCEPTION_STACK_INVALID:
   the search met a registration off the stack).
+- The exception's parameters, when nothing below explains them (an
+  access violation, a delay load and a C++ throw have lines of their
+  own saying what theirs mean): `3 parameters: 0x8007000e, 0x140001060
+  (crash.exe+0x1060), 0xfeedface`, each with the image it points into,
+  the count the record claimed and at most 15 shown. A raise of a code
+  no runtime knows -- what Office's shared code does with 0xe0000002
+  (ROADMAP OF) -- carries nothing else at all. Scenario `crash_raise`.
 - In 32-bit code, `32-bit SEH registrations, newest first`: the frame
   and handler (module+offset) of each registration on the TEB32's
   ExceptionList as the dispatcher offered it to them, up to 12, and
