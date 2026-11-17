@@ -391,6 +391,8 @@ syscall_stubs! {
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
+    // NtPulseEvent: gala's number, UNVERIFIED.
+    NtPulseEvent = 0x7f2a, fn(h: usize, previous: *mut i32);
     NtQuerySystemTime = 0x5a, fn(time: *mut i64);
     NtCreateEvent = 0x48, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32,

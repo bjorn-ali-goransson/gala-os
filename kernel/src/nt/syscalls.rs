@@ -320,6 +320,8 @@ pub const NT_QUERY_PERFORMANCE_COUNTER: u32 = 0x0031;
 pub const NT_DELAY_EXECUTION: u32 = 0x0034;
 pub const NT_DUPLICATE_OBJECT: u32 = 0x003c;
 pub const NT_CLEAR_EVENT: u32 = 0x003e;
+/// NtPulseEvent: gala's number, UNVERIFIED.
+pub const NT_PULSE_EVENT: u32 = 0x7f2a;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -506,6 +508,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
     (NT_DUPLICATE_OBJECT, "NtDuplicateObject", 7, nt_duplicate_object),
     (NT_CLEAR_EVENT, "NtClearEvent", 1, nt_clear_event),
+    (NT_PULSE_EVENT, "NtPulseEvent", 2, nt_pulse_event),
     (NT_CREATE_EVENT, "NtCreateEvent", 5, nt_create_event),
     (NT_QUERY_EVENT, "NtQueryEvent", 5, nt_query_event),
     (NT_QUERY_SYSTEM_TIME, "NtQuerySystemTime", 1, nt_query_system_time),
@@ -3170,6 +3173,18 @@ fn nt_set_event(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// NtClearEvent(EventHandle)
+/// NtPulseEvent(EventHandle, PreviousState): signal the event, release
+/// the threads waiting on it now, leave it unsignaled (`wait::pulse`).
+fn nt_pulse_event(call: &mut Call<'_>) -> NtStatus {
+    let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
+    let previous = wait::pulse(&event);
+    let prev_ptr = arg!(call, 1);
+    if prev_ptr != 0 {
+        tri!(call.write_u32(prev_ptr, previous as u32));
+    }
+    NtStatus::SUCCESS
+}
+
 fn nt_clear_event(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
     wait::set_signal(&event, 0);

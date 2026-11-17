@@ -2079,8 +2079,15 @@ checks, so WaitAll sees a consistent state.
   Windows.
 - Timeouts: NT timeouts (negative = relative 100 ns, positive = absolute
   system time, 0 = poll) become tick deadlines rounded up.
+- A pulse (NtPulseEvent) releases the waiters waiting at that moment and
+  leaves the event unsignaled: all of them for a notification event, the
+  one that has waited longest for a synchronization event (whose signal a
+  wait consumes, so a pulse cannot be shared). A thread not yet waiting
+  misses it, as on Windows, which documents PulseEvent as unreliable.
 - TODO: a wait-all is satisfied only when all objects are signaled at
-  its re-check (no release marking for wait-all).
+  its re-check (no release marking for wait-all; a pulse passes a
+  wait-all waiter over for the same reason, and would otherwise be lost
+  on it).
 
 Invariants:
 
@@ -2105,7 +2112,9 @@ Invariants:
 ### Synchronization objects
 
 - **Events**: NtCreateEvent, NtOpenEvent, NtSetEvent, NtClearEvent,
-  NtQueryEvent; notification and synchronization (auto-reset) types.
+  NtQueryEvent, NtPulseEvent (gala's number, UNVERIFIED; kernel32's
+  PulseEvent, which Office's mso98win32client imports); notification and
+  synchronization (auto-reset) types. What a pulse does: "Waits".
 - **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant
   is signaled for waiters when free or owned by the waiting thread
   (recursive); acquiring records it in the thread's owned list, and a

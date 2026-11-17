@@ -24,17 +24,24 @@ struct DispatcherInner {
     waiters: Vec<Waiter>,
 }
 
-/// A thread waiting on an object, and whether the object was signaled
-/// while it waited (`released`). A notification event or timer set while
-/// a thread waits satisfies that wait even when it is reset before the
-/// thread runs again, as on Windows: the woken thread's own check comes
-/// later and could find it reset (two console processes' Ctrl+C handler
-/// threads waited on one event and the first to run reset it: the other
-/// slept on until its timeout; sshd_shell, wait_test).
+/// A thread waiting on an object, and what reached it while it waited:
+/// the object was signaled (`released`) or pulsed (`pulsed`). A
+/// notification event or timer set while a thread waits satisfies that
+/// wait even when it is reset before the thread runs again, as on
+/// Windows: the woken thread's own check comes later and could find it
+/// reset (two console processes' Ctrl+C handler threads waited on one
+/// event and the first to run reset it: the other slept on until its
+/// timeout; sshd_shell, wait_test). A pulse is never there to be found,
+/// so `pulsed` is the only trace of it. `wait_all` is the waiting
+/// thread's kind of wait: neither mark satisfies a WaitAll wait, which
+/// needs every object at once (see `pulse` and the limit under "Waits"
+/// in docs/ARCHITECTURE.md).
 #[derive(Clone, Copy)]
 struct Waiter {
     thread: ThreadId,
     released: bool,
+    pulsed: bool,
+    wait_all: bool,
 }
 
 /// Wakes `inner`'s waiters, marking them released (it became signaled).
@@ -71,6 +78,40 @@ pub fn set_signal(object: &ObjectRef, signal: i32) -> i32 {
         // by the first one to get there (notification objects release
         // them all: `Waiter`).
         wake_all(&mut inner);
+    }
+    previous
+}
+
+/// Pulses an event (NtPulseEvent): the threads waiting on it at this
+/// moment are released, and it is left unsignaled whatever it was.
+/// A notification event releases all of them, a synchronization event
+/// the one that has waited longest (a wait on such an event consumes the
+/// signal, so a pulse cannot be shared); a thread that is not waiting
+/// yet misses the pulse altogether, which is why Windows documents
+/// PulseEvent as unreliable. Returns the previous signal state.
+pub fn pulse(object: &ObjectRef) -> i32 {
+    let Some(d) = object.dispatcher() else { return 0 };
+    let one = matches!(&object.body, ObjectBody::Event(e) if e.kind == EventType::Synchronization);
+    let _guard = DISPATCHER.lock();
+    pulse_waiters(&mut d.inner.lock(), one, platform::wake)
+}
+
+/// What a pulse does to one dispatcher: marks the waiters it releases,
+/// wakes them through `wake` and leaves the state unsignaled; returns the
+/// previous state. The waking is a parameter so that a host test can see
+/// which waiters a pulse releases without a scheduler to wake them.
+fn pulse_waiters(inner: &mut DispatcherInner, one: bool, mut wake: impl FnMut(ThreadId)) -> i32 {
+    let previous = inner.signal;
+    inner.signal = 0;
+    // A WaitAll waiter is passed over: it is satisfied only by every
+    // object at once, and a pulse leaves nothing behind for the others'
+    // check to find, so releasing it would lose the pulse.
+    for waiter in inner.waiters.iter_mut().filter(|w| !w.wait_all) {
+        waiter.pulsed = true;
+        wake(waiter.thread);
+        if one {
+            break;
+        }
     }
     previous
 }
@@ -332,12 +373,12 @@ pub fn wait_for_alertable(
     debug_assert!(!wait_all || !has_duplicates(objects), "WaitAll with an object twice");
     let me = platform::current();
     let mut timed_out = false;
-    // The object whose signal released the last sleep (`Waiter`).
-    let mut released: Option<usize> = None;
+    // The object whose signal satisfied the last sleep (`unregister`).
+    let mut satisfied: Option<usize> = None;
     loop {
         let guard = DISPATCHER.lock();
-        if !wait_all && let Some(i) = released.filter(|&i| releases_waiters(&objects[i])) {
-            // Satisfied when it was set, though reset since.
+        if !wait_all && let Some(i) = satisfied {
+            // Satisfied when it was signaled, though signaled no longer.
             return NtStatus(i as u32);
         }
         if alertable && super::thread::has_user_apc() {
@@ -365,7 +406,8 @@ pub fn wait_for_alertable(
         // Register as a waiter everywhere, then sleep.
         for (n, object) in objects.iter().enumerate() {
             let d = object.dispatcher().expect("waitable objects only");
-            if d.inner.lock().waiters.try_push(Waiter { thread: me, released: false }).is_err() {
+            let waiter = Waiter { thread: me, released: false, pulsed: false, wait_all };
+            if d.inner.lock().waiters.try_push(waiter).is_err() {
                 let _ = unregister(&objects[..n], me);
                 return NtStatus::NO_MEMORY;
             }
@@ -376,7 +418,7 @@ pub fn wait_for_alertable(
         super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
-            released = unregister(objects, me);
+            satisfied = unregister(objects, me);
         }
         let reason = match reason {
             Ok(reason) => reason,
@@ -389,22 +431,27 @@ pub fn wait_for_alertable(
     }
 }
 
-/// Removes `me` from `objects`' waiters; the first object that released
-/// it (was signaled while it waited), if any.
+/// Removes `me` from `objects`' waiters; the first object whose signal
+/// satisfied the wait while it slept, if any: a pulse, which is gone by
+/// the time the thread looks, or an object whose signal releases its
+/// waiters (`releases_waiters`). An object signaled while it waited whose
+/// signal a wait consumes is not one: the thread's own check takes it, or
+/// finds it taken.
 fn unregister(objects: &[ObjectRef], me: ThreadId) -> Option<usize> {
-    let mut released = None;
+    let mut satisfied = None;
     for (i, object) in objects.iter().enumerate() {
         if let Some(d) = object.dispatcher() {
             let mut inner = d.inner.lock();
             if let Some(pos) = inner.waiters.iter().position(|w| w.thread == me) {
-                if inner.waiters[pos].released && released.is_none() {
-                    released = Some(i);
+                let w = inner.waiters[pos];
+                if satisfied.is_none() && (w.pulsed || (w.released && releases_waiters(object))) {
+                    satisfied = Some(i);
                 }
                 inner.waiters.swap_remove(pos);
             }
         }
     }
-    released
+    satisfied
 }
 
 /// Sleeps the current thread until `timeout` (NtDelayExecution). An
@@ -451,7 +498,60 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nt::object::{KObject, ObjectBody};
+    use crate::nt::object::{Event, KObject, ObjectBody};
+
+    fn event(kind: EventType) -> ObjectRef {
+        KObject::new(ObjectBody::Event(Event { kind, dispatcher: Dispatcher::new(0) })).unwrap()
+    }
+
+    fn waiter(id: usize, wait_all: bool) -> Waiter {
+        Waiter { thread: ThreadId::from_raw(id), released: false, pulsed: false, wait_all }
+    }
+
+    /// Three waiters, the middle one in a WaitAll wait; `one` says
+    /// whether the event releases one waiter or all of them. Returns the
+    /// previous signal state, the threads woken and which were marked.
+    fn pulse_three(signal: i32, one: bool) -> (i32, [usize; 3], usize, [bool; 3]) {
+        let mut inner = DispatcherInner { signal, waiters: Vec::new() };
+        for w in [waiter(1, false), waiter(2, true), waiter(3, false)] {
+            inner.waiters.try_push(w).unwrap();
+        }
+        let mut woken = [0; 3];
+        let mut n = 0;
+        let previous = pulse_waiters(&mut inner, one, |t| {
+            woken[n] = t.as_usize();
+            n += 1;
+        });
+        assert_eq!(inner.signal, 0, "a pulse leaves the event unsignaled");
+        let marked = [inner.waiters[0].pulsed, inner.waiters[1].pulsed, inner.waiters[2].pulsed];
+        (previous, woken, n, marked)
+    }
+
+    #[test]
+    fn a_notification_pulse_releases_every_waiter_but_a_wait_all_one() {
+        let (previous, woken, n, marked) = pulse_three(1, false);
+        assert_eq!(previous, 1);
+        assert_eq!(&woken[..n], &[1, 3]);
+        assert_eq!(marked, [true, false, true]);
+    }
+
+    #[test]
+    fn a_synchronization_pulse_releases_the_waiter_that_waited_longest() {
+        let (previous, woken, n, marked) = pulse_three(0, true);
+        assert_eq!(previous, 0);
+        assert_eq!(&woken[..n], &[1]);
+        assert_eq!(marked, [true, false, false]);
+    }
+
+    #[test]
+    fn a_pulse_of_an_event_nobody_waits_on_leaves_it_unsignaled() {
+        let e = event(EventType::Notification);
+        assert_eq!(set_signal(&e, 1), 0);
+        assert_eq!(pulse(&e), 1, "the state before the pulse");
+        assert_eq!(e.dispatcher().unwrap().signal_state(), 0);
+        assert_eq!(pulse(&e), 0);
+        assert_eq!(e.dispatcher().unwrap().signal_state(), 0);
+    }
 
     #[test]
     fn duplicates_are_found_by_object_not_by_position() {
