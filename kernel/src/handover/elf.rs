@@ -1,13 +1,15 @@
 //! Just enough ELF (the System V ABI's ELF-64 format) to load a kernel
-//! image for a handover: a little-endian x86-64 executable whose loadable
-//! segments sit in one span of the kernel's higher-half window.
+//! image for a handover: a little-endian executable of the machine this
+//! kernel runs on (x86-64's or aarch64's, `lx::elf::EM_NATIVE`) whose
+//! loadable segments sit in one span of the kernel's higher-half window.
 
 use crate::mm::PAGE_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElfError {
     NotElf64,
-    NotX86_64Executable,
+    /// Not an executable of this kernel's machine.
+    NotNativeExecutable,
     Truncated,
     NoSegments,
     /// A segment outside `[base, base + max_span)` or a file range outside
@@ -81,9 +83,9 @@ pub fn parse(file: &[u8], base: u64, max_span: u64) -> Result<KernelImage<'_>, E
     if file.get(0..4) != Some(b"\x7fELF") || file.get(4) != Some(&2) || file.get(5) != Some(&1) {
         return Err(ElfError::NotElf64);
     }
-    // ET_EXEC, EM_X86_64.
-    if u16_at(file, 16) != Some(2) || u16_at(file, 18) != Some(62) {
-        return Err(ElfError::NotX86_64Executable);
+    // ET_EXEC, this machine's.
+    if u16_at(file, 16) != Some(2) || u16_at(file, 18) != Some(crate::lx::elf::EM_NATIVE) {
+        return Err(ElfError::NotNativeExecutable);
     }
     let entry = u64_at(file, 24).ok_or(ElfError::Truncated)?;
     let phoff = u64_at(file, 32).ok_or(ElfError::Truncated)? as usize;

@@ -6,7 +6,8 @@
 //! (`aarch64-unknown-none-softfloat`, as x86-64's kernel uses no SSE): it
 //! never touches the FP/SIMD registers, so an interrupt need not save
 //! them and they are user mode's alone; the entry turns FP/SIMD on for
-//! EL0. It calls `kmain` (its arguments zero: not a kernel handover) on
+//! EL0. It calls `kmain` (its arguments zero, or after a kernel handover
+//! the magic, the record and the HHDM offset the previous kernel passed) on
 //! the boot stack moved to SP_EL1 (the protocol does not say which SP is
 //! in use, and an exception at EL1 runs on SP_EL1: a kernel on SP_EL0
 //! would take its first exception on a stale stack). With VHE the `_EL1`
@@ -44,9 +45,19 @@ core::arch::global_asm!(
     "isb",
     "mov x9, #{pmr_off}",
     "msr S3_0_C4_C6_0, x9",
+    // Entered by a kernel handover (x0 the magic, x1 the record, x2 the
+    // HHDM offset: `handover::quiesce_and_jump`), kmain gets them;
+    // entered by Limine (which zeroes them), zeros.
+    "movz x9, #{m0}",
+    "movk x9, #{m1}, lsl #16",
+    "movk x9, #{m2}, lsl #32",
+    "movk x9, #{m3}, lsl #48",
+    "cmp x0, x9",
+    "b.eq 1f",
     "mov x0, xzr",
     "mov x1, xzr",
     "mov x2, xzr",
+    "1:",
     "b kmain",
     "",
     ".section .text.vectors, \"ax\"",
@@ -153,6 +164,10 @@ core::arch::global_asm!(
     irq = sym super::interrupts::irq,
     lower_sync = sym super::interrupts::lower_sync,
     pmr_off = const super::cpu::PMR_OFF,
+    m0 = const crate::boot::HANDOVER_MAGIC & 0xffff,
+    m1 = const (crate::boot::HANDOVER_MAGIC >> 16) & 0xffff,
+    m2 = const (crate::boot::HANDOVER_MAGIC >> 32) & 0xffff,
+    m3 = const crate::boot::HANDOVER_MAGIC >> 48,
 );
 
 const _: () = assert!(super::interrupts::TRAP_FRAME_SIZE == 288);

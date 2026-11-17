@@ -44,6 +44,13 @@ pub struct HhdmTables {
     offset: u64,
 }
 
+impl HhdmTables {
+    /// Tables reached through the HHDM at `offset`.
+    pub fn new(offset: u64) -> Self {
+        HhdmTables { offset }
+    }
+}
+
 impl TableMemory for HhdmTables {
     fn table(&mut self, frame: Frame) -> &mut PageTable {
         let virt = self.offset + frame.start();
@@ -101,6 +108,34 @@ pub(in crate::arch) fn alloc_table() -> Option<Frame> {
     crate::mm::allocate_frame(crate::mm::Use::PageTable)
 }
 
+/// Maps the HHDM of `regions` (sorted) into `mapper`'s tables at offset
+/// `hhdm`, with what Limine maps there (`hhdm_flags`): the kernel's own
+/// tables, and the next kernel's at a handover. The pages mapped by size.
+pub fn map_hhdm<M: TableMemory>(
+    mapper: &mut Mapper<M, Vmsa>,
+    hhdm: u64,
+    regions: impl Iterator<Item = MemoryRegion>,
+    alloc: &mut impl FnMut() -> Option<Frame>,
+) -> Result<[u64; 3], PagingError> {
+    let mut pages = [0; 3];
+    // Round outward to pages, never a page twice.
+    let mut mapped_until = 0;
+    for region in regions {
+        let Some(flags) = hhdm_flags(region.kind) else { continue };
+        let start = (region.base / PAGE_SIZE * PAGE_SIZE).max(mapped_until);
+        let end = region.end().next_multiple_of(PAGE_SIZE);
+        if start >= end {
+            continue;
+        }
+        let counts = mapper.map_range(hhdm + start, start, end - start, flags, alloc)?;
+        for (total, n) in pages.iter_mut().zip(counts) {
+            *total += n;
+        }
+        mapped_until = end;
+    }
+    Ok(pages)
+}
+
 /// HHDM flags for a memory map region (what Limine maps there), or None.
 fn hhdm_flags(kind: RegionKind) -> Option<PageFlags> {
     match kind {
@@ -125,22 +160,8 @@ pub fn init(layout: KernelLayout<'_>) -> Result<BuildStats, PagingError> {
     let mut stats = BuildStats::default();
     let mut mapper: Mapper<HhdmTables, Vmsa> =
         Mapper::new(HhdmTables { offset: layout.hhdm_offset }, &mut alloc_table)?;
-    // Regions are sorted; round outward to pages, never a page twice.
-    let mut mapped_until = 0;
-    for region in layout.memory_map {
-        let Some(flags) = hhdm_flags(region.kind) else { continue };
-        let start = (region.base / PAGE_SIZE * PAGE_SIZE).max(mapped_until);
-        let end = region.end().next_multiple_of(PAGE_SIZE);
-        if start >= end {
-            continue;
-        }
-        let virt = layout.hhdm_offset + start;
-        let counts = mapper.map_range(virt, start, end - start, flags, &mut alloc_table)?;
-        for (total, n) in stats.hhdm_pages.iter_mut().zip(counts) {
-            *total += n;
-        }
-        mapped_until = end;
-    }
+    stats.hhdm_pages =
+        map_hhdm(&mut mapper, layout.hhdm_offset, layout.memory_map, &mut alloc_table)?;
     // SAFETY: linker-script symbols; only their addresses are used.
     let segments: [(Range<u64>, PageFlags); 3] = unsafe {
         [

@@ -12476,6 +12476,14 @@ const ARM64_TWINS: &[&str] = &[
     "lx_dyn_pie",
     "lx_wl_input",
     "safepoint_test",
+    "handover_refused",
+    "handover_unsigned_refused",
+    "handover_park_late",
+    "handover_disk",
+    "onecpu_handover",
+    "handover_idle",
+    "handover_idle_twice",
+    "handover_same",
     "gui_test",
     "start_menu",
     "tray_test",
@@ -15613,7 +15621,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // R8: the next build is in the signed manifest.
             "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0xe7, 36 section kinds; with programs)",
+             extended state 0xe7, 37 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -15664,14 +15672,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds; with programs)",
+             extended state 0xe7, 36 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
              kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds)",
+             extended state 0xe7, 36 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
@@ -24565,7 +24573,12 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
 ];
 
 fn disk_scenario(name: &str) -> Option<&'static DiskScenario> {
-    DISK_SCENARIOS.iter().find(|d| d.name == name)
+    // A twin has its x64 scenario's disk (an aarch64 scenario of its own,
+    // arm_persist, is listed by its own name).
+    DISK_SCENARIOS
+        .iter()
+        .find(|d| d.name == name)
+        .or_else(|| DISK_SCENARIOS.iter().find(|d| Some(d.name) == twin_base(name)))
 }
 
 /// disk_test reads this at the start of sector 1.

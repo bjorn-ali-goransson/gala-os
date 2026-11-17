@@ -71,6 +71,8 @@ pub const EARLIER_SIGNING: &[(&str, Signing)] =
 /// The signing an image named `name` (`test-<scenario>`) gets.
 pub fn signing_for(name: &str) -> Signing {
     let scenario = name.strip_prefix("test-").unwrap_or(name);
+    // A twin is signed as its x64 scenario is.
+    let scenario = crate::twin_base(scenario).unwrap_or(scenario);
     SCENARIO_SIGNING.iter().find(|(n, _)| *n == scenario).map_or(DEFAULT, |(_, s)| *s)
 }
 

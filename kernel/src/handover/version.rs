@@ -126,7 +126,9 @@ const fn present(tag: u32, name: &'static str, writes: u16, must_read: u16) -> K
 ///   the new fields absent). SOCKETS 3: an endpoint's sending side
 ///   (must_read 3 only while a shutdown's FIN waits for pending sends).
 /// - STOPPED 1 (2026-11-03): when the programs stopped (optional; GalaHandoverPause).
-pub const KINDS: [Kind; 36] = [
+/// - FIRMWARE 1: the ACPI RSDP's physical address (optional: a reader that
+///   skips it has no firmware tables after the handover, as before).
+pub const KINDS: [Kind; 37] = [
     kind(tag::MEMORY_MAP, "MEMORY_MAP", 1, 0, false),
     kind(tag::PLATFORM, "PLATFORM", 1, 0, false),
     kind(tag::FRAMEBUFFER, "FRAMEBUFFER", 1, 0, false),
@@ -166,6 +168,8 @@ pub const KINDS: [Kind; 36] = [
     // When the programs stopped (optional: a reader that skips it reports
     // the pause from the record on).
     kind(tag::STOPPED, "STOPPED", 1, 0, false),
+    // The firmware's tables (optional, as above).
+    kind(tag::FIRMWARE, "FIRMWARE", 1, 0, false),
 ];
 
 /// This build's facts about section `tag` (None: it does not know it).
