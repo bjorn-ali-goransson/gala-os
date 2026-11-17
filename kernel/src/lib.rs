@@ -89,6 +89,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // Where the boot thread's stack ends (a hot swap's stack scan).
     arch::hotpatch::note_boot_stack();
     arch::bootphase::mark("entry");
+    // After a handover, what the console needs before `collect` (aarch64's
+    // UART from the firmware's tables) comes from the record.
+    if let Some(h) = handover {
+        boot::note_handover(h);
+    }
     console::init();
     kprintln!();
     kprintln!("gala-os kernel {}", env!("CARGO_PKG_VERSION"));
@@ -997,11 +1002,20 @@ fn start_cpus(info: &BootInfo, cmdline: &Cmdline) {
         }
     }
     if report.started_here > 0 {
-        warn!(
-            "smp: the bootloader did not start {} of the MADT's CPUs; the kernel started {} itself",
-            report.started_here + report.failed,
-            report.started_here
-        );
+        if info.handover.is_some() {
+            // aarch64's CPUs power off at a handover: started again here.
+            info!(
+                "smp: {} of the MADT's CPUs were powered off at the handover; the kernel started {} again",
+                report.started_here + report.failed,
+                report.started_here
+            );
+        } else {
+            warn!(
+                "smp: the bootloader did not start {} of the MADT's CPUs; the kernel started {} itself",
+                report.started_here + report.failed,
+                report.started_here
+            );
+        }
     }
     if let Some(id) = report.first_failed {
         error!(
@@ -1051,13 +1065,20 @@ fn log_processors(info: &BootInfo) {
             for id in fw.ids() {
                 let _ = write!(line, " {id}");
             }
-            let missing =
-                fw.ids().iter().filter(|id| !info.processors.iter().any(|p| p.hw_id() == **id));
+            // The boot CPU runs this; the others the bootloader (or the
+            // previous kernel) did not leave waiting.
+            let missing = fw.ids().iter().filter(|id| {
+                **id != info.processors.bsp_id && !info.processors.iter().any(|p| p.hw_id() == **id)
+            });
+            let by = if info.handover.is_some() {
+                "not parked by the previous kernel"
+            } else {
+                "not started by the bootloader"
+            };
             let mut first = true;
             for id in missing {
                 if first {
-                    let _ =
-                        write!(line, "; not started by the bootloader: {}", arch::smp::HW_ID_NAME);
+                    let _ = write!(line, "; {by}: {}", arch::smp::HW_ID_NAME);
                 } else {
                     let _ = write!(line, ",");
                 }

@@ -413,6 +413,9 @@ pub fn start_aps(
     }
     let hide = test == SmpTest::Hide;
     super::psci::init(info.psci);
+    // The handover's park SGI, before any AP enables its private
+    // interrupts (`gic::init_cpu`).
+    super::handover::init();
     *AP_MAIN.lock() = Some(main);
     AP_ROOT.store(super::paging::kernel_root(), Ordering::Release);
     let mut report = SmpReport {

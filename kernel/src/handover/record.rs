@@ -130,6 +130,11 @@ pub mod tag {
     /// When the programs stopped (the tick count, u64): with the record's
     /// clock, how long they were stopped (GalaHandoverPause). Optional.
     pub const STOPPED: u32 = 36;
+    /// The firmware's tables: the ACPI RSDP's physical address (u64), so
+    /// the next kernel reads the MADT, MCFG, FADT and SPCR as the first
+    /// did (aarch64's console, interrupt controller, PCI and PSCI come from
+    /// them). Optional.
+    pub const FIRMWARE: u32 = 37;
 }
 
 /// What a kept physical range is (KEPT section).

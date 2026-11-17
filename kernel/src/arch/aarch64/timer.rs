@@ -166,6 +166,15 @@ pub fn start_periodic_here(c: &Calibration, hz: u64) {
 
 pub fn eoi() {}
 
+/// Stops this CPU's tick (the virtual timer disabled): a kernel handover,
+/// whose next kernel starts its own.
+pub fn stop_here() {
+    // SAFETY: disables this CPU's virtual timer; nothing else changes.
+    unsafe {
+        core::arch::asm!("msr cntv_ctl_el0, xzr", "isb", options(nomem, nostack, preserves_flags))
+    };
+}
+
 /// The wall clock's seconds within its minute (the PL031's count), None
 /// without the RTC: the clock check's reference.
 pub fn rtc_seconds() -> Option<u8> {

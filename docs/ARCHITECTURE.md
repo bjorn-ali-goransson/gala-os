@@ -6419,9 +6419,10 @@ only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
   window from the MCFG, mapped once before the drivers enumerate, every
   read seeing no device without it), brute-force enumeration (bus 0-255,
   functions 1-7 only for multifunction devices). x86-64 keeps the ports
-  although q35 has an MCFG: a handover boot gets no ACPI tables from the
-  previous kernel, and the ports need none (aarch64's handover, when
-  ported, carries the window). The boot log names the mechanism (`pci:
+  although q35 has an MCFG: they need no table, and a kernel handed over
+  from one that wrote no FIRMWARE section has none. After a handover
+  aarch64 reads the MCFG again through the record's FIRMWARE section
+  (the RSDP). The boot log names the mechanism (`pci:
   configuration space through ...`). The firmware (SeaBIOS, OVMF or
   AAVMF) has assigned the BARs; the kernel only turns on memory decoding
   and bus mastering.
@@ -16374,7 +16375,8 @@ Test programs: `user/handover_test` (on ntrt), `user/handover_k32_test`
 Code: `kernel/src/handover/` (`record.rs` format, `elf.rs`, `carry.rs`
 what is carried, `programs.rs` and `sockets.rs` their formats,
 `version.rs` negotiation; safe, host-tested) and
-`kernel/src/arch/x86_64/handover.rs` (the machine side).
+`kernel/src/arch/x86_64/handover.rs` and `kernel/src/arch/aarch64/handover.rs` (the
+machine side; "On aarch64" below).
 
 #### The record
 
@@ -16411,6 +16413,7 @@ skipped (the rest). Full rules: "Versions and negotiation".
 | 33 | WRITER | the writing kernel's build name (optional; only the `handover_next` build writes it) |
 | 34, 35 | NET, SOCKETS | REQUIRED, written only when a program holds a socket: "Sockets across a handover" |
 | 36 | STOPPED | the tick count when the programs were stopped (optional, written with programs): the pause GalaHandoverPause reports |
+| 37 | FIRMWARE | the ACPI RSDP's physical address (optional): the next kernel reads the MADT, MCFG, FADT and SPCR again (its CPUs, PCI, PSCI, clock tables; aarch64's console and GIC before `BootInfo`, `boot::note_handover`) |
 
 #### Memory
 
@@ -16426,6 +16429,32 @@ generations 1 and 2). The first kernel's own image (inside Limine's
 "executable and modules") and Limine's reclaimable memory are not
 returned (as on a cold boot); the running kernel's scaffold is freed
 only by the next handover.
+
+#### On aarch64
+
+`arch::aarch64::handover`, the same sequence with the machine's means:
+the next kernel's TTBR1 tables (its image, the HHDM:
+`paging::map_hhdm`) and a TTBR0 mapping the trampoline at its physical
+address, both from the scaffold's pool; the image and the trampoline
+cleaned to the point of unification (`cpu::sync_code`, written as data,
+run as code). The other CPUs are not parked: on the park SGI (2) each
+enters the gate as x86-64's do, stops its timer and powers itself off
+(PSCI CPU_OFF); the boot CPU waits until PSCI's AFFINITY_INFO reports
+each off (the same 2 s, the same gate and abandonment), the record lists
+no parked CPU (CPUS count 0), and the next kernel starts them all with
+PSCI CPU_ON as it starts the CPUs a bootloader did not ("smp: N of the
+MADT's CPUs were powered off at the handover; the kernel started N
+again"). The jump: TTBR0 the scaffold's (TCR.EPD0 cleared), every EL1
+entry invalidated, a branch to the trampoline, which loads the next
+TTBR1, invalidates the TLB and the instruction cache and enters with x0
+the magic, x1 the record and x2 the HHDM offset, which the entry keeps
+for `kmain` (Limine's zeros otherwise). The next kernel reads its
+HHDM offset, load address and RSDP from the record before the console
+(`boot::note_handover`: its UART comes from the SPCR) and its firmware
+facts from FIRMWARE. Scenarios: the twins of `handover_same`,
+`handover_refused`, `handover_unsigned_refused`, `handover_park_late`,
+`handover_disk`, `onecpu_handover`, `handover_idle`,
+`handover_idle_twice`.
 
 #### The sequence
 

@@ -234,14 +234,16 @@ pub fn resume_clock(info: &BootInfo) {
     );
 }
 
-/// After the CPUs started: says how many came back.
+/// After the CPUs started: says how many came back, of the machine's (the
+/// MADT's count where it was read: aarch64's CPUs power off at a handover
+/// and are not in the record's parked list; else the parked list's).
 pub fn report_cpus(info: &BootInfo, online: u32) {
     if let Some(r) = &info.handover {
-        crate::info!(
-            "handover: generation {}: {online} of {} CPUs online again",
-            r.generation,
-            info.processors.len()
-        );
+        let of = match &info.firmware_cpus {
+            Some(Ok(fw)) => fw.len().max(info.processors.len()),
+            _ => info.processors.len(),
+        };
+        crate::info!("handover: generation {}: {online} of {of} CPUs online again", r.generation);
     }
 }
 
@@ -631,6 +633,12 @@ impl State<'_> {
                 w.section(tag::STOPPED, version::writes(tag::STOPPED), 0)?;
                 w.u64(ticks)?;
             }
+        }
+        // The firmware's tables, by physical address (each kernel's HHDM
+        // offset is its own).
+        if info.rsdp != 0 {
+            w.section(tag::FIRMWARE, version::writes(tag::FIRMWARE), 0)?;
+            w.u64(info.rsdp.wrapping_sub(info.hhdm_offset))?;
         }
         if version::known(tag::WRITER) {
             w.section(tag::WRITER, version::writes(tag::WRITER), 0)?;
