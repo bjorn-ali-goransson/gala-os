@@ -1303,6 +1303,23 @@ code `xtask/src/trust.rs`).
   below the rollback floor 2`) was used by a newer release; make a fresh
   one (the floor lives in sector 0 at byte 64).
 
+### CI build caches
+
+The boot shards (`ci.yml`) and the image builds (`images.yml`) restore
+the Rust build (the cargo registry; `target/`'s per-triple directories,
+`target/next` and the host's deps, build scripts and fingerprints;
+`target/cache-stamp`) before any cargo command, and save it from main's
+pushes only (one boot shard; pull requests read it), keyed
+`gala-target-boot-<sha>` and `gala-target-images-<arch>-<sha>`, the newest
+restored by prefix. `CARGO_INCREMENTAL=0` there: no incremental data in
+the caches. Cargo's freshness is by file time, which a checkout sets to
+now: `.github/restore-mtimes.sh` dates every tracked file 2000-01-01 and
+the files changed since the cache's commit (its stamp, `git diff`) now,
+so only those crates rebuild; without a stamp, or when that commit
+cannot be fetched, it dates everything now (a full build, never a stale
+one), and the stamp then names HEAD for the next save. The `linux` and
+`windows` jobs have no build cache.
+
 ### Downloadable images
 
 `.github/workflows/images.yml`: after each green CI run on main (and on

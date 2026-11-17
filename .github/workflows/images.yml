@@ -55,6 +55,8 @@ jobs:
     name: image (${{ matrix.arch }})
     env:
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # No incremental data (the host's xtask): smaller build caches.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,6 +74,33 @@ jobs:
       - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
         if: steps.head.outputs.current == 'true'
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+      # The build (WORKFLOW "CI build caches"), per machine: the previous
+      # image build's; sources dated for cargo by restore-mtimes.sh.
+      - name: Restore the build cache
+        if: steps.head.outputs.current == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/x86_64-unknown-none
+            target/aarch64-unknown-none-softfloat
+            target/x86_64-pc-windows-msvc
+            target/aarch64-pc-windows-msvc
+            target/i686-pc-windows-msvc
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+            target/release/deps
+            target/release/build
+            target/release/.fingerprint
+            target/cache-stamp
+          key: gala-target-images-${{ matrix.arch }}-${{ env.SHA }}
+          restore-keys: gala-target-images-${{ matrix.arch }}-
+      - name: Date the sources for cargo
+        if: steps.head.outputs.current == 'true'
+        run: .github/restore-mtimes.sh target/cache-stamp
       - name: Install xorriso
         if: steps.head.outputs.current == 'true'
         run: sudo apt-get update && sudo apt-get install -y xorriso
@@ -100,6 +129,27 @@ jobs:
             cat "out/gala-${{ matrix.arch }}.iso.sha256"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the build cache
+        if: steps.head.outputs.current == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/x86_64-unknown-none
+            target/aarch64-unknown-none-softfloat
+            target/x86_64-pc-windows-msvc
+            target/aarch64-pc-windows-msvc
+            target/i686-pc-windows-msvc
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+            target/release/deps
+            target/release/build
+            target/release/.fingerprint
+            target/cache-stamp
+          key: gala-target-images-${{ matrix.arch }}-${{ env.SHA }}
       - name: Upload (the image, then its checksum and commit)
         if: steps.head.outputs.current == 'true'
         env:

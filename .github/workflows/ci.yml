@@ -246,6 +246,10 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     name: boot (${{ matrix.shard }}/6)
+    env:
+      # No incremental data: smaller build caches, and a cached build is
+      # reused crate by crate anyway.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
@@ -253,6 +257,29 @@ jobs:
           df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h /
+      # The build (WORKFLOW "CI build caches"): main's newest, without
+      # incremental data; sources dated for cargo by restore-mtimes.sh.
+      - name: Restore the build cache (main's newest)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/x86_64-unknown-none
+            target/aarch64-unknown-none-softfloat
+            target/x86_64-pc-windows-msvc
+            target/aarch64-pc-windows-msvc
+            target/i686-pc-windows-msvc
+            target/next
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+            target/cache-stamp
+          key: gala-target-boot-${{ github.sha }}
+          restore-keys: gala-target-boot-
+      - name: Date the sources for cargo (those changed since the cache's commit dated now)
+        run: .github/restore-mtimes.sh target/cache-stamp
       - name: Let QEMU use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -293,6 +320,27 @@ jobs:
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
         run: cargo xtask boot-test
+      # Saved from main's pushes only (pull requests read it), by one shard
+      # (all six build the same).
+      - name: Save the build cache (main, shard 1)
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1 }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/x86_64-unknown-none
+            target/aarch64-unknown-none-softfloat
+            target/x86_64-pc-windows-msvc
+            target/aarch64-pc-windows-msvc
+            target/i686-pc-windows-msvc
+            target/next
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+            target/cache-stamp
+          key: gala-target-boot-${{ github.sha }}
       - name: Keep the failed boots' logs
         if: failure()
         uses: actions/upload-artifact@v4
