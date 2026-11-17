@@ -1906,13 +1906,23 @@ need gala's.
      to see at `[{ProgramFilesCommonX64}]\Microsoft Shared\Office16`
      there, and the package manifest under
      `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
-     writes every such path with those tokens. So the next step is that
-     mapping, test first: a process in Office's virtual environment
-     sees the package's `VFS\<token>` tree at the token's real path --
-     the subtree Word asks for, not the whole AppV file-system
-     subsystem -- and `office_word` reruns on it. (OfficeClickToRun
-     opens its own files by the package path directly, so the service
-     needs nothing of this.)
+     writes every such path with those tokens. That view is the
+     process's own on Windows, measured on a machine with the same
+     install: Word's module list reports mso.dll and the five clients
+     at `C:\Program Files\Common Files\Microsoft Shared\Office16`,
+     and while Word holds them no other process on the machine finds
+     that directory at all -- it is not a directory the install made
+     (none of the App-V drivers is so much as running) but what the
+     virtual environment presents to the processes in it. So the next
+     step is that mapping, test first: a process in Office's virtual
+     environment sees the package's `VFS\<token>` tree at the token's
+     real path -- the subtree Word asks for, not the whole AppV
+     file-system subsystem -- and `office_word` reruns on it. What puts
+     a process in that environment is Click-to-Run's own business on
+     Windows; gala's rule to try is the image's path, a process running
+     out of the package root, which is coarser than Windows' and says
+     so where it lands. (OfficeClickToRun opens its own files by the
+     package path directly, so the service needs nothing of this.)
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew
