@@ -396,8 +396,14 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   STATUS_INVALID_INFO_CLASS (with the class argument, per
   `ledger::class_argument`) and STATUS_NOT_IMPLEMENTED. Other code calls
   `nt::ledger::record(service, what, detail)`.
-- Lines `ledger: {"service":..,"what":..,"detail":..,"hits":..}` are
-  dumped after each program, before `boot ok` and in a state dump.
+- Lines `ledger:
+  {"service":..,"what":..,"detail":..,"hits":..,"first":..,"last":..}`
+  are dumped after each program, before `boot ok` and in a state dump.
+  `first` and `last` are the uptime in ms when the entry was first and
+  last hit: a count says how often a gap was hit, never when, and what
+  explains a program's end is what it hit just before it, which a
+  ranking by hits buries under the thousands hit at startup. The lines
+  that stand for records the table had no room for carry zeros.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
   (`dll!function` names, 96 characters kept, the ledger's own
   length). Its kinds: `missing
@@ -576,8 +582,8 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   CPUs, heap (peak) and frames (fewest free), warning/error counts and
   the first error, panic/exception/watchdog/leak/out-of-memory/
   missing-function lines, programs begun and not ended, processes that
-  failed, the ledger's top five, the state dump's CPUs, locks and
-  threads, each thread's last system calls (event stream, else flight
+  failed, the gaps hit last and the ledger's top five, the state
+  dump's CPUs, locks and threads, each thread's last system calls (event stream, else flight
   recorder), user faults, a TSC under 500 MHz as a suspicious clock,
   `triage: clock WRONG`, the last lines. `cargo xtask triage <log>
   [events.jsonl]` prints it for any log.

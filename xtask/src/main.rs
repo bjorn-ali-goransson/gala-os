@@ -17042,8 +17042,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "ledger_test: ok",
             "exited with status 0x00000000",
-            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1}"#,
-            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2}"#,
+            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1,"#,
+            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2,"#,
             // The table filled up; how many records it then dropped
             // depends on what the boot itself recorded, but their kind
             // does not.
