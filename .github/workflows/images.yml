@@ -1,0 +1,119 @@
+name: Images
+
+# Downloadable boot images (WORKFLOW "Downloadable images"): after each
+# green CI run on main, the desktop demo (`cargo xtask iso`) is built for
+# x86_64 (a hybrid BIOS/UEFI ISO, also for a USB stick) and for aarch64
+# (UEFI, QEMU `virt`) and uploaded to the R2 bucket under images/latest/,
+# overwriting the previous build (only the latest is kept): each image with
+# its SHA-256 and the commit it was built from, the image first so the
+# checksum never names a file not there yet. Public at
+# https://updates.gala-os.com/images/latest/.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# A newer build replaces an older one still running (only the latest is
+# kept); the head check below also keeps an older run from uploading last.
+concurrency:
+  group: images
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # R2's S3 API (the aws CLI reads these), as release.yml.
+  AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  AWS_DEFAULT_REGION: auto
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+  IMAGES: s3://${{ vars.R2_BUCKET }}/images/latest
+  IMAGES_URL: https://updates.gala-os.com/images/latest
+
+jobs:
+  image:
+    # CI passed on a push to main (not a pull request whose branch is
+    # called main), or a manual run from main.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-26.04
+    # The bucket's credentials, as release.yml's.
+    environment: release
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    name: image (${{ matrix.arch }})
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - name: Only main's head is built
+        id: head
+        run: |
+          main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$main" = "$SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$SHA is not main's head ($main): its run builds the images instead"
+          fi
+      - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
+        if: steps.head.outputs.current == 'true'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+      - name: Install xorriso
+        if: steps.head.outputs.current == 'true'
+        run: sudo apt-get update && sudo apt-get install -y xorriso
+      - name: Install Go (the x86_64 demo's Go programs; pinned in xtask GO_TOOLCHAIN)
+        if: steps.head.outputs.current == 'true' && matrix.arch == 'x86_64'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.7"
+          cache: false
+      - name: Install toolchain
+        if: steps.head.outputs.current == 'true'
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the image
+        if: steps.head.outputs.current == 'true'
+        run: |
+          cargo xtask iso --release --arch "${{ matrix.arch }}"
+          name=$([ "${{ matrix.arch }}" = aarch64 ] && echo gala-aarch64 || echo gala-demo)
+          mkdir -p out
+          cp "target/release/$name.iso" "out/gala-${{ matrix.arch }}.iso"
+          (cd out && sha256sum "gala-${{ matrix.arch }}.iso" > "gala-${{ matrix.arch }}.iso.sha256")
+          echo "$SHA" > "out/gala-${{ matrix.arch }}.commit"
+          {
+            echo "### gala-${{ matrix.arch }}.iso"
+            echo "commit $SHA, $(stat -c %s "out/gala-${{ matrix.arch }}.iso") bytes"
+            echo '```'
+            cat "out/gala-${{ matrix.arch }}.iso.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload (the image, then its checksum and commit)
+        if: steps.head.outputs.current == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          f="gala-${{ matrix.arch }}"
+          aws s3 cp "out/$f.iso" "$IMAGES/$f.iso" --content-type application/x-iso9660-image --cache-control no-cache --no-progress
+          aws s3 cp "out/$f.iso.sha256" "$IMAGES/$f.iso.sha256" --content-type text/plain --cache-control no-cache --no-progress
+          aws s3 cp "out/$f.commit" "$IMAGES/$f.commit" --content-type text/plain --cache-control no-cache --no-progress
+      - name: Check the public download
+        if: steps.head.outputs.current == 'true'
+        run: |
+          f="gala-${{ matrix.arch }}"
+          curl -sSfL -o "check.iso" "$IMAGES_URL/$f.iso"
+          curl -sSfL "$IMAGES_URL/$f.iso.sha256" | sed "s/$f.iso/check.iso/" | sha256sum -c -
+          echo "$IMAGES_URL/$f.iso" >> "$GITHUB_STEP_SUMMARY"

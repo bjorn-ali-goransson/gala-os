@@ -347,8 +347,18 @@ swapping DLLs and the kernel into a snapshot (at your own risk)").
 
 ### A bootable image
 
+Ready-made images of main's latest green build (the desktop demo; only the
+latest is kept), with their SHA-256 and the commit they came from:
+
+- x86_64 (BIOS and UEFI; also for a USB stick):
+  https://updates.gala-os.com/images/latest/gala-x86_64.iso
+- aarch64 (UEFI, QEMU `virt`):
+  https://updates.gala-os.com/images/latest/gala-aarch64.iso
+
+Each has `.sha256` and `.commit` beside it (`.../gala-x86_64.iso.sha256`).
+
 `cargo xtask iso` builds an image with every program and DLL and a kernel
-command line saying what to run:
+command line saying what to run (`--arch aarch64` for aarch64's):
 
 ```sh
 cargo xtask iso                                  # demo: hello, Go hello, 1000 goroutines
