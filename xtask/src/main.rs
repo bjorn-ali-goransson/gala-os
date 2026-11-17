@@ -10780,21 +10780,24 @@ fn next_target_dir() -> PathBuf {
 /// runs once per profile and process, under a lock, and the others wait
 /// for it and take its path (two `objcopy`s on the same file at once
 /// failed the handover scenarios).
-fn build_next_kernel(release: bool) -> Result<PathBuf> {
-    static BUILT: std::sync::Mutex<[Option<PathBuf>; 2]> = std::sync::Mutex::new([None, None]);
+/// The `handover_next` build for kernel target `target` (x86-64's, or
+/// aarch64's for an ARM64 twin's image).
+fn build_next_kernel(release: bool, target: &str) -> Result<PathBuf> {
+    static BUILT: std::sync::Mutex<[Option<PathBuf>; 4]> =
+        std::sync::Mutex::new([None, None, None, None]);
     let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let slot = &mut built[usize::from(release)];
+    let slot = &mut built[usize::from(release) + 2 * usize::from(target == KERNEL_TARGET_AARCH64)];
     if let Some(kernel) = slot {
         return Ok(kernel.clone());
     }
-    let kernel = build_next_kernel_unlocked(release)?;
+    let kernel = build_next_kernel_unlocked(release, target)?;
     *slot = Some(kernel.clone());
     Ok(kernel)
 }
 
-fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
+fn build_next_kernel_unlocked(release: bool, target: &str) -> Result<PathBuf> {
     let mut cmd = cargo();
-    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", target])
         .args(["--features", "handover_next", "--target-dir"])
         .arg(next_target_dir());
     trust::kernel_env(&mut cmd)?;
@@ -10803,7 +10806,7 @@ fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    let kernel = next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let kernel = next_target_dir().join(target).join(profile).join("kernel");
     drop_debug_relocations(&kernel)?;
     Ok(kernel)
 }
@@ -10892,12 +10895,14 @@ fn make_iso_unchecked(
         kernel = PathBuf::from(&path["kernel=".len()..]);
     }
     // R9 (d): the other build as a boot module, to hand over to.
-    let builds = name
-        .strip_prefix("test-")
-        .and_then(|n| HANDOVER_BUILD_SCENARIOS.iter().find(|s| s.0 == n).map(|s| s.1));
+    // A twin has its x64 scenario's, built for aarch64.
+    let builds = name.strip_prefix("test-").and_then(|n| {
+        let n = twin_base(n).unwrap_or(n);
+        HANDOVER_BUILD_SCENARIOS.iter().find(|s| s.0 == n).map(|s| s.1)
+    });
     let mut other_kernel = None;
     if let Some(boots_next) = builds {
-        let next = build_next_kernel(release)?;
+        let next = build_next_kernel(release, target)?;
         other_kernel = Some(if boots_next {
             ("kernel-gala", std::mem::replace(&mut kernel, next))
         } else {
@@ -12483,6 +12488,12 @@ const ARM64_TWINS: &[&str] = &[
     "onecpu_handover",
     "handover_idle",
     "handover_idle_twice",
+    "handover_k32",
+    "handover_k32_twice",
+    "handover_upgrade",
+    "handover_downgrade_refused",
+    "handover_net",
+    "handover_net_self",
     "handover_same",
     "gui_test",
     "start_menu",
@@ -12514,8 +12525,14 @@ fn is_aarch64_scenario(name: &str) -> bool {
     AARCH64_SCENARIOS.contains(&name) || twin_base(name).is_some()
 }
 
+/// Facts of the machine in an x64 scenario's expected lines and the
+/// aarch64 kernel's, which its twin expects instead: the extended state a
+/// kernel restores (handover negotiation: x86-64's XCR0 bits x87, SSE,
+/// AVX and AVX-512's; aarch64's FP/SIMD).
+const TWIN_MACHINE_FACTS: &[(&str, &str)] = &[("extended state 0xe7", "extended state 0x1")];
+
 /// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
-/// twin `arm_<name>`.
+/// twin `arm_<name>` (its expected lines through TWIN_MACHINE_FACTS).
 fn scenarios() -> &'static [Scenario] {
     static ALL: std::sync::OnceLock<Vec<Scenario>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
@@ -12525,7 +12542,21 @@ fn scenarios() -> &'static [Scenario] {
                 panic!("ARM64_TWINS names {twin}, which is no scenario");
             };
             let name: &'static str = Box::leak(format!("arm_{twin}").into_boxed_str());
-            all.push(Scenario { name, ..*base });
+            // Its expected lines with the machine's own facts.
+            let expect: Vec<&'static str> = base
+                .expect
+                .iter()
+                .map(|&line| {
+                    TWIN_MACHINE_FACTS.iter().fold(line, |line, (x64, arm64)| {
+                        if line.contains(x64) {
+                            Box::leak(line.replace(x64, arm64).into_boxed_str())
+                        } else {
+                            line
+                        }
+                    })
+                })
+                .collect();
+            all.push(Scenario { name, expect: Vec::leak(expect), ..*base });
         }
         all
     })
