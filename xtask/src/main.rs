@@ -17569,8 +17569,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // An exception the program raises itself, with a code nothing
         // decodes and three parameters, which no handler takes (what
         // Office's shared code does with 0xe0000002, ROADMAP OF): the
-        // report has only the parameters to go on, so it names them,
-        // with the image any of them points into.
+        // report has only the parameters and what the thread did last to
+        // go on, so it names the parameters, with the image any of them
+        // points into, and the thread's last calls from the flight
+        // recorder, each with its status (Office's raise carries no
+        // parameters at all, so there the calls are all there is).
         name: "crash_raise",
         cmdline: "qemu_exit run=crash.exe args=raise",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -17585,6 +17588,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash report:   3 parameters: 0x8007000e, 0x",
             "(crash.exe+0x",
             ", 0xfeedface",
+            // The line it printed, the handle that is not one, and the
+            // dispatcher's own calls after the raise.
+            "last calls, oldest first: ",
+            "NtWriteFile=0x00000000",
+            "NtClose=0xc0000008, GalaUnhandledException=0x00000000",
             "process crash.exe (pid 4) exited with status 0xe0000042",
             BOOT_OK_MARKER,
         ],

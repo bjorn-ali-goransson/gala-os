@@ -34,7 +34,7 @@ rather than free text.
 | Triage of a failed log | `xtask/src/triage.rs` | end of every failed log; `cargo xtask triage` |
 | Run history, health | `xtask/src/main.rs` (`record_history`) | `target/report/history.jsonl`, `xtask: health:` lines |
 | Backtraces, panic output | `arch::backtrace`, `cargo xtask symbolize` | `backtrace:` lines, symbolized in failed logs |
-| Flight recorder | `kernel/src/flight.rs` | `flight:` lines after a panic, watchdog report, state dump |
+| Flight recorder | `kernel/src/flight.rs` | `flight:` lines after a panic, watchdog report, state dump; a crashing thread's last calls in its crash report |
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
@@ -627,7 +627,11 @@ three stores. Kinds: `syscall` (number | pid << 32, thread id),
 (`flight::LINUX`) and is named from the machine's Linux table (x86-64's
 or aarch64's), an NT call's from NT's. Printed merged by time as
 `flight:` lines (service names, pid and tid on system calls) after a
-panic, in a watchdog report and in the state dump.
+panic, in a watchdog report and in the state dump. A crash report reads
+the same records for the crashing thread alone, as the calls it made
+last (below): a thread's call and the `syscall-done` that follows it on
+the same CPU are its own, since a thread runs a call on the CPU it
+started it on.
 
 ### Hang watchdog
 
@@ -770,7 +774,16 @@ read from), and of the next 128 stack words those that point into an
 image (`[esp+0x0dc] 0x77fdf7 (setup.exe+0x37fdf7)`: the return addresses
 of the calls that led there, with how many of the readable words did).
 The note reads the deeper stack a page's part at a time, as every
-delivered exception takes one. ntdll reports an exception no handler took before it calls the
+delivered exception takes one. The report then says what the thread was
+doing: `thread 16's last calls, oldest first: NtWriteFile=0x00000000,
+NtQueryVirtualMemory=0x00000000 x17, NtClose=0xc0000008,
+GalaUnhandledException=0x00000000`, the last 24 system calls the flight
+recorder kept for that thread (above), each with the status it ended
+with, `(no return yet)` for one that had not, and a run of the same call
+and status as one entry with its count. An exception a program raises
+itself can carry nothing else at all -- Office's 0xE0000002 names no
+parameters -- and then what the thread called last is the only account
+of what it gave up on. Scenario `crash_raise` pins it. ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed

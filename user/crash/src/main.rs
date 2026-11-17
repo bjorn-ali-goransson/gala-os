@@ -15,7 +15,12 @@
 //! process must end with that code, as on Windows. Such an exception
 //! carries nothing the report can decode but its parameters, so the
 //! report must name them -- which is all Office's shared code leaves
-//! behind when it raises 0xE0000002 (ROADMAP OF).
+//! behind when it raises 0xE0000002 (ROADMAP OF), and it carries no
+//! parameters at all. What is left then is what the thread did before
+//! the raise, so it closes a handle that is not one (a call with a
+//! status of its own) just before raising: the report's account of the
+//! thread's last calls must name that call and the write of the line
+//! above it, each with its status.
 
 #![no_std]
 #![no_main]
@@ -72,6 +77,15 @@ fn raise() -> u32 {
     record[5] = main as *const () as u64;
     record[6] = 0xfeed_face;
     ntrt::print("crash: raising 0xe0000042 with three parameters\r\n");
+    // A call that fails, for the report's account of the last calls:
+    // STATUS_INVALID_HANDLE from a value that is not a handle.
+    if let Some(close) = find_ntdll().and_then(|n| find_export(n, b"NtClose")) {
+        // SAFETY: NtClose's signature; the value is deliberately not a
+        // handle, which it answers STATUS_INVALID_HANDLE for.
+        let close: unsafe extern "system" fn(usize) -> u32 = unsafe { core::mem::transmute(close) };
+        // SAFETY: as above.
+        unsafe { close(0x1234) };
+    }
     // SAFETY: a well-formed EXCEPTION_RECORD, and the raise does not
     // return: no handler takes this code.
     unsafe { raise(record.as_mut_ptr().cast()) };

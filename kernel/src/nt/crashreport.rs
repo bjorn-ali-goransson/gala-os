@@ -1,9 +1,9 @@
 //! Crash reports (docs/OBSERVABILITY.md, "Crash reports (programs)"): when
 //! a program dies of an exception, the log says what Windows' error
 //! reporting would: the exception code and its name, the address as
-//! module+offset, what was accessed, the thread, the registers and the
-//! top of the stack with every value that points into an image named by
-//! module. Before, only "exited with status 0xc0000005" was left (the JVM
+//! module+offset, what was accessed, the thread, its last system calls
+//! from the flight recorder, the registers and the top of the stack with
+//! every value that points into an image named by module. Before, only "exited with status 0xc0000005" was left (the JVM
 //! had to write its own hs_err file to say more).
 //!
 //! Every user exception keeps a note in its process (fixed size, no
@@ -753,8 +753,56 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
     } else if note.status.0 == CXX_EXCEPTION {
         info!("crash report:   C++ throw: its type is unreadable (not MSVC's layout)");
     }
+    // What the thread was doing: the calls the flight recorder kept for
+    // it. An exception a program raises itself leaves the report nothing
+    // else to go on when it carries no parameters either, as Office's
+    // 0xE0000002 does (ROADMAP OF).
+    let mut calls = [crate::flight::Call::default(); crate::flight::CALLS];
+    let kept = crate::flight::thread_calls(note.tid, &mut calls);
+    if kept > 0 {
+        info!(
+            "crash report:   thread {}'s last calls, oldest first: {}",
+            note.tid,
+            Calls(&calls[..kept])
+        );
+    }
     super::abi::report_registers(note, &stack);
     report_memory(process, note);
+}
+
+/// A thread's last system calls, oldest first: each by name with the
+/// status it ended with, or that it had not returned when the report was
+/// written (the call it died in, or one a frame above is still in). A run
+/// of the same call with the same status is one entry with its count, so
+/// that a loop (a module lookup's, a wait's) leaves room for the calls
+/// around it.
+struct Calls<'a>(&'a [crate::flight::Call]);
+
+impl fmt::Display for Calls<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let same = |a: &crate::flight::Call, b: &crate::flight::Call| {
+            a.number == b.number && a.status == b.status
+        };
+        let mut rest = self.0;
+        let mut first = true;
+        while let Some(call) = rest.first() {
+            let run = rest.iter().take_while(|c| same(c, call)).count();
+            rest = &rest[run..];
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            f.write_str(crate::flight::call_name(call.number))?;
+            match call.status {
+                Some(status) => write!(f, "={status:#010x}")?,
+                None => f.write_str(" (no return yet)")?,
+            }
+            if run > 1 {
+                write!(f, " x{run}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The crash report's memory lines: what each general register points
