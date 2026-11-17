@@ -1303,18 +1303,37 @@ code `xtask/src/trust.rs`).
   below the rollback floor 2`) was used by a newer release; make a fresh
   one (the floor lives in sector 0 at byte 64).
 
+### CI build caches
+
+The boot shards (`ci.yml`) and the image builds (`images.yml`) restore
+the Rust build (the cargo registry; `target/`'s per-triple directories,
+`target/next` and the host's deps, build scripts and fingerprints;
+`target/cache-stamp`) before any cargo command, and save it from main's
+pushes only (one boot shard; pull requests read it), keyed
+`gala-target-boot-<sha>` and `gala-target-images-<arch>-<sha>`, the newest
+restored by prefix. `CARGO_INCREMENTAL=0` there: no incremental data in
+the caches. Cargo's freshness is by file time, which a checkout sets to
+now: `.github/restore-mtimes.sh` dates every tracked file 2000-01-01 and
+the files changed since the cache's commit (its stamp, `git diff`) now,
+so only those crates rebuild; without a stamp, or when that commit
+cannot be fetched, it dates everything now (a full build, never a stale
+one), and the stamp then names HEAD for the next save. The `linux` and
+`windows` jobs have no build cache.
+
 ### Downloadable images
 
-`.github/workflows/images.yml`: after each green CI run on main (and on
-a manual run from main), the desktop demo is built for each machine
+`.github/workflows/images.yml`: nightly (02:23 UTC) and on a manual run
+from main, main's newest commit whose CI passed on a push (`gh run
+list`; a red main never replaces a good image), unless the bucket's
+`.commit` names it already (a quiet night builds nothing): the desktop
+demo is built for each machine
 (`cargo xtask iso --release --arch x86_64|aarch64`) and uploaded to the R2
 bucket's `images/latest/` (public at
 `https://updates.gala-os.com/images/latest/`): `gala-<arch>.iso`, then its
 `.sha256` and `.commit`, overwriting the previous build (only the latest
 is kept), `Cache-Control: no-cache` so the domain's cache revalidates.
-Only main's head is built (an older run's commit is skipped), the newer
-run cancels an older one still running, and each job downloads its image
-back and checks the checksum. It runs in the `release` environment, with
+A newer run cancels an older one still running, and each job downloads
+its image back and checks the checksum. It runs in the `release` environment, with
 `release.yml`'s R2 variables and secrets. The aarch64 demo is
 `DEMO_CMDLINE_AARCH64` (the desktop on virtio-gpu, hello.exe); a
 downloadable image's command line names no file of the machine that

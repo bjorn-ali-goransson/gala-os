@@ -347,8 +347,9 @@ swapping DLLs and the kernel into a snapshot (at your own risk)").
 
 ### A bootable image
 
-Ready-made images of main's latest green build (the desktop demo; only the
-latest is kept), with their SHA-256 and the commit they came from:
+Ready-made images of main's latest green build, rebuilt nightly (the
+desktop demo; only the latest is kept), with their SHA-256 and the commit
+they came from:
 
 - x86_64 (BIOS and UEFI; also for a USB stick):
   https://updates.gala-os.com/images/latest/gala-x86_64.iso
