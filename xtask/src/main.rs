@@ -20680,7 +20680,7 @@ fn run_vm_once(
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
         {
-            let checked = check_screen(&socket, iso, check);
+            let checked = check_screen(&socket, iso, check, &mut vm_clock);
             screen_verdict = Some(match &checked {
                 Ok(note) => format!("xtask: screen ok{note}\n"),
                 Err(e) => format!("xtask: screen: {e}\n"),
@@ -23489,7 +23489,12 @@ fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
 /// Takes a screendump through the monitor at `socket` (kept as
 /// `<iso>.screen.png`) and checks `check`'s pixels. A note for the verdict
 /// line ("" or how the check ended early).
-fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String> {
+fn check_screen(
+    socket: &Path,
+    iso: &Path,
+    check: &ScreenCheck,
+    clock: &mut vmtime::VmClock,
+) -> Result<String> {
     use std::io::Write;
     let mut monitor = None;
     for _ in 0..100 {
@@ -23501,25 +23506,35 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
     let log = iso.with_extension("serial.log");
-    let wait = SCREEN_STEP_WAITS
-        .iter()
-        .find(|(n, _)| *n == iso_scenario(iso))
-        .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
     let mut ps2 = InputPace::default();
+    // What the steps waited for their lines, where it is a part of the
+    // limit worth knowing: the measurement a future failure of this wait
+    // is read against, and what SCREEN_STEP_WAIT is set from.
+    const WAIT_WORTH_SAYING: u64 = 5_000;
+    let mut waits = String::new();
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
-            wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
+            let waited = wait_for_line(&log, step.after, SCREEN_STEP_WAIT, clock)
+                .map_err(|e| format!("step {n}: {e}"))?;
+            if waited >= WAIT_WORTH_SAYING {
+                waits += &format!(
+                    " (step {n} waited {:.1}s of run time for {:?}, of {} s)",
+                    waited as f64 / 1000.0,
+                    step.after,
+                    SCREEN_STEP_WAIT.as_secs()
+                );
+            }
         }
         for command in step.input {
             // Each command only once the guest has read what QEMU queued
             // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
             // what does not fit is lost (InputPace).
-            ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
+            ps2.wait_taken(&mut monitor, &log, clock).map_err(|e| format!("step {n}: {e}"))?;
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
             ps2.sent(command).map_err(|e| format!("step {n}: {e}"))?;
         }
         if !step.input.is_empty() {
-            let taken = ps2.wait_taken(&mut monitor, &log);
+            let taken = ps2.wait_taken(&mut monitor, &log, clock);
             // The last step's input often ends the program (Esc, Ctrl+Q),
             // and with qemu_exit QEMU too, which may close the monitor
             // before the guest's read counters are asked for. Then there
@@ -23529,21 +23544,22 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
             if let Err(e) = taken {
                 if last && monitor_closed(&monitor) {
                     return Ok(format!(
-                        " (step {n}: QEMU's monitor closed after the last input, which ended \
-                         the program: {e})"
+                        "{waits} (step {n}: QEMU's monitor closed after the last input, which \
+                         ended the program: {e})"
                     ));
                 }
                 return Err(format!("step {n}: {e}"));
             }
         }
-        check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+        check_screen_step(&mut monitor, iso, n, step, clock)
+            .map_err(|e| format!("step {n}: {e}"))?;
         // A host-side wait this step's check ends (HELD_DOWNLOADS).
         if HELD_DOWNLOADS.iter().any(|&(name, held)| name == iso_scenario(iso) && held == n) {
             let release = iso.with_extension("serve.release");
             fs::write(&release, b"").map_err(|e| format!("step {n}: writing {release:?}: {e}"))?;
         }
     }
-    Ok(String::new())
+    Ok(waits)
 }
 
 /// Whether QEMU has closed its end of the monitor socket (it exited): a
@@ -23596,8 +23612,9 @@ struct InputPace {
     buttons: u8,
 }
 
-/// How long the guest may take to read what a screen check sent: a
-/// give-up only (a guest that stopped reading the controller).
+/// How long the guest may take to read what a screen check sent, in the
+/// VM's run time: a give-up only (a guest that stopped reading the
+/// controller).
 const PS2_TAKEN_WAIT: Duration = Duration::from_secs(120);
 
 /// What the guest's input counters count.
@@ -23611,21 +23628,25 @@ enum Counted {
 
 impl InputPace {
     /// Waits until the guest has read everything sent so far.
-    fn wait_taken(&mut self, monitor: &mut std::os::unix::net::UnixStream, log: &Path) -> Result {
-        let (at, _) = self.find(monitor, log)?;
-        let start = Instant::now();
+    fn wait_taken(
+        &mut self,
+        monitor: &mut std::os::unix::net::UnixStream,
+        log: &Path,
+        clock: &mut vmtime::VmClock,
+    ) -> Result {
+        let (at, _) = self.find(monitor, log, clock)?;
+        let began = ScreenWait::start(clock);
         let mut read = guest_ps2_read(monitor, at)?;
         while read.0 < self.want.0 || read.1 < self.want.1 {
-            if start.elapsed() > PS2_TAKEN_WAIT {
+            if let Some(why) = began.over(clock, PS2_TAKEN_WAIT) {
                 return Err(format!(
                     "the guest read {} of the {} keyboard and {} of the {} mouse {} sent \
-                     within {} s (its input thread: `input:` lines in the serial log)",
+                     {why} (its input thread: `input:` lines in the serial log)",
                     read.0,
                     self.want.0,
                     read.1,
                     self.want.1,
                     self.unit(),
-                    PS2_TAKEN_WAIT.as_secs()
                 ));
             }
             thread::sleep(Duration::from_millis(20));
@@ -23660,6 +23681,7 @@ impl InputPace {
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
         log: &Path,
+        clock: &mut vmtime::VmClock,
     ) -> Result<(u64, Counted)> {
         if let Some(g) = self.guest {
             return Ok(g);
@@ -23667,7 +23689,7 @@ impl InputPace {
         // The input thread logs one of the two once its devices are set up.
         const PS2: &str = "input: bytes read at ";
         const VIRTIO: &str = "input: virtio events read at ";
-        let start = Instant::now();
+        let began = ScreenWait::start(clock);
         let (rest, virtio) = loop {
             let text = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
             let found = text.lines().rev().find_map(|l| {
@@ -23678,11 +23700,8 @@ impl InputPace {
             if let Some(f) = found {
                 break f;
             }
-            if start.elapsed() > SCREEN_STEP_WAIT {
-                return Err(format!(
-                    "no {PS2:?} or {VIRTIO:?} in the serial log within {} s",
-                    SCREEN_STEP_WAIT.as_secs()
-                ));
+            if let Some(why) = began.over(clock, SCREEN_STEP_WAIT) {
+                return Err(format!("no {PS2:?} or {VIRTIO:?} in the serial log {why}"));
             }
             thread::sleep(Duration::from_millis(100));
         };
@@ -23875,43 +23894,113 @@ const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
 /// How much of a held download goes first, in percent.
 const HELD_PERCENT: usize = 60;
 
-/// How long a screen step waits for its `after` line: a give-up only
-/// (the VM's own limit is not checked while a screen check runs).
+/// How long a screen step waits for its `after` line, in the VM's run
+/// time: a give-up only (the VM's own limit is not checked while a
+/// screen check runs). The longest a step has been measured waiting is
+/// `linux_menu`'s 8.9 s, for the rootfs it fetches from the host and
+/// imports; a run says what each of its steps waited.
 const SCREEN_STEP_WAIT: Duration = Duration::from_secs(120);
-/// Scenarios whose steps wait on longer work: `linux_menu`'s install
-/// (17.7 MB fetched from the host and imported: about 40 s under TCG on
-/// an idle host, several times that beside other VMs) between two steps.
-const SCREEN_STEP_WAITS: &[(&str, Duration)] = &[("linux_menu", Duration::from_secs(300))];
 
-/// Waits at most `limit` for `line` in the serial log `log`.
-fn wait_for_line(log: &Path, line: &str, limit: Duration) -> Result {
-    let start = Instant::now();
-    while start.elapsed() < limit {
+/// One wait of a screen check, counted in the VM's run time as the
+/// scenario's own limit is (vmtime.rs), from the clock where the wait
+/// began. Wall time here failed checks for the host's load -- a VM
+/// starved of host CPU had not had the time the step waits for, and
+/// `chromium_window` failed a 120 s step with 48.8 s of its run spent
+/// waiting for a host CPU -- and the answer is the clock the rest of the
+/// harness uses, not a wider wait.
+struct ScreenWait {
+    began: vmtime::Sample,
+}
+
+impl ScreenWait {
+    fn start(clock: &mut vmtime::VmClock) -> Self {
+        ScreenWait { began: clock.sample() }
+    }
+
+    /// The VM's clocks since the wait began.
+    fn since(&self, clock: &mut vmtime::VmClock) -> vmtime::Sample {
+        let now = clock.sample();
+        vmtime::Sample {
+            wall_ms: now.wall_ms.saturating_sub(self.began.wall_ms),
+            // Both are counters of the whole run; the wait's share is
+            // the difference. Before any vCPU thread could be read
+            // there is nothing to subtract.
+            starved_ms: match (now.starved_ms, self.began.starved_ms) {
+                (Some(now), Some(began)) => Some(now.saturating_sub(began)),
+                (now, _) => now,
+            },
+        }
+    }
+
+    /// The run time the wait has taken (ms), which is what the limits
+    /// are set from.
+    fn run_ms(&self, clock: &mut vmtime::VmClock) -> u64 {
+        self.since(clock).run_ms()
+    }
+
+    /// Why `limit` is up for this wait, if it is.
+    fn over(&self, clock: &mut vmtime::VmClock, limit: Duration) -> Option<String> {
+        let sample = self.since(clock);
+        sample.over(limit).map(|over| match over {
+            vmtime::Over::RunTime => {
+                format!("within {} s of the VM's run time ({})", limit.as_secs(), sample.describe())
+            }
+            vmtime::Over::Backstop => format!(
+                "within {} s of wall time ({} times the {} s limit, vmtime::BACKSTOP; {})",
+                limit.as_secs() * u64::from(vmtime::BACKSTOP),
+                vmtime::BACKSTOP,
+                limit.as_secs(),
+                sample.describe()
+            ),
+        })
+    }
+}
+
+/// Waits for `line` in the serial log `log`, at most `limit` of the VM's
+/// run time; the run time it waited (ms), which is what the limits are
+/// set from.
+fn wait_for_line(
+    log: &Path,
+    line: &str,
+    limit: Duration,
+    clock: &mut vmtime::VmClock,
+) -> Result<u64> {
+    let began = ScreenWait::start(clock);
+    loop {
         if fs::read(log).is_ok_and(|b| b.windows(line.len()).any(|w| w == line.as_bytes())) {
-            return Ok(());
+            return Ok(began.run_ms(clock));
+        }
+        if let Some(why) = began.over(clock, limit) {
+            return Err(format!("no {line:?} in the serial log {why}"));
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("no {line:?} in the serial log within {} s", limit.as_secs()))
 }
+
+/// How long a step's pixels are waited for, in the VM's run time: the
+/// guest finishes drawing, and a step may wait for the program itself (a
+/// TLS handshake under TCG takes seconds).
+const PIXELS_WAIT: Duration = Duration::from_secs(30);
 
 fn check_screen_step(
     monitor: &mut std::os::unix::net::UnixStream,
     iso: &Path,
     n: usize,
     step: &ScreenStep,
+    clock: &mut vmtime::VmClock,
 ) -> Result {
     if step.pixels.is_empty() {
         return Ok(());
     }
-    // Let the guest finish drawing; under load (the full suite) a redraw
-    // can take longer, and a step may wait for the program (a TLS handshake
-    // under TCG takes seconds), so a failed check is retried for 30 s.
-    let mut tries = 0;
+    let began = ScreenWait::start(clock);
     loop {
         thread::sleep(Duration::from_millis(500));
         match dump_and_check(monitor, iso, n, step) {
-            Err(_) if tries < 60 => tries += 1,
+            Err(e) => {
+                if let Some(why) = began.over(clock, PIXELS_WAIT) {
+                    return Err(format!("{e} {why}"));
+                }
+            }
             r => return r,
         }
     }

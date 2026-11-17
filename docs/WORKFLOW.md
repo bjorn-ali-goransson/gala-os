@@ -465,7 +465,13 @@ xtask that change how a scenario boots:
   the host's even when starved (ARCHITECTURE "What a guest's clock
   follows"). Every log has `xtask: vm time: <run> run of <wall> wall
   (<w> waiting for a host CPU)`, the triage repeats it, and the state
-  dump's wait after a timeout counts run time too. What run time does
+  dump's wait after a timeout counts run time too, as does every wait
+  of a screen check -- its step's `after` line, the guest reading the
+  input sent, the pixels drawn -- each counted from where that wait
+  began, not from the boot. A run says what its steps waited
+  (`xtask: screen ok (step 5 waited 6.4s of run time for "...", of
+  120 s)`), which is where the one limit for every step comes from: the
+  longest measured is 8.9 s. What run time does
   not discount is waiting for host storage: a vCPU blocked in a disk
   read is running, not starved, so on slow storage a run-time limit
   behaves like a wall limit and the I/O-heavy scenarios are the ones
