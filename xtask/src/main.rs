@@ -9408,6 +9408,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The kernel32 functions Office imports once each (user/office_k32_test).
     ("office_k32_test", "ntdll.dll", "Windows/System32"),
     ("office_k32_test", "kernel32.dll", "Windows/System32"),
+    // A package's VFS view (user/pkgview_test): it registers its own
+    // package under HKLM and runs a copy of itself inside it.
+    ("pkgview_test", "ntdll.dll", "Windows/System32"),
+    ("pkgview_test", "kernel32.dll", "Windows/System32"),
+    ("pkgview_test", "advapi32.dll", "Windows/System32"),
+    ("pkgview_test", "secur32.dll", "Windows/System32"),
+    ("pkgview_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("pkgview_test", "bcrypt.dll", "Windows/System32"),
     ("wow64_office_k32_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -9877,6 +9885,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "office_k32_test",
+    "pkgview_test",
     "msi_test",
     "webservices_test",
     "rstrtmgr_test",
@@ -14355,6 +14364,22 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=office_k32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["office_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OF: a process's view of a Click-to-Run package's VFS tree
+        // (nt::pkgview). user/pkgview_test builds a package of its own,
+        // registers it as Windows registers one and runs a copy of
+        // itself from inside it: the copy finds the package's files at
+        // the tokens' real paths, and the parent, outside the package,
+        // finds none of them.
+        name: "pkgview_test",
+        cmdline: "qemu_exit run=pkgview_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pkgview_test: in the package: ok",
+            "pkgview_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The same through WOW64 (user/office_k32_test built for x86).
@@ -19440,6 +19465,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
     ("office_k32_test", "WinExec starts a child process (one NT process per Linux process)"),
+    ("pkgview_test", "a child process in the package (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),

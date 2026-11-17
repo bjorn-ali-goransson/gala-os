@@ -2479,6 +2479,70 @@ over it).
   (STATUS_NOTIFY_CLEANUP); a handle that is not one of these, closed
   twice included, is ERROR_INVALID_HANDLE.
 
+### A package's VFS view
+
+`nt/pkgview.rs` (`pkgview_test`). An Office Click-to-Run install keeps
+the files its programs are to find elsewhere on the machine under
+`<root>\root\VFS\<token>`, the token naming the place
+(`ProgramFilesCommonX64` is `C:\Program Files\Common Files`, `System` is
+`C:\Windows\System32`; `TOKENS` holds the nine an Office 16 install's
+`root\VFS` has), and the package manifest under
+`C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
+writes every such path with its token. So Word asks for
+`C:\Program Files\Common Files\Microsoft Shared\Office16\mso.dll`,
+which is on no volume, and the file is the install's
+`root\VFS\ProgramFilesCommonX64\Microsoft Shared\Office16\mso.dll`.
+
+What Windows does, measured on a machine with the same install: a
+running WINWORD.EXE reports the six mso DLLs, `MSPTLS.DLL` and
+`1033\OSFINTL.DLL` loaded from
+`C:\Program Files\Common Files\Microsoft Shared\Office16`, while no
+process on the machine finds that directory and it is on no listing of
+`Common Files`; those modules sit at low addresses outside the loader's
+own range, none of the App-V services or drivers runs, and other files
+of the same package (`RICHED20.DLL`, `AI\aitrx.dll`) are reported by
+their real `root\VFS\...` path. The view is Office's own loader naming
+what it mapped itself, in the one process -- not a file system anything
+keeps.
+
+gala makes the same files answer at the same paths from the kernel
+instead, which is the part a program can tell apart.
+
+- **Who has the view**: a process whose image is under a registered
+  package's `root` directory. The packages are the value names under
+  `HKLM\SOFTWARE\Microsoft\AppVISV`, where Windows keeps them and
+  Office's own `AppvIsvSubsystems64.dll` reads them; the longest
+  matching root wins, and the answer is decided once, where the process
+  is made (`package_of`, `Core.package`). **Difference from Windows**:
+  what puts a process in the virtual environment there is
+  Click-to-Run's own business, so gala's rule is coarser -- every
+  program of the package has the view, not only the ones the service
+  launched into it. (OfficeClickToRun opens its own files by the
+  package path directly, so it needs nothing of this either way.)
+- **Where it answers**: `resolve_file_name`, the one place a name
+  becomes a path on the volume, so every call that opens a file by name
+  has it.
+- **Local first**: the package's copy answers only where the machine
+  itself has nothing at the asked path, and only where the package has
+  the file; otherwise the open is the open that was asked. So a file
+  the machine has keeps its own contents. Windows never shows which way
+  round this is -- Office asks for the files it ships by their real
+  `root\Office16` path, and for the package's VFS tree only at the
+  tokens' paths, which the machine has nothing of.
+- **Limit**: the view answers for a path, not for what a directory
+  holds. A directory only the package has is opened from the package
+  and lists the package's files; a directory the machine also has lists
+  the machine's alone, so a file the view serves need not be in its
+  parent's listing. Office opens its shared code by name.
+- **Difference from Windows, visible**: a module list in gala names the
+  file's package path, Windows' names the virtual one, because gala
+  maps the file it found.
+- **Observability**: `pkgview: <image> runs in the package at <root>`
+  once per process that has a view, and a `package` file event per path
+  served (`XTASK_EVENTS=file`: the `pid`, the path `asked` for and the
+  path `served`), so a run shows every file a program found only in its
+  package.
+
 ### Pipes
 
 `nt/pipe.rs` (`pipe_test`). `\Device\NamedPipe` is a device object (like

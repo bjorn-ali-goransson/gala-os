@@ -5132,7 +5132,16 @@ impl Call<'_> {
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None })
+        let path = file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None };
+        // A program of a Click-to-Run package finds the package's own
+        // files at the paths its manifest's tokens name, when the
+        // machine itself has nothing there (nt::pkgview).
+        if let Some(root) = self.process.package
+            && let Some(served) = super::pkgview::redirect(root, &path, self.process.id)
+        {
+            return Ok(served);
+        }
+        Ok(path)
     }
 
     /// The string form of the caller's token user's SID (`S-1-5-21-...`):

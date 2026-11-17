@@ -1789,21 +1789,17 @@ need gala's.
    brightest) and the active window's pill on the taskbar, which the
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
-   Both runs end the same way today: the process starts, asks the SCM
-   to start `ClickToRunSvc`, and dies 0xc0000142
-   (STATUS_DLL_INIT_FAILED) without a window (228 s into Word's run,
-   which is where the ladder below has got to). The ledger's
-   25 missing `c2r64.dll!` exports are not the reason: they are the
-   AppV ISV shim's optional hooks (`EnsureFile`, `LoadRange`,
-   `StreamFault`, `HandleLoadIconW`, ...), and the real `C2R64.dll` the
-   ClickToRun directory holds exports none of the 25 either (101
-   exports, measured), so the same probes miss on Windows. The ledger
-   names the DLL the death is about (`what` "load failed", its status
-   the detail): `appvisvsubsystems64.dll`, status 0xc0000142, recorded
-   last of all in the seconds before Word exits with that same status.
-   Out of gala's loader that status means the image was found, mapped
-   and bound and its DllMain answered FALSE: the AppV ISV shim itself
-   saying no. Word's run leaves no user32 gap in the ledger any more.
+   Neither run draws a window yet. Word's ends with WINWORD.EXE
+   exiting with status 0 after 29 s, where the ladder below has got
+   to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   delay-load helper's "not found" for user32's WaitForInputIdle, the
+   one gap its run names -- nothing of Office's shared code fails in
+   it, so Excel's next step is that function and a rerun. The ledger's
+   25 missing `c2r64.dll!` exports are not a gap: they are the AppV ISV
+   shim's optional hooks (`EnsureFile`, `LoadRange`, `StreamFault`,
+   `HandleLoadIconW`, ...), and the real `C2R64.dll` the ClickToRun
+   directory holds exports none of the 25 either (101 exports,
+   measured), so the same probes miss on Windows.
    Two things, both next:
    - Under the Office root Windows has 16 reparse points (`C2R32.dll`,
      `C2R64.dll`, `AppvIsvSubsystems32.dll`, `AppvIsvSubsystems64.dll`,
@@ -1817,8 +1813,7 @@ need gala's.
      the integration step that fails (`ConfigureMSIs`, "Final
      Extensions Publishing", 1603 and Integrator 0x643 below), which
      waits on PK's MSI engine.
-   - What `appvisvsubsystems64.dll`'s DllMain needs before it answers
-     TRUE. The 24 user32 functions `mfc140u.dll` imports statically
+   - What Word loads, and where it stops. The 24 user32 functions `mfc140u.dll` imports statically
      that gala lacked are exported now, Windows' results measured first
      (`win32_misc_test`'s `mfc` section, 158 checks): the dialog-item
      helpers (CheckRadioButton, IsDlgButtonChecked, Get/SetDlgItemInt,
@@ -1891,38 +1886,48 @@ need gala's.
      C runtime prints with, moved into `user/decfloat` so that both
      round alike (ARCHITECTURE "COM: ole32 and oleaut32"). The run's
      ledger has no `missing import` and no `load failed` left at all.
-     What stops Word now is Office's shared code, and the file events
-     name the paths it wants (`XTASK_EVENTS=file`): it opens
-     `C:\Program Files\Common Files\Microsoft Shared\Office16\` for
+     Word finds Office's shared code: a process of a Click-to-Run
+     package sees the package's `VFS\<token>` tree at the token's real
+     path (ARCHITECTURE "A package's VFS view", `nt/pkgview.rs`,
+     `pkgview_test`), so WINWORD.EXE's opens of
      mso20win32client.dll, mso30win32client.dll,
      mso40uiwin32client.dll, mso50win32client.dll,
-     mso98win32client.dll and mso.dll, all six
-     STATUS_OBJECT_PATH_NOT_FOUND because that directory does not
-     exist, then mso.dll beside WINWORD.EXE and in System32
-     (STATUS_OBJECT_NAME_NOT_FOUND), formats Win32 error 197 and ends.
-     All six files are on the disk, under the Office root's
-     `VFS\ProgramFilesCommonX64\Microsoft Shared\Office16` (`cargo
-     xtask disk-files`): a Click-to-Run install keeps what a program is
-     to see at `[{ProgramFilesCommonX64}]\Microsoft Shared\Office16`
-     there, and the package manifest under
-     `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
-     writes every such path with those tokens. That view is the
-     process's own on Windows, measured on a machine with the same
-     install: Word's module list reports mso.dll and the five clients
-     at `C:\Program Files\Common Files\Microsoft Shared\Office16`,
-     and while Word holds them no other process on the machine finds
-     that directory at all -- it is not a directory the install made
-     (none of the App-V drivers is so much as running) but what the
-     virtual environment presents to the processes in it. So the next
-     step is that mapping, test first: a process in Office's virtual
-     environment sees the package's `VFS\<token>` tree at the token's
-     real path -- the subtree Word asks for, not the whole AppV
-     file-system subsystem -- and `office_word` reruns on it. What puts
-     a process in that environment is Click-to-Run's own business on
-     Windows; gala's rule to try is the image's path, a process running
-     out of the package root, which is coarser than Windows' and says
+     mso98win32client.dll and mso.dll at
+     `C:\Program Files\Common Files\Microsoft Shared\Office16` are all
+     served from the Office root's
+     `VFS\ProgramFilesCommonX64\Microsoft Shared\Office16`, where the
+     install keeps them (`cargo xtask disk-files`; the `package` file
+     events name each one, `XTASK_EVENTS=file`). What Windows does
+     there, measured on a machine with the same install: Word reports
+     those six, MSPTLS.DLL and `1033\OSFINTL.DLL` loaded from that
+     directory while no process on the machine finds it, those modules
+     sit outside the loader's own address range, and none of the App-V
+     services or drivers runs -- the view is Office's own loader naming
+     what it mapped itself, not a file system anything keeps. gala
+     makes the same files answer at the same paths from the kernel
+     instead, for a process whose image is under a package root
+     registered in `HKLM\SOFTWARE\Microsoft\AppVISV`, which is coarser
+     than Windows' (every program of the package has the view) and says
      so where it lands. (OfficeClickToRun opens its own files by the
      package path directly, so the service needs nothing of this.)
+     What stops Word now is what those six import: all six are laid
+     out and mapped, and their imports do not bind.
+     mso20win32client.dll fails first, STATUS_ENTRYPOINT_NOT_FOUND
+     over kernel32's GetSystemFirmwareTable, and the five behind it
+     fail STATUS_DLL_NOT_FOUND because each imports the one before.
+     What they are short of, from the run's ledger, is 15 kernel32
+     functions: GetSystemFirmwareTable (mso20win32client),
+     RegisterApplicationRecoveryCallback (mso30win32client),
+     ApplicationRecoveryFinished, ApplicationRecoveryInProgress,
+     PulseEvent, GetDateFormatA, GetTimeFormatA and EnumCalendarInfoA
+     (mso98win32client), GetPrivateProfileStringA, GetProfileStringA,
+     GetProfileIntA, GetPrivateProfileIntW, WritePrivateProfileStringA,
+     OpenFile, SetFileShortNameW and FindPackagesByPackageFamily
+     (mso.dll). So the next step is those, test first with Windows'
+     results measured, and `office_word` rerun on them;
+     mso40uiwin32client and mso50win32client name nothing of their own,
+     so they bind as soon as the chain does, and MSPTLS.DLL and
+     `1033\OSFINTL.DLL` are what Word loads next on Windows.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew

@@ -42,6 +42,10 @@ pub struct Core {
     pub name: &'static str,
     /// The Win32 path of the executable (`C:\\gala\\x.exe`).
     pub path: &'static str,
+    /// The root of the Click-to-Run package whose program this is, if
+    /// any: the process finds the package's own files at the paths its
+    /// manifest's tokens name (nt::pkgview), decided once, here.
+    pub package: Option<&'static str>,
     /// The address space, while the process has one: `release_space`
     /// gives it up at the exit, as Windows tears a process's virtual
     /// address space down there and keeps only the object, so a handle
@@ -1123,6 +1127,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             parent_id,
             name,
             path,
+            package: super::pkgview::package_of(path),
             space: IrqMutex::named("process.space", Some(space)),
             vad: IrqMutex::new(vad),
             views: IrqMutex::new(Vec::new()),
@@ -1374,6 +1379,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
             parent_id: bare.parent_id,
             name: bare.name,
             path: bare.path,
+            package: super::pkgview::package_of(bare.path),
             space: IrqMutex::named("process.space", Some(space)),
             vad: IrqMutex::new(bare.vad),
             views: IrqMutex::new(Vec::new()),
@@ -1758,6 +1764,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
             parent_id: a.parent_id,
             name: a.name,
             path: a.path,
+            package: super::pkgview::package_of(a.path),
             space: IrqMutex::named("process.space", Some(space)),
             vad: IrqMutex::new(a.vad),
             views: IrqMutex::new(a.views),
