@@ -473,6 +473,20 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // The same glibc for aarch64 (the twins of the glibc scenarios:
+    // GLIBC_ARM64), the release's arm64 libc6 from ports.ubuntu.com (the
+    // SHA-256 in its signed Packages index).
+    Prebuilt {
+        name: "glibc-arm64",
+        url: "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.43-2ubuntu2_arm64.deb",
+        checksum: "6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0",
+        members: &[
+            "usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+            "usr/lib/aarch64-linux-gnu/libc.so.6",
+            "usr/lib/aarch64-linux-gnu/libm.so.6",
+        ],
+        excludes: &[],
+    },
     // weston 14.0.2's demo clients as Ubuntu 26.04 (resolute) ships them
     // (universe, the release pocket's weston 14.0.2-5; the SHA-256
     // is the one in the release's signed Packages index): only
@@ -12458,6 +12472,8 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl",
     "lx_wl_maximize",
     "lx_wl_popup",
+    "lx_dyn",
+    "lx_dyn_pie",
     "lx_wl_input",
     "gui_test",
     "start_menu",
@@ -18789,11 +18805,48 @@ fn aarch64_display(name: &str) -> bool {
             .is_some_and(|s| !s.cmdline.contains("presenter=test"))
 }
 
+/// A boot module: (file, directory in the image).
+type Module = (&'static str, &'static str);
+
+/// glibc's files and places on x86-64 and their aarch64 counterparts, which
+/// a twin ships instead: the program interpreter where PT_INTERP names it
+/// (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`) and in
+/// the multiarch system directory, libc and libm there.
+const GLIBC_ARM64: &[(Module, Module)] = &[
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib64"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib"),
+    ),
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libc.so.6", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libm.so.6", "lib/aarch64-linux-gnu"),
+    ),
+];
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
-    // A twin ships its x64 scenario's files (their ARM64 builds).
-    let name = twin_base(name).unwrap_or(name);
+    // A twin ships its x64 scenario's files (their ARM64 builds), glibc's
+    // as aarch64's (GLIBC_ARM64).
+    if let Some(base) = twin_base(name) {
+        let mut modules = extra_modules(base);
+        for m in &mut modules {
+            if let Some((_, arm)) = GLIBC_ARM64.iter().find(|(x64, _)| x64 == m) {
+                *m = *arm;
+            }
+        }
+        modules.sort_unstable();
+        modules.dedup();
+        return modules;
+    }
     let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
     if sets.is_empty() {
         sets.push(name);

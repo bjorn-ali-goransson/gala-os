@@ -2234,7 +2234,15 @@ source).
   tests in its `AARCH64_TESTS` into `user/lx/bin/aarch64/` (static
   ET_EXEC) with clang `--target=aarch64-linux-musl` and ld.lld against
   musl 1.2.5, which it fetches (checksum checked) and builds for aarch64
-  into `target/lx-aarch64-musl` once. The same sources: `lx.h`'s
+  into `target/lx-aarch64-musl` once; and its `AARCH64_GLIBC_TESTS`
+  (dyn_test, as build.sh's GLIBC_TESTS: the program and PIE, its
+  libraries) with clang `--target=aarch64-linux-gnu` against a sysroot
+  of Ubuntu's arm64 libc6, libc6-dev, libgcc and kernel headers
+  (fetched from ports.ubuntu.com, checksums checked, unpacked into
+  `target/lx-aarch64-glibc` once; `/lib` linked to `/usr/lib` as on
+  Ubuntu). A twin ships arm64 glibc where x64's ships amd64's
+  (xtask `GLIBC_ARM64`); a transcript line that names the machine's
+  loader is the twin's own (`user/lx/dyn_test/arm_lx_dyn.txt`). The same sources: `lx.h`'s
   aarch64 branch makes `svc #0` calls and turns the calls aarch64 has
   no number for (open, stat, poll, pipe, dup2, select, ...) into the
   ones musl makes there (openat(AT_FDCWD, ...), ppoll, pipe2, dup3,
