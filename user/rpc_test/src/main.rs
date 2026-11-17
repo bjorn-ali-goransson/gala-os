@@ -15,6 +15,7 @@
 //! interface GalaRpcTest {
 //!   typedef [context_handle] void *CTX;
 //!   typedef struct { long id; [string] wchar_t *name; } NAMED;
+//!   typedef struct { unsigned long n; [size_is(n)] long *v; } VEC;
 //!   long Add([in] handle_t h, [in] long a, [in] long b);
 //!   void Square([in] handle_t h, [in] long x, [out] long *y);
 //!   long Length([in] handle_t h, [in, string] const wchar_t *s);
@@ -27,6 +28,8 @@
 //!   long Who([in] handle_t h, [out] long *inq, [out] long *level,
 //!            [out] long *svc, [out] long *imp);
 //!   long Named([in] handle_t h, [in] NAMED *n);
+//!   long SumVec([in] handle_t h, [in] VEC *s);
+//!   long SumNamed([in] handle_t h, [in] long n, [in, size_is(n)] NAMED *a);
 //! }
 //! ```
 //!
@@ -50,8 +53,11 @@
 //!   `[x]` alike, a malformed UUID RPC_S_INVALID_STRING_UUID, no `:`
 //!   RPC_S_INVALID_STRING_BINDING with every output NULL;
 //! - calls carry base types, out pointers, strings both ways, conformant
-//!   arrays, a complex structure with an embedded string, and context
-//!   handles, on ncalrpc and ncacn_np, and from another process;
+//!   arrays, a complex structure with an embedded string, a structure
+//!   whose pointer to a conformant array is sized by one of its own
+//!   fields (pointer conformance), a conformant array whose elements are
+//!   themselves a complex type, and context handles, on ncalrpc and
+//!   ncacn_np, and from another process;
 //! - in a call over ncalrpc RpcBindingInqAuthClient says RPC_S_OK, packet
 //!   privacy, NTLM (RPC_C_AUTHN_WINNT), the client "DOMAIN\user" as
 //!   GetUserNameEx(NameSamCompatible) gives it, and RpcImpersonateClient
@@ -316,13 +322,13 @@ const NDR: SyntaxId = SyntaxId {
     minor: 0,
 };
 
-const PROCS: usize = 10;
+const PROCS: usize = 12;
 
 // ---- The format strings (MIDL's /Oicf /robust output for x64) ----
 
 /// The type format string. Each simple-reference parameter's type offset
 /// is that of its referent (after the FC_RP), as MIDL writes it.
-static TYPES: [u8; 76] = [
+static TYPES: [u8; 136] = [
     0x00, 0x00, // 0
     // 2: [out] long * (a simple reference to a base type)
     0x11, 0x0c, 0x08, 0x5c, // FC_RP [alloced_on_stack] [simple_pointer] FC_LONG FC_PAD
@@ -355,6 +361,38 @@ static TYPES: [u8; 76] = [
     0x08, 0x40, 0x36, 0x5b, // 66: FC_LONG FC_STRUCTPAD4 FC_POINTER FC_END
     0x12, 0x08, 0x25, 0x5c, // 70: FC_UP [simple_pointer] FC_C_WSTRING FC_PAD
     0x00, 0x00,
+    // 76: [in] VEC *: the conformant array hangs off a pointer in the
+    // structure, and its size is the structure's own field, so the
+    // conformance is relative to the structure that holds the pointer
+    // (FC_POINTER_CONFORMANCE), not to the array's own memory.
+    0x11, 0x00, 0x02, 0x00, // FC_RP, offset 2 (80)
+    0x1a, 0x07, 0x10, 0x00, // 80: FC_BOGUS_STRUCT, align 8, memory size 16
+    0x00, 0x00, // 84: no conformant array
+    0x06, 0x00, // 86: pointer layout at 86 + 6 = 92
+    // A four-byte integer member is FC_LONG whether it is signed or not:
+    // FC_ULONG in a member layout is RPC_S_INTERNAL_ERROR on Windows
+    // (measured on 26200), while a correlation descriptor does take it.
+    0x08, 0x40, 0x36, 0x5b, // 88: FC_LONG FC_STRUCTPAD4 FC_POINTER FC_END
+    0x12, 0x00, 0x02, 0x00, // 92: FC_UP, offset 2 (96)
+    0x1b, 0x03, 0x04, 0x00, // 96: FC_CARRAY, align 4, element size 4
+    0x19, 0x00, 0x00,
+    0x00, // 100: FC_POINTER_CONFORMANCE | FC_ULONG, no operator, offset 0 (n)
+    0x01, 0x00, // correlation flags: early
+    0x08, 0x5b, // 106: FC_LONG FC_END
+    0x00, 0x00,
+    // 110: [in, size_is(n)] NAMED *: a conformant array of a complex
+    // type, so its element is not a format character of its own but a
+    // reference to the element's description (FC_EMBEDDED_COMPLEX).
+    0x11, 0x00, 0x02, 0x00, // FC_RP, offset 2 (114)
+    0x21, 0x07, 0x00, 0x00, // 114: FC_BOGUS_ARRAY, align 8, conformant
+    0x28, 0x00, 0x08,
+    0x00, // 118: FC_TOP_LEVEL_CONFORMANCE | FC_LONG, no operator, stack offset 8 (n)
+    0x01, 0x00, // correlation flags: early
+    0xff, 0xff, 0xff, 0xff, // 124: no variance
+    0x00, 0x00, // correlation flags
+    0x4c, 0x00, // 130: FC_EMBEDDED_COMPLEX, no padding before the element
+    0xb6, 0xff, // offset -74 from 132: NAMED (58)
+    0x5c, 0x5b, // 134: FC_PAD FC_END
 ];
 
 const T_STRING: u16 = 8;
@@ -364,6 +402,8 @@ const T_OUT_CTX: u16 = 38;
 const T_IN_CTX: u16 = 42;
 const T_INOUT_CTX: u16 = 50;
 const T_NAMED: u16 = 58;
+const T_VEC: u16 = 80;
+const T_NAMED_ARRAY: u16 = 114;
 
 // Parameter attributes.
 const IN_BASE: u16 = 0x48; // in, base type
@@ -489,6 +529,15 @@ fn build_procs() {
     p.header(9, 0x18, &PRIMITIVE, true, 2);
     p.param(IN_REF, 8, T_NAMED);
     p.param(RETURN_BASE, 16, FC_LONG);
+    // 10: long SumVec(h, [in] VEC *s)
+    p.header(10, 0x18, &PRIMITIVE, true, 2);
+    p.param(IN_REF, 8, T_VEC);
+    p.param(RETURN_BASE, 16, FC_LONG);
+    // 11: long SumNamed(h, n, [in, size_is(n)] NAMED *a)
+    p.header(11, 0x20, &PRIMITIVE, true, 3);
+    p.param(IN_BASE, 8, FC_LONG);
+    p.param(IN_REF, 16, T_NAMED_ARRAY);
+    p.param(RETURN_BASE, 24, FC_LONG);
 }
 
 fn proc_format(n: usize) -> *const u8 {
@@ -574,6 +623,8 @@ static ROUTINES: Routines = Routines([
     close as *const c_void,
     who as *const c_void,
     named as *const c_void,
+    sum_vec as *const c_void,
+    sum_named as *const c_void,
 ]);
 
 static SERVER_INFO: ServerInfo = ServerInfo {
@@ -741,6 +792,35 @@ struct Named {
 unsafe extern "system" fn named(_h: Handle, n: *const Named) -> i32 {
     // SAFETY: the stub's structure and its string.
     unsafe { (*n).id + wlen((*n).name) as i32 }
+}
+
+#[repr(C)]
+struct Vec32 {
+    n: u32,
+    v: *const i32,
+}
+
+unsafe extern "system" fn sum_named(_h: Handle, n: i32, a: *const Named) -> i32 {
+    let mut total = 0i32;
+    // SAFETY: the stub's array of `n` structures, each with its string.
+    unsafe {
+        for i in 0..n as usize {
+            let e = &*a.add(i);
+            total = total.wrapping_add(e.id + wlen(e.name) as i32);
+        }
+    }
+    total
+}
+
+unsafe extern "system" fn sum_vec(_h: Handle, s: *const Vec32) -> i32 {
+    let mut total = 0i32;
+    // SAFETY: the stub's structure and its array of `n` elements.
+    unsafe {
+        for i in 0..(*s).n as usize {
+            total = total.wrapping_add(*(*s).v.add(i));
+        }
+    }
+    total
 }
 
 // ---- Output and checks ----
@@ -1134,6 +1214,30 @@ fn calls(c: &mut Checks, h: Handle, lrpc: bool) -> Result<(), u32> {
         let four = wide::<5>("four");
         let n = Named { id: 40, name: four.as_ptr() };
         c.eq(NdrClientCall2(d, proc_format(9), h, addr_of!(n).cast::<c_void>()) as i32 as i64, 44)?;
+
+        let numbers = [5i32, 6, 7, 1000];
+        let vec = Vec32 { n: 3, v: numbers.as_ptr() };
+        c.eq(
+            NdrClientCall2(d, proc_format(10), h, addr_of!(vec).cast::<c_void>()) as i32 as i64,
+            18,
+        )?;
+        let all = Vec32 { n: 4, v: numbers.as_ptr() };
+        c.eq(
+            NdrClientCall2(d, proc_format(10), h, addr_of!(all).cast::<c_void>()) as i32 as i64,
+            1018,
+        )?;
+
+        let one = wide::<4>("one");
+        let three = wide::<6>("three");
+        let items = [Named { id: 10, name: one.as_ptr() }, Named { id: 20, name: three.as_ptr() }];
+        c.eq(
+            NdrClientCall2(d, proc_format(11), h, 2, items.as_ptr() as *mut c_void) as i32 as i64,
+            38,
+        )?;
+        c.eq(
+            NdrClientCall2(d, proc_format(11), h, 1, items.as_ptr() as *mut c_void) as i32 as i64,
+            13,
+        )?;
 
         let (mut inq, mut level, mut svc, mut imp) = (0i32, 0i32, 0i32, 0i32);
         let same =

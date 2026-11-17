@@ -2,6 +2,10 @@
 //! bound by the loader): console output, last-error, process and thread
 //! ids, virtual memory, events and waits, sleeping and tick counts, the
 //! performance counter, LoadLibrary/GetProcAddress/FreeLibrary,
+//! GetModuleHandleW/A/ExW (a loaded module's base, and NULL with
+//! ERROR_MOD_NOT_FOUND for one that is not loaded), the module graph a
+//! program reads that way (advapi32, oleaut32 and msi import rpcrt4, so
+//! loading one of them maps rpcrt4 too),
 //! SetDllDirectoryW/GetDllDirectoryW (a copy of testdll2.dll in %TEMP%),
 //! which names kernel32 and kernelbase each export (`export_split`: the
 //! PathCch, address-wait and interrupt-time functions are kernelbase's
@@ -40,6 +44,9 @@ unsafe extern "system" {
     fn QueryPerformanceCounter(count: *mut i64) -> Bool;
     fn QueryPerformanceFrequency(freq: *mut i64) -> Bool;
     fn LoadLibraryA(name: *const u8) -> Handle;
+    fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut Handle) -> Bool;
     fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn FreeLibrary(module: Handle) -> Bool;
     fn SetDllDirectoryW(dir: *const u16) -> Bool;
@@ -220,6 +227,48 @@ fn run() -> Result<(), u32> {
         c.ok(LoadLibraryA(c"no_such_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
 
+        // GetModuleHandle asks about a module already loaded and loads
+        // nothing: a loaded one gives the same base LoadLibrary does,
+        // and one that is not loaded gives NULL with the same
+        // ERROR_MOD_NOT_FOUND (126) a failed load gives -- by name (W and
+        // A) and through GetModuleHandleEx, which also writes a null
+        // handle. (Under gala each miss leaves its name in the ledger,
+        // `kernel32.dll!GetModuleHandle(<name>)`; Windows records
+        // nothing, so only the answers are checked here.)
+        let loaded = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
+        c.ok(!loaded.is_null(), 0)?;
+        c.eq(GetModuleHandleW(wide("kernel32.dll").as_ptr()) as u64, loaded as u64)?;
+        c.eq(FreeLibrary(loaded) as u64, 1)?;
+        let absent = wide("no_such_module.dll");
+        SetLastError(0);
+        c.ok(GetModuleHandleW(absent.as_ptr()).is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+        SetLastError(0);
+        c.ok(GetModuleHandleA(c"no_such_module.dll".as_ptr().cast()).is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+        let mut module: Handle = core::ptr::null_mut();
+        SetLastError(0);
+        c.eq(GetModuleHandleExW(0, absent.as_ptr(), &mut module) as u64, 0)?;
+        c.ok(module.is_null(), 0)?;
+        c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+
+        // Windows' module graph, which a program reads with
+        // GetModuleHandle: advapi32.dll, oleaut32.dll, msi.dll and
+        // combase.dll import rpcrt4.dll (their import tables, measured
+        // on 26100), so rpcrt4 is mapped in every process that loads one
+        // of them, before anything asks for its handle. Click-to-Run's
+        // AppV ISV server asks exactly that way and gives up with
+        // ERROR_MOD_NOT_FOUND (0x7e at `swrpcserver.cpp : 552`) when the
+        // answer is NULL (ROADMAP OF), so which system DLL brings which
+        // dependency is part of what a program sees.
+        for name in [c"advapi32.dll", c"oleaut32.dll", c"msi.dll", c"combase.dll"] {
+            SetLastError(0);
+            let dll = LoadLibraryA(name.as_ptr().cast());
+            c.ok(!dll.is_null(), GetLastError().into())?;
+            c.ok(imports(dll as usize, b"rpcrt4.dll"), dll as u64)?;
+        }
+        c.ok(!GetModuleHandleW(wide("rpcrt4.dll").as_ptr()).is_null(), 0)?;
+
         // Which names kernel32 and kernelbase export (Windows 11 25H2).
         let k32 = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
         let kb = LoadLibraryA(c"kernelbase.dll".as_ptr().cast());
@@ -291,6 +340,51 @@ fn run() -> Result<(), u32> {
         c.ok(RemoveDirectoryW(lib.as_ptr()) != 0, GetLastError().into())?;
     }
     Ok(())
+}
+
+/// Whether the image at `base` imports `dll` (given in lowercase): a
+/// descriptor of its import directory names it. The loader compares DLL
+/// names without case, so this does too.
+fn imports(base: usize, dll: &[u8]) -> bool {
+    // SAFETY: a loaded image, read inside its own headers.
+    unsafe {
+        let pe = base + ((base + 0x3c) as *const u32).read_unaligned() as usize;
+        let magic = ((pe + 24) as *const u16).read_unaligned();
+        // DataDirectory[1] of the optional header (PE32+ or PE32).
+        let dirs = pe + 24 + if magic == 0x20b { 112 } else { 96 };
+        let dir = ((dirs + 8) as *const u32).read_unaligned() as usize;
+        if dir == 0 {
+            return false;
+        }
+        let mut desc = base + dir;
+        loop {
+            // The Name of an IMPORT_DESCRIPTOR (20 bytes); 0 ends the table.
+            let name = ((desc + 12) as *const u32).read_unaligned() as usize;
+            if name == 0 {
+                return false;
+            }
+            let mut n = 0;
+            while *((base + name + n) as *const u8) != 0 {
+                n += 1;
+            }
+            let got = core::slice::from_raw_parts((base + name) as *const u8, n);
+            if got.len() == dll.len()
+                && got.iter().zip(dll).all(|(a, b)| a.to_ascii_lowercase() == *b)
+            {
+                return true;
+            }
+            desc += 20;
+        }
+    }
+}
+
+/// `text` (ASCII) as a NUL-terminated wide string.
+fn wide(text: &str) -> [u16; 64] {
+    let mut b = [0u16; 64];
+    for (i, ch) in text.bytes().enumerate() {
+        b[i] = ch.into();
+    }
+    b
 }
 
 /// The user's temporary directory (with its trailing backslash),

@@ -225,7 +225,10 @@ pub fn element_size(vt: u16) -> usize {
 #[derive(Clone, Copy)]
 pub(crate) enum Value {
     Int(i128),
-    Real(f64),
+    /// A floating-point number and the significant digits
+    /// Automation prints it with: seven for a float, fifteen for a
+    /// double (measured on Windows 11).
+    Real(f64, u32),
     Bool(bool),
     /// Characters (a BSTR's, or a caller's string without its NUL).
     Text(*const u16, usize),
@@ -243,9 +246,9 @@ pub(crate) fn value_of(vt: u16, v: [u64; WORDS]) -> Result<Value, HResult> {
         VT_UI4 | VT_UINT => Value::Int((raw as u32).into()),
         VT_I8 => Value::Int((raw as i64).into()),
         VT_UI8 => Value::Int(raw.into()),
-        VT_R4 => Value::Real(f32::from_bits(raw as u32).into()),
-        VT_R8 => Value::Real(f64::from_bits(raw)),
-        VT_CY => Value::Real(raw as i64 as f64 / 10000.0),
+        VT_R4 => Value::Real(f32::from_bits(raw as u32).into(), 7),
+        VT_R8 => Value::Real(f64::from_bits(raw), 15),
+        VT_CY => Value::Real(raw as i64 as f64 / 10000.0, 15),
         VT_BOOL => Value::Bool(raw as i16 != 0),
         VT_BSTR => Value::Text(raw as *const u16, SysStringLen(raw as *const u16) as usize),
         VT_NULL => return Err(DISP_E_TYPEMISMATCH),
@@ -429,79 +432,92 @@ pub(crate) fn decimal(mut v: u128, out: &mut [u8], mut at: usize) -> usize {
     }
 }
 
-/// `v` as Automation prints a double: up to 15 significant digits, no
-/// trailing zeros, an exponent ("E+n"/"E-n") outside 1e-11 .. 1e15.
-fn format_real(v: f64, out: &mut [u8; 48]) -> usize {
-    let mut n = 0;
-    if v == 0.0 || v.is_nan() {
-        out[0] = b'0';
-        return 1;
+/// `v` as Automation prints it with `digits` significant digits (seven
+/// for a float, fifteen for a double): rounded to that many half away
+/// from zero (1000000.5 prints as "1000001"), trailing zeros dropped, in fixed notation while both the integer digits and
+/// the decimals it needs fit in that many digits and with an exponent
+/// ("1.234567E+07", signed and at least two digits) otherwise. The
+/// zeroes are "0" and "-0" and what is no number is "inf", "-inf" or
+/// "nan" (all measured on Windows 11).
+fn format_real(v: f64, digits: u32, out: &mut [u8; 48]) -> usize {
+    if v.is_nan() {
+        out[..3].copy_from_slice(b"nan");
+        return 3;
     }
-    let mut x = v;
-    if x < 0.0 {
+    let mut n = 0;
+    if v.is_sign_negative() {
         out[n] = b'-';
         n += 1;
-        x = -x;
     }
-    // x = m * 10^e with 1 <= m < 10.
-    let mut e = 0i32;
-    while x >= 10.0 {
-        x /= 10.0;
-        e += 1;
+    if v.is_infinite() {
+        out[n..n + 3].copy_from_slice(b"inf");
+        return n + 3;
     }
-    while x < 1.0 {
-        x *= 10.0;
-        e -= 1;
+    if v == 0.0 {
+        out[n] = b'0';
+        return n + 1;
     }
-    // 15 significant digits, rounded.
-    let mut digits = round_even(x * 1e14).unwrap_or(0) as u64;
-    if digits >= 1_000_000_000_000_000 {
-        digits /= 10;
-        e += 1;
-    }
+    let places = digits.clamp(1, 15) as usize;
+    // The double's own decimal expansion, rounded half away from zero at
+    // the last digit printed (user/decfloat; the UCRT's conversion, which
+    // is what Windows' oleaut32 formats with). Rounding a value scaled by
+    // powers of ten instead would lose the ties: 12345675 as seven digits
+    // is 1.234568E+07.
+    let mut sig = [0u8; decfloat::MAX_PRECISION + 1];
+    let e = decfloat::significant(
+        if v < 0.0 { -v } else { v },
+        places,
+        &mut sig,
+        decfloat::Rounding { exact: true, ties_even: false },
+    );
     let mut text = [0u8; 15];
-    for i in (0..15).rev() {
-        text[i] = b'0' + (digits % 10) as u8;
-        digits /= 10;
+    for (d, &s) in text.iter_mut().zip(sig[..places].iter()) {
+        *d = b'0' + s;
     }
-    let mut last = 15;
+    let mut last = places;
     while last > 1 && text[last - 1] == b'0' {
         last -= 1;
     }
-    let significant = &text[..last];
+    let kept = &text[..last];
+    // The digits before the point, and the decimals these need.
+    let integer_digits = if e >= 0 { e as usize + 1 } else { 0 };
+    let decimals = (last as i32 - 1 - e).max(0) as usize;
     let mut push = |b: u8| {
         out[n] = b;
         n += 1;
     };
-    // Fixed notation from 1E-11 to below 1E+15 (Wine's vartype.c
-    // test_VarBstrFromR8 vectors, checked on Windows), else exponential.
-    if (-11..15).contains(&e) {
+    if integer_digits <= places && decimals <= places {
         if e < 0 {
             push(b'0');
             push(b'.');
             for _ in 0..(-e - 1) {
                 push(b'0');
             }
-            significant.iter().for_each(|&d| push(d));
+            kept.iter().for_each(|&d| push(d));
         } else {
             let whole = (e + 1) as usize;
-            for i in 0..whole.max(significant.len()) {
+            for i in 0..whole.max(kept.len()) {
                 if i == whole {
                     push(b'.');
                 }
-                push(*significant.get(i).unwrap_or(&b'0'));
+                push(*kept.get(i).unwrap_or(&b'0'));
             }
         }
     } else {
-        push(significant[0]);
-        if significant.len() > 1 {
+        push(kept[0]);
+        if kept.len() > 1 {
             push(b'.');
-            significant[1..].iter().for_each(|&d| push(d));
+            kept[1..].iter().for_each(|&d| push(d));
         }
         push(b'E');
         push(if e < 0 { b'-' } else { b'+' });
         let mut buf = [0u8; 8];
-        let start = decimal(e.unsigned_abs().into(), &mut buf, 8);
+        let mut start = decimal(e.unsigned_abs().into(), &mut buf, 8);
+        // At least two digits, as Windows writes the exponent.
+        if start == 7 {
+            start -= 1;
+            buf[start] = b'0';
+        }
         buf[start..].iter().for_each(|&d| push(d));
     }
     n
@@ -512,7 +528,7 @@ pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; WORDS],
     let as_real = |v: Value| -> Result<f64, HResult> {
         Ok(match v {
             Value::Int(i) => i as f64,
-            Value::Real(r) => r,
+            Value::Real(r, _) => r,
             Value::Bool(b) => {
                 if b {
                     -1.0
@@ -588,9 +604,9 @@ pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; WORDS],
                 }
                 bstr(&buf[start..])?
             }
-            Value::Real(r) => {
+            Value::Real(r, digits) => {
                 let mut buf = [0u8; 48];
-                let n = format_real(r, &mut buf);
+                let n = format_real(r, digits, &mut buf);
                 bstr(&buf[..n])?
             }
         },

@@ -341,6 +341,10 @@ pub extern "system" fn GetModuleHandleExW(
         if base.is_null() {
             // SAFETY: the caller's output pointer.
             unsafe { *module = core::ptr::null_mut() };
+            // No name to record (the caller asked by address), so the
+            // address is the detail; a miss by name records the name in
+            // GetModuleHandleW.
+            super::note(b"kernel32.dll!GetModuleHandleEx(address in no module)", name as u64);
             return fail_with(126 /* ERROR_MOD_NOT_FOUND */, FALSE);
         }
         base

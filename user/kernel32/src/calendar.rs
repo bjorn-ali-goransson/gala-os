@@ -146,7 +146,7 @@ pub extern "system" fn GetCalendarInfoW(
     len: i32,
     value: *mut u32,
 ) -> i32 {
-    if !matches!(lcid, 0x409 | 0x400 | 0x800 | 0x7f | 0) {
+    if !known_calendar_lcid(lcid) {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }
     GetCalendarInfoEx(core::ptr::null(), calendar, core::ptr::null(), kind, data, len, value)
@@ -212,11 +212,42 @@ pub extern "system" fn EnumCalendarInfoW(
     kind: u32,
 ) -> Bool {
     let Some(callback) = callback else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
-    if !matches!(lcid, 0x409 | 0x400 | 0x800 | 0x7f | 0) {
+    if !known_calendar_lcid(lcid) {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
     enum_calendar(b"kernel32.dll!EnumCalendarInfoW(CalType)", calendar, kind, |text, _| {
         callback(text)
+    })
+}
+
+type EnumProcA = extern "system" fn(*const u8) -> Bool;
+
+/// The LCIDs GetCalendarInfoW and the EnumCalendarInfo forms take: gala's
+/// locale, and the defaults that stand for it.
+fn known_calendar_lcid(lcid: u32) -> bool {
+    matches!(lcid, 0x409 | 0x400 | 0x800 | 0x7f | 0)
+}
+
+/// EnumCalendarInfoA: [`EnumCalendarInfoW`]'s values as ANSI (UTF-8); a
+/// value too long for one row is not passed on. Word's mso chain reads
+/// the month names with it.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumCalendarInfoA(
+    callback: Option<EnumProcA>,
+    lcid: u32,
+    calendar: u32,
+    kind: u32,
+) -> Bool {
+    let Some(callback) = callback else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    if !known_calendar_lcid(lcid) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    enum_calendar(b"kernel32.dll!EnumCalendarInfoA(CalType)", calendar, kind, |text, _| {
+        let mut utf8 = [0u8; 256];
+        match super::ansi::to_utf8(wide_slice(text), utf8.as_mut_ptr(), utf8.len()) {
+            Some(_) => callback(utf8.as_ptr()),
+            None => FALSE,
+        }
     })
 }
 

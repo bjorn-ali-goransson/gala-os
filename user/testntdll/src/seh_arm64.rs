@@ -994,15 +994,20 @@ fn call_handler(
 /// `context`). Never inlined: its CONTEXT copies must not enlarge the
 /// dispatcher's own frame.
 #[inline(never)]
-pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
+pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8, walk: &mut crate::Walk) -> bool {
     let (_, stack_base) = stack_bounds();
     let mut ctx = Context::from_ptr(context);
     for _ in 0..4096 {
         let mut frame_ctx = ctx;
-        let Some(found) = unwind_frame(&mut ctx) else { break };
+        let Some(found) = unwind_frame(&mut ctx) else {
+            walk.ended = crate::END_NO_DATA;
+            break;
+        };
         if !frame_ok(found.2, stack_base) {
+            walk.ended = crate::END_OFF_STACK;
             break;
         }
+        walk.frame(frame_ctx.get(CTX_PC), true, found.0 != 0);
         if found.0 != 0
             && call_handler(record, context, &mut frame_ctx, found, 0)
                 == DISPOSITION_CONTINUE_EXECUTION
@@ -1015,7 +1020,12 @@ pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
             return true;
         }
         let (pc, sp) = (ctx.get(CTX_PC), ctx.get(CTX_SP));
-        if pc == 0 || sp >= stack_base {
+        if pc == 0 {
+            walk.ended = crate::END_NO_RETURN;
+            break;
+        }
+        if sp >= stack_base {
+            walk.ended = crate::END_STACK_BASE;
             break;
         }
     }

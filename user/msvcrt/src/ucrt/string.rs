@@ -8,7 +8,7 @@
 use super::{EINVAL, ERANGE, STRUNCATE, TRUNCATE};
 use crate::safe::{bounded_len, fail, move_s, tok};
 use crate::wide::{set_errno, wlen};
-use core::ptr::null_mut;
+use core::ptr::{null, null_mut};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wmemcpy_s(dst: *mut u16, size: usize, src: *const u16, count: usize) -> i32 {
@@ -319,6 +319,74 @@ pub extern "C" fn mbrtowc(wc: *mut u16, s: *const u8, n: usize, state: *mut MbSt
 #[unsafe(no_mangle)]
 pub extern "C" fn mbrlen(s: *const u8, n: usize, state: *mut MbState) -> usize {
     mbrtowc(null_mut(), s, n, state)
+}
+
+/// `mbsrtowcs(dst, &src, len, state)`: the multibyte string `*src` as
+/// wide characters, restartable. With `dst` NULL it counts what the
+/// whole string takes and leaves `*src` alone, `len` unread; otherwise
+/// it writes at most `len` of them and leaves `*src` past the last byte
+/// it took, or NULL once it reached the terminator -- which it writes
+/// and does not count. An invalid sequence is (size_t)-1 with EILSEQ,
+/// `*src` left at the byte that failed. The pinned build answers this
+/// way with UTF-8 as the code page, which is the one gala has
+/// (`ucrt_test`).
+#[unsafe(no_mangle)]
+pub extern "C" fn mbsrtowcs(
+    dst: *mut u16,
+    src: *mut *const u8,
+    len: usize,
+    state: *mut MbState,
+) -> usize {
+    if src.is_null() {
+        set_errno(EINVAL);
+        return usize::MAX;
+    }
+    // SAFETY: the caller's pointer to its own source pointer.
+    let mut p = unsafe { *src };
+    if p.is_null() {
+        set_errno(EINVAL);
+        return usize::MAX;
+    }
+    // Counting (`dst` NULL) neither stops at `len` nor moves `*src`.
+    let counting = dst.is_null();
+    let mut written = 0usize;
+    loop {
+        if !counting && written == len {
+            // SAFETY: the caller's pointer.
+            unsafe { *src = p };
+            return written;
+        }
+        let mut wc = 0u16;
+        // A character is at most four bytes and `mbrtowc` returns at the
+        // first complete one, so offering four never reads past the
+        // terminator.
+        let taken = mbrtowc(&mut wc, p, 4, state);
+        if taken == usize::MAX || taken == usize::MAX - 1 {
+            if taken == usize::MAX - 1 {
+                set_errno(42); // EILSEQ: a sequence cut short by the terminator.
+            }
+            if !counting {
+                // SAFETY: the caller's pointer.
+                unsafe { *src = p };
+            }
+            return usize::MAX;
+        }
+        if !counting {
+            // SAFETY: the caller's buffer; `written` is below `len`.
+            unsafe { *dst.add(written) = wc };
+        }
+        if taken == 0 {
+            // The terminator: stored above, not counted.
+            if !counting {
+                // SAFETY: the caller's pointer.
+                unsafe { *src = null() };
+            }
+            return written;
+        }
+        written += 1;
+        // SAFETY: inside the string: those bytes were just taken from it.
+        p = unsafe { p.add(taken) };
+    }
 }
 
 /// `wcrtomb(out, wc, state)`: `wc` as UTF-8; its length (a surrogate

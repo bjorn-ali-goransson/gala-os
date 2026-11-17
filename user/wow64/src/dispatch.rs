@@ -258,8 +258,10 @@ pub fn apc(context: u64) -> ! {
     enter(area, &c, dispatcher, new_esp, Some(fx))
 }
 
-/// GalaUnhandledException(*ExceptionRecord, *Context) from the 32-bit
-/// ntdll: the x86 record and context as the x64 ones (SegCs 0x23).
+/// GalaUnhandledException(*ExceptionRecord, *Context, *Walk) from the
+/// 32-bit ntdll: the x86 record and context as the x64 ones (SegCs
+/// 0x23); the walk's record is three u32s whatever the word size, so its
+/// pointer passes through as it is.
 pub fn call(number: u32, a: &Args) -> NtStatus {
     debug_assert_eq!(number, GALA_UNHANDLED_EXCEPTION);
     unhandled(a).unwrap_or_else(|e| e)
@@ -267,7 +269,7 @@ pub fn call(number: u32, a: &Args) -> NtStatus {
 
 fn unhandled(a: &Args) -> Res<NtStatus> {
     if a.p(0) == 0 {
-        return Ok(syscall(GALA_UNHANDLED_EXCEPTION, &[0, 0]));
+        return Ok(syscall(GALA_UNHANDLED_EXCEPTION, &[0, 0, 0]));
     }
     let mut r = [0u8; RECORD32_SIZE];
     mem::read(a.p(0), &mut r)?;
@@ -292,5 +294,5 @@ fn unhandled(a: &Args) -> Res<NtStatus> {
     }
     let eip = u64::from(u32_at(&c, x86::EIP));
     ctx[x64::RIP..x64::RIP + 8].copy_from_slice(&eip.to_le_bytes());
-    Ok(syscall(GALA_UNHANDLED_EXCEPTION, &[rec.as_ptr() as u64, ctx.as_ptr() as u64]))
+    Ok(syscall(GALA_UNHANDLED_EXCEPTION, &[rec.as_ptr() as u64, ctx.as_ptr() as u64, a.p(2)]))
 }

@@ -13,6 +13,8 @@ use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+const STATUS_SOME_NOT_MAPPED: u32 = 0x0000_0107;
+const STATUS_INVALID_PARAMETER_5: u32 = 0xc000_00f3;
 const STATUS_NO_MEMORY: u32 = 0xc000_0017;
 const STATUS_INVALID_SID: u32 = 0xc000_0078;
 const STATUS_INVALID_ACL: u32 = 0xc000_0077;
@@ -427,6 +429,207 @@ pub extern "system" fn RtlUnicodeStringToAnsiString(
         d.length = at as u16;
     }
     STATUS_SUCCESS
+}
+
+/// The code point the UTF-8 sequence at the start of `src` holds and the
+/// bytes it takes, or `Err(taken)` for an invalid sequence and the bytes
+/// Windows consumes for it (measured against ntdll, `rtl_test`): a byte
+/// that cannot lead (a continuation byte, C0, C1, F5..FF) is one on its
+/// own; a first continuation byte outside the range its lead allows (the
+/// overlong, surrogate and above-U+10FFFF encodings) is taken with the
+/// lead; a sequence cut short by a byte that cannot continue it leaves
+/// that byte to be read next, and one cut short by the end of the source
+/// takes what is there.
+fn utf8_scalar(src: &[u8]) -> Result<(u32, usize), usize> {
+    const CONT: core::ops::RangeInclusive<u8> = 0x80..=0xbf;
+    let lead = src[0];
+    let (mut cp, tail, first) = match lead {
+        0x00..=0x7f => return Ok((u32::from(lead), 1)),
+        0xc2..=0xdf => (u32::from(lead & 0x1f), 1, CONT),
+        0xe0..=0xef => (
+            u32::from(lead & 0x0f),
+            2,
+            match lead {
+                0xe0 => 0xa0..=0xbf, // not an overlong two-byte encoding
+                0xed => 0x80..=0x9f, // not a surrogate
+                _ => CONT,
+            },
+        ),
+        0xf0..=0xf4 => (
+            u32::from(lead & 0x07),
+            3,
+            match lead {
+                0xf0 => 0x90..=0xbf, // not an overlong three-byte encoding
+                0xf4 => 0x80..=0x8f, // not above U+10FFFF
+                _ => CONT,
+            },
+        ),
+        _ => return Err(1),
+    };
+    for n in 0..tail {
+        let Some(&b) = src.get(1 + n) else { return Err(1 + n) };
+        if !(if n == 0 { first.contains(&b) } else { CONT.contains(&b) }) {
+            return Err(1 + n + usize::from(CONT.contains(&b)));
+        }
+        cp = (cp << 6) | u32::from(b & 0x3f);
+    }
+    Ok((cp, 1 + tail))
+}
+
+/// The UTF-16 code units of `cp`: a surrogate pair above the basic plane.
+fn utf16_units(cp: u32) -> ([u16; 2], usize) {
+    if cp < 0x1_0000 {
+        ([cp as u16, 0], 1)
+    } else {
+        let v = cp - 0x1_0000;
+        ([0xd800 | (v >> 10) as u16, 0xdc00 | (v & 0x3ff) as u16], 2)
+    }
+}
+
+/// RtlUTF8ToUnicodeN(Destination, MaxBytes, *ActualBytes, Source,
+/// SourceBytes): UTF-8 to UTF-16, as `rtl_test` measured ntdll. A null
+/// destination measures only (ActualBytes is what the conversion needs).
+/// Each invalid sequence becomes one U+FFFD and the status is
+/// STATUS_SOME_NOT_MAPPED. A destination too small takes whole code units
+/// (so the last can be half of a surrogate pair), reports what it wrote
+/// in ActualBytes and gives STATUS_BUFFER_TOO_SMALL, which an unmapped
+/// sequence does not downgrade to its warning.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlUTF8ToUnicodeN(
+    dst: *mut u16,
+    dst_max: u32,
+    actual: *mut u32,
+    src: *const u8,
+    src_len: u32,
+) -> u32 {
+    let room = dst_max as usize / 2; // whole code units only
+    let src: &[u8] = if src.is_null() {
+        &[]
+    } else {
+        // SAFETY: SourceBytes bytes at Source.
+        unsafe { core::slice::from_raw_parts(src, src_len as usize) }
+    };
+    let (mut status, mut out, mut i) = (STATUS_SUCCESS, 0usize, 0usize);
+    'convert: while i < src.len() {
+        let cp = match utf8_scalar(&src[i..]) {
+            Ok((cp, taken)) => {
+                i += taken;
+                cp
+            }
+            Err(taken) => {
+                i += taken;
+                status = STATUS_SOME_NOT_MAPPED;
+                0xfffd
+            }
+        };
+        let (units, n) = utf16_units(cp);
+        for &u in &units[..n] {
+            if !dst.is_null() {
+                if out == room {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    break 'convert;
+                }
+                // SAFETY: inside the caller's buffer (out < room).
+                unsafe { *dst.add(out) = u };
+            }
+            out += 1;
+        }
+    }
+    if !actual.is_null() {
+        // SAFETY: an optional out parameter.
+        unsafe { *actual = (out * 2) as u32 };
+    }
+    status
+}
+
+/// RtlUnicodeToUTF8N(Destination, MaxBytes, *ActualBytes, Source,
+/// SourceBytes): UTF-16 to UTF-8, as `rtl_test` measured ntdll. An odd
+/// SourceBytes is STATUS_INVALID_PARAMETER_5 and leaves ActualBytes
+/// alone; a null destination measures only. An unpaired surrogate becomes
+/// U+FFFD with STATUS_SOME_NOT_MAPPED. A destination too small takes
+/// whole sequences (never part of one) and gives STATUS_BUFFER_TOO_SMALL
+/// with what it wrote.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlUnicodeToUTF8N(
+    dst: *mut u8,
+    dst_max: u32,
+    actual: *mut u32,
+    src: *const u16,
+    src_len: u32,
+) -> u32 {
+    if !src_len.is_multiple_of(2) {
+        return STATUS_INVALID_PARAMETER_5;
+    }
+    let room = dst_max as usize;
+    let src: &[u16] = if src.is_null() {
+        &[]
+    } else {
+        // SAFETY: SourceBytes bytes at Source.
+        unsafe { core::slice::from_raw_parts(src, src_len as usize / 2) }
+    };
+    let (mut status, mut out, mut i) = (STATUS_SUCCESS, 0usize, 0usize);
+    'convert: while i < src.len() {
+        let unit = src[i];
+        i += 1;
+        let cp = match unit {
+            0xd800..=0xdbff => match src.get(i) {
+                Some(&low @ 0xdc00..=0xdfff) => {
+                    i += 1;
+                    0x1_0000 + (u32::from(unit - 0xd800) << 10) + u32::from(low - 0xdc00)
+                }
+                _ => {
+                    status = STATUS_SOME_NOT_MAPPED;
+                    0xfffd
+                }
+            },
+            0xdc00..=0xdfff => {
+                status = STATUS_SOME_NOT_MAPPED;
+                0xfffd
+            }
+            _ => u32::from(unit),
+        };
+        let mut seq = [0u8; 4];
+        let n = match cp {
+            0..=0x7f => {
+                seq[0] = cp as u8;
+                1
+            }
+            0x80..=0x7ff => {
+                seq[0] = 0xc0 | (cp >> 6) as u8;
+                seq[1] = 0x80 | (cp & 0x3f) as u8;
+                2
+            }
+            0x800..=0xffff => {
+                seq[0] = 0xe0 | (cp >> 12) as u8;
+                seq[1] = 0x80 | ((cp >> 6) & 0x3f) as u8;
+                seq[2] = 0x80 | (cp & 0x3f) as u8;
+                3
+            }
+            _ => {
+                seq[0] = 0xf0 | (cp >> 18) as u8;
+                seq[1] = 0x80 | ((cp >> 12) & 0x3f) as u8;
+                seq[2] = 0x80 | ((cp >> 6) & 0x3f) as u8;
+                seq[3] = 0x80 | (cp & 0x3f) as u8;
+                4
+            }
+        };
+        if !dst.is_null() {
+            if out + n > room {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break 'convert;
+            }
+            for (k, &b) in seq[..n].iter().enumerate() {
+                // SAFETY: inside the caller's buffer (out + n <= room).
+                unsafe { *dst.add(out + k) = b };
+            }
+        }
+        out += n;
+    }
+    if !actual.is_null() {
+        // SAFETY: an optional out parameter.
+        unsafe { *actual = out as u32 };
+    }
+    status
 }
 
 /// RtlFormatCurrentUserKeyPath(*CurrentUserKeyPath): `\REGISTRY\USER\<SID>`

@@ -1,7 +1,8 @@
 //! Export forwarders: these kernel32 exports name ntdll's functions (some
-//! under ntdll's Rtl names: the SRW locks, InitOnceInitialize), as on
-//! Windows (the loader follows them; defining them here would shadow the
-//! ntdll imports of the same name). Those of the architecture built.
+//! under ntdll's Rtl names: the SRW locks, InitOnceInitialize) and
+//! kernelbase's token calls, as on Windows (the loader follows them;
+//! defining them here would shadow the imports of the same name). Those
+//! of ntdll are of the architecture built.
 //!
 //! The version resource: programs read the system's version from
 //! kernel32.dll's VS_VERSION_INFO (Chromium's base::win::OSInfo CHECKs it
@@ -143,6 +144,16 @@ fn main() {
         ("InitOnceInitialize", "RtlRunOnceInitialize"),
     ] {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{target}");
+    }
+
+    // The token calls of the processthreads API set, which gala hosts in
+    // kernel32 (dbghelp imports OpenThreadToken from the set): Windows'
+    // kernel32 exports both as forwarders to the set, whose host is
+    // kernelbase, so these forward there too (gala's kernelbase forwards
+    // them on to advapi32, where they are implemented over
+    // NtOpenProcessToken and NtOpenThreadToken).
+    for name in ["OpenProcessToken", "OpenThreadToken"] {
+        println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=kernelbase.{name}");
     }
 
     let mut res = Vec::new();

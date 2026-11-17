@@ -263,6 +263,61 @@ pub fn frame_stats() -> (u64, u64) {
     with_frames(|a| (a.free_frames(), a.total_frames())).unwrap_or((0, 0))
 }
 
+/// What [`frame_self_check`] found.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameCheck {
+    /// Free frames before the round, while the 18 frames of it were held,
+    /// and after they were given back (the first and the last equal).
+    pub free_before: u64,
+    pub free_held: u64,
+    pub free_after: u64,
+    /// The two single frames were not the same frame.
+    pub distinct: bool,
+    /// The run of 16 started on a 16-frame boundary.
+    pub aligned: bool,
+    /// The allocator had no memory for the round, which leaves the rest of
+    /// the answer meaningless.
+    pub refused: bool,
+    /// Freeing a frame twice was refused.
+    pub double_free_refused: bool,
+}
+
+/// Takes two single frames and a 16-frame run, gives them back and frees
+/// one of them twice, with the allocator's lock held throughout: the free
+/// count is the whole kernel's, so an allocation made on another CPU
+/// inside the round would make the balance lie (as it would the heap's,
+/// `heap::self_check`). None where the allocator is not up yet.
+pub fn frame_self_check() -> Option<FrameCheck> {
+    const RUN: u64 = 16;
+    with_frames(|a| {
+        let free_before = a.free_frames();
+        let one = a.allocate_for(Use::Untagged);
+        let two = a.allocate_for(Use::Untagged);
+        let run = a.allocate_contiguous_for(RUN, RUN, Use::Untagged);
+        let free_held = a.free_frames();
+        for f in [one, two].into_iter().flatten() {
+            let _ = a.free(f);
+        }
+        if let Some(r) = run {
+            for i in 0..RUN {
+                let _ = a.free(Frame::from_number(r.number() + i));
+            }
+        }
+        FrameCheck {
+            free_before,
+            free_held,
+            free_after: a.free_frames(),
+            distinct: matches!((one, two), (Some(x), Some(y)) if x != y),
+            aligned: run.is_some_and(|r| r.number().is_multiple_of(RUN)),
+            refused: one.is_none() || two.is_none() || run.is_none(),
+            // A frame that is free already: the allocator's own answer,
+            // not the one `free_frame` gives (which also asks whether a
+            // user space still maps it).
+            double_free_refused: one.is_some_and(|f| a.free(f).is_err()),
+        }
+    })
+}
+
 /// The fewest free frames there have been (the low-water mark).
 pub fn frame_low_water() -> u64 {
     with_frames(|a| a.low_free_frames()).unwrap_or(0)

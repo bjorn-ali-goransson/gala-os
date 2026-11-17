@@ -532,8 +532,11 @@ fn query_system(a: &Args) -> Res<NtStatus> {
             convert_processes,
         ),
         // Laid out alike: performance, time of day, the performance
-        // counter's flags, gala's network interfaces and sessions.
-        2 | 3 | 124 | 0x6761_0001 | 0x6761_0002 => {
+        // counter's flags, gala's network interfaces and sessions, and
+        // SYSTEM_FIRMWARE_TABLE_INFORMATION (76, kernel32's
+        // GetSystemFirmwareTable), four ULONGs and the table after them in
+        // both worlds, read and written in place.
+        2 | 3 | 76 | 124 | 0x6761_0001 | 0x6761_0002 => {
             pass(NT_QUERY_SYSTEM_INFORMATION, a, &[K::U, K::U, K::U, K::U])
         }
         _ => no_class(b"wow64.dll!NtQuerySystemInformation(class)", class),

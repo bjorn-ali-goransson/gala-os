@@ -11,6 +11,7 @@ test = false
 bench = false
 
 [dependencies]
+decfloat = { path = "../decfloat" }
 
 [target.'cfg(target_arch = "x86")'.dependencies]
 ntrt = { path = "../ntrt" }

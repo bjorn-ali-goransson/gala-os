@@ -18,6 +18,16 @@
 //!   (no metafile DC to record it in): FALSE.
 //! - GetGlyphOutlineA/W (no glyph outlines or bitmaps yet; Mesa's
 //!   opengl32 imports the A form for wglUseFontOutlines): GDI_ERROR.
+//! - The kernel-mode display driver's thunks (D3DKMT*): STATUS_NOT_SUPPORTED.
+//!   DXVK's d3d11 and dxgi bind nineteen of them in their import tables,
+//!   which the loader resolves whatever they answer, and call them only
+//!   for shared resources and keyed mutexes -- which gala has no display
+//!   driver to share (GPU G2). They return NTSTATUS, so the
+//!   ERROR_NOT_SUPPORTED set with it is for callers that look there
+//!   anyway; the ledger is what names them. The two the Vulkan loader
+//!   looks up by name, D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo,
+//!   are deliberately not here: GetProcAddress must keep answering NULL
+//!   for those, which is how the loader learns to skip them.
 
 use super::unsupported;
 
@@ -31,6 +41,9 @@ unsafe extern "system" {
 }
 
 const ERROR_NOT_SUPPORTED: u32 = 50;
+
+/// The NTSTATUS the D3DKMT* thunks fail with.
+const STATUS_NOT_SUPPORTED: i32 = 0xc000_00bb_u32 as i32;
 
 /// Reports `what` and sets ERROR_NOT_SUPPORTED.
 fn absent(what: &str) {
@@ -65,4 +78,12 @@ absent_exports! {
     u32 = 0xffff_ffff => GetGlyphOutlineA GetGlyphOutlineW;
     usize = 0 => CreateEnhMetaFileW CloseEnhMetaFile SetEnhMetaFileBits;
     i32 = -1 => StartDocW EndDoc StartPage EndPage SetAbortProc;
+    i32 = STATUS_NOT_SUPPORTED =>
+        D3DKMTCloseAdapter D3DKMTCreateDCFromMemory D3DKMTCreateDevice
+        D3DKMTCreateKeyedMutex2 D3DKMTDestroyAllocation D3DKMTDestroyDCFromMemory
+        D3DKMTDestroyDevice D3DKMTDestroyKeyedMutex D3DKMTDestroySynchronizationObject
+        D3DKMTEscape D3DKMTOpenAdapterFromLuid D3DKMTOpenKeyedMutex D3DKMTOpenResource2
+        D3DKMTOpenResourceFromNtHandle D3DKMTOpenSyncObjectFromNtHandle
+        D3DKMTOpenSynchronizationObject D3DKMTQueryResourceInfo
+        D3DKMTQueryResourceInfoFromNtHandle D3DKMTShareObjects;
 }

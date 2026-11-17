@@ -178,11 +178,14 @@ pub struct Parked {
 /// The most a thread can be suspended (MAXIMUM_SUSPEND_COUNT).
 const MAXIMUM_SUSPEND_COUNT: u32 = 127;
 
-/// A user-mode APC: `routine(args[0], args[1], args[2])`.
+/// A user-mode APC: `routine(args[0], args[1], args[2])`. A special one
+/// (QueueUserAPC2's QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) runs at the
+/// thread's next return to user mode, not only in an alertable wait.
 #[derive(Clone, Copy, Debug)]
 pub struct UserApc {
     pub routine: u64,
     pub args: [u64; 3],
+    pub special: bool,
 }
 
 /// The base priority of every process (NORMAL_PRIORITY_CLASS).
@@ -843,11 +846,18 @@ pub fn has_user_apc() -> bool {
     current().is_some_and(|o| !as_thread(&o).apcs.lock().is_empty())
 }
 
-/// Takes the current thread's next user APC.
-pub fn take_user_apc() -> Option<UserApc> {
+/// Whether it has a special one, which every return to user mode runs.
+pub fn has_special_user_apc() -> bool {
+    current().is_some_and(|o| as_thread(&o).apcs.lock().iter().any(|a| a.special))
+}
+
+/// Takes the current thread's next user APC; `special_only` takes the
+/// first special one and leaves normal APCs queued for an alertable wait.
+pub fn take_user_apc(special_only: bool) -> Option<UserApc> {
     let object = current()?;
     let mut apcs = as_thread(&object).apcs.lock();
-    (!apcs.is_empty()).then(|| apcs.remove(0))
+    let at = if special_only { apcs.iter().position(|a| a.special)? } else { 0 };
+    (!apcs.is_empty()).then(|| apcs.remove(at))
 }
 
 /// Marks the current thread as in (or out of) an alertable wait.

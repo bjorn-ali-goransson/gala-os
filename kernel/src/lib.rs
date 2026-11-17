@@ -204,6 +204,25 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(n) = cmdline.value("diskreset").and_then(|v| v.parse().ok()) {
         disk::RESET_AT.store(n, Ordering::Relaxed);
     }
+    // The firmware's SMBIOS table, copied into the heap before the NT
+    // layer can be asked for it (GetSystemFirmwareTable; ARCHITECTURE
+    // "Firmware tables"). gala-um boots through no firmware and keeps no
+    // table (`Firmware::smbios` is None there), so this is the kernel's.
+    #[cfg(not(feature = "hosted"))]
+    if let Some(e) = info.smbios {
+        match boot::copy_smbios_table(&info) {
+            Ok(table) => {
+                info!("smbios: {} bytes of table kept", table.len());
+                platform::init_firmware(nt::platform::Smbios {
+                    major: e.major,
+                    minor: e.minor,
+                    docrev: e.docrev,
+                    table,
+                });
+            }
+            Err(why) => warn!("smbios: no table kept ({why})"),
+        }
+    }
     nt::init();
     net::init();
     phase(&cmdline, "drivers");
@@ -873,6 +892,20 @@ fn log_boot_info(info: &BootInfo) {
     }
     info!("cmdline: {:?}", info.cmdline);
     info!("hhdm offset: {:#018x}", info.hhdm_offset);
+    match info.smbios {
+        Some(e) => info!(
+            "smbios: {}.{}.{} table {:#x} len {} ({}-bit entry point)",
+            e.major,
+            e.minor,
+            e.docrev,
+            e.table_phys,
+            e.table_len,
+            if e.bits_64 { 64 } else { 32 },
+        ),
+        // No firmware tables: GetSystemFirmwareTable has nothing to give
+        // (after a handover, too).
+        None => warn!("smbios: none provided"),
+    }
     if let Some(addr) = info.kernel_address {
         info!("kernel image: phys {:#x} -> virt {:#x}", addr.physical_base, addr.virtual_base);
     }

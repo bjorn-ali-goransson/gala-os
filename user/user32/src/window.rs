@@ -638,6 +638,9 @@ pub(crate) struct Gdi {
     /// SetBoundsRect and GetBoundsRect (what a DC drew: `surface`).
     pub(crate) set_bounds: extern "system" fn(Handle, *const [i32; 4], u32) -> u32,
     pub(crate) get_bounds: extern "system" fn(Handle, *mut [i32; 4], u32) -> u32,
+    /// GalaSetDcThread: the thread a window DC was handed out for (`drew`
+    /// shows what any other thread draws on it).
+    set_dc_thread: extern "system" fn(Handle, u32) -> i32,
 }
 
 type ChildDc = extern "system" fn(*mut u32, i32, i32, i32, i32, i32, *const [i32; 4]) -> Handle;
@@ -677,7 +680,11 @@ pub(crate) fn gdi() -> Option<&'static Gdi> {
         );
         let child = f(b"GalaCreateChildDC\0");
         let (set_bounds, get_bounds) = (f(b"SetBoundsRect\0"), f(b"GetBoundsRect\0"));
-        if [a, b, c, d, e, child, set_bounds, get_bounds].iter().any(|p| p.is_null()) {
+        let (set_thread, set_hook) = (f(b"GalaSetDcThread\0"), f(b"GalaSetPresentHook\0"));
+        if [a, b, c, d, e, child, set_bounds, get_bounds, set_thread, set_hook]
+            .iter()
+            .any(|p| p.is_null())
+        {
             return None;
         }
         if GDI.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
@@ -709,7 +716,16 @@ pub(crate) fn gdi() -> Option<&'static Gdi> {
                     *const c_void,
                     extern "system" fn(Handle, *mut [i32; 4], u32) -> u32,
                 >(get_bounds),
+                set_dc_thread: core::mem::transmute::<
+                    *const c_void,
+                    extern "system" fn(Handle, u32) -> i32,
+                >(set_thread),
             });
+            // What a thread other than the window's draws on its DC shows
+            // at once, through `drew`.
+            core::mem::transmute::<*const c_void, extern "system" fn(*const c_void)>(set_hook)(
+                drew as *const c_void,
+            );
             GDI.store(2, Ordering::Release);
         }
         while GDI.load(Ordering::Acquire) != 2 {
@@ -1718,7 +1734,28 @@ fn client_dc(hwnd: Hwnd) -> Handle {
         (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
     };
     keep_dc(hdc, hwnd);
+    // The window's thread, not the one asking: what another thread draws
+    // on this DC shows as it is drawn (`drew`), since no idle moment of
+    // this window's thread need follow it.
+    (g.set_dc_thread)(hdc, window(hwnd).map_or(0, |w| w.thread));
     hdc
+}
+
+/// gdi32 calls this when a thread that is not the window's has drawn on a
+/// DC of it: what the window has drawn goes to the desktop now. On
+/// Windows GDI drawing on a window DC reaches the device as it is drawn;
+/// in gala it waits for the owning thread's idle moment (`flush`), which
+/// a thread waiting for a message never reaches again -- and a swapchain
+/// blits each frame from a presenter thread of its own (ARCHITECTURE
+/// "Deferred presenting"; `paint_thread_test`, `d3d11_test`).
+extern "system" fn drew(hdc: Handle) {
+    let hwnd = dc_window(hdc as usize);
+    if hwnd == 0 {
+        return;
+    }
+    if let Some((root, _)) = mark_dirty(hwnd) {
+        flush_window(root);
+    }
 }
 
 // ---- Window DCs a program keeps ----

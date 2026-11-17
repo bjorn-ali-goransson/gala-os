@@ -333,6 +333,8 @@ ucrt_imports! {
     fn atol(s: *const u8) -> i32;
     fn mbrtowc(wc: *mut u16, s: *const u8, n: usize, state: *mut MbState) -> usize;
     fn mbrlen(s: *const u8, n: usize, state: *mut MbState) -> usize;
+    fn mbsrtowcs(dst: *mut u16, src: *mut *const u8, len: usize, state: *mut MbState) -> usize;
+    fn wctype(name: *const u8) -> u16;
     fn wcrtomb(out: *mut u8, wc: u16, state: *mut MbState) -> usize;
     fn mbstowcs_s(
         converted: *mut usize,
@@ -1207,6 +1209,47 @@ fn strings(c: &mut Checks) -> Result<(), u32> {
         let mut out = [0u8; 8];
         c.eq(wcrtomb(out.as_mut_ptr(), u16::from(b'C'), &mut state) as i64, 1)?;
         c.eq(out[0].into(), i64::from(b'C'))?;
+        // mbsrtowcs. The bytes are ASCII, which the "C" locale the
+        // pinned build starts in and gala's UTF-8 code page agree on
+        // (the test asserts that startup locale elsewhere, so it must
+        // not set another). Counting leaves the source pointer alone,
+        // a whole string sets it to null, and a buffer too small
+        // leaves it past what was taken.
+        let src = b"abcz\0";
+        let mut wide = [0u16; 16];
+        let mut cur = src.as_ptr();
+        state = MbState::default();
+        c.eq(mbsrtowcs(core::ptr::null_mut(), &mut cur, 0, &mut state) as i64, 4)?;
+        c.ok(cur == src.as_ptr(), cur as u64)?;
+        state = MbState::default();
+        c.eq(mbsrtowcs(wide.as_mut_ptr(), &mut cur, 16, &mut state) as i64, 4)?;
+        c.ok(cur.is_null(), cur as u64)?;
+        c.eq(wide[0].into(), 0x61)?;
+        c.eq(wide[1].into(), 0x62)?;
+        c.eq(wide[2].into(), 0x63)?;
+        c.eq(wide[3].into(), 0x7a)?;
+        c.eq(wide[4].into(), 0)?;
+        state = MbState::default();
+        cur = src.as_ptr();
+        c.eq(mbsrtowcs(wide.as_mut_ptr(), &mut cur, 2, &mut state) as i64, 2)?;
+        c.ok(cur == src.as_ptr().add(2), cur as u64)?;
+
+        // wctype's twelve class names, and 0 for any other name and "".
+        c.eq(wctype(b"alnum\0".as_ptr()).into(), 0x107)?;
+        c.eq(wctype(b"alpha\0".as_ptr()).into(), 0x103)?;
+        c.eq(wctype(b"blank\0".as_ptr()).into(), 0x40)?;
+        c.eq(wctype(b"cntrl\0".as_ptr()).into(), 0x20)?;
+        c.eq(wctype(b"digit\0".as_ptr()).into(), 0x4)?;
+        c.eq(wctype(b"graph\0".as_ptr()).into(), 0x117)?;
+        c.eq(wctype(b"lower\0".as_ptr()).into(), 0x2)?;
+        c.eq(wctype(b"print\0".as_ptr()).into(), 0x157)?;
+        c.eq(wctype(b"punct\0".as_ptr()).into(), 0x10)?;
+        c.eq(wctype(b"space\0".as_ptr()).into(), 0x8)?;
+        c.eq(wctype(b"upper\0".as_ptr()).into(), 0x1)?;
+        c.eq(wctype(b"xdigit\0".as_ptr()).into(), 0x80)?;
+        c.eq(wctype(b"nosuch\0".as_ptr()).into(), 0)?;
+        c.eq(wctype(b"\0".as_ptr()).into(), 0)?;
+
         let mut converted = 0usize;
         c.eq(mbstowcs_s(&mut converted, q, 8, b"abc\0".as_ptr(), TRUNCATE).into(), 0)?;
         c.eq(converted as i64, 4)?;

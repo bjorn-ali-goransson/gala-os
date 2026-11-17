@@ -307,7 +307,17 @@ mod live {
     /// Every running process of both personalities (GalaTasks op 0), for
     /// `caller`.
     pub fn processes(caller: &Process) -> Result<Vec<u8>, NtStatus> {
-        let list = process::running().map_err(no_memory)?;
+        let mut list = process::running().map_err(no_memory)?;
+        // Not one that is ending. `terminate` records the exit status
+        // before the threads unwind, and from then on what the process
+        // is cannot be told truthfully: a Linux one's `comm` and root
+        // are being dismantled, so the image falls back to the one its
+        // NT process was created from (`sh` for one that had exec'd
+        // `sleep`). Task Manager showed such a row, and "End task" on
+        // it reached a pid the kernel no longer had
+        // (STATUS_INVALID_CID). `process::running` keeps them: the
+        // state dump must still show a process stuck in teardown.
+        list.retain(|p| p.exit_status().is_none());
         let users = crate::nt::accounts::local_users().unwrap_or_default();
         let distros = crate::nt::desktop::distro_roots();
         // The taskbar windows of each session the processes are in (one

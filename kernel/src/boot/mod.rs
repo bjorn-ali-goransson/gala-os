@@ -9,6 +9,7 @@
 pub mod acpi;
 mod framebuffer;
 mod limine;
+pub mod smbios;
 pub mod stack;
 
 use core::fmt;
@@ -17,6 +18,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::handover::record::{self, Record, RecordError};
 use crate::mm::PAGE_SIZE;
+use crate::mm::heap::TryVec;
 use crate::mm::memmap::{MemoryRegion, RegionKind};
 pub use framebuffer::Framebuffer;
 pub use limine::{MP_INFO_EXTRA_ARGUMENT, MpInfo};
@@ -328,6 +330,10 @@ pub struct BootInfo {
     /// How PSCI is called, from the FADT (Limine boots on aarch64):
     /// starting the CPUs the bootloader did not.
     pub psci: Option<acpi::Psci>,
+    /// The firmware's SMBIOS entry point (Limine boots only): the machine
+    /// a program asks GetSystemFirmwareTable about. The table itself is
+    /// copied later, once the heap is up (`platform::init_firmware`).
+    pub smbios: Option<smbios::EntryPoint>,
     /// The ACPI RSDP's virtual (HHDM) address, 0 without one: the
     /// bootloader's, or after a handover the record's FIRMWARE section's.
     pub rsdp: u64,
@@ -500,6 +506,10 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
         },
         pci_ecam: (rsdp != 0).then(|| acpi::read_mcfg(hhdm, rsdp)).flatten(),
         psci: (rsdp != 0).then(|| acpi::read_psci(hhdm, rsdp)).flatten(),
+        // The SMBIOS entry point was the first boot's firmware memory,
+        // which the record does not carry: a handed-over kernel has no
+        // firmware table to give out ("Firmware tables").
+        smbios: None,
         rsdp,
         framebuffer_facts,
         kernel_file,
@@ -640,12 +650,65 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
         ),
         pci_ecam: acpi::read_mcfg(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
         psci: acpi::read_psci(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
+        smbios: read_smbios(),
         rsdp: REQUESTS.rsdp.response().map_or(0, |r| r.address),
         framebuffer_facts,
         kernel_file,
         handover: None,
     })
 }
+
+/// The firmware's SMBIOS entry point, as the bootloader left it: the
+/// 64-bit one (`_SM3_`) where there is one, else the 32-bit one. Only the
+/// entry point is read here — it lives in the bootloader's memory, while
+/// the table it points at is the firmware's own and stays put.
+fn read_smbios() -> Option<smbios::EntryPoint> {
+    let response = REQUESTS.smbios.response()?;
+    // SAFETY: at base revisions other than 3 and 4 (this kernel asks for
+    // `REQUESTED_BASE_REVISION`) a non-null entry-point pointer is
+    // HHDM-virtual and points to an entry point of at least its own
+    // length, which the parsers check before reading further.
+    let at = |p: *const u8| unsafe {
+        (!p.is_null()).then(|| core::slice::from_raw_parts(p, SMBIOS_ENTRY_READ))
+    };
+    at(response.entry_64)
+        .and_then(smbios::parse_64)
+        .or_else(|| at(response.entry_32).and_then(smbios::parse_32))
+}
+
+/// The firmware's SMBIOS structure table, copied into the kernel's heap:
+/// the table itself stays in firmware memory, which the HHDM reaches but
+/// the kernel's own page tables need not, so the NT layer gets a copy that
+/// lives as long as the kernel (`platform::Kernel`'s `Firmware`). The
+/// 64-bit entry point gives only a maximum size, so the copy ends where
+/// the end-of-table structure does (`smbios::table_end`). Call once the
+/// heap is up; the error says what stopped it, for the boot log.
+pub fn copy_smbios_table(info: &BootInfo) -> Result<&'static [u8], &'static str> {
+    let entry = info.smbios.ok_or("no entry point")?;
+    let len = entry.table_len as usize;
+    if len == 0 {
+        return Err("an empty table");
+    }
+    // SAFETY: the firmware's structure table, at the address and length
+    // its entry point gives, HHDM-mapped like the ACPI tables (Limine
+    // base revision >= 4) and never written by anyone.
+    let bytes = unsafe { phys_bytes(info.hhdm_offset, entry.table_phys, entry.table_len.into()) };
+    if bytes.len() != len {
+        return Err("a table the HHDM does not reach");
+    }
+    // A table that does not read as structures is kept whole: the length
+    // the firmware declared is all that is known about it.
+    let end = smbios::table_end(bytes).unwrap_or(len);
+    let mut copy = alloc::vec::Vec::new();
+    copy.try_reserve_exact(end).map_err(|_| "out of memory")?;
+    copy.try_extend_from_slice(&bytes[..end]).map_err(|_| "out of memory")?;
+    Ok(alloc::vec::Vec::leak(copy))
+}
+
+/// How much of an entry point is read: both kinds are shorter than this
+/// (`smbios::ENTRY_32_LEN` is the longer, 0x1f), and the structure is
+/// 16-byte aligned, so the read stays inside it.
+const SMBIOS_ENTRY_READ: usize = 0x20;
 
 /// Lowest address for kernel-owned allocations made here; memory below 1 MiB
 /// is kept free for things that need it (e.g. SMP trampolines).

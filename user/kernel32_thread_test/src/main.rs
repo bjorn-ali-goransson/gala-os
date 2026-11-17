@@ -14,7 +14,13 @@
 //! is ERROR_INVALID_PARAMETER); a CreateThread thread's
 //! ThreadQuerySetWin32StartAddress is the start routine it was given;
 //! SetThreadDescription's name is the thread's, read back by
-//! NtQueryInformationThread(ThreadNameInformation) and GetThreadDescription.
+//! NtQueryInformationThread(ThreadNameInformation) and GetThreadDescription;
+//! QueueUserAPC2 as kernelbase hosts it (Office looks it up there): a
+//! special user APC (flag 1) has run by the time the call that queued it
+//! to the calling thread returns, while a normal one (flag 0) waits for
+//! an alertable wait, flags beyond 1 are ERROR_INVALID_PARAMETER, a
+//! handle that is not a thread's ERROR_INVALID_HANDLE and a thread that
+//! has ended ERROR_GEN_FAILURE.
 //! Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
@@ -27,6 +33,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 type Bool = i32;
 type Handle = *mut c_void;
 type StartRoutine = extern "system" fn(*mut c_void) -> u32;
+
+#[link(name = "kernelbase", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn QueueUserAPC2(
+        routine: extern "system" fn(usize),
+        thread: Handle,
+        data: usize,
+        flags: u32,
+    ) -> Bool;
+}
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -68,6 +84,8 @@ unsafe extern "system" {
     fn IsDebuggerPresent() -> Bool;
     fn IsProcessorFeaturePresent(feature: u32) -> Bool;
     fn GetCurrentProcessorNumber() -> u32;
+    fn CreateEventW(attrs: *mut c_void, manual: Bool, signaled: Bool, name: *const u16) -> Handle;
+    fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn FlushProcessWriteBuffers();
     fn IsThreadAFiber() -> Bool;
     fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
@@ -425,6 +443,21 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// What QueueUserAPC2's routine recorded: how often it ran and its data.
+static APC2_RUNS: AtomicU64 = AtomicU64::new(0);
+static APC2_DATA: AtomicU64 = AtomicU64::new(0);
+
+/// A PAPCFUNC: QueueUserAPC2 passes the data alone.
+extern "system" fn apc2(data: usize) {
+    APC2_RUNS.fetch_add(1, Ordering::SeqCst);
+    APC2_DATA.store(data as u64, Ordering::SeqCst);
+}
+
+/// A thread that ends at once, for the APC that finds it gone.
+extern "system" fn exiting(_: *mut c_void) -> u32 {
+    0
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     misc(&mut c)?;
@@ -597,6 +630,42 @@ fn run() -> Result<(), u32> {
         CloseHandle(h);
         c.ok(TlsFree(index) != 0, 0)?;
     }
+    // QueueUserAPC2, which kernelbase hosts (Office looks it up there).
+    // SAFETY: documented calls; the routine and handles are ours.
+    unsafe {
+        let me = GetCurrentThread();
+        // A special APC runs on the way back to user mode: queued to this
+        // thread, it has run when the call returns.
+        c.ok(QueueUserAPC2(apc2, me, 0x40, 1) != 0, GetLastError().into())?;
+        c.eq(APC2_RUNS.load(Ordering::SeqCst), 1)?;
+        c.eq(APC2_DATA.load(Ordering::SeqCst), 0x40)?;
+        // A normal one waits for an alertable wait, which reports it with
+        // WAIT_IO_COMPLETION.
+        c.ok(QueueUserAPC2(apc2, me, 0x41, 0) != 0, GetLastError().into())?;
+        c.eq(APC2_RUNS.load(Ordering::SeqCst), 1)?;
+        c.eq(SleepEx(10, 1).into(), 0xc0)?; // WAIT_IO_COMPLETION
+        c.eq(APC2_RUNS.load(Ordering::SeqCst), 2)?;
+        c.eq(APC2_DATA.load(Ordering::SeqCst), 0x41)?;
+        // The flags Windows has no meaning for.
+        c.ok(QueueUserAPC2(apc2, me, 0x42, 2) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        // A handle that is not a thread's, and a thread that has ended.
+        let event = CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null());
+        c.ok(!event.is_null(), GetLastError().into())?;
+        c.ok(QueueUserAPC2(apc2, event, 0x43, 0) == 0, 0)?;
+        c.eq(GetLastError().into(), 6)?; // ERROR_INVALID_HANDLE
+        c.ok(CloseHandle(event) != 0, GetLastError().into())?;
+        let mut id = 0u32;
+        let done =
+            CreateThread(core::ptr::null_mut(), 0, exiting, core::ptr::null_mut(), 0, &raw mut id);
+        c.ok(!done.is_null(), GetLastError().into())?;
+        c.eq(WaitForSingleObject(done, 5000).into(), 0)?;
+        c.ok(QueueUserAPC2(apc2, done, 0x44, 0) == 0, 0)?;
+        c.eq(GetLastError().into(), 31)?; // ERROR_GEN_FAILURE
+        c.ok(CloseHandle(done) != 0, GetLastError().into())?;
+        c.eq(APC2_RUNS.load(Ordering::SeqCst), 2)?;
+    }
+
     // Priorities, relative to the process's class (normal).
     // SAFETY: documented kernel32 calls on our own thread.
     unsafe {

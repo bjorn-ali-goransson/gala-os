@@ -47,6 +47,7 @@ mod console;
 // CONTEXT buffers and the XState functions (the architecture's layout).
 mod context;
 mod files;
+mod firmware;
 mod global;
 mod heap;
 mod idn;
@@ -63,6 +64,7 @@ mod processor;
 mod procinfo;
 mod profile;
 mod pty;
+mod recovery;
 mod resource;
 mod runtime;
 mod sync;
@@ -165,6 +167,7 @@ unsafe extern "system" {
         key: *const u32,
     ) -> u32;
     fn NtSetEvent(h: Handle, previous: *mut i32) -> u32;
+    fn NtPulseEvent(h: Handle, previous: *mut i32) -> u32;
     fn NtAllocateVirtualMemory(
         process: isize,
         base: *mut usize,
@@ -568,6 +571,17 @@ pub extern "system" fn VirtualFreeEx(
 pub extern "system" fn SetEvent(h: Handle) -> Bool {
     // SAFETY: the kernel validates the handle.
     let status = unsafe { NtSetEvent(h, core::ptr::null_mut()) };
+    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// PulseEvent: release the threads waiting on the event now and leave it
+/// unsignaled. Windows documents it as unreliable -- a thread not yet
+/// waiting misses the pulse -- and keeps it for the programs that use it
+/// anyway; Office's mso98win32client is one.
+#[unsafe(no_mangle)]
+pub extern "system" fn PulseEvent(h: Handle) -> Bool {
+    // SAFETY: the kernel validates the handle.
+    let status = unsafe { NtPulseEvent(h, core::ptr::null_mut()) };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 

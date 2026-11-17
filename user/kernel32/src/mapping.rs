@@ -499,6 +499,40 @@ pub(crate) fn image_base() -> Handle {
     unsafe { *((peb() + PEB_IMAGE_BASE) as *const Handle) }
 }
 
+/// Records a module `GetModuleHandle` did not find, with the name asked
+/// for (the ledger's "other", the NTSTATUS as the detail). The miss is
+/// not a gap in gala -- a program probing for a module that was never
+/// loaded gets the same NULL on Windows -- but it is the only record of
+/// the name: a missing export leaves `missing export` and 127, a load
+/// that fails leaves `missing dll` or `load failed`, and this answer
+/// (ERROR_MOD_NOT_FOUND, 126) left nothing at all, so a program that
+/// gave up over a module nobody could name was invisible
+/// (docs/OBSERVABILITY.md).
+fn note_module_miss(name: *const u16, len: usize, status: u32) {
+    let mut line = [0u8; 96];
+    let head = b"kernel32.dll!GetModuleHandle(";
+    line[..head.len()].copy_from_slice(head);
+    let mut n = head.len();
+    // SAFETY: `len` characters of the caller's name, measured above.
+    for &c in unsafe { core::slice::from_raw_parts(name, len) } {
+        if n + 1 >= line.len() {
+            break;
+        }
+        // The ledger's names are printable ASCII without quotes or
+        // backslashes (it writes them as JSON), so a module named by
+        // path keeps its shape with forward slashes.
+        let b = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
+        line[n] = match b {
+            b'\\' => b'/',
+            b'"' => b'?',
+            _ => b,
+        };
+        n += 1;
+    }
+    line[n] = b')';
+    note(&line[..n + 1], status.into());
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetModuleHandleW(name: *const u16) -> Handle {
     if name.is_null() {
@@ -510,7 +544,11 @@ pub extern "system" fn GetModuleHandleW(name: *const u16) -> Handle {
     let mut base = core::ptr::null_mut();
     // SAFETY: valid UNICODE_STRING and output pointer.
     let status = unsafe { LdrGetDllHandle(core::ptr::null(), core::ptr::null(), &us, &mut base) };
-    if status != STATUS_SUCCESS { fail(status, core::ptr::null_mut()) } else { base }
+    if status != STATUS_SUCCESS {
+        note_module_miss(name, len, status);
+        return fail(status, core::ptr::null_mut());
+    }
+    base
 }
 
 #[unsafe(no_mangle)]

@@ -99,6 +99,13 @@ pub enum Op {
         tag: u32,
         data: Vec<u8>,
     },
+    /// The node's 8.3 short name in its directory (NT's
+    /// FileShortNameInformation); empty: it has none any more
+    /// (version 6).
+    SetShortName {
+        path: Vec<u16>,
+        short: Vec<u16>,
+    },
 }
 
 /// Consecutive pages of a file in consecutive clusters (`Op::Clusters`).
@@ -123,7 +130,8 @@ const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// the SetMode, Symlink and Link records (LX seam 4).
 /// 4: the Clusters record (a disk-backed C:, D4).
 /// 5: the SetReparse record (NT symbolic links and other reparse points).
-pub const VERSION: u8 = 5;
+/// 6: the SetShortName record (8.3 short names a program sets).
+pub const VERSION: u8 = 6;
 /// Create's mode field when the node has no POSIX mode.
 const NO_MODE: u32 = u32::MAX;
 /// Create's flag bit: a case-sensitive directory.
@@ -193,6 +201,7 @@ impl Op {
             Op::Link { .. } => 10,
             Op::Clusters { .. } => 11,
             Op::SetReparse { .. } => 12,
+            Op::SetShortName { .. } => 13,
         }
     }
 
@@ -264,6 +273,10 @@ impl Op {
                 put_path(out, path)?;
                 put(out, &tag.to_le_bytes())?;
                 put_bytes(out, data)
+            }
+            Op::SetShortName { path, short } => {
+                put_path(out, path)?;
+                put_path(out, short)
             }
         }
     }
@@ -465,6 +478,11 @@ fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemor
             }
             Op::Clusters { path, size, written, runs }
         }
+        13 if version >= 6 => {
+            let path = path!();
+            let short = path!();
+            Op::SetShortName { path, short }
+        }
         12 if version >= 5 => {
             let path = path!();
             let tag = r.u32()?;
@@ -624,6 +642,8 @@ mod tests {
                 ],
             },
             Op::SetReparse { path: w("\\d\\l"), tag: 0xa000_000c, data: vec![1, 2, 3] },
+            Op::SetShortName { path: w("\\d\\long-name.ini"), short: w("GALASH~1.INI") },
+            Op::SetShortName { path: w("\\d\\long-name.ini"), short: Vec::new() },
         ]
     }
 

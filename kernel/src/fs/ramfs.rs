@@ -472,6 +472,13 @@ pub struct Node {
     dirty: bool,
     /// Its reparse point (`set_reparse`), if it has one.
     reparse: Option<Reparse>,
+    /// Its 8.3 short name (NT's FileShortNameInformation,
+    /// `set_short_name`), if a program gave it one: a name of its
+    /// directory like any other (`find` matches it), belonging to its
+    /// first name and not to its hard links. gala never makes one up,
+    /// where Windows generates one for every long name, so a node has one
+    /// only if it was set. Kept in the change log (SetShortName).
+    short: Option<Vec<u16>>,
     /// Unique across all nodes ever made (a page read for a node whose id
     /// was reused meanwhile is not taken: `fill`).
     serial: u64,
@@ -487,6 +494,19 @@ fn next_version() -> u64 {
 }
 
 impl Node {
+    /// Its 8.3 short name (`Node::short`), if it has one.
+    pub fn short_name(&self) -> Option<&[u16]> {
+        self.short.as_deref()
+    }
+
+    /// Its short name where `name` is the name it belongs to (its first
+    /// one, not a hard link's): what the directory classes that carry a
+    /// ShortName report.
+    pub fn short_name_of(&self, name: &[u16]) -> Option<&[u16]> {
+        (self.name.as_slice() == name).then_some(())?;
+        self.short.as_deref()
+    }
+
     /// The contents' version, or None while a writable data section maps
     /// the file (writes through its views do not pass through here). A
     /// read-only one cannot change it: image sections of the file keep
@@ -858,6 +878,7 @@ impl RamFs {
             image_holds: 0,
             dirty: false,
             reparse: None,
+            short: None,
             serial: next_version(),
             epoch: 0,
         };
@@ -971,7 +992,15 @@ impl RamFs {
             .iter()
             .copied()
             .find(|&c| self.node(c).is_some_and(|n| name_matches(exact, &n.name, name)));
-        Ok(first.or_else(|| self.link_at(dir, name).map(|i| self.links[i].node)))
+        // Then the hard links, then the short names: one name space, as on
+        // NTFS (`Node::short`).
+        Ok(first.or_else(|| self.link_at(dir, name).map(|i| self.links[i].node)).or_else(|| {
+            children.iter().copied().find(|&c| {
+                self.node(c)
+                    .and_then(Node::short_name)
+                    .is_some_and(|short| name_matches(exact, short, name))
+            })
+        }))
     }
 
     /// The index in `links` of hard link `name` in `dir`.
@@ -1183,6 +1212,7 @@ impl RamFs {
             image_holds: 0,
             dirty: self.recording || self.replaying,
             reparse: None,
+            short: None,
             serial: next_version(),
             epoch: 0,
         }
@@ -1502,6 +1532,10 @@ impl RamFs {
         let node = self.node_mut(id)?;
         let old_name = core::mem::replace(&mut node.name, owned);
         node.parent = parent;
+        // Windows makes a short name for the new long one; gala makes
+        // none, so the old one goes (a program sets it again if it wants
+        // one: `set_short_name`).
+        node.short = None;
         let directory = node.is_dir();
         self.note(old_parent, &old_name, directory, ACTION_RENAMED_OLD_NAME);
         self.note(parent, name, directory, ACTION_RENAMED_NEW_NAME);
@@ -1868,6 +1902,32 @@ impl RamFs {
         }
         node.mode = Some(mode & 0o7777);
         self.record_node(id, |path, n| Some(Op::SetMode { path, mode: n.mode.unwrap_or(0) }));
+        Ok(())
+    }
+
+    /// Gives node `id` the 8.3 short name `short` in its directory (NT's
+    /// FileShortNameInformation); an empty name takes its short name
+    /// away. A name another entry of the directory already holds, long or
+    /// short, is `FsError::Exists` -- Windows' ERROR_ALREADY_EXISTS
+    /// (measured: `office_k32_test`'s SetFileShortNameW). The shape of an
+    /// 8.3 name is the caller's to check (`nt::file::is_short_name`).
+    pub fn set_short_name(&mut self, id: NodeId, short: &[u16]) -> Result<(), FsError> {
+        let node = self.node(id).ok_or(FsError::NotFound)?;
+        let (parent, detached) = (node.parent, node.detached);
+        let name = if short.is_empty() {
+            None
+        } else {
+            // An unlinked node is in no directory: nothing to collide
+            // with (its name is gone too).
+            if !detached && self.find(parent, short)?.is_some_and(|other| other != id) {
+                return Err(FsError::Exists);
+            }
+            Some(copy(short).ok_or(FsError::NoMemory)?)
+        };
+        self.node_mut(id)?.short = name;
+        self.record_node(id, |path, n| {
+            Some(Op::SetShortName { path, short: copy(n.short_name().unwrap_or(&[]))? })
+        });
         Ok(())
     }
 
@@ -2560,6 +2620,10 @@ impl RamFs {
                 let id = self.lookup(path)?;
                 self.set_mode(id, *mode)
             }
+            Op::SetShortName { path, short } => {
+                let id = self.lookup(path)?;
+                self.set_short_name(id, short)
+            }
             Op::Symlink { path, target, created } => {
                 let (parent, name) = self.make_parent(path, *created)?;
                 if self.find(parent, name)?.is_some() {
@@ -2663,6 +2727,10 @@ impl RamFs {
                 if let Some(sd) = &n.security {
                     let descriptor = copy(sd).ok_or(FsError::NoMemory)?;
                     push(Op::SetSecurity { path: p()?, descriptor })?;
+                }
+                if let Some(short) = n.short_name() {
+                    let short = copy(short).ok_or(FsError::NoMemory)?;
+                    push(Op::SetShortName { path: p()?, short })?;
                 }
                 // Before the contents (a symbolic link has none) and the
                 // children (none either: a reparse point's directory is
@@ -3498,6 +3566,76 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn a_short_name_is_another_name_of_the_file() {
+        let mut f = fs();
+        let dir = f.create(ROOT, &w("d"), true, 1).unwrap();
+        let id = f.create(dir, &w("long-name.ini"), false, 1).unwrap();
+        let other = f.create(dir, &w("GALASH~2.INI"), false, 1).unwrap();
+        f.set_short_name(id, &w("GALASH~1.INI")).unwrap();
+        // The file answers to both its names, whatever the case.
+        assert_eq!(f.find(dir, &w("long-name.ini")).unwrap(), Some(id));
+        assert_eq!(f.find(dir, &w("GALASH~1.INI")).unwrap(), Some(id));
+        assert_eq!(f.find(dir, &w("galash~1.ini")).unwrap(), Some(id));
+        assert_eq!(f.node(id).unwrap().short_name(), Some(w("GALASH~1.INI").as_slice()));
+        // A name another entry holds, long or short, is not to be had.
+        assert_eq!(f.set_short_name(id, &w("GALASH~2.INI")), Err(FsError::Exists));
+        assert_eq!(f.set_short_name(other, &w("GALASH~1.INI")), Err(FsError::Exists));
+        assert_eq!(f.set_short_name(other, &w("long-name.ini")), Err(FsError::Exists));
+        // Its own again is no collision.
+        f.set_short_name(id, &w("GALASH~1.INI")).unwrap();
+        // The empty name takes it away.
+        f.set_short_name(id, &[]).unwrap();
+        assert_eq!(f.find(dir, &w("GALASH~1.INI")).unwrap(), None);
+        assert_eq!(f.node(id).unwrap().short_name(), None);
+    }
+
+    #[test]
+    fn a_rename_takes_the_short_name_away() {
+        let mut f = fs();
+        let id = f.create(ROOT, &w("long-name.ini"), false, 1).unwrap();
+        f.set_short_name(id, &w("GALASH~1.INI")).unwrap();
+        f.rename(id, ROOT, &w("other-name.ini"), false).unwrap();
+        assert_eq!(f.node(id).unwrap().short_name(), None);
+        assert_eq!(f.find(ROOT, &w("GALASH~1.INI")).unwrap(), None);
+        assert_eq!(f.find(ROOT, &w("other-name.ini")).unwrap(), Some(id));
+    }
+
+    #[test]
+    fn a_short_name_comes_back_from_the_change_log() {
+        let (mut f, mut disk) = disk_fs(8);
+        let dir = f.create(ROOT, &w("d"), true, 1).unwrap();
+        let id = f.create(dir, &w("long-name.ini"), false, 1).unwrap();
+        f.write(id, 0, b"x", 2).unwrap();
+        f.set_short_name(id, &w("GALASH~1.INI")).unwrap();
+        let mut log = sync(&mut f, &mut disk);
+        // The next boot finds the file under both names.
+        let mut g = fs();
+        for op in &log {
+            g.apply(op).unwrap();
+        }
+        let gdir = g.resolve(ROOT, &[&w("d")]).unwrap();
+        let gid = g.find(gdir, &w("GALASH~1.INI")).unwrap().expect("the short name");
+        assert_eq!(g.find(gdir, &w("long-name.ini")).unwrap(), Some(gid));
+        // A snapshot of the tree carries it too, and taking the name away
+        // is a record of its own.
+        f.set_short_name(id, &[]).unwrap();
+        log = sync(&mut f, &mut disk);
+        assert!(
+            log.iter().any(|o| matches!(o, Op::SetShortName { short, .. } if short.is_empty()))
+        );
+        for op in &log {
+            g.apply(op).unwrap();
+        }
+        assert_eq!(g.find(gdir, &w("GALASH~1.INI")).unwrap(), None);
+        let shot = f.snapshot().unwrap();
+        assert!(!shot.iter().any(|o| matches!(o, Op::SetShortName { .. })));
+        f.set_short_name(id, &w("GALASH~1.INI")).unwrap();
+        let shot = f.snapshot().unwrap();
+        assert!(shot.iter().any(|o| matches!(o, Op::SetShortName { short, .. }
+            if short == &w("GALASH~1.INI"))));
     }
 
     fn fs() -> RamFs {

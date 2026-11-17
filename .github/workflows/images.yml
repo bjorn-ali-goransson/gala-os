@@ -28,12 +28,6 @@ permissions:
   actions: read
 
 env:
-  # R2's S3 API (the aws CLI reads these), as release.yml.
-  AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-  AWS_DEFAULT_REGION: auto
-  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-  IMAGES: s3://${{ vars.R2_BUCKET }}/images/latest
   IMAGES_URL: https://updates.gala-os.com/images/latest
 
 jobs:
@@ -162,10 +156,22 @@ jobs:
           key: gala-target-images-${{ matrix.arch }}-${{ env.SHA }}
       - name: Upload (the image, then its checksum and commit)
         if: steps.head.outputs.current == 'true'
+        # In the step, not the workflow's env: the R2 variables are the
+        # release environment's, which the workflow-level env cannot see
+        # (the endpoint came out as https://.r2.cloudflarestorage.com).
         env:
+          AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          IMAGES: s3://${{ vars.R2_BUCKET }}/images/latest
         run: |
+          if [ -z "${{ vars.R2_ACCOUNT_ID }}" ] || [ -z "${{ vars.R2_BUCKET }}" ]; then
+            echo "::error::R2_ACCOUNT_ID or R2_BUCKET is empty in this job (the release environment's variables)"
+            exit 1
+          fi
           f="gala-${{ matrix.arch }}"
           aws s3 cp "out/$f.iso" "$IMAGES/$f.iso" --content-type application/x-iso9660-image --cache-control no-cache --no-progress
           aws s3 cp "out/$f.iso.sha256" "$IMAGES/$f.iso.sha256" --content-type text/plain --cache-control no-cache --no-progress

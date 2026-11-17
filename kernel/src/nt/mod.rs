@@ -28,6 +28,7 @@ pub mod params;
 pub mod pe;
 pub mod persist;
 pub mod pipe;
+pub mod pkgview;
 pub mod platform;
 pub mod process;
 pub mod quota;

@@ -432,7 +432,7 @@ pub(in crate::nt) fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     };
     if test_alert
         && crate::nt::thread::has_user_apc()
-        && deliver_apc(call, &regs, &fp.unwrap_or_else(current_fp))
+        && deliver_apc(call, &regs, &fp.unwrap_or_else(current_fp), false)
     {
         return NtStatus::SUCCESS;
     }
@@ -458,6 +458,10 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         Ok(v) => v,
         Err(status) => return status,
     };
+    let walk = match call.arg(2) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
     if record == 0 {
         *call.process.unhandled_exception.lock() = None;
         return NtStatus::SUCCESS;
@@ -479,6 +483,14 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     regs.set_ip(word(0x10));
     let mut note = Note::new(&call.process, NtStatus(code), access, regs, false);
     note.flags = (word(0) >> 32) as u32;
+    note.walk = crate::nt::abi::walk_of(call, walk);
+    // The parameters: RECORD_SIZE has room for all 15 of them.
+    note.params_count = count as usize;
+    note.params_len = note.params_count.min(crate::nt::crashreport::PARAMS);
+    let kept = note.params_len;
+    for (i, p) in note.params.iter_mut().take(kept).enumerate() {
+        *p = word(0x20 + 8 * i);
+    }
     *call.process.unhandled_exception.lock() = Some(note);
     NtStatus::SUCCESS
 }
@@ -492,8 +504,17 @@ pub(in crate::nt) fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtS
     }
     let mut regs = call.frame.return_regs();
     regs.set_syscall_result(u64::from(status.0));
-    deliver_apc(call, &regs, &current_fp());
+    deliver_apc(call, &regs, &current_fp(), false);
     status
+}
+
+/// A special user APC (QueueUserAPC2) on the way back to user mode from
+/// a system call that returned `status`: the thread runs it and the
+/// CONTEXT it resumes returns `status` from the call, as it would have.
+pub(in crate::nt) fn deliver_special_apc(call: &Call<'_>, status: NtStatus) {
+    let mut regs = call.frame.return_regs();
+    regs.set_syscall_result(u64::from(status.0));
+    deliver_apc(call, &regs, &current_fp(), true);
 }
 
 /// The running thread's FP/SIMD state as CONTEXT's floating-point part.
@@ -519,12 +540,13 @@ pub(in crate::nt) fn deliver_apc(
     call: &Call<'_>,
     regs: &UserRegs,
     fp: &[u8; context::FP_STATE_BYTES],
+    special_only: bool,
 ) -> bool {
     let dispatcher = call.process.apc_dispatcher.load(core::sync::atomic::Ordering::Relaxed);
     if dispatcher == 0 {
         return false;
     }
-    let Some(apc) = crate::nt::thread::take_user_apc() else { return false };
+    let Some(apc) = crate::nt::thread::take_user_apc(special_only) else { return false };
     let ctx = context::to_bytes(&context_regs(regs), Some(fp));
     let mut args = [0u8; 32];
     for (i, v) in [apc.routine, apc.args[0], apc.args[1], apc.args[2]].iter().enumerate() {

@@ -228,7 +228,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); Word and Excel start without a window yet (`office_word`, `office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen, then raises 0xe0000002 unhandled 29 s in, after no rendering device answered it (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1276,9 +1276,11 @@ server; paravirtual hardware next; vendor GPU drivers (WDDM) never in
 the kernel.
 
 **Done so far**:
-- G0: `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as stubs failing
-  with DXGI_ERROR_UNSUPPORTED (outputs NULL, each call in the ledger);
-  `gpu_stub_test`; Chromium's GPU process takes it as "no GPU".
+- G0: `dxgi.dll`, `d3d10.dll`, `d3d10_1.dll`, `d3d11.dll`, `d3d12.dll`,
+  `dcomp.dll` as stubs failing with DXGI_ERROR_UNSUPPORTED (outputs
+  NULL, each call in the ledger); `gpu_stub_test`; Chromium's GPU
+  process takes it as "no GPU", and Office's shared code can bind the
+  Direct3D 10 entry points it delay-loads (ROADMAP OF).
 - G1, virtio-gpu 2D: the modern virtio-pci transport, the driver over a
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
@@ -1295,6 +1297,14 @@ the kernel.
   loader needs it; `gpu_stub_test`); ntdll resolves `.` and `..` in DLL
   paths (`loader_test`); `vk_test` (a triangle read back, then presented
   through VK_KHR_win32_surface and checked on the screen).
+- G2, Direct3D 11: DXVK 3.1.1 (PREBUILT `dxvk`) over that Vulkan stack,
+  its `d3d11.dll` and `dxgi.dll` beside the program (System32's dxgi
+  stays gala's, the one the Vulkan loader calls); gdi32's 19 `D3DKMT*`
+  thunks (STATUS_NOT_SUPPORTED, in the ledger) and ucrtbase's
+  `mbsrtowcs` and `wctype`, which its import tables need; `d3d11_test`
+  (a device and a swap chain, a cleared back buffer with a copied
+  block, read back, presented and checked on the screen). No shader,
+  so no HLSL compiler yet.
 
 **Next**:
 1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
@@ -1309,22 +1319,16 @@ the kernel.
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
-   lavapipe, PREBUILT, beside the programs that use them (System32's
-   dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
-   screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
-   stays the fallback should lavapipe fall short. WARP is ruled out (not
-   redistributable). gdi32's GetGlyphOutline (Mesa's
-   wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
-   (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
-   STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
-   resources); everything else it imports gala has. d3d11_test needs
-   DXBC shaders, and the host has no HLSL compiler (Ubuntu's
-   vkd3d-compiler 1.2 predates vkd3d's HLSL): build a current
-   vkd3d-shader compiler for `build.sh`, or assemble the two shaders
-   with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
-   beside the program the same way.
+3. G2's rest: a drawn triangle in `d3d11_test` (DXVK is in, but
+   nothing is drawn through the pipeline yet), then DXVK's d3d9 and
+   d3d10core and its own tests, then vkd3d-proton 3.1 (d3d12,
+   d3d12core) beside the program the same way. Drawing needs DXBC
+   shaders, and the host has no HLSL compiler (Ubuntu's vkd3d-compiler
+   1.2 predates vkd3d's HLSL): build a current vkd3d-shader compiler
+   for `build.sh`, or assemble the two shaders with their checksum.
+   SwiftShader stays the fallback should lavapipe fall short. WARP is
+   ruled out (not redistributable). gdi32's GetGlyphOutline (Mesa's
+   wglUseFontOutlines) is still GDI_ERROR.
    `d3dcompiler_47.dll` (the decision, for Office's Click-to-Run UI,
    which imports D3DCompile): gala's own DLL with a working
    D3DCreateBlob and no HLSL compiler: D3DCompile, D3DCompile2 and
@@ -1789,20 +1793,17 @@ need gala's.
    brightest) and the active window's pill on the taskbar, which the
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
-   Both runs end the same way today: the process starts, asks the SCM
-   to start `ClickToRunSvc`, and dies 0xc0000142
-   (STATUS_DLL_INIT_FAILED) after 85 s without a window. The ledger's
-   25 missing `c2r64.dll!` exports are not the reason: they are the
-   AppV ISV shim's optional hooks (`EnsureFile`, `LoadRange`,
-   `StreamFault`, `HandleLoadIconW`, ...), and the real `C2R64.dll` the
-   ClickToRun directory holds exports none of the 25 either (101
-   exports, measured), so the same probes miss on Windows. The ledger
-   names the DLL the death is about (`what` "load failed", its status
-   the detail): `appvisvsubsystems64.dll`, status 0xc0000142, recorded
-   last of all in the seconds before Word exits with that same status.
-   Out of gala's loader that status means the image was found, mapped
-   and bound and its DllMain answered FALSE: the AppV ISV shim itself
-   saying no. Word's run leaves no user32 gap in the ledger any more.
+   Neither run draws the window its check wants yet. Word's puts an
+   untitled window on the screen and ends with WINWORD.EXE raising
+   0xe0000002 after 29 s, where the ladder below has got to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   delay-load helper's "not found" for user32's WaitForInputIdle, the
+   one gap its run names -- nothing of Office's shared code fails in
+   it, so Excel's next step is that function and a rerun. The ledger's
+   25 missing `c2r64.dll!` exports are not a gap: they are the AppV ISV
+   shim's optional hooks (`EnsureFile`, `LoadRange`, `StreamFault`,
+   `HandleLoadIconW`, ...), and the real `C2R64.dll` the ClickToRun
+   directory holds exports none of the 25 either (101 exports,
+   measured), so the same probes miss on Windows.
    Two things, both next:
    - Under the Office root Windows has 16 reparse points (`C2R32.dll`,
      `C2R64.dll`, `AppvIsvSubsystems32.dll`, `AppvIsvSubsystems64.dll`,
@@ -1816,8 +1817,7 @@ need gala's.
      the integration step that fails (`ConfigureMSIs`, "Final
      Extensions Publishing", 1603 and Integrator 0x643 below), which
      waits on PK's MSI engine.
-   - What `appvisvsubsystems64.dll`'s DllMain needs before it answers
-     TRUE. The 24 user32 functions `mfc140u.dll` imports statically
+   - What Word loads, and where it stops. The 24 user32 functions `mfc140u.dll` imports statically
      that gala lacked are exported now, Windows' results measured first
      (`win32_misc_test`'s `mfc` section, 158 checks): the dialog-item
      helpers (CheckRadioButton, IsDlgButtonChecked, Get/SetDlgItemInt,
@@ -1837,52 +1837,206 @@ need gala's.
      DrawStateW, GetDCEx, GetKeyNameTextW, HideCaret and
      TranslateMDISysAccel. None is reached yet, and neither is
      ChildWindowFromPointEx, which user32 does not export at all.
-     What the shim's DllMain does instead, with the kernel's `trace`
-     flag on (every system call logged): 171 NtCreateFile calls that
-     end 0xc0000034 (STATUS_OBJECT_NAME_NOT_FOUND), each raising
-     `rpcrt4.dll!NdrClientCall2` 1722 (RPC_S_SERVER_UNAVAILABLE) into
-     the ledger and retried after a wait, then a registry value read
-     and FALSE. There is no endpoint to open, and the service's own log
-     says why (`C2R::Orchestration::Initialize` in the dump):
-     `OISVAPI::Initialize Failed: [AppV Error: Code(0xc804525-0x7e)
-     ... File(swrpcserver.cpp : 552)], Error:0x7e`, error 126
-     (ERROR_MOD_NOT_FOUND) -- the AppV ISV API the service initializes
-     is the *server* side of that RPC, and it never came up, so Word's
-     client has nothing to reach. The client side of the diagnosis is
-     in place: a connect that finds no pipe records the name
+     What the shim's DllMain waits for is the AppV ISV RPC server in
+     the service, and that comes up: it registers
+     `APPV-VIRTMAN-NOTIFICATIONS`, `APPV-jitv_server`,
+     `APPV-VREG_SERVER` and `LRPC-C2RClientAPI_Server_System16` at
+     34.3-36.4 s of the run, and the shim connects to two of them (the
+     `no server at pipe` records before that -- 87 for the C2R client
+     API, one every 0.25 s -- are the shim retrying while the service
+     starts, and they end in a connect at 34.44 s). The lesson of the
+     0x7e that stood here before: the server's setup takes
+     `GetModuleHandle("Rpcrt4.dll")` and gave up with
+     ERROR_MOD_NOT_FOUND (126) because nothing in that process had
+     loaded rpcrt4, where Windows' advapi32, oleaut32, msi and combase
+     all import it statically. gala's system DLLs carry Windows' own
+     dependencies where a program can see them (ARCHITECTURE "The
+     module graph", `kernel32_test`), and the two records that found it
+     stay: a handle asked for a module that is not loaded is recorded
+     with the name asked for (`kernel32.dll!GetModuleHandle(<name>)`),
+     and a connect that finds no pipe with the endpoint's
      (`rpcrt4.dll!no server at pipe(<name>)`, the Win32 error as the
-     detail, `rpc_test`), so a run says which endpoint a program could
-     not reach -- for Word, `LRPC-AppV-ISV-<GUID>APPV-VIRTMAN-NOT`,
-     14 times over the 59 s the service's own log counts
-     (`isv_process_notifier.cpp : 64`, 0x800706ba, RetryCount 13).
-     Of every file the service looked for and did not find, one was
-     gala's own gap and is now closed: slc.dll (ARCHITECTURE "slc",
-     `slc_test`, Windows' answers measured), which it loads from
-     System32 and asks one thing,
+     detail, `rpc_test`).
+     The virtual process environment the shim waits for now comes
+     up: the service's `AppVEvents::VirtualProcessCreateFailed` and the
+     `xmlutils.cpp` failures under it are gone, the ISV calls are
+     answered, and `appvisvsubsystems64.dll` loads. Two engines were
+     short of what the AppV package catalog under
+     `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
+     and the deployment configuration need. msxml6 had none of the
+     MSXML extension functions a selection may call, where the
+     configuration compares strings with `ms:string-compare`
+     (ARCHITECTURE "msxml6"). rpcrt4's NDR engine had two defects on
+     the ISV interface's own parameters, each reproduced first in
+     `rpc_test` against Windows' engine before it was fixed: a complex
+     array's element is not a format character in place but a reference
+     to the element's own description (FC_EMBEDDED_COMPLEX), and the
+     unmarshal side dropped the referents that a deferred referent
+     defers itself, where the marshal side wrote them.
+     WINWORD.EXE runs its own code and loads Word: it maps WWLIB.DLL
+     (59 MiB) and OART.DLL, where it ended at 0xC0000142 before
+     reaching them and at status 1 when wwlib's own imports would not
+     bind. The nine imports wwlib was
+     short of are implemented, each measured on Windows first:
+     kernel32's NormalizeString and IsNormalizedString (which normaliz
+     forwards here too), EnumSystemLanguageGroupsW and EnumUILanguagesW
+     (`office_k32_test`, ARCHITECTURE "Locales and text"), and six of
+     oleaut32's by ordinal, RegisterActiveObject (33),
+     RevokeActiveObject (34), VarR4FromR8 (71), VarR8FromR4 (81),
+     VarBstrFromI4 (110) and VarBstrFromR4 (111) (`com_test`; the
+     ordinals are Windows' own, `user/oleaut32/build.rs`) -- the two
+     active-object calls over a running object table of the process and
+     the two number-to-string ones over the exact decimal expansion the
+     C runtime prints with, moved into `user/decfloat` so that both
+     round alike (ARCHITECTURE "COM: ole32 and oleaut32"). The run's
+     ledger has no `missing import` and no `load failed` left at all.
+     Word finds Office's shared code: a process of a Click-to-Run
+     package sees the package's `VFS\<token>` tree at the token's real
+     path (ARCHITECTURE "A package's VFS view", `nt/pkgview.rs`,
+     `pkgview_test`), so WINWORD.EXE's opens of
+     mso20win32client.dll, mso30win32client.dll,
+     mso40uiwin32client.dll, mso50win32client.dll,
+     mso98win32client.dll and mso.dll at
+     `C:\Program Files\Common Files\Microsoft Shared\Office16` are all
+     served from the Office root's
+     `VFS\ProgramFilesCommonX64\Microsoft Shared\Office16`, where the
+     install keeps them (`cargo xtask disk-files`; the `package` file
+     events name each one, `XTASK_EVENTS=file`). What Windows does
+     there, measured on a machine with the same install: Word reports
+     those six, MSPTLS.DLL and `1033\OSFINTL.DLL` loaded from that
+     directory while no process on the machine finds it, those modules
+     sit outside the loader's own address range, and none of the App-V
+     services or drivers runs -- the view is Office's own loader naming
+     what it mapped itself, not a file system anything keeps. gala
+     makes the same files answer at the same paths from the kernel
+     instead, for a process whose image is under a package root
+     registered in `HKLM\SOFTWARE\Microsoft\AppVISV`, which is coarser
+     than Windows' (every program of the package has the view) and says
+     so where it lands. (OfficeClickToRun opens its own files by the
+     package path directly, so the service needs nothing of this.)
+     What stops Word now is what those six import: all six are laid
+     out and mapped, and their imports do not bind.
+     mso20win32client.dll fails first, STATUS_ENTRYPOINT_NOT_FOUND
+     over kernel32's GetSystemFirmwareTable, and the five behind it
+     fail STATUS_DLL_NOT_FOUND because each imports the one before.
+     What they are short of, from the run's ledger, is 15 kernel32
+     functions: GetSystemFirmwareTable (mso20win32client),
+     RegisterApplicationRecoveryCallback (mso30win32client),
+     ApplicationRecoveryFinished, ApplicationRecoveryInProgress,
+     PulseEvent, GetDateFormatA, GetTimeFormatA and EnumCalendarInfoA
+     (mso98win32client), GetPrivateProfileStringA, GetProfileStringA,
+     GetProfileIntA, GetPrivateProfileIntW, WritePrivateProfileStringA,
+     OpenFile, SetFileShortNameW and FindPackagesByPackageFamily
+     (mso.dll). All fifteen are implemented, each measured on Windows
+     first (`office_k32_test`, ARCHITECTURE "kernel32"): the recovery
+     calls, GetDateFormatA, GetTimeFormatA, EnumCalendarInfoA, the
+     profile A and Int forms, OpenFile and FindPackagesByPackageFamily,
+     and the three that wanted the kernel -- PulseEvent (NtPulseEvent,
+     "Synchronization objects"), GetSystemFirmwareTable (the machine's
+     SMBIOS table from the boot protocol, "Firmware tables") and
+     SetFileShortNameW (8.3 names in the ramfs, "Files");
+     mso40uiwin32client and mso50win32client name nothing of their own,
+     so they bind as soon as the chain does.
+     With the chain bound, Word loads Office's shared code and its
+     resources -- MSO40UIRES, MSO99LRES and MSORES (81 MiB) -- and puts
+     a window on the screen, untitled, 29 s in. Two delay loads ended
+     it before that, each over a DLL whose exports have to exist
+     whatever they answer (one that resolves to nothing ends the
+     process before any handler runs): msi.dll, short eleven functions the shared
+     code binds by ordinal (0xc06d007f over ordinal 137), and
+     d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
+     implemented, each answer measured on Windows first (`msi_test`,
+     `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
+     What stops Word now is a raise of its own. It asks for a
+     rendering device and gala has none (GPU G0): d2d1's factory
+     refuses ID2D1Factory1 and ID2D1Factory2 (E_NOINTERFACE),
+     D3D11CreateDevice fails once and D3D10CreateDevice1 twenty times
+     (DXGI_ERROR_UNSUPPORTED, no adapter). Then, in Word's
+     international code (WWINTL.DLL) under mso30win32client, it calls
+     RaiseException with 0xe0000002 -- Office's own code, software
+     originated and continuable -- which no handler in the process
+     takes, and the process ends with that status. The raise carries no
+     parameters, so its code is everything it says, and the frame below
+     it is Mso30win32client's own `__fastfail` stub, which sits in the
+     padding between two functions and has no unwind entry of its own:
+     the chain ends there because the image describes nothing for that
+     address, not because the unwinder stops short (ARCHITECTURE
+     "Exceptions"). What the dying thread called last is in
+     the crash report now (OBSERVABILITY "Crash reports"), and the two
+     gaps the ledger named in the second before the raise are closed,
+     each measured on Windows first: user32's
+     SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
+     SPI_GETFONTSMOOTHINGCONTRAST), which Word reads before it lays
+     text out (`win32_misc_test`), and kernelbase's QueueUserAPC2,
+     which needed special user APCs in the kernel (`apc_test`,
+     `kernel32_thread_test`, ARCHITECTURE "Special user APCs").
+     A run with every system call traced does not reach the raise at
+     all: it stops earlier, in `MsoSplash`, asking
+     RoGetActivationFactory for
+     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
+     over and over, a runtime class gala has none of -- so the traced
+     run is a different path, not a slower one, and the raise has to be
+     read from an untraced run. With those two closed, the run from
+     boot leaves nothing else between the device and the raise: in the
+     200 ms before it the ledger names D3D11CreateDevice once, the
+     d2d1 factory's QueryInterface three times and D3D10CreateDevice1
+     twenty times, and otherwise only Word's own settings keys, absent
+     and defaulted. So the raise follows the refusals with nothing in
+     between, and the next step is a rendering device (G0), not another
+     export: until one answers, Word draws its untitled window and ends
+     there.
+     `office_word` and `office_excel` now ask for the window as well,
+     not only the program's exit status: a screen check whose marker
+     never appeared was skipped in silence, so a run where nothing drew
+     passed on the status alone. The run says what nothing printed
+     (`xtask: screen: nothing printed "<marker>"`) and the scenarios
+     expect `xtask: screen ok`, which is what the marker and the pixel
+     checks of the window Word draws leave.
+     The three gaps that stood here before are closed, each measured on
+     Windows first: ntdll's RtlUTF8ToUnicodeN and RtlUnicodeToUTF8N
+     (`rtl_test`), kernel32's FindFirstChangeNotification family
+     (`dirchange_test`, ARCHITECTURE "Directory change notification")
+     and OpenProcessToken and OpenThreadToken through
+     `api-ms-win-core-processthreads-l1-1-0`, which gala hosts in
+     kernel32 and which now forwards both to kernelbase as Windows does
+     (`token_test`). What the run's 38 `missing export` records name is
+     asked for with GetProcAddress and nothing waits on: ntdll's
+     NtDeleteFile, NtQueryDirectoryFileEx and NtQueryFullAttributesFile,
+     kernel32's GetCurrentDirectoryA and OOBEComplete, ole32's
+     CoRegisterClassObject, CoRevokeClassObject, CoGetInstanceFromFile
+     and OleRegEnumFormatEtc, oleaut32's RegisterActiveObject and
+     RevokeActiveObject by name, msi's MsiGetProductCodeW and the AppV
+     shim's 25 `c2r64.dll` hooks. They are not what to implement next.
+     One gap in the NDR engine stands, recorded rather than guessed at:
+     freeing a conformant array of pointers leaks its referents,
+     because the count that sized it is not kept with the object
+     (`rpcrt4.dll!NDR(free: conformant array of pointers)`, 4 hits in
+     the run). The lesson of the attempt that is not the fix:
+     recomputing the count at free time from the stack or a constant is
+     unsound -- the stack frame the conformance was read from is gone
+     by then, and freeing by the count it yields corrupted
+     OfficeClickToRun's heap -- so the count has to be kept when the
+     array is unmarshalled.
+     Pitfalls, measured, not worth chasing again: the module names the
+     run probes for and does not find (`sftldr.dll`,
+     `sftldr_wow64.dll`, `mso20win32client`, `mscoree.dll`,
+     `c2r64.dll`, `AppVEntSubsystems32/64.dll`) and the five files it
+     looks for by full path in `ClickToRun` (`AppVISVStream32.dll`,
+     `AppVISVStream64.dll`, `Mso20win32client.dll`,
+     `Mso30win32client.dll`, `Mso40UIwin32client.dll`) are absent on
+     Windows too (measured on the Windows machine; the three Mso ones
+     live under the Office root's
+     `vfs\ProgramFilesCommonX64\Microsoft Shared\Office16`, and no
+     Click-to-Run binary imports slc.dll or any of the five: 165 files
+     read). Of those misses one was gala's own gap and is closed:
+     slc.dll (ARCHITECTURE "slc", `slc_test`, Windows' answers
+     measured), which the service loads from System32 and asks one
+     thing,
      `SLGetWindowsInformationDWORD(Microsoft-Windows-Container-License-Mode)`
-     (SL_E_VALUE_NOT_FOUND, in the ledger). The 0x7e did not move, so
-     that absence was not its cause. What the run shows before it: the
-     App-V DLL set (AppVOrchestration, AppVIsvStreamingManager,
-     AppVManifest, AppVCatalog, AppVIsvVirtualization, AppVIntegration,
-     AppVIsvSubsystemController, AppVFileSystemMetadata) maps twice,
-     then five files are looked for by full path in `ClickToRun` and
-     are not there -- `AppVISVStream32.dll`, `AppVISVStream64.dll`,
-     `Mso20win32client.dll`, `Mso30win32client.dll`,
-     `Mso40UIwin32client.dll` -- and 1.5 s later the error is logged.
-     None of those five is in Windows' own `ClickToRun` either
-     (measured on the Windows machine; the three Mso ones live under
-     the Office root's `vfs\ProgramFilesCommonX64\Microsoft
-     Shared\Office16`, and no Click-to-Run binary imports slc.dll or
-     any of the five: 165 files read), so the misses are what Windows
-     has too. No DLL load failed in the service in the whole run: the
-     ledger has neither a `missing dll` nor a `load failed` for it, and
-     gala's loader records both ("Gaps are never silent", `load_module`
-     in `user/testntdll`). So the 126 is not a load of gala's --
-     ERROR_MOD_NOT_FOUND is also what GetModuleHandle answers for a
-     module that is not loaded, where GetProcAddress answers the 127
-     this ladder has already climbed, and that miss is recorded
-     nowhere. Making it say the name asked for is the next step; the
-     name is what the server needs.
+     (SL_E_VALUE_NOT_FOUND, in the ledger). No DLL load failed in the
+     service in the whole run: the ledger has neither a `missing dll`
+     nor a `load failed` for it, and gala's loader records both
+     ("Gaps are never silent", `load_module` in `user/testntdll`).
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
@@ -6046,6 +6200,22 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
 
+- **`d3d11_test`'s screen check expects red and blue swapped**
+  (`0x336699` reaches the screen as `0x996633`): DXVK asks for a
+  `VK_FORMAT_R8G8B8A8_UNORM` swapchain for any 8-bit UNORM back buffer,
+  Mesa's win32 WSI advertises that format, and the GDI present path --
+  the only one Mesa gives a software driver -- copies the image into a
+  BI_RGB (so BGRA) DIB section without swizzling it. The swap is in the
+  prebuilt stack, not in gala: it is the same on Windows with lavapipe,
+  and `vk_test`, which asks for `VK_FORMAT_B8G8R8A8_UNORM` itself, gets
+  its colours right through the same window path. Expecting what the
+  stack does keeps presentation covered and fails loudly when the stack
+  changes; what the frame should be is in the comment beside it.
+  Structural fix: a Vulkan driver whose present path matches what it
+  advertises -- Mesa's WSI fixed upstream (gala builds no Mesa today,
+  only fetches the release), or the GPU-backed driver of G3, which
+  presents through DXGI and not GDI. Item G2.
+
 - **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
   `lx_httpd.txt`): every other Linux transcript is recorded on real
   Linux (`cargo xtask lx-expect`); these were written from POSIX and
@@ -6179,6 +6349,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   the next failure says. Item W3.
 - **Fault-injection leftovers**: out-of-memory reported as
   STATUS_DLL_NOT_FOUND / STATUS_INVALID_IMAGE_FORMAT. Item R2.
+- **`clock_test`'s simulated rate measures the host's scheduling**: the
+  last check of the `control` step divides the program time a 30 s
+  simulated delay produced by the raw time it cost and asks for at
+  least 500 of the 1000 it set, so a host that leaves the VM off a CPU
+  for a few of those 30 ms fails it (1 of the scenario's last 24 runs;
+  its triage line read `5.4s run of 11.2s wall (5.4s waiting for a host
+  CPU)`, and it passes 3 of 3 alone). Nothing inside the VM can tell
+  that time apart: the raw clock is the TSC, which runs while the vCPU
+  does not. Fix: either the kernel accounts for the time it was not
+  running (a gap between timer ticks, steal time) and the check measures
+  against that, or the check keeps only what is gala's own -- the
+  program clock ran no faster than it was asked to, and 30 s of it cost
+  less than 30 s of raw time. Item R7.
 - **Seen once, unexplained**: sshd_password's sshd.exe ended with an
   unhandled access violation at 0xffffd0000013f948 (a kernel-half
   address read from user mode) after `ReadFileEx ERROR 38` lines, under
@@ -6217,6 +6400,9 @@ exact name (`cargo xtask boot-test office_install`).
 | Scenario | Why manual | Owner |
 |---|---|---|
 | `office_install` | the Office Deployment Tool installs Word, Excel and PowerPoint from Microsoft's CDN: a ~5.4 GB download onto a disk-backed C: (a 16 GiB sparse image, up to ~6 GiB on the host) | OF |
+| `office_install_local` | the same install from the host's cache of that download (`cargo xtask office-source`, put on the disk, installed from `C:\OfficeSource`): development's fast path, and the disk `office_word` and `office_excel` run on | OF |
+| `office_install_gui` | the same install again with ODT's and Click-to-Run's own windows, to watch (`XTASK_SHOTS`) | OF |
+| `office_word`, `office_excel` | an app on a copy of that install's disk (16 GiB): neither draws its window yet, so both fail on the screen check | OF |
 
 ### Environment
 

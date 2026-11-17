@@ -24,4 +24,11 @@ fn main() {
         }
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ole32.{name}");
     }
+
+    // Keep rpcrt4.dll in the import table (src/lib.rs declares it; nothing
+    // calls it, and the linker drops an import whose only reference is a
+    // static it also drops). ARCHITECTURE "The module graph".
+    if arch != "x86" {
+        println!("cargo:rustc-cdylib-link-arg=/INCLUDE:__imp_RpcStringFreeW");
+    }
 }

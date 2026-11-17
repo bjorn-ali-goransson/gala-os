@@ -465,7 +465,13 @@ xtask that change how a scenario boots:
   the host's even when starved (ARCHITECTURE "What a guest's clock
   follows"). Every log has `xtask: vm time: <run> run of <wall> wall
   (<w> waiting for a host CPU)`, the triage repeats it, and the state
-  dump's wait after a timeout counts run time too. What run time does
+  dump's wait after a timeout counts run time too, as does every wait
+  of a screen check -- its step's `after` line, the guest reading the
+  input sent, the pixels drawn -- each counted from where that wait
+  began, not from the boot. A run says what its steps waited
+  (`xtask: screen ok (step 5 waited 6.4s of run time for "...", of
+  120 s)`), which is where the one limit for every step comes from: the
+  longest measured is 8.9 s. What run time does
   not discount is waiting for host storage: a vCPU blocked in a disk
   read is running, not starved, so on slow storage a run-time limit
   behaves like a wall limit and the I/O-heavy scenarios are the ones
@@ -934,7 +940,11 @@ Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
 OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
 `glslangValidator`, apt `glslang-tools`, and clones the pinned
 Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
-`vulkan-runtime`), about 10 s each under TCG. When one fails:
+`vulkan-runtime`), about 10 s each under TCG. `d3d11_test`
+(user/d3d11_test, C, `build.sh`: mingw-w64's own Direct3D headers,
+nothing fetched) is Direct3D 11 on the same stack through DXVK
+(PREBUILT `dxvk`), whose `d3d11.dll` and `dxgi.dll` the scenario puts
+beside the program, never in System32. When one fails:
 
 - Read the ledger first: `missing export` stops a load; `missing dll`
   for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
@@ -944,6 +954,11 @@ Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
   0x180000000+<offset>` names the loader's source line (its PDB is
   unpacked beside it; the loader's source is
   github.com/KhronosGroup/Vulkan-Loader at the same version).
+- `d3d11_test: skipped (no device, hr ...)` means DXVK found no Vulkan
+  device: read the Vulkan points below first, since DXVK is above the
+  same loader. DXVK's own messages are in the serial log, and its
+  `d3d11.dll`/`dxgi.dll` must be beside the program, with System32's
+  `dxgi.dll` still gala's (the loader calls that one).
 - vk_test printing `skipped (no Vulkan driver)` means the loader found
   no driver: the Drivers key (the scenario's `registry` module), the
   manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader
@@ -1145,6 +1160,10 @@ scenario with a kernel flag gala-um does not apply (anything not in
 `um_command` refuses it; um-test's last lines list every program
 scenario it did not run and why (`um_gap`).
 
+- **gala-um's modules are the checked-in ones**: it ships
+  `user/bin`'s copies of the DLLs, and the module set is read from them
+  too (ARCHITECTURE "The module graph"), so a change to a DLL reaches
+  um-test only after `cargo xtask export-tests`.
 - **A "hang" in gala-um is first a question of setup**: read the
   SIGQUIT state dump and `um --trace` before naming a cause. A program
   run without the server its scenario starts retries its connect
@@ -3550,7 +3569,12 @@ about a minute under TCG. Read, in order:
   other bytes and `export-tests` rewrites the installers and the SHA-256s
   in their manifests: that belongs to no change, so restore
   `user/pk_install_test/source` (or export in the image: `cargo xtask
-  docker-test`) rather than committing it. Without makensis the checked-in installers are written
+  docker-test`) rather than committing it. Restore only the installers
+  nsis built and the SHA-256s in their manifests, never the whole tree:
+  a change to ntrt rewrites every zip around `user/bin/hello.exe`, and
+  restoring those leaves the manifests' hashes describing the zips that
+  are gone, which `cargo test -p galapkg` reports as a `HashMismatch`
+  and a PkHello that installs other bytes than `user/bin/hello.exe`. Without makensis the checked-in installers are written
   back from the working tree unchanged, so `export-tests` leaves the same
   bytes either way (make_source.py removes and remakes `source/installers`
   on every run, so keeping them means writing them back, not skipping

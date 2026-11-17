@@ -119,18 +119,51 @@ fn event_calls(events: &str) -> Calls {
     calls
 }
 
+/// What one `ledger: {...}` line is about: "service what detail".
+fn gap_key(line: &str) -> String {
+    let key = format!(
+        "{} {} {}",
+        field(line, "service").unwrap_or("?"),
+        field(line, "what").unwrap_or("?"),
+        field(line, "detail").unwrap_or("")
+    );
+    key.trim_end().to_string()
+}
+
+/// The `ledger: {...}` lines themselves (each dump's, in order).
+fn gaps(serial: &str) -> impl Iterator<Item = &str> {
+    serial.lines().map(text).filter_map(|l| l.strip_prefix("ledger: "))
+}
+
+/// `ledger: {...}` lines by when they were last hit: (uptime ms, hits,
+/// "service what detail"), latest first. A program's end is explained by
+/// the gaps it hit just before it, which the hit counts bury: a gap hit
+/// thousands of times at startup outranks the one it gave up on. Lines
+/// without a time (what a dump dropped) are left out.
+fn late_gaps(serial: &str) -> Vec<(u64, u64, String)> {
+    let mut merged: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for line in gaps(serial) {
+        let last = field(line, "last").and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+        if last == 0 {
+            continue;
+        }
+        let hits = field(line, "hits").and_then(|h| h.parse().ok()).unwrap_or(1);
+        let entry = merged.entry(gap_key(line)).or_insert((0, 0));
+        entry.0 = entry.0.max(last);
+        entry.1 += hits;
+    }
+    let mut v: Vec<(u64, u64, String)> =
+        merged.into_iter().map(|(key, (at, hits))| (at, hits, key)).collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
+    v
+}
+
 /// `ledger: {...}` lines: (hits, "service what detail"), most hits first.
 fn ledger(serial: &str) -> Vec<(u64, String)> {
     let mut merged: BTreeMap<String, u64> = BTreeMap::new();
-    for line in serial.lines().map(text).filter_map(|l| l.strip_prefix("ledger: ")) {
+    for line in gaps(serial) {
         let hits = field(line, "hits").and_then(|h| h.parse().ok()).unwrap_or(1);
-        let key = format!(
-            "{} {} {}",
-            field(line, "service").unwrap_or("?"),
-            field(line, "what").unwrap_or("?"),
-            field(line, "detail").unwrap_or("")
-        );
-        *merged.entry(key.trim_end().to_string()).or_default() += hits;
+        *merged.entry(gap_key(line)).or_default() += hits;
     }
     let mut v: Vec<(u64, String)> = merged.into_iter().map(|(k, h)| (h, k)).collect();
     v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -345,6 +378,15 @@ pub fn triage(serial: &str, events: Option<&str>, facts: &Facts) -> String {
         let shown: Vec<&str> = failed.iter().take(6).map(String::as_str).collect();
         writeln!(o, "triage: processes that failed: {}", shown.join("; ")).ok();
     }
+    let late = late_gaps(serial);
+    if !late.is_empty() {
+        let shown: Vec<String> = late
+            .iter()
+            .take(5)
+            .map(|(at, hits, key)| format!("{key} at {:.1}s x{hits}", *at as f64 / 1000.0))
+            .collect();
+        writeln!(o, "triage: the gaps hit last (ledger): {}", shown.join("; ")).ok();
+    }
     let missing = ledger(serial);
     if !missing.is_empty() {
         let top: Vec<String> = missing.iter().take(5).map(|(h, k)| format!("{k} x{h}")).collect();
@@ -540,8 +582,8 @@ mod tests {
 [error] net: something broke
 [info ] process javac.exe (pid 5) exited with status 0xc0000005
 [info ] process helper.exe (pid 6) exited with status 0x00000000
-[info ] ledger: {\"service\":\"NtQuerySystemInformation\",\"what\":\"info class\",\"detail\":\"0x99\",\"hits\":7}
-[info ] ledger: {\"service\":\"?\",\"what\":\"unknown service\",\"detail\":\"0x1ff\",\"hits\":2}
+[info ] ledger: {\"service\":\"NtQuerySystemInformation\",\"what\":\"info class\",\"detail\":\"0x99\",\"hits\":7,\"first\":120,\"last\":1500}
+[info ] ledger: {\"service\":\"?\",\"what\":\"unknown service\",\"detail\":\"0x1ff\",\"hits\":2,\"first\":20700,\"last\":20790}
 
 statedump: begin (NMI on CPU 0; CPUs answered 0x3 of online 0x3; now 20794 ms since boot)
 statedump: cpu 0 kernel rip 0xffffffff800acf32 rsp 0xffffd0000001ffd0
@@ -585,6 +627,10 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
         has(
             "triage: missing (ledger, top 2 of 2): NtQuerySystemInformation info class 0x99 x7; ? unknown service 0x1ff x2",
         );
+        // Hit twice, and last, the unknown service outranks the one hit
+        // seven times at startup.
+        has("triage: the gaps hit last (ledger): ? unknown service 0x1ff at 20.8s x2; \
+             NtQuerySystemInformation info class 0x99 at 1.5s x7");
         has("locks: scheduler free, heap HELD");
         has("triage:   cpu 1 user rip 0x1400010b9");
         has(

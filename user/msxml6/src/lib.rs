@@ -163,6 +163,41 @@ pub fn record(what: &[u8], kind: u32, detail: u64) {
     unsafe { GalaRecordMissing(name.as_ptr(), n, kind, detail) };
 }
 
+/// Records `msxml6.dll!<what> <value>`: a long value keeps its start and
+/// ends in `..` (the ledger keeps 96 characters of a name,
+/// `msxml6.dll!` included). `com::schema`'s `record_ns` keeps the end
+/// instead, where namespaces and paths differ.
+pub fn record_head(what: &str, value: &str, kind: u32, detail: u64) {
+    let mut s = String::from(what);
+    s.push(' ');
+    let room = 96usize.saturating_sub(11 + s.len());
+    let n = value.chars().count();
+    if n > room && room > 2 {
+        s.extend(value.chars().take(room - 2));
+        s.push_str("..");
+    } else {
+        s.push_str(value);
+    }
+    record(s.as_bytes(), kind, detail);
+}
+
+/// Records `msxml6.dll!<what> <value>` keeping the END of a long value
+/// after `..`, where namespaces, paths and predicates differ
+/// (`record_head` keeps the start instead).
+pub fn record_tail(what: &str, value: &str, kind: u32, detail: u64) {
+    let mut s = String::from(what);
+    s.push(' ');
+    let room = 96usize.saturating_sub(11 + s.len());
+    let n = value.chars().count();
+    if n > room && room > 2 {
+        s.push_str("..");
+        s.extend(value.chars().skip(n - (room - 2)));
+    } else {
+        s.push_str(value);
+    }
+    record(s.as_bytes(), kind, detail);
+}
+
 /// A method gala does not implement: recorded, E_NOTIMPL.
 pub fn not_implemented(method: &[u8]) -> HResult {
     record(method, LEDGER_NOT_IMPLEMENTED, 0);

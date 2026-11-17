@@ -34,7 +34,7 @@ rather than free text.
 | Triage of a failed log | `xtask/src/triage.rs` | end of every failed log; `cargo xtask triage` |
 | Run history, health | `xtask/src/main.rs` (`record_history`) | `target/report/history.jsonl`, `xtask: health:` lines |
 | Backtraces, panic output | `arch::backtrace`, `cargo xtask symbolize` | `backtrace:` lines, symbolized in failed logs |
-| Flight recorder | `kernel/src/flight.rs` | `flight:` lines after a panic, watchdog report, state dump |
+| Flight recorder | `kernel/src/flight.rs` | `flight:` lines after a panic, watchdog report, state dump; a crashing thread's last calls in its crash report |
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
@@ -248,7 +248,11 @@ stream (office_install's staging, half an hour in:
 | `console` | console sessions and pseudo consoles created, resized, closed (with how many programs it ended); `console ctrl`, `console ctrl taken` |
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
-| `file` | `writeback` (a sync of C:'s pending changes: `cause` lazy, flush buffers, write-through, throttle, flush key, program end, shutdown, handover, old layout; `pages` written, `records` appended, `dirty` pages queued at its start, `ms`; ARCHITECTURE "A disk-backed C:"), `writeback throttle` (a call that found more than the dirty limit queued and wrote back itself: `dirty`, `limit`; scenarios `writeback_crash`, `writeback_lazy`); `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
+| `file` | `writeback` (a sync of C:'s pending changes: `cause` lazy, flush buffers, write-through, throttle, flush key, program end, shutdown, handover, old layout; `pages` written, `records` appended, `dirty` pages queued at its start, `ms`; ARCHITECTURE "A disk-backed C:"), `writeback throttle` (a call that found more than the dirty limit queued and wrote back itself: `dirty`, `limit`; scenarios `writeback_crash`, `writeback_lazy`); `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names); `package`: each path served from a
+Click-to-Run package's VFS tree instead of the machine's own (nt::pkgview,
+ARCHITECTURE "A package's VFS view"): the `pid`, the path `asked` for and
+the path `served`, so a run shows every file a program found only in its
+package (scenario `pkgview_test`); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
 | `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
 | `wsl` | the WSL facade (`lx::distro`, `nt::wsl_calls`): `wsl import` (`distro`, `by`: wsl.exe's pid, `count`: the nodes made), `wsl start` (`distro`, `by`, `path`, and the Linux `pid` or the `errno`), `wsl terminate` and `wsl shutdown` (`count`: processes ended), `wsl remove` (`count`: names removed). The same as `wsl:` log lines (`wsl: bb: pid 108 /bin/sh started by pid 92`); a process that does not end within 10 s of `--terminate` is a warning; wsl.exe's missing options and gala's gaps are in the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special file`, `ntio`, `ntio ioctl`). Scenarios `wsl`, `wsl_terminal` |
 | `service` | the service control manager (nt::scm): `service` events with `op` (connected to, opened, created, marked for deletion, asked to start, sent a control to, changed configuration level of, deleted), the caller's `pid`, the service's `name`, the `access` granted or the failing `status` (0xC007xxxx: the SCM's Win32 error xxxx). The same as `scm:` log lines, the first 64 per boot (`scm: pid P (program) opened "OfficeSvc": 0xc0070424 (a Win32 error)`); a service whose key goes with its last handle is logged with the outcome; a running service's side (nt::scm_run) adds `service` events with `op` starting, status, stopped, process ended, exited (before its dispatcher connected), start timed out, cannot start (its executable), start refused, and its `state`, `exit`, `specific` and `service_pid`, and `scm:` lines (the first 96) for its start (pid, command line), its dispatcher's connection, ServiceMain's start, each state it reports and a handler's non-zero answer; a start that times out and a service process that ends while its service runs are warnings; what the SCM cannot start is in the ledger (`GalaServiceControl: start a driver`, `start as an account`, `share process: run alone`). A service's own output does not reach the serial log: its standard handles are NULL, as on Windows; what it did is read from these events, its `syscall` events (`events_pid`) and its exit codes (svcrun_test's service side reports its first failed check as its service-specific exit code). Scenarios `svc_test`, `svcrun_test` and their `wow64_` twins |
@@ -392,12 +396,23 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   STATUS_INVALID_INFO_CLASS (with the class argument, per
   `ledger::class_argument`) and STATUS_NOT_IMPLEMENTED. Other code calls
   `nt::ledger::record(service, what, detail)`.
-- Lines `ledger: {"service":..,"what":..,"detail":..,"hits":..}` are
-  dumped after each program, before `boot ok` and in a state dump.
+- Lines `ledger:
+  {"service":..,"what":..,"detail":..,"hits":..,"first":..,"last":..}`
+  are dumped after each program, before `boot ok` and in a state dump.
+  `first` and `last` are the uptime in ms when the entry was first and
+  last hit: a count says how often a gap was hit, never when, and what
+  explains a program's end is what it hit just before it, which a
+  ranking by hits buries under the thousands hit at startup. The lines
+  that stand for records the table had no room for carry zeros.
 - gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
   (`dll!function` names, 96 characters kept, the ledger's own
   length). Its kinds: `missing
-  export`, `unsupported`, `not implemented` (a gap the caller is told
+  export` (one a program asked for at run time and lives with,
+  GetProcAddress), `missing import` (one the loader could not bind,
+  which ends the load: named `<dll>!<export>(imported by <module>)`, so
+  the module that cannot run for it is in the record and a program's
+  probes are not mistaken for it; `missing_import_test`, `loader_test`),
+  `unsupported`, `not implemented` (a gap the caller is told
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export
@@ -471,8 +486,19 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   <what>` (unsupported: xsi:type, xsi:nil, a name no schema declares)
   and `validation: schema default attribute values not added to the
   tree` (unsupported; detail: how many); `load(res: URL)` for each
-  resource loaded. A value too long for the ledger's 96 characters keeps
-  its end after `..` (a namespace's last part). XSLT ("other" unless
+  resource loaded. Selections ("other", or "unsupported" for XPath gala
+  has not): `selectNodes: <reason>: <expression>` for every expression
+  that does not compile or answers no node-set, with `selectNodes at:
+  <the expression's end>` beside it when the expression did not fit, and
+  `XPath: an extension function <name>` (or `an MSXML function gala has
+  not`) for a prefixed function MSXML answers and gala does not; the
+  properties name their own refusals
+  (`IXMLDOMDocument2::setProperty(SelectionLanguage other than XPath):
+  <text>`, `setProperty(SelectionNamespaces does not parse): <text>`,
+  `set/getProperty(unknown property): <name>`, `setProperty: <name>: not
+  a number`). A value too long for the ledger's 96 characters keeps
+  whichever end names the gap: its start, ending in `..` (an
+  expression), or its end, after `..` (a namespace, a path). XSLT ("other" unless
   named): `XSLT transform (output: a string|a document|a stream)` for
   each transform (detail: how many parameters it was given); a
   stylesheet or transform that fails, `XSLT: <reason>` (`XSLT not
@@ -493,11 +519,24 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   `rpcrt4.dll!server: call answered with a fault` (detail: the opnum <<
   32 | the status) for each fault a server sends; `rpcrt4.dll!bind:
   interface not registered` when a client binds an interface no server
-  registered; `rpcrt4.dll!NDR(<what>)` with the format character as
-  detail for a format the interpreter does not handle (the call fails
-  with RPC_X_BAD_STUB_DATA); `rpcrt4.dll!protocol sequence(<name>)` and
+  registered; `rpcrt4.dll!NDR(<what>)` with the format character or the
+  correlation descriptor as detail for a format the interpreter does not
+  handle, for a conformance read through a NULL pointer (the call fails
+  with RPC_X_BAD_STUB_DATA instead of faulting on the program's data)
+  and for a conformant array whose count no longer exists when the
+  server frees it (its elements keep what they point to); `rpcrt4.dll!protocol sequence(<name>)` and
   `rpcrt4.dll!endpoint mapper (binding without endpoint)` for what local
   RPC does not reach.
+  Modules (kernel32's `mapping.rs`), "other":
+  `kernel32.dll!GetModuleHandle(<name>)` with the NTSTATUS as detail for
+  a handle asked by name for a module that is not loaded (the name is
+  kept printable: backslashes become `/`, so a module asked for by path
+  keeps its shape), and
+  `kernel32.dll!GetModuleHandleEx(address in no module)` with the
+  address as detail for the FROM_ADDRESS form, which has no name to
+  record. Neither is a gap of gala's: the answer is Windows' own
+  (NULL, ERROR_MOD_NOT_FOUND), and the line is there because nothing
+  else says which module a program wanted.
   Activation contexts (kernel32's `actctx.rs`), "other": every manifest
   CreateActCtxW refuses, `kernel32.dll!CreateActCtxW: <reason>` (`root is
   not asm.v1 <assembly>`, `unknown element in <file>`, `<file> hash is
@@ -533,13 +572,18 @@ keep one each: `target/failed/<name>.r<i>.log`), which ends with:
   up).
 - **Symbolized backtraces** (panic, state dump, watchdog), each block
   saying whose backtrace it is.
+- **A failed screen check's screendumps**:
+  `target/failed/<name>.screen<n>.png`, one per step the check reached,
+  the screens as it saw them (the same pictures as `<iso>.screen<n>.png`
+  beside the ISO, which CI does not upload). A wrong screen is read from
+  the picture; the verdict line says how many were kept.
 - **A triage block** (`xtask/src/triage.rs`, also printed on the
   console): scenario, verdict, duration, host CPUs/load/free disk, guest
   CPUs, heap (peak) and frames (fewest free), warning/error counts and
   the first error, panic/exception/watchdog/leak/out-of-memory/
   missing-function lines, programs begun and not ended, processes that
-  failed, the ledger's top five, the state dump's CPUs, locks and
-  threads, each thread's last system calls (event stream, else flight
+  failed, the gaps hit last and the ledger's top five, the state
+  dump's CPUs, locks and threads, each thread's last system calls (event stream, else flight
   recorder), user faults, a TSC under 500 MHz as a suspicious clock,
   `triage: clock WRONG`, the last lines. `cargo xtask triage <log>
   [events.jsonl]` prints it for any log.
@@ -583,7 +627,11 @@ three stores. Kinds: `syscall` (number | pid << 32, thread id),
 (`flight::LINUX`) and is named from the machine's Linux table (x86-64's
 or aarch64's), an NT call's from NT's. Printed merged by time as
 `flight:` lines (service names, pid and tid on system calls) after a
-panic, in a watchdog report and in the state dump.
+panic, in a watchdog report and in the state dump. A crash report reads
+the same records for the crashing thread alone, as the calls it made
+last (below): a thread's call and the `syscall-done` that follows it on
+the same CPU are its own, since a thread runs a call on the CPU it
+started it on.
 
 ### Hang watchdog
 
@@ -621,7 +669,7 @@ NMI). When the monitor gives nothing, QEMU is stuck in itself, not the
 guest: xtask then attaches gdb to it and adds QEMU's own record of each
 vCPU and every QEMU thread's stack (`xtask: gdb: ...`; what gdb said
 when it could not attach); `XTASK_QEMU_GDB=1` takes that at every
-timeout (WORKFLOW "Hunting a rare hang"). CI installs gdb and lets it
+timeout (WORKFLOW "Hunting a rare hang"). CI (the `linux` job and the boot shards) installs gdb and lets it
 attach (`kernel.yama.ptrace_scope=0`). The run's end says
 itself: `qemu: ending the run (Success|Failure)` before the exit, and
 on aarch64 `qemu: the run did not end: ...` if the semihosting exit
@@ -726,7 +774,16 @@ read from), and of the next 128 stack words those that point into an
 image (`[esp+0x0dc] 0x77fdf7 (setup.exe+0x37fdf7)`: the return addresses
 of the calls that led there, with how many of the readable words did).
 The note reads the deeper stack a page's part at a time, as every
-delivered exception takes one. ntdll reports an exception no handler took before it calls the
+delivered exception takes one. The report then says what the thread was
+doing: `thread 16's last calls, oldest first: NtWriteFile=0x00000000,
+NtQueryVirtualMemory=0x00000000 x17, NtClose=0xc0000008,
+GalaUnhandledException=0x00000000`, the last 24 system calls the flight
+recorder kept for that thread (above), each with the status it ended
+with, `(no return yet)` for one that had not, and a run of the same call
+and status as one entry with its count. An exception a program raises
+itself can carry nothing else at all -- Office's 0xE0000002 names no
+parameters -- and then what the thread called last is the only account
+of what it gave up on. Scenario `crash_raise` pins it. ntdll reports an exception no handler took before it calls the
 top-level filter (GalaUnhandledException, its record and context), so a
 filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
@@ -751,6 +808,36 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 
 - `record flags` when not 0 (noncontinuable; EXCEPTION_STACK_INVALID:
   the search met a registration off the stack).
+- `no handler took it: N frames unwound, K handlers asked`, ntdll's own
+  account of the search (`Walk` in `user/testntdll`): the frames it
+  unwound and those whose unwind data named a language handler, which
+  was asked and passed the exception on. 0 asked over many frames is not
+  "the code had no handler": it is also what failing to find the unwind
+  data looks like, so frames no function entry was found for (unwound by
+  the return address on the stack, as Windows does) are named too --
+  `N frames unwound (M of them with no unwind data found), K handlers
+  asked`. On ARM64 such a frame ends the search instead, so M stays 0
+  there; in 32-bit code every registration names a handler, so the two
+  counts are equal. Scenario `crash_raise`.
+- Then the chain itself, for 64-bit code: `the walk stopped at <why>`
+  (the stack's end -- no return address or the stack's base -- or where
+  it could go no further: a frame off the stack, no unwind data) and
+  `frame <i>: <module>+<offset>` for the first 12, innermost first, each
+  saying whether no unwind data was found for it and whether its handler
+  was asked and passed the exception on. This is ntdll's own unwind, not
+  the report's guess from stack values, so it tells a derailed walk (a
+  frame whose "return address" is a stack address) from a sound one, and
+  names the image whose unwind data was missed. Word's 0xe0000002 reads
+  as 12 frames to the stack's end with four of WWLIB's own handlers
+  asked and declining, which is what moved ROADMAP OF's blocker from
+  "our unwinder" to "what MSO decided to raise".
+- The exception's parameters, when nothing below explains them (an
+  access violation, a delay load and a C++ throw have lines of their
+  own saying what theirs mean): `3 parameters: 0x8007000e, 0x140001060
+  (crash.exe+0x1060), 0xfeedface`, each with the image it points into,
+  the count the record claimed and at most 15 shown. A raise of a code
+  no runtime knows -- what Office's shared code does with 0xe0000002
+  (ROADMAP OF) -- carries nothing else at all. Scenario `crash_raise`.
 - In 32-bit code, `32-bit SEH registrations, newest first`: the frame
   and handler (module+offset) of each registration on the TEB32's
   ExceptionList as the dispatcher offered it to them, up to 12, and
@@ -789,6 +876,11 @@ When the scenario fails, xtask writes each dumped file back out under
 names the directory; it holds that boot's files only, an earlier
 failure's are removed first), so a program's own log is read as the
 file it wrote.
+A long dump holds the boot thread in the kernel while it writes, so a
+run that dumps megabytes of logs (`office_word`'s Click-to-Run logs)
+ends with the watchdog's warning that thread 0 has been in the kernel
+without blocking: it is the printing, and nothing else of the run is
+affected.
 
 ### Machine snapshots
 

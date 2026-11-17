@@ -627,6 +627,55 @@ fn test(tasks: &Tasks) -> Result<(), u32> {
     args.push_str("bb-rootfs.tar");
     let (code, _) = run(&wsl, &args);
     c.ok(code == 0, "wsl --import bb")?;
+
+    // A Linux process that is ending: while it is still listed it is
+    // still itself. One that has exec'd says what it exec'd (`sleep`,
+    // its `comm`), not the image its NT process was created from
+    // (`sh`), and it is still in its distribution. The kernel showed
+    // the created-from name once its Linux state was being dismantled,
+    // and Task Manager's row for it then ended nothing (the pid was
+    // gone: STATUS_INVALID_CID).
+    let dying = start(&wsl, "-d bb --exec /bin/sh -c \"exec /bin/sleep 600\"", None);
+    c.ok(dying.is_some(), "the Linux process to end started")?;
+    let dying = dying.unwrap_or(core::ptr::null_mut());
+    let listed = wait_for(tasks, 60_000, 1, |p| p.distro == "bb" && p.image == "sleep");
+    c.ok(listed.len() == 1, "the Linux process to end listed as sleep")?;
+    let dying_pid = listed[0].pid;
+    c.ok(tasks.signal(dying_pid, 15) == 0, "SIGTERM to it")?;
+    // Every query until it leaves the list, as fast as they come: the
+    // window where it is ending is short.
+    let mut ghost = String::new();
+    // SAFETY: plain call.
+    let since = unsafe { GetTickCount() };
+    loop {
+        let procs = tasks.processes();
+        if let Some(p) = procs.iter().find(|p| p.pid == dying_pid) {
+            if p.image != "sleep" {
+                let _ = write!(ghost, "listed as {:?}, not sleep", p.image);
+            } else if p.distro != "bb" {
+                let _ = write!(ghost, "listed in distribution {:?}, not bb", p.distro);
+            }
+        } else {
+            break;
+        }
+        // SAFETY: plain call.
+        if !ghost.is_empty() || unsafe { GetTickCount() }.wrapping_sub(since) > END_WAIT_MS {
+            break;
+        }
+    }
+    if !ghost.is_empty() {
+        let mut s = String::new();
+        let _ = write!(s, "ending Linux process pid {dying_pid}: {ghost}");
+        line(&s);
+    }
+    c.ok(ghost.is_empty(), "an ending Linux process is still itself")?;
+    c.ok(wait_gone(tasks, dying_pid, END_WAIT_MS), "it left the list")?;
+    // SAFETY: a handle this program holds.
+    unsafe {
+        WaitForSingleObject(dying, END_WAIT_MS);
+        CloseHandle(dying);
+    }
+    line("an ending Linux process is still itself");
     // Its processes: sh ignoring SIGTERM, a sleep and a cat (reading a
     // pipe this program keeps open).
     let (in_r, _in_w) = pipe();
