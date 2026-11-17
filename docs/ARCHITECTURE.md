@@ -2430,7 +2430,8 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
 #### Directory change notification
 
 `nt::notify` (`dirchange_test`): NtNotifyChangeDirectoryFile (0x7f13;
-kernel32's ReadDirectoryChangesW over it).
+kernel32's ReadDirectoryChangesW and FindFirstChangeNotification family
+over it).
 
 - A watch belongs to one open of a directory (keyed by its file object).
   While any watch exists ramfs records a journal of changes (`Change`:
@@ -2444,6 +2445,12 @@ kernel32's ReadDirectoryChangesW over it).
   FILE_NOTIFY_INFORMATION records up to the last request's buffer size;
   past it (or if the journal lost a change) the next request gets
   STATUS_NOTIFY_ENUM_DIR and no data, so the caller rescans.
+- A watch whose request had no buffer at all keeps nothing: with nowhere
+  to put a record it has nothing to say but that something changed, which
+  it says to a request already waiting (STATUS_NOTIFY_ENUM_DIR at once,
+  which signals the handle) and forgets otherwise. That is what Windows
+  does, measured through the handle FindFirstChangeNotification returns,
+  whose wait stays pending after a change nothing was waiting for.
 - A request completes like AFD's: IO_STATUS_BLOCK, event, the file
   object's signal (its dispatcher is a shared `KArc`, so a waiting
   request does not keep the file object alive), a completion-port packet,
@@ -2454,6 +2461,23 @@ kernel32's ReadDirectoryChangesW over it).
   with STATUS_NOTIFY_CLEANUP.
 - Filters: file and directory names, size and last write; attribute and
   time changes are not reported yet.
+- kernel32's FindFirstChangeNotificationW (`files.rs`) opens the
+  directory asynchronously (FILE_LIST_DIRECTORY | SYNCHRONIZE,
+  FILE_DIRECTORY_FILE) and arms a request with no IO_STATUS_BLOCK and no
+  buffer, so the handle it returns is the open directory itself (as
+  Windows', whose type NtQueryObject names File) and waiting on it is
+  waiting for the request to complete. The errors of the open are the
+  documented ones for free: ERROR_PATH_NOT_FOUND for a path that is not
+  there, ERROR_DIRECTORY for a file; a filter of 0 or with unknown bits
+  is the kernel's ERROR_INVALID_PARAMETER. Nothing in the NT interface
+  gives a filter back, so FindNextChangeNotification finds the filter and
+  subtree flag it must ask with again in a table keyed by the handle
+  (**limit**: 64 of these watched at a time, where Windows has no limit;
+  the 65th is recorded in the ledger and fails with
+  ERROR_NOT_ENOUGH_MEMORY). FindCloseChangeNotification drops the entry
+  and closes the handle, which ends the waiting request
+  (STATUS_NOTIFY_CLEANUP); a handle that is not one of these, closed
+  twice included, is ERROR_INVALID_HANDLE.
 
 ### Pipes
 
@@ -3770,7 +3794,11 @@ ntdll imports.
 - **Processes and threads**: CreateProcess ("Processes started by
   programs"), CreateProcessAsUserW ("Access tokens"); CreateThread builds
   the stack and start CONTEXT itself and starts at a thunk that calls
-  ExitThread; CreateRemoteThreadEx in the calling process creates the
+  ExitThread; OpenProcessToken and OpenThreadToken are forwarders to
+  kernelbase (and so to advapi32), as Windows forwards them through
+  `api-ms-win-core-processthreads-l1-1-0`, whose host gala puts in
+  kernel32 (dbghelp imports OpenThreadToken from that set);
+  CreateRemoteThreadEx in the calling process creates the
   thread suspended, applies the attribute list's group affinity and
   ideal processor (a hint), then starts it; TLS (TEB.TlsSlots); fiber
   local storage (TLS indexes with callbacks, run at thread exit and

@@ -15,6 +15,18 @@
 //!   synchronous handle's call blocks until a change.
 //! - CancelIoEx ends a request with ERROR_OPERATION_ABORTED; closing the
 //!   handle ends it with STATUS_NOTIFY_CLEANUP.
+//! - FindFirstChangeNotification returns a handle on the directory itself
+//!   (NtQueryObject names its type File) which is unsignaled until a
+//!   change matching the filter happens and stays signaled until
+//!   FindNextChangeNotification asks again: the family says that
+//!   something changed, never what. A subtree watch sees a file created
+//!   below, a flat one does not, and two handles on one directory are two
+//!   independent watches. A change while the handle is already signaled is
+//!   lost: there is no buffer to keep it in.
+//! - Its failures: a path that is not there is ERROR_PATH_NOT_FOUND, a
+//!   file ERROR_DIRECTORY, a filter of 0 or with unknown bits
+//!   ERROR_INVALID_PARAMETER, and a handle that is not one of these (or
+//!   closed already) ERROR_INVALID_HANDLE.
 //!
 //! Works in its own directory under the temporary directory. Prints
 //! `dirchange_test: ok` or exits with the number of the failing check.
@@ -89,6 +101,9 @@ unsafe extern "system" {
     ) -> Handle;
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool;
     fn Sleep(ms: u32);
+    fn FindFirstChangeNotificationW(path: *const u16, subtree: Bool, filter: u32) -> Handle;
+    fn FindNextChangeNotification(h: Handle) -> Bool;
+    fn FindCloseChangeNotification(h: Handle) -> Bool;
 }
 
 #[allow(dead_code)]
@@ -98,6 +113,19 @@ unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
     fn __chkstk();
+}
+
+/// ObjectTypeInformation's header: the type's name.
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum: u16,
+    buffer: *mut u16,
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryObject(h: Handle, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
 
 #[unsafe(no_mangle)]
@@ -122,6 +150,12 @@ const WAIT_TIMEOUT: u64 = 0x102;
 const ERROR_IO_INCOMPLETE: u64 = 996;
 const ERROR_OPERATION_ABORTED: u64 = 995;
 const STATUS_NOTIFY_CLEANUP: u64 = 0x10b;
+const CHANGE_FILE_NAME: u32 = 0x1;
+const ERROR_PATH_NOT_FOUND: u64 = 3;
+const ERROR_INVALID_HANDLE: u64 = 6;
+const ERROR_INVALID_PARAMETER: u64 = 87;
+const ERROR_DIRECTORY: u64 = 267;
+const OBJECT_TYPE_INFORMATION: u32 = 2;
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -274,6 +308,129 @@ extern "system" fn sync_watcher(_: *mut c_void) -> u32 {
     // SAFETY: our handle.
     unsafe { CloseHandle(h) };
     if ok != 0 && has(&buf, returned as usize, 1, b"sync.txt") { returned } else { 0 }
+}
+
+/// The name of `h`'s object type, from NtQueryObject: `File` for what
+/// FindFirstChangeNotification returns, since the handle is the open
+/// directory. Writes ASCII into `name` and returns its length.
+fn type_name(h: Handle, name: &mut [u8; 16]) -> usize {
+    let mut buf = [0u8; 256];
+    let mut ret = 0;
+    // SAFETY: our buffer, with its length.
+    let status = unsafe {
+        NtQueryObject(h, OBJECT_TYPE_INFORMATION, buf.as_mut_ptr(), buf.len() as u32, &mut ret)
+    };
+    if status != 0 {
+        return 0;
+    }
+    // SAFETY: the class's first field is the type's name.
+    let s = unsafe { &*buf.as_ptr().cast::<UnicodeString>() };
+    let n = (usize::from(s.length) / 2).min(name.len());
+    for (i, c) in name.iter_mut().enumerate().take(n) {
+        // SAFETY: inside the name NtQueryObject reported.
+        *c = unsafe { *s.buffer.add(i) } as u8;
+    }
+    n
+}
+
+/// Removes `rest` and creates it again, so a change always happens.
+fn remake(rest: &str) -> bool {
+    // SAFETY: a NUL-terminated path.
+    unsafe { DeleteFileW(path(rest).0.as_ptr()) };
+    make(rest, b"")
+}
+
+/// The FindFirstChangeNotification family, over the same kernel machinery
+/// as ReadDirectoryChangesW: what the module doc describes, measured on
+/// Windows before gala had the calls.
+fn notifications(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: kernel32 calls with buffers and paths of ours.
+    unsafe {
+        let dir = path("");
+        let h = FindFirstChangeNotificationW(dir.0.as_ptr(), 0, CHANGE_FILE_NAME);
+        c.ok(h as isize != -1, GetLastError().into())?;
+
+        // The handle is the directory itself.
+        let mut name = [0u8; 16];
+        let n = type_name(h, &mut name);
+        c.ok(&name[..n] == b"File", n as u64)?;
+
+        // Nothing has changed yet.
+        c.eq(WaitForSingleObject(h, 0).into(), WAIT_TIMEOUT)?;
+        // A new file signals it, and it stays signaled until FindNext.
+        c.ok(remake("n1.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
+        c.eq(WaitForSingleObject(h, 0).into(), 0)?;
+        c.ok(FindNextChangeNotification(h) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 0).into(), WAIT_TIMEOUT)?;
+        // And again, with nothing waiting in between.
+        c.ok(remake("n2.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
+        c.ok(FindNextChangeNotification(h) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 200).into(), WAIT_TIMEOUT)?;
+        // FindNext with nothing pending is accepted.
+        c.ok(FindNextChangeNotification(h) != 0, GetLastError().into())?;
+        // A change while the handle is signaled (so nothing is waiting for
+        // it) is lost: this interface has no buffer to keep it in, and the
+        // next request starts unsignaled.
+        c.ok(remake("n6.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
+        c.ok(DeleteFileW(path("n6.txt").0.as_ptr()) != 0, GetLastError().into())?;
+        c.ok(FindNextChangeNotification(h) != 0, GetLastError().into())?;
+        c.eq(WaitForSingleObject(h, 300).into(), WAIT_TIMEOUT)?;
+
+        // A subtree watch sees a file created below; a flat one does not,
+        // and still answers for the directory itself. Two handles on one
+        // directory are two independent watches.
+        CreateDirectoryW(path("sub").0.as_ptr(), core::ptr::null_mut());
+        let sub = FindFirstChangeNotificationW(dir.0.as_ptr(), 1, CHANGE_FILE_NAME);
+        c.ok(sub as isize != -1, GetLastError().into())?;
+        let flat = FindFirstChangeNotificationW(dir.0.as_ptr(), 0, CHANGE_FILE_NAME);
+        c.ok(flat as isize != -1, GetLastError().into())?;
+        c.ok(remake("sub\\n3.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(sub, 5000).into(), 0)?;
+        c.eq(WaitForSingleObject(flat, 300).into(), WAIT_TIMEOUT)?;
+        c.ok(remake("n4.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(flat, 5000).into(), 0)?;
+        c.ok(FindNextChangeNotification(sub) != 0, GetLastError().into())?;
+        c.ok(FindNextChangeNotification(flat) != 0, GetLastError().into())?;
+        c.ok(remake("n5.txt"), GetLastError().into())?;
+        c.eq(WaitForSingleObject(sub, 5000).into(), 0)?;
+        c.eq(WaitForSingleObject(flat, 5000).into(), 0)?;
+        // CloseHandle is accepted on one of these handles (programs do it).
+        c.ok(CloseHandle(sub) != 0, GetLastError().into())?;
+        c.ok(FindCloseChangeNotification(flat) != 0, GetLastError().into())?;
+
+        // Closing it, and closing it again.
+        c.ok(FindCloseChangeNotification(h) != 0, GetLastError().into())?;
+        c.eq(FindCloseChangeNotification(h) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE)?;
+        // A handle that was never one of these.
+        c.eq(FindNextChangeNotification(core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE)?;
+
+        // The ways the first call fails.
+        let mut nowhere = [0u16; 300];
+        for (i, b) in "C:\\no\\such\\directory".bytes().enumerate() {
+            nowhere[i] = u16::from(b);
+        }
+        let bad = FindFirstChangeNotificationW(nowhere.as_ptr(), 0, CHANGE_FILE_NAME);
+        c.eq(bad as isize as u64, u64::MAX)?;
+        c.eq(GetLastError().into(), ERROR_PATH_NOT_FOUND)?;
+        let onfile = FindFirstChangeNotificationW(path("n1.txt").0.as_ptr(), 0, CHANGE_FILE_NAME);
+        c.eq(onfile as isize as u64, u64::MAX)?;
+        c.eq(GetLastError().into(), ERROR_DIRECTORY)?;
+        for filter in [0, 0x8000_0001] {
+            let refused = FindFirstChangeNotificationW(dir.0.as_ptr(), 0, filter);
+            c.eq(refused as isize as u64, u64::MAX)?;
+            c.eq(GetLastError().into(), ERROR_INVALID_PARAMETER)?;
+        }
+
+        for f in ["n1.txt", "n2.txt", "n4.txt", "n5.txt", "sub\\n3.txt"] {
+            DeleteFileW(path(f).0.as_ptr());
+        }
+    }
+    Ok(())
 }
 
 fn run() -> Result<(), u32> {
@@ -453,6 +610,8 @@ fn run() -> Result<(), u32> {
         GetExitCodeThread(t, &mut code);
         c.ok(code >= 12, code.into())?;
         CloseHandle(t);
+
+        notifications(&mut c)?;
 
         // Clean up.
         for f in ["b.txt", "sub\\c.txt", "sync.txt"] {

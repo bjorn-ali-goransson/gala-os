@@ -1,5 +1,6 @@
 //! More file functions: sizes, locks, device control, change
-//! notification, named pipe servers.
+//! notification (ReadDirectoryChangesW and the
+//! FindFirstChangeNotification family), named pipe servers.
 
 use super::*;
 
@@ -343,6 +344,188 @@ extern "system" fn io_completion_trampoline(routine: usize, iosb: *mut usize, _r
         let status = *iosb as u32;
         let error = if status == STATUS_SUCCESS { 0 } else { RtlNtStatusToDosError(status) };
         routine(error, *iosb.add(1) as u32, iosb);
+    }
+}
+
+/// What FindFirstChangeNotification left open: the directory handle it
+/// returned and the filter and subtree flag FindNextChangeNotification
+/// has to ask with again, which nothing in the NT interface gives back.
+#[derive(Clone, Copy)]
+struct Notification {
+    handle: usize,
+    filter: u32,
+    tree: u8,
+}
+
+/// Limit: that many directories can be watched at a time through
+/// FindFirstChangeNotification (Windows has no such limit); the table
+/// filling up is recorded in the ledger, not passed over in silence.
+const NOTIFICATIONS: usize = 64;
+
+struct Notifications {
+    lock: core::sync::atomic::AtomicBool,
+    slots: core::cell::UnsafeCell<[Notification; NOTIFICATIONS]>,
+}
+
+// SAFETY: `slots` is only used under `lock`.
+unsafe impl Sync for Notifications {}
+
+static WATCHED: Notifications = Notifications {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    slots: core::cell::UnsafeCell::new(
+        [const { Notification { handle: 0, filter: 0, tree: 0 } }; NOTIFICATIONS],
+    ),
+};
+
+impl Notifications {
+    fn with<R>(&self, f: impl FnOnce(&mut [Notification; NOTIFICATIONS]) -> R) -> R {
+        use core::sync::atomic::Ordering;
+        while self
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: under the lock.
+        let r = f(unsafe { &mut *self.slots.get() });
+        self.lock.store(false, Ordering::Release);
+        r
+    }
+
+    /// Keeps what a new notification needs; false if the table is full.
+    fn add(&self, handle: Handle, filter: u32, tree: u8) -> bool {
+        self.with(|slots| match slots.iter_mut().find(|s| s.handle == 0) {
+            Some(slot) => {
+                *slot = Notification { handle: handle as usize, filter, tree };
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// The filter and subtree flag of `handle`, if it is one of ours.
+    fn find(&self, handle: Handle) -> Option<(u32, u8)> {
+        self.with(|slots| {
+            slots
+                .iter()
+                .find(|s| s.handle == handle as usize && s.handle != 0)
+                .map(|s| (s.filter, s.tree))
+        })
+    }
+
+    fn remove(&self, handle: Handle) {
+        self.with(|slots| {
+            if let Some(slot) = slots.iter_mut().find(|s| s.handle == handle as usize) {
+                slot.handle = 0;
+            }
+        });
+    }
+}
+
+/// Whether an NTSTATUS says the request was accepted: STATUS_PENDING
+/// while nothing has changed, STATUS_SUCCESS or STATUS_NOTIFY_ENUM_DIR
+/// (0x10c, "rescan") for one that completed at once because a change was
+/// already waiting, which leaves the handle signaled. Every one is a
+/// success code; only an error means the handle was not armed.
+fn armed(status: u32) -> bool {
+    status as i32 >= 0
+}
+
+/// Asks for the next change on a directory opened for notification. The
+/// request has no IO_STATUS_BLOCK and no buffer: the handle becoming
+/// signaled is the whole answer this interface gives, so there is nothing
+/// for the completion to write (and the records it would have held are
+/// what ReadDirectoryChangesW is for).
+fn ask_for_change(h: Handle, filter: u32, tree: u8) -> u32 {
+    // SAFETY: a directory handle of ours; no caller memory is passed.
+    unsafe {
+        NtNotifyChangeDirectoryFile(
+            h,
+            0,
+            0,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+            filter,
+            tree,
+        )
+    }
+}
+
+/// FindFirstChangeNotificationW(lpPathName, bWatchSubtree,
+/// dwNotifyFilter): a handle on the directory that is signaled when a
+/// change matching the filter happens (the object is the directory
+/// itself, as `dirchange_test` measured on Windows: NtQueryObject names
+/// its type File). It is opened asynchronously so that the request
+/// completing signals the handle, and the wait says only that something
+/// changed. INVALID_HANDLE_VALUE and the error of the open on failure: a
+/// path that is not there is ERROR_PATH_NOT_FOUND, a file
+/// ERROR_DIRECTORY, a filter of 0 or with unknown bits
+/// ERROR_INVALID_PARAMETER (the kernel's check).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindFirstChangeNotificationW(
+    path: *const u16,
+    subtree: Bool,
+    filter: u32,
+) -> Handle {
+    let tree = u8::from(subtree != 0);
+    let (h, _) = match open_path(
+        path,
+        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        SHARE_ALL,
+        1, // FILE_OPEN
+        FILE_DIRECTORY_FILE,
+        0,
+    ) {
+        Ok(opened) => opened,
+        Err(e) => return fail_with(e, INVALID_HANDLE_VALUE),
+    };
+    let close = |h| {
+        // SAFETY: our own handle.
+        unsafe { NtClose(h) };
+    };
+    if !WATCHED.add(h, filter, tree) {
+        unsupported(
+            b"kernel32.dll!FindFirstChangeNotificationW(watching too many)",
+            NOTIFICATIONS as u64,
+        );
+        close(h);
+        return fail_with(ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE_VALUE);
+    }
+    let status = ask_for_change(h, filter, tree);
+    if armed(status) {
+        return h;
+    }
+    WATCHED.remove(h);
+    close(h);
+    fail(status, INVALID_HANDLE_VALUE)
+}
+
+/// FindNextChangeNotification(hChangeHandle): asks for the next change,
+/// which leaves the handle unsignaled until one happens. A handle that is
+/// not one of FindFirstChangeNotification's is ERROR_INVALID_HANDLE.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNextChangeNotification(h: Handle) -> Bool {
+    let Some((filter, tree)) = WATCHED.find(h) else {
+        return fail_with(ERROR_INVALID_HANDLE, FALSE);
+    };
+    let status = ask_for_change(h, filter, tree);
+    if armed(status) { TRUE } else { fail(status, FALSE) }
+}
+
+/// FindCloseChangeNotification(hChangeHandle): closes the handle, which
+/// ends the request waiting on it (STATUS_NOTIFY_CLEANUP), and forgets
+/// what FindNextChangeNotification would have needed. Closing it twice is
+/// ERROR_INVALID_HANDLE, as closing any handle twice is.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindCloseChangeNotification(h: Handle) -> Bool {
+    WATCHED.remove(h);
+    // SAFETY: the caller's handle.
+    match unsafe { NtClose(h) } {
+        STATUS_SUCCESS => TRUE,
+        status => fail(status, FALSE),
     }
 }
 

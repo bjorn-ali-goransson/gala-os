@@ -28,6 +28,9 @@
 //!   that token (the same object); RevertToSelf and SetThreadToken(NULL)
 //!   end it; ImpersonateSelf impersonates at the level asked; another
 //!   thread has no token.
+//! - The API set `api-ms-win-core-processthreads-l1-1-0` answers for
+//!   OpenProcessToken and OpenThreadToken, which Windows' kernel32
+//!   forwards to it and dbghelp imports from it.
 //! - PrivilegeCheck takes a primary token too (as Windows 11 25H2 does,
 //!   although the docs speak of a client's); enabled privileges pass and are
 //!   marked SE_PRIVILEGE_USED_FOR_ACCESS; all-necessary and any-of sets.
@@ -68,6 +71,25 @@ unsafe extern "system" {
     ) -> Handle;
     fn ResumeThread(h: Handle) -> u32;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+}
+
+// The token calls as the API set names them: Windows' kernel32 exports
+// OpenProcessToken and OpenThreadToken as forwarders to
+// `api-ms-win-core-processthreads-l1-1-0`, and dbghelp imports
+// OpenThreadToken from the set, so whichever DLL hosts the set must
+// export both (gala hosts it in kernel32, which forwards them on to
+// kernelbase and so to advapi32, where they are implemented).
+#[link(name = "api-ms-win-core-processthreads-l1-1-0", kind = "raw-dylib")]
+unsafe extern "system" {
+    #[link_name = "OpenProcessToken"]
+    fn OpenProcessTokenFromSet(process: Handle, access: u32, token: *mut Handle) -> Bool;
+    #[link_name = "OpenThreadToken"]
+    fn OpenThreadTokenFromSet(
+        thread: Handle,
+        access: u32,
+        as_self: Bool,
+        token: *mut Handle,
+    ) -> Bool;
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -518,6 +540,14 @@ fn run() -> Result<(), u32> {
         CloseHandle(t);
         c.ok(RevertToSelf() != 0, 0)?;
         c.fails(OpenThreadToken(thread, TOKEN_QUERY, 1, &mut t), ERROR_NO_TOKEN)?;
+
+        // The same two calls through the API set's host: the same process
+        // token, and a thread that is not impersonating has none.
+        let mut from_set = null;
+        c.ok(OpenProcessTokenFromSet(me, TOKEN_QUERY, &mut from_set) != 0, last_error())?;
+        c.eq(statistics(&c, from_set)?.0, id)?;
+        CloseHandle(from_set);
+        c.fails(OpenThreadTokenFromSet(thread, TOKEN_QUERY, 1, &mut from_set), ERROR_NO_TOKEN)?;
 
         // PrivilegeCheck.
         // A primary token is accepted too (Windows 11 25H2; the docs speak

@@ -8,7 +8,11 @@
 //! `deliver` then completes requests outside it. Changes that arrive while
 //! no request waits are kept, as FILE_NOTIFY_INFORMATION records, up to
 //! the size of the last request's buffer; beyond it the next request
-//! completes with STATUS_NOTIFY_ENUM_DIR (rescan). A request completes
+//! completes with STATUS_NOTIFY_ENUM_DIR (rescan). A watch whose request
+//! had no buffer at all (kernel32's FindFirstChangeNotification, which
+//! asks for no records) keeps nothing: it has nowhere to put a change and
+//! nothing to say but that one happened, so it says that to a request
+//! that is already waiting and forgets the rest. A request completes
 //! the way AFD's do: IO_STATUS_BLOCK, event, the file object's signal, a
 //! packet to its completion port, its completion routine. CancelIoEx ends
 //! it with STATUS_CANCELLED; the open's close with STATUS_NOTIFY_CLEANUP.
@@ -301,10 +305,26 @@ pub fn deliver((events, lost, inotify): Collected) {
     }
     for w in touched {
         let ready = take_ready(&w);
-        if let Some((request, status, data)) = ready {
-            complete(request, status, &data);
+        match ready {
+            Some((request, status, data)) => complete(request, status, &data),
+            None => {
+                forget_undeliverable(&mut w.state.lock());
+            }
         }
     }
+}
+
+/// Drops a change a watch with no buffer could not deliver, because no
+/// request was waiting for it: with nowhere to put a record it has
+/// nothing left to say about it later (`dirchange_test` measures this on
+/// FindFirstChangeNotification's handle, whose next wait stays pending).
+/// Returns whether anything was dropped.
+fn forget_undeliverable(s: &mut State) -> bool {
+    let drop = s.capacity == 0 && s.overflow;
+    if drop {
+        s.overflow = false;
+    }
+    drop
 }
 
 /// Adds a FILE_NOTIFY_INFORMATION record (NextEntryOffset, Action,
@@ -507,4 +527,51 @@ pub fn cleanup(key: usize) {
 /// Whether the open `key` has a watch (its close must call `cleanup`).
 pub fn watched(key: usize) -> bool {
     WATCHES.lock().iter().any(|w| w.key == key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(capacity: usize) -> State {
+        State {
+            filter: 0,
+            tree: false,
+            buffered: Vec::new(),
+            last: None,
+            capacity,
+            overflow: false,
+            pending: Vec::new(),
+        }
+    }
+
+    /// A watch with a buffer keeps records for a later request, and
+    /// remembers as an overflow what no longer fits.
+    #[test]
+    fn a_buffer_keeps_records_until_it_is_full() {
+        let name = [u16::from(b'a')];
+        let mut s = state(14); // one 14-byte record
+        append(&mut s, ramfs::ACTION_ADDED, &name);
+        assert_eq!(s.buffered.len(), 14);
+        assert!(!s.overflow);
+        assert!(!forget_undeliverable(&mut s));
+        append(&mut s, ramfs::ACTION_REMOVED, &name);
+        assert!(s.overflow);
+        assert!(s.buffered.is_empty());
+        // An overflow is kept for the next request, which rescans.
+        assert!(!forget_undeliverable(&mut s));
+        assert!(s.overflow);
+    }
+
+    /// A watch with no buffer has nowhere to keep a change no request was
+    /// waiting for.
+    #[test]
+    fn no_buffer_keeps_nothing() {
+        let mut s = state(0);
+        append(&mut s, ramfs::ACTION_ADDED, &[u16::from(b'a')]);
+        assert!(s.overflow); // something changed; nothing describes it
+        assert!(s.buffered.is_empty());
+        assert!(forget_undeliverable(&mut s));
+        assert!(!s.overflow);
+    }
 }

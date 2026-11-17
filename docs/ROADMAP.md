@@ -228,7 +228,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD runs its own code, whose libraries (wwlib, oart, dbghelp) fail to load on exports gala has not, so it exits 1 (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD runs its own code, whose dbghelp and oart load now, so wwlib is the one library left: it is short nine imports the loader names, and Word exits 1 (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1875,22 +1875,39 @@ need gala's.
      unmarshal side dropped the referents that a deferred referent
      defers itself, where the marshal side wrote them.
      WINWORD.EXE runs its own code now: it maps WWLIB.DLL (59 MiB) and
-     OART.DLL and exits with status 1 after 27 s, where it ended at
-     0xC0000142 before reaching them. gala's loader names the gap that
-     stops it: `dbghelp.dll`, `oart.dll` and `wwlib.dll` each fail to
-     load with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139), and the
-     `missing export` records around those three failures name the
-     candidates in the order the loader bound them -- ntdll's
-     NtDeleteFile, NtQueryDirectoryFileEx, NtQueryFullAttributesFile
-     and RtlUTF8ToUnicodeN; kernel32's GetCurrentDirectoryA and
-     FindCloseChangeNotification; OpenThreadToken through
-     `api-ms-win-core-processthreads-l1-1-0`; ole32's
+     OART.DLL and exits with status 1 after 26 s, where it ended at
+     0xC0000142 before reaching them. `dbghelp.dll` and `oart.dll` load;
+     `wwlib.dll` is the one left, failing with
+     STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139), and the loader names
+     exactly what it is short of: nine imports that did not bind, told
+     apart from the probes around them (`missing import`, OBSERVABILITY
+     "The gap ledger") -- kernel32's NormalizeString,
+     EnumSystemLanguageGroupsW and EnumUILanguagesW, and six of
+     oleaut32's by ordinal, RegisterActiveObject (33),
+     RevokeActiveObject (34), VarR4FromR8 (71), VarR8FromR4 (81),
+     VarBstrFromI4 (110) and VarBstrFromR4 (111) (the ordinals are
+     Windows' own, `user/oleaut32/build.rs`). So the next step is those
+     nine, test first: kernel32's three in `office_k32_test`, where
+     NormalizeString has FoldStringW's normalization tables under it
+     (ARCHITECTURE "Locales and text"), oleaut32's six in `com_test`,
+     which needs a running object table for the two active-object calls
+     (GetActiveObject answers MK_E_UNAVAILABLE out of none today); then
+     rerun `office_word`.
+     The three gaps that stood here before are closed, each measured on
+     Windows first: ntdll's RtlUTF8ToUnicodeN and RtlUnicodeToUTF8N
+     (`rtl_test`), kernel32's FindFirstChangeNotification family
+     (`dirchange_test`, ARCHITECTURE "Directory change notification")
+     and OpenProcessToken and OpenThreadToken through
+     `api-ms-win-core-processthreads-l1-1-0`, which gala hosts in
+     kernel32 and which now forwards both to kernelbase as Windows does
+     (`token_test`). What the run's 38 `missing export` records name is
+     asked for with GetProcAddress and nothing waits on: ntdll's
+     NtDeleteFile, NtQueryDirectoryFileEx and NtQueryFullAttributesFile,
+     kernel32's GetCurrentDirectoryA and OOBEComplete, ole32's
      CoRegisterClassObject, CoRevokeClassObject, CoGetInstanceFromFile
-     and OleRegEnumFormatEtc; oleaut32's RegisterActiveObject and
-     RevokeActiveObject; msi's MsiGetProductCodeW. So the next step is
-     to read which of them those three DLLs import (their import
-     tables, which the clean-room rules allow), implement them with
-     their tests, and rerun `office_word`.
+     and OleRegEnumFormatEtc, oleaut32's RegisterActiveObject and
+     RevokeActiveObject by name, msi's MsiGetProductCodeW and the AppV
+     shim's 25 `c2r64.dll` hooks. They are not what to implement next.
      One gap in the NDR engine stands, recorded rather than guessed at:
      freeing a conformant array of pointers leaks its referents,
      because the count that sized it is not kept with the object

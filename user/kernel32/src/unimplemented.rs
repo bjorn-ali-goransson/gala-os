@@ -16,8 +16,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     CreateFiber
     CreateFileMappingNumaW
     EnumResourceLanguagesA
-    FindFirstChangeNotificationW
-    FindNextChangeNotification
     GetNamedPipeHandleStateA
     GetNamedPipeInfo
     GetNumaNodeProcessorMaskEx
