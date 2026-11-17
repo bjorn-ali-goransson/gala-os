@@ -8,7 +8,11 @@
 //!   RtlAppendUnicodeToString and RtlAppendUnicodeStringToString
 //!   (STATUS_BUFFER_TOO_SMALL when it does not fit), RtlUpcaseUnicodeChar,
 //!   RtlUpcaseUnicodeString and RtlDowncaseUnicodeString (allocating),
-//!   RtlUnicodeStringToAnsiString (allocating), RtlFreeUnicodeString;
+//!   RtlUnicodeStringToAnsiString (allocating),
+//!   RtlFreeUnicodeString, RtlUTF8ToUnicodeN and RtlUnicodeToUTF8N (the
+//!   tables FROM_UTF8 and TO_UTF8: what is valid, one U+FFFD per invalid
+//!   sequence with STATUS_SOME_NOT_MAPPED, a destination too small, and
+//!   a null destination measuring the size);
 //! - SIDs: RtlInitializeSid, RtlSubAuthoritySid, RtlSubAuthorityCountSid,
 //!   RtlIdentifierAuthoritySid, RtlLengthSid, RtlCopySid, RtlEqualSid,
 //!   RtlEqualPrefixSid, RtlConvertSidToUnicodeString ("S-1-5-32-544");
@@ -88,6 +92,20 @@ unsafe extern "system" {
         dst: *mut AnsiString,
         src: *const UnicodeString,
         alloc: u8,
+    ) -> u32;
+    fn RtlUTF8ToUnicodeN(
+        dst: *mut u16,
+        dst_max: u32,
+        actual: *mut u32,
+        src: *const u8,
+        src_len: u32,
+    ) -> u32;
+    fn RtlUnicodeToUTF8N(
+        dst: *mut u8,
+        dst_max: u32,
+        actual: *mut u32,
+        src: *const u16,
+        src_len: u32,
     ) -> u32;
     fn RtlFreeUnicodeString(s: *mut UnicodeString);
     fn RtlFreeAnsiString(s: *mut AnsiString);
@@ -206,6 +224,8 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 
 const STATUS_SUCCESS: u64 = 0;
 const STATUS_BUFFER_TOO_SMALL: u64 = 0xc000_0023;
+const STATUS_SOME_NOT_MAPPED: u64 = 0x0000_0107;
+const STATUS_INVALID_PARAMETER_5: u64 = 0xc000_00f3;
 const STATUS_OBJECT_NAME_COLLISION: u64 = 0xc000_0035;
 
 fn out(text: &[u8]) {
@@ -573,9 +593,146 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A row of `FROM_UTF8`: the UTF-8 source, the destination's size in
+/// bytes, the status, the bytes the call reports written and the code
+/// units it wrote.
+type FromUtf8 = (&'static [u8], u32, u64, u32, &'static [u16]);
+
+/// A row of `TO_UTF8`: the UTF-16 source, its size in bytes, the
+/// destination's size, the status, the bytes reported and the bytes
+/// written.
+type ToUtf8 = (&'static [u16], u32, u32, u64, u32, &'static [u8]);
+
+/// What Windows' ntdll makes of a UTF-8 source. Every row was measured
+/// on Windows 11 (26200) before gala had the call.
+#[rustfmt::skip]
+const FROM_UTF8: &[FromUtf8] = &[
+    // What is valid, including a surrogate pair and an embedded NUL.
+    (b"abc",                        24, STATUS_SUCCESS, 6, &[0x61, 0x62, 0x63]),
+    (&[0xc3, 0xa9],                 24, STATUS_SUCCESS, 2, &[0x00e9]),
+    (&[0xe2, 0x82, 0xac],           24, STATUS_SUCCESS, 2, &[0x20ac]),
+    (&[0xf0, 0x9f, 0x98, 0x80],     24, STATUS_SUCCESS, 4, &[0xd83d, 0xde00]),
+    (b"",                           24, STATUS_SUCCESS, 0, &[]),
+    (&[b'a', 0, b'b'],              24, STATUS_SUCCESS, 6, &[0x61, 0x0000, 0x62]),
+    // One U+FFFD per invalid sequence, and the warning. A sequence cut
+    // short is one; a byte that cannot continue it is read on its own
+    // (E2 82 'a'), while a continuation byte outside the lead's range is
+    // taken with the lead (ED A0, F4 90), leaving the rest to be read.
+    (&[0xc3],                       24, STATUS_SOME_NOT_MAPPED, 2, &[0xfffd]),
+    (&[0xf0, 0x9f],                 24, STATUS_SOME_NOT_MAPPED, 2, &[0xfffd]),
+    (&[0x80],                       24, STATUS_SOME_NOT_MAPPED, 2, &[0xfffd]),
+    (&[0xff],                       24, STATUS_SOME_NOT_MAPPED, 2, &[0xfffd]),
+    (&[0xc0, 0x80],                 24, STATUS_SOME_NOT_MAPPED, 4, &[0xfffd, 0xfffd]),
+    (&[0xed, 0xa0, 0x80],           24, STATUS_SOME_NOT_MAPPED, 4, &[0xfffd, 0xfffd]),
+    (&[0xf4, 0x90, 0x80, 0x80],     24, STATUS_SOME_NOT_MAPPED, 6, &[0xfffd, 0xfffd, 0xfffd]),
+    (&[b'a', 0xff],                 24, STATUS_SOME_NOT_MAPPED, 4, &[0x61, 0xfffd]),
+    (&[0xe2, 0x82, b'a'],           24, STATUS_SOME_NOT_MAPPED, 4, &[0xfffd, 0x61]),
+    (&[0xe2, 0x82, 0xac, 0x80],     24, STATUS_SOME_NOT_MAPPED, 4, &[0x20ac, 0xfffd]),
+    // A destination too small: whole code units (an odd size rounds
+    // down), what fits is written, and half of a surrogate pair can be
+    // the last of them.
+    (b"abc",                         4, STATUS_BUFFER_TOO_SMALL, 4, &[0x61, 0x62]),
+    (b"abc",                         5, STATUS_BUFFER_TOO_SMALL, 4, &[0x61, 0x62]),
+    (&[0xe2, 0x82, 0xac, b'a'],      2, STATUS_BUFFER_TOO_SMALL, 2, &[0x20ac]),
+    (&[0xf0, 0x9f, 0x98, 0x80],      2, STATUS_BUFFER_TOO_SMALL, 2, &[0xd83d]),
+    (&[b'a', 0xf0, 0x9f, 0x98, 0x80], 4, STATUS_BUFFER_TOO_SMALL, 4, &[0x61, 0xd83d]),
+];
+
+/// The same for a UTF-16 source.
+#[rustfmt::skip]
+const TO_UTF8: &[ToUtf8] = &[
+    (&[0x61, 0x62, 0x63],  6, 24, STATUS_SUCCESS, 3, &[0x61, 0x62, 0x63]),
+    (&[0x00e9],            2, 24, STATUS_SUCCESS, 2, &[0xc3, 0xa9]),
+    (&[0x20ac],            2, 24, STATUS_SUCCESS, 3, &[0xe2, 0x82, 0xac]),
+    (&[0xd83d, 0xde00],    4, 24, STATUS_SUCCESS, 4, &[0xf0, 0x9f, 0x98, 0x80]),
+    (&[0x61],              0, 24, STATUS_SUCCESS, 0, &[]),
+    // An unpaired surrogate, either half, becomes U+FFFD's own encoding.
+    (&[0xd83d],            2, 24, STATUS_SOME_NOT_MAPPED, 3, &[0xef, 0xbf, 0xbd]),
+    (&[0xde00],            2, 24, STATUS_SOME_NOT_MAPPED, 3, &[0xef, 0xbf, 0xbd]),
+    (&[0xd83d, 0x61],      4, 24, STATUS_SOME_NOT_MAPPED, 4, &[0xef, 0xbf, 0xbd, 0x61]),
+    (&[0x61, 0xd83d],      4, 24, STATUS_SOME_NOT_MAPPED, 4, &[0x61, 0xef, 0xbf, 0xbd]),
+    // A destination too small takes whole sequences only: a character
+    // that does not fit leaves nothing of itself behind.
+    (&[0x61, 0x62, 0x63],  6,  2, STATUS_BUFFER_TOO_SMALL, 2, &[0x61, 0x62]),
+    (&[0x20ac, 0x61],      4,  2, STATUS_BUFFER_TOO_SMALL, 0, &[]),
+    (&[0xd83d, 0xde00],    4,  2, STATUS_BUFFER_TOO_SMALL, 0, &[]),
+    (&[0xd83d, 0xde00],    4,  3, STATUS_BUFFER_TOO_SMALL, 0, &[]),
+];
+
+/// RtlUTF8ToUnicodeN and RtlUnicodeToUTF8N (dbghelp imports the first),
+/// against the tables above. A failing check reports the row and the
+/// value that differs: `0000_0003 0000_0107` is row 3.
+fn utf8(c: &mut Checks) -> Result<(), u32> {
+    for (row, &(src, max, status, bytes, units)) in FROM_UTF8.iter().enumerate() {
+        let (row, mut buf, mut actual) = (row as u64, [0xbeefu16; 8], 0u32);
+        // SAFETY: a destination of max bytes and a source of its length.
+        let st = unsafe {
+            RtlUTF8ToUnicodeN(buf.as_mut_ptr(), max, &mut actual, src.as_ptr(), src.len() as u32)
+        };
+        c.ok(u64::from(st) == status, row << 32 | u64::from(st))?;
+        c.ok(actual == bytes, row << 32 | u64::from(actual))?;
+        c.ok(buf[..units.len()] == *units, row << 32 | u64::from(buf[0]))?;
+        // Nothing beyond what it reported.
+        c.ok(buf[units.len()] == 0xbeef, row << 32 | u64::from(buf[units.len()]))?;
+        // A null destination measures the whole conversion, whatever size
+        // is given, and still reports an unmapped sequence.
+        for size in [0, max] {
+            // SAFETY: a null destination is the documented size query.
+            let st = unsafe {
+                RtlUTF8ToUnicodeN(
+                    core::ptr::null_mut(),
+                    size,
+                    &mut actual,
+                    src.as_ptr(),
+                    src.len() as u32,
+                )
+            };
+            let whole = status != STATUS_BUFFER_TOO_SMALL;
+            c.ok(!whole || (u64::from(st) == status && actual == bytes), u64::from(actual))?;
+            c.ok(whole || u64::from(st) == STATUS_SUCCESS, row << 32 | u64::from(st))?;
+        }
+    }
+    // A null ActualByteCount is left out, not a fault.
+    let mut buf = [0u16; 4];
+    // SAFETY: the count is an optional out parameter.
+    let st = unsafe {
+        RtlUTF8ToUnicodeN(buf.as_mut_ptr(), 8, core::ptr::null_mut(), b"abc".as_ptr(), 3)
+    };
+    c.eq(u64::from(st), STATUS_SUCCESS)?;
+    c.ok(buf[..3] == [0x61, 0x62, 0x63], buf[0].into())?;
+
+    for (row, &(src, src_len, max, status, bytes, want)) in TO_UTF8.iter().enumerate() {
+        let (row, mut buf, mut actual) = (row as u64, [0x5au8; 12], 0u32);
+        // SAFETY: a destination of max bytes and src_len bytes of source.
+        let st =
+            unsafe { RtlUnicodeToUTF8N(buf.as_mut_ptr(), max, &mut actual, src.as_ptr(), src_len) };
+        c.ok(u64::from(st) == status, row << 32 | u64::from(st))?;
+        c.ok(actual == bytes, row << 32 | u64::from(actual))?;
+        c.ok(buf[..want.len()] == *want, row << 32 | u64::from(buf[0]))?;
+        c.ok(buf[want.len()] == 0x5a, row << 32 | u64::from(buf[want.len()]))?;
+        if status != STATUS_BUFFER_TOO_SMALL {
+            // SAFETY: a null destination is the documented size query.
+            let st = unsafe {
+                RtlUnicodeToUTF8N(core::ptr::null_mut(), 0, &mut actual, src.as_ptr(), src_len)
+            };
+            c.ok(u64::from(st) == status, row << 32 | u64::from(st))?;
+            c.ok(actual == bytes, row << 32 | u64::from(actual))?;
+        }
+    }
+    // An odd source size is the fifth parameter's fault, and leaves the
+    // count alone.
+    let (mut buf, mut actual) = ([0u8; 8], 0x1234u32);
+    let src = [0x61u16, 0x62];
+    // SAFETY: three bytes of a four-byte source.
+    let st = unsafe { RtlUnicodeToUTF8N(buf.as_mut_ptr(), 8, &mut actual, src.as_ptr(), 3) };
+    c.eq(u64::from(st), STATUS_INVALID_PARAMETER_5)?;
+    c.eq(actual.into(), 0x1234)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     strings(&mut c)?;
+    utf8(&mut c)?;
     sids(&mut c)?;
     security(&mut c)?;
     critical_sections(&mut c)?;
