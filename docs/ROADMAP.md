@@ -1953,11 +1953,31 @@ need gala's.
      international code (WWINTL.DLL) under mso30win32client, it calls
      RaiseException with 0xe0000002 -- Office's own code, software
      originated and continuable -- which no handler in the process
-     takes, and the process ends with that status. Whether the two are
-     one failure is not yet known: the crash report names the code but
-     not the parameters the raise carries, which is what would say
-     what Word is refusing to go on without. Naming them is the next
-     step, ahead of guessing at a device.
+     takes, and the process ends with that status. The raise carries no
+     parameters, so its code is everything it says, and the frame below
+     it is Mso30win32client's own `__fastfail` stub, which sits in the
+     padding between two functions and has no unwind entry of its own:
+     the chain ends there because the image describes nothing for that
+     address, not because the unwinder stops short (ARCHITECTURE
+     "Exceptions"). What the dying thread called last is in
+     the crash report now (OBSERVABILITY "Crash reports"), and the two
+     gaps the ledger named in the second before the raise are closed,
+     each measured on Windows first: user32's
+     SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
+     SPI_GETFONTSMOOTHINGCONTRAST), which Word reads before it lays
+     text out (`win32_misc_test`), and kernelbase's QueueUserAPC2,
+     which needed special user APCs in the kernel (`apc_test`,
+     `kernel32_thread_test`, ARCHITECTURE "Special user APCs").
+     A run with every system call traced does not reach the raise at
+     all: it stops earlier, in `MsoSplash`, asking
+     RoGetActivationFactory for
+     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
+     over and over, a runtime class gala has none of -- so the traced
+     run is a different path, not a slower one, and the raise has to be
+     read from an untraced run. Whether the raise and the missing
+     device are one failure is still not known; the next step is the
+     rerun with those two gaps closed, and what its ledger names at the
+     end of it.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew

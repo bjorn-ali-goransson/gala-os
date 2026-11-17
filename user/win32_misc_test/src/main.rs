@@ -1261,6 +1261,15 @@ fn inno_startup(c: &mut Checks) -> Result<(), u32> {
         let mut routing = 7u32;
         c.ok(SystemParametersInfoW(0x201c, 0, (&raw mut routing).cast(), 0) != 0, 0)?;
         c.eq(routing.into(), 2)?;
+        // SPI_GETFONTSMOOTHINGTYPE: FE_FONTSMOOTHINGCLEARTYPE (2), and
+        // the contrast ClearType is drawn with (Word reads both before it
+        // lays text out).
+        let mut smoothing = 7u32;
+        c.ok(SystemParametersInfoW(0x200a, 0, (&raw mut smoothing).cast(), 0) != 0, 0)?;
+        c.eq(smoothing.into(), 2)?;
+        let mut contrast = 7u32;
+        c.ok(SystemParametersInfoW(0x200c, 0, (&raw mut contrast).cast(), 0) != 0, 0)?;
+        c.eq(contrast.into(), 1200)?;
         // CharLowerW: in place, or one character in the low word.
         let mut mixed = w("MiXeD");
         c.eq(CharLowerW(mixed.as_mut_ptr()) as u64, mixed.as_ptr() as u64)?;

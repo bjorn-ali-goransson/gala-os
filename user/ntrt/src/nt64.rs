@@ -41,6 +41,7 @@ stubs! {
     ntrt_nt_yield_execution = 0x0046;
     ntrt_nt_get_current_processor_number = 0x00f8;
     ntrt_nt_queue_apc_thread = 0x0045;
+    ntrt_nt_queue_apc_thread_ex2 = 0x7f4e;
     ntrt_nt_wait_for_multiple_objects = 0x005b;
     ntrt_nt_query_object = 0x0010;
     ntrt_nt_open_event = 0x0040;
@@ -303,6 +304,14 @@ unsafe extern "system" {
     fn ntrt_nt_get_current_processor_number() -> u32;
     fn ntrt_nt_queue_apc_thread(
         h: Handle,
+        routine: extern "system" fn(usize, usize, usize),
+        a1: usize,
+        a2: usize,
+        a3: usize,
+    ) -> NtStatus;
+    fn ntrt_nt_queue_apc_thread_ex2(
+        h: Handle,
+        flags: usize,
         routine: extern "system" fn(usize, usize, usize),
         a1: usize,
         a2: usize,
@@ -1405,6 +1414,24 @@ pub fn set_thread(h: Handle, class: u32, data: &[u8]) -> NtStatus {
 }
 
 pub const STATUS_USER_APC: NtStatus = 0x0000_00c0;
+
+/// NtQueueApcThreadEx2 as QueueUserAPC2 calls it: with `flags` 1
+/// (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) `routine(a1, a2, a3)` runs in
+/// thread `h` at its next return to user mode, whatever it is doing --
+/// on this call's own return when a thread queues one to itself. With 0
+/// it waits for an alertable wait, as `queue_apc`'s does; every other
+/// value is STATUS_INVALID_PARAMETER.
+pub fn queue_apc_ex2(
+    h: Handle,
+    flags: usize,
+    routine: extern "system" fn(usize, usize, usize),
+    a1: usize,
+    a2: usize,
+    a3: usize,
+) -> NtStatus {
+    // SAFETY: the kernel validates the handle; the routine is ours.
+    unsafe { ntrt_nt_queue_apc_thread_ex2(h, flags, routine, a1, a2, a3) }
+}
 
 /// NtQueueApcThread: `routine(a1, a2, a3)` runs in thread `h` at its next
 /// alertable wait.

@@ -88,7 +88,10 @@ impl Request {
         if let Some((thread, apc)) = &self.apc {
             let none = Reserved::none();
             let reserved = self.reserved.as_ref().unwrap_or(&none);
-            reserved.queue_apc(thread, UserApc { routine: apc.routine, args: apc.args });
+            reserved.queue_apc(
+                thread,
+                UserApc { routine: apc.routine, args: apc.args, special: false },
+            );
         }
         if let Some(done) = &self.done {
             wait::set_signal(done, 1);

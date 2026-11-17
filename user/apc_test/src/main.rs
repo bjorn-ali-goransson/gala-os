@@ -2,8 +2,13 @@
 //! ntdll's KiUserApcDispatcher runs them; gala's scenario ships its test
 //! ntdll): NtQueueApcThread queues; only alertable waits and delays run
 //! queued APCs, in FIFO order, returning STATUS_USER_APC; an APC queued to
-//! a thread blocked in an alertable wait wakes it. Prints `apc_test: ok`
-//! or exits with the number of the failing check.
+//! a thread blocked in an alertable wait wakes it. A special user APC
+//! (NtQueueApcThreadEx2 with flag 1, which QueueUserAPC2 passes) runs at
+//! the thread's next return to user mode instead: on the queueing call's
+//! own return when a thread queues one to itself, and when a wait that is
+//! not alertable ends, which keeps its own status; other flags are
+//! STATUS_INVALID_PARAMETER. Prints `apc_test: ok` or exits with the
+//! number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -13,6 +18,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use ntrt::*;
 
 const STATUS_TIMEOUT: NtStatus = 0x0000_0102;
+const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
+/// QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC.
+const SPECIAL: usize = 1;
 const SECOND: i64 = -10_000_000;
 const TEB_CLIENT_ID_THREAD: usize = 0x48;
 
@@ -65,6 +73,22 @@ fn calls() -> u64 {
 static WORKER_STATUS: AtomicU64 = AtomicU64::new(0xffff_ffff);
 static WORKER_EVENT: AtomicUsize = AtomicUsize::new(0);
 
+/// The patient worker's wait (not alertable) and how many APCs had run
+/// by the time it returned.
+static PATIENT_STATUS: AtomicU64 = AtomicU64::new(0xffff_ffff);
+static PATIENT_SEEN: AtomicU64 = AtomicU64::new(0xffff_ffff);
+static PATIENT_EVENT: AtomicUsize = AtomicUsize::new(0);
+
+/// Waits a fifth of a second without being alertable: a special APC must
+/// run on the way out of that wait, before this thread goes on.
+extern "C" fn patient(_: usize) -> ! {
+    let event = Handle(PATIENT_EVENT.load(Ordering::SeqCst));
+    let s = wait(event, Some(SECOND / 5));
+    PATIENT_SEEN.store(calls(), Ordering::SeqCst);
+    PATIENT_STATUS.store(s.into(), Ordering::SeqCst);
+    exit_thread(0)
+}
+
 extern "C" fn worker(_: usize) -> ! {
     let event = Handle(WORKER_EVENT.load(Ordering::SeqCst));
     let s = wait_alertable(event, None);
@@ -110,6 +134,32 @@ fn run() -> Result<(), u32> {
     c.eq(calls(), 4)?;
     c.ok(logged(3) == [30, 31, 32], logged(3)[0])?;
     c.eq(LOG[3][3].load(Ordering::SeqCst), tid as u64)?;
+    close(t);
+
+    // A special user APC runs on the way back to user mode: one queued to
+    // the calling thread has run by the time the call returns.
+    c.eq(queue_apc_ex2(CURRENT_THREAD, SPECIAL, apc, 40, 41, 42).into(), ok)?;
+    c.eq(calls(), 5)?;
+    c.ok(logged(4) == [40, 41, 42], logged(4)[0])?;
+    // Flags beyond that one are refused, and nothing is queued.
+    c.eq(queue_apc_ex2(CURRENT_THREAD, 2, apc, 0, 0, 0).into(), STATUS_INVALID_PARAMETER.into())?;
+    c.eq(wait_alertable(event, Some(SECOND / 100)).into(), STATUS_TIMEOUT.into())?;
+    c.eq(calls(), 5)?;
+
+    // One queued to a thread waiting without being alertable runs when
+    // that wait ends; the wait keeps its own status (STATUS_TIMEOUT, not
+    // STATUS_USER_APC), and the thread sees the APC as already run.
+    PATIENT_EVENT.store(event.0, Ordering::SeqCst);
+    let (s, t, tid) = create_thread(patient, 0, false);
+    c.eq(s.into(), ok)?;
+    delay(SECOND / 50); // let it block
+    c.eq(queue_apc_ex2(t, SPECIAL, apc, 50, 51, 52).into(), ok)?;
+    c.eq(wait(t, Some(5 * SECOND)).into(), ok)?;
+    c.eq(PATIENT_STATUS.load(Ordering::SeqCst), STATUS_TIMEOUT.into())?;
+    c.eq(PATIENT_SEEN.load(Ordering::SeqCst), 6)?;
+    c.eq(calls(), 6)?;
+    c.ok(logged(5) == [50, 51, 52], logged(5)[0])?;
+    c.eq(LOG[5][3].load(Ordering::SeqCst), tid as u64)?;
     close(t);
     close(event);
     Ok(())

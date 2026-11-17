@@ -3524,7 +3524,12 @@ about a minute under TCG. Read, in order:
   other bytes and `export-tests` rewrites the installers and the SHA-256s
   in their manifests: that belongs to no change, so restore
   `user/pk_install_test/source` (or export in the image: `cargo xtask
-  docker-test`) rather than committing it. Without makensis the checked-in installers are written
+  docker-test`) rather than committing it. Restore only the installers
+  nsis built and the SHA-256s in their manifests, never the whole tree:
+  a change to ntrt rewrites every zip around `user/bin/hello.exe`, and
+  restoring those leaves the manifests' hashes describing the zips that
+  are gone, which `cargo test -p galapkg` reports as a `HashMismatch`
+  and a PkHello that installs other bytes than `user/bin/hello.exe`. Without makensis the checked-in installers are written
   back from the working tree unchanged, so `export-tests` leaves the same
   bytes either way (make_source.py removes and remakes `source/installers`
   on every run, so keeping them means writing them back, not skipping

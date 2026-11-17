@@ -263,6 +263,9 @@ pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
+/// gala's number and argument order for the service QueueUserAPC2 queues
+/// a special user APC through, until the pinned build's are verified.
+pub const NT_QUEUE_APC_THREAD_EX2: u32 = 0x7f4e;
 // Mutants and semaphores. NtReleaseSemaphore (0x0a) and NtReleaseMutant
 // (0x20) are long-stable on x64; the create/open/query numbers vary by build
 // and these are gala's own, UNVERIFIED for 26100 (tests reach them through
@@ -361,6 +364,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
+    (NT_QUEUE_APC_THREAD_EX2, "NtQueueApcThreadEx2", 6, nt_queue_apc_thread_ex2),
     (NT_RELEASE_SEMAPHORE, "NtReleaseSemaphore", 3, nt_release_semaphore),
     (NT_RELEASE_MUTANT, "NtReleaseMutant", 2, nt_release_mutant),
     (NT_CREATE_MUTANT, "NtCreateMutant", 4, nt_create_mutant),
@@ -770,6 +774,12 @@ fn dispatch(frame: &mut SyscallFrame) {
         }
     };
     thread::set_in_syscall(&me, None);
+    // A special user APC runs on the way back to user mode, whatever the
+    // call was (QueueUserAPC2). A wait that ended with STATUS_USER_APC has
+    // delivered one already, in `deliver_apc_after`.
+    if status != NtStatus::USER_APC && thread::has_special_user_apc() {
+        super::abi::deliver_special_apc(&call, status);
+    }
     crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
     // C:'s changes are written back lazily; a writer past the dirty limit
     // writes back here (throttling).
@@ -1134,7 +1144,7 @@ fn pipe_request(
     let apc = if routine == 0 {
         None
     } else {
-        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
+        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false };
         thread::current().map(|t| (t, apc))
     };
     super::notify::Request {
@@ -3416,12 +3426,51 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// NtQueueApcThreadEx2(ThreadHandle, ApcFlags, ApcRoutine, ApcArgument1,
+/// ApcArgument2, ApcArgument3) as QueueUserAPC2 calls it: `ApcFlags` 1
+/// (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) queues an APC every return to
+/// user mode runs, 0 one that waits for an alertable wait. Windows
+/// refuses every other flag with STATUS_INVALID_PARAMETER (measured on
+/// the pinned build: ERROR_INVALID_PARAMETER from QueueUserAPC2).
+fn nt_queue_apc_thread_ex2(call: &mut Call<'_>) -> NtStatus {
+    let flags = arg!(call, 1);
+    if flags > 1 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    // The type comes before the rights, as ObReferenceObjectByHandle
+    // checks them: a handle to something that is not a thread is
+    // STATUS_OBJECT_TYPE_MISMATCH whatever it grants (an event's
+    // EVENT_ALL_ACCESS does not grant THREAD_SET_CONTEXT, so the other
+    // order would answer STATUS_ACCESS_DENIED).
+    let ObjectBody::Thread(t) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let object = tri!(entry.require(THREAD_SET_CONTEXT));
+    if !KArc::ptr_eq(&t.process, &call.process) {
+        // TODO: APCs to other processes.
+        return NtStatus::ACCESS_DENIED;
+    }
+    let apc = thread::UserApc {
+        routine: arg!(call, 2),
+        args: [arg!(call, 3), arg!(call, 4), arg!(call, 5)],
+        special: flags == 1,
+    };
+    match thread::queue_user_apc(object, apc) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
 /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
 ///                  ApcArgument3)
 fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    // The type comes before the rights, as ObReferenceObjectByHandle
+    // checks them: a handle to something that is not a thread is
+    // STATUS_OBJECT_TYPE_MISMATCH whatever it grants (an event's
+    // EVENT_ALL_ACCESS does not grant THREAD_SET_CONTEXT, so the other
+    // order would answer STATUS_ACCESS_DENIED).
+    let ObjectBody::Thread(t) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let object = tri!(entry.require(THREAD_SET_CONTEXT));
-    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if !KArc::ptr_eq(&t.process, &call.process) {
         // TODO: APCs to other processes.
         return NtStatus::ACCESS_DENIED;
@@ -3429,6 +3478,7 @@ fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
     let apc = thread::UserApc {
         routine: arg!(call, 1),
         args: [arg!(call, 2), arg!(call, 3), arg!(call, 4)],
+        special: false,
     };
     match thread::queue_user_apc(object, apc) {
         Ok(()) => NtStatus::SUCCESS,
@@ -5941,7 +5991,7 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         None
     } else {
         let me = tri!(thread::current().ok_or(NtStatus::INVALID_HANDLE));
-        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0] }))
+        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0], special: false }))
     };
     let event = match event {
         0 => None,
@@ -6854,7 +6904,7 @@ fn io_apc(call: &Call<'_>, iosb: u64) -> Result<Option<thread::UserApc>, NtStatu
     // A synchronous handle takes one too: the I/O completes inline and
     // the routine still runs at the thread's next alertable wait (Windows
     // 11, ioapc_test).
-    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] }))
+    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false }))
 }
 
 /// The start of an I/O on `file`: the event (if any; it must be an event

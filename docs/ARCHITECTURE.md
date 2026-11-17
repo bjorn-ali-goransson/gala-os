@@ -2242,6 +2242,24 @@ Invariants:
   completes successfully, on a synchronous handle too (the I/O completes
   inline and the routine runs at the next alertable wait, as on Windows
   11; files and pipe ends alike).
+- **Special user APCs** (`apc_test`, `kernel32_thread_test`): the same
+  queue carries them, with a flag. NtQueueApcThreadEx2 (gala's 0x7f4e
+  until the pinned build's number is verified) takes the flags
+  QueueUserAPC2 passes: QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC (1) marks
+  a special APC, 0 queues a normal one, and every other value is
+  STATUS_INVALID_PARAMETER. A special APC does not wait for an alertable
+  wait: the system call dispatcher delivers it on the way back to user
+  mode from whatever call the thread makes next, so a thread that queues
+  one to itself runs it before that call returns, and one blocked in a
+  wait that is not alertable runs it when the wait ends -- the wait keeps
+  its own status (STATUS_TIMEOUT, not STATUS_USER_APC), because the
+  CONTEXT the dispatcher builds returns the call's own status. The limit
+  against Windows, where a special APC interrupts a thread that is only
+  computing: in gala it waits for that thread's next system call. Both
+  kinds are checked in the order ObReferenceObjectByHandle checks a
+  handle -- the type before the rights, so a handle to something that is
+  not a thread is STATUS_OBJECT_TYPE_MISMATCH (ERROR_INVALID_HANDLE)
+  whatever it grants, not STATUS_ACCESS_DENIED.
 
 ### Job objects
 
@@ -17029,7 +17047,7 @@ older entries).
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id; v3: the session; v4 (`handover_next`): the handovers it came through |
 | 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file; the page is not mapped at adoption but comes back at its first touch from that layout, as only listed processes may map a layout's frames), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: comes back at its first touch, the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments, and whether it is special -- the record's own stride says which, so a 32-byte one from an older writer reads 0 and means a normal APC); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |

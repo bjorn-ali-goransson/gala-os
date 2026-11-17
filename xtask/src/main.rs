@@ -10822,7 +10822,15 @@ fn build_next_kernel_unlocked(release: bool, target: &str) -> Result<PathBuf> {
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", target])
         .args(["--features", "handover_next", "--target-dir"])
-        .arg(next_target_dir());
+        .arg(next_target_dir())
+        // Without the incremental cache: the kernel is built in 1024
+        // codegen units (the root Cargo.toml says why), and an
+        // incremental rebuild of it has produced an rlib whose LLVM
+        // anonymous constants no unit defines -- the link then fails with
+        // `undefined hidden symbol: anon.<hash>.<n>.llvm.<id>` while the
+        // same sources build clean. This kernel is built once per profile
+        // and process, so the cache saves little here.
+        .env("CARGO_INCREMENTAL", "0");
     trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");

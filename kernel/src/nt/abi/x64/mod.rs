@@ -334,8 +334,19 @@ pub(in crate::nt) fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtS
     regs.set_syscall_result(u64::from(status.0));
     let state = platform::xsave();
     let context = self::context::to_bytes(&regs, Some(&state));
-    deliver_apc(call, context, call.frame.sp(), &state);
+    deliver_apc(call, context, call.frame.sp(), &state, false);
     status
+}
+
+/// A special user APC (QueueUserAPC2) on the way back to user mode from
+/// a system call that returned `status`: the thread runs it and the
+/// CONTEXT it resumes returns `status` from the call, as it would have.
+pub(in crate::nt) fn deliver_special_apc(call: &Call<'_>, status: NtStatus) {
+    let mut regs = call.frame.return_regs();
+    regs.set_syscall_result(u64::from(status.0));
+    let state = platform::xsave();
+    let context = self::context::to_bytes(&regs, Some(&state));
+    deliver_apc(call, context, call.frame.sp(), &state, true);
 }
 
 /// Where an APC frame has its XSTATE area: after the CONTEXT and its
@@ -358,13 +369,14 @@ pub(in crate::nt) fn deliver_apc(
     mut context: [u8; self::context::SIZE],
     rsp: u64,
     state: &platform::XState,
+    special_only: bool,
 ) -> bool {
     use self::context as c;
     let dispatcher = call.process.apc_dispatcher.load(Ordering::Relaxed);
     if dispatcher == 0 {
         return false;
     }
-    let Some(apc) = thread::take_user_apc() else { return false };
+    let Some(apc) = thread::take_user_apc(special_only) else { return false };
     for (i, v) in [apc.args[0], apc.args[1], apc.args[2], apc.routine].iter().enumerate() {
         context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
     }
@@ -411,7 +423,7 @@ pub(in crate::nt) fn nt_continue(call: &mut Call<'_>) -> NtStatus {
     // TestAlert: run the next queued user APC before resuming the context.
     if arg!(call, 1) as u8 != 0
         && thread::has_user_apc()
-        && deliver_apc(call, ctx, regs.sp(), &state)
+        && deliver_apc(call, ctx, regs.sp(), &state, false)
     {
         return NtStatus::SUCCESS;
     }
