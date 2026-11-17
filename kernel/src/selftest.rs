@@ -49,20 +49,16 @@ fn breakpoint_returns() {
 }
 
 fn frame_alloc_roundtrip() {
-    let (free_before, _) = mm::frame_stats();
-    let a = mm::allocate_frame(mm::Use::Untagged).expect("frame");
-    let b = mm::allocate_frame(mm::Use::Untagged).expect("frame");
-    assert_ne!(a, b);
-    let run = mm::allocate_frames(16, 16, mm::Use::Untagged).expect("16 contiguous frames");
-    assert_eq!(run.number() % 16, 0);
-    assert_eq!(mm::frame_stats().0, free_before - 18);
-    mm::free_frame(a).unwrap();
-    mm::free_frame(b).unwrap();
-    for i in 0..16 {
-        mm::free_frame(mm::frame::Frame::from_number(run.number() + i)).unwrap();
-    }
-    assert_eq!(mm::frame_stats().0, free_before);
-    assert!(mm::free_frame(a).is_err(), "double free must be rejected");
+    // The round is made with the allocator's lock held, because the free
+    // count is the whole kernel's: a frame another CPU took inside the
+    // round would make the balance lie (`mm::frame_self_check`).
+    let c = mm::frame_self_check().expect("the frame allocator is up");
+    assert!(!c.refused, "the frame allocator had no memory for the round");
+    assert!(c.distinct, "two allocations gave the same frame");
+    assert!(c.aligned, "a run of 16 frames did not start 16-aligned");
+    assert_eq!(c.free_held, c.free_before - 18, "18 frames held");
+    assert_eq!(c.free_after, c.free_before, "everything freed");
+    assert!(c.double_free_refused, "double free must be rejected");
 }
 
 fn kernel_sections_mapped() {
@@ -88,26 +84,29 @@ fn kernel_sections_mapped() {
 }
 
 fn heap_small_and_large() {
-    let before = mm::heap::stats();
-    {
-        let boxed = try_box([7u64; 4]).expect("small box");
-        assert_eq!(boxed.iter().sum::<u64>(), 28);
-        let big = try_box([0x5au8; 16 * 1024]).expect("16 KiB box");
-        assert!(big.iter().all(|&b| b == 0x5a));
-        assert_eq!(big.as_ptr() as usize % 4096, 0);
-
-        let mut v: Vec<u32> = Vec::new();
-        for i in 0..10_000 {
-            v.try_push(i).expect("push");
-        }
-        assert_eq!(v.iter().map(|&x| u64::from(x)).sum::<u64>(), 49_995_000);
-        let aligned = try_box(Aligned([0; 256])).expect("aligned box");
-        assert_eq!(&raw const *aligned as usize % 256, 0);
-        assert_eq!(aligned.0[255], 0);
+    // The balance is measured with the heap's lock held, for the same
+    // reason as the frames' (`mm::heap::self_check`).
+    let c = mm::heap::self_check().expect("the kernel heap");
+    assert!(!c.refused, "the heap had no memory for the round");
+    assert!(c.kept, "an object did not hold what was written to it");
+    assert!(c.aligned, "an over-aligned object was not aligned");
+    assert_eq!(c.after.in_use, c.before.in_use, "everything freed");
+    assert_eq!(c.after.large_pages, c.before.large_pages);
+    // The same heap through the API the kernel uses, which is the one
+    // that must work (what it leaves behind is the check above's).
+    let boxed = try_box([7u64; 4]).expect("small box");
+    assert_eq!(boxed.iter().sum::<u64>(), 28);
+    let big = try_box([0x5au8; 16 * 1024]).expect("16 KiB box");
+    assert!(big.iter().all(|&b| b == 0x5a));
+    assert_eq!(big.as_ptr() as usize % 4096, 0);
+    let mut v: Vec<u32> = Vec::new();
+    for i in 0..10_000 {
+        v.try_push(i).expect("push");
     }
-    let after = mm::heap::stats();
-    assert_eq!(after.in_use, before.in_use, "everything freed");
-    assert_eq!(after.large_pages, before.large_pages);
+    assert_eq!(v.iter().map(|&x| u64::from(x)).sum::<u64>(), 49_995_000);
+    let aligned = try_box(Aligned([0; 256])).expect("aligned box");
+    assert_eq!(&raw const *aligned as usize % 256, 0);
+    assert_eq!(aligned.0[255], 0);
 }
 
 #[repr(align(256))]

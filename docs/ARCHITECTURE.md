@@ -544,6 +544,13 @@ the call is missing.
   expected serial output. Compatible scenarios share a VM (WORKFLOW,
   "Test speed"). `selftest` runs `kernel/src/selftest.rs`; `fault=<name>`
   provokes a CPU exception to test the fault path.
+- A check on what an allocator has handed out (`selftest`'s
+  `heap_small_and_large`, `frame_alloc_roundtrip`) is made with that
+  allocator's own lock held (`mm::heap::self_check`,
+  `mm::frame_self_check`): the statistics count the whole kernel, so a
+  thread allocating on another CPU inside the round would make the
+  balance lie, and such a check passes or fails by what else the machine
+  happened to be doing.
 - `XTASK_VERBOSE=1 cargo xtask boot-test [filter]` prints every serial
   log.
 - `cargo xtask alloc-audit` (part of `cargo xtask test`): see "Heap".
