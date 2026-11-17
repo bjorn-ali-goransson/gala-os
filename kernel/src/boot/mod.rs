@@ -39,18 +39,62 @@ pub struct KernelAddress {
     pub virtual_base: u64,
 }
 
-/// The bootloader's HHDM offset and the kernel's load address, read
-/// straight from Limine's responses: for what must run before
-/// [`collect`] (aarch64's console maps its UART into the bootloader's
-/// page tables with them). None after a kernel handover, or without them.
-/// The RSDP's virtual (HHDM) address from the bootloader, 0 without one:
-/// for what reads the firmware's tables before `BootInfo` (aarch64's
-/// console and GIC).
+/// The RSDP's virtual (HHDM) address from the bootloader (after a kernel
+/// handover, from the record: `note_handover`), 0 without one: for what
+/// reads the firmware's tables before `BootInfo` (aarch64's console and
+/// GIC).
 pub fn early_rsdp() -> u64 {
+    if EARLY_HANDOVER[0].load(core::sync::atomic::Ordering::Acquire) != 0 {
+        return EARLY_HANDOVER[3].load(core::sync::atomic::Ordering::Acquire);
+    }
     REQUESTS.rsdp.response().map_or(0, |r| r.address)
 }
 
+/// After a kernel handover, what Limine's responses would have said
+/// early (HHDM offset, the kernel's physical and virtual base, the RSDP's
+/// virtual address), from the record (`note_handover`); zero otherwise.
+static EARLY_HANDOVER: [core::sync::atomic::AtomicU64; 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Takes `early_addresses`' and `early_rsdp`'s answers from the previous
+/// kernel's record, before `collect` (the console needs them first). A
+/// record that does not parse leaves them unset: `collect` reports it.
+pub fn note_handover(entry: HandoverEntry) {
+    use core::sync::atomic::Ordering;
+    let hhdm = entry.hhdm_offset;
+    // SAFETY: as in `collect_handover`: the record is in kept RAM mapped
+    // in the HHDM of the tables this kernel was entered with; the header
+    // is read first, the length it claims bounded by MAX_LEN.
+    let header = unsafe { phys_bytes(hhdm, entry.record_phys, record::HEADER_LEN as u64) };
+    let Some(len) = record::claimed_len(header) else { return };
+    // SAFETY: as above.
+    let bytes = unsafe { phys_bytes(hhdm, entry.record_phys, len) };
+    let Ok(rec) = record::parse(bytes) else { return };
+    let Some(mut p) = rec.section(record::tag::PLATFORM) else { return };
+    let platform = record::Platform::read(&mut p);
+    EARLY_HANDOVER[1].store(platform.kernel_phys, Ordering::Relaxed);
+    EARLY_HANDOVER[2].store(platform.kernel_virt, Ordering::Relaxed);
+    EARLY_HANDOVER[3].store(firmware_rsdp(&rec, hhdm), Ordering::Relaxed);
+    EARLY_HANDOVER[0].store(hhdm, Ordering::Release);
+}
+
+/// The HHDM offset and the kernel's load address, read straight from
+/// Limine's responses (after a kernel handover, from the record:
+/// `note_handover`): for what must run before [`collect`] (aarch64's
+/// console maps its UART into the page tables it was entered with). None
+/// without them.
 pub fn early_addresses() -> Option<(u64, KernelAddress)> {
+    use core::sync::atomic::Ordering;
+    let handover = EARLY_HANDOVER[0].load(Ordering::Acquire);
+    if handover != 0 {
+        return Some((
+            handover,
+            KernelAddress {
+                physical_base: EARLY_HANDOVER[1].load(Ordering::Relaxed),
+                virtual_base: EARLY_HANDOVER[2].load(Ordering::Relaxed),
+            },
+        ));
+    }
     let hhdm = REQUESTS.hhdm.response()?.offset;
     let kernel = REQUESTS.executable_address.response()?;
     Some((
@@ -290,6 +334,9 @@ pub struct BootInfo {
     /// a program asks GetSystemFirmwareTable about. The table itself is
     /// copied later, once the heap is up (`platform::init_firmware`).
     pub smbios: Option<smbios::EntryPoint>,
+    /// The ACPI RSDP's virtual (HHDM) address, 0 without one: the
+    /// bootloader's, or after a handover the record's FIRMWARE section's.
+    pub rsdp: u64,
     pub framebuffer_facts: Option<FramebufferFacts>,
     /// The kernel's own executable file (ELF), to hand over to next time.
     pub kernel_file: Option<&'static [u8]>,
@@ -349,6 +396,15 @@ pub struct HandoverEntry {
 /// The handover entry, if `kmain`'s arguments are one.
 pub fn handover_entry(magic: u64, record_phys: u64, hhdm_offset: u64) -> Option<HandoverEntry> {
     (magic == HANDOVER_MAGIC).then_some(HandoverEntry { record_phys, hhdm_offset })
+}
+
+/// The RSDP's virtual (HHDM) address the record's FIRMWARE section gives,
+/// 0 without one.
+fn firmware_rsdp(rec: &record::Record<'_>, hhdm: u64) -> u64 {
+    rec.section(record::tag::FIRMWARE)
+        .map(|mut r| r.u64())
+        .filter(|&phys| phys != 0)
+        .map_or(0, |phys| hhdm.wrapping_add(phys))
 }
 
 /// Reads the previous kernel's record: what Limine would have answered.
@@ -415,6 +471,7 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
             }
         }
     };
+    let rsdp = firmware_rsdp(&rec, hhdm);
     let kernel_file = rec.section(record::tag::KERNEL_FILE).and_then(|r| {
         let file = record::read_ranges(&r).next()?;
         // SAFETY: the kernel file is in "executable and modules" memory
@@ -439,11 +496,21 @@ fn collect_handover(entry: HandoverEntry) -> Result<BootInfo, BootError> {
             bsp_id: u64::from(cpus.bsp_lapic_id),
             cpus: CpuList::Parked(parked),
         },
-        firmware_cpus: None,
-        clock_tables: acpi::ClockTables::default(),
-        pci_ecam: None,
-        psci: None,
+        // The firmware's tables as the first kernel read them, where the
+        // record says they are (FIRMWARE); none from an older writer.
+        firmware_cpus: (rsdp != 0).then(|| acpi::read_madt(hhdm, rsdp)),
+        clock_tables: if rsdp != 0 {
+            acpi::read_clock_tables(hhdm, rsdp)
+        } else {
+            acpi::ClockTables::default()
+        },
+        pci_ecam: (rsdp != 0).then(|| acpi::read_mcfg(hhdm, rsdp)).flatten(),
+        psci: (rsdp != 0).then(|| acpi::read_psci(hhdm, rsdp)).flatten(),
+        // The SMBIOS entry point was the first boot's firmware memory,
+        // which the record does not carry: a handed-over kernel has no
+        // firmware table to give out ("Firmware tables").
         smbios: None,
+        rsdp,
         framebuffer_facts,
         kernel_file,
         handover: Some(Received {
@@ -584,6 +651,7 @@ pub fn collect(handover: Option<HandoverEntry>) -> Result<BootInfo, BootError> {
         pci_ecam: acpi::read_mcfg(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
         psci: acpi::read_psci(hhdm_offset, REQUESTS.rsdp.response().map_or(0, |r| r.address)),
         smbios: read_smbios(),
+        rsdp: REQUESTS.rsdp.response().map_or(0, |r| r.address),
         framebuffer_facts,
         kernel_file,
         handover: None,

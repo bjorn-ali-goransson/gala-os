@@ -51,6 +51,13 @@ struct objects {
 	char order[256];
 };
 
+/* The program interpreter's name on this machine. */
+#ifdef __aarch64__
+#define LDSO "ld-linux-aarch64.so.1"
+#else
+#define LDSO "ld-linux-x86-64.so.2"
+#endif
+
 static int each_object(struct dl_phdr_info *info, size_t size, void *data)
 {
 	struct objects *o = data;
@@ -61,7 +68,7 @@ static int each_object(struct dl_phdr_info *info, size_t size, void *data)
 		o->main_phnum = info->dlpi_phnum;
 	}
 	const char *name = base_name(info->dlpi_name);
-	if (strcmp(name, "ld-linux-x86-64.so.2") == 0) {
+	if (strcmp(name, LDSO) == 0) {
 		o->ldso_addr = info->dlpi_addr;
 		o->ldso_found = 1;
 	}

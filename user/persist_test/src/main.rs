@@ -338,7 +338,10 @@ fn read(h: Handle, buf: &mut [u8]) -> Option<usize> {
 }
 
 /// Everyone: all access; BUILTIN\Users: read and execute.
-fn make_descriptor(c: &mut Checks, sd: &mut [u64; 4], acl: &mut [u64; 16]) -> Result<(), u32> {
+/// `sd` holds an absolute SECURITY_DESCRIPTOR: 40 bytes on 64-bit Windows
+/// (revision, Sbz1, control, then the owner, group, SACL and DACL
+/// pointers).
+fn make_descriptor(c: &mut Checks, sd: &mut [u64; 5], acl: &mut [u64; 16]) -> Result<(), u32> {
     let (mut world, mut users) = ([0u64; 9], [0u64; 9]);
     let (mut wl, mut ul) = (72u32, 72u32);
     // SAFETY: buffers of the sizes given.
@@ -372,7 +375,7 @@ fn make_descriptor(c: &mut Checks, sd: &mut [u64; 4], acl: &mut [u64; 16]) -> Re
 }
 
 fn first_boot(c: &mut Checks) -> Result<(), u32> {
-    let (mut sd, mut acl) = ([0u64; 4], [0u64; 16]);
+    let (mut sd, mut acl) = ([0u64; 5], [0u64; 16]);
     make_descriptor(c, &mut sd, &mut acl)?;
     let sa = SecurityAttributes { length: 24, descriptor: sd.as_mut_ptr().cast(), inherit: 0 };
     // SAFETY: valid paths, handles and buffers throughout.

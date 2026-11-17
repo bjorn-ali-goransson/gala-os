@@ -436,6 +436,17 @@ const PREBUILT: &[Prebuilt] = &[
     // no published checksum, the SHA-256 pinned at the first fetch). The
     // Linux personality's milestone 2 target (ROADMAP LX); it runs only
     // inside gala.
+    // aarch64's: Alpine's static busybox (musl, static PIE; busybox.net
+    // has no aarch64 build), from the release's pinned package (an apk:
+    // gzipped tar streams), for the WSL distribution of the aarch64
+    // images (make_wsl_rootfs).
+    Prebuilt {
+        name: "busybox-linux-aarch64",
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk",
+        checksum: "965777e06b94bf11981d5f4ecdfcd577879f4b0dda544294d1dd3f72b217bc75",
+        members: &["bin/busybox.static"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "busybox-linux",
         url: "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox",
@@ -459,6 +470,20 @@ const PREBUILT: &[Prebuilt] = &[
             "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
             "usr/lib/x86_64-linux-gnu/libc.so.6",
             "usr/lib/x86_64-linux-gnu/libm.so.6",
+        ],
+        excludes: &[],
+    },
+    // The same glibc for aarch64 (the twins of the glibc scenarios:
+    // GLIBC_ARM64), the release's arm64 libc6 from ports.ubuntu.com (the
+    // SHA-256 in its signed Packages index).
+    Prebuilt {
+        name: "glibc-arm64",
+        url: "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.43-2ubuntu2_arm64.deb",
+        checksum: "6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0",
+        members: &[
+            "usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+            "usr/lib/aarch64-linux-gnu/libc.so.6",
+            "usr/lib/aarch64-linux-gnu/libm.so.6",
         ],
         excludes: &[],
     },
@@ -9960,6 +9985,11 @@ const USER_PROGRAMS_X86: &[&str] = &[
 /// the x64 ones and exported to user/bin/arm64.
 const USER_PROGRAMS_ARM64: &[&str] = &["hello", "crash"];
 
+/// The system's own programs every ARM64 image ships, as every x64 image
+/// ships every USER_PROGRAMS one: gala.exe (`C:\gala\gala.exe`, which the
+/// start menu and the tray's actions run).
+const ARM64_SYSTEM_PROGRAMS: &[&str] = &["gala"];
+
 /// Where the build puts the ARM64 build of test program `program`.
 fn built_program_arm64(program: &str) -> PathBuf {
     target_dir().join(USER_TARGET_ARM64).join("release").join(format!("{program}.exe"))
@@ -10766,21 +10796,24 @@ fn next_target_dir() -> PathBuf {
 /// runs once per profile and process, under a lock, and the others wait
 /// for it and take its path (two `objcopy`s on the same file at once
 /// failed the handover scenarios).
-fn build_next_kernel(release: bool) -> Result<PathBuf> {
-    static BUILT: std::sync::Mutex<[Option<PathBuf>; 2]> = std::sync::Mutex::new([None, None]);
+/// The `handover_next` build for kernel target `target` (x86-64's, or
+/// aarch64's for an ARM64 twin's image).
+fn build_next_kernel(release: bool, target: &str) -> Result<PathBuf> {
+    static BUILT: std::sync::Mutex<[Option<PathBuf>; 4]> =
+        std::sync::Mutex::new([None, None, None, None]);
     let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let slot = &mut built[usize::from(release)];
+    let slot = &mut built[usize::from(release) + 2 * usize::from(target == KERNEL_TARGET_AARCH64)];
     if let Some(kernel) = slot {
         return Ok(kernel.clone());
     }
-    let kernel = build_next_kernel_unlocked(release)?;
+    let kernel = build_next_kernel_unlocked(release, target)?;
     *slot = Some(kernel.clone());
     Ok(kernel)
 }
 
-fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
+fn build_next_kernel_unlocked(release: bool, target: &str) -> Result<PathBuf> {
     let mut cmd = cargo();
-    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", target])
         .args(["--features", "handover_next", "--target-dir"])
         .arg(next_target_dir());
     trust::kernel_env(&mut cmd)?;
@@ -10789,7 +10822,7 @@ fn build_next_kernel_unlocked(release: bool) -> Result<PathBuf> {
     }
     run_cmd(&mut cmd)?;
     let profile = if release { "release" } else { "debug" };
-    let kernel = next_target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
+    let kernel = next_target_dir().join(target).join(profile).join("kernel");
     drop_debug_relocations(&kernel)?;
     Ok(kernel)
 }
@@ -10878,12 +10911,14 @@ fn make_iso_unchecked(
         kernel = PathBuf::from(&path["kernel=".len()..]);
     }
     // R9 (d): the other build as a boot module, to hand over to.
-    let builds = name
-        .strip_prefix("test-")
-        .and_then(|n| HANDOVER_BUILD_SCENARIOS.iter().find(|s| s.0 == n).map(|s| s.1));
+    // A twin has its x64 scenario's, built for aarch64.
+    let builds = name.strip_prefix("test-").and_then(|n| {
+        let n = twin_base(n).unwrap_or(n);
+        HANDOVER_BUILD_SCENARIOS.iter().find(|s| s.0 == n).map(|s| s.1)
+    });
     let mut other_kernel = None;
     if let Some(boots_next) = builds {
-        let next = build_next_kernel(release)?;
+        let next = build_next_kernel(release, target)?;
         other_kernel = Some(if boots_next {
             ("kernel-gala", std::mem::replace(&mut kernel, next))
         } else {
@@ -10995,6 +11030,10 @@ fn make_iso_unchecked(
             // A test program: its ARM64 build there.
             Some((_, name)) if arm64 && shipped_program(file).is_some() => {
                 (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
+            }
+            // The WSL distribution: its aarch64 busybox's (make_wsl_rootfs).
+            Some((_, name)) if arm64 && file.starts_with("target/wsl/") => {
+                (root().join("target/wsl/aarch64").join(name), name)
             }
             // A Linux test program: its aarch64 build
             // (user/lx/build-aarch64.sh), which must exist.
@@ -11139,10 +11178,16 @@ fn make_wsl_rootfs() -> Result {
     if *made {
         return Ok(());
     }
-    let busybox = "target/prebuilt/busybox-linux/busybox";
-    fetch_prebuilt(busybox)?;
-    let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
-    wsl_rootfs::make(&root(), &data)?;
+    // x86-64's in target/wsl, aarch64's (an ARM64 image ships it in its
+    // place, under the same names) in target/wsl/aarch64.
+    for (busybox, dir) in [
+        ("target/prebuilt/busybox-linux/busybox", "wsl"),
+        ("target/prebuilt/busybox-linux-aarch64/busybox.static", "wsl/aarch64"),
+    ] {
+        fetch_prebuilt(busybox)?;
+        let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
+        wsl_rootfs::make(&root(), dir, &data)?;
+    }
     *made = true;
     Ok(())
 }
@@ -11317,6 +11362,8 @@ fn fetch_prebuilt(path: &str) -> Result {
         unpack_msi(p, &zip, &dir)?;
     } else if p.url.ends_with(".deb") {
         unpack_deb(p, &zip, &dir)?;
+    } else if p.url.ends_with(".apk") {
+        unpack_apk(p, &zip, &dir)?;
     } else if p.url.ends_with(".7z")
         || p.url.ends_with(".7z.exe")
         || p.url.ends_with("-setup.exe")
@@ -11544,6 +11591,33 @@ fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
     fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
 
+/// Unpacks the Alpine package `apk` (gzipped tar streams one after the
+/// other: signature, control, data; tar reads them as one) and moves
+/// `p`'s members into `dir` by their file names.
+fn unpack_apk(p: &Prebuilt, apk: &Path, dir: &Path) -> Result {
+    let tree = dir.join("apk");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    // Its PAX headers carry APK-TOOLS keywords tar does not know (a
+    // warning each).
+    run_quiet(
+        Command::new("tar")
+            .args(["--warning=no-unknown-keyword", "-xzf"])
+            .arg(apk)
+            .arg("-C")
+            .arg(&tree)
+            .args(p.members),
+    )?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        fs::rename(tree.join(member), dir.join(last))
+            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
+}
+
 /// Unpacks the MSI `msi` (msitools' msiextract, the files laid out as
 /// Windows Installer would install them) and moves `p`'s member
 /// directories into `dir`, then removes the excludes.
@@ -11690,6 +11764,9 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     // monitor's sendkey, mouse_move and mouse_button reach
     // (kernel/src/input/virtio.rs; `VirtioPace`).
     cmd.args(["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]);
+    if aarch64_display(iso_scenario(iso)) {
+        cmd.args(["-device", "virtio-gpu-pci,xres=1280,yres=800,edid=on"]);
+    }
     cmd.args(extra.split_whitespace());
     Ok(cmd)
 }
@@ -12249,10 +12326,11 @@ const AARCH64_SCENARIOS: &[&str] = &[
 ///
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
-/// (it ships Office's x64 setup.exe), the scenarios whose screen checks
-/// take screendumps (no framebuffer on QEMU `virt` yet: ROADMAP AR's
-/// next; those presented to memory, `presenter=test`, are twins, their
-/// input through virtio-input), and those ROADMAP AR lists as next.
+/// (it ships Office's x64 setup.exe), and those ROADMAP AR lists as
+/// next. The WSL scenarios' twins ship an aarch64 busybox's distribution
+/// (`make_wsl_rootfs`). Screen-checked twins are driven
+/// through virtio-input and, where the check takes screendumps, shown on
+/// a virtio-gpu (`aarch64_display`).
 const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
@@ -12415,7 +12493,32 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl",
     "lx_wl_maximize",
     "lx_wl_popup",
+    "lx_dyn",
+    "lx_dyn_pie",
     "lx_wl_input",
+    "safepoint_test",
+    "handover_refused",
+    "handover_unsigned_refused",
+    "handover_park_late",
+    "handover_disk",
+    "onecpu_handover",
+    "handover_idle",
+    "handover_idle_twice",
+    "handover_k32",
+    "handover_k32_twice",
+    "handover_upgrade",
+    "handover_downgrade_refused",
+    "handover_net",
+    "handover_net_self",
+    "handover_same",
+    "gui_test",
+    "start_menu",
+    "tray_test",
+    "d2d1_window",
+    "taskmgr",
+    "explorer",
+    "wsl",
+    "wsl_terminal",
     "gui_test_headless",
     "lx_fs",
     "lx_id",
@@ -12438,8 +12541,14 @@ fn is_aarch64_scenario(name: &str) -> bool {
     AARCH64_SCENARIOS.contains(&name) || twin_base(name).is_some()
 }
 
+/// Facts of the machine in an x64 scenario's expected lines and the
+/// aarch64 kernel's, which its twin expects instead: the extended state a
+/// kernel restores (handover negotiation: x86-64's XCR0 bits x87, SSE,
+/// AVX and AVX-512's; aarch64's FP/SIMD).
+const TWIN_MACHINE_FACTS: &[(&str, &str)] = &[("extended state 0xe7", "extended state 0x1")];
+
 /// Every scenario: BASE_SCENARIOS and, for each ARM64_TWINS entry, its
-/// twin `arm_<name>`.
+/// twin `arm_<name>` (its expected lines through TWIN_MACHINE_FACTS).
 fn scenarios() -> &'static [Scenario] {
     static ALL: std::sync::OnceLock<Vec<Scenario>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
@@ -12449,7 +12558,21 @@ fn scenarios() -> &'static [Scenario] {
                 panic!("ARM64_TWINS names {twin}, which is no scenario");
             };
             let name: &'static str = Box::leak(format!("arm_{twin}").into_boxed_str());
-            all.push(Scenario { name, ..*base });
+            // Its expected lines with the machine's own facts.
+            let expect: Vec<&'static str> = base
+                .expect
+                .iter()
+                .map(|&line| {
+                    TWIN_MACHINE_FACTS.iter().fold(line, |line, (x64, arm64)| {
+                        if line.contains(x64) {
+                            Box::leak(line.replace(x64, arm64).into_boxed_str())
+                        } else {
+                            line
+                        }
+                    })
+                })
+                .collect();
+            all.push(Scenario { name, expect: Vec::leak(expect), ..*base });
         }
         all
     })
@@ -12462,6 +12585,7 @@ fn arm64_programs() -> &'static [&'static str] {
     static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
         let mut all: Vec<&'static str> = USER_PROGRAMS_ARM64.to_vec();
+        all.extend(ARM64_SYSTEM_PROGRAMS);
         for s in scenarios().iter().filter(|s| twin_base(s.name).is_some()) {
             for word in s.cmdline.split_whitespace() {
                 if let Some(run) = word.strip_prefix("run=") {
@@ -15584,7 +15708,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // R8: the next build is in the signed manifest.
             "manifest: the next kernel is /boot/kernel-next of release 1",
             "handover: gala hands over to gala-next (record framing 1-1, image layout 1, \
-             extended state 0xe7, 36 section kinds; with programs)",
+             extended state 0xe7, 37 section kinds; with programs)",
             "handover: carrying 1 process(es), 10 thread(s)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala-next; the record was written by an older kernel \
@@ -15635,14 +15759,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover_k32_test: ready",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds; with programs)",
+             extended state 0xe7, 36 section kinds; with programs)",
             "handover: refused: the next kernel (gala) reads PROCESSES up to version 3; this \
              kernel writes version 4, which needs a reader of version 4",
             "handover_k32_test: slept",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
             "handover: gala-next hands over to gala (record framing 1-1, image layout 1, \
-             extended state 0xe7, 35 section kinds)",
+             extended state 0xe7, 36 section kinds)",
             "handover: generation 1 (from generation 0), record version 1",
             "handover: this kernel is gala; this build does not read the writer's name",
             "handover: skipped section 33 (unknown to this kernel)",
@@ -18755,15 +18879,72 @@ const FULL_SYSTEM_SCENARIOS: &[&str] = &[
 
 /// A scenario's kernel command line as its image has it.
 fn scenario_cmdline(s: &Scenario) -> String {
-    let screen = if scenario_boot(s.name) == Boot::Uefi { "" } else { " noscreen" };
+    let screen = match scenario_boot(s.name) {
+        Boot::Uefi => "",
+        // The firmware gives no framebuffer on `virt`: the kernel drives
+        // the virtio-gpu (`aarch64_display`).
+        Boot::UefiAarch64 if aarch64_display(s.name) => " display=virtio",
+        _ => " noscreen",
+    };
     format!("{}{screen}{}", s.cmdline, events_flag())
 }
+
+/// Whether aarch64 scenario `name` needs a screen: its screen check takes
+/// screendumps (a desktop presented to memory, `presenter=test`, needs
+/// none). QEMU `virt`'s firmware gives no framebuffer to take (and Limine
+/// refuses ramfb's: it lies in memory the firmware will not let go), so
+/// such a machine gets a virtio-gpu and its kernel `display=virtio`.
+fn aarch64_display(name: &str) -> bool {
+    scenario_boot(name) == Boot::UefiAarch64
+        && screen_check(name).is_some()
+        && scenarios()
+            .iter()
+            .find(|s| s.name == name)
+            .is_some_and(|s| !s.cmdline.contains("presenter=test"))
+}
+
+/// A boot module: (file, directory in the image).
+type Module = (&'static str, &'static str);
+
+/// glibc's files and places on x86-64 and their aarch64 counterparts, which
+/// a twin ships instead: the program interpreter where PT_INTERP names it
+/// (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`) and in
+/// the multiarch system directory, libc and libm there.
+const GLIBC_ARM64: &[(Module, Module)] = &[
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib64"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib"),
+    ),
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libc.so.6", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libm.so.6", "lib/aarch64-linux-gnu"),
+    ),
+];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
-    // A twin ships its x64 scenario's files (their ARM64 builds).
-    let name = twin_base(name).unwrap_or(name);
+    // A twin ships its x64 scenario's files (their ARM64 builds), glibc's
+    // as aarch64's (GLIBC_ARM64).
+    if let Some(base) = twin_base(name) {
+        let mut modules = extra_modules(base);
+        for m in &mut modules {
+            if let Some((_, arm)) = GLIBC_ARM64.iter().find(|(x64, _)| x64 == m) {
+                *m = *arm;
+            }
+        }
+        modules.sort_unstable();
+        modules.dedup();
+        return modules;
+    }
     let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
     if sets.is_empty() {
         sets.push(name);
@@ -18904,6 +19085,8 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
         || !matches!(scenario_boot(s.name), Boot::Bios | Boot::UefiAarch64)
         || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
+        // A screen check drives and reads its own machine.
+        || screen_check(s.name).is_some()
         || net_marker(s.name).is_some()
         || host_page_scenario(s.name)
         || disk_scenario(s.name).is_some()
@@ -24683,7 +24866,12 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
 ];
 
 fn disk_scenario(name: &str) -> Option<&'static DiskScenario> {
-    DISK_SCENARIOS.iter().find(|d| d.name == name)
+    // A twin has its x64 scenario's disk (an aarch64 scenario of its own,
+    // arm_persist, is listed by its own name).
+    DISK_SCENARIOS
+        .iter()
+        .find(|d| d.name == name)
+        .or_else(|| DISK_SCENARIOS.iter().find(|d| Some(d.name) == twin_base(name)))
 }
 
 /// disk_test reads this at the start of sector 1.

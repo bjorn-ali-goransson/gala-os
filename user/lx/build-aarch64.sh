@@ -2,7 +2,8 @@
 # Builds gala's Linux test programs that have an aarch64 form
 # (AARCH64_TESTS) for the aarch64 kernel (ROADMAP AR) into
 # user/lx/bin/aarch64: static executables (ET_EXEC), each from
-# user/lx/<name>/main.c, as build.sh builds the x86_64 ones.
+# user/lx/<name>/main.c, as build.sh builds the x86_64 ones; and the
+# glibc ones (AARCH64_GLIBC_TESTS, below) against arm64 glibc.
 #
 # The toolchain: clang (--target=aarch64-linux-musl) and ld.lld, against
 # musl 1.2.5 built here for aarch64 with that clang (its release tarball,
@@ -48,4 +49,45 @@ for t in $AARCH64_TESTS; do
 	ld.lld -static --build-id=none -s -o "$out/$t" "$musl/lib/crt1.o" "$musl/lib/crti.o" \
 		"$tmp/$t.o" "$musl/lib/libc.a" "$musl/lib/crtn.o"
 done
-echo "built $AARCH64_TESTS into $out"
+# The glibc tests (build.sh's GLIBC_TESTS that have an aarch64 form):
+# linked dynamically against Ubuntu 26.04's arm64 glibc 2.43, the one
+# the images ship (xtask's glibc-arm64), through a sysroot of the
+# release's arm64 packages from ports.ubuntu.com, each checked against
+# the SHA-256 in its signed Packages index and unpacked once into
+# target/lx-aarch64-glibc (/lib is /usr/lib, as on Ubuntu).
+AARCH64_GLIBC_TESTS="dyn_test"
+gcache=$root/target/lx-aarch64-glibc
+sysroot=$gcache/sysroot
+if [ ! -f "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
+	mkdir -p "$gcache/debs"
+	rm -rf "$sysroot"
+	mkdir -p "$sysroot"
+	while read -r path sha; do
+		deb=$gcache/debs/$(basename "$path")
+		[ -f "$deb" ] || curl -sSfL -o "$deb" "https://ports.ubuntu.com/ubuntu-ports/$path"
+		echo "$sha  $deb" | sha256sum -c - >/dev/null
+		dpkg-deb -x "$deb" "$sysroot"
+	done <<-EOF
+	pool/main/g/glibc/libc6_2.43-2ubuntu2_arm64.deb 6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0
+	pool/main/g/glibc/libc6-dev_2.43-2ubuntu2_arm64.deb 26060610ffbcb3e7260d113e659dbedfe0bacd5dd116affa3bde72431184d328
+	pool/main/g/gcc-15/libgcc-15-dev_15.2.0-16ubuntu1_arm64.deb d088c97ff459ab243eb369666dfc43b92f278556e45d72c2def4d7657d728fe4
+	pool/main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_arm64.deb 106e53a42bebdc55f253d737a818991eba5b4f22c8b1a035a4202b133ade9743
+	pool/main/l/linux/linux-libc-dev_7.0.0-14.14_arm64.deb e86f6bbf7bebdc1958241b546ca9467c35fc29f57c01d4f0336c1908ca21f2fe
+	EOF
+	ln -s usr/lib "$sysroot/lib"
+fi
+gcc_glibc="clang --target=aarch64-linux-gnu --sysroot=$sysroot --gcc-toolchain=$sysroot/usr -fuse-ld=lld -Wl,--build-id=none"
+for dir in $AARCH64_GLIBC_TESTS; do
+	libs=
+	for src in "$here/$dir"/lib*.c; do
+		[ -f "$src" ] || continue
+		lib=$(basename "$src" .c)
+		$gcc_glibc $flags -shared -fPIC -Wl,-soname,"$lib.so" -o "$out/$lib.so" "$src"
+		libs="$libs -l${lib#lib}"
+	done
+	# As build.sh: $ORIGIN, and --as-needed (libdyn2 is only dlopen()ed).
+	link="-L$out -Wl,--as-needed $libs -Wl,-rpath,\$ORIGIN -Wl,--enable-new-dtags"
+	$gcc_glibc $flags -no-pie -o "$out/$dir" "$here/$dir/main.c" $link
+	$gcc_glibc $flags -fPIE -pie -o "$out/$dir-pie" "$here/$dir/main.c" $link
+done
+echo "built $AARCH64_TESTS $AARCH64_GLIBC_TESTS into $out"

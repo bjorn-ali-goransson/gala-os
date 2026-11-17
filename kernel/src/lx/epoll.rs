@@ -7,7 +7,9 @@
 //! list: entries keyed by (fd number, open file description) as Linux
 //! keys them, each with its events, data and state. Readiness is asked
 //! of the object when epoll_wait looks (`poll::readiness`, the same as
-//! poll's), masked by the events asked plus ERR and HUP:
+//! poll's), once per open file description in a look (`look_once`: the
+//! entries of one description report alike, even with a write on another
+//! CPU between them), masked by the events asked plus ERR and HUP:
 //! - level-triggered: reported whenever ready;
 //! - EPOLLET: reported when ready and its object moved since the last
 //!   report (`poll::events_count`), or for the first time after ADD/MOD;
@@ -40,7 +42,7 @@ use super::dispatch::{Call, Result};
 use super::errno::{EBADF, EEXIST, EFAULT, EINVAL, ELOOP, ENOENT, ENOMEM, EPERM};
 use super::poll::{self, Watch};
 use super::state::{Fd, Object};
-use crate::mm::heap::{KArc, TryVec};
+use crate::mm::heap::{AllocError, KArc, TryVec};
 use crate::nt::platform;
 use crate::sync::IrqMutex;
 
@@ -165,16 +167,14 @@ impl Epoll {
     /// fd, an epoll in another's set); nothing is consumed.
     pub fn has_ready(&self) -> bool {
         let Ok(objects) = self.snapshot() else { return true };
-        let mut looks = Vec::new();
-        for (fd, desc, object) in &objects {
-            let look = (*fd, *desc, u32::from(poll::readiness(object)), poll::events_count(object));
-            if looks.try_push(look).is_err() {
-                // Without room to look: say ready (a look again is cheap).
-                return true;
-            }
-        }
+        // Without room to look: say ready (a look again is cheap).
+        let Ok(looks) = look_once(&objects, |object| {
+            (u32::from(poll::readiness(object)), poll::events_count(object))
+        }) else {
+            return true;
+        };
         let entries = self.entries.lock();
-        looks.iter().any(|&(fd, desc, ready, count)| {
+        looks.iter().any(|&(fd, desc, (ready, count))| {
             entries
                 .iter()
                 .find(|e| e.fd == fd && e.desc == desc)
@@ -195,17 +195,18 @@ impl Epoll {
             w.add_queue(&self.waiters);
         }
         let objects = self.snapshot()?;
-        let mut looks = Vec::new();
-        for (fd, desc, object) in &objects {
-            if let Some(w) = watch.as_deref_mut() {
+        if let Some(w) = watch {
+            for (_, _, object) in &objects {
                 w.add(object);
             }
-            let look = (*fd, *desc, u32::from(poll::readiness(object)), poll::events_count(object));
-            looks.try_push(look).map_err(|_| ENOMEM)?;
         }
+        let looks = look_once(&objects, |object| {
+            (u32::from(poll::readiness(object)), poll::events_count(object))
+        })
+        .map_err(|_| ENOMEM)?;
         let mut out = Vec::new();
         let mut entries = self.entries.lock();
-        for (fd, desc, ready, count) in looks {
+        for (fd, desc, (ready, count)) in looks {
             if out.len() == max {
                 break;
             }
@@ -361,6 +362,26 @@ pub fn epoll_ctl(call: &Call<'_>, epfd: u64, op: u64, fd: u64, event: u64) -> Re
 
 /// epoll_wait, epoll_pwait and epoll_pwait2's common part: `timeout`
 /// None waits for ever; `mask` is in effect while it waits.
+/// Each entry's (fd, description, readiness, events count), its object
+/// looked at once per open file description: entries that share one (a
+/// closed fd's and its dup's) report the same, as the one wakeup that
+/// readies them on Linux does. Looked at one by one, a write between two
+/// looks made the first say not ready and the second ready (epoll_test's
+/// "woken by another thread's write" on two CPUs).
+fn look_once<O, T: Copy>(
+    objects: &[(u64, usize, O)],
+    mut look: impl FnMut(&O) -> T,
+) -> core::result::Result<Vec<(u64, usize, T)>, AllocError> {
+    let mut looks: Vec<(u64, usize, T)> = Vec::new();
+    looks.try_reserve_exact(objects.len()).map_err(|_| AllocError)?;
+    for (fd, desc, object) in objects {
+        let seen = looks.iter().find(|l| l.1 == *desc).map(|l| l.2);
+        let value = seen.unwrap_or_else(|| look(object));
+        looks.try_push((*fd, *desc, value))?;
+    }
+    Ok(looks)
+}
+
 fn wait_events(
     call: &Call<'_>,
     epfd: u64,
@@ -464,6 +485,22 @@ pub fn dump(pid: u64, fd: usize, ep: &Epoll) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entries_of_one_description_agree_within_a_look() {
+        // Entries 1 and 3 share description 7 (a closed fd's and its
+        // dup's); the object changes between looks (a write on another
+        // CPU): each description is looked at once, so both say the same.
+        let objects = [(4u64, 7usize, ()), (5, 8, ()), (6, 7, ())];
+        let mut calls = 0;
+        let looks = super::look_once(&objects, |_| {
+            calls += 1;
+            calls
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(looks, [(4, 7, 1), (5, 8, 2), (6, 7, 1)]);
+    }
+
     use super::*;
 
     const OUT: u32 = 0x4;
