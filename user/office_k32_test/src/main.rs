@@ -29,6 +29,33 @@
 //!   MAP_COMPOSITE and MAP_PRECOMPOSED decompose and compose (A with an
 //!   acute, U+00C1; Microsoft's example: A and U+0308); a buffer of 0 asks
 //!   the size, one too small ERROR_INSUFFICIENT_BUFFER.
+//! - NormalizeString and IsNormalizedString: the measured rows of all
+//!   four forms (NFC, NFD, NFKC, NFKD) -- a precomposed letter and the
+//!   same decomposed, marks put in canonical order, a compatibility
+//!   ligature and a circled digit, Hangul (arithmetic, not tabled), a
+//!   singleton, a surrogate pair kept as it is; IsNormalizedString TRUE
+//!   exactly where the result is the source. A destination of 0 or none
+//!   at all measures (max(min(factor * n, 64), n + n / 8), the factor 3
+//!   for NFC and NFD and 18 for the compatibility forms); one too small
+//!   is a negative return, never smaller in magnitude than the answer,
+//!   with ERROR_INSUFFICIENT_BUFFER. -1 counts and writes the NUL, a
+//!   length of 0 is nothing to do with no error; an unknown form, no
+//!   source, a length below -1, a negative destination size and a
+//!   destination that is the source are ERROR_INVALID_PARAMETER; an
+//!   unpaired surrogate is -1 with ERROR_NO_UNICODE_TRANSLATION.
+//! - EnumSystemLanguageGroupsW: the 17 groups Windows gives, in order,
+//!   with their ids as lowercase hex text and their English names, the
+//!   installed flag on every row and the caller's parameter unchanged;
+//!   no flags, LGRPID_INSTALLED and LGRPID_SUPPORTED all give the same
+//!   rows, other flags ERROR_INVALID_FLAGS, no callback
+//!   ERROR_INVALID_PARAMETER; a callback that answers FALSE stops the
+//!   enumeration and the call still returns TRUE.
+//! - EnumUILanguagesW: the system's own language is in every list, as an
+//!   id ("0409") or, with MUI_LANGUAGE_NAME, a name ("en-US"); the flags
+//!   Windows accepts are 0, 4, 8, 0x20, 0x24, 0x28, 0x40 and 0x80, and
+//!   an id and a name together (12), 0x20 and 0x40 together, and bits
+//!   outside them are ERROR_INVALID_FLAGS; no callback
+//!   ERROR_INVALID_PARAMETER; a callback that answers FALSE stops it.
 //! - GetStringTypeExA: CT_CTYPE1 of `aA1 !` and the NUL that -1 counts.
 //! - IsBadReadPtr/IsBadWritePtr/IsBadCodePtr/IsBadStringPtrA/W: a size of
 //!   0 is never bad; NULL, 0xdeadbeef and the stack's reserved part are;
@@ -164,6 +191,10 @@ unsafe extern "system" {
     // The functions under test.
     fn CompareStringA(lcid: u32, flags: u32, a: *const u8, n: i32, b: *const u8, m: i32) -> i32;
     fn FoldStringW(flags: u32, src: *const u16, n: i32, dst: *mut u16, size: i32) -> i32;
+    fn NormalizeString(form: i32, src: *const u16, n: i32, dst: *mut u16, size: i32) -> i32;
+    fn IsNormalizedString(form: i32, src: *const u16, n: i32) -> i32;
+    fn EnumSystemLanguageGroupsW(f: Option<GroupProcW>, flags: u32, param: isize) -> i32;
+    fn EnumUILanguagesW(f: Option<UiLanguageProcW>, flags: u32, param: isize) -> i32;
     fn GetStringTypeExA(lcid: u32, kind: u32, s: *const u8, n: i32, out: *mut u16) -> i32;
     fn IsBadReadPtr(p: *const c_void, n: usize) -> i32;
     fn IsBadWritePtr(p: *mut c_void, n: usize) -> i32;
@@ -256,6 +287,17 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_BUSY: u32 = 170;
 const ERROR_INVALID_FLAGS: u32 = 1004;
+const ERROR_NO_UNICODE_TRANSLATION: u32 = 1113;
+const LGRPID_INSTALLED: u32 = 1;
+const LGRPID_SUPPORTED: u32 = 2;
+const MUI_LANGUAGE_ID: u32 = 4;
+const MUI_LANGUAGE_NAME: u32 = 8;
+
+/// EnumSystemLanguageGroupsW's callback: the group, its id as text, its
+/// English name, the flags of the row and the caller's parameter.
+type GroupProcW = unsafe extern "system" fn(u32, *const u16, *const u16, u32, isize) -> i32;
+/// EnumUILanguagesW's callback: the language and the caller's parameter.
+type UiLanguageProcW = unsafe extern "system" fn(*const u16, isize) -> i32;
 
 // ---- Output and checks ---------------------------------------------------
 
@@ -1224,6 +1266,322 @@ fn currency_format(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+// ---- NormalizeString, IsNormalizedString ------------------------------------
+
+const NFC: i32 = 1;
+const NFD: i32 = 2;
+const NFKC: i32 = 5;
+const NFKD: i32 = 6;
+
+/// A row of `NORMALIZE`: the source, the form, and what Windows makes of
+/// it. IsNormalizedString is TRUE exactly where the result is the source.
+type Normalized = (&'static [u16], i32, &'static [u16]);
+
+/// Measured on Windows 11 before gala had the call.
+#[rustfmt::skip]
+const NORMALIZE: &[Normalized] = &[
+    // Plain ASCII is its own normal form in every form.
+    (&[0x0061, 0x0062, 0x0063], NFC,  &[0x0061, 0x0062, 0x0063]),
+    (&[0x0061, 0x0062, 0x0063], NFD,  &[0x0061, 0x0062, 0x0063]),
+    (&[0x0061, 0x0062, 0x0063], NFKC, &[0x0061, 0x0062, 0x0063]),
+    (&[0x0061, 0x0062, 0x0063], NFKD, &[0x0061, 0x0062, 0x0063]),
+    // A precomposed letter, and the same letter decomposed.
+    (&[0x00e9], NFC,  &[0x00e9]),
+    (&[0x00e9], NFD,  &[0x0065, 0x0301]),
+    (&[0x00e9], NFKC, &[0x00e9]),
+    (&[0x00e9], NFKD, &[0x0065, 0x0301]),
+    (&[0x0065, 0x0301], NFC,  &[0x00e9]),
+    (&[0x0065, 0x0301], NFD,  &[0x0065, 0x0301]),
+    (&[0x0065, 0x0301], NFKC, &[0x00e9]),
+    (&[0x0065, 0x0301], NFKD, &[0x0065, 0x0301]),
+    // Marks out of canonical order: cedilla (202) before acute (230).
+    (&[0x0063, 0x0301, 0x0327], NFC, &[0x1e09]),
+    (&[0x0063, 0x0301, 0x0327], NFD, &[0x0063, 0x0327, 0x0301]),
+    // A compatibility ligature: canonically itself, else its letters.
+    (&[0xfb01], NFC,  &[0xfb01]),
+    (&[0xfb01], NFKC, &[0x0066, 0x0069]),
+    (&[0xfb01], NFKD, &[0x0066, 0x0069]),
+    // A circled digit, and a no-break space.
+    (&[0x2460], NFC,  &[0x2460]),
+    (&[0x2460], NFKC, &[0x0031]),
+    (&[0x00a0], NFKC, &[0x0020]),
+    // Hangul, which is arithmetic rather than tabled.
+    (&[0xac01], NFC, &[0xac01]),
+    (&[0xac01], NFD, &[0x1100, 0x1161, 0x11a8]),
+    (&[0x1100, 0x1161, 0x11a8], NFC, &[0xac01]),
+    (&[0x1100, 0x1161, 0x11a8], NFD, &[0x1100, 0x1161, 0x11a8]),
+    // A singleton decomposition (the angstrom sign).
+    (&[0x212b], NFC, &[0x00c5]),
+    // A surrogate pair has no decomposition and is kept.
+    (&[0xd83d, 0xde00], NFC, &[0xd83d, 0xde00]),
+];
+
+/// A row of `ESTIMATE`: the source length in units, the form, and what
+/// the call answers with no destination. Windows' estimate is
+/// max(min(factor * n, 64), n + n / 8), the factor 3 for NFC and NFD and
+/// 18 for NFKC and NFKD; these rows are the measured ones.
+#[rustfmt::skip]
+const ESTIMATE: &[(i32, i32, i32)] = &[
+    (1, NFC, 3), (3, NFC, 9), (16, NFC, 48), (21, NFC, 63), (22, NFC, 64),
+    (57, NFC, 64), (58, NFC, 65), (64, NFC, 72), (100, NFC, 112),
+    (1, NFKC, 18), (3, NFKC, 54), (4, NFKC, 64), (57, NFKD, 64),
+    (58, NFKD, 65), (100, NFKD, 112),
+];
+
+fn normalize(c: &mut Checks) -> Result<(), u32> {
+    let mut buf = [0u16; 128];
+    for &(src, form, want) in NORMALIZE {
+        // SAFETY: a source and a destination of the lengths given.
+        let n =
+            unsafe { NormalizeString(form, src.as_ptr(), src.len() as i32, buf.as_mut_ptr(), 128) };
+        c.eq(n as u64, want.len() as u64)?;
+        let same = n > 0 && buf[..n as usize] == *want;
+        c.ok(same, u64::from(buf[0]))?;
+        // SAFETY: the same source.
+        let is = unsafe { IsNormalizedString(form, src.as_ptr(), src.len() as i32) };
+        c.eq(is as u64, u64::from(want == src))?;
+        // A destination one unit short: a negative return that is never
+        // smaller in magnitude than the answer, and
+        // ERROR_INSUFFICIENT_BUFFER.
+        if want.len() > 1 {
+            // SAFETY: a destination of n - 1 units.
+            let short = unsafe {
+                NormalizeString(form, src.as_ptr(), src.len() as i32, buf.as_mut_ptr(), n - 1)
+            };
+            // SAFETY: plain call.
+            let err = unsafe { GetLastError() };
+            c.ok(short < 0 && -short >= n && err == ERROR_INSUFFICIENT_BUFFER, short as u64)?;
+        }
+    }
+    // What the call answers with no destination at all.
+    let long = [0x00e9u16; 100];
+    for &(n, form, want) in ESTIMATE {
+        // SAFETY: a source of n units and no destination.
+        let got = unsafe { NormalizeString(form, long.as_ptr(), n, null_mut(), 0) };
+        c.eq(got as u64, want as u64)?;
+    }
+    // A NULL destination with a size is a measurement too.
+    let ab = w::<3>("ab");
+    // SAFETY: no destination, with a size the call must ignore.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), 2, null_mut(), 4) };
+    c.eq(got as u64, 6)?;
+    // -1 counts the NUL and writes it.
+    // SAFETY: a NUL-terminated source.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), -1, buf.as_mut_ptr(), 128) };
+    c.eq(got as u64, 3)?;
+    c.eq(u64::from(buf[2]), 0)?;
+    // SAFETY: a NUL-terminated source.
+    c.eq(unsafe { IsNormalizedString(NFC, ab.as_ptr(), -1) } as u64, 1)?;
+    // An empty source is nothing to do, with no error.
+    // SAFETY: plain call.
+    unsafe { SetLastError(0) };
+    // SAFETY: a source of no units.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), 0, buf.as_mut_ptr(), 128) };
+    // SAFETY: plain call.
+    c.ok(got == 0 && unsafe { GetLastError() } == 0, got as u64)?;
+    // SAFETY: a source of no units.
+    c.eq(unsafe { IsNormalizedString(NFC, ab.as_ptr(), 0) } as u64, 1)?;
+    // Arguments Windows rejects: an unknown form, no source, a length
+    // below -1, a negative destination size, and a destination that is
+    // the source.
+    for form in [0, 3, 4, 7, -1] {
+        // SAFETY: a valid source and destination, with a bad form.
+        let got = unsafe { NormalizeString(form, ab.as_ptr(), 2, buf.as_mut_ptr(), 128) };
+        c.fails(got.into(), ERROR_INVALID_PARAMETER)?;
+        // SAFETY: the same.
+        let is = unsafe { IsNormalizedString(form, ab.as_ptr(), 2) };
+        c.fails(is.into(), ERROR_INVALID_PARAMETER)?;
+    }
+    // SAFETY: no source.
+    let got = unsafe { NormalizeString(NFC, null(), 2, buf.as_mut_ptr(), 128) };
+    c.fails(got.into(), ERROR_INVALID_PARAMETER)?;
+    // SAFETY: no source.
+    c.fails(unsafe { IsNormalizedString(NFC, null(), 2) }.into(), ERROR_INVALID_PARAMETER)?;
+    // SAFETY: a valid source, with a length no string has.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), -2, buf.as_mut_ptr(), 128) };
+    c.fails(got.into(), ERROR_INVALID_PARAMETER)?;
+    // SAFETY: a valid source, with a negative destination size.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), 2, buf.as_mut_ptr(), -1) };
+    c.fails(got.into(), ERROR_INVALID_PARAMETER)?;
+    // SAFETY: the source as its own destination, which Windows rejects.
+    let got = unsafe { NormalizeString(NFC, ab.as_ptr(), 2, ab.as_ptr().cast_mut(), 2) };
+    c.fails(got.into(), ERROR_INVALID_PARAMETER)?;
+    // Text that is not well formed: an unpaired surrogate.
+    let lone = [0xd83du16, 0x0061];
+    // SAFETY: a source of two units.
+    let got = unsafe { NormalizeString(NFC, lone.as_ptr(), 2, buf.as_mut_ptr(), 128) };
+    // SAFETY: plain call.
+    let err = unsafe { GetLastError() };
+    c.ok(got == -1 && err == ERROR_NO_UNICODE_TRANSLATION, got as u64)?;
+    // SAFETY: the same source.
+    let is = unsafe { IsNormalizedString(NFC, lone.as_ptr(), 2) };
+    c.fails(is.into(), ERROR_NO_UNICODE_TRANSLATION)?;
+    Ok(())
+}
+
+// ---- EnumSystemLanguageGroupsW, EnumUILanguagesW ----------------------------
+
+/// The language groups Windows enumerates, in the order it gives them:
+/// the id, the id as text, and the English name.
+#[rustfmt::skip]
+const LANGUAGE_GROUPS: &[(u32, &str, &str)] = &[
+    (0x01, "1", "Western Europe and United States"),
+    (0x02, "2", "Central Europe"),
+    (0x03, "3", "Baltic"),
+    (0x04, "4", "Greek"),
+    (0x05, "5", "Cyrillic"),
+    (0x06, "6", "Turkic"),
+    (0x07, "7", "Japanese"),
+    (0x08, "8", "Korean"),
+    (0x09, "9", "Traditional Chinese"),
+    (0x0a, "a", "Simplified Chinese"),
+    (0x0b, "b", "Thai"),
+    (0x0c, "c", "Hebrew"),
+    (0x0d, "d", "Arabic"),
+    (0x0e, "e", "Vietnamese"),
+    (0x0f, "f", "Indic"),
+    (0x10, "10", "Georgian"),
+    (0x11, "11", "Armenian"),
+];
+
+/// How many rows the callbacks below have seen, the first row that did
+/// not match (0 for none), and the row the callback stops after (0 for
+/// none). One thread enumerates at a time.
+static SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static WRONG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STOP_AFTER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Whether a row named en-US, or its id 0x409, has come.
+static FOUND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn counters(stop_after: u32) {
+    use core::sync::atomic::Ordering::SeqCst;
+    SEEN.store(0, SeqCst);
+    WRONG.store(0, SeqCst);
+    FOUND.store(0, SeqCst);
+    STOP_AFTER.store(stop_after, SeqCst);
+}
+
+/// Whether `text`, NUL-terminated, is `want`.
+fn is_text(text: *const u16, want: &str) -> bool {
+    if text.is_null() {
+        return false;
+    }
+    for (i, b) in want.bytes().enumerate() {
+        // SAFETY: a NUL-terminated string, read up to its NUL.
+        if unsafe { *text.add(i) } != u16::from(b) {
+            return false;
+        }
+    }
+    // SAFETY: the unit after the text, inside the same string.
+    unsafe { *text.add(want.len()) == 0 }
+}
+
+unsafe extern "system" fn group_row(
+    id: u32,
+    id_text: *const u16,
+    name: *const u16,
+    flags: u32,
+    param: isize,
+) -> i32 {
+    use core::sync::atomic::Ordering::SeqCst;
+    let row = SEEN.fetch_add(1, SeqCst);
+    let want = LANGUAGE_GROUPS.get(row as usize);
+    let ok = want.is_some_and(|&(want_id, want_text, want_name)| {
+        id == want_id
+            && is_text(id_text, want_text)
+            && is_text(name, want_name)
+            && flags == LGRPID_INSTALLED
+            && param == 0x1234
+    });
+    if !ok && WRONG.load(SeqCst) == 0 {
+        WRONG.store(row + 1, SeqCst);
+    }
+    let stop = STOP_AFTER.load(SeqCst);
+    i32::from(stop == 0 || row + 1 < stop)
+}
+
+unsafe extern "system" fn language_row(name: *const u16, param: isize) -> i32 {
+    use core::sync::atomic::Ordering::SeqCst;
+    let row = SEEN.fetch_add(1, SeqCst);
+    if is_text(name, "en-US") || is_text(name, "0409") {
+        FOUND.store(1, SeqCst);
+    }
+    if param != 0x1234 && WRONG.load(SeqCst) == 0 {
+        WRONG.store(row + 1, SeqCst);
+    }
+    let stop = STOP_AFTER.load(SeqCst);
+    i32::from(stop == 0 || row + 1 < stop)
+}
+
+fn language_groups(c: &mut Checks) -> Result<(), u32> {
+    use core::sync::atomic::Ordering::SeqCst;
+    // The installed groups, the supported groups and no flags at all all
+    // give the same 17 rows, with the installed flag on every one.
+    for flags in [0, LGRPID_INSTALLED, LGRPID_SUPPORTED] {
+        counters(0);
+        // SAFETY: plain call with a callback of the right shape.
+        let ok = unsafe { EnumSystemLanguageGroupsW(Some(group_row), flags, 0x1234) };
+        c.eq(ok as u64, 1)?;
+        c.eq(u64::from(SEEN.load(SeqCst)), LANGUAGE_GROUPS.len() as u64)?;
+        c.eq(u64::from(WRONG.load(SeqCst)), 0)?;
+    }
+    // A callback that answers FALSE stops the enumeration, and the call
+    // still returns TRUE.
+    counters(2);
+    // SAFETY: plain call.
+    let ok = unsafe { EnumSystemLanguageGroupsW(Some(group_row), LGRPID_SUPPORTED, 0x1234) };
+    c.eq(ok as u64, 1)?;
+    c.eq(u64::from(SEEN.load(SeqCst)), 2)?;
+    c.eq(u64::from(WRONG.load(SeqCst)), 0)?;
+    // Flags Windows rejects, and no callback.
+    for flags in [3, 4, 0x8000] {
+        counters(0);
+        // SAFETY: plain call.
+        let ok = unsafe { EnumSystemLanguageGroupsW(Some(group_row), flags, 0) };
+        c.fails(ok.into(), ERROR_INVALID_FLAGS)?;
+        c.eq(u64::from(SEEN.load(SeqCst)), 0)?;
+    }
+    // SAFETY: plain call with no callback.
+    let ok = unsafe { EnumSystemLanguageGroupsW(None, LGRPID_INSTALLED, 0) };
+    c.fails(ok.into(), ERROR_INVALID_PARAMETER)?;
+    Ok(())
+}
+
+fn ui_languages(c: &mut Checks) -> Result<(), u32> {
+    use core::sync::atomic::Ordering::SeqCst;
+    // The flags Windows accepts: an id or a name, and the two pairs that
+    // pick which languages count. Every list has the system's own
+    // language in it, as an id ("0409") or a name ("en-US").
+    for flags in [0, MUI_LANGUAGE_ID, MUI_LANGUAGE_NAME, 0x20, 0x24, 0x28, 0x40, 0x80] {
+        counters(0);
+        // SAFETY: plain call with a callback of the right shape.
+        let ok = unsafe { EnumUILanguagesW(Some(language_row), flags, 0x1234) };
+        c.eq(ok as u64, 1)?;
+        c.ok(SEEN.load(SeqCst) >= 1, u64::from(SEEN.load(SeqCst)))?;
+        c.eq(u64::from(WRONG.load(SeqCst)), 0)?;
+        c.eq(u64::from(FOUND.load(SeqCst)), 1)?;
+    }
+    // A callback that answers FALSE stops the enumeration.
+    counters(1);
+    // SAFETY: plain call.
+    let ok = unsafe { EnumUILanguagesW(Some(language_row), MUI_LANGUAGE_NAME, 0x1234) };
+    c.eq(ok as u64, 1)?;
+    c.eq(u64::from(SEEN.load(SeqCst)), 1)?;
+    // An id and a name together, both of the installed/licensed pair
+    // together, and bits that mean nothing here: ERROR_INVALID_FLAGS.
+    for flags in [MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME, 0x60, 0x100, 0x200, 0x400, 0x800, 0x8000] {
+        counters(0);
+        // SAFETY: plain call.
+        let ok = unsafe { EnumUILanguagesW(Some(language_row), flags, 0) };
+        c.fails(ok.into(), ERROR_INVALID_FLAGS)?;
+        c.eq(u64::from(SEEN.load(SeqCst)), 0)?;
+    }
+    // SAFETY: plain call with no callback.
+    let ok = unsafe { EnumUILanguagesW(None, 0, 0) };
+    c.fails(ok.into(), ERROR_INVALID_PARAMETER)?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     compare_a(&mut c)?;
@@ -1235,6 +1593,9 @@ fn run() -> Result<(), u32> {
     ideal(&mut c)?;
     number_format(&mut c)?;
     currency_format(&mut c)?;
+    normalize(&mut c)?;
+    language_groups(&mut c)?;
+    ui_languages(&mut c)?;
     win_exec(&mut c)?;
     Ok(())
 }

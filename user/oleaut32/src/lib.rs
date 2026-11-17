@@ -1,8 +1,8 @@
 //! gala's oleaut32.dll: OLE Automation's data types, as documented:
 //! BSTRs (a 4-byte byte length before the text, a NUL after it), VARIANTs
 //! (clearing, copying, converting between numbers, booleans and strings
-//! in the invariant/en-US format), SAFEARRAYs (safearray.rs) and
-//! VarCyFromDec. gala has no registry, so no type library is registered
+//! in the invariant/en-US format), SAFEARRAYs (safearray.rs),
+//! VarCyFromDec and this process's running objects (active.rs). gala has no registry, so no type library is registered
 //! (TYPE_E_LIBNOTREGISTERED) and loading .tlb files is not there yet
 //! (recorded). Exports have the standard ordinals (build.rs).
 
@@ -12,6 +12,7 @@
 
 use core::ffi::c_void;
 
+mod active;
 mod arith;
 mod conversions;
 mod date;
@@ -79,6 +80,8 @@ unsafe extern "system" {
 )]
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;

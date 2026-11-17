@@ -1,7 +1,7 @@
 //! The rest of kernel32's national-language functions (ROADMAP OF: what
-//! Office's apps import once each): FoldStringW (Unicode normalization
-//! from the tables `tools/nls_tables.py` writes), number and currency
-//! formats (GetNumberFormat*, GetCurrencyFormat*), ResolveLocaleName and
+//! Office's apps import once each): FoldStringW and NormalizeString with
+//! IsNormalizedString (Unicode normalization from the tables
+//! `tools/nls_tables.py` writes), number and currency formats (GetNumberFormat*, GetCurrencyFormat*), ResolveLocaleName and
 //! the ANSI CompareStringA, GetStringTypeA and GetStringTypeExA. gala has
 //! one locale, en-US (locale.rs); its ANSI code page is UTF-8.
 
@@ -332,18 +332,42 @@ fn composite(a: u32, b: u32) -> Option<u32> {
     Some(tables::COMPOSE[i].2.into())
 }
 
-/// Where FoldStringW's result goes: counted always, written while it fits.
-struct Out {
+/// Where a normalized result goes: counted always, written while it
+/// fits. With `same_as` set nothing is written and each unit is compared
+/// with the text there instead, which is all IsNormalizedString needs.
+struct Out<'a> {
     dst: *mut u16,
     size: usize,
     n: usize,
+    same_as: Option<&'a [u16]>,
+    same: bool,
 }
 
-impl Out {
+impl Out<'_> {
+    /// A sink that writes into the caller's buffer.
+    fn writing(dst: *mut u16, size: usize) -> Self {
+        Self { dst, size, n: 0, same_as: None, same: true }
+    }
+
+    /// A sink that compares with `text` and writes nothing.
+    fn comparing(text: &[u16]) -> Out<'_> {
+        Out { dst: core::ptr::null_mut(), size: 0, n: 0, same_as: Some(text), same: true }
+    }
+
+    /// Whether every unit so far was the one `same_as` has, and there
+    /// were exactly as many.
+    fn unchanged(&self) -> bool {
+        self.same && self.same_as.is_some_and(|text| text.len() == self.n)
+    }
+
     fn unit(&mut self, u: u16) {
-        if self.n < self.size {
-            // SAFETY: inside the caller's buffer of `size` units.
-            unsafe { *self.dst.add(self.n) = u };
+        match self.same_as {
+            Some(text) => self.same &= text.get(self.n) == Some(&u),
+            None if self.n < self.size => {
+                // SAFETY: inside the caller's buffer of `size` units.
+                unsafe { *self.dst.add(self.n) = u };
+            }
+            None => {}
         }
         self.n += 1;
     }
@@ -366,19 +390,28 @@ impl Out {
 /// a longer run is passed on uncomposed.
 const RUN: usize = 32;
 
-/// Composes runs of a starter and its marks (canonical order, then
-/// Unicode's canonical composition) and passes them on.
+/// Puts runs of a starter and its marks in canonical order, composes
+/// them where `compose` is set (Unicode's canonical composition), and
+/// passes them on. `what` names the caller in the ledger, since a run
+/// longer than `RUN` is a limit of gala's.
 struct Composer {
     run: [u32; RUN],
     len: usize,
+    compose: bool,
+    what: &'static [u8],
 }
 
 impl Composer {
-    fn push(&mut self, c: u32, out: &mut Out) {
+    fn new(compose: bool, what: &'static [u8]) -> Self {
+        Self { run: [0; RUN], len: 0, compose, what }
+    }
+
+    fn push(&mut self, c: u32, out: &mut Out<'_>) {
         if ccc(c) == 0 {
             // Two starters: Hangul's L+V and LV+T, and the few pairs of
             // starters that compose.
-            if self.len == 1
+            if self.compose
+                && self.len == 1
                 && ccc(self.run[0]) == 0
                 && let Some(x) = composite(self.run[0], c)
             {
@@ -387,14 +420,14 @@ impl Composer {
             }
             self.flush(out);
         } else if self.len == RUN {
-            unsupported(b"kernel32.dll!FoldStringW(combining run)", RUN as u64);
+            unsupported(self.what, RUN as u64);
             self.flush(out);
         }
         self.run[self.len] = c;
         self.len += 1;
     }
 
-    fn flush(&mut self, out: &mut Out) {
+    fn flush(&mut self, out: &mut Out<'_>) {
         let run = &mut self.run[..self.len];
         // Canonical order: the marks after a starter by combining class
         // (a stable insertion sort).
@@ -407,7 +440,7 @@ impl Composer {
             }
         }
         let mut kept = 0;
-        if first == 1 {
+        if first == 1 && self.compose {
             let mut starter = run[0];
             let mut last_cc: Option<u8> = None;
             let mut rest = [0u32; RUN];
@@ -436,6 +469,26 @@ impl Composer {
     }
 }
 
+/// Unicode's full decomposition of `c`, canonical or (with `compat`)
+/// compatibility, one character at a time; `c` itself where it has none.
+/// Hangul syllables are arithmetic rather than tabled (chapter 3.12).
+fn decompose(c: u32, compat: bool, mut emit: impl FnMut(u32)) {
+    if let Some(units) = decomposition(c, compat) {
+        for d in char::decode_utf16(units.iter().copied()) {
+            emit(d.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from));
+        }
+    } else if (S_BASE..S_BASE + S_COUNT).contains(&c) {
+        let s = c - S_BASE;
+        emit(L_BASE + s / N_COUNT);
+        emit(V_BASE + (s % N_COUNT) / T_COUNT);
+        if !s.is_multiple_of(T_COUNT) {
+            emit(T_BASE + s % T_COUNT);
+        }
+    } else {
+        emit(c);
+    }
+}
+
 /// The digit MAP_FOLDDIGITS makes of `c`, if it is one.
 fn ascii_digit(c: u32) -> Option<u32> {
     let i = DIGITS.partition_point(|d| d.0 <= c).checked_sub(1)?;
@@ -446,7 +499,7 @@ fn ascii_digit(c: u32) -> Option<u32> {
 
 /// The steps after decomposition: digits, ligatures, then composition
 /// or output.
-fn fold_tail(flags: u32, c: u32, composer: &mut Option<Composer>, out: &mut Out) {
+fn fold_tail(flags: u32, c: u32, composer: &mut Option<Composer>, out: &mut Out<'_>) {
     let c = if flags & MAP_FOLDDIGITS != 0 { ascii_digit(c).unwrap_or(c) } else { c };
     let mut emit = |c: u32| match composer {
         Some(composer) => composer.push(c, out),
@@ -497,33 +550,23 @@ pub extern "system" fn FoldStringW(
     } else {
         units(src, n)
     };
-    let mut out = Out { dst, size: size as usize, n: 0 };
+    let mut out = Out::writing(dst, size as usize);
     let mut composer = (flags & (MAP_FOLDCZONE | MAP_PRECOMPOSED) != 0)
-        .then_some(Composer { run: [0; RUN], len: 0 });
+        .then(|| Composer::new(true, b"kernel32.dll!FoldStringW(combining run)"));
     for c in char::decode_utf16(text.iter().copied()) {
         let c = c.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from);
-        let decomposed = if flags & MAP_FOLDCZONE != 0 {
-            decomposition(c, true)
-        } else if flags & MAP_COMPOSITE != 0 {
-            decomposition(c, false)
-        } else {
-            None
+        // MAP_FOLDCZONE is NFKC and MAP_COMPOSITE the canonical
+        // decomposition; MAP_PRECOMPOSED composes what it is given.
+        let compat = match flags {
+            f if f & MAP_FOLDCZONE != 0 => Some(true),
+            f if f & MAP_COMPOSITE != 0 => Some(false),
+            _ => None,
         };
-        let hangul = flags & MAP_COMPOSITE != 0 && (S_BASE..S_BASE + S_COUNT).contains(&c);
-        if let Some(units) = decomposed {
-            for d in char::decode_utf16(units.iter().copied()) {
-                let d = d.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from);
-                fold_tail(flags, d, &mut composer, &mut out);
+        match compat {
+            Some(compat) => {
+                decompose(c, compat, |d| fold_tail(flags, d, &mut composer, &mut out));
             }
-        } else if hangul {
-            let s = c - S_BASE;
-            fold_tail(flags, L_BASE + s / N_COUNT, &mut composer, &mut out);
-            fold_tail(flags, V_BASE + (s % N_COUNT) / T_COUNT, &mut composer, &mut out);
-            if !s.is_multiple_of(T_COUNT) {
-                fold_tail(flags, T_BASE + s % T_COUNT, &mut composer, &mut out);
-            }
-        } else {
-            fold_tail(flags, c, &mut composer, &mut out);
+            None => fold_tail(flags, c, &mut composer, &mut out),
         }
     }
     if let Some(composer) = &mut composer {
@@ -533,6 +576,142 @@ pub extern "system" fn FoldStringW(
         return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
     }
     out.n as i32
+}
+
+// ---- NormalizeString ---------------------------------------------------------
+
+const ERROR_NO_UNICODE_TRANSLATION: u32 = 1113;
+
+/// Unicode's four normalization forms, as NORM_FORM names them.
+const NORM_NFC: i32 = 1;
+const NORM_NFD: i32 = 2;
+const NORM_NFKC: i32 = 5;
+const NORM_NFKD: i32 = 6;
+
+/// What a form asks for: the compatibility decomposition rather than the
+/// canonical one, and whether to compose afterwards. None for a form
+/// there is no such thing as.
+fn form_steps(form: i32) -> Option<(bool, bool)> {
+    match form {
+        NORM_NFC => Some((false, true)),
+        NORM_NFD => Some((false, false)),
+        NORM_NFKC => Some((true, true)),
+        NORM_NFKD => Some((true, false)),
+        _ => None,
+    }
+}
+
+/// What Windows answers when asked for the size of a normalized result
+/// without doing the work: three times the source for the canonical
+/// forms and eighteen times for the compatibility ones, but never more
+/// than 64 and never less than the source and an eighth (measured on
+/// Windows 11). It is an estimate, not the answer: callers are expected
+/// to make the call and grow their buffer if it does not fit.
+fn estimate(compat: bool, n: usize) -> i32 {
+    let factor = if compat { 18 } else { 3 };
+    let guess = n.saturating_mul(factor).min(64).max(n + n / 8);
+    i32::try_from(guess).unwrap_or(i32::MAX)
+}
+
+/// The source NormalizeString and IsNormalizedString were given, with
+/// the arguments they both reject: a form there is no such thing as, no
+/// source, and a length no string has. A length of -1 is a
+/// NUL-terminated string whose NUL is part of the text, as Windows
+/// counts and writes it.
+fn normalize_source(form: i32, src: *const u16, n: i32) -> Result<&'static [u16], u32> {
+    if form_steps(form).is_none() || src.is_null() || n < -1 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    if n < 0 {
+        // SAFETY: the caller's NUL-terminated string, its NUL included.
+        return Ok(unsafe { core::slice::from_raw_parts(src, wide_len(src) + 1) });
+    }
+    Ok(units(src, n))
+}
+
+/// Whether the text is well formed UTF-16. Text that is not has no
+/// normal form, and Windows says so rather than normalizing what it can
+/// -- but only when asked to normalize: asked for a size it answers with
+/// its estimate either way.
+fn well_formed(text: &[u16]) -> bool {
+    char::decode_utf16(text.iter().copied()).all(|c| c.is_ok())
+}
+
+/// Normalizes `text` into `out`, which either writes or compares.
+fn normalize_into(form: i32, text: &[u16], out: &mut Out<'_>) {
+    let Some((compat, compose)) = form_steps(form) else { return };
+    let mut composer = Composer::new(compose, b"kernel32.dll!NormalizeString(combining run)");
+    for c in char::decode_utf16(text.iter().copied()) {
+        let c = c.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from);
+        decompose(c, compat, |d| composer.push(d, out));
+    }
+    composer.flush(out);
+}
+
+/// NormalizeString(form, src, srclen, dst, dstlen): the text in one of
+/// Unicode's four normalization forms, from the same tables FoldStringW
+/// uses. A destination of 0 units, or none at all, answers with an
+/// estimate of the size (`estimate`) and leaves the last error alone; a
+/// destination too small is a negative return with
+/// ERROR_INSUFFICIENT_BUFFER, where gala gives the size it needs and
+/// Windows a guess of its own (never smaller than what is needed, which
+/// is all a caller can rely on). A srclen of -1 counts the NUL and
+/// writes it; 0 is nothing to do, with no error.
+/// ERROR_INVALID_PARAMETER for a form there is no such thing as, no
+/// source, a srclen below -1, a negative dstlen or a destination that is
+/// the source; text that is not well formed is -1 with
+/// ERROR_NO_UNICODE_TRANSLATION.
+#[unsafe(no_mangle)]
+pub extern "system" fn NormalizeString(
+    form: i32,
+    src: *const u16,
+    n: i32,
+    dst: *mut u16,
+    size: i32,
+) -> i32 {
+    if size < 0 || (!dst.is_null() && src == dst.cast_const()) {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let text = match normalize_source(form, src, n) {
+        Ok(text) => text,
+        Err(error) => return fail_with(error, 0),
+    };
+    if text.is_empty() {
+        return 0;
+    }
+    if dst.is_null() || size == 0 {
+        let compat = form_steps(form).is_some_and(|(compat, _)| compat);
+        return estimate(compat, text.len());
+    }
+    if !well_formed(text) {
+        return fail_with(ERROR_NO_UNICODE_TRANSLATION, -1);
+    }
+    let mut out = Out::writing(dst, size as usize);
+    normalize_into(form, text, &mut out);
+    let wrote = i32::try_from(out.n).unwrap_or(i32::MAX);
+    if out.n > size as usize {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, -wrote);
+    }
+    wrote
+}
+
+/// IsNormalizedString(form, src, srclen): whether normalizing the text
+/// would leave it as it is. NormalizeString's errors, FALSE with each.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsNormalizedString(form: i32, src: *const u16, n: i32) -> Bool {
+    let text = match normalize_source(form, src, n) {
+        Ok(text) => text,
+        Err(error) => return fail_with(error, 0),
+    };
+    if text.is_empty() {
+        return 1;
+    }
+    if !well_formed(text) {
+        return fail_with(ERROR_NO_UNICODE_TRANSLATION, 0);
+    }
+    let mut out = Out::comparing(text);
+    normalize_into(form, text, &mut out);
+    Bool::from(out.unchanged())
 }
 
 // ---- ResolveLocaleName --------------------------------------------------------

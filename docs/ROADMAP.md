@@ -1874,25 +1874,52 @@ need gala's.
      to the element's own description (FC_EMBEDDED_COMPLEX), and the
      unmarshal side dropped the referents that a deferred referent
      defers itself, where the marshal side wrote them.
-     WINWORD.EXE runs its own code now: it maps WWLIB.DLL (59 MiB) and
-     OART.DLL and exits with status 1 after 26 s, where it ended at
-     0xC0000142 before reaching them. `dbghelp.dll` and `oart.dll` load;
-     `wwlib.dll` is the one left, failing with
-     STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139), and the loader names
-     exactly what it is short of: nine imports that did not bind, told
-     apart from the probes around them (`missing import`, OBSERVABILITY
-     "The gap ledger") -- kernel32's NormalizeString,
-     EnumSystemLanguageGroupsW and EnumUILanguagesW, and six of
+     WINWORD.EXE runs its own code and loads Word: it maps WWLIB.DLL
+     (59 MiB) and OART.DLL, runs 27 s and exits with status 0, where it
+     ended at 0xC0000142 before reaching them and at status 1 when
+     wwlib's own imports would not bind. The nine imports wwlib was
+     short of are implemented, each measured on Windows first:
+     kernel32's NormalizeString and IsNormalizedString (which normaliz
+     forwards here too), EnumSystemLanguageGroupsW and EnumUILanguagesW
+     (`office_k32_test`, ARCHITECTURE "Locales and text"), and six of
      oleaut32's by ordinal, RegisterActiveObject (33),
      RevokeActiveObject (34), VarR4FromR8 (71), VarR8FromR4 (81),
-     VarBstrFromI4 (110) and VarBstrFromR4 (111) (the ordinals are
-     Windows' own, `user/oleaut32/build.rs`). So the next step is those
-     nine, test first: kernel32's three in `office_k32_test`, where
-     NormalizeString has FoldStringW's normalization tables under it
-     (ARCHITECTURE "Locales and text"), oleaut32's six in `com_test`,
-     which needs a running object table for the two active-object calls
-     (GetActiveObject answers MK_E_UNAVAILABLE out of none today); then
-     rerun `office_word`.
+     VarBstrFromI4 (110) and VarBstrFromR4 (111) (`com_test`; the
+     ordinals are Windows' own, `user/oleaut32/build.rs`) -- the two
+     active-object calls over a running object table of the process and
+     the two number-to-string ones over the exact decimal expansion the
+     C runtime prints with, moved into `user/decfloat` so that both
+     round alike (ARCHITECTURE "COM: ole32 and oleaut32"). The run's
+     ledger has no `missing import` and no `load failed` left at all.
+     What stops Word now is Office's shared code, and the file events
+     name the paths it wants (`XTASK_EVENTS=file`): it opens
+     `C:\Program Files\Common Files\Microsoft Shared\Office16\` for
+     mso20win32client.dll, mso30win32client.dll,
+     mso40uiwin32client.dll, mso50win32client.dll,
+     mso98win32client.dll and mso.dll, all six
+     STATUS_OBJECT_PATH_NOT_FOUND because that directory does not
+     exist, then mso.dll beside WINWORD.EXE and in System32
+     (STATUS_OBJECT_NAME_NOT_FOUND), formats Win32 error 197 and ends.
+     All six files are on the disk, under the Office root's
+     `VFS\ProgramFilesCommonX64\Microsoft Shared\Office16` (`cargo
+     xtask disk-files`): a Click-to-Run install keeps what a program is
+     to see at `[{ProgramFilesCommonX64}]\Microsoft Shared\Office16`
+     there, and the package manifest under
+     `C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
+     writes every such path with those tokens. So the next step is that
+     mapping, test first: a process in Office's virtual environment
+     sees the package's `VFS\<token>` tree at the token's real path --
+     the subtree Word asks for, not the whole AppV file-system
+     subsystem -- and `office_word` reruns on it. (OfficeClickToRun
+     opens its own files by the package path directly, so the service
+     needs nothing of this.)
+     `office_word` and `office_excel` now ask for the window as well,
+     not only the program's exit status: a screen check whose marker
+     never appeared was skipped in silence, so a run where nothing drew
+     passed on the status alone. The run says what nothing printed
+     (`xtask: screen: nothing printed "<marker>"`) and the scenarios
+     expect `xtask: screen ok`, which is what the marker and the pixel
+     checks of the window Word draws leave.
      The three gaps that stood here before are closed, each measured on
      Windows first: ntdll's RtlUTF8ToUnicodeN and RtlUnicodeToUTF8N
      (`rtl_test`), kernel32's FindFirstChangeNotification family
@@ -6237,6 +6264,9 @@ exact name (`cargo xtask boot-test office_install`).
 | Scenario | Why manual | Owner |
 |---|---|---|
 | `office_install` | the Office Deployment Tool installs Word, Excel and PowerPoint from Microsoft's CDN: a ~5.4 GB download onto a disk-backed C: (a 16 GiB sparse image, up to ~6 GiB on the host) | OF |
+| `office_install_local` | the same install from the host's cache of that download (`cargo xtask office-source`, put on the disk, installed from `C:\OfficeSource`): development's fast path, and the disk `office_word` and `office_excel` run on | OF |
+| `office_install_gui` | the same install again with ODT's and Click-to-Run's own windows, to watch (`XTASK_SHOTS`) | OF |
+| `office_word`, `office_excel` | an app on a copy of that install's disk (16 GiB): neither draws its window yet, so both fail on the screen check | OF |
 
 ### Environment
 

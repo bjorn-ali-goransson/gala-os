@@ -567,6 +567,10 @@ name = "dcomp"
 version = "0.1.0"
 
 [[package]]
+name = "decfloat"
+version = "0.1.0"
+
+[[package]]
 name = "defmt"
 version = "0.3.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1468,6 +1472,7 @@ dependencies = [
 name = "msvcrt"
 version = "0.1.0"
 dependencies = [
+ "decfloat",
  "gala_stubs",
  "libm",
  "ntrt",
@@ -1621,6 +1626,7 @@ dependencies = [
 name = "oleaut32"
 version = "0.1.0"
 dependencies = [
+ "decfloat",
  "ntrt",
 ]
 
@@ -2802,6 +2808,7 @@ dependencies = [
 name = "ucrtbase"
 version = "0.1.0"
 dependencies = [
+ "decfloat",
  "gala_stubs",
  "libm",
  "ntrt",

@@ -17205,6 +17205,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -17222,6 +17223,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -20833,6 +20835,13 @@ fn run_vm_once(
     }
     if let Some(verdict) = screen_verdict {
         serial += &verdict;
+    } else if let Some(check) = screen {
+        // The check never ran: the marker it waits for was not printed,
+        // so the program never drew the window. Saying so is what tells
+        // that apart from a check that ran and passed -- without the
+        // line, a run where nothing drew left no trace of the check at
+        // all and passed on the program's exit status alone.
+        serial += &format!("xtask: screen: nothing printed \"{}\"\n", check.marker);
     }
     // The host page's requests (`serve-page`), as they came.
     if let Ok(served) = fs::read_to_string(iso.with_extension("serve.log")) {

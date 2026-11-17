@@ -3993,7 +3993,34 @@ ntdll imports.
   MAP_PRECOMPOSED canonical composition alone (no decomposition first),
   in runs of a starter and up to 32 marks (longer runs pass uncomposed,
   recorded); MAP_FOLDDIGITS and MAP_EXPAND_LIGATURES use the tables
-  Windows' answers give (Wine's test_FoldStringW). GetNumberFormat and
+  Windows' answers give (Wine's test_FoldStringW). NormalizeString and
+  IsNormalizedString (which normaliz forwards here, and Word's wwlib
+  imports) work from the same tables: NFD and NFKD are the canonical and
+  compatibility decomposition in canonical order, NFC and NFKC compose
+  afterwards, and a string is normalized exactly when normalizing leaves
+  it as it is. Their answers are Windows' own, measured: a destination of
+  0 units, or none at all, is an estimate Windows makes from the length
+  alone and gala makes the same way (three times the source for the
+  canonical forms and eighteen for the compatibility ones, never more
+  than 64 and never less than the source and an eighth), with the last
+  error untouched; a destination too small is a negative return with
+  ERROR_INSUFFICIENT_BUFFER, where gala gives the size it needs and
+  Windows a guess never smaller than that; a source length of -1 counts
+  the NUL and writes it; a form there is no such thing as, no source, a
+  length below -1, a negative destination length and a destination that
+  is the source are ERROR_INVALID_PARAMETER; and text that is not well
+  formed (an unpaired surrogate) is -1 with
+  ERROR_NO_UNICODE_TRANSLATION, which the estimate does not check.
+  EnumSystemLanguageGroupsW enumerates the seventeen language groups
+  Windows reports (ids 1 to 0x11 in order, each with its id in lowercase
+  hex, its English name and the installed flag) and EnumUILanguagesW the
+  one user interface language, "en-US" with MUI_LANGUAGE_NAME and the
+  LANGID as four hexadecimal digits otherwise; a callback that answers
+  FALSE stops the enumeration and the call still succeeds, a null
+  callback is ERROR_INVALID_PARAMETER, and the flags each call accepts
+  are Windows' (ERROR_INVALID_FLAGS for the rest, measured:
+  MUI_LANGUAGE_ID with MUI_LANGUAGE_NAME, or MUI_LANGUAGE_INSTALLED with
+  MUI_LANGUAGE_LICENSED, is refused). GetNumberFormat and
   GetCurrencyFormat (W, A, Ex) parse `-?digits(.digits)?`, round half up
   on the digit string, and group by NUMBERFMT's Grouping digits (a last
   0 stops, another repeats) or LOCALE_SGROUPING's string (a trailing
@@ -4274,7 +4301,9 @@ runtime of mingw-w64 programs.
   strtod sets ERANGE on overflow (HUGE_VAL) and on underflow to 0 (TinyCC
   parses float constants with strtod).
 - **Printing floats** (`float.rs`): %f %e %g from the exact decimal
-  expansion of the double (a 1152-bit bignum), rounded to 17 significant
+  expansion of the double (a 1152-bit bignum in `user/decfloat`, which
+  Automation's number-to-string shares,
+  "COM: ole32 and oleaut32"), rounded to 17 significant
   digits with zeros after them and then half away from zero at the
   requested digit, as msvcrt.dll's conversion does; exponents have a sign
   and at least three digits. inf and nan print as `inf`/`nan` (msvcrt.dll
@@ -5101,9 +5130,21 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   VarBstrFromCy/Bool/R8, VarCyFromDec; the DATE/currency/boolean/double
   ones msxmlsql imports by ordinal: VarR8FromCy/Date,
   VarDateFromR8/Cy/Bool with DATE's range, VarCyFromDate,
-  VarBoolFromDate/Cy; doubles print with 15 significant digits, fixed
-  from 1E-11 to below 1E+15; strings to currency in exact decimal
-  arithmetic, half to even); dates (`date.rs`: SystemTimeToVariantTime,
+  VarBoolFromDate/Cy; the four of them Word's wwlib imports by ordinal,
+  VarR4FromR8 (the nearest float, ties to even; DISP_E_OVERFLOW when the
+  result would not be finite, the output left as it was, which an
+  infinite or NaN source is too), VarR8FromR4 (the exact widening, which
+  cannot fail), VarBstrFromI4 and VarBstrFromR4; strings to currency in
+  exact decimal arithmetic, half to even);
+  numbers to strings (`variant.rs` `format_real`, measured on Windows:
+  15 significant digits, 7 from a float, taken from the double's exact
+  decimal expansion (`user/decfloat`, shared with the C runtime's
+  printf, "The UCRT") and rounded half away from zero -- a tie survives
+  only because the expansion is exact, where scaling by a power of ten
+  first would lose it; fixed notation while the integer digits and the
+  decimals needed both fit in that many digits and "1.234568E+07"
+  otherwise, the exponent signed and of at least two digits; "0" and
+  "-0" for the zeros, "inf", "-inf" and "nan" for what is no number); dates (`date.rs`: SystemTimeToVariantTime,
   VariantTimeToSystemTime to the second, VarDateFromStr for en-US
   month/day/year, year-month-day and English month names; the forms
   Windows reads relative to the current year are recorded); VarCmp
@@ -5132,7 +5173,27 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   LOGPIXELSY over 2540 HIMETRIC; IFontDisp, IPersistStream and
   QueryTextMetrics recorded unsupported) (`office_api_test`: Office's
   Click-to-Run UI imports them by ordinal);
-  GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
+  the running objects of the process (`active.rs`: RegisterActiveObject,
+  RevokeActiveObject and GetActiveObject, which Word's wwlib imports to
+  publish its Application object at startup). Windows keeps these in
+  COM's running object table, which is machine-wide and reached through
+  a moniker, so another *process* finds the object; gala's ole32 has no
+  monikers and no shared table (ROADMAP OF), so a program finds what it
+  registered itself and one program does not see another's -- enough for
+  an app that publishes to be scriptable later, not enough for a second
+  process to take hold of a running Word. What the calls answer is
+  Windows' own, measured (`com_test`): CO_E_NOTINITIALIZED before this
+  thread has an apartment (ole32's CoGetApartmentType decides, an
+  implicit MTA included), E_INVALIDARG for a null object, CLSID, cookie
+  or output and for a cookie that is not in force (so a second
+  revocation fails), a cookie of its own for every registration,
+  MK_S_MONIKERALREADYREGISTERED for a class already registered,
+  MK_E_UNAVAILABLE when nothing holds the class (recorded), one
+  reference held from registration to revocation (ACTIVEOBJECT_WEAK as
+  well as ACTIVEOBJECT_STRONG: gala has no marshalling to tell them
+  apart), and the oldest registration of a class answered, AddRef'd.
+  Thirty-two registrations at a time, past which the ledger says so
+  (Windows has no limit; Word publishes one).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are neither loaded nor registered:
   LoadTypeLib(Ex) and LoadRegTypeLib fail, RegisterTypeLib (#163) and
@@ -9251,7 +9312,8 @@ windows can use them too.
   x86 stacks too: TRUE on 25H2); other machines are FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
   SymGetModuleBase64 the allocation base of a MEM_IMAGE region.
   MiniDumpWriteDump stays a stub (exported, so SqlDumper loads).
-- **normaliz** (`user/normaliz`): forwards IdnToAscii to kernel32 and
+- **normaliz** (`user/normaliz`): forwards IdnToAscii, NormalizeString
+  and IsNormalizedString to kernel32 ("Locales and text") and
   has its own IdnToUnicode (RFC 3492 decoding), because kernel32's is
   still a stub and a forwarder to a stub fails to bind (the ledger says
   "missing export").

@@ -363,6 +363,139 @@ pub extern "system" fn EnumSystemLocalesA(f: Option<LocaleEnumProcA>, _flags: u3
     TRUE
 }
 
+// ---- Language groups and the languages of the user interface ----
+
+/// Windows' language groups, in LGRPID order (1 to 0x11), with the
+/// English names it gives them. Which are installed is a Windows
+/// setting; gala has them all, as a Windows with every group does.
+const LANGUAGE_GROUPS: [&str; 17] = [
+    "Western Europe and United States",
+    "Central Europe",
+    "Baltic",
+    "Greek",
+    "Cyrillic",
+    "Turkic",
+    "Japanese",
+    "Korean",
+    "Traditional Chinese",
+    "Simplified Chinese",
+    "Thai",
+    "Hebrew",
+    "Arabic",
+    "Vietnamese",
+    "Indic",
+    "Georgian",
+    "Armenian",
+];
+
+const LGRPID_INSTALLED: u32 = 1;
+const LGRPID_SUPPORTED: u32 = 2;
+const MUI_LANGUAGE_ID: u32 = 4;
+const MUI_LANGUAGE_NAME: u32 = 8;
+/// The flags that pick which languages EnumUILanguages counts: the ones
+/// installed, the ones licensed, and (0x80) those of the whole system.
+const MUI_LANGUAGE_INSTALLED: u32 = 0x20;
+const MUI_LANGUAGE_LICENSED: u32 = 0x40;
+const MUI_MACHINE_LANGUAGE: u32 = 0x80;
+
+/// A group's id as lowercase hex text with no leading zero, as Windows
+/// gives it ("1" to "f", then "10" and "11"), NUL-terminated.
+fn hex_text(v: u32) -> [u16; 3] {
+    let digit = |d: u32| u16::from(if d < 10 { b'0' + d as u8 } else { b'a' + d as u8 - 10 });
+    let mut out = [0u16; 3];
+    let mut at = 0;
+    for shift in [4, 0] {
+        let d = (v >> shift) & 0xf;
+        if at > 0 || shift == 0 || d != 0 {
+            out[at] = digit(d);
+            at += 1;
+        }
+    }
+    out
+}
+
+/// An ASCII name as NUL-terminated UTF-16, long enough for the longest
+/// language group name.
+fn wide_name(name: &str) -> [u16; 40] {
+    let mut out = [0u16; 40];
+    for (o, b) in out.iter_mut().zip(name.bytes()) {
+        *o = u16::from(b);
+    }
+    out
+}
+
+type LanguageGroupProcW = extern "system" fn(u32, *const u16, *const u16, u32, isize) -> Bool;
+type UiLanguageProcW = extern "system" fn(*const u16, isize) -> Bool;
+
+/// EnumSystemLanguageGroupsW(proc, flags, param): every language group,
+/// each with its id, the id as hex text, its English name and
+/// LGRPID_INSTALLED, which Windows sets on every row of a system that
+/// has them all. LGRPID_INSTALLED, LGRPID_SUPPORTED and no flags at all
+/// give the same rows (measured on Windows 11); any other flags are
+/// ERROR_INVALID_FLAGS and no callback is ERROR_INVALID_PARAMETER. A
+/// callback that answers FALSE stops the enumeration, which still
+/// returns TRUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumSystemLanguageGroupsW(
+    f: Option<LanguageGroupProcW>,
+    flags: u32,
+    param: isize,
+) -> Bool {
+    let Some(f) = f else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    if !matches!(flags, 0 | LGRPID_INSTALLED | LGRPID_SUPPORTED) {
+        return fail_with(ERROR_INVALID_FLAGS, FALSE);
+    }
+    for (i, name) in LANGUAGE_GROUPS.iter().enumerate() {
+        let id = i as u32 + 1;
+        let (id_text, name) = (hex_text(id), wide_name(name));
+        if f(id, id_text.as_ptr(), name.as_ptr(), LGRPID_INSTALLED, param) == FALSE {
+            break;
+        }
+    }
+    TRUE
+}
+
+/// EnumUILanguagesW(proc, flags, param): the languages the user
+/// interface comes in, which for gala is its one locale. With
+/// MUI_LANGUAGE_NAME the callback gets the name ("en-US"), otherwise the
+/// LANGID as four hex digits ("0409"), as Windows gives them. An id and
+/// a name together, or both of the installed/licensed pair, or a bit
+/// outside them, is ERROR_INVALID_FLAGS; no callback is
+/// ERROR_INVALID_PARAMETER (all measured on Windows 11). A callback that
+/// answers FALSE stops the enumeration, which still returns TRUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumUILanguagesW(
+    f: Option<UiLanguageProcW>,
+    flags: u32,
+    param: isize,
+) -> Bool {
+    const VALID: u32 = MUI_LANGUAGE_ID
+        | MUI_LANGUAGE_NAME
+        | MUI_LANGUAGE_INSTALLED
+        | MUI_LANGUAGE_LICENSED
+        | MUI_MACHINE_LANGUAGE;
+    let Some(f) = f else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    let both = |x: u32, y: u32| flags & x != 0 && flags & y != 0;
+    if flags & !VALID != 0
+        || both(MUI_LANGUAGE_ID, MUI_LANGUAGE_NAME)
+        || both(MUI_LANGUAGE_INSTALLED, MUI_LANGUAGE_LICENSED)
+    {
+        return fail_with(ERROR_INVALID_FLAGS, FALSE);
+    }
+    let mut text = [0u16; 16];
+    if flags & MUI_LANGUAGE_NAME != 0 {
+        GetUserDefaultLocaleName(text.as_mut_ptr(), text.len() as i32);
+    } else {
+        let id = GetUserDefaultUILanguage();
+        for (i, shift) in [12, 8, 4, 0].into_iter().enumerate() {
+            let d = (u32::from(id) >> shift) & 0xf;
+            text[i] = u16::from(if d < 10 { b'0' + d as u8 } else { b'a' + d as u8 - 10 });
+        }
+    }
+    f(text.as_ptr(), param);
+    TRUE
+}
+
 // ---- Case mapping, comparison and character types ----
 
 const LCMAP_LOWERCASE: u32 = 0x100;

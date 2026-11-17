@@ -1,7 +1,9 @@
 //! oleaut32's exports have standard ordinals, and programs (CoreCLR)
 //! import them by ordinal only. The numbers are those of Windows'
 //! oleaut32.dll, taken from Wine's dlls/oleaut32/oleaut32.spec (LGPL; the
-//! numbers only, recorded in THIRD_PARTY.md). Get/Set/CreateErrorInfo
+//! numbers only, recorded in THIRD_PARTY.md) and, for the active objects
+//! and the conversions Office imports, read from the export table of an
+//! installed oleaut32.dll (which agrees with the spec throughout). Get/Set/CreateErrorInfo
 //! forward to ole32, as Windows' oleaut32 forwards them to COM's base.
 fn main() {
     let ordinals: &[(&str, u32)] = &[
@@ -51,7 +53,13 @@ fn main() {
         ("VarBstrFromBool", 116),
         ("VarBoolFromStr", 125),
         ("VarCmp", 176),
+        ("RegisterActiveObject", 33),
+        ("RevokeActiveObject", 34),
         ("GetActiveObject", 35),
+        ("VarR4FromR8", 71),
+        ("VarR8FromR4", 81),
+        ("VarBstrFromI4", 110),
+        ("VarBstrFromR4", 111),
         ("VarCyFromR8", 102),
         ("VarBstrFromCy", 113),
         ("SystemTimeToVariantTime", 184),

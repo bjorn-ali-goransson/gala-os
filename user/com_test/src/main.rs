@@ -26,7 +26,13 @@
 //!   frees, VariantChangeType(Ex) between numbers and strings),
 //!   SAFEARRAYs (vectors, bounds, elements, the stored VARTYPE,
 //!   descriptors), Get/SetErrorInfo, VarCyFromDec, type libraries that are
-//!   not registered (TYPE_E_LIBNOTREGISTERED).
+//!   not registered (TYPE_E_LIBNOTREGISTERED), the number conversions
+//!   Office's wwlib imports (VarR4FromR8 and VarR8FromR4 with their
+//!   rounding and overflow, VarBstrFromI4, VarBstrFromR4 and
+//!   VarBstrFromR8 with Automation's fixed-or-scientific rule) and the
+//!   process's running objects (RegisterActiveObject,
+//!   RevokeActiveObject, GetActiveObject), each documented where it is
+//!   checked.
 //!
 //! Prints `com_test: ok` or exits with the number of the failing check.
 
@@ -225,6 +231,28 @@ unsafe extern "system" {
     fn SetErrorInfo(reserved: u32, info: *mut c_void) -> HResult;
     #[link_ordinal(228)]
     fn VarCyFromDec(dec: *const Decimal, out: *mut i64) -> HResult;
+    #[link_ordinal(71)]
+    fn VarR4FromR8(v: f64, out: *mut f32) -> HResult;
+    #[link_ordinal(81)]
+    fn VarR8FromR4(v: f32, out: *mut f64) -> HResult;
+    #[link_ordinal(110)]
+    fn VarBstrFromI4(v: i32, lcid: u32, flags: u32, out: *mut *mut u16) -> HResult;
+    #[link_ordinal(111)]
+    fn VarBstrFromR4(v: f32, lcid: u32, flags: u32, out: *mut *mut u16) -> HResult;
+    #[link_ordinal(112)]
+    fn VarBstrFromR8(v: f64, lcid: u32, flags: u32, out: *mut *mut u16) -> HResult;
+    #[link_ordinal(33)]
+    fn RegisterActiveObject(
+        unk: *mut c_void,
+        clsid: *const Guid,
+        flags: u32,
+        cookie: *mut u32,
+    ) -> HResult;
+    #[link_ordinal(34)]
+    fn RevokeActiveObject(cookie: u32, reserved: *mut c_void) -> HResult;
+    #[link_ordinal(35)]
+    fn GetActiveObject(clsid: *const Guid, reserved: *mut c_void, out: *mut *mut c_void)
+    -> HResult;
     #[link_ordinal(162)]
     fn LoadRegTypeLib(
         guid: *const Guid,
@@ -293,6 +321,13 @@ struct Decimal {
 
 const S_OK: u64 = 0;
 const S_FALSE: u64 = 1;
+const E_INVALIDARG: u64 = 0x8007_0057;
+const DISP_E_OVERFLOW: u64 = 0x8002_000a;
+const CO_E_NOTINITIALIZED: u64 = 0x8004_01f0;
+const MK_E_UNAVAILABLE: u64 = 0x8004_01e3;
+const MK_S_MONIKERALREADYREGISTERED: u64 = 0x0004_01e7;
+/// en-US, the one locale gala formats numbers in.
+const LCID_EN_US: u32 = 0x409;
 const COINIT_MULTITHREADED: u32 = 0;
 const COINIT_APARTMENTTHREADED: u32 = 2;
 const VT_EMPTY: u16 = 0;
@@ -318,6 +353,9 @@ const IID_IINITIALIZESPY: Guid = ole_iid(0x34);
 const IID_ICOMTHREADINGINFO: Guid = ole_iid(0x1ce);
 /// A GUID nothing registers.
 const NOBODY: Guid = *b"gala-no-such-cls";
+/// Two CLSIDs of this test's own, for the running objects.
+const CLSID_RUNNING: Guid = *b"gala-running-obj";
+const CLSID_OTHER: Guid = *b"gala-other-objct";
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -331,6 +369,15 @@ fn out(text: &[u8]) {
             core::ptr::null_mut(),
         )
     };
+}
+
+fn hex64(v: u64) -> [u8; 16] {
+    let mut s = [0u8; 16];
+    for (i, c) in s.iter_mut().enumerate() {
+        let d = ((v >> (60 - 4 * i)) & 0xf) as u8;
+        *c = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+    }
+    s
 }
 
 fn hex(v: u32) -> [u8; 8] {
@@ -354,7 +401,7 @@ impl Checks {
         out(b"com_test: check ");
         out(&hex(self.0));
         out(b" got ");
-        out(&hex(got as u32));
+        out(&hex64(got));
         check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
@@ -362,6 +409,12 @@ impl Checks {
 
     #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
+        if got != want {
+            out(b"com_test: want ");
+            out(&hex64(want));
+            out(b"
+");
+        }
         self.ok(got == want, got)
     }
 
@@ -830,13 +883,349 @@ fn guid_strings(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+// ---- oleaut32's number conversions and active objects ----
+
+/// A BSTR is exactly `want` (its length as well as its characters).
+fn bstr_is(c: &mut Checks, s: *const u16, want: &str) -> Result<(), u32> {
+    // SAFETY: a BSTR, or NULL.
+    c.eq(unsafe { SysStringLen(s) }.into(), want.len() as u64)?;
+    c.text(s, want)
+}
+
+/// The conversions Office's wwlib imports, with the results Windows 11
+/// gives:
+///
+/// - VarR8FromR4: the exact widening, always S_OK, infinities and NaNs
+///   with it (0x7fc00000 becomes 0x7ff8000000000000), -0 still -0.
+/// - VarR4FromR8: rounded to nearest f32, ties to even (16777219
+///   becomes 0x4b800002); S_OK whenever the rounded result is finite,
+///   DISP_E_OVERFLOW otherwise, which includes an infinite or NaN
+///   source, where the output is left alone. Underflow is 0 (or -0) with
+///   S_OK and subnormals come through (1e-44 becomes 0x00000007).
+/// - VarBstrFromI4: plain decimal, no grouping, the locale ignored.
+/// - VarBstrFromR4 and VarBstrFromR8: the number with up to 7 (R4) or 15
+///   (R8) significant digits, fixed notation when the integer digits and
+///   the decimals it needs both fit in that many digits and scientific
+///   ("1.234567E+07", the exponent signed and at least two digits)
+///   otherwise; "0" and "-0" for the zeroes, "inf", "-inf" and "nan".
+fn conversions(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: oleaut32 calls with outputs of ours.
+    unsafe {
+        let mut r8 = 0.0f64;
+        for (src, want) in [
+            (0x3f00_0000u32, 0x3fe0_0000_0000_0000u64),
+            (0x8000_0000, 0x8000_0000_0000_0000),
+            (0x3eaa_aaab, 0x3fd5_5555_6000_0000),
+            (0x7f7f_ffff, 0x47ef_ffff_e000_0000),
+            (0x0080_0000, 0x3810_0000_0000_0000),
+            (0x0000_0007, 0x36cc_0000_0000_0000),
+            (0x7f80_0000, 0x7ff0_0000_0000_0000),
+            (0xff80_0000, 0xfff0_0000_0000_0000),
+            (0x7fc0_0000, 0x7ff8_0000_0000_0000),
+        ] {
+            c.eq(hr(VarR8FromR4(f32::from_bits(src), &mut r8)), S_OK)?;
+            c.eq(r8.to_bits(), want)?;
+        }
+
+        let mut r4 = 0.0f32;
+        for (src, want) in [
+            (0x3fe0_0000_0000_0000u64, 0x3f00_0000u32),
+            (0x8000_0000_0000_0000, 0x8000_0000),
+            (0x3fd5_5555_5555_5555, 0x3eaa_aaab),
+            // Ties to even: 16777217 down, 16777219 up.
+            (0x4170_0000_1000_0000, 0x4b80_0000),
+            (0x4170_0000_3000_0000, 0x4b80_0002),
+            // Just inside f32::MAX once rounded.
+            (0x47ef_ffff_e000_0001, 0x7f7f_ffff),
+            // Underflow, and a subnormal result.
+            (0x3662_44ce_242c_5561, 0x0000_0000),
+            (0xb662_44ce_242c_5561, 0x8000_0000),
+            (0x36cc_8b82_1885_4567, 0x0000_0007),
+        ] {
+            c.eq(hr(VarR4FromR8(f64::from_bits(src), &mut r4)), S_OK)?;
+            c.eq(r4.to_bits().into(), want.into())?;
+        }
+        // Too large, infinite or NaN: DISP_E_OVERFLOW, the output kept.
+        for src in [
+            0x47ef_ffff_f514_a7bcu64,
+            0x4807_8287_f49c_4a1d,
+            0xc807_8287_f49c_4a1d,
+            0x7fef_ffff_ffff_ffff,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff8_0000_0000_0000,
+        ] {
+            r4 = 42.0;
+            c.eq(hr(VarR4FromR8(f64::from_bits(src), &mut r4)), DISP_E_OVERFLOW)?;
+            c.eq(r4.to_bits().into(), 42.0f32.to_bits().into())?;
+        }
+
+        let mut s = core::ptr::null_mut();
+        for (v, want) in [
+            (0i32, "0"),
+            (1, "1"),
+            (-1, "-1"),
+            (1234567, "1234567"),
+            (-1234567, "-1234567"),
+            (i32::MAX, "2147483647"),
+            (i32::MIN, "-2147483648"),
+        ] {
+            c.eq(hr(VarBstrFromI4(v, LCID_EN_US, 0, &mut s)), S_OK)?;
+            bstr_is(c, s, want)?;
+            SysFreeString(s);
+        }
+        // The locale and the flags change nothing for an integer.
+        c.eq(hr(VarBstrFromI4(1234567, 0, 0x8000_0000, &mut s)), S_OK)?;
+        bstr_is(c, s, "1234567")?;
+        SysFreeString(s);
+
+        for (src, want) in [
+            (0x0000_0000u32, "0"),
+            (0x8000_0000, "-0"),
+            (0x3fc0_0000, "1.5"),
+            (0xbfc0_0000, "-1.5"),
+            (0x3eaa_aaab, "0.3333333"),
+            (0x7f7f_ffff, "3.402823E+38"),
+            (0x0000_0007, "9.809089E-45"),
+            (0x7f80_0000, "inf"),
+            (0xff80_0000, "-inf"),
+            (0x7fc0_0000, "nan"),
+            (0x322b_cc77, "1E-08"),
+            (0x3749_539c, "0.000012"),
+            (0x4996_b438, "1234567"),
+            (0x4b3c_6146, "1.234567E+07"),
+            // Ties round away from zero, not to even.
+            (0x4974_2408, "1000001"),
+            (0x4974_2418, "1000002"),
+            (0x4b3c_614b, "1.234568E+07"),
+            (0x4b3c_6155, "1.234569E+07"),
+            (0x60ad_78ec, "1E+20"),
+            (0x3c4a_457e, "1.234567E-02"),
+        ] {
+            c.eq(hr(VarBstrFromR4(f32::from_bits(src), LCID_EN_US, 0, &mut s)), S_OK)?;
+            bstr_is(c, s, want)?;
+            SysFreeString(s);
+        }
+
+        for (src, want) in [
+            (0x0000_0000_0000_0000u64, "0"),
+            (0x8000_0000_0000_0000, "-0"),
+            (0x7ff0_0000_0000_0000, "inf"),
+            (0xfff0_0000_0000_0000, "-inf"),
+            (0x7ff8_0000_0000_0000, "nan"),
+            (0x3ff8_0000_0000_0000, "1.5"),
+            // The rule's edges: 15 decimals fit, 16 do not; 15 integer
+            // digits fit, 16 do not.
+            (0x3cd2_03af_9ee7_5616, "0.000000000000001"),
+            (0x3c9c_d2b2_97d8_89bc, "1E-16"),
+            (0x430c_6bf5_2634_0000, "1E+15"),
+            (0x430c_6bf5_2633_fff8, "999999999999999"),
+            (0x3fd5_5555_5555_5555, "0.333333333333333"),
+            // Ties round away from zero here too.
+            (0x42d6_bcc4_1e90_0020, "100000000000001"),
+            (0x42d6_bcc4_1e90_0060, "100000000000002"),
+            (0x4311_8b54_f22a_ead4, "1.23456789012345E+15"),
+            (0x4311_8b54_f22a_eafc, "1.23456789012346E+15"),
+            // Three exponent digits, and a fraction that stays fixed.
+            (0x7e37_e43c_8800_759c, "1E+300"),
+            (0x01a5_6e1f_c2f8_f359, "1E-300"),
+            (0x3eef_7510_4d55_1d69, "0.000015"),
+        ] {
+            c.eq(hr(VarBstrFromR8(f64::from_bits(src), LCID_EN_US, 0, &mut s)), S_OK)?;
+            bstr_is(c, s, want)?;
+            SysFreeString(s);
+        }
+    }
+    Ok(())
+}
+
+/// A test object: a strict IUnknown (only IID_IUnknown succeeds, as the
+/// marshaller needs) that counts its references.
+#[repr(C)]
+struct Active {
+    vtable: *const usize,
+    refs: u32,
+}
+
+extern "system" fn active_query(
+    this: *mut Active,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    // SAFETY: our own object and the caller's IID and output.
+    unsafe {
+        if *iid == IID_IUNKNOWN {
+            (*this).refs += 1;
+            *out = this.cast();
+            return 0;
+        }
+        *out = core::ptr::null_mut();
+    }
+    0x8000_4002u32 as i32 // E_NOINTERFACE
+}
+
+extern "system" fn active_add_ref(this: *mut Active) -> u32 {
+    // SAFETY: our own object.
+    unsafe {
+        (*this).refs += 1;
+        (*this).refs
+    }
+}
+
+extern "system" fn active_release(this: *mut Active) -> u32 {
+    // SAFETY: our own object.
+    unsafe {
+        (*this).refs -= 1;
+        (*this).refs
+    }
+}
+
+static ACTIVE_VTABLE: VTable = VTable([
+    active_query as *const (),
+    active_add_ref as *const (),
+    active_release as *const (),
+    core::ptr::null(),
+    core::ptr::null(),
+    core::ptr::null(),
+    core::ptr::null(),
+]);
+
+/// RegisterActiveObject, RevokeActiveObject and GetActiveObject before
+/// any apartment exists: CO_E_NOTINITIALIZED from all three (measured on
+/// Windows 11).
+fn active_objects_before_com(c: &mut Checks) -> Result<(), u32> {
+    let mut object = Active { vtable: ACTIVE_VTABLE.0.as_ptr().cast(), refs: 1 };
+    let me: *mut Active = &mut object;
+    let mut cookie = 0u32;
+    let mut got = core::ptr::null_mut();
+    // SAFETY: oleaut32 calls with an object and outputs of ours.
+    unsafe {
+        c.eq(
+            hr(RegisterActiveObject(me.cast(), &CLSID_RUNNING, 0, &mut cookie)),
+            CO_E_NOTINITIALIZED,
+        )?;
+        c.eq(
+            hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)),
+            CO_E_NOTINITIALIZED,
+        )?;
+        c.eq(hr(RevokeActiveObject(1, core::ptr::null_mut())), CO_E_NOTINITIALIZED)?;
+    }
+    c.eq(object.refs.into(), 1)
+}
+
+/// The running objects of a process, as Windows 11 keeps them:
+///
+/// - A null object, a null cookie output or a null CLSID is
+///   E_INVALIDARG, as is a null CLSID or output for GetActiveObject and
+///   a cookie of 0 or one never given for RevokeActiveObject (so
+///   revoking the same cookie twice fails the second time).
+/// - The first registration of a CLSID is S_OK with a non-zero cookie;
+///   another of the same CLSID is MK_S_MONIKERALREADYREGISTERED, still
+///   with a cookie of its own.
+/// - Registering holds one reference until revoked, weak as well as
+///   strong, and GetActiveObject AddRefs what it gives.
+/// - GetActiveObject gives the first registration still in force, so
+///   after revoking that one the next answers; with none,
+///   MK_E_UNAVAILABLE.
+fn active_objects(c: &mut Checks) -> Result<(), u32> {
+    let mut first = Active { vtable: ACTIVE_VTABLE.0.as_ptr().cast(), refs: 1 };
+    let mut second = Active { vtable: ACTIVE_VTABLE.0.as_ptr().cast(), refs: 1 };
+    let (a, b): (*mut Active, *mut Active) = (&mut first, &mut second);
+    let mut cookie = 0u32;
+    let mut got = core::ptr::null_mut();
+    // SAFETY: oleaut32 calls with objects and outputs of ours.
+    unsafe {
+        // The arguments.
+        c.eq(
+            hr(RegisterActiveObject(core::ptr::null_mut(), &CLSID_RUNNING, 0, &mut cookie)),
+            E_INVALIDARG,
+        )?;
+        c.eq(
+            hr(RegisterActiveObject(a.cast(), &CLSID_RUNNING, 0, core::ptr::null_mut())),
+            E_INVALIDARG,
+        )?;
+        c.eq(hr(RegisterActiveObject(a.cast(), core::ptr::null(), 0, &mut cookie)), E_INVALIDARG)?;
+        c.eq(
+            hr(GetActiveObject(core::ptr::null(), core::ptr::null_mut(), &mut got)),
+            E_INVALIDARG,
+        )?;
+        c.eq(
+            hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), core::ptr::null_mut())),
+            E_INVALIDARG,
+        )?;
+        c.eq(hr(RevokeActiveObject(0, core::ptr::null_mut())), E_INVALIDARG)?;
+        c.eq(hr(RevokeActiveObject(0x1234_5678, core::ptr::null_mut())), E_INVALIDARG)?;
+        c.eq(first.refs.into(), 1)?;
+
+        // Nothing registered yet.
+        c.eq(
+            hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)),
+            MK_E_UNAVAILABLE,
+        )?;
+        c.ok(got.is_null(), 0)?;
+
+        // Two objects under one CLSID: the first one answers.
+        let mut one = 0u32;
+        c.eq(hr(RegisterActiveObject(a.cast(), &CLSID_RUNNING, 0, &mut one)), S_OK)?;
+        c.ok(one != 0, one.into())?;
+        c.eq(first.refs.into(), 2)?;
+        c.eq(hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)), S_OK)?;
+        c.ok(got == a.cast(), got as u64)?;
+        c.eq(first.refs.into(), 3)?;
+        c.eq(u64::from(release(got)), 2)?;
+        let mut two = 0u32;
+        c.eq(
+            hr(RegisterActiveObject(b.cast(), &CLSID_RUNNING, 0, &mut two)),
+            MK_S_MONIKERALREADYREGISTERED,
+        )?;
+        c.ok(two != 0 && two != one, two.into())?;
+        c.eq(second.refs.into(), 2)?;
+        c.eq(hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)), S_OK)?;
+        c.ok(got == a.cast(), got as u64)?;
+        c.eq(u64::from(release(got)), 2)?;
+
+        // Revoking the first leaves the second to answer.
+        c.eq(hr(RevokeActiveObject(one, core::ptr::null_mut())), S_OK)?;
+        c.eq(first.refs.into(), 1)?;
+        c.eq(hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)), S_OK)?;
+        c.ok(got == b.cast(), got as u64)?;
+        c.eq(u64::from(release(got)), 2)?;
+        c.eq(hr(RevokeActiveObject(one, core::ptr::null_mut())), E_INVALIDARG)?;
+        c.eq(hr(RevokeActiveObject(two, core::ptr::null_mut())), S_OK)?;
+        c.eq(second.refs.into(), 1)?;
+        c.eq(
+            hr(GetActiveObject(&CLSID_RUNNING, core::ptr::null_mut(), &mut got)),
+            MK_E_UNAVAILABLE,
+        )?;
+
+        // A weak registration holds a reference too, and answers.
+        let mut weak = 0u32;
+        c.eq(hr(RegisterActiveObject(b.cast(), &CLSID_OTHER, 1, &mut weak)), S_OK)?;
+        c.eq(second.refs.into(), 2)?;
+        c.eq(hr(GetActiveObject(&CLSID_OTHER, core::ptr::null_mut(), &mut got)), S_OK)?;
+        c.ok(got == b.cast(), got as u64)?;
+        c.eq(u64::from(release(got)), 2)?;
+        c.eq(hr(RevokeActiveObject(weak, core::ptr::null_mut())), S_OK)?;
+        c.eq(second.refs.into(), 1)?;
+        // Another CLSID is its own; this one is free again.
+        c.eq(hr(GetActiveObject(&CLSID_OTHER, core::ptr::null_mut(), &mut got)), MK_E_UNAVAILABLE)?;
+    }
+    c.eq(first.refs.into(), 1)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    // Before anything initializes COM, so the active objects see a
+    // process without an apartment.
+    active_objects_before_com(&mut c)?;
     guid_strings(&mut c)?;
     task_allocator(&mut c)?;
     apartments(&mut c)?;
     memory_guids_classes(&mut c)?;
-    automation(&mut c)
+    automation(&mut c)?;
+    conversions(&mut c)?;
+    // After apartments(), which leaves this thread in the MTA.
+    active_objects(&mut c)
 }
 
 #[unsafe(no_mangle)]
