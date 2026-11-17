@@ -3885,7 +3885,17 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   line counts the pages shared and copied (`0 copied` required).
 
 **Next**:
-1. Milestone 2's rest: the rest of signal_test and fork_test
+1. `thread_test`'s futex requeue (open): once on CI its transcript
+   differed from `expected.txt` -- FUTEX_CMP_REQUEUE said it had moved
+   the waiter to the second word, and the FUTEX_WAKE after it found
+   the waiter on the first. lx-expect runs these programs on the host
+   kernel, so what raced is the program's own expectation: `rq_ready`
+   is set before the waiter blocks, and nothing proves it is queued
+   when the requeue runs. Not reproduced locally (200 runs). The
+   report now names the host kernel, so the next occurrence says
+   which Linux answered that way; the fix is a handshake that proves
+   the waiter is queued, not a wider retry.
+2. Milestone 2's rest: the rest of signal_test and fork_test
    (rt_sigqueueinfo, faults as SIGSEGV/SIGBUS/SIGFPE through the
    exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid's stopped and
@@ -3897,9 +3907,9 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    `lx::state` onto the core process; an `lx_pipe_pie` scenario.
    Each corpus program becomes a boot scenario as its calls land; the
    busybox scripts grow with them.
-2. Milestone 3: clocks, ptys over the core terminal object, /proc.
-3. Seam 1: the pty as a core terminal object under ConPTY.
-4. Seam 4's NT surface, each test first against real Windows:
+3. Milestone 3: clocks, ptys over the core terminal object, /proc.
+4. Seam 1: the pty as a core terminal object under ConPTY.
+5. Seam 4's NT surface, each test first against real Windows:
    FileCaseSensitiveInformation (query, and set on an empty directory),
    FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
    CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
@@ -3908,13 +3918,13 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    the token, `lx::identity`; a file shows the caller as its owner
    today); a reboot scenario for Linux
    files (modes and links are host-tested only).
-5. Seam 5: shared core objects when pipes, sockets or files are
+6. Seam 5: shared core objects when pipes, sockets or files are
    reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
    them: Windows' AF_UNIX through afd on the same core sockets (a test
    first on real Windows: bind, connect, accept, the socket file as a
    reparse point), then pipes and TCP sockets' state (with wait queues
    instead of TCP's 1 ms look).
-6. Also open (ARCHITECTURE "The lx module"): address randomization, a
+7. Also open (ARCHITECTURE "The lx module"): address randomization, a
    vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
 **Done when** (each milestone): every corpus program of the milestone
@@ -3985,7 +3995,7 @@ recordings), then the Windows side (steps 2, 3, 6, then 5); Kubernetes
    calls, the registry's one writer), a distribution's init as an LX
    process (an instance that outlives its last command, as WSL's),
    DefaultUid applied (root inside the distribution), `-u`, `--cd`,
-   `--export`, ptys and process groups for the terminal (LX "Next" 2-3:
+   `--export`, ptys and process groups for the terminal (LX "Next" 3-4:
    job control, Ctrl+C as SIGINT).
 3. The facade's plumbing: `/mnt/<drive>` inside the distribution
    (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
