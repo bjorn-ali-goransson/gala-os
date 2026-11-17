@@ -77,6 +77,33 @@ pub extern "system" fn QueueUserAPC(routine: usize, thread: Handle, data: usize)
     1
 }
 
+/// QueueUserAPC2: `routine(data)` in thread `thread`, with the flags
+/// QueueUserAPC has no room for. QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC
+/// (1) makes it a special APC, which runs at the thread's next return to
+/// user mode rather than at its next alertable wait: a thread that queues
+/// one to itself runs it before this call returns, and one in a wait that
+/// is not alertable runs it when that wait ends, which keeps its own
+/// status. Windows refuses every other flag with ERROR_INVALID_PARAMETER
+/// (measured on the pinned build, with ERROR_INVALID_HANDLE for a handle
+/// that is not a thread's and ERROR_GEN_FAILURE for a thread that has
+/// ended).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueueUserAPC2(
+    routine: usize,
+    thread: Handle,
+    data: usize,
+    flags: u32,
+) -> Bool {
+    // SAFETY: the kernel validates the handle; the routine is the caller's.
+    let status = unsafe {
+        NtQueueApcThreadEx2(thread, core::ptr::null_mut(), flags as usize, routine, data, 0, 0)
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
+    TRUE
+}
+
 /// The current thread's TEB.
 pub(crate) fn teb() -> usize {
     teb_read(TEB_SELF)
@@ -472,6 +499,15 @@ unsafe extern "system" {
     ) -> u32;
     fn NtIsProcessInJob(process: Handle, job: Handle) -> u32;
     fn NtQueueApcThread(thread: Handle, routine: usize, a1: usize, a2: usize, a3: usize) -> u32;
+    fn NtQueueApcThreadEx2(
+        thread: Handle,
+        reserve: Handle,
+        flags: usize,
+        routine: usize,
+        a1: usize,
+        a2: usize,
+        a3: usize,
+    ) -> u32;
     fn NtFsControlFile(
         h: Handle,
         event: usize,

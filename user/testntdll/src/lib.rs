@@ -52,6 +52,83 @@ mod sync;
 mod tls;
 mod unimplemented;
 
+/// How the search for a handler went, as the kernel is given it with an
+/// unhandled exception (`GalaUnhandledException`, the crash report):
+///
+/// - `frames`: frames unwound (for 32-bit code, SEH registrations
+///   walked).
+/// - `handlers`: those whose unwind data named a language handler, which
+///   was asked and passed the exception on (for 32-bit code, every
+///   registration names one, so the two counts are equal).
+/// - `no_entry`: frames no function entry was found for, unwound by the
+///   return address on the stack as Windows does. They can have no
+///   handler, so a walk that asked none and found no entries says the
+///   unwind data was not found, not that the code had no handler. (On
+///   ARM64 such a frame ends the search instead, so the count stays 0
+///   there; for 32-bit code it has no meaning.)
+/// - `ips`, `kept`, `no_data`, `asked`: the chain itself, the first
+///   `WALK_FRAMES` frames, so the report can name the frame the unwind
+///   data was missing for rather than only count it. 32-bit code leaves
+///   these empty: its registration list is reported from the TEB32.
+/// - `ended`: why the walk stopped, which tells the stack's end from a
+///   chain that derailed.
+///
+/// A raise nothing handles is what Office's shared code ends a process
+/// with (0xe0000002, ROADMAP OF), where which of the three it is decides
+/// where to look.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Walk {
+    /// Each frame the search reached, innermost first: its instruction
+    /// pointer, `kept` of them filled (u64 first, so the record's layout
+    /// is the same whatever the word size).
+    pub ips: [u64; WALK_FRAMES],
+    pub frames: u32,
+    pub handlers: u32,
+    pub no_entry: u32,
+    pub kept: u32,
+    /// Bit i: no function entry was found for `ips[i]`.
+    pub no_data: u32,
+    /// Bit i: `ips[i]`'s handler was asked, and passed the exception on.
+    pub asked: u32,
+    /// Why the search stopped: `END_*`.
+    pub ended: u32,
+}
+
+/// Frames of the walk kept in the record (the rest are counted only).
+pub const WALK_FRAMES: usize = 12;
+
+/// The walk ran to its own limit (4096 frames).
+pub const END_LIMIT: u32 = 0;
+/// The frame the unwind data established is not on the thread's stack.
+pub const END_OFF_STACK: u32 = 1;
+/// The unwound return address is 0: the stack's end.
+pub const END_NO_RETURN: u32 = 2;
+/// The unwound stack pointer reached the stack's base: the stack's end.
+pub const END_STACK_BASE: u32 = 3;
+/// No unwind data for the frame, which ends the search on ARM64.
+pub const END_NO_DATA: u32 = 4;
+
+impl Walk {
+    /// Record a frame the search reached and what was found for it.
+    pub fn frame(&mut self, ip: u64, entry: bool, asked: bool) {
+        let i = self.frames as usize;
+        self.frames += 1;
+        self.no_entry += u32::from(!entry);
+        self.handlers += u32::from(asked);
+        if i < WALK_FRAMES {
+            self.ips[i] = ip;
+            self.kept = self.frames;
+            if !entry {
+                self.no_data |= 1 << i;
+            }
+            if asked {
+                self.asked |= 1 << i;
+            }
+        }
+    }
+}
+
 pub use arch::*;
 
 /// "galantdl": marks the state as written by this DLL.
@@ -391,6 +468,8 @@ syscall_stubs! {
     // gala's number, UNVERIFIED.
     NtCreateDirectoryObject = 0x7f24, fn(handle: *mut usize, access: u32, attributes: *const ObjectAttributes);
     NtClearEvent = 0x3e, fn(h: usize);
+    // NtPulseEvent: gala's number, UNVERIFIED.
+    NtPulseEvent = 0x7f2a, fn(h: usize, previous: *mut i32);
     NtQuerySystemTime = 0x5a, fn(time: *mut i64);
     NtCreateEvent = 0x48, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32,
@@ -420,6 +499,10 @@ syscall_stubs! {
     );
     NtResumeThread = 0x52, fn(h: usize, previous: *mut u32);
     NtQueueApcThread = 0x45, fn(h: usize, routine: usize, a1: usize, a2: usize, a3: usize);
+    NtQueueApcThreadEx2 = 0x7f4e, fn(
+        h: usize, reserve: usize, flags: usize, routine: usize, a1: usize, a2: usize,
+        a3: usize
+    );
     // Files (long-stable x64 numbers).
     NtReadFile = 0x06, fn(
         h: usize, event: usize, apc: usize, apc_context: usize, iosb: *mut [usize; 2],
@@ -462,7 +545,11 @@ syscall_stubs! {
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
     // describes it whatever status the process then ends with.
-    GalaUnhandledException = 0x7f5c, fn(record: *const u8, context: *const u8);
+    GalaUnhandledException = 0x7f5c, fn(
+        record: *const u8,
+        context: *const u8,
+        walk: *const crate::Walk
+    );
     // Waitable timers (gala's numbers, unverified).
     NtCreateTimer = 0xd9, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32
@@ -1772,6 +1859,18 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
     // for one by ordinal, as Windows reports "the ordinal N could not be
     // located"), once every missing import is reported.
     let mut missing = None;
+    // Whose imports these are, for the report of one that does not bind:
+    // the executable is not in the module table, so its name comes from
+    // its path.
+    let mut who = [0u8; MAX_NAME];
+    let who_len = match slot {
+        Some(slot) => with_modules(|m| {
+            let n = m[slot].name_len;
+            who[..n].copy_from_slice(&m[slot].name[..n]);
+            n
+        }),
+        None => normalize(image_path().iter().copied(), &mut who)?,
+    };
     while rd32(desc + 12) != 0 {
         let mut name = [0u8; MAX_NAME];
         let len = normalize(
@@ -1819,7 +1918,12 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                 None => {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
-                    report_missing_export(c_str(base + rd32(desc + 12) as usize), name, ordinal);
+                    report_missing_export(
+                        c_str(base + rd32(desc + 12) as usize),
+                        name,
+                        ordinal,
+                        Some(&who[..who_len]),
+                    );
                     missing.get_or_insert(if name.is_empty() {
                         STATUS_ORDINAL_NOT_FOUND
                     } else {
@@ -1836,9 +1940,12 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
 }
 
 /// Reports `dll!name` (or `dll!#ordinal`) to the kernel's missing-features
-/// ledger (gala's own service; see `GalaRecordMissing`).
-fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32) {
-    let mut text = [0u8; 64];
+/// ledger (gala's own service; see `GalaRecordMissing`). With `importer`
+/// it is an import that did not bind, which ends the load and is named
+/// with the module whose import it is; without, a program's own lookup at
+/// run time, which the program is told about and lives with.
+fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option<&[u8]>) {
+    let mut text = [0u8; 128];
     let mut n = 0;
     let mut push = |bytes: &[u8]| {
         for &b in bytes {
@@ -1866,7 +1973,13 @@ fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32) {
     } else {
         push(name);
     }
-    GalaRecordMissing(text.as_ptr(), n, 1, u64::from(ordinal));
+    if let Some(importer) = importer {
+        push(b"(imported by ");
+        push(importer);
+        push(b")");
+    }
+    let what = if importer.is_some() { 8 } else { 1 };
+    GalaRecordMissing(text.as_ptr(), n, what, u64::from(ordinal));
 }
 
 /// The normalized name in a UNICODE_STRING.
@@ -2039,7 +2152,7 @@ unsafe extern "system" fn ldr_get_procedure_address(
             // SAFETY: the caller passes a valid ANSI_STRING.
             unsafe { core::slice::from_raw_parts((*name).buffer, usize::from((*name).length)) }
         };
-        report_missing_export(&dll[..len], wanted, ordinal);
+        report_missing_export(&dll[..len], wanted, ordinal, None);
     }
     match found {
         Ok(target) => {

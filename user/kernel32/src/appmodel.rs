@@ -100,3 +100,36 @@ pub extern "system" fn GetPackageFamilyName(
 ) -> i32 {
     APPMODEL_ERROR_NO_PACKAGE
 }
+
+/// FindPackagesByPackageFamily's filters (PACKAGE_FILTER_HEAD, _DIRECT,
+/// _RESOURCE, _BUNDLE and _OPTIONAL): at least one must be named.
+const PACKAGE_FILTERS: u32 = 0x10 | 0x20 | 0x40 | 0x80 | 0x0002_0000;
+
+/// FindPackagesByPackageFamily(family, filters, count, names, length,
+/// buffer, properties): the packages of a family. gala installs no MSIX
+/// package, as every package query here says, so a family has none: the
+/// count and the length come back nought with ERROR_SUCCESS, which is
+/// what Windows answers for a family nobody has installed (measured,
+/// `office_k32_test`'s `packages`). The checks are Windows': a family, a
+/// count, a length and a filter are each needed. Word's mso chain
+/// imports it.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindPackagesByPackageFamily(
+    family: *const u16,
+    filters: u32,
+    count: *mut u32,
+    _names: *mut *mut u16,
+    length: *mut u32,
+    _buffer: *mut u16,
+    _properties: *mut u32,
+) -> i32 {
+    if family.is_null() || count.is_null() || length.is_null() || filters & PACKAGE_FILTERS == 0 {
+        return ERROR_INVALID_PARAMETER as i32;
+    }
+    // SAFETY: the caller's count and length.
+    unsafe {
+        *count = 0;
+        *length = 0;
+    }
+    ERROR_SUCCESS
+}

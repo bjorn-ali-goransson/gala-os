@@ -364,6 +364,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f09, &[H]),                                          // NtFlushKey
     (0x7fd6, &[H, U, U, U]),                                 // NtSetInformationKey
     (0x7f25, &[H, H, Apc, U, U, U, U, U, U, U]),             // NtNotifyChangeKey
+    (0x7f2a, &[H, U]),                                       // NtPulseEvent
     // At most one subordinate (a Count over 1 is refused): its
     // OBJECT_ATTRIBUTES converts as one.
     (0x7f26, &[H, U, Oa, H, Apc, U, U, U, U, U, U, U]), // NtNotifyChangeMultipleKeys

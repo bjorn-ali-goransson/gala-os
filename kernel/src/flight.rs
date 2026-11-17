@@ -86,6 +86,100 @@ impl Default for Ring {
     }
 }
 
+/// What a recorded call's number is called: a system service of the NT
+/// table, or a Linux call from the machine's Linux table.
+pub fn call_name(number: u64) -> &'static str {
+    if number & LINUX != 0 {
+        crate::lx::syscalls::name(number & !LINUX).unwrap_or("an unknown Linux call")
+    } else {
+        crate::nt::syscalls::service_name(number as u32)
+    }
+}
+
+/// One system call a thread made: when it started (ns), its number and,
+/// when it returned before the records were read, its status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Call {
+    pub at: u64,
+    pub number: u64,
+    pub status: Option<u32>,
+}
+
+/// Calls kept for a crash report: enough to say what a thread was doing
+/// before the exception, over the calls the dispatcher's own search adds
+/// after it (eleven in a `crash_raise` run).
+pub const CALLS: usize = 24;
+
+/// The last calls of thread `tid` in `rings`, oldest first, into `out`;
+/// the count written. A call's status is the `syscall-done` record that
+/// followed it on the same CPU: a thread runs its call on the CPU it
+/// started it on, and the records of a CPU are in the order they
+/// happened, so what a ring holds between a thread's call and the next
+/// call of any thread is that call's own end.
+#[cfg_attr(feature = "hosted", allow(dead_code))]
+fn calls_of<'a>(rings: impl Iterator<Item = &'a Ring>, tid: u64, out: &mut [Call]) -> usize {
+    let mut n = 0;
+    let mut keep = |call: Call| {
+        if n < out.len() {
+            out[n] = call;
+            n += 1;
+        } else if let Some(oldest) = out[..n].iter_mut().min_by_key(|c| c.at)
+            && oldest.at < call.at
+        {
+            *oldest = call;
+        }
+    };
+    for ring in rings {
+        // The thread whose call this CPU is in, and that call until its
+        // end is known (a record of another thread ends the wait for it:
+        // this CPU went on to something else).
+        let mut whose = 0;
+        let mut open: Option<Call> = None;
+        for (at, kind, a, b) in ring.records() {
+            match kind {
+                k if k == Kind::Syscall as u8 => {
+                    whose = b;
+                    if let Some(call) = open.take() {
+                        keep(call);
+                    }
+                    if b == tid {
+                        open = Some(Call { at, number: a & 0xffff_ffff, status: None });
+                    }
+                }
+                k if k == Kind::SyscallDone as u8 => {
+                    if let Some(mut call) = open.take() {
+                        if whose == tid {
+                            call.status = Some(b as u32);
+                        }
+                        keep(call);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(call) = open.take() {
+            keep(call);
+        }
+    }
+    out[..n].sort_unstable_by_key(|c| c.at);
+    n
+}
+
+/// The last calls of thread `tid` on every CPU, oldest first (the crash
+/// report: what the thread was doing before it died, which an exception
+/// a program raises itself leaves nothing else to go on).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn thread_calls(tid: u64, out: &mut [Call]) -> usize {
+    calls_of(RINGS.iter(), tid, out)
+}
+
+/// Host unit tests and gala-um: nothing is kept, so there is nothing to
+/// say.
+#[cfg(any(test, feature = "hosted"))]
+pub fn thread_calls(_tid: u64, _out: &mut [Call]) -> usize {
+    0
+}
+
 #[cfg(not(any(test, feature = "hosted")))]
 static RINGS: [Ring; crate::arch::smp::MAX_CPUS] =
     [const { Ring::new() }; crate::arch::smp::MAX_CPUS];
@@ -131,14 +225,7 @@ pub fn dump(cpus: u64, max: usize, mut print: impl FnMut(core::fmt::Arguments)) 
     for &(t, kind, a, b, cpu) in &last[..n] {
         // System calls by name, with the caller (xtask's triage reads
         // these to show each thread's last calls).
-        // A Linux call is named from the machine's Linux table.
-        let service = |number: u64| {
-            if number & LINUX != 0 {
-                crate::lx::syscalls::name(number & !LINUX).unwrap_or("an unknown Linux call")
-            } else {
-                crate::nt::syscalls::service_name(number as u32)
-            }
-        };
+        let service = call_name;
         match kind {
             1 => print(format_args!(
                 "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} pid {} tid {b})",
@@ -320,6 +407,51 @@ pub fn on_kernel_tick(_id: usize, _rip: u64) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_threads_last_calls_keep_each_calls_own_status() {
+        let ring = Ring::new();
+        // Two threads on one CPU: 16 opens a key that is not there, 20
+        // waits, then 16 writes.
+        ring.push(10, Kind::Syscall, 0x12, 16);
+        ring.push(20, Kind::SyscallDone, 0x12, 0xc000_0034);
+        ring.push(30, Kind::Syscall, 0x4, 20);
+        ring.push(40, Kind::SyscallDone, 0x4, 0x102);
+        ring.push(50, Kind::Syscall, 0x8, 16);
+        ring.push(60, Kind::SyscallDone, 0x8, 0);
+        let mut out = [Call::default(); CALLS];
+        let n = calls_of([&ring].into_iter(), 16, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                Call { at: 10, number: 0x12, status: Some(0xc000_0034) },
+                Call { at: 50, number: 0x8, status: Some(0) },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_that_never_returned_is_kept_without_a_status() {
+        let ring = Ring::new();
+        ring.push(10, Kind::Syscall, 0x91, 16);
+        let mut out = [Call::default(); CALLS];
+        let n = calls_of([&ring].into_iter(), 16, &mut out);
+        assert_eq!(&out[..n], &[Call { at: 10, number: 0x91, status: None }]);
+    }
+
+    #[test]
+    fn the_calls_kept_are_the_last_ones_whatever_cpu_they_ran_on() {
+        let (first, second) = (Ring::new(), Ring::new());
+        for i in 0..20u64 {
+            let ring = if i % 2 == 0 { &first } else { &second };
+            ring.push(100 + i, Kind::Syscall, i, 16);
+            ring.push(100 + i, Kind::SyscallDone, i, 0);
+        }
+        let mut out = [Call::default(); 4];
+        let n = calls_of([&first, &second].into_iter(), 16, &mut out);
+        assert_eq!(n, 4);
+        assert_eq!(out.map(|c| c.number), [16, 17, 18, 19]);
+    }
 
     #[test]
     fn the_ring_keeps_the_last_records_in_order() {

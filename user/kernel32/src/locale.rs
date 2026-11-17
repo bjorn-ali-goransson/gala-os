@@ -363,6 +363,139 @@ pub extern "system" fn EnumSystemLocalesA(f: Option<LocaleEnumProcA>, _flags: u3
     TRUE
 }
 
+// ---- Language groups and the languages of the user interface ----
+
+/// Windows' language groups, in LGRPID order (1 to 0x11), with the
+/// English names it gives them. Which are installed is a Windows
+/// setting; gala has them all, as a Windows with every group does.
+const LANGUAGE_GROUPS: [&str; 17] = [
+    "Western Europe and United States",
+    "Central Europe",
+    "Baltic",
+    "Greek",
+    "Cyrillic",
+    "Turkic",
+    "Japanese",
+    "Korean",
+    "Traditional Chinese",
+    "Simplified Chinese",
+    "Thai",
+    "Hebrew",
+    "Arabic",
+    "Vietnamese",
+    "Indic",
+    "Georgian",
+    "Armenian",
+];
+
+const LGRPID_INSTALLED: u32 = 1;
+const LGRPID_SUPPORTED: u32 = 2;
+const MUI_LANGUAGE_ID: u32 = 4;
+const MUI_LANGUAGE_NAME: u32 = 8;
+/// The flags that pick which languages EnumUILanguages counts: the ones
+/// installed, the ones licensed, and (0x80) those of the whole system.
+const MUI_LANGUAGE_INSTALLED: u32 = 0x20;
+const MUI_LANGUAGE_LICENSED: u32 = 0x40;
+const MUI_MACHINE_LANGUAGE: u32 = 0x80;
+
+/// A group's id as lowercase hex text with no leading zero, as Windows
+/// gives it ("1" to "f", then "10" and "11"), NUL-terminated.
+fn hex_text(v: u32) -> [u16; 3] {
+    let digit = |d: u32| u16::from(if d < 10 { b'0' + d as u8 } else { b'a' + d as u8 - 10 });
+    let mut out = [0u16; 3];
+    let mut at = 0;
+    for shift in [4, 0] {
+        let d = (v >> shift) & 0xf;
+        if at > 0 || shift == 0 || d != 0 {
+            out[at] = digit(d);
+            at += 1;
+        }
+    }
+    out
+}
+
+/// An ASCII name as NUL-terminated UTF-16, long enough for the longest
+/// language group name.
+fn wide_name(name: &str) -> [u16; 40] {
+    let mut out = [0u16; 40];
+    for (o, b) in out.iter_mut().zip(name.bytes()) {
+        *o = u16::from(b);
+    }
+    out
+}
+
+type LanguageGroupProcW = extern "system" fn(u32, *const u16, *const u16, u32, isize) -> Bool;
+type UiLanguageProcW = extern "system" fn(*const u16, isize) -> Bool;
+
+/// EnumSystemLanguageGroupsW(proc, flags, param): every language group,
+/// each with its id, the id as hex text, its English name and
+/// LGRPID_INSTALLED, which Windows sets on every row of a system that
+/// has them all. LGRPID_INSTALLED, LGRPID_SUPPORTED and no flags at all
+/// give the same rows (measured on Windows 11); any other flags are
+/// ERROR_INVALID_FLAGS and no callback is ERROR_INVALID_PARAMETER. A
+/// callback that answers FALSE stops the enumeration, which still
+/// returns TRUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumSystemLanguageGroupsW(
+    f: Option<LanguageGroupProcW>,
+    flags: u32,
+    param: isize,
+) -> Bool {
+    let Some(f) = f else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    if !matches!(flags, 0 | LGRPID_INSTALLED | LGRPID_SUPPORTED) {
+        return fail_with(ERROR_INVALID_FLAGS, FALSE);
+    }
+    for (i, name) in LANGUAGE_GROUPS.iter().enumerate() {
+        let id = i as u32 + 1;
+        let (id_text, name) = (hex_text(id), wide_name(name));
+        if f(id, id_text.as_ptr(), name.as_ptr(), LGRPID_INSTALLED, param) == FALSE {
+            break;
+        }
+    }
+    TRUE
+}
+
+/// EnumUILanguagesW(proc, flags, param): the languages the user
+/// interface comes in, which for gala is its one locale. With
+/// MUI_LANGUAGE_NAME the callback gets the name ("en-US"), otherwise the
+/// LANGID as four hex digits ("0409"), as Windows gives them. An id and
+/// a name together, or both of the installed/licensed pair, or a bit
+/// outside them, is ERROR_INVALID_FLAGS; no callback is
+/// ERROR_INVALID_PARAMETER (all measured on Windows 11). A callback that
+/// answers FALSE stops the enumeration, which still returns TRUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumUILanguagesW(
+    f: Option<UiLanguageProcW>,
+    flags: u32,
+    param: isize,
+) -> Bool {
+    const VALID: u32 = MUI_LANGUAGE_ID
+        | MUI_LANGUAGE_NAME
+        | MUI_LANGUAGE_INSTALLED
+        | MUI_LANGUAGE_LICENSED
+        | MUI_MACHINE_LANGUAGE;
+    let Some(f) = f else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    let both = |x: u32, y: u32| flags & x != 0 && flags & y != 0;
+    if flags & !VALID != 0
+        || both(MUI_LANGUAGE_ID, MUI_LANGUAGE_NAME)
+        || both(MUI_LANGUAGE_INSTALLED, MUI_LANGUAGE_LICENSED)
+    {
+        return fail_with(ERROR_INVALID_FLAGS, FALSE);
+    }
+    let mut text = [0u16; 16];
+    if flags & MUI_LANGUAGE_NAME != 0 {
+        GetUserDefaultLocaleName(text.as_mut_ptr(), text.len() as i32);
+    } else {
+        let id = GetUserDefaultUILanguage();
+        for (i, shift) in [12, 8, 4, 0].into_iter().enumerate() {
+            let d = (u32::from(id) >> shift) & 0xf;
+            text[i] = u16::from(if d < 10 { b'0' + d as u8 } else { b'a' + d as u8 - 10 });
+        }
+    }
+    f(text.as_ptr(), param);
+    TRUE
+}
+
 // ---- Case mapping, comparison and character types ----
 
 const LCMAP_LOWERCASE: u32 = 0x100;
@@ -1036,6 +1169,11 @@ pub extern "system" fn GetDateFormatW(
     if !known_lcid(lcid) || size < 0 {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }
+    // A picture of the caller's own takes no flags: Windows answers
+    // ERROR_INVALID_FLAGS (measured, `office_k32_test`'s `date_time_a`).
+    if !format.is_null() && flags != 0 {
+        return fail_with(ERROR_INVALID_FLAGS, 0);
+    }
     let t = read_time(st);
     let default: [u16; 32];
     let picture: &[u16] = if format.is_null() {
@@ -1087,6 +1225,11 @@ pub extern "system" fn GetTimeFormatW(
 ) -> i32 {
     if !known_lcid(lcid) || size < 0 {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // A picture of the caller's own takes no flags: Windows answers
+    // ERROR_INVALID_FLAGS (measured, `office_k32_test`'s `date_time_a`).
+    if !format.is_null() && flags != 0 {
+        return fail_with(ERROR_INVALID_FLAGS, 0);
     }
     let t = read_time(st);
     let default: [u16; 16];
@@ -1640,4 +1783,80 @@ pub extern "system" fn MulDiv(a: i32, b: i32, c: i32) -> i32 {
     let q =
         if (p < 0) == (c < 0) { (p.abs() + half) / c.abs() } else { -((p.abs() + half) / c.abs()) };
     i32::try_from(q).unwrap_or(-1)
+}
+
+/// GetDateFormatA and GetTimeFormatA: the W form's text as ANSI (UTF-8),
+/// the count with the NUL as the W forms' is. `size` is in bytes, and a
+/// size of none asks what the text needs.
+fn format_ansi(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+    f: extern "system" fn(u32, u32, *const u16, *const u16, *mut u16, i32) -> i32,
+) -> i32 {
+    if size < 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut picture = [0u16; 128];
+    let p = if format.is_null() {
+        core::ptr::null()
+    } else {
+        let last = picture.len() - 1;
+        match super::sync::ansi_to_wide(format, &mut picture[..last]) {
+            Some(n) => {
+                picture[n] = 0;
+                picture.as_ptr()
+            }
+            None => return fail_with(ERROR_INVALID_PARAMETER, 0),
+        }
+    };
+    let mut w = [0u16; 160];
+    let n = f(lcid, flags, st, p, w.as_mut_ptr(), w.len() as i32);
+    if n <= 0 {
+        return 0; // the W form set the error
+    }
+    // The count is with the NUL; the text is what comes before it.
+    let mut utf8 = [0u8; 3 * 160];
+    let Some(len) = super::ansi::to_utf8(&w[..n as usize - 1], utf8.as_mut_ptr(), utf8.len())
+    else {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    };
+    if size == 0 || buf.is_null() {
+        return len as i32 + 1;
+    }
+    if size as usize <= len {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe { core::ptr::copy_nonoverlapping(utf8.as_ptr(), buf, len + 1) };
+    len as i32 + 1
+}
+
+/// GetDateFormatA: [`GetDateFormatW`] in ANSI ([`format_ansi`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDateFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
+    format_ansi(lcid, flags, st, format, buf, size, GetDateFormatW)
+}
+
+/// GetTimeFormatA: [`GetTimeFormatW`] in ANSI ([`format_ansi`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTimeFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
+    format_ansi(lcid, flags, st, format, buf, size, GetTimeFormatW)
 }

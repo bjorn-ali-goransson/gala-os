@@ -174,6 +174,10 @@ pub fn replay_from(path: &str) -> Result<(), String> {
 /// gala-um, implementing `nt::platform`'s traits.
 pub struct Um;
 
+/// gala-um runs on a host process, with no firmware to have left tables
+/// (`Firmware::smbios` is None).
+impl crate::nt::platform::Firmware for Um {}
+
 /// gala-um has no screen.
 impl Display for Um {
     fn screen_size() -> Option<(u32, u32)> {

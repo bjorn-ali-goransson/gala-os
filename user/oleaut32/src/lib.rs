@@ -1,8 +1,8 @@
 //! gala's oleaut32.dll: OLE Automation's data types, as documented:
 //! BSTRs (a 4-byte byte length before the text, a NUL after it), VARIANTs
 //! (clearing, copying, converting between numbers, booleans and strings
-//! in the invariant/en-US format), SAFEARRAYs (safearray.rs) and
-//! VarCyFromDec. gala has no registry, so no type library is registered
+//! in the invariant/en-US format), SAFEARRAYs (safearray.rs),
+//! VarCyFromDec and this process's running objects (active.rs). gala has no registry, so no type library is registered
 //! (TYPE_E_LIBNOTREGISTERED) and loading .tlb files is not there yet
 //! (recorded). Exports have the standard ordinals (build.rs).
 
@@ -12,6 +12,7 @@
 
 use core::ffi::c_void;
 
+mod active;
 mod arith;
 mod conversions;
 mod date;
@@ -55,12 +56,32 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+// rpcrt4.dll, which Windows' oleaut32 imports (RpcRaiseException,
+// NdrClientCall2 and the proxy and stub helpers for typelib-driven
+// marshalling; its import table, measured on 26100). gala's oleaut32 calls
+// nothing in it, but the dependency is part of what a program sees: rpcrt4
+// is mapped in every process that loads oleaut32, and programs read the
+// module graph -- Click-to-Run's AppV ISV server takes rpcrt4's handle with
+// GetModuleHandle and gives up with ERROR_MOD_NOT_FOUND when it is NULL
+// (ARCHITECTURE "The module graph", ROADMAP OF; `kernel32_test`). gala has
+// no 32-bit rpcrt4 yet, so the 32-bit build goes without it.
+// Nothing here calls it: build.rs pins the import on the link command
+// line, so the linker keeps it.
+#[cfg(not(target_arch = "x86"))]
+#[allow(dead_code)]
+#[link(name = "rpcrt4", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RpcRaiseException(status: u32) -> !;
+}
+
 #[cfg_attr(
     target_arch = "x86",
     link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
 )]
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;

@@ -34,6 +34,16 @@ pub fn run_delay_ns(schedstat: &str) -> Option<u64> {
     schedstat.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// QEMU's `-name` value for scenario `scenario`'s VM. `debug-threads=on`
+/// is what makes QEMU name its threads (`CPU 0/TCG`, `CPU 0/KVM`), which
+/// is how [`is_vcpu`] finds the vCPUs and so how a run's time is
+/// measured at all: without it Ubuntu's qemu-system-aarch64 leaves every
+/// thread named `qemu-system-aar` (measured 2026-11-17), every limit
+/// becomes wall time, and a loaded host fails scenarios that ran fine.
+pub fn qemu_name(scenario: &str) -> String {
+    format!("{scenario},debug-threads=on")
+}
+
 /// Whether a QEMU thread's name (`comm`) is a vCPU's.
 pub fn is_vcpu(comm: &str) -> bool {
     let comm = comm.trim();
@@ -138,6 +148,7 @@ mod tests {
     fn schedstat_and_names() {
         assert_eq!(run_delay_ns("1036000000 8984000000 2201\n"), Some(8_984_000_000));
         assert_eq!(run_delay_ns("12"), None);
+        assert_eq!(qemu_name("taskmgr"), "taskmgr,debug-threads=on");
         assert!(is_vcpu("CPU 0/TCG\n"));
         assert!(is_vcpu("CPU 1/KVM"));
         assert!(is_vcpu("ALL CPUs/TCG"));

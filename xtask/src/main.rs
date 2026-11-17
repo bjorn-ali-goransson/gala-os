@@ -6996,6 +6996,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
     Dll { package: "dxgi", file: "dxgi.dll", exported_as: "testdxgi.dll" },
+    // d3d10_1 and d3d10: what Word's shared code and Office's image
+    // modules delay-load of Direct3D 10 (ROADMAP OF).
+    Dll { package: "d3d10", file: "d3d10.dll", exported_as: "testd3d10.dll" },
+    Dll { package: "d3d10_1", file: "d3d10_1.dll", exported_as: "testd3d10_1.dll" },
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
     Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
     Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
@@ -7275,12 +7279,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hotswap_files", "hotswap_dll.dll@hotswap_late.dll", "gala"),
     ("crash_dispatched", "ntdll.dll", "Windows/System32"),
     ("crash_filtered", "ntdll.dll", "Windows/System32"),
+    ("crash_raise", "ntdll.dll", "Windows/System32"),
     ("safepoint_test", "ntdll.dll", "Windows/System32"),
     ("shootdown_test", "ntdll.dll", "Windows/System32"),
     ("events", "ntdll.dll", "Windows/System32"),
     ("events", "testdll.dll", "gala"),
     ("kernel32_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_test", "kernel32.dll", "Windows/System32"),
+    // It loads these three and reads their imports: the module graph a
+    // program sees (ARCHITECTURE "The module graph"). rpcrt4, which they
+    // import, comes with them (`extra_modules` closes the set).
+    ("kernel32_test", "advapi32.dll", "Windows/System32"),
+    ("kernel32_test", "oleaut32.dll", "Windows/System32"),
+    ("kernel32_test", "msi.dll", "Windows/System32"),
+    ("kernel32_test", "combase.dll", "Windows/System32"),
     ("kernel32_test", "testdll.dll", "gala"),
     ("kernel32_test", "testdll2.dll", "gala/lib"),
     ("missing_import_test", "ntdll.dll", "Windows/System32"),
@@ -7622,6 +7634,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
     ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d10.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d10_1.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d11.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d12.dll", "Windows/System32"),
     ("gpu_stub_test", "dcomp.dll", "Windows/System32"),
@@ -9426,6 +9440,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The kernel32 functions Office imports once each (user/office_k32_test).
     ("office_k32_test", "ntdll.dll", "Windows/System32"),
     ("office_k32_test", "kernel32.dll", "Windows/System32"),
+    // A package's VFS view (user/pkgview_test): it registers its own
+    // package under HKLM and runs a copy of itself inside it.
+    ("pkgview_test", "ntdll.dll", "Windows/System32"),
+    ("pkgview_test", "kernel32.dll", "Windows/System32"),
+    ("pkgview_test", "advapi32.dll", "Windows/System32"),
+    ("pkgview_test", "secur32.dll", "Windows/System32"),
+    ("pkgview_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("pkgview_test", "bcrypt.dll", "Windows/System32"),
     ("wow64_office_k32_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -9895,6 +9917,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "office_k32_test",
+    "pkgview_test",
     "msi_test",
     "webservices_test",
     "rstrtmgr_test",
@@ -10799,7 +10822,15 @@ fn build_next_kernel_unlocked(release: bool, target: &str) -> Result<PathBuf> {
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", target])
         .args(["--features", "handover_next", "--target-dir"])
-        .arg(next_target_dir());
+        .arg(next_target_dir())
+        // Without the incremental cache: the kernel is built in 1024
+        // codegen units (the root Cargo.toml says why), and an
+        // incremental rebuild of it has produced an rlib whose LLVM
+        // anonymous constants no unit defines -- the link then fails with
+        // `undefined hidden symbol: anon.<hash>.<n>.llvm.<id>` while the
+        // same sources build clean. This kernel is built once per profile
+        // and process, so the cache saves little here.
+        .env("CARGO_INCREMENTAL", "0");
     trust::kernel_env(&mut cmd)?;
     if release {
         cmd.arg("--release");
@@ -11722,6 +11753,7 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     let mut cmd = Command::new(qemu_binary_aarch64());
     let cpus = telemetry::vm_cpus(iso).to_string();
     cmd.args(["-machine", "virt,gic-version=3", "-cpu", "max", "-m", "512M", "-smp", &cpus]);
+    cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
     if !extra.split_whitespace().any(|a| a == "-accel") {
         cmd.args(["-accel", "tcg"]);
     }
@@ -12328,6 +12360,7 @@ const ARM64_TWINS: &[&str] = &[
     "apc_test",
     "crash_dispatched",
     "crash_filtered",
+    "crash_raise",
     "seh_test",
     "context_test",
     "threadinfo_test",
@@ -12753,6 +12786,7 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     let machine =
         if NO_I8042_SCENARIOS.contains(&iso_scenario(iso)) { "q35,i8042=off" } else { "q35" };
     cmd.args(["-machine", machine, "-cpu", "max", "-m", &format!("{memory}M"), "-smp", &cpus]);
+    cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
     // KVM when available, otherwise software emulation; an `-accel` in
     // XTASK_QEMU_ARGS replaces both (`-accel tcg,thread=multi` reproduces
     // what SINGLE_THREAD_TCG avoids).
@@ -13065,11 +13099,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=loader_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            // testdll's ordinal 2 has no export (RVA 0): asked for, and
-            // imported by testdll_gap.dll, it is a missing export. The
-            // DLL that could not load for it is named too, with the
-            // status (STATUS_ORDINAL_NOT_FOUND, 0xc0000138).
+            // testdll's ordinal 2 has no export (RVA 0). Asked for by
+            // the program it is a missing export, which the program is
+            // told about and lives with; imported by testdll_gap.dll it
+            // is a missing import, which ends that load -- and the two
+            // are told apart in the ledger. The DLL that could not load
+            // is named too, with the status (STATUS_ORDINAL_NOT_FOUND,
+            // 0xc0000138).
             r#"ledger: {"service":"testdll.dll!#2","what":"missing export""#,
+            r#"ledger: {"service":"testdll.dll!#2(imported by testdll_gap.dll)","what":"missing import""#,
             r#"ledger: {"service":"testdll_gap.dll","what":"load failed","detail":3221225784"#,
             "loader_test: ok",
             "exited with status 0x00000000",
@@ -13510,6 +13548,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "kernel32_test: hello from kernel32",
             "kernel32_test: ok",
+            // The name a GetModuleHandle miss asks for is in the ledger
+            // (three hits: W, A and Ex), which is how a run says which
+            // module a program wanted and did not get.
+            r#"ledger: {"service":"kernel32.dll!GetModuleHandle(no_such_module.dll)","what":"other""#,
             "exited with status 0x00000000",
         ],
     },
@@ -13519,8 +13561,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "missing_import_test.exe finished with status 0xc0000139",
-            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne","what":"missing export""#,
-            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo","what":"missing export""#,
+            // An import that does not bind is a "missing import", named
+            // with the module whose import it is -- here the executable,
+            // which has no module table entry of its own.
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionOne(imported by missing_import_test.exe)","what":"missing import""#,
+            r#"ledger: {"service":"kernel32.dll!GalaNoSuchFunctionTwo(imported by missing_import_test.exe)","what":"missing import""#,
         ],
     },
     Scenario {
@@ -14468,6 +14513,22 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["office_k32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // OF: a process's view of a Click-to-Run package's VFS tree
+        // (nt::pkgview). user/pkgview_test builds a package of its own,
+        // registers it as Windows registers one and runs a copy of
+        // itself from inside it: the copy finds the package's files at
+        // the tokens' real paths, and the parent, outside the package,
+        // finds none of them.
+        name: "pkgview_test",
+        cmdline: "qemu_exit run=pkgview_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "pkgview_test: in the package: ok",
+            "pkgview_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // The same through WOW64 (user/office_k32_test built for x86).
         name: "wow64_office_k32_test",
         cmdline: "qemu_exit run=wow64_office_k32_test.exe",
@@ -14919,10 +14980,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
     Scenario {
         // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
         // attributes, XPath selection, parse errors (user/msxml_test).
+        // Every E_FAIL the test asks for names itself in the ledger, with
+        // the expression or the property it is about: all a program that
+        // reads XML through a wrapper of its own leaves behind is that
+        // E_FAIL (OBSERVABILITY "MSXML").
         name: "msxml_test",
         cmdline: "qemu_exit run=msxml_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["msxml_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "msxml_test: ok",
+            r#"ledger: {"service":"msxml6.dll!selectNodes: an undeclared prefix: //y:Item","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!selectNodes: a step expected: //[","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!selectNodes: a value that is no node-set: count(//ExcludeApp)","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::getProperty(unknown property): askldhfaklsdf","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(unknown property): askldhfaklsdf","what":"other""#,
+            r#"ledger: {"service":"msxml6.dll!IXMLDOMDocument2::setProperty(SelectionLanguage: not a string)","what":"other""#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // The Windows Imaging Component (user/windowscodecs_test): the
@@ -16981,8 +17055,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "ledger_test: ok",
             "exited with status 0x00000000",
-            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1}"#,
-            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2}"#,
+            r#"ledger: {"service":"?","what":"unknown service","detail":4095,"hits":1,"#,
+            r#"ledger: {"service":"NtQueryInformationProcess","what":"info class","detail":32512,"hits":2,"#,
             // The table filled up; how many records it then dropped
             // depends on what the boot itself recorded, but their kind
             // does not.
@@ -17303,6 +17377,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -17320,6 +17395,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
+            "xtask: screen ok",
             "consolerun.exe (pid 4) exited with status 0x00000000",
         ],
     },
@@ -17499,6 +17575,38 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "(crash.exe+0x",
             "writing address 0x0",
             "process crash.exe (pid 4) exited with status 0xffff7002",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // An exception the program raises itself, with a code nothing
+        // decodes and three parameters, which no handler takes (what
+        // Office's shared code does with 0xe0000002, ROADMAP OF): the
+        // report has only the parameters and what the thread did last to
+        // go on, so it names the parameters, with the image any of them
+        // points into, and the thread's last calls from the flight
+        // recorder, each with its status (Office's raise carries no
+        // parameters at all, so there the calls are all there is).
+        name: "crash_raise",
+        cmdline: "qemu_exit run=crash.exe args=raise",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "crash: raising 0xe0000042 with three parameters",
+            "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000042 \
+             (exception) in thread",
+            "crash report:   no handler took it: ",
+            "frames unwound, 0 handlers asked",
+            "crash report:     the walk stopped at ",
+            "crash report:     frame 0: ",
+            "crash report:   3 parameters: 0x8007000e, 0x",
+            "(crash.exe+0x",
+            ", 0xfeedface",
+            // The line it printed, the handle that is not one, and the
+            // dispatcher's own calls after the raise.
+            "last calls, oldest first: ",
+            "NtWriteFile=0x00000000",
+            "NtClose=0xc0000008, GalaUnhandledException=0x00000000",
+            "process crash.exe (pid 4) exited with status 0xe0000042",
             BOOT_OK_MARKER,
         ],
     },
@@ -18490,6 +18598,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "wsl: bb: imported",
+            "taskmgr_test: an ending Linux process is still itself",
             "taskmgr_test: ready",
             "(taskmgr_test.exe) is not responding: its input has waited untaken",
             "taskmgr_test: frozen window not responding",
@@ -18911,9 +19020,116 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     if FULL_SYSTEM_SCENARIOS.contains(&name) {
         modules.extend(system_modules());
     }
+    // What those modules import, so the set is closed: a DLL whose
+    // dependency is not in the image does not load, and the program dies
+    // of a module nobody listed. gala's DLLs carry Windows' own
+    // dependencies where a program can see them (ARCHITECTURE "The
+    // module graph"), so this follows the import tables of the DLLs
+    // themselves (`static_imports`, from the checked-in copies) rather
+    // than a second list to keep in step with them. The 32-bit set
+    // (`x86/`, SysWOW64) stays as listed: its names are written with the
+    // prefix. A dependency neither checked in nor built is left out; the
+    // load then fails in the guest, where the loader records the name
+    // (`missing dll`).
+    let mut i = 0;
+    while i < modules.len() {
+        let (file, _) = modules[i];
+        i += 1;
+        if file.contains('/') {
+            continue;
+        }
+        for dep in static_imports(file) {
+            // Dependencies live where the system's DLLs do, whatever
+            // directory the importer was put in (a test DLL in C:\gala
+            // imports kernel32 from System32).
+            if !modules.contains(&(dep, "Windows/System32")) {
+                modules.push((dep, "Windows/System32"));
+            }
+        }
+    }
     modules.sort_unstable();
     modules.dedup();
     modules
+}
+
+/// Where the checked-in copy of the USER_DLLS file `file` is: user/bin
+/// holds it under its exported name, and `export-tests` keeps it equal to
+/// the build's (CI checks they match). This is the copy gala-um ships, and
+/// the one every checkout has whether or not the DLLs are built, so what
+/// a module set is read from does not depend on what was built before it.
+fn shipped_dll(file: &str) -> PathBuf {
+    match USER_DLLS.iter().find(|d| d.file == file) {
+        Some(d) => root().join("user/bin").join(d.exported_as),
+        None => built_dll(file),
+    }
+}
+
+/// The DLLs of `file`'s import table that gala builds itself (by their
+/// USER_DLLS names): what has to be in the image for it to load. Read from
+/// the checked-in copy (`shipped_dll`), never from the build, so a clean
+/// tree closes the set exactly as a built one does: reading the build
+/// instead left every set open where nothing was built yet, which took the
+/// 23 gala-um programs that load advapi32 and its kin with it. Empty if
+/// the file is neither checked in nor built, or is no PE.
+fn static_imports(file: &str) -> Vec<&'static str> {
+    let Ok(image) = fs::read(shipped_dll(file)) else {
+        return Vec::new();
+    };
+    let names = import_names(&image);
+    USER_DLLS
+        .iter()
+        .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
+        .map(|d| d.file)
+        .collect()
+}
+
+/// The DLL names in a PE's import directory (empty if it has none or the
+/// file is not one: every read is checked, so a truncated or odd file
+/// gives nothing instead of a panic).
+fn import_names(image: &[u8]) -> Vec<String> {
+    let at32 = |o: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(image.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let at16 = |o: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?))
+    };
+    let names = || -> Option<Vec<String>> {
+        let pe = at32(0x3c)?;
+        if image.get(pe..pe + 4)? != b"PE\0\0" {
+            return None;
+        }
+        let sections = pe + 24 + usize::from(at16(pe + 20)?);
+        // DataDirectory[1] (imports) of a PE32+ or PE32 optional header.
+        let dirs = pe + 24 + if at16(pe + 24)? == 0x20b { 112 } else { 96 };
+        let rva = at32(dirs + 8)?;
+        if rva == 0 {
+            return None;
+        }
+        // A section's file offset for an address in it (the image on disk
+        // is not laid out as it is in memory).
+        let offset = |rva: usize| -> Option<usize> {
+            (0..usize::from(at16(pe + 6)?)).find_map(|i| {
+                let s = sections + i * 40;
+                let (va, vs) = (at32(s + 12)?, at32(s + 8)?);
+                let (raw, rs) = (at32(s + 20)?, at32(s + 16)?);
+                if va <= rva && rva < va + vs.max(rs) { Some(raw + (rva - va)) } else { None }
+            })
+        };
+        let mut out = Vec::new();
+        let mut desc = offset(rva)?;
+        loop {
+            // The Name of an IMPORT_DESCRIPTOR (20 bytes); 0 ends the table.
+            let name = at32(desc + 12)?;
+            if name == 0 {
+                return Some(out);
+            }
+            let at = offset(name)?;
+            let end = at + image.get(at..)?.iter().position(|&b| b == 0)?;
+            out.push(String::from_utf8_lossy(&image[at..end]).into_owned());
+            desc += 20;
+        }
+    };
+    names().unwrap_or_default()
 }
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one
@@ -19505,6 +19721,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
     ("office_k32_test", "WinExec starts a child process (one NT process per Linux process)"),
+    ("pkgview_test", "a child process in the package (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
@@ -20745,7 +20962,7 @@ fn run_vm_once(
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
         {
-            let checked = check_screen(&socket, iso, check);
+            let checked = check_screen(&socket, iso, check, &mut vm_clock);
             screen_verdict = Some(match &checked {
                 Ok(note) => format!("xtask: screen ok{note}\n"),
                 Err(e) => format!("xtask: screen: {e}\n"),
@@ -20885,6 +21102,14 @@ fn run_vm_once(
         vm_time.describe(),
         timeout.as_secs()
     );
+    // Timed by the wall clock: the limit is then the host's load as
+    // much as the guest's work, which is worth saying where the run's
+    // own lines are rather than leaving to be noticed (vmtime.rs).
+    if vm_time.starved_ms.is_none() {
+        serial += "xtask: warning: QEMU named no vCPU thread (`CPU n/TCG`), so this run was \
+                   timed by the wall clock: is `-name <scenario>,debug-threads=on` still on \
+                   its command line?\n";
+    }
     // A `record` boot's recording (kernel/src/replay.rs), from the debug
     // console's `"ev":"rec"` lines.
     if let Some(line) = extract_recording(&events, &iso.with_extension("rec")) {
@@ -20900,6 +21125,13 @@ fn run_vm_once(
     }
     if let Some(verdict) = screen_verdict {
         serial += &verdict;
+    } else if let Some(check) = screen {
+        // The check never ran: the marker it waits for was not printed,
+        // so the program never drew the window. Saying so is what tells
+        // that apart from a check that ran and passed -- without the
+        // line, a run where nothing drew left no trace of the check at
+        // all and passed on the program's exit status alone.
+        serial += &format!("xtask: screen: nothing printed \"{}\"\n", check.marker);
     }
     // The host page's requests (`serve-page`), as they came.
     if let Ok(served) = fs::read_to_string(iso.with_extension("serve.log")) {
@@ -23547,7 +23779,12 @@ fn screen_check(name: &str) -> Option<&'static ScreenCheck> {
 /// Takes a screendump through the monitor at `socket` (kept as
 /// `<iso>.screen.png`) and checks `check`'s pixels. A note for the verdict
 /// line ("" or how the check ended early).
-fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String> {
+fn check_screen(
+    socket: &Path,
+    iso: &Path,
+    check: &ScreenCheck,
+    clock: &mut vmtime::VmClock,
+) -> Result<String> {
     use std::io::Write;
     let mut monitor = None;
     for _ in 0..100 {
@@ -23558,26 +23795,42 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
         thread::sleep(Duration::from_millis(20));
     }
     let mut monitor = monitor.ok_or("cannot connect to the QEMU monitor")?;
+    // This run's screendumps only: an earlier run of the scenario may
+    // have reached a later step, and its pictures would be kept with a
+    // failed log as if they were this run's.
+    for n in 0..check.steps.len() {
+        let _ = fs::remove_file(iso.with_extension(format!("screen{n}.png")));
+    }
     let log = iso.with_extension("serial.log");
-    let wait = SCREEN_STEP_WAITS
-        .iter()
-        .find(|(n, _)| *n == iso_scenario(iso))
-        .map_or(SCREEN_STEP_WAIT, |&(_, w)| w);
     let mut ps2 = InputPace::default();
+    // What the steps waited for their lines, where it is a part of the
+    // limit worth knowing: the measurement a future failure of this wait
+    // is read against, and what SCREEN_STEP_WAIT is set from.
+    const WAIT_WORTH_SAYING: u64 = 5_000;
+    let mut waits = String::new();
     for (n, step) in check.steps.iter().enumerate() {
         if !step.after.is_empty() {
-            wait_for_line(&log, step.after, wait).map_err(|e| format!("step {n}: {e}"))?;
+            let waited = wait_for_line(&log, step.after, SCREEN_STEP_WAIT, clock)
+                .map_err(|e| format!("step {n}: {e}"))?;
+            if waited >= WAIT_WORTH_SAYING {
+                waits += &format!(
+                    " (step {n} waited {:.1}s of run time for {:?}, of {} s)",
+                    waited as f64 / 1000.0,
+                    step.after,
+                    SCREEN_STEP_WAIT.as_secs()
+                );
+            }
         }
         for command in step.input {
             // Each command only once the guest has read what QEMU queued
             // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
             // what does not fit is lost (InputPace).
-            ps2.wait_taken(&mut monitor, &log).map_err(|e| format!("step {n}: {e}"))?;
+            ps2.wait_taken(&mut monitor, &log, clock).map_err(|e| format!("step {n}: {e}"))?;
             writeln!(monitor, "{command}").map_err(|e| e.to_string())?;
             ps2.sent(command).map_err(|e| format!("step {n}: {e}"))?;
         }
         if !step.input.is_empty() {
-            let taken = ps2.wait_taken(&mut monitor, &log);
+            let taken = ps2.wait_taken(&mut monitor, &log, clock);
             // The last step's input often ends the program (Esc, Ctrl+Q),
             // and with qemu_exit QEMU too, which may close the monitor
             // before the guest's read counters are asked for. Then there
@@ -23587,21 +23840,22 @@ fn check_screen(socket: &Path, iso: &Path, check: &ScreenCheck) -> Result<String
             if let Err(e) = taken {
                 if last && monitor_closed(&monitor) {
                     return Ok(format!(
-                        " (step {n}: QEMU's monitor closed after the last input, which ended \
-                         the program: {e})"
+                        "{waits} (step {n}: QEMU's monitor closed after the last input, which \
+                         ended the program: {e})"
                     ));
                 }
                 return Err(format!("step {n}: {e}"));
             }
         }
-        check_screen_step(&mut monitor, iso, n, step).map_err(|e| format!("step {n}: {e}"))?;
+        check_screen_step(&mut monitor, iso, n, step, clock)
+            .map_err(|e| format!("step {n}: {e}"))?;
         // A host-side wait this step's check ends (HELD_DOWNLOADS).
         if HELD_DOWNLOADS.iter().any(|&(name, held)| name == iso_scenario(iso) && held == n) {
             let release = iso.with_extension("serve.release");
             fs::write(&release, b"").map_err(|e| format!("step {n}: writing {release:?}: {e}"))?;
         }
     }
-    Ok(String::new())
+    Ok(waits)
 }
 
 /// Whether QEMU has closed its end of the monitor socket (it exited): a
@@ -23654,8 +23908,9 @@ struct InputPace {
     buttons: u8,
 }
 
-/// How long the guest may take to read what a screen check sent: a
-/// give-up only (a guest that stopped reading the controller).
+/// How long the guest may take to read what a screen check sent, in the
+/// VM's run time: a give-up only (a guest that stopped reading the
+/// controller).
 const PS2_TAKEN_WAIT: Duration = Duration::from_secs(120);
 
 /// What the guest's input counters count.
@@ -23669,21 +23924,25 @@ enum Counted {
 
 impl InputPace {
     /// Waits until the guest has read everything sent so far.
-    fn wait_taken(&mut self, monitor: &mut std::os::unix::net::UnixStream, log: &Path) -> Result {
-        let (at, _) = self.find(monitor, log)?;
-        let start = Instant::now();
+    fn wait_taken(
+        &mut self,
+        monitor: &mut std::os::unix::net::UnixStream,
+        log: &Path,
+        clock: &mut vmtime::VmClock,
+    ) -> Result {
+        let (at, _) = self.find(monitor, log, clock)?;
+        let began = ScreenWait::start(clock);
         let mut read = guest_ps2_read(monitor, at)?;
         while read.0 < self.want.0 || read.1 < self.want.1 {
-            if start.elapsed() > PS2_TAKEN_WAIT {
+            if let Some(why) = began.over(clock, PS2_TAKEN_WAIT) {
                 return Err(format!(
                     "the guest read {} of the {} keyboard and {} of the {} mouse {} sent \
-                     within {} s (its input thread: `input:` lines in the serial log)",
+                     {why} (its input thread: `input:` lines in the serial log)",
                     read.0,
                     self.want.0,
                     read.1,
                     self.want.1,
                     self.unit(),
-                    PS2_TAKEN_WAIT.as_secs()
                 ));
             }
             thread::sleep(Duration::from_millis(20));
@@ -23718,6 +23977,7 @@ impl InputPace {
         &mut self,
         monitor: &mut std::os::unix::net::UnixStream,
         log: &Path,
+        clock: &mut vmtime::VmClock,
     ) -> Result<(u64, Counted)> {
         if let Some(g) = self.guest {
             return Ok(g);
@@ -23725,7 +23985,7 @@ impl InputPace {
         // The input thread logs one of the two once its devices are set up.
         const PS2: &str = "input: bytes read at ";
         const VIRTIO: &str = "input: virtio events read at ";
-        let start = Instant::now();
+        let began = ScreenWait::start(clock);
         let (rest, virtio) = loop {
             let text = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
             let found = text.lines().rev().find_map(|l| {
@@ -23736,11 +23996,8 @@ impl InputPace {
             if let Some(f) = found {
                 break f;
             }
-            if start.elapsed() > SCREEN_STEP_WAIT {
-                return Err(format!(
-                    "no {PS2:?} or {VIRTIO:?} in the serial log within {} s",
-                    SCREEN_STEP_WAIT.as_secs()
-                ));
+            if let Some(why) = began.over(clock, SCREEN_STEP_WAIT) {
+                return Err(format!("no {PS2:?} or {VIRTIO:?} in the serial log {why}"));
             }
             thread::sleep(Duration::from_millis(100));
         };
@@ -23933,43 +24190,113 @@ const HELD_DOWNLOADS: &[(&str, usize)] = &[("linux_menu", 5)];
 /// How much of a held download goes first, in percent.
 const HELD_PERCENT: usize = 60;
 
-/// How long a screen step waits for its `after` line: a give-up only
-/// (the VM's own limit is not checked while a screen check runs).
+/// How long a screen step waits for its `after` line, in the VM's run
+/// time: a give-up only (the VM's own limit is not checked while a
+/// screen check runs). The longest a step has been measured waiting is
+/// `linux_menu`'s 8.9 s, for the rootfs it fetches from the host and
+/// imports; a run says what each of its steps waited.
 const SCREEN_STEP_WAIT: Duration = Duration::from_secs(120);
-/// Scenarios whose steps wait on longer work: `linux_menu`'s install
-/// (17.7 MB fetched from the host and imported: about 40 s under TCG on
-/// an idle host, several times that beside other VMs) between two steps.
-const SCREEN_STEP_WAITS: &[(&str, Duration)] = &[("linux_menu", Duration::from_secs(300))];
 
-/// Waits at most `limit` for `line` in the serial log `log`.
-fn wait_for_line(log: &Path, line: &str, limit: Duration) -> Result {
-    let start = Instant::now();
-    while start.elapsed() < limit {
+/// One wait of a screen check, counted in the VM's run time as the
+/// scenario's own limit is (vmtime.rs), from the clock where the wait
+/// began. Wall time here failed checks for the host's load -- a VM
+/// starved of host CPU had not had the time the step waits for, and
+/// `chromium_window` failed a 120 s step with 48.8 s of its run spent
+/// waiting for a host CPU -- and the answer is the clock the rest of the
+/// harness uses, not a wider wait.
+struct ScreenWait {
+    began: vmtime::Sample,
+}
+
+impl ScreenWait {
+    fn start(clock: &mut vmtime::VmClock) -> Self {
+        ScreenWait { began: clock.sample() }
+    }
+
+    /// The VM's clocks since the wait began.
+    fn since(&self, clock: &mut vmtime::VmClock) -> vmtime::Sample {
+        let now = clock.sample();
+        vmtime::Sample {
+            wall_ms: now.wall_ms.saturating_sub(self.began.wall_ms),
+            // Both are counters of the whole run; the wait's share is
+            // the difference. Before any vCPU thread could be read
+            // there is nothing to subtract.
+            starved_ms: match (now.starved_ms, self.began.starved_ms) {
+                (Some(now), Some(began)) => Some(now.saturating_sub(began)),
+                (now, _) => now,
+            },
+        }
+    }
+
+    /// The run time the wait has taken (ms), which is what the limits
+    /// are set from.
+    fn run_ms(&self, clock: &mut vmtime::VmClock) -> u64 {
+        self.since(clock).run_ms()
+    }
+
+    /// Why `limit` is up for this wait, if it is.
+    fn over(&self, clock: &mut vmtime::VmClock, limit: Duration) -> Option<String> {
+        let sample = self.since(clock);
+        sample.over(limit).map(|over| match over {
+            vmtime::Over::RunTime => {
+                format!("within {} s of the VM's run time ({})", limit.as_secs(), sample.describe())
+            }
+            vmtime::Over::Backstop => format!(
+                "within {} s of wall time ({} times the {} s limit, vmtime::BACKSTOP; {})",
+                limit.as_secs() * u64::from(vmtime::BACKSTOP),
+                vmtime::BACKSTOP,
+                limit.as_secs(),
+                sample.describe()
+            ),
+        })
+    }
+}
+
+/// Waits for `line` in the serial log `log`, at most `limit` of the VM's
+/// run time; the run time it waited (ms), which is what the limits are
+/// set from.
+fn wait_for_line(
+    log: &Path,
+    line: &str,
+    limit: Duration,
+    clock: &mut vmtime::VmClock,
+) -> Result<u64> {
+    let began = ScreenWait::start(clock);
+    loop {
         if fs::read(log).is_ok_and(|b| b.windows(line.len()).any(|w| w == line.as_bytes())) {
-            return Ok(());
+            return Ok(began.run_ms(clock));
+        }
+        if let Some(why) = began.over(clock, limit) {
+            return Err(format!("no {line:?} in the serial log {why}"));
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("no {line:?} in the serial log within {} s", limit.as_secs()))
 }
+
+/// How long a step's pixels are waited for, in the VM's run time: the
+/// guest finishes drawing, and a step may wait for the program itself (a
+/// TLS handshake under TCG takes seconds).
+const PIXELS_WAIT: Duration = Duration::from_secs(30);
 
 fn check_screen_step(
     monitor: &mut std::os::unix::net::UnixStream,
     iso: &Path,
     n: usize,
     step: &ScreenStep,
+    clock: &mut vmtime::VmClock,
 ) -> Result {
     if step.pixels.is_empty() {
         return Ok(());
     }
-    // Let the guest finish drawing; under load (the full suite) a redraw
-    // can take longer, and a step may wait for the program (a TLS handshake
-    // under TCG takes seconds), so a failed check is retried for 30 s.
-    let mut tries = 0;
+    let began = ScreenWait::start(clock);
     loop {
         thread::sleep(Duration::from_millis(500));
         match dump_and_check(monitor, iso, n, step) {
-            Err(_) if tries < 60 => tries += 1,
+            Err(e) => {
+                if let Some(why) = began.over(clock, PIXELS_WAIT) {
+                    return Err(format!("{e} {why}"));
+                }
+            }
             r => return r,
         }
     }
@@ -26295,13 +26622,16 @@ fn judge(
         let dir = target_dir().join("failed");
         // A repeat's boot (`test-<name>.r<i>.iso`) keeps its own: boots
         // at once must not overwrite each other's.
-        let name = match run.events.as_deref().and_then(repeat_index) {
+        let name = match run.iso.as_deref().and_then(repeat_index) {
             Some(i) => format!("{}.r{i}", scenario.name),
             None => scenario.name.to_string(),
         };
         let path = dir.join(format!("{name}.log"));
         let symbols = symbolize(RELEASE.load(std::sync::atomic::Ordering::Relaxed), serial);
-        let events = run.events.as_deref().and_then(|p| fs::read_to_string(p).ok());
+        let events = run
+            .iso
+            .as_deref()
+            .and_then(|p| fs::read_to_string(p.with_extension("events.jsonl")).ok());
         // The event stream (when it was on) next to the log.
         if let Some(text) = events.as_deref().filter(|t| !t.is_empty()) {
             let _ = fs::create_dir_all(&dir)
@@ -26321,13 +26651,53 @@ fn judge(
             0 => String::new(),
             n => format!("; {n} guest files in {}", dir.join(format!("{name}.dump")).display()),
         };
+        // The screen check's screendumps, beside the log: CI uploads
+        // `target/failed/` alone, and a wrong screen is read from the
+        // picture, not guessed from the serial log.
+        let shots = save_screens(run.iso.as_deref(), &dir, &name);
+        let shots = match shots.len() {
+            0 => String::new(),
+            n => format!(
+                "; {n} screendump(s) as {}",
+                dir.join(format!("{name}.screen*.png")).display()
+            ),
+        };
         match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
             Ok(()) => {
-                format!("{e} (serial log: {}; it ends with a triage{dumps})", path.display())
+                format!("{e} (serial log: {}; it ends with a triage{dumps}{shots})", path.display())
             }
             Err(_) => e,
         }
     })
+}
+
+/// The screendumps a scenario's screen check wrote
+/// (`<iso>.screen<n>.png`), copied next to a failed boot's log as
+/// `<name>.screen<n>.png`.
+fn save_screens(iso: Option<&Path>, dir: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(iso) = iso else { return Vec::new() };
+    let (Some(parent), Some(stem)) = (iso.parent(), iso.file_stem().and_then(|s| s.to_str()))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(parent) else { return Vec::new() };
+    let mut saved = Vec::new();
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(rest) = file.to_str().and_then(|f| f.strip_prefix(&format!("{stem}.screen")))
+        else {
+            continue;
+        };
+        if !rest.ends_with(".png") {
+            continue;
+        }
+        let to = dir.join(format!("{name}.screen{rest}"));
+        if fs::create_dir_all(dir).and_then(|()| fs::copy(entry.path(), &to)).is_ok() {
+            saved.push(to);
+        }
+    }
+    saved.sort();
+    saved
 }
 
 /// A serial log as text. Not `read_to_string`: a program's bytes need
@@ -26348,7 +26718,10 @@ fn repeat_index(path: &Path) -> Option<usize> {
 /// What xtask knows of a boot besides its log (for the triage).
 #[derive(Default)]
 struct RunFacts {
-    events: Option<PathBuf>,
+    /// The run's ISO: its name says the scenario and the repeat, and
+    /// the run's other files are beside it (the event stream, the
+    /// screen check's screendumps).
+    iso: Option<PathBuf>,
     secs: Option<f64>,
 }
 
@@ -27040,10 +27413,7 @@ fn boot_vm<'a>(vm: &Vm<'a>, iso: &Path) -> (BootTime, Vec<(&'a Scenario, Result)
     }
     let short = telemetry::cpus_online(&serial).filter(|&n| n < want_cpus);
     let code = status.and_then(|s| s.code());
-    let facts = RunFacts {
-        events: Some(iso.with_extension("events.jsonl")),
-        secs: Some(time.total.as_secs_f64()),
-    };
+    let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
     let verdicts: Vec<(&Scenario, Result)> = match vm {
         Vm::Single(s) => {
             let events = fs::read_to_string(iso.with_extension("events.jsonl")).unwrap_or_default();
@@ -27670,10 +28040,7 @@ fn restore_pair(
         )?;
         let kept = iso.with_extension(format!("restore{i}.serial.log"));
         let _ = fs::write(&kept, &serial);
-        let facts = RunFacts {
-            events: Some(iso.with_extension("events.jsonl")),
-            secs: Some(time.total.as_secs_f64()),
-        };
+        let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
         judge(s, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)
             .map_err(|e| format!("resumed run {i}: {e}"))?;
         // The guest's lines (xtask's own name the snapshot's line).
@@ -27772,10 +28139,7 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
         screen_check(scenario.name),
         None,
     )?;
-    let facts = RunFacts {
-        events: Some(iso.with_extension("events.jsonl")),
-        secs: Some(time.total.as_secs_f64()),
-    };
+    let facts = RunFacts { iso: Some(iso.to_path_buf()), secs: Some(time.total.as_secs_f64()) };
     judge(scenario, status.and_then(|s| s.code()), status.is_none(), &serial, &facts)?;
     disk.as_deref().map_or(Ok(()), |d| check_disk(scenario.name, d))
 }
@@ -28355,6 +28719,52 @@ fn objcopy() -> PathBuf {
 
 fn write(path: &Path, contents: &str) -> Result {
     fs::write(path, contents).map_err(|e| format!("writing {path:?}: {e}"))
+}
+
+#[cfg(test)]
+mod module_sets {
+    use super::*;
+
+    /// A module set is read from the checked-in DLLs, not from the build:
+    /// `cargo xtask test` builds only um, so a set read from the build is
+    /// empty in a clean tree and every program whose DLL needs another
+    /// dies of a module nobody listed.
+    #[test]
+    fn a_set_is_read_from_the_checked_in_dlls() {
+        let path = shipped_dll("advapi32.dll");
+        assert!(
+            path.starts_with(root().join("user/bin")),
+            "{} is not the checked-in copy",
+            path.display()
+        );
+        assert!(path.is_file(), "{} is missing (cargo xtask export-tests)", path.display());
+        assert!(
+            static_imports("advapi32.dll").contains(&"rpcrt4.dll"),
+            "advapi32.dll imports rpcrt4.dll; read {:?}",
+            static_imports("advapi32.dll")
+        );
+    }
+
+    /// Every scenario's set holds what its own DLLs import, so no program
+    /// starts with a dependency the image does not have.
+    #[test]
+    fn every_scenario_s_set_is_closed() {
+        for s in scenarios() {
+            let modules = extra_modules(s.name);
+            for (file, _) in &modules {
+                if file.contains('/') {
+                    continue;
+                }
+                for dep in static_imports(file) {
+                    assert!(
+                        modules.iter().any(|(f, _)| *f == dep),
+                        "{}: {file} imports {dep}, which the set does not hold",
+                        s.name
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

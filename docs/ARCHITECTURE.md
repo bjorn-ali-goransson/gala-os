@@ -485,6 +485,59 @@ exceptions are fatal (panic with a register dump) except #BP, which is
 counted and returns; the #BP gate has DPL 3 so `int3` works from user
 mode. Vectors 32..255 go to handlers registered with `set_handler`.
 
+## Firmware tables
+
+What the firmware says about the machine it booted, which programs read
+through GetSystemFirmwareTable: Office's shared code (mso) asks the
+SMBIOS provider for the machine it runs on, and a program that does not
+get an answer there is told the machine has no such provider, not that
+the call is missing.
+
+- **At boot** (`boot::smbios`, Limine's SMBIOS request): the bootloader
+  gives the entry point's address, the 64-bit `_SM3_` one or the 32-bit
+  `_SM_`. `boot::read_smbios` reads 0x20 bytes of it through the HHDM
+  while the bootloader's memory is still there and parses it; both
+  checksums must hold, or these are not the firmware's bytes and there is
+  no table. It keeps the version, the document revision (0 for the
+  32-bit entry point, which has none, as Windows reports it) and where
+  the structure table is.
+- **The table itself** is copied into the heap once the heap is up and
+  before the NT layer needs it (`boot::copy_smbios_table`,
+  `platform::init_firmware`), because the bootloader's memory is
+  reclaimed. The copy stops where the end-of-table structure (type 127)
+  ends (`smbios::table_end`): the 64-bit entry point declares the room
+  the table may take, not its length. The boot log says what was kept
+  (`smbios: <n> bytes of table kept`) or why nothing was (`smbios: no
+  table kept (<why>)`).
+- **The system call**: NtQuerySystemInformation's
+  SystemFirmwareTableInformation (class 76) takes and gives one buffer —
+  SYSTEM_FIRMWARE_TABLE_INFORMATION in front (the provider's signature,
+  the action, the table's id, the room after it) and the table behind it.
+  gala has one provider, SMBIOS (`RSMB`), with the Get action and one
+  table (id 0); it answers RawSMBIOSData, the head Windows gives (the
+  2.0 calling method, never used here, the version, the DMI revision and
+  the length) and then the table. The length the table needs goes back
+  into the caller's own field whether or not it fitted, and a buffer too
+  short is STATUS_BUFFER_TOO_SMALL. Another provider, action or id is
+  STATUS_NOT_IMPLEMENTED with the provider in the ledger, which
+  kernel32 reports as ERROR_INVALID_FUNCTION: Windows' answer for a
+  provider nobody has. A 32-bit process needs no conversion (the header
+  is four ULONGs in both worlds), so WOW64 passes the class straight
+  through.
+- **kernel32's GetSystemFirmwareTable** (`firmware.rs`) puts the request
+  and the caller's room in one buffer of its own, hands back as much of
+  the table as fits and answers the length the table needs either way,
+  which is how a caller asks for the size first (a null buffer and 0).
+  A provider or table the machine has not got answers 0 with
+  ERROR_INVALID_FUNCTION (both measured on Windows:
+  `office_k32_test`'s `firmware`).
+- **Limits**: one provider and one table; no Enumerate action, no ACPI or
+  `FIRM` provider (each goes in the ledger with the provider asked for).
+  There is no table at all where no firmware left one -- gala-um, and a
+  kernel that came up through a handover (`Firmware::smbios` is None
+  there) -- and GetSystemFirmwareTable then answers as it does for a
+  provider nobody has.
+
 ## Testing
 
 - Host unit tests: `cargo test -p kernel --lib` for hardware-independent
@@ -494,6 +547,13 @@ mode. Vectors 32..255 go to handlers registered with `set_handler`.
   expected serial output. Compatible scenarios share a VM (WORKFLOW,
   "Test speed"). `selftest` runs `kernel/src/selftest.rs`; `fault=<name>`
   provokes a CPU exception to test the fault path.
+- A check on what an allocator has handed out (`selftest`'s
+  `heap_small_and_large`, `frame_alloc_roundtrip`) is made with that
+  allocator's own lock held (`mm::heap::self_check`,
+  `mm::frame_self_check`): the statistics count the whole kernel, so a
+  thread allocating on another CPU inside the round would make the
+  balance lie, and such a check passes or fails by what else the machine
+  happened to be doing.
 - `XTASK_VERBOSE=1 cargo xtask boot-test [filter]` prints every serial
   log.
 - `cargo xtask alloc-audit` (part of `cargo xtask test`): see "Heap".
@@ -2082,8 +2142,15 @@ checks, so WaitAll sees a consistent state.
   Windows.
 - Timeouts: NT timeouts (negative = relative 100 ns, positive = absolute
   system time, 0 = poll) become tick deadlines rounded up.
+- A pulse (NtPulseEvent) releases the waiters waiting at that moment and
+  leaves the event unsignaled: all of them for a notification event, the
+  one that has waited longest for a synchronization event (whose signal a
+  wait consumes, so a pulse cannot be shared). A thread not yet waiting
+  misses it, as on Windows, which documents PulseEvent as unreliable.
 - TODO: a wait-all is satisfied only when all objects are signaled at
-  its re-check (no release marking for wait-all).
+  its re-check (no release marking for wait-all; a pulse passes a
+  wait-all waiter over for the same reason, and would otherwise be lost
+  on it).
 
 Invariants:
 
@@ -2108,7 +2175,9 @@ Invariants:
 ### Synchronization objects
 
 - **Events**: NtCreateEvent, NtOpenEvent, NtSetEvent, NtClearEvent,
-  NtQueryEvent; notification and synchronization (auto-reset) types.
+  NtQueryEvent, NtPulseEvent (gala's number, UNVERIFIED; kernel32's
+  PulseEvent, which Office's mso98win32client imports); notification and
+  synchronization (auto-reset) types. What a pulse does: "Waits".
 - **Mutants and semaphores** (`ObjectBody::Mutant/Semaphore`): a mutant
   is signaled for waiters when free or owned by the waiting thread
   (recursive); acquiring records it in the thread's owned list, and a
@@ -2173,6 +2242,30 @@ Invariants:
   completes successfully, on a synchronous handle too (the I/O completes
   inline and the routine runs at the next alertable wait, as on Windows
   11; files and pipe ends alike).
+- **Special user APCs** (`apc_test`, `kernel32_thread_test`): the same
+  queue carries them, with a flag. NtQueueApcThreadEx2 (gala's 0x7f4e
+  until the pinned build's number is verified) takes Windows' own
+  arguments, ThreadHandle, ReserveHandle, ApcFlags, ApcRoutine and three
+  arguments, which `apc_test` verifies by calling the pinned build's
+  export with them. ReserveHandle names an APC reserve object, which
+  gala has none of: QueueUserAPC2 passes zero, and anything else is
+  STATUS_INVALID_PARAMETER, as the pinned build answers for a handle of
+  another type and for one that names nothing. The flags are
+  QueueUserAPC2's: QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC (1) marks
+  a special APC, 0 queues a normal one, and every other value is
+  STATUS_INVALID_PARAMETER. A special APC does not wait for an alertable
+  wait: the system call dispatcher delivers it on the way back to user
+  mode from whatever call the thread makes next, so a thread that queues
+  one to itself runs it before that call returns, and one blocked in a
+  wait that is not alertable runs it when the wait ends -- the wait keeps
+  its own status (STATUS_TIMEOUT, not STATUS_USER_APC), because the
+  CONTEXT the dispatcher builds returns the call's own status. The limit
+  against Windows, where a special APC interrupts a thread that is only
+  computing: in gala it waits for that thread's next system call. Both
+  kinds are checked in the order ObReferenceObjectByHandle checks a
+  handle -- the type before the rights, so a handle to something that is
+  not a thread is STATUS_OBJECT_TYPE_MISMATCH (ERROR_INVALID_HANDLE)
+  whatever it grants, not STATUS_ACCESS_DENIED.
 
 ### Job objects
 
@@ -2373,6 +2466,30 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   path); FILE_LINK/RENAME_POSIX_SEMANTICS (replacing an open target;
   recorded, refused as without it); IGNORE_READONLY_ATTRIBUTE on a rename
   (recorded, ignored).
+- **Short names** (FileShortNameInformation 40; kernel32's
+  SetFileShortNameW, which Office's mso.dll imports;
+  `office_k32_test`'s SetFileShortNameW, measured on Windows first): the
+  8.3 name a program gives a file beside its long one
+  (`ramfs::Node::short`), which then is a name of its directory like any
+  other -- an open under it finds the file, and `find` matches it after
+  the long names and the hard links, one name space as on NTFS. A name
+  another entry of the directory holds is
+  STATUS_OBJECT_NAME_COLLISION (kernel32: ERROR_ALREADY_EXISTS), a name
+  that is not 8.3 (a base of one to eight characters, an optional
+  extension of one to three, no space, control character or forbidden
+  character: `file::is_short_name`) STATUS_INVALID_PARAMETER and
+  recorded. The empty name takes the short name away. The handle needs
+  DELETE access, as a rename does, and nothing else: Windows sets a short
+  name unelevated, without SeRestorePrivilege. A rename takes the short
+  name away too, where Windows makes a new one. The name belongs to the
+  node's first name, not to its hard links; the Both directory classes
+  report it in their ShortName field; the change log's SetShortName
+  record keeps it across a reboot (record version 6, "The disk"), and a
+  snapshot carries it. gala never generates one, where Windows gives
+  every long name a short name of its own, so a file has one only if a
+  program set it: a program that needs an 8.3 path for a file it did not
+  name itself does not get one (recorded when it asks, and the generator
+  goes in with the first program that depends on it).
 - **Volume**: reports itself as an NTFS disk (FileFs* classes), sized by
   the disk's data area (by RAM without a disk). Its
   FILE_FS_ATTRIBUTE_INFORMATION flags (`file::VOLUME_ATTRIBUTES`) are the
@@ -2433,7 +2550,8 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
 #### Directory change notification
 
 `nt::notify` (`dirchange_test`): NtNotifyChangeDirectoryFile (0x7f13;
-kernel32's ReadDirectoryChangesW over it).
+kernel32's ReadDirectoryChangesW and FindFirstChangeNotification family
+over it).
 
 - A watch belongs to one open of a directory (keyed by its file object).
   While any watch exists ramfs records a journal of changes (`Change`:
@@ -2447,6 +2565,12 @@ kernel32's ReadDirectoryChangesW over it).
   FILE_NOTIFY_INFORMATION records up to the last request's buffer size;
   past it (or if the journal lost a change) the next request gets
   STATUS_NOTIFY_ENUM_DIR and no data, so the caller rescans.
+- A watch whose request had no buffer at all keeps nothing: with nowhere
+  to put a record it has nothing to say but that something changed, which
+  it says to a request already waiting (STATUS_NOTIFY_ENUM_DIR at once,
+  which signals the handle) and forgets otherwise. That is what Windows
+  does, measured through the handle FindFirstChangeNotification returns,
+  whose wait stays pending after a change nothing was waiting for.
 - A request completes like AFD's: IO_STATUS_BLOCK, event, the file
   object's signal (its dispatcher is a shared `KArc`, so a waiting
   request does not keep the file object alive), a completion-port packet,
@@ -2457,6 +2581,87 @@ kernel32's ReadDirectoryChangesW over it).
   with STATUS_NOTIFY_CLEANUP.
 - Filters: file and directory names, size and last write; attribute and
   time changes are not reported yet.
+- kernel32's FindFirstChangeNotificationW (`files.rs`) opens the
+  directory asynchronously (FILE_LIST_DIRECTORY | SYNCHRONIZE,
+  FILE_DIRECTORY_FILE) and arms a request with no IO_STATUS_BLOCK and no
+  buffer, so the handle it returns is the open directory itself (as
+  Windows', whose type NtQueryObject names File) and waiting on it is
+  waiting for the request to complete. The errors of the open are the
+  documented ones for free: ERROR_PATH_NOT_FOUND for a path that is not
+  there, ERROR_DIRECTORY for a file; a filter of 0 or with unknown bits
+  is the kernel's ERROR_INVALID_PARAMETER. Nothing in the NT interface
+  gives a filter back, so FindNextChangeNotification finds the filter and
+  subtree flag it must ask with again in a table keyed by the handle
+  (**limit**: 64 of these watched at a time, where Windows has no limit;
+  the 65th is recorded in the ledger and fails with
+  ERROR_NOT_ENOUGH_MEMORY). FindCloseChangeNotification drops the entry
+  and closes the handle, which ends the waiting request
+  (STATUS_NOTIFY_CLEANUP); a handle that is not one of these, closed
+  twice included, is ERROR_INVALID_HANDLE.
+
+### A package's VFS view
+
+`nt/pkgview.rs` (`pkgview_test`). An Office Click-to-Run install keeps
+the files its programs are to find elsewhere on the machine under
+`<root>\root\VFS\<token>`, the token naming the place
+(`ProgramFilesCommonX64` is `C:\Program Files\Common Files`, `System` is
+`C:\Windows\System32`; `TOKENS` holds the nine an Office 16 install's
+`root\VFS` has), and the package manifest under
+`C:\ProgramData\Microsoft\ClickToRun\MachineData\Catalog\Packages`
+writes every such path with its token. So Word asks for
+`C:\Program Files\Common Files\Microsoft Shared\Office16\mso.dll`,
+which is on no volume, and the file is the install's
+`root\VFS\ProgramFilesCommonX64\Microsoft Shared\Office16\mso.dll`.
+
+What Windows does, measured on a machine with the same install: a
+running WINWORD.EXE reports the six mso DLLs, `MSPTLS.DLL` and
+`1033\OSFINTL.DLL` loaded from
+`C:\Program Files\Common Files\Microsoft Shared\Office16`, while no
+process on the machine finds that directory and it is on no listing of
+`Common Files`; those modules sit at low addresses outside the loader's
+own range, none of the App-V services or drivers runs, and other files
+of the same package (`RICHED20.DLL`, `AI\aitrx.dll`) are reported by
+their real `root\VFS\...` path. The view is Office's own loader naming
+what it mapped itself, in the one process -- not a file system anything
+keeps.
+
+gala makes the same files answer at the same paths from the kernel
+instead, which is the part a program can tell apart.
+
+- **Who has the view**: a process whose image is under a registered
+  package's `root` directory. The packages are the value names under
+  `HKLM\SOFTWARE\Microsoft\AppVISV`, where Windows keeps them and
+  Office's own `AppvIsvSubsystems64.dll` reads them; the longest
+  matching root wins, and the answer is decided once, where the process
+  is made (`package_of`, `Core.package`). **Difference from Windows**:
+  what puts a process in the virtual environment there is
+  Click-to-Run's own business, so gala's rule is coarser -- every
+  program of the package has the view, not only the ones the service
+  launched into it. (OfficeClickToRun opens its own files by the
+  package path directly, so it needs nothing of this either way.)
+- **Where it answers**: `resolve_file_name`, the one place a name
+  becomes a path on the volume, so every call that opens a file by name
+  has it.
+- **Local first**: the package's copy answers only where the machine
+  itself has nothing at the asked path, and only where the package has
+  the file; otherwise the open is the open that was asked. So a file
+  the machine has keeps its own contents. Windows never shows which way
+  round this is -- Office asks for the files it ships by their real
+  `root\Office16` path, and for the package's VFS tree only at the
+  tokens' paths, which the machine has nothing of.
+- **Limit**: the view answers for a path, not for what a directory
+  holds. A directory only the package has is opened from the package
+  and lists the package's files; a directory the machine also has lists
+  the machine's alone, so a file the view serves need not be in its
+  parent's listing. Office opens its shared code by name.
+- **Difference from Windows, visible**: a module list in gala names the
+  file's package path, Windows' names the virtual one, because gala
+  maps the file it found.
+- **Observability**: `pkgview: <image> runs in the package at <root>`
+  once per process that has a view, and a `package` file event per path
+  served (`XTASK_EVENTS=file`: the `pid`, the path `asked` for and the
+  path `served`), so a run shows every file a program found only in its
+  package.
 
 ### Pipes
 
@@ -3496,6 +3701,41 @@ own name).
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
 
+### The module graph
+
+A program can read which DLLs are loaded -- GetModuleHandle,
+EnumProcessModules, the PEB's loader lists -- and some decide what to do
+by the answer, so gala's system DLLs carry Windows' own dependencies
+where a program can see them, even where gala's code calls nothing in
+them. Windows' advapi32, oleaut32, msi and combase import rpcrt4.dll
+statically (their import tables, measured on 26100: 19 functions, 13, 30
+and 118), so rpcrt4 is mapped in every process that loads one of those
+four, before anything asks for its handle; ole32 and sechost only delay-
+import it, and user32, kernelbase, secur32, imm32 and gdi32 not at all.
+gala's four import it too, and `kernel32_test` holds the measurement: it
+reads their import directories after loading each, then takes rpcrt4's
+handle, which is not NULL. Nothing in gala's DLLs calls the imported
+function, so each crate's `build.rs` pins the name on the link command
+line (`/INCLUDE:__imp_<function>`); the linker drops an import whose only
+reference is a static it also drops.
+
+gala has no 32-bit rpcrt4 yet, so the 32-bit (SysWOW64) builds go without
+it and a 32-bit program finds no rpcrt4 in the graph until that DLL is
+built (ROADMAP OF).
+
+A DLL whose dependency is not in the boot image does not load, so an
+edge like this one belongs in every scenario that ships the importer:
+`extra_modules` in `xtask/src/main.rs` closes each scenario's module set
+under the import tables of the DLLs themselves, rather than a second list
+to keep in step with them. It reads the checked-in copies in `user/bin`
+(`shipped_dll`), which `export-tests` keeps equal to the build and CI
+checks, and which gala-um ships as its modules: so a set is the same in a
+clean tree as in a built one. Reading the build instead would leave every
+set open wherever nothing is built yet, and `cargo xtask test` builds only
+um. A dependency neither checked in nor built is left out; the load then
+fails in the guest, where the loader records the name (`missing dll`),
+never silently.
+
 ### ntdll: the loader
 
 `user/testntdll` (`loader_test`, `import_test`, `tls_test`).
@@ -3530,7 +3770,28 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   LdrAddRefDll takes a reference (or pins); GetModuleHandleEx takes one
   unless GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT is given (the JVM
   pairs it with FreeLibrary). A recursive loader lock serializes
-  loading, unloading and thread notifications.
+  loading, unloading and thread notifications. A handle asked for a
+  module that is not loaded is NULL with ERROR_MOD_NOT_FOUND, as on
+  Windows, and kernel32 records the name asked for
+  (`kernel32.dll!GetModuleHandle(<name>)`, "other", the NTSTATUS as
+  detail; `kernel32_test`): the answer is no gap of gala's -- a program
+  probing for an optional module gets the same NULL on Windows -- but it
+  is the only record of the name, where an export a program looks up at
+  run time leaves `missing export`, an import that does not bind
+  `missing import` and a failed load `missing dll` or `load failed`, so a
+  program that gives up over a module nobody could name is not invisible
+  ("Gaps are never silent").
+- **An import that does not bind** is reported with the module whose
+  import it is (`<dll>!<export>(imported by <module>)`, "missing
+  import"), and every missing import of an image is reported before the
+  load fails, not just the first. The importer is what makes the record
+  actionable: the same export may be probed at run time by a program that
+  lives without it (`missing export`) and imported by a DLL that cannot
+  load without it, and only the second stops anything. The executable has
+  no module table entry of its own, so its name comes from its path
+  (`missing_import_test`); a DLL's comes from the table (`loader_test`,
+  where testdll's ordinal 2 is both, from the program and from
+  testdll_gap.dll).
 - **Search** (`map_dll`): the executable's directory, SetDllDirectoryW's
   directory (LdrSetDllDirectory, kept under the loader lock), then
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A bare name is
@@ -3722,7 +3983,11 @@ ntdll imports.
 - **Processes and threads**: CreateProcess ("Processes started by
   programs"), CreateProcessAsUserW ("Access tokens"); CreateThread builds
   the stack and start CONTEXT itself and starts at a thunk that calls
-  ExitThread; CreateRemoteThreadEx in the calling process creates the
+  ExitThread; OpenProcessToken and OpenThreadToken are forwarders to
+  kernelbase (and so to advapi32), as Windows forwards them through
+  `api-ms-win-core-processthreads-l1-1-0`, whose host gala puts in
+  kernel32 (dbghelp imports OpenThreadToken from that set);
+  CreateRemoteThreadEx in the calling process creates the
   thread suspended, applies the attribute list's group affinity and
   ideal processor (a hint), then starts it; TLS (TEB.TlsSlots); fiber
   local storage (TLS indexes with callbacks, run at thread exit and
@@ -3909,7 +4174,12 @@ ntdll imports.
   symbols and spaces before digits and digits before letters, and gives
   NULs no weight (CompareStringA compares the UTF-8 strings as UTF-16;
   SORT_DIGITSASNUMBERS is the W form's only, ERROR_INVALID_FLAGS in the
-  A form, as on Windows).
+  A form, as on Windows). GetDateFormatA/GetTimeFormatA and
+  EnumCalendarInfoA are the W forms through the ANSI code page, a row at
+  a time; a value too long for the row is not passed on. A picture of
+  the caller's own takes no flags: a format with any flag is
+  ERROR_INVALID_FLAGS, in the W forms too (measured,
+  `office_k32_test`).
   `nls.rs`: FoldStringW is Unicode normalization from tables
   `tools/nls_tables.py` writes from Python's unicodedata
   (`nls/tables.rs`, the Basic Multilingual Plane; Hangul by arithmetic):
@@ -3917,7 +4187,34 @@ ntdll imports.
   MAP_PRECOMPOSED canonical composition alone (no decomposition first),
   in runs of a starter and up to 32 marks (longer runs pass uncomposed,
   recorded); MAP_FOLDDIGITS and MAP_EXPAND_LIGATURES use the tables
-  Windows' answers give (Wine's test_FoldStringW). GetNumberFormat and
+  Windows' answers give (Wine's test_FoldStringW). NormalizeString and
+  IsNormalizedString (which normaliz forwards here, and Word's wwlib
+  imports) work from the same tables: NFD and NFKD are the canonical and
+  compatibility decomposition in canonical order, NFC and NFKC compose
+  afterwards, and a string is normalized exactly when normalizing leaves
+  it as it is. Their answers are Windows' own, measured: a destination of
+  0 units, or none at all, is an estimate Windows makes from the length
+  alone and gala makes the same way (three times the source for the
+  canonical forms and eighteen for the compatibility ones, never more
+  than 64 and never less than the source and an eighth), with the last
+  error untouched; a destination too small is a negative return with
+  ERROR_INSUFFICIENT_BUFFER, where gala gives the size it needs and
+  Windows a guess never smaller than that; a source length of -1 counts
+  the NUL and writes it; a form there is no such thing as, no source, a
+  length below -1, a negative destination length and a destination that
+  is the source are ERROR_INVALID_PARAMETER; and text that is not well
+  formed (an unpaired surrogate) is -1 with
+  ERROR_NO_UNICODE_TRANSLATION, which the estimate does not check.
+  EnumSystemLanguageGroupsW enumerates the seventeen language groups
+  Windows reports (ids 1 to 0x11 in order, each with its id in lowercase
+  hex, its English name and the installed flag) and EnumUILanguagesW the
+  one user interface language, "en-US" with MUI_LANGUAGE_NAME and the
+  LANGID as four hexadecimal digits otherwise; a callback that answers
+  FALSE stops the enumeration and the call still succeeds, a null
+  callback is ERROR_INVALID_PARAMETER, and the flags each call accepts
+  are Windows' (ERROR_INVALID_FLAGS for the rest, measured:
+  MUI_LANGUAGE_ID with MUI_LANGUAGE_NAME, or MUI_LANGUAGE_INSTALLED with
+  MUI_LANGUAGE_LICENSED, is refused). GetNumberFormat and
   GetCurrencyFormat (W, A, Ex) parse `-?digits(.digits)?`, round half up
   on the digit string, and group by NUMBERFMT's Grouping digits (a last
   0 stops, another repeats) or LOCALE_SGROUPING's string (a trailing
@@ -4062,7 +4359,25 @@ ntdll imports.
   recorded. SetThreadIdealProcessor(Ex) is the kernel's
   ThreadIdealProcessor ("Threads"); WinExec is CreateProcessA with the
   show state, waiting for input idle only when user32 is loaded and has
-  WaitForInputIdle (gala's has not yet).
+  WaitForInputIdle (gala's has not yet). OpenFile (`ansi.rs`) is
+  CreateFileA under the style bits, and fills the OFSTRUCT whether it
+  opens the file or not: the structure's own size, a fixed disk, the full
+  path in upper case and, when the open failed, the last error in
+  nErrCode, which is what the caller reads it for. OF_PARSE only parses
+  (0), OF_EXIST only asks whether the file is there (1), OF_DELETE
+  deletes, OF_CREATE truncates and opens for writing; the answer is the
+  handle as a 32-bit HFILE, which a handle past 32 bits cannot be, on
+  Windows no more than here. FindPackagesByPackageFamily answers
+  ERROR_SUCCESS with no packages and no characters, Windows' answer for a
+  family nobody has installed, since gala installs no MSIX package (as
+  every package query here says). The application recovery four
+  (`recovery.rs`) keep a registration and never call it: gala has no
+  error reporting (ROADMAP OF), so a registration goes in the ledger —
+  a program that waited to be recovered leaves a trace — and
+  ApplicationRecoveryInProgress is E_FAIL, which is Windows' answer
+  outside a recovery. GetSystemFirmwareTable (`firmware.rs`) gives the
+  machine's SMBIOS table ("Firmware tables") and SetFileShortNameW
+  (`files.rs`) the file system's 8.3 names ("Files", **Short names**).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA
@@ -4082,7 +4397,16 @@ ntdll imports.
   UTF-16 after its byte-order mark, else the ANSI code page (UTF-8),
   written back as read (new files ANSI). A new key goes after its
   section's last entry, a new section at the end. win.ini is a file, not
-  mapped to the registry (IniFileMapping).
+  mapped to the registry (IniFileMapping). The A forms are the W forms
+  with the strings converted through the ANSI code page, counting as
+  Windows counts (the characters written, the final NUL excluded, and a
+  truncated answer is still NUL-terminated). The Int forms
+  (GetPrivateProfileIntW/A, GetProfileIntW/A) read the value as text and
+  take the decimal number at its front: blanks and one sign are allowed,
+  the first character that is not a digit ends it ("12ab" is 12), the
+  number wraps, and a negative one comes back as its two's complement,
+  which is how the unsigned answer reads (-5 is 0xfffffffb). A key that
+  is not there is the default as given, unexamined.
 - **Files replaced in one step**: MoveFileExW with
   MOVEFILE_REPLACE_EXISTING renames with FileRenameInformation's
   ReplaceIfExists (the target is never deleted first); ReplaceFileW
@@ -4198,7 +4522,9 @@ runtime of mingw-w64 programs.
   strtod sets ERANGE on overflow (HUGE_VAL) and on underflow to 0 (TinyCC
   parses float constants with strtod).
 - **Printing floats** (`float.rs`): %f %e %g from the exact decimal
-  expansion of the double (a 1152-bit bignum), rounded to 17 significant
+  expansion of the double (a 1152-bit bignum in `user/decfloat`, which
+  Automation's number-to-string shares,
+  "COM: ole32 and oleaut32"), rounded to 17 significant
   digits with zeros after them and then half away from zero at the
   requested digit, as msvcrt.dll's conversion does; exponents have a sign
   and at least three digits. inf and nan print as `inf`/`nan` (msvcrt.dll
@@ -5025,9 +5351,21 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   VarBstrFromCy/Bool/R8, VarCyFromDec; the DATE/currency/boolean/double
   ones msxmlsql imports by ordinal: VarR8FromCy/Date,
   VarDateFromR8/Cy/Bool with DATE's range, VarCyFromDate,
-  VarBoolFromDate/Cy; doubles print with 15 significant digits, fixed
-  from 1E-11 to below 1E+15; strings to currency in exact decimal
-  arithmetic, half to even); dates (`date.rs`: SystemTimeToVariantTime,
+  VarBoolFromDate/Cy; the four of them Word's wwlib imports by ordinal,
+  VarR4FromR8 (the nearest float, ties to even; DISP_E_OVERFLOW when the
+  result would not be finite, the output left as it was, which an
+  infinite or NaN source is too), VarR8FromR4 (the exact widening, which
+  cannot fail), VarBstrFromI4 and VarBstrFromR4; strings to currency in
+  exact decimal arithmetic, half to even);
+  numbers to strings (`variant.rs` `format_real`, measured on Windows:
+  15 significant digits, 7 from a float, taken from the double's exact
+  decimal expansion (`user/decfloat`, shared with the C runtime's
+  printf, "The UCRT") and rounded half away from zero -- a tie survives
+  only because the expansion is exact, where scaling by a power of ten
+  first would lose it; fixed notation while the integer digits and the
+  decimals needed both fit in that many digits and "1.234568E+07"
+  otherwise, the exponent signed and of at least two digits; "0" and
+  "-0" for the zeros, "inf", "-inf" and "nan" for what is no number); dates (`date.rs`: SystemTimeToVariantTime,
   VariantTimeToSystemTime to the second, VarDateFromStr for en-US
   month/day/year, year-month-day and English month names; the forms
   Windows reads relative to the current year are recorded); VarCmp
@@ -5056,7 +5394,27 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   LOGPIXELSY over 2540 HIMETRIC; IFontDisp, IPersistStream and
   QueryTextMetrics recorded unsupported) (`office_api_test`: Office's
   Click-to-Run UI imports them by ordinal);
-  GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
+  the running objects of the process (`active.rs`: RegisterActiveObject,
+  RevokeActiveObject and GetActiveObject, which Word's wwlib imports to
+  publish its Application object at startup). Windows keeps these in
+  COM's running object table, which is machine-wide and reached through
+  a moniker, so another *process* finds the object; gala's ole32 has no
+  monikers and no shared table (ROADMAP OF), so a program finds what it
+  registered itself and one program does not see another's -- enough for
+  an app that publishes to be scriptable later, not enough for a second
+  process to take hold of a running Word. What the calls answer is
+  Windows' own, measured (`com_test`): CO_E_NOTINITIALIZED before this
+  thread has an apartment (ole32's CoGetApartmentType decides, an
+  implicit MTA included), E_INVALIDARG for a null object, CLSID, cookie
+  or output and for a cookie that is not in force (so a second
+  revocation fails), a cookie of its own for every registration,
+  MK_S_MONIKERALREADYREGISTERED for a class already registered,
+  MK_E_UNAVAILABLE when nothing holds the class (recorded), one
+  reference held from registration to revocation (ACTIVEOBJECT_WEAK as
+  well as ACTIVEOBJECT_STRONG: gala has no marshalling to tell them
+  apart), and the oldest registration of a class answered, AddRef'd.
+  Thirty-two registrations at a time, past which the ledger says so
+  (Windows has no limit; Word publishes one).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are neither loaded nor registered:
   LoadTypeLib(Ex) and LoadRegTypeLib fail, RegisterTypeLib (#163) and
@@ -5151,7 +5509,18 @@ built for x64 and x86.
   with XPath's conversions and comparison rules, the core function
   library. Prefixes resolve through SelectionNamespaces only (an
   undeclared one is E_FAIL, as in MSXML 6); an unprefixed name is in no
-  namespace; namespace declarations are not attributes. Node-sets are in
+  namespace; namespace declarations are not attributes. A prefixed
+  function name resolves through the same declarations: MSXML's
+  `ms:string-compare(s1, s2, language?, options?)` in
+  `urn:schemas-microsoft-com:xslt` answers -1, 0 or 1 in a selection as
+  well as in a stylesheet (Click-to-Run's AppV selects its opaque
+  directories with it), while `msxsl:node-set()` is XSLT's alone (it
+  takes a result tree fragment) and every other extension function is
+  E_FAIL, recorded with its name. gala has one collation: character by
+  character with the case ignored first, the lower case first where only
+  the case differs (what Windows' default locale gives for ASCII text);
+  the option `i` ignores case, and any other option is recorded and
+  compared without, as Windows takes them without failing. Node-sets are in
   document order (attributes after their element). selectNodes and
   selectSingleNode fail with E_FAIL on an expression that is not a
   node-set. Numbers print as Rust's shortest round-trip form (XPath
@@ -5475,8 +5844,20 @@ of their own, clients of it) is the yardstick.
   sized and fixed strings, simple and complex structures, fixed,
   conformant, conformant varying and complex arrays, ranges, context
   handles (client: NDR_CCONTEXT records with a copy of the binding;
-  server: the group's table). Embedded pointers' referents follow the
-  outermost construct (deferral). NdrClientCall2 is an assembly entry
+  server: the group's table), and arrays whose elements are themselves
+  complex, where the element description refers to its type instead of
+  holding it (FC_EMBEDDED_COMPLEX). Embedded pointers' referents follow
+  the construct that holds them (deferral), each referent's own
+  deferrals right behind it and each walked in the correlation base its
+  pointer was found under: an array behind a pointer in a structure is
+  sized by a field of that structure, which is no longer being walked
+  when its referent is read. The interpreter never faults on a
+  program's data: a conformance read through a NULL pointer fails the
+  call, with the descriptor recorded. A conformant array the server
+  frees is counted again from where its conformance names it (the
+  call's stack, or a constant); a count that lived in a structure's
+  field is gone by then, so that array's elements keep what they point
+  to (recorded). NdrClientCall2 is an assembly entry
   that spills the variadic arguments and raises the returned status
   itself (RpcRaiseException), so no Rust frame is unwound; a float
   argument comes as a double. The server allocates [in] referents and
@@ -9153,7 +9534,8 @@ windows can use them too.
   x86 stacks too: TRUE on 25H2); other machines are FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
   SymGetModuleBase64 the allocation base of a MEM_IMAGE region.
   MiniDumpWriteDump stays a stub (exported, so SqlDumper loads).
-- **normaliz** (`user/normaliz`): forwards IdnToAscii to kernel32 and
+- **normaliz** (`user/normaliz`): forwards IdnToAscii, NormalizeString
+  and IsNormalizedString to kernel32 ("Locales and text") and
   has its own IdnToUnicode (RFC 3492 decoding), because kernel32's is
   still a stub and a forwarder to a stub fails to bind (the ledger says
   "missing export").
@@ -10206,16 +10588,33 @@ stations and desktops a program creates are refused until stage 3).
   installer database, no installer service): MsiQueryProductStateW,
   MsiGetComponentPathW and MsiLocateComponentW INSTALLSTATE_UNKNOWN,
   MsiEnumProductsW none, MsiConfigureProductExW ERROR_UNKNOWN_PRODUCT,
-  MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
-  ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
+  MsiProvideQualifiedComponentExW, MsiProvideQualifiedComponentW,
+  MsiEnumComponentQualifiersW, MsiEnumClientsW, MsiGetProductCodeW and
+  MsiGetProductCodeA ERROR_UNKNOWN_COMPONENT, MsiQueryFeatureStateW,
+  MsiUseFeatureW and MsiUseFeatureExW INSTALLSTATE_UNKNOWN,
+  MsiReinstallFeatureW ERROR_UNKNOWN_PRODUCT, MsiGetUserInfoW
+  USERINFOSTATE_UNKNOWN; a code that is not a braced GUID is
   INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
   keeps the process's level and owner window (an invalid level returns
   INSTALLUILEVEL_NOCHANGE yet its known flags replace the current ones,
-  as on Windows). Each "nothing installed" answer is recorded
-  (`msi.dll!<function>: nothing installed`, kind other, the ordinal as
-  detail). The exports carry Windows' ordinals (build.rs; ODT's
-  setup.exe and the integrator.exe it runs both import them by
-  ordinal). Installing a package is galapkg's business (its MSI reader,
+  as on Windows). The ANSI forms (MsiGetProductCodeA,
+  MsiGetComponentPathA) answer as the wide ones do, of their own bytes:
+  one braced-GUID check serves both widths. MsiUseFeatureExW takes only
+  INSTALLMODE_NODETECTION as its install mode, INSTALLMODE_EXISTING --
+  which the qualified-component calls do take -- being
+  INSTALLSTATE_INVALIDARG, measured. MsiSetExternalUIW is the one that
+  is not an answer about an install but a handler for one: it keeps the
+  handler, its message filter and its context for the process and gives
+  back the handler set before it (0 where none was), which is how Word's
+  mso chain finds out whether one was installed and puts the old one
+  back. Nothing calls that handler, nothing here running an install; a
+  program learns that from the install's own failure. Each "nothing
+  installed" answer is recorded (`msi.dll!<function>: nothing
+  installed`, kind other, the ordinal as detail). The exports carry
+  Windows' ordinals (build.rs; ODT's setup.exe and the integrator.exe it
+  runs import them by ordinal, and Word's shared code -- MSO.DLL,
+  Mso30win32client.dll, Mso40UIwin32client.dll,
+  Mso98win32client.dll -- delay-loads eleven of them so). Installing a package is galapkg's business (its MSI reader,
   ROADMAP PK), not msi.dll's, so MsiInstallProductW installs nothing --
   and is exported all the same, because integrator.exe delay-loads it
   and a delay load that cannot be resolved ends the process with
@@ -14173,6 +14572,17 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   the commit charge, disk and network bytes, the process, thread and
   handle counts. Both answer STATUS_BUFFER_TOO_SMALL with the size
   needed (the list changes between calls).
+- **Only processes that are still themselves**: the list leaves out a
+  process whose exit status is set. `terminate` records it before the
+  threads unwind, and from then on a Linux process's `comm` and root
+  are being dismantled, so its image would be the one its NT process
+  was created from (`sh` for one that had exec'd `sleep`) and its
+  distribution empty. Task Manager showed such a row and "End task" on
+  it reached a pid the kernel no longer had (STATUS_INVALID_CID).
+  `process::running` keeps them, since the state dump must still show a
+  process stuck in teardown; this list drops them. `taskmgr_test` ends
+  a Linux process of its own and watches what the list says of it while
+  it goes.
 - **Windows' contents stay Windows'**: NtQuerySystemInformation's
   SystemProcessInformation (and so Toolhelp and psapi) lists NT
   processes only; a Linux process is no Windows process. `/proc` inside
@@ -14519,7 +14929,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 | Stage | Content | Tests | Status |
 |---|---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`, and for Office's shared code `d3d10_1.dll` (D3D10CreateDevice1, D3D10CreateStateBlock) and `d3d10.dll` (D3D10CreateEffectFromMemory), as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
@@ -16643,7 +17053,7 @@ older entries).
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id; v3: the session; v4 (`handover_next`): the handovers it came through |
 | 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file; the page is not mapped at adoption but comes back at its first touch from that layout, as only listed processes may map a layout's frames), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: comes back at its first touch, the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
-| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
+| 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments, and whether it is special -- the record's own stride says which, so a 32-byte one from an older writer reads 0 and means a normal APC); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |
 | 25 | HANDLES | per process: (handle value, object id, granted access, attributes) |

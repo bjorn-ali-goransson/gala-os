@@ -34,7 +34,9 @@
 //!   prefixes from the SelectionNamespaces property; nothing found is
 //!   S_FALSE and NULL (selectSingleNode) or an empty list; an undeclared
 //!   prefix, a syntax error and an expression that is no node-set are
-//!   E_FAIL; not(), position(), last(), count(), starts-with(),
+//!   E_FAIL (each named in the ledger with its reason and its
+//!   expression, the scenario's expectations); not(), position(),
+//!   last(), count(), starts-with(),
 //!   local-name(), `and`, a filter expression, a union, the
 //!   following-sibling axis; node lists: length, get_item (S_FALSE and
 //!   NULL past the end), nextNode to the end and reset; what setup.exe
@@ -1015,6 +1017,46 @@ fn xpath(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     c.hr(hr, S_OK)?;
     get_bstr(c, attr, GET_TEXT, "k")?;
     release(attr);
+    // MSXML's extension functions in a selection, their namespace
+    // declared like any other: string-compare(s1, s2, lang, options)
+    // is -1, 0 or 1, "i" among the options ignoring case (what
+    // Click-to-Run's AppV selects its opaque directories with).
+    let both = Wide::new("xmlns:y='urn:x' xmlns:ms='urn:schemas-microsoft-com:xslt'");
+    c.hr(
+        call!(doc, SET_PROPERTY, fn(Bstr, Variant) -> HResult, namespaces.0, Variant::bstr(&both)),
+        S_OK,
+    )?;
+    id_of(c, doc, "//ExcludeApp[ms:string-compare(@ID, 'Access') = 0]", "Access")?;
+    id_of(c, doc, "//ExcludeApp[ms:string-compare(@ID, 'access', '', 'i') = 0]", "Access")?;
+    id_of(c, doc, "//ExcludeApp[ms:string-compare(@ID, 'Groove', 'en-US') = 0]", "Groove")?;
+    // A comparison's value, probed through a predicate every element
+    // matches when it holds: both ExcludeApp elements, or none.
+    let compares = |c: &mut Checks, expr: &str| -> Result<u64, u32> {
+        let (hr, list) = select(doc, expr);
+        c.hr(hr, S_OK)?;
+        let n = list_length(list);
+        release(list);
+        Ok(n)
+    };
+    let n = compares(c, "//ExcludeApp[ms:string-compare('a', 'b') = -1]")?;
+    c.eq(n, 2)?;
+    let n = compares(c, "//ExcludeApp[ms:string-compare('b', 'a') = 1]")?;
+    c.eq(n, 2)?;
+    let n = compares(c, "//ExcludeApp[ms:string-compare('a', 'a') = 0]")?;
+    c.eq(n, 2)?;
+    let n = compares(c, "//ExcludeApp[ms:string-compare('Access', 'access', '', 'i') = 0]")?;
+    c.eq(n, 2)?;
+    // Windows' collation puts the lower case first (its own answer).
+    let n = compares(c, "//ExcludeApp[ms:string-compare('access', 'Access') = -1]")?;
+    c.note(n == 2, n)?;
+    let n = compares(c, "//ExcludeApp[ms:string-compare('Access', 'access') = 1]")?;
+    c.note(n == 2, n)?;
+    // A prefix no declaration gives, and a function the namespace has
+    // not: E_FAIL, like any other expression that does not compile.
+    let (hr, _) = select(doc, "//ExcludeApp[z:string-compare(@ID, 'Access') = 0]");
+    c.code(hr, E_FAIL)?;
+    let (hr, _) = select(doc, "//ExcludeApp[ms:no-such-function(@ID) = 0]");
+    c.code(hr, E_FAIL)?;
     // A syntax error.
     let (hr, _) = select(doc, "//[");
     c.hr(hr, E_FAIL)

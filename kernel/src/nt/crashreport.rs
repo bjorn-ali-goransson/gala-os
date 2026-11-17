@@ -1,9 +1,9 @@
 //! Crash reports (docs/OBSERVABILITY.md, "Crash reports (programs)"): when
 //! a program dies of an exception, the log says what Windows' error
 //! reporting would: the exception code and its name, the address as
-//! module+offset, what was accessed, the thread, the registers and the
-//! top of the stack with every value that points into an image named by
-//! module. Before, only "exited with status 0xc0000005" was left (the JVM
+//! module+offset, what was accessed, the thread, its last system calls
+//! from the flight recorder, the registers and the top of the stack with
+//! every value that points into an image named by module. Before, only "exited with status 0xc0000005" was left (the JVM
 //! had to write its own hs_err file to say more).
 //!
 //! Every user exception keeps a note in its process (fixed size, no
@@ -11,10 +11,11 @@
 //! status (the unhandled exception ended it: from the kernel when there
 //! is no dispatcher, from ntdll's unhandled-exception path otherwise),
 //! `report` prints it as `crash report:` lines. ntdll also reports an
-//! exception no handler took before it calls the top-level filter
-//! (GalaUnhandledException): the process's report then comes whatever
-//! status it ends with (Chromium's Crashpad ends it with 0xffff7002 when
-//! its handler fails), unless the filter continued execution.
+//! exception no handler took, whether or not a top-level filter was
+//! registered (GalaUnhandledException): the process's report then comes
+//! whatever status it ends with (Chromium's Crashpad ends it with
+//! 0xffff7002 when its handler fails), unless the filter continued
+//! execution.
 
 use core::fmt;
 
@@ -32,6 +33,45 @@ const REG_WORDS: usize = 8;
 /// Registers whose memory is kept (x86 or x64 numbering: ax, cx, dx, bx,
 /// sp skipped, bp, si, di).
 const REG_DUMPED: [usize; 7] = [0, 1, 2, 3, 5, 6, 7];
+
+/// ntdll's own account of its search for a handler, as
+/// `GalaUnhandledException` passes it (`Walk` in gala's ntdll, which
+/// fills it as it walks; the kernel only reads it).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Walk {
+    /// Each frame the search reached, innermost first, `kept` filled.
+    pub ips: [u64; WALK_FRAMES],
+    /// Frames unwound (for 32-bit code, registrations walked).
+    pub frames: u32,
+    /// Frames whose unwind data named a language handler, which was
+    /// asked and passed the exception on.
+    pub handlers: u32,
+    /// Frames no function entry was found for: they can name no
+    /// handler, so a walk that asked none and found no entries says the
+    /// unwind data was not found, not that the code had none.
+    pub no_entry: u32,
+    pub kept: u32,
+    /// Bit i: no function entry was found for `ips[i]`.
+    pub no_data: u32,
+    /// Bit i: `ips[i]`'s handler was asked.
+    pub asked: u32,
+    /// Why the walk stopped, as gala's ntdll's `END_*` number it.
+    pub ended: u32,
+}
+
+impl Walk {
+    /// Why the walk stopped, in words: the stack's end, or where it
+    /// could go no further.
+    pub fn ending(&self) -> &'static str {
+        match self.ended {
+            1 => "a frame off the stack",
+            2 => "no return address: the stack's end",
+            3 => "the stack's base: the stack's end",
+            4 => "no unwind data for the frame",
+            _ => "the walk's own limit",
+        }
+    }
+}
 
 /// The last exception a process's thread took.
 #[derive(Clone, Copy, Debug)]
@@ -74,10 +114,28 @@ pub struct Note {
     /// For one in 32-bit code: the TEB32's ExceptionList itself (None:
     /// unread), shown when the list could not be walked.
     pub seh_head: Option<u32>,
+    /// How ntdll's search for a handler went, when ntdll is what
+    /// reported the exception (None: the kernel saw the fault itself, or
+    /// ntdll gave no record of the walk).
+    pub walk: Option<Walk>,
+    /// The exception's parameters as its EXCEPTION_RECORD carried them,
+    /// `params_len` of them read (at most `PARAMS`) and `params_count`
+    /// claimed: for a code nothing here decodes they are all it says.
+    pub params: [u64; PARAMS],
+    pub params_len: usize,
+    pub params_count: usize,
 }
+
+/// Exception parameters a report keeps (EXCEPTION_MAXIMUM_PARAMETERS,
+/// all a record has room for).
+pub const PARAMS: usize = 15;
 
 /// SEH registrations kept for a 32-bit crash report.
 pub const SEH_FRAMES: usize = 12;
+
+/// Frames of ntdll's walk the report names (`WALK_FRAMES` in gala's
+/// ntdll, which fills them).
+pub const WALK_FRAMES: usize = 12;
 
 impl Note {
     /// A note for an exception `status` at `regs`' instruction pointer,
@@ -173,6 +231,10 @@ impl Note {
             seh_len: 0,
             seh_end: false,
             seh_head: None,
+            walk: None,
+            params: [0; PARAMS],
+            params_len: 0,
+            params_count: 0,
         }
     }
 }
@@ -581,6 +643,54 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             }
         );
     }
+    if let Some(walk) = &note.walk {
+        let (frames, handlers, no_entry) = (walk.frames, walk.handlers, walk.no_entry);
+        let plural = |n: u32| if n == 1 { "" } else { "s" };
+        // A frame with no function entry can name no handler, so the two
+        // counts together say whether the unwind data was found at all.
+        if no_entry > 0 {
+            info!(
+                "crash report:   no handler took it: {frames} frame{} unwound ({no_entry} of \
+                 them with no unwind data found), {handlers} handler{} asked",
+                plural(frames),
+                plural(handlers)
+            );
+        } else {
+            info!(
+                "crash report:   no handler took it: {frames} frame{} unwound, {handlers} \
+                 handler{} asked",
+                plural(frames),
+                plural(handlers)
+            );
+        }
+        if walk.kept > 0 {
+            info!(
+                "crash report:     the walk stopped at {}{}",
+                walk.ending(),
+                if frames > walk.kept { ", frames past the first 12 not kept" } else { "" }
+            );
+            for (i, &ip) in walk.ips.iter().take(walk.kept as usize).enumerate() {
+                info!(
+                    "crash report:     frame {i}: {}{}{}",
+                    At::of(process, ip),
+                    if walk.no_data >> i & 1 != 0 { " (no unwind data found)" } else { "" },
+                    if walk.asked >> i & 1 != 0 { " (its handler passed it on)" } else { "" }
+                );
+            }
+        }
+    }
+    if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {
+        let shown = Params(process, &note.params[..note.params_len]);
+        if note.params_count > note.params_len {
+            info!("crash report:   {} parameters, the first {PARAMS}: {shown}", note.params_count);
+        } else {
+            info!(
+                "crash report:   {} parameter{}: {shown}",
+                note.params_count,
+                if note.params_count == 1 { "" } else { "s" }
+            );
+        }
+    }
     if note.seh_len == 0
         && !note.seh_end
         && let Some(head) = note.seh_head
@@ -643,8 +753,56 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
     } else if note.status.0 == CXX_EXCEPTION {
         info!("crash report:   C++ throw: its type is unreadable (not MSVC's layout)");
     }
+    // What the thread was doing: the calls the flight recorder kept for
+    // it. An exception a program raises itself leaves the report nothing
+    // else to go on when it carries no parameters either, as Office's
+    // 0xE0000002 does (ROADMAP OF).
+    let mut calls = [crate::flight::Call::default(); crate::flight::CALLS];
+    let kept = crate::flight::thread_calls(note.tid, &mut calls);
+    if kept > 0 {
+        info!(
+            "crash report:   thread {}'s last calls, oldest first: {}",
+            note.tid,
+            Calls(&calls[..kept])
+        );
+    }
     super::abi::report_registers(note, &stack);
     report_memory(process, note);
+}
+
+/// A thread's last system calls, oldest first: each by name with the
+/// status it ended with, or that it had not returned when the report was
+/// written (the call it died in, or one a frame above is still in). A run
+/// of the same call with the same status is one entry with its count, so
+/// that a loop (a module lookup's, a wait's) leaves room for the calls
+/// around it.
+struct Calls<'a>(&'a [crate::flight::Call]);
+
+impl fmt::Display for Calls<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let same = |a: &crate::flight::Call, b: &crate::flight::Call| {
+            a.number == b.number && a.status == b.status
+        };
+        let mut rest = self.0;
+        let mut first = true;
+        while let Some(call) = rest.first() {
+            let run = rest.iter().take_while(|c| same(c, call)).count();
+            rest = &rest[run..];
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            f.write_str(crate::flight::call_name(call.number))?;
+            match call.status {
+                Some(status) => write!(f, "={status:#010x}")?,
+                None => f.write_str(" (no return yet)")?,
+            }
+            if run > 1 {
+                write!(f, " x{run}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The crash report's memory lines: what each general register points
@@ -700,6 +858,22 @@ impl fmt::Display for Words<'_> {
 }
 
 /// Bytes shown as text: printable ASCII as is, others as `\xNN`.
+/// An exception's parameters: each value, and the image it points into
+/// when it points into one.
+struct Params<'a>(&'a Process, &'a [u64]);
+
+impl fmt::Display for Params<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, &v) in self.1.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", At::of(self.0, v))?;
+        }
+        Ok(())
+    }
+}
+
 struct Lossy<'a>(&'a [u8]);
 
 impl fmt::Display for Lossy<'_> {

@@ -140,21 +140,10 @@ fn namespace(uri: Bstr) -> String {
     xsd::collapse(&text(uri).unwrap_or_default())
 }
 
-/// Records `<what> <value>`: the ledger keeps 96 characters of a
-/// name (`msxml6.dll!` included), so a long value keeps its end (where
-/// namespaces and paths differ), after `..`.
+/// Records `<what> <value>`, a namespace or path keeping its end
+/// (`record_tail`).
 fn record_ns(what: &str, ns: &str, kind: u32, detail: u64) {
-    let mut s = String::from(what);
-    s.push(' ');
-    let room = 96usize.saturating_sub(11 + s.len());
-    let n = ns.chars().count();
-    if n > room && room > 2 {
-        s.push_str("..");
-        s.extend(ns.chars().skip(n - (room - 2)));
-    } else {
-        s.push_str(ns);
-    }
-    record(s.as_bytes(), kind, detail);
+    record_tail(what, ns, kind, detail);
 }
 
 /// The tree a schema argument gives: a document of ours (any node: its

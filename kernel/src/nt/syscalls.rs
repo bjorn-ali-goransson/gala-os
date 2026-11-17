@@ -263,6 +263,10 @@ pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
+/// gala's number for the service QueueUserAPC2 queues a special user APC
+/// through, until the pinned build's is verified; its arguments are
+/// Windows' own (`apc_test` calls the pinned build's export with them).
+pub const NT_QUEUE_APC_THREAD_EX2: u32 = 0x7f4e;
 // Mutants and semaphores. NtReleaseSemaphore (0x0a) and NtReleaseMutant
 // (0x20) are long-stable on x64; the create/open/query numbers vary by build
 // and these are gala's own, UNVERIFIED for 26100 (tests reach them through
@@ -320,6 +324,8 @@ pub const NT_QUERY_PERFORMANCE_COUNTER: u32 = 0x0031;
 pub const NT_DELAY_EXECUTION: u32 = 0x0034;
 pub const NT_DUPLICATE_OBJECT: u32 = 0x003c;
 pub const NT_CLEAR_EVENT: u32 = 0x003e;
+/// NtPulseEvent: gala's number, UNVERIFIED.
+pub const NT_PULSE_EVENT: u32 = 0x7f2a;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -359,6 +365,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
+    (NT_QUEUE_APC_THREAD_EX2, "NtQueueApcThreadEx2", 7, nt_queue_apc_thread_ex2),
     (NT_RELEASE_SEMAPHORE, "NtReleaseSemaphore", 3, nt_release_semaphore),
     (NT_RELEASE_MUTANT, "NtReleaseMutant", 2, nt_release_mutant),
     (NT_CREATE_MUTANT, "NtCreateMutant", 4, nt_create_mutant),
@@ -462,7 +469,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
-    (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 2, gala_unhandled_exception),
+    (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 3, gala_unhandled_exception),
     (GALA_USER_OBJECT_OPEN, "GalaUserObjectOpen", 6, winsta_calls::gala_user_object_open),
     (
         GALA_USER_OBJECT_CONNECTION,
@@ -506,6 +513,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
     (NT_DUPLICATE_OBJECT, "NtDuplicateObject", 7, nt_duplicate_object),
     (NT_CLEAR_EVENT, "NtClearEvent", 1, nt_clear_event),
+    (NT_PULSE_EVENT, "NtPulseEvent", 2, nt_pulse_event),
     (NT_CREATE_EVENT, "NtCreateEvent", 5, nt_create_event),
     (NT_QUERY_EVENT, "NtQueryEvent", 5, nt_query_event),
     (NT_QUERY_SYSTEM_TIME, "NtQuerySystemTime", 1, nt_query_system_time),
@@ -767,6 +775,12 @@ fn dispatch(frame: &mut SyscallFrame) {
         }
     };
     thread::set_in_syscall(&me, None);
+    // A special user APC runs on the way back to user mode, whatever the
+    // call was (QueueUserAPC2). A wait that ended with STATUS_USER_APC has
+    // delivered one already, in `deliver_apc_after`.
+    if status != NtStatus::USER_APC && thread::has_special_user_apc() {
+        super::abi::deliver_special_apc(&call, status);
+    }
     crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
     // C:'s changes are written back lazily; a writer past the dirty limit
     // writes back here (throttling).
@@ -1131,7 +1145,7 @@ fn pipe_request(
     let apc = if routine == 0 {
         None
     } else {
-        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
+        let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false };
         thread::current().map(|t| (t, apc))
     };
     super::notify::Request {
@@ -3170,6 +3184,18 @@ fn nt_set_event(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// NtClearEvent(EventHandle)
+/// NtPulseEvent(EventHandle, PreviousState): signal the event, release
+/// the threads waiting on it now, leave it unsignaled (`wait::pulse`).
+fn nt_pulse_event(call: &mut Call<'_>) -> NtStatus {
+    let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
+    let previous = wait::pulse(&event);
+    let prev_ptr = arg!(call, 1);
+    if prev_ptr != 0 {
+        tri!(call.write_u32(prev_ptr, previous as u32));
+    }
+    NtStatus::SUCCESS
+}
+
 fn nt_clear_event(call: &mut Call<'_>) -> NtStatus {
     let event = tri!(event_object(call, Handle(arg!(call, 0)), EVENT_MODIFY_STATE));
     wait::set_signal(&event, 0);
@@ -3401,12 +3427,58 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// NtQueueApcThreadEx2(ThreadHandle, ReserveHandle, ApcFlags,
+/// ApcRoutine, ApcArgument1, ApcArgument2, ApcArgument3) as QueueUserAPC2
+/// calls it: `ApcFlags` 1 (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) queues
+/// an APC every return to user mode runs, 0 one that waits for an
+/// alertable wait. Windows refuses every other flag with
+/// STATUS_INVALID_PARAMETER (measured on the pinned build:
+/// ERROR_INVALID_PARAMETER from QueueUserAPC2).
+///
+/// `ReserveHandle` names an APC reserve object (NtAllocateReserveObject),
+/// which gala has none of. QueueUserAPC2 passes zero; anything else is
+/// STATUS_INVALID_PARAMETER, as the pinned build answers for a handle to
+/// another type and for one that names nothing alike (`apc_test`), so
+/// the reserve is refused before the thread handle is looked at.
+fn nt_queue_apc_thread_ex2(call: &mut Call<'_>) -> NtStatus {
+    let flags = arg!(call, 2);
+    if flags > 1 || arg!(call, 1) != 0 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    // The type comes before the rights, as ObReferenceObjectByHandle
+    // checks them: a handle to something that is not a thread is
+    // STATUS_OBJECT_TYPE_MISMATCH whatever it grants (an event's
+    // EVENT_ALL_ACCESS does not grant THREAD_SET_CONTEXT, so the other
+    // order would answer STATUS_ACCESS_DENIED).
+    let ObjectBody::Thread(t) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    let object = tri!(entry.require(THREAD_SET_CONTEXT));
+    if !KArc::ptr_eq(&t.process, &call.process) {
+        // TODO: APCs to other processes.
+        return NtStatus::ACCESS_DENIED;
+    }
+    let apc = thread::UserApc {
+        routine: arg!(call, 3),
+        args: [arg!(call, 4), arg!(call, 5), arg!(call, 6)],
+        special: flags == 1,
+    };
+    match thread::queue_user_apc(object, apc) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => e,
+    }
+}
+
 /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
 ///                  ApcArgument3)
 fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
+    // The type comes before the rights, as ObReferenceObjectByHandle
+    // checks them: a handle to something that is not a thread is
+    // STATUS_OBJECT_TYPE_MISMATCH whatever it grants (an event's
+    // EVENT_ALL_ACCESS does not grant THREAD_SET_CONTEXT, so the other
+    // order would answer STATUS_ACCESS_DENIED).
+    let ObjectBody::Thread(t) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let object = tri!(entry.require(THREAD_SET_CONTEXT));
-    let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     if !KArc::ptr_eq(&t.process, &call.process) {
         // TODO: APCs to other processes.
         return NtStatus::ACCESS_DENIED;
@@ -3414,6 +3486,7 @@ fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
     let apc = thread::UserApc {
         routine: arg!(call, 1),
         args: [arg!(call, 2), arg!(call, 3), arg!(call, 4)],
+        special: false,
     };
     match thread::queue_user_apc(object, apc) {
         Ok(()) => NtStatus::SUCCESS,
@@ -4450,6 +4523,7 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
                 Err(_) => NtStatus::ACCESS_VIOLATION,
             }
         }
+        sysinfo::SYSTEM_FIRMWARE_TABLE_INFORMATION => firmware_table(call, buffer, length, ret_ptr),
         sysinfo::GALA_SESSIONS => {
             let records = tri!(sysinfo::sessions());
             if ret_ptr != 0 {
@@ -4477,6 +4551,48 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             }
         }
         _ => NtStatus::INVALID_INFO_CLASS,
+    }
+}
+
+/// SystemFirmwareTableInformation: a firmware table, in and out through
+/// one buffer — the caller writes the provider, the action, the table's id
+/// and the room it has, and reads back the length the table needs and,
+/// where it fits, the table. gala has one provider, SMBIOS ('RSMB') with
+/// one table (id 0), from the machine's firmware (ARCHITECTURE "Firmware
+/// tables"); any other provider, action or id is STATUS_NOT_IMPLEMENTED
+/// with the provider in the ledger, which kernel32 reports as
+/// ERROR_INVALID_FUNCTION — Windows' answer for a provider nobody has.
+fn firmware_table(call: &mut Call<'_>, buffer: u64, length: u64, ret_ptr: u64) -> NtStatus {
+    use super::sysinfo::{FIRMWARE_PROVIDER_RSMB, FIRMWARE_TABLE_GET, FIRMWARE_TABLE_HEADER};
+    if (length as usize) < FIRMWARE_TABLE_HEADER {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut head = [0u8; FIRMWARE_TABLE_HEADER];
+    if call.process.read(buffer, &mut head).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let word = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().unwrap_or([0; 4]));
+    let (provider, action, id, room) = (word(0), word(4), word(8), word(12) as usize);
+    let table = super::platform::smbios()
+        .filter(|_| provider == FIRMWARE_PROVIDER_RSMB && action == FIRMWARE_TABLE_GET && id == 0);
+    let Some(table) = table else {
+        super::ledger::record("NtQuerySystemInformation", "firmware table", u64::from(provider));
+        return NtStatus::NOT_IMPLEMENTED;
+    };
+    let data =
+        tri!(super::sysinfo::raw_smbios((table.major, table.minor, table.docrev), table.table));
+    // The length the table needs, whether or not it fits: the caller's
+    // own field, which is what GetSystemFirmwareTable answers with.
+    tri!(call.write_u32(buffer + 12, data.len() as u32));
+    if ret_ptr != 0 {
+        tri!(call.write_u32(ret_ptr, (FIRMWARE_TABLE_HEADER + data.len()) as u32));
+    }
+    if room < data.len() || (length as usize) < FIRMWARE_TABLE_HEADER + data.len() {
+        return NtStatus::BUFFER_TOO_SMALL;
+    }
+    match call.process.write(buffer + FIRMWARE_TABLE_HEADER as u64, &data) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(_) => NtStatus::ACCESS_VIOLATION,
     }
 }
 
@@ -5132,7 +5248,16 @@ impl Call<'_> {
         if !matches!(device.body, ObjectBody::Volume) {
             return Err(NtStatus::OBJECT_TYPE_MISMATCH);
         }
-        Ok(file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None })
+        let path = file::FilePath { start: crate::fs::ramfs::ROOT, name: rest, linux: None };
+        // A program of a Click-to-Run package finds the package's own
+        // files at the paths its manifest's tokens name, when the
+        // machine itself has nothing there (nt::pkgview).
+        if let Some(root) = self.process.package
+            && let Some(served) = super::pkgview::redirect(root, &path, self.process.id)
+        {
+            return Ok(served);
+        }
+        Ok(path)
     }
 
     /// The string form of the caller's token user's SID (`S-1-5-21-...`):
@@ -5874,7 +5999,7 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         None
     } else {
         let me = tri!(thread::current().ok_or(NtStatus::INVALID_HANDLE));
-        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0] }))
+        Some((me, thread::UserApc { routine: apc, args: [arg!(call, 3), iosb, 0], special: false }))
     };
     let event = match event {
         0 => None,
@@ -6787,7 +6912,7 @@ fn io_apc(call: &Call<'_>, iosb: u64) -> Result<Option<thread::UserApc>, NtStatu
     // A synchronous handle takes one too: the I/O completes inline and
     // the routine still runs at the thread's next alertable wait (Windows
     // 11, ioapc_test).
-    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] }))
+    Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0], special: false }))
 }
 
 /// The start of an I/O on `file`: the event (if any; it must be an event
@@ -6881,6 +7006,8 @@ const FILE_COMPLETION_INFORMATION: u64 = 30;
 /// FileIoCompletionNotificationInformation (SetFileCompletionNotificationModes).
 const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: u64 = 41;
 const FILE_END_OF_FILE_INFORMATION: u64 = 20;
+/// FileShortNameInformation (kernel32's SetFileShortNameW).
+const FILE_SHORT_NAME_INFORMATION: u64 = 40;
 
 /// FILE_NAME_INFORMATION { FileNameLength, FileName[] } for `name`: what
 /// fits, with STATUS_BUFFER_OVERFLOW.
@@ -7290,6 +7417,13 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
         }
         return status;
     }
+    if class == FILE_SHORT_NAME_INFORMATION {
+        let status = short_name_file(call, &entry, file, buffer, length);
+        if status == NtStatus::SUCCESS {
+            tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
+        }
+        return status;
+    }
     if class == FILE_DISPOSITION_INFORMATION_EX {
         let status = dispose_file(call, &entry, file, buffer, length);
         if status == NtStatus::SUCCESS {
@@ -7409,6 +7543,62 @@ fn dispose_file(
         file.set_posix_delete(delete && flags & POSIX_SEMANTICS != 0);
     }
     status
+}
+
+/// FileShortNameInformation: FILE_NAME_INFORMATION { ULONG
+/// FileNameLength; WCHAR FileName[]; } -- the 8.3 name the file is to
+/// have in its directory beside its long one (`ramfs::Node::short`), or
+/// no name at all (a length of 0) to take the one it has away. The handle
+/// must have DELETE access, as a rename does, and nothing more: Windows
+/// sets a short name without SeRestorePrivilege (measured unelevated,
+/// `office_k32_test`'s SetFileShortNameW). A name that is not 8.3 is
+/// STATUS_INVALID_PARAMETER, and one another entry of the directory
+/// holds STATUS_OBJECT_NAME_COLLISION (both measured).
+fn short_name_file(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    file: &file::FileObject,
+    buffer: u64,
+    length: usize,
+) -> NtStatus {
+    const HEADER: usize = 4;
+    if entry.access & file::DELETE == 0 {
+        return NtStatus::ACCESS_DENIED;
+    }
+    if length < HEADER {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut header = [0u8; HEADER];
+    if call.process.read(buffer, &mut header).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let name_len = u32::from_le_bytes(header) as usize;
+    if !name_len.is_multiple_of(2) || HEADER + name_len > length {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(name_len).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    bytes.resize(name_len, 0u8);
+    if call.process.read(buffer + HEADER as u64, &mut bytes).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let mut short = Vec::new();
+    if short.try_reserve_exact(name_len / 2).is_err() {
+        return NtStatus::NO_MEMORY;
+    }
+    for pair in bytes.chunks_exact(2) {
+        let _ = short.try_push(u16::from_le_bytes([pair[0], pair[1]]));
+    }
+    if !short.is_empty() && !file::is_short_name(&short) {
+        super::ledger::record("NtSetInformationFile", "short name not 8.3", short.len() as u64);
+        return NtStatus::INVALID_PARAMETER;
+    }
+    match file::with_fs(|fs| fs.set_short_name(file.node, &short)) {
+        Ok(()) => NtStatus::SUCCESS,
+        Err(e) => file::fs_status(e),
+    }
 }
 
 /// FileRenameInformation(Ex) and FileLinkInformation(Ex): FILE_RENAME_INFORMATION

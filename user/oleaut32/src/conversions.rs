@@ -1,5 +1,6 @@
-//! The VarXxxFromYyy conversions programs import directly, VarCmp and
-//! GetActiveObject, as documented. They share VariantChangeType's
+//! The VarXxxFromYyy conversions programs import directly and VarCmp,
+//! as documented (the running objects are active.rs). They share
+//! VariantChangeType's
 //! conversions (variant.rs): numbers in the en-US format, integers
 //! rounded half to even, DISP_E_OVERFLOW out of range and
 //! DISP_E_TYPEMISMATCH for text that is no number. Locales other than
@@ -11,7 +12,6 @@ use crate::variant::{
     DISP_E_BADVARTYPE, DISP_E_TYPEMISMATCH, VARIANT_ALPHABOOL, VT_BOOL, VT_BSTR, VT_CY, VT_I4,
     VT_R8, VT_UI4, Value, Variant, bstr, chars, convert, decimal,
 };
-use core::ffi::c_void;
 
 #[cfg_attr(
     target_arch = "x86",
@@ -21,8 +21,6 @@ use core::ffi::c_void;
 unsafe extern "system" {
     fn CompareStringW(lcid: u32, flags: u32, a: *const u16, n: i32, b: *const u16, m: i32) -> i32;
 }
-
-const MK_E_UNAVAILABLE: HResult = 0x8004_01e3u32 as i32;
 
 /// VARCMP_LT .. VARCMP_NULL (VarCmp's results).
 const VARCMP_LT: HResult = 0;
@@ -111,7 +109,7 @@ pub extern "system" fn VarCyFromR8(v: f64, out: *mut i64) -> HResult {
     if out.is_null() {
         return E_INVALIDARG;
     }
-    match convert(Value::Real(v), VT_CY, 0) {
+    match convert(Value::Real(v, 15), VT_CY, 0) {
         Ok(c) => {
             put(out, c[0] as i64);
             S_OK
@@ -268,7 +266,8 @@ pub extern "system" fn VarBoolFromCy(cy: i64, out: *mut i16) -> HResult {
 }
 
 /// VarBstrFromR8: the number with up to 15 significant digits, fixed
-/// from 1E-11 to below 1E+15, else as "5.6789E-12" (en-US).
+/// while the integer digits and the decimals it needs both fit in 15 and
+/// scientific ("5.6789E-12") otherwise (variant.rs `format_real`).
 #[unsafe(no_mangle)]
 pub extern "system" fn VarBstrFromR8(
     v: f64,
@@ -280,13 +279,89 @@ pub extern "system" fn VarBstrFromR8(
         return E_INVALIDARG;
     }
     check_locale(b"oleaut32.dll!VarBstrFromR8(locale)", lcid);
-    match convert(Value::Real(v), VT_BSTR, 0) {
+    match convert(Value::Real(v, 15), VT_BSTR, 0) {
         Ok(b) => {
             put(out, b[0] as *mut u16);
             S_OK
         }
         Err(hr) => hr,
     }
+}
+
+/// VarBstrFromR4: as VarBstrFromR8, with a float's seven significant
+/// digits -- so "0.3333333", and "1.234567E-02" where a double would
+/// still be fixed (measured on Windows 11).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBstrFromR4(
+    v: f32,
+    lcid: u32,
+    _flags: u32,
+    out: *mut *mut u16,
+) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    check_locale(b"oleaut32.dll!VarBstrFromR4(locale)", lcid);
+    match convert(Value::Real(v.into(), 7), VT_BSTR, 0) {
+        Ok(b) => {
+            put(out, b[0] as *mut u16);
+            S_OK
+        }
+        Err(hr) => hr,
+    }
+}
+
+/// VarBstrFromI4: the number in plain decimal. Windows gives no
+/// grouping and reads no separator from the locale here, so the locale
+/// is not reported either (measured on Windows 11, where 0x40c answers
+/// "1234567" as 0x409 does).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBstrFromI4(
+    v: i32,
+    _lcid: u32,
+    _flags: u32,
+    out: *mut *mut u16,
+) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    match convert(Value::Int(v.into()), VT_BSTR, 0) {
+        Ok(b) => {
+            put(out, b[0] as *mut u16);
+            S_OK
+        }
+        Err(hr) => hr,
+    }
+}
+
+/// VarR8FromR4: a float widened, which every float has an answer for --
+/// infinities and NaNs with the rest, and -0 still -0 (measured on
+/// Windows 11).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarR8FromR4(v: f32, out: *mut f64) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, f64::from(v));
+    S_OK
+}
+
+/// VarR4FromR8: a double narrowed to the nearest float, ties to even
+/// (16777219 becomes 16777220). DISP_E_OVERFLOW when the result would
+/// not be finite -- an infinity or a NaN included -- and then the output
+/// is left as the caller had it; a value too small for a float
+/// underflows to zero with its sign and S_OK (measured on Windows 11).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarR4FromR8(v: f64, out: *mut f32) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    let narrowed = v as f32;
+    if !narrowed.is_finite() {
+        return DISP_E_OVERFLOW;
+    }
+    put(out, narrowed);
+    S_OK
 }
 
 const VT_EMPTY: u16 = 0;
@@ -409,22 +484,4 @@ pub extern "system" fn VarCmp(
             order(real(a), real(b))
         }
     }
-}
-
-/// GetActiveObject: gala has no running object table (nothing calls
-/// RegisterActiveObject yet), so no class is running: MK_E_UNAVAILABLE,
-/// as Windows answers for a class not registered as running. Reported,
-/// so a program that expects a running server shows up.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetActiveObject(
-    clsid: *const c_void,
-    _reserved: *mut c_void,
-    out: *mut *mut c_void,
-) -> HResult {
-    if out.is_null() || clsid.is_null() {
-        return E_INVALIDARG;
-    }
-    put(out, core::ptr::null_mut());
-    missing(b"oleaut32.dll!GetActiveObject(no running object table)", 0);
-    MK_E_UNAVAILABLE
 }

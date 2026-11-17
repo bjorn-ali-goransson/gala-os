@@ -20,7 +20,18 @@
 //!    so), which returns DXGI_ERROR_UNSUPPORTED and a NULL device;
 //!    D3D12GetDebugInterface is ordinal 102;
 //! 4. dcomp.dll: DCompositionCreateDevice, DCompositionCreateDevice2 and
-//!    DCompositionCreateDevice3 return DXGI_ERROR_UNSUPPORTED, device NULL.
+//!    DCompositionCreateDevice3 return DXGI_ERROR_UNSUPPORTED, device NULL;
+//! 5. d3d10_1.dll and d3d10.dll, which Word's shared code
+//!    (Mso40UIwin32client.dll) and Office's image modules (OIMG.DLL,
+//!    VVIEWER.DLL) delay-load: D3D10CreateDevice1 with
+//!    D3D10_1_SDK_VERSION returns DXGI_ERROR_UNSUPPORTED and a NULL
+//!    device, and with any other SDK version E_INVALIDARG -- which is
+//!    Windows' own answer, measured: it checks the version before it
+//!    looks for an adapter, and 0x20 is the only one it takes.
+//!    D3D10CreateStateBlock and D3D10CreateEffectFromMemory need a
+//!    device, which nothing here hands out, so they answer what Windows
+//!    answers when asked without one (measured): E_INVALIDARG and
+//!    E_FAIL.
 
 #![no_std]
 #![no_main]
@@ -51,6 +62,9 @@ const UNSUPPORTED: i32 = 0x887a_0004_u32 as i32;
 const NOT_FOUND: i32 = 0x887a_0002_u32 as i32;
 const E_INVALIDARG: i32 = 0x8007_0057_u32 as i32;
 const E_NOINTERFACE: i32 = 0x8000_4002_u32 as i32;
+const E_FAIL: i32 = 0x8000_4005_u32 as i32;
+/// D3D10_1_SDK_VERSION, the only one D3D10CreateDevice1 takes (measured).
+const D3D10_1_SDK_VERSION: u32 = 0x20;
 /// A non-null placeholder output, overwritten with NULL by the stubs.
 const JUNK: *mut c_void = 0x1234 as *mut c_void;
 /// An IID no DXGI object has (all zero: GUID_NULL).
@@ -145,6 +159,11 @@ type D3d11 = extern "system" fn(
 ) -> i32;
 type D3d12 = extern "system" fn(*mut c_void, u32, *const u8, *mut *mut c_void) -> i32;
 type Dcomp = extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> i32;
+type D3d10Device1 =
+    extern "system" fn(*mut c_void, u32, *mut c_void, u32, u32, u32, *mut *mut c_void) -> i32;
+type StateBlock = extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> i32;
+type Effect =
+    extern "system" fn(*const u8, usize, u32, *mut c_void, *mut c_void, *mut *mut c_void) -> i32;
 
 fn tests() {
     // SAFETY (whole function): each export has the type it is cast to
@@ -241,6 +260,36 @@ fn tests() {
             );
             check(device.is_null(), 18);
         }
+
+        // 5. HARDWARE (0), D3D10_FEATURE_LEVEL_10_1 (0xa100).
+        let dev1: D3d10Device1 =
+            core::mem::transmute(proc(b"d3d10_1.dll\0", c"D3D10CreateDevice1".as_ptr().cast(), 27));
+        let null = core::ptr::null_mut();
+        let mut device = JUNK;
+        let hr = dev1(null, 0, null, 0, 0xa100, D3D10_1_SDK_VERSION, &mut device);
+        check(hr == UNSUPPORTED && device.is_null(), 28);
+        let mut device = JUNK;
+        // D3D10_SDK_VERSION (29), which is the other DLL's.
+        check(dev1(null, 0, null, 0, 0xa100, 29, &mut device) == E_INVALIDARG, 29);
+        check(device.is_null(), 30);
+        let block: StateBlock = core::mem::transmute(proc(
+            b"d3d10_1.dll\0",
+            c"D3D10CreateStateBlock".as_ptr().cast(),
+            31,
+        ));
+        let mut state = JUNK;
+        check(block(null, null, &mut state) == E_INVALIDARG && state.is_null(), 32);
+        let effect: Effect = core::mem::transmute(proc(
+            b"d3d10.dll\0",
+            c"D3D10CreateEffectFromMemory".as_ptr().cast(),
+            33,
+        ));
+        let mut made = JUNK;
+        let data = *b"not an effect";
+        check(
+            effect(data.as_ptr(), data.len(), 0, null, null, &mut made) == E_FAIL && made.is_null(),
+            34,
+        );
     }
 }
 

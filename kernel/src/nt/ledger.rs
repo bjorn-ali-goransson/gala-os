@@ -133,6 +133,11 @@ struct Key {
 struct Entry {
     key: Key,
     hits: u64,
+    /// When it was first and last hit (uptime in ms): a gap's count says
+    /// how often, never when, and what explains a program's end is what
+    /// it hit just before it. A dump's lines carry both.
+    first: u64,
+    last: u64,
 }
 
 /// The kinds a dump names the dropped records under. There are more
@@ -165,15 +170,17 @@ struct Ledger {
 }
 
 impl Ledger {
-    /// Counts one hit of `key`, adding it if there is room (for a bulk
-    /// report, within `BULK_ENTRIES`); otherwise only `overflow` counts it.
-    fn add(&mut self, key: Key, bulk: bool) {
+    /// Counts one hit of `key` at `at` (uptime in ms), adding it if
+    /// there is room (for a bulk report, within `BULK_ENTRIES`);
+    /// otherwise only `overflow` counts it.
+    fn add(&mut self, key: Key, bulk: bool, at: u64) {
         if let Some(entry) = self.entries.iter_mut().flatten().find(|e| e.key == key) {
             entry.hits += 1;
+            entry.last = at;
         } else if bulk && self.bulk == BULK_ENTRIES {
             self.drop_record(key.what, true);
         } else if let Some(slot) = self.entries.iter_mut().find(|e| e.is_none()) {
-            *slot = Some(Entry { key, hits: 1 });
+            *slot = Some(Entry { key, hits: 1, first: at, last: at });
             self.bulk += usize::from(bulk);
         } else {
             self.drop_record(key.what, bulk);
@@ -216,7 +223,11 @@ pub fn record(service: &'static str, what: &'static str, detail: u64) {
 /// reader cannot read), so only the first ends a program. "load failed"
 /// is a DLL the loader found and could not load (its detail the status),
 /// which is what names the DLL behind a process that dies
-/// STATUS_DLL_INIT_FAILED.
+/// STATUS_DLL_INIT_FAILED. A "missing export" is one a program asked for
+/// at run time and lives with (GetProcAddress); a "missing import" is one
+/// the loader could not bind, which ends the load, and is named with the
+/// module whose import it is (`<dll>!<export>(imported by <module>)`), so
+/// that a program's probes and the gaps that stop it are told apart.
 pub fn user_what(code: u32) -> &'static str {
     match code {
         1 => "missing export",
@@ -225,6 +236,9 @@ pub fn user_what(code: u32) -> &'static str {
         4 => "missing dll",
         6 => "stub",
         7 => "load failed",
+        8 => "missing import",
+        // 5 and anything else: a gap a DLL reports without a kind of its
+        // own (gala's DLLs pass 5).
         _ => "other",
     }
 }
@@ -251,7 +265,13 @@ fn record_named(name: &[u8], what: &'static str, detail: u64, bulk: bool) {
 }
 
 fn add(key: Key, bulk: bool) {
-    LEDGER.lock().add(key, bulk);
+    LEDGER.lock().add(key, bulk, now_ms());
+}
+
+/// Uptime in ms, for when a gap was hit; the machine's clock as the rest
+/// of nt reads it (host unit tests give `add` the time themselves).
+fn now_ms() -> u64 {
+    super::platform::monotonic_ns() / 1_000_000
 }
 
 /// One ledger entry as a JSON object.
@@ -259,7 +279,7 @@ struct Json<'a>(&'a Entry);
 
 impl fmt::Display for Json<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Entry { key, hits } = self.0;
+        let Entry { key, hits, first, last } = self.0;
         // Kernel names and kinds are literals without quotes or backslashes;
         // user names are checked for that in `record_user`.
         f.write_str(r#"{"service":""#)?;
@@ -271,7 +291,11 @@ impl fmt::Display for Json<'_> {
                 f.write_str(core::str::from_utf8(name).unwrap_or("?"))?;
             }
         }
-        write!(f, r#"","what":"{}","detail":{},"hits":{}}}"#, key.what, key.detail, hits)
+        write!(
+            f,
+            r#"","what":"{}","detail":{},"hits":{},"first":{first},"last":{last}}}"#,
+            key.what, key.detail, hits
+        )
     }
 }
 
@@ -300,13 +324,13 @@ pub fn dump() {
         let (what, hits) = (d.what, d.hits);
         named += hits;
         crate::kprintln!(
-            r#"ledger: {{"service":"{service}","what":"{what}","detail":0,"hits":{hits}}}"#
+            r#"ledger: {{"service":"{service}","what":"{what}","detail":0,"hits":{hits},"first":0,"last":0}}"#
         );
     }
     if overflow > named {
         let rest = overflow - named;
         crate::kprintln!(
-            r#"ledger: {{"service":"?","what":"ledger full","detail":0,"hits":{rest}}}"#
+            r#"ledger: {{"service":"?","what":"ledger full","detail":0,"hits":{rest},"first":0,"last":0}}"#
         );
     }
     // The last dump out gives back the names only its copy used. A dump
@@ -352,14 +376,33 @@ pub fn class_argument(service: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// Every hit moves the entry's last time; the first stays. A gap's
+    /// count says how often, and these say when, which is what tells the
+    /// gaps a program hit before it gave up from the thousands before.
+    #[test]
+    fn hits_keep_when_they_were_first_and_last() {
+        let mut ledger = empty();
+        let key = Key { service: Service::Kernel("NtX"), what: "info class", detail: 7 };
+        ledger.add(key, false, 100);
+        ledger.add(key, false, 2500);
+        ledger.add(key, false, 2600);
+        let entry = ledger.entries.iter().flatten().next().copied().unwrap();
+        assert_eq!((entry.hits, entry.first, entry.last), (3, 100, 2600));
+    }
+
     #[test]
     fn json_form() {
         let entry = Entry {
             key: Key { service: Service::Kernel("NtX"), what: "info class", detail: 7 },
             hits: 2,
+            first: 11,
+            last: 2200,
         };
         let text = alloc::format!("{}", Json(&entry));
-        assert_eq!(text, r#"{"service":"NtX","what":"info class","detail":7,"hits":2}"#);
+        assert_eq!(
+            text,
+            r#"{"service":"NtX","what":"info class","detail":7,"hits":2,"first":11,"last":2200}"#
+        );
     }
 
     #[test]
@@ -370,6 +413,8 @@ mod tests {
         let entry = Entry {
             key: Key { service: Service::User(a), what: "missing export", detail: 0 },
             hits: 1,
+            first: 0,
+            last: 0,
         };
         let text = alloc::format!("{}", Json(&entry));
         assert!(
@@ -398,10 +443,14 @@ mod tests {
         entries[0] = Some(Entry {
             key: Key { service: Service::User(dll), what: "missing dll", detail: 0 },
             hits: 2,
+            first: 0,
+            last: 0,
         });
         entries[1] = Some(Entry {
             key: Key { service: Service::User(7), what: "absent key", detail: 0 },
             hits: 1,
+            first: 0,
+            last: 0,
         });
         compact(&mut entries, &mut t);
         assert_eq!((t.count, t.bulk_count), (2, 1));
@@ -428,10 +477,15 @@ mod tests {
             ledger.add(
                 Key { service: Service::Kernel("k"), what: "absent key", detail: i as u64 },
                 true,
+                0,
             );
         }
         assert_eq!((ledger.bulk, ledger.overflow), (BULK_ENTRIES, 10));
-        ledger.add(Key { service: Service::Kernel("dll"), what: "missing dll", detail: 0 }, false);
+        ledger.add(
+            Key { service: Service::Kernel("dll"), what: "missing dll", detail: 0 },
+            false,
+            0,
+        );
         assert_eq!(ledger.entries.iter().flatten().count(), BULK_ENTRIES + 1);
     }
 
@@ -445,16 +499,28 @@ mod tests {
             ledger.add(
                 Key { service: Service::Kernel("k"), what: "absent key", detail: i as u64 },
                 true,
+                0,
             );
         }
         // The bulk reports hold BULK_ENTRIES entries; these fill the rest.
         for i in 0..ENTRIES - BULK_ENTRIES {
-            ledger
-                .add(Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 }, false);
+            ledger.add(
+                Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 },
+                false,
+                0,
+            );
         }
         // The table is full now, so these two find no room of their own.
-        ledger.add(Key { service: Service::Kernel("x"), what: "missing export", detail: 1 }, false);
-        ledger.add(Key { service: Service::Kernel("y"), what: "missing export", detail: 2 }, false);
+        ledger.add(
+            Key { service: Service::Kernel("x"), what: "missing export", detail: 1 },
+            false,
+            0,
+        );
+        ledger.add(
+            Key { service: Service::Kernel("y"), what: "missing export", detail: 2 },
+            false,
+            0,
+        );
         let dropped: alloc::vec::Vec<_> =
             ledger.dropped.iter().flatten().map(|d| (d.what, d.bulk, d.hits)).collect();
         assert_eq!(dropped, [("absent key", true, 3), ("missing export", false, 2)]);
@@ -470,12 +536,15 @@ mod tests {
         assert!(KINDS.len() > DROPPED_KINDS);
         let mut ledger = empty();
         for i in 0..ENTRIES {
-            ledger
-                .add(Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 }, false);
+            ledger.add(
+                Key { service: Service::Kernel("f"), what: "flag", detail: i as u64 },
+                false,
+                0,
+            );
         }
         for i in 0..DROPPED_KINDS + 1 {
             let what: &'static str = &KINDS[i..i + 1];
-            ledger.add(Key { service: Service::Kernel("k"), what, detail: 0 }, false);
+            ledger.add(Key { service: Service::Kernel("k"), what, detail: 0 }, false, 0);
         }
         assert_eq!(ledger.dropped.iter().flatten().count(), DROPPED_KINDS);
         let named: u64 = ledger.dropped.iter().flatten().map(|d| d.hits).sum();

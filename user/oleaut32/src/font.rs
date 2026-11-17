@@ -12,6 +12,7 @@
 //! E_NOINTERFACE (recorded). QueryTextMetrics is E_NOTIMPL (recorded).
 //! Office's Click-to-Run UI imports it by ordinal.
 
+use super::GetProcAddress;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -27,7 +28,6 @@ use super::{
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
-    fn GetProcAddress(module: usize, name: *const u8) -> usize;
 }
 
 const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;

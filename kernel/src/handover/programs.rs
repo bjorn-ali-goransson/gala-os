@@ -294,9 +294,16 @@ pub mod thread_state {
     pub const START: u32 = 2;
 }
 
-/// A queued user APC in a THREADS entry (32-byte records): routine, then
-/// its three arguments.
-pub type ApcRec = [u64; 4];
+/// A queued user APC in a THREADS entry (40-byte records): routine, its
+/// three arguments, then 1 for a special APC (QueueUserAPC2's) and 0 for
+/// one that waits for an alertable wait. An older writer's 32-byte
+/// records read as 0 there, which is what they all were.
+pub type ApcRec = [u64; 5];
+
+/// The bytes an `ApcRec` takes in the table. The record carries it, so a
+/// writer that did not know about special APCs wrote 32 and its records
+/// read as normal APCs (the flag past their end is 0).
+pub const APC_STRIDE: u32 = 40;
 
 /// A THREADS entry: a live thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,15 +353,18 @@ impl<'a> ThreadRec<'a> {
     /// The entry, then its queued APCs (a table of `ApcRec`), then (version
     /// 3) its extended state.
     pub fn write(&self, w: &mut Writer, apcs: &[ApcRec]) -> Result<(), AllocError> {
-        self.write_as(w, apcs, version_of(super::record::tag::THREADS))
+        self.write_as(w, apcs, version_of(super::record::tag::THREADS), APC_STRIDE)
     }
 
-    /// The entry at `version` (2: no extended state).
+    /// The entry at `version` (2: no extended state), with the APC table
+    /// at `apc_stride` bytes a record (an older writer's 32 leaves out
+    /// whether the APC is special).
     pub fn write_as(
         &self,
         w: &mut Writer,
         apcs: &[ApcRec],
         version: u16,
+        apc_stride: u32,
     ) -> Result<(), AllocError> {
         let e = w.begin_entry()?;
         for v in [self.tid, self.pid, self.teb, self.win32_start, self.create_time, self.affinity] {
@@ -377,9 +387,9 @@ impl<'a> ThreadRec<'a> {
         w.u32(self.mxcsr.unwrap_or(0))?;
         w.u32(self.impersonation)?;
         w.u32(0)?;
-        w.table(apcs.len() as u32, 32)?;
+        w.table(apcs.len() as u32, apc_stride)?;
         for apc in apcs {
-            for v in apc {
+            for v in &apc[..apc_stride as usize / 8] {
                 w.u64(*v)?;
             }
         }
@@ -439,7 +449,7 @@ impl<'a> ThreadRec<'a> {
 
 /// Reads an `ApcRec` from a table record.
 pub fn read_apc(r: &mut Reader<'_>) -> ApcRec {
-    [r.u64(), r.u64(), r.u64(), r.u64()]
+    [r.u64(), r.u64(), r.u64(), r.u64(), r.u64()]
 }
 
 /// The start of every object entry: its id and its name in the object
@@ -1206,7 +1216,7 @@ mod tests {
             xstate: XSTATE_LEGACY,
             extended: &[],
         }
-        .write(&mut w, &[[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]])
+        .write(&mut w, &[[0x40_1000, 1, 2, 3, 0], [0x40_2000, 4, 5, 6, 1]])
         .unwrap();
         // One created suspended that never ran.
         ThreadRec {
@@ -1417,7 +1427,7 @@ mod tests {
         let (t, apcs) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!((t.tid, t.state, t.suspend, t.regs[16]), (16, thread_state::USER, 2, 81));
         let apcs: Vec<_> = apcs.iter().map(|mut a| read_apc(&mut a)).collect();
-        assert_eq!(apcs, [[0x40_1000, 1, 2, 3], [0x40_2000, 4, 5, 6]]);
+        assert_eq!(apcs, [[0x40_1000, 1, 2, 3, 0], [0x40_2000, 4, 5, 6, 1]]);
         let (t, _) = ThreadRec::read(&mut threads.entry().unwrap());
         assert_eq!(
             (t.tid, t.state, t.suspend, t.mxcsr),
@@ -1707,8 +1717,8 @@ mod tests {
         };
         let mut w = Writer::new(1).unwrap();
         w.section(tag::THREADS, 2, REQUIRED).unwrap();
-        t.write_as(&mut w, &[[1, 2, 3, 4]], 2).unwrap();
-        t.write_as(&mut w, &[[1, 2, 3, 4]], 3).unwrap();
+        t.write_as(&mut w, &[[1, 2, 3, 4, 0]], 2, APC_STRIDE).unwrap();
+        t.write_as(&mut w, &[[1, 2, 3, 4, 0]], 3, APC_STRIDE).unwrap();
         let bytes = w.finish().unwrap();
         let rec = record::parse(&bytes).unwrap();
         let mut r = rec.section(tag::THREADS).unwrap();
@@ -1722,6 +1732,46 @@ mod tests {
         // A thread with extended state needs a version-3 reader.
         assert_eq!(threads_must_read(true), 3);
         assert_eq!(threads_must_read(false), 2);
+    }
+
+    /// Special APCs widened the APC record without a version bump,
+    /// because the table carries its own stride: a writer that wrote 32
+    /// bytes a record is read with the flag 0, a normal APC, and what
+    /// follows the table is still found.
+    #[test]
+    fn an_older_apc_record_is_a_normal_apc() {
+        let t = ThreadRec {
+            tid: 12,
+            pid: 8,
+            teb: 0x7ffd_e000,
+            win32_start: 0,
+            create_time: 5,
+            affinity: 3,
+            object: 1,
+            ordinal: 0,
+            priority: 8,
+            base_priority: 8,
+            number: 0,
+            regs: [7; 18],
+            deadline: None,
+            fx: [1; 512],
+            state: thread_state::USER,
+            suspend: 0,
+            mxcsr: None,
+            impersonation: 0,
+            xstate: 0b111,
+            extended: &[9; 64],
+        };
+        let mut w = Writer::new(1).unwrap();
+        w.section(tag::THREADS, 2, REQUIRED).unwrap();
+        t.write_as(&mut w, &[[0x40_1000, 1, 2, 3, 1]], 3, 32).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let (read, apcs) =
+            ThreadRec::read(&mut rec.section(tag::THREADS).unwrap().entry().unwrap());
+        assert_eq!(read, t);
+        let apcs: Vec<_> = apcs.iter().map(|mut a| read_apc(&mut a)).collect();
+        assert_eq!(apcs, [[0x40_1000, 1, 2, 3, 0]]);
     }
 
     #[test]

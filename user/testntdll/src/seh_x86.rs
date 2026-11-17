@@ -184,7 +184,7 @@ fn call_frame(record: *mut u8, frame: usize, context: *mut u8, nested: Handler) 
 }
 
 /// The frames' handlers, newest first: whether one continued execution.
-fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
+fn dispatch_frames(record: *mut u8, context: *mut u8, walk: &mut crate::Walk) -> bool {
     let mut frame = exception_list();
     for _ in 0..4096 {
         if frame == END || frame == 0 {
@@ -194,6 +194,10 @@ fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
             set_record_flags(record, record_flags(record) | EXCEPTION_STACK_INVALID);
             return false;
         }
+        // Every registration names a handler, so a frame walked here is
+        // a handler asked.
+        walk.frames += 1;
+        walk.handlers += 1;
         // ExceptionContinueExecution; anything else is taken as
         // ExceptionContinueSearch (ExceptionNestedException and
         // ExceptionCollidedUnwind too: see the module).
@@ -233,21 +237,23 @@ extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
     let mut pointers = ExceptionPointers { record, context };
     // Snapshots, so that handlers may (un)register handlers themselves.
     let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
-    let handled = call_handlers(&exception, &mut pointers) || dispatch_frames(record, context);
+    let mut walk = crate::Walk::default();
+    let handled =
+        call_handlers(&exception, &mut pointers) || dispatch_frames(record, context, &mut walk);
     if call_handlers(&continue_, &mut pointers) || handled {
         NtContinue(context, 0);
     }
     // Unhandled: the kernel keeps it for the crash report (wow64.dll
     // passes it on with the 32-bit registers); the top-level filter may
     // continue execution; otherwise the process ends.
-    crate::GalaUnhandledException(record, context);
+    crate::GalaUnhandledException(record, context, &raw const walk);
     let filter = TOP_FILTER.load(core::sync::atomic::Ordering::Acquire);
     if filter != 0 {
         // SAFETY: a filter registered with RtlSetUnhandledExceptionFilter.
         let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
             unsafe { core::mem::transmute(filter) };
         if f(&mut pointers) == -1 {
-            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null());
+            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null(), core::ptr::null());
             NtContinue(context, 0);
         }
     }

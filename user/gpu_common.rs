@@ -1,5 +1,5 @@
-// Shared by gala's GPU stub DLLs (dxgi, d3d11, d3d12, dcomp; ROADMAP
-// GPU G0), included by each with `include!`: gala has no Direct3D
+// Shared by gala's GPU stub DLLs (dxgi, d3d10, d3d10_1, d3d11, d3d12,
+// dcomp; ROADMAP GPU G0), included by each with `include!`: gala has no Direct3D
 // adapter (G2's software 3D comes as DXVK and vkd3d-proton beside the
 // programs that use them), so the device entry points fail as they
 // do on Windows when the system cannot provide what is asked:
@@ -22,6 +22,8 @@ unsafe extern "system" {
 const DXGI_ERROR_UNSUPPORTED: i32 = 0x887a_0004_u32 as i32;
 #[allow(dead_code)]
 const E_INVALIDARG: i32 = 0x8007_0057_u32 as i32;
+#[allow(dead_code)]
+const E_FAIL: i32 = 0x8000_4005_u32 as i32;
 
 /// Records `what` (a `dll!function` name) as unsupported in the ledger.
 fn unsupported(what: &[u8]) {

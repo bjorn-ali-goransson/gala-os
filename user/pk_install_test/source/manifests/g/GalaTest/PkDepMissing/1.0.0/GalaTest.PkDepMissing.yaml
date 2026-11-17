@@ -13,7 +13,7 @@ Installers:
   - RelativeFilePath: pkdepmissing-1.0.0\pkdepmissing.exe
     PortableCommandAlias: pkdepmissing
   InstallerUrl: https://packages.gala.invalid/pkdepmissing-1.0.0.zip
-  InstallerSha256: 5CDE7FC290910ACDF918FB52D4F04AB0E46E38C48C65231C4927579BDB536B40
+  InstallerSha256: 67BFD0D2E07D24F8E9F8CCF466E82BA7A992EF97F8018B1D70FFBA0620448D2E
   Dependencies:
     PackageDependencies:
     - PackageIdentifier: GalaTest.NoSuchLib

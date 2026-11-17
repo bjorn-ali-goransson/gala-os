@@ -55,6 +55,22 @@ pub struct HeapStats {
     pub peak_in_use: usize,
 }
 
+/// What [`self_check`] found.
+#[derive(Clone, Copy, Debug)]
+pub struct SelfCheck {
+    /// The statistics before the round of allocations and after it:
+    /// equal, because every object was freed again.
+    pub before: HeapStats,
+    pub after: HeapStats,
+    /// Every object held the bytes written to it.
+    pub kept: bool,
+    /// The over-aligned object was aligned as asked.
+    pub aligned: bool,
+    /// The heap had no memory for the round, which leaves the rest of the
+    /// answer meaningless.
+    pub refused: bool,
+}
+
 pub struct Heap<S: PageSource> {
     free: [Option<NonNull<FreeObject>>; CLASSES.len()],
     source: S,
@@ -410,6 +426,7 @@ fn unmap_run(base: u64, pages: usize) {
 #[cfg(not(any(test, feature = "hosted")))]
 mod global {
     use core::alloc::{GlobalAlloc, Layout};
+
     use core::ptr::{self, NonNull};
 
     use super::{FramePages, Heap, HeapStats};
@@ -443,6 +460,75 @@ mod global {
         HEAP.0.lock().stats()
     }
 
+    /// Takes a slab's worth of small objects, a large one and an
+    /// over-aligned one from the heap, writes to each and gives them all
+    /// back, with the heap's lock held throughout: the statistics count
+    /// the whole kernel, so an allocation made on another CPU inside the
+    /// round would make the balance lie (the boot selftest's
+    /// `heap_small_and_large` once failed on 32 bytes an input thread
+    /// took as it came up). The lock makes the two sets of statistics
+    /// this round's own and nothing else's.
+    pub fn self_check() -> Option<super::SelfCheck> {
+        const SMALL: Layout = Layout::new::<[u64; 4]>();
+        const LARGE: Layout = Layout::new::<[u8; 16 * 1024]>();
+        /// An alignment no size class gives of itself.
+        const OVER: Layout = match Layout::from_size_align(256, 256) {
+            Ok(layout) => layout,
+            // 256 is a power of two and a multiple of itself.
+            Err(_) => SMALL,
+        };
+        /// More small objects than a page of them holds, so the heap has
+        /// to carve a fresh slab page and take it back off the free list.
+        const MANY: usize = 300;
+
+        let mut heap = HEAP.0.lock();
+        let before = heap.stats();
+        let mut kept = true;
+        let mut refused = false;
+        let mut small = [None; MANY];
+        for (i, slot) in small.iter_mut().enumerate() {
+            *slot = heap.alloc(SMALL);
+            match *slot {
+                Some(p) => kept &= filled(p, SMALL.size(), i as u8),
+                None => refused = true,
+            }
+        }
+        let large = heap.alloc(LARGE);
+        let over = heap.alloc(OVER);
+        refused |= large.is_none() || over.is_none();
+        for (p, layout, byte) in [(large, LARGE, 0x5a), (over, OVER, 0xa5)] {
+            if let Some(p) = p {
+                kept &= filled(p, layout.size(), byte);
+            }
+        }
+        let aligned = over.is_some_and(|p| (p.as_ptr() as usize).is_multiple_of(OVER.align()));
+        // Given back in the other order, so the free list has to hold
+        // every object and hand it out again.
+        for (p, layout) in [(over, OVER), (large, LARGE)] {
+            if let Some(p) = p {
+                // SAFETY: this heap handed `p` out for `layout` just
+                // above, and nothing else holds it.
+                unsafe { heap.dealloc(p, layout) };
+            }
+        }
+        for p in small.iter().rev().flatten() {
+            // SAFETY: as above, an object of `SMALL` from this heap.
+            unsafe { heap.dealloc(*p, SMALL) };
+        }
+        Some(super::SelfCheck { before, after: heap.stats(), kept, aligned, refused })
+    }
+
+    /// Writes `byte` over `len` bytes from `p` and reads them back:
+    /// whether the memory held what was written to it.
+    fn filled(p: NonNull<u8>, len: usize, byte: u8) -> bool {
+        // SAFETY: `p` is `len` bytes the heap has just handed out, which
+        // nothing else holds until it is freed.
+        unsafe {
+            ptr::write_bytes(p.as_ptr(), byte, len);
+            (0..len).all(|i| p.as_ptr().add(i).read() == byte)
+        }
+    }
+
     /// The statistics if the heap's lock is free (a state dump from an
     /// NMI, a panic: the interrupted code may hold it).
     pub fn try_stats() -> Option<HeapStats> {
@@ -451,12 +537,19 @@ mod global {
 }
 
 #[cfg(not(any(test, feature = "hosted")))]
-pub use global::{stats, try_stats};
+pub use global::{self_check, stats, try_stats};
 
 /// Host builds use std's allocator; there are no kernel heap statistics.
 #[cfg(any(test, feature = "hosted"))]
 pub fn stats() -> HeapStats {
     HeapStats::default()
+}
+
+/// Host builds use std's allocator; there is no kernel heap to check, and
+/// a caller is told so rather than given an answer about another heap.
+#[cfg(any(test, feature = "hosted"))]
+pub fn self_check() -> Option<SelfCheck> {
+    None
 }
 
 #[cfg(any(test, feature = "hosted"))]

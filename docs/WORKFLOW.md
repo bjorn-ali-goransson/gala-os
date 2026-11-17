@@ -465,7 +465,13 @@ xtask that change how a scenario boots:
   the host's even when starved (ARCHITECTURE "What a guest's clock
   follows"). Every log has `xtask: vm time: <run> run of <wall> wall
   (<w> waiting for a host CPU)`, the triage repeats it, and the state
-  dump's wait after a timeout counts run time too. What run time does
+  dump's wait after a timeout counts run time too, as does every wait
+  of a screen check -- its step's `after` line, the guest reading the
+  input sent, the pixels drawn -- each counted from where that wait
+  began, not from the boot. A run says what its steps waited
+  (`xtask: screen ok (step 5 waited 6.4s of run time for "...", of
+  120 s)`), which is where the one limit for every step comes from: the
+  longest measured is 8.9 s. What run time does
   not discount is waiting for host storage: a vCPU blocked in a disk
   read is running, not starved, so on slow storage a run-time limit
   behaves like a wall limit and the I/O-heavy scenarios are the ones
@@ -1145,6 +1151,10 @@ scenario with a kernel flag gala-um does not apply (anything not in
 `um_command` refuses it; um-test's last lines list every program
 scenario it did not run and why (`um_gap`).
 
+- **gala-um's modules are the checked-in ones**: it ships
+  `user/bin`'s copies of the DLLs, and the module set is read from them
+  too (ARCHITECTURE "The module graph"), so a change to a DLL reaches
+  um-test only after `cargo xtask export-tests`.
 - **A "hang" in gala-um is first a question of setup**: read the
   SIGQUIT state dump and `um --trace` before naming a cause. A program
   run without the server its scenario starts retries its connect
@@ -3550,7 +3560,12 @@ about a minute under TCG. Read, in order:
   other bytes and `export-tests` rewrites the installers and the SHA-256s
   in their manifests: that belongs to no change, so restore
   `user/pk_install_test/source` (or export in the image: `cargo xtask
-  docker-test`) rather than committing it. Without makensis the checked-in installers are written
+  docker-test`) rather than committing it. Restore only the installers
+  nsis built and the SHA-256s in their manifests, never the whole tree:
+  a change to ntrt rewrites every zip around `user/bin/hello.exe`, and
+  restoring those leaves the manifests' hashes describing the zips that
+  are gone, which `cargo test -p galapkg` reports as a `HashMismatch`
+  and a PkHello that installs other bytes than `user/bin/hello.exe`. Without makensis the checked-in installers are written
   back from the working tree unchanged, so `export-tests` leaves the same
   bytes either way (make_source.py removes and remakes `source/installers`
   on every run, so keeping them means writing them back, not skipping

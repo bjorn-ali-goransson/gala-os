@@ -10,7 +10,34 @@ pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 pub const SYSTEM_PAGEFILE_INFORMATION: u32 = 18;
+pub const SYSTEM_FIRMWARE_TABLE_INFORMATION: u32 = 76;
 pub const SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: u32 = 124;
+
+/// SYSTEM_FIRMWARE_TABLE_INFORMATION's header: the provider's signature,
+/// the action, the table's id and the length of the buffer after it, which
+/// comes back as the length the table needs.
+pub const FIRMWARE_TABLE_HEADER: usize = 16;
+/// Its actions: enumerate the providers' table ids (0), get a table (1).
+pub const FIRMWARE_TABLE_GET: u32 = 1;
+/// The SMBIOS provider, 'RSMB' with 'R' highest, as a program writes the
+/// four characters: the only provider gala has.
+pub const FIRMWARE_PROVIDER_RSMB: u32 = 0x5253_4d42;
+
+/// What the SMBIOS provider gives (RawSMBIOSData): whether the SMBIOS 2.0
+/// calling method was used (never here, so 0), the version the firmware
+/// reports, the DMI revision, the table's length, then the table.
+pub fn raw_smbios(
+    (major, minor, docrev): (u8, u8, u8),
+    table: &[u8],
+) -> Result<Vec<u8>, super::status::NtStatus> {
+    const NOMEM: super::status::NtStatus = super::status::NtStatus::NO_MEMORY;
+    let mut out = Vec::new();
+    out.try_reserve_exact(8 + table.len()).map_err(|_| NOMEM)?;
+    out.try_extend_from_slice(&[0, major, minor, docrev]).map_err(|_| NOMEM)?;
+    out.try_extend_from_slice(&(table.len() as u32).to_le_bytes()).map_err(|_| NOMEM)?;
+    out.try_extend_from_slice(table).map_err(|_| NOMEM)?;
+    Ok(out)
+}
 
 /// SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: Version 1; Flags and
 /// ValidFlags (QUERY_PERFORMANCE_COUNTER_FLAGS) with KernelQpc set: gala's
@@ -295,6 +322,16 @@ pub fn push_process(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_smbios_is_the_head_windows_gives_and_then_the_table() {
+        let table = [1u8, 4, 0, 0, 0, 0, 127, 4, 1, 0, 0, 0];
+        let b = super::raw_smbios((3, 4, 1), &table).expect("the table");
+        assert_eq!(&b[..4], &[0, 3, 4, 1]);
+        assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), table.len() as u32);
+        assert_eq!(&b[8..], &table);
+        assert_eq!(b.len(), 8 + table.len());
+    }
+
     #[test]
     fn performance_information_has_the_memory_counts() {
         let b = super::performance_information(100, 300, 400, 350);

@@ -20,6 +20,24 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+// rpcrt4.dll, which Windows' advapi32 imports (RpcStringFreeW,
+// UuidToStringW and the service control RPC's stubs; its import table,
+// measured on 26100). gala's advapi32 calls nothing in it, but the
+// dependency is part of what a program sees: rpcrt4 is mapped in every
+// process that loads advapi32, and programs read the module graph -- Click-
+// to-Run's AppV ISV server takes rpcrt4's handle with GetModuleHandle and
+// gives up with ERROR_MOD_NOT_FOUND when it is NULL (ARCHITECTURE "The
+// module graph", ROADMAP OF; `kernel32_test`). gala has no 32-bit rpcrt4
+// yet, so the 32-bit build goes without it.
+// Nothing here calls it: build.rs pins the import on the link command
+// line, so the linker keeps it.
+#[cfg(not(target_arch = "x86"))]
+#[allow(dead_code)]
+#[link(name = "rpcrt4", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RpcStringFreeW(text: *mut *mut u16) -> i32;
+}
+
 // The C runtime helpers the compiler may call, exported by ntdll. On x86
 // they come from ntrt's x86 runtime: a raw-dylib import does not give the
 // symbols the compiler calls there (ARCHITECTURE "Plan: WOW64").
