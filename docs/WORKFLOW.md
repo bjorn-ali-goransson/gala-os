@@ -1151,6 +1151,10 @@ scenario with a kernel flag gala-um does not apply (anything not in
 `um_command` refuses it; um-test's last lines list every program
 scenario it did not run and why (`um_gap`).
 
+- **gala-um's modules are the checked-in ones**: it ships
+  `user/bin`'s copies of the DLLs, and the module set is read from them
+  too (ARCHITECTURE "The module graph"), so a change to a DLL reaches
+  um-test only after `cargo xtask export-tests`.
 - **A "hang" in gala-um is first a question of setup**: read the
   SIGQUIT state dump and `um --trace` before naming a cause. A program
   run without the server its scenario starts retries its connect

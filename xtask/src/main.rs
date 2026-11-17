@@ -18787,12 +18787,13 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     // dependency is not in the image does not load, and the program dies
     // of a module nobody listed. gala's DLLs carry Windows' own
     // dependencies where a program can see them (ARCHITECTURE "The
-    // module graph"), so this follows the import tables of the DLLs just
-    // built rather than a second list to keep in step with them. The
-    // 32-bit set (`x86/`, SysWOW64) stays as listed: its names are
-    // written with the prefix. A dependency whose file is not built yet
-    // is left out; the load then fails in the guest, where the loader
-    // records the name (`missing dll`).
+    // module graph"), so this follows the import tables of the DLLs
+    // themselves (`static_imports`, from the checked-in copies) rather
+    // than a second list to keep in step with them. The 32-bit set
+    // (`x86/`, SysWOW64) stays as listed: its names are written with the
+    // prefix. A dependency neither checked in nor built is left out; the
+    // load then fails in the guest, where the loader records the name
+    // (`missing dll`).
     let mut i = 0;
     while i < modules.len() {
         let (file, _) = modules[i];
@@ -18814,11 +18815,27 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     modules
 }
 
+/// Where the checked-in copy of the USER_DLLS file `file` is: user/bin
+/// holds it under its exported name, and `export-tests` keeps it equal to
+/// the build's (CI checks they match). This is the copy gala-um ships, and
+/// the one every checkout has whether or not the DLLs are built, so what
+/// a module set is read from does not depend on what was built before it.
+fn shipped_dll(file: &str) -> PathBuf {
+    match USER_DLLS.iter().find(|d| d.file == file) {
+        Some(d) => root().join("user/bin").join(d.exported_as),
+        None => built_dll(file),
+    }
+}
+
 /// The DLLs of `file`'s import table that gala builds itself (by their
-/// USER_DLLS names): what has to be in the image for it to load. Empty if
-/// the file is not built yet or is no PE.
+/// USER_DLLS names): what has to be in the image for it to load. Read from
+/// the checked-in copy (`shipped_dll`), never from the build, so a clean
+/// tree closes the set exactly as a built one does: reading the build
+/// instead left every set open where nothing was built yet, which took the
+/// 23 gala-um programs that load advapi32 and its kin with it. Empty if
+/// the file is neither checked in nor built, or is no PE.
 fn static_imports(file: &str) -> Vec<&'static str> {
-    let Ok(image) = fs::read(built_dll(file)) else {
+    let Ok(image) = fs::read(shipped_dll(file)) else {
         return Vec::new();
     };
     let names = import_names(&image);
@@ -28372,6 +28389,52 @@ fn objcopy() -> PathBuf {
 
 fn write(path: &Path, contents: &str) -> Result {
     fs::write(path, contents).map_err(|e| format!("writing {path:?}: {e}"))
+}
+
+#[cfg(test)]
+mod module_sets {
+    use super::*;
+
+    /// A module set is read from the checked-in DLLs, not from the build:
+    /// `cargo xtask test` builds only um, so a set read from the build is
+    /// empty in a clean tree and every program whose DLL needs another
+    /// dies of a module nobody listed.
+    #[test]
+    fn a_set_is_read_from_the_checked_in_dlls() {
+        let path = shipped_dll("advapi32.dll");
+        assert!(
+            path.starts_with(root().join("user/bin")),
+            "{} is not the checked-in copy",
+            path.display()
+        );
+        assert!(path.is_file(), "{} is missing (cargo xtask export-tests)", path.display());
+        assert!(
+            static_imports("advapi32.dll").contains(&"rpcrt4.dll"),
+            "advapi32.dll imports rpcrt4.dll; read {:?}",
+            static_imports("advapi32.dll")
+        );
+    }
+
+    /// Every scenario's set holds what its own DLLs import, so no program
+    /// starts with a dependency the image does not have.
+    #[test]
+    fn every_scenario_s_set_is_closed() {
+        for s in scenarios() {
+            let modules = extra_modules(s.name);
+            for (file, _) in &modules {
+                if file.contains('/') {
+                    continue;
+                }
+                for dep in static_imports(file) {
+                    assert!(
+                        modules.iter().any(|(f, _)| *f == dep),
+                        "{}: {file} imports {dep}, which the set does not hold",
+                        s.name
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

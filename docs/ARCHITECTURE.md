@@ -3606,10 +3606,15 @@ built (ROADMAP OF).
 A DLL whose dependency is not in the boot image does not load, so an
 edge like this one belongs in every scenario that ships the importer:
 `extra_modules` in `xtask/src/main.rs` closes each scenario's module set
-under the import tables of the DLLs just built, rather than a second list
-to keep in step with them. A dependency whose file is not built yet is
-left out; the load then fails in the guest, where the loader records the
-name (`missing dll`), never silently.
+under the import tables of the DLLs themselves, rather than a second list
+to keep in step with them. It reads the checked-in copies in `user/bin`
+(`shipped_dll`), which `export-tests` keeps equal to the build and CI
+checks, and which gala-um ships as its modules: so a set is the same in a
+clean tree as in a built one. Reading the build instead would leave every
+set open wherever nothing is built yet, and `cargo xtask test` builds only
+um. A dependency neither checked in nor built is left out; the load then
+fails in the guest, where the loader records the name (`missing dll`),
+never silently.
 
 ### ntdll: the loader
 
