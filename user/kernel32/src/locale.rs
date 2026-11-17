@@ -1169,6 +1169,11 @@ pub extern "system" fn GetDateFormatW(
     if !known_lcid(lcid) || size < 0 {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     }
+    // A picture of the caller's own takes no flags: Windows answers
+    // ERROR_INVALID_FLAGS (measured, `office_k32_test`'s `date_time_a`).
+    if !format.is_null() && flags != 0 {
+        return fail_with(ERROR_INVALID_FLAGS, 0);
+    }
     let t = read_time(st);
     let default: [u16; 32];
     let picture: &[u16] = if format.is_null() {
@@ -1220,6 +1225,11 @@ pub extern "system" fn GetTimeFormatW(
 ) -> i32 {
     if !known_lcid(lcid) || size < 0 {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // A picture of the caller's own takes no flags: Windows answers
+    // ERROR_INVALID_FLAGS (measured, `office_k32_test`'s `date_time_a`).
+    if !format.is_null() && flags != 0 {
+        return fail_with(ERROR_INVALID_FLAGS, 0);
     }
     let t = read_time(st);
     let default: [u16; 16];
@@ -1773,4 +1783,80 @@ pub extern "system" fn MulDiv(a: i32, b: i32, c: i32) -> i32 {
     let q =
         if (p < 0) == (c < 0) { (p.abs() + half) / c.abs() } else { -((p.abs() + half) / c.abs()) };
     i32::try_from(q).unwrap_or(-1)
+}
+
+/// GetDateFormatA and GetTimeFormatA: the W form's text as ANSI (UTF-8),
+/// the count with the NUL as the W forms' is. `size` is in bytes, and a
+/// size of none asks what the text needs.
+fn format_ansi(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+    f: extern "system" fn(u32, u32, *const u16, *const u16, *mut u16, i32) -> i32,
+) -> i32 {
+    if size < 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut picture = [0u16; 128];
+    let p = if format.is_null() {
+        core::ptr::null()
+    } else {
+        let last = picture.len() - 1;
+        match super::sync::ansi_to_wide(format, &mut picture[..last]) {
+            Some(n) => {
+                picture[n] = 0;
+                picture.as_ptr()
+            }
+            None => return fail_with(ERROR_INVALID_PARAMETER, 0),
+        }
+    };
+    let mut w = [0u16; 160];
+    let n = f(lcid, flags, st, p, w.as_mut_ptr(), w.len() as i32);
+    if n <= 0 {
+        return 0; // the W form set the error
+    }
+    // The count is with the NUL; the text is what comes before it.
+    let mut utf8 = [0u8; 3 * 160];
+    let Some(len) = super::ansi::to_utf8(&w[..n as usize - 1], utf8.as_mut_ptr(), utf8.len())
+    else {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    };
+    if size == 0 || buf.is_null() {
+        return len as i32 + 1;
+    }
+    if size as usize <= len {
+        return fail_with(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` > len bytes.
+    unsafe { core::ptr::copy_nonoverlapping(utf8.as_ptr(), buf, len + 1) };
+    len as i32 + 1
+}
+
+/// GetDateFormatA: [`GetDateFormatW`] in ANSI ([`format_ansi`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDateFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
+    format_ansi(lcid, flags, st, format, buf, size, GetDateFormatW)
+}
+
+/// GetTimeFormatA: [`GetTimeFormatW`] in ANSI ([`format_ansi`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTimeFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const u16,
+    format: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
+    format_ansi(lcid, flags, st, format, buf, size, GetTimeFormatW)
 }

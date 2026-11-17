@@ -1923,8 +1923,14 @@ need gala's.
      (mso98win32client), GetPrivateProfileStringA, GetProfileStringA,
      GetProfileIntA, GetPrivateProfileIntW, WritePrivateProfileStringA,
      OpenFile, SetFileShortNameW and FindPackagesByPackageFamily
-     (mso.dll). So the next step is those, test first with Windows'
-     results measured, and `office_word` rerun on them;
+     (mso.dll). All but three are implemented, each measured on Windows
+     first (`office_k32_test`, ARCHITECTURE "kernel32"): the recovery
+     calls, GetDateFormatA, GetTimeFormatA, EnumCalendarInfoA, the
+     profile A and Int forms, OpenFile and FindPackagesByPackageFamily.
+     The three left want the kernel and are the next step: PulseEvent,
+     GetSystemFirmwareTable (a firmware table from the boot protocol)
+     and SetFileShortNameW (8.3 names in the ramfs). Then `office_word`
+     rerun on them;
      mso40uiwin32client and mso50win32client name nothing of their own,
      so they bind as soon as the chain does, and MSPTLS.DLL and
      `1033\OSFINTL.DLL` are what Word loads next on Windows.

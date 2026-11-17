@@ -452,3 +452,189 @@ pub extern "system" fn WriteProfileStringW(
 ) -> Bool {
     WritePrivateProfileStringW(app, key, value, core::ptr::null())
 }
+
+/// What an A form reads the W form's answer into: as much as kernel32's
+/// own ANSI functions take (`ansi.rs`).
+const MAX_ANSWER: usize = 1024;
+
+/// The number a profile value starts with, as the Int forms read it:
+/// blanks, an optional sign, then decimal digits, stopping at anything
+/// else ("12ab" is 12); no digits at all is zero. A negative value comes
+/// back as the bits of the 32-bit number (-5 is 0xfffffffb), which is
+/// what Windows gives.
+fn as_int(s: &[u16]) -> u32 {
+    let s = trim(s);
+    let (negative, digits) = match s.split_first() {
+        Some((&c, rest)) if c == u16::from(b'-') => (true, rest),
+        Some((&c, rest)) if c == u16::from(b'+') => (false, rest),
+        _ => (false, s),
+    };
+    let mut n = 0u32;
+    for &c in digits {
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&c) {
+            break;
+        }
+        n = n.wrapping_mul(10).wrapping_add(u32::from(c - u16::from(b'0')));
+    }
+    if negative { n.wrapping_neg() } else { n }
+}
+
+/// GetPrivateProfileIntW: the value as a number ([`as_int`]); a key that
+/// holds nothing, the missing key among them, gives the default.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPrivateProfileIntW(
+    app: *const u16,
+    key: *const u16,
+    default: i32,
+    file: *const u16,
+) -> u32 {
+    let mut buf = [0u16; 64];
+    let n = GetPrivateProfileStringW(
+        app,
+        key,
+        core::ptr::null(),
+        buf.as_mut_ptr(),
+        buf.len() as u32,
+        file,
+    ) as usize;
+    if n == 0 {
+        return default as u32;
+    }
+    as_int(&buf[..n])
+}
+
+/// GetProfileIntW: GetPrivateProfileIntW of win.ini.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProfileIntW(app: *const u16, key: *const u16, default: i32) -> u32 {
+    GetPrivateProfileIntW(app, key, default, core::ptr::null())
+}
+
+/// The caller's ANSI string as UTF-16, NUL-terminated, in `buf`; NULL
+/// stays NULL, and a string that does not fit is None.
+fn ansi_arg(s: *const u8, buf: &mut [u16]) -> Option<*const u16> {
+    if s.is_null() {
+        return Some(core::ptr::null());
+    }
+    let last = buf.len() - 1;
+    let n = super::sync::ansi_to_wide(s, &mut buf[..last])?;
+    buf[n] = 0;
+    Some(buf.as_ptr())
+}
+
+/// The W form's answer `w` (its count, without the final NUL) in the
+/// caller's ANSI buffer of `size` bytes: UTF-8, cut as Windows cuts it —
+/// one string to its NUL (size - 1 bytes), a list of names to its two
+/// (size - 2) — and the count without the final NUL. Its own frame: the
+/// A forms' stay under 4 KiB.
+#[inline(never)]
+fn string_a(out: *mut u8, size: u32, list: bool, w: &[u16]) -> u32 {
+    if out.is_null() || size == 0 {
+        return 0;
+    }
+    if list && size < 2 {
+        // SAFETY: the caller's buffer of one byte.
+        unsafe { *out = 0 };
+        return 0;
+    }
+    let mut tmp = [0u8; 3 * MAX_ANSWER + 1];
+    let Some(len) = super::ansi::to_utf8(w, tmp.as_mut_ptr(), tmp.len()) else { return 0 };
+    let room = size as usize - if list { 2 } else { 1 };
+    let n = len.min(room);
+    // SAFETY: the caller's buffer of `size` bytes, of which n + 1 (a
+    // string) or n + 2 (a list) are written.
+    unsafe {
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), out, n);
+        *out.add(n) = 0;
+        if list {
+            *out.add(n + 1) = 0;
+        }
+    }
+    n as u32
+}
+
+/// GetPrivateProfileStringA: [`GetPrivateProfileStringW`]'s answer as
+/// ANSI ([`string_a`]). Office's mso reads its settings with it.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPrivateProfileStringA(
+    app: *const u8,
+    key: *const u8,
+    default: *const u8,
+    out: *mut u8,
+    size: u32,
+    file: *const u8,
+) -> u32 {
+    let (mut a, mut k) = ([0u16; 128], [0u16; 128]);
+    let (mut d, mut f) = ([0u16; 512], [0u16; 512]);
+    let (Some(app_w), Some(key_w), Some(default_w), Some(file_w)) = (
+        ansi_arg(app, &mut a),
+        ansi_arg(key, &mut k),
+        ansi_arg(default, &mut d),
+        ansi_arg(file, &mut f),
+    ) else {
+        return fail_with(ERROR_FILENAME_EXCED_RANGE, 0);
+    };
+    let mut w = [0u16; MAX_ANSWER];
+    let n = GetPrivateProfileStringW(
+        app_w,
+        key_w,
+        default_w,
+        w.as_mut_ptr(),
+        MAX_ANSWER as u32,
+        file_w,
+    ) as usize;
+    string_a(out, size, app.is_null() || key.is_null(), &w[..n])
+}
+
+/// GetProfileStringA: GetPrivateProfileStringA of win.ini.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProfileStringA(
+    app: *const u8,
+    key: *const u8,
+    default: *const u8,
+    out: *mut u8,
+    size: u32,
+) -> u32 {
+    GetPrivateProfileStringA(app, key, default, out, size, core::ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetPrivateProfileIntA(
+    app: *const u8,
+    key: *const u8,
+    default: i32,
+    file: *const u8,
+) -> u32 {
+    let (mut a, mut k, mut f) = ([0u16; 128], [0u16; 128], [0u16; 512]);
+    let (Some(app), Some(key), Some(file)) =
+        (ansi_arg(app, &mut a), ansi_arg(key, &mut k), ansi_arg(file, &mut f))
+    else {
+        return fail_with(ERROR_FILENAME_EXCED_RANGE, default as u32);
+    };
+    GetPrivateProfileIntW(app, key, default, file)
+}
+
+/// GetProfileIntA: GetPrivateProfileIntA of win.ini.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProfileIntA(app: *const u8, key: *const u8, default: i32) -> u32 {
+    GetPrivateProfileIntA(app, key, default, core::ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WritePrivateProfileStringA(
+    app: *const u8,
+    key: *const u8,
+    value: *const u8,
+    file: *const u8,
+) -> Bool {
+    let (mut a, mut k) = ([0u16; 128], [0u16; 128]);
+    let (mut v, mut f) = ([0u16; 512], [0u16; 512]);
+    let (Some(app), Some(key), Some(value), Some(file)) = (
+        ansi_arg(app, &mut a),
+        ansi_arg(key, &mut k),
+        ansi_arg(value, &mut v),
+        ansi_arg(file, &mut f),
+    ) else {
+        return fail_with(ERROR_FILENAME_EXCED_RANGE, FALSE);
+    };
+    WritePrivateProfileStringW(app, key, value, file)
+}

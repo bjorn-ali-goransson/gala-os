@@ -147,6 +147,58 @@ struct ProcessorNumber {
     reserved: u8,
 }
 
+/// SYSTEMTIME.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SystemTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+/// OFSTRUCT (OpenFile's): szPathName is OFS_MAXPATHNAME bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OfStruct {
+    bytes: u8,
+    fixed_disk: u8,
+    err_code: u16,
+    reserved1: u16,
+    reserved2: u16,
+    path_name: [u8; 128],
+}
+
+impl Default for OfStruct {
+    fn default() -> Self {
+        Self {
+            bytes: 0,
+            fixed_disk: 0,
+            err_code: 0,
+            reserved1: 0,
+            reserved2: 0,
+            path_name: [0; 128],
+        }
+    }
+}
+
+/// The head of what the `RSMB` provider of GetSystemFirmwareTable gives
+/// (RawSMBIOSData): the SMBIOS version and the length of the table that
+/// follows it.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RawSmbios {
+    used_20_calling_method: u8,
+    major: u8,
+    minor: u8,
+    revision: u8,
+    length: u32,
+}
+
 /// MEMORY_BASIC_INFORMATION.
 #[repr(C)]
 #[derive(Default)]
@@ -261,6 +313,95 @@ unsafe extern "system" {
         buf: *mut u16,
         size: i32,
     ) -> i32;
+    fn GetTempPathA(size: u32, buf: *mut u8) -> u32;
+    fn CreateFileA(
+        path: *const u8,
+        access: u32,
+        share: u32,
+        security: usize,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn DeleteFileA(path: *const u8) -> i32;
+    fn CreateDirectoryA(path: *const u8, security: usize) -> i32;
+    fn RemoveDirectoryA(path: *const u8) -> i32;
+
+    // The functions Office's shared code imports (ROADMAP OF).
+    fn GetSystemFirmwareTable(provider: u32, id: u32, buf: *mut u8, size: u32) -> u32;
+    fn PulseEvent(h: Handle) -> i32;
+    fn GetDateFormatA(
+        lcid: u32,
+        flags: u32,
+        time: *const SystemTime,
+        format: *const u8,
+        buf: *mut u8,
+        size: i32,
+    ) -> i32;
+    fn GetTimeFormatA(
+        lcid: u32,
+        flags: u32,
+        time: *const SystemTime,
+        format: *const u8,
+        buf: *mut u8,
+        size: i32,
+    ) -> i32;
+    fn EnumCalendarInfoA(f: Option<CalendarProcA>, lcid: u32, calendar: u32, kind: u32) -> i32;
+    fn GetPrivateProfileStringA(
+        section: *const u8,
+        key: *const u8,
+        default: *const u8,
+        buf: *mut u8,
+        size: u32,
+        file: *const u8,
+    ) -> u32;
+    fn GetProfileStringA(
+        section: *const u8,
+        key: *const u8,
+        default: *const u8,
+        buf: *mut u8,
+        size: u32,
+    ) -> u32;
+    fn GetProfileIntA(section: *const u8, key: *const u8, default: i32) -> u32;
+    fn GetProfileIntW(section: *const u16, key: *const u16, default: i32) -> u32;
+    fn GetPrivateProfileIntA(
+        section: *const u8,
+        key: *const u8,
+        default: i32,
+        file: *const u8,
+    ) -> u32;
+    fn GetPrivateProfileIntW(
+        section: *const u16,
+        key: *const u16,
+        default: i32,
+        file: *const u16,
+    ) -> u32;
+    fn WritePrivateProfileStringA(
+        section: *const u8,
+        key: *const u8,
+        value: *const u8,
+        file: *const u8,
+    ) -> i32;
+    fn OpenFile(name: *const u8, of: *mut OfStruct, style: u32) -> i32;
+    fn SetFileShortNameW(h: Handle, name: *const u16) -> i32;
+    fn FindPackagesByPackageFamily(
+        family: *const u16,
+        flags: u32,
+        count: *mut u32,
+        full_names: *mut *mut u16,
+        buffer_length: *mut u32,
+        buffer: *mut u16,
+        properties: *mut u32,
+    ) -> i32;
+    fn RegisterApplicationRecoveryCallback(
+        f: Option<RecoveryProc>,
+        param: *mut c_void,
+        ping: u32,
+        flags: u32,
+    ) -> i32;
+    fn UnregisterApplicationRecoveryCallback() -> i32;
+    fn ApplicationRecoveryInProgress(cancelled: *mut i32) -> i32;
+    fn ApplicationRecoveryFinished(success: i32);
 }
 
 const EN_US: u32 = 0x409;
@@ -292,6 +433,37 @@ const LGRPID_INSTALLED: u32 = 1;
 const LGRPID_SUPPORTED: u32 = 2;
 const MUI_LANGUAGE_ID: u32 = 4;
 const MUI_LANGUAGE_NAME: u32 = 8;
+
+/// EnumCalendarInfoA's callback: one calendar string.
+type CalendarProcA = unsafe extern "system" fn(*const u8) -> i32;
+/// RegisterApplicationRecoveryCallback's callback.
+type RecoveryProc = unsafe extern "system" fn(*mut c_void) -> u32;
+
+const ERROR_SUCCESS: u32 = 0;
+const ERROR_INVALID_HANDLE: u32 = 6;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 258;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const DELETE: u32 = 0x1_0000;
+const FILE_SHARE_READ: u32 = 1;
+const CREATE_ALWAYS: u32 = 2;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+/// OpenFile's styles and its failure.
+const OF_READ: u32 = 0;
+const OF_CREATE: u32 = 0x1000;
+const OF_EXIST: u32 = 0x4000;
+const HFILE_ERROR: i32 = -1;
+/// GetSystemFirmwareTable's SMBIOS provider ('RSMB', big-endian in the
+/// signature's order).
+const RSMB: u32 = 0x5253_4d42;
+const CAL_GREGORIAN: u32 = 1;
+const CAL_SMONTHNAME1: u32 = 0x15;
+const DATE_SHORTDATE: u32 = 1;
+/// FindPackagesByPackageFamily's filters.
+const PACKAGE_FILTER_HEAD: u32 = 0x10;
+const PACKAGE_FILTER_DIRECT: u32 = 0x20;
+const E_FAIL: u32 = 0x8000_4005;
+const E_INVALIDARG: u32 = 0x8007_0057;
 
 /// EnumSystemLanguageGroupsW's callback: the group, its id as text, its
 /// English name, the flags of the row and the caller's parameter.
@@ -1582,6 +1754,538 @@ fn ui_languages(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+// ---- The profile functions: the ANSI forms and the Int forms -------------
+
+/// `<temp>\k32<what>-<pid><ext>` as ANSI and as UTF-16 (the Int forms
+/// take both): the pid so that two runs never share a file, and `what`
+/// so that two sections never do.
+fn temp_path(what: &[u8], ext: &[u8], a: &mut [u8; 300], wide: &mut [u16; 300]) -> bool {
+    // SAFETY: the buffers' sizes.
+    let n = unsafe { GetTempPathA(240, a.as_mut_ptr()) } as usize;
+    if n == 0 || n > 240 {
+        return false;
+    }
+    let mut i = n;
+    let mut put = |bytes: &[u8], i: &mut usize| {
+        for &b in bytes {
+            a[*i] = b;
+            *i += 1;
+        }
+    };
+    put(b"k32", &mut i);
+    put(what, &mut i);
+    put(b"-", &mut i);
+    // SAFETY: plain call.
+    let mut v = unsafe { GetCurrentProcessId() };
+    let mut d = [0u8; 10];
+    let mut k = d.len();
+    loop {
+        k -= 1;
+        d[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let digits = d;
+    put(&digits[k..], &mut i);
+    put(ext, &mut i);
+    a[i] = 0;
+    for (o, &b) in wide.iter_mut().zip(a[..=i].iter()) {
+        *o = u16::from(b);
+    }
+    true
+}
+
+fn profile(c: &mut Checks) -> Result<(), u32> {
+    section("profile");
+    let mut path = [0u8; 300];
+    let mut wpath = [0u16; 300];
+    c.ok(temp_path(b"prof", b".ini", &mut path, &mut wpath), 0)?;
+    let (file, wfile) = (path.as_ptr(), wpath.as_ptr());
+    let sec = b"gala\0";
+    let wsec = w::<8>("gala");
+    let mut buf = [0u8; 64];
+    // SAFETY: NUL-terminated strings, and every buffer's size with it.
+    unsafe {
+        // A value written and read back; the count is without the NUL.
+        let r =
+            WritePrivateProfileStringA(sec.as_ptr(), b"key\0".as_ptr(), b"value\0".as_ptr(), file);
+        c.eq(u64::from(r as u32), 1)?;
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            b"key\0".as_ptr(),
+            b"dflt\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            file,
+        );
+        c.ok(n == 5 && buf[..6] == *b"value\0", u64::from(n))?;
+        // A key that is not there gives the default, and no default at
+        // all gives the empty string.
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            b"none\0".as_ptr(),
+            b"dflt\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            file,
+        );
+        c.ok(n == 4 && buf[..5] == *b"dflt\0", u64::from(n))?;
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            b"none\0".as_ptr(),
+            null(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            file,
+        );
+        c.ok(n == 0 && buf[0] == 0, u64::from(n))?;
+        // A buffer too small truncates and answers its size without the NUL.
+        buf = [0u8; 64];
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            b"key\0".as_ptr(),
+            b"dflt\0".as_ptr(),
+            buf.as_mut_ptr(),
+            3,
+            file,
+        );
+        info("GetPrivateProfileStringA size 3", u64::from(n));
+        c.ok(n == 2 && buf[..3] == *b"va\0", u64::from(n))?;
+        // The Int forms read the same file, A and W alike.
+        let r = WritePrivateProfileStringA(sec.as_ptr(), b"num\0".as_ptr(), b"42\0".as_ptr(), file);
+        c.eq(u64::from(r as u32), 1)?;
+        let v = GetPrivateProfileIntA(sec.as_ptr(), b"num\0".as_ptr(), 7, file);
+        c.eq(u64::from(v), 42)?;
+        let wnum = w::<8>("num");
+        let v = GetPrivateProfileIntW(wsec.as_ptr(), wnum.as_ptr(), 7, wfile);
+        c.eq(u64::from(v), 42)?;
+        let v = GetPrivateProfileIntA(sec.as_ptr(), b"none\0".as_ptr(), 7, file);
+        c.eq(u64::from(v), 7)?;
+        // What a value that is not a plain number gives.
+        let r =
+            WritePrivateProfileStringA(sec.as_ptr(), b"junk\0".as_ptr(), b"12ab\0".as_ptr(), file);
+        c.eq(u64::from(r as u32), 1)?;
+        let v = GetPrivateProfileIntA(sec.as_ptr(), b"junk\0".as_ptr(), 7, file);
+        info("GetPrivateProfileIntA 12ab", u64::from(v));
+        c.eq(u64::from(v), 12)?;
+        let r = WritePrivateProfileStringA(sec.as_ptr(), b"neg\0".as_ptr(), b"-5\0".as_ptr(), file);
+        c.eq(u64::from(r as u32), 1)?;
+        let v = GetPrivateProfileIntA(sec.as_ptr(), b"neg\0".as_ptr(), 7, file);
+        // A negative value comes back as it reads, the bits of a
+        // 32-bit negative number (Windows; -5 is 0xfffffffb).
+        c.eq(u64::from(v), 0xffff_fffb)?;
+        // A NULL value deletes the key.
+        let r = WritePrivateProfileStringA(sec.as_ptr(), b"key\0".as_ptr(), null(), file);
+        c.eq(u64::from(r as u32), 1)?;
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            b"key\0".as_ptr(),
+            b"dflt\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            file,
+        );
+        c.ok(n == 4 && buf[..5] == *b"dflt\0", u64::from(n))?;
+        // The keys of the section, with no key named: each one NUL-ended
+        // and the lot ended by a second NUL.
+        buf = [0u8; 64];
+        let n = GetPrivateProfileStringA(
+            sec.as_ptr(),
+            null(),
+            null(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            file,
+        );
+        info("GetPrivateProfileStringA keys", u64::from(n));
+        c.ok(n == 13 && buf[..14] == *b"num\0junk\0neg\0\0", u64::from(n))?;
+        // win.ini's own: gala has no win.ini and this machine's holds
+        // nothing of gala's, so the defaults come back.
+        buf = [0u8; 64];
+        let n = GetProfileStringA(
+            b"gala\0".as_ptr(),
+            b"none\0".as_ptr(),
+            b"dflt\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        );
+        c.ok(n == 4 && buf[..5] == *b"dflt\0", u64::from(n))?;
+        let v = GetProfileIntA(b"gala\0".as_ptr(), b"none\0".as_ptr(), 9);
+        c.eq(u64::from(v), 9)?;
+        let wnone = w::<8>("none");
+        let v = GetProfileIntW(wsec.as_ptr(), wnone.as_ptr(), 9);
+        c.eq(u64::from(v), 9)?;
+        DeleteFileA(file);
+    }
+    Ok(())
+}
+
+// ---- GetDateFormatA, GetTimeFormatA, EnumCalendarInfoA -------------------
+
+/// EnumCalendarInfoA's rows: how many, and whether January was among them.
+static CAL_ROWS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static CAL_JANUARY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+unsafe extern "system" fn calendar_row(text: *const u8) -> i32 {
+    use core::sync::atomic::Ordering::SeqCst;
+    CAL_ROWS.fetch_add(1, SeqCst);
+    // SAFETY: the callback's NUL-terminated string.
+    let same = unsafe {
+        let mut i = 0;
+        loop {
+            let b = text.add(i).read_volatile();
+            match b"January".get(i) {
+                Some(&want) if want == b => i += 1,
+                Some(_) => break false,
+                None => break b == 0,
+            }
+        }
+    };
+    if same {
+        CAL_JANUARY.store(1, SeqCst);
+    }
+    1
+}
+
+fn date_time_a(c: &mut Checks) -> Result<(), u32> {
+    section("date and time (ANSI)");
+    let time = SystemTime {
+        year: 2024,
+        month: 1,
+        day_of_week: 2,
+        day: 2,
+        hour: 3,
+        minute: 4,
+        second: 5,
+        milliseconds: 6,
+    };
+    let mut buf = [0u8; 64];
+    // SAFETY: NUL-terminated formats and the buffer's size.
+    unsafe {
+        // A format of its own: the count is with the NUL. A format and a
+        // flag together are ERROR_INVALID_FLAGS (Windows), so a call
+        // with a format of its own passes none.
+        let n = GetDateFormatA(
+            EN_US,
+            0,
+            &time,
+            b"yyyy-MM-dd\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        c.astr(n, &buf, "2024-01-02")?;
+        let n = GetDateFormatA(EN_US, NUO, &time, b"yyyy-MM-dd\0".as_ptr(), buf.as_mut_ptr(), 64);
+        c.fails(i64::from(n), ERROR_INVALID_FLAGS)?;
+        // A buffer of none asks the size.
+        let n = GetDateFormatA(EN_US, 0, &time, b"yyyy-MM-dd\0".as_ptr(), core::ptr::null_mut(), 0);
+        c.eq(u64::from(n as u32), 11)?;
+        // en-US's own short date, with no format.
+        buf = [0u8; 64];
+        let n = GetDateFormatA(
+            EN_US,
+            NUO | DATE_SHORTDATE,
+            &time,
+            null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        c.astr(n, &buf, "1/2/2024")?;
+        // A buffer too small.
+        buf = [0u8; 64];
+        let n = GetDateFormatA(EN_US, 0, &time, b"yyyy-MM-dd\0".as_ptr(), buf.as_mut_ptr(), 4);
+        c.fails(i64::from(n), ERROR_INSUFFICIENT_BUFFER)?;
+        // The time, likewise.
+        buf = [0u8; 64];
+        let n = GetTimeFormatA(
+            EN_US,
+            0,
+            &time,
+            b"HH:mm:ss\0".as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        c.astr(n, &buf, "03:04:05")?;
+        let n = GetTimeFormatA(EN_US, NUO, &time, b"HH:mm:ss\0".as_ptr(), buf.as_mut_ptr(), 64);
+        c.fails(i64::from(n), ERROR_INVALID_FLAGS)?;
+        buf = [0u8; 64];
+        let n = GetTimeFormatA(EN_US, NUO, &time, null(), buf.as_mut_ptr(), buf.len() as i32);
+        c.astr(n, &buf, "3:04:05 AM")?;
+        // The Gregorian calendar's first month, in ANSI.
+        let ok = EnumCalendarInfoA(Some(calendar_row), EN_US, CAL_GREGORIAN, CAL_SMONTHNAME1);
+        c.eq(u64::from(ok as u32), 1)?;
+        use core::sync::atomic::Ordering::SeqCst;
+        info("EnumCalendarInfoA rows", u64::from(CAL_ROWS.load(SeqCst)));
+        c.eq(u64::from(CAL_JANUARY.load(SeqCst)), 1)?;
+    }
+    Ok(())
+}
+
+// ---- PulseEvent ----------------------------------------------------------
+
+fn pulse(c: &mut Checks) -> Result<(), u32> {
+    section("PulseEvent");
+    // SAFETY: handles of this process's own events.
+    unsafe {
+        // A manual-reset event nobody waits on: the pulse leaves it
+        // unsignalled, whether it was signalled before or not.
+        let manual = CreateEventA(0, 1, 0, null());
+        c.ok(manual != 0, 0)?;
+        c.eq(u64::from(PulseEvent(manual) as u32), 1)?;
+        c.eq(u64::from(WaitForSingleObject(manual, 0)), u64::from(WAIT_TIMEOUT))?;
+        c.eq(u64::from(SetEvent(manual) as u32), 1)?;
+        c.eq(u64::from(WaitForSingleObject(manual, 0)), u64::from(WAIT_OBJECT_0))?;
+        c.eq(u64::from(PulseEvent(manual) as u32), 1)?;
+        c.eq(u64::from(WaitForSingleObject(manual, 0)), u64::from(WAIT_TIMEOUT))?;
+        CloseHandle(manual);
+        // An auto-reset event the same way.
+        let auto = CreateEventA(0, 0, 0, null());
+        c.ok(auto != 0, 0)?;
+        c.eq(u64::from(PulseEvent(auto) as u32), 1)?;
+        c.eq(u64::from(WaitForSingleObject(auto, 0)), u64::from(WAIT_TIMEOUT))?;
+        CloseHandle(auto);
+        // No handle at all.
+        SetLastError(0);
+        let r = PulseEvent(0);
+        c.fails(i64::from(r), ERROR_INVALID_HANDLE)?;
+    }
+    Ok(())
+}
+
+// ---- GetSystemFirmwareTable ---------------------------------------------
+
+fn firmware(c: &mut Checks) -> Result<(), u32> {
+    section("GetSystemFirmwareTable");
+    // SAFETY: the sizes the calls are given are the buffers' own.
+    unsafe {
+        // The SMBIOS table's size, then the table itself: a
+        // RawSMBIOSData head and `length` bytes of table after it.
+        let size = GetSystemFirmwareTable(RSMB, 0, core::ptr::null_mut(), 0);
+        info("RSMB size", u64::from(size));
+        c.ok(size > size_of::<RawSmbios>() as u32, u64::from(size))?;
+        let buf = VirtualAlloc(null_mut(), size as usize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        c.ok(!buf.is_null(), 0)?;
+        let n = GetSystemFirmwareTable(RSMB, 0, buf, size);
+        c.eq(u64::from(n), u64::from(size))?;
+        let head = buf.cast::<RawSmbios>().read_unaligned();
+        info("SMBIOS version", u64::from(head.major) << 8 | u64::from(head.minor));
+        c.eq(u64::from(head.length), u64::from(size) - size_of::<RawSmbios>() as u64)?;
+        c.ok(head.major >= 2, u64::from(head.major))?;
+        // The first structure's header: a type, a length of at least 4
+        // and a handle (SMBIOS's own layout).
+        let first_len = buf.add(size_of::<RawSmbios>() + 1).read_volatile();
+        c.ok(first_len >= 4, u64::from(first_len))?;
+        // A buffer too small keeps the required size and writes nothing.
+        let mut small = [0u8; 4];
+        let n = GetSystemFirmwareTable(RSMB, 0, small.as_mut_ptr(), 4);
+        info("RSMB size 4", u64::from(n));
+        c.ok(n == size && small == [0; 4], u64::from(n))?;
+        VirtualFree(buf.cast(), 0, MEM_RELEASE);
+        // A provider nobody has.
+        SetLastError(0);
+        let n = GetSystemFirmwareTable(0x5a5a_5a5a, 0, core::ptr::null_mut(), 0);
+        info("unknown provider error", u64::from(GetLastError()));
+        c.eq(u64::from(n), 0)?;
+    }
+    Ok(())
+}
+
+// ---- SetFileShortNameW --------------------------------------------------
+
+fn short_name(c: &mut Checks) -> Result<(), u32> {
+    section("SetFileShortNameW");
+    // A directory of this run's own: a short name is a name in its
+    // directory, and a leftover file holding it would make the call fail
+    // (ERROR_ALREADY_EXISTS).
+    let mut dir = [0u8; 300];
+    let mut wdir = [0u16; 300];
+    c.ok(temp_path(b"sht", b"", &mut dir, &mut wdir), 0)?;
+    let mut path = [0u8; 300];
+    let mut wpath = [0u16; 300];
+    c.ok(temp_path(b"sht", b"\\long-name.ini", &mut path, &mut wpath), 0)?;
+    // SAFETY: NUL-terminated paths and this process's own handle.
+    unsafe {
+        CreateDirectoryA(dir.as_ptr(), 0);
+        let h = CreateFileA(
+            path.as_ptr(),
+            GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ,
+            0,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+        );
+        c.ok(h != usize::MAX, u64::from(GetLastError()))?;
+        // The short name of a file this process made, opened with
+        // DELETE: Windows sets it without SeRestorePrivilege, which this
+        // program does not hold (measured, unelevated, Windows 11 24H2).
+        let short = w::<16>("GALASH~1.INI");
+        SetLastError(0);
+        let r = SetFileShortNameW(h, short.as_ptr());
+        c.ok(r != 0, u64::from(GetLastError()))?;
+        c.eq(u64::from(GetLastError()), 0)?;
+        CloseHandle(h);
+        DeleteFileA(path.as_ptr());
+        RemoveDirectoryA(dir.as_ptr());
+        // No handle at all.
+        SetLastError(0);
+        let r = SetFileShortNameW(0, short.as_ptr());
+        c.fails(i64::from(r), ERROR_INVALID_HANDLE)?;
+    }
+    Ok(())
+}
+
+// ---- OpenFile -----------------------------------------------------------
+
+fn open_file(c: &mut Checks) -> Result<(), u32> {
+    section("OpenFile");
+    let mut path = [0u8; 300];
+    let mut wpath = [0u16; 300];
+    c.ok(temp_path(b"open", b".tmp", &mut path, &mut wpath), 0)?;
+    let mut of = OfStruct::default();
+    // SAFETY: a NUL-terminated path and the OFSTRUCT the call fills.
+    unsafe {
+        // A file it makes, then opens for reading.
+        let h = OpenFile(path.as_ptr(), &mut of, OF_CREATE);
+        info("OpenFile OF_CREATE", h as u64);
+        c.ok(h != HFILE_ERROR, h as u64)?;
+        c.eq(u64::from(of.err_code), 0)?;
+        info("OFSTRUCT cBytes", u64::from(of.bytes));
+        CloseHandle(h as usize);
+        of = OfStruct::default();
+        let h = OpenFile(path.as_ptr(), &mut of, OF_READ);
+        c.ok(h != HFILE_ERROR, h as u64)?;
+        c.eq(u64::from(of.err_code), 0)?;
+        // The path it names is the file's, in upper case on Windows.
+        info("OFSTRUCT szPathName[0]", u64::from(of.path_name[0]));
+        CloseHandle(h as usize);
+        // OF_EXIST opens and closes it again.
+        of = OfStruct::default();
+        let h = OpenFile(path.as_ptr(), &mut of, OF_EXIST);
+        info("OpenFile OF_EXIST", h as u64);
+        c.ok(h != HFILE_ERROR, h as u64)?;
+        DeleteFileA(path.as_ptr());
+        // A file nobody has: HFILE_ERROR, and the OFSTRUCT names the
+        // reason.
+        of = OfStruct::default();
+        let h = OpenFile(path.as_ptr(), &mut of, OF_READ);
+        c.eq(u64::from(h as u32), u64::from(HFILE_ERROR as u32))?;
+        c.eq(u64::from(of.err_code), 2)?;
+    }
+    Ok(())
+}
+
+// ---- FindPackagesByPackageFamily ----------------------------------------
+
+fn packages(c: &mut Checks) -> Result<(), u32> {
+    section("FindPackagesByPackageFamily");
+    let family = w::<40>("GalaNoSuchFamily_8wekyb3d8bbwe");
+    // The counts are what the buffers hold on the way in (none) and what
+    // the answer needs on the way out, as every two-phase call of this
+    // kind: a count that is not a buffer's own is ERROR_INVALID_PARAMETER.
+    let mut count = 0u32;
+    let mut length = 0u32;
+    // SAFETY: a NUL-terminated family name and the counts it fills.
+    unsafe {
+        let r = FindPackagesByPackageFamily(
+            family.as_ptr(),
+            PACKAGE_FILTER_HEAD | PACKAGE_FILTER_DIRECT,
+            &mut count,
+            core::ptr::null_mut(),
+            &mut length,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        info("no such family", u64::from(r as u32));
+        c.eq(u64::from(r as u32), u64::from(ERROR_SUCCESS))?;
+        c.eq(u64::from(count), 0)?;
+        c.eq(u64::from(length), 0)?;
+        // No name, no count: the parameters are wrong.
+        let mut count = 0u32;
+        let mut length = 0u32;
+        let r = FindPackagesByPackageFamily(
+            null(),
+            PACKAGE_FILTER_HEAD,
+            &mut count,
+            core::ptr::null_mut(),
+            &mut length,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        c.eq(u64::from(r as u32), u64::from(ERROR_INVALID_PARAMETER))?;
+        let r = FindPackagesByPackageFamily(
+            family.as_ptr(),
+            PACKAGE_FILTER_HEAD,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut length,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        c.eq(u64::from(r as u32), u64::from(ERROR_INVALID_PARAMETER))?;
+        // No filter at all.
+        let r = FindPackagesByPackageFamily(
+            family.as_ptr(),
+            0,
+            &mut count,
+            core::ptr::null_mut(),
+            &mut length,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        info("no filter", u64::from(r as u32));
+        c.eq(u64::from(r as u32), u64::from(ERROR_INVALID_PARAMETER))?;
+    }
+    Ok(())
+}
+
+// ---- The application recovery callback ----------------------------------
+
+/// Whether the recovery callback ran (it does not, outside a recovery).
+static RECOVERED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+unsafe extern "system" fn recovery_callback(_param: *mut c_void) -> u32 {
+    RECOVERED.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    0
+}
+
+fn recovery(c: &mut Checks) -> Result<(), u32> {
+    section("application recovery");
+    // SAFETY: plain calls; the callback outlives the registration.
+    unsafe {
+        let r = RegisterApplicationRecoveryCallback(
+            Some(recovery_callback),
+            core::ptr::null_mut(),
+            5000,
+            0,
+        );
+        c.eq(u64::from(r as u32), 0)?;
+        // Outside a recovery there is nothing in progress.
+        let mut cancelled = 0;
+        let r = ApplicationRecoveryInProgress(&mut cancelled);
+        info("ApplicationRecoveryInProgress", u64::from(r as u32));
+        c.eq(u64::from(r as u32), u64::from(E_FAIL))?;
+        // A ping interval past the five minutes Windows allows.
+        let r = RegisterApplicationRecoveryCallback(
+            Some(recovery_callback),
+            core::ptr::null_mut(),
+            400_000,
+            0,
+        );
+        info("ping 400 s", u64::from(r as u32));
+        c.eq(u64::from(r as u32), u64::from(E_INVALIDARG))?;
+        let r = UnregisterApplicationRecoveryCallback();
+        c.eq(u64::from(r as u32), 0)?;
+        // Nothing of this ran the callback.
+        c.eq(u64::from(RECOVERED.load(core::sync::atomic::Ordering::SeqCst)), 0)?;
+        // Finished outside a recovery: it returns, and the process lives.
+        ApplicationRecoveryFinished(0);
+        c.eq(u64::from(GetCurrentProcessId() != 0), 1)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     compare_a(&mut c)?;
@@ -1597,6 +2301,16 @@ fn run() -> Result<(), u32> {
     language_groups(&mut c)?;
     ui_languages(&mut c)?;
     win_exec(&mut c)?;
+    profile(&mut c)?;
+    date_time_a(&mut c)?;
+    pulse(&mut c)?;
+    firmware(&mut c)?;
+    short_name(&mut c)?;
+    open_file(&mut c)?;
+    packages(&mut c)?;
+    // Last: ApplicationRecoveryFinished ends a recovery, so a run that
+    // got this far has printed everything the earlier sections measured.
+    recovery(&mut c)?;
     Ok(())
 }
 

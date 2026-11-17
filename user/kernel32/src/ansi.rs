@@ -500,3 +500,117 @@ pub extern "system" fn CreateNamedPipeA(
         Err(e) => fail_with(e, INVALID_HANDLE_VALUE),
     }
 }
+
+/// OpenFile's style bits: how to open it (OF_READ is none of them),
+/// OF_SHARE_EXCLUSIVE and its kin at 0x70 (OF_SHARE_COMPAT is none),
+/// then the parse, delete, create and exist forms.
+const OF_WRITE: u32 = 1;
+const OF_READWRITE: u32 = 2;
+const OF_SHARE_EXCLUSIVE: u32 = 0x10;
+const OF_SHARE_DENY_WRITE: u32 = 0x20;
+const OF_SHARE_DENY_READ: u32 = 0x30;
+const OF_PARSE: u32 = 0x100;
+const OF_DELETE: u32 = 0x200;
+const OF_CREATE: u32 = 0x1000;
+const OF_EXIST: u32 = 0x4000;
+const HFILE_ERROR: i32 = -1;
+
+/// OFSTRUCT: cBytes (the structure's own size), fFixedDisk, nErrCode, two
+/// reserved words and szPathName (128 bytes), 136 bytes in all.
+const OFSTRUCT_SIZE: usize = 136;
+const OFSTRUCT_PATH: usize = 8;
+
+/// The OFSTRUCT the call fills whether it opens the file or not: its own
+/// size, a fixed disk, no error and the file's full path in upper case,
+/// which is how Windows writes it.
+fn of_struct(of: *mut u8, path: &[u8]) {
+    // SAFETY: the caller's OFSTRUCT of `OFSTRUCT_SIZE` bytes.
+    unsafe {
+        core::ptr::write_bytes(of, 0, OFSTRUCT_SIZE);
+        *of = OFSTRUCT_SIZE as u8;
+        *of.add(1) = 1;
+        for (i, &c) in path.iter().take(OFSTRUCT_SIZE - OFSTRUCT_PATH - 1).enumerate() {
+            *of.add(OFSTRUCT_PATH + i) = c.to_ascii_uppercase();
+        }
+    }
+}
+
+/// An open that failed: the last error in the OFSTRUCT's nErrCode (which
+/// is what the caller reads it for) and HFILE_ERROR.
+fn of_failed(of: *mut u8) -> i32 {
+    // SAFETY: the caller's OFSTRUCT: nErrCode is the word at 2.
+    unsafe { core::ptr::write_unaligned(of.add(2).cast::<u16>(), GetLastError() as u16) };
+    HFILE_ERROR
+}
+
+/// OpenFile(name, of, style): the open of the 16-bit era, which Windows
+/// keeps. It answers an HFILE — the file's handle as a 32-bit number, or
+/// 1 for the forms that only ask a question — or HFILE_ERROR, and fills
+/// an OFSTRUCT with the full path and, when it fails, the error
+/// (`office_k32_test`'s `open_file` measures both). A handle past 32 bits
+/// cannot be an HFILE, on Windows no more than here. Word's mso chain
+/// imports it.
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenFile(name: *const u8, of: *mut u8, style: u32) -> i32 {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    if name.is_null() || of.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, HFILE_ERROR);
+    }
+    let mut full = [0u8; MAX];
+    let n = GetFullPathNameA(name, full.len() as u32, full.as_mut_ptr(), core::ptr::null_mut())
+        as usize;
+    of_struct(of, &full[..n.min(full.len())]);
+    if n == 0 || n >= full.len() {
+        return of_failed(of);
+    }
+    // OF_PARSE asks for the path and nothing else.
+    if style & OF_PARSE != 0 {
+        return 0;
+    }
+    if style & OF_DELETE != 0 {
+        return if DeleteFileA(name) == FALSE { of_failed(of) } else { 1 };
+    }
+    let access = match style & 3 {
+        OF_WRITE => GENERIC_WRITE,
+        OF_READWRITE => GENERIC_READ | GENERIC_WRITE,
+        _ => GENERIC_READ,
+    };
+    // OF_CREATE makes the file, or truncates the one that is there, and
+    // opens it for writing whatever the access bits say.
+    let (access, disposition) = if style & OF_CREATE != 0 {
+        (GENERIC_READ | GENERIC_WRITE, CREATE_ALWAYS)
+    } else {
+        (access, OPEN_EXISTING)
+    };
+    let share = match style & 0x70 {
+        OF_SHARE_EXCLUSIVE => 0,
+        OF_SHARE_DENY_WRITE => FILE_SHARE_READ,
+        OF_SHARE_DENY_READ => FILE_SHARE_WRITE,
+        // OF_SHARE_COMPAT and OF_SHARE_DENY_NONE: both ways.
+        _ => FILE_SHARE_READ | FILE_SHARE_WRITE,
+    };
+    let h = CreateFileA(
+        name,
+        access,
+        share,
+        core::ptr::null_mut(),
+        disposition,
+        FILE_ATTRIBUTE_NORMAL,
+        core::ptr::null_mut(),
+    );
+    if h == INVALID_HANDLE_VALUE {
+        return of_failed(of);
+    }
+    // OF_EXIST asks only whether the file is there.
+    if style & OF_EXIST != 0 {
+        CloseHandle(h);
+        return 1;
+    }
+    h as usize as i32
+}

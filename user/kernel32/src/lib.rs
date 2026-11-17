@@ -63,6 +63,7 @@ mod processor;
 mod procinfo;
 mod profile;
 mod pty;
+mod recovery;
 mod resource;
 mod runtime;
 mod sync;

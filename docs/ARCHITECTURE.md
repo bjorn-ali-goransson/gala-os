@@ -4054,7 +4054,12 @@ ntdll imports.
   symbols and spaces before digits and digits before letters, and gives
   NULs no weight (CompareStringA compares the UTF-8 strings as UTF-16;
   SORT_DIGITSASNUMBERS is the W form's only, ERROR_INVALID_FLAGS in the
-  A form, as on Windows).
+  A form, as on Windows). GetDateFormatA/GetTimeFormatA and
+  EnumCalendarInfoA are the W forms through the ANSI code page, a row at
+  a time; a value too long for the row is not passed on. A picture of
+  the caller's own takes no flags: a format with any flag is
+  ERROR_INVALID_FLAGS, in the W forms too (measured,
+  `office_k32_test`).
   `nls.rs`: FoldStringW is Unicode normalization from tables
   `tools/nls_tables.py` writes from Python's unicodedata
   (`nls/tables.rs`, the Basic Multilingual Plane; Hangul by arithmetic):
@@ -4234,7 +4239,23 @@ ntdll imports.
   recorded. SetThreadIdealProcessor(Ex) is the kernel's
   ThreadIdealProcessor ("Threads"); WinExec is CreateProcessA with the
   show state, waiting for input idle only when user32 is loaded and has
-  WaitForInputIdle (gala's has not yet).
+  WaitForInputIdle (gala's has not yet). OpenFile (`ansi.rs`) is
+  CreateFileA under the style bits, and fills the OFSTRUCT whether it
+  opens the file or not: the structure's own size, a fixed disk, the full
+  path in upper case and, when the open failed, the last error in
+  nErrCode, which is what the caller reads it for. OF_PARSE only parses
+  (0), OF_EXIST only asks whether the file is there (1), OF_DELETE
+  deletes, OF_CREATE truncates and opens for writing; the answer is the
+  handle as a 32-bit HFILE, which a handle past 32 bits cannot be, on
+  Windows no more than here. FindPackagesByPackageFamily answers
+  ERROR_SUCCESS with no packages and no characters, Windows' answer for a
+  family nobody has installed, since gala installs no MSIX package (as
+  every package query here says). The application recovery four
+  (`recovery.rs`) keep a registration and never call it: gala has no
+  error reporting (ROADMAP OF), so a registration goes in the ledger —
+  a program that waited to be recovered leaves a trace — and
+  ApplicationRecoveryInProgress is E_FAIL, which is Windows' answer
+  outside a recovery.
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA
@@ -4254,7 +4275,16 @@ ntdll imports.
   UTF-16 after its byte-order mark, else the ANSI code page (UTF-8),
   written back as read (new files ANSI). A new key goes after its
   section's last entry, a new section at the end. win.ini is a file, not
-  mapped to the registry (IniFileMapping).
+  mapped to the registry (IniFileMapping). The A forms are the W forms
+  with the strings converted through the ANSI code page, counting as
+  Windows counts (the characters written, the final NUL excluded, and a
+  truncated answer is still NUL-terminated). The Int forms
+  (GetPrivateProfileIntW/A, GetProfileIntW/A) read the value as text and
+  take the decimal number at its front: blanks and one sign are allowed,
+  the first character that is not a digit ends it ("12ab" is 12), the
+  number wraps, and a negative one comes back as its two's complement,
+  which is how the unsigned answer reads (-5 is 0xfffffffb). A key that
+  is not there is the default as given, unexamined.
 - **Files replaced in one step**: MoveFileExW with
   MOVEFILE_REPLACE_EXISTING renames with FileRenameInformation's
   ReplaceIfExists (the target is never deleted first); ReplaceFileW
