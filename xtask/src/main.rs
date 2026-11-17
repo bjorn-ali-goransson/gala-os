@@ -436,6 +436,17 @@ const PREBUILT: &[Prebuilt] = &[
     // no published checksum, the SHA-256 pinned at the first fetch). The
     // Linux personality's milestone 2 target (ROADMAP LX); it runs only
     // inside gala.
+    // aarch64's: Alpine's static busybox (musl, static PIE; busybox.net
+    // has no aarch64 build), from the release's pinned package (an apk:
+    // gzipped tar streams), for the WSL distribution of the aarch64
+    // images (make_wsl_rootfs).
+    Prebuilt {
+        name: "busybox-linux-aarch64",
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk",
+        checksum: "965777e06b94bf11981d5f4ecdfcd577879f4b0dda544294d1dd3f72b217bc75",
+        members: &["bin/busybox.static"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "busybox-linux",
         url: "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox",
@@ -459,6 +470,20 @@ const PREBUILT: &[Prebuilt] = &[
             "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
             "usr/lib/x86_64-linux-gnu/libc.so.6",
             "usr/lib/x86_64-linux-gnu/libm.so.6",
+        ],
+        excludes: &[],
+    },
+    // The same glibc for aarch64 (the twins of the glibc scenarios:
+    // GLIBC_ARM64), the release's arm64 libc6 from ports.ubuntu.com (the
+    // SHA-256 in its signed Packages index).
+    Prebuilt {
+        name: "glibc-arm64",
+        url: "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.43-2ubuntu2_arm64.deb",
+        checksum: "6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0",
+        members: &[
+            "usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+            "usr/lib/aarch64-linux-gnu/libc.so.6",
+            "usr/lib/aarch64-linux-gnu/libm.so.6",
         ],
         excludes: &[],
     },
@@ -10985,6 +11010,10 @@ fn make_iso_unchecked(
             Some((_, name)) if arm64 && shipped_program(file).is_some() => {
                 (built_program_arm64(shipped_program(file).unwrap_or_default()), name)
             }
+            // The WSL distribution: its aarch64 busybox's (make_wsl_rootfs).
+            Some((_, name)) if arm64 && file.starts_with("target/wsl/") => {
+                (root().join("target/wsl/aarch64").join(name), name)
+            }
             // A Linux test program: its aarch64 build
             // (user/lx/build-aarch64.sh), which must exist.
             Some((_, name)) if arm64 && file.starts_with("user/lx/bin/") => {
@@ -11128,10 +11157,16 @@ fn make_wsl_rootfs() -> Result {
     if *made {
         return Ok(());
     }
-    let busybox = "target/prebuilt/busybox-linux/busybox";
-    fetch_prebuilt(busybox)?;
-    let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
-    wsl_rootfs::make(&root(), &data)?;
+    // x86-64's in target/wsl, aarch64's (an ARM64 image ships it in its
+    // place, under the same names) in target/wsl/aarch64.
+    for (busybox, dir) in [
+        ("target/prebuilt/busybox-linux/busybox", "wsl"),
+        ("target/prebuilt/busybox-linux-aarch64/busybox.static", "wsl/aarch64"),
+    ] {
+        fetch_prebuilt(busybox)?;
+        let data = fs::read(root().join(busybox)).map_err(|e| format!("reading {busybox}: {e}"))?;
+        wsl_rootfs::make(&root(), dir, &data)?;
+    }
     *made = true;
     Ok(())
 }
@@ -11306,6 +11341,8 @@ fn fetch_prebuilt(path: &str) -> Result {
         unpack_msi(p, &zip, &dir)?;
     } else if p.url.ends_with(".deb") {
         unpack_deb(p, &zip, &dir)?;
+    } else if p.url.ends_with(".apk") {
+        unpack_apk(p, &zip, &dir)?;
     } else if p.url.ends_with(".7z")
         || p.url.ends_with(".7z.exe")
         || p.url.ends_with("-setup.exe")
@@ -11529,6 +11566,33 @@ fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
             from = from.parent().map(|d| d.join(&target)).unwrap_or(target);
         }
         fs::rename(&from, dir.join(last)).map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
+}
+
+/// Unpacks the Alpine package `apk` (gzipped tar streams one after the
+/// other: signature, control, data; tar reads them as one) and moves
+/// `p`'s members into `dir` by their file names.
+fn unpack_apk(p: &Prebuilt, apk: &Path, dir: &Path) -> Result {
+    let tree = dir.join("apk");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    // Its PAX headers carry APK-TOOLS keywords tar does not know (a
+    // warning each).
+    run_quiet(
+        Command::new("tar")
+            .args(["--warning=no-unknown-keyword", "-xzf"])
+            .arg(apk)
+            .arg("-C")
+            .arg(&tree)
+            .args(p.members),
+    )?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        fs::rename(tree.join(member), dir.join(last))
+            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
     }
     fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
@@ -12241,9 +12305,9 @@ const AARCH64_SCENARIOS: &[&str] = &[
 ///
 /// Not twins: straddle_test (it writes and runs x86 instructions; ARM64's
 /// are four bytes and aligned, so none straddles a page), wintrust_test
-/// (it ships Office's x64 setup.exe), taskmgr and explorer (their WSL
-/// distribution is x86-64 busybox: an aarch64 one is ROADMAP AR's next),
-/// and those ROADMAP AR lists as next. Screen-checked twins are driven
+/// (it ships Office's x64 setup.exe), and those ROADMAP AR lists as
+/// next. The WSL scenarios' twins ship an aarch64 busybox's distribution
+/// (`make_wsl_rootfs`). Screen-checked twins are driven
 /// through virtio-input and, where the check takes screendumps, shown on
 /// a virtio-gpu (`aarch64_display`).
 const ARM64_TWINS: &[&str] = &[
@@ -12408,11 +12472,17 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl",
     "lx_wl_maximize",
     "lx_wl_popup",
+    "lx_dyn",
+    "lx_dyn_pie",
     "lx_wl_input",
     "gui_test",
     "start_menu",
     "tray_test",
     "d2d1_window",
+    "taskmgr",
+    "explorer",
+    "wsl",
+    "wsl_terminal",
     "gui_test_headless",
     "lx_fs",
     "lx_id",
@@ -18735,11 +18805,48 @@ fn aarch64_display(name: &str) -> bool {
             .is_some_and(|s| !s.cmdline.contains("presenter=test"))
 }
 
+/// A boot module: (file, directory in the image).
+type Module = (&'static str, &'static str);
+
+/// glibc's files and places on x86-64 and their aarch64 counterparts, which
+/// a twin ships instead: the program interpreter where PT_INTERP names it
+/// (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`) and in
+/// the multiarch system directory, libc and libm there.
+const GLIBC_ARM64: &[(Module, Module)] = &[
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib64"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib"),
+    ),
+    (
+        ("target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/ld-linux-aarch64.so.1", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libc.so.6", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/glibc-arm64/libm.so.6", "lib/aarch64-linux-gnu"),
+    ),
+];
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
-    // A twin ships its x64 scenario's files (their ARM64 builds).
-    let name = twin_base(name).unwrap_or(name);
+    // A twin ships its x64 scenario's files (their ARM64 builds), glibc's
+    // as aarch64's (GLIBC_ARM64).
+    if let Some(base) = twin_base(name) {
+        let mut modules = extra_modules(base);
+        for m in &mut modules {
+            if let Some((_, arm)) = GLIBC_ARM64.iter().find(|(x64, _)| x64 == m) {
+                *m = *arm;
+            }
+        }
+        modules.sort_unstable();
+        modules.dedup();
+        return modules;
+    }
     let mut sets: Vec<&str> = MODULE_SETS.iter().filter(|s| s.0 == name).map(|s| s.1).collect();
     if sets.is_empty() {
         sets.push(name);

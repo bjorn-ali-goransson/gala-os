@@ -202,7 +202,7 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 137 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (38 `arm_lx_*` twins); virtio-input keyboard and mouse; next the remaining test programs |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 141 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; next the remaining test programs |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -4499,7 +4499,7 @@ on the seams item PT prepared: native ARM64 Windows programs
   arguments (the registers it made the call with: ARM64's x0 is both
   the first argument and the result).
 - The x64 test programs run on ARM64 as twins (`ARM64_TWINS`:
-  `arm_<name>`, the x64 scenario's expectations; 137 of them, with the
+  `arm_<name>`, the x64 scenario's expectations; 141 of them, with the
   network, single-CPU and shipped-program cases): ProcessPrng from the
   kernel (RNDR), RtlCaptureStackBackTrace, NdrClientCall2 and rpcrt4's
   guarded calls, the native machine (KUSER_SHARED_DATA, IsWow64Process2)
@@ -4523,7 +4523,7 @@ on the seams item PT prepared: native ARM64 Windows programs
   argument order, the open flags, `struct stat` and `struct
   epoll_event`, AT_HWCAP, seccomp's architecture and strict mode, the
   signal frame (fpsimd_context), the thread pointer kept across
-  switches; the Linux test programs built for aarch64 (38 `arm_lx_*`
+  switches; the Linux test programs built for aarch64 (40 `arm_lx_*`
   twins, their transcripts real Linux's). Copy-on-write fork now works
   wherever frames are numbered above the managed count (QEMU `virt`'s
   memory starts at 1 GiB).
@@ -4537,7 +4537,12 @@ on the seams item PT prepared: native ARM64 Windows programs
   screen-checked twins get a virtio-gpu the kernel drives
   (`display=virtio`; the firmware gives no framebuffer and Limine
   refuses ramfb's): gui_test, start_menu, tray_test and d2d1_window run
-  there; every ARM64 image ships gala.exe's ARM64 build.
+  there; every ARM64 image ships gala.exe's ARM64 build. The WSL
+  distribution of an aarch64 image is Alpine's static aarch64 busybox
+  (busybox.net has none; `target/wsl/aarch64`): wsl, wsl_terminal,
+  taskmgr and explorer run as twins. glibc on aarch64: dyn_test and
+  its PIE run against Ubuntu's arm64 glibc 2.43 (`arm_lx_dyn`,
+  `arm_lx_dyn_pie`; GLIBC_ARM64, build-aarch64.sh's sysroot).
 - The event stream on aarch64: a host file written through semihosting
   (`events_file=`); session_test runs there.
 - CI runs the aarch64 scenarios in its boot shards, under QEMU's
@@ -4552,9 +4557,8 @@ on the seams item PT prepared: native ARM64 Windows programs
    client's socket) and names Linux calls in the flight records.
 2. User mode, the rest: safepoint_test's ARM64 counterpart (a poll
    load, HotSpot's on ARM64); the handover programs (no handover on
-   aarch64 yet); glibc's dynamic programs on aarch64 (dyn_test,
-   gtk_test); an aarch64 busybox for the WSL distribution, which
-   taskmgr's and explorer's twins need (theirs is x86-64's). arch_prctl_test and signal_test stay x86_64's (the
+   aarch64 yet); gtk_test on aarch64 (GTK 3's arm64 libraries as its
+   Linux root, as x64's amd64 ones). arch_prctl_test and signal_test stay x86_64's (the
    call and the sigcontext fields they check are x86's; the aarch64
    signal frame is pipe_test's, id_test's, altstack_test's and
    seccomp_test's).
