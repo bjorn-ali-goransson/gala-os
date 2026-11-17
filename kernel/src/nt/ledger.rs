@@ -268,16 +268,10 @@ fn add(key: Key, bulk: bool) {
     LEDGER.lock().add(key, bulk, now_ms());
 }
 
-/// Uptime in ms, for when a gap was hit. Host unit tests have no clock
-/// (they give `add` the time themselves).
-#[cfg(not(test))]
+/// Uptime in ms, for when a gap was hit; the machine's clock as the rest
+/// of nt reads it (host unit tests give `add` the time themselves).
 fn now_ms() -> u64 {
-    crate::time::raw_monotonic_ns() / 1_000_000
-}
-
-#[cfg(test)]
-fn now_ms() -> u64 {
-    0
+    super::platform::monotonic_ns() / 1_000_000
 }
 
 /// One ledger entry as a JSON object.
