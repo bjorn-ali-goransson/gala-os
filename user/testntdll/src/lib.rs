@@ -52,6 +52,32 @@ mod sync;
 mod tls;
 mod unimplemented;
 
+/// How the search for a handler went, as the kernel is given it with an
+/// unhandled exception (`GalaUnhandledException`, the crash report):
+///
+/// - `frames`: frames unwound (for 32-bit code, SEH registrations
+///   walked).
+/// - `handlers`: those whose unwind data named a language handler, which
+///   was asked and passed the exception on (for 32-bit code, every
+///   registration names one, so the two counts are equal).
+/// - `no_entry`: frames no function entry was found for, unwound by the
+///   return address on the stack as Windows does. They can have no
+///   handler, so a walk that asked none and found no entries says the
+///   unwind data was not found, not that the code had no handler. (On
+///   ARM64 such a frame ends the search instead, so the count stays 0
+///   there; for 32-bit code it has no meaning.)
+///
+/// A raise nothing handles is what Office's shared code ends a process
+/// with (0xe0000002, ROADMAP OF), where which of the three it is decides
+/// where to look.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Walk {
+    pub frames: u32,
+    pub handlers: u32,
+    pub no_entry: u32,
+}
+
 pub use arch::*;
 
 /// "galantdl": marks the state as written by this DLL.
@@ -464,7 +490,11 @@ syscall_stubs! {
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
     // describes it whatever status the process then ends with.
-    GalaUnhandledException = 0x7f5c, fn(record: *const u8, context: *const u8);
+    GalaUnhandledException = 0x7f5c, fn(
+        record: *const u8,
+        context: *const u8,
+        walk: *const crate::Walk
+    );
     // Waitable timers (gala's numbers, unverified).
     NtCreateTimer = 0xd9, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, kind: u32

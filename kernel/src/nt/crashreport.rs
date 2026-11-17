@@ -75,6 +75,13 @@ pub struct Note {
     /// For one in 32-bit code: the TEB32's ExceptionList itself (None:
     /// unread), shown when the list could not be walked.
     pub seh_head: Option<u32>,
+    /// How ntdll's search for a handler went, when ntdll is what
+    /// reported the exception (None: the kernel saw the fault itself, or
+    /// ntdll gave no record of the walk): the frames unwound, the
+    /// handlers asked, and the frames no function entry was found for
+    /// (`Walk` in gala's ntdll). No handler asked and no entry found
+    /// means the unwind data was not found, not that the code had none.
+    pub walk: Option<(u32, u32, u32)>,
     /// The exception's parameters as its EXCEPTION_RECORD carried them,
     /// `params_len` of them read (at most `PARAMS`) and `params_count`
     /// claimed: for a code nothing here decodes they are all it says.
@@ -184,6 +191,7 @@ impl Note {
             seh_len: 0,
             seh_end: false,
             seh_head: None,
+            walk: None,
             params: [0; PARAMS],
             params_len: 0,
             params_count: 0,
@@ -594,6 +602,26 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
                 ""
             }
         );
+    }
+    if let Some((frames, handlers, no_entry)) = note.walk {
+        let plural = |n: u32| if n == 1 { "" } else { "s" };
+        // A frame with no function entry can name no handler, so the two
+        // counts together say whether the unwind data was found at all.
+        if no_entry > 0 {
+            info!(
+                "crash report:   no handler took it: {frames} frame{} unwound ({no_entry} of \
+                 them with no unwind data found), {handlers} handler{} asked",
+                plural(frames),
+                plural(handlers)
+            );
+        } else {
+            info!(
+                "crash report:   no handler took it: {frames} frame{} unwound, {handlers} \
+                 handler{} asked",
+                plural(frames),
+                plural(handlers)
+            );
+        }
     }
     if note.params_len > 0 && note.access.is_none() && note.delay.is_none() && note.cxx.is_none() {
         let shown = Params(process, &note.params[..note.params_len]);

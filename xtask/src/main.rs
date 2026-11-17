@@ -17578,6 +17578,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "crash: raising 0xe0000042 with three parameters",
             "crash report: crash.exe (pid 4) ended by an unhandled exception 0xe0000042 \
              (exception) in thread",
+            "crash report:   no handler took it: ",
+            "frames unwound, 0 handlers asked",
             "crash report:   3 parameters: 0x8007000e, 0x",
             "(crash.exe+0x",
             ", 0xfeedface",

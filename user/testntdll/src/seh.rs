@@ -606,7 +606,7 @@ pub extern "system" fn RtlCaptureStackBackTrace(
 /// dispatcher's own frame, which runs on what is left of an overflowed
 /// stack (the vectored handlers get a stack overflow first).
 #[inline(never)]
-pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
+pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8, walk: &mut crate::Walk) -> bool {
     let (_, stack_base) = stack_bounds();
     let mut ctx = Context::from_ptr(context);
     for _ in 0..4096 {
@@ -615,7 +615,10 @@ pub(crate) fn dispatch_frames(record: *mut u8, context: *mut u8) -> bool {
         if !frame_ok(frame, stack_base) {
             break;
         }
+        walk.frames += 1;
+        walk.no_entry += u32::from(entry.is_null());
         if handler != 0 {
+            walk.handlers += 1;
             let mut frame_ctx = frame_ctx;
             let mut dc = DispatcherContext {
                 control_pc: frame_ctx.get(CTX_RIP),

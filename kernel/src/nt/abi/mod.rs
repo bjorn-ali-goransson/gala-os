@@ -8,6 +8,25 @@
 //! module is its own (aarch64: a stub that compiles, so that the kernel's
 //! aarch64 check finds x64 assumptions elsewhere in `nt/`).
 
+/// gala's ntdll's record of how the search for a handler went, as
+/// `GalaUnhandledException` passes it: three u32s (frames unwound,
+/// handlers asked, frames no function entry was found for), whatever the
+/// word size. None when the pointer is null or unreadable: a report
+/// without the line says nothing instead of guessing (`Walk` in
+/// user/testntdll, `nt::crashreport`).
+pub(in crate::nt) fn walk_of(
+    call: &mut super::syscalls::Call<'_>,
+    at: u64,
+) -> Option<(u32, u32, u32)> {
+    if at == 0 {
+        return None;
+    }
+    let mut bytes = [0u8; 12];
+    call.process.read(at, &mut bytes).ok()?;
+    let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap_or([0; 4]));
+    Some((word(0), word(1), word(2)))
+}
+
 /// Where a system call argument is: in a register (its value) or on the
 /// user stack (the address to read it from).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

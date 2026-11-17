@@ -458,6 +458,10 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         Ok(v) => v,
         Err(status) => return status,
     };
+    let walk = match call.arg(2) {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
     if record == 0 {
         *call.process.unhandled_exception.lock() = None;
         return NtStatus::SUCCESS;
@@ -479,6 +483,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     regs.set_ip(word(0x10));
     let mut note = Note::new(&call.process, NtStatus(code), access, regs, false);
     note.flags = (word(0) >> 32) as u32;
+    note.walk = crate::nt::abi::walk_of(call, walk);
     // The parameters: RECORD_SIZE has room for all 15 of them.
     note.params_count = count as usize;
     note.params_len = note.params_count.min(crate::nt::crashreport::PARAMS);

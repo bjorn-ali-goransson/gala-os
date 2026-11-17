@@ -464,7 +464,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
-    (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 2, gala_unhandled_exception),
+    (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 3, gala_unhandled_exception),
     (GALA_USER_OBJECT_OPEN, "GalaUserObjectOpen", 6, winsta_calls::gala_user_object_open),
     (
         GALA_USER_OBJECT_CONNECTION,

@@ -466,6 +466,7 @@ pub(in crate::nt) fn create_wow64_thread(
 /// process's crash report, printed when it ends (nt::crashreport).
 pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     let (record, context) = (arg!(call, 0), arg!(call, 1));
+    let walk = arg!(call, 2);
     if record == 0 {
         *call.process.unhandled_exception.lock() = None;
         return NtStatus::SUCCESS;
@@ -515,6 +516,7 @@ pub(in crate::nt) fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
         note.delay = DelayLoad::decode(info, x86, &read);
     }
     note.flags = tri!(call.read_u64(record)).wrapping_shr(32) as u32;
+    note.walk = crate::nt::abi::walk_of(call, walk);
     // 32-bit code: the SEH registrations the dispatcher walked (the list
     // is unchanged by a search that found no handler).
     if x86 && let Some((teb32, _, _)) = crate::nt::thread::current_stack32(&call.process) {

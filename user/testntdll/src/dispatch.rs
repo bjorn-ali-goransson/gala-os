@@ -47,8 +47,9 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     let mut pointers = ExceptionPointers { record, context };
     // Snapshots, so that handlers may (un)register handlers themselves.
     let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));
-    let handled =
-        call_handlers(&exception, &mut pointers) || crate::seh::dispatch_frames(record, context);
+    let mut walk = crate::Walk::default();
+    let handled = call_handlers(&exception, &mut pointers)
+        || crate::seh::dispatch_frames(record, context, &mut walk);
     if call_handlers(&continue_, &mut pointers) || handled {
         NtContinue(context, 0);
     }
@@ -57,7 +58,7 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     // alone has none, and its crash is the one worth describing), and
     // whatever status the process ends with: a filter such as
     // Crashpad's ends it with one of its own (0xffff7002).
-    crate::GalaUnhandledException(record, context);
+    crate::GalaUnhandledException(record, context, &raw const walk);
     // The top-level filter (kernel32's UnhandledExceptionFilter, which
     // calls SetUnhandledExceptionFilter's) may continue execution;
     // otherwise the process ends.
@@ -67,7 +68,7 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
         let f: extern "system" fn(*mut ExceptionPointers) -> i32 =
             unsafe { core::mem::transmute(filter) };
         if f(&mut pointers) == -1 {
-            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null());
+            crate::GalaUnhandledException(core::ptr::null(), core::ptr::null(), core::ptr::null());
             NtContinue(context, 0);
         }
     }

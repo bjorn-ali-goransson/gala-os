@@ -789,6 +789,17 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 
 - `record flags` when not 0 (noncontinuable; EXCEPTION_STACK_INVALID:
   the search met a registration off the stack).
+- `no handler took it: N frames unwound, K handlers asked`, ntdll's own
+  account of the search (`Walk` in `user/testntdll`): the frames it
+  unwound and those whose unwind data named a language handler, which
+  was asked and passed the exception on. 0 asked over many frames is not
+  "the code had no handler": it is also what failing to find the unwind
+  data looks like, so frames no function entry was found for (unwound by
+  the return address on the stack, as Windows does) are named too --
+  `N frames unwound (M of them with no unwind data found), K handlers
+  asked`. On ARM64 such a frame ends the search instead, so M stays 0
+  there; in 32-bit code every registration names a handler, so the two
+  counts are equal. Scenario `crash_raise`.
 - The exception's parameters, when nothing below explains them (an
   access violation, a delay load and a C++ throw have lines of their
   own saying what theirs mean): `3 parameters: 0x8007000e, 0x140001060
