@@ -621,7 +621,7 @@ NMI). When the monitor gives nothing, QEMU is stuck in itself, not the
 guest: xtask then attaches gdb to it and adds QEMU's own record of each
 vCPU and every QEMU thread's stack (`xtask: gdb: ...`; what gdb said
 when it could not attach); `XTASK_QEMU_GDB=1` takes that at every
-timeout (WORKFLOW "Hunting a rare hang"). CI installs gdb and lets it
+timeout (WORKFLOW "Hunting a rare hang"). CI (the `linux` job and the boot shards) installs gdb and lets it
 attach (`kernel.yama.ptrace_scope=0`). The run's end says
 itself: `qemu: ending the run (Success|Failure)` before the exit, and
 on aarch64 `qemu: the run did not end: ...` if the semihosting exit

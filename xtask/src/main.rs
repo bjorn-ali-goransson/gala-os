@@ -27958,10 +27958,12 @@ fn iso(release: bool, args: &[String]) -> Result {
         let found = scenarios().iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
         cmdline.extend(found.cmdline.split_whitespace().filter(|w| *w != "qemu_exit"));
     }
+    // x64's side first: an ARM64 program embeds an x64 DLL (cow_test,
+    // testdll.dll from x64's build), so the ARM64 builds need it built.
+    build_kernel(release)?;
     if aarch64 {
         build_kernel_aarch64(release)?;
     }
-    build_kernel(release)?;
     let mut modules: Vec<(&str, &str)> = image_modules(&cmdline, scenario.as_deref())?;
     modules.extend(files.iter().map(|(path, dir)| (path.as_str(), dir.as_str())));
     let path = make_iso(release, &format!("gala-{name}"), &cmdline.join(" "), &modules)?;
