@@ -263,8 +263,9 @@ pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
-/// gala's number and argument order for the service QueueUserAPC2 queues
-/// a special user APC through, until the pinned build's are verified.
+/// gala's number for the service QueueUserAPC2 queues a special user APC
+/// through, until the pinned build's is verified; its arguments are
+/// Windows' own (`apc_test` calls the pinned build's export with them).
 pub const NT_QUEUE_APC_THREAD_EX2: u32 = 0x7f4e;
 // Mutants and semaphores. NtReleaseSemaphore (0x0a) and NtReleaseMutant
 // (0x20) are long-stable on x64; the create/open/query numbers vary by build
@@ -364,7 +365,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
-    (NT_QUEUE_APC_THREAD_EX2, "NtQueueApcThreadEx2", 6, nt_queue_apc_thread_ex2),
+    (NT_QUEUE_APC_THREAD_EX2, "NtQueueApcThreadEx2", 7, nt_queue_apc_thread_ex2),
     (NT_RELEASE_SEMAPHORE, "NtReleaseSemaphore", 3, nt_release_semaphore),
     (NT_RELEASE_MUTANT, "NtReleaseMutant", 2, nt_release_mutant),
     (NT_CREATE_MUTANT, "NtCreateMutant", 4, nt_create_mutant),
@@ -3426,15 +3427,22 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// NtQueueApcThreadEx2(ThreadHandle, ApcFlags, ApcRoutine, ApcArgument1,
-/// ApcArgument2, ApcArgument3) as QueueUserAPC2 calls it: `ApcFlags` 1
-/// (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) queues an APC every return to
-/// user mode runs, 0 one that waits for an alertable wait. Windows
-/// refuses every other flag with STATUS_INVALID_PARAMETER (measured on
-/// the pinned build: ERROR_INVALID_PARAMETER from QueueUserAPC2).
+/// NtQueueApcThreadEx2(ThreadHandle, ReserveHandle, ApcFlags,
+/// ApcRoutine, ApcArgument1, ApcArgument2, ApcArgument3) as QueueUserAPC2
+/// calls it: `ApcFlags` 1 (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) queues
+/// an APC every return to user mode runs, 0 one that waits for an
+/// alertable wait. Windows refuses every other flag with
+/// STATUS_INVALID_PARAMETER (measured on the pinned build:
+/// ERROR_INVALID_PARAMETER from QueueUserAPC2).
+///
+/// `ReserveHandle` names an APC reserve object (NtAllocateReserveObject),
+/// which gala has none of. QueueUserAPC2 passes zero; anything else is
+/// STATUS_INVALID_PARAMETER, as the pinned build answers for a handle to
+/// another type and for one that names nothing alike (`apc_test`), so
+/// the reserve is refused before the thread handle is looked at.
 fn nt_queue_apc_thread_ex2(call: &mut Call<'_>) -> NtStatus {
-    let flags = arg!(call, 1);
-    if flags > 1 {
+    let flags = arg!(call, 2);
+    if flags > 1 || arg!(call, 1) != 0 {
         return NtStatus::INVALID_PARAMETER;
     }
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
@@ -3450,8 +3458,8 @@ fn nt_queue_apc_thread_ex2(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_DENIED;
     }
     let apc = thread::UserApc {
-        routine: arg!(call, 2),
-        args: [arg!(call, 3), arg!(call, 4), arg!(call, 5)],
+        routine: arg!(call, 3),
+        args: [arg!(call, 4), arg!(call, 5), arg!(call, 6)],
         special: flags == 1,
     };
     match thread::queue_user_apc(object, apc) {

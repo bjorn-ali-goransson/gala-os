@@ -95,7 +95,9 @@ pub extern "system" fn QueueUserAPC2(
     flags: u32,
 ) -> Bool {
     // SAFETY: the kernel validates the handle; the routine is the caller's.
-    let status = unsafe { NtQueueApcThreadEx2(thread, flags as usize, routine, data, 0, 0) };
+    let status = unsafe {
+        NtQueueApcThreadEx2(thread, core::ptr::null_mut(), flags as usize, routine, data, 0, 0)
+    };
     if status != STATUS_SUCCESS {
         return fail(status, FALSE);
     }
@@ -499,6 +501,7 @@ unsafe extern "system" {
     fn NtQueueApcThread(thread: Handle, routine: usize, a1: usize, a2: usize, a3: usize) -> u32;
     fn NtQueueApcThreadEx2(
         thread: Handle,
+        reserve: Handle,
         flags: usize,
         routine: usize,
         a1: usize,

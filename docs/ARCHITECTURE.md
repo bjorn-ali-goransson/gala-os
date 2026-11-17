@@ -2244,8 +2244,14 @@ Invariants:
   11; files and pipe ends alike).
 - **Special user APCs** (`apc_test`, `kernel32_thread_test`): the same
   queue carries them, with a flag. NtQueueApcThreadEx2 (gala's 0x7f4e
-  until the pinned build's number is verified) takes the flags
-  QueueUserAPC2 passes: QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC (1) marks
+  until the pinned build's number is verified) takes Windows' own
+  arguments, ThreadHandle, ReserveHandle, ApcFlags, ApcRoutine and three
+  arguments, which `apc_test` verifies by calling the pinned build's
+  export with them. ReserveHandle names an APC reserve object, which
+  gala has none of: QueueUserAPC2 passes zero, and anything else is
+  STATUS_INVALID_PARAMETER, as the pinned build answers for a handle of
+  another type and for one that names nothing. The flags are
+  QueueUserAPC2's: QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC (1) marks
   a special APC, 0 queues a normal one, and every other value is
   STATUS_INVALID_PARAMETER. A special APC does not wait for an alertable
   wait: the system call dispatcher delivers it on the way back to user

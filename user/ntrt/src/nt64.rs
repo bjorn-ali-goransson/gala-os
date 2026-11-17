@@ -11,7 +11,13 @@ use super::x64::*;
 use core::ffi::c_void;
 
 // Service numbers of the pinned build are in the `stubs!` list below and
-// must match `kernel/src/nt/syscalls.rs`.
+// must match `kernel/src/nt/syscalls.rs`. A number of gala's own (0x7fxx,
+// for a service whose Windows number is not verified) must never be
+// issued where a real Windows kernel is underneath: it decodes into the
+// window manager's table and the call ends the process, which is what a
+// test program would do on Windows. Such a service is reached through
+// `ntdll_export` instead, with the stub left for a gala scenario that
+// maps no ntdll (`queue_apc_ex2`, the timers, the semaphores).
 
 /// A handle value. Opaque to user mode, so an integer rather than a pointer.
 #[repr(transparent)]
@@ -311,6 +317,7 @@ unsafe extern "system" {
     ) -> NtStatus;
     fn ntrt_nt_queue_apc_thread_ex2(
         h: Handle,
+        reserve: Handle,
         flags: usize,
         routine: extern "system" fn(usize, usize, usize),
         a1: usize,
@@ -1415,22 +1422,44 @@ pub fn set_thread(h: Handle, class: u32, data: &[u8]) -> NtStatus {
 
 pub const STATUS_USER_APC: NtStatus = 0x0000_00c0;
 
-/// NtQueueApcThreadEx2 as QueueUserAPC2 calls it: with `flags` 1
+/// NtQueueApcThreadEx2(ThreadHandle, ReserveHandle, ApcFlags,
+/// ApcRoutine, ApcArgument1..3) as QueueUserAPC2 calls it: with `flags` 1
 /// (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) `routine(a1, a2, a3)` runs in
 /// thread `h` at its next return to user mode, whatever it is doing --
 /// on this call's own return when a thread queues one to itself. With 0
 /// it waits for an alertable wait, as `queue_apc`'s does; every other
-/// value is STATUS_INVALID_PARAMETER.
+/// value is STATUS_INVALID_PARAMETER. `reserve` is an APC reserve
+/// object, `Handle(0)` for none (what QueueUserAPC2 passes).
+///
+/// Through ntdll's export, because gala's number for it is unverified
+/// and `ntdll_export` says what that costs: issued as a system call on
+/// Windows it reaches the win32k table and the process dies.
 pub fn queue_apc_ex2(
     h: Handle,
+    reserve: Handle,
     flags: usize,
     routine: extern "system" fn(usize, usize, usize),
     a1: usize,
     a2: usize,
     a3: usize,
 ) -> NtStatus {
-    // SAFETY: the kernel validates the handle; the routine is ours.
-    unsafe { ntrt_nt_queue_apc_thread_ex2(h, flags, routine, a1, a2, a3) }
+    type F = unsafe extern "system" fn(
+        Handle,
+        Handle,
+        usize,
+        extern "system" fn(usize, usize, usize),
+        usize,
+        usize,
+        usize,
+    ) -> NtStatus;
+    // SAFETY: the kernel validates the handles; the routine is ours; the
+    // export has NtQueueApcThreadEx2's signature.
+    unsafe {
+        match ntdll_export(b"NtQueueApcThreadEx2") {
+            Some(f) => core::mem::transmute::<usize, F>(f)(h, reserve, flags, routine, a1, a2, a3),
+            None => ntrt_nt_queue_apc_thread_ex2(h, reserve, flags, routine, a1, a2, a3),
+        }
+    }
 }
 
 /// NtQueueApcThread: `routine(a1, a2, a3)` runs in thread `h` at its next

@@ -21,6 +21,8 @@ const STATUS_TIMEOUT: NtStatus = 0x0000_0102;
 const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
 /// QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC.
 const SPECIAL: usize = 1;
+/// No APC reserve object, what QueueUserAPC2 passes.
+const NO_RESERVE: Handle = Handle(0);
 const SECOND: i64 = -10_000_000;
 const TEB_CLIENT_ID_THREAD: usize = 0x48;
 
@@ -138,11 +140,24 @@ fn run() -> Result<(), u32> {
 
     // A special user APC runs on the way back to user mode: one queued to
     // the calling thread has run by the time the call returns.
-    c.eq(queue_apc_ex2(CURRENT_THREAD, SPECIAL, apc, 40, 41, 42).into(), ok)?;
+    c.eq(queue_apc_ex2(CURRENT_THREAD, NO_RESERVE, SPECIAL, apc, 40, 41, 42).into(), ok)?;
     c.eq(calls(), 5)?;
     c.ok(logged(4) == [40, 41, 42], logged(4)[0])?;
     // Flags beyond that one are refused, and nothing is queued.
-    c.eq(queue_apc_ex2(CURRENT_THREAD, 2, apc, 0, 0, 0).into(), STATUS_INVALID_PARAMETER.into())?;
+    c.eq(
+        queue_apc_ex2(CURRENT_THREAD, NO_RESERVE, 2, apc, 0, 0, 0).into(),
+        STATUS_INVALID_PARAMETER.into(),
+    )?;
+    // A reserve handle names an APC reserve object; a handle to another
+    // type and one that names nothing are both STATUS_INVALID_PARAMETER.
+    c.eq(
+        queue_apc_ex2(CURRENT_THREAD, event, SPECIAL, apc, 0, 0, 0).into(),
+        STATUS_INVALID_PARAMETER.into(),
+    )?;
+    c.eq(
+        queue_apc_ex2(CURRENT_THREAD, Handle(0x1234), SPECIAL, apc, 0, 0, 0).into(),
+        STATUS_INVALID_PARAMETER.into(),
+    )?;
     c.eq(wait_alertable(event, Some(SECOND / 100)).into(), STATUS_TIMEOUT.into())?;
     c.eq(calls(), 5)?;
 
@@ -153,7 +168,7 @@ fn run() -> Result<(), u32> {
     let (s, t, tid) = create_thread(patient, 0, false);
     c.eq(s.into(), ok)?;
     delay(SECOND / 50); // let it block
-    c.eq(queue_apc_ex2(t, SPECIAL, apc, 50, 51, 52).into(), ok)?;
+    c.eq(queue_apc_ex2(t, NO_RESERVE, SPECIAL, apc, 50, 51, 52).into(), ok)?;
     c.eq(wait(t, Some(5 * SECOND)).into(), ok)?;
     c.eq(PATIENT_STATUS.load(Ordering::SeqCst), STATUS_TIMEOUT.into())?;
     c.eq(PATIENT_SEEN.load(Ordering::SeqCst), 6)?;
