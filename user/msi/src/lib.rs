@@ -16,6 +16,21 @@
 //!   ERROR_UNKNOWN_COMPONENT;
 //! - MsiSetInternalUI: the process's UI level and window, kept.
 //!
+//! Word's shared code (MSO.DLL, Mso30win32client.dll,
+//! Mso40UIwin32client.dll, Mso98win32client.dll) delay-loads eleven
+//! more, which answer the same way for what is not installed:
+//! MsiQueryFeatureStateW, MsiUseFeatureW and MsiUseFeatureExW
+//! (INSTALLSTATE_UNKNOWN), MsiReinstallFeatureW
+//! (ERROR_UNKNOWN_PRODUCT), MsiGetUserInfoW (USERINFOSTATE_UNKNOWN),
+//! MsiEnumClientsW, MsiGetProductCodeW, MsiGetProductCodeA and
+//! MsiProvideQualifiedComponentW (ERROR_UNKNOWN_COMPONENT),
+//! MsiGetComponentPathA (as the W form) -- and MsiSetExternalUIW, which
+//! is not an answer about an install but a handler for one: it keeps
+//! what it is given for the process and gives back the handler set
+//! before it. Nothing calls that handler, because nothing here installs
+//! anything (MsiInstallProductW below); a program learns that from the
+//! install's own failure, not from the handler's silence.
+//!
 //! Each answer that stands for "Windows Installer has nothing here" is
 //! recorded in the ledger (`msi.dll!<function>: nothing installed`, kind
 //! "other", detail the call's ordinal), so a program that goes on to fail
@@ -146,6 +161,14 @@ const MSIDBOPEN_CREATE: usize = 3;
 const MSIDBOPEN_PATCHFILE: usize = 32;
 const INSTALLSTATE_INVALIDARG: i32 = -2;
 const INSTALLSTATE_UNKNOWN: i32 = -1;
+const USERINFOSTATE_INVALIDARG: i32 = -2;
+const USERINFOSTATE_UNKNOWN: i32 = -1;
+
+/// INSTALLMODE_NODETECTION, the only install mode MsiUseFeatureExW takes
+/// (msiquery.h); another is INSTALLSTATE_INVALIDARG, measured with
+/// INSTALLMODE_EXISTING, which the qualified-component calls do take
+/// (`msi_test`).
+const INSTALLMODE_NODETECTION: u32 = -2i32 as u32;
 
 // INSTALLUILEVEL: a level in the low nibble and flags above it.
 const INSTALLUILEVEL_NOCHANGE: u32 = 0;
@@ -182,19 +205,20 @@ fn nothing_installed(name: &[u8], ordinal: u64) {
 
 /// Whether `p` is a braced GUID string, `{XXXXXXXX-XXXX-XXXX-XXXX-
 /// XXXXXXXXXXXX}` (hexadecimal digits of either case), as product and
-/// component codes are.
-fn is_guid(p: *const u16) -> bool {
+/// component codes are. One body for both string widths: the ANSI
+/// functions ask it of their own bytes.
+fn is_guid<T: Copy + Into<u32>>(p: *const T) -> bool {
     if p.is_null() {
         return false;
     }
     for i in 0..39 {
         // SAFETY: the caller's NUL-terminated string, read up to its NUL
         // (every unit before index 38 is checked to be non-zero).
-        let c = unsafe { *p.add(i) };
+        let c: u32 = unsafe { *p.add(i) }.into();
         let ok = match i {
-            0 => c == u16::from(b'{'),
-            9 | 14 | 19 | 24 => c == u16::from(b'-'),
-            37 => c == u16::from(b'}'),
+            0 => c == u32::from(b'{'),
+            9 | 14 | 19 | 24 => c == u32::from(b'-'),
+            37 => c == u32::from(b'}'),
             38 => c == 0,
             _ => u8::try_from(c).is_ok_and(|b| b.is_ascii_hexdigit()),
         };
@@ -477,6 +501,182 @@ pub extern "system" fn MsiEnumComponentQualifiersW(
     }
     nothing_installed(b"MsiEnumComponentQualifiersW", 39);
     ERROR_UNKNOWN_COMPONENT
+}
+
+/// The process's external UI handler (MsiSetExternalUIW): the handler,
+/// the messages it asked for and the context it is to be handed back.
+/// Kept as plain addresses, since nothing here reads them to call: the
+/// handler hears from a running install, and gala runs none (module
+/// comment).
+static EXTERNAL_UI: AtomicUsize = AtomicUsize::new(0);
+static EXTERNAL_UI_FILTER: AtomicU32 = AtomicU32::new(0);
+static EXTERNAL_UI_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// MsiSetExternalUIW (#137): keeps the handler, its message filter and
+/// its context for the process, and gives back the handler set before it
+/// -- 0 in a process that has set none, which is what Word's mso chain
+/// reads to find out whether it had one, and what it hands back to put
+/// the old one in place. A NULL handler takes the current one away. The
+/// handler is taken and returned as an address: ABI-wise that is the
+/// INSTALLUI_HANDLERW pointer itself, and an address is what this can
+/// honestly promise about it, nothing here being able to call it.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiSetExternalUIW(handler: usize, filter: u32, context: *mut u8) -> usize {
+    EXTERNAL_UI_FILTER.store(filter, Ordering::Relaxed);
+    EXTERNAL_UI_CONTEXT.store(context.addr(), Ordering::Relaxed);
+    EXTERNAL_UI.swap(handler, Ordering::Relaxed)
+}
+
+/// What the three feature calls answer for a product nothing installed:
+/// INSTALLSTATE_INVALIDARG for a product that is not a braced GUID or a
+/// feature that is not there, INSTALLSTATE_UNKNOWN otherwise.
+fn feature_state(product: *const u16, feature: *const u16, name: &[u8], ordinal: u64) -> i32 {
+    if !is_guid(product) || feature.is_null() {
+        return INSTALLSTATE_INVALIDARG;
+    }
+    nothing_installed(name, ordinal);
+    INSTALLSTATE_UNKNOWN
+}
+
+/// MsiQueryFeatureStateW (#111): whether a feature of a product is
+/// installed -- INSTALLSTATE_UNKNOWN, no product being.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiQueryFeatureStateW(product: *const u16, feature: *const u16) -> i32 {
+    feature_state(product, feature, b"MsiQueryFeatureStateW", 111)
+}
+
+/// MsiUseFeatureW (#155): as MsiQueryFeatureStateW, and on Windows it
+/// also counts the use of the feature it finds. There is none to count.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiUseFeatureW(product: *const u16, feature: *const u16) -> i32 {
+    feature_state(product, feature, b"MsiUseFeatureW", 155)
+}
+
+/// MsiUseFeatureExW (#193): MsiUseFeatureW with an install mode, which
+/// must be INSTALLMODE_NODETECTION.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiUseFeatureExW(
+    product: *const u16,
+    feature: *const u16,
+    mode: u32,
+    _reserved: u32,
+) -> i32 {
+    if mode != INSTALLMODE_NODETECTION {
+        return INSTALLSTATE_INVALIDARG;
+    }
+    feature_state(product, feature, b"MsiUseFeatureExW", 193)
+}
+
+/// MsiReinstallFeatureW (#129): ERROR_UNKNOWN_PRODUCT for a product
+/// code and a feature, ERROR_INVALID_PARAMETER without either.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiReinstallFeatureW(
+    product: *const u16,
+    feature: *const u16,
+    _mode: u32,
+) -> u32 {
+    if !is_guid(product) || feature.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    nothing_installed(b"MsiReinstallFeatureW", 129);
+    ERROR_UNKNOWN_PRODUCT
+}
+
+/// MsiGetUserInfoW (#82): who a product was registered to --
+/// USERINFOSTATE_UNKNOWN, none being installed. Every one of the three
+/// sizes is required, with or without its buffer
+/// (USERINFOSTATE_INVALIDARG without one, measured), as is a product
+/// code.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn MsiGetUserInfoW(
+    product: *const u16,
+    _user: *mut u16,
+    user_size: *mut u32,
+    _organization: *mut u16,
+    organization_size: *mut u32,
+    _serial: *mut u16,
+    serial_size: *mut u32,
+) -> i32 {
+    if !is_guid(product)
+        || user_size.is_null()
+        || organization_size.is_null()
+        || serial_size.is_null()
+    {
+        return USERINFOSTATE_INVALIDARG;
+    }
+    nothing_installed(b"MsiGetUserInfoW", 82);
+    USERINFOSTATE_UNKNOWN
+}
+
+/// MsiEnumClientsW (#37): the products that use a component --
+/// ERROR_UNKNOWN_COMPONENT, no component being installed, whatever the
+/// index.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiEnumClientsW(
+    component: *const u16,
+    _index: u32,
+    product: *mut u16,
+) -> u32 {
+    if !is_guid(component) || product.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    nothing_installed(b"MsiEnumClientsW", 37);
+    ERROR_UNKNOWN_COMPONENT
+}
+
+/// MsiGetProductCodeW (#66): which product installed a component --
+/// ERROR_UNKNOWN_COMPONENT, none having.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiGetProductCodeW(component: *const u16, product: *mut u16) -> u32 {
+    if !is_guid(component) || product.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    nothing_installed(b"MsiGetProductCodeW", 66);
+    ERROR_UNKNOWN_COMPONENT
+}
+
+/// MsiGetProductCodeA (#65): the ANSI form, asked of ANSI strings.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiGetProductCodeA(component: *const u8, product: *mut u8) -> u32 {
+    if !is_guid(component) || product.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    nothing_installed(b"MsiGetProductCodeA", 65);
+    ERROR_UNKNOWN_COMPONENT
+}
+
+/// MsiProvideQualifiedComponentW (#109): MsiProvideQualifiedComponentExW
+/// without a product to charge the use to -- ERROR_UNKNOWN_COMPONENT.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiProvideQualifiedComponentW(
+    component: *const u16,
+    _qualifier: *const u16,
+    _mode: u32,
+    _path: *mut u16,
+    _size: *mut u32,
+) -> u32 {
+    if !is_guid(component) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    nothing_installed(b"MsiProvideQualifiedComponentW", 109);
+    ERROR_UNKNOWN_COMPONENT
+}
+
+/// MsiGetComponentPathA (#172): MsiGetComponentPathW of ANSI strings,
+/// with the same answers.
+#[unsafe(no_mangle)]
+pub extern "system" fn MsiGetComponentPathA(
+    product: *const u8,
+    component: *const u8,
+    path: *mut u8,
+    size: *mut u32,
+) -> i32 {
+    if !is_guid(product) || !is_guid(component) || (!path.is_null() && size.is_null()) {
+        return INSTALLSTATE_INVALIDARG;
+    }
+    nothing_installed(b"MsiGetComponentPathA", 172);
+    INSTALLSTATE_UNKNOWN
 }
 
 /// DllMain (the entry point our link flags name).

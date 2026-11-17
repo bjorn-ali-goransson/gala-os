@@ -538,6 +538,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "d3d10"
+version = "0.1.0"
+
+[[package]]
+name = "d3d10_1"
+version = "0.1.0"
+
+[[package]]
 name = "d3d11"
 version = "0.1.0"
 

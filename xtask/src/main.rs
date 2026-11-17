@@ -6996,6 +6996,10 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
     Dll { package: "dxgi", file: "dxgi.dll", exported_as: "testdxgi.dll" },
+    // d3d10_1 and d3d10: what Word's shared code and Office's image
+    // modules delay-load of Direct3D 10 (ROADMAP OF).
+    Dll { package: "d3d10", file: "d3d10.dll", exported_as: "testd3d10.dll" },
+    Dll { package: "d3d10_1", file: "d3d10_1.dll", exported_as: "testd3d10_1.dll" },
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
     Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
     Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
@@ -7629,6 +7633,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
     ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d10.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d10_1.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d11.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d12.dll", "Windows/System32"),
     ("gpu_stub_test", "dcomp.dll", "Windows/System32"),

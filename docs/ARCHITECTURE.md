@@ -10564,16 +10564,33 @@ stations and desktops a program creates are refused until stage 3).
   installer database, no installer service): MsiQueryProductStateW,
   MsiGetComponentPathW and MsiLocateComponentW INSTALLSTATE_UNKNOWN,
   MsiEnumProductsW none, MsiConfigureProductExW ERROR_UNKNOWN_PRODUCT,
-  MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
-  ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
+  MsiProvideQualifiedComponentExW, MsiProvideQualifiedComponentW,
+  MsiEnumComponentQualifiersW, MsiEnumClientsW, MsiGetProductCodeW and
+  MsiGetProductCodeA ERROR_UNKNOWN_COMPONENT, MsiQueryFeatureStateW,
+  MsiUseFeatureW and MsiUseFeatureExW INSTALLSTATE_UNKNOWN,
+  MsiReinstallFeatureW ERROR_UNKNOWN_PRODUCT, MsiGetUserInfoW
+  USERINFOSTATE_UNKNOWN; a code that is not a braced GUID is
   INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
   keeps the process's level and owner window (an invalid level returns
   INSTALLUILEVEL_NOCHANGE yet its known flags replace the current ones,
-  as on Windows). Each "nothing installed" answer is recorded
-  (`msi.dll!<function>: nothing installed`, kind other, the ordinal as
-  detail). The exports carry Windows' ordinals (build.rs; ODT's
-  setup.exe and the integrator.exe it runs both import them by
-  ordinal). Installing a package is galapkg's business (its MSI reader,
+  as on Windows). The ANSI forms (MsiGetProductCodeA,
+  MsiGetComponentPathA) answer as the wide ones do, of their own bytes:
+  one braced-GUID check serves both widths. MsiUseFeatureExW takes only
+  INSTALLMODE_NODETECTION as its install mode, INSTALLMODE_EXISTING --
+  which the qualified-component calls do take -- being
+  INSTALLSTATE_INVALIDARG, measured. MsiSetExternalUIW is the one that
+  is not an answer about an install but a handler for one: it keeps the
+  handler, its message filter and its context for the process and gives
+  back the handler set before it (0 where none was), which is how Word's
+  mso chain finds out whether one was installed and puts the old one
+  back. Nothing calls that handler, nothing here running an install; a
+  program learns that from the install's own failure. Each "nothing
+  installed" answer is recorded (`msi.dll!<function>: nothing
+  installed`, kind other, the ordinal as detail). The exports carry
+  Windows' ordinals (build.rs; ODT's setup.exe and the integrator.exe it
+  runs import them by ordinal, and Word's shared code -- MSO.DLL,
+  Mso30win32client.dll, Mso40UIwin32client.dll,
+  Mso98win32client.dll -- delay-loads eleven of them so). Installing a package is galapkg's business (its MSI reader,
   ROADMAP PK), not msi.dll's, so MsiInstallProductW installs nothing --
   and is exported all the same, because integrator.exe delay-loads it
   and a delay load that cannot be resolved ends the process with
@@ -14877,7 +14894,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 | Stage | Content | Tests | Status |
 |---|---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`, and for Office's shared code `d3d10_1.dll` (D3D10CreateDevice1, D3D10CreateStateBlock) and `d3d10.dll` (D3D10CreateEffectFromMemory), as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |

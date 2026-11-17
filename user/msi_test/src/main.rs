@@ -57,6 +57,41 @@
 //!   gala cannot, so the two answer differently by design, as with the
 //!   database create modes above (ROADMAP OF).
 //!
+//! Word's own shared code (MSO.DLL, Mso30win32client.dll,
+//! Mso40UIwin32client.dll and Mso98win32client.dll) delay-loads eleven
+//! more by ordinal, and `office` asks those of a machine where the
+//! product, component and feature named are not installed:
+//! - the ordinals: #37 MsiEnumClientsW, #65 MsiGetProductCodeA, #66
+//!   MsiGetProductCodeW, #82 MsiGetUserInfoW, #109
+//!   MsiProvideQualifiedComponentW, #111 MsiQueryFeatureStateW, #129
+//!   MsiReinstallFeatureW, #137 MsiSetExternalUIW, #155 MsiUseFeatureW,
+//!   #172 MsiGetComponentPathA, #193 MsiUseFeatureExW;
+//! - MsiSetExternalUIW returns the handler set before it, NULL in a
+//!   process that has set none, and takes the handler away when given
+//!   NULL; the message filter and the context are kept with it and
+//!   nothing is called back until an install runs;
+//! - MsiQueryFeatureStateW, MsiUseFeatureW and MsiUseFeatureExW:
+//!   INSTALLSTATE_INVALIDARG without a product or a feature and for a
+//!   product that is not a braced GUID, INSTALLSTATE_UNKNOWN for a
+//!   product not installed; MsiUseFeatureExW's install mode must be
+//!   INSTALLMODE_NODETECTION, and INSTALLMODE_EXISTING (which
+//!   MsiProvideQualifiedComponentExW takes) is INSTALLSTATE_INVALIDARG;
+//! - MsiGetUserInfoW: USERINFOSTATE_INVALIDARG without a product, for a
+//!   malformed one, or without the three sizes, USERINFOSTATE_UNKNOWN
+//!   for a product not installed;
+//! - MsiEnumClientsW: ERROR_INVALID_PARAMETER without a component or a
+//!   buffer, ERROR_UNKNOWN_COMPONENT for a component not installed;
+//! - MsiGetProductCodeW and MsiGetProductCodeA:
+//!   ERROR_INVALID_PARAMETER without a component or a buffer,
+//!   ERROR_UNKNOWN_COMPONENT for a component not installed;
+//! - MsiReinstallFeatureW: ERROR_INVALID_PARAMETER without a product or
+//!   a feature, ERROR_UNKNOWN_PRODUCT for a product not installed (a
+//!   reinstall of an installed one is not asked for here: Windows would
+//!   do it);
+//! - MsiProvideQualifiedComponentW: ERROR_UNKNOWN_COMPONENT for a
+//!   component not installed, ERROR_INVALID_PARAMETER without one;
+//! - MsiGetComponentPathA answers as the W form does.
+//!
 //! Reading a database is in `db`, over a fixture this program writes
 //! beside its own image (`user/galapkg/testdata/msi/basic.msi`, built
 //! with wixl and checked in), so the one program asks Windows and gala
@@ -141,6 +176,62 @@ unsafe extern "system" {
         data: *mut u16,
         data_size: *mut u32,
     ) -> u32;
+    fn MsiEnumClientsW(component: *const u16, index: u32, product: *mut u16) -> u32;
+    fn MsiGetProductCodeW(component: *const u16, product: *mut u16) -> u32;
+    fn MsiGetProductCodeA(component: *const u8, product: *mut u8) -> u32;
+    fn MsiGetUserInfoW(
+        product: *const u16,
+        user: *mut u16,
+        user_size: *mut u32,
+        organization: *mut u16,
+        organization_size: *mut u32,
+        serial: *mut u16,
+        serial_size: *mut u32,
+    ) -> i32;
+    fn MsiProvideQualifiedComponentW(
+        component: *const u16,
+        qualifier: *const u16,
+        mode: u32,
+        path: *mut u16,
+        size: *mut u32,
+    ) -> u32;
+    fn MsiQueryFeatureStateW(product: *const u16, feature: *const u16) -> i32;
+    fn MsiReinstallFeatureW(product: *const u16, feature: *const u16, mode: u32) -> u32;
+    fn MsiSetExternalUIW(
+        handler: Option<UiHandler>,
+        filter: u32,
+        context: *mut u8,
+    ) -> Option<UiHandler>;
+    fn MsiUseFeatureW(product: *const u16, feature: *const u16) -> i32;
+    fn MsiUseFeatureExW(product: *const u16, feature: *const u16, mode: u32, reserved: u32) -> i32;
+    fn MsiGetComponentPathA(
+        product: *const u8,
+        component: *const u8,
+        path: *mut u8,
+        size: *mut u32,
+    ) -> i32;
+}
+
+/// An INSTALLUI_HANDLERW: what MsiSetExternalUIW is given and gives back.
+/// Nothing calls it here (no install runs), so the two below are only
+/// addresses to tell apart.
+type UiHandler = extern "system" fn(context: *mut u8, message: u32, record: *const u16) -> i32;
+
+/// Two handlers with bodies of their own, so the linker cannot fold them
+/// into one address (what they return is never read: no install runs).
+#[inline(never)]
+extern "system" fn first_handler(_: *mut u8, _: u32, _: *const u16) -> i32 {
+    0
+}
+
+#[inline(never)]
+extern "system" fn second_handler(_: *mut u8, _: u32, _: *const u16) -> i32 {
+    1
+}
+
+/// A handler as a number, to compare with another: 0 for none.
+fn handler_address(handler: Option<UiHandler>) -> u64 {
+    handler.map_or(0, |f| f as usize as u64)
 }
 
 const ERROR_SUCCESS: u32 = 0;
@@ -164,6 +255,16 @@ const INSTALLUILEVEL_DEFAULT: u32 = 1;
 const INSTALLUILEVEL_NONE: u32 = 2;
 const INSTALLUILEVEL_FULL: u32 = 5;
 const INSTALLMODE_EXISTING: u32 = -1i32 as u32;
+const INSTALLMODE_NODETECTION: u32 = -2i32 as u32;
+const USERINFOSTATE_INVALIDARG: i32 = -2;
+const USERINFOSTATE_UNKNOWN: i32 = -1;
+/// INSTALLLOGMODE_FATALEXIT | ERROR | WARNING | USER | INFO: a filter a
+/// handler would be called with, kept with it and never used here.
+const INSTALL_LOG_MODE: u32 = 0x3e;
+/// REINSTALLMODE_FILEMISSING | MACHINEDATA | USERDATA | SHORTCUT: what a
+/// program asks a reinstall for; the product is not installed, so nothing
+/// is reinstalled.
+const REINSTALLMODE: u32 = 0x2 | 0x40 | 0x80 | 0x100;
 
 /// The persistence modes: a small integer passed where a string pointer
 /// goes, standing for a mode and not a path (msiquery.h), so an address
@@ -293,6 +394,15 @@ fn wide<const N: usize>(text: &str) -> [u16; N] {
     out
 }
 
+/// `text` as a NUL-terminated ANSI string.
+fn ansi<const N: usize>(text: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    for (slot, b) in out.iter_mut().zip(text.bytes()) {
+        *slot = b;
+    }
+    out
+}
+
 /// A NUL-terminated path: `directory` itself, or `tail` inside it.
 /// `directory` carries no separator of its own; None if the result
 /// would not fit in `N` units, the NUL included.
@@ -313,15 +423,16 @@ fn path_in<const N: usize>(directory: &[u16], tail: Option<&str>) -> Option<[u16
     Some(out)
 }
 
-/// The eleven ordinals setup.exe and integrator.exe import by name here:
+/// The ordinals setup.exe, integrator.exe and Word's mso chain import:
 /// GetProcAddress by ordinal is the export of that name.
 fn ordinals(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: a NUL-terminated name.
     let module = unsafe { LoadLibraryW(wide::<8>("msi.dll").as_ptr()) };
     // SAFETY: plain call.
     c.ok(module != 0, u64::from(unsafe { GetLastError() }))?;
-    let named: [(u16, &core::ffi::CStr); 11] = [
+    let named: [(u16, &core::ffi::CStr); 22] = [
         (8, c"MsiCloseHandle"),
+        (37, c"MsiEnumClientsW"),
         (39, c"MsiEnumComponentQualifiersW"),
         (45, c"MsiEnumProductsW"),
         (88, c"MsiInstallProductW"),
@@ -332,6 +443,16 @@ fn ordinals(c: &mut Checks) -> Result<(), u32> {
         (173, c"MsiGetComponentPathW"),
         (190, c"MsiConfigureProductExW"),
         (203, c"MsiProvideQualifiedComponentExW"),
+        (65, c"MsiGetProductCodeA"),
+        (66, c"MsiGetProductCodeW"),
+        (82, c"MsiGetUserInfoW"),
+        (109, c"MsiProvideQualifiedComponentW"),
+        (111, c"MsiQueryFeatureStateW"),
+        (129, c"MsiReinstallFeatureW"),
+        (137, c"MsiSetExternalUIW"),
+        (155, c"MsiUseFeatureW"),
+        (172, c"MsiGetComponentPathA"),
+        (193, c"MsiUseFeatureExW"),
     ];
     for (ordinal, name) in named.into_iter().chain(db::ORDINALS) {
         // SAFETY: a loaded module; an ordinal (MAKEINTRESOURCE) and a name.
@@ -555,6 +676,220 @@ fn components(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// What Word's shared code (the mso chain) delay-loads: the external UI
+/// handler, the feature queries, the user information, a component's
+/// clients and product, and the ANSI forms of two functions the W side
+/// already has. Nothing here is installed, which is what makes these
+/// answers safe to ask of the host's own Windows as well as of gala.
+fn office(c: &mut Checks) -> Result<(), u32> {
+    let product = wide::<39>(PRODUCT);
+    let component = wide::<39>(COMPONENT);
+    let feature = wide::<8>("Feature");
+    let garbage = wide::<8>("garbage");
+    let empty = [0u16; 1];
+    let qualifier = wide::<10>("qualifier");
+    let mut path = [0u16; 260];
+    let mut size;
+    // SAFETY: documented calls with our arguments.
+    unsafe {
+        // The external UI handler: given back the next time, and taken
+        // away by a NULL one. A process has none to begin with.
+        c.eq(
+            handler_address(MsiSetExternalUIW(Some(first_handler), INSTALL_LOG_MODE, null_mut())),
+            0,
+        )?;
+        c.eq(
+            handler_address(MsiSetExternalUIW(Some(second_handler), INSTALL_LOG_MODE, null_mut())),
+            first_handler as UiHandler as usize as u64,
+        )?;
+        c.eq(
+            handler_address(MsiSetExternalUIW(None, 0, null_mut())),
+            second_handler as UiHandler as usize as u64,
+        )?;
+        c.eq(handler_address(MsiSetExternalUIW(None, 0, null_mut())), 0)?;
+
+        // The features of a product nothing installed.
+        c.state(MsiQueryFeatureStateW(null(), feature.as_ptr()), INSTALLSTATE_INVALIDARG)?;
+        c.state(MsiQueryFeatureStateW(product.as_ptr(), null()), INSTALLSTATE_INVALIDARG)?;
+        c.state(
+            MsiQueryFeatureStateW(garbage.as_ptr(), feature.as_ptr()),
+            INSTALLSTATE_INVALIDARG,
+        )?;
+        c.state(MsiQueryFeatureStateW(product.as_ptr(), feature.as_ptr()), INSTALLSTATE_UNKNOWN)?;
+        c.state(MsiUseFeatureW(null(), feature.as_ptr()), INSTALLSTATE_INVALIDARG)?;
+        c.state(MsiUseFeatureW(product.as_ptr(), null()), INSTALLSTATE_INVALIDARG)?;
+        c.state(MsiUseFeatureW(product.as_ptr(), feature.as_ptr()), INSTALLSTATE_UNKNOWN)?;
+        // The Ex form takes an install mode, and measured on Windows it
+        // is the one place these calls differ: INSTALLMODE_EXISTING, which
+        // MsiProvideQualifiedComponentExW takes, is INSTALLSTATE_INVALIDARG
+        // here, while INSTALLMODE_NODETECTION -- the mode msiquery.h
+        // documents for it -- answers for the product as the plain form
+        // does.
+        c.state(
+            MsiUseFeatureExW(product.as_ptr(), feature.as_ptr(), INSTALLMODE_EXISTING, 0),
+            INSTALLSTATE_INVALIDARG,
+        )?;
+        c.state(
+            MsiUseFeatureExW(product.as_ptr(), feature.as_ptr(), INSTALLMODE_NODETECTION, 0),
+            INSTALLSTATE_UNKNOWN,
+        )?;
+        c.state(
+            MsiUseFeatureExW(null(), feature.as_ptr(), INSTALLMODE_NODETECTION, 0),
+            INSTALLSTATE_INVALIDARG,
+        )?;
+        c.eq(
+            MsiReinstallFeatureW(null(), feature.as_ptr(), REINSTALLMODE).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiReinstallFeatureW(product.as_ptr(), null(), REINSTALLMODE).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiReinstallFeatureW(product.as_ptr(), feature.as_ptr(), REINSTALLMODE).into(),
+            ERROR_UNKNOWN_PRODUCT.into(),
+        )?;
+
+        // Who the product was registered to.
+        let (mut user, mut organization, mut serial) = ([0u16; 64], [0u16; 64], [0u16; 64]);
+        let (mut user_size, mut organization_size, mut serial_size) = (64u32, 64u32, 64u32);
+        c.state(
+            MsiGetUserInfoW(
+                null(),
+                user.as_mut_ptr(),
+                &mut user_size,
+                organization.as_mut_ptr(),
+                &mut organization_size,
+                serial.as_mut_ptr(),
+                &mut serial_size,
+            ),
+            USERINFOSTATE_INVALIDARG,
+        )?;
+        c.state(
+            MsiGetUserInfoW(
+                garbage.as_ptr(),
+                user.as_mut_ptr(),
+                &mut user_size,
+                organization.as_mut_ptr(),
+                &mut organization_size,
+                serial.as_mut_ptr(),
+                &mut serial_size,
+            ),
+            USERINFOSTATE_INVALIDARG,
+        )?;
+        c.state(
+            MsiGetUserInfoW(
+                product.as_ptr(),
+                user.as_mut_ptr(),
+                &mut user_size,
+                organization.as_mut_ptr(),
+                &mut organization_size,
+                serial.as_mut_ptr(),
+                &mut serial_size,
+            ),
+            USERINFOSTATE_UNKNOWN,
+        )?;
+        // A buffer whose size it was not given is refused.
+        c.state(
+            MsiGetUserInfoW(
+                product.as_ptr(),
+                user.as_mut_ptr(),
+                null_mut(),
+                organization.as_mut_ptr(),
+                &mut organization_size,
+                serial.as_mut_ptr(),
+                &mut serial_size,
+            ),
+            USERINFOSTATE_INVALIDARG,
+        )?;
+
+        // A component's clients and the product that installed it.
+        let mut client = [0u16; 39];
+        c.eq(
+            MsiEnumClientsW(null(), 0, client.as_mut_ptr()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiEnumClientsW(component.as_ptr(), 0, null_mut()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiEnumClientsW(component.as_ptr(), 0, client.as_mut_ptr()).into(),
+            ERROR_UNKNOWN_COMPONENT.into(),
+        )?;
+        c.eq(
+            MsiGetProductCodeW(null(), client.as_mut_ptr()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiGetProductCodeW(component.as_ptr(), null_mut()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiGetProductCodeW(empty.as_ptr(), client.as_mut_ptr()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiGetProductCodeW(component.as_ptr(), client.as_mut_ptr()).into(),
+            ERROR_UNKNOWN_COMPONENT.into(),
+        )?;
+
+        // A qualified component without the product the Ex form takes.
+        size = 260;
+        c.eq(
+            MsiProvideQualifiedComponentW(
+                null(),
+                qualifier.as_ptr(),
+                INSTALLMODE_EXISTING,
+                path.as_mut_ptr(),
+                &mut size,
+            )
+            .into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        c.eq(
+            MsiProvideQualifiedComponentW(
+                component.as_ptr(),
+                qualifier.as_ptr(),
+                INSTALLMODE_EXISTING,
+                path.as_mut_ptr(),
+                &mut size,
+            )
+            .into(),
+            ERROR_UNKNOWN_COMPONENT.into(),
+        )?;
+
+        // The ANSI forms: the same answers, asked with narrow strings.
+        let (product_a, component_a) = (ansi::<39>(PRODUCT), ansi::<39>(COMPONENT));
+        let mut product_code = [0u8; 39];
+        c.eq(
+            MsiGetProductCodeA(component_a.as_ptr(), product_code.as_mut_ptr()).into(),
+            ERROR_UNKNOWN_COMPONENT.into(),
+        )?;
+        c.eq(
+            MsiGetProductCodeA(null(), product_code.as_mut_ptr()).into(),
+            ERROR_INVALID_PARAMETER.into(),
+        )?;
+        let mut narrow_path = [0u8; 260];
+        size = 260;
+        c.state(
+            MsiGetComponentPathA(
+                product_a.as_ptr(),
+                component_a.as_ptr(),
+                narrow_path.as_mut_ptr(),
+                &mut size,
+            ),
+            INSTALLSTATE_UNKNOWN,
+        )?;
+        c.eq(size.into(), 260)?;
+        c.state(
+            MsiGetComponentPathA(null(), component_a.as_ptr(), narrow_path.as_mut_ptr(), &mut size),
+            INSTALLSTATE_INVALIDARG,
+        )?;
+    }
+    Ok(())
+}
+
 /// MsiOpenDatabaseW (#92), which integrator.exe imports: no database
 /// opens here. Windows gives the same answer for a path that is not
 /// there and for a file that is not an installer database, whichever
@@ -689,6 +1024,7 @@ fn run() -> Result<(), u32> {
     handles_and_ui(&mut c)?;
     products(&mut c)?;
     components(&mut c)?;
+    office(&mut c)?;
     databases(&mut c)?;
     installs(&mut c)?;
     db::reading(&mut c)?;

@@ -228,7 +228,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD runs its own code, whose dbghelp and oart load now, so wwlib is the one library left: it is short nine imports the loader names, and Word exits 1 (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen, then raises 0xe0000002 unhandled 29 s in, after no rendering device answered it (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1276,9 +1276,11 @@ server; paravirtual hardware next; vendor GPU drivers (WDDM) never in
 the kernel.
 
 **Done so far**:
-- G0: `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as stubs failing
-  with DXGI_ERROR_UNSUPPORTED (outputs NULL, each call in the ledger);
-  `gpu_stub_test`; Chromium's GPU process takes it as "no GPU".
+- G0: `dxgi.dll`, `d3d10.dll`, `d3d10_1.dll`, `d3d11.dll`, `d3d12.dll`,
+  `dcomp.dll` as stubs failing with DXGI_ERROR_UNSUPPORTED (outputs
+  NULL, each call in the ledger); `gpu_stub_test`; Chromium's GPU
+  process takes it as "no GPU", and Office's shared code can bind the
+  Direct3D 10 entry points it delay-loads (ROADMAP OF).
 - G1, virtio-gpu 2D: the modern virtio-pci transport, the driver over a
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
@@ -1789,9 +1791,9 @@ need gala's.
    brightest) and the active window's pill on the taskbar, which the
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
-   Neither run draws a window yet. Word's ends with WINWORD.EXE
-   exiting with status 0 after 29 s, where the ladder below has got
-   to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   Neither run draws the window its check wants yet. Word's puts an
+   untitled window on the screen and ends with WINWORD.EXE raising
+   0xe0000002 after 29 s, where the ladder below has got to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's
@@ -1870,9 +1872,9 @@ need gala's.
      unmarshal side dropped the referents that a deferred referent
      defers itself, where the marshal side wrote them.
      WINWORD.EXE runs its own code and loads Word: it maps WWLIB.DLL
-     (59 MiB) and OART.DLL, runs 27 s and exits with status 0, where it
-     ended at 0xC0000142 before reaching them and at status 1 when
-     wwlib's own imports would not bind. The nine imports wwlib was
+     (59 MiB) and OART.DLL, where it ended at 0xC0000142 before
+     reaching them and at status 1 when wwlib's own imports would not
+     bind. The nine imports wwlib was
      short of are implemented, each measured on Windows first:
      kernel32's NormalizeString and IsNormalizedString (which normaliz
      forwards here too), EnumSystemLanguageGroupsW and EnumUILanguagesW
@@ -1930,11 +1932,32 @@ need gala's.
      and the three that wanted the kernel -- PulseEvent (NtPulseEvent,
      "Synchronization objects"), GetSystemFirmwareTable (the machine's
      SMBIOS table from the boot protocol, "Firmware tables") and
-     SetFileShortNameW (8.3 names in the ramfs, "Files"). Next is
-     `office_word` rerun on them;
+     SetFileShortNameW (8.3 names in the ramfs, "Files");
      mso40uiwin32client and mso50win32client name nothing of their own,
-     so they bind as soon as the chain does, and MSPTLS.DLL and
-     `1033\OSFINTL.DLL` are what Word loads next on Windows.
+     so they bind as soon as the chain does.
+     With the chain bound, Word loads Office's shared code and its
+     resources -- MSO40UIRES, MSO99LRES and MSORES (81 MiB) -- and puts
+     a window on the screen, untitled, 29 s in. Two delay loads ended
+     it before that, each over a DLL whose exports have to exist
+     whatever they answer (one that resolves to nothing ends the
+     process before any handler runs): msi.dll, short eleven functions the shared
+     code binds by ordinal (0xc06d007f over ordinal 137), and
+     d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
+     implemented, each answer measured on Windows first (`msi_test`,
+     `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
+     What stops Word now is a raise of its own. It asks for a
+     rendering device and gala has none (GPU G0): d2d1's factory
+     refuses ID2D1Factory1 and ID2D1Factory2 (E_NOINTERFACE),
+     D3D11CreateDevice fails once and D3D10CreateDevice1 twenty times
+     (DXGI_ERROR_UNSUPPORTED, no adapter). Then, in Word's
+     international code (WWINTL.DLL) under mso30win32client, it calls
+     RaiseException with 0xe0000002 -- Office's own code, software
+     originated and continuable -- which no handler in the process
+     takes, and the process ends with that status. Whether the two are
+     one failure is not yet known: the crash report names the code but
+     not the parameters the raise carries, which is what would say
+     what Word is refusing to go on without. Naming them is the next
+     step, ahead of guessing at a device.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew
