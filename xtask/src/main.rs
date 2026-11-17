@@ -11062,7 +11062,9 @@ fn make_iso_unchecked(
     // aarch64's event stream: a host file the kernel writes through
     // semihosting (`arch::aarch64::debugcon`), the one x86-64's debugcon
     // device writes (`<image>.events.jsonl`, beside the image).
-    let cmdline = if aarch64_image(name) {
+    // Test images only: a downloadable one (`iso`, gala-*) names no file
+    // of the machine that made it.
+    let cmdline = if aarch64_image(name) && !name.starts_with("gala-") {
         let events = out.join(format!("{name}.events.jsonl"));
         format!("{cmdline} events_file={}", events.display())
     } else {
@@ -12603,9 +12605,12 @@ fn shipped_program(file: &str) -> Option<&'static str> {
 /// Whether the image `name` (`test-<scenario>`, or `batch-<first
 /// scenario>` for a shared VM) is the aarch64 kernel's.
 fn aarch64_image(name: &str) -> bool {
-    name.strip_prefix("test-")
-        .or_else(|| name.strip_prefix("batch-"))
-        .is_some_and(is_aarch64_scenario)
+    // `cargo xtask iso --arch aarch64`'s images are named gala-aarch64*.
+    name.starts_with("gala-aarch64")
+        || name
+            .strip_prefix("test-")
+            .or_else(|| name.strip_prefix("batch-"))
+            .is_some_and(is_aarch64_scenario)
 }
 
 fn single_thread_tcg(name: &str) -> bool {
@@ -27898,24 +27903,37 @@ mod release_tree_tests {
 /// What `cargo xtask iso` runs without a command line: a few programs that
 /// show the C runtime-free, Rust and Go layers on any machine.
 const DEMO_CMDLINE: &str = "run=hello.exe,go_hello.exe,go_goroutines.exe";
+/// aarch64's demo (`iso --arch aarch64`): the desktop on the kernel's
+/// virtio-gpu (QEMU `virt`'s firmware gives no framebuffer), hello.exe's
+/// ARM64 build (the Go programs are x64's).
+const DEMO_CMDLINE_AARCH64: &str = "display=virtio run=hello.exe";
 
-/// `cargo xtask iso [--name N] [--scenario S] [--file PATH[=DIR]]...
-/// [kernel cmdline...]`: a bootable hybrid ISO (BIOS and UEFI; written as
-/// is to a USB stick, it boots too) with every program and DLL, `S`'s
+/// `cargo xtask iso [--arch x86_64|aarch64] [--name N] [--scenario S]
+/// [--file PATH[=DIR]]... [kernel cmdline...]`: a bootable hybrid ISO
+/// (BIOS and UEFI; written as is to a USB stick, it boots too; aarch64's
+/// for UEFI, QEMU `virt`, DEMO_CMDLINE_AARCH64) with every program and DLL, `S`'s
 /// files, the host files given, and the command line (`S`'s, or
 /// DEMO_CMDLINE if none). Prints where it is.
 fn iso(release: bool, args: &[String]) -> Result {
-    let mut name = String::from("demo");
+    let mut name: Option<String> = None;
     let mut cmdline = Vec::new();
     let mut scenario: Option<String> = None;
+    let mut aarch64 = false;
     // --file PATH[=DIR]: a file of the host's, as C:\DIR\<its name> (DIR
     // gala by default).
     let mut files: Vec<(String, String)> = Vec::new();
     let mut it = args.iter().filter(|a| *a != "--release");
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--name" => name = it.next().ok_or("--name needs a value")?.clone(),
+            "--name" => name = Some(it.next().ok_or("--name needs a value")?.clone()),
             "--scenario" => scenario = Some(it.next().ok_or("--scenario needs a name")?.clone()),
+            // The image's machine: x86_64 (the default) or aarch64 (QEMU
+            // `virt`: the aarch64 kernel, the ARM64 builds).
+            "--arch" => match it.next().map(String::as_str) {
+                Some("x86_64") => aarch64 = false,
+                Some("aarch64") => aarch64 = true,
+                other => return Err(format!("--arch: x86_64 or aarch64, not {other:?}")),
+            },
             "--file" => {
                 let spec = it.next().ok_or("--file needs a path")?;
                 let (path, dir) = spec.split_once('=').unwrap_or((spec, "gala"));
@@ -27926,18 +27944,38 @@ fn iso(release: bool, args: &[String]) -> Result {
         }
     }
     if cmdline.is_empty() && scenario.is_none() {
-        cmdline.push(DEMO_CMDLINE);
+        cmdline.push(if aarch64 { DEMO_CMDLINE_AARCH64 } else { DEMO_CMDLINE });
     }
+    // An aarch64 image's name starts gala-aarch64 (`aarch64_image`).
+    let name = match (name, aarch64) {
+        (Some(n), true) => format!("aarch64-{n}"),
+        (Some(n), false) => n,
+        (None, true) => "aarch64".to_string(),
+        (None, false) => "demo".to_string(),
+    };
     if let Some(s) = scenario.as_deref().filter(|_| cmdline.is_empty()) {
         // The scenario's own command line, without the test-only exit.
         let found = scenarios().iter().find(|x| x.name == s).ok_or(format!("no scenario {s:?}"))?;
         cmdline.extend(found.cmdline.split_whitespace().filter(|w| *w != "qemu_exit"));
+    }
+    if aarch64 {
+        build_kernel_aarch64(release)?;
     }
     build_kernel(release)?;
     let mut modules: Vec<(&str, &str)> = image_modules(&cmdline, scenario.as_deref())?;
     modules.extend(files.iter().map(|(path, dir)| (path.as_str(), dir.as_str())));
     let path = make_iso(release, &format!("gala-{name}"), &cmdline.join(" "), &modules)?;
     println!("xtask: wrote {} (kernel command line: {})", path.display(), cmdline.join(" "));
+    if aarch64 {
+        println!(
+            "xtask: QEMU: qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 1G -smp 2 \
+             -bios <AAVMF/edk2-aarch64 code> -device virtio-gpu-pci -device virtio-keyboard-pci \
+             -device virtio-mouse-pci -device virtio-scsi-pci -drive \
+             if=none,id=cd,media=cdrom,file={} -device scsi-cd,drive=cd",
+            path.display()
+        );
+        return Ok(());
+    }
     println!("xtask: QEMU: qemu-system-x86_64 -cpu max -m 1G -smp 2 -cdrom {}", path.display());
     println!(
         "xtask: USB stick (erases it): sudo dd if={} of=/dev/sdX bs=4M conv=fsync",
