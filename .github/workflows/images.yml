@@ -1,7 +1,7 @@
 name: Images
 
-# Downloadable boot images (WORKFLOW "Downloadable images"): after each
-# green CI run on main, the desktop demo (`cargo xtask iso`) is built for
+# Downloadable boot images (WORKFLOW "Downloadable images"): nightly, main's
+# latest commit whose CI passed, the desktop demo (`cargo xtask iso`) built for
 # x86_64 (a hybrid BIOS/UEFI ISO, also for a USB stick) and for aarch64
 # (UEFI, QEMU `virt`) and uploaded to the R2 bucket under images/latest/,
 # overwriting the previous build (only the latest is kept): each image with
@@ -10,20 +10,22 @@ name: Images
 # https://updates.gala-os.com/images/latest/.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  schedule:
+    # Nightly, off-peak (02:23 UTC); a night with no new green commit
+    # builds nothing (the commit check below).
+    - cron: "23 2 * * *"
   workflow_dispatch:
 
 # A newer build replaces an older one still running (only the latest is
-# kept); the head check below also keeps an older run from uploading last.
+# kept).
 concurrency:
   group: images
   cancel-in-progress: true
 
 permissions:
   contents: read
+  # Which of main's commits CI passed on (gh run list).
+  actions: read
 
 env:
   # R2's S3 API (the aws CLI reads these), as release.yml.
@@ -36,14 +38,8 @@ env:
 
 jobs:
   image:
-    # CI passed on a push to main (not a pull request whose branch is
-    # called main), or a manual run from main.
-    if: >-
-      (github.event_name == 'workflow_run'
-        && github.event.workflow_run.conclusion == 'success'
-        && github.event.workflow_run.event == 'push'
-        && github.event.workflow_run.head_repository.full_name == github.repository)
-      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    # The schedule (main), or a manual run from main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     # The bucket's credentials, as release.yml's.
     environment: release
@@ -54,23 +50,37 @@ jobs:
         arch: [x86_64, aarch64]
     name: image (${{ matrix.arch }})
     env:
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       # No incremental data (the host's xtask): smaller build caches.
       CARGO_INCREMENTAL: "0"
     steps:
+      # The commit to build: main's newest whose CI passed on a push (a red
+      # main never replaces a good image); none to build when the bucket's
+      # image is that commit's already.
+      - name: Main's latest green commit, unless already built
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --event push --status success --limit 1 --json headSha --jq '.[0].headSha')
+          if [ -z "$sha" ]; then
+            echo "::error::no green CI run on main found"
+            exit 1
+          fi
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+          built=$(curl -sSfL "$IMAGES_URL/gala-${{ matrix.arch }}.commit" 2>/dev/null || true)
+          if [ "$built" = "$sha" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::gala-${{ matrix.arch }}.iso is $sha's already: nothing to build"
+            echo "Not built: the image is already $sha's." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "Building $sha (the image was ${built:-none})." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/checkout@v4
+        if: steps.head.outputs.current == 'true'
         with:
           ref: ${{ env.SHA }}
-      - name: Only main's head is built
-        id: head
-        run: |
-          main=$(git ls-remote origin refs/heads/main | cut -f1)
-          if [ "$main" = "$SHA" ]; then
-            echo "current=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::$SHA is not main's head ($main): its run builds the images instead"
-          fi
       - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
         if: steps.head.outputs.current == 'true'
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
