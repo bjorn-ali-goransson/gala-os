@@ -94,7 +94,7 @@ In order, after it:
    milestone 2's rest (busybox runs; threads, futex, fs_test's links
    done) as filler.
 3. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
-   screen checks through SESSION_INPUT); then B3b's remote presenter.
+   screen checks through SESSION_INPUT); then B3b, the RDP server.
 4. **WOW** follow-ups (done otherwise): the x86 Inno runs' other ledger
    gaps; kernel32_test built for x86.
 5. **R**: R7's next part (network frames, disk reads and input in
@@ -233,7 +233,7 @@ has a section under "Open items".
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b, the RDP server, next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
@@ -254,7 +254,7 @@ has a section under "Open items".
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
-| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree; next OT6's one query path for every session (`xtask observe`, `xtask query`) |
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
@@ -817,7 +817,7 @@ switches to it from the taskbar (UIA), kills the shell and sees it
 restarted; `profile=server` starts no shell.
 
 **Design**: ARCHITECTURE "Windows on the screen" (shasha), "Server and
-desktop workloads", "Plan: sessions and remote shasha" (presenters).
+desktop workloads", "Plan: sessions and remote desktops" (presenters).
 
 ### AI. An AI-enabled start menu
 
@@ -1189,8 +1189,9 @@ LX seam 1.
 ### RS. Remote access and sessions
 
 **Goal**: sessions own desktops; a desktop is shown by a presenter
-(console, remote shasha client, none, test); remote users get their
-own session and shell.
+(console, an RDP client, none, test); remote users get their own
+session and shell, reached with the Remote Desktop clients they
+already have (mstsc, the Windows App, FreeRDP).
 
 **Done so far**:
 - A: SSH steps 1-2 (item SSH).
@@ -1253,9 +1254,18 @@ own session and shell.
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
    desktops with windows of their own; UOI_USER_SID; atoms per station
    (the clipboard is the station's: LD step 3).
-2. B3b: remote shasha: the compositor as a crate that also builds for
-   the host, a versioned protocol, the server end (also in the server
-   kernel, which has no compositor), a host client (winit).
+2. B3b: the RDP server (ARCHITECTURE "Plan: sessions and remote
+   desktops"): a session-0 service on TCP 3389 presenting a session's
+   desktop through GalaSession, from Microsoft's Open Specifications
+   ([MS-RDPBCGR] first) with IronRDP's crates where they fit; TLS
+   through Schannel's server side and network level authentication
+   (CredSSP) through secur32's NTLM server side, whose interoperability
+   with Windows is proven here. First a whole desktop (planar and
+   bitmap updates, fast-path input, disconnect and reconnect,
+   resizing); then the graphics pipeline, clipboard, RemoteApp (the
+   server profile's GUI programs as windows on the client), audio,
+   drives. Test first: an xtask client from the host through a
+   forwarded port; mstsc in the Windows test lab as the reference.
 3. B4: a session manager, `wtsapi32` (only WTSGetActiveConsoleSessionId
    exists), `gala sessions/logoff/disconnect` (`gala attach` exists, for
    SeTcbPrivilege holders: B4 decides who may attach where), a user per
@@ -1268,17 +1278,21 @@ own session and shell.
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
-5. Later: several desktops per session, a secure desktop, the
-   clipboard over the remote protocol, seamless windows, RDP proper. Interim, with no gala work: QEMU's
-   `-vnc`.
+5. Later: several desktops per session, a secure desktop; H.264 in
+   RDP's graphics pipeline (an encoder and its licence); remote shasha,
+   gala's own protocol (the server owning window state, the client the
+   chrome), only if a need RDP cannot carry is shown (a GUI kept across
+   a handover with no visible reconnect). Interim, with no gala work:
+   QEMU's `-vnc`.
 
-**Done when**: B3b: an xtask test client connects through a forwarded
-port, gets a test program's window (title, pixels), clicks, the program
+**Done when**: B3b: an RDP client (xtask's, then mstsc on real
+Windows) connects through a forwarded port with network level
+authentication, sees a test program's window, clicks, the program
 reports WM_LBUTTONDOWN at the right client coordinates, and a reconnect
-gets the same window back. B4: two remote clients each log on to their
-own session and shell.
+after a disconnect gets the same session back. B4: two remote clients
+each log on to their own session and shell.
 
-**Design**: ARCHITECTURE "Plan: sessions and remote shasha".
+**Design**: ARCHITECTURE "Plan: sessions and remote desktops".
 
 ### GPU. Graphics and GPU
 
@@ -5710,8 +5724,25 @@ among the slowest hand-offs.
    (OBSERVABILITY "Volume").
 5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
-   flows, samples); next a live view (`cargo xtask
-   observe`: streaming OTLP into a collector and Grafana's stack with
+   flows, samples). Next, one way to query a run for every session,
+   people's and agents' alike (OBSERVABILITY "Querying a run"):
+   otel-desktop-viewer pinned (recorded in THIRD_PARTY); every
+   boot-test, locally and in CI, leaving its run's DuckDB file beside
+   its log; `cargo xtask observe <scenario | file>` (the UI) and
+   `cargo xtask query <scenario | file> '<sql>' | --std <name>` (no UI);
+   named standard queries (errors by NTSTATUS, system calls by time
+   with p95, a span's subtree, slowest hand-offs, a thread's
+   timeline); then WORKFLOW's recipe moves to the commands and
+   CLAUDE.md points every session at them, with the rule that a
+   conclusion from a run's data quotes its query. Its first tests: the
+   commands on `events_ipc`, each standard query against known
+   answers. Its follow-ups, which make the data worth querying: a
+   metrics registry in the kernel (counters and histograms kept at the
+   source, OBSERVABILITY "Volume", instead of derived from events) and
+   kernel time accounting (TM's statistics; ThreadTimes returns zeros
+   today); a failure becoming span status wherever it happens, as
+   system calls' NTSTATUS does. After that a live view (`cargo xtask
+   observe --stack`: streaming OTLP into a collector and Grafana's stack with
    provisioned dashboards: overview, system (Task Manager's Performance
    tab: per-CPU user, kernel and interrupt time, per-process CPU and
    memory, from kernel time accounting that ThreadTimes and

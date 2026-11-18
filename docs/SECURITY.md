@@ -6,7 +6,7 @@ levels and UIPI.
 The implementation detail (layouts, the groups each token gets, every
 service's rules) is in ARCHITECTURE: "Access tokens", "Security
 descriptors", "Access checks", "Accounts and logon", "Windows across
-processes: UIPI", "Plan: sessions and remote shasha".
+processes: UIPI", "Plan: sessions and remote desktops".
 
 Clean-room sources: Microsoft's documentation (Access Control, the
 security descriptor and ACE formats, AccessCheck's algorithm, the SDDL

@@ -254,7 +254,7 @@ export const componentGroups: ComponentGroup[] = [
       {
         name: "Remote desktop",
         status: "planned",
-        what: "A session's desktop shown over the network, a session manager, and sessions carried across a handover.",
+        what: "A session's desktop over RDP, so Windows' own Remote Desktop clients connect to it, a session manager, and sessions carried across a handover.",
       },
     ],
   },
@@ -619,7 +619,7 @@ export const planned: Planned[] = [
   },
   {
     name: "A remote desktop",
-    what: "shasha presented over the network, on the sessions that already separate users",
+    what: "gala's desktop over RDP, reached with the Remote Desktop clients people already have (mstsc, the Windows App, FreeRDP), on the sessions that already separate users",
   },
   {
     name: "Docker and Podman",
