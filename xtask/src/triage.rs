@@ -593,7 +593,7 @@ statedump: locks: scheduler free, heap HELD, frames free, console free
 statedump: heap 881 KiB in use (peak 908 KiB, 207 large pages); frames free 121338 of 131072 (fewest free 1200)
 flight: 249135280 cpu 0 syscall 0x400000048 0x8 (NtCreateEvent pid 4 tid 8)
 flight: 251557318 cpu 0 syscall 0x400000004 0x8 (NtWaitForSingleObject pid 4 tid 8)
-flight: 251557319 cpu 1 syscall-done 0x4 0x102 (NtWaitForSingleObject status 0x00000102)
+flight: 251557319 cpu 1 syscall-done 0x800000004 0x102 (NtWaitForSingleObject status 0x00000102 tid 8)
 statedump: NMI part done; the threads follow from the boot thread if it still runs
 [info ] statedump: threads (NT, then scheduler), the ledger, the statistics:
 [info ] thread: pid 4 tid 8 (sched Some(ThreadId(5))) suspend 0 exited false in a system call true (java.exe)
