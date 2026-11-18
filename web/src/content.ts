@@ -641,6 +641,18 @@ export const planned: Planned[] = [
     name: "Sound and USB",
     what: "virtio-sound with WASAPI on top; xHCI with keyboards, mice and storage",
   },
+  {
+    name: "An installer",
+    what: "boot the USB image to the desktop and install gala onto the machine's disk, which then boots it by itself",
+  },
+  {
+    name: "Real laptops",
+    what: "disk, USB, network and power drivers, so a laptop runs gala and takes every update by itself",
+  },
+  {
+    name: "Virtual machines",
+    what: "QEMU running inside gala, then gala as the hypervisor behind Linux's /dev/kvm and the Windows Hypervisor Platform",
+  },
 ];
 
 // ---------------------------------------------------------------------------

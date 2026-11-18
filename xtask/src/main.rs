@@ -23060,8 +23060,17 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep {
             after: "taskmgr_test: sleep ended",
             // "sh", which ignores SIGTERM: SIGKILL after the grace time.
+            // The list `sleep` left looks the same (one Linux group, one
+            // row), so the row's name cell is blank right of "sh" and
+            // unselected, where "sleep" goes on and End task left it
+            // selected: the click below waits for this search, not the
+            // last one's screen.
             input: &["sendkey esc", "sendkey s", "sendkey h"],
-            pixels: &[TASKMGR_FILTERED, PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420)],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::Most(369, 229, 20, 18, 0xfbfbfb, 100),
+            ],
         },
         ScreenStep {
             after: "",

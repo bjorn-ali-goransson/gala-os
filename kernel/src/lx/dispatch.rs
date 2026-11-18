@@ -165,7 +165,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     }
     // An expired timer's SIGALRM is delivered with the others below.
     super::timer::fire(&call);
-    crate::flight::record(crate::flight::Kind::SyscallDone, number | crate::flight::LINUX, rax);
+    crate::flight::record(
+        crate::flight::Kind::SyscallDone,
+        number | crate::flight::LINUX | (tid << 32),
+        rax,
+    );
     let Call { process, lx, resume, .. } = call;
     frame.set_result(rax);
     let resume = resume.take();

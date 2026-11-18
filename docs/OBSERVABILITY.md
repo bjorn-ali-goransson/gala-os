@@ -622,16 +622,23 @@ Out-of-space errors on the way get the same hint.
 last 256 records, kept whether the event stream is on or not. A record
 is three words (time << 8 | kind, two values): one atomic increment and
 three stores. Kinds: `syscall` (number | pid << 32, thread id),
-`syscall-done` (number, status), `process-exit` (pid, status),
+`syscall-done` (number | thread id << 32, status), `process-exit` (pid, status),
 `watchdog` (the CPU found stuck). A Linux call's number carries bit 31
 (`flight::LINUX`) and is named from the machine's Linux table (x86-64's
 or aarch64's), an NT call's from NT's. Printed merged by time as
 `flight:` lines (service names, pid and tid on system calls) after a
 panic, in a watchdog report and in the state dump. A crash report reads
 the same records for the crashing thread alone, as the calls it made
-last (below): a thread's call and the `syscall-done` that follows it on
-the same CPU are its own, since a thread runs a call on the CPU it
-started it on.
+last (below). Invariant: a call's end is matched to it by thread id
+(and number), never by where it lies in a ring. A call that blocks or is
+preempted resumes on whichever CPU picks its thread, so its
+`syscall-done` can be on another CPU's ring, and other threads' records
+come between the two even on one CPU; pairing by position would show
+such a call `(no return yet)` although it returned, now and then (as
+the timing of a run decides). Each end, oldest first, closes the
+latest open call of its number that started before it, so the calls a
+callback makes end before the call it was made from (host unit tests in
+`flight.rs`).
 
 ### Hang watchdog
 
