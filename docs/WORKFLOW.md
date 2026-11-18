@@ -5079,7 +5079,19 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   is passed in the slot its position gives, and a call through a
   transmuted vtable slot must pass every argument (a missing trailing
   stroke style or opacity brush is garbage to the callee), and never a
-  `()` argument (it shifts the rest).
+  `()` argument (it shifts the rest). mingw-w64's **C** declarations of
+  those three say by value, which is wrong: a C test program calls them
+  through a pointer of its own (`d2d1_device_test`'s `pixel_size`), and
+  mingw's `d2d1_1.h` C convenience macros for inherited methods leave
+  out the `Base.` chain, so a C test reaches QueryInterface and Release
+  through `lpVtbl` itself.
+- **A vtable slot is counted from IUnknown, not from the interface**:
+  the index of a method is its position after QueryInterface, AddRef,
+  Release and everything the base interfaces declare
+  (ID2D1Bitmap::GetPixelSize is slot 5: IUnknown's three, GetFactory,
+  GetSize). One slot off calls the next method, which on x64 returns
+  without a crash and hands back a plausible answer -- GetPixelFormat's
+  {87, 1} read as a size is an 87 x 1 bitmap.
 - **Small integer LPCSTRs**: a store provider or structure type passed
   as `1 as *const u8` trips clippy's `manual_dangling_ptr`; write
   `core::ptr::without_provenance(1)`.

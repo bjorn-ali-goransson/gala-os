@@ -7740,6 +7740,36 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("d3d11_test", "user/bin/d3d11_test.exe", "gala"),
+    // d2d1_device_test (GPU G2): Direct2D on the program's own Direct3D
+    // 11 device, so it ships d3d11_test's stack (DXVK beside the program,
+    // the Vulkan stack in System32) plus gala's d2d1.dll.
+    ("d2d1_device_test", "ntdll.dll", "Windows/System32"),
+    ("d2d1_device_test", "kernel32.dll", "Windows/System32"),
+    ("d2d1_device_test", "msvcrt.dll", "Windows/System32"),
+    ("d2d1_device_test", "ucrtbase.dll", "Windows/System32"),
+    ("d2d1_device_test", "user32.dll", "Windows/System32"),
+    ("d2d1_device_test", "gdi32.dll", "Windows/System32"),
+    ("d2d1_device_test", "advapi32.dll", "Windows/System32"),
+    ("d2d1_device_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d2d1_device_test", "version.dll", "Windows/System32"),
+    ("d2d1_device_test", "setupapi.dll", "Windows/System32"),
+    ("d2d1_device_test", "cfgmgr32.dll", "Windows/System32"),
+    ("d2d1_device_test", "dxgi.dll", "Windows/System32"),
+    ("d2d1_device_test", "shell32.dll", "Windows/System32"),
+    ("d2d1_device_test", "shlwapi.dll", "Windows/System32"),
+    ("d2d1_device_test", "ole32.dll", "Windows/System32"),
+    ("d2d1_device_test", "d2d1.dll", "Windows/System32"),
+    (
+        "d2d1_device_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("d2d1_device_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("d2d1_device_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("d2d1_device_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -9420,6 +9450,31 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "ucrtbase.dll", "Windows/System32"),
     ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
     ("office_install", "user/office_install/config.xml", "gala"),
+    // office_word: a rendering device for Word (ROADMAP OF, GPU G2).
+    // DXVK's d3d11 and dxgi go beside WINWORD.EXE, the directory the
+    // loader searches before System32 (ARCHITECTURE "The module
+    // graph"), as a program that ships DXVK puts them (`d3d11_test`);
+    // System32's dxgi stays gala's, the one the Vulkan loader calls.
+    // The stack under it is the one `vk_test` uses: the Khronos loader
+    // and Mesa's lavapipe in System32, lavapipe registered.
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("office_word", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("office_word", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("office_word", "user/mesa/lavapipe.regseed", "registry"),
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
@@ -15168,6 +15223,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["d2d1_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Direct2D 1.1 on the program's own Direct3D 11 device
+        // (user/d2d1_device_test), which is how Word draws: an
+        // ID2D1Factory1 over the program's IDXGIDevice, a device context
+        // targeting a bitmap over the swap chain's DXGI surface, a frame
+        // drawn into it with the colours and geometry of d3d11_test's,
+        // read back through a staging texture and presented. The device
+        // is DXVK on lavapipe; Direct2D itself is gala's software
+        // rasterizer, so what it draws has to reach the DXGI surface.
+        name: "d2d1_device_test",
+        cmdline: "qemu_exit presenter=test run=d2d1_device_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d2d1_device_test: device llvmpipe",
+            "d2d1_device_test: read back 0x336699 0xffcc00",
+            "d2d1_device_test: presented",
+            "xtask: screen ok",
+            "d2d1_device_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // A window drawn with Direct2D through a window render target
         // (d2d1_test window; D2D1_WINDOW_SCREEN checks its pixels, then
         // q ends it). UEFI: a screen.
@@ -17525,7 +17601,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
-                  dump=C:/Users/Public,C:/Windows/Temp",
+                  dump=C:/Users/Public,C:/Windows/Temp,\
+                  C:/gala/winword_d3d11.log,C:/gala/winword_dxgi.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
@@ -18879,6 +18956,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("office_install_local", "office_install"),
     ("office_install_local", "office_install_local"),
     ("office_word", "office_install"),
+    ("office_word", "office_word"),
     ("office_excel", "office_install"),
     ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
@@ -23640,6 +23718,44 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     // BI_RGB (so BGRA) DIB without swizzling it. The
                     // window path itself is sound: vk_test, which asks for
                     // BGRA, gets its colours right through the same one.
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x996633),
+                        PixelCheck::At(101 + 199, 133 + 133, 0x00ccff),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x996633),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
+        // GPU G2: d2d1_device_test's frame, drawn by Direct2D into a
+        // bitmap over the swap chain's DXGI surface and presented through
+        // the same path as d3d11_test's, into the same 400 x 300 window at
+        // (100, 100), client 398 x 266 from (101, 133): the clear colour
+        // in the corner and below the rectangle, the rectangle's colour in
+        // the middle (it covers the client's middle half, from (99, 66) to
+        // (298, 199)); then a click there ends the program.
+        "d2d1_device_test",
+        ScreenCheck {
+            marker: "d2d1_device_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    // Red and blue arrive swapped, as in d3d11_test's
+                    // check: these are the swapped colours, a stopgap
+                    // expectation of Mesa's Win32 WSI GDI present path,
+                    // ROADMAP "Known issues and stopgaps".
                     pixels: &[
                         PixelCheck::At(101 + 4, 133 + 4, 0x996633),
                         PixelCheck::At(101 + 199, 133 + 133, 0x00ccff),

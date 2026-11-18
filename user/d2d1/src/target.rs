@@ -1,4 +1,4 @@
-//! Render targets: one object for the three kinds gala makes, told apart
+//! Render targets: one object for the four kinds gala makes, told apart
 //! by what backs their pixels.
 //!
 //! - WIC bitmap (CreateWicBitmapRenderTarget): the target draws into a
@@ -16,6 +16,13 @@
 //! - HWND (CreateHwndRenderTarget): a DIB section of the window's client
 //!   size (or the size asked for) kept between frames; EndDraw copies it
 //!   to the window's DC (GetDC, BitBlt).
+//! - A device context (ID2D1Device::CreateDeviceContext, Direct2D 1.1):
+//!   a buffer of its own, of the size of the ID2D1Bitmap1 SetTarget gave
+//!   it. BeginDraw fills it from that bitmap and EndDraw writes it back,
+//!   and through the bitmap into the DXGI surface it is over, if any
+//!   (`device`): that is how a frame drawn in software becomes a render
+//!   target of the program's own Direct3D 11 device. A context without a
+//!   target is 0 x 0 and its frames fail, as Direct2D's do.
 //!
 //! Drawing outside BeginDraw/EndDraw does nothing and makes the next
 //! EndDraw D2DERR_WRONG_STATE; EndDraw without BeginDraw is
@@ -29,17 +36,21 @@
 
 use alloc::vec::Vec;
 
-use crate::brush::{self, BitmapBrushProps, BitmapProps, BrushProps, Kind, Stop};
+use crate::brush::{
+    self, BITMAP_OPTION_TARGET, BitmapBrushProps, BitmapProps, BitmapProps1, BrushProps, Kind,
+    Options, Stop,
+};
+use crate::device;
 use crate::geometry::{self, Ellipse, Path, RoundedRect};
 use crate::raster::{self, Clip, IRect, Rgba, Surface};
 use crate::{
     ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ALPHA_STRAIGHT, ALPHA_UNKNOWN, ColorF, ComRef,
     D2DERR_PUSH_POP_UNBALANCED, D2DERR_UNSUPPORTED_PIXEL_FORMAT, D2DERR_WRONG_STATE,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, E_INVALIDARG,
-    E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_HWND_RENDER_TARGET,
-    IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF,
-    SizeU, Spin, VTable, add_ref, gap, get_factory, give, not_implemented, pt, push, put, query,
-    read, release_object, slot, vtable_of,
+    E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
+    IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj, PixelFormat, Point,
+    RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, com_add_ref, gap, get_factory, give,
+    not_implemented, pt, push, put, query, read, release_object, slot, vtable_of,
 };
 
 #[link(name = "gdi32", kind = "raw-dylib")]
@@ -155,9 +166,27 @@ impl Drop for Dib {
 }
 
 enum Backing {
-    Wic { bitmap: ComRef, buf: Vec<u8> },
-    Dc { hdc: usize, origin: (i32, i32), dib: Option<Dib> },
-    Hwnd { hwnd: usize, dib: Option<Dib> },
+    Wic {
+        bitmap: ComRef,
+        buf: Vec<u8>,
+    },
+    Dc {
+        hdc: usize,
+        origin: (i32, i32),
+        dib: Option<Dib>,
+    },
+    Hwnd {
+        hwnd: usize,
+        dib: Option<Dib>,
+    },
+    /// A device context: the ID2D1Device it came from, the ID2D1Bitmap1
+    /// SetTarget gave it (NULL for none) and the buffer it draws into,
+    /// of that bitmap's size.
+    Context {
+        device: ComRef,
+        target: ComRef,
+        buf: Vec<u8>,
+    },
 }
 
 struct State {
@@ -177,7 +206,28 @@ struct State {
     clips: Vec<Clip>,
     layers: u32,
     dirty: bool,
+    /// A device context's D2D1_PRIMITIVE_BLEND, D2D1_UNIT_MODE and
+    /// D2D1_RENDERING_CONTROLS: answered as they were set. Only the unit
+    /// mode changes what is drawn (it is what DIPs mean).
+    primitive_blend: u32,
+    unit_mode: u32,
+    controls: RenderingControls,
 }
+
+/// D2D1_RENDERING_CONTROLS. gala draws a whole frame at once, so the
+/// tile size is only answered, never used.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RenderingControls {
+    precision: u32,
+    tile: SizeU,
+}
+
+const BUFFER_PRECISION_8BPC_UNORM: u32 = 1;
+const PRIMITIVE_BLEND_SOURCE_OVER: u32 = 0;
+const UNIT_MODE_PIXELS: u32 = 1;
+/// D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS.
+const DEVICE_CONTEXT_OPTIONS_KNOWN: u32 = 1;
 
 // SAFETY: the raw pointers (the DIB's bits) belong to the target, used
 // under its lock.
@@ -190,14 +240,19 @@ pub struct Target {
 }
 
 impl State {
-    /// DIPs to device pixels.
+    /// DIPs to device pixels. A device context in
+    /// D2D1_UNIT_MODE_PIXELS is told its coordinates are pixels
+    /// already, so the DPI scale is left out.
     fn device(&self) -> Matrix {
+        if self.unit_mode == UNIT_MODE_PIXELS {
+            return self.transform;
+        }
         self.transform.then(&Matrix::scale(self.dpi.0 / 96.0, self.dpi.1 / 96.0))
     }
 
     fn surface(&mut self) -> Option<Surface> {
         let ptr = match &mut self.backing {
-            Backing::Wic { buf, .. } => buf.as_mut_ptr(),
+            Backing::Wic { buf, .. } | Backing::Context { buf, .. } => buf.as_mut_ptr(),
             Backing::Dc { dib: Some(d), .. } | Backing::Hwnd { dib: Some(d), .. } => d.bits,
             _ => return None,
         };
@@ -302,6 +357,45 @@ macro_rules! target_slots {
 }
 
 static WIC_VTBL: VTable<57> = VTable(target_slots!());
+/// ID2D1DeviceContext (d2d1_1.h): ID2D1RenderTarget's methods, then its
+/// own thirty-five.
+static CONTEXT_VTBL: VTable<92> = VTable(target_slots!(
+    dc1_CreateBitmap,
+    dc1_CreateBitmapFromWicBitmap,
+    dc1_CreateColorContext,
+    dc1_CreateColorContextFromFilename,
+    dc1_CreateColorContextFromWicColorContext,
+    dc1_CreateBitmapFromDxgiSurface,
+    dc1_CreateEffect,
+    dc1_CreateGradientStopCollection,
+    dc1_CreateImageBrush,
+    dc1_CreateBitmapBrush,
+    dc1_CreateCommandList,
+    dc1_IsDxgiFormatSupported,
+    dc1_IsBufferPrecisionSupported,
+    dc1_GetImageLocalBounds,
+    dc1_GetImageWorldBounds,
+    dc1_GetGlyphRunWorldBounds,
+    dc1_GetDevice,
+    dc1_SetTarget,
+    dc1_GetTarget,
+    dc1_SetRenderingControls,
+    dc1_GetRenderingControls,
+    dc1_SetPrimitiveBlend,
+    dc1_GetPrimitiveBlend,
+    dc1_SetUnitMode,
+    dc1_GetUnitMode,
+    dc1_DrawGlyphRun,
+    dc1_DrawImage,
+    dc1_DrawGdiMetafile,
+    dc1_DrawBitmap,
+    dc1_PushLayer,
+    dc1_InvalidateEffectInputRectangle,
+    dc1_GetEffectInvalidRectangleCount,
+    dc1_GetEffectInvalidRectangles,
+    dc1_GetEffectRequiredInputRectangles,
+    dc1_FillOpacityMask
+));
 static DC_VTBL: VTable<58> = VTable(target_slots!(dc_BindDC));
 static HWND_VTBL: VTable<60> =
     VTable(target_slots!(hwnd_CheckWindowState, hwnd_Resize, hwnd_GetHwnd));
@@ -353,6 +447,12 @@ fn new_state(backing: Backing, w: u32, h: u32, format: PixelFormat, dpi: (f32, f
         clips: Vec::new(),
         layers: 0,
         dirty: false,
+        primitive_blend: PRIMITIVE_BLEND_SOURCE_OVER,
+        unit_mode: 0,
+        controls: RenderingControls {
+            precision: BUFFER_PRECISION_8BPC_UNORM,
+            tile: SizeU { width: 4096, height: 4096 },
+        },
     }
 }
 
@@ -504,10 +604,14 @@ extern "system" fn t_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResu
         IID_DC_RENDER_TARGET
     } else if v == HWND_VTBL.addr() {
         IID_HWND_RENDER_TARGET
+    } else if v == CONTEXT_VTBL.addr() {
+        IID_DEVICE_CONTEXT
     } else {
         IID_RENDER_TARGET
     };
-    query(this, b"ID2D1RenderTarget", &[IID_RESOURCE, IID_RENDER_TARGET, own], riid, out)
+    let what: &[u8] =
+        if v == CONTEXT_VTBL.addr() { b"ID2D1DeviceContext" } else { b"ID2D1RenderTarget" };
+    query(this, what, &[IID_RESOURCE, IID_RENDER_TARGET, own], riid, out)
 }
 
 extern "system" fn t_release(this: Obj) -> u32 {
@@ -525,7 +629,8 @@ extern "system" fn t_CreateBitmap(
     out: *mut Obj,
 ) -> HResult {
     let format = with(this, |s| s.format);
-    brush::create_bitmap(factory_of(this), format, size, src, pitch, props, out)
+    let rows = brush::Rows { src, pitch };
+    brush::create_bitmap(factory_of(this), format, size, rows, props, Options::plain(), out)
 }
 
 extern "system" fn t_CreateBitmapFromWicBitmap(
@@ -534,7 +639,7 @@ extern "system" fn t_CreateBitmapFromWicBitmap(
     props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
-    brush::create_from_wic(factory_of(this), source, props, out)
+    brush::create_from_wic(factory_of(this), source, props, Options::plain(), out)
 }
 
 extern "system" fn t_CreateSharedBitmap(
@@ -939,7 +1044,18 @@ extern "system" fn t_PopLayer(this: Obj) {
 }
 
 extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
-    let (e, t) = with(this, |s| (s.error, s.error_tags));
+    // A device context's frame reaches its target bitmap, and the DXGI
+    // surface behind it, at Flush as at EndDraw: Flush is what a program
+    // calls when it wants the pixels without ending the frame.
+    let (e, t) = with(this, |s| {
+        if let Backing::Context { target, buf, .. } = &s.backing
+            && s.dirty
+            && !target.0.is_null()
+        {
+            brush::write_pixels(target.0, buf);
+        }
+        (s.error, s.error_tags)
+    });
     put(a, t.0);
     put(b, t.1);
     e
@@ -1115,7 +1231,15 @@ extern "system" fn t_BeginDraw(this: Obj) {
         }
         s.drawing = true;
         s.dirty = false;
-        match &s.backing {
+        // A device context with nothing to draw into fails its frame, as
+        // Direct2D's does (D2DERR_WRONG_STATE, no target set).
+        if matches!(&s.backing, Backing::Context { target, .. } if target.0.is_null())
+            && s.error == S_OK
+        {
+            s.error = D2DERR_WRONG_STATE;
+            s.error_tags = (0, 0);
+        }
+        match &mut s.backing {
             Backing::Dc { hdc: 0, .. } => {
                 // No DC bound: the frame fails at EndDraw (tags 0).
                 if s.error == S_OK {
@@ -1129,6 +1253,10 @@ extern "system" fn t_BeginDraw(this: Obj) {
                     BitBlt(d.dc, 0, 0, s.w as i32, s.h as i32, *hdc, origin.0, origin.1, SRCCOPY);
                     GdiFlush();
                 }
+            }
+            // A device context starts from what its target bitmap holds.
+            Backing::Context { target, buf, .. } if !target.0.is_null() => {
+                brush::read_pixels(target.0, buf);
             }
             _ => {}
         }
@@ -1179,6 +1307,9 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
             }
             Backing::Wic { bitmap, .. } if dirty => {
                 return (S_OK, (0, 0), Some((ComRef::new(bitmap.0), s.w, s.h)));
+            }
+            Backing::Context { target, buf, .. } if dirty && !target.0.is_null() => {
+                brush::write_pixels(target.0, buf);
             }
             _ => {}
         }
@@ -1232,6 +1363,8 @@ extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
     put(y, d.1);
 }
 
+/// GetSize: in DIPs, which for a device context in
+/// D2D1_UNIT_MODE_PIXELS are pixels.
 extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
     let v = with(this, |s| SizeF {
         width: s.w as f32 * 96.0 / s.dpi.0,
@@ -1324,4 +1457,435 @@ extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
 
 extern "system" fn hwnd_GetHwnd(this: Obj) -> usize {
     hwnd_of(this)
+}
+
+// ---- Device contexts (ID2D1DeviceContext, Direct2D 1.1) ------------------------
+//
+// A context is a render target of the fourth kind: everything
+// ID2D1RenderTarget declares is the same code, and the methods below are
+// what 1.1 adds. The ones that matter for drawing are CreateBitmap,
+// CreateBitmapFromDxgiSurface, SetTarget and GetTarget; effects, command
+// lists, colour contexts and image brushes are a rendering graph gala
+// has none of, and are recorded.
+
+/// ID2D1Device::CreateDeviceContext: a context with no target yet.
+pub fn create_device_context(dev: Obj, options: u32, out: *mut Obj) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    if options & !DEVICE_CONTEXT_OPTIONS_KNOWN != 0 {
+        return E_INVALIDARG;
+    }
+    // Multithreaded optimizations are the caller's hint to use more than
+    // one thread; gala draws on the calling thread either way.
+    let backing = Backing::Context {
+        device: ComRef::new(dev),
+        target: ComRef(core::ptr::null_mut()),
+        buf: Vec::new(),
+    };
+    let format = PixelFormat { format: DXGI_FORMAT_B8G8R8A8_UNORM, alpha: ALPHA_PREMULTIPLIED };
+    let state = new_state(backing, 0, 0, format, (96.0, 96.0));
+    make(device::factory_of(dev), CONTEXT_VTBL.addr(), state, out)
+}
+
+/// D2D1_BITMAP_PROPERTIES1 as the 1.0 properties plus its options.
+fn props1(props: *const BitmapProps1) -> (Option<BitmapProps>, Options) {
+    let p = read(props);
+    let opts = Options { options: p.map_or(0, |p| p.options), surface: None, bitmap1: true };
+    (p.map(|p| p.base), opts)
+}
+
+fn as_ptr(p: &Option<BitmapProps>) -> *const BitmapProps {
+    match p {
+        Some(p) => p as *const BitmapProps,
+        None => core::ptr::null(),
+    }
+}
+
+extern "system" fn dc1_CreateBitmap(
+    this: Obj,
+    size: SizeU,
+    src: *const u8,
+    pitch: u32,
+    props: *const BitmapProps1,
+    out: *mut Obj,
+) -> HResult {
+    let (base, opts) = props1(props);
+    let format = with(this, |s| s.format);
+    let rows = brush::Rows { src, pitch };
+    brush::create_bitmap(factory_of(this), format, size, rows, as_ptr(&base), opts, out)
+}
+
+extern "system" fn dc1_CreateBitmapFromWicBitmap(
+    this: Obj,
+    source: Obj,
+    props: *const BitmapProps1,
+    out: *mut Obj,
+) -> HResult {
+    let (base, opts) = props1(props);
+    brush::create_from_wic(factory_of(this), source, as_ptr(&base), opts, out)
+}
+
+extern "system" fn dc1_CreateColorContext(
+    _this: Obj,
+    _space: u32,
+    _profile: *const u8,
+    _size: u32,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateColorContext")
+}
+
+extern "system" fn dc1_CreateColorContextFromFilename(
+    _this: Obj,
+    _name: *const u16,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateColorContextFromFilename")
+}
+
+extern "system" fn dc1_CreateColorContextFromWicColorContext(
+    _this: Obj,
+    _wic: Obj,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext")
+}
+
+extern "system" fn dc1_CreateBitmapFromDxgiSurface(
+    this: Obj,
+    surface: Obj,
+    props: *const BitmapProps1,
+    out: *mut Obj,
+) -> HResult {
+    brush::create_from_dxgi(factory_of(this), surface, props, out)
+}
+
+extern "system" fn dc1_CreateEffect(_this: Obj, class_id: *const Guid, out: *mut Obj) -> HResult {
+    put(out, core::ptr::null_mut());
+    // The effect's CLSID is the detail: which effects a program wants is
+    // what the ledger is for.
+    gap(b"ID2D1DeviceContext::CreateEffect", read(class_id).map_or(0, |g| crate::data1(&g)));
+    E_NOTIMPL
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "system" fn dc1_CreateGradientStopCollection(
+    _this: Obj,
+    _stops: *const Stop,
+    _count: u32,
+    _pre: u32,
+    _post: u32,
+    _precision: u32,
+    _extend: u32,
+    _interpolation: u32,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateGradientStopCollection")
+}
+
+extern "system" fn dc1_CreateImageBrush(
+    _this: Obj,
+    _image: Obj,
+    _iprops: *const u8,
+    _props: *const BrushProps,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateImageBrush")
+}
+
+/// CreateBitmapBrush (D2D1_BITMAP_BRUSH_PROPERTIES1): the same three
+/// fields as the 1.0 properties, with D2D1_INTERPOLATION_MODE in place
+/// of D2D1_BITMAP_INTERPOLATION_MODE, whose two values it starts with.
+extern "system" fn dc1_CreateBitmapBrush(
+    this: Obj,
+    bitmap: Obj,
+    bprops: *const BitmapBrushProps,
+    props: *const BrushProps,
+    out: *mut Obj,
+) -> HResult {
+    let mut p = read(bprops);
+    if let Some(p) = &mut p
+        && p.interp > 1
+    {
+        gap(b"ID2D1DeviceContext::CreateBitmapBrush(interpolation mode)", p.interp.into());
+        p.interp = 1;
+    }
+    let ptr = match &p {
+        Some(p) => p as *const BitmapBrushProps,
+        None => core::ptr::null(),
+    };
+    t_CreateBitmapBrush(this, bitmap, ptr, props, out)
+}
+
+extern "system" fn dc1_CreateCommandList(_this: Obj, out: *mut Obj) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1DeviceContext::CreateCommandList")
+}
+
+/// IsDxgiFormatSupported: B8G8R8A8 is what gala's rasterizer writes.
+extern "system" fn dc1_IsDxgiFormatSupported(_this: Obj, format: u32) -> i32 {
+    i32::from(format == DXGI_FORMAT_B8G8R8A8_UNORM)
+}
+
+/// IsBufferPrecisionSupported: eight bits a channel, which is what a
+/// software target holds.
+extern "system" fn dc1_IsBufferPrecisionSupported(_this: Obj, precision: u32) -> i32 {
+    i32::from(precision == BUFFER_PRECISION_8BPC_UNORM)
+}
+
+extern "system" fn dc1_GetImageLocalBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
+    put(bounds, RectF::default());
+    not_implemented(b"ID2D1DeviceContext::GetImageLocalBounds")
+}
+
+extern "system" fn dc1_GetImageWorldBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
+    put(bounds, RectF::default());
+    not_implemented(b"ID2D1DeviceContext::GetImageWorldBounds")
+}
+
+extern "system" fn dc1_GetGlyphRunWorldBounds(
+    _this: Obj,
+    _origin: Point,
+    _run: *const u8,
+    _measuring: u32,
+    bounds: *mut RectF,
+) -> HResult {
+    put(bounds, RectF::default());
+    not_implemented(b"ID2D1DeviceContext::GetGlyphRunWorldBounds")
+}
+
+/// The device a context came from, or NULL for a render target that is
+/// not one (a context's methods are only on a context's vtable, so this
+/// is the context's own device).
+extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
+    let d = with(this, |s| match &s.backing {
+        Backing::Context { device, .. } => device.0,
+        _ => core::ptr::null_mut(),
+    });
+    if !d.is_null() {
+        com_add_ref(d);
+    }
+    put(out, d);
+}
+
+/// SetTarget: the ID2D1Bitmap1 the context draws into, which takes the
+/// context's size and pixel format from it. The bitmap must be one of
+/// gala's and made with D2D1_BITMAP_OPTIONS_TARGET; anything else is
+/// recorded and fails the frame, as Direct2D fails a target it cannot
+/// draw into. NULL clears the target (the context is then 0 x 0).
+extern "system" fn dc1_SetTarget(this: Obj, image: Obj) {
+    if !image.is_null() && !brush::is_bitmap(image) {
+        gap(b"ID2D1DeviceContext::SetTarget(not a bitmap of gala's d2d1)", 0);
+        with(this, |s| {
+            if s.error == S_OK {
+                s.error = E_INVALIDARG;
+                s.error_tags = s.tags;
+            }
+        });
+        return;
+    }
+    let bitmap = (!image.is_null()).then(|| {
+        let b = brush::bitmap(image);
+        (b.w, b.h, b.format, b.dpi, b.options)
+    });
+    // The bitmap that was the target is released after our lock.
+    let mut was = ComRef(core::ptr::null_mut());
+    let mut failure = S_OK;
+    with(this, |s| {
+        let Backing::Context { target, buf, .. } = &mut s.backing else {
+            return;
+        };
+        core::mem::swap(target, &mut was);
+        match bitmap {
+            Some((w, h, format, _dpi, options)) => {
+                *target = ComRef::new(image);
+                s.w = w;
+                s.h = h;
+                s.format = format;
+                let need = w as usize * h as usize * 4;
+                if buf.len() != need {
+                    match crate::filled(need, 0u8) {
+                        Some(v) => *buf = v,
+                        None => {
+                            buf.clear();
+                            s.w = 0;
+                            s.h = 0;
+                            failure = E_OUTOFMEMORY;
+                        }
+                    }
+                }
+                if options & BITMAP_OPTION_TARGET == 0 {
+                    failure = E_INVALIDARG;
+                }
+            }
+            None => {
+                s.w = 0;
+                s.h = 0;
+                buf.clear();
+            }
+        }
+        if failure != S_OK && s.error == S_OK {
+            s.error = failure;
+            s.error_tags = s.tags;
+        }
+    });
+    if failure == E_INVALIDARG {
+        gap(b"ID2D1DeviceContext::SetTarget(not a D2D1_BITMAP_OPTIONS_TARGET bitmap)", 0);
+    }
+}
+
+extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
+    let t = with(this, |s| match &s.backing {
+        Backing::Context { target, .. } => target.0,
+        _ => core::ptr::null_mut(),
+    });
+    if !t.is_null() {
+        com_add_ref(t);
+    }
+    put(out, t);
+}
+
+extern "system" fn dc1_SetRenderingControls(this: Obj, controls: *const RenderingControls) {
+    if let Some(c) = read(controls) {
+        if c.precision != BUFFER_PRECISION_8BPC_UNORM {
+            gap(b"ID2D1DeviceContext::SetRenderingControls(buffer precision)", c.precision.into());
+        }
+        with(this, |s| s.controls = c);
+    }
+}
+
+extern "system" fn dc1_GetRenderingControls(this: Obj, out: *mut RenderingControls) {
+    put(out, with(this, |s| s.controls));
+}
+
+extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
+    if blend != PRIMITIVE_BLEND_SOURCE_OVER {
+        gap(b"ID2D1DeviceContext::SetPrimitiveBlend(drawn source-over)", blend.into());
+    }
+    with(this, |s| s.primitive_blend = blend);
+}
+
+extern "system" fn dc1_GetPrimitiveBlend(this: Obj) -> u32 {
+    with(this, |s| s.primitive_blend)
+}
+
+extern "system" fn dc1_SetUnitMode(this: Obj, mode: u32) {
+    with(this, |s| s.unit_mode = mode);
+}
+
+extern "system" fn dc1_GetUnitMode(this: Obj) -> u32 {
+    with(this, |s| s.unit_mode)
+}
+
+extern "system" fn dc1_DrawGlyphRun(
+    _this: Obj,
+    _origin: Point,
+    _run: *const u8,
+    _description: *const u8,
+    _brush: Obj,
+    _measuring: u32,
+) {
+    gap(b"ID2D1DeviceContext::DrawGlyphRun", 0);
+}
+
+extern "system" fn dc1_DrawImage(
+    _this: Obj,
+    _image: Obj,
+    _offset: *const Point,
+    _rect: *const RectF,
+    _interpolation: u32,
+    _composite: u32,
+) {
+    gap(b"ID2D1DeviceContext::DrawImage", 0);
+}
+
+extern "system" fn dc1_DrawGdiMetafile(_this: Obj, _metafile: Obj, _offset: *const Point) {
+    gap(b"ID2D1DeviceContext::DrawGdiMetafile", 0);
+}
+
+/// DrawBitmap with D2D1_INTERPOLATION_MODE and a perspective transform:
+/// the 1.0 draw, for the two interpolation modes it shares (nearest and
+/// linear) and without perspective, which the rasterizer has no
+/// projective transform for.
+#[allow(clippy::too_many_arguments)]
+extern "system" fn dc1_DrawBitmap(
+    this: Obj,
+    bitmap: Obj,
+    dst: *const RectF,
+    opacity: f32,
+    interpolation: u32,
+    src: *const RectF,
+    perspective: *const u8,
+) {
+    if !perspective.is_null() {
+        gap(b"ID2D1DeviceContext::DrawBitmap(perspective transform)", 0);
+        return;
+    }
+    let mode = if interpolation <= 1 {
+        interpolation
+    } else {
+        gap(b"ID2D1DeviceContext::DrawBitmap(interpolation mode)", interpolation.into());
+        1
+    };
+    t_DrawBitmap(this, bitmap, dst, opacity, mode, src);
+}
+
+extern "system" fn dc1_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
+    gap(b"ID2D1DeviceContext::PushLayer(content not masked)", 0);
+    with(this, |s| s.layers += 1);
+}
+
+extern "system" fn dc1_InvalidateEffectInputRectangle(
+    _this: Obj,
+    _effect: Obj,
+    _input: u32,
+    _rect: *const RectF,
+) -> HResult {
+    not_implemented(b"ID2D1DeviceContext::InvalidateEffectInputRectangle")
+}
+
+extern "system" fn dc1_GetEffectInvalidRectangleCount(
+    _this: Obj,
+    _effect: Obj,
+    count: *mut u32,
+) -> HResult {
+    put(count, 0);
+    not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount")
+}
+
+extern "system" fn dc1_GetEffectInvalidRectangles(
+    _this: Obj,
+    _effect: Obj,
+    _rects: *mut RectF,
+    _count: u32,
+) -> HResult {
+    not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangles")
+}
+
+extern "system" fn dc1_GetEffectRequiredInputRectangles(
+    _this: Obj,
+    _effect: Obj,
+    _image_rect: *const RectF,
+    _descriptions: *const u8,
+    _required: *mut RectF,
+    _count: u32,
+) -> HResult {
+    not_implemented(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles")
+}
+
+extern "system" fn dc1_FillOpacityMask(
+    _this: Obj,
+    _mask: Obj,
+    _brush: Obj,
+    _dst: *const RectF,
+    _src: *const RectF,
+) {
+    gap(b"ID2D1DeviceContext::FillOpacityMask", 0);
 }

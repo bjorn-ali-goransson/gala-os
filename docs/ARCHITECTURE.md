@@ -11030,8 +11030,10 @@ files Word, Excel and PowerPoint load import `d2d1.dll`, by ordinal #1 to
 D2D1IsMatrixInvertible, D2D1InvertMatrix; `build.rs` exports them at
 those ordinals). `user/d2d1`, x64 only; `d2d1_test`, whose expected
 values are those of Wine's d2d1 tests (run on Windows) and Microsoft's
-documentation, and the `d2d1_window` screen scenario (a window drawn
-through a window render target; `d2d1_test window`).
+documentation, the `d2d1_window` screen scenario (a window drawn
+through a window render target; `d2d1_test window`) and
+`d2d1_device_test` (Direct2D 1.1 over a program's own Direct3D 11
+device, the path Office draws with).
 
 - **Objects**: every object starts with a vtable and a reference count
   (as windowscodecs's); every resource (brush, bitmap, geometry, stroke
@@ -11043,9 +11045,12 @@ through a window render target; `d2d1_test window`).
 - **The factory**: each D2D1CreateFactory is a new object; it answers
   ID2D1Factory and ID2D1Multithread (on both kinds, as Windows 10's
   does; Enter/Leave hold a critical section on a multi-threaded factory,
-  nothing on a single-threaded one). ID2D1Factory1 and later are not
-  answered (recorded).
-- **Render targets** (`target.rs`): one object, three backings. A WIC
+  nothing on a single-threaded one). It answers ID2D1Factory1 as well
+  (CreateDevice, below); ID2D1Factory2 and later are not answered
+  (recorded), and ID2D1Factory1's own stroke styles, path geometries,
+  drawing state blocks, GDI metafiles and effect registry are recorded
+  and E_NOTIMPL.
+- **Render targets** (`target.rs`): one object, four backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
   IWICBitmap: gala's windowscodecs or the caller's); its format is the
@@ -11055,16 +11060,41 @@ through a window render target; `d2d1_test window`).
   size: BeginDraw copies the DC's pixels in, EndDraw copies them back
   only when something was drawn (GDI's drawing between them survives an
   empty frame). A window target keeps its DIB section between frames
-  and copies it to the window's DC at EndDraw. The transform then the
-  DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs.
+  and copies it to the window's DC at EndDraw. A device context
+  (below) is the fourth. The transform then the
+  DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs
+  (D2D1_UNIT_MODE_PIXELS leaves the DPI scale out, so they are pixels).
   Drawing outside BeginDraw/EndDraw draws nothing and fails the next
   EndDraw with D2DERR_WRONG_STATE; clips or layers left pushed fail it
   with D2DERR_PUSH_POP_UNBALANCED.
-- **No GPU**: every target draws in software, also when
-  D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's
+- **The device and its contexts** (`device.rs`, Direct2D 1.1): this is
+  how Office draws. ID2D1Factory1::CreateDevice takes the program's
+  IDXGIDevice (on gala, DXVK's over lavapipe: GPU G2) and gives an
+  ID2D1Device; its CreateDeviceContext gives a render target of the
+  fourth kind, with a buffer of its own and no size until SetTarget
+  gives it an ID2D1Bitmap1. CreateBitmapFromDxgiSurface makes that
+  bitmap over a surface of the program's own Direct3D 11 device (its
+  swap chain's back buffer): the surface's IDXGISurface::GetDesc gives
+  the size and format, and QueryInterface for ID3D11Texture2D the
+  texture behind it, whose device's immediate context writes into it.
+  Drawing stays in software: BeginDraw fills the context's buffer from
+  the target bitmap, the rasterizer draws the frame, and EndDraw (or
+  Flush) writes the buffer back into the bitmap and through it into the
+  surface with ID3D11DeviceContext::UpdateSubresource -- the one way
+  into a texture the program uses as a render target that needs neither
+  a shader nor a staging texture of our own. A context with no target
+  is 0 x 0 and its frame fails with D2DERR_WRONG_STATE, as Direct2D's
+  does. Nothing here is linked against: every Direct3D and DXGI call
+  goes through the vtable slot its interface declares, so d2d1.dll
+  imports no Direct3D and works with whichever d3d11.dll the program
+  brought. Test: `d2d1_device_test`.
+- **No GPU of its own**: every target draws in software, also when
+  D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's own
   d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives
   on a machine whose only adapter is the Basic Render Driver (a CPU
-  device). D3D11-backed targets come with GPU G2.
+  device). What a device context draws is software too; what the
+  program's Direct3D 11 device does with the surface afterwards is
+  DXVK's.
 - **The rasterizer** (`raster.rs`): figures flattened to polygons (a
   Bézier subdivided to within 0.1 pixel), coverage on a 4 x 4 sample grid
   per pixel (aliased mode: the pixel's centre), the fill rule (alternate
@@ -11094,12 +11124,16 @@ through a window render target; `d2d1_test window`).
   (DrawText, DrawTextLayout, DrawGlyphRun: DirectWrite has no text
   layout yet), layers (PushLayer is counted, its mask not applied),
   opacity masks and FillGeometry's opacity brush, meshes, drawing state
-  blocks, compatible render targets, shared bitmaps, DXGI surface
-  targets, geometry groups and transformed geometries, Simplify,
-  Tessellate, Widen, Outline, CombineWithGeometry, dashes (drawn
-  solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
-  interface, ID2D1Factory1 and device contexts, bitmaps from WIC formats
-  other than 32bppPBGRA and 32bppBGR (D2DERR_UNSUPPORTED_PIXEL_FORMAT).
+  blocks, compatible render targets, shared bitmaps,
+  CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface, which
+  device contexts replace), geometry groups and transformed geometries,
+  Simplify, Tessellate, Widen, Outline, CombineWithGeometry, dashes
+  (drawn solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
+  interface, bitmaps from WIC formats other than 32bppPBGRA and
+  32bppBGR (D2DERR_UNSUPPORTED_PIXEL_FORMAT), and, on a device context,
+  effects, command lists, colour contexts, image brushes, DrawImage,
+  DrawGdiMetafile, a primitive blend other than source-over and a
+  perspective transform on DrawBitmap.
 
 ### DirectWrite
 
@@ -11145,8 +11179,9 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 
 ### Known limits
 
-- Direct2D: software only, no text, layers, compatible targets or
-  Factory1 device contexts yet ("Direct2D" lists them).
+- Direct2D: software only (a device context's frame is drawn on the
+  CPU and written into the program's DXGI surface), no text, layers,
+  compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
   rotation, skew or sideways runs; no text layout, IDWriteFactory1+.

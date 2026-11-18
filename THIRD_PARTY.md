@@ -356,10 +356,17 @@ versions are pinned in `web/package-lock.json` (CI installs with `npm ci`).
   testbmp_24bpp, testbmp_1bpp and testbmp_bitfields_abgr and converter.c's
   32bppBGRA80 data reused as test data, no code copied) and Microsoft's
   WIC documentation (the PNG decoder's native formats).
-- gala's d2d1.dll (`user/d2d1`) and `user/d2d1_test`: interfaces (their
+- gala's d2d1.dll (`user/d2d1`), `user/d2d1_test` and
+  `user/d2d1_device_test`: interfaces (their
   method order), GUIDs, structures, enums and the export ordinals from
   Wine's `include/d2d1.idl`, `include/d2d1_1.idl`, `include/d2derr.h` and
-  `dlls/d2d1/d2d1.spec`, and behaviour and expected results from Wine's
+  `dlls/d2d1/d2d1.spec`, and, for Direct2D 1.1 over a program's own
+  Direct3D 11 device, the method order of ID2D1Factory1, ID2D1Device,
+  ID2D1DeviceContext and ID2D1Bitmap1 and the vtable slots of
+  IDXGISurface::GetDesc, ID3D11DeviceChild::GetDevice,
+  ID3D11Device::GetImmediateContext and
+  ID3D11DeviceContext::UpdateSubresource from mingw-w64's `d2d1_1.h`,
+  `dxgi.h` and `d3d11.h` (declarations read, no code copied), and behaviour and expected results from Wine's
   `dlls/d2d1/tests/d2d1.c` (test_mt_factory, test_desktop_dpi,
   test_invert_matrix and test_skew_matrix's tables, test_wic_target_format,
   test_clip's DPI rules, test_path_geometry's states and counts,
