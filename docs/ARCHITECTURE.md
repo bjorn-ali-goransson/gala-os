@@ -14714,10 +14714,11 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   the Linux personality's own processes under "Linux"; gala's UI says
   Linux, never WSL); columns Name, PID, Status ("Not responding"),
   User name, CPU (its share of all processors between two samples,
-  `taskmgr::Shares`; the cell tinted as Windows does), Memory; a click
-  on a header sorts each group by it (numbers largest first; again the
-  other way). A blue tile marks a Windows process, an orange one a
-  Linux process.
+  `taskmgr::Shares`; the cell tinted as Windows does), Memory; the CPU
+  and Memory cells carry the process's own last minute as a sparkline
+  behind the number (below); a click on a header sorts each group by it
+  (numbers largest first; again the other way). A blue tile marks a
+  Windows process, an orange one a Linux process.
 - **End task** (the button, or Delete): a Windows process gets
   OpenProcess and TerminateProcess(1), as Windows' Task Manager; a Linux
   process SIGTERM, then SIGKILL if it is still listed after
@@ -14726,10 +14727,63 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
 - **Performance**: a graph per processor (busy per mille between
   samples), memory in use, disk and network throughput, a minute of
   history each (`taskmgr::History`), the process, thread and handle
-  counts.
+  counts. A list on the left (`paint_side`, `SIDE_W` wide, a row every
+  `SIDE_ROW_H`) gives every metric its name, its value, its peak where
+  one is meant, and the same minute as a sparkline, as Windows'
+  Performance sidebar: the CPU total, each processor, memory, disk,
+  network, and the process, thread and handle counts.
 - **Details**: every process in one flat list, sortable, with CPU time,
   commit size, threads, handles or fds, platform (Windows, Windows
   32-bit, Linux with the distribution) and the command line.
+- **Sparklines** (`taskmgr::History`, `taskmgr::line` and
+  `taskmgr::Trails`, the model; `spark` in `main.rs` draws them): every
+  metric carries its last minute as a line with its load under it.
+  - **The ring**: `History` is a fixed ring of `HISTORY` (60) samples,
+    one a second from the refresh the views already do; a push
+    overwrites the oldest in place, so nothing allocates after it is
+    made. `last()` is the newest sample, `max()` the peak.
+  - **The geometry** is `taskmgr::line` (host-tested, no floats): a
+    history's points in a box, each point's height its sample's share
+    of a scale (clamped to it), the newest at the right edge. `over` is
+    how many samples the box is wide. A Performance graph and a
+    sidebar row pass the ring's whole `cap`, so the line fills from the
+    right over the minute the gridlines mark; a row's cell passes the
+    samples it holds, so the first seconds of a process are a line
+    across its cell and not a dot in the corner (a cell has no axis to
+    read a time off anyway). A history with no samples draws nothing (a
+    row not sampled yet), where a history of zeroes is a flat line on
+    the floor (an idle process).
+  - **A ring per process**: `Trails` keeps a pair of rings (CPU share,
+    working set) for each process listed, keyed by pid **and** start
+    time, so a row that ends takes its lines with it and a reused pid
+    starts its own. Each refresh retains only the processes the query
+    returned and pushes one sample to each.
+  - **The scales**: CPU against all the processors and Performance's
+    memory against the machine's, both 1000 per mille; a throughput or
+    a count against its own peak, which is written beside the value.
+    The Memory column scales to the largest row listed (floored at
+    `MEMORY_FLOOR`, 10 per mille of the machine): against physical
+    memory every row would rest on the floor, and the largest row's
+    size is already in the column to read.
+  - **Drawing** (`spark`): the points are laid out in `taskmgr::SUB`ths
+    of a pixel and each column is painted from `taskmgr::stroke`, which
+    says which rows the line covers and how much of the first and the
+    last of them; a row covered in part is blended with what is behind
+    it. A minute in 94 pixels moves the line by a fraction of a pixel a
+    sample, which whole pixels would draw as a staircase. The line is a
+    pixel thick and a column where it climbs covers every row it
+    passes, so it is joined and not a dotted trail. The area under it is
+    the metric's colour mixed towards white, `GRAPH_SHADE` (600 per
+    mille) in a graph and `CELL_SHADE` (820) in a row's cell, where the
+    number is read over it. A cell draws behind its text rather than in
+    a column of its own (the Details view's twelve columns already fill
+    the window), and over the row's own background — the selection, or
+    the CPU column's tint — which it is given to blend with.
+  - Checked on the screen (`TASKMGR_SCREEN`): the sidebar's lines in
+    the right-hand columns of their boxes, where only a view that has
+    run some seconds has drawn (1.6 columns a second); the busy
+    window's CPU cell risen and its memory cell filled; and an idle
+    `cat`'s CPU cell background above the floor its line rests on.
 - **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
   (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
   desktop tracks Ctrl and Shift; no program sees that Esc; logged
@@ -14741,7 +14795,8 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   is the CLI's way; `gala ps` lists both personalities from the same
   query and `gala kill <pid>` ends a Linux process as End task does.
 - **Limits**: no per-process disk, network, GPU or power columns (no
-  counters: ledgered); no process tree within a group; "Not responding"
+  counters: ledgered), and so no sparkline for them either; no process
+  tree within a group; "Not responding"
   is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
   there; End task waits for a distribution's end on the window's
   thread (up to `lx::distro`'s 10 s).

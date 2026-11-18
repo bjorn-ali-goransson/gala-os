@@ -17,6 +17,10 @@
 //!   `target/lx-expect/<binary>/<name>_test` and run there as
 //!   `./<name>_test` (so argv[0] and AT_EXECFN are the same for both) with
 //!   [`ARGS`] and only [`ENV`] in its environment.
+//! - Every run names the host kernel (`/proc/sys/kernel/osrelease`) and
+//!   each failure repeats it: the expected.txt files are what one Linux
+//!   printed, so a mismatch has to say which kernel printed the other
+//!   answer.
 //! - The transcript is stdout, then `-- stderr:` and stderr's lines if
 //!   any, then `-- exit status N` or `-- killed by signal N`. A mismatch
 //!   prints a line diff, leaves `actual.txt` in the run directory and
@@ -92,6 +96,8 @@ pub fn lx_expect(args: &[String]) -> Result {
     if tests.is_empty() {
         return Err(format!("no tests in {}", lx.display()));
     }
+    let kernel = host_kernel();
+    eprintln!("lx-expect: host kernel {kernel}, {} programs", tests.len());
     let mut failed = Vec::new();
     let mut skipped = 0;
     for test in &tests {
@@ -128,7 +134,9 @@ pub fn lx_expect(args: &[String]) -> Result {
                 }
             }
             if varied {
-                failed.push(format!("{binary}: not deterministic over {runs} runs"));
+                failed.push(format!(
+                    "{binary}: not deterministic over {runs} runs (kernel {kernel})"
+                ));
                 continue;
             }
             if record && binary == *test {
@@ -151,12 +159,12 @@ pub fn lx_expect(args: &[String]) -> Result {
                 let actual_path = dir.join("actual.txt");
                 let _ = fs::write(&actual_path, &actual);
                 eprintln!(
-                    "lx-expect: {binary}: MISMATCH with {} (- expected, + actual; all of it in {}):",
+                    "lx-expect: {binary}: MISMATCH on kernel {kernel} with {} (- expected, + actual; all of it in {}):",
                     expected_path.display(),
                     actual_path.display()
                 );
                 eprint!("{}", diff(want, &actual));
-                failed.push(format!("{binary}: transcript differs"));
+                failed.push(format!("{binary}: transcript differs (kernel {kernel})"));
             }
         }
     }
@@ -170,6 +178,15 @@ pub fn lx_expect(args: &[String]) -> Result {
     } else {
         Err(format!("lx-expect: {} failed:\n  {}", failed.len(), failed.join("\n  ")))
     }
+}
+
+/// The kernel the expectations are being compared against: these are
+/// real Linux's answers, and a run that disagrees has to name the Linux
+/// that gave it.
+fn host_kernel() -> String {
+    fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|e| format!("unknown ({e})"))
 }
 
 /// `--runs N` (or `--runs=N`): how many times each binary runs.

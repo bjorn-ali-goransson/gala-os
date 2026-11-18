@@ -13,7 +13,11 @@
 //!   the search (a name, a PID); [`details`] the Details view's flat
 //!   rows;
 //! - the numbers' formats ([`memory`], [`percent`], [`cpu_time`],
-//!   [`speed`]).
+//!   [`speed`]);
+//! - [`History`], a fixed ring of samples, [`line`], its points in a
+//!   box (a Performance graph's, a row's sparkline), and [`Trails`],
+//!   one ring pair per process behind the CPU and Memory columns'
+//!   sparklines.
 //!
 //! `no_std` with `alloc`: `taskmgr.exe` is freestanding (`gala_heap`).
 
@@ -520,30 +524,234 @@ pub fn speed(bytes_per_second: u64) -> String {
     s
 }
 
-/// A history of samples for a graph (the newest last), at most `cap`.
+/// A history of samples for a graph or a sparkline: a fixed ring of
+/// `cap` of them (a minute at one a second), the newest last. Its
+/// buffer is taken once, when the ring is made, and written in place
+/// from then on, so a row's line costs nothing per sample however long
+/// its process lives.
 pub struct History {
-    pub values: Vec<u32>,
+    values: Vec<u32>,
+    /// The oldest sample's place once the ring is full (0 until then).
+    head: usize,
     cap: usize,
 }
 
 impl History {
     pub fn new(cap: usize) -> History {
-        History { values: Vec::new(), cap }
+        let cap = cap.max(1);
+        History { values: Vec::with_capacity(cap), head: 0, cap }
+    }
+
+    /// How many samples it holds at most: the line's width in samples.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 
     pub fn push(&mut self, v: u32) {
-        if self.values.len() == self.cap {
-            self.values.remove(0);
+        if self.values.len() < self.cap {
+            self.values.push(v);
+        } else {
+            self.values[self.head] = v;
+            self.head = (self.head + 1) % self.cap;
         }
-        self.values.push(v);
+    }
+
+    /// The samples it holds, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.values[self.head..].iter().chain(&self.values[..self.head]).copied()
     }
 
     pub fn last(&self) -> u32 {
-        self.values.last().copied().unwrap_or(0)
+        let n = self.values.len();
+        if n == 0 { 0 } else { self.values[(self.head + n - 1) % n] }
     }
 
     pub fn max(&self) -> u32 {
         self.values.iter().copied().max().unwrap_or(0)
+    }
+}
+
+/// A history's points in a box `w` by `height` (its own coordinates, y
+/// down from its top left corner): one per sample held, the newest at
+/// the box's right edge, each point's height its sample's share of
+/// `scale` (clamped to it).
+///
+/// `over` is how many samples the box is wide. A graph passes the
+/// ring's whole `cap`, so a history still filling draws at the right of
+/// the box and grows leftwards as Windows' Performance graphs do, under
+/// gridlines that mark the minute. A row's cell passes the samples it
+/// holds, which spreads them over the cell: a minute at a sample every
+/// pixel-and-a-bit would be a dot in the corner for the first seconds,
+/// and a cell has no axis to read the time off anyway.
+///
+/// A history with no samples has no points: nothing is drawn for it,
+/// where a history of zeroes is a flat line on the floor. A box one
+/// sample wide is that sample, flat from edge to edge.
+pub fn line(h: &History, scale: u32, w: i32, height: i32, over: usize) -> Vec<(i32, i32)> {
+    if w < 1 || height < 1 {
+        return Vec::new();
+    }
+    let n = h.len();
+    let columns = i64::from(w - 1);
+    let floor = u64::try_from(height - 1).unwrap_or(0);
+    let up = |v: u32| (u64::from(v.min(scale)) * floor / u64::from(scale.max(1))) as i32;
+    let mut points = Vec::with_capacity(n.max(2));
+    if over < 2 {
+        if !h.is_empty() {
+            let y = height - 1 - up(h.last());
+            points.push((0, y));
+            points.push((w - 1, y));
+        }
+        return points;
+    }
+    for (k, v) in h.iter().enumerate() {
+        let x = ((over.saturating_sub(n) + k) as i64 * columns / (over - 1) as i64) as i32;
+        points.push((x, height - 1 - up(v)));
+    }
+    points
+}
+
+/// The steps a pixel is divided into when a line is drawn smoothly:
+/// `line` over a box `SUB` times as high gives each point's height in
+/// these, and [`stroke`] turns a column of them into pixels.
+pub const SUB: i32 = 16;
+
+/// What one column of a sparkline paints ([`stroke`]).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Stroke {
+    /// The first and last pixel row the line itself covers. The rows
+    /// between them are wholly its own.
+    pub top: i32,
+    pub bottom: i32,
+    /// How much of `top` and of `bottom` the line covers, in per mille,
+    /// and how much of `bottom` lies under it (the area under the line).
+    /// In `top`, what is neither is what was behind the line.
+    pub covers_top: u32,
+    pub covers_bottom: u32,
+    pub under: u32,
+}
+
+/// What a column paints, from the line's height at its left and right
+/// edge (`a` and `b`, in `SUB`ths of a pixel down from the box's top:
+/// the centre of the line there, which the caller takes from [`line`]
+/// over a box `SUB` times as high but a pixel shorter, half a pixel
+/// down) in a box `height` pixels high.
+///
+/// The line is a pixel thick about the samples it joins, and a column
+/// where it climbs covers every row it passes: a line that rises
+/// steeply is a line and not a dotted trail. A row the line covers only
+/// in part is for the caller to blend, which is what keeps a shallow
+/// slope from looking like a staircase.
+pub fn stroke(a: i32, b: i32, height: i32) -> Stroke {
+    let floor = height.max(1) * SUB;
+    let half = SUB / 2;
+    let top = (a.min(b) - half).clamp(0, floor - 1);
+    let bottom = (a.max(b) + half).clamp(top + 1, floor);
+    let row_top = top / SUB;
+    let row_bottom = (bottom - 1) / SUB;
+    let covers = |row: i32| {
+        let (start, end) = (row * SUB, (row + 1) * SUB);
+        u32::try_from((bottom.min(end) - top.max(start)).max(0) * 1000 / SUB).unwrap_or(0)
+    };
+    let end = (row_bottom + 1) * SUB;
+    let under = u32::try_from((end - bottom).max(0) * 1000 / SUB).unwrap_or(0);
+    Stroke {
+        top: row_top,
+        bottom: row_bottom,
+        covers_top: covers(row_top),
+        covers_bottom: covers(row_bottom),
+        under,
+    }
+}
+
+/// The CPU and Memory columns' sample rings, one pair per process: made
+/// when a process is first listed and dropped when it is gone, so they
+/// never outlast the list and a long session's cost is the rows it
+/// shows. A pid and its start time name a row, since a pid given out
+/// again is another process and not the one whose line was being drawn.
+#[derive(Default)]
+pub struct Trails {
+    cap: usize,
+    of: Vec<Trail>,
+}
+
+struct Trail {
+    pid: u64,
+    create_time: u64,
+    cpu: History,
+    memory: History,
+}
+
+impl Trails {
+    pub fn new(cap: usize) -> Trails {
+        Trails { cap, of: Vec::new() }
+    }
+
+    /// A sample for every process listed -- its share of the processors
+    /// (`shares`, by the same index) and its working set as a per mille
+    /// of `memory_total` -- and the rows that have ended dropped.
+    pub fn update(&mut self, procs: &[Proc], shares: &[u32], memory_total: u64) {
+        self.of.retain(|t| procs.iter().any(|p| p.pid == t.pid && p.create_time == t.create_time));
+        for (i, p) in procs.iter().enumerate() {
+            let share = shares.get(i).copied().unwrap_or(0);
+            let used = (p.working_set.saturating_mul(1000) / memory_total.max(1)) as u32;
+            let trail = match self.of.iter_mut().position(|t| t.is(p)) {
+                Some(k) => &mut self.of[k],
+                None => {
+                    self.of.push(Trail {
+                        pid: p.pid,
+                        create_time: p.create_time,
+                        cpu: History::new(self.cap),
+                        memory: History::new(self.cap),
+                    });
+                    self.of.last_mut().unwrap_or_else(|| unreachable!())
+                }
+            };
+            trail.cpu.push(share);
+            trail.memory.push(used);
+        }
+    }
+
+    /// `p`'s CPU ring, none before its first sample.
+    pub fn cpu(&self, p: &Proc) -> Option<&History> {
+        self.of.iter().find(|t| t.is(p)).map(|t| &t.cpu)
+    }
+
+    /// `p`'s memory ring (per mille of the machine's memory).
+    pub fn memory(&self, p: &Proc) -> Option<&History> {
+        self.of.iter().find(|t| t.is(p)).map(|t| &t.memory)
+    }
+
+    /// The Memory column's scale: the largest sample the processes
+    /// listed hold, at least `floor` per mille, so their lines are
+    /// comparable with each other. 100 % of the machine's memory is no
+    /// use here: gala's processes are megabytes of a machine that has
+    /// gigabytes, which would leave every line on the floor.
+    pub fn memory_scale<'a>(&self, listed: impl Iterator<Item = &'a Proc>, floor: u32) -> u32 {
+        listed.filter_map(|p| self.memory(p)).map(History::max).max().unwrap_or(0).max(floor)
+    }
+
+    /// How many processes have rings.
+    pub fn len(&self) -> usize {
+        self.of.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.of.is_empty()
+    }
+}
+
+impl Trail {
+    fn is(&self, p: &Proc) -> bool {
+        self.pid == p.pid && self.create_time == p.create_time
     }
 }
 
@@ -817,7 +1025,174 @@ mod tests {
         for v in [1, 5, 2, 9] {
             h.push(v);
         }
-        assert_eq!(h.values, vec![5, 2, 9]);
-        assert_eq!((h.last(), h.max()), (9, 9));
+        assert_eq!(h.iter().collect::<Vec<u32>>(), vec![5, 2, 9]);
+        assert_eq!((h.len(), h.cap(), h.last(), h.max()), (3, 3, 9, 9));
+    }
+
+    /// The ring writes in place once it is full: the samples it hands
+    /// out are the newest `cap`, oldest first, however many have gone
+    /// through it.
+    #[test]
+    fn the_ring_keeps_the_newest_samples_in_order() {
+        let mut h = History::new(4);
+        assert!(h.is_empty());
+        assert_eq!(h.iter().next(), None);
+        for v in 1..=10 {
+            h.push(v);
+            assert_eq!(h.last(), v);
+            assert_eq!(h.len(), (v as usize).min(4));
+            let want: Vec<u32> = (v.saturating_sub(3).max(1)..=v).collect();
+            assert_eq!(h.iter().collect::<Vec<u32>>(), want, "after {v}");
+        }
+    }
+
+    #[test]
+    fn a_line_rises_with_its_samples() {
+        let mut h = History::new(5);
+        for v in [0, 250, 500, 750, 1000] {
+            h.push(v);
+        }
+        // A box 5 wide and 5 high: a column per sample, the floor at 4,
+        // the top at 0.
+        assert_eq!(line(&h, 1000, 5, 5, h.cap()), vec![(0, 4), (1, 3), (2, 2), (3, 1), (4, 0)]);
+    }
+
+    #[test]
+    fn an_idle_line_is_flat_on_the_floor() {
+        let mut h = History::new(5);
+        for _ in 0..5 {
+            h.push(0);
+        }
+        let points = line(&h, 1000, 5, 5, h.cap());
+        assert!(points.iter().all(|&(_, y)| y == 4), "{points:?}");
+    }
+
+    /// A history that is still filling draws at the right of its box,
+    /// as the Performance graphs do: the newest sample is always at the
+    /// right edge, and a history with no samples draws nothing at all
+    /// (an empty line and a line of zeroes are not the same picture).
+    #[test]
+    fn a_filling_line_grows_from_the_right() {
+        let mut h = History::new(5);
+        assert_eq!(line(&h, 1000, 9, 5, h.cap()), vec![]);
+        h.push(1000);
+        assert_eq!(line(&h, 1000, 9, 5, h.cap()), vec![(8, 0)]);
+        h.push(0);
+        assert_eq!(line(&h, 1000, 9, 5, h.cap()), vec![(6, 0), (8, 4)]);
+    }
+
+    /// A line level in its box is a pixel thick, and the rows it
+    /// covers in part are left for the caller to blend: that is what
+    /// keeps a shallow slope from looking like a staircase.
+    #[test]
+    fn a_level_line_is_a_pixel_thick() {
+        // Half way down a box 4 pixels high, exactly on a pixel's
+        // boundary: one row covered whole, the rest under it.
+        let s = stroke(2 * SUB, 2 * SUB, 4);
+        assert_eq!((s.top, s.bottom), (1, 2));
+        assert_eq!((s.covers_top, s.covers_bottom, s.under), (500, 500, 500));
+        // Half a pixel lower: one row, half of it under the line.
+        let s = stroke(2 * SUB + SUB / 2, 2 * SUB + SUB / 2, 4);
+        assert_eq!((s.top, s.bottom), (2, 2));
+        assert_eq!((s.covers_top, s.covers_bottom, s.under), (1000, 1000, 0));
+    }
+
+    /// A column where the line climbs covers every row it passes, so
+    /// the line is joined.
+    #[test]
+    fn a_climbing_column_is_joined() {
+        let s = stroke(3 * SUB, 0, 4);
+        assert_eq!((s.top, s.bottom), (0, 3));
+        assert_eq!(s.under, 500);
+    }
+
+    /// The floor and the ceiling hold the line, a whole pixel of it:
+    /// an idle history is a line along the bottom row with nothing
+    /// under it, a full one a line along the top row.
+    #[test]
+    fn the_box_holds_the_line() {
+        let s = stroke(3 * SUB + SUB / 2, 3 * SUB + SUB / 2, 4);
+        assert_eq!((s.top, s.bottom), (3, 3));
+        assert_eq!((s.covers_top, s.under), (1000, 0));
+        let s = stroke(SUB / 2, SUB / 2, 4);
+        assert_eq!((s.top, s.bottom), (0, 0));
+        assert_eq!((s.covers_top, s.under), (1000, 0));
+    }
+
+    /// A cell's line is as wide as the samples it holds, so it is a
+    /// line from the first seconds and not a dot in the corner; the
+    /// newest sample is still at the right edge.
+    #[test]
+    fn a_cells_line_spreads_the_samples_it_holds() {
+        let mut h = History::new(60);
+        h.push(1000);
+        // One sample: the whole cell is that sample.
+        assert_eq!(line(&h, 1000, 9, 5, h.len()), vec![(0, 0), (8, 0)]);
+        h.push(0);
+        assert_eq!(line(&h, 1000, 9, 5, h.len()), vec![(0, 0), (8, 4)]);
+        h.push(1000);
+        assert_eq!(line(&h, 1000, 9, 5, h.len()), vec![(0, 0), (4, 4), (8, 0)]);
+    }
+
+    #[test]
+    fn a_line_is_clamped_to_its_scale() {
+        let mut h = History::new(2);
+        h.push(4000);
+        h.push(2000);
+        assert_eq!(line(&h, 1000, 2, 5, h.cap()), vec![(0, 0), (1, 0)]);
+    }
+
+    /// A row's rings are made when its process is first listed and
+    /// dropped when it ends, so the rings never outlast the list.
+    #[test]
+    fn a_rows_samples_are_dropped_with_it() {
+        let mut t = Trails::new(3);
+        let mut procs = vec![p(4, "a.exe", 0, ""), p(9, "sleep", FLAG_LINUX, "bb")];
+        procs[0].working_set = 50 << 20;
+        t.update(&procs, &[250, 0], 1000 << 20);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.cpu(&procs[0]).map(|h| h.last()), Some(250));
+        assert_eq!(t.memory(&procs[0]).map(|h| h.last()), Some(50));
+        t.update(&procs, &[500, 0], 1000 << 20);
+        assert_eq!(t.cpu(&procs[0]).unwrap().iter().collect::<Vec<u32>>(), vec![250, 500]);
+        // sleep ends: its rings go with it, the other's stay.
+        procs.pop();
+        t.update(&procs, &[500, 0], 1000 << 20);
+        assert_eq!(t.len(), 1);
+        assert!(t.cpu(&p(9, "sleep", FLAG_LINUX, "bb")).is_none());
+        assert_eq!(t.cpu(&procs[0]).unwrap().len(), 3);
+        // The ring is fixed: a fourth sample drops the first.
+        t.update(&procs, &[600, 0], 1000 << 20);
+        assert_eq!(t.cpu(&procs[0]).unwrap().iter().collect::<Vec<u32>>(), vec![500, 500, 600]);
+    }
+
+    /// A pid Windows or Linux has given out again is another process,
+    /// not the one whose line was being drawn (the key is the pid and
+    /// its start time, as every other list of processes keys them).
+    #[test]
+    fn a_reused_pid_starts_its_own_line() {
+        let mut t = Trails::new(3);
+        let mut procs = vec![p(4, "a.exe", 0, "")];
+        procs[0].create_time = 100;
+        t.update(&procs, &[250], 1000 << 20);
+        procs[0].create_time = 200;
+        t.update(&procs, &[700], 1000 << 20);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.cpu(&procs[0]).unwrap().iter().collect::<Vec<u32>>(), vec![700]);
+    }
+
+    /// The Memory column's scale is the largest sample of the rows
+    /// listed, so their lines are comparable with each other; 100 % of
+    /// the machine's memory would leave every line on the floor.
+    #[test]
+    fn the_memory_column_scales_to_the_rows_shown() {
+        let mut t = Trails::new(3);
+        let mut procs = vec![p(4, "a.exe", 0, ""), p(9, "sleep", FLAG_LINUX, "bb")];
+        procs[0].working_set = 100 << 20;
+        procs[1].working_set = 4 << 20;
+        t.update(&procs, &[0, 0], 1000 << 20);
+        assert_eq!(t.memory_scale(procs.iter(), 10), 100);
+        assert_eq!(t.memory_scale(procs[1..].iter(), 10), 10);
+        assert_eq!(t.memory_scale(core::iter::empty(), 10), 10);
     }
 }

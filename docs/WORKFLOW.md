@@ -1903,8 +1903,10 @@ its program through LdrInitializeThunk (`arm_startup_test`).
   `USER_PROGRAMS_ARM64`). An image refuses another x64 executable from
   user/bin (xtask's error says so): an ARM64 machine cannot run it.
 - The per-name lists (NET_SCENARIOS, HOST_PAGE_SCENARIOS, SSH_PORT_22,
-  `onecpu_*`'s single CPU) look a twin up by its x64 scenario
-  (`twin_base`); a new list keyed by scenario name does the same.
+  SLOW_SCENARIOS' run-time budget, `onecpu_*`'s single CPU) look a twin
+  up by its x64 scenario (`twin_base`); a new list keyed by scenario
+  name does the same. A twin left out of one gets the default on the
+  slower machine, where its x64 scenario needed the exception.
 - A test's expectations stay real Windows': where ARM64 Windows answers
   differently (the native machine 0xaa64, PROCESSOR_ARCHITECTURE_ARM64,
   CONTEXT's offsets), the test picks by `cfg!(target_arch)`. What gala
@@ -2807,8 +2809,9 @@ A root is what its workload opened on real 26.04, traced:
   Manager with Alt+F4 (the test waits for that, so the last screendump
   comes before the guest ends). Screendumps:
   `target/debug/test-taskmgr.screen<n>.png` (1 Processes with the
-  frozen window "Not responding", 2 Performance, 3 Details, 4 the app
-  found, 6 `sleep`, 8 `sh`, 10 the distribution's heading, 12 what is
+  frozen window "Not responding", 2 Performance, 3 Details, then each
+  victim's list filtered (4, 7, 10, 13) and its row selected (5 the
+  app, 8 `sleep`, 11 `sh`, 14 the distribution's heading), 16 what is
   left).
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
   `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
@@ -3904,6 +3907,15 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   reads it (a pixel check of the prompt: a window shows before its
   program reads keys). `after` matches anywhere in the serial log, so
   it names a line that comes only from that change.
+- **A click that aims at what an earlier key in the same step changed
+  goes in a step of its own.** Pacing says the guest has read the
+  bytes, not that the program has acted on them: taskmgr applies a
+  typed search on a thread of its own, so typing the search and
+  clicking the row it leaves are two steps, the first ending on a pixel
+  check that the list has been filtered (`TASKMGR_FILTERED`, the list's
+  background where unfiltered there are rows). Otherwise a loaded host
+  clicks where the row is about to be, the row arrives unselected, and
+  only the step's screendump says so.
 - Windows-key chords are one `sendkey` (`sendkey meta_l-right`: Snap).
   The wheel: `mouse_move 0 0 1` is one notch up (away from the user; a
   negative dz is down).

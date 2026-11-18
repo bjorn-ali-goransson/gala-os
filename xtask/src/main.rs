@@ -10088,7 +10088,9 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// 133 s of run time under TCG, 2.5 s on the host) and its window
 /// (`lx_gimp`: GTK, its UI's data and icons, its plug-ins; about 180 s
 /// before its screen check). They
-/// get this much instead of BOOT_TEST_TIMEOUT.
+/// get this much instead of BOOT_TEST_TIMEOUT, an ARM64 twin with its
+/// x64 scenario (whose work it does on the slower machine: arm_taskmgr
+/// printed its marker at 141 s, after 120 s had ended its VM).
 const SLOW_SCENARIOS: &[&str] = &[
     "taskmgr",
     "explorer",
@@ -10173,7 +10175,7 @@ fn scenario_timeout(name: &str) -> Duration {
         || name.starts_with("chromium_")
     {
         ELASTICSEARCH_TIMEOUT
-    } else if SLOW_SCENARIOS.contains(&name) {
+    } else if SLOW_SCENARIOS.contains(&twin_base(name).unwrap_or(name)) {
         SLOW_TIMEOUT
     } else {
         BOOT_TEST_TIMEOUT
@@ -22793,10 +22795,29 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
 /// on the frozen window, which then is "Not responding" (red in the
 /// Status column); Ctrl+Shift+Esc opens Task Manager; each view is a
 /// screendump (`test-taskmgr.screen<n>.png`: 1 Processes, 2
-/// Performance, 3 Details, 4 the busy window found and selected, 6
-/// `sleep`, 8 `sh`, 10 the distribution's heading, 12 after the ends); the search finds each victim (row 0 its group's heading,
+/// Performance, 3 Details, then each victim's list filtered (4, 7, 10,
+/// 13) and the row selected in it (5 the busy window, 8 `sleep`, 11
+/// `sh`, 14 the distribution's heading), 16 after the ends); the search finds each victim (row 0 its group's heading,
 /// row 1 the process), End task ends it, and taskmgr_test says so before
 /// the next step; Alt+F4 closes Task Manager last.
+///
+/// The sparklines (ROADMAP TM): Performance's list of metrics on the
+/// left has a row every 56 pixels from client y 144 (CPU, a processor
+/// each, Memory, Disk, Network, Processes, Threads, Handles), its line
+/// in a box at client x 297, 94 by 36, so the first row's is at screen
+/// (418, 218); in Processes a row's CPU and Memory cells carry the same
+/// minute behind the number (client x 786 and 866, 18 rows high from
+/// row 1's y 155: screen (907, 228) and (987, 228)), the CPU against
+/// all the processors and the memory against the largest row listed.
+/// A box holds a sample per second over a minute, so a check of a
+/// sidebar line waits for the view to have run the seconds that reach
+/// the columns it looks at (1.6 columns a second from the right).
+///
+/// A line is blended with whatever it is drawn over wherever it covers
+/// a pixel in part, which is most of them (`taskmgr::stroke`), so what
+/// the checks look for is the area under it: the metric's colour mixed
+/// towards white, which is a colour of its own and solid. Where the
+/// line stands in its box is then what that area proves.
 const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
     marker: "taskmgr_test: ready",
     steps: &[
@@ -22842,6 +22863,23 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x117dbb), // CPU graphs
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x9fcbe3), // load under a line
                 PixelCheck::AnyIn(317, 450, 800, 250, 0x8b12ae), // memory's graph
+                // The list on the left, in the right 12 columns of
+                // each box: a sample a second over a minute's width, so
+                // those columns are a line only once the view has run
+                // some seconds, where the newest sample alone would be
+                // a dot in the corner. What each check looks for is the
+                // area under the line, the metric's colour mixed
+                // towards white: the line itself is blended with what
+                // it is drawn over wherever it covers a pixel in part.
+                // The CPU total's load reaches the top of its box (over
+                // 250 per mille: the busy thread is one of the two
+                // processors) and fills the bottom of it; memory's few
+                // per cent and the process count are their own lines'
+                // own load.
+                PixelCheck::AnyIn(500, 219, 12, 26, 0x9fcbe3),
+                PixelCheck::Most(500, 246, 12, 8, 0x9fcbe3, 90),
+                PixelCheck::AnyIn(500, 387, 12, 35, 0xd0a0de),
+                PixelCheck::AnyIn(500, 555, 12, 34, 0x99bfe2),
             ],
         },
         ScreenStep {
@@ -22856,8 +22894,8 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
-            // Processes (201, 149), "busy" searched, row 1 (521, 237)
-            // selected: End task lights up.
+            // Processes (201, 149), "busy" searched: the list is down to
+            // the one window before anything is clicked.
             input: &[
                 "mouse_move 0 -80",
                 "mouse_button 1",
@@ -22866,11 +22904,22 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "sendkey u",
                 "sendkey s",
                 "sendkey y",
-                "mouse_move 255 88",
-                "mouse_move 65 0",
-                "mouse_button 1",
-                "mouse_button 0",
             ],
+            pixels: &[
+                TASKMGR_FILTERED,
+                // The area under its CPU line, which stands well above
+                // the cell's floor (a thread of the two processors),
+                // and its memory line at the ceiling with its own area
+                // under it: the only row listed, so it is the scale.
+                PixelCheck::Most(910, 240, 40, 6, 0xd4e7f2, 80),
+                PixelCheck::AnyIn(990, 228, 40, 10, 0x8b12ae),
+                PixelCheck::Most(990, 234, 40, 10, 0xead4f0, 90),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Row 1 (521, 237) selected: End task lights up.
+            input: &["mouse_move 255 88", "mouse_move 65 0", "mouse_button 1", "mouse_button 0"],
             pixels: &[
                 PixelCheck::At(700, 240, 0xcce4f7),  // the selection (row 1)
                 PixelCheck::At(1030, 135, 0x005fb8), // End task enabled
@@ -22890,7 +22939,7 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "taskmgr_test: busy window ended",
-            // "sleep" searched, its row selected.
+            // "sleep" searched.
             input: &[
                 "sendkey esc",
                 "sendkey s",
@@ -22898,6 +22947,16 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "sendkey e",
                 "sendkey e",
                 "sendkey p",
+            ],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Its row selected.
+            input: &[
                 "mouse_move -255 92",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -22905,7 +22964,7 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "mouse_button 0",
             ],
             pixels: &[
-                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
                 PixelCheck::At(700, 240, 0xcce4f7),
             ],
         },
@@ -22923,10 +22982,12 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep {
             after: "taskmgr_test: sleep ended",
             // "sh", which ignores SIGTERM: SIGKILL after the grace time.
+            input: &["sendkey esc", "sendkey s", "sendkey h"],
+            pixels: &[TASKMGR_FILTERED, PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420)],
+        },
+        ScreenStep {
+            after: "",
             input: &[
-                "sendkey esc",
-                "sendkey s",
-                "sendkey h",
                 "mouse_move -255 92",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -22951,13 +23012,21 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "taskmgr_test: sh ended",
-            // "cat" searched, the distribution's heading (row 0, 521,
-            // 213) selected: End task ends its whole tree.
+            // "cat" searched: `cat` waits for its input and takes no
+            // processor, so its CPU cell is background above the floor
+            // its line rests on (the busy window's was not).
+            input: &["sendkey esc", "sendkey c", "sendkey a", "sendkey t"],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::Most(910, 228, 40, 14, 0xfbfbfb, 95),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // The distribution's heading (row 0, 521, 213) selected: End
+            // task ends its whole tree.
             input: &[
-                "sendkey esc",
-                "sendkey c",
-                "sendkey a",
-                "sendkey t",
                 "mouse_move -255 68",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -22989,6 +23058,14 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
     ],
 };
+
+/// The process list narrowed to one group: below the group's own
+/// rows the list is all background, where unfiltered it is rows
+/// (95% of this rectangle at its emptiest, the Details view).
+/// taskmgr applies the search on its own thread, so a click on the
+/// row the search leaves waits for this: see WORKFLOW, "a click that
+/// aims at what an earlier key in the same step changed".
+const TASKMGR_FILTERED: PixelCheck = PixelCheck::Most(310, 300, 800, 260, 0xfbfbfb, 99);
 
 const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
     marker: "start_menu_test: ready",
@@ -29474,6 +29551,24 @@ mod health {
         assert!(judge_log(&s, None, true, "statedump: end").is_ok());
         assert!(judge_log(&s, None, true, "statedump: begin").is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "statedump: end").is_err());
+    }
+
+    /// A twin does its x64 scenario's work on the slower machine
+    /// (aarch64 under TCG), so it cannot have less run time than the
+    /// scenario that needed more than the default.
+    #[test]
+    fn an_arm64_twin_gets_its_x64_scenario_s_run_time() {
+        let twins: Vec<&str> =
+            ARM64_TWINS.iter().copied().filter(|t| SLOW_SCENARIOS.contains(t)).collect();
+        assert!(twins.contains(&"taskmgr"), "{twins:?}");
+        for base in twins {
+            let twin = format!("arm_{base}");
+            assert_eq!(
+                scenario_timeout(&twin),
+                scenario_timeout(base),
+                "{twin} has less run time than {base}"
+            );
+        }
     }
 }
 
