@@ -2129,7 +2129,7 @@ need gala's.
      (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
      the Office Deployment Tool's `setup.exe /configure` in gala
-     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     (PREBUILT `odt`: 16.0.20527.20150, SHA-256 daea2a1c...e16be1,
      re-pinned when Microsoft replaces the file at its URL;
      `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
      Current channel, Display None, AcceptEULA; a net scenario, the

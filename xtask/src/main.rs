@@ -534,14 +534,14 @@ const PREBUILT: &[Prebuilt] = &[
         excludes: &[],
     },
     // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
-    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // current one, 16.0.20527.20150, x86; the SHA-256 is the one we
     // measured: Microsoft replaces the file at this URL with each release,
     // so a new one fails the checksum until it is pinned again). Scenario
     // office_install (ROADMAP OF) runs it inside gala; never committed.
     Prebuilt {
         name: "odt",
         url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
-        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        checksum: "daea2a1c2beef16e88dded58916b9c4d816ff247e76ee5ebb41c3810fee16be1",
         members: &["setup.exe"],
         excludes: &[],
     },
