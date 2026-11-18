@@ -262,6 +262,21 @@ an administrator prompt for `schannel_test` (its test CA goes into
 LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
 and `wininet_test` and their WOW64 twins, which fetch from the Nginx
 that setup starts).
+
+Elevation decides results in both directions, so no one run answers for
+every program and the report's `platform` says which run it was
+(`windows 10.0.26200 elevated` or `... standard user`, the first line of
+`windows-output.txt` too). An elevated run skips the four programs whose
+checks are what a *standard* user gets, since a program on gala has a
+standard user's token: `token_test` (an administrator's token holds
+SeDebugPrivilege, which its checks assert is absent), `kernel32_file_test`
+(an administrator may open `\\.\C:` for reading, its checks expect
+ERROR_ACCESS_DENIED), `kernel32_pool_test` (an administrator holds
+SeCreateSymbolicLinkPrivilege, which its checks assert is not held) and
+`disk_test` (an administrator opens PhysicalDrive0, which is not
+xtask's 16 MiB scratch disk). CI's windows job is elevated, so its
+report lists them as skipped.
+
 A program that crashes gets a `fault` field
 (`<code> <name> at module+offset`) from `user/windows/fault.py`, which
 the runner looks for at `..\windowsault.py`: it re-runs the program as
@@ -1356,7 +1371,10 @@ its image back and checks the checksum. It runs in the `release` environment, wi
 `release.yml`'s R2 variables and secrets. The aarch64 demo is
 `DEMO_CMDLINE_AARCH64` (the desktop on virtio-gpu, hello.exe); a
 downloadable image's command line names no file of the machine that
-built it (no `events_file=`).
+built it (no `events_file=`). The website's "Try it" section links
+them, with the QEMU commands that boot them (`images` in
+`web/src/content.ts`; a change to the image names or the demo changes it
+too).
 
 ### The update feed
 
@@ -2434,7 +2452,11 @@ source).
   it. Nor may a transcript assert what Linux leaves to timing: a chain of
   exactly 40 symbolic links reads or fails with ELOOP, depending on
   whether the lookup's lockless walk fell back (fs_test asserts 20 and
-  41, and "opens or ELOOP" for 40). lx-expect
+  41, and "opens or ELOOP" for 40); nor that an expiry is readable on
+  the instruction after the timer is armed, even for an absolute time
+  already past, because the expiry is posted by the timer subsystem and
+  a non-blocking read races it (timerfd_test polls before each read of
+  such a timer). lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the
@@ -3451,7 +3473,14 @@ keyed by the relay's pid: `open` with its start, then its start and end
 bytes each way and how each side ended in order, or why it could not
 connect; an `open` without its second line never ended) and Chromium maps web-platform.test and its subdomains
 there (`--host-resolver-rules`); our testharnessreport.js replaces the
-tree's (the file WPT leaves to vendors). Each test waits for its
+tree's (the file WPT leaves to vendors). The session also passes
+`--enable-experimental-web-platform-features` and
+`--enable-blink-test-features`, which wptrunner passes whenever it is
+not told otherwise (`browsers/chrome.py`), so every run on wpt.fyi has
+them: without them Chromium 159 splits a qualified name at every colon
+and 20 `dom/nodes` subtests fail that pass there, a difference in the
+flags and not in gala. A flag wptrunner passes and we do not is the
+first thing to suspect when a test fails only here. Each test waits for its
 results as long as testharness's own timeout allows, times 4, plus
 20 s; a test without results is a TIMEOUT whose message says what the
 page was doing (its URL, an error page's being chrome-error://,

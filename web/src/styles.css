@@ -1130,6 +1130,67 @@ a {
   font-size: 0.9rem;
 }
 
+/* ---------------------------------------------------------- downloads */
+
+.downloads {
+  margin-bottom: 2.5rem;
+}
+
+.downloads li {
+  min-width: 0;
+}
+
+.dl-size {
+  color: var(--ink-faint);
+  font-size: 0.85rem;
+}
+
+.dl-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0.25rem 0;
+}
+
+.dl-links .btn {
+  color: var(--on-accent);
+}
+
+.dl-label {
+  font-weight: 600;
+  color: var(--ink) !important;
+  margin-top: 0.25rem;
+}
+
+.dl-needs {
+  font-size: 0.85rem !important;
+}
+
+.cmd {
+  margin: 0.25rem 0;
+  padding: 0.7rem 0.85rem;
+  background: var(--surface-2, var(--bg));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+  max-width: 100%;
+  line-height: 1.5;
+}
+
+.cmd code {
+  white-space: pre;
+  font-size: 0.8rem;
+}
+
+.explain .cmd {
+  margin: 0.5rem 0;
+}
+
+.explain > div {
+  min-width: 0;
+}
+
 /* --------------------------------------------------------- principles */
 
 .principles {
