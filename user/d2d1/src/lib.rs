@@ -10,7 +10,9 @@
 //!   (CreateDCRenderTarget, BindDC) and a window (CreateHwndRenderTarget,
 //!   presented through GDI). Every target draws in software into 32 bpp
 //!   premultiplied pixels; a request for hardware rendering is served by
-//!   the same rasterizer (gala has no Direct3D 11 device, ROADMAP GPU).
+//!   the same rasterizer. A program's own Direct3D 11 device (DXVK's,
+//!   beside it: ROADMAP GPU G2) is not drawn through yet, which is what
+//!   ID2D1Factory1 and device contexts would need.
 //! - Brushes, gradient stop collections and bitmaps (`brush`).
 //! - Geometries: rectangles, rounded rectangles, ellipses, paths and their
 //!   sinks (`geometry`).

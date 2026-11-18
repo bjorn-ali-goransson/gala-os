@@ -9420,6 +9420,31 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "ucrtbase.dll", "Windows/System32"),
     ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
     ("office_install", "user/office_install/config.xml", "gala"),
+    // office_word: a rendering device for Word (ROADMAP OF, GPU G2).
+    // DXVK's d3d11 and dxgi go beside WINWORD.EXE, the directory the
+    // loader searches before System32 (ARCHITECTURE "The module
+    // graph"), as a program that ships DXVK puts them (`d3d11_test`);
+    // System32's dxgi stays gala's, the one the Vulkan loader calls.
+    // The stack under it is the one `vk_test` uses: the Khronos loader
+    // and Mesa's lavapipe in System32, lavapipe registered.
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("office_word", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("office_word", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("office_word", "user/mesa/lavapipe.regseed", "registry"),
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
@@ -17525,7 +17550,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
-                  dump=C:/Users/Public,C:/Windows/Temp",
+                  dump=C:/Users/Public,C:/Windows/Temp,\
+                  C:/gala/winword_d3d11.log,C:/gala/winword_dxgi.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
@@ -18879,6 +18905,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("office_install_local", "office_install"),
     ("office_install_local", "office_install_local"),
     ("office_word", "office_install"),
+    ("office_word", "office_word"),
     ("office_excel", "office_install"),
     ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),

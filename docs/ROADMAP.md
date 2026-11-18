@@ -239,7 +239,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen, then raises 0xe0000002 unhandled 29 s in, after no rendering device answered it (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises, and ends with status 0 after 30 s because Direct2D has no 1.1 factory and the 1.0 path's D3D10CreateDevice1 is a stub, with no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1329,7 +1329,9 @@ the kernel.
   `mbsrtowcs` and `wctype`, which its import tables need; `d3d11_test`
   (a device and a swap chain, a cleared back buffer with a copied
   block, read back, presented and checked on the screen). No shader,
-  so no HLSL compiler yet.
+  so no HLSL compiler yet. `office_word` ships the same pair beside
+  WINWORD.EXE and Word creates a D3D_FEATURE_LEVEL_11_0 device there,
+  which is how a program other than a test gets one (ROADMAP OF).
 
 **Next**:
 1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
@@ -1802,7 +1804,9 @@ need gala's.
     each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
     layout first), layers, compatible render targets, drawing state
     blocks, the GDI interop interface, dashes, ID2D1Factory1 and device
-    contexts, then D3D11-backed targets with GPU G2. The `info` lines of
+    contexts, then D3D11-backed targets with GPU G2. ID2D1Factory1 is
+    what Word waits on now: it has a Direct3D 11 device and no Direct2D
+    1.1 to use it with (ROADMAP OF). The `info` lines of
     `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
     of 32bppBGRA, antialiased edge values) and its expectations wait for
     a Windows run: the first (issue #94) stopped at D2D1CreateFactory,
@@ -1983,44 +1987,50 @@ need gala's.
      d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
      implemented, each answer measured on Windows first (`msi_test`,
      `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
-     What stops Word now is a raise of its own. It asks for a
-     rendering device and gala has none (GPU G0): d2d1's factory
-     refuses ID2D1Factory1 and ID2D1Factory2 (E_NOINTERFACE),
-     D3D11CreateDevice fails once and D3D10CreateDevice1 twenty times
-     (DXGI_ERROR_UNSUPPORTED, no adapter). Then, in Word's
-     international code (WWINTL.DLL) under mso30win32client, it calls
-     RaiseException with 0xe0000002 -- Office's own code, software
-     originated and continuable -- which no handler in the process
-     takes, and the process ends with that status. The raise carries no
-     parameters, so its code is everything it says, and the frame below
-     it is Mso30win32client's own `__fastfail` stub, which sits in the
-     padding between two functions and has no unwind entry of its own:
-     the chain ends there because the image describes nothing for that
-     address, not because the unwinder stops short (ARCHITECTURE
-     "Exceptions"). What the dying thread called last is in
-     the crash report now (OBSERVABILITY "Crash reports"), and the two
-     gaps the ledger named in the second before the raise are closed,
-     each measured on Windows first: user32's
-     SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
+     What stops Word now is Direct2D. The rendering device it asks
+     for is there: the scenario ships DXVK's `d3d11.dll` and `dxgi.dll`
+     beside WINWORD.EXE, the directory the loader searches before
+     System32, over the Vulkan stack in System32 (GPU G2), and DXVK
+     creates a D3D_FEATURE_LEVEL_11_0 device on Mesa's lavapipe -- its
+     own logs say so, and the scenario's `dump=` keeps them
+     (C:/gala/winword_d3d11.log and winword_dxgi.log, OBSERVABILITY
+     "Guest files"). With a device in hand Word no longer raises
+     0xe0000002, the fail-fast it took when nothing answered: it asks
+     d2d1's factory for ID2D1Factory1 and ID2D1Factory2
+     (E_NOINTERFACE: Direct2D 1.1's device and device contexts, which
+     gala's software Direct2D does not have), falls back to Direct2D
+     1.0's own device with D3D10CreateDevice1 twenty times
+     (DXGI_ERROR_UNSUPPORTED: G0's stub, and DXVK ships no d3d10), and
+     ends with status 0 after 30 s -- which is the status the scenario
+     asks for, so only its screen check fails now, with the untitled
+     window on the screen and no document drawn.
+     So the next step is Direct2D 1.1 on that device: ID2D1Factory1's
+     CreateDevice over the program's IDXGIDevice,
+     ID2D1Device::CreateDeviceContext and a target over a DXGI surface
+     (the Direct2D item above), and then text, which needs
+     DirectWrite's text layout first -- a document is text.
+     The other gaps the ledger names around that exit, each to be
+     measured on Windows before it is answered: kernelbase's
+     SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
+     times), HeapQueryInformation's class, and gdi32's
+     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo (sixteen each,
+     which the Vulkan loader tries before the registry's list of
+     drivers) with the interface gala's dxgi refuses CreateDXGIFactory1
+     (three times).
+     A run with every system call traced takes a different path, not a
+     slower one: it stops in `MsoSplash`, asking RoGetActivationFactory
+     for
+     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
+     over and over, a runtime class gala has none of -- so what Word
+     does has to be read from an untraced run.
+     What a dying thread called last is in the crash report
+     (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
+     where Word used to raise are closed, each measured on Windows
+     first: user32's SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
      SPI_GETFONTSMOOTHINGCONTRAST), which Word reads before it lays
      text out (`win32_misc_test`), and kernelbase's QueueUserAPC2,
      which needed special user APCs in the kernel (`apc_test`,
      `kernel32_thread_test`, ARCHITECTURE "Special user APCs").
-     A run with every system call traced does not reach the raise at
-     all: it stops earlier, in `MsoSplash`, asking
-     RoGetActivationFactory for
-     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
-     over and over, a runtime class gala has none of -- so the traced
-     run is a different path, not a slower one, and the raise has to be
-     read from an untraced run. With those two closed, the run from
-     boot leaves nothing else between the device and the raise: in the
-     200 ms before it the ledger names D3D11CreateDevice once, the
-     d2d1 factory's QueryInterface three times and D3D10CreateDevice1
-     twenty times, and otherwise only Word's own settings keys, absent
-     and defaulted. So the raise follows the refusals with nothing in
-     between, and the next step is a rendering device (G0), not another
-     export: until one answers, Word draws its untitled window and ends
-     there.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew
