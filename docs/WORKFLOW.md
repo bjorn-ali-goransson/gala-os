@@ -1356,7 +1356,10 @@ its image back and checks the checksum. It runs in the `release` environment, wi
 `release.yml`'s R2 variables and secrets. The aarch64 demo is
 `DEMO_CMDLINE_AARCH64` (the desktop on virtio-gpu, hello.exe); a
 downloadable image's command line names no file of the machine that
-built it (no `events_file=`).
+built it (no `events_file=`). The website's "Try it" section links
+them, with the QEMU commands that boot them (`images` in
+`web/src/content.ts`; a change to the image names or the demo changes it
+too).
 
 ### The update feed
 
