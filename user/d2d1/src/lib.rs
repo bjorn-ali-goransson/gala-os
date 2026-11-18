@@ -10,9 +10,13 @@
 //!   (CreateDCRenderTarget, BindDC) and a window (CreateHwndRenderTarget,
 //!   presented through GDI). Every target draws in software into 32 bpp
 //!   premultiplied pixels; a request for hardware rendering is served by
-//!   the same rasterizer. A program's own Direct3D 11 device (DXVK's,
-//!   beside it: ROADMAP GPU G2) is not drawn through yet, which is what
-//!   ID2D1Factory1 and device contexts would need.
+//!   the same rasterizer.
+//! - The Direct2D 1.1 device and its device contexts (`device`, and
+//!   `target`'s fourth kind): ID2D1Factory1::CreateDevice over the
+//!   program's own Direct3D 11 device (DXVK's, beside it: ROADMAP GPU
+//!   G2), a context drawing into the ID2D1Bitmap1 SetTarget gave it, and
+//!   a bitmap over a DXGI surface writing its pixels into that surface
+//!   when the frame ends. This is how Office draws.
 //! - Brushes, gradient stop collections and bitmaps (`brush`).
 //! - Geometries: rectangles, rounded rectangles, ellipses, paths and their
 //!   sinks (`geometry`).
@@ -25,8 +29,9 @@
 //! What it does not do is recorded in the ledger (`d2d1.dll!...`): text
 //! (DrawText, DrawTextLayout, DrawGlyphRun: gala's DirectWrite has no
 //! text layout yet), layers, meshes, opacity masks, drawing state blocks,
-//! compatible render targets, DXGI surface targets, dashes, ID2D1Factory1
-//! and device contexts, and the GDI interop interface.
+//! compatible render targets, effects, command lists, colour contexts,
+//! dashes, CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface,
+//! which device contexts replace), and the GDI interop interface.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -35,6 +40,7 @@
 extern crate alloc;
 
 mod brush;
+mod device;
 mod factory;
 mod geometry;
 mod raster;
@@ -171,6 +177,15 @@ pub const IID_BITMAP: Guid =
     guid(0xa229_6057, 0xea42, 0x4099, [0x98, 0x3b, 0x53, 0x9f, 0xb6, 0x50, 0x54, 0x26]);
 pub const IID_FACTORY: Guid =
     guid(0x0615_2247, 0x6f50, 0x465a, [0x92, 0x45, 0x11, 0x8b, 0xfd, 0x3b, 0x60, 0x07]);
+/// The Direct2D 1.1 interfaces (d2d1_1.h).
+pub const IID_FACTORY1: Guid =
+    guid(0xbb12_d362, 0xdaee, 0x4b9a, [0xaa, 0x1d, 0x14, 0xba, 0x40, 0x1c, 0xfa, 0x1f]);
+pub const IID_DEVICE: Guid =
+    guid(0x47dd_575d, 0xac05, 0x4cdd, [0x80, 0x49, 0x9b, 0x02, 0xcd, 0x16, 0xf4, 0x4c]);
+pub const IID_DEVICE_CONTEXT: Guid =
+    guid(0xe8f7_fe7a, 0x191c, 0x466d, [0xad, 0x95, 0x97, 0x56, 0x78, 0xbd, 0xa9, 0x98]);
+pub const IID_BITMAP1: Guid =
+    guid(0xa898_a84c, 0x3873, 0x4588, [0xb0, 0x8b, 0xeb, 0xbf, 0x97, 0x8d, 0xf0, 0x41]);
 pub const IID_MULTITHREAD: Guid =
     guid(0x31e6_e7bc, 0xe0ff, 0x4d46, [0x8c, 0x64, 0xa0, 0xa8, 0xc4, 0x1c, 0x15, 0xd3]);
 
@@ -403,6 +418,12 @@ pub struct ComRef(pub Obj);
 unsafe impl Send for ComRef {}
 
 impl ComRef {
+    /// A reference the caller already holds, adopted (not added): what a
+    /// method that hands out an object leaves us with.
+    pub fn owned(o: Obj) -> ComRef {
+        ComRef(o)
+    }
+
     /// A new reference to `o` (NULL stays NULL).
     pub fn new(o: Obj) -> ComRef {
         if !o.is_null() {

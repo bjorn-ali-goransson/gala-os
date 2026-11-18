@@ -1,5 +1,5 @@
-//! The factory (ID2D1Factory, and ID2D1Multithread on the same object)
-//! and stroke styles.
+//! The factory (ID2D1Factory, ID2D1Factory1 and ID2D1Multithread on the
+//! same object) and stroke styles.
 //!
 //! Each D2D1CreateFactory makes a new factory; every resource holds a
 //! reference to its factory (GetFactory). ID2D1Multithread answers on
@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 use crate::geometry::{self, Ellipse, RoundedRect, Shape};
 use crate::raster::StrokeStyle;
 use crate::{
-    E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Header, IID_FACTORY, IID_IUNKNOWN,
-    IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj, RectF, Res, S_OK, VTable,
-    add_ref, gap, get_factory, give, not_implemented, put, query, read, release_object, try_box,
-    vtable_of,
+    E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Header, IID_FACTORY, IID_FACTORY1,
+    IID_IUNKNOWN, IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj, RectF, Res, S_OK,
+    VTable, add_ref, gap, get_factory, give, not_implemented, put, query, read, release_object,
+    try_box, vtable_of,
 };
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -48,7 +48,10 @@ impl Drop for Factory {
     }
 }
 
-static FACTORY_VTBL: VTable<17> = VTable([
+/// ID2D1Factory, and ID2D1Factory1's ten further methods after it
+/// (d2d1_1.h). CreateDevice is the one Office needs: everything else of
+/// 1.1 hangs off the device.
+static FACTORY_VTBL: VTable<27> = VTable([
     factory_query_fn as *const (),
     add_ref as *const (),
     factory_release_fn as *const (),
@@ -66,6 +69,16 @@ static FACTORY_VTBL: VTable<17> = VTable([
     crate::target::f_CreateHwndRenderTarget as *const (),
     f_CreateDxgiSurfaceRenderTarget as *const (),
     crate::target::f_CreateDCRenderTarget as *const (),
+    crate::device::f1_CreateDevice as *const (),
+    f1_CreateStrokeStyle as *const (),
+    f1_CreatePathGeometry as *const (),
+    f1_CreateDrawingStateBlock as *const (),
+    f1_CreateGdiMetafile as *const (),
+    f1_RegisterEffectFromStream as *const (),
+    f1_RegisterEffectFromString as *const (),
+    f1_UnregisterEffect as *const (),
+    f1_GetRegisteredEffects as *const (),
+    f1_GetEffectProperties as *const (),
 ]);
 
 static MT_VTBL: VTable<6> = VTable([
@@ -111,7 +124,7 @@ pub fn factory_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
         put(out, (&factory(this).mt_vtbl as *const *const ()).cast_mut().cast());
         return S_OK;
     }
-    query(this, b"ID2D1Factory", &[IID_FACTORY], riid, out)
+    query(this, b"ID2D1Factory", &[IID_FACTORY, IID_FACTORY1], riid, out)
 }
 
 pub fn factory_release(this: Obj) -> u32 {
@@ -236,6 +249,97 @@ extern "system" fn f_CreateDxgiSurfaceRenderTarget(
 ) -> HResult {
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateDxgiSurfaceRenderTarget")
+}
+
+// ---- ID2D1Factory1's own methods ----------------------------------------------
+//
+// CreateDevice is in `device`. The rest are recorded and E_NOTIMPL: a
+// 1.1 stroke style (ID2D1StrokeStyle1) and path geometry
+// (ID2D1PathGeometry1) each add one method to the 1.0 interface, which
+// is work for the program that asks for them, and effects are a
+// rendering graph gala has none of.
+
+extern "system" fn f1_CreateStrokeStyle(
+    _this: Obj,
+    _props: *const u8,
+    _dashes: *const f32,
+    _count: u32,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1Factory1::CreateStrokeStyle")
+}
+
+extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1Factory1::CreatePathGeometry")
+}
+
+extern "system" fn f1_CreateDrawingStateBlock(
+    _this: Obj,
+    _desc: *const u8,
+    _params: Obj,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1Factory1::CreateDrawingStateBlock")
+}
+
+extern "system" fn f1_CreateGdiMetafile(_this: Obj, _stream: Obj, out: *mut Obj) -> HResult {
+    put(out, core::ptr::null_mut());
+    not_implemented(b"ID2D1Factory1::CreateGdiMetafile")
+}
+
+extern "system" fn f1_RegisterEffectFromStream(
+    _this: Obj,
+    class_id: *const Guid,
+    _xml: Obj,
+    _bindings: *const u8,
+    _count: u32,
+    _factory: *const (),
+) -> HResult {
+    gap(b"ID2D1Factory1::RegisterEffectFromStream", read(class_id).map_or(0, |g| crate::data1(&g)));
+    crate::E_NOTIMPL
+}
+
+extern "system" fn f1_RegisterEffectFromString(
+    _this: Obj,
+    class_id: *const Guid,
+    _xml: *const u16,
+    _bindings: *const u8,
+    _count: u32,
+    _factory: *const (),
+) -> HResult {
+    gap(b"ID2D1Factory1::RegisterEffectFromString", read(class_id).map_or(0, |g| crate::data1(&g)));
+    crate::E_NOTIMPL
+}
+
+extern "system" fn f1_UnregisterEffect(_this: Obj, _class_id: *const Guid) -> HResult {
+    not_implemented(b"ID2D1Factory1::UnregisterEffect")
+}
+
+/// GetRegisteredEffects: gala registers none, and says so (Direct2D's
+/// own built-in effects are not counted here either).
+extern "system" fn f1_GetRegisteredEffects(
+    _this: Obj,
+    _effects: *mut Guid,
+    _count: u32,
+    returned: *mut u32,
+    registered: *mut u32,
+) -> HResult {
+    put(returned, 0);
+    put(registered, 0);
+    S_OK
+}
+
+extern "system" fn f1_GetEffectProperties(
+    _this: Obj,
+    class_id: *const Guid,
+    out: *mut Obj,
+) -> HResult {
+    put(out, core::ptr::null_mut());
+    gap(b"ID2D1Factory1::GetEffectProperties", read(class_id).map_or(0, |g| crate::data1(&g)));
+    crate::E_NOTIMPL
 }
 
 // ---- Stroke styles ------------------------------------------------------------
