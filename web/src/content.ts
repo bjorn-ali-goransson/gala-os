@@ -162,8 +162,8 @@ export const componentGroups: ComponentGroup[] = [
       },
       {
         name: "Direct3D 9 to 12",
-        status: "planned",
-        what: "Direct3D over Vulkan through DXVK and vkd3d-proton, in software first. Direct3D 11 comes first, since Office draws through it.",
+        status: "building",
+        what: "Direct3D over Vulkan through DXVK and vkd3d-proton, in software first. Direct3D 11 works through DXVK on lavapipe: a device and a swap chain clear, copy and present into a window on the desktop. Drawing with shaders comes next, then Direct3D 9, 10 and 12.",
       },
       {
         name: "GPU acceleration",
@@ -296,7 +296,7 @@ export const focus: Focus[] = [
       {
         label: "Word and Excel windows",
         status: "building",
-        detail: "they stop before the first window",
+        detail: "Word puts its window up, then stops for want of a rendering device",
       },
       {
         label: "Shapes and images",
@@ -310,8 +310,8 @@ export const focus: Focus[] = [
       },
       {
         label: "Direct3D 11 in software",
-        status: "planned",
-        detail: "DXVK over Mesa's lavapipe",
+        status: "building",
+        detail: "DXVK over Mesa's lavapipe presents to a window; shaders next",
       },
       {
         label: "The new Outlook",
