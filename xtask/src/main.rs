@@ -22795,6 +22795,24 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
 /// `sh`, 14 the distribution's heading), 16 after the ends); the search finds each victim (row 0 its group's heading,
 /// row 1 the process), End task ends it, and taskmgr_test says so before
 /// the next step; Alt+F4 closes Task Manager last.
+///
+/// The sparklines (ROADMAP TM): Performance's list of metrics on the
+/// left has a row every 56 pixels from client y 144 (CPU, a processor
+/// each, Memory, Disk, Network, Processes, Threads, Handles), its line
+/// in a box at client x 297, 94 by 36, so the first row's is at screen
+/// (418, 218); in Processes a row's CPU and Memory cells carry the same
+/// minute behind the number (client x 786 and 866, 18 rows high from
+/// row 1's y 155: screen (907, 228) and (987, 228)), the CPU against
+/// all the processors and the memory against the largest row listed.
+/// A box holds a sample per second over a minute, so a check of a
+/// sidebar line waits for the view to have run the seconds that reach
+/// the columns it looks at (1.6 columns a second from the right).
+///
+/// A line is blended with whatever it is drawn over wherever it covers
+/// a pixel in part, which is most of them (`taskmgr::stroke`), so what
+/// the checks look for is the area under it: the metric's colour mixed
+/// towards white, which is a colour of its own and solid. Where the
+/// line stands in its box is then what that area proves.
 const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
     marker: "taskmgr_test: ready",
     steps: &[
@@ -22840,6 +22858,23 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x117dbb), // CPU graphs
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x9fcbe3), // load under a line
                 PixelCheck::AnyIn(317, 450, 800, 250, 0x8b12ae), // memory's graph
+                // The list on the left, in the right 12 columns of
+                // each box: a sample a second over a minute's width, so
+                // those columns are a line only once the view has run
+                // some seconds, where the newest sample alone would be
+                // a dot in the corner. What each check looks for is the
+                // area under the line, the metric's colour mixed
+                // towards white: the line itself is blended with what
+                // it is drawn over wherever it covers a pixel in part.
+                // The CPU total's load reaches the top of its box (over
+                // 250 per mille: the busy thread is one of the two
+                // processors) and fills the bottom of it; memory's few
+                // per cent and the process count are their own lines'
+                // own load.
+                PixelCheck::AnyIn(500, 219, 12, 26, 0x9fcbe3),
+                PixelCheck::Most(500, 246, 12, 8, 0x9fcbe3, 90),
+                PixelCheck::AnyIn(500, 387, 12, 35, 0xd0a0de),
+                PixelCheck::AnyIn(500, 555, 12, 34, 0x99bfe2),
             ],
         },
         ScreenStep {
@@ -22865,7 +22900,16 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "sendkey s",
                 "sendkey y",
             ],
-            pixels: &[TASKMGR_FILTERED],
+            pixels: &[
+                TASKMGR_FILTERED,
+                // The area under its CPU line, which stands well above
+                // the cell's floor (a thread of the two processors),
+                // and its memory line at the ceiling with its own area
+                // under it: the only row listed, so it is the scale.
+                PixelCheck::Most(910, 240, 40, 6, 0xd4e7f2, 80),
+                PixelCheck::AnyIn(990, 228, 40, 10, 0x8b12ae),
+                PixelCheck::Most(990, 234, 40, 10, 0xead4f0, 90),
+            ],
         },
         ScreenStep {
             after: "",
@@ -22963,9 +23007,15 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "taskmgr_test: sh ended",
-            // "cat" searched.
+            // "cat" searched: `cat` waits for its input and takes no
+            // processor, so its CPU cell is background above the floor
+            // its line rests on (the busy window's was not).
             input: &["sendkey esc", "sendkey c", "sendkey a", "sendkey t"],
-            pixels: &[TASKMGR_FILTERED, PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420)],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::Most(910, 228, 40, 14, 0xfbfbfb, 95),
+            ],
         },
         ScreenStep {
             after: "",

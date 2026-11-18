@@ -247,7 +247,7 @@ has a section under "Open items".
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent |
 | EX | A file explorer over every file system | in progress | steps 1-2 done (the drives and the WSL distributions in one tree) and part of 3-4 (`explorer`); next the namespace's rest (Desktop, Recycle Bin, context menus), file dialogs, drag and drop |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
@@ -6072,6 +6072,18 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
   its busy one never. Not covered: messages between programs, Wayland
   clients, Linux D state (gala's Linux waits are all interruptible:
   ledgered); no "(Not Responding)" caption or ghost window yet.
+- Step 4, sparklines: every metric carries its last minute as a line.
+  Performance has a list on the left, as Windows' Performance sidebar,
+  giving the CPU total, each processor, memory, disk, network and the
+  process, thread and handle counts their value, their peak and their
+  line; a row's CPU and Memory cells in Processes and Details carry the
+  process's own minute behind the number, from a ring per process kept
+  with its row (`taskmgr::Trails`, keyed by pid and start time, dropped
+  when the process ends; no allocation per sample). The scenario checks
+  the sidebar's lines where only a view that has run some seconds has
+  drawn, the busy window's CPU cell risen, and an idle `cat`'s flat on
+  its floor. Not covered: no Disk or Network column per process to draw
+  in (no per-process counters: ledgered), and no Statistics view yet.
 
 **Next** (each test first, checked on the screen, screenshots):
 1. Inspection: open file location, a process's threads with their
@@ -6082,7 +6094,8 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    from the same CPU accounting.
 3. Statistics: distributions over time, not only totals, in a
    Statistics view beside Performance (top lists, sortable, p50/p95/p99
-   columns, a chosen window of 1, 10 or 60 s) and `gala stats`:
+   columns, each row's p50 and p99 over time as a sparkline beside it,
+   a chosen window of 1, 10 or 60 s) and `gala stats`:
    - per thread and process: CPU over the window (the busiest threads
      now, by name), scheduling latency (runnable to running), run-slice
      length, context switches per second, and blocked time split by
@@ -6103,22 +6116,14 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    view shows on the clipboard as text, ready to paste to a person or
    an agent: the view's name, the time and window, the gala build, the
    sort and filter, then the visible rows as a Markdown table with
-   their units (selected rows only when there is a selection), and in
-   Statistics the percentiles' sample counts. The same text from
-   `gala ps --copy` and `gala stats --copy`; the scenario checks the
-   clipboard's text against the view.
-5. Sparklines: a small line of the last minute beside every metric, as
-   Windows' Performance sidebar: in Performance's list on the left
-   (each processor, memory, disk, network, the process, thread and
-   handle counts, from `taskmgr::History`), and in the CPU, Memory,
-   Disk and Network columns of Processes and Details per process
-   (a fixed ring of samples per process, kept with its row and dropped
-   when it ends; no allocation per sample), and beside each
-   Statistics row (its p50 and p99 over time). Scaled per metric
-   (CPU and memory to 100 %, throughput to the visible peak, the peak
-   written beside it); the scenario checks the lines rise under its
-   busy thread and stay flat for an idle process, and the Copy text
-   carries the sampled values.
+   their units (selected rows only when there is a selection), the
+   values behind each sparkline, and in Statistics the percentiles'
+   sample counts. The same text from `gala ps --copy` and `gala stats
+   --copy`; the scenario checks the clipboard's text against the view.
+5. Per-process I/O: Disk and Network columns in Processes and Details,
+   each with its sparkline as CPU and Memory have (gala counts disk and
+   network bytes for the machine, not per process: ledgered
+   `taskmgr.exe!Processes(Disk)`, `(Network)`).
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its
