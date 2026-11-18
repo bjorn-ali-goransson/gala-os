@@ -2450,7 +2450,11 @@ source).
   it. Nor may a transcript assert what Linux leaves to timing: a chain of
   exactly 40 symbolic links reads or fails with ELOOP, depending on
   whether the lookup's lockless walk fell back (fs_test asserts 20 and
-  41, and "opens or ELOOP" for 40). lx-expect
+  41, and "opens or ELOOP" for 40); nor that an expiry is readable on
+  the instruction after the timer is armed, even for an absolute time
+  already past, because the expiry is posted by the timer subsystem and
+  a non-blocking read races it (timerfd_test polls before each read of
+  such a timer). lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the

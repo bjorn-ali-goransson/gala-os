@@ -79,10 +79,12 @@ In order, after it:
    this list; heavier, meatier work before polish): its window, input
    and accessibility tree are done (`chromium_window`, `chromium_uia`),
    ChromeDriver too (`chromium_driver`); now the conformance report.
-   Its blockers (Chrome's out-of-memory exceptions 0xE0000008,
-   ChromeDriver not exiting, the full WPT run) go with item 12 to the
-   Windows machine, where gala runs under KVM (the owner;
-   `docs/windows-kvm-brief.md`).
+   Its blockers went with item 12 to the Windows machine, where gala
+   runs under KVM (the owner; `docs/windows-kvm-brief.md`): the whole
+   `dom/nodes` directory runs there (13326 of 13397 subtests), and
+   neither Chrome's out-of-memory exceptions (0xE0000008) nor
+   ChromeDriver's hang reproduces under KVM, so both wait on the
+   conditions they were seen under (stage 2's "Next" (b) and (c)).
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -128,8 +130,9 @@ In order, after it:
     loads 8-31x faster here. Next: the scenarios' programs
     (run-all's `ms` against `cargo xtask report`, then `cargo xtask
     compare`), Chromium's page loads and Python, then `cargo xtask
-    profile` on the system call path -- which needs #43 first, since
-    the profiler's samples hang the boot thread under KVM.
+    profile` on the system call path -- after rechecking #43 (the
+    profiler's samples hung the boot thread under KVM) there, since a
+    tick's writing is bounded now (ARCHITECTURE, the profiler).
 
 Then the next breakthroughs (the owner), in this order: **LD**, desktop
 Linux applications (dynamic glibc programs first, then the Wayland
@@ -1676,10 +1679,21 @@ samples).
    lost-wake-up stress and the state dump's keyed-event lines found no
    lost wake in the locks); (b) Chrome's out-of-memory exceptions
    (0xE0000008) when a second browser starts with the first still alive,
-   with free frames left: which limit (commit, reservations, a quota);
+   with free frames left: which limit (commit, reservations, a quota).
+   Not reproduced under KVM on the Windows machine, over the whole
+   `dom/nodes` directory (406 tests) nor in the `XTASK_WPT_LIMIT=20`
+   run, with no memory pressure (fewest frames free 469219 of 673061);
+   the run keeps one session and starts a new browser only when one
+   dies, so the condition needs a browser that died, and what it was
+   seen under (TCG, the VM's memory) decides where to look next;
    (c) ChromeDriver not exiting after the client's /shutdown (the
-   scenario then runs to its limit); (d) the whole directory again, then
-   the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
+   scenario then runs to its limit): under KVM `chromedriver.exe`
+   finished with status 0x00000000 after 406 tests, twice, so it wants
+   a TCG run or the conditions it was seen under; (d) done under KVM:
+   406 tests, 404 harness OK, 13326 of 13397 subtests pass against
+   edge-159-win's 13343 (`user/windows/wpt/` records it); next, the
+   other directories and the comparison with Chrome on Windows
+   (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as
