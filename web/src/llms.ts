@@ -7,6 +7,9 @@ import {
   debugCapabilities,
   decisions,
   focus,
+  imageDemo,
+  images,
+  imagesUrl,
   insideTools,
   linuxPrograms,
   liveCapabilities,
@@ -111,6 +114,19 @@ export function llmsText(): string {
   out.push("");
   for (const t of insideTools) out.push(`- \`${t.name}\`: ${t.what}`);
   out.push("");
+
+  out.push("## Try it");
+  out.push("");
+  out.push(imageDemo);
+  out.push("");
+  for (const i of images) {
+    out.push(`- **${i.arch}** (${i.size}): ${imagesUrl}/${i.file} (SHA-256: ${imagesUrl}/${i.file}.sha256). ${i.what} Needs ${i.needs}`);
+    out.push("");
+    out.push("  ```sh");
+    for (const line of i.qemu.split("\n")) out.push(`  ${line}`);
+    out.push("  ```");
+    out.push("");
+  }
 
   out.push("## Principles");
   out.push("");
