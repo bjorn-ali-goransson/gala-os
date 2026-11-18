@@ -8569,7 +8569,10 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries), filtered by
-  thread. Waking: each thread waiting for a message (GetMessage,
+  thread. A message that finds every entry taken is lost (PostMessage
+  returns 0, a key `pump` takes or the WM_CHAR TranslateMessage makes
+  goes nowhere): ledgered `user32.dll!message queue full`, the detail
+  the message. Waking: each thread waiting for a message (GetMessage,
   MsgWaitForMultipleObjects, WaitMessage) waits on an auto-reset event
   of its own (made before its first look at the queue, so a wake between
   the look and the wait is kept) and on the process's event, which the
@@ -14624,12 +14627,22 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   threads unwind, and from then on a Linux process's `comm` and root
   are being dismantled, so its image would be the one its NT process
   was created from (`sh` for one that had exec'd `sleep`) and its
-  distribution empty. Task Manager showed such a row and "End task" on
-  it reached a pid the kernel no longer had (STATUS_INVALID_CID).
-  `process::running` keeps them, since the state dump must still show a
-  process stuck in teardown; this list drops them. `taskmgr_test` ends
-  a Linux process of its own and watches what the list says of it while
-  it goes.
+  distribution empty: a row of its own, in a group ahead of the
+  distribution's. Invariant: the exit status is checked again after a
+  record's parts are read (`tasks::still_themselves`), and the record
+  is dropped if it is set by then; teardown starts only after the
+  status is recorded, so a part read from teardown always comes with
+  that second check failing. Checking only before the read left a
+  window as long as the read (wide on a starved processor): `sleep`,
+  killed while it was being read, was listed as such an `sh`, and End
+  task on `sh` aimed at it (STATUS_INVALID_CID). A query that drops one
+  says so (`tasks: ... left out N that ended while being read`, the
+  `tasks query` event's `ended`). `process::running` keeps them, since
+  the state dump must still show a process stuck in teardown.
+  `taskmgr_test` ends a Linux process of its own and watches what the
+  list says of it while it goes; on a loaded host
+  (`XTASK_REPEAT=20 XTASK_REPEAT_JOBS=4` beside busy loops) it is what
+  reports the race (`listed as "sh", not sleep`).
 - **Windows' contents stay Windows'**: NtQuerySystemInformation's
   SystemProcessInformation (and so Toolhelp and psapi) lists NT
   processes only; a Linux process is no Windows process. `/proc` inside

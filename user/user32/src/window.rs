@@ -2923,6 +2923,12 @@ fn queue(thread: u32, msg: Msg, input: bool) -> bool {
     });
     if ok {
         wake();
+    } else {
+        // Every entry taken: the message is lost (a key, the WM_CHAR
+        // TranslateMessage makes of it, a click), which nothing else
+        // would show. Recorded after the lock (the ledger takes none of
+        // ours); the detail is the message.
+        unsupported(b"user32.dll!message queue full", u64::from(msg.message));
     }
     ok
 }

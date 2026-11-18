@@ -3915,7 +3915,11 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   check that the list has been filtered (`TASKMGR_FILTERED`, the list's
   background where unfiltered there are rows). Otherwise a loaded host
   clicks where the row is about to be, the row arrives unselected, and
-  only the step's screendump says so.
+  only the step's screendump says so. The check must also tell this
+  search's list from the previous step's: two searches that each leave
+  one group with one row look alike, and a check both pass is met by
+  the screen still showing the last one (the `sh` step checks that the
+  name cell is blank right of "sh", where `sleep`'s name goes on).
 - Windows-key chords are one `sendkey` (`sendkey meta_l-right`: Snap).
   The wheel: `mouse_move 0 0 1` is one notch up (away from the user; a
   negative dz is down).
