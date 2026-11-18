@@ -162,8 +162,8 @@ export const componentGroups: ComponentGroup[] = [
       },
       {
         name: "Direct3D 9 to 12",
-        status: "planned",
-        what: "Direct3D over Vulkan through DXVK and vkd3d-proton, in software first. Direct3D 11 comes first, since Office draws through it.",
+        status: "building",
+        what: "Direct3D over Vulkan through DXVK and vkd3d-proton, in software first. Direct3D 11 works through DXVK on lavapipe: a device and a swap chain clear, copy and present into a window on the desktop. Drawing with shaders comes next, then Direct3D 9, 10 and 12.",
       },
       {
         name: "GPU acceleration",
@@ -296,7 +296,7 @@ export const focus: Focus[] = [
       {
         label: "Word and Excel windows",
         status: "building",
-        detail: "they stop before the first window",
+        detail: "Word puts its window up, then stops for want of a rendering device",
       },
       {
         label: "Shapes and images",
@@ -310,8 +310,8 @@ export const focus: Focus[] = [
       },
       {
         label: "Direct3D 11 in software",
-        status: "planned",
-        detail: "DXVK over Mesa's lavapipe",
+        status: "building",
+        detail: "DXVK over Mesa's lavapipe presents to a window; shaders next",
       },
       {
         label: "The new Outlook",
@@ -890,3 +890,51 @@ export const shots: Shot[] = [
     caption: "قلعة: gala's boot screen.",
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Downloads: the nightly images (.github/workflows/images.yml, WORKFLOW
+// "Downloadable images"). Each file has `.sha256` and `.commit` beside it.
+
+export const imagesUrl = "https://updates.gala-os.com/images/latest";
+
+export type Image = {
+  arch: string;
+  file: string;
+  size: string;
+  what: string;
+  /** The command that boots it, checked against the published image. */
+  qemu: string;
+  /** What the command needs besides QEMU. */
+  needs: string;
+};
+
+export const images: Image[] = [
+  {
+    arch: "x86_64",
+    file: "gala-x86_64.iso",
+    size: "about 55 MB",
+    what: "For PCs and x86_64 virtual machines. A hybrid image: it boots by BIOS or UEFI, from a CD drive or written to a USB stick.",
+    qemu:
+      "qemu-system-x86_64 -cpu max -m 1G -smp 2 -serial stdio \\\n" +
+      "  -cdrom gala-x86_64.iso",
+    needs: "QEMU (the qemu-system-x86 package, or qemu from Homebrew).",
+  },
+  {
+    arch: "aarch64",
+    file: "gala-aarch64.iso",
+    size: "about 22 MB",
+    what: "For QEMU's virt machine on ARM64, booted by UEFI. Real ARM64 hardware is not supported yet.",
+    qemu:
+      "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 1G -smp 2 -serial stdio \\\n" +
+      "  -bios QEMU_EFI.fd \\\n" +
+      "  -device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-mouse-pci \\\n" +
+      "  -device virtio-scsi-pci -device scsi-cd,drive=cd \\\n" +
+      "  -drive if=none,id=cd,media=cdrom,file=gala-aarch64.iso",
+    needs:
+      "QEMU and its ARM64 UEFI firmware: QEMU_EFI.fd from the qemu-efi-aarch64 package (in /usr/share/qemu-efi-aarch64/), or edk2-aarch64-code.fd, which comes with QEMU (Homebrew: $(brew --prefix)/share/qemu/).",
+  },
+];
+
+/** What a downloaded image does when it boots (xtask DEMO_CMDLINE*). */
+export const imageDemo =
+  "Each image is a developer build of main's latest commit that passed every test, rebuilt nightly. It boots the kernel, assembles C:, and runs a few demonstration programs: a minimal Windows program on both machines, and on x86_64 also a Go program and one that starts a thousand goroutines across both processors. Their output and the kernel's log go to the serial console, which the command's serial option shows in your terminal; the window stays on the boot screen (x86_64) or blank (aarch64), since there is no interactive desktop on these images yet. Expect lines such as “Hello from user mode!” and, at the end, “gala: boot ok”. Close QEMU's window, or press Ctrl+C in the terminal, to stop it.";

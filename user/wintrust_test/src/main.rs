@@ -833,8 +833,8 @@ fn setup_exe(c: &mut Checks, path: &[u16]) -> Result<(), u32> {
         b"Microsoft Corporation",
         b"Microsoft Root Certificate Authority 2010",
         SHA256,
-        // Its RFC 3161 timestamp's genTime, 2026-10-03 07:54:38.455 UTC.
-        Some(filetime(2026, 10, 3, 7, 54, 38) + 4_550_000),
+        // Its RFC 3161 timestamp's genTime, 2026-11-01 23:47:58.018 UTC.
+        Some(filetime(2026, 11, 1, 23, 47, 58) + 180_000),
         WTD_REVOKE_NONE,
     )?;
     real_image(
