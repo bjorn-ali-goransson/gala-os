@@ -6350,8 +6350,18 @@ volume instead).
    ARCHITECTURE "Installing gala onto a disk"). Open: the graphical
    installer over it (pick a disk, confirm, progress; GUI after CLI,
    item SD), installing into free space, every step as events, an answer
-   file for unattended runs (Windows' autounattend is the model), the
-   images carrying the release tar (only `install_to_disk`'s does).
+   file for unattended runs (Windows' autounattend is the model).
+   Waiting (the owner): what installing from a USB stick needs, in order:
+   a. The downloadable images carry the release tar (only
+      `install_to_disk`'s does), so `gala setup` has a release to copy.
+   b. A way to start it from the desktop: an "Install gala" entry in the
+      start menu, then the graphical installer (gala has no interactive
+      prompt, item CP, and the boot menu's command line is sealed, R8).
+      With a and b, a downloaded image installs onto a virtual disk in
+      QEMU.
+   c. On a laptop: its disk (NVMe, or AHCI: item HW step 1) and its
+      keyboard and touchpad (USB HID: item USB); gala sees only virtio
+      disks today.
 5. Beside Windows: the Windows-side tool shrinks C:, the installer uses
    the space; the boot menu offers both.
 
