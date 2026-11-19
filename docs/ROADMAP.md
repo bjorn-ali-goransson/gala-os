@@ -251,7 +251,7 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
-| IN | The installer: gala onto a machine's disk | in progress (step 1: the layout IOCTLs, `partition_test`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| IN | The installer: gala onto a machine's disk | in progress (steps 1-4's command: `gala setup` installs, the disk boots: `install_to_disk`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -6555,18 +6555,34 @@ volume instead).
    CREATE_DISK, UPDATE_PROPERTIES, GET_PARTITION_INFO_EX) and each
    partition a device (`\Device\Harddisk0\Partition1`...). Open: its
    run on real Windows (GitHub issue #206), MBR tables read.
-2. C: in a partition: the persisted volume found by its partition type
-   GUID instead of filling the disk; the `persist` scenarios on a
-   partitioned disk.
-3. Booting from the installed disk: the EFI system partition with
-   Limine, the kernel, the sealed config and the manifest (R8), the
-   firmware's boot entry; Secure Boot's enrollment with R8 step 1.
-4. The installer program: pick a disk, erase it or use its free space,
-   confirm, install, report; every step and failure as events, an
-   answer file for unattended runs (Windows' autounattend is the
-   model). Scenario: a first boot installs onto an empty virtio disk
-   unattended; a second boot starts from that disk alone and reaches
-   the desktop.
+2. C: in a partition: done (`persist_partition`; ARCHITECTURE "C: kept
+   on the disk"): on a GPT disk C: is the partition of gala's C: type;
+   a partitioned disk without one, or an MBR disk, is never formatted.
+3. Booting from the installed disk: the layout done (`boot_from_disk`,
+   ARCHITECTURE "Boot"): a GPT whose EFI system partition (FAT32) holds
+   the image's boot tree as it is, found by the firmware's removable-media
+   path `EFI/BOOT/BOOTX64.EFI` with no boot entry, and gala's C:
+   partition after it. Open: a firmware boot entry (UEFI variables),
+   BIOS machines (Limine's `bios-install` on the disk), Secure Boot's
+   enrollment with R8 step 1.
+4. The installer program: its command done (`gala setup <disk> --erase`,
+   `install_to_disk`: a first boot installs onto an empty disk, a second
+   boots from that disk alone to the desktop, C: kept in partition 2;
+   ARCHITECTURE "Installing gala onto a disk"). Open: the graphical
+   installer over it (pick a disk, confirm, progress; GUI after CLI,
+   item SD), installing into free space, every step as events, an answer
+   file for unattended runs (Windows' autounattend is the model).
+   Waiting (the owner): what installing from a USB stick needs, in order:
+   a. The downloadable images carry the release tar (only
+      `install_to_disk`'s does), so `gala setup` has a release to copy.
+   b. A way to start it from the desktop: an "Install gala" entry in the
+      start menu, then the graphical installer (gala has no interactive
+      prompt, item CP, and the boot menu's command line is sealed, R8).
+      With a and b, a downloaded image installs onto a virtual disk in
+      QEMU.
+   c. On a laptop: its disk (NVMe, or AHCI: item HW step 1) and its
+      keyboard and touchpad (USB HID: item USB); gala sees only virtio
+      disks today.
 5. Beside Windows: the Windows-side tool shrinks C:, the installer uses
    the space; the boot menu offers both.
 
@@ -6763,6 +6779,16 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
+- **`arm_lx_inkscape` stalled once on CI** (1 of 5 runs; 0 of 9
+  locally, 4 of them at once beside busy host loops): after glycin
+  SIGKILLed its image loader (as it does on every run), Inkscape's main
+  window never came; both CPUs idle, the Wayland server with no work,
+  two Inkscape threads in wait4 (`lx/fork.rs`) and the main thread on a
+  futex, until the 300 s limit. Reading wait4 and the child's end
+  (`state::become_zombie`, `child_ended`) found no window for a lost
+  wakeup. The state dump now lists each Linux process's children
+  (running, zombies) and its wait4/waitid waiters with the pid each
+  wants, so the next stall names what the threads waited for.
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread
@@ -6870,6 +6896,30 @@ exact name (`cargo xtask boot-test office_install`).
 ## Later
 
 Wanted, not scheduled. Each becomes an item with a section when it is.
+
+- **No binaries in the repository** (the owner): `user/bin` (about
+  400 files, 71 MB, rewritten by most changes to a DLL) goes; what is
+  built from source is built, not checked in. Building the test
+  programs on Windows, to run them there, is that machine's job (the
+  Rust ones are freestanding and link with rust-lld, so cargo builds
+  them on Windows; the C ones need mingw-w64 there), not a reason to
+  keep copies. Steps: the scenarios, um-test and the module graph read
+  what the build just made in `target/` (which also ends the pitfall
+  of a scenario running a stale copy until `export-tests`); the
+  third-party programs (Go, mingw-w64) are built by xtask from their
+  pinned sources and cached in CI, keyed by the build script and the
+  source's checksum; `run-all.ps1` takes the folder a build made;
+  then `user/bin`, `export-tests`' copying and CI's `git diff
+  --exit-code user/bin` check go, with README, WORKFLOW and
+  ARCHITECTURE's mentions. Last, the history (the owner): every past
+  binary is removed from it (`git filter-repo` over a full clone,
+  dropping `user/bin` and the other built files), which rewrites every
+  commit from the first binary on: main is force-pushed (its ruleset
+  allows that for the step), open pull requests and every clone and
+  session branch are rebased or remade, and GitHub support is asked to
+  drop the old commits that pull request refs keep reachable. Done in
+  a quiet moment, with no work in flight; the old hashes in docs and
+  commit messages stop resolving.
 
 - **Hygiene sweep** (the owner; in a few months, not now): first
   enumerate the practices gala's code should not follow, by sweeping
@@ -7086,6 +7136,91 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   kept mapped for return addresses, vtables and callbacks still
   pointing at it (as the hot swap keeps it). Restarting stays the
   default; migration is for programs that cannot be restarted.
+- **Change this program: a coding agent from the window menu** (the
+  owner): the user changes one of gala's own user-mode programs
+  (Explorer, the task manager, the start menu once SH moves it out of
+  the kernel) by saying what they want; a coding agent edits the
+  program's source, builds it, and the running program is replaced by
+  the new build, its window and state kept. The owner's mockups,
+  `docs/images/change-program-<n>-<step>.png`, show the flow, one per
+  step; only this feature's elements in them are its scope (the menu
+  entry, the dialog, the progress, the toasts), the rest of what they
+  draw (Explorer's tabs and toolbar, the taskbar, file names) is
+  illustration, not a target:
+  1. The window menu (`-1-menu`): "Change this program..." between
+     Maximize and Close, with a wand icon. It appears only on programs
+     whose source gala has: a window maps to its source by its module
+     (the image's crate), never on third-party programs. The same
+     action is a `gala` command first (item SD): `gala change <window
+     or program> "<request>"`.
+  2. Inspect: before or while writing the request, the user points at
+     the part of the window to change. The cursor picks the UI
+     Automation element under it (item UIA's ElementFromPoint: Name,
+     ControlType, AutomationId and bounding rectangle, a fragment's
+     elements included) and outlines it on the screen, as browsers'
+     developer tools do; the click attaches the element, its path up
+     the tree and a screenshot of it to the request ("this column
+     header"). gala's own programs make that exact: every control gets
+     a stable AutomationId, and the build writes a map from each
+     AutomationId to the source that creates it (file and line, as
+     lld's map gives the hot swap its functions), so the agent starts
+     at the right line instead of searching.
+  3. The request (`-2-request`): a small dialog beside the window
+     titled "Change <program>", a text box, a line saying the agent
+     will edit, build and restart the program with the open folder and
+     selection kept, Cancel and "Make the change".
+  4. Progress (`-3-progress`): a checklist with live state (reading
+     the source, editing <n> files, building with its time,
+     restarting), a progress bar, "Show the change" opening the diff;
+     the program stays usable meanwhile. The agent and the build run
+     on the machine itself, never on another host (no second machine
+     the feature depends on): the agent is a gala program calling the
+     model's API over gala's own network stack, and the build uses a
+     toolchain installed on the machine (rustc, cargo, lld, the
+     program's source at the image's commit and its dependencies),
+     installed on first use as a package and removable again by a disk
+     cleanup tool, which lists it with its size. So the real flow needs
+     self-hosting (above) to run rustc on gala first. The agent is a
+     small loop, not a general coding assistant (running one such as
+     Claude Code on gala needs Node.js on gala, a separate goal): the
+     request, the picked part's automation id and that part's source
+     files go to the model with three tools - read a file, replace an
+     exact piece of text, build - and compiler errors go back to it
+     for a bounded number of rounds; every round, edit and build is
+     logged, and the card's steps are those events. Stopgap until gala
+     runs rustc and calls HTTPS itself: the loop runs on the
+     development host against the real source and API, to prove it;
+     the same loop moves onto gala unchanged. The agent's
+     tools are item MCP's (the ledger, screenshots, UIA), so it checks
+     its change on the running desktop; the change is a branch or diff
+     the user can read.
+  5. Updated (`-4-updated`): the new build in the same window, folder
+     and selection; a toast "<program> was updated" with Undo and
+     Details. The swap: the program writes its state as a versioned
+     record (folder, selection, window place, tabs), the new build
+     reads it, the old process exits; a record whose format changed
+     goes through a migration the agent writes with the change, as
+     R9's handover readers are its migrations. In-place migration
+     (above) is for programs that cannot restart.
+  6. Rollback (`-5-rollback`): the old build is kept; Undo returns to
+     it, and a new build that crashes before it is up is replaced by
+     the old one automatically, with a toast saying so ("See what
+     happened" opens the crash report and the agent's log, "Try again"
+     sends both back to the agent).
+  Observability: every request (with its inspected element), the
+  agent's change, the build, the swap and a rollback in the event
+  stream; the running build's commit and change in the program's
+  About and crash reports. Security: the agent works with the user's
+  token only, and a replaced system program is signed under R8's rule
+  or runs as the user's own build, never silently as gala's.
+  Status: the window menu is on the screen (Alt+Space, a caption right
+  click) and File Explorer has the flow as a preview with no agent
+  behind it (ARCHITECTURE "The file explorer", "Change this program"):
+  the menu item, the request card, Inspect over the window's parts by
+  automation id, the steps on a timer, a last card saying nothing was
+  changed; scenario `explorer` drives it. Next: the agent loop
+  (the stopgap above first), the AutomationId-to-source map, the state record and
+  the swap, Undo; the item on Task Manager.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's

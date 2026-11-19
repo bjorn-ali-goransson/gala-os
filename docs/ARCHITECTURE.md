@@ -464,6 +464,15 @@ faults, its exit).
    (test ISO only) it ends by exiting QEMU through `isa-debug-exit`
    (status 33 = success, 35 = panic); otherwise it halts.
 
+An installed disk (ROADMAP IN step 3; scenario `boot_from_disk`, its
+disk made by xtask's `boot_disk`) boots the same way: a GPT with an EFI
+system partition (FAT32, at 1 MiB) holding the image's tree unchanged
+(`EFI/BOOT/BOOTX64.EFI` is the firmware's removable-media path, so no
+boot entry is needed; Limine's `boot():` is the partition it was loaded
+from, and its enrolled hashes still match) and gala's C: partition after
+it (`persist`, "C: kept on the disk"). xtask attaches no CD to such a
+scenario.
+
 ## CPU tables
 
 The GDT uses the x64 Windows selector values because user mode can
@@ -1591,9 +1600,18 @@ fault) and used only if the view is still there.
 - A PAGE_GUARD page loses its guard on first touch.
 - Inside the current thread's stack reservation (TEB
   DeallocationStack..StackBase) the guard moves one page down and
-  StackLimit follows, without an exception; when only the
-  never-committed bottom page is left, STATUS_STACK_OVERFLOW is raised
-  (the touched page stays usable for the handler).
+  StackLimit follows, without an exception, while the thread's stack
+  guarantee (TEB GuaranteedStackBytes, which SetThreadStackGuarantee
+  raises; 64-bit stacks) still fits between the new guard and the
+  never-committed bottom page. Otherwise STATUS_STACK_OVERFLOW is raised:
+  the guarantee's pages below the touched one are committed without a
+  guard, StackLimit goes to the lowest, and the exception is dispatched on
+  them and the touched page (the kernel log's `vm: stack overflow` line
+  names both ranges). With no guarantee the handler has the touched page
+  and what is left of the one above it, which is not enough for every
+  Windows' dispatch (an exception frame with AVX-512 state is 3.6 KiB):
+  a program that handles its overflow asks for a guarantee, as
+  guard_test does.
 - Anywhere else the program gets STATUS_GUARD_PAGE_VIOLATION (read/write,
   address).
 - Stacks are laid out as Windows does: a reservation of the executable's
@@ -7530,15 +7548,66 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   table.
 - TODO: device interrupts, more than one request in flight.
 
+### Installing gala onto a disk
+
+`gala setup <disk> --erase [--from <release.tar>]` (user/gala's module
+`setup`, over the `setup` library; ROADMAP IN step 4) installs gala onto
+`\\.\PhysicalDrive<disk>`, run as an administrator:
+
+- It reads a release tar (by default `C:\gala\release.tar`): the
+  release tree `cargo xtask release-tree` makes (kernel, system DLLs,
+  Limine, the sealed config with an empty command line, the manifest),
+  as ustar (`setup::tar`: checksums checked, regular files).
+- Through Windows' disk IOCTLs ("Disk"): IOCTL_DISK_CREATE_DISK (GPT, a
+  new disk GUID, 128 entries), IOCTL_DISK_SET_DRIVE_LAYOUT_EX with an EFI
+  system partition (256 MiB at 1 MiB) and gala's C: partition over the
+  rest of the usable range (whole MiB; at least 64 MiB, else refused
+  with the size needed), IOCTL_DISK_UPDATE_PROPERTIES.
+- The EFI system partition, opened as
+  `\\?\GLOBALROOT\Device\Harddisk<disk>\Partition1`, gets a FAT32
+  volume of the release's files (`setup::fat32`: Microsoft's FAT32
+  geometry, contiguous clusters, long names, a fixed date: the same
+  release makes the same volume), then both are flushed.
+- C: is not written: the first boot from the disk formats it. A machine
+  whose disk has gala's C: partition keeps C: without `persist` on its
+  command line (`persist::installed`, logged), as a release's is empty.
+- Without `--erase` nothing is written. Each step is printed (`gala
+  setup: disk partitioned: ...`, `EFI system partition written: FAT32,
+  N files, M of T MiB`, `done: ...`). Exit codes: 0, 1 usage, 4 failed
+  (what failed printed), 6 needs an administrator.
+- Test: `install_to_disk` (the first boot, from its own CD image as
+  SYSTEM, runs it on an empty 512 MiB disk with xtask's release tar,
+  `INSTALL_RELEASE_TAR`; the last boot is from the disk alone, ends on
+  the desktop with C: in partition 2, and the start menu answers).
+  `cargo test -p setup` reads the FAT32 back with its own reader and with
+  mtools' `mtype` where the host has it.
+- Limits: the whole disk only (no free-space install), no graphical
+  installer yet, only `install_to_disk`'s image carries the release tar.
+
 ### C: kept on the disk
 
 With `persist`, the disk keeps what programs change on C: (the whole
-disk; no partitions). The ramfs stays the tree of names and attributes;
+disk, or gala's partition of a GPT disk: below). The ramfs stays the tree of names and attributes;
 the disk holds a log of the changes since the boot's files were laid
 down, replayed over them at the next boot. On a volume of layout 3 (every
 new one) files' pages live in the data area ("A disk-backed C:" below);
 on an older layout 1 or 2 volume they live in memory and the log
 carries their data (Write records).
+
+- **Where** (`persist::volume_range`, ROADMAP IN step 2): on a disk with
+  a GPT, C: is the partition of gala's C: type,
+  {6A1A0C0D-E000-4C3A-8000-67616C614300} (`gpt::GALA_C_TYPE`), and the
+  volume's sectors are that partition's (`DiskBlocks { first, sectors }`;
+  the data area's and crash area's starts it reports are made the disk's
+  by adding `first`); a GPT without one keeps no C:. A disk with an MBR
+  boot signature and no gala volume in sector 0 keeps no C: either: a
+  disk gala did not make is never formatted. Otherwise the whole disk, as
+  before partitions. Each choice is logged (`persist: C: is partition N
+  of the disk (LBA ..., ... sectors)`). Test: `persist_partition` (an EFI
+  system partition before C:'s; the table, the gap and partition 1 stay
+  as written). xtask boots BIOS scenarios from the CD first (`-boot
+  order=d`): SeaBIOS otherwise boots a disk whose protective MBR carries
+  the boot signature.
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
@@ -8985,8 +9054,21 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   is a posted WM_COMMAND (or TrackPopupMenu's result with
   TPM_RETURNCMD). One loop at a time per process; a disabled window's
   bar takes no input (a modal dialog is up).
+- **The window menu** (`track::track_system`): Alt+Space (WM_SYSCHAR
+  ' ', which DefWindowProc turns into WM_SYSCOMMAND SC_KEYMENU) opens
+  GetSystemMenu's menu at the client area's top left; a right click on
+  the caption (the desktop sends WM_NCRBUTTONDOWN/UP HTCAPTION with the
+  screen point; DefWindowProc's WM_CONTEXTMENU of a top-level window
+  in its caption band) opens it at the pointer. Restore, Move, Size,
+  Minimize and Maximize are enabled or greyed by IsZoomed and IsIconic
+  first; WM_INITMENUPOPUP's HIWORD(lParam) is TRUE for it; the choice is
+  a posted WM_SYSCOMMAND (a program's own items, below 0xF000, are its
+  to handle). Test: gui_test (Alt+Space, a program item "Mark", a
+  caption right click), the desktop's host test of the caption's right
+  click.
 - Not yet: item bitmaps (hbmpItem), Alt/F10 keyboard access to the bar,
-  mnemonic underlines, the system menu on the screen.
+  mnemonic underlines, the caption icon (no window draws one) and Alt+-
+  (an MDI child's menu).
 
 #### Scroll bars
 
@@ -15219,6 +15301,23 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   MsgWaitForMultipleObjects); a change made by anyone (a Windows
   program, a Linux process in the distribution: both reach the one file
   system's change journal, `nt::notify`) re-reads the folder.
+- **Change this program** (ROADMAP "Change this program", no coding
+  agent connected yet: a preview of the flow). The window menu gets
+  "Change this program..." before Close (InsertMenuW into
+  GetSystemMenu; WM_SYSCOMMAND 0x0200). It opens a request card over
+  the window (modal: clicks, keys and the wheel go to it): the request
+  typed, the part it is about ("The whole window" by default) and
+  Inspect, Cancel, "Make the change". Inspect hides the card; the part
+  of the window under the pointer is outlined with its automation id in
+  a tag (`change_ui::element_at`: AddressBar, BackButton, UpButton,
+  SearchBox, CommandBar.<command>, ViewButton.<view>,
+  NavigationPane.<row>, ColumnHeader.<column>, ItemsView.Item.<name>,
+  ItemsView, StatusBar); a click picks it, Esc goes back. "Make the
+  change" (or Enter) walks the agent's steps on a timer
+  (`explorer::change::STEPS`, `STEP_MS` each: reading the source,
+  editing, building, restarting) and ends on a card saying that nothing
+  was changed. The flow's state is the library's (`change.rs`,
+  host-tested); `change_ui.rs` draws it and names the parts.
 - **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
   Explorer's PROGRAMS entry as the start menu's tile does (logged
   `desktop: Win+E: File Explorer`); no program sees the E.
@@ -15227,7 +15326,9 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   <parsing name> (<n> items)`, `explorer: open <path>: started`,
   `explorer: copy ...`, `explorer: paste <n> item(s) into <dir>: ok`,
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
-  rename ...`, `explorer: properties ...`, `explorer: closed`): a
+  rename ...`, `explorer: properties ...`, `explorer: window menu`,
+  `explorer: change: ...` for each card, pick, request and step,
+  `explorer: closed`): a
   program the desktop starts writes to the
   serial line. What it cannot do goes to the ledger
   (`explorer.exe!<what>`).

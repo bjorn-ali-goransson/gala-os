@@ -1728,6 +1728,28 @@ pub fn find_ntdll() -> Option<usize> {
     None
 }
 
+/// The base of the image mapped from a path ending in `suffix` (e.g.
+/// `\System32\kernel32.dll`), if the process has it mapped.
+pub fn find_system_image(suffix: &str) -> Option<usize> {
+    const USER_TOP: usize = 0x7fff_ffff_0000;
+    let mut addr = 0;
+    let mut buf = [0u8; 600];
+    while addr < USER_TOP {
+        let (s, mbi) = query(addr);
+        if s != STATUS_SUCCESS || mbi.region_size == 0 {
+            return None;
+        }
+        if mbi.kind == MEM_IMAGE
+            && mbi.base_address == mbi.allocation_base
+            && mapped_file_name(addr, &mut buf).is_ok_and(|n| ends_with_ci(n, suffix))
+        {
+            return Some(addr);
+        }
+        addr = mbi.base_address + mbi.region_size;
+    }
+    None
+}
+
 /// Returns (status, old protection).
 pub fn protect(base: usize, size: usize, new: u32) -> (NtStatus, u32) {
     let (mut b, mut s, mut old) = (base, size, 0);

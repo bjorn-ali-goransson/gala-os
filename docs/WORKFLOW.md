@@ -113,7 +113,9 @@ away. Change the function it wraps, or the directives, instead.
     `xtask/src/main.rs` with the shard's older caches restored: every
     download is checked against its pinned checksum at each use, so only
     what is missing is fetched (a release host's outage fails only a run
-    that needs a new download).
+    that needs a new download). The boot shards save that cache even
+    when a boot failed, so a package fetched once is not fetched again on
+    every run until a whole shard passes.
     The runners have hardware virtualization: a step opens /dev/kvm to
     the runner's user, so the boots run under KVM (the boot log's
     `xtask: vm time` line, and a QEMU standard error without "falling
@@ -1409,6 +1411,22 @@ cannot be fetched, it dates everything now (a full build, never a stale
 one), and the stamp then names HEAD for the next save. The `linux` and
 `windows` jobs have no build cache.
 
+The Linux roots' Ubuntu packages (`target/prebuilt/debs`) are fetched once
+per run by the `debs` job (`cargo xtask fetch-debs`: every root's pinned
+packages, amd64 and arm64, and the prebuilts that are Ubuntu packages
+(glibc, libwayland-client, libffi, weston: `fetch_prebuilt` takes them
+from this cache), checked, the ones no longer pinned removed)
+into one cache, `gala-debs-<hash of xtask/src/main.rs>` (the newest
+restored first, so only new pins are downloaded); the boot shards restore
+exactly that key (`fail-on-cache-miss`) and keep it out of their own
+prebuilt caches. Six shards each fetching them had Ubuntu's archive reset
+their connections whenever the scenarios moved between shards. CI fetches
+amd64 packages (and the prebuilts from Ubuntu's pool) through the mirror
+the runners' apt uses, `XTASK_UBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu`:
+archive.ubuntu.com resets or hangs the runners' connections even one
+download at a time. Every download is checked against its pinned
+SHA-256, whatever serves it.
+
 ### Downloadable images
 
 `.github/workflows/images.yml`: nightly (02:23 UTC) and on a manual run
@@ -1639,6 +1657,11 @@ Adding a required check, or moving the website out of `web/`, means
 revisiting all three.
 
 ## Writing tests and adding functions
+
+A change to `docs/ROADMAP.md` alone runs no pipeline either (the
+owner): `ci.yml`'s push filter ignores it and its `changes` job counts it
+with the website, so a roadmap-only pull request reports its checks as
+skipped and a roadmap-only merge starts no runner and no release.
 
 ### Test programs
 
@@ -2913,22 +2936,28 @@ A root is what its workload opened on real 26.04, traced:
   writes `/tmp/live.txt` from Linux (`wsl -d bb -- ...`) and Explorer's
   `explorer: changed ...` line shows it noticed; the screen check opens
   the copy's Properties (Linux permissions), renames it (F2), shows the
-  icon view, and closes
+  icon view, goes through "Change this program..." (Alt+Space, Up, Up,
+  Enter; a request typed, Inspect over the address bar, Enter, the
+  steps to the last card, Enter), and closes
   Explorer with Alt+F4 (the test waits for the window class
   `CabinetWClass` to go). Screendumps: `target/debug/test-explorer.screen<n>.png`
   (1 This PC, 3 the C: folder with the file selected, 5 Linux with `bb`,
   7 the distribution's root, 9 the copy found in `tmp`, 11 the Linux
-  file listed live, 13 Properties, 15 the icon view).
+  file listed live, 13 Properties, 15 the icon view, 18 the change
+  request card, 20 Inspect's outline, 23 the "nothing was changed"
+  card).
 - Host tests: `cargo test -p shellns` (lists, parsing and display
   names, order), `cargo test -p explorer --lib` (rows, sorting, search,
-  formats), `cargo test -p kernel --lib nt::wslfs` and
+  formats, the change flow's states), `cargo test -p kernel --lib nt::wslfs` and
   `nt::desktop` (Win+E). `cargo clippy -p explorer --lib --tests` and
   `-p shellns --tests` check them on the host.
 - Reading a run: `desktop: Win+E: File Explorer`, explorer.exe's
   `explorer: navigate <parsing name> (<n> items)`, `explorer: copy
   ...`, `explorer: paste ...: ok`, `explorer: open <path>: started`,
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
-  rename ...`, `explorer: properties ...`,
+  rename ...`, `explorer: properties ...`, `explorer: window menu`,
+  `explorer: change: ...` (the card opened, inspecting, the part picked,
+  the request on its part, each step, nothing changed, closed),
   `explorer: closed`; the ledger's `shell32.dll!IShellFolder::...` and
   `explorer.exe!...` lines are what the namespace or the program could
   not do; `UNC path` is a UNC path to a server other than WSL's.
@@ -2940,7 +2969,9 @@ A root is what its workload opened on real 26.04, traced:
   root, tmp (`mnt` exists once a Linux program has run: WSLg's runtime
   directory). Explorer's window is at a fixed place (100, 40) so the
   clicks land; each step waits for explorer's log line of the step
-  before. A path through `\\wsl.localhost` is case-sensitive below the
+  before. The change flow's steps run on a timer: no screen check may
+  wait for one of its middle steps (a screendump under TCG can take
+  longer than a step), only for its last card. A path through `\\wsl.localhost` is case-sensitive below the
   share (Linux names), as on Windows.
 
 ### X11 programs (Xwayland, ROADMAP LD step 5)

@@ -21,6 +21,7 @@
 //! gala upgrade [<id>|--all] [--version v] [--source dir]
 //! gala uninstall <id>|--product-code <key>
 //! gala linux-install <name> <url>    fetch a Linux distribution and import it (the start menu's)
+//! gala setup <disk> --erase [--from <release.tar>]   install gala onto a disk (module `setup`)
 //! gala help
 //! ```
 //!
@@ -56,6 +57,7 @@ use gala_heap as _;
 mod fetch;
 mod linux;
 mod pkg;
+mod setup;
 
 use core::ffi::c_void;
 
@@ -142,6 +144,8 @@ const USAGE: &str = "usage: gala <command> [arguments]
   uninstall <id>                remove a package (its files, commands, record;
                                 or run its uninstaller silently)
   linux-install <name> <url>    fetch a Linux distribution's rootfs and import it
+  setup <disk> --erase [--from <release.tar>]
+                                install gala onto a disk (everything on it is lost)
                                 (wsl --import), its progress on the start menu
   help                          this text
 
@@ -1174,6 +1178,8 @@ fn run() -> u32 {
         let name = alloc::string::String::from_utf16_lossy(a.get(2));
         let url = alloc::string::String::from_utf16_lossy(a.get(3));
         linux::install(&name, &url)
+    } else if a.is(1, "setup") {
+        setup::run(&a)
     } else if a.is(1, "ps") {
         ps()
     } else if a.is(1, "kill") {

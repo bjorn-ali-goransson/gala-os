@@ -1,7 +1,7 @@
 //! Build, boot and test driver: `cargo xtask <command>`.
 //!
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
-//! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
+//! (UEFI) firmware image; `mtools` for the disk-boot scenarios. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
 // The kernel's file-system modules (`diskimage`) use `alloc::` paths.
 extern crate alloc;
@@ -1665,6 +1665,74 @@ const DEBS_ARM64: &[(&str, &str)] = &[
         "4b87d66f9d0cc8558f39d44d221569af6612a98112f43c352c44bca2c067291a",
     ),
 ];
+
+/// Prebuilt `p` as a package of Ubuntu's pool (its URL under
+/// archive.ubuntu.com's or ports.ubuntu.com's `pool/`), if it is one.
+fn ubuntu_deb(p: &Prebuilt) -> Option<Deb> {
+    let pool = p
+        .url
+        .strip_prefix("https://archive.ubuntu.com/ubuntu/pool/")
+        .or_else(|| p.url.strip_prefix("https://ports.ubuntu.com/ubuntu-ports/pool/"))?;
+    pool.ends_with(".deb").then_some(Deb { pool, sha256: p.checksum, files: &[] })
+}
+
+/// `cargo xtask fetch-debs`: every package of every Linux root, amd64 and
+/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), and the prebuilts that are
+/// Ubuntu packages (glibc, libwayland-client, libffi, weston), into the package cache
+/// `target/prebuilt/debs`, each checked against its SHA-256 (`fetch_deb`);
+/// files there that no root pins any more are removed. One after another:
+/// CI runs it once (its `debs` job) for every boot shard, so the shards
+/// download nothing from Ubuntu's archives (WORKFLOW "CI build caches").
+fn fetch_debs() -> Result {
+    let mut wanted = std::collections::BTreeSet::new();
+    let (mut have, mut fetched) = (0, 0);
+    let cache = root().join("target/prebuilt/debs");
+    for r in LINUX_ROOTS {
+        for d in r.debs {
+            for (deb, arm64) in [
+                (Deb { pool: d.pool, sha256: d.sha256, files: d.files }, false),
+                (deb_arm64(d)?, true),
+            ] {
+                let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+                if !wanted.insert(name.clone()) {
+                    continue;
+                }
+                if cache.join(&name).exists() {
+                    have += 1;
+                } else {
+                    fetched += 1;
+                }
+                fetch_deb(&deb, arm64)?;
+            }
+        }
+    }
+    for p in PREBUILT {
+        let Some(deb) = ubuntu_deb(p) else { continue };
+        let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+        if !wanted.insert(name.clone()) {
+            continue;
+        }
+        if cache.join(&name).exists() {
+            have += 1;
+        } else {
+            fetched += 1;
+        }
+        fetch_deb(&deb, deb.pool.ends_with("_arm64.deb"))?;
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&cache).map_err(|e| format!("reading {cache:?}: {e}"))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !wanted.contains(&name) {
+            fs::remove_file(entry.path()).map_err(|e| format!("removing {name}: {e}"))?;
+            removed += 1;
+        }
+    }
+    eprintln!(
+        "xtask: fetch-debs: {} packages ({have} cached, {fetched} fetched), {removed} no longer pinned removed",
+        wanted.len()
+    );
+    Ok(())
+}
 
 /// Deb `d`'s arm64 build (DEBS_ARM64).
 fn deb_arm64(d: &Deb) -> Result<Deb> {
@@ -8309,6 +8377,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("exception_test", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
+    ("guard_test", "kernel32.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
@@ -8476,6 +8545,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("console_window", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
+    // IN step 4: the release gala setup installs (INSTALL_RELEASE_TAR).
+    ("install_to_disk", "target/install/release.tar", "gala"),
     ("disk_test", "ntdll.dll", "Windows/System32"),
     ("disk_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "advapi32.dll", "Windows/System32"),
@@ -11565,6 +11636,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("fetch-debs") => fetch_debs(),
             Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
@@ -11843,6 +11915,8 @@ fn unit_tests() -> Result {
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The installer's FAT32 and tar (ROADMAP IN step 4).
+    run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
@@ -12275,6 +12349,10 @@ fn make_iso_unchecked(
         if file.starts_with("target/wsl/") {
             make_wsl_rootfs()?;
         }
+        // The release an installer copies (IN step 4).
+        if *file == INSTALL_RELEASE_TAR {
+            make_release_tar(release)?;
+        }
         // A path ending in a slash is a directory tree, shipped as C:\<dir>
         // with its subdirectories: packed into one USTAR archive the kernel
         // unpacks (Limine runs out of memory-map entries with hundreds of
@@ -12615,8 +12693,15 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
-    eprintln!("xtask: fetching {} ({})", p.name, p.url);
-    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    if let Some(d) = ubuntu_deb(p) {
+        // An Ubuntu package: from the package cache (`fetch-debs` fills it
+        // once for CI's shards), copied as the download.
+        let (deb, _) = fetch_deb(&d, d.pool.ends_with("_arm64.deb"))?;
+        fs::copy(&deb, &zip).map_err(|e| format!("copying {deb:?}: {e}"))?;
+    } else {
+        eprintln!("xtask: fetching {} ({})", p.name, p.url);
+        run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    }
     // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
     let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
     let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;
@@ -12846,6 +12931,22 @@ fn compile_gsettings_schemas(dir: &Path) -> Result {
     Ok(())
 }
 
+/// `url` with Ubuntu's archive replaced by the mirror `XTASK_UBUNTU_MIRROR`
+/// names (its `.../ubuntu` base), if set: CI's runners reach
+/// archive.ubuntu.com badly (connections reset or hung for minutes) and
+/// their own apt uses Azure's mirror of it (`ci.yml`). The pool's paths
+/// and files are the same, and each download is checked against its
+/// pinned SHA-256 whatever serves it.
+fn ubuntu_mirror(url: &str) -> String {
+    const ARCHIVE: &str = "https://archive.ubuntu.com/ubuntu/";
+    match (url.strip_prefix(ARCHIVE), env::var("XTASK_UBUNTU_MIRROR")) {
+        (Some(rest), Ok(base)) if !base.is_empty() => {
+            format!("{}/{rest}", base.trim_end_matches('/'))
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// The package `d` in the package cache, `target/prebuilt/debs/<file>`
 /// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
 /// (curl, to a `.part` file renamed when whole) and checked against its
@@ -12856,7 +12957,7 @@ fn fetch_deb(d: &Deb, arm64: bool) -> Result<(PathBuf, String)> {
     let url = if arm64 {
         format!("https://ports.ubuntu.com/ubuntu-ports/pool/{}", d.pool)
     } else {
-        format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool)
+        ubuntu_mirror(&format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool))
     };
     let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
     let cache = root().join("target/prebuilt/debs");
@@ -13386,6 +13487,9 @@ fn named_only(name: &str) -> bool {
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
+    // Booted from its disk's EFI system partition (DISK_BOOT_SCENARIOS).
+    "boot_from_disk",
+    "install_to_disk",
     // A framebuffer to show the installer's windows (XTASK_SHOTS).
     "office_install_gui",
     // A framebuffer for Word's and Excel's windows (XTASK_SHOTS).
@@ -14165,7 +14269,16 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
                 .arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
         }
     }
-    cmd.arg("-cdrom").arg(iso);
+    // The image's CD boots, whatever a scenario's disk holds: SeaBIOS
+    // otherwise boots the first disk with an MBR boot signature (a GPT's
+    // protective MBR has one) and runs what its sector 0 holds.
+    if boot != Boot::Uefi {
+        cmd.args(["-boot", "order=d"]);
+    }
+    // A machine booted from its own disk has no CD (DISK_BOOT_SCENARIOS).
+    if !DISK_BOOT_SCENARIOS.contains(&iso_scenario(iso)) {
+        cmd.arg("-cdrom").arg(iso);
+    }
     // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
     cmd.args(extra.split_whitespace());
     Ok(cmd)
@@ -15489,6 +15602,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -15530,6 +15644,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -15552,6 +15667,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -15832,6 +15948,53 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist run=persist_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["persist_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // IN step 2: C: kept in a partition. persist_test's two boots on a
+        // GPT disk whose partition 2 has gala's C: type
+        // (DISK_SCENARIOS: an EFI system partition before it, filled
+        // with a marker; the check finds the volume at partition 2's
+        // start and the table, the gap and partition 1 untouched).
+        name: "persist_partition",
+        cmdline: "qemu_exit persist run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA 34816",
+            "persist_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // IN step 4: gala installs itself. The first boot (from a CD, as
+        // SYSTEM, an empty 512 MiB disk) runs `gala setup 0 --erase`,
+        // which partitions the disk and writes the release
+        // (C:\gala\release.tar) to its EFI system partition; the last
+        // boot is from the disk alone and ends on the desktop with C:
+        // in partition 2 (DESKTOP_AT_BOOT_SCREEN; xtask stops it).
+        name: "install_to_disk",
+        cmdline: "qemu_exit as=system run=gala.exe args=setup%200%20--erase",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA 526336",
+            "persist: formatted the disk",
+            "desktop: session 1 is live",
+            "xtask: screen ok",
+        ],
+    },
+    Scenario {
+        // IN step 3: a machine boots from its own disk, as an installed one
+        // does: no CD; the disk is a GPT with an EFI system partition
+        // holding the image's boot tree (Limine, the kernel, the sealed
+        // config, the modules) and gala's C: partition (`boot_disk`).
+        name: "boot_from_disk",
+        cmdline: "qemu_exit persist run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA",
+            "persist: formatted the disk",
+            "Hello from user mode!",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // P1 (JDK): locale and time (en-US, UTC).
@@ -20223,6 +20386,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "explorer: properties notes.galatxt",
             "Permissions: -rw-r--r--",
             "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            "explorer: window menu",
+            "explorer: change: request card opened (no coding agent is connected)",
+            "explorer: change: inspecting",
+            "explorer: change: picked AddressBar",
+            "explorer: change: request \"bigger\" on AddressBar",
+            "explorer: change: step Reading File Explorer's source",
+            "explorer: change: step Restarting File Explorer",
+            "explorer: change: no coding agent is connected, so nothing was changed",
+            "explorer: change: closed (Esc or Enter)",
             "explorer: closed",
             "explorer_test: explorer closed",
             "xtask: screen ok",
@@ -20345,6 +20517,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("runas_declined", "runas_test"),
     ("reparse_test_user", "reparse_test"),
     ("handover_disk", "persist_test"),
+    ("persist_partition", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
     ("handover_net", "handover_net_test"),
@@ -20506,6 +20679,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// what they will (office_install: ODT starts the 64-bit
 /// OfficeClickToRun.exe, whose imports are only seen in the run).
 const FULL_SYSTEM_SCENARIOS: &[&str] = &[
+    // gala setup (gala.exe and what it loads).
+    "install_to_disk",
     "office_install",
     "office_install_gui",
     "office_install_local",
@@ -20799,10 +20974,16 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
-/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
-/// so n machines boot the whole set between them (CI's boot jobs). The VMs
-/// are dealt out after `plan_vms`, so a batch stays in one shard; the
-/// shard says what it took.
+/// `XTASK_SHARD=i/n` (1-based): the VMs whose first scenario's name
+/// hashes to share i of n (FNV-1a), so n machines boot the whole set
+/// between them (CI's boot jobs). By name, not by position: a scenario
+/// added or removed moves no other VM to another shard, so each shard's
+/// cache of downloads (CI's per-shard prebuilt cache) keeps holding what
+/// its scenarios need; a round-robin deal moved scenarios between shards
+/// whenever one was added, and their first runs elsewhere downloaded
+/// everything again (GitHub's release host answered 429). The VMs are
+/// dealt out after `plan_vms`, so a batch stays in one shard; the shard
+/// says what it took.
 fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
     let Ok(spec) = env::var("XTASK_SHARD") else {
         return Ok(vms);
@@ -20814,8 +20995,11 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
     };
     let total = vms.len();
-    let mine: Vec<Vm<'_>> =
-        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let first = |vm: &Vm<'_>| match vm {
+        Vm::Single(s) => s.name,
+        Vm::Batch(group) => group.first().map_or("", |s| s.name),
+    };
+    let mine: Vec<Vm<'_>> = vms.into_iter().filter(|vm| shard_of(first(vm), n) == i - 1).collect();
     let scenarios: usize = mine
         .iter()
         .map(|vm| match vm {
@@ -20825,6 +21009,17 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         .sum();
     eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
     Ok(mine)
+}
+
+/// The share (0-based, of `n`) scenario `name` falls in: FNV-1a of its
+/// name, stable across runs, hosts and Rust versions.
+fn shard_of(name: &str, n: usize) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (h % n as u64) as usize
 }
 
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
@@ -21356,6 +21551,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
     ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
+    ("install_to_disk", "a disk and two boots (the installer, then the installed disk)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
@@ -24066,7 +24262,10 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// (explorer_test's `open` mode); a file a Linux process writes then
 /// shows without a refresh (screen 11); its context menu's Properties
 /// shows the Linux permissions (screen 13); F2 renames it; Ctrl+Shift+2
-/// is the icon view (screen 15); Alt+F4 closes it. Each step waits for explorer's
+/// is the icon view (screen 15); the window menu's "Change this
+/// program..." opens its request card (screen 18), Inspect picks the
+/// address bar (screen 20) and the request runs its steps to the card
+/// that says nothing was changed (screen 23); Alt+F4 closes it. Each step waits for explorer's
 /// own log line of the one before (`explorer: navigate ...`).
 const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
     marker: "explorer_test: ready",
@@ -24240,7 +24439,60 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(355, 170, 60, 60, 0xf8c84a), // a 48-pixel folder
             ],
         },
-        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+        // "Change this program..." (no coding agent connected): Alt+Space
+        // opens the window menu; Up, Up (past Close and the separator),
+        // Enter.
+        ScreenStep { after: "", input: &["sendkey alt-spc"], pixels: &[] },
+        ScreenStep {
+            after: "explorer: window menu",
+            input: &["sendkey up", "sendkey up", "sendkey ret"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 18: the request card (client 279, 183, 520 x 300): its
+            // accent strip and title, a request typed.
+            after: "explorer: change: request card opened",
+            input: &["sendkey b", "sendkey i", "sendkey g", "sendkey g", "sendkey e", "sendkey r"],
+            pixels: &[
+                PixelCheck::At(600, 257, 0x005fb8),
+                PixelCheck::AnyIn(400, 274, 200, 18, 0x1b1b1b),
+            ],
+        },
+        ScreenStep {
+            // Inspect (832, 458).
+            after: "",
+            input: &["mouse_move 255 152", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 20: inspecting: the band over the status bar; the pointer
+            // over the address bar (401, 95) outlines it (its left edge
+            // at x 185-186).
+            after: "explorer: change: inspecting",
+            input: &["mouse_move -255 -255", "mouse_move -150 -108"],
+            pixels: &[PixelCheck::At(1100, 735, 0x005fb8), PixelCheck::At(186, 95, 0x005fb8)],
+        },
+        ScreenStep {
+            // A click picks it; Enter sends the request.
+            after: "",
+            input: &["mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "explorer: change: picked AddressBar",
+            input: &["sendkey ret"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 23: the steps ran: the last card (client 279, 238) with
+            // its Close button (790, 453).
+            after: "explorer: change: no coding agent is connected",
+            input: &[],
+            pixels: &[PixelCheck::At(600, 312, 0x005fb8), PixelCheck::At(795, 458, 0x005fb8)],
+        },
+        // Enter closes it.
+        ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
+        ScreenStep { after: "explorer: change: closed", input: &["sendkey alt-f4"], pixels: &[] },
     ],
 };
 
@@ -24887,9 +25139,42 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
+            // Alt+Space: the window menu under the caption's left end, at
+            // the client origin (101, 133), over the red rectangle.
+            input: &["sendkey alt-spc"],
+            pixels: &[
+                PixelCheck::At(231, 192, 0xf9f9f9),            // the menu
+                PixelCheck::AnyIn(130, 166, 60, 20, 0x1b1b1b), // "Move"
+            ],
+        },
+        ScreenStep {
+            after: "gui_test: window menu",
+            // Up to the last item, the program's "Mark", and Enter:
+            // WM_SYSCOMMAND 0x110, its yellow square; the menu goes.
+            input: &["sendkey up", "sendkey ret"],
+            pixels: &[
+                PixelCheck::At(487, 379, 0xffff00), // the mark
+                PixelCheck::At(231, 192, 0xff0000), // the menu gone
+            ],
+        },
+        ScreenStep {
+            after: "gui_test: window menu Mark",
+            // A right click on the caption at (300, 115): the window
+            // menu there, over the client area.
+            input: &["mouse_move -96 -161", "mouse_button 2", "mouse_button 0"],
+            pixels: &[PixelCheck::At(400, 265, 0xf9f9f9)],
+        },
+        ScreenStep {
+            after: "",
+            // Esc dismisses it.
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::At(400, 265, 0xffffff)],
+        },
+        ScreenStep {
+            after: "",
             // The close button (x 453..498 of the caption): the program
             // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-            input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
+            input: &["mouse_move 176 2", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },
     ],
@@ -25063,6 +25348,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
     ("desktop_at_boot", DESKTOP_AT_BOOT_SCREEN),
+    ("install_to_disk", DESKTOP_AT_BOOT_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
@@ -26749,6 +27035,44 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // Empty: `gala setup` lays it out in the first boot.
+        name: "install_to_disk",
+        size: 512 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&[
+            "gala setup: disk partitioned: EFI system partition 256 MiB",
+            "gala setup: EFI system partition written: FAT32",
+            "gala setup: done: disk 0 boots gala",
+            "exited with status 0x00000000",
+        ]],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // Made by `boot_disk` from the scenario's image (setup is not used).
+        name: "boot_from_disk",
+        size: BOOT_DISK_SIZE,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "persist_partition",
+        size: 64 << 20,
+        host_mib: None,
+        setup: persist_partition_setup,
+        check: persist_partition_check,
+        earlier_boots: &[&[
+            "persist: C: is partition 2 of the disk (LBA 34816",
+            "persist_test: first boot",
+            "exited with status 0x00000000",
+        ]],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_test",
         size: 32 << 20,
         host_mib: None,
@@ -26897,6 +27221,213 @@ fn partition_test_check(image: &[u8]) -> Result {
     Ok(())
 }
 
+/// Scenarios whose last boot is from their disk alone (no CD):
+/// `boot_from_disk`'s disk made by `boot_disk` from its image,
+/// `install_to_disk`'s by `gala setup` in its first boot (from its own
+/// CD image, `earlier-install_to_disk`).
+const DISK_BOOT_SCENARIOS: &[&str] = &["boot_from_disk", "install_to_disk"];
+
+/// What `gala setup` installs in `install_to_disk`: the release tree
+/// (`release-tree`'s files: the kernel, the system DLLs, Limine, the
+/// sealed config with an empty command line, the manifest) as a ustar
+/// archive, shipped as `C:\gala\release.tar` (`make_release_tar`).
+const INSTALL_RELEASE_TAR: &str = "target/install/release.tar";
+
+/// Makes INSTALL_RELEASE_TAR from the built kernel and DLLs (a boot test
+/// has built them): the tree `make_iso_unchecked` stages for a release,
+/// packed by tar (ustar, sorted, owner 0).
+fn make_release_tar(release: bool) -> Result {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let out = root().join(INSTALL_RELEASE_TAR);
+    let dir = root().join("target/install/tree");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    make_iso_unchecked(
+        release,
+        "release-install",
+        "",
+        &system_modules(),
+        &trust::DEFAULT,
+        Some(&dir),
+    )?;
+    run_quiet(
+        Command::new("tar")
+            .args(["--format=ustar", "--owner=0", "--group=0", "--numeric-owner", "--sort=name"])
+            .arg("-C")
+            .arg(&dir)
+            .arg("-cf")
+            .arg(&out)
+            .arg("."),
+    )?;
+    let _ = fs::remove_dir_all(&dir);
+    let size = fs::metadata(&out).map_or(0, |m| m.len());
+    eprintln!("xtask: {INSTALL_RELEASE_TAR}: the release tree, {} MiB", size >> 20);
+    Ok(())
+}
+
+/// Disk-boot scenarios whose disk xtask lays out (`boot_disk`); the others
+/// start from an empty disk.
+const MADE_BOOT_DISKS: &[&str] = &["boot_from_disk"];
+/// An installed disk's size in those scenarios, and its EFI system
+/// partition's (FAT32: at least 32 MiB) from 1 MiB.
+const BOOT_DISK_SIZE: usize = 256 << 20;
+const BOOT_DISK_ESP_SECTORS: u64 = 128 << 11;
+
+/// Lays out disk image `disk` as an installed gala disk (ROADMAP IN step
+/// 3): a GPT with an EFI system partition at 1 MiB (FAT32, `mformat`,
+/// holding the tree of `iso`: EFI/BOOT/BOOTX64.EFI, Limine, the kernel,
+/// the sealed config, the modules, copied with `mcopy`) and gala's C:
+/// partition after it, to the end. Limine's `boot():` is the partition it
+/// was loaded from, so the tree works as it is on the CD.
+fn boot_disk(iso: &Path, disk: &Path) -> Result {
+    let work = iso.with_extension("boot-disk");
+    let _ = fs::remove_dir_all(&work);
+    let tree = work.join("tree");
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(
+        Command::new("xorriso")
+            .args(["-osirrox", "on", "-indev"])
+            .arg(iso)
+            .args(["-extract", "/"])
+            .arg(&tree),
+    )?;
+    let esp = work.join("esp.img");
+    let esp_sectors = BOOT_DISK_ESP_SECTORS;
+    run_quiet(
+        Command::new("mformat")
+            .args(["-C", "-F", "-T", &esp_sectors.to_string(), "-h", "64", "-s", "32", "-i"])
+            .arg(&esp)
+            .arg("::"),
+    )
+    .map_err(|e| format!("{e} (mformat is in mtools)"))?;
+    let entries: Vec<PathBuf> = fs::read_dir(&tree)
+        .map_err(|e| format!("reading {tree:?}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    run_quiet(Command::new("mcopy").args(["-s", "-i"]).arg(&esp).args(&entries).arg("::/"))
+        .map_err(|e| format!("{e} (mcopy is in mtools)"))?;
+    let mut image = vec![0u8; BOOT_DISK_SIZE];
+    let sectors = (BOOT_DISK_SIZE / 512) as u64;
+    let (first, last) = (2048, 2048 + esp_sectors - 1);
+    write_gpt(
+        &mut image,
+        PARTITION_TEST_DISK_ID,
+        &[
+            (PARTITION_TEST_ESP_TYPE, PARTITION_TEST_ESP_ID, first, last, "EFI system partition"),
+            (GALA_C_TYPE, PARTITION_TEST_DATA_ID, last + 1, sectors - 34, "gala C:"),
+        ],
+    );
+    let fat = fs::read(&esp).map_err(|e| format!("reading {esp:?}: {e}"))?;
+    image[first as usize * 512..first as usize * 512 + fat.len()].copy_from_slice(&fat);
+    fs::write(disk, &image).map_err(|e| format!("writing {disk:?}: {e}"))?;
+    let _ = fs::remove_dir_all(&work);
+    Ok(())
+}
+
+/// gala's C: partition type, {6A1A0C0D-E000-4C3A-8000-67616C614300} (the
+/// kernel's `nt::gpt::GALA_C_TYPE`), in the GPT's byte order.
+const GALA_C_TYPE: [u8; 16] =
+    gpt_guid(0x6a1a_0c0d, 0xe000, 0x4c3a, [0x80, 0, 0x67, 0x61, 0x6c, 0x61, 0x43, 0]);
+/// persist_partition's layout: an EFI system partition at 1 MiB (16 MiB,
+/// filled with PERSIST_PARTITION_FILL), then gala's C: to the end.
+const PERSIST_PARTITION_ESP: (u64, u64) = (2048, 2048 + 32768 - 1);
+const PERSIST_PARTITION_FILL: u8 = 0x5a;
+
+/// A GPT on `image` (128 entries; `parts`: type, GUID, first and last
+/// LBA, name), as UEFI's specification lays it out: the protective MBR,
+/// the primary header and array, the backup array and header.
+/// A GPT entry for `write_gpt`: type, GUID, first and last LBA, name.
+type GptPart<'a> = ([u8; 16], [u8; 16], u64, u64, &'a str);
+
+fn write_gpt(image: &mut [u8], disk_id: [u8; 16], parts: &[GptPart]) {
+    let sectors = (image.len() / 512) as u64;
+    let mut array = vec![0u8; 128 * 128];
+    for (i, (kind, id, first, last, name)) in parts.iter().enumerate() {
+        let e = &mut array[i * 128..(i + 1) * 128];
+        e[..16].copy_from_slice(kind);
+        e[16..32].copy_from_slice(id);
+        e[32..40].copy_from_slice(&first.to_le_bytes());
+        e[40..48].copy_from_slice(&last.to_le_bytes());
+        for (j, b) in name.bytes().enumerate() {
+            e[56 + 2 * j] = b;
+        }
+    }
+    let array_crc = crc32(&array);
+    let header = |me: u64, other: u64, at: u64| {
+        let mut h = vec![0u8; 512];
+        h[..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&me.to_le_bytes());
+        h[32..40].copy_from_slice(&other.to_le_bytes());
+        h[40..48].copy_from_slice(&34u64.to_le_bytes());
+        h[48..56].copy_from_slice(&(sectors - 34).to_le_bytes());
+        h[56..72].copy_from_slice(&disk_id);
+        h[72..80].copy_from_slice(&at.to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        h[88..92].copy_from_slice(&array_crc.to_le_bytes());
+        let crc = crc32(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    };
+    let mbr = &mut image[..512];
+    mbr[446..454].copy_from_slice(&[0, 0, 2, 0, 0xee, 0xff, 0xff, 0xff]);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    mbr[458..462].copy_from_slice(&u32::try_from(sectors - 1).unwrap_or(u32::MAX).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xaa;
+    let put = |image: &mut [u8], lba: u64, bytes: &[u8]| {
+        image[lba as usize * 512..lba as usize * 512 + bytes.len()].copy_from_slice(bytes);
+    };
+    put(image, 1, &header(1, sectors - 1, 2));
+    put(image, 2, &array);
+    put(image, sectors - 33, &array);
+    put(image, sectors - 1, &header(sectors - 1, 1, sectors - 33));
+}
+
+fn persist_partition_setup(image: &mut [u8]) {
+    let sectors = (image.len() / 512) as u64;
+    let (first, last) = PERSIST_PARTITION_ESP;
+    write_gpt(
+        image,
+        PARTITION_TEST_DISK_ID,
+        &[
+            (PARTITION_TEST_ESP_TYPE, PARTITION_TEST_ESP_ID, first, last, "EFI system partition"),
+            (GALA_C_TYPE, PARTITION_TEST_DATA_ID, last + 1, sectors - 34, "gala C:"),
+        ],
+    );
+    image[first as usize * 512..(last as usize + 1) * 512].fill(PERSIST_PARTITION_FILL);
+}
+
+/// After persist_partition's boots: the volume (gala's superblock magic)
+/// at partition 2's first sector, and nothing outside partition 2 changed
+/// (the GPT and its backup as written, the gap before partition 1 still
+/// zero, partition 1 still the marker).
+fn persist_partition_check(image: &[u8]) -> Result {
+    let mut want = vec![0u8; image.len()];
+    persist_partition_setup(&mut want);
+    let (_, last) = PERSIST_PARTITION_ESP;
+    let sectors = (image.len() / 512) as u64;
+    let at = |lba: u64| lba as usize * 512;
+    if image[..at(last + 1)] != want[..at(last + 1)] {
+        return Err("the GPT, the gap or partition 1 changed (only partition 2 is C:'s)".into());
+    }
+    if image[at(sectors - 33)..] != want[at(sectors - 33)..] {
+        return Err("the backup GPT changed".into());
+    }
+    let c = &image[at(last + 1)..at(last + 2)];
+    if !c.starts_with(b"GALAFS\0") {
+        return Err(format!(
+            "no gala volume at partition 2's start (LBA {}), {:?}",
+            last + 1,
+            &c[..8]
+        ));
+    }
+    Ok(())
+}
+
 /// GUIDs as partition_test gives them, in the GPT's byte order.
 const PARTITION_TEST_DISK_ID: [u8; 16] =
     gpt_guid(0x6a1a_d15c, 0x0001, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 1]);
@@ -26990,8 +27521,10 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         );
         return Ok(Some(kept));
     }
-    // What setup writes goes in the first MiB; the rest is a sparse file.
-    let mut image = vec![0u8; d.size.min(1 << 20)];
+    // Images up to 64 MiB are set up whole (a GPT's backup is at the
+    // end); of larger ones setup writes the first MiB and the rest is a
+    // sparse file.
+    let mut image = vec![0u8; if d.size <= 64 << 20 { d.size } else { 1 << 20 }];
     (d.setup)(&mut image);
     let path = iso.with_extension("disk.img");
     let made = fs::File::create(&path).and_then(|f| {
@@ -27000,6 +27533,9 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if MADE_BOOT_DISKS.contains(&name) {
+        boot_disk(iso, &path)?;
+    }
     if name == "office_install_local" || name == "office_install_gui" {
         let source = office_source()?;
         let t = Instant::now();
@@ -27144,6 +27680,14 @@ fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &P
     let Some(d) = disk_scenario(name) else { return Ok(()) };
     // R8: earlier boots of another release (its own image, signed so).
     let earlier = match trust::EARLIER_SIGNING.iter().find(|(n, _)| *n == name) {
+        // A disk-boot scenario's earlier boots run from a CD: an image of
+        // their own name (`earlier-<name>`), which gets one.
+        None if DISK_BOOT_SCENARIOS.contains(&name) => {
+            let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
+            let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+            let earlier_name = format!("earlier-{name}");
+            Some(make_iso(release, &earlier_name, &scenario_cmdline(s), &extra_modules(name))?)
+        }
         Some((_, signing)) => {
             let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
             let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
@@ -30208,6 +30752,22 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         modules.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+
+    /// A scenario's shard depends on its name alone, the same on every
+    /// host and run (FNV-1a), and every share is reached.
+    #[test]
+    fn shards_are_by_name() {
+        assert_eq!(shard_of("hello", 6), 3);
+        assert_eq!(shard_of("hello", 7), 5);
+        let reached: std::collections::BTreeSet<usize> =
+            scenarios().iter().map(|s| shard_of(s.name, 6)).collect();
+        assert_eq!(reached.len(), 6);
+    }
 }
 
 #[cfg(test)]

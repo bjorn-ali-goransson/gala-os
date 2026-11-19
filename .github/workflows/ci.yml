@@ -8,9 +8,12 @@ on:
     # The website has its own pipeline (website.yml). A merge that only
     # touches it starts no runner here, and so publishes no release
     # either (release.yml runs off this workflow's completion).
+    # The roadmap is planning only (the owner: a change to it runs no
+    # pipeline).
     paths-ignore:
       - web/**
       - .github/workflows/website.yml
+      - docs/ROADMAP.md
   # Not filtered by path: the `linux` and `windows` checks are required by
   # the `main-run-ci` ruleset, and a workflow skipped by a path filter
   # never reports them, leaving the pull request waiting for a status that
@@ -37,7 +40,7 @@ jobs:
         with:
           fetch-depth: 0
       - id: what
-        name: Is there anything outside web/ in this change
+        name: Is there anything outside web/ and the roadmap in this change
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
@@ -58,12 +61,12 @@ jobs:
           echo "$changed" | sed 's/^/  /'
           # No files at all means something unexpected about the range, so
           # run the system jobs rather than silently skipping them.
-          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$)'; then
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$|docs/ROADMAP\.md$)'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "the system is touched: the system jobs run"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "website only: the system jobs are skipped"
+            echo "website or roadmap only: the system jobs are skipped"
           fi
 
   # gala itself: the kernel and its programs, booted in QEMU. GitHub's Linux
@@ -181,6 +184,7 @@ jobs:
           cargo clippy -p kernel --lib --features hosted -- -D warnings
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
+          cargo clippy -p setup --tests -- -D warnings
           cargo clippy -p wsl --lib --tests -- -D warnings
           cargo clippy -p taskmgr --lib --tests -- -D warnings
           cargo clippy -p shellns --tests -- -D warnings
@@ -236,11 +240,38 @@ jobs:
       - name: Generated vtable tracing matches its sources
         run: cargo xtask gen-trace && git diff --exit-code user/d2d1
 
+  # The Linux roots' Ubuntu packages, fetched once for all boot shards
+  # (`cargo xtask fetch-debs`) and kept in one cache they restore: six
+  # shards fetching the same packages from Ubuntu's archive had their
+  # connections reset (WORKFLOW "CI build caches"). The newest cache is
+  # restored first, so only packages new to the pins are downloaded.
+  debs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache the Linux roots' packages
+        uses: actions/cache@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-debs-
+      - name: Fetch what the pins name and the cache lacks
+        # Through the mirror the runner's own apt uses: archive.ubuntu.com
+        # resets or hangs the runners' connections (xtask ubuntu_mirror).
+        env:
+          XTASK_UBUNTU_MIRROR: http://azure.archive.ubuntu.com/ubuntu
+        run: cargo xtask fetch-debs
+
   # Every boot scenario, dealt out over parallel runners (xtask's
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
-  # Each shard builds what it boots and fetches the prebuilt programs.
+  # Each shard builds what it boots and fetches the prebuilt programs; the
+  # Linux roots' packages come from the `debs` job's cache.
   boot:
-    needs: changes
+    needs: [changes, debs]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-26.04
     strategy:
@@ -294,7 +325,7 @@ jobs:
         # (OBSERVABILITY "State dump"); the boot scenarios are where it does.
         run: |
           sudo sysctl -w kernel.yama.ptrace_scope=0
-          sudo apt-get update && sudo apt-get install -y gdb ovmf xorriso msitools 7zip unzip openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+          sudo apt-get update && sudo apt-get install -y gdb ovmf xorriso mtools msitools 7zip unzip openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-bin libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       - name: Cache the pinned QEMU
         uses: actions/cache@v4
         with:
@@ -314,19 +345,39 @@ jobs:
       # use (an unpacked tree carries a marker naming it), so an older cache
       # is safe and only what is missing is fetched; a release host's
       # outage (a 504 from GitHub's release downloads) then fails only the
-      # runs that need a new download.
-      - name: Cache the pinned prebuilt programs
-        uses: actions/cache@v4
+      # runs that need a new download. Saved even when a boot fails: what
+      # was fetched is kept, so a download is made once and not on every
+      # run until a whole shard passes.
+      - name: Restore the pinned prebuilt programs
+        id: prebuilt
+        uses: actions/cache/restore@v4
         with:
           path: |
             target/prebuilt
             !target/prebuilt/chromium-syms
+            !target/prebuilt/debs
           key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
           restore-keys: gala-prebuilt-${{ matrix.shard }}-
+      - name: Restore the Linux roots' packages (the debs job's)
+        uses: actions/cache/restore@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          fail-on-cache-miss: true
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
+          XTASK_UBUNTU_MIRROR: http://azure.archive.ubuntu.com/ubuntu
         run: cargo xtask boot-test
+      - name: Save the pinned prebuilt programs (also when a boot failed)
+        if: ${{ !cancelled() && steps.prebuilt.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+            !target/prebuilt/debs
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
       # Saved from main's pushes only (pull requests read it), by one shard
       # (all six build the same).
       - name: Save the build cache (main, shard 1)

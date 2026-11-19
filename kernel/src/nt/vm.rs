@@ -288,45 +288,59 @@ fn copy_on_write(
 
 /// A touched guard page: the guard is removed. In the current thread's
 /// stack (a WOW64 thread's 32-bit one too: its TEB32's), the guard moves
-/// one page down and StackLimit follows, silently; with no room left (the
-/// bottom page stays reserved) the stack overflows. Elsewhere the program
-/// gets STATUS_GUARD_PAGE_VIOLATION.
+/// one page down and StackLimit follows, silently, while the stack the
+/// thread keeps for its overflow handling (TEB GuaranteedStackBytes,
+/// from SetThreadStackGuarantee; 64-bit stacks) still fits below the new
+/// guard, above the bottom page that stays reserved. Otherwise the stack
+/// overflows: the pages of the guarantee below the touched one are
+/// committed without a guard, StackLimit goes to the lowest, and the
+/// exception is dispatched on them. Elsewhere the program gets
+/// STATUS_GUARD_PAGE_VIOLATION.
 fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> Fault {
     use super::layout::{teb, wow64::teb32};
     let page = addr / PAGE_SIZE * PAGE_SIZE;
-    // (the stack, where its StackLimit is, that field's width)
+    // (the stack, where its StackLimit is, that field's width, the
+    // guarantee rounded up to pages)
     let stack = super::thread::current_stack(process)
-        .map(|(t, bottom, base)| ((t + teb::STACK_LIMIT, bottom, base), 8))
-        .filter(|((_, bottom, base), _)| (*bottom..*base).contains(&page))
+        .map(|(t, bottom, base)| ((t + teb::STACK_LIMIT, bottom, base), 8, guarantee(process, t)))
+        .filter(|((_, bottom, base), _, _)| (*bottom..*base).contains(&page))
         .or_else(|| {
             super::thread::current_stack32(process)
-                .map(|(t, bottom, base)| ((t + teb32::STACK_LIMIT, bottom, base), 4))
+                .map(|(t, bottom, base)| ((t + teb32::STACK_LIMIT, bottom, base), 4, 0))
         });
     let (result, new_limit) = {
         if vad.protect(page, PAGE_SIZE, protect).is_err() {
             return Fault::OutOfMemory;
         }
         match stack {
-            Some(((limit_at, bottom, base), width)) if (bottom..base).contains(&page) => {
+            Some(((limit_at, bottom, base), width, kept)) if (bottom..base).contains(&page) => {
                 let next = page - PAGE_SIZE;
-                let room = next > bottom;
+                let room = next > bottom && next - bottom > kept;
                 let grown = room
                     && match vad.page(next) {
                         Some(PageState { committed: true, .. }) => true,
                         Some(_) => vad.commit(next, PAGE_SIZE, protect | vad::PAGE_GUARD).is_ok(),
                         None => false,
                     };
-                charge::sync(process, vad.private_commit());
-                let result = if grown {
-                    Fault::Resolved
+                let (result, limit) = if grown {
+                    (Fault::Resolved, page)
                 } else {
+                    // The guarantee's pages, above the reserved bottom one.
+                    let low = page.saturating_sub(kept).max(bottom + PAGE_SIZE).min(page);
+                    let low = if low < page && vad.commit(low, page - low, protect).is_err() {
+                        page
+                    } else {
+                        low
+                    };
                     crate::warn!(
-                        "vm: stack overflow in pid {} at {addr:#x} (stack {bottom:#x}..{base:#x})",
+                        "vm: stack overflow in pid {} at {addr:#x} (stack {bottom:#x}..{base:#x}; \
+                         guarantee {kept:#x}, handling on {low:#x}..{page:#x} and the touched page)",
                         process.id
                     );
-                    Fault::Raise(NtStatus::STACK_OVERFLOW)
+                    (Fault::Raise(NtStatus::STACK_OVERFLOW), low)
                 };
-                (result, Some((limit_at, page, width)))
+                charge::sync(process, vad.private_commit());
+                (result, Some((limit_at, limit, width)))
             }
             _ => (Fault::Raise(NtStatus::GUARD_PAGE_VIOLATION), None),
         }
@@ -340,6 +354,16 @@ fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> 
         let _ = space.write(at, &limit.to_le_bytes()[..width]);
     }
     result
+}
+
+/// The current thread's TEB GuaranteedStackBytes, rounded up to pages.
+fn guarantee(process: &Process, teb_at: u64) -> u64 {
+    let Some(space_of) = process.space_now() else { return 0 };
+    let mut b = [0u8; 4];
+    if space_of.lock().read(teb_at + super::layout::teb::GUARANTEED_STACK_BYTES, &mut b).is_err() {
+        return 0;
+    }
+    u64::from(u32::from_le_bytes(b)).div_ceil(PAGE_SIZE) * PAGE_SIZE
 }
 
 /// Re-applies VAD state to the page tables for `[start, start + size)`:

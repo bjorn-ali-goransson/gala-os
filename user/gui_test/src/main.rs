@@ -45,6 +45,14 @@
 //!   the edit shows the tip below and right of the pointer after the
 //!   initial delay (a light face, a grey border, dark text); moving off
 //!   the edit hides it.
+//! - The window menu: GetSystemMenu gives it, and an item appended to it
+//!   ("Mark", 0x110) is the program's. Alt+Space shows it under the
+//!   caption's left end (WM_INITMENUPOPUP with the window menu and
+//!   HIWORD(lParam) TRUE); Up selects the last item, Enter chooses it:
+//!   WM_SYSCOMMAND 0x110, where the program paints a yellow square at
+//!   (380, 240)-(392, 252). A right click on the caption shows the menu
+//!   at the pointer (WM_NCRBUTTONUP, DefWindowProc's WM_CONTEXTMENU); Esc
+//!   dismisses it.
 //! - A click on the window's close button is WM_CLOSE; DefWindowProc
 //!   destroys the window: WM_DESTROY, where the program calls
 //!   PostQuitMessage(7); GetMessageW then returns 0 with wParam 7; IsWindow
@@ -53,7 +61,8 @@
 //!
 //! It prints `gui_test: painted` once it has painted (xtask then checks the
 //! screen and gives the input), `gui_test: click`, `gui_test: typed hi`,
-//! `gui_test: menu 202`, `gui_test: combo picked Blue`, and
+//! `gui_test: menu 202`, `gui_test: combo picked Blue`, `gui_test: window
+//! menu` (each time it opens), `gui_test: window menu Mark`, and
 //! `gui_test: ok` at the end, or exits with the number of the failing
 //! check.
 
@@ -171,6 +180,7 @@ unsafe extern "system" {
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
     fn CreatePopupMenu() -> Handle;
     fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> i32;
+    fn GetSystemMenu(hwnd: Hwnd, revert: i32) -> Handle;
     fn TrackPopupMenu(
         menu: Handle,
         flags: u32,
@@ -387,6 +397,14 @@ static COMBO: AtomicUsize = AtomicUsize::new(0);
 static NOTES: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 static NOTES_LEN: AtomicUsize = AtomicUsize::new(0);
 static PICKED: AtomicU32 = AtomicU32::new(0);
+/// The window menu's WM_INITMENUPOPUPs, and its "Mark" chosen.
+static WINDOW_MENUS: AtomicU32 = AtomicU32::new(0);
+static MARKED: AtomicU32 = AtomicU32::new(0);
+/// The program's item in the window menu (below 0xF000, its low four bits
+/// clear: WM_SYSCOMMAND's are the system's).
+const ID_MARK: usize = 0x110;
+const WM_INITMENUPOPUP: u32 = 0x0117;
+const WM_SYSCOMMAND: u32 = 0x0112;
 
 #[track_caller]
 fn check(cond: bool, got: u64) -> Result<(), u32> {
@@ -730,6 +748,30 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             }
             0
         }
+        // The window menu (HIWORD(lParam) TRUE), the one GetSystemMenu
+        // gives.
+        WM_INITMENUPOPUP if lparam >> 16 & 0xffff != 0 => {
+            // SAFETY: our window.
+            let system = unsafe { GetSystemMenu(hwnd, 0) };
+            let _ = check(wparam == system as usize, wparam as u64);
+            WINDOW_MENUS.fetch_add(1, Ordering::SeqCst);
+            out(b"gui_test: window menu\r\n");
+            0
+        }
+        WM_SYSCOMMAND if wparam & 0xfff0 == ID_MARK => {
+            MARKED.fetch_add(1, Ordering::SeqCst);
+            // SAFETY: valid window and structures.
+            unsafe {
+                let hdc = GetDC(hwnd);
+                let yellow = CreateSolidBrush(0x0000_ffff);
+                let r = Rect { left: 380, top: 240, right: 392, bottom: 252 };
+                FillRect(hdc, &r, yellow);
+                DeleteObject(yellow);
+                ReleaseDC(hwnd, hdc);
+            }
+            out(b"gui_test: window menu Mark\r\n");
+            0
+        }
         WM_DESTROY => {
             DESTROYED.fetch_add(1, Ordering::SeqCst);
             // SAFETY: a plain call.
@@ -838,6 +880,12 @@ fn run() -> Result<(), u32> {
         check(IsWindowVisible(hwnd) != 0, 0)?;
         check(UpdateWindow(hwnd) != 0, 0)?;
         check(PAINTS.load(Ordering::SeqCst) >= 1, 0)?;
+        // The program's item at the window menu's end.
+        let system = GetSystemMenu(hwnd, 0);
+        check(!system.is_null(), 0)?;
+        check(GetSystemMenu(hwnd, 0) == system, 0)?;
+        let mark: [u16; 5] = wide("Mark");
+        check(AppendMenuW(system, 0, ID_MARK, mark.as_ptr()) != 0, 0)?;
 
         let t = CreateThread(
             core::ptr::null(),
@@ -869,6 +917,13 @@ fn run() -> Result<(), u32> {
         check(TIMED_OUT.load(Ordering::SeqCst) == 0, 0)?;
         // The combo box's list was dropped and Blue picked in it.
         check(PICKED.load(Ordering::SeqCst) == 1, NOTES_LEN.load(Ordering::SeqCst) as u64)?;
+        // The window menu opened twice (Alt+Space, the caption's right
+        // click) and "Mark" was chosen once.
+        check(
+            WINDOW_MENUS.load(Ordering::SeqCst) == 2,
+            WINDOW_MENUS.load(Ordering::SeqCst).into(),
+        )?;
+        check(MARKED.load(Ordering::SeqCst) == 1, 0)?;
     }
     match FAILED.load(Ordering::SeqCst) {
         0 => Ok(()),

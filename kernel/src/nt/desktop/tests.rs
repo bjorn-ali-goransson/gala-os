@@ -590,6 +590,27 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
 }
 
 #[test]
+fn a_right_click_on_the_caption_goes_to_the_program_for_its_window_menu() {
+    let (mut d, a) = desktop_with_window();
+    let b = d.create(7, 600, 400, 200, 150, &title("Other"), 0).unwrap();
+    d.show(b, 7, true).unwrap();
+    assert_eq!(d.s.active, Some(b));
+    // On window a's caption: it comes forward and is active, and its
+    // program gets WM_NCRBUTTONDOWN/UP with HTCAPTION and the screen
+    // point (its DefWindowProc shows the window menu there).
+    right_click(&mut d, 350, 110);
+    assert_eq!(d.s.active, Some(a));
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 8];
+    let n = d.take_input(7, &mut out);
+    let got: Vec<(u32, u32, u64, u64)> =
+        out[..n].iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
+    let pt = 110 << 16 | 350;
+    assert!(got.contains(&(a, WM_NCRBUTTONDOWN, HTCAPTION, pt)), "{got:x?}");
+    assert!(got.contains(&(a, WM_NCRBUTTONUP, HTCAPTION, pt)), "{got:x?}");
+    assert!(!got.iter().any(|g| g.1 == WM_RBUTTONDOWN || g.1 == WM_RBUTTONUP));
+}
+
+#[test]
 fn a_program_minimizes_and_restores_its_window() {
     let (mut d, a) = desktop_with_window();
     // GalaWindowShow 2 (user32's SC_MINIMIZE): on the taskbar only, not
