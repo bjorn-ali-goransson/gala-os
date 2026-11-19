@@ -1605,6 +1605,11 @@ revisiting all three.
 
 ## Writing tests and adding functions
 
+A change to `docs/ROADMAP.md` alone runs no pipeline either (the
+owner): `ci.yml`'s push filter ignores it and its `changes` job counts it
+with the website, so a roadmap-only pull request reports its checks as
+skipped and a roadmap-only merge starts no runner and no release.
+
 ### Test programs
 
 Test programs are freestanding Windows executables on `user/ntrt` (or

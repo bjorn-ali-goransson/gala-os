@@ -8544,6 +8544,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("console_window", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
+    // IN step 4: the release gala setup installs (INSTALL_RELEASE_TAR).
+    ("install_to_disk", "target/install/release.tar", "gala"),
     ("disk_test", "ntdll.dll", "Windows/System32"),
     ("disk_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "advapi32.dll", "Windows/System32"),
@@ -11844,6 +11846,8 @@ fn unit_tests() -> Result {
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The installer's FAT32 and tar (ROADMAP IN step 4).
+    run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
@@ -12275,6 +12279,10 @@ fn make_iso_unchecked(
         // The WSL scenarios' rootfs tarballs, made from busybox.
         if file.starts_with("target/wsl/") {
             make_wsl_rootfs()?;
+        }
+        // The release an installer copies (IN step 4).
+        if *file == INSTALL_RELEASE_TAR {
+            make_release_tar(release)?;
         }
         // A path ending in a slash is a directory tree, shipped as C:\<dir>
         // with its subdirectories: packed into one USTAR archive the kernel
@@ -13399,6 +13407,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
     // Booted from its disk's EFI system partition (DISK_BOOT_SCENARIOS).
     "boot_from_disk",
+    "install_to_disk",
     // A framebuffer to show the installer's windows (XTASK_SHOTS).
     "office_install_gui",
     // A framebuffer for Word's and Excel's windows (XTASK_SHOTS).
@@ -15870,6 +15879,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "persist: C: is partition 2 of the disk (LBA 34816",
             "persist_test: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // IN step 4: gala installs itself. The first boot (from a CD, as
+        // SYSTEM, an empty 512 MiB disk) runs `gala setup 0 --erase`,
+        // which partitions the disk and writes the release
+        // (C:\gala\release.tar) to its EFI system partition; the last
+        // boot is from the disk alone and ends on the desktop with C:
+        // in partition 2 (DESKTOP_AT_BOOT_SCREEN; xtask stops it).
+        name: "install_to_disk",
+        cmdline: "qemu_exit as=system run=gala.exe args=setup%200%20--erase",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA 526336",
+            "persist: formatted the disk",
+            "desktop: session 1 is live",
+            "xtask: screen ok",
         ],
     },
     Scenario {
@@ -20429,6 +20455,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// what they will (office_install: ODT starts the 64-bit
 /// OfficeClickToRun.exe, whose imports are only seen in the run).
 const FULL_SYSTEM_SCENARIOS: &[&str] = &[
+    // gala setup (gala.exe and what it loads).
+    "install_to_disk",
     "office_install",
     "office_install_gui",
     "office_install_local",
@@ -20722,10 +20750,16 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
-/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
-/// so n machines boot the whole set between them (CI's boot jobs). The VMs
-/// are dealt out after `plan_vms`, so a batch stays in one shard; the
-/// shard says what it took.
+/// `XTASK_SHARD=i/n` (1-based): the VMs whose first scenario's name
+/// hashes to share i of n (FNV-1a), so n machines boot the whole set
+/// between them (CI's boot jobs). By name, not by position: a scenario
+/// added or removed moves no other VM to another shard, so each shard's
+/// cache of downloads (CI's per-shard prebuilt cache) keeps holding what
+/// its scenarios need; a round-robin deal moved scenarios between shards
+/// whenever one was added, and their first runs elsewhere downloaded
+/// everything again (GitHub's release host answered 429). The VMs are
+/// dealt out after `plan_vms`, so a batch stays in one shard; the shard
+/// says what it took.
 fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
     let Ok(spec) = env::var("XTASK_SHARD") else {
         return Ok(vms);
@@ -20737,8 +20771,11 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
     };
     let total = vms.len();
-    let mine: Vec<Vm<'_>> =
-        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let first = |vm: &Vm<'_>| match vm {
+        Vm::Single(s) => s.name,
+        Vm::Batch(group) => group.first().map_or("", |s| s.name),
+    };
+    let mine: Vec<Vm<'_>> = vms.into_iter().filter(|vm| shard_of(first(vm), n) == i - 1).collect();
     let scenarios: usize = mine
         .iter()
         .map(|vm| match vm {
@@ -20748,6 +20785,17 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         .sum();
     eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
     Ok(mine)
+}
+
+/// The share (0-based, of `n`) scenario `name` falls in: FNV-1a of its
+/// name, stable across runs, hosts and Rust versions.
+fn shard_of(name: &str, n: usize) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (h % n as u64) as usize
 }
 
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
@@ -21279,6 +21327,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
     ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
+    ("install_to_disk", "a disk and two boots (the installer, then the installed disk)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
@@ -25075,6 +25124,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
     ("desktop_at_boot", DESKTOP_AT_BOOT_SCREEN),
+    ("install_to_disk", DESKTOP_AT_BOOT_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
@@ -26761,6 +26811,21 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // Empty: `gala setup` lays it out in the first boot.
+        name: "install_to_disk",
+        size: 512 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[&[
+            "gala setup: disk partitioned: EFI system partition 256 MiB",
+            "gala setup: EFI system partition written: FAT32",
+            "gala setup: done: disk 0 boots gala",
+            "exited with status 0x00000000",
+        ]],
+        earlier_fail: false,
+    },
+    DiskScenario {
         // Made by `boot_disk` from the scenario's image (setup is not used).
         name: "boot_from_disk",
         size: BOOT_DISK_SIZE,
@@ -26932,9 +26997,54 @@ fn partition_test_check(image: &[u8]) -> Result {
     Ok(())
 }
 
-/// Scenarios booted from their disk alone (no CD): the disk is made by
-/// `boot_disk` from the scenario's image.
-const DISK_BOOT_SCENARIOS: &[&str] = &["boot_from_disk"];
+/// Scenarios whose last boot is from their disk alone (no CD):
+/// `boot_from_disk`'s disk made by `boot_disk` from its image,
+/// `install_to_disk`'s by `gala setup` in its first boot (from its own
+/// CD image, `earlier-install_to_disk`).
+const DISK_BOOT_SCENARIOS: &[&str] = &["boot_from_disk", "install_to_disk"];
+
+/// What `gala setup` installs in `install_to_disk`: the release tree
+/// (`release-tree`'s files: the kernel, the system DLLs, Limine, the
+/// sealed config with an empty command line, the manifest) as a ustar
+/// archive, shipped as `C:\gala\release.tar` (`make_release_tar`).
+const INSTALL_RELEASE_TAR: &str = "target/install/release.tar";
+
+/// Makes INSTALL_RELEASE_TAR from the built kernel and DLLs (a boot test
+/// has built them): the tree `make_iso_unchecked` stages for a release,
+/// packed by tar (ustar, sorted, owner 0).
+fn make_release_tar(release: bool) -> Result {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let out = root().join(INSTALL_RELEASE_TAR);
+    let dir = root().join("target/install/tree");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    make_iso_unchecked(
+        release,
+        "release-install",
+        "",
+        &system_modules(),
+        &trust::DEFAULT,
+        Some(&dir),
+    )?;
+    run_quiet(
+        Command::new("tar")
+            .args(["--format=ustar", "--owner=0", "--group=0", "--numeric-owner", "--sort=name"])
+            .arg("-C")
+            .arg(&dir)
+            .arg("-cf")
+            .arg(&out)
+            .arg("."),
+    )?;
+    let _ = fs::remove_dir_all(&dir);
+    let size = fs::metadata(&out).map_or(0, |m| m.len());
+    eprintln!("xtask: {INSTALL_RELEASE_TAR}: the release tree, {} MiB", size >> 20);
+    Ok(())
+}
+
+/// Disk-boot scenarios whose disk xtask lays out (`boot_disk`); the others
+/// start from an empty disk.
+const MADE_BOOT_DISKS: &[&str] = &["boot_from_disk"];
 /// An installed disk's size in those scenarios, and its EFI system
 /// partition's (FAT32: at least 32 MiB) from 1 MiB.
 const BOOT_DISK_SIZE: usize = 256 << 20;
@@ -27199,7 +27309,7 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    if DISK_BOOT_SCENARIOS.contains(&name) {
+    if MADE_BOOT_DISKS.contains(&name) {
         boot_disk(iso, &path)?;
     }
     if name == "office_install_local" || name == "office_install_gui" {
@@ -27346,6 +27456,14 @@ fn earlier_boots(name: &str, iso: &Path, boot: Boot, timeout: Duration, disk: &P
     let Some(d) = disk_scenario(name) else { return Ok(()) };
     // R8: earlier boots of another release (its own image, signed so).
     let earlier = match trust::EARLIER_SIGNING.iter().find(|(n, _)| *n == name) {
+        // A disk-boot scenario's earlier boots run from a CD: an image of
+        // their own name (`earlier-<name>`), which gets one.
+        None if DISK_BOOT_SCENARIOS.contains(&name) => {
+            let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
+            let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
+            let earlier_name = format!("earlier-{name}");
+            Some(make_iso(release, &earlier_name, &scenario_cmdline(s), &extra_modules(name))?)
+        }
         Some((_, signing)) => {
             let s = scenarios().iter().find(|s| s.name == name).ok_or("no such scenario")?;
             let release = RELEASE.load(std::sync::atomic::Ordering::Relaxed);
@@ -30410,6 +30528,22 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         modules.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+
+    /// A scenario's shard depends on its name alone, the same on every
+    /// host and run (FNV-1a), and every share is reached.
+    #[test]
+    fn shards_are_by_name() {
+        assert_eq!(shard_of("hello", 6), 3);
+        assert_eq!(shard_of("hello", 7), 5);
+        let reached: std::collections::BTreeSet<usize> =
+            scenarios().iter().map(|s| shard_of(s.name, 6)).collect();
+        assert_eq!(reached.len(), 6);
+    }
 }
 
 #[cfg(test)]

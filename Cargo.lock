@@ -893,6 +893,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "galapkg",
+ "setup",
  "taskmgr",
 ]
 
@@ -2295,6 +2296,10 @@ dependencies = [
 
 [[package]]
 name = "session_test"
+version = "0.1.0"
+
+[[package]]
+name = "setup"
 version = "0.1.0"
 
 [[package]]

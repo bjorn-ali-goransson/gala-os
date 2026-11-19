@@ -14,3 +14,4 @@ bench = false
 galapkg = { path = "../galapkg" }
 taskmgr = { path = "../taskmgr" }
 gala_heap = { path = "../gala_heap" }
+setup = { path = "../setup" }

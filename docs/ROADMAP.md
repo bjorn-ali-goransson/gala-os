@@ -251,7 +251,7 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
-| IN | The installer: gala onto a machine's disk | in progress (step 1: the layout IOCTLs, `partition_test`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| IN | The installer: gala onto a machine's disk | in progress (steps 1-4's command: `gala setup` installs, the disk boots: `install_to_disk`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -6344,12 +6344,24 @@ volume instead).
    partition after it. Open: a firmware boot entry (UEFI variables),
    BIOS machines (Limine's `bios-install` on the disk), Secure Boot's
    enrollment with R8 step 1.
-4. The installer program: pick a disk, erase it or use its free space,
-   confirm, install, report; every step and failure as events, an
-   answer file for unattended runs (Windows' autounattend is the
-   model). Scenario: a first boot installs onto an empty virtio disk
-   unattended; a second boot starts from that disk alone and reaches
-   the desktop.
+4. The installer program: its command done (`gala setup <disk> --erase`,
+   `install_to_disk`: a first boot installs onto an empty disk, a second
+   boots from that disk alone to the desktop, C: kept in partition 2;
+   ARCHITECTURE "Installing gala onto a disk"). Open: the graphical
+   installer over it (pick a disk, confirm, progress; GUI after CLI,
+   item SD), installing into free space, every step as events, an answer
+   file for unattended runs (Windows' autounattend is the model).
+   Waiting (the owner): what installing from a USB stick needs, in order:
+   a. The downloadable images carry the release tar (only
+      `install_to_disk`'s does), so `gala setup` has a release to copy.
+   b. A way to start it from the desktop: an "Install gala" entry in the
+      start menu, then the graphical installer (gala has no interactive
+      prompt, item CP, and the boot menu's command line is sealed, R8).
+      With a and b, a downloaded image installs onto a virtual disk in
+      QEMU.
+   c. On a laptop: its disk (NVMe, or AHCI: item HW step 1) and its
+      keyboard and touchpad (USB HID: item USB); gala sees only virtio
+      disks today.
 5. Beside Windows: the Windows-side tool shrinks C:, the installer uses
    the space; the boot menu offers both.
 

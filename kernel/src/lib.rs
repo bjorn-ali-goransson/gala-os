@@ -269,8 +269,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         error!("lx: identity: cannot publish the user database: {e:?}");
     }
     // `persist`: C: is kept on the disk (changes since earlier boots are
-    // replayed now, over the boot's files).
-    if cmdline.flag("persist") {
+    // replayed now, over the boot's files). An installed machine (a disk
+    // with gala's C: partition, IN step 4) keeps it without being asked.
+    if cmdline.flag("persist") || nt::persist::installed() {
         nt::persist::CRASH_TEST.store(cmdline.flag("crashtest"), Ordering::Relaxed);
         // `writeback_ms=`: the lazy writer's cadence.
         if let Some(ms) = cmdline.value("writeback_ms").and_then(|v| v.parse().ok()) {

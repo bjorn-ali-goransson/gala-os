@@ -8,9 +8,12 @@ on:
     # The website has its own pipeline (website.yml). A merge that only
     # touches it starts no runner here, and so publishes no release
     # either (release.yml runs off this workflow's completion).
+    # The roadmap is planning only (the owner: a change to it runs no
+    # pipeline).
     paths-ignore:
       - web/**
       - .github/workflows/website.yml
+      - docs/ROADMAP.md
   # Not filtered by path: the `linux` and `windows` checks are required by
   # the `main-run-ci` ruleset, and a workflow skipped by a path filter
   # never reports them, leaving the pull request waiting for a status that
@@ -37,7 +40,7 @@ jobs:
         with:
           fetch-depth: 0
       - id: what
-        name: Is there anything outside web/ in this change
+        name: Is there anything outside web/ and the roadmap in this change
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
@@ -58,12 +61,12 @@ jobs:
           echo "$changed" | sed 's/^/  /'
           # No files at all means something unexpected about the range, so
           # run the system jobs rather than silently skipping them.
-          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$)'; then
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '^(web/|\.github/workflows/website\.yml$|docs/ROADMAP\.md$)'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "the system is touched: the system jobs run"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "website only: the system jobs are skipped"
+            echo "website or roadmap only: the system jobs are skipped"
           fi
 
   # gala itself: the kernel and its programs, booted in QEMU. GitHub's Linux
@@ -181,6 +184,7 @@ jobs:
           cargo clippy -p kernel --lib --features hosted -- -D warnings
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
+          cargo clippy -p setup --tests -- -D warnings
           cargo clippy -p wsl --lib --tests -- -D warnings
           cargo clippy -p taskmgr --lib --tests -- -D warnings
           cargo clippy -p shellns --tests -- -D warnings
