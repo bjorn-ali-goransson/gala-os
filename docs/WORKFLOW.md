@@ -2583,7 +2583,12 @@ source).
 ### Linux roots from Ubuntu 26.04 (ROADMAP LD)
 
 The Linux roots (`LINUX_ROOTS`, the "glibc", "wayland_client" and
-"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket.
+"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket. An aarch64 twin
+ships a root's arm64 build (`<root>-arm64`, assembled from the same
+packages' `_arm64.deb` on ports.ubuntu.com): each new amd64 package of a
+root a twin uses needs its arm64 SHA-256 in `DEBS_ARM64`, from the
+release's signed arm64 `Packages` index (`dists/resolute/<component>/
+binary-arm64/Packages.xz`).
 A root is what its workload opened on real 26.04, traced:
 
 - `tools/linux-roots/mkchroot.sh <base.tar.gz> <dir> <packages>` makes a
