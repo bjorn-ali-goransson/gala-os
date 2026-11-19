@@ -2243,6 +2243,46 @@ need gala's.
      "Import tracing"). What it gives for that window is the set of
      Microsoft entry points Word reaches in it; what it cannot give is
      the order, one record being all a slot leaves.
+     The reading needs every slot armed to be a reading at all:
+     `imports=WINWORD.EXE:65536` arms 23375 of them and records 1876
+     first calls without spending the budget, where 8192 is spent on
+     the modules that load first and leaves wwlib's and MSO's imports
+     unarmed -- a set of load order rather than of the program. With
+     the Direct3D 11 device beside Word the last brush is at 41754 ms,
+     and the entry points it reaches for the first time after it are:
+     between 41765 and 41805 ms seven ordinals of
+     `mso40uiWin32Client.dll` (#51400, #55304, #43924, #36626, #9850,
+     #3393, #58199) with three of Mso20win32client's and
+     Mso30win32client's among them; the four activation-context
+     functions the box's Common-Controls manifest needs (QueryActCtxW,
+     ActivateActCtx, FindActCtxSectionStringW, DeactivateActCtx); and
+     at 41861 ms GetStdHandle(STD_ERROR_HANDLE) and a 21-byte
+     WriteFile, which is gala's own user32 echoing the box's caption to
+     stderr (`user/user32/src/lib.rs`). So the box is raised 107 ms
+     after the brush, and the decision is made in the 51 ms of MSO
+     ordinals before it. What follows is teardown and not a decision: a
+     worker thread that sleeps, four `oart.dll` ordinals, one more
+     DLL's CRT DllMain, GalaWindowUnregister at 42077 ms, the
+     GracefulExit value deleted, exit(0) at 43151 ms.
+     What the window does not hold is a call gala answered badly. The
+     only ledger activity in it is the `Word\Options\Debug` read
+     already named above, and every graphics call in the 100 ms before
+     it answered S_OK: D3D10CreateDevice1 (631 ms of it, on DXVK over
+     lavapipe), CreateTexture2D, CreateDxgiSurfaceRenderTarget,
+     CreateDeviceContext twice, CreateRenderingParams,
+     SetTextRenderingParams, CreateMesh, CreateDrawingStateBlock,
+     SaveDrawingState, CreateBitmapFromDxgiSurface, SetTarget,
+     CreateSolidColorBrush. Word is given a device, a render target
+     bound to a DXGI surface and a brush, and asks for nothing further.
+     It concluded what it concluded from something it already held, so
+     what to close next is the QueryInterface blind spot above and not
+     another missing export. Two gaps stand beside the window and
+     neither is in it: the Vulkan loader asks gala's System32 dxgi for
+     IDXGIFactory6 (c1b6694f-ff09-44a9-...) three times as it sorts
+     adapters and is refused, and `d3d10_1.dll!D3D10CreateDevice1`
+     drops D3D10_CREATE_DEVICE_ALLOW_NULL_FROM_MAP (0x10), which has no
+     Direct3D 11 flag of the same meaning -- nothing in the run maps a
+     resource.
      Measured beside it and not yet explained:
      `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
      which falls back to blank display metadata and carries on
@@ -6075,7 +6115,11 @@ among the slowest hand-offs.
      the option cannot trace Word, whose AppvIsvSubsystems64.dll reads
      an import that way); 32-bit programs go
      through the same code untested; and entries are not reclaimed when
-     a process ends, which the budget is what bounds.
+     a process ends, which the budget is what bounds. The budget is
+     also what bounds the reading: spent part way through, it arms the
+     modules that loaded first and leaves the rest, so the ceiling is
+     65536 slots (9 MiB of kernel heap) -- what a program of Word's
+     size takes whole -- and the summary line says when it was spent.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

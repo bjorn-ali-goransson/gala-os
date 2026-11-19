@@ -61,10 +61,16 @@ use crate::sync::IrqMutex;
 const BUDGET: u32 = 4096;
 
 /// The most `:<n>` may ask for. Each slot keeps its name and addresses
-/// here ([`Trap`], about 128 bytes), so this is a megabyte of kernel
-/// heap at the far end -- and a trace is for a window of a program's
-/// life, not for every import a program has.
-const MAX_BUDGET: u32 = 8192;
+/// here ([`Trap`], 136 bytes), so this is about 9 MiB of kernel heap at
+/// the far end. It is as high as that because the question the option
+/// answers -- which entry points a program reaches in a window of its
+/// life -- is only answerable of a program whose slots are all armed:
+/// a budget spent part way through leaves a reading of the modules
+/// that happened to load first, which is no set at all. Word binds
+/// some 30 000 imports across its 90 images, and the ceiling is what
+/// lets a program of that size be traced whole; the default stays a
+/// window's worth, since most programs are not Word.
+const MAX_BUDGET: u32 = 65536;
 
 /// The longest name kept, as the ledger keeps its own
 /// (`tracecall::NAME_LEN`, which a `<dll>!<export>` name shares).

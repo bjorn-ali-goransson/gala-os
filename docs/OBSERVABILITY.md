@@ -1193,10 +1193,17 @@ data first, which disarms the slot (below), so that one leaves a
   violation -- is outside that range, so it never takes the trap
   table's lock. A process the option does not name pays one system call
   for its whole life: the loader asks once and remembers the answer.
-- **Cost in the kernel's memory**: about 128 bytes a slot, which is why
-  this budget's ceiling is 8192 where `trace_from=`'s is a million.
-  Entries are not reclaimed when a process ends, so a run that starts
-  the program twice arms twice; the budget is what bounds that.
+- **Cost in the kernel's memory**: 136 bytes a slot, so the ceiling of
+  65536 is about 9 MiB of kernel heap where `trace_from=`'s million
+  records are cheaper each. The ceiling is that high because the set
+  only means something whole: a budget spent part way through arms the
+  modules that loaded first and leaves the rest, so what comes out is a
+  reading of load order rather than of the program (Word binds some
+  30 000 imports across its 90 images, and `imports=WINWORD.EXE:8192`
+  reached none of wwlib's). The summary line says when the budget was
+  spent, which is when to ask for more. Entries are not reclaimed when
+  a process ends, so a run that starts the program twice arms twice;
+  the budget is what bounds that.
 - **A trace that armed nothing says so**, with the three reasons it can
   happen (the program never ran, it imports nothing from that DLL, every
   slot was a variable). So does a trace that armed slots and recorded no
