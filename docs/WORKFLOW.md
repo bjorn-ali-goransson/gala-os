@@ -581,6 +581,34 @@ stacks, so try the next one. Reach for this before
 adding records by hand to a DLL -- it costs a run, needs nothing of the
 program, and works for Microsoft's DLLs too.
 
+### When the call that matters is a repeat
+
+A `reached` record is one-shot per call site, so a method the program
+already called leaves nothing the second time: the window between the
+last thing that worked and the failure can be a hundred calls that are
+all repeats, and the ledger shows none of them. `trace_from=` records
+them, from the moment the program reaches a method named:
+
+```sh
+XTASK_CMDLINE='events=call events_match=WINWORD \
+  trace_from=d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush' \
+  cargo xtask boot-test 'office_word$'
+```
+
+Every call into that DLL after the first `CreateSolidColorBrush` is a
+`call` event with its arguments, 4096 at most (`:<n>` asks for another
+budget). The name is the one a `ledger:` row spells, so pick the last
+method the ledger shows the program reaching and arm there. `events=call`
+is what carries them and `events_match=`/`events_pid=` choose the
+process, as for every other category.
+
+The run's last `trace:` line says what happened: how many calls were
+recorded, that the method was never reached (the value was understood,
+so look at a method earlier in the sequence), or that the budget was
+spent (the trace stopped, not the program). Only the DLLs whose slots
+`cargo xtask gen-trace` wraps can report, d2d1 today (OBSERVABILITY
+"Call tracing").
+
 ### Network tests
 
 VMs have no network card unless the scenario is in `NET_SCENARIOS`,

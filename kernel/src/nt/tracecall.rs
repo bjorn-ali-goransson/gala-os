@@ -166,12 +166,7 @@ pub fn record(process: &str, pid: u64, name: &[u8], args: &[u64]) -> bool {
     events::emit(
         Category::Call,
         "call",
-        format_args!(
-            r#","pid":{pid},"process":"{}","call":"{}","args":{}"#,
-            Str(process),
-            Str(text),
-            Words(args)
-        ),
+        format_args!("{}", Fields { pid, process, call: text, args }),
     );
     RECORDED.fetch_add(1, Ordering::Relaxed);
     left > 1
@@ -203,6 +198,29 @@ pub fn log_stats() {
     }
 }
 
+/// One `call` event's fields: the JSON members [`events::emit`] writes
+/// after `"ev":"call",`, without braces and with every string quoted.
+///
+/// A type rather than a `format_args!` where the event is written, so
+/// that a host test can read the line the stream would carry. The event
+/// stream is split out of the serial log, and a boot scenario matches
+/// the serial log, so a doubled comma or quote here is something no
+/// scenario can see.
+struct Fields<'a> {
+    pid: u64,
+    process: &'a str,
+    call: &'a str,
+    args: &'a [u64],
+}
+
+impl fmt::Display for Fields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (pid, args) = (self.pid, Words(self.args));
+        let (process, call) = (Str(self.process), Str(self.call));
+        write!(f, r#""pid":{pid},"process":{process},"call":{call},"args":{args}"#)
+    }
+}
+
 /// An argument list, as a JSON array of unsigned words.
 struct Words<'a>(&'a [u64]);
 
@@ -221,7 +239,37 @@ impl fmt::Display for Words<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET, MAX_BUDGET, split_budget};
+    use super::{BUDGET, Fields, MAX_BUDGET, split_budget};
+
+    /// What the event stream carries, which no boot scenario sees: the
+    /// scenarios match the serial log, and the events are split out of
+    /// it.
+    #[test]
+    fn a_recorded_call_is_the_fields_of_one_json_event() {
+        let fields = Fields {
+            pid: 12,
+            process: "WINWORD.EXE",
+            call: "d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush",
+            args: &[159706400, 2078216, 0],
+        };
+        assert_eq!(
+            alloc::format!("{{\"ev\":\"call\",{fields}}}"),
+            "{\"ev\":\"call\",\"pid\":12,\"process\":\"WINWORD.EXE\",\"call\":\
+             \"d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush\",\"args\":\
+             [159706400,2078216,0]}"
+        );
+    }
+
+    /// A method with no arguments at all is still an array, not a
+    /// missing member: a reader of the stream can take `args` as read.
+    #[test]
+    fn a_call_without_arguments_still_has_an_array() {
+        let fields = Fields { pid: 1, process: "a.exe", call: "d2d1.dll!X::Y", args: &[] };
+        assert_eq!(
+            alloc::format!("{fields}"),
+            "\"pid\":1,\"process\":\"a.exe\",\"call\":\"d2d1.dll!X::Y\",\"args\":[]"
+        );
+    }
 
     #[test]
     fn a_value_without_a_count_keeps_the_default() {

@@ -1080,8 +1080,17 @@ trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)
   low first. Eight words at most; no method gala wraps has more. A type
   the `Arg` trait does not cover fails the build rather than recording a
   zero (`user/d2d1/src/trace.rs`).
+- **What is not recorded**: the answer. A trace says a call was made
+  and with what, not what came back, so six identical calls read the
+  same whether each one succeeded or each one failed. The ledger's
+  `answered` rows are where a method's HRESULT is, for the methods that
+  have one.
 - **Limits**: the DLLs whose slots `cargo xtask gen-trace` wraps (d2d1
   today: `DLLS` in `xtask/src/gentrace.rs`), and one armed method a run.
+  QueryInterface, AddRef and Release are not among the wrapped slots:
+  every object shares one implementation of each, so they are written by
+  hand and the generator does not reach them. A program that gives up
+  after asking an object for an interface leaves nothing in the trace.
   Arming is per process, because the flag lives in the DLL's own data;
   the budget is the run's, shared by every process that traces. Once
   armed, *every* traced call in that process is recorded, not only the

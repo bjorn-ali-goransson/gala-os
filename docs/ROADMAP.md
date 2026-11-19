@@ -2180,16 +2180,28 @@ need gala's.
      (`answered`, `user/d2d1/src/lib.rs`). CreateMesh and
      CreateSolidColorBrush have no `answered` site, so their silence
      says nothing either way.
-     What hides the deciding call is that `reached!` is one-shot per
-     site: a *repeat* of a method Word already called leaves no record,
-     so the 9.2 ms window is invisible by construction. What lifts it
-     is OT3b piece 2, now built:
-     `trace_from=d2d1.dll!<Interface>::<Method>` with `events=call`
-     records every call into d2d1 from the first time Word reaches that
-     method, repeats and all (OBSERVABILITY "Call tracing"). Reading
-     that window is the next step here, not another stack capture: the
-     stack already names the layer, and what is missing is the
-     sequence.
+     What hid the deciding call is that `reached!` is one-shot per
+     site: a repeat of a method Word already called leaves no record,
+     so the 9.2 ms window was invisible by construction. OT3b piece 2
+     lifts it, and the reading is a negative result. Armed at
+     `trace_from=d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush`
+     with `events=call` (OBSERVABILITY "Call tracing"), the run
+     records six calls, all of them that same method with identical
+     arguments, over 18.5 ms -- and Word makes no other Direct2D call
+     at all afterwards. Direct2D is not where it gives up. What the
+     ledger shows in the ~900 ms that follow, in order: GetModuleHandle
+     for tbarcode10.dll and tbarcode10_x64.dll, the Word\Security
+     keys, then kernelbase's SetSystemFileCacheSize and ntdll's
+     NtSetSystemInformation, missing export, six hits each across
+     39074-39536 ms, then the absent GracefulExit\WINWORD\12 key and
+     GetModuleHandle(mscoree.dll) before the box. Those two missing
+     exports are the only named gaps in the window, and measuring them
+     on Windows is the next step here. Two blind spots stand beside
+     them, both named in OBSERVABILITY: a trace records a call's
+     arguments and not its answer, and QueryInterface, AddRef and
+     Release are hand-written slots every object shares, which the
+     generator does not wrap -- so a refused interface query would
+     leave nothing in the trace.
      Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
