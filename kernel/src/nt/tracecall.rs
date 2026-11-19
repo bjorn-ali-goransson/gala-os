@@ -276,8 +276,9 @@ impl fmt::Display for Answer<'_> {
     }
 }
 
-/// An argument list, as a JSON array of unsigned words.
-struct Words<'a>(&'a [u64]);
+/// An argument list, as a JSON array of unsigned words. Shared with
+/// `traceimports`, which records the same shape of call.
+pub(super) struct Words<'a>(pub(super) &'a [u64]);
 
 impl fmt::Display for Words<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

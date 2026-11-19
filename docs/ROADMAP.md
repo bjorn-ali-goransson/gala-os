@@ -2236,9 +2236,151 @@ need gala's.
      not what decides it either, and the question is no longer what
      gala refused but what Word concluded in the 150 ms of user-mode
      work after the last brush, where it makes no syscalls at all.
-     That is what OT3b piece 3 (the loader's IAT thunks) is for: it is
-     the only instrument that can see a call which never leaves user
-     mode. Measured beside it and not yet explained:
+     That is what OT3b piece 3 is for, and it exists now:
+     `imports=<program>[!<dll>][:<n>]` records the first call through
+     each of a program's import slots, which is the only instrument
+     that sees a call into a DLL gala did not write (OBSERVABILITY
+     "Import tracing"). What it gives for that window is the set of
+     Microsoft entry points Word reaches in it; what it cannot give is
+     the order, one record being all a slot leaves.
+     The reading needs every slot armed to be a reading at all:
+     `imports=WINWORD.EXE:65536` arms 23375 of them and records 1876
+     first calls without spending the budget, where 8192 is spent on
+     the modules that load first and leaves wwlib's and MSO's imports
+     unarmed -- a set of load order rather than of the program. With
+     the Direct3D 11 device beside Word the last brush is at 41754 ms,
+     and the entry points it reaches for the first time after it are:
+     between 41765 and 41805 ms seven ordinals of
+     `mso40uiWin32Client.dll` (#51400, #55304, #43924, #36626, #9850,
+     #3393, #58199) with three of Mso20win32client's and
+     Mso30win32client's among them; the four activation-context
+     functions the box's Common-Controls manifest needs (QueryActCtxW,
+     ActivateActCtx, FindActCtxSectionStringW, DeactivateActCtx); and
+     at 41861 ms GetStdHandle(STD_ERROR_HANDLE) and a 21-byte
+     WriteFile, which is gala's own user32 echoing the box's caption to
+     stderr (`user/user32/src/lib.rs`). So the box is raised 107 ms
+     after the brush, and the decision is made in the 51 ms of MSO
+     ordinals before it. What follows is teardown and not a decision: a
+     worker thread that sleeps, four `oart.dll` ordinals, one more
+     DLL's CRT DllMain, GalaWindowUnregister at 42077 ms, the
+     GracefulExit value deleted, exit(0) at 43151 ms.
+     What the window does not hold is a call gala answered badly. The
+     only ledger activity in it is the `Word\Options\Debug` read
+     already named above, and every graphics call in the 100 ms before
+     it answered S_OK: D3D10CreateDevice1 (631 ms of it, on DXVK over
+     lavapipe), CreateTexture2D, CreateDxgiSurfaceRenderTarget,
+     CreateDeviceContext twice, CreateRenderingParams,
+     SetTextRenderingParams, CreateMesh, CreateDrawingStateBlock,
+     SaveDrawingState, CreateBitmapFromDxgiSurface, SetTarget,
+     CreateSolidColorBrush. Word is given a device, a render target
+     bound to a DXGI surface and a brush, and asks for nothing further.
+     It concluded what it concluded from something it already held,
+     and it was never refused an interface on the way: every object of
+     gala's d2d1 records the IID of a QueryInterface it cannot answer
+     (`query`, `user/d2d1/src/lib.rs`), and the run has no such row.
+     Nor does Word ask DirectWrite for a font: of the 59 entry points
+     dwrite records reaching, not one is reached in the whole run, and
+     IDWriteFactory::CreateRenderingParams is the only call it makes
+     into that DLL at all. The decision is therefore made within 19 ms
+     of the brush -- the `Word\Options\Debug` read at 41773 ms is
+     already Word asking whether to break before it gives up -- and on
+     a value some call answered S_OK with rather than on a status.
+     What those calls were handed and what they gave back is what
+     `trace_from=<dll>!<Interface>::<Method>` with `events=call`
+     measures, the ledger keeping one row a site and so hiding every
+     repeat and every answer: the ordered stream is
+     SetUnitMode(ctx, 1), GetDevice three times, CreateDeviceContext
+     three times, SetTextRenderingParams, CreateMesh,
+     CreateDrawingStateBlock(NULL, NULL), SaveDrawingState,
+     CreateBitmapFromDxgiSurface(surface, NULL), SetTarget, then six
+     CreateSolidColorBrush -- every one S_OK, and nothing after it. No
+     BeginDraw, no RestoreDrawingState, not even a Release.
+     Two gaps stand beside the window and neither is in it: the Vulkan
+     loader asks gala's System32 dxgi for IDXGIFactory6
+     (c1b6694f-ff09-44a9-...) three times as it sorts
+     adapters and is refused, and `d3d10_1.dll!D3D10CreateDevice1`
+     drops D3D10_CREATE_DEVICE_ALLOW_NULL_FROM_MAP (0x10), which has no
+     Direct3D 11 flag of the same meaning -- nothing in the run maps a
+     resource.
+     What is on the screen while this happens is Word's splash. The
+     window `desktop: shown window ''` names is a real top-level window
+     of Word's, created at 38206 ms and shown at 40315 ms, and a
+     screenshot of the second it lives (`XTASK_SHOTS`, WORKFLOW
+     "Screenshots") has the Office splash drawn whole: the Word
+     wordmark, "Starting...", the custom title bar with its minimise
+     and close buttons, the icon in the taskbar. Its title is
+     empty because a splash has none -- Word draws "Office" into the
+     client area and never calls SetWindowTextW, which is absent from
+     the import set. So the scenario's screen check for
+     `Document1 - Word` cannot fire on this window, and it is still the
+     right check: the document frame is a second window Word never
+     reaches. The splash's frame is presented (GalaWindowPresent,
+     40473 ms) a second before the Direct2D work above, so it is not
+     what the six brushes were for.
+     Nor is the graphics path what stops it. Office's own switch for
+     that path is `DisableHardwareAcceleration` under
+     `HKCU\Software\Microsoft\Office\16.0\Common\Graphics`,
+     and seeding it as 1 moves Word onto the software target:
+     `ID2D1Factory::CreateWicBitmapRenderTarget` in place of
+     CreateDxgiSurfaceRenderTarget, with no device context, no bitmap
+     from a DXGI surface and no CreateTexture2D (it still probes the
+     Direct3D 10.1 device). Word then fails in the same place with the
+     same message, after 31016 ms against 31216 ms. The two paths share
+     only their tail -- CreateMesh, SetTextRenderingParams, six
+     CreateSolidColorBrush, nothing after -- so what Word concludes is
+     reached from both, and neither the DXGI surface nor the Direct3D
+     device is what it concludes it from.
+     Safe mode is the same failure, which rules out everything safe
+     mode skips. Launched `/safe` (the scenario's own `args=` replaced
+     through `XTASK_CMDLINE`, `cmdline::value` reading the last word of
+     a key) Word loads no add-ins, no global templates, no
+     Normal.dotm, no toolbar or customization file and no resiliency
+     list, and it fails with the same message after 30817 ms against
+     30774 ms, with the same splash on the screen. None of those is
+     what it reads and gives up on, which leaves the decision where
+     the stack capture put it: Word's core boot, in wwlib.
+     Word never reaches a template at all. It creates
+     `C:\Users\gala\AppData\Roaming\Microsoft\Templates` 285.7 s in
+     -- path not found, created, then opened, and the eight opens of the
+     whole run that name a template are all of that directory itself -- and that is as far as it gets: `Normal.dotm`
+     is neither opened nor created anywhere in the run, and neither is
+     the `Default.dotx` the scenario passes it with `/t`. So Word
+     concludes what it concludes before a document or a template of
+     its own exists, and nothing it was refused on the way there is
+     the cause, because it never asked.
+     The time the traced run spends inside D3D10CreateDevice1 is
+     lavapipe's, and the untraced run's 631 ms is the honest figure for
+     it. With every event recorded the one call runs from 290749 ms to
+     336451 ms, and of the 1244 user-mode sampler ticks in that window
+     941 sit in `vulkan_lvp.dll` and 230 in ntdll's allocator under it
+     (`cargo xtask profile <events.jsonl> --pid 12 --from 290.749 --to
+     336.451`), with 7574 of the 9822 user faults Word raises there in
+     lavapipe too. Nothing in the call waits on a lock
+     or a reply: it is Mesa's software rasterizer building a pipeline,
+     so the stretch before the box is not Word deliberating. The
+     window's 3123 kernel samples are the instrument and not the
+     system (OBSERVABILITY "Event stream"), which is why only the
+     user-mode share of a traced run is a measurement at all.
+     DXVK's own logs end clean beside it, which says the device is not
+     merely created but unobjected-to: `winword_d3d11.log` in the dump
+     ends on a feature level 10.1 device, then an 11_0 one and its
+     8 MiB resource descriptor heap, with nothing after it and one
+     warning in the file (external memory features unsupported), and
+     `winword_dxgi.log` holds only the monitor-metadata errors named
+     above.
+     Who raises the box is measured rather than inferred, by the
+     facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
+     stack_from=user32 stack_words=400` catches gala's MessageBoxW
+     writing the caption and the text, and passes over 634 writes of
+     DXVK's that would have spent the count on their own. Both captures
+     read alike -- kernel32 and WWINTL.DLL (where the localized string
+     comes from) under the system call, user32 under them, then
+     MSO.DLL and Mso30win32client, and below those a run of WWLIB.DLL
+     frames. So the decision is Word's own, in wwlib, and MSO only
+     puts the box on the screen for it. A scan is evidence and not
+     proof (OBSERVABILITY "Stack captures"), but it names the DLL to
+     ask about, which no other facility here does.
+     Measured beside it and not yet explained:
      `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
      which falls back to blank display metadata and carries on
      (`winword_dxgi.log` in the dump).
@@ -6034,13 +6176,47 @@ among the slowest hand-offs.
      armed every traced call in that process is recorded, not only the
      method named; the OpenTelemetry export does not map `call` or
      `ret` events yet (the same gap `ledger:` rows have, OT5).
-   - **Import thunks in the loader, for the DLLs gala did not write.**
-     gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
-     under a rule each resolved import can point at a thunk that
-     records `<program>` called `<dll>!<export>`. That covers exported
-     entry points of Microsoft's DLLs too, which the vtable wrappers
-     cannot reach; what it does not cover is the COM vtable slots behind
-     an export, which is why both pieces exist.
+   - **The import slots, for the DLLs gala did not write.** Done.
+     `imports=<program>[!<dll>][:<n>]` records the first call a program
+     makes through each of its import slots, `n` at most (default
+     4096), as `import` events. That reaches the exported entry points
+     of Microsoft's own DLLs, which the vtable wrappers cannot; what it
+     does not reach is the COM vtable slots behind such an export,
+     which is why both pieces exist.
+     A trap page rather than thunks: gala's loader fills the IAT
+     (`user/testntdll/src/lib.rs`), so it reserves a region it never
+     commits and reports each bound import, and the kernel writes
+     `base + index * 16` into the slot. The first call through it
+     fetches an instruction from an absent page and arrives in the
+     kernel's own page-fault path, with the call's arguments in
+     registers and its return address on the stack; the kernel records
+     it, puts the export's address back in the slot and sets the
+     instruction pointer there, and the call runs on. Thunks would have
+     meant generating code at run time for x64, ARM64 and WOW64 alike,
+     new `unsafe` on both sides, and a system call on every call for
+     ever; this way the only cost after the first call through a slot is
+     the slot itself (`kernel/src/nt/traceimports.rs`, `arm_imports` in
+     the loader, scenario `iat_trace_test` with an ARM64 twin,
+     OBSERVABILITY "Import tracing").
+     Its gaps: one record a slot, so the stream is a set of names and
+     not a sequence (the opposite trade from `trace_from=`); the first
+     four integer argument registers only, read whether the function
+     takes that many or not; static imports only, so no delay-load
+     import and nothing a program resolved with GetProcAddress; an
+     imported variable is left alone, because the value a read of its
+     slot returns *is* what the program uses and no fault announces that
+     read -- a *function's* slot read as data is answered instead, the
+     dereference of the value faulting at the trap address, which
+     disarms the slot, repairs the register and takes the instruction
+     again, and is recorded as a read rather than a call (without which
+     the option cannot trace Word, whose AppvIsvSubsystems64.dll reads
+     an import that way); 32-bit programs go
+     through the same code untested; and entries are not reclaimed when
+     a process ends, which the budget is what bounds. The budget is
+     also what bounds the reading: spent part way through, it arms the
+     modules that loaded first and leaves the rest, so the ceiling is
+     65536 slots (9 MiB of kernel heap) -- what a program of Word's
+     size takes whole -- and the summary line says when it was spent.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

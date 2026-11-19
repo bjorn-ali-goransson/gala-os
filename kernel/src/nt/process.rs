@@ -1627,6 +1627,17 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             platform::FaultAccess::Write => AccessKind::Write,
             platform::FaultAccess::Read => AccessKind::Read,
         };
+        // `imports=`: an instruction fetch at a trap address is the
+        // first call through an import slot, which the kernel answers by
+        // putting the export's address in the slot and sending the call
+        // on; any other access there is the program using the import's
+        // value as a pointer, answered by disarming the slot and
+        // repairing the register (nt::traceimports). Before the fault is
+        // resolved, because the trap page is reserved on purpose:
+        // resolving it could only deny it.
+        if super::traceimports::resolve(&process, frame, addr, kind == AccessKind::Execute) {
+            return;
+        }
         let started = platform::monotonic_ns();
         let resolved = vm::resolve_fault(&process, addr, kind);
         super::stats::FAULTS.add_since(started);

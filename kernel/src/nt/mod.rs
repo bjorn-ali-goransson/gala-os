@@ -53,6 +53,7 @@ pub mod thread;
 pub mod timer;
 pub mod token;
 pub mod tracecall;
+pub mod traceimports;
 pub mod vad;
 pub mod vm;
 pub mod wait;

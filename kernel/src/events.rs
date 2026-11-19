@@ -69,6 +69,9 @@ pub enum Category {
     /// method's full name and its arguments as words. A vtable call
     /// is an indirect call inside the program, so the DLL reports it;
     /// without `trace_from=` nothing is reported and nothing is paid.
+    /// `imports=` writes to the same category under its own event name,
+    /// `import`: the first call through each of a program's import
+    /// slots, whoever wrote the DLL it imports from (nt::traceimports).
     Call = 262144,
 }
 

@@ -163,6 +163,49 @@ impl TrapFrame {
         self.rcx
     }
 
+    /// The registers a call's first four integer arguments arrive in
+    /// (x86-64: rcx, rdx, r8, r9). An import trap takes a call at the
+    /// callee's entry, before any of its own code has run, so these are
+    /// that call's arguments. An argument past the fourth is on the
+    /// stack and a floating-point one is in an SSE register: neither is
+    /// read (docs/OBSERVABILITY.md, "Import tracing").
+    pub fn arg_regs(&self) -> [u64; 4] {
+        [self.rcx, self.rdx, self.r8, self.r9]
+    }
+
+    /// Replaces every integer register holding `find` with `put`; true
+    /// when at least one did. For a fault at an address a register holds
+    /// a stale copy of (`imports=`: an import's value read as data,
+    /// nt::traceimports), which the right value in the register and the
+    /// instruction taken again answer. rsp and rip are not registers an
+    /// address operand is read from, and are left alone.
+    pub fn swap_reg(&mut self, find: u64, put: u64) -> bool {
+        let mut swapped = false;
+        for reg in [
+            &mut self.rax,
+            &mut self.rbx,
+            &mut self.rcx,
+            &mut self.rdx,
+            &mut self.rsi,
+            &mut self.rdi,
+            &mut self.rbp,
+            &mut self.r8,
+            &mut self.r9,
+            &mut self.r10,
+            &mut self.r11,
+            &mut self.r12,
+            &mut self.r13,
+            &mut self.r14,
+            &mut self.r15,
+        ] {
+            if *reg == find {
+                *reg = put;
+                swapped = true;
+            }
+        }
+        swapped
+    }
+
     /// A page fault's access (the error code's bits: 1 write, 4
     /// instruction fetch); None for other traps.
     pub fn page_fault_access(&self) -> Option<FaultAccess> {

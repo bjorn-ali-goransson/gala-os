@@ -331,6 +331,8 @@ pub const NT_CLEAR_EVENT: u32 = 0x003e;
 pub const NT_PULSE_EVENT: u32 = 0x7f2a;
 /// GalaTrace: gala's own service, not part of Windows.
 pub const GALA_TRACE: u32 = 0x7f2b;
+/// GalaImports: gala's own service, not part of Windows.
+pub const GALA_IMPORTS: u32 = 0x7f2c;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -391,6 +393,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
     (GALA_RECORD_MISSING, "GalaRecordMissing", 4, gala_record_missing),
     (GALA_TRACE, "GalaTrace", 4, gala_trace),
+    (GALA_IMPORTS, "GalaImports", 4, gala_imports),
     (
         NT_GET_CURRENT_PROCESSOR_NUMBER,
         "NtGetCurrentProcessorNumber",
@@ -4045,6 +4048,87 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
                 arg!(call, 3),
             );
             if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
+}
+
+/// GalaImports(Op, A, B, C): the loader's half of `imports=`
+/// (nt::traceimports). Op 0 asks whether this process's imports are
+/// armed: A is a buffer of B bytes taking the DLL they must come from
+/// and C a `u64` taking its length (0: every DLL). The answer is SUCCESS
+/// when they are and OBJECT_NAME_NOT_FOUND when they are not, so a
+/// process that is not the one named pays one system call for its whole
+/// life. Op 1 reports imports the loader has just bound: A is an array
+/// of B entries of four words each (the import slot's address, the
+/// export's address, the name's address and its length), and C a
+/// `[u64; 3]` holding the base and size of the region the loader
+/// reserved for their trap addresses and the index in it the chunk
+/// starts at (so that one region serves several calls). Each entry that
+/// the budget covers has its slot written with `base + index * STRIDE`,
+/// so the next call through it faults there.
+fn gala_imports(call: &mut Call<'_>) -> NtStatus {
+    /// One reported import: slot, target, name, name length.
+    const ENTRY: u64 = 4 * 8;
+    match arg!(call, 0) {
+        0 => {
+            if !super::traceimports::program_wanted(call.process.name) {
+                return NtStatus::OBJECT_NAME_NOT_FOUND;
+            }
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::traceimports::NAME_LEN];
+            let len = len.min(name.len());
+            let written = super::traceimports::dll(&mut name[..len]);
+            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            if written != 0 && call.process.write(ptr, &name[..written]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        1 => {
+            let (entries, count) = (arg!(call, 1), arg!(call, 2));
+            let mut region = [0u8; 24];
+            if call.process.read(arg!(call, 3), &mut region).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let word = |bytes: &[u8], n: usize| {
+                u64::from_ne_bytes(bytes[n * 8..n * 8 + 8].try_into().unwrap_or_default())
+            };
+            let (base, size, first) = (word(&region, 0), word(&region, 1), word(&region, 2));
+            // The region holds the chunks before this one as well, so
+            // what it must cover is where this one ends.
+            let end = first.saturating_add(count);
+            if !super::traceimports::region(&call.process, base, size, end) {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            for index in 0..count {
+                let mut entry = [0u8; ENTRY as usize];
+                if call.process.read(entries + index * ENTRY, &mut entry).is_err() {
+                    return NtStatus::ACCESS_VIOLATION;
+                }
+                let mut name = [0u8; super::traceimports::NAME_LEN];
+                let len = (word(&entry, 3) as usize).min(name.len());
+                if call.process.read(word(&entry, 2), &mut name[..len]).is_err() {
+                    return NtStatus::ACCESS_VIOLATION;
+                }
+                super::traceimports::arm(
+                    &call.process,
+                    base,
+                    first + index,
+                    word(&entry, 0),
+                    word(&entry, 1),
+                    &name[..len],
+                );
+                // The budget is what stops this: the imports past it
+                // keep the export's address, as they would with no
+                // option at all.
+                if super::traceimports::spent() {
+                    break;
+                }
+            }
+            NtStatus::SUCCESS
         }
         _ => NtStatus::INVALID_PARAMETER,
     }

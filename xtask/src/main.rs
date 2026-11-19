@@ -8380,6 +8380,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("guard_test", "kernel32.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
+    ("iat_trace_test", "ntdll.dll", "Windows/System32"),
+    ("iat_trace_test", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
     ("apc_test", "ntdll.dll", "Windows/System32"),
     ("ioapc_test", "ntdll.dll", "Windows/System32"),
@@ -11103,6 +11105,7 @@ const USER_PROGRAMS: &[&str] = &[
     "seh_test",
     "guard_test",
     "import_test",
+    "iat_trace_test",
     "args_test",
     "fpu_test",
     "sysinfo_test",
@@ -13804,6 +13807,7 @@ const AARCH64_SCENARIOS: &[&str] = &[
 const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
+    "iat_trace_test",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -18932,6 +18936,26 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=import_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["import_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: `imports=`, the first call through each import slot. The
+        // program checks the mechanism from its own side (an armed slot
+        // holds a reserved address, the call answers the same, the slot
+        // is the export's afterwards); the kernel's two lines say what
+        // it armed and what was reached. The data import is why 3
+        // imports arm 2 slots.
+        name: "iat_trace_test",
+        cmdline: "qemu_exit events=call run=iat_trace_test.exe \
+                  imports=iat_trace_test.exe!testdll.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_trace_test: trapped",
+            "iat_trace_test: ok",
+            "exited with status 0x00000000",
+            "imports: the first call through each import of iat_trace_test.exe \
+             from testdll.dll, 4096 at most (imports=)",
+            "imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)",
+        ],
     },
     Scenario {
         name: "guard_test",

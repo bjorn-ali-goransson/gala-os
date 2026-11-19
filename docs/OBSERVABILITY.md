@@ -40,6 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` with `events=call`; `import` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -235,6 +236,20 @@ starts now`): a failure late in a long run without the run's whole
 stream (office_install's staging, half an hour in:
 `XTASK_CMDLINE=events_from=2100`).
 
+What the stream costs is its formatting, which matters for reading a
+traced run and not only for how long it takes: every event is written
+to port 0xe9 a byte at a time through `core::fmt`, so `office_word`'s
+31 s of run time becomes 74 s with `events=syscall` and 441 s with
+`events=all`, and the run's own profile is mostly that. Of the 3123
+kernel samples taken inside one Direct3D device creation in such a
+run, 90% sit under `DebugCon::write_fmt`, reached from
+`nt::syscalls::syscall_event` and `nt::process::on_user_exception`
+(the fault event). So in a traced run only the user-mode samples say
+where a program's time goes, the kernel's share is the instrument's,
+and a wall-clock figure from one measures the stream rather than the
+system: `events=syscall`, `events_pid=` or `events_match=` is what
+keeps the cost near the question.
+
 | Category | Events |
 |---|---|
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); a Linux process's are `lx syscall` events (pid, tid, nr, name, the six arguments as entered, `ret`: the result or a negative errno, ns), what strace shows, under the same `events_pid` and `events_match`; `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
@@ -256,7 +271,7 @@ ARCHITECTURE "A package's VFS view"): the `pid`, the path `asked` for and
 the path `served`, so a run shows every file a program found only in its
 package (scenario `pkgview_test`); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
 | `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
-| `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test` |
+| `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test`. `imports=` writes to this same category under the event name `import` ("Import tracing"): the first call a program makes through each of its import slots, with `call` the import's name as the ledger spells it (`testdll.dll!gala_add`) and `args` the four integer argument registers. Whoever wrote the DLL: an import of Microsoft's own code is reported the same way, which is what no other instrument here can do. Scenario `iat_trace_test` |
 | `wsl` | the WSL facade (`lx::distro`, `nt::wsl_calls`): `wsl import` (`distro`, `by`: wsl.exe's pid, `count`: the nodes made), `wsl start` (`distro`, `by`, `path`, and the Linux `pid` or the `errno`), `wsl terminate` and `wsl shutdown` (`count`: processes ended), `wsl remove` (`count`: names removed). The same as `wsl:` log lines (`wsl: bb: pid 108 /bin/sh started by pid 92`); a process that does not end within 10 s of `--terminate` is a warning; wsl.exe's missing options and gala's gaps are in the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special file`, `ntio`, `ntio ioctl`). Scenarios `wsl`, `wsl_terminal` |
 | `service` | the service control manager (nt::scm): `service` events with `op` (connected to, opened, created, marked for deletion, asked to start, sent a control to, changed configuration level of, deleted), the caller's `pid`, the service's `name`, the `access` granted or the failing `status` (0xC007xxxx: the SCM's Win32 error xxxx). The same as `scm:` log lines, the first 64 per boot (`scm: pid P (program) opened "OfficeSvc": 0xc0070424 (a Win32 error)`); a service whose key goes with its last handle is logged with the outcome; a running service's side (nt::scm_run) adds `service` events with `op` starting, status, stopped, process ended, exited (before its dispatcher connected), start timed out, cannot start (its executable), start refused, and its `state`, `exit`, `specific` and `service_pid`, and `scm:` lines (the first 96) for its start (pid, command line), its dispatcher's connection, ServiceMain's start, each state it reports and a handler's non-zero answer; a start that times out and a service process that ends while its service runs are warnings; what the SCM cannot start is in the ledger (`GalaServiceControl: start a driver`, `start as an account`, `share process: run alone`). A service's own output does not reach the serial log: its standard handles are NULL, as on Windows; what it did is read from these events, its `syscall` events (`events_pid`) and its exit codes (svcrun_test's service side reports its first failed check as its service-specific exit code). Scenarios `svc_test`, `svcrun_test` and their `wow64_` twins |
 | `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `pointer` (each change of the mouse buttons the desktop takes, wherever it goes: pressed and released bits, x, y and `to`, what got it: the shell's own targets such as `Start` or `LinuxEntry(0)`, `Client(<window>)`, `capture <window>`, `the end of a popup grab`; a screen check that finds the screen behind tells from these whether, and where, its click arrived), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `popup grab ended` (a press outside the windows of a popup grab's owner ended it: the grab's window, owner, the screen point; the press went nowhere else), `other session` (a process asks about, sends or posts to another session's HWND), `start menu` (a tile clicked: op `start`, `install` (`gala install <id>`) or `missing`; session, name, target (the path or the package id), pid, status; scenario `start_menu`; the Linux distributions section's: op `linux install`, `linux desktop`, `linux terminal`, `linux app` with name, target, pid, status; `linux progress` with name, state, percent; `linux prefs` with hidden, collapsed, dismissed, status; scenario `linux_menu`), `tray` (a Shell_NotifyIcon message on the notification area: op, the NIM_ number, session, pid, hwnd, id, flags, status; with `desktop: notification-area icon added/deleted` log lines for adds and deletes; scenario `tray_test`); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
@@ -1112,6 +1127,120 @@ method that answers records a second line a call:
   armed, *every* traced call in that process is recorded, not only the
   method named -- the method is where recording starts, not what is
   recorded.
+
+### Import tracing (`imports=`)
+
+`imports=<program>[!<dll>][:<n>]` records the first call a program makes
+through each of its import slots, `n` slots at most (default 4096; the
+kernel's half in `kernel/src/nt/traceimports.rs`, the loader's in
+`arm_imports`, `user/testntdll/src/lib.rs`; scenario `iat_trace_test`,
+with an ARM64 twin). The calls are `import` events, so `events=call`
+turns the stream on and `events_pid=`/`events_match=` choose the
+process, as for every other category.
+
+What it answers that nothing else here can is a call into a DLL **gala
+did not write**. `trace_from=` lives in the wrappers
+`cargo xtask gen-trace` puts inside gala's own DLLs, so it ends where
+gala's code ends, and the kernel sees only what crosses it. A call from
+Word's own code into Microsoft's own DLL crosses neither -- and the
+150 ms in which Word decides to give up, after the last Direct2D call
+it makes, is exactly that (ROADMAP OT3b).
+
+```
+imports: the first call through each import of iat_trace_test.exe from testdll.dll, 4096 at most (imports=)
+{"t":..,"cpu":1,"by":8,"ev":"import","pid":4,"process":"iat_trace_test.exe","call":"testdll.dll!gala_add","args":[2,3,131072,161]}
+imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)
+```
+
+The program there imports three names from testdll.dll and two slots are
+armed: the third is a variable, which cannot be trapped (below). One of
+the two it calls, which is the `import` event; the other it reads as
+data first, which disarms the slot (below), so that one leaves a
+`ledger:` row and the count at the end of the summary line instead.
+
+- **A trap page, not a thunk.** The loader reserves a region it never
+  commits, and the kernel writes `base + index * 16` into each armed
+  slot. The first call through the slot fetches its first instruction
+  from an absent page, so it arrives in the kernel's own page-fault
+  path -- with the call's arguments in registers and its return address
+  on the stack, because the call itself succeeded and only the fetch at
+  the far end did not. The kernel records it, puts the export's address
+  back in the slot (a protect, a write and a protect back, as
+  NtWriteVirtualMemory does, since an import address table sits in a
+  read-only part of its image) and sets the instruction pointer to that
+  address; the call then runs as though nothing had happened. No code is
+  generated at run time, no architecture needs assembly of its own, and
+  no `unsafe` is added on either side.
+- **Recorded once, answered always.** The slot is repaired on the first
+  call, so the second is a call and not a fault: what this trades away
+  is the repeat, which is the opposite trade from `trace_from=`
+  (every call to one method). The entry stays in the kernel's table
+  afterwards, which is what keeps a pointer the program copied out of
+  its IAT before the repair working -- such a call faults again and is
+  answered again, and only the recording is once.
+- **Functions only.** An imported variable cannot be trapped: the value
+  a read of its slot gives *is* what the program then uses, and no fault
+  announces that read. So the loader arms a slot only when the address
+  the import resolved to is in an executable section of the module
+  holding it (`in_code`), which leaves imported variables alone.
+- **A function's slot read as data disarms it.** Reading the slot of a
+  function announces nothing either -- the value it gives is the trap
+  address -- but *using* that value as a pointer faults at the trap
+  address with no instruction fetch in sight, which is what a hook
+  installer does when it reads the bytes it is about to patch. The bytes
+  it wants are the export's, which no page here can hold, so the fault is
+  answered as the state the program would have been in with nothing
+  armed: the export's address goes back in the slot and into every
+  register holding the stale trap address, and the instruction is taken
+  again. The slot is recorded as read and not called -- a `ledger:` row
+  (`read as data, not called`) and `, <n> read as data` at the end of the
+  summary line -- and left disarmed, a program that read it once being
+  certain to read it again. Where no register holds the trap address
+  itself, because the program computed an address from it, there is
+  nothing to repair: a warn line says which import it was and the access
+  violation is delivered as it would be without `imports=`. Word's own
+  `AppvIsvSubsystems64.dll` reads an import this way, so without this the
+  option could not trace Word at all.
+- **Cost when nothing is traced**: one relaxed load per page fault. The
+  kernel keeps the lowest and highest trap address it has armed, and an
+  ordinary fault -- demand paging, a guard page, a real access
+  violation -- is outside that range, so it never takes the trap
+  table's lock. A process the option does not name pays one system call
+  for its whole life: the loader asks once and remembers the answer.
+- **Cost in the kernel's memory**: 136 bytes a slot, so the ceiling of
+  65536 is about 9 MiB of kernel heap where `trace_from=`'s million
+  records are cheaper each. The ceiling is that high because the set
+  only means something whole: a budget spent part way through arms the
+  modules that loaded first and leaves the rest, so what comes out is a
+  reading of load order rather than of the program (Word binds some
+  30 000 imports across its 90 images, and `imports=WINWORD.EXE:8192`
+  reached none of wwlib's). The summary line says when the budget was
+  spent, which is when to ask for more. Entries are not reclaimed when
+  a process ends, so a run that starts the program twice arms twice;
+  the budget is what bounds that.
+- **A trace that armed nothing says so**, with the three reasons it can
+  happen (the program never ran, it imports nothing from that DLL, every
+  slot was a variable). So does a trace that armed slots and recorded no
+  call, which is the program saying it never used those imports -- and
+  so does `events=call` left out, which would otherwise look the same.
+- **Arguments** are the first four integer argument registers, read at
+  the callee's entry before any of its own code has run (x86-64: rcx,
+  rdx, r8, r9; ARM64: x0-x3). They are read whether the function takes
+  that many or not, so a function of none records four words of
+  whatever the caller happened to leave there. An argument past the
+  fourth is on the stack and a floating-point one is in an SSE
+  register, and neither is read. There is no `ret` event either: the
+  kernel is out of the call before it returns.
+- **Static imports only**, the ones the loader binds. A delay-load
+  import is bound by the program's own helper on its first call, and a
+  `GetProcAddress` result never goes through an IAT slot at all;
+  neither is seen.
+- **Limits**: one record a slot, so the stream is a set of names and not
+  a sequence; 64-bit programs are what the scenario covers, and a
+  32-bit one goes through the same code untested. The name is the one
+  the ledger spells (`<dll>!<export>`, from `import_name`, which the
+  ledger's own rows use), so a reading and a ledger row name the same
+  import the same way.
 
 ### Guest files (`dump=`)
 

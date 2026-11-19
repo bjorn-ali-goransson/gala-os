@@ -609,6 +609,33 @@ spent (the trace stopped, not the program). Only the DLLs whose slots
 `cargo xtask gen-trace` wraps can report, d2d1 today (OBSERVABILITY
 "Call tracing").
 
+### When the call is into a DLL gala did not write
+
+`trace_from=` ends where gala's own code ends, and the kernel sees only
+what crosses it. A call from a program's own code into one of
+Microsoft's DLLs is neither. `imports=` records the first call through
+each of the program's import slots, whoever wrote the DLL:
+
+```sh
+XTASK_CMDLINE='events=call events_match=WINWORD imports=WINWORD.EXE:8192' \
+  cargo xtask boot-test 'office_word$'
+```
+
+`!<dll>` after the program keeps it to the imports from one DLL
+(`imports=WINWORD.EXE!kernelbase.dll`), which is how a reading is
+narrowed once the first one says where to look. The last `imports:` line
+says how many slots were armed and how many of them were reached: armed
+and never reached is the program saying it never used that import.
+
+What it gives is a **set of names, not a sequence**: one record a slot,
+so an import the program had already called leaves nothing the second
+time -- the opposite trade from `trace_from=`. For a window late in a
+long run, read it as which entry points are reached there *for the first
+time*; everything the program touched during startup is already spent.
+Imports of variables are not armed at all, and nor are delay-load
+imports or anything resolved with GetProcAddress (OBSERVABILITY "Import
+tracing").
+
 ### Network tests
 
 VMs have no network card unless the scenario is in `NET_SCENARIOS`,

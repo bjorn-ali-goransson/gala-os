@@ -401,6 +401,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("trace_from") {
         nt::tracecall::set_from(spec);
     }
+    // `imports=<program>[!<dll>][:<n>]`: the first call a program makes
+    // through each of its import slots, which is the only way to see a
+    // call into a DLL gala did not write (nt::traceimports). Needs
+    // `events=call`.
+    if let Some(spec) = cmdline.value("imports") {
+        nt::traceimports::set(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }
@@ -608,6 +615,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     nt::desktop::log_clock_stats();
     nt::stack_at::log_stats();
     nt::tracecall::log_stats();
+    nt::traceimports::log_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);
