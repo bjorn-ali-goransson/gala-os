@@ -6542,6 +6542,16 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
+- **`arm_lx_inkscape` stalled once on CI** (1 of 5 runs; 0 of 9
+  locally, 4 of them at once beside busy host loops): after glycin
+  SIGKILLed its image loader (as it does on every run), Inkscape's main
+  window never came; both CPUs idle, the Wayland server with no work,
+  two Inkscape threads in wait4 (`lx/fork.rs`) and the main thread on a
+  futex, until the 300 s limit. Reading wait4 and the child's end
+  (`state::become_zombie`, `child_ended`) found no window for a lost
+  wakeup. The state dump now lists each Linux process's children
+  (running, zombies) and its wait4/waitid waiters with the pid each
+  wants, so the next stall names what the threads waited for.
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread

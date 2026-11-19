@@ -276,7 +276,9 @@ pub struct Brk {
 pub struct Children {
     pub running: Vec<u64>,
     pub ended: Vec<(u64, NtStatus)>,
-    pub waiters: Vec<ThreadId>,
+    /// Threads in wait4/waitid, with the pid each asked for (-1 or 0:
+    /// any child), for the state dump.
+    pub waiters: Vec<(ThreadId, i64)>,
 }
 
 /// A thread's own Linux state beside its signals (`signal::Signals`).
@@ -707,7 +709,7 @@ fn child_ended(parent: &LxProcess, child: &LxProcess, status: NtStatus, reap_now
             child.exit_signal
         ),
     );
-    for w in waiters {
+    for (w, _) in waiters {
         platform::wake(w);
     }
 }
@@ -1012,6 +1014,21 @@ pub fn dump() {
                         if t.sleeper.is_some() { "blocked" } else { "running" }
                     );
                 }
+            }
+        }
+        {
+            // Its children and who waits for them: a wait4 that never
+            // returned names the pid it wanted and whether that child
+            // is still running, a zombie, or gone.
+            let c = p.children.lock();
+            if !c.running.is_empty() || !c.ended.is_empty() || !c.waiters.is_empty() {
+                crate::info!(
+                    "lx: pid {} children: running {:?}, zombies (pid, status) {:?}, waiting (thread, pid wanted) {:?}",
+                    p.pid,
+                    c.running,
+                    c.ended,
+                    c.waiters,
+                );
             }
         }
         let fds = p.fds.lock();
