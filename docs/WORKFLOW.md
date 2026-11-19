@@ -550,6 +550,33 @@ same scenario: after a pass it is stale). Timing per scenario (or VM) and
 a summary go to `target/report/timing.txt`; outcomes to
 `target/report/history.jsonl`.
 
+### When a program stops inside a DLL
+
+Tracing says which calls a program made; it does not say who made them.
+When a program gives up and no `ledger:` line names a gap -- the
+decision was taken inside a DLL whose source we do not have -- arm the
+user-mode stack capture on the call it makes at that moment (the write
+of its error message, the first failing open, the free of its window):
+
+```sh
+XTASK_CMDLINE='stack_at=NtWriteFile:8 stack_from=wwlib events_match=WINWORD' \
+  cargo xtask boot-test 'office_word$'
+```
+
+Each capture is a `stack:` block naming the instruction and every stack
+word that points into a loaded image, so the call path is there as
+`<module>+<offset>` (OBSERVABILITY "Stack captures"). `events_match=`
+(or `events_pid=`) keeps it to the program in question, and
+`stack_from=` names the module whose call is wanted: on a service
+someone else reaches in a loop (DXVK's logging is ahead of Word's own
+write) no count gets to the call in question, and raising it only moves
+the flood. The count is the flood guard behind that, and the end of the
+run says how many captures were taken and how many calls the filter
+passed over -- 0 and the rest means the module was not on any of those
+stacks, so try the next one. Reach for this before
+adding records by hand to a DLL -- it costs a run, needs nothing of the
+program, and works for Microsoft's DLLs too.
+
 ### Network tests
 
 VMs have no network card unless the scenario is in `NET_SCENARIOS`,

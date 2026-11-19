@@ -379,6 +379,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("events_match") {
         events::set_syscall_match(text);
     }
+    // `stack_at=<service>[:<n>]`: the calling thread's user stack the
+    // first few times a process reaches that system call (nt::stack_at).
+    if let Some(spec) = cmdline.value("stack_at") {
+        nt::stack_at::arm(spec);
+    }
+    // `stack_from=<text>`: of those, only the calls a module whose name
+    // contains the text is on the stack of (nt::stack_at).
+    if let Some(text) = cmdline.value("stack_from") {
+        nt::stack_at::only_from(text);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }
@@ -584,6 +594,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
     nt::desktop::log_clock_stats();
+    nt::stack_at::log_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);

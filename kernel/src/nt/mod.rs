@@ -42,6 +42,7 @@ pub mod scm_run;
 pub mod section;
 pub mod security;
 pub mod session;
+pub mod stack_at;
 pub mod stats;
 pub mod status;
 pub mod syscalls;

@@ -38,6 +38,7 @@ rather than free text.
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
+| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`; `stack:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -929,6 +930,74 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+
+### Stack captures (`stack_at=`, `stack_from=`)
+
+`stack_at=<service>[:<n>]` logs the calling thread's user stack the first
+`n` times a process reaches that system call, and `stack_from=<module>`
+keeps only the calls a module of that name is on the stack of (`n`
+default 4, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
+`stack_at_test` and `stack_at_from_test`). It answers what the other
+facilities leave open: the event stream says which calls a program made
+and the ledger what gala did not have, and neither says who made the
+call. A program that stops inside a DLL gala has no source for
+leaves nothing else to go on -- Word's `wwlib.dll` deciding to print
+"Word was unable to start" is the case it was built for.
+
+A capture is a header line and a line per stack word that points into a
+loaded image:
+
+```
+stack: NtWriteFile from stack_at_test.exe (pid 4, tid 8), capture 1 of 2, at 0x180001c9a (ntdll.dll+0x1c9a)
+stack:   [rsp+0x000] 0x3ff7fff5750a (kernel32.dll+0x750a)
+stack:   [rsp+0x090] 0x14000103b (stack_at_test.exe+0x103b)
+stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
+```
+
+- **`stack_from=<text>` chooses the stack, not the number.** "The first
+  `n`" is the wrong shape of trigger on its own: a service another
+  thread reaches in a loop spends the count before the call in question.
+  Word's own write of "Word was unable to start" is behind DXVK's log
+  writes through the same `NtWriteFile`, and no count gets to it --
+  raising the number only moves the flood. With `stack_from=wwlib` a
+  call is captured only when a module whose name contains `wwlib` is on
+  its stack (or is where it was made), and the others are passed over
+  without spending a capture. The text is part of a module's name, in
+  either case; without `stack_at=` there is nothing to filter and the
+  option says so.
+- **Scanned, not unwound.** Every word of the stack that falls inside a
+  loaded image is named `<module>+<offset>`, dead values from earlier
+  frames with it, so a line is evidence rather than proof. The real
+  unwinder needs the unwind data and runs in user mode (gala's ntdll
+  fills `crashreport::Walk` while it dispatches an exception; the kernel
+  only reads it). At a system call the kernel has the stack and the
+  loaded images, and the scan is what those two give -- without the
+  program's cooperation, and for Microsoft's DLLs as well as gala's.
+- **Which processes**: `events_pid=` and `events_match=`, the same
+  choice the system-call events are filtered by, so
+  `events_match=WINWORD stack_at=NtWriteFile:8` is one program's
+  writes. With neither given, every process.
+- **The count is the flood guard.** When it is spent one line says so
+  (`stack: <service>: the N captures asked for are spent`, with how many
+  the filter passed over) and the capture goes quiet, so a service
+  called in a loop cannot bury the log. A count that is not a number, or
+  is zero, refuses the whole option rather than quietly arming the
+  default.
+- **The end of a run says what the trigger did**: `stack: <service>: 2
+  captures of the 2 asked for, 3 calls passed over by stack_from=...`.
+  Captures alone cannot tell a filter that matched nothing from a
+  service nobody called, and that difference is the next thing to type.
+- **Cost**: off unless the option is given, and then one relaxed load on
+  the system-call path. A capture reads at most 128 words (1 KiB) of the
+  caller's stack, a page's part at a time, and allocates nothing. With
+  `stack_from=` the stack is read before the count is claimed, so a
+  passed-over call costs that read -- it is already a call to the named
+  service, and the read is what buys the trigger its aim.
+- **Limits**: the capture is at the system-call boundary, which in a
+  WOW64 process is the 64-bit thunk, so a 32-bit program's own frames
+  are above what is scanned and are not placed by this yet; and 128
+  words reach several frames of a Windows DLL, not an arbitrarily deep
+  stack.
 
 ### Guest files (`dump=`)
 

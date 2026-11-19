@@ -762,6 +762,13 @@ fn dispatch(frame: &mut SyscallFrame) {
     {
         syscall_event(&call, number, Some((name, argc)), NtStatus::SUCCESS, started, "wait");
     }
+    // `stack_at=`: who called this service, while the stack is still
+    // the caller's (nt::stack_at).
+    if super::stack_at::armed()
+        && let Some(&(_, name, ..)) = service
+    {
+        super::stack_at::on_call(&call, name);
+    }
     let status = match service {
         Some((.., handler)) => handler(&mut call),
         None => {

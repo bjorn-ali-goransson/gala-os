@@ -544,8 +544,15 @@ pub(crate) struct Module {
     base: u64,
 }
 
+impl Module {
+    /// The image's file name, as a capture names it.
+    pub(crate) fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.len]).unwrap_or("?")
+    }
+}
+
 /// The image containing `addr`: the executable or a mapped image view.
-fn module_at(process: &Process, addr: u64) -> Option<Module> {
+pub(crate) fn module_at(process: &Process, addr: u64) -> Option<Module> {
     let mut m = Module { name: [0; 40], len: 0, base: 0 };
     let mut put = |chars: &mut dyn Iterator<Item = u16>| {
         for c in chars {
@@ -583,8 +590,7 @@ impl fmt::Display for At {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#x}", self.0)?;
         if let Some(m) = &self.1 {
-            let name = core::str::from_utf8(&m.name[..m.len]).unwrap_or("?");
-            write!(f, " ({name}+{:#x})", self.0 - m.base)?;
+            write!(f, " ({}+{:#x})", m.name(), self.0 - m.base)?;
         }
         Ok(())
     }

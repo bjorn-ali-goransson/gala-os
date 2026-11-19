@@ -1892,7 +1892,11 @@ need gala's.
    drawn Word prints "Word was unable to start. (13)" and exits with
    status 0 after 31.2 s. What it does between that call and the message
    is the next thing to read, from the system-call stream rather than
-   from the DLLs. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   from the DLLs; the message itself is Word's own
+   `user32!MessageBoxW` with `WWLIB.DLL` and `WWINTL.DLL` on the stack,
+   which is what a stack capture of the write says
+   (`stack_at=NtWriteFile:8 stack_from=wwlib`, OBSERVABILITY "Stack
+   captures": 633 of DXVK's log writes passed over, 3 captured). Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's
@@ -5857,6 +5861,20 @@ among the slowest hand-offs.
      entry points of Microsoft's DLLs too, which the vtable wrappers
      cannot reach; what it does not cover is the COM vtable slots behind
      an export, which is why both pieces exist.
+
+   The kernel's half of the same question is done:
+   `stack_at=<service>[:<n>]` logs the calling thread's user stack the
+   first `n` times a process reaches a system call, each word of it
+   that points into a loaded image named `<module>+<offset>`, and
+   `stack_from=<module>` keeps the captures to the calls that module is
+   on the stack of -- without it a service another thread reaches in a
+   loop spends any count before the call in question
+   (`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test` and
+   `stack_at_from_test`, OBSERVABILITY "Stack captures"). The wrappers
+   say what happened inside a DLL gala wrote; this says who called, in
+   any DLL, including Microsoft's own. Its gaps: a scan, not an unwind, so dead words of
+   earlier frames come with the call path, and a 32-bit program's
+   frames are above the WOW64 thunk the capture is taken at.
 
    What this is for: every program whose compatibility is worked on
    next runs into the same wall Word did, and the answer should not be

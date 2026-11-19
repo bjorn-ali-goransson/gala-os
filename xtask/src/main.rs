@@ -7619,6 +7619,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pipe_test", "bcrypt.dll", "Windows/System32"),
     ("lock_test", "ntdll.dll", "Windows/System32"),
     ("lock_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_from_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_from_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -10055,6 +10059,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "stack_at_test",
     "ucrt_test",
     "office_api_test",
     "office_k32_test",
@@ -12647,6 +12652,7 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "stack_at_test",
     "iocp_test",
     "symlink_test",
     "ioapc_test",
@@ -17375,6 +17381,53 @@ const BASE_SCENARIOS: &[Scenario] = &[
             // depends on what the boot itself recorded, but their kind
             // does not.
             r#"ledger: {"service":"?full","what":"other","detail":0,"hits":"#,
+        ],
+    },
+    Scenario {
+        // The user-mode stack capture (`stack_at=`): the kernel logs the
+        // calling thread's user stack the first `n` times a process
+        // reaches the named system service, so a program that stops
+        // inside a DLL can be placed by the path that got there
+        // (OBSERVABILITY "Stack captures"). The program writes six
+        // lines, the first three straight to the system call and the
+        // last three through kernel32, so the captures must name this
+        // program and kernel32 both; five are captured and the sixth
+        // finds the count spent.
+        name: "stack_at_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:5 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: armed: NtWriteFile, 5 captures",
+            "stack: NtWriteFile from stack_at_test.exe",
+            "capture 5 of 5",
+            "(kernel32.dll+0x",
+            "(stack_at_test.exe+0x",
+            "stack: NtWriteFile: the 5 captures asked for are spent",
+        ],
+    },
+    Scenario {
+        // The capture's filter (`stack_from=`): the count alone is the
+        // wrong trigger when another caller reaches the same service in
+        // a loop (DXVK's logging is ahead of Word's own write), so the
+        // filter chooses the stack instead of how many to take. The
+        // program's first three writes go straight to the system call
+        // with kernel32 on no frame; `stack_from=kernel32` must pass
+        // all three over without spending a capture -- the spent line's
+        // count of them is the proof -- and capture the two writes that
+        // do go through kernel32.
+        name: "stack_at_from_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:2 stack_from=kernel32 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: only calls with a module whose name contains \"kernel32\" on the stack",
+            "(kernel32.dll+0x",
+            "capture 2 of 2",
+            "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
+            "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
         ],
     },
     Scenario {
