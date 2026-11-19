@@ -1665,8 +1665,19 @@ const DEBS_ARM64: &[(&str, &str)] = &[
     ),
 ];
 
+/// Prebuilt `p` as a package of Ubuntu's pool (its URL under
+/// archive.ubuntu.com's or ports.ubuntu.com's `pool/`), if it is one.
+fn ubuntu_deb(p: &Prebuilt) -> Option<Deb> {
+    let pool = p
+        .url
+        .strip_prefix("https://archive.ubuntu.com/ubuntu/pool/")
+        .or_else(|| p.url.strip_prefix("https://ports.ubuntu.com/ubuntu-ports/pool/"))?;
+    pool.ends_with(".deb").then_some(Deb { pool, sha256: p.checksum, files: &[] })
+}
+
 /// `cargo xtask fetch-debs`: every package of every Linux root, amd64 and
-/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), into the package cache
+/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), and the prebuilts that are
+/// Ubuntu packages (glibc, libwayland-client, libffi, weston), into the package cache
 /// `target/prebuilt/debs`, each checked against its SHA-256 (`fetch_deb`);
 /// files there that no root pins any more are removed. One after another:
 /// CI runs it once (its `debs` job) for every boot shard, so the shards
@@ -1693,6 +1704,19 @@ fn fetch_debs() -> Result {
                 fetch_deb(&deb, arm64)?;
             }
         }
+    }
+    for p in PREBUILT {
+        let Some(deb) = ubuntu_deb(p) else { continue };
+        let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+        if !wanted.insert(name.clone()) {
+            continue;
+        }
+        if cache.join(&name).exists() {
+            have += 1;
+        } else {
+            fetched += 1;
+        }
+        fetch_deb(&deb, deb.pool.ends_with("_arm64.deb"))?;
     }
     let mut removed = 0;
     for entry in fs::read_dir(&cache).map_err(|e| format!("reading {cache:?}: {e}"))?.flatten() {
@@ -12591,9 +12615,15 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
-    let url = ubuntu_mirror(p.url);
-    eprintln!("xtask: fetching {} ({url})", p.name);
-    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(&url))?;
+    if let Some(d) = ubuntu_deb(p) {
+        // An Ubuntu package: from the package cache (`fetch-debs` fills it
+        // once for CI's shards), copied as the download.
+        let (deb, _) = fetch_deb(&d, d.pool.ends_with("_arm64.deb"))?;
+        fs::copy(&deb, &zip).map_err(|e| format!("copying {deb:?}: {e}"))?;
+    } else {
+        eprintln!("xtask: fetching {} ({})", p.name, p.url);
+        run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    }
     // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
     let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
     let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;

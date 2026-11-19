@@ -1358,7 +1358,9 @@ one), and the stamp then names HEAD for the next save. The `linux` and
 
 The Linux roots' Ubuntu packages (`target/prebuilt/debs`) are fetched once
 per run by the `debs` job (`cargo xtask fetch-debs`: every root's pinned
-packages, amd64 and arm64, checked, the ones no longer pinned removed)
+packages, amd64 and arm64, and the prebuilts that are Ubuntu packages
+(glibc, libwayland-client, libffi, weston: `fetch_prebuilt` takes them
+from this cache), checked, the ones no longer pinned removed)
 into one cache, `gala-debs-<hash of xtask/src/main.rs>` (the newest
 restored first, so only new pins are downloaded); the boot shards restore
 exactly that key (`fail-on-cache-miss`) and keep it out of their own
