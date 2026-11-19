@@ -28,6 +28,7 @@
 //! Design: docs/ARCHITECTURE.md, "Windows on the screen", "Server and
 //! desktop workloads" and "Presenters (B3a)".
 
+pub mod edid;
 pub mod linux;
 mod paint;
 pub mod pkg;

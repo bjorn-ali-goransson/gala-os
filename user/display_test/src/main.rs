@@ -40,6 +40,18 @@
 //!   adapter's is a device path as well. A wrong structure size, an
 //!   unknown target or an unknown adapter is ERROR_INVALID_PARAMETER, and
 //!   no packet at all is ERROR_GEN_FAILURE.
+//! - The same monitor has a device interface under
+//!   GUID_DEVINTERFACE_MONITOR whose DevicePath is the path the CCD gave
+//!   for that target -- in whatever case, since Windows gives the path
+//!   lower-cased there and upper-cased through the CCD, which is why
+//!   DXVK matches it with `_wcsicmp` -- and the EDID its panel reports
+//!   is a REG_BINARY
+//!   value in that device's registry key: the VESA header, version 1.3
+//!   or later, a base block whose bytes sum to zero and a preferred
+//!   detailed timing. An interface class the machine has no device for
+//!   is a valid, empty set. This is the walk DXVK's `getMonitorEdid`
+//!   makes, and the one part of the display that does not go through the
+//!   CCD at all.
 //!
 //! Assumed of the machine it runs on: a 32-bit desktop, and a first
 //! active path that is not rotated or scaled (the common case, and gala's).
@@ -60,6 +72,7 @@ type Handle = usize;
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, overlapped: usize) -> i32;
+    fn GetLastError() -> u32;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -79,6 +92,53 @@ unsafe extern "system" {
     fn EnumDisplayDevicesW(device: *const u16, index: u32, info: *mut u8, flags: u32) -> i32;
 }
 
+#[link(name = "setupapi", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetupDiGetClassDevsW(
+        class: *const u8,
+        enumerator: *const u16,
+        parent: usize,
+        flags: u32,
+    ) -> usize;
+    fn SetupDiEnumDeviceInterfaces(
+        set: usize,
+        device: *const u8,
+        class: *const u8,
+        index: u32,
+        data: *mut u8,
+    ) -> i32;
+    fn SetupDiGetDeviceInterfaceDetailW(
+        set: usize,
+        interface: *const u8,
+        detail: *mut u8,
+        size: u32,
+        required: *mut u32,
+        device: *mut u8,
+    ) -> i32;
+    fn SetupDiOpenDevRegKey(
+        set: usize,
+        device: *const u8,
+        scope: u32,
+        profile: u32,
+        kind: u32,
+        access: u32,
+    ) -> usize;
+    fn SetupDiDestroyDeviceInfoList(set: usize) -> i32;
+}
+
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RegQueryValueExW(
+        key: usize,
+        name: *const u16,
+        reserved: *mut u32,
+        kind: *mut u32,
+        data: *mut u8,
+        size: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(key: usize) -> i32;
+}
+
 const QDC_ALL_PATHS: u32 = 1;
 const QDC_ONLY_ACTIVE_PATHS: u32 = 2;
 const QDC_VIRTUAL_MODE_AWARE: u32 = 0x10;
@@ -87,6 +147,31 @@ const INSUFFICIENT_BUFFER: i32 = 122;
 const GEN_FAILURE: i32 = 31;
 const ENUM_CURRENT_SETTINGS: u32 = 0xffff_ffff;
 const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+const DIGCF_PRESENT: u32 = 2;
+const DIGCF_DEVICEINTERFACE: u32 = 0x10;
+const DICS_FLAG_GLOBAL: u32 = 1;
+const DIREG_DEV: u32 = 1;
+const KEY_READ: u32 = 0x2_0019;
+const REG_BINARY: u32 = 3;
+const NO_MORE_ITEMS: u32 = 259;
+const INVALID_HANDLE_VALUE: usize = usize::MAX;
+
+/// GUID_DEVINTERFACE_MONITOR, {e6f07b5f-ee97-4a90-b076-33f57bf4eaa7},
+/// and a device interface class no machine has a device for (gala's own
+/// vendor GUID with an unused second word).
+const MONITOR_INTERFACE: [u8; 16] = [
+    0x5f, 0x7b, 0xf0, 0xe6, 0x97, 0xee, 0x90, 0x4a, 0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7,
+];
+const ABSENT_INTERFACE: [u8; 16] =
+    [0x61, 0x6c, 0x61, 0x67, 0x02, 0x00, 0x00, 0x40, 0x80, 0, 0, 0, 0, 0, 0, 0];
+
+/// SP_DEVICE_INTERFACE_DATA and SP_DEVINFO_DATA are both 32 bytes where a
+/// pointer is 8 (28 where it is 4), and
+/// SP_DEVICE_INTERFACE_DETAIL_DATA_W's cbSize is its own size: 8 or 6.
+const DEVICE_DATA_CB: u64 = if cfg!(target_pointer_width = "64") { 32 } else { 28 };
+const DETAIL_CB: u64 = if cfg!(target_pointer_width = "64") { 8 } else { 6 };
+const DETAIL_PATH: usize = 4;
+const DETAIL_BYTES: usize = 560;
 
 /// DISPLAY_DEVICEW: cb, DeviceName[32], DeviceString[128], StateFlags,
 /// DeviceID[128], DeviceKey[128].
@@ -276,6 +361,20 @@ fn wide_len16(s: &[u16]) -> usize {
 fn wide_same(a: &[u8], b: &[u8]) -> bool {
     let n = wide_len(a);
     n == wide_len(b) && a[..2 * n] == b[..2 * n]
+}
+
+/// Whether two wide strings are the same name ignoring case, which is
+/// how a device path is compared: Windows' setupapi gives the monitor's
+/// in lower case where its CCD gives it in upper.
+fn wide_same_fold(a: &[u8], b: &[u8]) -> bool {
+    let n = wide_len(a);
+    let fold = |w: u16| if w < 0x80 { u16::from((w as u8).to_ascii_lowercase()) } else { w };
+    n == wide_len(b)
+        && (0..n).all(|i| {
+            let x = u16::from_le_bytes([a[2 * i], a[2 * i + 1]]);
+            let y = u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
+            fold(x) == fold(y)
+        })
 }
 
 /// The wide string of ASCII text, for a call that takes a name.
@@ -520,6 +619,11 @@ fn run() -> Result<(), u32> {
     info(b"target name flags", u64::from(u32at(&packet, 20)));
     info_text(b"target friendly name", &packet[36..164]);
     info_text(b"target device path", &packet[164..420]);
+    // Kept in a buffer of its own: the packet is filled again below,
+    // and everything that follows compares against this path -- GDI's
+    // monitor, and the device interface setupapi has for it.
+    let mut monitor_path = [0u8; 256];
+    monitor_path.copy_from_slice(&packet[164..420]);
     c.eq(u64::from(u32at(&packet, 24)), u64::from(technology))?;
     c.ok(starts_with(&packet[164..420], br"\\?\DISPLAY#"), 0)?;
     c.ok(ends_with(&packet[164..420], b"{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"), 0)?;
@@ -616,7 +720,7 @@ fn run() -> Result<(), u32> {
     };
     c.ok(r != 0, 0)?;
     info_text(b"monitor interface", &iface[DD_ID..DD_KEY]);
-    c.ok(wide_same(&iface[DD_ID..DD_KEY], &packet[164..420]), 0)?;
+    c.ok(wide_same(&iface[DD_ID..DD_KEY], &monitor_path), 0)?;
 
     // What it answers for a second monitor, a name it does not have, and a
     // cb under the structure: no device, no device, and the fields that
@@ -658,6 +762,165 @@ fn run() -> Result<(), u32> {
     // SAFETY: no packet, which the call must refuse.
     let r = unsafe { DisplayConfigGetDeviceInfo(core::ptr::null_mut()) };
     c.ret(r, GEN_FAILURE)?;
+
+    // The monitor as setupapi sees it. A program that wants the panel's
+    // EDID -- DXVK's getMonitorEdid, and Word under it -- does not ask
+    // the CCD for it: it enumerates GUID_DEVINTERFACE_MONITOR, matches
+    // each DevicePath against the one the CCD gave for its target, and
+    // reads an EDID value out of that device's registry key.
+    let set = unsafe {
+        SetupDiGetClassDevsW(
+            MONITOR_INTERFACE.as_ptr(),
+            core::ptr::null(),
+            0,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    c.ok(set != 0 && set != INVALID_HANDLE_VALUE, set as u64)?;
+    // The interface whose path is this target's, and that device, found
+    // without a check of its own so that the numbering below does not
+    // depend on how many monitors the machine has.
+    let mut iface = [0u64; 4];
+    let mut monitor = [0u64; 4];
+    let mut found = false;
+    for i in 0..16u32 {
+        iface = [0u64; 4];
+        iface[0] = DEVICE_DATA_CB;
+        // SAFETY: our SP_DEVICE_INTERFACE_DATA, which a u64 array aligns.
+        let r = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                set,
+                core::ptr::null(),
+                MONITOR_INTERFACE.as_ptr(),
+                i,
+                iface.as_mut_ptr().cast(),
+            )
+        };
+        if r == 0 {
+            info(b"setupapi monitor interfaces", u64::from(i));
+            break;
+        }
+        let mut detail = [0u64; DETAIL_BYTES / 8];
+        detail[0] = DETAIL_CB;
+        let mut candidate = [0u64; 4];
+        candidate[0] = DEVICE_DATA_CB;
+        let mut need = 0;
+        // SAFETY: our interface, detail buffer and SP_DEVINFO_DATA.
+        let r = unsafe {
+            SetupDiGetDeviceInterfaceDetailW(
+                set,
+                iface.as_ptr().cast(),
+                detail.as_mut_ptr().cast(),
+                DETAIL_BYTES as u32,
+                &mut need,
+                candidate.as_mut_ptr().cast(),
+            )
+        };
+        if r == 0 {
+            continue;
+        }
+        // SAFETY: the detail just written, as the bytes its path is in.
+        let path = unsafe {
+            core::slice::from_raw_parts(
+                detail.as_ptr().cast::<u8>().add(DETAIL_PATH),
+                DETAIL_BYTES - DETAIL_PATH,
+            )
+        };
+        info_text(b"setupapi interface path", path);
+        info(b"setupapi interface detail bytes", u64::from(need));
+        if wide_same_fold(path, &monitor_path) {
+            monitor = candidate;
+            found = true;
+            break;
+        }
+    }
+    c.ok(found, 0)?;
+    // Its detail asks for its size the way every setupapi call does: no
+    // buffer at all is ERROR_INSUFFICIENT_BUFFER and the size needed.
+    let mut need = 0;
+    // SAFETY: the interface found above; no detail, which the call sizes.
+    let r = unsafe {
+        SetupDiGetDeviceInterfaceDetailW(
+            set,
+            iface.as_ptr().cast(),
+            core::ptr::null_mut(),
+            0,
+            &mut need,
+            core::ptr::null_mut(),
+        )
+    };
+    c.ret(r, 0)?;
+    // SAFETY: no arguments.
+    c.eq(u64::from(unsafe { GetLastError() }), INSUFFICIENT_BUFFER as u32 as u64)?;
+    c.ok(need as usize > DETAIL_PATH && (need as usize) <= DETAIL_BYTES, u64::from(need))?;
+    // The device's own registry key, and the panel's EDID in it.
+    // SAFETY: the device the interface above belongs to.
+    let key = unsafe {
+        SetupDiOpenDevRegKey(set, monitor.as_ptr().cast(), DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ)
+    };
+    c.ok(key != 0 && key != INVALID_HANDLE_VALUE, key as u64)?;
+    let mut edid = [0u8; 512];
+    let mut kind = 0;
+    let mut size = edid.len() as u32;
+    let name = wide(b"EDID");
+    // SAFETY: our name and buffer, whose size the call is given.
+    let r = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            edid.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    c.ret(r, 0)?;
+    c.eq(u64::from(kind), u64::from(REG_BINARY))?;
+    c.ok(size >= 128 && size.is_multiple_of(128), u64::from(size))?;
+    // What VESA says an EDID is: the header, a version at least 1.3, a
+    // base block whose bytes sum to zero, and a preferred timing.
+    c.ok(
+        edid[..8] == [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0],
+        u64::from_le_bytes(edid[..8].try_into().unwrap_or_default()),
+    )?;
+    c.eq(u64::from(edid[18]), 1)?;
+    c.ok(edid[19] >= 3, u64::from(edid[19]))?;
+    let sum = edid[..128].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    c.eq(u64::from(sum), 0)?;
+    c.ok(u32at(&edid, 54) & 0xffff != 0, u64::from(u32at(&edid, 54)))?;
+    // SAFETY: the key and the set, both ours.
+    c.ret(unsafe { RegCloseKey(key) }, 0)?;
+    // SAFETY: as above.
+    c.ret(unsafe { SetupDiDestroyDeviceInfoList(set) }, 1)?;
+
+    // An interface class the machine has no device for: a set all the
+    // same, which enumerates to nothing.
+    let empty = unsafe {
+        SetupDiGetClassDevsW(
+            ABSENT_INTERFACE.as_ptr(),
+            core::ptr::null(),
+            0,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    c.ok(empty != 0 && empty != INVALID_HANDLE_VALUE, empty as u64)?;
+    iface = [0u64; 4];
+    iface[0] = DEVICE_DATA_CB;
+    // SAFETY: our SP_DEVICE_INTERFACE_DATA.
+    let r = unsafe {
+        SetupDiEnumDeviceInterfaces(
+            empty,
+            core::ptr::null(),
+            ABSENT_INTERFACE.as_ptr(),
+            0,
+            iface.as_mut_ptr().cast(),
+        )
+    };
+    c.ret(r, 0)?;
+    // SAFETY: no arguments.
+    c.eq(u64::from(unsafe { GetLastError() }), u64::from(NO_MORE_ITEMS))?;
+    // SAFETY: the set, ours.
+    c.ret(unsafe { SetupDiDestroyDeviceInfoList(empty) }, 1)?;
     Ok(())
 }
 

@@ -10803,6 +10803,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_setupcab_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_setupcab_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_setupcab_test", "x86/setupapi.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     // msi's queries (user/msi_test), x64 and x86.
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
@@ -10853,6 +10855,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("display_test", "kernel32.dll", "Windows/System32"),
     ("display_test", "user32.dll", "Windows/System32"),
     ("display_test", "gdi32.dll", "Windows/System32"),
+    ("display_test", "setupapi.dll", "Windows/System32"),
+    ("display_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -20926,6 +20930,27 @@ fn static_imports(file: &str) -> Vec<&'static str> {
     };
     let names = import_names(&image);
     USER_DLLS
+        .iter()
+        .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
+        .map(|d| d.file)
+        .collect()
+}
+
+/// The same for an EXTRA_MODULES file with the `x86/` prefix: the
+/// USER_DLLS_X86 DLLs its i686 copy imports, by their own file names
+/// (without the prefix). Read from the checked-in copy, as
+/// `static_imports` is. Empty if `file` is not one of them. Only the
+/// test below reads it: the 32-bit set is listed and not closed.
+#[cfg(test)]
+fn static_imports_x86(file: &str) -> Vec<&'static str> {
+    let Some(dll) = x86_dll(file) else {
+        return Vec::new();
+    };
+    let Ok(image) = fs::read(root().join("user/bin").join(dll.exported_as)) else {
+        return Vec::new();
+    };
+    let names = import_names(&image);
+    USER_DLLS_X86
         .iter()
         .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
         .map(|d| d.file)
@@ -31365,6 +31390,28 @@ mod module_sets {
                     assert!(
                         modules.iter().any(|(f, _)| *f == dep),
                         "{}: {file} imports {dep}, which the set does not hold",
+                        s.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the 32-bit half of it, which `extra_modules` does not close
+    /// itself (its names carry the `x86/` prefix): a SysWOW64
+    /// dependency nobody listed showed up only as a guest `missing dll`
+    /// and a 0xc0000135 in a boot test, which is late and reads like a
+    /// gap in the DLL rather than a gap in the list.
+    #[test]
+    fn every_scenario_s_32_bit_set_is_closed() {
+        for s in scenarios() {
+            let modules = extra_modules(s.name);
+            for (file, dir) in &modules {
+                for dep in static_imports_x86(file) {
+                    let name = format!("x86/{dep}");
+                    assert!(
+                        modules.iter().any(|(f, d)| *f == name && d == dir),
+                        "{}: {file} imports {dep}, which the set does not hold for {dir}",
                         s.name
                     );
                 }
