@@ -255,7 +255,7 @@ has a section under "Open items".
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 is there now (ID2D1Factory1, the device, device contexts and target bitmaps over DXGI surfaces: `d2d1_device_test`), and Word asks for ID2D1Factory2 instead, falls back to the 1.0 path's D3D10CreateDevice1 stub and ends with status 0 after 30 s with no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 30.5 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1322,6 +1322,9 @@ the kernel.
   NULL, each call in the ledger); `gpu_stub_test`; Chromium's GPU
   process takes it as "no GPU", and Office's shared code can bind the
   Direct3D 10 entry points it delay-loads (ROADMAP OF).
+  `d3d10_1.dll`'s D3D10CreateDevice1 is no longer one of them: it gives
+  a real device now, over whichever Direct3D 11 the program brought
+  (G2 below).
 - G1, virtio-gpu 2D: the modern virtio-pci transport, the driver over a
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
@@ -1348,6 +1351,17 @@ the kernel.
   so no HLSL compiler yet. `office_word` ships the same pair beside
   WINWORD.EXE and Word creates a D3D_FEATURE_LEVEL_11_0 device there,
   which is how a program other than a test gets one (ROADMAP OF).
+- G2, Direct3D 10.1: gala's own `d3d10_1.dll` (`user/d3d10_1`,
+  ARCHITECTURE "Direct3D 10.1") over whichever `d3d11.dll` the program
+  brought, since DXVK dropped Direct3D 10 in 2.0: a merged device and
+  context answering ID3D10Device and ID3D10Device1 (feature levels,
+  textures, Map/Unmap, CopyResource, format support) whose objects
+  answer QueryInterface with the real Direct3D 11 ones underneath, so
+  Direct2D draws into them as into any DXGI surface; everything else of
+  the interface records its own name. `d3d10_1_test` (a device over
+  DXVK on lavapipe, a texture, a Direct2D 1.0 surface render target
+  over it, the frame read back through a staging texture). It is what
+  Word draws with (ROADMAP OF).
 
 **Next**:
 1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
@@ -1809,7 +1823,8 @@ need gala's.
     (WINCODEC_ERR_FRAMEMISSING).
   - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, the
     `d2d1_window` screen scenario and `d2d1_device_test`): done for the
-    factory (both kinds, ID2D1Multithread, ID2D1Factory1; the ordinals
+    factory (both kinds, ID2D1Multithread, ID2D1Factory1 and
+    ID2D1Factory2; the ordinals
     Office imports), the matrix
     helpers, software render targets over WIC bitmaps, device contexts
     (BindDC) and windows (hardware requests drawn in software), solid,
@@ -1817,21 +1832,50 @@ need gala's.
     rectangles, rounded rectangles, ellipses, lines and path geometries
     (lines, Béziers, arcs, fill modes) filled and stroked with widths,
     caps and joins, antialiased or aliased, transforms and axis-aligned
-    clips, DrawBitmap; and Direct2D 1.1 over the program's own Direct3D
-    11 device (GPU G2's DXVK): ID2D1Factory1::CreateDevice,
-    ID2D1Device::CreateDeviceContext, a target bitmap over a DXGI
-    surface (CreateBitmapFromDxgiSurface) and a frame drawn in software
-    written back into that surface with UpdateSubresource. Next, as
+    clips, DrawBitmap; and Direct2D 1.1 and 1.2 over the program's own
+    Direct3D 11 device (GPU G2's DXVK): CreateDevice on either factory,
+    CreateDeviceContext on either device (rendering priority),
+    a target bitmap over a DXGI
+    surface (CreateBitmapFromDxgiSurface), geometry realizations drawn
+    at the rasterizer's own tolerance, and a frame drawn in software
+    written back into that surface with UpdateSubresource. Direct2D
+    1.0's own way onto such a surface is there too, which is the one
+    Word takes: CreateDxgiSurfaceRenderTarget over a texture of a
+    Direct3D 10.1 device, and the target it gives is a device context
+    over a bitmap of that surface, which is what every Direct2D render
+    target has been since Windows 8 and what a program on the 1.0 path
+    asks it for (`d3d10_1_test`). Drawing state blocks are there as well, on both
+    factories and in one object answering ID2D1DrawingStateBlock and
+    ID2D1DrawingStateBlock1, with the text-rendering parameters
+    DirectWrite now makes (the `dwrite` item); so are meshes
+    (ID2D1Mesh, its tessellation sink, FillMesh triangle by triangle,
+    aliased only as Direct2D has it) and the options, alpha mode and
+    DPI Direct2D gives a bitmap over a DXGI surface when the program
+    asks for none, with D2DERR_INVALID_TARGET for a frame whose target
+    bitmap is no target. Next, as
     Office's use shows it (the ledger names
-    each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
-    layout first), layers, compatible render targets, drawing state
-    blocks, the GDI interop interface, dashes, effects and command
-    lists. The `info` lines of
-    `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
-    of 32bppBGRA, antialiased edge values) and its expectations wait for
-    a Windows run: the first (issue #94) stopped at D2D1CreateFactory,
-    E_NOINTERFACE for an IID_ID2D1Factory with two bytes wrong in both
-    the test and the DLL (now d2d1.h's value).
+    each): text (DrawText/DrawTextLayout, which needs
+    DirectWrite's text
+    layout first), layers, compatible render targets, the GDI interop
+    interface, dashes, effects and command lists.
+    `d2d1_test` runs on Windows too, which is where its expectations
+    come from (its first run, issue #94, stopped at D2D1CreateFactory:
+    IID_ID2D1Factory had two bytes wrong in both the test and the DLL,
+    now d2d1.h's value). The bounds are Direct2D's own now, each
+    measured on Windows and checked in the test: GetBounds is the
+    fill's, with hollow figures out of it and +inf corners and +FLT_MAX
+    extents for a geometry with nothing to measure, and
+    GetWidenedBounds is the stroke outline's, widened in the geometry's
+    own coordinates (the transform applies to the outline afterwards)
+    with the stroke style's caps, joins and miter limit in it
+    (ARCHITECTURE "Direct2D"). One difference between gala and Direct2D
+    is left, with an `info` line of its own and the checks around it
+    banded rather than exact: a half-covered or half-transparent
+    channel can be one off, as gala composes in float and rounds half
+    up where Direct2D quantises the source's alpha to 8 bits first and
+    blends in integers (so 50% red over white is ff8080 here and
+    ff7f7f there) -- to be settled by blending the way Direct2D does,
+    not by widening the bands further.
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
@@ -1853,9 +1897,22 @@ need gala's.
    brightest) and the active window's pill on the taskbar, which the
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
-   Neither run draws the window its check wants yet. Word's puts an
-   untitled window on the screen and ends with WINWORD.EXE raising
-   0xe0000002 after 29 s, where the ladder below has got to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   Neither run draws the window its check wants yet. Word's puts its
+   untitled splash window (MsoSplash) on the screen and walks the whole
+   Direct2D and DirectWrite path the ladder below answers: every method
+   of both DLLs records the first call that reaches it (OBSERVABILITY
+   "Missing-features ledger"), and the last one Word makes is
+   ID2D1RenderTarget::CreateSolidColorBrush. Nothing follows it -- no
+   method on the brush it asked for, no BeginDraw, no geometry, and no
+   exception the program handles itself -- and with nothing of the frame
+   drawn Word prints "Word was unable to start. (13)" and exits with
+   status 0 after 31.2 s. What it does between that call and the message
+   is the next thing to read, from the system-call stream rather than
+   from the DLLs; the message itself is Word's own
+   `user32!MessageBoxW` with `WWLIB.DLL` and `WWINTL.DLL` on the stack,
+   which is what a stack capture of the write says
+   (`stack_at=NtWriteFile:8 stack_from=wwlib`, OBSERVABILITY "Stack
+   captures": 633 of DXVK's log writes passed over, 3 captured). Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's
@@ -2006,9 +2063,9 @@ need gala's.
      code binds by ordinal (0xc06d007f over ordinal 137), and
      d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
      implemented, each answer measured on Windows first (`msi_test`,
-     `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
-     What stops Word now is Direct2D's version. The rendering device
-     it asks
+     `d3d10_1_test`; ARCHITECTURE "Other DLLs", "Direct3D 10.1").
+     What stops Word now is that its render target is not a device
+     context. Everything up to that works. The rendering device it asks
      for is there: the scenario ships DXVK's `d3d11.dll` and `dxgi.dll`
      beside WINWORD.EXE, the directory the loader searches before
      System32, over the Vulkan stack in System32 (GPU G2), and DXVK
@@ -2017,25 +2074,44 @@ need gala's.
      (C:/gala/winword_d3d11.log and winword_dxgi.log, OBSERVABILITY
      "Guest files"). With a device in hand Word no longer raises
      0xe0000002, the fail-fast it took when nothing answered. Direct2D
-     1.1 over that device is there too (the Direct2D item above):
-     ID2D1Factory1, ID2D1Device, device contexts, and a target bitmap
-     over a DXGI surface whose frames reach the program's Direct3D 11
-     device -- `d2d1_device_test` draws one through DXVK on lavapipe
-     and presents it. Word takes the ID2D1Factory1 it is given and then
-     asks the factory for **ID2D1Factory2** (Direct2D 1.2,
-     {94f81a73-...}; recorded, E_NOINTERFACE, 37.2 s), never calls
-     CreateDevice, falls back to Direct2D
-     1.0's own device with D3D10CreateDevice1 twenty times
-     (DXGI_ERROR_UNSUPPORTED: G0's stub, and DXVK ships no d3d10), and
-     ends with status 0 after 30 s -- which is the status the scenario
-     asks for, so only its screen check fails now, with the untitled
-     window on the screen and no document drawn.
-     So the next step is ID2D1Factory2: its CreateDevice gives an
-     ID2D1Device1 (rendering priority, and a CreateDeviceContext that
-     gives an ID2D1DeviceContext1: geometry realizations), each over
-     what 1.1 already does, until Word stops asking for a newer one.
-     After that comes text, which needs
-     DirectWrite's text layout first -- a document is text.
+     1.1 and 1.2 over that device are there too (the Direct2D item
+     above), but Word does not take them: it asks the factory for
+     ID2D1Factory2 ({94f81a73-...}) and is answered, and that is a
+     version probe -- it calls CreateDevice on neither interface, and
+     the whole device path leaves nothing in its ledger, where the
+     calls that work are recorded (OBSERVABILITY "Missing-features
+     ledger").
+     What it does instead, 39.0 s in, is Direct2D 1.0's own path,
+     which is there now: one D3D10CreateDevice1 at feature level 10.1
+     -- gala's own `d3d10_1.dll` over the Direct3D 11 beside the exe,
+     ARCHITECTURE "Direct3D 10.1" -- then one
+     ID3D10Device1::CreateTexture2D and one
+     ID2D1Factory::CreateDxgiSurfaceRenderTarget over that texture,
+     both S_OK and in the ledger. The target it is given is a device
+     context as well (ARCHITECTURE "A DXGI surface render target"), and
+     Word uses it as one: it takes the ID2D1Device behind it and makes
+     a context of its own, ID2D1Device::CreateDeviceContext, S_OK, 2 ms
+     later. That is where it used to ask for ID2D1DeviceContext1, be
+     refused, and stop.
+     Everything it asks that context for is answered now, and the
+     ledger says how far that reaches: two
+     ID2D1Factory::CreateDrawingStateBlock (the state a frame saves and
+     restores, ARCHITECTURE "Drawing state blocks") with
+     IDWriteFactory::CreateRenderingParams between them, then
+     ID2D1Device::CreateDeviceContext, then
+     ID2D1DeviceContext::CreateBitmapFromDxgiSurface over the texture
+     and ID2D1DeviceContext::SetTarget with that bitmap -- every one
+     S_OK, the last of them 37.8 s in, and nothing after it. The meshes
+     Word asked for a run earlier (ID2D1RenderTarget::CreateMesh,
+     unsupported) are there too and that record is gone. So Word now
+     has a render target of its own with Word's own texture behind it
+     and a frame it may draw into, and what it does with it is the next
+     thing to find out: it draws nothing that reaches the window.
+     Instead comes the "(13)" message box ("Sorry, something went
+     wrong and Word was unable to start. (13)") on the untitled window,
+     exit status 0 after 30.5 s, which is the status the scenario asks
+     for, so only its screen check fails. After them comes text itself,
+     which needs DirectWrite's text layout -- a document is text.
      The other gaps the ledger names around that exit, each to be
      measured on Windows before it is answered: kernelbase's
      SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
@@ -2044,12 +2120,138 @@ need gala's.
      which the Vulkan loader tries before the registry's list of
      drivers) with the interface gala's dxgi refuses CreateDXGIFactory1
      (three times).
-     A run with every system call traced takes a different path, not a
-     slower one: it stops in `MsoSplash`, asking RoGetActivationFactory
-     for
+     A run with every system call traced from boot takes a different
+     path, not a slower one: it stops in `MsoSplash`, asking
+     RoGetActivationFactory for
      `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
-     over and over, a runtime class gala has none of -- so what Word
-     does has to be read from an untraced run.
+     over and over, a runtime class gala has none of. `events_from=`
+     (OBSERVABILITY "Event stream") is the way past that:
+     started 35 s in, after the splash, the stream reaches the same
+     "(13)" message box an untraced run does, so the failure window
+     can be read as a syscall stream after all. The box is two
+     NtWriteFile calls on one thread, 21 bytes ("Microsoft Word 16.0")
+     then 64 (the message), 65.3 s in. Everything that fails in the
+     twelve seconds before them is routine: absent registry keys,
+     empty window queues, and the private-assembly probes
+     `Model::resolve` (`user/kernel32/src/actctx/manifest.rs`) makes
+     for `Microsoft.Windows.Common-Controls` before it falls back to
+     the Microsoft-key system assembly, which are expected and not a
+     failure -- `CreateActCtxW` returns Ok. Word also writes no log of
+     its own: Office's ULS logging under HKCU `Office\16.0\Common\
+     Logging` is read but produces nothing, so the %TEMP% dumps hold
+     only OFFICECL's.
+     What decides the box is pure user-mode code, and the stream says
+     where it sits. Word never begins a frame: BeginDraw, Clear,
+     FillRectangle, DrawRectangle and EndDraw all carry `reached!` and
+     sit in the traced vtable, and none of them is in the ledger
+     anywhere in the run. The last graphics call Word ever makes is
+     ID2D1RenderTarget::CreateSolidColorBrush, which succeeds
+     (`brush::create_brush` fails only on OOM). Nine milliseconds
+     later, with no system call in between, the main thread reads
+     `16.0\Word\Options\Debug` (absent), and everything after that is
+     the box being built: uxtheme, the Common-Controls probes,
+     GalaScreenInfo three times to place it, `Common\CrashPersistence\
+     WINWORD\12`, the absent `Word\Security` policy keys, and the two
+     writes. So Word sets its whole drawing apparatus up, gets a brush
+     back, and gives up without drawing with it.
+     The code that decides sits in Office's shared layer, not in Word
+     alone. `stack_at=NtWriteFile stack_from=user32` captures the box,
+     and `stack_words=400` (OBSERVABILITY "Stack captures") reads past
+     MessageBoxW's own kilobyte of locals, which the default 128 words
+     stop inside. Both writes capture the same chain: above user32 at
+     [rsp+0x090] the words pointing into an image are WWLIB.DLL, then
+     MSO.DLL+0xbb0450, Mso30win32client.dll+0x8646f3,
+     Mso40UIwin32client.dll+0x1b8170 and Mso20win32client.dll+0x8fb560,
+     with WINWORD.EXE's own base only at [rsp+0xa08]. The scan is not
+     an unwind, so some of those words are data rather than return
+     addresses (the bare `Mso40UIwin32client.dll+0x0` is a module
+     base), but the layer is unambiguous: Word hands the failure to
+     MSO's UI client DLLs and they raise the box, whose text is
+     Office's generic "Sorry, something went wrong and Word was unable
+     to start. (13)".
+     The decision is made in 9.2 ms of pure user-mode code, between
+     CreateSolidColorBrush at 63926.5 ms and the `Word\Options\Debug`
+     read at 63935.7 ms that is Word checking whether to break before
+     it gives up; everything after is the box (GalaScreenInfo, uxtheme,
+     the Common-Controls probes, the two writes). Nothing in that
+     window failed: of the 660 calls the thread made in its last three
+     seconds the only non-zero statuses are absent keys and paths, and
+     every Direct2D call that records its answer at all recorded S_OK
+     (`answered`, `user/d2d1/src/lib.rs`). CreateMesh and
+     CreateSolidColorBrush have no `answered` site, so their silence
+     says nothing either way.
+     What hid the deciding call is that `reached!` is one-shot per
+     site: a repeat of a method Word already called leaves no record,
+     so the 9.2 ms window was invisible by construction. OT3b piece 2
+     lifts it, and the reading is a negative result. Armed at
+     `trace_from=d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush`
+     with `events=call` (OBSERVABILITY "Call tracing"), the run
+     records six calls, all of them that same method with identical
+     arguments, over 18.5 ms -- and Word makes no other Direct2D call
+     at all afterwards. Direct2D is not where it gives up. What the
+     ledger shows in the ~900 ms that follow, in order: GetModuleHandle
+     for tbarcode10.dll and tbarcode10_x64.dll, the Word\Security
+     keys, then the gap of the day and, behind it, the next one, and
+     GetModuleHandle(mscoree.dll) before the box. One blind spot
+     stands beside the trace, named in OBSERVABILITY: QueryInterface,
+     AddRef and Release are hand-written slots every object shares,
+     which the generator does not wrap -- a refused interface is in
+     the ledger, but where it falls in the sequence is not.
+     The gaps in that window come one behind another, each hiding the
+     next, because the ledger names a missing export only until it
+     exists. Closed so far: kernelbase's SetSystemFileCacheSize and
+     ntdll's NtSetSystemInformation (six hits each, the same retry
+     shape), measured on Windows first -- reading the file cache's
+     limits needs no privilege and gives 1 MiB and 16 TiB on a system
+     whose size was never set, setting them needs
+     SeIncreaseQuotaPrivilege, and a process without it is refused
+     ACCESS_DENIED rather than the PRIVILEGE_NOT_HELD the name
+     suggests (`kernel32_system_test`; `GetSystemFileCacheSize` and
+     `SetSystemFileCacheSize` in `user/kernel32/src/sysmem.rs`,
+     `NtSetSystemInformation` in `kernel/src/nt/syscalls.rs`). Both
+     rows are gone from the run that follows, and Word fails the same
+     way at the same place: the file cache is not what decided it.
+     What stood behind them,
+     `kernelbase.dll!PrivIsDllSynchronizationHeld` with six hits
+     across 37835-38293 ms, is not a divergence at all: Windows does
+     not export it either. Measured on the pinned build's kernelbase
+     (file version 10.0.26100.9974), GetProcAddress answers 0 for that
+     name on kernelbase, kernel32 and ntdll, where
+     `PrivCopyFileExW` and `GetSystemFileCacheSize` give real
+     addresses -- so Word's six lookups fail on Windows as they do
+     here, and implementing it would have been wrong. A missing-export
+     row is a divergence only once the host is asked, which is why the
+     ledger's row is a question and not a verdict.
+     That empties the window of named gaps and moves the question to
+     what Word was told, not what it could not find: the last thing it
+     reached is
+     `d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush` at 37477 ms,
+     six calls, and everything after 37627 ms -- add-in probes, the
+     policy keys, the loader-lock lookup, GracefulExit -- reads as
+     MSO's failure path. All six answered S_OK, and that is only half
+     of what the reading gave: arming one method records every traced
+     d2d1 call that process makes afterwards, and there were none. Word
+     asks Direct2D for six brushes, is given all six, and never calls
+     the DLL again -- no layer, no BeginDraw, no text. So Direct2D is
+     not what decides it either, and the question is no longer what
+     gala refused but what Word concluded in the 150 ms of user-mode
+     work after the last brush, where it makes no syscalls at all.
+     That is what OT3b piece 3 (the loader's IAT thunks) is for: it is
+     the only instrument that can see a call which never leaves user
+     mode. Measured beside it and not yet explained:
+     `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
+     which falls back to blank display metadata and carries on
+     (`winword_dxgi.log` in the dump).
+     The machine's size is not the cause either, and that question is
+     closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
+     Word fails identically, and gala itself never came near the edge
+     (fewest frames free 38129, about 149 MiB, pagefile untouched).
+     The office scenarios stay at their old size.
+     Still unexplained beside it, and to be measured on Windows
+     before it is called a divergence: ten NtAllocateVirtualMemory
+     calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
+     PAGE_READWRITE) against 685 that succeed -- gala's own loader
+     probes addresses the same way (`thread.rs`).
      What a dying thread called last is in the crash report
      (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
      where Word used to raise are closed, each measured on Windows
@@ -3067,7 +3269,7 @@ need gala's.
      links (FileHardLinkInformation).
      Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
-     ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
+     ID2D1Factory1/2/3 (1 and 2 answered, 3 recorded); the gadget needs .NET
      Framework.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed
@@ -5774,10 +5976,95 @@ among the slowest hand-offs.
 2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
    ALPC/RPC; sockets and events signaled across processes as links like
    pipes and completion ports.
-3. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
+3. OT3b: **what a program does inside a DLL gala wrote**, without a
+   record typed per method. The ledger says what was missing and the
+   event stream what crossed the kernel, but a COM call from a program
+   into one of gala's DLLs is an indirect call through a vtable in the
+   program's own address space: the kernel cannot see it, and the
+   `reached` records that found Word's last call are typed by hand, so
+   the gap is always the method nobody instrumented. Three pieces:
+   - **A wrapper per vtable slot, generated.** Done for d2d1:
+     `cargo xtask gen-trace` reads each slot list and the interface each
+     slot belongs to (`// gen-trace` directives beside the list), and
+     writes a wrapper per slot into the DLL's own source -- a generated
+     block, checked in and verified in CI as `user/bin`'s binaries are
+     (WORKFLOW "Generated code") -- which records the first call that
+     reaches the method and then calls it. The slot list is the only
+     place a method is named, and a slot no directive explains fails the
+     generator, so a new method cannot be left unrecorded. Generated
+     typed wrappers rather than assembly thunks: no `unsafe`, no
+     per-architecture code, the compiler checks each signature against
+     the function it wraps, and a wrapper that knows its arguments can
+     record them when asked to. 225 slots of d2d1 are wrapped, against
+     the 204 that were written by hand; the hand-written records are
+     gone. Next: dwrite, whose functions are named in snake_case
+     (`collection_family_count`), so they are renamed to d2d1's
+     `<prefix>_<Method>` convention first and the generator then derives
+     their names like the rest.
+   - **A trigger, so a long run records only what is wanted.** Done.
+     The one-shot record a slot leaves is free (a relaxed atomic a
+     call), but a record of every call needs a system call per call,
+     which a drawing loop cannot pay.
+     `trace_from=<dll>!<Interface>::<Method>[:<n>]` arms the DLL at the
+     slot named: before it, nothing but the one-shot records; after it,
+     every call with its arguments as `call` events, `n` at most
+     (default 4096). The decision is made where the call is, before
+     anything is formatted (OBSERVABILITY "Volume": decide before the
+     cost), and the arming lives in the boot options rather than in a
+     DLL's source, so an investigation needs no edit. The name compared
+     is the one the ledger's rows spell, so a value is read straight off
+     a ledger row, and it is compared once per slot, inside that slot's
+     existing one-shot: a call nobody is tracing costs two relaxed loads
+     and no string compare at all. A spent budget is answered to the
+     DLL, which stops making the call, and the closing line says the
+     trace ended rather than the program -- a stream that simply stopped
+     would read as a program that stopped calling
+     (`kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs`, scenarios
+     `trace_from_test`, `trace_from_budget_test` and
+     `trace_from_answer_test`, OBSERVABILITY "Call tracing"). What a
+     call answered is recorded with it: the generator knows which
+     methods return something and puts a second record in those
+     wrappers, so the answer is a `ret` event naming the same method,
+     one word, out of the same budget as the calls. That it comes out
+     of the same budget is what keeps the pairing honest -- a trace can
+     end between a call and its answer, never the other way about. It
+     closes the blind spot the first reading of Word's window ran into,
+     where six identical calls read the same whether each one succeeded
+     or each one failed. Its gaps: one armed method a run, and once
+     armed every traced call in that process is recorded, not only the
+     method named; the OpenTelemetry export does not map `call` or
+     `ret` events yet (the same gap `ledger:` rows have, OT5).
+   - **Import thunks in the loader, for the DLLs gala did not write.**
+     gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
+     under a rule each resolved import can point at a thunk that
+     records `<program>` called `<dll>!<export>`. That covers exported
+     entry points of Microsoft's DLLs too, which the vtable wrappers
+     cannot reach; what it does not cover is the COM vtable slots behind
+     an export, which is why both pieces exist.
+
+   The kernel's half of the same question is done:
+   `stack_at=<service>[:<n>]` logs the calling thread's user stack the
+   first `n` times a process reaches a system call, each word of it
+   that points into a loaded image named `<module>+<offset>`, and
+   `stack_from=<module>` keeps the captures to the calls that module is
+   on the stack of -- without it a service another thread reaches in a
+   loop spends any count before the call in question
+   (`kernel/src/nt/stack_at.rs`, scenarios `stack_at_test` and
+   `stack_at_from_test`, OBSERVABILITY "Stack captures"). The wrappers
+   say what happened inside a DLL gala wrote; this says who called, in
+   any DLL, including Microsoft's own. Its gaps: a scan, not an unwind, so dead words of
+   earlier frames come with the call path, and a 32-bit program's
+   frames are above the WOW64 thunk the capture is taken at.
+
+   What this is for: every program whose compatibility is worked on
+   next runs into the same wall Word did, and the answer should not be
+   another round of records typed by hand. Its gaps when done: the
+   32-bit DLLs (WOW64) are not generated for yet, and a slot's
+   arguments are recorded by value, not followed.
+4. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
    what Windows programs emit into OTel logs and spans; later the same
    for LX.
-4. OT5: the in-guest OTLP exporter for servers, controlled from the
+5. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling rules, endpoint), metrics pushed to
    Prometheus' OTLP receiver on the same host (diagnosis, not
    availability; `/metrics` for scraping as an option); later, anomalies against a key's own baseline
@@ -5785,7 +6072,7 @@ among the slowest hand-offs.
    defaults: metrics, failures, ledger, crash reports and the flight
    recorder always on, traces and the profiler on demand
    (OBSERVABILITY "Volume").
-5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
+6. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
    flows, samples). Next, one way to query a run for every session,
    people's and agents' alike (OBSERVABILITY "Querying a run"):

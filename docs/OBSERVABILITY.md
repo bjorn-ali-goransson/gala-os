@@ -38,6 +38,8 @@ rather than free text.
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
+| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
+| Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -239,7 +241,7 @@ stream (office_install's staging, half an hour in:
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; `"elevated"`: its primary token is elevated (TokenElevation; the log line ends in `, elevated token`); scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line); `process terminate` (TerminateProcess of another process: `by`, pid, status; with the log line `process: pid B (x.exe) terminates pid P (y.exe) with status S`, so who ended a process is in the log); the task manager's (`nt::tasks`, ARCHITECTURE "The task manager"): `tasks query` (each GalaTasks list: `by`, `nt`, `linux` and `hung` counts; the first query of each caller also a `tasks: pid P (x.exe) lists the processes: ...` line, and each process's first "Not responding" a `tasks: pid P (x.exe) is not responding: ...` line), `tasks end` (End task of a Linux process or distribution: `by`, `what`, pid, `detail` (the signal, or the distribution and how many processes ended), status; always a `tasks: pid P (x.exe) ends ...` line), and `lx signal` for the signal itself; scenario `taskmgr` |
-| `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
+| `fault` | every user-mode CPU exception, before it is resolved or delivered (`fault`: pid, vector, rip, cr2, error), and the ones handed to the program's own dispatcher once the frame is on its stack (`exception`: pid, tid, `status`, `name` as the crash report names it, `ip`, `address` for an access violation). The second is the only record of an exception a program catches itself, which is what a program that gives up over one of its own leaves behind (scenario `seh_test`) |
 | `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled: in the kernel by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too, and in user mode by its own tick (exact there, as user mode runs with interrupts on; an NMI landing in user mode records nothing, so user samples never depend on the neighbor's vCPU getting host time, and both kinds come at the same rate); the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts the samples asked of another CPU, written in user mode and in the kernel, lost to a full ring, interrupts off for over 8 sample periods, and those that landed while the tick was writing samples, which are not kept, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued); Linux memfds: `lx memfd` (pid, fd, name, flags, node) and `lx memfd seal` (pid, fd, seals asked for, errno or 0). Linux AF_UNIX sockets: `lx unix` (pid, fd, op: socketpair, bind, listen, connect, accept with `new_fd` and `peer_pid`, close of a named socket; the name, a path or `@` and an abstract name; errno or 0: a refused bind, listen or connect is here) and `lx unix rights` (pid, fd, what: sent, received, dropped; count). The window station's clipboard: `clipboard` (pid, tid, session, station; op `open`, `open denied` with the holder, `empty` with the previous owner, `set` and `get` with format, kind and size, `get`'s `source` for a synthesized format and `from_pid`, `close` with `changed` and the listeners told, `listener`; ARCHITECTURE "The clipboard"; scenario `clipboard_test`). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
@@ -254,6 +256,7 @@ ARCHITECTURE "A package's VFS view"): the `pid`, the path `asked` for and
 the path `served`, so a run shows every file a program found only in its
 package (scenario `pkgview_test`); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
 | `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
+| `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test` |
 | `wsl` | the WSL facade (`lx::distro`, `nt::wsl_calls`): `wsl import` (`distro`, `by`: wsl.exe's pid, `count`: the nodes made), `wsl start` (`distro`, `by`, `path`, and the Linux `pid` or the `errno`), `wsl terminate` and `wsl shutdown` (`count`: processes ended), `wsl remove` (`count`: names removed). The same as `wsl:` log lines (`wsl: bb: pid 108 /bin/sh started by pid 92`); a process that does not end within 10 s of `--terminate` is a warning; wsl.exe's missing options and gala's gaps are in the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special file`, `ntio`, `ntio ioctl`). Scenarios `wsl`, `wsl_terminal` |
 | `service` | the service control manager (nt::scm): `service` events with `op` (connected to, opened, created, marked for deletion, asked to start, sent a control to, changed configuration level of, deleted), the caller's `pid`, the service's `name`, the `access` granted or the failing `status` (0xC007xxxx: the SCM's Win32 error xxxx). The same as `scm:` log lines, the first 64 per boot (`scm: pid P (program) opened "OfficeSvc": 0xc0070424 (a Win32 error)`); a service whose key goes with its last handle is logged with the outcome; a running service's side (nt::scm_run) adds `service` events with `op` starting, status, stopped, process ended, exited (before its dispatcher connected), start timed out, cannot start (its executable), start refused, and its `state`, `exit`, `specific` and `service_pid`, and `scm:` lines (the first 96) for its start (pid, command line), its dispatcher's connection, ServiceMain's start, each state it reports and a handler's non-zero answer; a start that times out and a service process that ends while its service runs are warnings; what the SCM cannot start is in the ledger (`GalaServiceControl: start a driver`, `start as an account`, `share process: run alone`). A service's own output does not reach the serial log: its standard handles are NULL, as on Windows; what it did is read from these events, its `syscall` events (`events_pid`) and its exit codes (svcrun_test's service side reports its first failed check as its service-specific exit code). Scenarios `svc_test`, `svcrun_test` and their `wow64_` twins |
 | `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `pointer` (each change of the mouse buttons the desktop takes, wherever it goes: pressed and released bits, x, y and `to`, what got it: the shell's own targets such as `Start` or `LinuxEntry(0)`, `Client(<window>)`, `capture <window>`, `the end of a popup grab`; a screen check that finds the screen behind tells from these whether, and where, its click arrived), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `popup grab ended` (a press outside the windows of a popup grab's owner ended it: the grab's window, owner, the screen point; the press went nowhere else), `other session` (a process asks about, sends or posts to another session's HWND), `start menu` (a tile clicked: op `start`, `install` (`gala install <id>`) or `missing`; session, name, target (the path or the package id), pid, status; scenario `start_menu`; the Linux distributions section's: op `linux install`, `linux desktop`, `linux terminal`, `linux app` with name, target, pid, status; `linux progress` with name, state, percent; `linux prefs` with hidden, collapsed, dismissed, status; scenario `linux_menu`), `tray` (a Shell_NotifyIcon message on the notification area: op, the NIM_ number, session, pid, hwnd, id, flags, status; with `desktop: notification-area icon added/deleted` log lines for adds and deletes; scenario `tray_test`); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
@@ -416,8 +419,11 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export
-  that only reports itself and ends the process, `gala_stubs`) and
-  `other`. Both
+  that only reports itself and ends the process, `gala_stubs`),
+  `reached` (not a gap at all: the first call that reached a method gala
+  answers, so that a program stopping in the middle of a path leaves the
+  path it took; it is told from a call answered S_OK, which `other`
+  records with the HRESULT as its detail) and `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:
@@ -439,9 +445,77 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   pixel format)` with the format GUID's first dword, `draw(a brush not
   made by gala's d2d1)`), and `<interface> QueryInterface` with the IID's
   first dword for an interface it does not answer (ID2D1Factory1's
-  0xbb12d362, the GDI interop interface's 0xe0db51c3). A failed WIC
+  0xbb12d362, the GDI interop interface's 0xe0db51c3).
+  **A call that works is recorded too**, "other" with the HRESULT as
+  the detail (0 for success), because a call that works leaves nothing
+  else behind: the ledger would otherwise go quiet exactly where a
+  program stops in the middle of a path this DLL answers, which is what
+  a program that gives up over graphics (Word) leaves behind. Every
+  method a vtable of the DLL points at records the first time a program
+  reaches it. The recording is not written by hand: `cargo xtask
+  gen-trace` reads the slot lists and generates a wrapper for each slot,
+  the slot list points at the wrapper, and a method added to a vtable is
+  recorded by having been added (WORKFLOW "Generated code"; a slot whose
+  name no `// gen-trace` directive explains fails the generator, so a new
+  interface cannot be left unnamed). A wrapper is one `AtomicBool` a call
+  site -- a relaxed load once it has fired -- so a drawing loop pays
+  nothing to speak of and the rows are the path a program took through
+  the DLL, not a count: a row's `first` is when the program got there.
+  IUnknown's three methods are the exception, never wrapped: every
+  program calls them on every object and they say nothing about what it
+  is trying to do. The calls whose answer is worth keeping record
+  it every time instead, with their HRESULT as the detail:
+  `ID2D1Factory1::CreateDevice` and `ID2D1Factory2::CreateDevice`,
+  `ID2D1Device::CreateDeviceContext` and
+  `ID2D1Device1::CreateDeviceContext`,
+  `ID2D1DeviceContext::CreateBitmapFromDxgiSurface`,
+  `ID2D1DeviceContext::SetTarget`,
+  `ID2D1Factory::CreateDrawingStateBlock`,
+  `ID2D1Factory::CreateDxgiSurfaceRenderTarget` (Direct2D 1.0's way onto
+  a surface, which a program with its own Direct3D 10 device takes) and
+  `ID2D1RenderTarget::EndDraw`.
+  A surface render target builds itself out of three of those calls (a
+  device, a context, a bitmap over the surface: ARCHITECTURE), and they
+  are gala's own, so the ledger shows the program's
+  CreateDxgiSurfaceRenderTarget alone and a CreateDevice line always
+  means the program asked for one. What it refuses is named instead:
+  `CreateDxgiSurfaceRenderTarget(multisampled)` with the sample count,
+  `(surface format)` with the DXGI format (only B8G8R8A8 is drawn) and
+  `(no IDXGIDevice behind the surface)`. A failed WIC
   bitmap lock at BeginDraw or EndDraw is `BeginDraw(WIC bitmap lock)` or
   `EndDraw(...)` with the HRESULT, and EndDraw returns it.
+  DirectWrite (dwrite) keeps the same two halves:
+  `dwrite.dll!IDWriteFactory::<method>`, "unsupported", for the factory
+  methods not built (CreateTextFormat, CreateTextLayout,
+  CreateTextAnalyzer, GetGdiInterop, ...) and for the cases a built one
+  turns away (`CreateGlyphRunAnalysis(sideways)`, `CreateFontFace(file
+  or options)`, and `font file (Windows\Fonts\selawk*.ttf)` with the
+  font's index when gala's own font cannot be read, so a text run with
+  no font behind it says so), and `QueryInterface(refused)` with the
+  IID's first dword for an interface it does not answer; while the
+  factory, the font collection, a family, a font, a face, a font file,
+  its loader and its stream record the first time a program reaches
+  each of their methods, so a program's way from
+  GetSystemFontCollection to a glyph run's alpha texture is in the
+  ledger whether or not it ends in a gap.
+  Direct3D 10.1 (d3d10_1): `d3d10_1.dll!ID3D10Device1::<method>`, "not
+  implemented", for each of the eighty-seven methods not built (the
+  pipeline, the views, the states, the queries), so a run names the ones
+  a program asks for and nothing else is guessed; the device and the
+  calls that work, "other" with the HRESULT as the detail (0 for
+  success): `D3D10CreateDevice1`, `ID3D10Device::CreateTexture2D` and
+  `ID3D10Device::CopyResource`. A device this DLL turns away is
+  "unsupported" with what was asked for as the detail (`level << 32 |
+  flags << 8 | driver type`): `D3D10CreateDevice1 driver type` (one
+  Direct3D 11 has no name for), `D3D10CreateDevice1 feature level` (none
+  asked for) and `D3D10CreateDevice1 flags` (the flags dropped, as the
+  detail); one Direct3D 11 itself refused, or whose d3d11.dll is not
+  there, is "other" with the reason in the name
+  (`D3D10CreateDevice1 (Direct3D 11 refused)`, `(no d3d11.dll)`, `(no
+  D3D11CreateDevice)`). `ID3D10Device1 QueryInterface` and
+  `ID3D10Texture2D QueryInterface` carry the IID's first dword for an
+  interface neither this DLL nor the Direct3D 11 object under it
+  answers.
   NtSetInformationKey's flags classes, "NtSetInformationKey" with
   `control flags: no registry virtualization` (or `wow64 flags`), the
   flags as detail: what a program asked of the virtualization gala has
@@ -865,6 +939,179 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
 - A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
+
+### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
+
+`stack_at=<service>[:<n>]` logs the calling thread's user stack the first
+`n` times a process reaches that system call, and `stack_from=<module>`
+keeps only the calls a module of that name is on the stack of, while
+`stack_words=<n>` says how far up the stack to read (`n`
+default 4, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
+`stack_at_test` and `stack_at_from_test`). It answers what the other
+facilities leave open: the event stream says which calls a program made
+and the ledger what gala did not have, and neither says who made the
+call. A program that stops inside a DLL gala has no source for
+leaves nothing else to go on -- Word's `wwlib.dll` deciding to print
+"Word was unable to start" is the case it was built for.
+
+A capture is a header line and a line per stack word that points into a
+loaded image:
+
+```
+stack: NtWriteFile from stack_at_test.exe (pid 4, tid 8), capture 1 of 2, at 0x180001c9a (ntdll.dll+0x1c9a)
+stack:   [rsp+0x000] 0x3ff7fff5750a (kernel32.dll+0x750a)
+stack:   [rsp+0x090] 0x14000103b (stack_at_test.exe+0x103b)
+stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
+```
+
+- **`stack_from=<text>` chooses the stack, not the number.** "The first
+  `n`" is the wrong shape of trigger on its own: a service another
+  thread reaches in a loop spends the count before the call in question.
+  Word's own write of "Word was unable to start" is behind DXVK's log
+  writes through the same `NtWriteFile`, and no count gets to it --
+  raising the number only moves the flood. With `stack_from=wwlib` a
+  call is captured only when a module whose name contains `wwlib` is on
+  its stack (or is where it was made), and the others are passed over
+  without spending a capture. The text is part of a module's name, in
+  either case; without `stack_at=` there is nothing to filter and the
+  option says so.
+- **`stack_words=<n>` reaches past the service's own frame.** The
+  default 128 words are several frames of a Windows DLL, but a service
+  that keeps a large frame of its own buries the caller below them:
+  user32's `MessageBoxW` holds about a kilobyte of locals, which puts
+  the program's frames at about 148 words, past the default, so the
+  capture stops in the DLL that called it. `stack_words=400` reads
+  further up, to at most 512 words (4 KiB of a 64 KiB kernel stack).
+  A number out of that range is refused rather than cut to it, and
+  without `stack_at=` there is nothing to read and the option says so.
+- **Scanned, not unwound.** Every word of the stack that falls inside a
+  loaded image is named `<module>+<offset>`, dead values from earlier
+  frames with it, so a line is evidence rather than proof. The real
+  unwinder needs the unwind data and runs in user mode (gala's ntdll
+  fills `crashreport::Walk` while it dispatches an exception; the kernel
+  only reads it). At a system call the kernel has the stack and the
+  loaded images, and the scan is what those two give -- without the
+  program's cooperation, and for Microsoft's DLLs as well as gala's.
+- **Which processes**: `events_pid=` and `events_match=`, the same
+  choice the system-call events are filtered by, so
+  `events_match=WINWORD stack_at=NtWriteFile:8` is one program's
+  writes. With neither given, every process.
+- **The count is the flood guard.** When it is spent one line says so
+  (`stack: <service>: the N captures asked for are spent`, with how many
+  the filter passed over) and the capture goes quiet, so a service
+  called in a loop cannot bury the log. A count that is not a number, or
+  is zero, refuses the whole option rather than quietly arming the
+  default.
+- **The end of a run says what the trigger did**: `stack: <service>: 2
+  captures of the 2 asked for, 3 calls passed over by stack_from=...`.
+  Captures alone cannot tell a filter that matched nothing from a
+  service nobody called, and that difference is the next thing to type.
+- **Cost**: off unless the option is given, and then one relaxed load on
+  the system-call path. A capture reads at most 128 words (1 KiB) of the
+  caller's stack, or what `stack_words=` asks for up to 512 words
+  (4 KiB), a page's part at a time, and allocates nothing. With
+  `stack_from=` the stack is read before the count is claimed, so a
+  passed-over call costs that read -- it is already a call to the named
+  service, and the read is what buys the trigger its aim.
+- **Limits**: the capture is at the system-call boundary, which in a
+  WOW64 process is the 64-bit thunk, so a 32-bit program's own frames
+  are above what is scanned and are not placed by this yet; and the
+  scan is bounded (512 words at the most, `stack_words=`) because it
+  runs on a kernel stack, so an arbitrarily deep stack is not reached.
+
+### Call tracing (`trace_from=`)
+
+`trace_from=<dll>!<Interface>::<Method>[:<n>]` records every call a
+program makes into a DLL gala wrote, from the moment it first reaches
+the method named, `n` calls at most (default 4096; the kernel's half in
+`kernel/src/nt/tracecall.rs`, the DLL's in `user/d2d1/src/trace.rs`;
+scenarios `trace_from_test`, `trace_from_budget_test` and
+`trace_from_answer_test`). The calls are
+`call` events, so `events=call` turns the stream on and
+`events_pid=`/`events_match=` choose the process, as for every other
+category.
+
+What it answers that the ledger cannot is a **repeat**. A `reached!`
+record is one-shot per call site, so a method a program calls a thousand
+times leaves one row, and the sequence between the last thing that
+worked and the failure is invisible by construction. Word's startup is
+the case it was built for: 9.2 ms of Direct2D calls between
+`CreateSolidColorBrush` and the message box, every one of them a repeat
+of a method already recorded.
+
+```
+trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)
+{"t":..,"cpu":0,"by":8,"ev":"call","pid":4,"process":"trace_from_test.exe","call":"d2d1.dll!ID2D1Factory::GetDesktopDpi","args":[5368713216,829424,829428]}
+trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)
+trace: 0 of those calls recorded what they answered (trace_from=)
+```
+
+GetDesktopDpi returns nothing, which is why that last count is zero. A
+method that answers records a second line a call:
+
+```
+{"t":..,"cpu":0,"by":8,"ev":"call","pid":4,"process":"trace_from_test.exe","call":"d2d1.dll!ID2D1Factory::ReloadSystemMetrics","args":[5368713216]}
+{"t":..,"cpu":0,"by":8,"ev":"ret","pid":4,"process":"trace_from_test.exe","call":"d2d1.dll!ID2D1Factory::ReloadSystemMetrics","answer":0}
+```
+
+- **A vtable call is not a system call.** A COM call from a program into
+  one of gala's DLLs is an indirect call through a vtable in the
+  program's own address space: the kernel never sees one. The generated
+  wrapper around each slot (`cargo xtask gen-trace`) does, and it is what
+  reports. That is also why the trigger is a method's name and not an
+  address -- the wrapper is the only place that knows which slot was
+  entered, and the name it reports is the one the ledger's rows spell,
+  so a `trace_from=` value is read straight off a ledger row.
+- **A trigger, rather than recording everything.** The one-shot record a
+  slot leaves is free. A record of every call is a system call a call,
+  which a drawing loop cannot pay. Arming on a method the program
+  reaches just before the window of interest buys the window without
+  buying the loop ("Volume": decide before the cost).
+- **Cost when nothing is traced**: one relaxed load a call, on top of
+  the one the one-shot record already pays. The compare against the
+  `trace_from=` value happens once per slot, folded into that one-shot,
+  so a program that calls `FillRectangle` a thousand times compares no
+  names at all.
+- **The budget stops the trace, not the program.** As `n` runs out the
+  kernel says so in its answer and the DLL stops making the call, so the
+  run goes back to those two relaxed loads. The closing line says which
+  ended (`the budget is spent, so the trace stops here, not the
+  program`), because a stream that simply stopped would otherwise read
+  as a program that stopped calling.
+- **A trace that recorded nothing says so**: `trace: <method> was never
+  reached: no call recorded`. The value was understood and the method
+  was not reached, which is as much of an answer as a thousand calls
+  would have been, and the opposite of a stream that is quiet for
+  reasons unknown.
+- **Arguments** are the words the method was handed: a pointer is its
+  address, a number is itself, a float is its bits (the event is JSON,
+  which has room for the bits and not for the value), and a pair small
+  enough to pass by value -- a `Point`, a `SizeU` -- is its two halves,
+  low first. Eight words at most; no method gala wraps has more. A type
+  the `Arg` trait does not cover fails the build rather than recording a
+  zero (`user/d2d1/src/trace.rs`).
+- **What it answered** is a line of its own, a `ret` event naming the
+  same method, right after the call's. A method that returns nothing has
+  none, so a trace of such methods records no answers at all and says so
+  rather than look as though answers were lost. An answer is one word,
+  as an argument is: an HRESULT is its bits, so `2147500037` is
+  E_FAIL. A reader pairs a call with its answer by name and by order.
+  Answers come out of the same budget as calls, so a trace can end
+  between a call and its answer -- never the other way about, which
+  would read as an answer to a call the program never made.
+- **Limits**: the DLLs whose slots `cargo xtask gen-trace` wraps (d2d1
+  today: `DLLS` in `xtask/src/gentrace.rs`), and one armed method a run.
+  QueryInterface, AddRef and Release are not among the wrapped slots:
+  every object shares one implementation of each, so they are written by
+  hand and the generator does not reach them. An interface a DLL refuses
+  is still in the ledger (`<object> QueryInterface`, with the IID's first
+  dword), so what the trace misses there is the order: which object was
+  asked, between which other calls.
+  Arming is per process, because the flag lives in the DLL's own data;
+  the budget is the run's, shared by every process that traces. Once
+  armed, *every* traced call in that process is recorded, not only the
+  method named -- the method is where recording starts, not what is
+  recorded.
 
 ### Guest files (`dump=`)
 

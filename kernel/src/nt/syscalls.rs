@@ -260,6 +260,9 @@ pub const NT_LOCK_FILE: u32 = 0x0123;
 pub const NT_UNLOCK_FILE: u32 = 0x01c5;
 pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
+// NtSetSystemInformation: gala's own number, UNVERIFIED for 26100 (it is
+// reached through ntdll's export, never by number).
+pub const NT_SET_SYSTEM_INFORMATION: u32 = 0x01c6;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
@@ -326,6 +329,8 @@ pub const NT_DUPLICATE_OBJECT: u32 = 0x003c;
 pub const NT_CLEAR_EVENT: u32 = 0x003e;
 /// NtPulseEvent: gala's number, UNVERIFIED.
 pub const NT_PULSE_EVENT: u32 = 0x7f2a;
+/// GalaTrace: gala's own service, not part of Windows.
+pub const GALA_TRACE: u32 = 0x7f2b;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -362,6 +367,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_UNLOCK_FILE, "NtUnlockFile", 5, nt_unlock_file),
     (NT_CONTINUE, "NtContinue", 2, nt_continue),
     (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
+    (NT_SET_SYSTEM_INFORMATION, "NtSetSystemInformation", 3, nt_set_system_information),
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
@@ -384,6 +390,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
     (GALA_RECORD_MISSING, "GalaRecordMissing", 4, gala_record_missing),
+    (GALA_TRACE, "GalaTrace", 4, gala_trace),
     (
         NT_GET_CURRENT_PROCESSOR_NUMBER,
         "NtGetCurrentProcessorNumber",
@@ -761,6 +768,13 @@ fn dispatch(frame: &mut SyscallFrame) {
         && crate::events::syscall_pid_wanted(call.process.id)
     {
         syscall_event(&call, number, Some((name, argc)), NtStatus::SUCCESS, started, "wait");
+    }
+    // `stack_at=`: who called this service, while the stack is still
+    // the caller's (nt::stack_at).
+    if super::stack_at::armed()
+        && let Some(&(_, name, ..)) = service
+    {
+        super::stack_at::on_call(&call, name);
     }
     let status = match service {
         Some((.., handler)) => handler(&mut call),
@@ -3963,6 +3977,79 @@ fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer
     NtStatus::SUCCESS
 }
 
+/// GalaTrace(Op, A, B, C): the DLL half of `trace_from=`
+/// (nt::tracecall). Op 0 asks for the value: A is a buffer of B bytes
+/// and C takes the length written as a `u64` (0: nothing is traced, or
+/// the buffer is too short for all of it). Op 1 records one call: A is
+/// the method's ASCII name, B its length, and C a `[u64; 1 + ARGS]`
+/// whose first word says how many argument words follow. Op 2 records
+/// what one call answered: A and B name the method as op 1 does, and C
+/// is the answer itself, one word by value.
+///
+/// The answer to op 1 and op 2 is what stops a trace: NO_MORE_ENTRIES
+/// once the budget is spent, or once this process is not one
+/// `events_pid=` wants, so a DLL that would otherwise make a system call
+/// a call stops making them. SUCCESS means the line was written and more
+/// are wanted.
+fn gala_trace(call: &mut Call<'_>) -> NtStatus {
+    const WORDS: usize = 1 + super::tracecall::ARGS;
+    match arg!(call, 0) {
+        0 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut value = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(value.len());
+            let written = super::tracecall::value(&mut value[..len]);
+            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            if written != 0 && call.process.write(ptr, &value[..written]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        1 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(name.len());
+            if call.process.read(ptr, &mut name[..len]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let mut bytes = [0u8; WORDS * 8];
+            if call.process.read(arg!(call, 3), &mut bytes).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let mut words = [0u64; WORDS];
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+                *word = u64::from_ne_bytes(chunk.try_into().unwrap_or_default());
+            }
+            let count = (words[0] as usize).min(super::tracecall::ARGS);
+            let keep = super::tracecall::record(
+                call.process.name,
+                call.process.id,
+                &name[..len],
+                &words[1..1 + count],
+            );
+            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        2 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(name.len());
+            if call.process.read(ptr, &mut name[..len]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let keep = super::tracecall::record_answer(
+                call.process.name,
+                call.process.id,
+                &name[..len],
+                arg!(call, 3),
+            );
+            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
+}
+
 /// GalaRecordMissing(Name, NameLength, What, Detail): counts a gap that
 /// gala's user-mode DLLs ran into (ASCII name such as
 /// `kernel32.dll!CreateFileW`; What: 1 missing export, 2 unsupported, 3
@@ -4598,6 +4685,31 @@ fn firmware_table(call: &mut Call<'_>, buffer: u64, length: u64, ret_ptr: u64) -
         Ok(()) => NtStatus::SUCCESS,
         Err(_) => NtStatus::ACCESS_VIOLATION,
     }
+}
+
+/// NtSetSystemInformation(Class, Buffer, Length). What asks for it here
+/// is the system file cache's size, which Word tries to trim as it
+/// starts: SystemFileCacheInformation, and the Ex form a caller with
+/// flags uses. Changing it needs SeIncreaseQuotaPrivilege, and a caller
+/// without it is answered STATUS_ACCESS_DENIED rather than
+/// STATUS_PRIVILEGE_NOT_HELD -- measured on the pinned build, and what
+/// every program that is not elevated sees (`kernel32_system_test`).
+/// gala keeps no file cache working set to size, so a caller that does
+/// hold the privilege is a gap, recorded rather than answered. So is
+/// every other class.
+fn nt_set_system_information(call: &mut Call<'_>) -> NtStatus {
+    use super::sysinfo;
+    /// SeIncreaseQuotaPrivilege, as `set_quota_limits` names it.
+    const SE_INCREASE_QUOTA: u64 = 5;
+    let class = arg!(call, 0) as u32;
+    let cache = class == sysinfo::SYSTEM_FILE_CACHE_INFORMATION
+        || class == sysinfo::SYSTEM_FILE_CACHE_INFORMATION_EX;
+    if cache && !security_calls::effective_privilege(call, SE_INCREASE_QUOTA) {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let what = if cache { "file cache size" } else { "class" };
+    super::ledger::record("NtSetSystemInformation", what, u64::from(class));
+    NtStatus::NOT_IMPLEMENTED
 }
 
 /// NtSetInformationProcess(ProcessHandle, Class, Buffer, Length): only

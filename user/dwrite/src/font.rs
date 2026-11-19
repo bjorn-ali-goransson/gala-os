@@ -3,7 +3,8 @@
 //! strings, all static (see the crate documentation).
 
 use crate::{
-    E_INVALIDARG, E_NOTIMPL, E_POINTER, HResult, Iid, S_OK, VTable, guid, missing, query, vt,
+    E_INVALIDARG, E_NOTIMPL, E_POINTER, HResult, Iid, S_OK, VTable, guid, missing, query, reached,
+    vt,
 };
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
@@ -448,6 +449,7 @@ extern "system" fn collection_qi(
 }
 
 extern "system" fn collection_family_count(_this: *const c_void) -> u32 {
+    reached!(b"IDWriteFontCollection::GetFontFamilyCount");
     1
 }
 
@@ -456,6 +458,7 @@ extern "system" fn collection_get_family(
     index: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontCollection::GetFontFamily");
     if index != 0 {
         return E_INVALIDARG;
     }
@@ -485,6 +488,7 @@ extern "system" fn collection_find_family(
     index: *mut u32,
     exists: *mut i32,
 ) -> HResult {
+    reached!(b"IDWriteFontCollection::FindFamilyName");
     if name.is_null() || index.is_null() || exists.is_null() {
         return E_INVALIDARG;
     }
@@ -512,6 +516,7 @@ extern "system" fn collection_font_from_face(
     face: *const c_void,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontCollection::GetFontFromFontFace");
     match FACE_OBJS.iter().position(|f| core::ptr::eq((f as *const Indexed).cast(), face)) {
         Some(i) => give(out, (&raw const FONT_OBJS[i]).cast()),
         None => DWRITE_E_NOFONT,
@@ -541,10 +546,12 @@ extern "system" fn family_qi(
 }
 
 extern "system" fn family_collection(_this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFontFamily::GetFontCollection");
     give(out, (&raw const COLLECTION).cast())
 }
 
 extern "system" fn family_font_count(_this: *const c_void) -> u32 {
+    reached!(b"IDWriteFontFamily::GetFontCount");
     FONTS as u32
 }
 
@@ -553,6 +560,7 @@ extern "system" fn family_get_font(
     index: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFamily::GetFont");
     match FONT_OBJS.get(index as usize) {
         Some(f) => give(out, (f as *const Indexed).cast()),
         None => E_INVALIDARG,
@@ -560,6 +568,7 @@ extern "system" fn family_get_font(
 }
 
 extern "system" fn family_names(_this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFontFamily::GetFamilyNames");
     give(out, (&raw const FAMILY_NAMES).cast())
 }
 
@@ -575,6 +584,7 @@ extern "system" fn family_first_matching(
     _style: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFamily::GetFirstMatchingFont");
     give(out, (&raw const FONT_OBJS[nearest(weight)]).cast())
 }
 
@@ -587,6 +597,7 @@ extern "system" fn family_matching(
     _style: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFamily::GetMatchingFonts");
     give(out, (&raw const FAMILY).cast())
 }
 
@@ -618,6 +629,7 @@ extern "system" fn font_qi(
 }
 
 extern "system" fn font_family(_this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFont::GetFontFamily");
     give(out, (&raw const FAMILY).cast())
 }
 
@@ -640,6 +652,7 @@ extern "system" fn font_is_symbol(_this: *const c_void) -> i32 {
 }
 
 extern "system" fn font_face_names(this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFont::GetFaceNames");
     give(out, (&raw const FACE_NAMES[index_of(this)]).cast())
 }
 
@@ -651,6 +664,7 @@ extern "system" fn font_informational(
     out: *mut *const c_void,
     exists: *mut i32,
 ) -> HResult {
+    reached!(b"IDWriteFont::GetInformationalStrings");
     if out.is_null() || exists.is_null() {
         return E_INVALIDARG;
     }
@@ -675,6 +689,7 @@ extern "system" fn font_simulations(_this: *const c_void) -> u32 {
 }
 
 extern "system" fn font_metrics(this: *const c_void, out: *mut [u8; 20]) {
+    reached!(b"IDWriteFont::GetMetrics");
     if !out.is_null() {
         // SAFETY: the caller's DWRITE_FONT_METRICS.
         unsafe { *out = metrics(index_of(this)) };
@@ -686,6 +701,7 @@ extern "system" fn font_has_character(
     value: u32,
     exists: *mut i32,
 ) -> HResult {
+    reached!(b"IDWriteFont::HasCharacter");
     if exists.is_null() {
         return E_INVALIDARG;
     }
@@ -698,6 +714,7 @@ extern "system" fn font_has_character(
 }
 
 extern "system" fn font_create_face(this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFont::CreateFontFace");
     let i = index_of(this);
     if data(i).is_none() {
         return crate::DWRITE_E_FILENOTFOUND;
@@ -760,6 +777,7 @@ extern "system" fn strings_qi(
 }
 
 extern "system" fn strings_count(_this: *const c_void) -> u32 {
+    reached!(b"IDWriteLocalizedStrings::GetCount");
     1
 }
 
@@ -769,6 +787,7 @@ extern "system" fn strings_find_locale(
     index: *mut u32,
     exists: *mut i32,
 ) -> HResult {
+    reached!(b"IDWriteLocalizedStrings::FindLocaleName");
     if name.is_null() || index.is_null() || exists.is_null() {
         return E_INVALIDARG;
     }
@@ -840,6 +859,7 @@ fn text_of(this: *const c_void) -> &'static [u16] {
 }
 
 extern "system" fn strings_length(this: *const c_void, index: u32, len: *mut u32) -> HResult {
+    reached!(b"IDWriteLocalizedStrings::GetStringLength");
     if index != 0 || len.is_null() {
         return E_INVALIDARG;
     }
@@ -854,6 +874,7 @@ extern "system" fn strings_get(
     buf: *mut u16,
     size: u32,
 ) -> HResult {
+    reached!(b"IDWriteLocalizedStrings::GetString");
     if index != 0 {
         return E_INVALIDARG;
     }
@@ -893,6 +914,7 @@ extern "system" fn face_qi(
 
 /// DWRITE_FONT_FACE_TYPE_TRUETYPE.
 extern "system" fn face_type(_this: *const c_void) -> u32 {
+    reached!(b"IDWriteFontFace::GetType");
     1
 }
 
@@ -901,6 +923,7 @@ extern "system" fn face_files(
     count: *mut u32,
     files: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetFiles");
     if count.is_null() {
         return E_INVALIDARG;
     }
@@ -922,6 +945,7 @@ extern "system" fn face_index(_this: *const c_void) -> u32 {
 }
 
 extern "system" fn face_glyph_count(this: *const c_void) -> u16 {
+    reached!(b"IDWriteFontFace::GetGlyphCount");
     face(index_of(this)).map_or(0, |f| f.number_of_glyphs())
 }
 
@@ -950,6 +974,7 @@ extern "system" fn face_design_glyph_metrics(
     out: *mut [i32; 7],
     _sideways: i32,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetDesignGlyphMetrics");
     if (glyphs.is_null() || out.is_null()) && count != 0 {
         return E_INVALIDARG;
     }
@@ -970,6 +995,7 @@ extern "system" fn face_glyph_indices(
     count: u32,
     out: *mut u16,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetGlyphIndices");
     if (codepoints.is_null() || out.is_null()) && count != 0 {
         return E_INVALIDARG;
     }
@@ -992,6 +1018,7 @@ extern "system" fn face_try_get_table(
     context: *mut *mut c_void,
     exists: *mut i32,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::TryGetFontTable");
     if table.is_null() || size.is_null() || context.is_null() || exists.is_null() {
         return E_INVALIDARG;
     }
@@ -1032,6 +1059,7 @@ extern "system" fn face_glyph_run_outline(
     rtl: i32,
     sink: *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetGlyphRunOutline");
     crate::glyphs::outline(
         index_of(this),
         em,
@@ -1054,6 +1082,7 @@ extern "system" fn face_recommended_rendering_mode(
     _params: *const c_void,
     mode: *mut u32,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetRecommendedRenderingMode");
     if mode.is_null() {
         return E_INVALIDARG;
     }
@@ -1070,6 +1099,7 @@ extern "system" fn face_gdi_metrics(
     _transform: *const c_void,
     out: *mut [u8; 20],
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetGdiCompatibleMetrics");
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -1090,6 +1120,7 @@ extern "system" fn face_gdi_glyph_metrics(
     out: *mut [i32; 7],
     sideways: i32,
 ) -> HResult {
+    reached!(b"IDWriteFontFace::GetGdiCompatibleGlyphMetrics");
     face_design_glyph_metrics(this, glyphs, count, out, sideways)
 }
 
@@ -1117,6 +1148,7 @@ extern "system" fn file_reference_key(
     key: *mut *const c_void,
     size: *mut u32,
 ) -> HResult {
+    reached!(b"IDWriteFontFile::GetReferenceKey");
     if key.is_null() || size.is_null() {
         return E_INVALIDARG;
     }
@@ -1129,6 +1161,7 @@ extern "system" fn file_reference_key(
 }
 
 extern "system" fn file_loader(_this: *const c_void, out: *mut *const c_void) -> HResult {
+    reached!(b"IDWriteFontFile::GetLoader");
     give(out, (&raw const LOADER).cast())
 }
 
@@ -1141,6 +1174,7 @@ extern "system" fn file_analyze(
     face_type: *mut u32,
     faces: *mut u32,
 ) -> HResult {
+    reached!(b"IDWriteFontFile::Analyze");
     if supported.is_null() || file_type.is_null() || faces.is_null() {
         return E_INVALIDARG;
     }
@@ -1190,6 +1224,7 @@ extern "system" fn loader_create_stream(
     size: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteLocalFontFileLoader::CreateStreamFromKey");
     let Some(i) = key_index(key, size) else { return E_INVALIDARG };
     if data(i).is_none() {
         return crate::DWRITE_E_FILENOTFOUND;
@@ -1203,6 +1238,7 @@ extern "system" fn loader_path_length(
     size: u32,
     len: *mut u32,
 ) -> HResult {
+    reached!(b"IDWriteLocalFontFileLoader::GetFilePathLengthFromKey");
     let Some(i) = key_index(key, size) else { return E_INVALIDARG };
     if len.is_null() {
         return E_INVALIDARG;
@@ -1220,6 +1256,7 @@ extern "system" fn loader_path(
     buf: *mut u16,
     len: u32,
 ) -> HResult {
+    reached!(b"IDWriteLocalFontFileLoader::GetFilePathFromKey");
     let Some(i) = key_index(key, size) else { return E_INVALIDARG };
     let mut p = [0u16; 280];
     let n = path(i, &mut p);
@@ -1232,6 +1269,7 @@ extern "system" fn loader_write_time(
     size: u32,
     time: *mut u64,
 ) -> HResult {
+    reached!(b"IDWriteLocalFontFileLoader::GetLastWriteTimeFromKey");
     if key_index(key, size).is_none() || time.is_null() {
         return E_INVALIDARG;
     }
@@ -1267,6 +1305,7 @@ extern "system" fn stream_read(
     size: u64,
     context: *mut *mut c_void,
 ) -> HResult {
+    reached!(b"IDWriteFontFileStream::ReadFileFragment");
     if start.is_null() || context.is_null() {
         return E_INVALIDARG;
     }
@@ -1287,6 +1326,7 @@ extern "system" fn stream_read(
 extern "system" fn stream_release_fragment(_this: *const c_void, _context: *mut c_void) {}
 
 extern "system" fn stream_size(this: *const c_void, size: *mut u64) -> HResult {
+    reached!(b"IDWriteFontFileStream::GetFileSize");
     if size.is_null() {
         return E_INVALIDARG;
     }
@@ -1297,6 +1337,7 @@ extern "system" fn stream_size(this: *const c_void, size: *mut u64) -> HResult {
 }
 
 extern "system" fn stream_write_time(_this: *const c_void, time: *mut u64) -> HResult {
+    reached!(b"IDWriteFontFileStream::GetLastWriteTime");
     if time.is_null() {
         return E_INVALIDARG;
     }

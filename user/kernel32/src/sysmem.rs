@@ -142,6 +142,61 @@ pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool
     TRUE
 }
 
+/// SystemFileCacheInformation, and the size of its structure on x64.
+/// gala's kernel refuses the call before it reads the structure (a
+/// caller that holds the privilege is a recorded gap), so nothing here
+/// lays its fields out; the layout belongs with that path when it is
+/// built.
+const SYSTEM_FILE_CACHE_INFORMATION: u32 = 21;
+const FILE_CACHE_LEN: u32 = 64;
+
+/// The limits a Windows x64 system reports where the file cache's size
+/// has never been set: 1 MiB and 16 TiB (measured on the pinned build,
+/// `kernel32_system_test`).
+const FILE_CACHE_MIN: usize = 0x10_0000;
+#[cfg(target_pointer_width = "64")]
+const FILE_CACHE_MAX: usize = 0x1000_0000_0000;
+/// Not measured on a 32-bit system, where the 64-bit maximum does not
+/// fit in a SIZE_T.
+#[cfg(not(target_pointer_width = "64"))]
+const FILE_CACHE_MAX: usize = usize::MAX;
+
+/// GetSystemFileCacheSize: the limits of the system file cache's working
+/// set, which need no privilege to read. gala keeps no such working set
+/// and reports the limits of a system whose cache size was never set.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemFileCacheSize(
+    min: *mut usize,
+    max: *mut usize,
+    flags: *mut u32,
+) -> Bool {
+    if min.is_null() || max.is_null() || flags.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's three outputs, none of them null.
+    unsafe {
+        *min = FILE_CACHE_MIN;
+        *max = FILE_CACHE_MAX;
+        *flags = 0;
+    }
+    TRUE
+}
+
+/// SetSystemFileCacheSize: changing the cache's size needs
+/// SeIncreaseQuotaPrivilege, and a program that does not hold it is
+/// answered ERROR_ACCESS_DENIED (measured; `kernel32_system_test`).
+/// Word asks six times as it starts, falling back to the native call
+/// each time. The answer is the native call's, so both paths agree.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSystemFileCacheSize(_min: usize, _max: usize, _flags: u32) -> Bool {
+    let mut info = [0u8; FILE_CACHE_LEN as usize];
+    // SAFETY: a buffer this frame owns, of the length given.
+    let status = unsafe {
+        NtSetSystemInformation(SYSTEM_FILE_CACHE_INFORMATION, info.as_mut_ptr(), FILE_CACHE_LEN)
+    };
+    if status != 0 { fail(status, FALSE) } else { TRUE }
+}
+
 /// GetLargePageMinimum: 2 MiB (large pages themselves need
 /// SeLockMemoryPrivilege, which processes do not hold here).
 #[unsafe(no_mangle)]

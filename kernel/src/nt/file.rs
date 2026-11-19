@@ -80,6 +80,15 @@ const DIRECTORIES: &[&[&str]] = &[
     &["Users", "Public"],
     &["Users", "gala", "AppData", "Roaming"],
     &["Users", "gala", "AppData", "Local", "Temp"],
+    // The per-user cache folders a Windows profile holds
+    // (FOLDERID_InternetCache, FOLDERID_Cookies, FOLDERID_History;
+    // `knownfolder_test` measures them on Windows). A program writes
+    // below one of them and does not make the folders above it, because
+    // creating a directory does not: Word's start-up writes
+    // INetCache\Content.MSO and gives up when it cannot (ROADMAP OF).
+    &["Users", "gala", "AppData", "Local", "Microsoft", "Windows", "INetCache"],
+    &["Users", "gala", "AppData", "Local", "Microsoft", "Windows", "INetCookies"],
+    &["Users", "gala", "AppData", "Local", "Microsoft", "Windows", "History"],
     // SYSTEM's profile and the system's temporary directory, a
     // LocalSystem service's (nt::process::SERVICE_ENVIRONMENT).
     &["Windows", "System32", "config", "systemprofile", "AppData", "Roaming"],

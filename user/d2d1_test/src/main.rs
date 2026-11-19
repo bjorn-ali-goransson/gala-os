@@ -25,7 +25,32 @@
 //!   bitmap brush that wraps, DrawBitmap (scaled, nearest neighbour),
 //!   CreateBitmapFromWicBitmap; EndDraw without BeginDraw
 //!   D2DERR_WRONG_STATE.
+//! - Drawing state blocks: a block's defaults (per-primitive
+//!   antialiasing, the default text antialiasing, no tags, the identity
+//!   transform, source-over, DIPs, no rendering parameters), that one
+//!   object answers ID2D1Resource, ID2D1DrawingStateBlock and
+//!   ID2D1DrawingStateBlock1 whichever factory interface made it, the
+//!   descriptions and the parameters round-tripped, that the 1.0
+//!   SetDescription leaves the primitive blend and the unit mode as they
+//!   stand, and a render target's state saved into a block and restored
+//!   from one (a block the target never wrote into included).
 //! - Brushes: a solid brush's colour, opacity 1 and identity transform.
+//! - Meshes: a mesh is one object with ID2D1Mesh and ID2D1Resource and
+//!   carries its target's factory; only one tessellation sink is open at a
+//!   time (a second Open, a second Close and an Open after Close are
+//!   D2DERR_WRONG_STATE, and triangles added after Close are dropped).
+//!   FillMesh fills the pixels whose centre is inside a triangle, with a
+//!   centre on a right or bottom edge outside (Direct3D's top-left rule),
+//!   whatever way the triangle is wound; it goes through the transform,
+//!   the clip and the brush's opacity. The antialias mode is read when
+//!   FillMesh is called, and a mesh is drawn aliased only: a frame that
+//!   fills one per primitive ends with D2DERR_WRONG_STATE, and so does a
+//!   frame that fills a mesh whose sink is still open or that was never
+//!   opened at all (such a mesh can still be opened afterwards). A mesh
+//!   of another target of the same factory draws; one of another factory
+//!   ends the frame with D2DERR_WRONG_FACTORY. Every triangle blends on
+//!   its own, as the hardware draws a triangle list, so two that overlap
+//!   blend twice under a half transparent brush.
 //! - Geometries: a path geometry's states (counts D2DERR_WRONG_STATE until
 //!   Close, a second Close D2DERR_WRONG_STATE), its figure and segment
 //!   counts (a closed figure's closing line counted), the fill modes
@@ -123,6 +148,11 @@ unsafe extern "system" {
     fn GetStockObject(index: i32) -> Handle;
 }
 
+#[link(name = "dwrite", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn DWriteCreateFactory(kind: u32, iid: *const Guid, out: *mut Obj) -> Hr;
+}
+
 #[link(name = "windowscodecs", kind = "raw-dylib")]
 unsafe extern "system" {
     fn WICCreateImagingFactory_Proxy(version: u32, out: *mut Obj) -> Hr;
@@ -140,6 +170,7 @@ unsafe extern "system" {
 const S_OK: Hr = 0;
 const E_INVALIDARG: Hr = 0x8007_0057_u32 as i32;
 const D2DERR_WRONG_STATE: Hr = 0x8899_0001_u32 as i32;
+const D2DERR_WRONG_FACTORY: Hr = 0x8899_0012_u32 as i32;
 const D2DERR_UNSUPPORTED_PIXEL_FORMAT: Hr = 0x8898_2f80_u32 as i32;
 
 const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
@@ -155,6 +186,20 @@ const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
 const IID_IUNKNOWN: Guid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_FACTORY: Guid =
     guid(0x0615_2247, 0x6f50, 0x465a, [0x92, 0x45, 0x11, 0x8b, 0xfd, 0x3b, 0x60, 0x07]);
+const IID_FACTORY1: Guid =
+    guid(0xbb12_d362, 0xdaee, 0x4b9a, [0xaa, 0x1d, 0x14, 0xba, 0x40, 0x1c, 0xfa, 0x1f]);
+const IID_RESOURCE: Guid =
+    guid(0x2cd9_0691, 0x12e2, 0x11dc, [0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9]);
+const IID_MESH: Guid =
+    guid(0x2cd9_06c2, 0x12e2, 0x11dc, [0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9]);
+const IID_TESSELLATION_SINK: Guid =
+    guid(0x2cd9_06c1, 0x12e2, 0x11dc, [0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9]);
+const IID_STATE_BLOCK: Guid =
+    guid(0x2850_6e39, 0xebf6, 0x46a1, [0xbb, 0x47, 0xfd, 0x85, 0x56, 0x5a, 0xb9, 0x57]);
+const IID_STATE_BLOCK1: Guid =
+    guid(0x689f_1f85, 0xc72e, 0x4e33, [0x8f, 0x19, 0x85, 0x75, 0x4e, 0xfd, 0x5a, 0xce]);
+const IID_DWRITE_FACTORY: Guid =
+    guid(0xb859_ee5a, 0xd838, 0x4b5b, [0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48]);
 const IID_MULTITHREAD: Guid =
     guid(0x31e6_e7bc, 0xe0ff, 0x4d46, [0x8c, 0x64, 0xa0, 0xa8, 0xc4, 0x1c, 0x15, 0xd3]);
 const IID_RENDER_TARGET: Guid =
@@ -231,6 +276,80 @@ const IDENTITY: Matrix = Matrix { m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] };
 
 const fn translate(x: f32, y: f32) -> Matrix {
     Matrix { m: [1.0, 0.0, 0.0, 1.0, x, y] }
+}
+
+/// D2D1_STROKE_STYLE_PROPERTIES.
+#[repr(C)]
+struct StrokeProps {
+    start_cap: u32,
+    end_cap: u32,
+    dash_cap: u32,
+    join: u32,
+    miter_limit: f32,
+    dash_style: u32,
+    dash_offset: f32,
+}
+
+/// D2D1_DRAWING_STATE_DESCRIPTION.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq)]
+struct StateDesc {
+    antialias: u32,
+    text_antialias: u32,
+    tag1: u64,
+    tag2: u64,
+    transform: Matrix,
+}
+
+/// D2D1_DRAWING_STATE_DESCRIPTION1.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq)]
+struct StateDesc1 {
+    base: StateDesc,
+    primitive_blend: u32,
+    unit_mode: u32,
+}
+
+/// A description read back, every field written over a sentinel first
+/// (an untouched field shows as 0x5a5a5a5a or the sentinel transform).
+fn desc_of(o: Obj, i: usize) -> StateDesc {
+    let mut v = SENTINEL;
+    let f: extern "system" fn(Obj, *mut StateDesc) = unsafe { m(o, i) };
+    f(o, &mut v);
+    v
+}
+
+fn desc1_of(o: Obj, i: usize) -> StateDesc1 {
+    let mut v = StateDesc1 { base: SENTINEL, primitive_blend: 0x5a5a_5a5a, unit_mode: 0x5a5a_5a5a };
+    let f: extern "system" fn(Obj, *mut StateDesc1) = unsafe { m(o, i) };
+    f(o, &mut v);
+    v
+}
+
+const SENTINEL: StateDesc = StateDesc {
+    antialias: 0x5a5a_5a5a,
+    text_antialias: 0x5a5a_5a5a,
+    tag1: 0x5a5a_5a5a,
+    tag2: 0x5a5a_5a5a,
+    transform: Matrix { m: [9.0; 6] },
+};
+
+/// A method handing back an object through its only argument, without an
+/// HRESULT (GetTextRenderingParams, GetFactory).
+fn out_obj(o: Obj, i: usize) -> Obj {
+    let mut out = null_mut();
+    let f: extern "system" fn(Obj, *mut Obj) = unsafe { m(o, i) };
+    f(o, &mut out);
+    out
+}
+
+/// D2D1_TRIANGLE, the only thing a tessellation sink takes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Triangle {
+    a: Point,
+    b: Point,
+    c: Point,
 }
 
 #[repr(C)]
@@ -570,6 +689,8 @@ const F_GET_DESKTOP_DPI: usize = 4;
 const F_CREATE_RECT_GEOMETRY: usize = 5;
 const F_CREATE_ELLIPSE_GEOMETRY: usize = 7;
 const F_CREATE_PATH_GEOMETRY: usize = 10;
+const F_CREATE_STROKE_STYLE: usize = 11;
+const F_CREATE_STATE_BLOCK: usize = 12;
 const F_CREATE_WIC_TARGET: usize = 13;
 const F_CREATE_HWND_TARGET: usize = 14;
 const F_CREATE_DC_TARGET: usize = 16;
@@ -579,6 +700,7 @@ const RT_CREATE_BITMAP: usize = 4;
 const RT_CREATE_BITMAP_FROM_WIC: usize = 5;
 const RT_CREATE_BITMAP_BRUSH: usize = 7;
 const RT_CREATE_SOLID_BRUSH: usize = 8;
+const RT_CREATE_MESH: usize = 14;
 const RT_CREATE_STOPS: usize = 9;
 const RT_CREATE_LINEAR: usize = 10;
 const RT_CREATE_RADIAL: usize = 11;
@@ -590,11 +712,20 @@ const RT_DRAW_ELLIPSE: usize = 20;
 const RT_FILL_ELLIPSE: usize = 21;
 const RT_DRAW_GEOMETRY: usize = 22;
 const RT_FILL_GEOMETRY: usize = 23;
+const RT_FILL_MESH: usize = 24;
 const RT_DRAW_BITMAP: usize = 26;
 const RT_SET_TRANSFORM: usize = 30;
 const RT_GET_TRANSFORM: usize = 31;
 const RT_SET_AA: usize = 32;
 const RT_GET_AA: usize = 33;
+const RT_SET_TEXT_AA: usize = 34;
+const RT_GET_TEXT_AA: usize = 35;
+const RT_SET_TEXT_PARAMS: usize = 36;
+const RT_GET_TEXT_PARAMS: usize = 37;
+const RT_SET_TAGS: usize = 38;
+const RT_GET_TAGS: usize = 39;
+const RT_SAVE_STATE: usize = 43;
+const RT_RESTORE_STATE: usize = 44;
 const RT_PUSH_CLIP: usize = 45;
 const RT_POP_CLIP: usize = 46;
 const RT_CLEAR: usize = 47;
@@ -608,6 +739,29 @@ const RT_GET_PIXEL_SIZE: usize = 54;
 const HWND_RESIZE: usize = 58;
 const HWND_GET_HWND: usize = 59;
 const DC_BIND: usize = 57;
+
+// ID2D1Factory1's CreateDrawingStateBlock, and the state block's own
+// slots (ID2D1DrawingStateBlock; the last two are
+// ID2D1DrawingStateBlock1's description).
+const F1_CREATE_STATE_BLOCK: usize = 20;
+const SB_GET_FACTORY: usize = 3;
+const SB_GET_DESC: usize = 4;
+const SB_SET_DESC: usize = 5;
+const SB_SET_PARAMS: usize = 6;
+const SB_GET_PARAMS: usize = 7;
+const SB_GET_DESC1: usize = 8;
+const SB_SET_DESC1: usize = 9;
+
+/// ID2D1Brush::SetOpacity, and a mesh's and a tessellation sink's own
+/// slots (ID2D1Mesh::Open, ID2D1TessellationSink::AddTriangles/Close).
+const BRUSH_SET_OPACITY: usize = 4;
+const MESH_GET_FACTORY: usize = 3;
+const MESH_OPEN: usize = 4;
+const SINK_ADD_TRIANGLES: usize = 3;
+const SINK_CLOSE: usize = 4;
+
+/// IDWriteFactory::CreateRenderingParams.
+const DW_CREATE_PARAMS: usize = 10;
 
 fn end_draw(rt: Obj) -> Hr {
     let f: extern "system" fn(Obj, *mut u64, *mut u64) -> Hr = unsafe { m(rt, RT_END) };
@@ -1107,6 +1261,170 @@ fn paints(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     Ok(())
 }
 
+/// Drawing state blocks, and a render target's state saved into one and
+/// restored from it. The rendering parameters a block carries are a real
+/// IDWriteRenderingParams (dwrite's own answers are `dwrite_test`'s).
+fn state_blocks(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
+    section("state blocks");
+    // A block made with no description and no parameters: the state a
+    // fresh render target draws with.
+    let (hr, b) = obj2(f, F_CREATE_STATE_BLOCK, null::<StateDesc>(), null_mut::<c_void>());
+    c.hr(hr, S_OK)?;
+    c.ok(!b.is_null(), 0)?;
+    let d = desc1_of(b, SB_GET_DESC1);
+    c.eq(u64::from(d.base.antialias), u64::from(PER_PRIMITIVE))?;
+    c.eq(u64::from(d.base.text_antialias), 0)?;
+    c.eq(d.base.tag1 | d.base.tag2, 0)?;
+    c.ok(d.base.transform == IDENTITY, u64::from(d.base.transform.m[0].to_bits()))?;
+    c.eq(u64::from(d.primitive_blend), 0)?;
+    c.eq(u64::from(d.unit_mode), 0)?;
+    c.ok(out_obj(b, SB_GET_PARAMS).is_null(), 0)?;
+    // One object, three interfaces, and its factory.
+    c.hr(qi(b, &IID_RESOURCE).0, S_OK)?;
+    c.hr(qi(b, &IID_STATE_BLOCK).0, S_OK)?;
+    let (hr, b1) = qi(b, &IID_STATE_BLOCK1);
+    c.hr(hr, S_OK)?;
+    c.eq(b1 as u64, b as u64)?;
+    release(b1);
+    let fac = out_obj(b, SB_GET_FACTORY);
+    c.eq(fac as u64, f as u64)?;
+    release(fac);
+    // A 1.0 description written and read back; the primitive blend and
+    // the unit mode are not part of it.
+    let want = StateDesc {
+        antialias: ALIASED,
+        text_antialias: 2,
+        tag1: 7,
+        tag2: 9,
+        transform: Matrix { m: [2.0, 0.0, 0.0, 3.0, 4.0, 5.0] },
+    };
+    call1(b, SB_SET_DESC, &want as *const StateDesc);
+    c.ok(desc_of(b, SB_GET_DESC) == want, 0)?;
+    let d = desc1_of(b, SB_GET_DESC1);
+    c.eq(u64::from(d.primitive_blend) | u64::from(d.unit_mode), 0)?;
+    // The rendering parameters a block carries.
+    let mut dw = null_mut();
+    // SAFETY: valid arguments (DWRITE_FACTORY_TYPE_SHARED).
+    unsafe { c.hr(DWriteCreateFactory(0, &IID_DWRITE_FACTORY, &mut dw), S_OK)? };
+    let (hr, params) = obj0(dw, DW_CREATE_PARAMS);
+    c.hr(hr, S_OK)?;
+    c.ok(!params.is_null(), 0)?;
+    call1(b, SB_SET_PARAMS, params);
+    let got = out_obj(b, SB_GET_PARAMS);
+    c.eq(got as u64, params as u64)?;
+    release(got);
+    call1(b, SB_SET_PARAMS, null_mut::<c_void>());
+    c.ok(out_obj(b, SB_GET_PARAMS).is_null(), 0)?;
+    release(b);
+    // ID2D1Factory1's block: the description with the primitive blend
+    // and the unit mode, and parameters given at the start.
+    let (hr, f1) = qi(f, &IID_FACTORY1);
+    c.hr(hr, S_OK)?;
+    let want1 = StateDesc1 {
+        base: StateDesc {
+            antialias: ALIASED,
+            text_antialias: 1,
+            tag1: 3,
+            tag2: 4,
+            transform: translate(6.0, 7.0),
+        },
+        primitive_blend: 1,
+        unit_mode: 1,
+    };
+    let (hr, b) = obj2(f1, F1_CREATE_STATE_BLOCK, &want1 as *const StateDesc1, params);
+    c.hr(hr, S_OK)?;
+    c.ok(desc1_of(b, SB_GET_DESC1) == want1, 0)?;
+    c.ok(desc_of(b, SB_GET_DESC) == want1.base, 0)?;
+    let got = out_obj(b, SB_GET_PARAMS);
+    c.eq(got as u64, params as u64)?;
+    release(got);
+    c.hr(qi(b, &IID_STATE_BLOCK).0, S_OK)?;
+    // The 1.1 SetDescription takes the whole description.
+    let other1 = StateDesc1 {
+        base: StateDesc {
+            antialias: PER_PRIMITIVE,
+            text_antialias: 2,
+            tag1: 8,
+            tag2: 9,
+            transform: translate(1.0, 2.0),
+        },
+        primitive_blend: 1,
+        unit_mode: 1,
+    };
+    call1(b, SB_SET_DESC1, &other1 as *const StateDesc1);
+    c.ok(desc1_of(b, SB_GET_DESC1) == other1, 0)?;
+    // A 1.0 description over it leaves the blend and the unit mode.
+    call1(b, SB_SET_DESC, &want as *const StateDesc);
+    let d = desc1_of(b, SB_GET_DESC1);
+    c.eq(u64::from(d.primitive_blend), 1)?;
+    c.eq(u64::from(d.unit_mode), 1)?;
+    release(b);
+    release(f1);
+    // A target's state saved into a block and restored from it.
+    let cv = Canvas::new(f, wic, 4, 4, PER_PRIMITIVE);
+    let mine = Matrix { m: [2.0, 0.0, 0.0, 2.0, 10.0, 20.0] };
+    call1(cv.rt, RT_SET_TRANSFORM, &mine as *const Matrix);
+    call1(cv.rt, RT_SET_AA, ALIASED);
+    call1(cv.rt, RT_SET_TEXT_AA, 1u32);
+    call2(cv.rt, RT_SET_TAGS, 11u64, 22u64);
+    call1(cv.rt, RT_SET_TEXT_PARAMS, params);
+    let (hr, saved) = obj2(f, F_CREATE_STATE_BLOCK, null::<StateDesc>(), null_mut::<c_void>());
+    c.hr(hr, S_OK)?;
+    call1(cv.rt, RT_SAVE_STATE, saved);
+    let d = desc_of(saved, SB_GET_DESC);
+    c.ok(d.transform == mine, u64::from(d.transform.m[4].to_bits()))?;
+    c.eq(u64::from(d.antialias), u64::from(ALIASED))?;
+    c.eq(u64::from(d.text_antialias), 1)?;
+    c.eq(d.tag1, 11)?;
+    c.eq(d.tag2, 22)?;
+    let got = out_obj(saved, SB_GET_PARAMS);
+    c.eq(got as u64, params as u64)?;
+    release(got);
+    // Everything changed, then the block restored over it.
+    call1(cv.rt, RT_SET_TRANSFORM, &IDENTITY as *const Matrix);
+    call1(cv.rt, RT_SET_AA, PER_PRIMITIVE);
+    call1(cv.rt, RT_SET_TEXT_AA, 3u32);
+    call2(cv.rt, RT_SET_TAGS, 0u64, 0u64);
+    call1(cv.rt, RT_SET_TEXT_PARAMS, null_mut::<c_void>());
+    call1(cv.rt, RT_RESTORE_STATE, saved);
+    let mut back = Matrix { m: [9.0; 6] };
+    call1(cv.rt, RT_GET_TRANSFORM, &mut back as *mut Matrix);
+    c.ok(back == mine, u64::from(back.m[4].to_bits()))?;
+    c.eq(u64::from(u32_0(cv.rt, RT_GET_AA)), u64::from(ALIASED))?;
+    c.eq(u64::from(u32_0(cv.rt, RT_GET_TEXT_AA)), 1)?;
+    let (mut t1, mut t2) = (0u64, 0u64);
+    call2(cv.rt, RT_GET_TAGS, &mut t1 as *mut u64, &mut t2 as *mut u64);
+    c.eq(t1, 11)?;
+    c.eq(t2, 22)?;
+    let got = out_obj(cv.rt, RT_GET_TEXT_PARAMS);
+    c.eq(got as u64, params as u64)?;
+    release(got);
+    // A block the target never saved into: the state it was made with,
+    // its NULL parameters included.
+    let plain = StateDesc {
+        antialias: PER_PRIMITIVE,
+        text_antialias: 0,
+        tag1: 5,
+        tag2: 6,
+        transform: translate(3.0, 4.0),
+    };
+    call1(saved, SB_SET_DESC, &plain as *const StateDesc);
+    call1(saved, SB_SET_PARAMS, null_mut::<c_void>());
+    call1(cv.rt, RT_RESTORE_STATE, saved);
+    call1(cv.rt, RT_GET_TRANSFORM, &mut back as *mut Matrix);
+    c.ok(back == translate(3.0, 4.0), u64::from(back.m[4].to_bits()))?;
+    c.eq(u64::from(u32_0(cv.rt, RT_GET_AA)), u64::from(PER_PRIMITIVE))?;
+    call2(cv.rt, RT_GET_TAGS, &mut t1 as *mut u64, &mut t2 as *mut u64);
+    c.eq(t1, 5)?;
+    c.eq(t2, 6)?;
+    c.ok(out_obj(cv.rt, RT_GET_TEXT_PARAMS).is_null(), 0)?;
+    release(saved);
+    c.hr(cv.end(), S_OK)?;
+    release(params);
+    release(dw);
+    Ok(())
+}
+
 fn brushes(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     section("brushes");
     let cv = Canvas::new(f, wic, 4, 4, ALIASED);
@@ -1143,10 +1461,259 @@ fn path(f: Obj, figs: &[(&[Point], bool)], winding: bool) -> Obj {
     g
 }
 
+/// ID2D1Geometry::GetBounds through `mat` (null: no transform).
+fn get_bounds(g: Obj, mat: *const Matrix) -> (Hr, RectF) {
+    let mut r = RectF::default();
+    let f: extern "system" fn(Obj, *const Matrix, *mut RectF) -> Hr = unsafe { m(g, 4) };
+    (f(g, mat, &mut r), r)
+}
+
+/// ID2D1Geometry::GetWidenedBounds for a stroke `width` wide in `style`
+/// (null: the default style) through `mat`.
+fn widened(g: Obj, width: f32, style: Obj, mat: *const Matrix) -> (Hr, RectF) {
+    let mut r = RectF::default();
+    let f: extern "system" fn(Obj, f32, Obj, *const Matrix, f32, *mut RectF) -> Hr =
+        unsafe { m(g, 5) };
+    (f(g, width, style, mat, 0.25, &mut r), r)
+}
+
 fn fill_contains(g: Obj, p: Point) -> (Hr, i32) {
     let mut v = -1;
     let f: extern "system" fn(Obj, Point, *const Matrix, f32, *mut i32) -> Hr = unsafe { m(g, 7) };
     (f(g, p, null(), 0.25, &mut v), v)
+}
+
+/// Meshes: what a tessellation sink takes, and how FillMesh draws it.
+fn meshes(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
+    section("meshes");
+    let (r_, w_) = (0xffff_0000, 0xffff_ffff);
+    let cv = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red = solid(cv.rt, RED);
+    let (r, mesh) = obj0(cv.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    c.ok(!mesh.is_null(), 0)?;
+    // One object with both interfaces, and the target's factory.
+    for iid in [IID_MESH, IID_RESOURCE] {
+        let (r, same) = qi(mesh, &iid);
+        c.hr(r, S_OK)?;
+        c.eq(same as u64, mesh as u64)?;
+        release(same);
+    }
+    let mf = out_obj(mesh, MESH_GET_FACTORY);
+    c.eq(mf as u64, f as u64)?;
+    release(mf);
+    // One sink at a time.
+    let (r, sink) = obj0(mesh, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    c.ok(!sink.is_null(), 0)?;
+    c.hr(qi(sink, &IID_TESSELLATION_SINK).0, S_OK)?;
+    let (r, none) = obj0(mesh, MESH_OPEN);
+    c.hr(r, D2DERR_WRONG_STATE)?;
+    c.ok(none.is_null(), none as u64)?;
+    // Two triangles wound opposite ways: a mesh fills both.
+    let tris = [
+        Triangle { a: pt(4.0, 4.0), b: pt(12.0, 4.0), c: pt(4.0, 12.0) },
+        Triangle { a: pt(14.0, 14.0), b: pt(14.0, 18.0), c: pt(18.0, 14.0) },
+    ];
+    call2(sink, SINK_ADD_TRIANGLES, tris.as_ptr(), 2u32);
+    c.hr(hr0(sink, SINK_CLOSE), S_OK)?;
+    c.hr(hr0(sink, SINK_CLOSE), D2DERR_WRONG_STATE)?;
+    // A closed mesh takes no more triangles and opens no second sink.
+    let after = [Triangle { a: pt(0.0, 16.0), b: pt(4.0, 16.0), c: pt(0.0, 20.0) }];
+    call2(sink, SINK_ADD_TRIANGLES, after.as_ptr(), 1u32);
+    let (r, none) = obj0(mesh, MESH_OPEN);
+    c.hr(r, D2DERR_WRONG_STATE)?;
+    c.ok(none.is_null(), none as u64)?;
+    release(sink);
+    call2(cv.rt, RT_FILL_MESH, mesh, red);
+    c.hr(cv.end(), S_OK)?;
+    // A pixel is filled when its centre is inside the triangle; the
+    // hypotenuse is a right edge, so a centre on it is outside.
+    c.px(cv.at(4, 4), r_)?;
+    c.px(cv.at(10, 4), r_)?;
+    c.px(cv.at(11, 4), w_)?; // centre (11.5, 4.5): on the hypotenuse
+    c.px(cv.at(4, 10), r_)?;
+    c.px(cv.at(4, 11), w_)?;
+    c.px(cv.at(5, 9), r_)?;
+    c.px(cv.at(6, 9), w_)?;
+    c.px(cv.at(3, 4), w_)?;
+    c.px(cv.at(16, 14), r_)?;
+    c.px(cv.at(17, 14), w_)?;
+    c.px(cv.at(14, 16), r_)?;
+    c.px(cv.at(14, 17), w_)?; // centre (14.5, 17.5): on the hypotenuse
+    c.px(cv.at(0, 16), w_)?; // the triangle added after Close
+    release(red);
+
+    // The antialias mode is the one FillMesh sees, and a mesh is
+    // aliased only. The mesh is the other target's, of this factory.
+    let cv2 = Canvas::new(f, wic, 20, 20, PER_PRIMITIVE);
+    let red2 = solid(cv2.rt, RED);
+    call2(cv2.rt, RT_FILL_MESH, mesh, red2);
+    call1(cv2.rt, RT_SET_AA, ALIASED);
+    c.hr(cv2.end(), D2DERR_WRONG_STATE)?;
+    release(red2);
+    drop(cv2);
+    let cv3 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red3 = solid(cv3.rt, RED);
+    call2(cv3.rt, RT_FILL_MESH, mesh, red3);
+    call1(cv3.rt, RT_SET_AA, PER_PRIMITIVE);
+    c.hr(cv3.end(), S_OK)?;
+    c.px(cv3.at(4, 4), r_)?;
+    release(red3);
+    drop(cv3);
+
+    // Through the transform.
+    let cv4 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red4 = solid(cv4.rt, RED);
+    let t = translate(2.0, 3.0);
+    call1(cv4.rt, RT_SET_TRANSFORM, &t as *const Matrix);
+    call2(cv4.rt, RT_FILL_MESH, mesh, red4);
+    call1(cv4.rt, RT_SET_TRANSFORM, &IDENTITY as *const Matrix);
+    c.hr(cv4.end(), S_OK)?;
+    c.px(cv4.at(6, 7), r_)?;
+    c.px(cv4.at(12, 7), r_)?;
+    c.px(cv4.at(13, 7), w_)?;
+    c.px(cv4.at(6, 13), r_)?;
+    c.px(cv4.at(6, 14), w_)?;
+    release(red4);
+    drop(cv4);
+
+    // Through the clip.
+    let cv5 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red5 = solid(cv5.rt, RED);
+    let clip = rc(6.0, 0.0, 20.0, 20.0);
+    call2(cv5.rt, RT_PUSH_CLIP, &clip as *const RectF, ALIASED);
+    call2(cv5.rt, RT_FILL_MESH, mesh, red5);
+    call0(cv5.rt, RT_POP_CLIP);
+    c.hr(cv5.end(), S_OK)?;
+    c.px(cv5.at(5, 5), w_)?;
+    c.px(cv5.at(6, 6), r_)?;
+    release(red5);
+    drop(cv5);
+
+    // Through the brush's opacity.
+    let cv6 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red6 = solid(cv6.rt, RED);
+    call1(red6, BRUSH_SET_OPACITY, 0.5f32);
+    call2(cv6.rt, RT_FILL_MESH, mesh, red6);
+    c.hr(cv6.end(), S_OK)?;
+    let px = cv6.at(5, 5);
+    info("mesh at half opacity", px.into());
+    c.ok(
+        channel(px, 16) == 255
+            && (112..=144).contains(&channel(px, 8))
+            && (112..=144).contains(&channel(px, 0)),
+        px.into(),
+    )?;
+    release(red6);
+    drop(cv6);
+
+    // An empty mesh draws nothing; a mesh whose sink is still open
+    // fails the frame.
+    let cv7 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red7 = solid(cv7.rt, RED);
+    let (r, empty) = obj0(cv7.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    let (r, esink) = obj0(empty, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    c.hr(hr0(esink, SINK_CLOSE), S_OK)?;
+    release(esink);
+    call2(cv7.rt, RT_FILL_MESH, empty, red7);
+    c.hr(cv7.end(), S_OK)?;
+    c.px(cv7.at(5, 5), w_)?;
+    release(empty);
+    release(red7);
+    drop(cv7);
+    let cv8 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red8 = solid(cv8.rt, RED);
+    let (r, open) = obj0(cv8.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    let (r, osink) = obj0(open, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    call2(osink, SINK_ADD_TRIANGLES, tris.as_ptr(), 1u32);
+    call2(cv8.rt, RT_FILL_MESH, open, red8);
+    c.hr(cv8.end(), D2DERR_WRONG_STATE)?;
+    release(osink);
+    release(open);
+    release(red8);
+    drop(cv8);
+
+    // A mesh of another factory is none of this one's.
+    let mut f2 = null_mut();
+    // SAFETY: valid arguments.
+    unsafe { c.hr(D2D1CreateFactory(0, &IID_FACTORY, null(), &mut f2), S_OK)? };
+    let cvf = Canvas::new(f2, wic, 20, 20, ALIASED);
+    let (r, foreign) = obj0(cvf.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    let (r, fsink) = obj0(foreign, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    call2(fsink, SINK_ADD_TRIANGLES, tris.as_ptr(), 1u32);
+    c.hr(hr0(fsink, SINK_CLOSE), S_OK)?;
+    release(fsink);
+    c.hr(cvf.end(), S_OK)?;
+    drop(cvf);
+    let cv9 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red9 = solid(cv9.rt, RED);
+    call2(cv9.rt, RT_FILL_MESH, foreign, red9);
+    c.hr(cv9.end(), D2DERR_WRONG_FACTORY)?;
+    c.px(cv9.at(5, 5), w_)?;
+    release(red9);
+    drop(cv9);
+    release(foreign);
+    release(f2);
+
+    // A mesh that was never opened has no tessellation either: the
+    // frame fails and it can still be opened afterwards.
+    let cv10 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red10 = solid(cv10.rt, RED);
+    let (r, fresh) = obj0(cv10.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    call2(cv10.rt, RT_FILL_MESH, fresh, red10);
+    c.hr(cv10.end(), D2DERR_WRONG_STATE)?;
+    c.px(cv10.at(5, 5), w_)?;
+    let (r, late) = obj0(fresh, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    c.ok(!late.is_null(), 0)?;
+    release(late);
+    release(fresh);
+    release(red10);
+    drop(cv10);
+
+    // Every triangle blends on its own, as the hardware draws a
+    // triangle list: where two of one mesh overlap, a half transparent
+    // brush blends twice.
+    let cv11 = Canvas::new(f, wic, 20, 20, ALIASED);
+    let red11 = solid(cv11.rt, RED);
+    let (r, over) = obj0(cv11.rt, RT_CREATE_MESH);
+    c.hr(r, S_OK)?;
+    let (r, osink2) = obj0(over, MESH_OPEN);
+    c.hr(r, S_OK)?;
+    let pair = [
+        Triangle { a: pt(4.0, 4.0), b: pt(14.0, 4.0), c: pt(4.0, 14.0) },
+        Triangle { a: pt(6.0, 2.0), b: pt(16.0, 2.0), c: pt(6.0, 12.0) },
+    ];
+    call2(osink2, SINK_ADD_TRIANGLES, pair.as_ptr(), 2u32);
+    c.hr(hr0(osink2, SINK_CLOSE), S_OK)?;
+    release(osink2);
+    call1(red11, BRUSH_SET_OPACITY, 0.5f32);
+    call2(cv11.rt, RT_FILL_MESH, over, red11);
+    c.hr(cv11.end(), S_OK)?;
+    let one = cv11.at(5, 5);
+    let both = cv11.at(8, 6);
+    info("one mesh triangle at half opacity", one.into());
+    info("two mesh triangles over each other", both.into());
+    c.ok(channel(one, 16) == 255 && (112..=144).contains(&channel(one, 8)), one.into())?;
+    // Blended twice: about a quarter of the white left, and darker than
+    // where only one triangle covers.
+    c.ok(channel(both, 16) == 255 && (48..=80).contains(&channel(both, 8)), both.into())?;
+    c.ok(channel(both, 8) + 32 < channel(one, 8), both.into())?;
+    release(over);
+    release(red11);
+    drop(cv11);
+
+    release(mesh);
+    drop(cv);
+    Ok(())
 }
 
 fn geometries(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
@@ -1180,14 +1747,109 @@ fn geometries(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     c.ok(fill_contains(g, pt(2.0, 2.0)) == (S_OK, 1), 0)?;
     c.ok(fill_contains(g, pt(14.0, 14.0)) == (S_OK, 0), 0)?;
     c.ok(fill_contains(g, pt(24.0, 25.0)) == (S_OK, 0), 0)?;
-    let mut bounds = RectF::default();
-    let gb: extern "system" fn(Obj, *const Matrix, *mut RectF) -> Hr = unsafe { m(g, 4) };
-    c.hr(gb(g, null(), &mut bounds), S_OK)?;
-    c.near(bounds.l, 0.0, 0.01)?;
-    c.near(bounds.b, 30.0, 0.01)?;
+    // GetBounds is the fill's: the hollow Bézier figure is not in it,
+    // although the widened bounds below cover it (all measured).
+    let (r, fill) = get_bounds(g, null());
+    c.hr(r, S_OK)?;
+    c.ok(fill == rc(0.0, 0.0, 16.0, 16.0), u64::from(fill.b.to_bits()))?;
+    // A width of zero asks for every figure's points, hollow ones too.
+    let (r, zero) = widened(g, 0.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(zero.l, 0.0, 0.01)?;
+    c.near(zero.t, 0.0, 0.01)?;
     // The Bézier's farthest point: x = 20 + 0.75 * 10.
-    c.near(bounds.r, 27.5, 0.05)?;
+    c.near(zero.r, 27.5, 0.05)?;
+    c.near(zero.b, 30.0, 0.01)?;
+    // A width of its own: the outline that stroke would cover, with the
+    // triangle's right-angled corner mitered out to (-1,-1) and the
+    // Bézier's ends capped flat.
+    let (r, wide) = widened(g, 2.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(wide.l, -1.0, 0.01)?;
+    c.near(wide.t, -1.0, 0.01)?;
+    c.near(wide.r, 28.5, 0.05)?;
+    c.near(wide.b, 31.0, 0.05)?;
+    // A negative width is its absolute value.
+    let (_, same) = widened(g, -2.0, null_mut(), null());
+    c.ok(same == wide, u64::from(same.r.to_bits()))?;
     release(g);
+
+    // Nothing but hollow figures: a fill draws none of them, so there
+    // are no fill bounds at all -- the rectangle Direct2D gives a
+    // geometry with nothing to measure has +inf corners and +FLT_MAX
+    // extents -- while the widened bounds are the stroke's outline, so
+    // they honour its caps and joins: flat caps and a mitered corner
+    // reach (20,19)-(31,30) and round ones (19,19)-(31,31).
+    let (_, hollow) = obj0(f, F_CREATE_PATH_GEOMETRY);
+    let (_, hsink) = obj0(hollow, 17);
+    call2(hsink, 5, pt(20.0, 20.0), 1u32); // BeginFigure, hollow
+    call1(hsink, 10, pt(30.0, 20.0));
+    call1(hsink, 10, pt(30.0, 30.0));
+    call1(hsink, 8, 0u32); // EndFigure, open
+    c.hr(hr0(hsink, 9), S_OK)?;
+    release(hsink);
+    let (r, empty) = get_bounds(hollow, null());
+    c.hr(r, S_OK)?;
+    c.ok(
+        empty.l.to_bits() == 0x7f80_0000
+            && empty.t.to_bits() == 0x7f80_0000
+            && empty.r.to_bits() == 0x7f7f_ffff
+            && empty.b.to_bits() == 0x7f7f_ffff,
+        u64::from(empty.r.to_bits()),
+    )?;
+    let (_, points) = widened(hollow, 0.0, null_mut(), null());
+    c.ok(points == rc(20.0, 20.0, 30.0, 30.0), u64::from(points.r.to_bits()))?;
+    let (_, flat) = widened(hollow, 2.0, null_mut(), null());
+    c.near(flat.l, 20.0, 0.01)?;
+    c.near(flat.t, 19.0, 0.01)?;
+    c.near(flat.r, 31.0, 0.01)?;
+    c.near(flat.b, 30.0, 0.01)?;
+    let props = StrokeProps {
+        start_cap: 2,
+        end_cap: 2,
+        dash_cap: 0,
+        join: 2,
+        miter_limit: 10.0,
+        dash_style: 0,
+        dash_offset: 0.0,
+    };
+    let (r, style) =
+        obj3(f, F_CREATE_STROKE_STYLE, &props as *const StrokeProps, null::<f32>(), 0u32);
+    c.hr(r, S_OK)?;
+    let (_, round) = widened(hollow, 2.0, style, null());
+    c.near(round.l, 19.0, 0.05)?;
+    c.near(round.t, 19.0, 0.05)?;
+    c.near(round.r, 31.0, 0.05)?;
+    c.near(round.b, 31.0, 0.05)?;
+    release(style);
+    release(hollow);
+
+    // A closed figure of two points doubles back on itself, so its join
+    // has no miter of its own: Direct2D takes it to the limit (10 by
+    // default) past each end, whatever the segment is long (measured).
+    let back = path(f, &[(&[pt(20.0, 20.0), pt(30.0, 20.0)], true)], false);
+    let (r, spike) = widened(back, 2.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(spike.l, 10.0, 0.01)?;
+    c.near(spike.t, 19.0, 0.01)?;
+    c.near(spike.r, 40.0, 0.01)?;
+    c.near(spike.b, 21.0, 0.01)?;
+    release(back);
+
+    // The widening happens in the geometry's own coordinates and the
+    // transform applies to the outline afterwards: a rectangle widened
+    // by 2 and then scaled by 2 in x keeps 1 of outline on each side in
+    // x, where widening the scaled rectangle would give 2 (measured).
+    let (_, wide_rect) = obj1(f, F_CREATE_RECT_GEOMETRY, &rc(4.0, 4.0, 12.0, 12.0) as *const RectF);
+    let twice = Matrix { m: [2.0, 0.0, 0.0, 1.0, 0.0, 0.0] };
+    let (_, scaled) = widened(wide_rect, 2.0, null_mut(), &twice);
+    c.near(scaled.l, 6.0, 0.01)?;
+    c.near(scaled.t, 3.0, 0.01)?;
+    c.near(scaled.r, 26.0, 0.01)?;
+    c.near(scaled.b, 13.0, 0.01)?;
+    let (_, scaled_fill) = get_bounds(wide_rect, &twice);
+    c.ok(scaled_fill == rc(8.0, 4.0, 24.0, 12.0), u64::from(scaled_fill.r.to_bits()))?;
+    release(wide_rect);
 
     // Nested squares, both clockwise: alternate leaves a hole, winding not.
     let outer = [pt(0.0, 0.0), pt(16.0, 0.0), pt(16.0, 16.0), pt(0.0, 16.0)];
@@ -1236,8 +1898,9 @@ fn geometries(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     let ell = Ellipse { c: pt(10.0, 10.0), rx: 5.0, ry: 3.0 };
     let (r, eg) = obj1(f, F_CREATE_ELLIPSE_GEOMETRY, &ell as *const Ellipse);
     c.hr(r, S_OK)?;
-    c.hr(gb(eg, null(), &mut bounds), S_OK)?;
-    c.ok(bounds == rc(5.0, 7.0, 15.0, 13.0), u64::from(bounds.l.to_bits()))?;
+    let (r, eb) = get_bounds(eg, null());
+    c.hr(r, S_OK)?;
+    c.ok(eb == rc(5.0, 7.0, 15.0, 13.0), u64::from(eb.l.to_bits()))?;
     release(eg);
     release(rg);
     release(black);
@@ -1576,10 +2239,12 @@ fn run() -> Result<(), u32> {
         return demo(f);
     }
     matrices(&mut c)?;
+    state_blocks(&mut c, f, wic)?;
     wic_target(&mut c, f, wic)?;
     drawing(&mut c, f, wic)?;
     paints(&mut c, f, wic)?;
     brushes(&mut c, f, wic)?;
+    meshes(&mut c, f, wic)?;
     geometries(&mut c, f, wic)?;
     dc_target(&mut c, f)?;
     hwnd_target(&mut c, f)?;

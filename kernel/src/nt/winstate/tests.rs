@@ -66,8 +66,9 @@ fn windows_keep_their_place_order_focus_and_last_pixels() {
     assert_eq!(w.client_size(), (398, 266));
     assert_eq!(w.client[266 * 398 - 1], 0x00ff_ffff);
     assert_ne!(w.look, look);
-    // A size no window may have.
-    assert_eq!(s.place(a, 1, 0, 0, 10, 10).err(), Some(NtStatus::INVALID_PARAMETER));
+    // A size no window may have (a small one is a window's to ask
+    // for: a_window_smaller_than_its_frame_is_made_and_keeps_what_is_left).
+    assert_eq!(s.place(a, 1, 0, 0, MAX_SIDE + 1, 10).err(), Some(NtStatus::INVALID_PARAMETER));
     // A title and an icon: the taskbar's listing changed.
     s.listing_changed = false;
     s.set_title(a, 1, &title("A2")).unwrap();
@@ -79,6 +80,52 @@ fn windows_keep_their_place_order_focus_and_last_pixels() {
     s.destroy(b, 2).unwrap();
     assert_eq!(s.active, Some(a));
     assert!(s.window(b).is_none());
+}
+
+/// A window smaller than its own frame, which Windows makes and Office
+/// does make: the size `AdjustWindowRect` gives for a one-pixel client
+/// area, and one pixel in all. The window API's minimum is what the
+/// state can represent (`size_fits`), not what a frame looks good at;
+/// the desktop's own placement keeps its usable minimum (`DRAG_MIN`).
+#[test]
+fn a_window_smaller_than_its_frame_is_made_and_keeps_what_is_left() {
+    let mut s = state();
+    // What AdjustWindowRect gives for a 1 x 1 client area.
+    let (w, h) = (2 * BORDER + 1, BORDER + CAPTION + BORDER + 1);
+    let tiny = s.create(1, 0, 0, w, h, &title("tiny"), 0).unwrap();
+    assert_eq!(s.window(tiny).unwrap().client_size(), (1, 1));
+    assert_eq!(s.window(tiny).unwrap().client.len(), 1);
+    // All frame and no client area: a window too, with no pixel to
+    // present to (as an empty client area on Windows has none).
+    let none = s.create(1, 0, 0, 1, 1, &title("none"), 0).unwrap();
+    assert_eq!(s.window(none).unwrap().client_size(), (0, 0));
+    assert!(s.window(none).unwrap().client.is_empty());
+    assert_eq!(
+        s.present(none, Rect { x: 0, y: 0, w: 1, h: 1 }, &[0], 1).err(),
+        Some(NtStatus::INVALID_PARAMETER)
+    );
+    // The one pixel of the smallest window that has one is its own.
+    s.present(tiny, Rect { x: 0, y: 0, w: 1, h: 1 }, &[0x00ff_0000], 1).unwrap();
+    assert_eq!(s.window(tiny).unwrap().client[0], 0x00ff_0000);
+    // A program places its window there and back.
+    s.place(tiny, 1, 10, 20, 300, 200).unwrap();
+    assert_eq!(s.window(tiny).unwrap().client_size(), (298, 166));
+    s.place(tiny, 1, 10, 20, w, h).unwrap();
+    assert_eq!(s.window(tiny).unwrap().client_size(), (1, 1));
+    // The desktop's own placement keeps the minimum that leaves a
+    // caption worth pointing at; wider than the screen is refused
+    // whoever asks.
+    s.show(tiny, 1, true).unwrap();
+    assert_eq!(
+        s.act(tiny, Action::Place { x: 0, y: 0, w, h }).err(),
+        Some(NtStatus::INVALID_PARAMETER)
+    );
+    s.act(tiny, Action::Place { x: 0, y: 0, w: DRAG_MIN.0, h: DRAG_MIN.1 }).unwrap();
+    assert_eq!(
+        s.create(1, 0, 0, MAX_SIDE + 1, 100, &title("vast"), 0).err(),
+        Some(NtStatus::INVALID_PARAMETER)
+    );
+    assert_eq!(s.place(tiny, 1, 0, 0, 100, MAX_SIDE + 1).err(), Some(NtStatus::INVALID_PARAMETER));
 }
 
 #[test]

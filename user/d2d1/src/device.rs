@@ -18,12 +18,12 @@
 //! d3d11.h), so gala's d2d1.dll imports no Direct3D at all and works
 //! with whichever d3d11.dll the program brought.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{
-    ComRef, E_INVALIDARG, E_NOINTERFACE, E_POINTER, Guid, HResult, IID_DEVICE, IID_RESOURCE, Obj,
-    Res, S_OK, VTable, add_ref, gap, get_factory, give, guid, not_implemented, put, query,
-    release_object, slot,
+    ComRef, E_INVALIDARG, E_NOINTERFACE, E_POINTER, Guid, HResult, IID_DEVICE, IID_DEVICE1,
+    IID_RESOURCE, Obj, Res, S_OK, VTable, add_ref, answered, gap, give, guid, not_implemented, put,
+    query, release_object, slot,
 };
 
 /// The slots this DLL calls on the program's DXGI and Direct3D 11
@@ -32,11 +32,34 @@ use crate::{
 const SURFACE_GET_DESC: usize = 8;
 /// ID3D11DeviceChild::GetDevice, which ID3D11Texture2D inherits.
 const TEXTURE_GET_DEVICE: usize = 3;
+/// ID3D11Texture2D::GetDesc, which says what the texture may be bound as.
+const TEXTURE_GET_DESC: usize = 10;
 const DEVICE_GET_IMMEDIATE_CONTEXT: usize = 40;
 const CONTEXT_UPDATE_SUBRESOURCE: usize = 48;
 
 const IID_D3D11_TEXTURE2D: Guid =
     guid(0x6f15_aaf2, 0xd208, 0x4e89, [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c]);
+/// IDXGIDevice (dxgi.h): the face of a Direct3D device Direct2D takes.
+const IID_DXGI_DEVICE: Guid =
+    guid(0x54ec_77fa, 0x1377, 0x44e6, [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c]);
+
+/// D3D11_TEXTURE2D_DESC (d3d11.h). Only `bind` is read: Direct2D takes
+/// a bitmap's options from it when the program gives none.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Texture2dDesc {
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    array_size: u32,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    usage: u32,
+    bind: u32,
+    cpu_access: u32,
+    misc: u32,
+}
 
 /// DXGI_SURFACE_DESC (dxgi.h).
 #[repr(C)]
@@ -54,6 +77,9 @@ pub struct SurfaceDesc {
 /// context, each with a reference of ours, and what the surface is.
 pub struct DxgiSurface {
     pub surface: ComRef,
+    /// The texture's D3D11_BIND_FLAG set, which says what a bitmap over
+    /// it may be used for when the program asks for no options.
+    pub bind: u32,
     texture: ComRef,
     context: ComRef,
     pub desc: SurfaceDesc,
@@ -102,6 +128,14 @@ pub fn open_surface(surface: Obj) -> Result<DxgiSurface, HResult> {
         gap(b"CreateBitmapFromDxgiSurface(not an ID3D11Texture2D)", 0);
         return Err(E_NOINTERFACE);
     };
+    // What the texture may be bound as: Direct2D derives a bitmap's
+    // options from it (`brush::inferred_options`).
+    let mut tex_desc = Texture2dDesc::default();
+    // SAFETY: ID3D11Texture2D::GetDesc's signature at its own slot; it
+    // writes the whole structure and returns nothing.
+    let get_tex_desc: extern "system" fn(Obj, *mut Texture2dDesc) =
+        unsafe { core::mem::transmute(slot(texture.0, TEXTURE_GET_DESC)) };
+    get_tex_desc(texture.0, &mut tex_desc);
     // The device is only the way to its immediate context, which holds a
     // reference of its own to it.
     let context = com_get(texture.0, TEXTURE_GET_DEVICE)
@@ -110,7 +144,19 @@ pub fn open_surface(surface: Obj) -> Result<DxgiSurface, HResult> {
         gap(b"CreateBitmapFromDxgiSurface(no immediate context)", 0);
         return Err(E_NOINTERFACE);
     };
-    Ok(DxgiSurface { surface: ComRef::new(surface), texture, context, desc })
+    Ok(DxgiSurface { surface: ComRef::new(surface), bind: tex_desc.bind, texture, context, desc })
+}
+
+/// The IDXGIDevice of the Direct3D device a surface belongs to: the
+/// surface's ID3D11Texture2D asked for its device, and that device for
+/// DXGI's face of itself. A Direct2D 1.0 surface render target is built
+/// on it, because the target it hands the program is a device context
+/// and a device context comes from a device
+/// (`target::create_dxgi_target`).
+pub fn dxgi_device(surface: Obj) -> Option<ComRef> {
+    let texture = com_query(surface, &IID_D3D11_TEXTURE2D).map(ComRef::owned)?;
+    let device = com_get(texture.0, TEXTURE_GET_DEVICE)?;
+    com_query(device.0, &IID_DXGI_DEVICE).map(ComRef::owned)
 }
 
 /// Writes `pixels` (premultiplied BGRA, rows `width * 4` bytes apart)
@@ -141,23 +187,59 @@ pub struct Device {
     dxgi: ComRef,
     /// SetMaximumTextureMemory's value, answered as it was given.
     texture_memory: AtomicU64,
+    /// ID2D1Device1's rendering priority, answered as it was given:
+    /// NORMAL (0) or LOW (1). It asks Direct2D to yield the GPU to other
+    /// programs, and gala draws on the calling thread either way.
+    priority: AtomicU32,
 }
 
-static DEVICE_VTBL: VTable<9> = VTable([
+/// ID2D1Device1 (d2d1_2.h): ID2D1Device's nine methods, then its three.
+/// One object answers both interfaces, so it has the longer vtable.
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace prefix d_ ID2D1Device
+// gen-trace prefix d1_ ID2D1Device1
+// gen-trace prefix f1_ ID2D1Factory1
+// gen-trace prefix f2_ ID2D1Factory2
+static DEVICE_VTBL: VTable<12> = VTable([
     device_query as *const (),
     add_ref as *const (),
     device_release as *const (),
-    get_factory as *const (),
-    d_CreateDeviceContext as *const (),
-    d_CreatePrintControl as *const (),
-    d_SetMaximumTextureMemory as *const (),
-    d_GetMaximumTextureMemory as *const (),
-    d_ClearResources as *const (),
+    crate::traced::get_factory as *const (),
+    traced::d_CreateDeviceContext as *const (),
+    traced::d_CreatePrintControl as *const (),
+    traced::d_SetMaximumTextureMemory as *const (),
+    traced::d_GetMaximumTextureMemory as *const (),
+    traced::d_ClearResources as *const (),
+    traced::d1_GetRenderingPriority as *const (),
+    traced::d1_SetRenderingPriority as *const (),
+    traced::d1_CreateDeviceContext as *const (),
 ]);
 
 /// ID2D1Factory1::CreateDevice: a Direct2D device over the program's own
-/// Direct3D 11 device, given as its IDXGIDevice.
+/// Direct3D 11 device, given as its IDXGIDevice. Which interface the
+/// program asked through is in the ledger, so a run says whether it took
+/// 1.1's factory or 1.2's.
 pub extern "system" fn f1_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
+    let r = create_device(factory, dxgi, out);
+    answered(b"ID2D1Factory1::CreateDevice", r);
+    r
+}
+
+/// ID2D1Factory2::CreateDevice: the same device, which answers
+/// ID2D1Device1 as well (its vtable has 1.2's three methods and its
+/// QueryInterface the interface).
+pub extern "system" fn f2_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
+    let r = create_device(factory, dxgi, out);
+    answered(b"ID2D1Factory2::CreateDevice", r);
+    r
+}
+
+/// The device itself, without a ledger record: what the factory's two
+/// methods above do, and what a surface render target does for itself
+/// (the program asked for a render target, not for a device, and the
+/// ledger says what the program asked for).
+pub fn create_device(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
@@ -171,6 +253,7 @@ pub extern "system" fn f1_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -
             res: Res::new(DEVICE_VTBL.addr(), factory),
             dxgi: ComRef::new(dxgi),
             texture_memory: AtomicU64::new(0),
+            priority: AtomicU32::new(RENDERING_PRIORITY_NORMAL),
         },
     )
 }
@@ -186,7 +269,7 @@ pub fn factory_of(o: Obj) -> Obj {
 }
 
 extern "system" fn device_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
-    query(this, b"ID2D1Device", &[IID_RESOURCE, IID_DEVICE], riid, out)
+    query(this, b"ID2D1Device", &[IID_RESOURCE, IID_DEVICE, IID_DEVICE1], riid, out)
 }
 
 extern "system" fn device_release(this: Obj) -> u32 {
@@ -194,7 +277,9 @@ extern "system" fn device_release(this: Obj) -> u32 {
 }
 
 extern "system" fn d_CreateDeviceContext(this: Obj, options: u32, out: *mut Obj) -> HResult {
-    crate::target::create_device_context(this, options, out)
+    let r = crate::target::create_device_context(this, options, out);
+    answered(b"ID2D1Device::CreateDeviceContext", r);
+    r
 }
 
 extern "system" fn d_CreatePrintControl(
@@ -218,3 +303,125 @@ extern "system" fn d_GetMaximumTextureMemory(this: Obj) -> u64 {
 
 /// ClearResources: gala's Direct2D keeps no cache of its own to drop.
 extern "system" fn d_ClearResources(_this: Obj, _milliseconds_since_use: u32) {}
+
+// ---- ID2D1Device1 (Direct2D 1.2) -----------------------------------------------
+
+/// D2D1_RENDERING_PRIORITY_NORMAL (d2d1_2.h); LOW is 1.
+const RENDERING_PRIORITY_NORMAL: u32 = 0;
+const RENDERING_PRIORITY_LOW: u32 = 1;
+
+extern "system" fn d1_GetRenderingPriority(this: Obj) -> u32 {
+    device(this).priority.load(Ordering::Relaxed)
+}
+
+/// A priority other than NORMAL or LOW is not one Direct2D has: it is
+/// recorded and the device keeps the priority it had.
+extern "system" fn d1_SetRenderingPriority(this: Obj, priority: u32) {
+    if priority != RENDERING_PRIORITY_NORMAL && priority != RENDERING_PRIORITY_LOW {
+        gap(b"ID2D1Device1::SetRenderingPriority(unknown)", priority.into());
+        return;
+    }
+    device(this).priority.store(priority, Ordering::Relaxed);
+}
+
+/// ID2D1Device1::CreateDeviceContext: the same context, which answers
+/// ID2D1DeviceContext1 as well (`target`).
+extern "system" fn d1_CreateDeviceContext(this: Obj, options: u32, out: *mut Obj) -> HResult {
+    let r = crate::target::create_device_context(this, options, out);
+    answered(b"ID2D1Device1::CreateDeviceContext", r);
+    r
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module: each records
+/// the first call that reaches its method, and every call at all
+/// once `trace_from=` has armed one (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1Device1::CreateDeviceContext, traced.
+    pub(super) extern "system" fn d1_CreateDeviceContext(
+        this: Obj,
+        options: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Device1::CreateDeviceContext", [this, options, out]);
+        let answer = super::d1_CreateDeviceContext(this, options, out);
+        crate::answered_call!(b"ID2D1Device1::CreateDeviceContext", answer);
+        answer
+    }
+    /// ID2D1Device1::GetRenderingPriority, traced.
+    pub(super) extern "system" fn d1_GetRenderingPriority(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1Device1::GetRenderingPriority", [this]);
+        let answer = super::d1_GetRenderingPriority(this);
+        crate::answered_call!(b"ID2D1Device1::GetRenderingPriority", answer);
+        answer
+    }
+    /// ID2D1Device1::SetRenderingPriority, traced.
+    pub(super) extern "system" fn d1_SetRenderingPriority(this: Obj, priority: u32) {
+        crate::traced!(b"ID2D1Device1::SetRenderingPriority", [this, priority]);
+        super::d1_SetRenderingPriority(this, priority)
+    }
+    /// ID2D1Device::ClearResources, traced.
+    pub(super) extern "system" fn d_ClearResources(_this: Obj, _milliseconds_since_use: u32) {
+        crate::traced!(b"ID2D1Device::ClearResources", [_this, _milliseconds_since_use]);
+        super::d_ClearResources(_this, _milliseconds_since_use)
+    }
+    /// ID2D1Device::CreateDeviceContext, traced.
+    pub(super) extern "system" fn d_CreateDeviceContext(
+        this: Obj,
+        options: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Device::CreateDeviceContext", [this, options, out]);
+        let answer = super::d_CreateDeviceContext(this, options, out);
+        crate::answered_call!(b"ID2D1Device::CreateDeviceContext", answer);
+        answer
+    }
+    /// ID2D1Device::CreatePrintControl, traced.
+    pub(super) extern "system" fn d_CreatePrintControl(
+        _this: Obj,
+        _wic: Obj,
+        _target: Obj,
+        _props: *const u8,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Device::CreatePrintControl", [_this, _wic, _target, _props, out]);
+        let answer = super::d_CreatePrintControl(_this, _wic, _target, _props, out);
+        crate::answered_call!(b"ID2D1Device::CreatePrintControl", answer);
+        answer
+    }
+    /// ID2D1Device::GetMaximumTextureMemory, traced.
+    pub(super) extern "system" fn d_GetMaximumTextureMemory(this: Obj) -> u64 {
+        crate::traced!(b"ID2D1Device::GetMaximumTextureMemory", [this]);
+        let answer = super::d_GetMaximumTextureMemory(this);
+        crate::answered_call!(b"ID2D1Device::GetMaximumTextureMemory", answer);
+        answer
+    }
+    /// ID2D1Device::SetMaximumTextureMemory, traced.
+    pub(super) extern "system" fn d_SetMaximumTextureMemory(this: Obj, bytes: u64) {
+        crate::traced!(b"ID2D1Device::SetMaximumTextureMemory", [this, bytes]);
+        super::d_SetMaximumTextureMemory(this, bytes)
+    }
+    /// ID2D1Factory1::CreateDevice, traced.
+    pub(crate) extern "system" fn f1_CreateDevice(
+        factory: Obj,
+        dxgi: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Factory1::CreateDevice", [factory, dxgi, out]);
+        let answer = super::f1_CreateDevice(factory, dxgi, out);
+        crate::answered_call!(b"ID2D1Factory1::CreateDevice", answer);
+        answer
+    }
+    /// ID2D1Factory2::CreateDevice, traced.
+    pub(crate) extern "system" fn f2_CreateDevice(
+        factory: Obj,
+        dxgi: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Factory2::CreateDevice", [factory, dxgi, out]);
+        let answer = super::f2_CreateDevice(factory, dxgi, out);
+        crate::answered_call!(b"ID2D1Factory2::CreateDevice", answer);
+        answer
+    }
+}

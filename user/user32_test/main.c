@@ -23,6 +23,15 @@
  *   also activates it when the process may set the foreground: a second
  *   WM_WINDOWPOSCHANGING, then WM_ACTIVATE, before WM_WINDOWPOSCHANGED;
  *   the next one of the active window does not.
+ * - A window smaller than its own frame: CreateWindowEx has no minimum
+ *   size. The outer size AdjustWindowRect gives for a one-pixel client
+ *   area makes a window with a one-pixel client area, GetWindowRect is
+ *   the rectangle asked for, and a window of one pixel in all is made
+ *   too, its client area what is left of it (never negative, never
+ *   larger than the window: how much frame a window has is the
+ *   system's). SetWindowPos and MoveWindow may take an ordinary window
+ *   down to that size and back. Office's shared runtime makes such a
+ *   window before Word's first real one.
  * - WM_NCCALCSIZE (a custom frame, as Chromium's browser window draws
  *   its own): CreateWindowEx sends it (wParam FALSE, the window's
  *   rectangle); returning it unchanged makes the whole window the client
@@ -1472,6 +1481,48 @@ static void posted_order(void) {
     CHECK(!PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE));
 }
 
+/* A window smaller than its own frame. CreateWindowEx has no minimum
+   size: what AdjustWindowRect gives for a one-pixel client area is a
+   window with a one-pixel client area, and one pixel in all is a window
+   too. Only the bounds of a client area are the same on every system
+   (how much frame a window has is the system's), so that is what is
+   checked for the smallest; the round trip through AdjustWindowRect is
+   exact by its own definition. Office's shared runtime makes one of
+   these, hidden, before Word's first real window. */
+static void tiny_windows(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"User32TestTiny";
+    CHECK(RegisterClassW(&wc));
+    RECT f = {0, 0, 1, 1};
+    CHECK(AdjustWindowRect(&f, WS_OVERLAPPEDWINDOW, FALSE));
+    int fw = f.right - f.left, fh = f.bottom - f.top;
+    CHECK(fw >= 1 && fh >= 1);
+    HWND w = CreateWindowExW(0, L"User32TestTiny", L"tiny", WS_OVERLAPPEDWINDOW, 0, 0, fw, fh, NULL, NULL, inst, NULL);
+    CHECK(w != NULL);
+    RECT r, c;
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == fw && r.bottom - r.top == fh);
+    CHECK(GetClientRect(w, &c) && c.right == 1 && c.bottom == 1);
+    /* One pixel in all: all frame, and a client area of nothing. */
+    HWND one = CreateWindowExW(0, L"User32TestTiny", L"one", WS_OVERLAPPEDWINDOW, 0, 0, 1, 1, NULL, NULL, inst, NULL);
+    CHECK(one != NULL);
+    CHECK(GetWindowRect(one, &r) && r.right - r.left == 1 && r.bottom - r.top == 1);
+    CHECK(GetClientRect(one, &c) && c.right >= 0 && c.bottom >= 0 && c.right <= 1 && c.bottom <= 1);
+    CHECK(DestroyWindow(one));
+    /* An ordinary window goes down to it and back. */
+    CHECK(SetWindowPos(w, NULL, 0, 0, 300, 200, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(GetClientRect(w, &c) && c.right > 1 && c.bottom > 1);
+    CHECK(SetWindowPos(w, NULL, 0, 0, fw, fh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    CHECK(GetWindowRect(w, &r) && r.right - r.left == fw && r.bottom - r.top == fh);
+    CHECK(GetClientRect(w, &c) && c.right == 1 && c.bottom == 1);
+    CHECK(MoveWindow(w, 10, 20, 1, 1, FALSE));
+    CHECK(GetWindowRect(w, &r) && r.left == 10 && r.top == 20 && r.right - r.left == 1 && r.bottom - r.top == 1);
+    CHECK(DestroyWindow(w));
+    CHECK(UnregisterClassW(L"User32TestTiny", inst));
+}
+
 int main(void) {
     bitmaps();
     wnet();
@@ -1487,6 +1538,7 @@ int main(void) {
     dialog_units();
     deferred();
     positions();
+    tiny_windows();
     custom_frame();
     activation();
     timers();

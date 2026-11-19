@@ -380,6 +380,27 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("events_match") {
         events::set_syscall_match(text);
     }
+    // `stack_at=<service>[:<n>]`: the calling thread's user stack the
+    // first few times a process reaches that system call (nt::stack_at).
+    if let Some(spec) = cmdline.value("stack_at") {
+        nt::stack_at::arm(spec);
+    }
+    // `stack_from=<text>`: of those, only the calls a module whose name
+    // contains the text is on the stack of (nt::stack_at).
+    if let Some(text) = cmdline.value("stack_from") {
+        nt::stack_at::only_from(text);
+    }
+    // `stack_words=<n>`: how far up the caller's stack a capture reads,
+    // for a service whose own frame hides the caller (nt::stack_at).
+    if let Some(text) = cmdline.value("stack_words") {
+        nt::stack_at::scan_words(text);
+    }
+    // `trace_from=<dll>!<Interface>::<Method>[:<n>]`: every call a
+    // program makes into one of gala's DLLs, from the first time it
+    // reaches that method (nt::tracecall). Needs `events=call`.
+    if let Some(spec) = cmdline.value("trace_from") {
+        nt::tracecall::set_from(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }
@@ -585,6 +606,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
     nt::desktop::log_clock_stats();
+    nt::stack_at::log_stats();
+    nt::tracecall::log_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);

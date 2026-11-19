@@ -9,3 +9,6 @@ publish.workspace = true
 crate-type = ["cdylib"]
 test = false
 bench = false
+
+[dependencies]
+gala_heap = { path = "../gala_heap" }

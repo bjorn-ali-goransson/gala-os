@@ -25,7 +25,28 @@
  *   mapped, the corner is 0x336699 and the middle 0xffcc00 (the colours
  *   and the geometry of d3d11_test's frame, drawn by Direct2D instead of
  *   by Direct3D's clears and copies).
- * - Present(0, 0) puts the frame on the screen, which xtask checks; a
+ * - The same factory answers IID_ID2D1Factory2 (Direct2D 1.2, the
+ *   interface Word asks for): its CreateDevice gives an ID2D1Device1,
+ *   which is an ID2D1Device as well, whose rendering priority is NORMAL
+ *   and keeps what it is set to, and whose CreateDeviceContext gives an
+ *   ID2D1DeviceContext1 -- an ID2D1DeviceContext as well.
+ * - That context draws the same frame into the same surface, with the
+ *   middle rectangle as a filled geometry realization and a 40 x 40
+ *   square in the corner as a stroked one (width 4): read back, the
+ *   corner is 0x336699, the middle 0xffcc00, the square's left edge
+ *   0xffcc00 and the middle of the square 0x336699, because a stroked
+ *   realization draws the outline and not the inside.
+ * - The options a bitmap over a surface gets when the program passes no
+ *   properties follow the texture's bind flags: a render target alone is
+ *   TARGET | CANNOT_DRAW, a render target a shader may read is TARGET,
+ *   a shader resource alone is NONE and a texture bound as neither is
+ *   CANNOT_DRAW. A bitmap without TARGET is no target: the frame drawn
+ *   into it ends with D2DERR_INVALID_TARGET. Properties that ask for an
+ *   alpha mode of UNKNOWN or STRAIGHT are D2DERR_UNSUPPORTED_PIXEL_FORMAT
+ *   (although CreateBitmap takes UNKNOWN), a pixel format of UNKNOWN
+ *   takes the surface's, and a DPI the program gives is kept as it is,
+ *   0 included (96 is what a bitmap made without properties gets).
+ * - Present(0, 0) puts that frame on the screen, which xtask checks; a
  *   click in the window ends the program (it waits up to 60 s for one:
  *   without one, a failure).
  *
@@ -47,6 +68,7 @@
 #include <dxgi.h>
 #include <d2d1.h>
 #include <d2d1_1.h>
+#include <d2d1_2.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -113,10 +135,144 @@ static void rel(void *o) {
     u->lpVtbl->Release(u);
 }
 
+/* mingw-w64's d2d1_2.h declares no C interfaces for Direct2D 1.2 ("FIXME:
+ * Add full C declaration"), only its GUIDs, so its three methods are
+ * called through the slot each has in its own vtable, IUnknown's three
+ * included: ID2D1Factory2::CreateDevice after ID2D1Factory1's
+ * twenty-seven, ID2D1Device1's three after ID2D1Device's nine, and
+ * ID2D1DeviceContext1's three after ID2D1DeviceContext's ninety-two. One
+ * slot off calls the next method and hands back a plausible answer
+ * (docs/WORKFLOW.md, "A vtable slot is counted from IUnknown"). */
+#define FACTORY2_CREATE_DEVICE 27
+#define DEVICE1_GET_RENDERING_PRIORITY 9
+#define DEVICE1_SET_RENDERING_PRIORITY 10
+#define DEVICE1_CREATE_DEVICE_CONTEXT 11
+#define CONTEXT1_CREATE_FILLED_REALIZATION 92
+#define CONTEXT1_CREATE_STROKED_REALIZATION 93
+#define CONTEXT1_DRAW_GEOMETRY_REALIZATION 94
+
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_DEVICE1)(void *, IDXGIDevice *, void **);
+typedef D2D1_RENDERING_PRIORITY(STDMETHODCALLTYPE *PFN_GET_PRIORITY)(void *);
+typedef void(STDMETHODCALLTYPE *PFN_SET_PRIORITY)(void *, D2D1_RENDERING_PRIORITY);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_CONTEXT1)(void *, D2D1_DEVICE_CONTEXT_OPTIONS,
+                                                        void **);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_FILLED)(void *, ID2D1Geometry *, FLOAT, void **);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_STROKED)(void *, ID2D1Geometry *, FLOAT, FLOAT,
+                                                       ID2D1StrokeStyle *, void **);
+typedef void(STDMETHODCALLTYPE *PFN_DRAW_REALIZATION)(void *, void *, ID2D1Brush *);
+
+/* A method of an interface the headers do not declare, by its slot. */
+static void *vslot(void *o, int index) {
+    return (*(void ***)o)[index];
+}
+
 /* The pixel at (x, y) of a mapped B8G8R8A8 row, as 0xRRGGBB. */
 static unsigned pixel(const D3D11_MAPPED_SUBRESOURCE *m, int x, int y) {
     const unsigned char *p = (const unsigned char *)m->pData + (size_t)y * m->RowPitch + (size_t)x * 4;
     return (unsigned)p[2] << 16 | (unsigned)p[1] << 8 | p[0];
+}
+
+/* The options a bitmap over a DXGI surface gets, and the pixel formats
+ * a program may ask for: textures of this test's own, one per bind-flag
+ * set, each read back through ID2D1Bitmap1::GetOptions and tried as the
+ * context's target. The context has no target when this returns. */
+static void surface_bitmaps(ID3D11Device *dev, ID2D1DeviceContext *dc) {
+    static const struct {
+        UINT bind;
+        UINT options;
+    } cases[] = {
+        {D3D11_BIND_RENDER_TARGET,
+         D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW},
+        {D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, D2D1_BITMAP_OPTIONS_TARGET},
+        {D3D11_BIND_SHADER_RESOURCE, D2D1_BITMAP_OPTIONS_NONE},
+        {0, D2D1_BITMAP_OPTIONS_CANNOT_DRAW},
+    };
+    const D2D1_COLOR_F white = {1.0f, 1.0f, 1.0f, 1.0f};
+    D3D11_TEXTURE2D_DESC td;
+    unsigned i;
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        memset(&td, 0, sizeof td);
+        td.Width = 64;
+        td.Height = 32;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.BindFlags = cases[i].bind;
+        ID3D11Texture2D *tex = NULL;
+        HR(ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex));
+        IDXGISurface *surf = NULL;
+        HR(qi(tex, &IID_IDXGISurface, (void **)&surf));
+        ID2D1Bitmap1 *b = NULL;
+        HR(dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, NULL, &b));
+        CHECK(b != NULL);
+        CHECK(b->lpVtbl->GetOptions(b) == cases[i].options);
+        D2D1_SIZE_U size = pixel_size(b);
+        CHECK(size.width == 64 && size.height == 32);
+        FLOAT dpi_x = 0.0f, dpi_y = 0.0f;
+        b->lpVtbl->Base.GetDpi((ID2D1Bitmap *)b, &dpi_x, &dpi_y);
+        CHECK(dpi_x == 96.0f && dpi_y == 96.0f);
+        /* Only a TARGET bitmap may be drawn into. */
+        dc->lpVtbl->SetTarget(dc, (struct ID2D1Image *)b);
+        dc->lpVtbl->Base.BeginDraw((ID2D1RenderTarget *)dc);
+        dc->lpVtbl->Base.Clear((ID2D1RenderTarget *)dc, &white);
+        last = dc->lpVtbl->Base.EndDraw((ID2D1RenderTarget *)dc, NULL, NULL);
+        if (cases[i].options & D2D1_BITMAP_OPTIONS_TARGET)
+            CHECK(last == S_OK);
+        else
+            CHECK(last == D2DERR_INVALID_TARGET);
+        dc->lpVtbl->SetTarget(dc, NULL);
+        rel(b);
+        IDXGISurface_Release(surf);
+        ID3D11Texture2D_Release(tex);
+    }
+
+    /* The pixel format and the DPI a program may ask for. */
+    memset(&td, 0, sizeof td);
+    td.Width = 64;
+    td.Height = 32;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Texture2D *tex = NULL;
+    HR(ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex));
+    IDXGISurface *surf = NULL;
+    HR(qi(tex, &IID_IDXGISurface, (void **)&surf));
+    D2D1_BITMAP_PROPERTIES1 props;
+    ID2D1Bitmap1 *b = NULL;
+    memset(&props, 0, sizeof props);
+    props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_UNKNOWN;
+    props.dpiX = 96.0f;
+    props.dpiY = 96.0f;
+    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    last = dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b);
+    CHECK(last == D2DERR_UNSUPPORTED_PIXEL_FORMAT && b == NULL);
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_STRAIGHT;
+    last = dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b);
+    CHECK(last == D2DERR_UNSUPPORTED_PIXEL_FORMAT && b == NULL);
+    /* An UNKNOWN format takes the surface's, and 0 dpi means 96. */
+    props.pixelFormat.format = DXGI_FORMAT_UNKNOWN;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    props.dpiX = 0.0f;
+    props.dpiY = 0.0f;
+    HR(dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b));
+    CHECK(b != NULL);
+    CHECK(b->lpVtbl->GetOptions(b) == D2D1_BITMAP_OPTIONS_TARGET);
+    D2D1_PIXEL_FORMAT fmt;
+    ((void (WINAPI *)(void *, D2D1_PIXEL_FORMAT *))vslot(b, 6))(b, &fmt);
+    CHECK(fmt.format == DXGI_FORMAT_B8G8R8A8_UNORM);
+    CHECK(fmt.alphaMode == D2D1_ALPHA_MODE_PREMULTIPLIED);
+    /* The DPI is the program's own, 0 included: Direct2D puts 96 in its
+     * place only when the program gives no properties at all. */
+    FLOAT dpi_x = -1.0f, dpi_y = -1.0f;
+    b->lpVtbl->Base.GetDpi((ID2D1Bitmap *)b, &dpi_x, &dpi_y);
+    CHECK(dpi_x == 0.0f && dpi_y == 0.0f);
+    rel(b);
+    IDXGISurface_Release(surf);
+    ID3D11Texture2D_Release(tex);
 }
 
 int main(void) {
@@ -302,6 +458,97 @@ int main(void) {
     CHECK(corner == 0x336699);
     CHECK(middle == 0xffcc00);
 
+    /* Direct2D 1.2 over the same Direct3D device, the interface Word asks
+     * for: the factory answers IID_ID2D1Factory2, its CreateDevice gives
+     * an ID2D1Device1 that is an ID2D1Device as well, and that device's
+     * CreateDeviceContext an ID2D1DeviceContext1 that is an
+     * ID2D1DeviceContext as well. */
+    void *factory2 = NULL;
+    HR(qi(factory, &IID_ID2D1Factory2, &factory2));
+    CHECK(factory2 != NULL);
+    void *dev1 = NULL;
+    last = ((PFN_CREATE_DEVICE1)vslot(factory2, FACTORY2_CREATE_DEVICE))(factory2, dxgi_dev, &dev1);
+    CHECK(SUCCEEDED(last) && dev1 != NULL);
+    void *dev1_as_device = NULL;
+    HR(qi(dev1, &IID_ID2D1Device, &dev1_as_device));
+    CHECK(dev1_as_device != NULL);
+    rel(dev1_as_device);
+    PFN_GET_PRIORITY get_priority = (PFN_GET_PRIORITY)vslot(dev1, DEVICE1_GET_RENDERING_PRIORITY);
+    PFN_SET_PRIORITY set_priority = (PFN_SET_PRIORITY)vslot(dev1, DEVICE1_SET_RENDERING_PRIORITY);
+    CHECK(get_priority(dev1) == D2D1_RENDERING_PRIORITY_NORMAL);
+    set_priority(dev1, D2D1_RENDERING_PRIORITY_LOW);
+    CHECK(get_priority(dev1) == D2D1_RENDERING_PRIORITY_LOW);
+    set_priority(dev1, D2D1_RENDERING_PRIORITY_NORMAL);
+    CHECK(get_priority(dev1) == D2D1_RENDERING_PRIORITY_NORMAL);
+    void *dc1v = NULL;
+    last = ((PFN_CREATE_CONTEXT1)vslot(dev1, DEVICE1_CREATE_DEVICE_CONTEXT))(
+        dev1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc1v);
+    CHECK(SUCCEEDED(last) && dc1v != NULL);
+    void *dc1_as_context = NULL;
+    HR(qi(dc1v, &IID_ID2D1DeviceContext, &dc1_as_context));
+    CHECK(dc1_as_context != NULL);
+    rel(dc1_as_context);
+    void *dc1_as_context1 = NULL;
+    HR(qi(dc1v, &IID_ID2D1DeviceContext1, &dc1_as_context1));
+    CHECK(dc1_as_context1 != NULL);
+    rel(dc1_as_context1);
+
+    /* The same frame through the 1.2 context, with the middle rectangle
+     * drawn as a filled geometry realization and a 40 x 40 square in the
+     * corner as a stroked one: a realization draws what its geometry
+     * would. The 1.1 context lets its target go first, so that one
+     * bitmap at a time has the surface. */
+    ID2D1DeviceContext *dc1 = (ID2D1DeviceContext *)dc1v;
+    dc->lpVtbl->SetTarget(dc, NULL);
+    ID2D1Bitmap1 *bitmap2 = NULL;
+    HR(dc1->lpVtbl->CreateBitmapFromDxgiSurface(dc1, surface, &props, &bitmap2));
+    CHECK(bitmap2 != NULL);
+    dc1->lpVtbl->SetTarget(dc1, (struct ID2D1Image *)bitmap2);
+    ID2D1Factory *f0 = (ID2D1Factory *)factory;
+    ID2D1RectangleGeometry *middle_geom = NULL;
+    HR(ID2D1Factory_CreateRectangleGeometry(f0, &rect, &middle_geom));
+    D2D1_RECT_F square;
+    square.left = 20.0f;
+    square.top = 20.0f;
+    square.right = 60.0f;
+    square.bottom = 60.0f;
+    ID2D1RectangleGeometry *square_geom = NULL;
+    HR(ID2D1Factory_CreateRectangleGeometry(f0, &square, &square_geom));
+    void *filled = NULL;
+    last = ((PFN_CREATE_FILLED)vslot(dc1v, CONTEXT1_CREATE_FILLED_REALIZATION))(
+        dc1v, (ID2D1Geometry *)middle_geom, 0.25f, &filled);
+    CHECK(SUCCEEDED(last) && filled != NULL);
+    void *stroked = NULL;
+    last = ((PFN_CREATE_STROKED)vslot(dc1v, CONTEXT1_CREATE_STROKED_REALIZATION))(
+        dc1v, (ID2D1Geometry *)square_geom, 0.25f, 4.0f, NULL, &stroked);
+    CHECK(SUCCEEDED(last) && stroked != NULL);
+    PFN_DRAW_REALIZATION draw_realization =
+        (PFN_DRAW_REALIZATION)vslot(dc1v, CONTEXT1_DRAW_GEOMETRY_REALIZATION);
+    ID2D1SolidColorBrush *brush1 = NULL;
+    dc1->lpVtbl->Base.BeginDraw((ID2D1RenderTarget *)dc1);
+    dc1->lpVtbl->Base.Clear((ID2D1RenderTarget *)dc1, &blue);
+    HR(dc1->lpVtbl->Base.CreateSolidColorBrush((ID2D1RenderTarget *)dc1, &gold, NULL, &brush1));
+    draw_realization(dc1v, filled, (ID2D1Brush *)brush1);
+    draw_realization(dc1v, stroked, (ID2D1Brush *)brush1);
+    HR(dc1->lpVtbl->Base.EndDraw((ID2D1RenderTarget *)dc1, NULL, NULL));
+
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)back);
+    HR(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped));
+    unsigned corner2 = pixel(&mapped, 4, 4);
+    unsigned middle2 = pixel(&mapped, (int)width / 2, (int)height / 2);
+    unsigned edge = pixel(&mapped, 20, 40);
+    unsigned inside = pixel(&mapped, 40, 40);
+    printf("d2d1_device_test: realized 0x%06x 0x%06x 0x%06x 0x%06x\n", corner2, middle2, edge,
+           inside);
+    fflush(stdout);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+    CHECK(corner2 == 0x336699);
+    CHECK(middle2 == 0xffcc00);
+    CHECK(edge == 0xffcc00);
+    CHECK(inside == 0x336699);
+
+    surface_bitmaps(dev, dc);
+
     HR(IDXGISwapChain_Present(swap, 0, 0));
     printf("d2d1_device_test: presented\n");
     fflush(stdout);
@@ -316,6 +563,16 @@ int main(void) {
 
     ID3D11Texture2D_Release(staging);
     ID3D11Texture2D_Release(back);
+    rel(stroked);
+    rel(filled);
+    rel(square_geom);
+    rel(middle_geom);
+    if (brush1)
+        rel(brush1);
+    rel(bitmap2);
+    rel(dc1v);
+    rel(dev1);
+    rel(factory2);
     if (brush)
         rel(brush);
     rel(bitmap);

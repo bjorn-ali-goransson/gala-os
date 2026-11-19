@@ -52,6 +52,7 @@ mod alloc_audit;
 mod clockcheck;
 mod diskimage;
 mod feed;
+mod gentrace;
 mod lint;
 mod lx_expect;
 mod stub_audit;
@@ -8725,6 +8726,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "bcrypt.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
+    ("kernel32_system_test", "kernelbase.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_py_test", "kernel32.dll", "Windows/System32"),
@@ -8750,6 +8752,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pipe_test", "bcrypt.dll", "Windows/System32"),
     ("lock_test", "ntdll.dll", "Windows/System32"),
     ("lock_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_from_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_from_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_words_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_words_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -8902,6 +8910,38 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
+    // d3d10_1_test (GPU G2): Direct3D 10.1 over the program's own
+    // Direct3D 11 and Direct2D 1.0 over that, the path Word takes when
+    // it does not use Direct2D's device, so it ships d2d1_device_test's
+    // stack plus gala's d3d10_1.dll.
+    ("d3d10_1_test", "ntdll.dll", "Windows/System32"),
+    ("d3d10_1_test", "kernel32.dll", "Windows/System32"),
+    ("d3d10_1_test", "msvcrt.dll", "Windows/System32"),
+    ("d3d10_1_test", "ucrtbase.dll", "Windows/System32"),
+    ("d3d10_1_test", "user32.dll", "Windows/System32"),
+    ("d3d10_1_test", "gdi32.dll", "Windows/System32"),
+    ("d3d10_1_test", "advapi32.dll", "Windows/System32"),
+    ("d3d10_1_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d3d10_1_test", "version.dll", "Windows/System32"),
+    ("d3d10_1_test", "setupapi.dll", "Windows/System32"),
+    ("d3d10_1_test", "cfgmgr32.dll", "Windows/System32"),
+    ("d3d10_1_test", "dxgi.dll", "Windows/System32"),
+    ("d3d10_1_test", "shell32.dll", "Windows/System32"),
+    ("d3d10_1_test", "shlwapi.dll", "Windows/System32"),
+    ("d3d10_1_test", "ole32.dll", "Windows/System32"),
+    ("d3d10_1_test", "d2d1.dll", "Windows/System32"),
+    ("d3d10_1_test", "d3d10_1.dll", "Windows/System32"),
+    (
+        "d3d10_1_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("d3d10_1_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("d3d10_1_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("d3d10_1_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d10_1_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -10973,6 +11013,43 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_test", "gdi32.dll", "Windows/System32"),
     ("d2d1_test", "windowscodecs.dll", "Windows/System32"),
     ("d2d1_test", "d2d1.dll", "Windows/System32"),
+    ("d2d1_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_test", "user32.dll", "Windows/System32"),
+    ("trace_from_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_answer_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_answer_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_answer_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_answer_test", "user32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_answer_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_answer_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_budget_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_budget_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_budget_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_budget_test", "user32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_budget_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_budget_test", "dwrite.dll", "Windows/System32"),
     ("d2d1_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
     ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -11154,6 +11231,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "stack_at_test",
     "ucrt_test",
     "office_api_test",
     "office_k32_test",
@@ -11182,6 +11260,7 @@ const USER_PROGRAMS: &[&str] = &[
     "knownfolder_test",
     "windowscodecs_test",
     "d2d1_test",
+    "trace_from_test",
     "winhttp_cb_test",
     "runas_test",
     "combase_test",
@@ -11407,6 +11486,8 @@ commands:
                <new> <new.map>, DLLs or the kernel (lld maps: a DLL's in
                target/<target>/release/deps, the kernel's beside it as
                kernel.map; XTASK_HOTSWAP_WHY=1: why each changed)
+  gen-trace    generate the wrapper of every vtable slot of gala's DLLs, each
+               recording the first call that reaches its method (checked in)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -11515,6 +11596,7 @@ fn main() -> ExitCode {
             Some("boot-test") => boot_test_command(release, &args),
             Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
             Some("hotswap-diff") => hotswap_diff(&args[1..]),
+            Some("gen-trace") => gentrace::gen_trace(&root()),
             Some("export-tests") => build_kernel(release)
                 .and_then(|()| build_arm64_programs())
                 .and_then(|()| export_tests()),
@@ -13205,6 +13287,19 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         &[r#"!"ev":"syscall","pid":4,"#, r#""ev":"syscall","pid":12,"#],
     ),
     (
+        // An exception handed to a program's own dispatcher is an event
+        // although the program handles it and lives: seh_test's bad
+        // write (an access violation) and the exceptions it raises
+        // itself are all there, each with the thread it was handed to
+        // and the address it was raised at.
+        "seh_test",
+        &[
+            r#""ev":"exception","pid":4,"#,
+            r#""name":"access violation","#,
+            r#""status":3221225477,"#,
+        ],
+    ),
+    (
         // The mask set aside at boot is set again by the waiting thread.
         "events_from",
         &[r#""ev":"syscall","pid":4,"#],
@@ -13785,6 +13880,7 @@ const ARM64_TWINS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "stack_at_test",
     "iocp_test",
     "symlink_test",
     "ioapc_test",
@@ -16512,23 +16608,59 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["d2d1_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Direct3D 10.1 over the program's own Direct3D 11, and Direct2D
+        // 1.0 over that (user/d3d10_1_test): the path Word takes when it
+        // does not use Direct2D's device -- a texture made by
+        // ID3D10Device1::CreateTexture2D, that texture as a DXGI surface,
+        // and ID2D1Factory::CreateDxgiSurfaceRenderTarget over it, with
+        // the colours and geometry of d2d1_device_test's frame read back
+        // through a staging texture. That render target is a device
+        // context as well, with the surface's own device behind it and a
+        // bitmap over the surface itself as its target, which is what
+        // Word asks a 1.0 surface render target for. The Direct3D 11
+        // under it is DXVK on lavapipe, which the adapter's name says.
+        name: "d3d10_1_test",
+        cmdline: "qemu_exit run=d3d10_1_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3d10_1_test: device llvmpipe",
+            "d3d10_1_test: context 0x00000000 0x00000000",
+            "d3d10_1_test: target 0x00000000 0x00000000 1",
+            "d3d10_1_test: read back 0x336699 0xffcc00",
+            "d3d10_1_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Direct2D 1.1 on the program's own Direct3D 11 device
         // (user/d2d1_device_test), which is how Word draws: an
         // ID2D1Factory1 over the program's IDXGIDevice, a device context
         // targeting a bitmap over the swap chain's DXGI surface, a frame
         // drawn into it with the colours and geometry of d3d11_test's,
-        // read back through a staging texture and presented. The device
-        // is DXVK on lavapipe; Direct2D itself is gala's software
-        // rasterizer, so what it draws has to reach the DXGI surface.
+        // read back through a staging texture; then the same frame again
+        // through Direct2D 1.2 (ID2D1Factory2, ID2D1Device1,
+        // ID2D1DeviceContext1, the interfaces Word asks for) with the
+        // rectangle as a filled geometry realization and a square as a
+        // stroked one, and that one is presented. The device is DXVK on
+        // lavapipe; Direct2D itself is gala's software rasterizer, so
+        // what it draws has to reach the DXGI surface.
         name: "d2d1_device_test",
         cmdline: "qemu_exit presenter=test run=d2d1_device_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "d2d1_device_test: device llvmpipe",
             "d2d1_device_test: read back 0x336699 0xffcc00",
+            "d2d1_device_test: realized 0x336699 0xffcc00 0xffcc00 0x336699",
             "d2d1_device_test: presented",
             "xtask: screen ok",
             "d2d1_device_test: ok",
+            // The device path's calls are in the ledger when they work
+            // (OBSERVABILITY "Missing-features ledger"): what says how
+            // far a program that stops on this path got, so a run of
+            // this test has to leave them.
+            r#"ledger: {"service":"d2d1.dll!ID2D1Factory2::CreateDevice","what":"other","detail":0"#,
+            r#"ledger: {"service":"d2d1.dll!ID2D1Device1::CreateDeviceContext","what":"other","detail":0"#,
+            r#"ledger: {"service":"d2d1.dll!ID2D1RenderTarget::EndDraw","what":"other","detail":0"#,
             "exited with status 0x00000000",
         ],
     },
@@ -18581,6 +18713,131 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The user-mode stack capture (`stack_at=`): the kernel logs the
+        // calling thread's user stack the first `n` times a process
+        // reaches the named system service, so a program that stops
+        // inside a DLL can be placed by the path that got there
+        // (OBSERVABILITY "Stack captures"). The program writes six
+        // lines, the first three straight to the system call and the
+        // last three through kernel32, so the captures must name this
+        // program and kernel32 both; five are captured and the sixth
+        // finds the count spent.
+        name: "stack_at_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:5 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: armed: NtWriteFile, 5 captures",
+            "stack: NtWriteFile from stack_at_test.exe",
+            "capture 5 of 5",
+            "(kernel32.dll+0x",
+            "(stack_at_test.exe+0x",
+            "stack: NtWriteFile: the 5 captures asked for are spent",
+        ],
+    },
+    Scenario {
+        // The capture's filter (`stack_from=`): the count alone is the
+        // wrong trigger when another caller reaches the same service in
+        // a loop (DXVK's logging is ahead of Word's own write), so the
+        // filter chooses the stack instead of how many to take. The
+        // program's first three writes go straight to the system call
+        // with kernel32 on no frame; `stack_from=kernel32` must pass
+        // all three over without spending a capture -- the spent line's
+        // count of them is the proof -- and capture the two writes that
+        // do go through kernel32.
+        name: "stack_at_from_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:2 stack_from=kernel32 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: only calls with a module whose name contains \"kernel32\" on the stack",
+            "(kernel32.dll+0x",
+            "capture 2 of 2",
+            "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
+            "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
+        ],
+    },
+    Scenario {
+        // How far up the stack a capture reads (`stack_words=`): the
+        // default 128 words stop inside a service that keeps a large
+        // frame of its own (user32's MessageBoxW puts Word's frames at
+        // about 148), so the depth is a knob. The capture's closing
+        // line counts the words it read, which is what says the option
+        // took effect rather than the default.
+        name: "stack_at_words_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:1 stack_words=400 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: 400 words of each caller's stack are read (stack_words=)",
+            "stack: NtWriteFile from stack_at_test.exe",
+            "of the 400 stack words read from",
+        ],
+    },
+    Scenario {
+        // `trace_from=` (nt::tracecall, OBSERVABILITY "Call
+        // tracing"): a *repeat* of a call into a DLL gala wrote,
+        // which the one-shot `reached!` record cannot show. The
+        // program calls ID2D1Factory::GetDesktopDpi 25 times; where
+        // the ledger keeps one row, the trace records all 25. The
+        // count also says the rest of the chain held: the value
+        // parsed, the DLL asked for it and armed the slot whose name
+        // matched, and `events=call` named a category the stream
+        // knows -- a call the stream drops is never counted.
+        name: "trace_from_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::GetDesktopDpi",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)",
+            "trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)",
+        ],
+    },
+    Scenario {
+        // The budget `:<n>`: ten calls recorded, and the trace stops
+        // itself there, so no run can be made to pay a system call a
+        // call for longer than it was asked to. The program still
+        // makes all 25 and still ends ok -- what stops is the
+        // recording, not the program, and the line says so rather
+        // than let a short trace read as a program that stopped
+        // calling.
+        name: "trace_from_budget_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::GetDesktopDpi:10",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: 10 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=); the budget is spent, \
+             so the trace stops here, not the program",
+        ],
+    },
+    Scenario {
+        // What a call answered, which the trace used to leave out
+        // (OBSERVABILITY "Call tracing"): armed one method earlier
+        // than the two scenarios above, at ReloadSystemMetrics, the
+        // run records all 30 calls the program makes and the answers
+        // of the 5 made to a method that returns an HRESULT. The 25
+        // made to a method that returns nothing record no answer,
+        // which is the control: an answer is recorded where there is
+        // one to record, not per call.
+        name: "trace_from_answer_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::ReloadSystemMetrics",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: 30 calls recorded from d2d1.dll!ID2D1Factory::ReloadSystemMetrics (trace_from=)",
+            "trace: 5 of those calls recorded what they answered (trace_from=)",
+        ],
+    },
+    Scenario {
         name: "context_test",
         cmdline: "qemu_exit run=context_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -18686,7 +18943,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // P1: frame-based exception handling (unwind data, language
         // handlers, RtlVirtualUnwind/RtlUnwindEx/RtlRaiseException).
         name: "seh_test",
-        cmdline: "qemu_exit run=seh_test.exe",
+        cmdline: "qemu_exit events=fault run=seh_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["seh_test: ok", "exited with status 0x00000000"],
     },

@@ -228,6 +228,10 @@ pub fn record(service: &'static str, what: &'static str, detail: u64) {
 /// the loader could not bind, which ends the load, and is named with the
 /// module whose import it is (`<dll>!<export>(imported by <module>)`), so
 /// that a program's probes and the gaps that stop it are told apart.
+/// "reached" is not a gap at all: it is the first call that reached a
+/// method gala answers, recorded so that a program which stops in the
+/// middle of a path leaves the path it took (OBSERVABILITY
+/// "Missing-features ledger").
 pub fn user_what(code: u32) -> &'static str {
     match code {
         1 => "missing export",
@@ -237,6 +241,7 @@ pub fn user_what(code: u32) -> &'static str {
         6 => "stub",
         7 => "load failed",
         8 => "missing import",
+        9 => "reached",
         // 5 and anything else: a gap a DLL reports without a kind of its
         // own (gala's DLLs pass 5).
         _ => "other",

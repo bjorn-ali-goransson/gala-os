@@ -18,7 +18,9 @@
 //!   it.
 
 use crate::font::{face, font_of_face};
-use crate::{E_INVALIDARG, E_NOTIMPL, E_POINTER, HResult, Iid, S_OK, guid, missing, query};
+use crate::{
+    E_INVALIDARG, E_NOTIMPL, E_POINTER, HResult, Iid, S_OK, guid, missing, query, reached,
+};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -136,6 +138,7 @@ extern "system" fn analysis_bounds(
     texture: u32,
     out: *mut [i32; 4],
 ) -> HResult {
+    reached!(b"IDWriteGlyphRunAnalysis::GetAlphaTextureBounds");
     if out.is_null() {
         return E_POINTER;
     }
@@ -160,6 +163,7 @@ extern "system" fn analysis_texture(
     alpha: *mut u8,
     size: u32,
 ) -> HResult {
+    reached!(b"IDWriteGlyphRunAnalysis::CreateAlphaTexture");
     if bounds.is_null() || alpha.is_null() || texture > 1 {
         return E_INVALIDARG;
     }
@@ -197,6 +201,7 @@ extern "system" fn analysis_blend_params(
     contrast: *mut f32,
     level: *mut f32,
 ) -> HResult {
+    reached!(b"IDWriteGlyphRunAnalysis::GetAlphaBlendParams");
     if gamma.is_null() || contrast.is_null() || level.is_null() {
         return E_INVALIDARG;
     }
@@ -233,6 +238,7 @@ pub extern "system" fn create_glyph_run_analysis(
     y: f32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFactory::CreateGlyphRunAnalysis");
     if out.is_null() || run.is_null() {
         return E_INVALIDARG;
     }

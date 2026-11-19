@@ -17,6 +17,12 @@
 //!   G2), a context drawing into the ID2D1Bitmap1 SetTarget gave it, and
 //!   a bitmap over a DXGI surface writing its pixels into that surface
 //!   when the frame ends. This is how Office draws.
+//! - Direct2D 1.2 (d2d1_2.h) over the same code, which is the version
+//!   Word asks for: ID2D1Factory2 (one more CreateDevice, for an
+//!   ID2D1Device1), ID2D1Device1 (a rendering priority, and a
+//!   CreateDeviceContext for an ID2D1DeviceContext1) and
+//!   ID2D1DeviceContext1 (geometry realizations). One object answers
+//!   each interface and the one it inherits from.
 //! - Brushes, gradient stop collections and bitmaps (`brush`).
 //! - Geometries: rectangles, rounded rectangles, ellipses, paths and their
 //!   sinks (`geometry`).
@@ -26,12 +32,17 @@
 //!   clips, and source-over compositing of a paint (a colour, a gradient
 //!   or a bitmap).
 //!
+//! - Drawing state blocks (`state`): a target's transform, antialias
+//!   modes, tags and text-rendering parameters (and a device context's
+//!   primitive blend and unit mode) held away from the target, which
+//!   SaveDrawingState writes and RestoreDrawingState reads back. Word
+//!   makes two before it draws.
+//!
 //! What it does not do is recorded in the ledger (`d2d1.dll!...`): text
 //! (DrawText, DrawTextLayout, DrawGlyphRun: gala's DirectWrite has no
-//! text layout yet), layers, meshes, opacity masks, drawing state blocks,
-//! compatible render targets, effects, command lists, colour contexts,
-//! dashes, CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface,
-//! which device contexts replace), and the GDI interop interface.
+//! text layout yet), layers, meshes, opacity masks, compatible render
+//! targets, effects, command lists, colour contexts, dashes, and the GDI
+//! interop interface.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -43,8 +54,11 @@ mod brush;
 mod device;
 mod factory;
 mod geometry;
+mod mesh;
 mod raster;
+mod state;
 mod target;
+pub mod trace;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -96,6 +110,12 @@ pub const E_INVALIDARG: HResult = 0x8007_0057_u32 as i32;
 pub const D2DERR_WRONG_STATE: HResult = 0x8899_0001_u32 as i32;
 pub const D2DERR_NOT_INITIALIZED: HResult = 0x8899_0002_u32 as i32;
 pub const D2DERR_PUSH_POP_UNBALANCED: HResult = 0x8899_0016_u32 as i32;
+/// D2DERR_WRONG_FACTORY: the resource was made by another factory.
+/// EndDraw answers it, as the drawing call returns nothing.
+pub const D2DERR_WRONG_FACTORY: HResult = 0x8899_0012_u32 as i32;
+/// D2DERR_INVALID_TARGET: the frame was drawn into something that is no
+/// target. EndDraw answers it, as SetTarget returns nothing.
+pub const D2DERR_INVALID_TARGET: HResult = 0x8899_0024_u32 as i32;
 /// WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT (d2derr.h).
 pub const D2DERR_UNSUPPORTED_PIXEL_FORMAT: HResult = 0x8898_2f80_u32 as i32;
 
@@ -103,6 +123,7 @@ pub const D2DERR_UNSUPPORTED_PIXEL_FORMAT: HResult = 0x8898_2f80_u32 as i32;
 const LEDGER_UNSUPPORTED: u32 = 2;
 const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 const LEDGER_OTHER: u32 = 5;
+const LEDGER_REACHED: u32 = 9;
 
 fn record_kind(what: &[u8], kind: u32, detail: u64) {
     let mut name = [0u8; 96];
@@ -122,6 +143,85 @@ fn record_kind(what: &[u8], kind: u32, detail: u64) {
 /// option, a case), with a detail.
 pub fn gap(what: &[u8], detail: u64) {
     record_kind(what, LEDGER_UNSUPPORTED, detail);
+}
+
+/// Records `d2d1.dll!<what>`: a call a program made and was answered,
+/// the HRESULT it was answered with as the detail (0 for success). The
+/// device path Office draws through (CreateDevice, CreateDeviceContext,
+/// a target bitmap over a DXGI surface, the frames that end on it)
+/// leaves nothing in the ledger when it works, so a program that stops
+/// after it shows how far it got (OBSERVABILITY "Missing-features
+/// ledger").
+pub fn answered(what: &[u8], hr: HResult) {
+    record_kind(what, LEDGER_OTHER, hr as u32 as u64);
+}
+
+/// Records `d2d1.dll!<what>` the first time a program reaches the call
+/// site: a call that works leaves nothing else behind, so the ledger
+/// would go quiet exactly where a program stops in the middle of a path
+/// this DLL answers. Once per site -- the record is the path a program
+/// took through this DLL, not a count, and a drawing loop pays one
+/// relaxed atomic a call (OBSERVABILITY "Missing-features ledger").
+#[macro_export]
+macro_rules! reached {
+    ($what:expr) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        // A relaxed load once it has been recorded, not a locked
+        // exchange: the call is on a drawing loop.
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            $crate::reached_now($what);
+        }
+    }};
+}
+
+/// `reached!`'s record, and -- once `trace_from=` has armed this method
+/// -- every call after it. A generated vtable wrapper uses this rather
+/// than `reached!` so that an investigation can read a *sequence*: the
+/// one-shot record says a method was reached once, which leaves the
+/// calls between the last thing that worked and a failure invisible by
+/// construction.
+///
+/// What it costs a program that is not being traced is two relaxed
+/// loads a call. The compare against the `trace_from=` value is folded
+/// into the one-shot, so it is paid once per slot and never on a
+/// drawing loop (crate::trace, OBSERVABILITY "Call tracing").
+#[macro_export]
+macro_rules! traced {
+    ($what:expr, [$($arg:expr),* $(,)?]) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            $crate::reached_now($what);
+            $crate::trace::arm_if_named($what);
+        }
+        if $crate::trace::on() {
+            $crate::trace::record($what, &[$($crate::trace::Arg::word(&$arg)),*]);
+        }
+    }};
+}
+
+/// What a traced call answered, recorded right after the call itself
+/// (`trace_from=`). The generator puts this in the wrapper of every slot
+/// whose method returns anything; a method that returns nothing has no
+/// answer to record. An answer costs what a call costs and comes out of
+/// the same budget, so a trace can end between a call and its answer but
+/// can never show an answer whose call it did not record.
+#[macro_export]
+macro_rules! answered_call {
+    ($what:expr, $answer:expr) => {{
+        if $crate::trace::on() {
+            $crate::trace::record_answer($what, $crate::trace::Arg::word(&$answer));
+        }
+    }};
+}
+
+/// `reached!`'s record. Call it through the macro, which keeps it to the
+/// first time.
+pub fn reached_now(what: &[u8]) {
+    record_kind(what, LEDGER_REACHED, 0);
 }
 
 /// A method gala does not implement: recorded, E_NOTIMPL.
@@ -162,6 +262,8 @@ pub const IID_ROUNDED_RECTANGLE_GEOMETRY: Guid = d2d_iid(0x2cd9_06a3);
 pub const IID_ELLIPSE_GEOMETRY: Guid = d2d_iid(0x2cd9_06a4);
 pub const IID_PATH_GEOMETRY: Guid = d2d_iid(0x2cd9_06a5);
 pub const IID_GRADIENT_STOPS: Guid = d2d_iid(0x2cd9_06a7);
+pub const IID_TESSELLATION_SINK: Guid = d2d_iid(0x2cd9_06c1);
+pub const IID_MESH: Guid = d2d_iid(0x2cd9_06c2);
 pub const IID_BRUSH: Guid = d2d_iid(0x2cd9_06a8);
 pub const IID_SOLID_BRUSH: Guid = d2d_iid(0x2cd9_06a9);
 pub const IID_BITMAP_BRUSH: Guid = d2d_iid(0x2cd9_06aa);
@@ -186,6 +288,19 @@ pub const IID_DEVICE_CONTEXT: Guid =
     guid(0xe8f7_fe7a, 0x191c, 0x466d, [0xad, 0x95, 0x97, 0x56, 0x78, 0xbd, 0xa9, 0x98]);
 pub const IID_BITMAP1: Guid =
     guid(0xa898_a84c, 0x3873, 0x4588, [0xb0, 0x8b, 0xeb, 0xbf, 0x97, 0x8d, 0xf0, 0x41]);
+/// The Direct2D 1.2 interfaces (d2d1_2.h).
+pub const IID_FACTORY2: Guid =
+    guid(0x94f8_1a73, 0x9212, 0x4376, [0x9c, 0x58, 0xb1, 0x6a, 0x3a, 0x0d, 0x39, 0x92]);
+pub const IID_DEVICE1: Guid =
+    guid(0xd217_68e1, 0x23a4, 0x4823, [0xa1, 0x4b, 0x7c, 0x3e, 0xba, 0x85, 0xd6, 0x58]);
+pub const IID_DEVICE_CONTEXT1: Guid =
+    guid(0xd37f_57e4, 0x6908, 0x459f, [0xa1, 0x99, 0xe7, 0x2f, 0x24, 0xf7, 0x99, 0x87]);
+pub const IID_GEOMETRY_REALIZATION: Guid =
+    guid(0xa169_07d7, 0xbc02, 0x4801, [0x99, 0xe8, 0x8c, 0xf7, 0xf4, 0x85, 0xf7, 0x74]);
+pub const IID_DRAWING_STATE_BLOCK: Guid =
+    guid(0x2850_6e39, 0xebf6, 0x46a1, [0xbb, 0x47, 0xfd, 0x85, 0x56, 0x5a, 0xb9, 0x57]);
+pub const IID_DRAWING_STATE_BLOCK1: Guid =
+    guid(0x689f_1f85, 0xc72e, 0x4e33, [0x8f, 0x19, 0x85, 0x75, 0x4e, 0xfd, 0x5a, 0xce]);
 pub const IID_MULTITHREAD: Guid =
     guid(0x31e6_e7bc, 0xe0ff, 0x4d46, [0x8c, 0x64, 0xa0, 0xa8, 0xc4, 0x1c, 0x15, 0xd3]);
 
@@ -455,6 +570,9 @@ impl Res {
     }
 }
 
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace fn get_factory ID2D1Resource::GetFactory
 /// ID2D1Resource::GetFactory of every resource of this DLL.
 pub extern "system" fn get_factory(this: Obj, out: *mut Obj) {
     // SAFETY: one of our resources: it starts with a Res.
@@ -725,4 +843,17 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     record_kind(&text[..n], LEDGER_OTHER, line.into());
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xc000_0409) }
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module: each records
+/// the first call that reaches its method, and every call at all
+/// once `trace_from=` has armed one (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1Resource::GetFactory, traced.
+    pub(crate) extern "system" fn get_factory(this: Obj, out: *mut Obj) {
+        crate::traced!(b"ID2D1Resource::GetFactory", [this, out]);
+        super::get_factory(this, out)
+    }
 }

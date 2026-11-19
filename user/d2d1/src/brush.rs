@@ -8,12 +8,12 @@ use alloc::vec::Vec;
 use crate::device::{self, DxgiSurface};
 use crate::raster::{self, EXTEND_CLAMP, Paint, Pixels, Ramp, Rgba};
 use crate::{
-    ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ColorF, ComRef, D2DERR_UNSUPPORTED_PIXEL_FORMAT,
-    DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, Guid, HResult,
-    IID_BITMAP, IID_BITMAP_BRUSH, IID_BITMAP1, IID_BRUSH, IID_GRADIENT_STOPS, IID_IMAGE,
-    IID_LINEAR_BRUSH, IID_RADIAL_BRUSH, IID_RESOURCE, IID_SOLID_BRUSH, Matrix, Obj, PixelFormat,
-    Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, com_add_ref, get_factory, give,
-    not_implemented, put, query, read, release_object, vtable_of,
+    ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ALPHA_UNKNOWN, ColorF, ComRef,
+    D2DERR_UNSUPPORTED_PIXEL_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_NOINTERFACE,
+    E_OUTOFMEMORY, Guid, HResult, IID_BITMAP, IID_BITMAP_BRUSH, IID_BITMAP1, IID_BRUSH,
+    IID_GRADIENT_STOPS, IID_IMAGE, IID_LINEAR_BRUSH, IID_RADIAL_BRUSH, IID_RESOURCE,
+    IID_SOLID_BRUSH, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable,
+    add_ref, com_add_ref, give, not_implemented, put, query, read, release_object, vtable_of,
 };
 
 // ---- Gradient stop collections ----------------------------------------------
@@ -34,15 +34,26 @@ pub struct Stops {
     ramp: Ramp,
 }
 
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace prefix stops_ ID2D1GradientStopCollection
+// gen-trace prefix bitmap_ ID2D1Bitmap
+// gen-trace prefix b1_ ID2D1Bitmap1
+// gen-trace prefix brush_ ID2D1Brush
+// gen-trace prefix solid_ ID2D1SolidColorBrush
+// gen-trace prefix gradient_ ID2D1GradientBrush
+// gen-trace prefix linear_ ID2D1LinearGradientBrush
+// gen-trace prefix radial_ ID2D1RadialGradientBrush
+// gen-trace prefix bb_ ID2D1BitmapBrush
 static STOPS_VTBL: VTable<8> = VTable([
     stops_query as *const (),
     add_ref as *const (),
     stops_release as *const (),
-    get_factory as *const (),
-    stops_GetGradientStopCount as *const (),
-    stops_GetGradientStops as *const (),
-    stops_GetColorInterpolationGamma as *const (),
-    stops_GetExtendMode as *const (),
+    crate::traced::get_factory as *const (),
+    traced::stops_GetGradientStopCount as *const (),
+    traced::stops_GetGradientStops as *const (),
+    traced::stops_GetColorInterpolationGamma as *const (),
+    traced::stops_GetExtendMode as *const (),
 ]);
 
 /// CreateGradientStopCollection: the stops as given (sorted by position
@@ -154,6 +165,29 @@ pub struct Bitmap {
 
 /// D2D1_BITMAP_OPTIONS_TARGET: a bitmap a device context may draw into.
 pub const BITMAP_OPTION_TARGET: u32 = 1;
+/// D2D1_BITMAP_OPTIONS_CANNOT_DRAW: a bitmap no draw call may read.
+pub const BITMAP_OPTION_CANNOT_DRAW: u32 = 2;
+
+/// D3D11_BIND_SHADER_RESOURCE and D3D11_BIND_RENDER_TARGET (d3d11.h).
+const BIND_SHADER_RESOURCE: u32 = 0x8;
+const BIND_RENDER_TARGET: u32 = 0x20;
+
+/// The options Direct2D gives a bitmap over a DXGI surface when the
+/// program passes no properties: what the texture may be bound as
+/// decides them (measured on Windows, `d2d1_device_test`): a render
+/// target makes it a TARGET, and a texture no shader may read is
+/// CANNOT_DRAW. So a swap chain's buffer, bound as a render target
+/// alone, is TARGET | CANNOT_DRAW.
+fn inferred_options(bind: u32) -> u32 {
+    let mut options = 0;
+    if bind & BIND_RENDER_TARGET != 0 {
+        options |= BITMAP_OPTION_TARGET;
+    }
+    if bind & BIND_SHADER_RESOURCE == 0 {
+        options |= BITMAP_OPTION_CANNOT_DRAW;
+    }
+    options
+}
 
 macro_rules! bitmap_slots {
     ($($extra:expr),*) => {
@@ -161,14 +195,14 @@ macro_rules! bitmap_slots {
             bitmap_query as *const (),
             add_ref as *const (),
             bitmap_release as *const (),
-            get_factory as *const (),
-            bitmap_GetSize as *const (),
-            bitmap_GetPixelSize as *const (),
-            bitmap_GetPixelFormat as *const (),
-            bitmap_GetDpi as *const (),
-            bitmap_CopyFromBitmap as *const (),
-            bitmap_CopyFromRenderTarget as *const (),
-            bitmap_CopyFromMemory as *const (),
+            crate::traced::get_factory as *const (),
+            traced::bitmap_GetSize as *const (),
+            traced::bitmap_GetPixelSize as *const (),
+            traced::bitmap_GetPixelFormat as *const (),
+            traced::bitmap_GetDpi as *const (),
+            traced::bitmap_CopyFromBitmap as *const (),
+            traced::bitmap_CopyFromRenderTarget as *const (),
+            traced::bitmap_CopyFromMemory as *const (),
             $($extra as *const ()),*
         ]
     };
@@ -177,8 +211,13 @@ macro_rules! bitmap_slots {
 static BITMAP_VTBL: VTable<11> = VTable(bitmap_slots!());
 /// ID2D1Bitmap1 (d2d1_1.h): a bitmap made through a device context, with
 /// five methods after ID2D1Bitmap's.
-static BITMAP1_VTBL: VTable<16> =
-    VTable(bitmap_slots!(b1_GetColorContext, b1_GetOptions, b1_GetSurface, b1_Map, b1_Unmap));
+static BITMAP1_VTBL: VTable<16> = VTable(bitmap_slots!(
+    traced::b1_GetColorContext,
+    traced::b1_GetOptions,
+    traced::b1_GetSurface,
+    traced::b1_Map,
+    traced::b1_Unmap
+));
 
 /// D2D1_BITMAP_PROPERTIES.
 #[repr(C)]
@@ -422,6 +461,13 @@ pub fn create_from_wic(
 /// which a multisampled texture has none of. The bitmap starts as the
 /// surface's own pixels are not read back (Direct2D's own does not
 /// promise them either: a target bitmap is drawn before it is shown).
+///
+/// Properties the program gives are taken as they are, and without them
+/// the bitmap is the surface's own: its format, premultiplied alpha, 96
+/// dpi and the options the texture's bind flags imply
+/// (`inferred_options`). An alpha mode of UNKNOWN is refused, which is
+/// Windows' answer for this call although CreateBitmap takes it (both
+/// measured; `d2d1_device_test`).
 pub fn create_from_dxgi(
     factory: Obj,
     surface: Obj,
@@ -441,11 +487,15 @@ pub fn create_from_dxgi(
         return E_INVALIDARG;
     }
     let p = read(props);
-    let want = p.map(|p| p.base.format).unwrap_or_default();
+    let natural = PixelFormat { format: s.desc.format, alpha: ALPHA_PREMULTIPLIED };
+    let want = p.map(|p| p.base.format).unwrap_or(natural);
     if want.format != 0 && want.format != s.desc.format {
         return E_INVALIDARG;
     }
-    let natural = PixelFormat { format: s.desc.format, alpha: ALPHA_PREMULTIPLIED };
+    if want.alpha == ALPHA_UNKNOWN {
+        crate::gap(b"CreateBitmapFromDxgiSurface(D2D1_ALPHA_MODE_UNKNOWN)", 0);
+        return D2DERR_UNSUPPORTED_PIXEL_FORMAT;
+    }
     let format = match bitmap_format(want, natural) {
         Ok(f) => f,
         Err(e) => {
@@ -457,8 +507,11 @@ pub fn create_from_dxgi(
     let Some(pixels) = crate::filled(w as usize * h as usize * 4, 0u8) else {
         return E_OUTOFMEMORY;
     };
-    let options = p.map_or(0, |p| p.options);
-    let dpi = dpi_of(p.map(|p| p.base));
+    let options = p.map_or_else(|| inferred_options(s.bind), |p| p.options);
+    // Properties the program gives carry their own DPI, zero included
+    // (Windows does not put 96 in its place for this call, measured);
+    // without them the bitmap is 96 dpi.
+    let dpi = p.map_or((96.0, 96.0), |p| (p.base.dpi_x, p.base.dpi_y));
     let opts = Options { options, surface: Some(s), bitmap1: true };
     new_bitmap(factory, SizeU { width: w, height: h }, dpi, format, pixels, opts, out)
 }
@@ -701,44 +754,45 @@ macro_rules! brush_slots {
             brush_query as *const (),
             add_ref as *const (),
             brush_release as *const (),
-            get_factory as *const (),
-            brush_SetOpacity as *const (),
-            brush_SetTransform as *const (),
-            brush_GetOpacity as *const (),
-            brush_GetTransform as *const (),
+            crate::traced::get_factory as *const (),
+            traced::brush_SetOpacity as *const (),
+            traced::brush_SetTransform as *const (),
+            traced::brush_GetOpacity as *const (),
+            traced::brush_GetTransform as *const (),
             $($extra as *const ()),*
         ]
     };
 }
 
-static SOLID_VTBL: VTable<10> = VTable(brush_slots!(solid_SetColor, solid_GetColor));
+static SOLID_VTBL: VTable<10> =
+    VTable(brush_slots!(traced::solid_SetColor, traced::solid_GetColor));
 static LINEAR_VTBL: VTable<13> = VTable(brush_slots!(
-    linear_SetStartPoint,
-    linear_SetEndPoint,
-    linear_GetStartPoint,
-    linear_GetEndPoint,
-    gradient_GetGradientStopCollection
+    traced::linear_SetStartPoint,
+    traced::linear_SetEndPoint,
+    traced::linear_GetStartPoint,
+    traced::linear_GetEndPoint,
+    traced::gradient_GetGradientStopCollection
 ));
 static RADIAL_VTBL: VTable<17> = VTable(brush_slots!(
-    radial_SetCenter,
-    radial_SetGradientOriginOffset,
-    radial_SetRadiusX,
-    radial_SetRadiusY,
-    radial_GetCenter,
-    radial_GetGradientOriginOffset,
-    radial_GetRadiusX,
-    radial_GetRadiusY,
-    gradient_GetGradientStopCollection
+    traced::radial_SetCenter,
+    traced::radial_SetGradientOriginOffset,
+    traced::radial_SetRadiusX,
+    traced::radial_SetRadiusY,
+    traced::radial_GetCenter,
+    traced::radial_GetGradientOriginOffset,
+    traced::radial_GetRadiusX,
+    traced::radial_GetRadiusY,
+    traced::gradient_GetGradientStopCollection
 ));
 static BITMAP_BRUSH_VTBL: VTable<16> = VTable(brush_slots!(
-    bb_SetExtendModeX,
-    bb_SetExtendModeY,
-    bb_SetInterpolationMode,
-    bb_SetBitmap,
-    bb_GetExtendModeX,
-    bb_GetExtendModeY,
-    bb_GetInterpolationMode,
-    bb_GetBitmap
+    traced::bb_SetExtendModeX,
+    traced::bb_SetExtendModeY,
+    traced::bb_SetInterpolationMode,
+    traced::bb_SetBitmap,
+    traced::bb_GetExtendModeX,
+    traced::bb_GetExtendModeY,
+    traced::bb_GetInterpolationMode,
+    traced::bb_GetBitmap
 ));
 
 pub fn is_brush(o: Obj) -> bool {
@@ -1096,4 +1150,296 @@ pub fn with_bitmap_paint(
     with_pixels(b, |px| {
         f(&Paint::Bitmap { inv, px, ex: EXTEND_CLAMP, ey: EXTEND_CLAMP, linear, opacity })
     });
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module: each records
+/// the first call that reaches its method, and every call at all
+/// once `trace_from=` has armed one (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1Bitmap1::GetColorContext, traced.
+    pub(super) extern "system" fn b1_GetColorContext(_this: Obj, out: *mut Obj) {
+        crate::traced!(b"ID2D1Bitmap1::GetColorContext", [_this, out]);
+        super::b1_GetColorContext(_this, out)
+    }
+    /// ID2D1Bitmap1::GetOptions, traced.
+    pub(super) extern "system" fn b1_GetOptions(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1Bitmap1::GetOptions", [this]);
+        let answer = super::b1_GetOptions(this);
+        crate::answered_call!(b"ID2D1Bitmap1::GetOptions", answer);
+        answer
+    }
+    /// ID2D1Bitmap1::GetSurface, traced.
+    pub(super) extern "system" fn b1_GetSurface(this: Obj, out: *mut Obj) -> HResult {
+        crate::traced!(b"ID2D1Bitmap1::GetSurface", [this, out]);
+        let answer = super::b1_GetSurface(this, out);
+        crate::answered_call!(b"ID2D1Bitmap1::GetSurface", answer);
+        answer
+    }
+    /// ID2D1Bitmap1::Map, traced.
+    pub(super) extern "system" fn b1_Map(_this: Obj, _options: u32, _mapped: *mut u8) -> HResult {
+        crate::traced!(b"ID2D1Bitmap1::Map", [_this, _options, _mapped]);
+        let answer = super::b1_Map(_this, _options, _mapped);
+        crate::answered_call!(b"ID2D1Bitmap1::Map", answer);
+        answer
+    }
+    /// ID2D1Bitmap1::Unmap, traced.
+    pub(super) extern "system" fn b1_Unmap(_this: Obj) -> HResult {
+        crate::traced!(b"ID2D1Bitmap1::Unmap", [_this]);
+        let answer = super::b1_Unmap(_this);
+        crate::answered_call!(b"ID2D1Bitmap1::Unmap", answer);
+        answer
+    }
+    /// ID2D1BitmapBrush::GetBitmap, traced.
+    pub(super) extern "system" fn bb_GetBitmap(this: Obj, out: *mut Obj) {
+        crate::traced!(b"ID2D1BitmapBrush::GetBitmap", [this, out]);
+        super::bb_GetBitmap(this, out)
+    }
+    /// ID2D1BitmapBrush::GetExtendModeX, traced.
+    pub(super) extern "system" fn bb_GetExtendModeX(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1BitmapBrush::GetExtendModeX", [this]);
+        let answer = super::bb_GetExtendModeX(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetExtendModeX", answer);
+        answer
+    }
+    /// ID2D1BitmapBrush::GetExtendModeY, traced.
+    pub(super) extern "system" fn bb_GetExtendModeY(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1BitmapBrush::GetExtendModeY", [this]);
+        let answer = super::bb_GetExtendModeY(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetExtendModeY", answer);
+        answer
+    }
+    /// ID2D1BitmapBrush::GetInterpolationMode, traced.
+    pub(super) extern "system" fn bb_GetInterpolationMode(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1BitmapBrush::GetInterpolationMode", [this]);
+        let answer = super::bb_GetInterpolationMode(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetInterpolationMode", answer);
+        answer
+    }
+    /// ID2D1BitmapBrush::SetBitmap, traced.
+    pub(super) extern "system" fn bb_SetBitmap(this: Obj, b: Obj) {
+        crate::traced!(b"ID2D1BitmapBrush::SetBitmap", [this, b]);
+        super::bb_SetBitmap(this, b)
+    }
+    /// ID2D1BitmapBrush::SetExtendModeX, traced.
+    pub(super) extern "system" fn bb_SetExtendModeX(this: Obj, v: u32) {
+        crate::traced!(b"ID2D1BitmapBrush::SetExtendModeX", [this, v]);
+        super::bb_SetExtendModeX(this, v)
+    }
+    /// ID2D1BitmapBrush::SetExtendModeY, traced.
+    pub(super) extern "system" fn bb_SetExtendModeY(this: Obj, v: u32) {
+        crate::traced!(b"ID2D1BitmapBrush::SetExtendModeY", [this, v]);
+        super::bb_SetExtendModeY(this, v)
+    }
+    /// ID2D1BitmapBrush::SetInterpolationMode, traced.
+    pub(super) extern "system" fn bb_SetInterpolationMode(this: Obj, v: u32) {
+        crate::traced!(b"ID2D1BitmapBrush::SetInterpolationMode", [this, v]);
+        super::bb_SetInterpolationMode(this, v)
+    }
+    /// ID2D1Bitmap::CopyFromBitmap, traced.
+    pub(super) extern "system" fn bitmap_CopyFromBitmap(
+        this: Obj,
+        at: *const PointU,
+        other: Obj,
+        src: *const RectU,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Bitmap::CopyFromBitmap", [this, at, other, src]);
+        let answer = super::bitmap_CopyFromBitmap(this, at, other, src);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromBitmap", answer);
+        answer
+    }
+    /// ID2D1Bitmap::CopyFromMemory, traced.
+    pub(super) extern "system" fn bitmap_CopyFromMemory(
+        this: Obj,
+        dst: *const RectU,
+        src: *const u8,
+        pitch: u32,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Bitmap::CopyFromMemory", [this, dst, src, pitch]);
+        let answer = super::bitmap_CopyFromMemory(this, dst, src, pitch);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromMemory", answer);
+        answer
+    }
+    /// ID2D1Bitmap::CopyFromRenderTarget, traced.
+    pub(super) extern "system" fn bitmap_CopyFromRenderTarget(
+        _this: Obj,
+        _at: *const PointU,
+        _target: Obj,
+        _src: *const RectU,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Bitmap::CopyFromRenderTarget", [_this, _at, _target, _src]);
+        let answer = super::bitmap_CopyFromRenderTarget(_this, _at, _target, _src);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromRenderTarget", answer);
+        answer
+    }
+    /// ID2D1Bitmap::GetDpi, traced.
+    pub(super) extern "system" fn bitmap_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
+        crate::traced!(b"ID2D1Bitmap::GetDpi", [this, x, y]);
+        super::bitmap_GetDpi(this, x, y)
+    }
+    /// ID2D1Bitmap::GetPixelFormat, traced.
+    pub(super) extern "system" fn bitmap_GetPixelFormat(
+        this: Obj,
+        ret: *mut PixelFormat,
+    ) -> *mut PixelFormat {
+        crate::traced!(b"ID2D1Bitmap::GetPixelFormat", [this, ret]);
+        let answer = super::bitmap_GetPixelFormat(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetPixelFormat", answer);
+        answer
+    }
+    /// ID2D1Bitmap::GetPixelSize, traced.
+    pub(super) extern "system" fn bitmap_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
+        crate::traced!(b"ID2D1Bitmap::GetPixelSize", [this, ret]);
+        let answer = super::bitmap_GetPixelSize(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetPixelSize", answer);
+        answer
+    }
+    /// ID2D1Bitmap::GetSize, traced.
+    pub(super) extern "system" fn bitmap_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
+        crate::traced!(b"ID2D1Bitmap::GetSize", [this, ret]);
+        let answer = super::bitmap_GetSize(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetSize", answer);
+        answer
+    }
+    /// ID2D1Brush::GetOpacity, traced.
+    pub(super) extern "system" fn brush_GetOpacity(this: Obj) -> f32 {
+        crate::traced!(b"ID2D1Brush::GetOpacity", [this]);
+        let answer = super::brush_GetOpacity(this);
+        crate::answered_call!(b"ID2D1Brush::GetOpacity", answer);
+        answer
+    }
+    /// ID2D1Brush::GetTransform, traced.
+    pub(super) extern "system" fn brush_GetTransform(this: Obj, out: *mut Matrix) {
+        crate::traced!(b"ID2D1Brush::GetTransform", [this, out]);
+        super::brush_GetTransform(this, out)
+    }
+    /// ID2D1Brush::SetOpacity, traced.
+    pub(super) extern "system" fn brush_SetOpacity(this: Obj, v: f32) {
+        crate::traced!(b"ID2D1Brush::SetOpacity", [this, v]);
+        super::brush_SetOpacity(this, v)
+    }
+    /// ID2D1Brush::SetTransform, traced.
+    pub(super) extern "system" fn brush_SetTransform(this: Obj, m: *const Matrix) {
+        crate::traced!(b"ID2D1Brush::SetTransform", [this, m]);
+        super::brush_SetTransform(this, m)
+    }
+    /// ID2D1GradientBrush::GetGradientStopCollection, traced.
+    pub(super) extern "system" fn gradient_GetGradientStopCollection(this: Obj, out: *mut Obj) {
+        crate::traced!(b"ID2D1GradientBrush::GetGradientStopCollection", [this, out]);
+        super::gradient_GetGradientStopCollection(this, out)
+    }
+    /// ID2D1LinearGradientBrush::GetEndPoint, traced.
+    pub(super) extern "system" fn linear_GetEndPoint(this: Obj, ret: *mut Point) -> *mut Point {
+        crate::traced!(b"ID2D1LinearGradientBrush::GetEndPoint", [this, ret]);
+        let answer = super::linear_GetEndPoint(this, ret);
+        crate::answered_call!(b"ID2D1LinearGradientBrush::GetEndPoint", answer);
+        answer
+    }
+    /// ID2D1LinearGradientBrush::GetStartPoint, traced.
+    pub(super) extern "system" fn linear_GetStartPoint(this: Obj, ret: *mut Point) -> *mut Point {
+        crate::traced!(b"ID2D1LinearGradientBrush::GetStartPoint", [this, ret]);
+        let answer = super::linear_GetStartPoint(this, ret);
+        crate::answered_call!(b"ID2D1LinearGradientBrush::GetStartPoint", answer);
+        answer
+    }
+    /// ID2D1LinearGradientBrush::SetEndPoint, traced.
+    pub(super) extern "system" fn linear_SetEndPoint(this: Obj, p: Point) {
+        crate::traced!(b"ID2D1LinearGradientBrush::SetEndPoint", [this, p]);
+        super::linear_SetEndPoint(this, p)
+    }
+    /// ID2D1LinearGradientBrush::SetStartPoint, traced.
+    pub(super) extern "system" fn linear_SetStartPoint(this: Obj, p: Point) {
+        crate::traced!(b"ID2D1LinearGradientBrush::SetStartPoint", [this, p]);
+        super::linear_SetStartPoint(this, p)
+    }
+    /// ID2D1RadialGradientBrush::GetCenter, traced.
+    pub(super) extern "system" fn radial_GetCenter(this: Obj, ret: *mut Point) -> *mut Point {
+        crate::traced!(b"ID2D1RadialGradientBrush::GetCenter", [this, ret]);
+        let answer = super::radial_GetCenter(this, ret);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetCenter", answer);
+        answer
+    }
+    /// ID2D1RadialGradientBrush::GetGradientOriginOffset, traced.
+    pub(super) extern "system" fn radial_GetGradientOriginOffset(
+        this: Obj,
+        ret: *mut Point,
+    ) -> *mut Point {
+        crate::traced!(b"ID2D1RadialGradientBrush::GetGradientOriginOffset", [this, ret]);
+        let answer = super::radial_GetGradientOriginOffset(this, ret);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetGradientOriginOffset", answer);
+        answer
+    }
+    /// ID2D1RadialGradientBrush::GetRadiusX, traced.
+    pub(super) extern "system" fn radial_GetRadiusX(this: Obj) -> f32 {
+        crate::traced!(b"ID2D1RadialGradientBrush::GetRadiusX", [this]);
+        let answer = super::radial_GetRadiusX(this);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetRadiusX", answer);
+        answer
+    }
+    /// ID2D1RadialGradientBrush::GetRadiusY, traced.
+    pub(super) extern "system" fn radial_GetRadiusY(this: Obj) -> f32 {
+        crate::traced!(b"ID2D1RadialGradientBrush::GetRadiusY", [this]);
+        let answer = super::radial_GetRadiusY(this);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetRadiusY", answer);
+        answer
+    }
+    /// ID2D1RadialGradientBrush::SetCenter, traced.
+    pub(super) extern "system" fn radial_SetCenter(this: Obj, p: Point) {
+        crate::traced!(b"ID2D1RadialGradientBrush::SetCenter", [this, p]);
+        super::radial_SetCenter(this, p)
+    }
+    /// ID2D1RadialGradientBrush::SetGradientOriginOffset, traced.
+    pub(super) extern "system" fn radial_SetGradientOriginOffset(this: Obj, p: Point) {
+        crate::traced!(b"ID2D1RadialGradientBrush::SetGradientOriginOffset", [this, p]);
+        super::radial_SetGradientOriginOffset(this, p)
+    }
+    /// ID2D1RadialGradientBrush::SetRadiusX, traced.
+    pub(super) extern "system" fn radial_SetRadiusX(this: Obj, v: f32) {
+        crate::traced!(b"ID2D1RadialGradientBrush::SetRadiusX", [this, v]);
+        super::radial_SetRadiusX(this, v)
+    }
+    /// ID2D1RadialGradientBrush::SetRadiusY, traced.
+    pub(super) extern "system" fn radial_SetRadiusY(this: Obj, v: f32) {
+        crate::traced!(b"ID2D1RadialGradientBrush::SetRadiusY", [this, v]);
+        super::radial_SetRadiusY(this, v)
+    }
+    /// ID2D1SolidColorBrush::GetColor, traced.
+    pub(super) extern "system" fn solid_GetColor(this: Obj, ret: *mut ColorF) -> *mut ColorF {
+        crate::traced!(b"ID2D1SolidColorBrush::GetColor", [this, ret]);
+        let answer = super::solid_GetColor(this, ret);
+        crate::answered_call!(b"ID2D1SolidColorBrush::GetColor", answer);
+        answer
+    }
+    /// ID2D1SolidColorBrush::SetColor, traced.
+    pub(super) extern "system" fn solid_SetColor(this: Obj, c: *const ColorF) {
+        crate::traced!(b"ID2D1SolidColorBrush::SetColor", [this, c]);
+        super::solid_SetColor(this, c)
+    }
+    /// ID2D1GradientStopCollection::GetColorInterpolationGamma, traced.
+    pub(super) extern "system" fn stops_GetColorInterpolationGamma(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1GradientStopCollection::GetColorInterpolationGamma", [this]);
+        let answer = super::stops_GetColorInterpolationGamma(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetColorInterpolationGamma", answer);
+        answer
+    }
+    /// ID2D1GradientStopCollection::GetExtendMode, traced.
+    pub(super) extern "system" fn stops_GetExtendMode(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1GradientStopCollection::GetExtendMode", [this]);
+        let answer = super::stops_GetExtendMode(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetExtendMode", answer);
+        answer
+    }
+    /// ID2D1GradientStopCollection::GetGradientStopCount, traced.
+    pub(super) extern "system" fn stops_GetGradientStopCount(this: Obj) -> u32 {
+        crate::traced!(b"ID2D1GradientStopCollection::GetGradientStopCount", [this]);
+        let answer = super::stops_GetGradientStopCount(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetGradientStopCount", answer);
+        answer
+    }
+    /// ID2D1GradientStopCollection::GetGradientStops, traced.
+    pub(super) extern "system" fn stops_GetGradientStops(this: Obj, out: *mut Stop, n: u32) {
+        crate::traced!(b"ID2D1GradientStopCollection::GetGradientStops", [this, out, n]);
+        super::stops_GetGradientStops(this, out, n)
+    }
 }

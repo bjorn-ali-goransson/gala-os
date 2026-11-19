@@ -40,6 +40,32 @@ fn windows_composite_in_z_order_with_their_frames() {
     assert_eq!(d.pixel(client.0 + 4, client.1 + 5), DESKTOP_COLOR);
 }
 
+/// A window smaller than its own frame is drawn like any other: its
+/// caption has no room for the buttons it would hold, and the drawing
+/// clips (`Canvas::put`) instead of reaching outside the window. Office
+/// makes such a window, hidden, before Word's first real one.
+#[test]
+fn a_window_smaller_than_its_frame_is_drawn_clipped() {
+    let mut d = Desktop::new();
+    let t = title("tiny");
+    // What AdjustWindowRect gives for a 1 x 1 client area.
+    let a = d.create(1, 100, 100, 2 * BORDER + 1, BORDER + CAPTION + BORDER + 1, &t, 0).unwrap();
+    d.show(a, 1, true).unwrap();
+    // The one pixel of client area is the window's to present to.
+    d.present(a, Rect { x: 0, y: 0, w: 1, h: 1 }, &[0x00ff_0000], 1).unwrap();
+    assert_eq!(d.s.window(a).unwrap().client, [0x00ff_0000]);
+    // Drawn: the caption's own band, between the rounded corners, is
+    // the window's (the corners take the rest of a window this narrow,
+    // its one client pixel with them -- it is as wide as the rounding).
+    assert_ne!(d.pixel(100 + i64::from(BORDER), 100 + i64::from(CAPTION) / 2), DESKTOP_COLOR);
+    // One pixel in all, no client area at all: drawn too, and nothing
+    // of it reaches the desktop around it.
+    let b = d.create(1, 300, 300, 1, 1, &t, 0).unwrap();
+    d.show(b, 1, true).unwrap();
+    assert!(d.s.window(b).unwrap().client.is_empty());
+    assert_eq!(d.pixel(600, 600), DESKTOP_COLOR);
+}
+
 /// A 1024 x 768 desktop with one shown window "Notes" at (300, 100).
 fn desktop_with_window() -> (Desktop, u32) {
     let mut d = Desktop::new();
@@ -794,9 +820,11 @@ fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let down = out[..n].iter().find(|e| e.message == WM_LBUTTONDOWN).unwrap();
     assert_eq!((down.window, down.lparam), (p, 10 << 16 | 10));
     assert_eq!(d.s.active, Some(a));
-    // Too small for a frame is fine for a popup; unknown styles are not.
+    // Smaller than a frame is a window all the same (framed or not);
+    // wider than the desktop keeps, and unknown styles, are not.
     assert!(d.create(7, 0, 0, 2, 2, &title(""), STYLE_POPUP).is_ok());
-    assert!(d.create(7, 0, 0, 2, 2, &title(""), 0).is_err());
+    assert!(d.create(7, 0, 0, 2, 2, &title(""), 0).is_ok());
+    assert!(d.create(7, 0, 0, crate::nt::winstate::MAX_SIDE + 1, 2, &title(""), 0).is_err());
     assert!(d.create(7, 0, 0, 200, 200, &title(""), 0x8).is_err());
 }
 

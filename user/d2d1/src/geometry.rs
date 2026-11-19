@@ -16,12 +16,39 @@ use alloc::vec::Vec;
 
 use crate::raster::{self, Poly};
 use crate::{
-    D2DERR_WRONG_STATE, E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, IID_ELLIPSE_GEOMETRY,
-    IID_GEOMETRY, IID_GEOMETRY_SINK, IID_PATH_GEOMETRY, IID_RECTANGLE_GEOMETRY, IID_RESOURCE,
-    IID_ROUNDED_RECTANGLE_GEOMETRY, IID_SIMPLIFIED_SINK, Matrix, Obj, Point, RectF, Res, S_OK,
-    Spin, VTable, add_ref, get_factory, give, not_implemented, pt, push, put, query, read,
-    release_object, vtable_of,
+    ComRef, D2DERR_WRONG_STATE, E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, IID_ELLIPSE_GEOMETRY,
+    IID_GEOMETRY, IID_GEOMETRY_REALIZATION, IID_GEOMETRY_SINK, IID_PATH_GEOMETRY,
+    IID_RECTANGLE_GEOMETRY, IID_RESOURCE, IID_ROUNDED_RECTANGLE_GEOMETRY, IID_SIMPLIFIED_SINK,
+    Matrix, Obj, Point, RectF, Res, S_OK, Spin, VTable, add_ref, give, not_implemented, pt, push,
+    put, query, read, release_object, vtable_of,
 };
+
+/// The rectangle Direct2D answers for a geometry with nothing to
+/// measure: its corners are +inf and its extents +FLT_MAX, not the
+/// inverted infinities one would guess (measured).
+const NOTHING: RectF =
+    RectF { left: f32::INFINITY, top: f32::INFINITY, right: f32::MAX, bottom: f32::MAX };
+
+/// The bounds of the points added to it, `NOTHING` while there are none.
+struct Bounds(Option<RectF>);
+
+impl Bounds {
+    fn add(&mut self, q: Point) {
+        match &mut self.0 {
+            None => self.0 = Some(RectF { left: q.x, top: q.y, right: q.x, bottom: q.y }),
+            Some(r) => {
+                r.left = r.left.min(q.x);
+                r.top = r.top.min(q.y);
+                r.right = r.right.max(q.x);
+                r.bottom = r.bottom.max(q.y);
+            }
+        }
+    }
+
+    fn rect(self) -> RectF {
+        self.0.unwrap_or(NOTHING)
+    }
+}
 
 /// A segment of a figure, ending at its last point.
 #[derive(Clone, Copy)]
@@ -161,24 +188,54 @@ impl Path {
         self.figs.iter().map(|f| f.segs.len() as u32 + u32::from(f.closed)).sum()
     }
 
-    /// The bounds of every point through `m` (curves as flattened); an
-    /// empty path's are inverted infinities.
-    fn bounds(&self, m: &Matrix) -> Option<RectF> {
-        let mut r = RectF {
-            left: f32::INFINITY,
-            top: f32::INFINITY,
-            right: f32::NEG_INFINITY,
-            bottom: f32::NEG_INFINITY,
-        };
+    /// GetBounds: the bounds of the filled figures' points through `m`
+    /// (curves as flattened). A hollow figure is not in them -- a fill
+    /// does not draw it -- so a path of nothing but hollow figures has
+    /// no bounds at all (measured; `GetWidenedBounds` keeps them).
+    fn fill_bounds(&self, m: &Matrix) -> Option<RectF> {
+        let mut b = Bounds(None);
         for p in self.flatten(m)? {
-            for q in p.pts {
-                r.left = r.left.min(q.x);
-                r.top = r.top.min(q.y);
-                r.right = r.right.max(q.x);
-                r.bottom = r.bottom.max(q.y);
+            if p.filled {
+                for q in p.pts {
+                    b.add(q);
+                }
             }
         }
-        Some(r)
+        Some(b.rect())
+    }
+
+    /// GetWidenedBounds: the bounds of the outline a stroke `width` wide
+    /// in `style` covers, hollow figures included (a stroke draws them).
+    /// The widening is done in the geometry's own coordinates and `m`
+    /// applied to the outline afterwards, as Direct2D does it, so a
+    /// transform that scales the axes differently is not the same as
+    /// widening what it already scaled (measured). A width of zero asks
+    /// for the points alone, and a figure of one point has no outline at
+    /// all although stroking it draws its cap.
+    fn widened_bounds(&self, width: f32, style: &raster::StrokeStyle, m: &Matrix) -> Option<RectF> {
+        let mut b = Bounds(None);
+        let width = width.abs();
+        if width == 0.0 {
+            for p in self.flatten(m)? {
+                for q in p.pts {
+                    b.add(q);
+                }
+            }
+            return Some(b.rect());
+        }
+        let mut figs = Vec::new();
+        for p in self.flatten(&Matrix::IDENTITY)? {
+            let two = p.pts.first().is_some_and(|f| p.pts.iter().any(|q| q != f));
+            if two && !push(&mut figs, p) {
+                return None;
+            }
+        }
+        for poly in raster::stroke(&figs, width, style)? {
+            for q in poly {
+                b.add(m.apply(q));
+            }
+        }
+        Some(b.rect())
     }
 
     /// Whether `p` is inside the filled figures through `m`.
@@ -202,6 +259,20 @@ pub fn contains_point(polys: &[Vec<Point>], p: Point, winding: bool) -> bool {
         }
     }
     if winding { w != 0 } else { w & 1 != 0 }
+}
+
+/// A copy of a path (fallibly: a path is figures of segments, each in
+/// its own allocation).
+pub fn copy_path(p: &Path) -> Option<Path> {
+    let mut figs = Vec::new();
+    figs.try_reserve_exact(p.figs.len()).ok()?;
+    for f in &p.figs {
+        let mut segs = Vec::new();
+        segs.try_reserve_exact(f.segs.len()).ok()?;
+        segs.extend_from_slice(&f.segs);
+        figs.push(Fig { start: f.start, segs, closed: f.closed, filled: f.filled });
+    }
+    Some(Path { figs, winding: p.winding })
 }
 
 // ---- The geometry objects -------------------------------------------------
@@ -237,26 +308,35 @@ pub struct Geometry {
 }
 
 /// The ID2D1Geometry methods every shape shares (slots 3 to 16).
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace prefix geo_ ID2D1Geometry
+// gen-trace prefix rect_ ID2D1RectangleGeometry
+// gen-trace prefix rounded_ ID2D1RoundedRectangleGeometry
+// gen-trace prefix ellipse_ ID2D1EllipseGeometry
+// gen-trace prefix path_ ID2D1PathGeometry
+// gen-trace prefix sink_ ID2D1GeometrySink
+// gen-trace prefix realization_ ID2D1GeometryRealization
 macro_rules! geometry_slots {
     () => {
         [
             geo_query as *const (),
             add_ref as *const (),
             geo_release as *const (),
-            get_factory as *const (),
-            geo_GetBounds as *const (),
-            geo_GetWidenedBounds as *const (),
-            geo_StrokeContainsPoint as *const (),
-            geo_FillContainsPoint as *const (),
-            geo_CompareWithGeometry as *const (),
-            geo_Simplify as *const (),
-            geo_Tessellate as *const (),
-            geo_CombineWithGeometry as *const (),
-            geo_Outline as *const (),
-            geo_ComputeArea as *const (),
-            geo_ComputeLength as *const (),
-            geo_ComputePointAtLength as *const (),
-            geo_Widen as *const (),
+            crate::traced::get_factory as *const (),
+            traced::geo_GetBounds as *const (),
+            traced::geo_GetWidenedBounds as *const (),
+            traced::geo_StrokeContainsPoint as *const (),
+            traced::geo_FillContainsPoint as *const (),
+            traced::geo_CompareWithGeometry as *const (),
+            traced::geo_Simplify as *const (),
+            traced::geo_Tessellate as *const (),
+            traced::geo_CombineWithGeometry as *const (),
+            traced::geo_Outline as *const (),
+            traced::geo_ComputeArea as *const (),
+            traced::geo_ComputeLength as *const (),
+            traced::geo_ComputePointAtLength as *const (),
+            traced::geo_Widen as *const (),
         ]
     };
 }
@@ -277,14 +357,14 @@ const fn with_slots<const N: usize>(extra: [*const (); N]) -> [*const (); 21] {
     out
 }
 
-static RECT_VTBL: VTable<21> = VTable(with_slots([rect_GetRect as *const ()]));
-static ROUNDED_VTBL: VTable<21> = VTable(with_slots([rounded_GetRoundedRect as *const ()]));
-static ELLIPSE_VTBL: VTable<21> = VTable(with_slots([ellipse_GetEllipse as *const ()]));
+static RECT_VTBL: VTable<21> = VTable(with_slots([traced::rect_GetRect as *const ()]));
+static ROUNDED_VTBL: VTable<21> = VTable(with_slots([traced::rounded_GetRoundedRect as *const ()]));
+static ELLIPSE_VTBL: VTable<21> = VTable(with_slots([traced::ellipse_GetEllipse as *const ()]));
 static PATH_VTBL: VTable<21> = VTable(with_slots([
-    path_Open as *const (),
-    path_Stream as *const (),
-    path_GetSegmentCount as *const (),
-    path_GetFigureCount as *const (),
+    traced::path_Open as *const (),
+    traced::path_Stream as *const (),
+    traced::path_GetSegmentCount as *const (),
+    traced::path_GetFigureCount as *const (),
 ]));
 
 /// Whether `o` is one of this DLL's geometries.
@@ -365,7 +445,7 @@ extern "system" fn geo_GetBounds(this: Obj, m: *const Matrix, out: *mut RectF) -
         return E_INVALIDARG;
     }
     let m = matrix_or_identity(m);
-    match with_path(this, |p| p.bounds(&m)) {
+    match with_path(this, |p| p.fill_bounds(&m)) {
         Ok(Some(r)) => {
             put(out, r);
             S_OK
@@ -378,7 +458,7 @@ extern "system" fn geo_GetBounds(this: Obj, m: *const Matrix, out: *mut RectF) -
 extern "system" fn geo_GetWidenedBounds(
     this: Obj,
     width: f32,
-    _style: Obj,
+    style: Obj,
     m: *const Matrix,
     _tolerance: f32,
     out: *mut RectF,
@@ -387,18 +467,10 @@ extern "system" fn geo_GetWidenedBounds(
         return E_INVALIDARG;
     }
     let m = matrix_or_identity(m);
-    let h = width.abs() / 2.0 * m.max_scale();
-    match with_path(this, |p| p.bounds(&m)) {
+    let st = crate::factory::stroke_style_of(style);
+    match with_path(this, |p| p.widened_bounds(width, &st, &m)) {
         Ok(Some(r)) => {
-            put(
-                out,
-                RectF {
-                    left: r.left - h,
-                    top: r.top - h,
-                    right: r.right + h,
-                    bottom: r.bottom + h,
-                },
-            );
+            put(out, r);
             S_OK
         }
         Ok(None) => E_OUTOFMEMORY,
@@ -711,18 +783,18 @@ static SINK_VTBL: VTable<15> = VTable([
     sink_query as *const (),
     add_ref as *const (),
     sink_release as *const (),
-    sink_SetFillMode as *const (),
-    sink_SetSegmentFlags as *const (),
-    sink_BeginFigure as *const (),
-    sink_AddLines as *const (),
-    sink_AddBeziers as *const (),
-    sink_EndFigure as *const (),
-    sink_Close as *const (),
-    sink_AddLine as *const (),
-    sink_AddBezier as *const (),
-    sink_AddQuadraticBezier as *const (),
-    sink_AddQuadraticBeziers as *const (),
-    sink_AddArc as *const (),
+    traced::sink_SetFillMode as *const (),
+    traced::sink_SetSegmentFlags as *const (),
+    traced::sink_BeginFigure as *const (),
+    traced::sink_AddLines as *const (),
+    traced::sink_AddBeziers as *const (),
+    traced::sink_EndFigure as *const (),
+    traced::sink_Close as *const (),
+    traced::sink_AddLine as *const (),
+    traced::sink_AddBezier as *const (),
+    traced::sink_AddQuadraticBezier as *const (),
+    traced::sink_AddQuadraticBeziers as *const (),
+    traced::sink_AddArc as *const (),
 ]);
 
 extern "system" fn sink_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
@@ -1005,4 +1077,369 @@ fn arc_to_cubics(p0: Point, a: &Arc, out: &mut Vec<Seg>) -> Option<()> {
         t = t_next;
     }
     Some(())
+}
+
+// ---- Geometry realizations (ID2D1GeometryRealization, Direct2D 1.2) -------
+
+/// A geometry prepared for drawing. Direct2D 1.2 tessellates the geometry
+/// once, at a flattening tolerance, and draws that tessellation whenever
+/// DrawGeometryRealization is called; gala's rasterizer flattens every
+/// path as it draws it, so a realization keeps the path itself (and, for
+/// a stroked one, the width and stroke style it was made with) and draws
+/// like FillGeometry or DrawGeometry would. The pixels are the same; the
+/// tolerance asked for has no effect, because nothing is flattened in
+/// advance (ARCHITECTURE "Direct2D").
+#[repr(C)]
+pub struct Realization {
+    res: Res,
+    path: Path,
+    /// A stroked realization's width and its stroke style (None: a
+    /// filled one).
+    stroke: Option<(f32, ComRef)>,
+}
+
+static REALIZATION_VTBL: VTable<4> = VTable([
+    realization_query as *const (),
+    add_ref as *const (),
+    realization_release as *const (),
+    crate::traced::get_factory as *const (),
+]);
+
+/// Whether `o` is one of this DLL's geometry realizations.
+pub fn is_realization(o: Obj) -> bool {
+    vtable_of(o) == REALIZATION_VTBL.addr()
+}
+
+/// A realization of `path`, filled (`stroke` None) or stroked.
+pub fn create_realization(
+    factory: Obj,
+    path: Path,
+    stroke: Option<(f32, Obj)>,
+    out: *mut Obj,
+) -> HResult {
+    give(
+        out,
+        Realization {
+            res: Res::new(REALIZATION_VTBL.addr(), factory),
+            path,
+            stroke: stroke.map(|(width, style)| (width, ComRef::new(style))),
+        },
+    )
+}
+
+/// How to draw a realization: a copy of its path, and a stroked one's
+/// width and style. None when `o` is not one of ours, or on OOM.
+pub fn realization_of(o: Obj) -> Option<(Path, Option<(f32, Obj)>)> {
+    if !is_realization(o) {
+        return None;
+    }
+    // SAFETY: one of our realizations (its vtable says so).
+    let r = unsafe { &*(o as *const Realization) };
+    Some((copy_path(&r.path)?, r.stroke.as_ref().map(|(width, style)| (*width, style.0))))
+}
+
+extern "system" fn realization_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
+    query(this, b"ID2D1GeometryRealization", &[IID_RESOURCE, IID_GEOMETRY_REALIZATION], riid, out)
+}
+
+extern "system" fn realization_release(this: Obj) -> u32 {
+    release_object::<Realization>(this)
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module: each records
+/// the first call that reaches its method, and every call at all
+/// once `trace_from=` has armed one (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1EllipseGeometry::GetEllipse, traced.
+    pub(super) extern "system" fn ellipse_GetEllipse(this: Obj, out: *mut Ellipse) {
+        crate::traced!(b"ID2D1EllipseGeometry::GetEllipse", [this, out]);
+        super::ellipse_GetEllipse(this, out)
+    }
+    /// ID2D1Geometry::CombineWithGeometry, traced.
+    pub(super) extern "system" fn geo_CombineWithGeometry(
+        _this: Obj,
+        _other: Obj,
+        _mode: u32,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _sink: Obj,
+    ) -> HResult {
+        crate::traced!(
+            b"ID2D1Geometry::CombineWithGeometry",
+            [_this, _other, _mode, _m, _tolerance, _sink]
+        );
+        let answer = super::geo_CombineWithGeometry(_this, _other, _mode, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::CombineWithGeometry", answer);
+        answer
+    }
+    /// ID2D1Geometry::CompareWithGeometry, traced.
+    pub(super) extern "system" fn geo_CompareWithGeometry(
+        _this: Obj,
+        _other: Obj,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _out: *mut u32,
+    ) -> HResult {
+        crate::traced!(
+            b"ID2D1Geometry::CompareWithGeometry",
+            [_this, _other, _m, _tolerance, _out]
+        );
+        let answer = super::geo_CompareWithGeometry(_this, _other, _m, _tolerance, _out);
+        crate::answered_call!(b"ID2D1Geometry::CompareWithGeometry", answer);
+        answer
+    }
+    /// ID2D1Geometry::ComputeArea, traced.
+    pub(super) extern "system" fn geo_ComputeArea(
+        this: Obj,
+        m: *const Matrix,
+        _tolerance: f32,
+        out: *mut f32,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::ComputeArea", [this, m, _tolerance, out]);
+        let answer = super::geo_ComputeArea(this, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::ComputeArea", answer);
+        answer
+    }
+    /// ID2D1Geometry::ComputeLength, traced.
+    pub(super) extern "system" fn geo_ComputeLength(
+        this: Obj,
+        m: *const Matrix,
+        _tolerance: f32,
+        out: *mut f32,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::ComputeLength", [this, m, _tolerance, out]);
+        let answer = super::geo_ComputeLength(this, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::ComputeLength", answer);
+        answer
+    }
+    /// ID2D1Geometry::ComputePointAtLength, traced.
+    pub(super) extern "system" fn geo_ComputePointAtLength(
+        _this: Obj,
+        _length: f32,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _point: *mut Point,
+        _tangent: *mut Point,
+    ) -> HResult {
+        crate::traced!(
+            b"ID2D1Geometry::ComputePointAtLength",
+            [_this, _length, _m, _tolerance, _point, _tangent]
+        );
+        let answer =
+            super::geo_ComputePointAtLength(_this, _length, _m, _tolerance, _point, _tangent);
+        crate::answered_call!(b"ID2D1Geometry::ComputePointAtLength", answer);
+        answer
+    }
+    /// ID2D1Geometry::FillContainsPoint, traced.
+    pub(super) extern "system" fn geo_FillContainsPoint(
+        this: Obj,
+        p: Point,
+        m: *const Matrix,
+        _tolerance: f32,
+        out: *mut i32,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::FillContainsPoint", [this, p, m, _tolerance, out]);
+        let answer = super::geo_FillContainsPoint(this, p, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::FillContainsPoint", answer);
+        answer
+    }
+    /// ID2D1Geometry::GetBounds, traced.
+    pub(super) extern "system" fn geo_GetBounds(
+        this: Obj,
+        m: *const Matrix,
+        out: *mut RectF,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::GetBounds", [this, m, out]);
+        let answer = super::geo_GetBounds(this, m, out);
+        crate::answered_call!(b"ID2D1Geometry::GetBounds", answer);
+        answer
+    }
+    /// ID2D1Geometry::GetWidenedBounds, traced.
+    pub(super) extern "system" fn geo_GetWidenedBounds(
+        this: Obj,
+        width: f32,
+        style: Obj,
+        m: *const Matrix,
+        _tolerance: f32,
+        out: *mut RectF,
+    ) -> HResult {
+        crate::traced!(
+            b"ID2D1Geometry::GetWidenedBounds",
+            [this, width, style, m, _tolerance, out]
+        );
+        let answer = super::geo_GetWidenedBounds(this, width, style, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::GetWidenedBounds", answer);
+        answer
+    }
+    /// ID2D1Geometry::Outline, traced.
+    pub(super) extern "system" fn geo_Outline(
+        _this: Obj,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _sink: Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::Outline", [_this, _m, _tolerance, _sink]);
+        let answer = super::geo_Outline(_this, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Outline", answer);
+        answer
+    }
+    /// ID2D1Geometry::Simplify, traced.
+    pub(super) extern "system" fn geo_Simplify(
+        _this: Obj,
+        _option: u32,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _sink: Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::Simplify", [_this, _option, _m, _tolerance, _sink]);
+        let answer = super::geo_Simplify(_this, _option, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Simplify", answer);
+        answer
+    }
+    /// ID2D1Geometry::StrokeContainsPoint, traced.
+    pub(super) extern "system" fn geo_StrokeContainsPoint(
+        this: Obj,
+        p: Point,
+        width: f32,
+        style: Obj,
+        m: *const Matrix,
+        _tolerance: f32,
+        out: *mut i32,
+    ) -> HResult {
+        crate::traced!(
+            b"ID2D1Geometry::StrokeContainsPoint",
+            [this, p, width, style, m, _tolerance, out]
+        );
+        let answer = super::geo_StrokeContainsPoint(this, p, width, style, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::StrokeContainsPoint", answer);
+        answer
+    }
+    /// ID2D1Geometry::Tessellate, traced.
+    pub(super) extern "system" fn geo_Tessellate(
+        _this: Obj,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _sink: Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::Tessellate", [_this, _m, _tolerance, _sink]);
+        let answer = super::geo_Tessellate(_this, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Tessellate", answer);
+        answer
+    }
+    /// ID2D1Geometry::Widen, traced.
+    pub(super) extern "system" fn geo_Widen(
+        _this: Obj,
+        _width: f32,
+        _style: Obj,
+        _m: *const Matrix,
+        _tolerance: f32,
+        _sink: Obj,
+    ) -> HResult {
+        crate::traced!(b"ID2D1Geometry::Widen", [_this, _width, _style, _m, _tolerance, _sink]);
+        let answer = super::geo_Widen(_this, _width, _style, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Widen", answer);
+        answer
+    }
+    /// ID2D1PathGeometry::GetFigureCount, traced.
+    pub(super) extern "system" fn path_GetFigureCount(this: Obj, out: *mut u32) -> HResult {
+        crate::traced!(b"ID2D1PathGeometry::GetFigureCount", [this, out]);
+        let answer = super::path_GetFigureCount(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::GetFigureCount", answer);
+        answer
+    }
+    /// ID2D1PathGeometry::GetSegmentCount, traced.
+    pub(super) extern "system" fn path_GetSegmentCount(this: Obj, out: *mut u32) -> HResult {
+        crate::traced!(b"ID2D1PathGeometry::GetSegmentCount", [this, out]);
+        let answer = super::path_GetSegmentCount(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::GetSegmentCount", answer);
+        answer
+    }
+    /// ID2D1PathGeometry::Open, traced.
+    pub(super) extern "system" fn path_Open(this: Obj, out: *mut Obj) -> HResult {
+        crate::traced!(b"ID2D1PathGeometry::Open", [this, out]);
+        let answer = super::path_Open(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::Open", answer);
+        answer
+    }
+    /// ID2D1PathGeometry::Stream, traced.
+    pub(super) extern "system" fn path_Stream(_this: Obj, _sink: Obj) -> HResult {
+        crate::traced!(b"ID2D1PathGeometry::Stream", [_this, _sink]);
+        let answer = super::path_Stream(_this, _sink);
+        crate::answered_call!(b"ID2D1PathGeometry::Stream", answer);
+        answer
+    }
+    /// ID2D1RectangleGeometry::GetRect, traced.
+    pub(super) extern "system" fn rect_GetRect(this: Obj, out: *mut RectF) {
+        crate::traced!(b"ID2D1RectangleGeometry::GetRect", [this, out]);
+        super::rect_GetRect(this, out)
+    }
+    /// ID2D1RoundedRectangleGeometry::GetRoundedRect, traced.
+    pub(super) extern "system" fn rounded_GetRoundedRect(this: Obj, out: *mut RoundedRect) {
+        crate::traced!(b"ID2D1RoundedRectangleGeometry::GetRoundedRect", [this, out]);
+        super::rounded_GetRoundedRect(this, out)
+    }
+    /// ID2D1GeometrySink::AddArc, traced.
+    pub(super) extern "system" fn sink_AddArc(this: Obj, a: *const Arc) {
+        crate::traced!(b"ID2D1GeometrySink::AddArc", [this, a]);
+        super::sink_AddArc(this, a)
+    }
+    /// ID2D1GeometrySink::AddBezier, traced.
+    pub(super) extern "system" fn sink_AddBezier(this: Obj, b: *const Bezier) {
+        crate::traced!(b"ID2D1GeometrySink::AddBezier", [this, b]);
+        super::sink_AddBezier(this, b)
+    }
+    /// ID2D1GeometrySink::AddBeziers, traced.
+    pub(super) extern "system" fn sink_AddBeziers(this: Obj, b: *const Bezier, n: u32) {
+        crate::traced!(b"ID2D1GeometrySink::AddBeziers", [this, b, n]);
+        super::sink_AddBeziers(this, b, n)
+    }
+    /// ID2D1GeometrySink::AddLine, traced.
+    pub(super) extern "system" fn sink_AddLine(this: Obj, p: Point) {
+        crate::traced!(b"ID2D1GeometrySink::AddLine", [this, p]);
+        super::sink_AddLine(this, p)
+    }
+    /// ID2D1GeometrySink::AddLines, traced.
+    pub(super) extern "system" fn sink_AddLines(this: Obj, pts: *const Point, n: u32) {
+        crate::traced!(b"ID2D1GeometrySink::AddLines", [this, pts, n]);
+        super::sink_AddLines(this, pts, n)
+    }
+    /// ID2D1GeometrySink::AddQuadraticBezier, traced.
+    pub(super) extern "system" fn sink_AddQuadraticBezier(this: Obj, q: *const Quadratic) {
+        crate::traced!(b"ID2D1GeometrySink::AddQuadraticBezier", [this, q]);
+        super::sink_AddQuadraticBezier(this, q)
+    }
+    /// ID2D1GeometrySink::AddQuadraticBeziers, traced.
+    pub(super) extern "system" fn sink_AddQuadraticBeziers(this: Obj, q: *const Quadratic, n: u32) {
+        crate::traced!(b"ID2D1GeometrySink::AddQuadraticBeziers", [this, q, n]);
+        super::sink_AddQuadraticBeziers(this, q, n)
+    }
+    /// ID2D1GeometrySink::BeginFigure, traced.
+    pub(super) extern "system" fn sink_BeginFigure(this: Obj, start: Point, begin: u32) {
+        crate::traced!(b"ID2D1GeometrySink::BeginFigure", [this, start, begin]);
+        super::sink_BeginFigure(this, start, begin)
+    }
+    /// ID2D1GeometrySink::Close, traced.
+    pub(super) extern "system" fn sink_Close(this: Obj) -> HResult {
+        crate::traced!(b"ID2D1GeometrySink::Close", [this]);
+        let answer = super::sink_Close(this);
+        crate::answered_call!(b"ID2D1GeometrySink::Close", answer);
+        answer
+    }
+    /// ID2D1GeometrySink::EndFigure, traced.
+    pub(super) extern "system" fn sink_EndFigure(this: Obj, end: u32) {
+        crate::traced!(b"ID2D1GeometrySink::EndFigure", [this, end]);
+        super::sink_EndFigure(this, end)
+    }
+    /// ID2D1GeometrySink::SetFillMode, traced.
+    pub(super) extern "system" fn sink_SetFillMode(this: Obj, mode: u32) {
+        crate::traced!(b"ID2D1GeometrySink::SetFillMode", [this, mode]);
+        super::sink_SetFillMode(this, mode)
+    }
+    /// ID2D1GeometrySink::SetSegmentFlags, traced.
+    pub(super) extern "system" fn sink_SetSegmentFlags(this: Obj, flags: u32) {
+        crate::traced!(b"ID2D1GeometrySink::SetSegmentFlags", [this, flags]);
+        super::sink_SetSegmentFlags(this, flags)
+    }
 }

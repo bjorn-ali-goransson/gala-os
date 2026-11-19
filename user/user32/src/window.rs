@@ -261,11 +261,18 @@ pub(crate) fn calc_frame(hwnd: Hwnd, changed: bool) {
 }
 
 /// Where top-level window `w` at (x, y), w x h is on the desktop: its
-/// rectangle, or its client area's for a frame of its own.
+/// rectangle, or its client area's for a frame of its own. Either way
+/// at least the size that leaves the one pixel of client area every
+/// window has here, so that the desktop's window and this one's buffer
+/// hold the same pixels -- a window smaller than its own frame (Office
+/// makes one) keeps the size it reports and is drawn at this one.
 pub(crate) fn desktop_rect(w: &Window, x: i32, y: i32, wd: i32, ht: i32) -> (i32, i32, i32, i32) {
     match w.custom {
         Some((b, t)) => (x + b, y + t, (wd - 2 * b).max(1), (ht - t - b).max(1)),
-        None => (x, y, wd, ht),
+        None => {
+            let (b, top) = frame(w);
+            (x, y, wd.max(2 * b + 1), ht.max(top + b + 1))
+        }
     }
 }
 
@@ -1154,9 +1161,21 @@ pub extern "system" fn CreateWindowExW(
         0
     };
     let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
-    let (w, h) =
-        if w == CW_USEDEFAULT { (640, 480) } else { (w.max(2 * b + 1), h.max(top + bar + b + 1)) };
-    let (cw, ch) = (w - 2 * b, h - top - bar - b);
+    let (w, h) = if w == CW_USEDEFAULT { (640, 480) } else { (w.max(0), h.max(0)) };
+    // A window smaller than its own frame is made on Windows, and the
+    // kernel keeps one (winstate::size_fits): the window is that size
+    // and GetWindowRect says so. Its client area is not nothing here
+    // but one pixel, because every client area is a shared section of
+    // at least that (`desktop_rect` asks the desktop for a window that
+    // leaves room for it); GetClientRect answers 1 x 1 where Windows
+    // answers 0 x 0, which is the gap in the ledger.
+    if w < 2 * b + 1 || h < top + bar + b + 1 {
+        unsupported(
+            b"user32.dll!a window smaller than its frame (a pixel of client area, not none)",
+            ((w as u64) << 32) | h as u64,
+        );
+    }
+    let (cw, ch) = ((w - 2 * b).max(1), (h - top - bar - b).max(1));
     // SAFETY: plain calls; the title is the caller's NUL-terminated string.
     let (pixels, section, desktop) = unsafe {
         let Some((base, section)) = crate::surface::alloc(cw, ch, bar) else {
