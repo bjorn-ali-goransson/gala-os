@@ -8425,7 +8425,14 @@ draws nothing; user32 loads gdi32 lazily).
 - **Lazy desktop**: a session's desktop goes live at its first GUI call
   (`desktop::with`, `desktop::screen`) and is drawn only when something
   shows it (the screen, `presenter=`); on a machine nothing shows it is
-  bare (below) and nothing is laid out or drawn.
+  bare (below) and nothing is laid out or drawn. A boot that keeps
+  running (no `qemu_exit`: a machine, the downloadable images) makes the
+  console session's desktop live when the boot's own work ends
+  (`desktop::show_console_at_boot_end`, logged either way), so a boot
+  whose programs are console programs ends on the desktop, not on the
+  splash (or, on virtio-gpu, a screen never flushed); a test boot exits
+  first and draws nothing it did not ask for (`desktop_at_boot`, its
+  twin).
 - **Bare desktops.** A machine with no screen and no `presenter=` (BIOS
   boots, gala-um) or in the server profile has nothing that can show a
   desktop (`desktop::bare`, fixed before any program runs). There each
@@ -8569,7 +8576,10 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries), filtered by
-  thread. Waking: each thread waiting for a message (GetMessage,
+  thread. A message that finds every entry taken is lost (PostMessage
+  returns 0, a key `pump` takes or the WM_CHAR TranslateMessage makes
+  goes nowhere): ledgered `user32.dll!message queue full`, the detail
+  the message. Waking: each thread waiting for a message (GetMessage,
   MsgWaitForMultipleObjects, WaitMessage) waits on an auto-reset event
   of its own (made before its first look at the queue, so a wake between
   the look and the wait is kept) and on the process's event, which the
@@ -11043,8 +11053,10 @@ files Word, Excel and PowerPoint load import `d2d1.dll`, by ordinal #1 to
 D2D1IsMatrixInvertible, D2D1InvertMatrix; `build.rs` exports them at
 those ordinals). `user/d2d1`, x64 only; `d2d1_test`, whose expected
 values are those of Wine's d2d1 tests (run on Windows) and Microsoft's
-documentation, and the `d2d1_window` screen scenario (a window drawn
-through a window render target; `d2d1_test window`).
+documentation, the `d2d1_window` screen scenario (a window drawn
+through a window render target; `d2d1_test window`) and
+`d2d1_device_test` (Direct2D 1.1 over a program's own Direct3D 11
+device, the path Office draws with).
 
 - **Objects**: every object starts with a vtable and a reference count
   (as windowscodecs's); every resource (brush, bitmap, geometry, stroke
@@ -11056,9 +11068,12 @@ through a window render target; `d2d1_test window`).
 - **The factory**: each D2D1CreateFactory is a new object; it answers
   ID2D1Factory and ID2D1Multithread (on both kinds, as Windows 10's
   does; Enter/Leave hold a critical section on a multi-threaded factory,
-  nothing on a single-threaded one). ID2D1Factory1 and later are not
-  answered (recorded).
-- **Render targets** (`target.rs`): one object, three backings. A WIC
+  nothing on a single-threaded one). It answers ID2D1Factory1 as well
+  (CreateDevice, below); ID2D1Factory2 and later are not answered
+  (recorded), and ID2D1Factory1's own stroke styles, path geometries,
+  drawing state blocks, GDI metafiles and effect registry are recorded
+  and E_NOTIMPL.
+- **Render targets** (`target.rs`): one object, four backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
   IWICBitmap: gala's windowscodecs or the caller's); its format is the
@@ -11068,16 +11083,41 @@ through a window render target; `d2d1_test window`).
   size: BeginDraw copies the DC's pixels in, EndDraw copies them back
   only when something was drawn (GDI's drawing between them survives an
   empty frame). A window target keeps its DIB section between frames
-  and copies it to the window's DC at EndDraw. The transform then the
-  DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs.
+  and copies it to the window's DC at EndDraw. A device context
+  (below) is the fourth. The transform then the
+  DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs
+  (D2D1_UNIT_MODE_PIXELS leaves the DPI scale out, so they are pixels).
   Drawing outside BeginDraw/EndDraw draws nothing and fails the next
   EndDraw with D2DERR_WRONG_STATE; clips or layers left pushed fail it
   with D2DERR_PUSH_POP_UNBALANCED.
-- **No GPU**: every target draws in software, also when
-  D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's
+- **The device and its contexts** (`device.rs`, Direct2D 1.1): this is
+  how Office draws. ID2D1Factory1::CreateDevice takes the program's
+  IDXGIDevice (on gala, DXVK's over lavapipe: GPU G2) and gives an
+  ID2D1Device; its CreateDeviceContext gives a render target of the
+  fourth kind, with a buffer of its own and no size until SetTarget
+  gives it an ID2D1Bitmap1. CreateBitmapFromDxgiSurface makes that
+  bitmap over a surface of the program's own Direct3D 11 device (its
+  swap chain's back buffer): the surface's IDXGISurface::GetDesc gives
+  the size and format, and QueryInterface for ID3D11Texture2D the
+  texture behind it, whose device's immediate context writes into it.
+  Drawing stays in software: BeginDraw fills the context's buffer from
+  the target bitmap, the rasterizer draws the frame, and EndDraw (or
+  Flush) writes the buffer back into the bitmap and through it into the
+  surface with ID3D11DeviceContext::UpdateSubresource -- the one way
+  into a texture the program uses as a render target that needs neither
+  a shader nor a staging texture of our own. A context with no target
+  is 0 x 0 and its frame fails with D2DERR_WRONG_STATE, as Direct2D's
+  does. Nothing here is linked against: every Direct3D and DXGI call
+  goes through the vtable slot its interface declares, so d2d1.dll
+  imports no Direct3D and works with whichever d3d11.dll the program
+  brought. Test: `d2d1_device_test`.
+- **No GPU of its own**: every target draws in software, also when
+  D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's own
   d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives
   on a machine whose only adapter is the Basic Render Driver (a CPU
-  device). D3D11-backed targets come with GPU G2.
+  device). What a device context draws is software too; what the
+  program's Direct3D 11 device does with the surface afterwards is
+  DXVK's.
 - **The rasterizer** (`raster.rs`): figures flattened to polygons (a
   Bézier subdivided to within 0.1 pixel), coverage on a 4 x 4 sample grid
   per pixel (aliased mode: the pixel's centre), the fill rule (alternate
@@ -11107,12 +11147,16 @@ through a window render target; `d2d1_test window`).
   (DrawText, DrawTextLayout, DrawGlyphRun: DirectWrite has no text
   layout yet), layers (PushLayer is counted, its mask not applied),
   opacity masks and FillGeometry's opacity brush, meshes, drawing state
-  blocks, compatible render targets, shared bitmaps, DXGI surface
-  targets, geometry groups and transformed geometries, Simplify,
-  Tessellate, Widen, Outline, CombineWithGeometry, dashes (drawn
-  solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
-  interface, ID2D1Factory1 and device contexts, bitmaps from WIC formats
-  other than 32bppPBGRA and 32bppBGR (D2DERR_UNSUPPORTED_PIXEL_FORMAT).
+  blocks, compatible render targets, shared bitmaps,
+  CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface, which
+  device contexts replace), geometry groups and transformed geometries,
+  Simplify, Tessellate, Widen, Outline, CombineWithGeometry, dashes
+  (drawn solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
+  interface, bitmaps from WIC formats other than 32bppPBGRA and
+  32bppBGR (D2DERR_UNSUPPORTED_PIXEL_FORMAT), and, on a device context,
+  effects, command lists, colour contexts, image brushes, DrawImage,
+  DrawGdiMetafile, a primitive blend other than source-over and a
+  perspective transform on DrawBitmap.
 
 ### DirectWrite
 
@@ -11158,8 +11202,9 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 
 ### Known limits
 
-- Direct2D: software only, no text, layers, compatible targets or
-  Factory1 device contexts yet ("Direct2D" lists them).
+- Direct2D: software only (a device context's frame is drawn on the
+  CPU and written into the program's DXGI surface), no text, layers,
+  compatible targets, effects or command lists ("Direct2D" lists them).
 - DirectWrite: custom collections and files hold only the system's
   fonts (gala's font objects are static); glyph run analysis without
   rotation, skew or sideways runs; no text layout, IDWriteFactory1+.
@@ -14637,12 +14682,22 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   threads unwind, and from then on a Linux process's `comm` and root
   are being dismantled, so its image would be the one its NT process
   was created from (`sh` for one that had exec'd `sleep`) and its
-  distribution empty. Task Manager showed such a row and "End task" on
-  it reached a pid the kernel no longer had (STATUS_INVALID_CID).
-  `process::running` keeps them, since the state dump must still show a
-  process stuck in teardown; this list drops them. `taskmgr_test` ends
-  a Linux process of its own and watches what the list says of it while
-  it goes.
+  distribution empty: a row of its own, in a group ahead of the
+  distribution's. Invariant: the exit status is checked again after a
+  record's parts are read (`tasks::still_themselves`), and the record
+  is dropped if it is set by then; teardown starts only after the
+  status is recorded, so a part read from teardown always comes with
+  that second check failing. Checking only before the read left a
+  window as long as the read (wide on a starved processor): `sleep`,
+  killed while it was being read, was listed as such an `sh`, and End
+  task on `sh` aimed at it (STATUS_INVALID_CID). A query that drops one
+  says so (`tasks: ... left out N that ended while being read`, the
+  `tasks query` event's `ended`). `process::running` keeps them, since
+  the state dump must still show a process stuck in teardown.
+  `taskmgr_test` ends a Linux process of its own and watches what the
+  list says of it while it goes; on a loaded host
+  (`XTASK_REPEAT=20 XTASK_REPEAT_JOBS=4` beside busy loops) it is what
+  reports the race (`listed as "sh", not sleep`).
 - **Windows' contents stay Windows'**: NtQuerySystemInformation's
   SystemProcessInformation (and so Toolhelp and psapi) lists NT
   processes only; a Linux process is no Windows process. `/proc` inside
@@ -14727,10 +14782,11 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   the Linux personality's own processes under "Linux"; gala's UI says
   Linux, never WSL); columns Name, PID, Status ("Not responding"),
   User name, CPU (its share of all processors between two samples,
-  `taskmgr::Shares`; the cell tinted as Windows does), Memory; a click
-  on a header sorts each group by it (numbers largest first; again the
-  other way). A blue tile marks a Windows process, an orange one a
-  Linux process.
+  `taskmgr::Shares`; the cell tinted as Windows does), Memory; the CPU
+  and Memory cells carry the process's own last minute as a sparkline
+  behind the number (below); a click on a header sorts each group by it
+  (numbers largest first; again the other way). A blue tile marks a
+  Windows process, an orange one a Linux process.
 - **End task** (the button, or Delete): a Windows process gets
   OpenProcess and TerminateProcess(1), as Windows' Task Manager; a Linux
   process SIGTERM, then SIGKILL if it is still listed after
@@ -14739,10 +14795,63 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
 - **Performance**: a graph per processor (busy per mille between
   samples), memory in use, disk and network throughput, a minute of
   history each (`taskmgr::History`), the process, thread and handle
-  counts.
+  counts. A list on the left (`paint_side`, `SIDE_W` wide, a row every
+  `SIDE_ROW_H`) gives every metric its name, its value, its peak where
+  one is meant, and the same minute as a sparkline, as Windows'
+  Performance sidebar: the CPU total, each processor, memory, disk,
+  network, and the process, thread and handle counts.
 - **Details**: every process in one flat list, sortable, with CPU time,
   commit size, threads, handles or fds, platform (Windows, Windows
   32-bit, Linux with the distribution) and the command line.
+- **Sparklines** (`taskmgr::History`, `taskmgr::line` and
+  `taskmgr::Trails`, the model; `spark` in `main.rs` draws them): every
+  metric carries its last minute as a line with its load under it.
+  - **The ring**: `History` is a fixed ring of `HISTORY` (60) samples,
+    one a second from the refresh the views already do; a push
+    overwrites the oldest in place, so nothing allocates after it is
+    made. `last()` is the newest sample, `max()` the peak.
+  - **The geometry** is `taskmgr::line` (host-tested, no floats): a
+    history's points in a box, each point's height its sample's share
+    of a scale (clamped to it), the newest at the right edge. `over` is
+    how many samples the box is wide. A Performance graph and a
+    sidebar row pass the ring's whole `cap`, so the line fills from the
+    right over the minute the gridlines mark; a row's cell passes the
+    samples it holds, so the first seconds of a process are a line
+    across its cell and not a dot in the corner (a cell has no axis to
+    read a time off anyway). A history with no samples draws nothing (a
+    row not sampled yet), where a history of zeroes is a flat line on
+    the floor (an idle process).
+  - **A ring per process**: `Trails` keeps a pair of rings (CPU share,
+    working set) for each process listed, keyed by pid **and** start
+    time, so a row that ends takes its lines with it and a reused pid
+    starts its own. Each refresh retains only the processes the query
+    returned and pushes one sample to each.
+  - **The scales**: CPU against all the processors and Performance's
+    memory against the machine's, both 1000 per mille; a throughput or
+    a count against its own peak, which is written beside the value.
+    The Memory column scales to the largest row listed (floored at
+    `MEMORY_FLOOR`, 10 per mille of the machine): against physical
+    memory every row would rest on the floor, and the largest row's
+    size is already in the column to read.
+  - **Drawing** (`spark`): the points are laid out in `taskmgr::SUB`ths
+    of a pixel and each column is painted from `taskmgr::stroke`, which
+    says which rows the line covers and how much of the first and the
+    last of them; a row covered in part is blended with what is behind
+    it. A minute in 94 pixels moves the line by a fraction of a pixel a
+    sample, which whole pixels would draw as a staircase. The line is a
+    pixel thick and a column where it climbs covers every row it
+    passes, so it is joined and not a dotted trail. The area under it is
+    the metric's colour mixed towards white, `GRAPH_SHADE` (600 per
+    mille) in a graph and `CELL_SHADE` (820) in a row's cell, where the
+    number is read over it. A cell draws behind its text rather than in
+    a column of its own (the Details view's twelve columns already fill
+    the window), and over the row's own background — the selection, or
+    the CPU column's tint — which it is given to blend with.
+  - Checked on the screen (`TASKMGR_SCREEN`): the sidebar's lines in
+    the right-hand columns of their boxes, where only a view that has
+    run some seconds has drawn (1.6 columns a second); the busy
+    window's CPU cell risen and its memory cell filled; and an idle
+    `cat`'s CPU cell background above the floor its line rests on.
 - **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
   (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
   desktop tracks Ctrl and Shift; no program sees that Esc; logged
@@ -14754,7 +14863,8 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   is the CLI's way; `gala ps` lists both personalities from the same
   query and `gala kill <pid>` ends a Linux process as End task does.
 - **Limits**: no per-process disk, network, GPU or power columns (no
-  counters: ledgered); no process tree within a group; "Not responding"
+  counters: ledgered), and so no sparkline for them either; no process
+  tree within a group; "Not responding"
   is decided for Windows windows only (below); the Users, Services, Startup and App history pages are not
   there; End task waits for a distribution's end on the window's
   thread (up to `lx::distro`'s 10 s).

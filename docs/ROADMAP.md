@@ -64,9 +64,22 @@ The ordering rules in force (set by the owner):
 
 ## Current focus
 
-**The next big thing (the owner): Microsoft Office, item OF, with
-everything it depends on.** It goes before the list below (work in
-flight finishes: LD's first GTK program). Its chain, in order:
+**Next (the owner): a laptop that runs gala and takes every release by
+itself.** In order:
+1. **The desktop on ARM** (item AR, "Next" 0): the downloadable
+   aarch64 image boots to a desktop that keyboard and mouse can use,
+   GTK programs on aarch64, `arm_lx_wl_popup`'s hang.
+2. **The installer** (item IN): gala installed from its USB image onto
+   a machine's disk, which then boots by itself.
+3. **Live update working end to end** (items R8 and R9, on item HW's
+   machine): R8's updater in gala takes each release from
+   `updates.gala-os.com` and hands it to R9; the user-mode half of R9.
+   The machine also needs item HW's drivers (its disk, USB input, a
+   network: a wired USB adapter first, Wi-Fi, item WF, after).
+
+**Then (the owner): Microsoft Office, item OF, with everything it
+depends on.** It goes before the list below (work in flight finishes:
+LD's first GTK program). Its chain, in order:
 OF step 1's gap analysis (what the apps import and register, ranked
 against gala); GPU G2's rest (DXVK: Direct3D 11 in software over
 lavapipe, which the apps' rendering expects); COM/OLE depth and the
@@ -79,10 +92,12 @@ In order, after it:
    this list; heavier, meatier work before polish): its window, input
    and accessibility tree are done (`chromium_window`, `chromium_uia`),
    ChromeDriver too (`chromium_driver`); now the conformance report.
-   Its blockers (Chrome's out-of-memory exceptions 0xE0000008,
-   ChromeDriver not exiting, the full WPT run) go with item 12 to the
-   Windows machine, where gala runs under KVM (the owner;
-   `docs/windows-kvm-brief.md`).
+   Its blockers went with item 12 to the Windows machine, where gala
+   runs under KVM (the owner; `docs/windows-kvm-brief.md`): the whole
+   `dom/nodes` directory runs there (13326 of 13397 subtests), and
+   neither Chrome's out-of-memory exceptions (0xE0000008) nor
+   ChromeDriver's hang reproduces under KVM, so both wait on the
+   conditions they were seen under (stage 2's "Next" (b) and (c)).
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -121,7 +136,16 @@ In order, after it:
     programs with run-all's `ms` and `cargo xtask compare`, Chromium's
     page loads, Python) profiled on both, compared operation by
     operation, gala's hot spots fixed in order of the gap, each with a
-    benchmark in `bench` and its numbers in PERF.md.
+    benchmark in `bench` and its numbers in PERF.md. `bench` is compared
+    (PERF.md 12): the system call path is 7x Windows' and the widest
+    gap, a reservation split into 4096 runs 6x where one run is faster,
+    `demand_zero_fault` 3-8x with 3x variance of its own, and image
+    loads 8-31x faster here. Next: the scenarios' programs
+    (run-all's `ms` against `cargo xtask report`, then `cargo xtask
+    compare`), Chromium's page loads and Python, then `cargo xtask
+    profile` on the system call path -- after rechecking #43 (the
+    profiler's samples hung the boot thread under KVM) there, since a
+    tick's writing is bounded now (ARCHITECTURE, the profiler).
 
 Then the next breakthroughs (the owner), in this order: **LD**, desktop
 Linux applications (dynamic glibc programs first, then the Wayland
@@ -202,7 +226,8 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next the remaining test programs |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next (the owner) the desktop on ARM: the boot ends on a usable desktop (done: `desktop_at_boot`), GTK on aarch64 and the popup hang left |
+| VM | Virtual machines on gala | later | wanted, not scheduled (the owner); step 1: QEMU's emulation (TCG) as an ordinary program, a small Linux guest booted inside gala; step 2: gala as the hypervisor (VT-x/AMD-V, ARM's EL2) behind Linux's `/dev/kvm`, then the Windows Hypervisor Platform (`WinHvPlatform.dll`) |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -226,9 +251,11 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
+| IN | The installer: gala onto a machine's disk | planned (the owner: after AR's desktop) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen, then raises 0xe0000002 unhandled 29 s in, after no rendering device answered it (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 is there now (ID2D1Factory1, the device, device contexts and target bitmaps over DXGI surfaces: `d2d1_device_test`), and Word asks for ID2D1Factory2 instead, falls back to the 1.0 path's D3D10CreateDevice1 stub and ends with status 0 after 30 s with no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -247,7 +274,7 @@ has a section under "Open items".
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-3 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding"); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent, and sparklines beside every metric |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent |
 | EX | A file explorer over every file system | in progress | steps 1-2 done (the drives and the WSL distributions in one tree) and part of 3-4 (`explorer`); next the namespace's rest (Desktop, Recycle Bin, context menus), file dialogs, drag and drop |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
@@ -1318,7 +1345,9 @@ the kernel.
   `mbsrtowcs` and `wctype`, which its import tables need; `d3d11_test`
   (a device and a swap chain, a cleared back buffer with a copied
   block, read back, presented and checked on the screen). No shader,
-  so no HLSL compiler yet.
+  so no HLSL compiler yet. `office_word` ships the same pair beside
+  WINWORD.EXE and Word creates a D3D_FEATURE_LEVEL_11_0 device there,
+  which is how a program other than a test gets one (ROADMAP OF).
 
 **Next**:
 1. `virtio_gpu_reset`'s QEMU wedge (open): once on CI, QEMU stopped
@@ -1682,10 +1711,21 @@ samples).
    lost-wake-up stress and the state dump's keyed-event lines found no
    lost wake in the locks); (b) Chrome's out-of-memory exceptions
    (0xE0000008) when a second browser starts with the first still alive,
-   with free frames left: which limit (commit, reservations, a quota);
+   with free frames left: which limit (commit, reservations, a quota).
+   Not reproduced under KVM on the Windows machine, over the whole
+   `dom/nodes` directory (406 tests) nor in the `XTASK_WPT_LIMIT=20`
+   run, with no memory pressure (fewest frames free 469219 of 673061);
+   the run keeps one session and starts a new browser only when one
+   dies, so the condition needs a browser that died, and what it was
+   seen under (TCG, the VM's memory) decides where to look next;
    (c) ChromeDriver not exiting after the client's /shutdown (the
-   scenario then runs to its limit); (d) the whole directory again, then
-   the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
+   scenario then runs to its limit): under KVM `chromedriver.exe`
+   finished with status 0x00000000 after 406 tests, twice, so it wants
+   a TCG run or the conditions it was seen under; (d) done under KVM:
+   406 tests, 404 harness OK, 13326 of 13397 subtests pass against
+   edge-159-win's 13343 (`user/windows/wpt/` records it); next, the
+   other directories and the comparison with Chrome on Windows
+   (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as
@@ -1767,20 +1807,26 @@ need gala's.
     run; its first run (issue #91) settled WICCreateImagingFactory_Proxy(0)
     (WINCODEC_ERR_UNSUPPORTEDVERSION) and a BMP's GetFrame(1)
     (WINCODEC_ERR_FRAMEMISSING).
-  - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, and
-    the `d2d1_window` screen scenario): done for the factory (both
-    kinds, ID2D1Multithread; the ordinals Office imports), the matrix
+  - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, the
+    `d2d1_window` screen scenario and `d2d1_device_test`): done for the
+    factory (both kinds, ID2D1Multithread, ID2D1Factory1; the ordinals
+    Office imports), the matrix
     helpers, software render targets over WIC bitmaps, device contexts
     (BindDC) and windows (hardware requests drawn in software), solid,
     linear, radial and bitmap brushes, bitmaps (from memory and WIC),
     rectangles, rounded rectangles, ellipses, lines and path geometries
     (lines, Béziers, arcs, fill modes) filled and stroked with widths,
     caps and joins, antialiased or aliased, transforms and axis-aligned
-    clips, DrawBitmap. Next, as Office's use shows it (the ledger names
+    clips, DrawBitmap; and Direct2D 1.1 over the program's own Direct3D
+    11 device (GPU G2's DXVK): ID2D1Factory1::CreateDevice,
+    ID2D1Device::CreateDeviceContext, a target bitmap over a DXGI
+    surface (CreateBitmapFromDxgiSurface) and a frame drawn in software
+    written back into that surface with UpdateSubresource. Next, as
+    Office's use shows it (the ledger names
     each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
     layout first), layers, compatible render targets, drawing state
-    blocks, the GDI interop interface, dashes, ID2D1Factory1 and device
-    contexts, then D3D11-backed targets with GPU G2. The `info` lines of
+    blocks, the GDI interop interface, dashes, effects and command
+    lists. The `info` lines of
     `d2d1_test` (drawing outside BeginDraw, CreateBitmapFromWicBitmap
     of 32bppBGRA, antialiased edge values) and its expectations wait for
     a Windows run: the first (issue #94) stopped at D2D1CreateFactory,
@@ -1961,44 +2007,57 @@ need gala's.
      d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
      implemented, each answer measured on Windows first (`msi_test`,
      `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
-     What stops Word now is a raise of its own. It asks for a
-     rendering device and gala has none (GPU G0): d2d1's factory
-     refuses ID2D1Factory1 and ID2D1Factory2 (E_NOINTERFACE),
-     D3D11CreateDevice fails once and D3D10CreateDevice1 twenty times
-     (DXGI_ERROR_UNSUPPORTED, no adapter). Then, in Word's
-     international code (WWINTL.DLL) under mso30win32client, it calls
-     RaiseException with 0xe0000002 -- Office's own code, software
-     originated and continuable -- which no handler in the process
-     takes, and the process ends with that status. The raise carries no
-     parameters, so its code is everything it says, and the frame below
-     it is Mso30win32client's own `__fastfail` stub, which sits in the
-     padding between two functions and has no unwind entry of its own:
-     the chain ends there because the image describes nothing for that
-     address, not because the unwinder stops short (ARCHITECTURE
-     "Exceptions"). What the dying thread called last is in
-     the crash report now (OBSERVABILITY "Crash reports"), and the two
-     gaps the ledger named in the second before the raise are closed,
-     each measured on Windows first: user32's
-     SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
+     What stops Word now is Direct2D's version. The rendering device
+     it asks
+     for is there: the scenario ships DXVK's `d3d11.dll` and `dxgi.dll`
+     beside WINWORD.EXE, the directory the loader searches before
+     System32, over the Vulkan stack in System32 (GPU G2), and DXVK
+     creates a D3D_FEATURE_LEVEL_11_0 device on Mesa's lavapipe -- its
+     own logs say so, and the scenario's `dump=` keeps them
+     (C:/gala/winword_d3d11.log and winword_dxgi.log, OBSERVABILITY
+     "Guest files"). With a device in hand Word no longer raises
+     0xe0000002, the fail-fast it took when nothing answered. Direct2D
+     1.1 over that device is there too (the Direct2D item above):
+     ID2D1Factory1, ID2D1Device, device contexts, and a target bitmap
+     over a DXGI surface whose frames reach the program's Direct3D 11
+     device -- `d2d1_device_test` draws one through DXVK on lavapipe
+     and presents it. Word takes the ID2D1Factory1 it is given and then
+     asks the factory for **ID2D1Factory2** (Direct2D 1.2,
+     {94f81a73-...}; recorded, E_NOINTERFACE, 37.2 s), never calls
+     CreateDevice, falls back to Direct2D
+     1.0's own device with D3D10CreateDevice1 twenty times
+     (DXGI_ERROR_UNSUPPORTED: G0's stub, and DXVK ships no d3d10), and
+     ends with status 0 after 30 s -- which is the status the scenario
+     asks for, so only its screen check fails now, with the untitled
+     window on the screen and no document drawn.
+     So the next step is ID2D1Factory2: its CreateDevice gives an
+     ID2D1Device1 (rendering priority, and a CreateDeviceContext that
+     gives an ID2D1DeviceContext1: geometry realizations), each over
+     what 1.1 already does, until Word stops asking for a newer one.
+     After that comes text, which needs
+     DirectWrite's text layout first -- a document is text.
+     The other gaps the ledger names around that exit, each to be
+     measured on Windows before it is answered: kernelbase's
+     SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
+     times), HeapQueryInformation's class, and gdi32's
+     D3DKMTEnumAdapters2 and D3DKMTQueryAdapterInfo (sixteen each,
+     which the Vulkan loader tries before the registry's list of
+     drivers) with the interface gala's dxgi refuses CreateDXGIFactory1
+     (three times).
+     A run with every system call traced takes a different path, not a
+     slower one: it stops in `MsoSplash`, asking RoGetActivationFactory
+     for
+     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
+     over and over, a runtime class gala has none of -- so what Word
+     does has to be read from an untraced run.
+     What a dying thread called last is in the crash report
+     (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
+     where Word used to raise are closed, each measured on Windows
+     first: user32's SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE,
      SPI_GETFONTSMOOTHINGCONTRAST), which Word reads before it lays
      text out (`win32_misc_test`), and kernelbase's QueueUserAPC2,
      which needed special user APCs in the kernel (`apc_test`,
      `kernel32_thread_test`, ARCHITECTURE "Special user APCs").
-     A run with every system call traced does not reach the raise at
-     all: it stops earlier, in `MsoSplash`, asking
-     RoGetActivationFactory for
-     `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
-     over and over, a runtime class gala has none of -- so the traced
-     run is a different path, not a slower one, and the raise has to be
-     read from an untraced run. With those two closed, the run from
-     boot leaves nothing else between the device and the raise: in the
-     200 ms before it the ledger names D3D11CreateDevice once, the
-     d2d1 factory's QueryInterface three times and D3D10CreateDevice1
-     twenty times, and otherwise only Word's own settings keys, absent
-     and defaulted. So the raise follows the refusals with nothing in
-     between, and the next step is a rendering device (G0), not another
-     export: until one answers, Word draws its untitled window and ends
-     there.
      `office_word` and `office_excel` now ask for the window as well,
      not only the program's exit status: a screen check whose marker
      never appeared was skipped in silence, so a run where nothing drew
@@ -2143,7 +2202,7 @@ need gala's.
      (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
      the Office Deployment Tool's `setup.exe /configure` in gala
-     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     (PREBUILT `odt`: 16.0.20527.20150, SHA-256 daea2a1c...e16be1,
      re-pinned when Microsoft replaces the file at its URL;
      `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
      Current channel, Display None, AcceptEULA; a net scenario, the
@@ -3899,7 +3958,17 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   line counts the pages shared and copied (`0 copied` required).
 
 **Next**:
-1. Milestone 2's rest: the rest of signal_test and fork_test
+1. `thread_test`'s futex requeue (open): once on CI its transcript
+   differed from `expected.txt` -- FUTEX_CMP_REQUEUE said it had moved
+   the waiter to the second word, and the FUTEX_WAKE after it found
+   the waiter on the first. lx-expect runs these programs on the host
+   kernel, so what raced is the program's own expectation: `rq_ready`
+   is set before the waiter blocks, and nothing proves it is queued
+   when the requeue runs. Not reproduced locally (200 runs). The
+   report now names the host kernel, so the next occurrence says
+   which Linux answered that way; the fix is a handshake that proves
+   the waiter is queued, not a wider retry.
+2. Milestone 2's rest: the rest of signal_test and fork_test
    (rt_sigqueueinfo, faults as SIGSEGV/SIGBUS/SIGFPE through the
    exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid's stopped and
@@ -3911,9 +3980,9 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    `lx::state` onto the core process; an `lx_pipe_pie` scenario.
    Each corpus program becomes a boot scenario as its calls land; the
    busybox scripts grow with them.
-2. Milestone 3: clocks, ptys over the core terminal object, /proc.
-3. Seam 1: the pty as a core terminal object under ConPTY.
-4. Seam 4's NT surface, each test first against real Windows:
+3. Milestone 3: clocks, ptys over the core terminal object, /proc.
+4. Seam 1: the pty as a core terminal object under ConPTY.
+5. Seam 4's NT surface, each test first against real Windows:
    FileCaseSensitiveInformation (query, and set on an empty directory),
    FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
    CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
@@ -3922,13 +3991,13 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    the token, `lx::identity`; a file shows the caller as its owner
    today); a reboot scenario for Linux
    files (modes and links are host-tested only).
-5. Seam 5: shared core objects when pipes, sockets or files are
+6. Seam 5: shared core objects when pipes, sockets or files are
    reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
    them: Windows' AF_UNIX through afd on the same core sockets (a test
    first on real Windows: bind, connect, accept, the socket file as a
    reparse point), then pipes and TCP sockets' state (with wait queues
    instead of TCP's 1 ms look).
-6. Also open (ARCHITECTURE "The lx module"): address randomization, a
+7. Also open (ARCHITECTURE "The lx module"): address randomization, a
    vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
 **Done when** (each milestone): every corpus program of the milestone
@@ -3999,7 +4068,7 @@ recordings), then the Windows side (steps 2, 3, 6, then 5); Kubernetes
    calls, the registry's one writer), a distribution's init as an LX
    process (an instance that outlives its last command, as WSL's),
    DefaultUid applied (root inside the distribution), `-u`, `--cd`,
-   `--export`, ptys and process groups for the terminal (LX "Next" 2-3:
+   `--export`, ptys and process groups for the terminal (LX "Next" 3-4:
    job control, Ctrl+C as SIGINT).
 3. The facade's plumbing: `/mnt/<drive>` inside the distribution
    (`\\wsl.localhost\<distro>` outside is done: EX, `nt::wslfs`), interop
@@ -4731,6 +4800,15 @@ on the seams item PT prepared: native ARM64 Windows programs
   emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
+0. **The desktop on ARM** (the owner: the next work). Done: a boot
+   that keeps running ends on the console session's desktop (the
+   downloadable images showed a black screen on aarch64 and the splash
+   on x64: their console programs never made it live);
+   `desktop_at_boot` and `arm_desktop_at_boot` boot as the images do and
+   check the desktop, the start menu from the Windows key and from a
+   click. Left: items 1 and 2 below (the popup hang, GTK on aarch64),
+   and the hardware a real machine has (item HW). The aarch64 image's
+   command line is the twin's; x64's adds the Go programs.
 1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
    reading its socket in a roundtrip after the "anchor bottom" popup's
    commit while the server's thread waited too (a wakeup lost, or a
@@ -5331,7 +5409,9 @@ floor in the superblock's sector. Next:
      update feed"), then a publish that proves what the local tests
      cannot (R2's 404 for an absent file at the public URL, `aws`
      against R2's endpoint, the head-object guard, the job summary).
-   - The updater in gala (test first): a scenario where xtask serves a
+   - The updater in gala (test first; the owner: next after item IN,
+     so that item HW's laptop takes every release by itself): a
+     scenario where xtask serves a
      feed from a local directory (a fake bucket) and gala's updater
      (`tuf::update` over winhttp and C:, the trusted root in the image)
      takes a release, and hands the staged release to R9's live update;
@@ -6093,6 +6173,18 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
   its busy one never. Not covered: messages between programs, Wayland
   clients, Linux D state (gala's Linux waits are all interruptible:
   ledgered); no "(Not Responding)" caption or ghost window yet.
+- Step 4, sparklines: every metric carries its last minute as a line.
+  Performance has a list on the left, as Windows' Performance sidebar,
+  giving the CPU total, each processor, memory, disk, network and the
+  process, thread and handle counts their value, their peak and their
+  line; a row's CPU and Memory cells in Processes and Details carry the
+  process's own minute behind the number, from a ring per process kept
+  with its row (`taskmgr::Trails`, keyed by pid and start time, dropped
+  when the process ends; no allocation per sample). The scenario checks
+  the sidebar's lines where only a view that has run some seconds has
+  drawn, the busy window's CPU cell risen, and an idle `cat`'s flat on
+  its floor. Not covered: no Disk or Network column per process to draw
+  in (no per-process counters: ledgered), and no Statistics view yet.
 
 **Next** (each test first, checked on the screen, screenshots):
 1. Inspection: open file location, a process's threads with their
@@ -6103,7 +6195,8 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    from the same CPU accounting.
 3. Statistics: distributions over time, not only totals, in a
    Statistics view beside Performance (top lists, sortable, p50/p95/p99
-   columns, a chosen window of 1, 10 or 60 s) and `gala stats`:
+   columns, each row's p50 and p99 over time as a sparkline beside it,
+   a chosen window of 1, 10 or 60 s) and `gala stats`:
    - per thread and process: CPU over the window (the busiest threads
      now, by name), scheduling latency (runnable to running), run-slice
      length, context switches per second, and blocked time split by
@@ -6124,22 +6217,14 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    view shows on the clipboard as text, ready to paste to a person or
    an agent: the view's name, the time and window, the gala build, the
    sort and filter, then the visible rows as a Markdown table with
-   their units (selected rows only when there is a selection), and in
-   Statistics the percentiles' sample counts. The same text from
-   `gala ps --copy` and `gala stats --copy`; the scenario checks the
-   clipboard's text against the view.
-5. Sparklines: a small line of the last minute beside every metric, as
-   Windows' Performance sidebar: in Performance's list on the left
-   (each processor, memory, disk, network, the process, thread and
-   handle counts, from `taskmgr::History`), and in the CPU, Memory,
-   Disk and Network columns of Processes and Details per process
-   (a fixed ring of samples per process, kept with its row and dropped
-   when it ends; no allocation per sample), and beside each
-   Statistics row (its p50 and p99 over time). Scaled per metric
-   (CPU and memory to 100 %, throughput to the visible peak, the peak
-   written beside it); the scenario checks the lines rise under its
-   busy thread and stay flat for an idle process, and the Copy text
-   carries the sampled values.
+   their units (selected rows only when there is a selection), the
+   values behind each sparkline, and in Statistics the percentiles'
+   sample counts. The same text from `gala ps --copy` and `gala stats
+   --copy`; the scenario checks the clipboard's text against the view.
+5. Per-process I/O: Disk and Network columns in Processes and Details,
+   each with its sparkline as CPU and Memory have (gala counts disk and
+   network bytes for the machine, not per process: ledgered
+   `taskmgr.exe!Processes(Disk)`, `(Network)`).
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its
@@ -6207,6 +6292,129 @@ a refresh.
 
 **Design**: ARCHITECTURE "The file explorer" (and "The WSL facade" for
 `\\wsl.localhost`).
+
+### IN. The installer: gala onto a machine's disk
+
+**Goal** (the owner): a machine booted from gala's USB image comes up
+to the desktop, and a graphical installer there puts gala on its disk;
+the machine then boots gala from that disk alone.
+
+**Today**: gala boots from its ISO (Limine on the image's EFI system
+partition, ARCHITECTURE "Boot"); with `persist` it uses the whole
+virtio disk as C: with no partition table (ARCHITECTURE "C: kept on the
+disk"). `\\.\PhysicalDrive0` opens the raw disk for Administrators and
+SYSTEM, with the length and geometry IOCTLs and no partition ones.
+
+**Shape**: a native gala program (a Rust Windows executable on
+gala's user32, as taskmgr and explorer are), not a Linux one. The raw
+disk is an NT device behind the security model, which a Linux
+distribution's root does not reach; Windows' own disk IOCTLs
+(IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+IOCTL_DISK_UPDATE_PROPERTIES) are what it calls, so its test program
+runs on real Windows against a scratch disk and gives the expected
+results, as every other test program's do. Windows Setup has the same
+shape. A small Windows-side tool (shrink C: with Windows' own volume
+APIs, write the USB stick) is later, for installs beside Windows.
+
+**Libraries** (permissive; recorded in THIRD_PARTY.md when taken):
+`gpt` or `gptman` (GPT tables), `mbrman` (MBR disks), `fatfs` (the EFI
+system partition), Limine's own `bios-install` for BIOS machines. Not
+taken: GNU parted/libparted (GPL-3), Calamares (GPL, Qt, assumes Linux
+underneath), ntfs-3g's ntfsresize (GPL; Windows shrinks its own
+volume instead).
+
+**Next** (each step test first):
+1. Partitions in the kernel: the disk's GPT read at boot, each partition
+   a device (`\Device\Harddisk0\Partition1`...), the layout IOCTLs
+   above (test program against real Windows).
+2. C: in a partition: the persisted volume found by its partition type
+   GUID instead of filling the disk; the `persist` scenarios on a
+   partitioned disk.
+3. Booting from the installed disk: the EFI system partition with
+   Limine, the kernel, the sealed config and the manifest (R8), the
+   firmware's boot entry; Secure Boot's enrollment with R8 step 1.
+4. The installer program: pick a disk, erase it or use its free space,
+   confirm, install, report; every step and failure as events, an
+   answer file for unattended runs (Windows' autounattend is the
+   model). Scenario: a first boot installs onto an empty virtio disk
+   unattended; a second boot starts from that disk alone and reaches
+   the desktop.
+5. Beside Windows: the Windows-side tool shrinks C:, the installer uses
+   the space; the boot menu offers both.
+
+**Needs**: item AR's desktop on the image (and x64's), item HW's
+drivers for a real machine's disk.
+
+**Done when**: step 4's two-boot scenario passes on both architectures,
+and the owner's laptop is installed by it.
+
+### VM. Virtual machines on gala
+
+**Not scheduled** (the owner): in the backlog until it is picked.
+
+**Goal**: virtual machines run on gala, first by emulation, then with
+the processor's virtualization, through the interfaces existing
+virtual machine programs already use.
+
+**Today**: nothing. CT's containers run on LX with no virtual machine;
+WSL2, the Hyper-V backends and Docker Desktop's own VM are out of CT's
+scope.
+
+**Next** (each step test first):
+1. QEMU's emulation (TCG) as an ordinary program: its Windows build,
+   and its Linux build in a distribution, boot a small Linux guest
+   inside gala (a scenario checks the guest's serial output). It needs
+   what JITs already use (executable memory written at run time,
+   threads, timers); 10-50x slower than hardware, enough for small
+   guests and tests.
+2. gala as the hypervisor: one in-kernel core for both architectures
+   (a virtual CPU's run loop and exits, the guest's second-level page
+   tables, interrupt injection, the scheduler preempting a CPU running
+   guest code); VT-x and AMD-V on x86-64, EL2 on aarch64 (the kernel
+   already runs at EL2 with VHE, as KVM does there). Guests are
+   isolated as processes are (SECURITY).
+3. Linux's `/dev/kvm` on that core (QEMU, Firecracker,
+   cloud-hypervisor, crosvm), test programs against real Linux's KVM.
+4. The Windows Hypervisor Platform (`WinHvPlatform.dll`, the `WHv*`
+   functions, Microsoft's public documentation) on the same core:
+   QEMU's `whpx`, the Android emulator, VirtualBox and VMware in their
+   Hyper-V modes; test programs against real Windows.
+
+Tests run in CI under emulation: QEMU's TCG emulates AMD's SVM on
+x86-64 and EL2 on aarch64 (`virtualization=on`).
+
+**Out of scope**: VirtualBox's and VMware's own kernel drivers (gala
+loads no Windows kernel drivers), Hyper-V itself (its manager and
+services), device passthrough (GPU's G3 note).
+
+**Done when**: each step's scenario passes; a Linux guest boots under
+QEMU with `/dev/kvm` and with `whpx`.
+
+### HW. A real laptop: gala on hardware, waiting for updates
+
+**Goal** (the owner): a laptop installed by item IN runs gala, stays on,
+and takes every release from the update feed by itself (R8's updater,
+R9's live update).
+
+**Today**: gala runs in QEMU only (virtio disk, network, GPU and input;
+PS/2 on x86-64). On a machine without PS/2 the input thread says so and
+stops (item USB).
+
+**Next** (each test first, in QEMU with the same device, then on the
+owner's laptop):
+1. Disks: AHCI (`-device ahci`) and NVMe (`-device nvme`) drivers from
+   their published specifications, as disks under gala's file systems
+   and `\\.\PhysicalDrive<n>`.
+2. Input: item USB's device interrupts, xHCI and HID.
+3. A network: a wired USB Ethernet adapter (CDC-ECM/NCM) first, with
+   WF layer 1's DHCP; then Wi-Fi (item WF).
+4. The screen: the firmware's framebuffer (GOP) on x86-64; on ARM
+   laptops what their firmware gives.
+5. Power: the lid, the battery's state, the backlight, sleep (ACPI).
+6. A machine-sized test: R8's updater and R9's handover on the laptop,
+   every release taken for a week with nothing restarted by hand.
+
+**Done when**: step 6 holds on the owner's laptop.
 
 ## Known issues and stopgaps
 
@@ -6532,8 +6740,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   0xE0000008, ChromeDriver not exiting, the WPT run), and Widevine and
   the proprietary codecs are a piece apart for either browser.
 - **gala's own drivers** against published standards: after virtio,
-  AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
-  item SND).
+  e1000 (AHCI and NVMe: item HW; xHCI and device interrupts: item USB;
+  sound: item SND).
 - **Raspberry Pi** (on item AR's port): Pi 4/5, QEMU's `raspi4b`/`virt`
   first; Limine or the Pi's firmware loading the kernel, the GIC and the
   generic timer, the PL011 UART, the mailbox framebuffer, then EMMC2/SD,

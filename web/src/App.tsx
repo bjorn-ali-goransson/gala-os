@@ -3,6 +3,9 @@ import {
   debugCapabilities,
   decisions,
   focus,
+  imageDemo,
+  images,
+  imagesUrl,
   insideTools,
   linuxPrograms,
   liveCapabilities,
@@ -27,6 +30,7 @@ const nav = [
   { id: "now", label: "In progress" },
   { id: "runs", label: "What runs" },
   { id: "tooling", label: "Tooling" },
+  { id: "try", label: "Try it" },
 ];
 
 function Logo() {
@@ -127,6 +131,9 @@ export function App() {
             </a>
             <a className="btn btn-quiet" href="#runs">
               What runs on it
+            </a>
+            <a className="btn btn-quiet" href="#try">
+              Download
             </a>
           </p>
           <figure className="hero-shot">
@@ -403,6 +410,68 @@ export function App() {
                     </div>
                   ))}
                 </dl>
+              </div>
+            </div>
+          </Section>
+
+          <Section
+            id="try"
+            title="Try it"
+            intro="Bootable images of the latest build, for a virtual machine. They are early developer images: they show the kernel booting and running programs, not a desktop to use yet."
+          >
+            <ul className="cards cards-wide downloads">
+              {images.map((i) => (
+                <li key={i.arch} id={`get-${i.arch}`}>
+                  <div className="card-top">
+                    <h4>{i.arch}</h4>
+                    <span className="dl-size">{i.size}</span>
+                  </div>
+                  <p>{i.what}</p>
+                  <p className="dl-links">
+                    <a className="btn" href={`${imagesUrl}/${i.file}`}>
+                      Download {i.file}
+                    </a>
+                    <a href={`${imagesUrl}/${i.file}.sha256`}>SHA-256</a>
+                    <a href={`${imagesUrl}/${i.file.replace(/\.iso$/, "")}.commit`}>commit</a>
+                  </p>
+                  <p className="dl-label">Run it in QEMU</p>
+                  <pre className="cmd">
+                    <code>{i.qemu}</code>
+                  </pre>
+                  <p className="dl-needs">Needs {i.needs}</p>
+                </li>
+              ))}
+            </ul>
+
+            <div className="explain">
+              <div>
+                <h3>What you will see</h3>
+                <p>{imageDemo}</p>
+              </div>
+              <div>
+                <h3>Check the download</h3>
+                <p>
+                  Each image has its SHA-256 beside it. In the folder you
+                  downloaded both files to:
+                </p>
+                <pre className="cmd">
+                  <code>sha256sum -c gala-x86_64.iso.sha256</code>
+                </pre>
+                <p>
+                  The <code>.commit</code> file names the commit it was
+                  built from.
+                </p>
+              </div>
+              <div>
+                <h3>On a USB stick</h3>
+                <p>
+                  The x86_64 image can be written as it is to a USB stick
+                  (this erases the stick), for example with{" "}
+                  <code>sudo dd if=gala-x86_64.iso of=/dev/sdX bs=4M conv=fsync</code>{" "}
+                  on Linux, or with a tool such as Rufus or balenaEtcher.
+                  It is tested in QEMU, not on real machines, so hardware
+                  support is limited.
+                </p>
               </div>
             </div>
           </Section>

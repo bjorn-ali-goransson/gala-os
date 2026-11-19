@@ -5,14 +5,15 @@
 
 use alloc::vec::Vec;
 
+use crate::device::{self, DxgiSurface};
 use crate::raster::{self, EXTEND_CLAMP, Paint, Pixels, Ramp, Rgba};
 use crate::{
     ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ColorF, ComRef, D2DERR_UNSUPPORTED_PIXEL_FORMAT,
-    DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, IID_BITMAP,
-    IID_BITMAP_BRUSH, IID_BRUSH, IID_GRADIENT_STOPS, IID_IMAGE, IID_LINEAR_BRUSH, IID_RADIAL_BRUSH,
-    IID_RESOURCE, IID_SOLID_BRUSH, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU,
-    Spin, VTable, add_ref, get_factory, give, not_implemented, put, query, read, release_object,
-    vtable_of,
+    DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, Guid, HResult,
+    IID_BITMAP, IID_BITMAP_BRUSH, IID_BITMAP1, IID_BRUSH, IID_GRADIENT_STOPS, IID_IMAGE,
+    IID_LINEAR_BRUSH, IID_RADIAL_BRUSH, IID_RESOURCE, IID_SOLID_BRUSH, Matrix, Obj, PixelFormat,
+    Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, com_add_ref, get_factory, give,
+    not_implemented, put, query, read, release_object, vtable_of,
 };
 
 // ---- Gradient stop collections ----------------------------------------------
@@ -143,21 +144,41 @@ pub struct Bitmap {
     pub format: PixelFormat,
     /// Premultiplied BGRA, rows `w * 4` bytes apart.
     pub pixels: Spin<Vec<u8>>,
+    /// D2D1_BITMAP_OPTIONS, zero for a bitmap of the 1.0 interface.
+    pub options: u32,
+    /// The DXGI surface this bitmap is over
+    /// (ID2D1DeviceContext::CreateBitmapFromDxgiSurface): a frame drawn
+    /// into the bitmap is written into it.
+    pub surface: Option<DxgiSurface>,
 }
 
-static BITMAP_VTBL: VTable<11> = VTable([
-    bitmap_query as *const (),
-    add_ref as *const (),
-    bitmap_release as *const (),
-    get_factory as *const (),
-    bitmap_GetSize as *const (),
-    bitmap_GetPixelSize as *const (),
-    bitmap_GetPixelFormat as *const (),
-    bitmap_GetDpi as *const (),
-    bitmap_CopyFromBitmap as *const (),
-    bitmap_CopyFromRenderTarget as *const (),
-    bitmap_CopyFromMemory as *const (),
-]);
+/// D2D1_BITMAP_OPTIONS_TARGET: a bitmap a device context may draw into.
+pub const BITMAP_OPTION_TARGET: u32 = 1;
+
+macro_rules! bitmap_slots {
+    ($($extra:expr),*) => {
+        [
+            bitmap_query as *const (),
+            add_ref as *const (),
+            bitmap_release as *const (),
+            get_factory as *const (),
+            bitmap_GetSize as *const (),
+            bitmap_GetPixelSize as *const (),
+            bitmap_GetPixelFormat as *const (),
+            bitmap_GetDpi as *const (),
+            bitmap_CopyFromBitmap as *const (),
+            bitmap_CopyFromRenderTarget as *const (),
+            bitmap_CopyFromMemory as *const (),
+            $($extra as *const ()),*
+        ]
+    };
+}
+
+static BITMAP_VTBL: VTable<11> = VTable(bitmap_slots!());
+/// ID2D1Bitmap1 (d2d1_1.h): a bitmap made through a device context, with
+/// five methods after ID2D1Bitmap's.
+static BITMAP1_VTBL: VTable<16> =
+    VTable(bitmap_slots!(b1_GetColorContext, b1_GetOptions, b1_GetSurface, b1_Map, b1_Unmap));
 
 /// D2D1_BITMAP_PROPERTIES.
 #[repr(C)]
@@ -169,7 +190,32 @@ pub struct BitmapProps {
 }
 
 pub fn is_bitmap(o: Obj) -> bool {
-    vtable_of(o) == BITMAP_VTBL.addr()
+    vtable_of(o) == BITMAP_VTBL.addr() || vtable_of(o) == BITMAP1_VTBL.addr()
+}
+
+/// What a new bitmap is beyond its pixels: its D2D1_BITMAP_OPTIONS, the
+/// DXGI surface it is over (if any) and whether it is an ID2D1Bitmap1
+/// (made through a device context) or a 1.0 ID2D1Bitmap.
+pub struct Options {
+    pub options: u32,
+    pub surface: Option<DxgiSurface>,
+    pub bitmap1: bool,
+}
+
+impl Options {
+    /// A bitmap of the 1.0 interface: no options, no surface.
+    pub fn plain() -> Options {
+        Options { options: 0, surface: None, bitmap1: false }
+    }
+}
+
+/// D2D1_BITMAP_PROPERTIES1: D2D1_BITMAP_PROPERTIES and two fields more.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BitmapProps1 {
+    pub base: BitmapProps,
+    pub options: u32,
+    pub color_context: Obj,
 }
 
 pub fn bitmap<'a>(o: Obj) -> &'a Bitmap {
@@ -198,24 +244,35 @@ fn dpi_of(props: Option<BitmapProps>) -> (f32, f32) {
     }
 }
 
+/// The caller's rows for a new bitmap: where they start and how far
+/// apart they are. A NULL source means a bitmap of zeroes.
+#[derive(Clone, Copy)]
+pub struct Rows {
+    pub src: *const u8,
+    pub pitch: u32,
+}
+
 fn new_bitmap(
     factory: Obj,
-    w: u32,
-    h: u32,
+    size: SizeU,
     dpi: (f32, f32),
     format: PixelFormat,
     pixels: Vec<u8>,
+    opts: Options,
     out: *mut Obj,
 ) -> HResult {
+    let vtbl = if opts.bitmap1 { BITMAP1_VTBL.addr() } else { BITMAP_VTBL.addr() };
     give(
         out,
         Bitmap {
-            res: Res::new(BITMAP_VTBL.addr(), factory),
-            w,
-            h,
+            res: Res::new(vtbl, factory),
+            w: size.width,
+            h: size.height,
             dpi,
             format,
             pixels: Spin::new(pixels),
+            options: opts.options,
+            surface: opts.surface,
         },
     )
 }
@@ -226,9 +283,9 @@ pub fn create_bitmap(
     factory: Obj,
     target_format: PixelFormat,
     size: SizeU,
-    src: *const u8,
-    pitch: u32,
+    rows: Rows,
     props: *const BitmapProps,
+    opts: Options,
     out: *mut Obj,
 ) -> HResult {
     if out.is_null() {
@@ -244,17 +301,18 @@ pub fn create_bitmap(
     let Some(mut pixels) = crate::filled(row * size.height as usize, 0u8) else {
         return E_OUTOFMEMORY;
     };
-    if !src.is_null() {
-        if (pitch as usize) < row {
+    if !rows.src.is_null() {
+        if (rows.pitch as usize) < row {
             return E_INVALIDARG;
         }
         for y in 0..size.height as usize {
-            // SAFETY: the caller's rows, `pitch` bytes apart.
-            let line = unsafe { core::slice::from_raw_parts(src.add(y * pitch as usize), row) };
+            // SAFETY: the caller's rows, `rows.pitch` bytes apart.
+            let line =
+                unsafe { core::slice::from_raw_parts(rows.src.add(y * rows.pitch as usize), row) };
             pixels[y * row..(y + 1) * row].copy_from_slice(line);
         }
     }
-    new_bitmap(factory, size.width, size.height, dpi_of(p), format, pixels, out)
+    new_bitmap(factory, size, dpi_of(p), format, pixels, opts, out)
 }
 
 // The WIC pixel formats a bitmap is made from.
@@ -307,6 +365,7 @@ pub fn create_from_wic(
     factory: Obj,
     source: Obj,
     props: *const BitmapProps,
+    opts: Options,
     out: *mut Obj,
 ) -> HResult {
     if out.is_null() {
@@ -352,11 +411,125 @@ pub fn create_from_wic(
     if natural == ALPHA_IGNORE || format.alpha == ALPHA_IGNORE {
         pixels.chunks_exact_mut(4).for_each(|p| p[3] = 255);
     }
-    new_bitmap(factory, w, h, dpi_of(p), format, pixels, out)
+    new_bitmap(factory, SizeU { width: w, height: h }, dpi_of(p), format, pixels, opts, out)
+}
+
+/// CreateBitmapFromDxgiSurface: an ID2D1Bitmap1 whose pixels are this
+/// DLL's own and whose frames are written into the surface (`device`).
+/// The surface's format must be one gala draws (B8G8R8A8), the asked-for
+/// format must be the surface's (UNKNOWN takes it) and the surface must
+/// not be multisampled: UpdateSubresource writes whole rows of pixels,
+/// which a multisampled texture has none of. The bitmap starts as the
+/// surface's own pixels are not read back (Direct2D's own does not
+/// promise them either: a target bitmap is drawn before it is shown).
+pub fn create_from_dxgi(
+    factory: Obj,
+    surface: Obj,
+    props: *const BitmapProps1,
+    out: *mut Obj,
+) -> HResult {
+    if out.is_null() {
+        return crate::E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    let s = match device::open_surface(surface) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if s.desc.samples > 1 {
+        crate::gap(b"CreateBitmapFromDxgiSurface(multisampled)", s.desc.samples.into());
+        return E_INVALIDARG;
+    }
+    let p = read(props);
+    let want = p.map(|p| p.base.format).unwrap_or_default();
+    if want.format != 0 && want.format != s.desc.format {
+        return E_INVALIDARG;
+    }
+    let natural = PixelFormat { format: s.desc.format, alpha: ALPHA_PREMULTIPLIED };
+    let format = match bitmap_format(want, natural) {
+        Ok(f) => f,
+        Err(e) => {
+            crate::gap(b"CreateBitmapFromDxgiSurface(pixel format)", s.desc.format.into());
+            return e;
+        }
+    };
+    let (w, h) = (s.desc.width, s.desc.height);
+    let Some(pixels) = crate::filled(w as usize * h as usize * 4, 0u8) else {
+        return E_OUTOFMEMORY;
+    };
+    let options = p.map_or(0, |p| p.options);
+    let dpi = dpi_of(p.map(|p| p.base));
+    let opts = Options { options, surface: Some(s), bitmap1: true };
+    new_bitmap(factory, SizeU { width: w, height: h }, dpi, format, pixels, opts, out)
+}
+
+/// The bitmap's pixels into `buf`: a device context's frame starts from
+/// what its target bitmap already holds.
+pub fn read_pixels(o: Obj, buf: &mut [u8]) {
+    bitmap(o).pixels.with(|p| {
+        let n = p.len().min(buf.len());
+        buf[..n].copy_from_slice(&p[..n]);
+    });
+}
+
+/// A device context's frame written into its target bitmap, and through
+/// it into the DXGI surface the bitmap is over: what puts the frame in
+/// the program's own Direct3D render target.
+pub fn write_pixels(o: Obj, buf: &[u8]) {
+    let b = bitmap(o);
+    b.pixels.with(|p| {
+        let n = p.len().min(buf.len());
+        p[..n].copy_from_slice(&buf[..n]);
+    });
+    if let Some(s) = &b.surface {
+        device::write_surface(s, buf);
+    }
 }
 
 extern "system" fn bitmap_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
+    if vtable_of(this) == BITMAP1_VTBL.addr() {
+        let iids = [IID_RESOURCE, IID_IMAGE, IID_BITMAP, IID_BITMAP1];
+        return query(this, b"ID2D1Bitmap1", &iids, riid, out);
+    }
     query(this, b"ID2D1Bitmap", &[IID_RESOURCE, IID_IMAGE, IID_BITMAP], riid, out)
+}
+
+// ---- ID2D1Bitmap1's own methods ----------------------------------------------
+
+/// GetColorContext: gala keeps none (it is handed out as NULL, which is
+/// what a bitmap made without one has).
+extern "system" fn b1_GetColorContext(_this: Obj, out: *mut Obj) {
+    put(out, core::ptr::null_mut());
+}
+
+extern "system" fn b1_GetOptions(this: Obj) -> u32 {
+    bitmap(this).options
+}
+
+/// GetSurface: the DXGI surface the bitmap was made from. A bitmap of
+/// gala's own pixels has none (Direct2D's are all textures); that is
+/// recorded, with E_NOINTERFACE.
+extern "system" fn b1_GetSurface(this: Obj, out: *mut Obj) -> HResult {
+    put(out, core::ptr::null_mut());
+    match &bitmap(this).surface {
+        Some(s) => {
+            com_add_ref(s.surface.0);
+            put(out, s.surface.0);
+            S_OK
+        }
+        None => {
+            crate::gap(b"ID2D1Bitmap1::GetSurface(not over a DXGI surface)", 0);
+            E_NOINTERFACE
+        }
+    }
+}
+
+extern "system" fn b1_Map(_this: Obj, _options: u32, _mapped: *mut u8) -> HResult {
+    not_implemented(b"ID2D1Bitmap1::Map")
+}
+
+extern "system" fn b1_Unmap(_this: Obj) -> HResult {
+    not_implemented(b"ID2D1Bitmap1::Unmap")
 }
 
 extern "system" fn bitmap_release(this: Obj) -> u32 {

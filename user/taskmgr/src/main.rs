@@ -9,7 +9,8 @@
 //!   processes grouped by WSL distribution ("Linux: <name>"; the Linux
 //!   personality's own under "Linux"); columns Name, PID, Status, User
 //!   name, CPU (each process's share of all processors, its cell tinted
-//!   by it), Memory (the working set); a click on a column's header sorts
+//!   by it), Memory (the working set); the CPU and Memory cells carry
+//!   the process's last minute as a sparkline behind the number; a click on a column's header sorts
 //!   by it (again: the other way); the search box (typing anywhere goes
 //!   there; Esc clears it) keeps the processes whose name or image has
 //!   the text, or whose PID starts with it.
@@ -21,7 +22,9 @@
 //! - **Performance**: a graph per processor (busy time from the
 //!   scheduler), memory in use, disk and network throughput (the
 //!   drivers' byte counters), a minute of history each, refreshed every
-//!   second.
+//!   second; a list on the left gives every metric its value and the
+//!   same minute as a sparkline (as Windows' Performance sidebar),
+//!   including the process, thread and handle counts.
 //! - **Details**: every process in one flat list with the full columns
 //!   (CPU time, commit size, threads, handles or fds, platform with the
 //!   distribution, command line), sortable and searchable too.
@@ -43,7 +46,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::fmt::Write;
 
-use taskmgr::{Column, End, Group, History, Perf, Proc, Row, Shares, Sort};
+use taskmgr::{Column, End, Group, History, Perf, Proc, Row, Shares, Sort, Trails};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -140,7 +143,6 @@ unsafe extern "system" {
 #[link(name = "gdi32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CreateSolidBrush(color: u32) -> Handle;
-    fn CreatePen(style: i32, width: i32, color: u32) -> Handle;
     #[allow(clippy::too_many_arguments)]
     fn CreateFontW(
         height: i32,
@@ -164,7 +166,6 @@ unsafe extern "system" {
     fn SetBkMode(hdc: Handle, mode: i32) -> i32;
     fn TextOutW(hdc: Handle, x: i32, y: i32, text: *const u16, n: i32) -> Bool;
     fn GetTextExtentPoint32W(hdc: Handle, text: *const u16, n: i32, size: *mut [i32; 2]) -> Bool;
-    fn Polyline(hdc: Handle, points: *const [i32; 2], n: i32) -> Bool;
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -246,6 +247,19 @@ const ROW_H: i32 = 24;
 const SEARCH: Rect = Rect { left: 260, top: 8, right: 640, bottom: 40 };
 const BUTTON_W: i32 = 120;
 const HISTORY: usize = 60;
+// Performance's list of metrics on the left: the name, the value and the
+// peak in the first 100 pixels of a row, the last minute in the rest.
+const SIDE_W: i32 = 196;
+const SIDE_ROW_H: i32 = 56;
+/// The Memory column's smallest scale, in per mille of the machine's
+/// memory: below this the rows' lines stay on the floor instead of
+/// magnifying a megabyte into a mountain.
+const MEMORY_FLOOR: u32 = 10;
+/// How far a graph's area under its line is mixed towards white, in per
+/// mille, and the same for a row's cell, where the row's number is read
+/// over it.
+const GRAPH_SHADE: u32 = 600;
+const CELL_SHADE: u32 = 820;
 
 const PROCESS_COLUMNS: &[(Column, i32)] = &[
     (Column::Name, 300),
@@ -309,6 +323,11 @@ struct State {
     memory: History,
     disk: History,
     network: History,
+    processes: History,
+    threads: History,
+    handles: History,
+    /// The CPU and Memory columns' sparklines, a ring per process.
+    trails: Trails,
     /// Linux processes sent SIGTERM: (pid, when SIGKILL follows).
     pending: Vec<(u64, u32)>,
     font: Handle,
@@ -405,9 +424,15 @@ impl State {
                     before.net_received + before.net_sent,
                     perf.net_received + perf.net_sent,
                 ));
+                self.processes.push(perf.processes);
+                self.threads.push(perf.threads);
+                self.handles.push(perf.handles);
             }
             self.perf = Some(perf);
         }
+        // The rows' own rings, the ended ones dropped with their rows.
+        let total = self.perf.as_ref().map_or(0, |p| p.memory_total);
+        self.trails.update(&self.procs, &self.shares, total);
         // SIGKILL for a Linux process still there after its grace time.
         // SAFETY: a plain call.
         let now = unsafe { GetTickCount() };
@@ -632,11 +657,8 @@ fn paint_header(s: &State, dc: &Dc, columns: &[(Column, i32)], sort: Sort, x0: i
             break;
         }
         let mut t = String::from(column.title());
-        if column == Column::Cpu
-            && s.view == View::Processes
-            && let Some(total) = s.cpu_total.values.last()
-        {
-            let _ = write!(t, " {}%", total / 10);
+        if column == Column::Cpu && s.view == View::Processes && !s.cpu_total.is_empty() {
+            let _ = write!(t, " {}%", s.cpu_total.last() / 10);
         }
         if sort.column == column {
             t.push_str(if sort.descending { " v" } else { " ^" });
@@ -661,7 +683,11 @@ fn is_number(c: Column) -> bool {
     )
 }
 
-/// One process's cells from `x0` on row `y`.
+/// One process's cells from `x0` on row `y` over `back` (the row's
+/// own background, which its sparklines are drawn over), the Memory
+/// column's sparklines scaled to `memory_scale` (the largest row
+/// listed).
+#[allow(clippy::too_many_arguments)]
 fn paint_cells(
     s: &State,
     dc: &Dc,
@@ -670,6 +696,8 @@ fn paint_cells(
     x0: i32,
     y: i32,
     processes_view: bool,
+    memory_scale: u32,
+    back: u32,
 ) {
     let (w, _) = s.size;
     let p = &s.procs[i];
@@ -681,14 +709,24 @@ fn paint_cells(
         }
         let width = width.min(w - x);
         // CPU and memory cells tinted by their weight, as Windows does.
+        let mut cell = back;
         if column == Column::Cpu && share > 0 {
-            dc.fill(
-                x,
-                y,
-                width,
-                ROW_H,
-                mix(rgb(0xff, 0xf4, 0xc4), rgb(0xff, 0xd3, 0x4f), share * 4),
-            );
+            cell = mix(rgb(0xff, 0xf4, 0xc4), rgb(0xff, 0xd3, 0x4f), share * 4);
+            dc.fill(x, y, width, ROW_H, cell);
+        }
+        // The process's last minute behind its number (ROADMAP TM):
+        // the CPU against all the processors and the memory against the
+        // largest row listed, so the rows are comparable with each
+        // other. A row with no samples yet draws nothing, where an idle
+        // one is a flat line on the cell's floor.
+        let line = match column {
+            Column::Cpu => s.trails.cpu(p).map(|h| (h, 1000, CPU_COLOR)),
+            Column::Memory => s.trails.memory(p).map(|h| (h, memory_scale, MEMORY_COLOR)),
+            _ => None,
+        };
+        if let Some((history, scale, color)) = line {
+            let (cw, ch) = (width - 4, ROW_H - 6);
+            spark(dc, x + 2, y + 3, cw, ch, history, scale, color, cell, CELL_SHADE, history.len());
         }
         let mut text = taskmgr::cell(p, share, column, processes_view);
         let mut color = TEXT;
@@ -723,6 +761,13 @@ fn paint_processes(s: &State, dc: &Dc) {
     let rows = s.rows();
     let visible = ((h - ROWS_Y) / ROW_H).max(0) as usize;
     let selected = s.selected_row();
+    let memory_scale = s.trails.memory_scale(
+        rows.iter().filter_map(|r| match r {
+            Row::Process(i) => s.procs.get(*i),
+            Row::Heading(..) => None,
+        }),
+        MEMORY_FLOOR,
+    );
     for (k, row) in rows.iter().skip(s.scroll).take(visible).enumerate() {
         let y = ROWS_Y + ROW_H * k as i32;
         let is_selected = selected.as_ref() == Some(row);
@@ -751,7 +796,8 @@ fn paint_processes(s: &State, dc: &Dc) {
                 if is_selected {
                     dc.fill(NAV_W + 1, y, w - NAV_W - 1, ROW_H, SELECTED);
                 }
-                paint_cells(s, dc, *i, PROCESS_COLUMNS, x0, y, true);
+                let back = if is_selected { SELECTED } else { CONTENT };
+                paint_cells(s, dc, *i, PROCESS_COLUMNS, x0, y, true, memory_scale, back);
             }
         }
     }
@@ -767,18 +813,111 @@ fn paint_details(s: &State, dc: &Dc) {
     paint_header(s, dc, DETAIL_COLUMNS, s.detail_sort, x0);
     let list = s.details();
     let visible = ((h - ROWS_Y) / ROW_H).max(0) as usize;
+    let memory_scale =
+        s.trails.memory_scale(list.iter().filter_map(|&i| s.procs.get(i)), MEMORY_FLOOR);
     for (k, &i) in list.iter().skip(s.scroll).take(visible).enumerate() {
         let y = ROWS_Y + ROW_H * k as i32;
-        if s.selection == Selection::Process(s.procs[i].pid) {
+        let selected = s.selection == Selection::Process(s.procs[i].pid);
+        if selected {
             dc.fill(NAV_W + 1, y, w - NAV_W - 1, ROW_H, SELECTED);
         }
-        paint_cells(s, dc, i, DETAIL_COLUMNS, x0, y, false);
+        let back = if selected { SELECTED } else { CONTENT };
+        paint_cells(s, dc, i, DETAIL_COLUMNS, x0, y, false, memory_scale, back);
     }
 }
 
-/// A graph of `values` (per mille of `scale`) in (x, y, w, h).
+/// `history` as a line in the box (x, y, w, h) over `back`, what is
+/// behind it there: the area under the line in `color` mixed `shade`
+/// per mille towards white, the line itself in `color`, a pixel thick
+/// and joined from column to column (where it climbs it covers every
+/// row it passes, so there are no gaps). `over` is how many samples the
+/// box is wide (`taskmgr::line`).
+///
+/// A graph's area is the shade Windows' are; a row's cell is lighter,
+/// since the cell's number is read over it.
+///
+/// The line is drawn in `taskmgr::SUB`ths of a pixel and a row it
+/// covers in part is blended with what is behind it
+/// (`taskmgr::stroke`): a minute in 94 pixels moves by a fraction of a
+/// pixel a sample, and whole pixels would draw that as a staircase.
 #[allow(clippy::too_many_arguments)]
-fn graph(dc: &Dc, x: i32, y: i32, w: i32, h: i32, values: &[u32], scale: u32, color: u32) {
+fn spark(
+    dc: &Dc,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    history: &History,
+    scale: u32,
+    color: u32,
+    back: u32,
+    shade: u32,
+    over: usize,
+) {
+    // A sample's height is a pixel's centre, so the whole pixel is the
+    // line where the samples around it are level: `line` over the
+    // centres (a pixel fewer) and half a pixel down.
+    let half = taskmgr::SUB / 2;
+    let points = taskmgr::line(history, scale, w, (h - 1) * taskmgr::SUB + 1, over);
+    let (Some(&(first, _)), Some(&(last, _))) = (points.first(), points.last()) else {
+        return;
+    };
+    let light = mix(color, rgb(0xff, 0xff, 0xff), shade);
+    // The line's height where each column meets the next, from the
+    // samples it joins; a column is what `stroke` makes of its two.
+    let mut edge: Vec<i32> = Vec::new();
+    edge.resize(w as usize + 1, points[0].1);
+    for pair in points.windows(2) {
+        let ((ax, ay), (bx, by)) = (pair[0], pair[1]);
+        for px in ax..=bx {
+            edge[px as usize] = ay + (by - ay) * (px - ax) / (bx - ax).max(1);
+        }
+    }
+    // A row the line covers in part keeps the rest of what is in it:
+    // the area under the line below, what was behind it above.
+    let blend = |covers: u32, under: u32| {
+        // What is left of the row is the area under the line and what
+        // was behind it, in the proportion the two have there; a row
+        // the line covers whole has none of either.
+        let rest = 1000 - covers.min(1000);
+        let base = match (under * 1000).checked_div(rest) {
+            Some(share) => mix(back, light, share),
+            None => light,
+        };
+        mix(base, color, covers)
+    };
+    for px in first..=last {
+        let a = edge[px as usize] + half;
+        let b = if px < last { edge[px as usize + 1] + half } else { a };
+        let s = taskmgr::stroke(a, b, h);
+        if s.top == s.bottom {
+            dc.fill(x + px, y + s.top, 1, 1, blend(s.covers_top, s.under));
+        } else {
+            dc.fill(x + px, y + s.top, 1, 1, mix(back, color, s.covers_top));
+            if s.bottom > s.top + 1 {
+                dc.fill(x + px, y + s.top + 1, 1, s.bottom - s.top - 1, color);
+            }
+            dc.fill(x + px, y + s.bottom, 1, 1, blend(s.covers_bottom, s.under));
+        }
+        if s.bottom + 1 < h {
+            dc.fill(x + px, y + s.bottom + 1, 1, h - s.bottom - 1, light);
+        }
+    }
+}
+
+/// A graph of `history` (per mille of `scale`) in (x, y, w, h): the
+/// minute its ring holds, under gridlines, filling from the right.
+#[allow(clippy::too_many_arguments)]
+fn graph(
+    dc: &Dc,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    history: Option<&History>,
+    scale: u32,
+    color: u32,
+) {
     dc.fill(x, y, w, h, rgb(0xff, 0xff, 0xff));
     for k in 1..4 {
         dc.fill(x, y + h * k / 4, w, 1, rgb(0xf0, 0xf0, 0xf0));
@@ -787,43 +926,114 @@ fn graph(dc: &Dc, x: i32, y: i32, w: i32, h: i32, values: &[u32], scale: u32, co
         dc.fill(x + w * k / 6, y, 1, h, rgb(0xf0, 0xf0, 0xf0));
     }
     dc.frame(x, y, w, h, color);
-    if values.is_empty() {
-        return;
+    if let Some(history) = history {
+        let white = rgb(0xff, 0xff, 0xff);
+        spark(
+            dc,
+            x + 1,
+            y + 1,
+            w - 2,
+            h - 2,
+            history,
+            scale,
+            color,
+            white,
+            GRAPH_SHADE,
+            history.cap(),
+        );
     }
-    let step = (w - 2) as f32 / (HISTORY - 1) as f32;
-    let start = HISTORY - values.len();
-    let mut points: Vec<[i32; 2]> = Vec::new();
-    let light = mix(color, rgb(0xff, 0xff, 0xff), 600);
-    for (k, &v) in values.iter().enumerate() {
-        let px = x + 1 + ((start + k) as f32 * step) as i32;
-        let vh = ((u64::from(v.min(scale)) * (h - 2) as u64) / u64::from(scale.max(1))) as i32;
-        let py = y + h - 1 - vh;
-        points.push([px, py]);
+}
+
+/// Performance's list of metrics on the left (`SIDE_W` wide from `x`,
+/// a row every `SIDE_ROW_H` from `top`): each processor, memory, disk,
+/// network and the process, thread and handle counts, each with its
+/// value and the last minute beside it as a sparkline, as Windows'
+/// Performance sidebar. CPU and memory are scaled to 100 %, the
+/// throughputs and the counts to their own peak, which is written under
+/// the value.
+fn paint_side(s: &State, dc: &Dc, x: i32, top: i32, h: i32, perf: &Perf) {
+    type Metric<'a> = (String, String, Option<String>, &'a History, u32, u32);
+    let mut rows: Vec<Metric> = Vec::new();
+    rows.push((
+        String::from("CPU"),
+        taskmgr::percent(s.cpu_total.last()),
+        None,
+        &s.cpu_total,
+        1000,
+        CPU_COLOR,
+    ));
+    for (i, history) in s.cpus.iter().enumerate() {
+        let mut name = String::from("CPU ");
+        let _ = write!(name, "{i}");
+        rows.push((name, taskmgr::percent(history.last()), None, history, 1000, CPU_COLOR));
     }
-    // The area under the line, then the line.
-    for pair in points.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        for px in a[0]..b[0] {
-            let t = (px - a[0]) * 1000 / (b[0] - a[0]).max(1);
-            let py = a[1] + (b[1] - a[1]) * t / 1000;
-            dc.fill(px, py, 1, y + h - 1 - py, light);
+    let mut in_use = taskmgr::percent(s.memory.last());
+    let _ = write!(in_use, " ({})", taskmgr::memory(perf.memory_used));
+    rows.push((String::from("Memory"), in_use, None, &s.memory, 1000, MEMORY_COLOR));
+    for (name, history, color, present, missing) in [
+        ("Disk", &s.disk, DISK_COLOR, perf.has_disk, "No disk"),
+        ("Network", &s.network, NETWORK_COLOR, perf.has_network, "No network adapter"),
+    ] {
+        let mut peak = String::from("peak ");
+        peak.push_str(&taskmgr::speed(u64::from(history.max())));
+        let value =
+            if present { taskmgr::speed(u64::from(history.last())) } else { String::from(missing) };
+        rows.push((
+            String::from(name),
+            value,
+            present.then_some(peak),
+            history,
+            history.max().max(1),
+            color,
+        ));
+    }
+    for (name, history) in
+        [("Processes", &s.processes), ("Threads", &s.threads), ("Handles", &s.handles)]
+    {
+        let mut value = String::new();
+        let _ = write!(value, "{}", history.last());
+        let mut peak = String::from("peak ");
+        let _ = write!(peak, "{}", history.max());
+        rows.push((String::from(name), value, Some(peak), history, history.max().max(1), ACCENT));
+    }
+    let rh = SIDE_ROW_H.min((h - top - 8) / rows.len().max(1) as i32);
+    for (k, (name, value, peak, history, scale, color)) in rows.iter().enumerate() {
+        let ry = top + rh * k as i32;
+        let bh = rh - 18;
+        if bh < 8 {
+            break;
         }
-    }
-    // SAFETY: a pen made, selected and freed here; valid points.
-    unsafe {
-        let pen = CreatePen(0, 1, color);
-        let old = SelectObject(dc.0, pen);
-        Polyline(dc.0, points.as_ptr(), points.len() as i32);
-        SelectObject(dc.0, old);
-        DeleteObject(pen);
+        dc.text(x, ry, 96, name, s.bold, TEXT, false);
+        dc.text(x, ry + 17, 96, value, s.font, TEXT_DIM, false);
+        if let Some(peak) = peak {
+            dc.text(x, ry + 32, 96, peak, s.font, TEXT_DIM, false);
+        }
+        let (bx, bw) = (x + 100, SIDE_W - 100);
+        dc.fill(bx, ry, bw, bh, rgb(0xff, 0xff, 0xff));
+        dc.frame(bx, ry, bw, bh, mix(*color, rgb(0xff, 0xff, 0xff), 700));
+        spark(
+            dc,
+            bx + 1,
+            ry + 1,
+            bw - 2,
+            bh - 2,
+            history,
+            *scale,
+            *color,
+            rgb(0xff, 0xff, 0xff),
+            GRAPH_SHADE,
+            history.cap(),
+        );
     }
 }
 
 fn paint_performance(s: &State, dc: &Dc) {
     let (w, h) = s.size;
-    let x0 = NAV_W + 20;
+    let sx = NAV_W + 20;
+    let x0 = sx + SIDE_W + 12;
     let width = w - x0 - 20;
     let Some(perf) = &s.perf else { return };
+    paint_side(s, dc, sx, COLS_Y + 44, h, perf);
     // CPU: the whole width, a graph per processor.
     let mut t = String::from("CPU");
     let _ = write!(t, "   {}%   {} processors", s.cpu_total.last() / 10, perf.cpus.len());
@@ -846,8 +1056,7 @@ fn paint_performance(s: &State, dc: &Dc) {
         let (col, row) = (i % per_row, i / per_row);
         let gx = x0 + col * (gw + 8);
         let gy = top + row * (gh + 8);
-        let values = s.cpus.get(i as usize).map_or(&[][..], |h| &h.values[..]);
-        graph(dc, gx, gy, gw, gh, values, 1000, CPU_COLOR);
+        graph(dc, gx, gy, gw, gh, s.cpus.get(i as usize), 1000, CPU_COLOR);
         let mut t = String::from("CPU ");
         let _ = write!(t, "{}  {}%", i, s.cpus.get(i as usize).map_or(0, |h| h.last()) / 10);
         dc.text(gx + 6, gy + 4, gw - 12, &t, s.font, TEXT_DIM, false);
@@ -899,7 +1108,7 @@ fn paint_performance(s: &State, dc: &Dc) {
             String::from("No network adapter")
         };
         dc.text(px, by + 20, bw, &shown, s.font, TEXT_DIM, false);
-        graph(dc, px, by + 44, bw, bh, &history.values, *scale, *color);
+        graph(dc, px, by + 44, bw, bh, Some(*history), *scale, *color);
     }
 }
 
@@ -1093,6 +1302,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
             memory: History::new(HISTORY),
             disk: History::new(HISTORY),
             network: History::new(HISTORY),
+            processes: History::new(HISTORY),
+            threads: History::new(HISTORY),
+            handles: History::new(HISTORY),
+            trails: Trails::new(HISTORY),
             pending: Vec::new(),
             font: font(-13, 400),
             bold: font(-13, 600),

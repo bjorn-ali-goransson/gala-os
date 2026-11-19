@@ -534,14 +534,14 @@ const PREBUILT: &[Prebuilt] = &[
         excludes: &[],
     },
     // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
-    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // current one, 16.0.20527.20150, x86; the SHA-256 is the one we
     // measured: Microsoft replaces the file at this URL with each release,
     // so a new one fails the checksum until it is pinned again). Scenario
     // office_install (ROADMAP OF) runs it inside gala; never committed.
     Prebuilt {
         name: "odt",
         url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
-        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        checksum: "daea2a1c2beef16e88dded58916b9c4d816ff247e76ee5ebb41c3810fee16be1",
         members: &["setup.exe"],
         excludes: &[],
     },
@@ -7740,6 +7740,36 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("d3d11_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("d3d11_test", "user/bin/d3d11_test.exe", "gala"),
+    // d2d1_device_test (GPU G2): Direct2D on the program's own Direct3D
+    // 11 device, so it ships d3d11_test's stack (DXVK beside the program,
+    // the Vulkan stack in System32) plus gala's d2d1.dll.
+    ("d2d1_device_test", "ntdll.dll", "Windows/System32"),
+    ("d2d1_device_test", "kernel32.dll", "Windows/System32"),
+    ("d2d1_device_test", "msvcrt.dll", "Windows/System32"),
+    ("d2d1_device_test", "ucrtbase.dll", "Windows/System32"),
+    ("d2d1_device_test", "user32.dll", "Windows/System32"),
+    ("d2d1_device_test", "gdi32.dll", "Windows/System32"),
+    ("d2d1_device_test", "advapi32.dll", "Windows/System32"),
+    ("d2d1_device_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d2d1_device_test", "version.dll", "Windows/System32"),
+    ("d2d1_device_test", "setupapi.dll", "Windows/System32"),
+    ("d2d1_device_test", "cfgmgr32.dll", "Windows/System32"),
+    ("d2d1_device_test", "dxgi.dll", "Windows/System32"),
+    ("d2d1_device_test", "shell32.dll", "Windows/System32"),
+    ("d2d1_device_test", "shlwapi.dll", "Windows/System32"),
+    ("d2d1_device_test", "ole32.dll", "Windows/System32"),
+    ("d2d1_device_test", "d2d1.dll", "Windows/System32"),
+    (
+        "d2d1_device_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("d2d1_device_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("d2d1_device_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("d2d1_device_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -9420,6 +9450,31 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "ucrtbase.dll", "Windows/System32"),
     ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
     ("office_install", "user/office_install/config.xml", "gala"),
+    // office_word: a rendering device for Word (ROADMAP OF, GPU G2).
+    // DXVK's d3d11 and dxgi go beside WINWORD.EXE, the directory the
+    // loader searches before System32 (ARCHITECTURE "The module
+    // graph"), as a program that ships DXVK puts them (`d3d11_test`);
+    // System32's dxgi stays gala's, the one the Vulkan loader calls.
+    // The stack under it is the one `vk_test` uses: the Khronos loader
+    // and Mesa's lavapipe in System32, lavapipe registered.
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll",
+        "Program Files/Microsoft Office/root/Office16",
+    ),
+    (
+        "office_word",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("office_word", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("office_word", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("office_word", "user/mesa/lavapipe.regseed", "registry"),
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
@@ -10088,7 +10143,9 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// 133 s of run time under TCG, 2.5 s on the host) and its window
 /// (`lx_gimp`: GTK, its UI's data and icons, its plug-ins; about 180 s
 /// before its screen check). They
-/// get this much instead of BOOT_TEST_TIMEOUT.
+/// get this much instead of BOOT_TEST_TIMEOUT, an ARM64 twin with its
+/// x64 scenario (whose work it does on the slower machine: arm_taskmgr
+/// printed its marker at 141 s, after 120 s had ended its VM).
 const SLOW_SCENARIOS: &[&str] = &[
     "taskmgr",
     "explorer",
@@ -10173,7 +10230,7 @@ fn scenario_timeout(name: &str) -> Duration {
         || name.starts_with("chromium_")
     {
         ELASTICSEARCH_TIMEOUT
-    } else if SLOW_SCENARIOS.contains(&name) {
+    } else if SLOW_SCENARIOS.contains(&twin_base(name).unwrap_or(name)) {
         SLOW_TIMEOUT
     } else {
         BOOT_TEST_TIMEOUT
@@ -10368,7 +10425,12 @@ fn main() -> ExitCode {
                 }
             }
             Some("bench") => {
-                bench(release, args.get(1).filter(|a| !a.starts_with("--")).map(Path::new))
+                // The file is the first argument that is not a flag,
+                // wherever it stands: --release is accepted anywhere for
+                // every other command, and taking position 1 alone made
+                // `bench --release <file>` print an empty Windows column
+                // instead of saying the file had been ignored.
+                bench(release, args[1..].iter().find(|a| !a.starts_with("--")).map(Path::new))
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
@@ -12186,6 +12248,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "console_window",
     "wsl_terminal",
     "start_menu",
+    "desktop_at_boot",
     "taskmgr",
     "explorer",
     "linux_menu",
@@ -12306,8 +12369,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
-/// finished, xtask stops the VM (QEMU_EXIT_SUCCESS cannot come) and the
-/// scenario passes if the client succeeded.
+/// finished (or, with no client, the screen check has passed), xtask
+/// stops the VM (QEMU_EXIT_SUCCESS cannot come) and the scenario passes
+/// if the client (the check) succeeded.
 const XTASK_STOPS: i32 = -1;
 /// Scenarios that are meant to time out (a program that hangs on
 /// purpose): xtask asks for the state dump, which must have the expected
@@ -12639,6 +12703,7 @@ const ARM64_TWINS: &[&str] = &[
     "handover_same",
     "gui_test",
     "start_menu",
+    "desktop_at_boot",
     "tray_test",
     "d2d1_window",
     "taskmgr",
@@ -14188,6 +14253,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // console window) and an install-on-click tile (7-Zip, not
         // installed: `gala install 7zip.7zip` without a window, its
         // progress on the tile); START_MENU_SCREEN clicks them.
+        name: "desktop_at_boot",
+        // A machine booted as the downloadable images are (no qemu_exit,
+        // a console program and nothing else): once the boot's work is
+        // done the console session's desktop is on the screen, the
+        // taskbar and start button drawn, the start menu answering the
+        // keyboard and the mouse (DESKTOP_AT_BOOT_SCREEN). xtask stops
+        // the machine after the screen check.
+        cmdline: "run=hello.exe",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "Hello from user mode!",
+            "boot: the boot thread's work is done; it ends",
+            "desktop: session 1 is live",
+            "xtask: screen ok",
+        ],
+    },
+    Scenario {
         name: "start_menu",
         cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -15162,6 +15244,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=d2d1_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["d2d1_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Direct2D 1.1 on the program's own Direct3D 11 device
+        // (user/d2d1_device_test), which is how Word draws: an
+        // ID2D1Factory1 over the program's IDXGIDevice, a device context
+        // targeting a bitmap over the swap chain's DXGI surface, a frame
+        // drawn into it with the colours and geometry of d3d11_test's,
+        // read back through a staging texture and presented. The device
+        // is DXVK on lavapipe; Direct2D itself is gala's software
+        // rasterizer, so what it draws has to reach the DXGI surface.
+        name: "d2d1_device_test",
+        cmdline: "qemu_exit presenter=test run=d2d1_device_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d2d1_device_test: device llvmpipe",
+            "d2d1_device_test: read back 0x336699 0xffcc00",
+            "d2d1_device_test: presented",
+            "xtask: screen ok",
+            "d2d1_device_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // A window drawn with Direct2D through a window render target
@@ -17521,7 +17624,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   args=%22C:\\Program%20Files\\Microsoft%20Office\\root\\Office16\\\
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
-                  dump=C:/Users/Public,C:/Windows/Temp",
+                  dump=C:/Users/Public,C:/Windows/Temp,\
+                  C:/gala/winword_d3d11.log,C:/gala/winword_dxgi.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "consolerun: started pid ",
@@ -18884,6 +18988,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("office_install_local", "office_install"),
     ("office_install_local", "office_install_local"),
     ("office_word", "office_install"),
+    ("office_word", "office_word"),
     ("office_excel", "office_install"),
     ("office_install_gui", "office_install_gui"),
     ("events_process", "process_test"),
@@ -19914,6 +20019,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
+    ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
@@ -21175,6 +21281,17 @@ fn run_vm_once(
                 let text = plain_text(&String::from_utf8_lossy(&b));
                 LIMINE_HALTED.iter().any(|m| text.contains(m))
             })
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            stopped = true;
+            break None;
+        }
+        // One with a screen check and no client (a machine that keeps
+        // running, as the downloadable images do) once the check passed.
+        if stop_after_client
+            && port.is_none()
+            && screen_verdict.as_deref().is_some_and(|v| v.starts_with("xtask: screen ok"))
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -22856,10 +22973,29 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
 /// on the frozen window, which then is "Not responding" (red in the
 /// Status column); Ctrl+Shift+Esc opens Task Manager; each view is a
 /// screendump (`test-taskmgr.screen<n>.png`: 1 Processes, 2
-/// Performance, 3 Details, 4 the busy window found and selected, 6
-/// `sleep`, 8 `sh`, 10 the distribution's heading, 12 after the ends); the search finds each victim (row 0 its group's heading,
+/// Performance, 3 Details, then each victim's list filtered (4, 7, 10,
+/// 13) and the row selected in it (5 the busy window, 8 `sleep`, 11
+/// `sh`, 14 the distribution's heading), 16 after the ends); the search finds each victim (row 0 its group's heading,
 /// row 1 the process), End task ends it, and taskmgr_test says so before
 /// the next step; Alt+F4 closes Task Manager last.
+///
+/// The sparklines (ROADMAP TM): Performance's list of metrics on the
+/// left has a row every 56 pixels from client y 144 (CPU, a processor
+/// each, Memory, Disk, Network, Processes, Threads, Handles), its line
+/// in a box at client x 297, 94 by 36, so the first row's is at screen
+/// (418, 218); in Processes a row's CPU and Memory cells carry the same
+/// minute behind the number (client x 786 and 866, 18 rows high from
+/// row 1's y 155: screen (907, 228) and (987, 228)), the CPU against
+/// all the processors and the memory against the largest row listed.
+/// A box holds a sample per second over a minute, so a check of a
+/// sidebar line waits for the view to have run the seconds that reach
+/// the columns it looks at (1.6 columns a second from the right).
+///
+/// A line is blended with whatever it is drawn over wherever it covers
+/// a pixel in part, which is most of them (`taskmgr::stroke`), so what
+/// the checks look for is the area under it: the metric's colour mixed
+/// towards white, which is a colour of its own and solid. Where the
+/// line stands in its box is then what that area proves.
 const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
     marker: "taskmgr_test: ready",
     steps: &[
@@ -22905,6 +23041,23 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x117dbb), // CPU graphs
                 PixelCheck::AnyIn(317, 217, 800, 200, 0x9fcbe3), // load under a line
                 PixelCheck::AnyIn(317, 450, 800, 250, 0x8b12ae), // memory's graph
+                // The list on the left, in the right 12 columns of
+                // each box: a sample a second over a minute's width, so
+                // those columns are a line only once the view has run
+                // some seconds, where the newest sample alone would be
+                // a dot in the corner. What each check looks for is the
+                // area under the line, the metric's colour mixed
+                // towards white: the line itself is blended with what
+                // it is drawn over wherever it covers a pixel in part.
+                // The CPU total's load reaches the top of its box (over
+                // 250 per mille: the busy thread is one of the two
+                // processors) and fills the bottom of it; memory's few
+                // per cent and the process count are their own lines'
+                // own load.
+                PixelCheck::AnyIn(500, 219, 12, 26, 0x9fcbe3),
+                PixelCheck::Most(500, 246, 12, 8, 0x9fcbe3, 90),
+                PixelCheck::AnyIn(500, 387, 12, 35, 0xd0a0de),
+                PixelCheck::AnyIn(500, 555, 12, 34, 0x99bfe2),
             ],
         },
         ScreenStep {
@@ -22919,8 +23072,8 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
-            // Processes (201, 149), "busy" searched, row 1 (521, 237)
-            // selected: End task lights up.
+            // Processes (201, 149), "busy" searched: the list is down to
+            // the one window before anything is clicked.
             input: &[
                 "mouse_move 0 -80",
                 "mouse_button 1",
@@ -22929,11 +23082,22 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "sendkey u",
                 "sendkey s",
                 "sendkey y",
-                "mouse_move 255 88",
-                "mouse_move 65 0",
-                "mouse_button 1",
-                "mouse_button 0",
             ],
+            pixels: &[
+                TASKMGR_FILTERED,
+                // The area under its CPU line, which stands well above
+                // the cell's floor (a thread of the two processors),
+                // and its memory line at the ceiling with its own area
+                // under it: the only row listed, so it is the scale.
+                PixelCheck::Most(910, 240, 40, 6, 0xd4e7f2, 80),
+                PixelCheck::AnyIn(990, 228, 40, 10, 0x8b12ae),
+                PixelCheck::Most(990, 234, 40, 10, 0xead4f0, 90),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Row 1 (521, 237) selected: End task lights up.
+            input: &["mouse_move 255 88", "mouse_move 65 0", "mouse_button 1", "mouse_button 0"],
             pixels: &[
                 PixelCheck::At(700, 240, 0xcce4f7),  // the selection (row 1)
                 PixelCheck::At(1030, 135, 0x005fb8), // End task enabled
@@ -22953,7 +23117,7 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "taskmgr_test: busy window ended",
-            // "sleep" searched, its row selected.
+            // "sleep" searched.
             input: &[
                 "sendkey esc",
                 "sendkey s",
@@ -22961,6 +23125,16 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "sendkey e",
                 "sendkey e",
                 "sendkey p",
+            ],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Its row selected.
+            input: &[
                 "mouse_move -255 92",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -22968,7 +23142,7 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 "mouse_button 0",
             ],
             pixels: &[
-                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420), // "Linux: bb (1)"
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
                 PixelCheck::At(700, 240, 0xcce4f7),
             ],
         },
@@ -22986,10 +23160,21 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep {
             after: "taskmgr_test: sleep ended",
             // "sh", which ignores SIGTERM: SIGKILL after the grace time.
+            // The list `sleep` left looks the same (one Linux group, one
+            // row), so the row's name cell is blank right of "sh" and
+            // unselected, where "sleep" goes on and End task left it
+            // selected: the click below waits for this search, not the
+            // last one's screen.
+            input: &["sendkey esc", "sendkey s", "sendkey h"],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::Most(369, 229, 20, 18, 0xfbfbfb, 100),
+            ],
+        },
+        ScreenStep {
+            after: "",
             input: &[
-                "sendkey esc",
-                "sendkey s",
-                "sendkey h",
                 "mouse_move -255 92",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -23014,13 +23199,21 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "taskmgr_test: sh ended",
-            // "cat" searched, the distribution's heading (row 0, 521,
-            // 213) selected: End task ends its whole tree.
+            // "cat" searched: `cat` waits for its input and takes no
+            // processor, so its CPU cell is background above the floor
+            // its line rests on (the busy window's was not).
+            input: &["sendkey esc", "sendkey c", "sendkey a", "sendkey t"],
+            pixels: &[
+                TASKMGR_FILTERED,
+                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
+                PixelCheck::Most(910, 228, 40, 14, 0xfbfbfb, 95),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // The distribution's heading (row 0, 521, 213) selected: End
+            // task ends its whole tree.
             input: &[
-                "sendkey esc",
-                "sendkey c",
-                "sendkey a",
-                "sendkey t",
                 "mouse_move -255 68",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
@@ -23050,6 +23243,51 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[PixelCheck::AnyIn(130, 201, 250, 24, 0x005fb8)],
         },
         ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+    ],
+};
+
+/// The process list narrowed to one group: below the group's own
+/// rows the list is all background, where unfiltered it is rows
+/// (95% of this rectangle at its emptiest, the Details view).
+/// taskmgr applies the search on its own thread, so a click on the
+/// row the search leaves waits for this: see WORKFLOW, "a click that
+/// aims at what an earlier key in the same step changed".
+const TASKMGR_FILTERED: PixelCheck = PixelCheck::Most(310, 300, 800, 260, 0xfbfbfb, 99);
+
+/// desktop_at_boot's screen: the desktop with no window, the start button
+/// alone in the taskbar's middle (640, 776), the pointer at the screen's
+/// (640, 400). The Windows key opens the start menu, Esc closes it, and a
+/// click on the start button opens it again (a click on an open menu
+/// would close it: the last step also says Esc did).
+const DESKTOP_AT_BOOT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: session 1 is live",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
+                PixelCheck::AnyIn(600, 760, 80, 30, 0x167fd6), // the fortress
+                PixelCheck::Varied(0, 0, 1280, 700, 2),        // a wallpaper
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &["sendkey meta_l"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+            ],
+        },
     ],
 };
 
@@ -23577,6 +23815,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("office_word", OFFICE_WORD_SCREEN),
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
+    ("desktop_at_boot", DESKTOP_AT_BOOT_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
@@ -23659,6 +23898,44 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     // BI_RGB (so BGRA) DIB without swizzling it. The
                     // window path itself is sound: vk_test, which asks for
                     // BGRA, gets its colours right through the same one.
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x996633),
+                        PixelCheck::At(101 + 199, 133 + 133, 0x00ccff),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x996633),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
+        // GPU G2: d2d1_device_test's frame, drawn by Direct2D into a
+        // bitmap over the swap chain's DXGI surface and presented through
+        // the same path as d3d11_test's, into the same 400 x 300 window at
+        // (100, 100), client 398 x 266 from (101, 133): the clear colour
+        // in the corner and below the rectangle, the rectangle's colour in
+        // the middle (it covers the client's middle half, from (99, 66) to
+        // (298, 199)); then a click there ends the program.
+        "d2d1_device_test",
+        ScreenCheck {
+            marker: "d2d1_device_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    // Red and blue arrive swapped, as in d3d11_test's
+                    // check: these are the swapped colours, a stopgap
+                    // expectation of Mesa's Win32 WSI GDI present path,
+                    // ROADMAP "Known issues and stopgaps".
                     pixels: &[
                         PixelCheck::At(101 + 4, 133 + 4, 0x996633),
                         PixelCheck::At(101 + 199, 133 + 133, 0x00ccff),
@@ -29570,6 +29847,24 @@ mod health {
         assert!(judge_log(&s, None, true, "statedump: end").is_ok());
         assert!(judge_log(&s, None, true, "statedump: begin").is_err());
         assert!(judge_log(&s, Some(QEMU_EXIT_SUCCESS), false, "statedump: end").is_err());
+    }
+
+    /// A twin does its x64 scenario's work on the slower machine
+    /// (aarch64 under TCG), so it cannot have less run time than the
+    /// scenario that needed more than the default.
+    #[test]
+    fn an_arm64_twin_gets_its_x64_scenario_s_run_time() {
+        let twins: Vec<&str> =
+            ARM64_TWINS.iter().copied().filter(|t| SLOW_SCENARIOS.contains(t)).collect();
+        assert!(twins.contains(&"taskmgr"), "{twins:?}");
+        for base in twins {
+            let twin = format!("arm_{base}");
+            assert_eq!(
+                scenario_timeout(&twin),
+                scenario_timeout(base),
+                "{twin} has less run time than {base}"
+            );
+        }
     }
 }
 

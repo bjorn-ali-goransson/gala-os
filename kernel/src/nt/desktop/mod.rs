@@ -3420,6 +3420,30 @@ pub fn has_shell(shell: &Shell) -> bool {
     ensure_live(shell, &mut d).is_ok() && d.bare.is_none()
 }
 
+/// The end of a boot that keeps running (no `qemu_exit`: a machine, not
+/// a test): the console session's desktop goes live if no program has
+/// made it so, so the screen shows the desktop, its taskbar and start
+/// menu answering the keyboard and mouse, instead of the boot splash (or,
+/// on virtio-gpu, nothing). A desktop goes live otherwise only when a
+/// program first uses it; a boot whose programs are console programs
+/// left the splash up. Where nothing shows desktops (`bare`) it stays the
+/// window state alone, as before. Says what it did.
+pub fn show_console_at_boot_end() {
+    let id = super::session::active_console();
+    let Some(desk) = super::session::desk(id) else {
+        crate::warn!("desktop: the boot ends with no console session ({id}): no desktop shown");
+        return;
+    };
+    let mut d = desk.shell.d.lock();
+    if d.s.live {
+        crate::info!("desktop: the boot ends with session {id}'s desktop already live");
+        return;
+    }
+    if let Err(e) = ensure_live(&desk.shell, &mut d) {
+        crate::warn!("desktop: the boot ends: session {id}'s desktop not shown ({e:?})");
+    }
+}
+
 /// Runs `f` on the desktop and redraws what it changed. Works the same
 /// whatever shows the desktop, or nothing, bare or not.
 pub fn with<R>(

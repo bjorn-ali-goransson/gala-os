@@ -262,6 +262,21 @@ an administrator prompt for `schannel_test` (its test CA goes into
 LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
 and `wininet_test` and their WOW64 twins, which fetch from the Nginx
 that setup starts).
+
+Elevation decides results in both directions, so no one run answers for
+every program and the report's `platform` says which run it was
+(`windows 10.0.26200 elevated` or `... standard user`, the first line of
+`windows-output.txt` too). An elevated run skips the four programs whose
+checks are what a *standard* user gets, since a program on gala has a
+standard user's token: `token_test` (an administrator's token holds
+SeDebugPrivilege, which its checks assert is absent), `kernel32_file_test`
+(an administrator may open `\\.\C:` for reading, its checks expect
+ERROR_ACCESS_DENIED), `kernel32_pool_test` (an administrator holds
+SeCreateSymbolicLinkPrivilege, which its checks assert is not held) and
+`disk_test` (an administrator opens PhysicalDrive0, which is not
+xtask's 16 MiB scratch disk). CI's windows job is elevated, so its
+report lists them as skipped.
+
 A program that crashes gets a `fault` field
 (`<code> <name> at module+offset`) from `user/windows/fault.py`, which
 the runner looks for at `..\windowsault.py`: it re-runs the program as
@@ -491,7 +506,9 @@ xtask that change how a scenario boots:
   sqllocaldb and postgres get 3 GiB (`qemu()` in xtask).
 - **Servers**: a server never exits; scenarios with exit status
   `XTASK_STOPS` are stopped by xtask once their net client has finished,
-  and pass if it succeeded.
+  and pass if it succeeded. One with a screen check and no client (a
+  machine left running, `desktop_at_boot`) is stopped once the check
+  has passed.
 - **A server and a client at once**: `run=` starts programs one after
   another, so the client starts the server itself (CreateProcessW) and
   waits for it, as `tds_test` does with sqlservr; or the scenario starts
@@ -1356,7 +1373,10 @@ its image back and checks the checksum. It runs in the `release` environment, wi
 `release.yml`'s R2 variables and secrets. The aarch64 demo is
 `DEMO_CMDLINE_AARCH64` (the desktop on virtio-gpu, hello.exe); a
 downloadable image's command line names no file of the machine that
-built it (no `events_file=`).
+built it (no `events_file=`). The website's "Try it" section links
+them, with the QEMU commands that boot them (`images` in
+`web/src/content.ts`; a change to the image names or the demo changes it
+too).
 
 ### The update feed
 
@@ -1885,8 +1905,10 @@ its program through LdrInitializeThunk (`arm_startup_test`).
   `USER_PROGRAMS_ARM64`). An image refuses another x64 executable from
   user/bin (xtask's error says so): an ARM64 machine cannot run it.
 - The per-name lists (NET_SCENARIOS, HOST_PAGE_SCENARIOS, SSH_PORT_22,
-  `onecpu_*`'s single CPU) look a twin up by its x64 scenario
-  (`twin_base`); a new list keyed by scenario name does the same.
+  SLOW_SCENARIOS' run-time budget, `onecpu_*`'s single CPU) look a twin
+  up by its x64 scenario (`twin_base`); a new list keyed by scenario
+  name does the same. A twin left out of one gets the default on the
+  slower machine, where its x64 scenario needed the exception.
 - A test's expectations stay real Windows': where ARM64 Windows answers
   differently (the native machine 0xaa64, PROCESSOR_ARCHITECTURE_ARM64,
   CONTEXT's offsets), the test picks by `cfg!(target_arch)`. What gala
@@ -2432,7 +2454,11 @@ source).
   it. Nor may a transcript assert what Linux leaves to timing: a chain of
   exactly 40 symbolic links reads or fails with ELOOP, depending on
   whether the lookup's lockless walk fell back (fs_test asserts 20 and
-  41, and "opens or ELOOP" for 40). lx-expect
+  41, and "opens or ELOOP" for 40); nor that an expiry is readable on
+  the instruction after the timer is armed, even for an absolute time
+  already past, because the expiry is posted by the timer subsystem and
+  a non-blocking read races it (timerfd_test polls before each read of
+  such a timer). lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the
@@ -2785,8 +2811,9 @@ A root is what its workload opened on real 26.04, traced:
   Manager with Alt+F4 (the test waits for that, so the last screendump
   comes before the guest ends). Screendumps:
   `target/debug/test-taskmgr.screen<n>.png` (1 Processes with the
-  frozen window "Not responding", 2 Performance, 3 Details, 4 the app
-  found, 6 `sleep`, 8 `sh`, 10 the distribution's heading, 12 what is
+  frozen window "Not responding", 2 Performance, 3 Details, then each
+  victim's list filtered (4, 7, 10, 13) and its row selected (5 the
+  app, 8 `sleep`, 11 `sh`, 14 the distribution's heading), 16 what is
   left).
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
   `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
@@ -3456,7 +3483,14 @@ keyed by the relay's pid: `open` with its start, then its start and end
 bytes each way and how each side ended in order, or why it could not
 connect; an `open` without its second line never ended) and Chromium maps web-platform.test and its subdomains
 there (`--host-resolver-rules`); our testharnessreport.js replaces the
-tree's (the file WPT leaves to vendors). Each test waits for its
+tree's (the file WPT leaves to vendors). The session also passes
+`--enable-experimental-web-platform-features` and
+`--enable-blink-test-features`, which wptrunner passes whenever it is
+not told otherwise (`browsers/chrome.py`), so every run on wpt.fyi has
+them: without them Chromium 159 splits a qualified name at every colon
+and 20 `dom/nodes` subtests fail that pass there, a difference in the
+flags and not in gala. A flag wptrunner passes and we do not is the
+first thing to suspect when a test fails only here. Each test waits for its
 results as long as testharness's own timeout allows, times 4, plus
 20 s; a test without results is a TIMEOUT whose message says what the
 page was doing (its URL, an error page's being chrome-error://,
@@ -3883,6 +3917,19 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   reads it (a pixel check of the prompt: a window shows before its
   program reads keys). `after` matches anywhere in the serial log, so
   it names a line that comes only from that change.
+- **A click that aims at what an earlier key in the same step changed
+  goes in a step of its own.** Pacing says the guest has read the
+  bytes, not that the program has acted on them: taskmgr applies a
+  typed search on a thread of its own, so typing the search and
+  clicking the row it leaves are two steps, the first ending on a pixel
+  check that the list has been filtered (`TASKMGR_FILTERED`, the list's
+  background where unfiltered there are rows). Otherwise a loaded host
+  clicks where the row is about to be, the row arrives unselected, and
+  only the step's screendump says so. The check must also tell this
+  search's list from the previous step's: two searches that each leave
+  one group with one row look alike, and a check both pass is met by
+  the screen still showing the last one (the `sh` step checks that the
+  name cell is blank right of "sh", where `sleep`'s name goes on).
 - Windows-key chords are one `sendkey` (`sendkey meta_l-right`: Snap).
   The wheel: `mouse_move 0 0 1` is one notch up (away from the user; a
   negative dz is down).
@@ -5046,7 +5093,19 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   is passed in the slot its position gives, and a call through a
   transmuted vtable slot must pass every argument (a missing trailing
   stroke style or opacity brush is garbage to the callee), and never a
-  `()` argument (it shifts the rest).
+  `()` argument (it shifts the rest). mingw-w64's **C** declarations of
+  those three say by value, which is wrong: a C test program calls them
+  through a pointer of its own (`d2d1_device_test`'s `pixel_size`), and
+  mingw's `d2d1_1.h` C convenience macros for inherited methods leave
+  out the `Base.` chain, so a C test reaches QueryInterface and Release
+  through `lpVtbl` itself.
+- **A vtable slot is counted from IUnknown, not from the interface**:
+  the index of a method is its position after QueryInterface, AddRef,
+  Release and everything the base interfaces declare
+  (ID2D1Bitmap::GetPixelSize is slot 5: IUnknown's three, GetFactory,
+  GetSize). One slot off calls the next method, which on x64 returns
+  without a crash and hands back a plausible answer -- GetPixelFormat's
+  {87, 1} read as a size is an 87 x 1 bitmap.
 - **Small integer LPCSTRs**: a store provider or structure type passed
   as `1 as *const u8` trips clippy's `manual_dangling_ptr`; write
   `core::ptr::without_provenance(1)`.

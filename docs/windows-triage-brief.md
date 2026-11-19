@@ -33,8 +33,14 @@ The last group is what matters: find what Windows really does.
 
 1. Pull, then run `powershell -ExecutionPolicy Bypass -File user\bin\run-all.ps1 -Out windows.json`
    (it now records a crash's faulting module and offset as `fault`).
-   Before it: a local account `galatest` with password `Gala-Test-1`;
-   run it once elevated so `schannel_test` runs too.
+   Before it: a local account `galatest` with password `Gala-Test-1`,
+   a standard user (`access_test` and `disk_test` assert that a standard
+   user is refused, so it must not be an administrator). Run the sweep
+   once as a standard user and once elevated: elevation is what lets
+   `schannel_test`, `winhttp_test` and `wininet_test` run, and what
+   makes the four standard-user programs skip (see docs/WORKFLOW.md,
+   "To compare with Windows"). The report's `platform` says which run
+   it was; a round that quotes a check number says it too.
 2. For each program that does not exit 0, find the failing check: the
    report line says `check N` (or `line L`); the checks are numbered in
    order in `user/<program>/src/main.rs` (each `c.eq`/`c.ok` call

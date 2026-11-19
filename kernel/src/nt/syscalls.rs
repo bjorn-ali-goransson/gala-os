@@ -781,7 +781,11 @@ fn dispatch(frame: &mut SyscallFrame) {
     if status != NtStatus::USER_APC && thread::has_special_user_apc() {
         super::abi::deliver_special_apc(&call, status);
     }
-    crate::flight::record(crate::flight::Kind::SyscallDone, u64::from(number), u64::from(status.0));
+    crate::flight::record(
+        crate::flight::Kind::SyscallDone,
+        u64::from(number) | (t.id << 32),
+        u64::from(status.0),
+    );
     // C:'s changes are written back lazily; a writer past the dirty limit
     // writes back here (throttling).
     super::persist::after_call();
