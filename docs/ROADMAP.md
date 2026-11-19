@@ -4812,8 +4812,10 @@ on the seams item PT prepared: native ARM64 Windows programs
 1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
    reading its socket in a roundtrip after the "anchor bottom" popup's
    commit while the server's thread waited too (a wakeup lost, or a
-   request answered with nothing); not reproduced locally, loaded or
-   not. The state dump now says which (`a round would find work`, each
+   request answered with nothing; the server had served 79 requests
+   and had no events waiting); not reproduced locally (0 of 224 boots
+   with 4 at once beside 2-3 busy host loops), nor on CI since. The
+   state dump now says which (`a round would find work`, each
    client's socket) and names Linux calls in the flight records.
 2. User mode, the rest: the desktop Linux applications run on aarch64
    from their roots' arm64 builds (`DEBS_ARM64`): GTK (`arm_lx_gtk`,
