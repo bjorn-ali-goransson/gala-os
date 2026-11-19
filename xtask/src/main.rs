@@ -1665,6 +1665,74 @@ const DEBS_ARM64: &[(&str, &str)] = &[
     ),
 ];
 
+/// Prebuilt `p` as a package of Ubuntu's pool (its URL under
+/// archive.ubuntu.com's or ports.ubuntu.com's `pool/`), if it is one.
+fn ubuntu_deb(p: &Prebuilt) -> Option<Deb> {
+    let pool = p
+        .url
+        .strip_prefix("https://archive.ubuntu.com/ubuntu/pool/")
+        .or_else(|| p.url.strip_prefix("https://ports.ubuntu.com/ubuntu-ports/pool/"))?;
+    pool.ends_with(".deb").then_some(Deb { pool, sha256: p.checksum, files: &[] })
+}
+
+/// `cargo xtask fetch-debs`: every package of every Linux root, amd64 and
+/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), and the prebuilts that are
+/// Ubuntu packages (glibc, libwayland-client, libffi, weston), into the package cache
+/// `target/prebuilt/debs`, each checked against its SHA-256 (`fetch_deb`);
+/// files there that no root pins any more are removed. One after another:
+/// CI runs it once (its `debs` job) for every boot shard, so the shards
+/// download nothing from Ubuntu's archives (WORKFLOW "CI build caches").
+fn fetch_debs() -> Result {
+    let mut wanted = std::collections::BTreeSet::new();
+    let (mut have, mut fetched) = (0, 0);
+    let cache = root().join("target/prebuilt/debs");
+    for r in LINUX_ROOTS {
+        for d in r.debs {
+            for (deb, arm64) in [
+                (Deb { pool: d.pool, sha256: d.sha256, files: d.files }, false),
+                (deb_arm64(d)?, true),
+            ] {
+                let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+                if !wanted.insert(name.clone()) {
+                    continue;
+                }
+                if cache.join(&name).exists() {
+                    have += 1;
+                } else {
+                    fetched += 1;
+                }
+                fetch_deb(&deb, arm64)?;
+            }
+        }
+    }
+    for p in PREBUILT {
+        let Some(deb) = ubuntu_deb(p) else { continue };
+        let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+        if !wanted.insert(name.clone()) {
+            continue;
+        }
+        if cache.join(&name).exists() {
+            have += 1;
+        } else {
+            fetched += 1;
+        }
+        fetch_deb(&deb, deb.pool.ends_with("_arm64.deb"))?;
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&cache).map_err(|e| format!("reading {cache:?}: {e}"))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !wanted.contains(&name) {
+            fs::remove_file(entry.path()).map_err(|e| format!("removing {name}: {e}"))?;
+            removed += 1;
+        }
+    }
+    eprintln!(
+        "xtask: fetch-debs: {} packages ({have} cached, {fetched} fetched), {removed} no longer pinned removed",
+        wanted.len()
+    );
+    Ok(())
+}
+
 /// Deb `d`'s arm64 build (DEBS_ARM64).
 fn deb_arm64(d: &Deb) -> Result<Deb> {
     if d.pool.ends_with("_all.deb") {
@@ -11496,6 +11564,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("fetch-debs") => fetch_debs(),
             Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
@@ -12546,8 +12615,15 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
-    eprintln!("xtask: fetching {} ({})", p.name, p.url);
-    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    if let Some(d) = ubuntu_deb(p) {
+        // An Ubuntu package: from the package cache (`fetch-debs` fills it
+        // once for CI's shards), copied as the download.
+        let (deb, _) = fetch_deb(&d, d.pool.ends_with("_arm64.deb"))?;
+        fs::copy(&deb, &zip).map_err(|e| format!("copying {deb:?}: {e}"))?;
+    } else {
+        eprintln!("xtask: fetching {} ({})", p.name, p.url);
+        run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    }
     // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
     let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
     let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;
@@ -12777,6 +12853,22 @@ fn compile_gsettings_schemas(dir: &Path) -> Result {
     Ok(())
 }
 
+/// `url` with Ubuntu's archive replaced by the mirror `XTASK_UBUNTU_MIRROR`
+/// names (its `.../ubuntu` base), if set: CI's runners reach
+/// archive.ubuntu.com badly (connections reset or hung for minutes) and
+/// their own apt uses Azure's mirror of it (`ci.yml`). The pool's paths
+/// and files are the same, and each download is checked against its
+/// pinned SHA-256 whatever serves it.
+fn ubuntu_mirror(url: &str) -> String {
+    const ARCHIVE: &str = "https://archive.ubuntu.com/ubuntu/";
+    match (url.strip_prefix(ARCHIVE), env::var("XTASK_UBUNTU_MIRROR")) {
+        (Some(rest), Ok(base)) if !base.is_empty() => {
+            format!("{}/{rest}", base.trim_end_matches('/'))
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// The package `d` in the package cache, `target/prebuilt/debs/<file>`
 /// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
 /// (curl, to a `.part` file renamed when whole) and checked against its
@@ -12787,7 +12879,7 @@ fn fetch_deb(d: &Deb, arm64: bool) -> Result<(PathBuf, String)> {
     let url = if arm64 {
         format!("https://ports.ubuntu.com/ubuntu-ports/pool/{}", d.pool)
     } else {
-        format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool)
+        ubuntu_mirror(&format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool))
     };
     let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
     let cache = root().join("target/prebuilt/debs");

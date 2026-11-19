@@ -395,7 +395,7 @@ pub fn waitid(
         super::timer::fire(call);
         {
             let mut c = call.lx.children.lock();
-            c.waiters.retain(|&w| w != me);
+            c.waiters.retain(|&(w, _)| w != me);
             if let Some(&(child, how)) = c.ended.iter().find(|&&(p, _)| wanted(p)) {
                 if options & WNOWAIT == 0 {
                     c.ended.retain(|&(p, _)| p != child);
@@ -425,11 +425,12 @@ pub fn waitid(
             if nonblock {
                 return Err(EAGAIN);
             }
-            c.waiters.try_push(me).map_err(|_| ENOMEM)?;
+            // What it waits for, for the state dump (-1: any child).
+            c.waiters.try_push((me, target.map_or(-1, |t| t as i64))).map_err(|_| ENOMEM)?;
             super::wait::prepare(call, None);
         }
         let r = super::wait::block(call);
-        call.lx.children.lock().waiters.retain(|&w| w != me);
+        call.lx.children.lock().waiters.retain(|&(w, _)| w != me);
         r?;
     }
 }
@@ -471,7 +472,7 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
         super::timer::fire(call);
         {
             let mut c = call.lx.children.lock();
-            c.waiters.retain(|&w| w != me);
+            c.waiters.retain(|&(w, _)| w != me);
             if let Some(&(child, how)) = c.ended.iter().find(|&&(p, _)| wanted(p)) {
                 drop(c);
                 let word = super::signal::wait_status(how);
@@ -498,12 +499,12 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
             if options & WNOHANG != 0 {
                 return Ok(0);
             }
-            c.waiters.try_push(me).map_err(|_| ENOMEM)?;
+            c.waiters.try_push((me, i64::from(pid))).map_err(|_| ENOMEM)?;
             // Woken by a child's end, a signal, or the timer's expiry.
             super::wait::prepare(call, None);
         }
         let r = super::wait::block(call);
-        call.lx.children.lock().waiters.retain(|&w| w != me);
+        call.lx.children.lock().waiters.retain(|&(w, _)| w != me);
         r?;
     }
 }
