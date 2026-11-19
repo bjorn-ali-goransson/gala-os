@@ -2274,15 +2274,74 @@ need gala's.
      SaveDrawingState, CreateBitmapFromDxgiSurface, SetTarget,
      CreateSolidColorBrush. Word is given a device, a render target
      bound to a DXGI surface and a brush, and asks for nothing further.
-     It concluded what it concluded from something it already held, so
-     what to close next is the QueryInterface blind spot above and not
-     another missing export. Two gaps stand beside the window and
-     neither is in it: the Vulkan loader asks gala's System32 dxgi for
-     IDXGIFactory6 (c1b6694f-ff09-44a9-...) three times as it sorts
+     It concluded what it concluded from something it already held,
+     and it was never refused an interface on the way: every object of
+     gala's d2d1 records the IID of a QueryInterface it cannot answer
+     (`query`, `user/d2d1/src/lib.rs`), and the run has no such row.
+     Nor does Word ask DirectWrite for a font: of the 59 entry points
+     dwrite records reaching, not one is reached in the whole run, and
+     IDWriteFactory::CreateRenderingParams is the only call it makes
+     into that DLL at all. The decision is therefore made within 19 ms
+     of the brush -- the `Word\Options\Debug` read at 41773 ms is
+     already Word asking whether to break before it gives up -- and on
+     a value some call answered S_OK with rather than on a status.
+     What those calls were handed and what they gave back is what
+     `trace_from=<dll>!<Interface>::<Method>` with `events=call`
+     measures, the ledger keeping one row a site and so hiding every
+     repeat and every answer: the ordered stream is
+     SetUnitMode(ctx, 1), GetDevice three times, CreateDeviceContext
+     three times, SetTextRenderingParams, CreateMesh,
+     CreateDrawingStateBlock(NULL, NULL), SaveDrawingState,
+     CreateBitmapFromDxgiSurface(surface, NULL), SetTarget, then six
+     CreateSolidColorBrush -- every one S_OK, and nothing after it. No
+     BeginDraw, no RestoreDrawingState, not even a Release.
+     Two gaps stand beside the window and neither is in it: the Vulkan
+     loader asks gala's System32 dxgi for IDXGIFactory6
+     (c1b6694f-ff09-44a9-...) three times as it sorts
      adapters and is refused, and `d3d10_1.dll!D3D10CreateDevice1`
      drops D3D10_CREATE_DEVICE_ALLOW_NULL_FROM_MAP (0x10), which has no
      Direct3D 11 flag of the same meaning -- nothing in the run maps a
      resource.
+     What is on the screen while this happens is Word's splash. The
+     window `desktop: shown window ''` names is a real top-level window
+     of Word's, created at 38206 ms and shown at 40315 ms, and a
+     screenshot of the second it lives (`XTASK_SHOTS`, WORKFLOW
+     "Screenshots") has the Office splash drawn whole: the Word
+     wordmark, "Starting...", the custom title bar with its minimise
+     and close buttons, the icon in the taskbar. Its title is
+     empty because a splash has none -- Word draws "Office" into the
+     client area and never calls SetWindowTextW, which is absent from
+     the import set. So the scenario's screen check for
+     `Document1 - Word` cannot fire on this window, and it is still the
+     right check: the document frame is a second window Word never
+     reaches. The splash's frame is presented (GalaWindowPresent,
+     40473 ms) a second before the Direct2D work above, so it is not
+     what the six brushes were for.
+     Nor is the graphics path what stops it. Office's own switch for
+     that path is `DisableHardwareAcceleration` under
+     `HKCU\Software\Microsoft\Office\16.0\Common\Graphics`,
+     and seeding it as 1 moves Word onto the software target:
+     `ID2D1Factory::CreateWicBitmapRenderTarget` in place of
+     CreateDxgiSurfaceRenderTarget, with no device context, no bitmap
+     from a DXGI surface and no CreateTexture2D (it still probes the
+     Direct3D 10.1 device). Word then fails in the same place with the
+     same message, after 31016 ms against 31216 ms. The two paths share
+     only their tail -- CreateMesh, SetTextRenderingParams, six
+     CreateSolidColorBrush, nothing after -- so what Word concludes is
+     reached from both, and neither the DXGI surface nor the Direct3D
+     device is what it concludes it from.
+     Who raises the box is measured rather than inferred, by the
+     facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
+     stack_from=user32 stack_words=400` catches gala's MessageBoxW
+     writing the caption and the text, and passes over 634 writes of
+     DXVK's that would have spent the count on their own. Both captures
+     read alike -- kernel32 and WWINTL.DLL (where the localized string
+     comes from) under the system call, user32 under them, then
+     MSO.DLL and Mso30win32client, and below those a run of WWLIB.DLL
+     frames. So the decision is Word's own, in wwlib, and MSO only
+     puts the box on the screen for it. A scan is evidence and not
+     proof (OBSERVABILITY "Stack captures"), but it names the DLL to
+     ask about, which no other facility here does.
      Measured beside it and not yet explained:
      `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
      which falls back to blank display metadata and carries on
