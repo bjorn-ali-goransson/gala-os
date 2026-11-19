@@ -234,11 +234,34 @@ jobs:
       - name: Checked-in test binaries match their sources
         run: cargo xtask export-tests && git diff --exit-code user/bin
 
+  # The Linux roots' Ubuntu packages, fetched once for all boot shards
+  # (`cargo xtask fetch-debs`) and kept in one cache they restore: six
+  # shards fetching the same packages from Ubuntu's archive had their
+  # connections reset (WORKFLOW "CI build caches"). The newest cache is
+  # restored first, so only packages new to the pins are downloaded.
+  debs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache the Linux roots' packages
+        uses: actions/cache@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-debs-
+      - name: Fetch what the pins name and the cache lacks
+        run: cargo xtask fetch-debs
+
   # Every boot scenario, dealt out over parallel runners (xtask's
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
-  # Each shard builds what it boots and fetches the prebuilt programs.
+  # Each shard builds what it boots and fetches the prebuilt programs; the
+  # Linux roots' packages come from the `debs` job's cache.
   boot:
-    needs: changes
+    needs: [changes, debs]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-26.04
     strategy:
@@ -319,8 +342,15 @@ jobs:
           path: |
             target/prebuilt
             !target/prebuilt/chromium-syms
+            !target/prebuilt/debs
           key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
           restore-keys: gala-prebuilt-${{ matrix.shard }}-
+      - name: Restore the Linux roots' packages (the debs job's)
+        uses: actions/cache/restore@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          fail-on-cache-miss: true
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6

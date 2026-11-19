@@ -1665,6 +1665,50 @@ const DEBS_ARM64: &[(&str, &str)] = &[
     ),
 ];
 
+/// `cargo xtask fetch-debs`: every package of every Linux root, amd64 and
+/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), into the package cache
+/// `target/prebuilt/debs`, each checked against its SHA-256 (`fetch_deb`);
+/// files there that no root pins any more are removed. One after another:
+/// CI runs it once (its `debs` job) for every boot shard, so the shards
+/// download nothing from Ubuntu's archives (WORKFLOW "CI build caches").
+fn fetch_debs() -> Result {
+    let mut wanted = std::collections::BTreeSet::new();
+    let (mut have, mut fetched) = (0, 0);
+    let cache = root().join("target/prebuilt/debs");
+    for r in LINUX_ROOTS {
+        for d in r.debs {
+            for (deb, arm64) in [
+                (Deb { pool: d.pool, sha256: d.sha256, files: d.files }, false),
+                (deb_arm64(d)?, true),
+            ] {
+                let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+                if !wanted.insert(name.clone()) {
+                    continue;
+                }
+                if cache.join(&name).exists() {
+                    have += 1;
+                } else {
+                    fetched += 1;
+                }
+                fetch_deb(&deb, arm64)?;
+            }
+        }
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&cache).map_err(|e| format!("reading {cache:?}: {e}"))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !wanted.contains(&name) {
+            fs::remove_file(entry.path()).map_err(|e| format!("removing {name}: {e}"))?;
+            removed += 1;
+        }
+    }
+    eprintln!(
+        "xtask: fetch-debs: {} packages ({have} cached, {fetched} fetched), {removed} no longer pinned removed",
+        wanted.len()
+    );
+    Ok(())
+}
+
 /// Deb `d`'s arm64 build (DEBS_ARM64).
 fn deb_arm64(d: &Deb) -> Result<Deb> {
     if d.pool.ends_with("_all.deb") {
@@ -11496,6 +11540,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("fetch-debs") => fetch_debs(),
             Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
