@@ -464,6 +464,15 @@ faults, its exit).
    (test ISO only) it ends by exiting QEMU through `isa-debug-exit`
    (status 33 = success, 35 = panic); otherwise it halts.
 
+An installed disk (ROADMAP IN step 3; scenario `boot_from_disk`, its
+disk made by xtask's `boot_disk`) boots the same way: a GPT with an EFI
+system partition (FAT32, at 1 MiB) holding the image's tree unchanged
+(`EFI/BOOT/BOOTX64.EFI` is the firmware's removable-media path, so no
+boot entry is needed; Limine's `boot():` is the partition it was loaded
+from, and its enrolled hashes still match) and gala's C: partition after
+it (`persist`, "C: kept on the disk"). xtask attaches no CD to such a
+scenario.
+
 ## CPU tables
 
 The GDT uses the x64 Windows selector values because user mode can

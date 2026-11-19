@@ -1,7 +1,7 @@
 //! Build, boot and test driver: `cargo xtask <command>`.
 //!
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
-//! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
+//! (UEFI) firmware image; `mtools` for the disk-boot scenarios. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
 // The kernel's file-system modules (`diskimage`) use `alloc::` paths.
 extern crate alloc;
@@ -13396,6 +13396,8 @@ fn named_only(name: &str) -> bool {
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
+    // Booted from its disk's EFI system partition (DISK_BOOT_SCENARIOS).
+    "boot_from_disk",
     // A framebuffer to show the installer's windows (XTASK_SHOTS).
     "office_install_gui",
     // A framebuffer for Word's and Excel's windows (XTASK_SHOTS).
@@ -14180,7 +14182,10 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     if boot != Boot::Uefi {
         cmd.args(["-boot", "order=d"]);
     }
-    cmd.arg("-cdrom").arg(iso);
+    // A machine booted from its own disk has no CD (DISK_BOOT_SCENARIOS).
+    if !DISK_BOOT_SCENARIOS.contains(&iso_scenario(iso)) {
+        cmd.arg("-cdrom").arg(iso);
+    }
     // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
     cmd.args(extra.split_whitespace());
     Ok(cmd)
@@ -15860,6 +15865,21 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "persist: C: is partition 2 of the disk (LBA 34816",
             "persist_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // IN step 3: a machine boots from its own disk, as an installed one
+        // does: no CD; the disk is a GPT with an EFI system partition
+        // holding the image's boot tree (Limine, the kernel, the sealed
+        // config, the modules) and gala's C: partition (`boot_disk`).
+        name: "boot_from_disk",
+        cmdline: "qemu_exit persist run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA",
+            "persist: formatted the disk",
+            "Hello from user mode!",
             "exited with status 0x00000000",
         ],
     },
@@ -26639,6 +26659,16 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // Made by `boot_disk` from the scenario's image (setup is not used).
+        name: "boot_from_disk",
+        size: BOOT_DISK_SIZE,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_partition",
         size: 64 << 20,
         host_mib: None,
@@ -26797,6 +26827,65 @@ fn partition_test_check(image: &[u8]) -> Result {
     if !sector(34816).starts_with(text) {
         return Err("partition 2's first sector does not hold what partition_test wrote".into());
     }
+    Ok(())
+}
+
+/// Scenarios booted from their disk alone (no CD): the disk is made by
+/// `boot_disk` from the scenario's image.
+const DISK_BOOT_SCENARIOS: &[&str] = &["boot_from_disk"];
+/// An installed disk's size in those scenarios, and its EFI system
+/// partition's (FAT32: at least 32 MiB) from 1 MiB.
+const BOOT_DISK_SIZE: usize = 256 << 20;
+const BOOT_DISK_ESP_SECTORS: u64 = 128 << 11;
+
+/// Lays out disk image `disk` as an installed gala disk (ROADMAP IN step
+/// 3): a GPT with an EFI system partition at 1 MiB (FAT32, `mformat`,
+/// holding the tree of `iso`: EFI/BOOT/BOOTX64.EFI, Limine, the kernel,
+/// the sealed config, the modules, copied with `mcopy`) and gala's C:
+/// partition after it, to the end. Limine's `boot():` is the partition it
+/// was loaded from, so the tree works as it is on the CD.
+fn boot_disk(iso: &Path, disk: &Path) -> Result {
+    let work = iso.with_extension("boot-disk");
+    let _ = fs::remove_dir_all(&work);
+    let tree = work.join("tree");
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(
+        Command::new("xorriso")
+            .args(["-osirrox", "on", "-indev"])
+            .arg(iso)
+            .args(["-extract", "/"])
+            .arg(&tree),
+    )?;
+    let esp = work.join("esp.img");
+    let esp_sectors = BOOT_DISK_ESP_SECTORS;
+    run_quiet(
+        Command::new("mformat")
+            .args(["-C", "-F", "-T", &esp_sectors.to_string(), "-h", "64", "-s", "32", "-i"])
+            .arg(&esp)
+            .arg("::"),
+    )
+    .map_err(|e| format!("{e} (mformat is in mtools)"))?;
+    let entries: Vec<PathBuf> = fs::read_dir(&tree)
+        .map_err(|e| format!("reading {tree:?}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    run_quiet(Command::new("mcopy").args(["-s", "-i"]).arg(&esp).args(&entries).arg("::/"))
+        .map_err(|e| format!("{e} (mcopy is in mtools)"))?;
+    let mut image = vec![0u8; BOOT_DISK_SIZE];
+    let sectors = (BOOT_DISK_SIZE / 512) as u64;
+    let (first, last) = (2048, 2048 + esp_sectors - 1);
+    write_gpt(
+        &mut image,
+        PARTITION_TEST_DISK_ID,
+        &[
+            (PARTITION_TEST_ESP_TYPE, PARTITION_TEST_ESP_ID, first, last, "EFI system partition"),
+            (GALA_C_TYPE, PARTITION_TEST_DATA_ID, last + 1, sectors - 34, "gala C:"),
+        ],
+    );
+    let fat = fs::read(&esp).map_err(|e| format!("reading {esp:?}: {e}"))?;
+    image[first as usize * 512..first as usize * 512 + fat.len()].copy_from_slice(&fat);
+    fs::write(disk, &image).map_err(|e| format!("writing {disk:?}: {e}"))?;
+    let _ = fs::remove_dir_all(&work);
     Ok(())
 }
 
@@ -27008,6 +27097,9 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if DISK_BOOT_SCENARIOS.contains(&name) {
+        boot_disk(iso, &path)?;
+    }
     if name == "office_install_local" || name == "office_install_gui" {
         let source = office_source()?;
         let t = Instant::now();
