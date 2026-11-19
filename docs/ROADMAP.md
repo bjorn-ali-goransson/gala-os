@@ -6894,10 +6894,25 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   4. Progress (`-3-progress`): a checklist with live state (reading
      the source, editing <n> files, building with its time,
      restarting), a progress bar, "Show the change" opening the diff;
-     the program stays usable meanwhile. The agent and the build run on
-     a build host at first (the source at the image's commit, a release
-     build of the one crate: seconds once its dependencies are built),
-     on gala itself once self-hosting (above) runs rustc. The agent's
+     the program stays usable meanwhile. The agent and the build run
+     on the machine itself, never on another host (no second machine
+     the feature depends on): the agent is a gala program calling the
+     model's API over gala's own network stack, and the build uses a
+     toolchain installed on the machine (rustc, cargo, lld, the
+     program's source at the image's commit and its dependencies),
+     installed on first use as a package and removable again by a disk
+     cleanup tool, which lists it with its size. So the real flow needs
+     self-hosting (above) to run rustc on gala first. The agent is a
+     small loop, not a general coding assistant (running one such as
+     Claude Code on gala needs Node.js on gala, a separate goal): the
+     request, the picked part's automation id and that part's source
+     files go to the model with three tools - read a file, replace an
+     exact piece of text, build - and compiler errors go back to it
+     for a bounded number of rounds; every round, edit and build is
+     logged, and the card's steps are those events. Stopgap until gala
+     runs rustc and calls HTTPS itself: the loop runs on the
+     development host against the real source and API, to prove it;
+     the same loop moves onto gala unchanged. The agent's
      tools are item MCP's (the ledger, screenshots, UIA), so it checks
      its change on the running desktop; the change is a branch or diff
      the user can read.
@@ -6925,8 +6940,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   behind it (ARCHITECTURE "The file explorer", "Change this program"):
   the menu item, the request card, Inspect over the window's parts by
   automation id, the steps on a timer, a last card saying nothing was
-  changed; scenario `explorer` drives it. Next: the agent (a build
-  host first), the AutomationId-to-source map, the state record and
+  changed; scenario `explorer` drives it. Next: the agent loop
+  (the stopgap above first), the AutomationId-to-source map, the state record and
   the swap, Undo; the item on Task Manager.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
