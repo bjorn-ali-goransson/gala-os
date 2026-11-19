@@ -2192,12 +2192,11 @@ need gala's.
      ledger shows in the ~900 ms that follow, in order: GetModuleHandle
      for tbarcode10.dll and tbarcode10_x64.dll, the Word\Security
      keys, then the gap of the day and, behind it, the next one, and
-     GetModuleHandle(mscoree.dll) before the box. Two blind spots
-     stand beside the trace, both named in OBSERVABILITY: it records a
-     call's arguments and not its answer, and QueryInterface, AddRef
-     and Release are hand-written slots every object shares, which the
-     generator does not wrap -- a refused interface is in the ledger,
-     but where it falls in the sequence is not.
+     GetModuleHandle(mscoree.dll) before the box. One blind spot
+     stands beside the trace, named in OBSERVABILITY: QueryInterface,
+     AddRef and Release are hand-written slots every object shares,
+     which the generator does not wrap -- a refused interface is in
+     the ledger, but where it falls in the sequence is not.
      The gaps in that window come one behind another, each hiding the
      next, because the ledger names a missing export only until it
      exists. Closed so far: kernelbase's SetSystemFileCacheSize and
@@ -2212,11 +2211,37 @@ need gala's.
      `NtSetSystemInformation` in `kernel/src/nt/syscalls.rs`). Both
      rows are gone from the run that follows, and Word fails the same
      way at the same place: the file cache is not what decided it.
-     What stood behind them is
-     `kernelbase.dll!PrivIsDllSynchronizationHeld`, missing export,
-     six hits across 37835-38293 ms -- the last named gap before the
-     absent GracefulExit\WINWORD\12 key at 38297 ms and the box. That
-     is the next one to measure.
+     What stood behind them,
+     `kernelbase.dll!PrivIsDllSynchronizationHeld` with six hits
+     across 37835-38293 ms, is not a divergence at all: Windows does
+     not export it either. Measured on the pinned build's kernelbase
+     (file version 10.0.26100.9974), GetProcAddress answers 0 for that
+     name on kernelbase, kernel32 and ntdll, where
+     `PrivCopyFileExW` and `GetSystemFileCacheSize` give real
+     addresses -- so Word's six lookups fail on Windows as they do
+     here, and implementing it would have been wrong. A missing-export
+     row is a divergence only once the host is asked, which is why the
+     ledger's row is a question and not a verdict.
+     That empties the window of named gaps and moves the question to
+     what Word was told, not what it could not find: the last thing it
+     reached is
+     `d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush` at 37477 ms,
+     six calls, and everything after 37627 ms -- add-in probes, the
+     policy keys, the loader-lock lookup, GracefulExit -- reads as
+     MSO's failure path. All six answered S_OK, and that is only half
+     of what the reading gave: arming one method records every traced
+     d2d1 call that process makes afterwards, and there were none. Word
+     asks Direct2D for six brushes, is given all six, and never calls
+     the DLL again -- no layer, no BeginDraw, no text. So Direct2D is
+     not what decides it either, and the question is no longer what
+     gala refused but what Word concluded in the 150 ms of user-mode
+     work after the last brush, where it makes no syscalls at all.
+     That is what OT3b piece 3 (the loader's IAT thunks) is for: it is
+     the only instrument that can see a call which never leaves user
+     mode. Measured beside it and not yet explained:
+     `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
+     which falls back to blank display metadata and carries on
+     (`winword_dxgi.log` in the dump).
      The machine's size is not the cause either, and that question is
      closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
      Word fails identically, and gala itself never came near the edge
