@@ -123,8 +123,9 @@ pub extern "system" fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut u
 
 /// SetThreadStackGuarantee: raises the stack the thread keeps for its
 /// stack-overflow handler (never lowers it) and returns the previous
-/// guarantee; 0 only queries. Kept in the TEB; gala's guard page handling
-/// does not reserve it yet (TODO).
+/// guarantee; 0 only queries. Kept in the TEB (GuaranteedStackBytes),
+/// where the kernel's guard page handling reads it: the overflow is raised
+/// while that much stack is still left for its handling.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetThreadStackGuarantee(size: *mut u32) -> Bool {
     if size.is_null() {

@@ -8376,6 +8376,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("exception_test", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
+    ("guard_test", "kernel32.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
@@ -15498,6 +15499,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -15539,6 +15541,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -15561,6 +15564,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
+            "gui_test: window menu Mark",
             "xtask: screen ok",
             "gui_test: ok",
             "exited with status 0x00000000",
@@ -20091,6 +20095,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "explorer: properties notes.galatxt",
             "Permissions: -rw-r--r--",
             "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
+            "explorer: window menu",
+            "explorer: change: request card opened (no coding agent is connected)",
+            "explorer: change: inspecting",
+            "explorer: change: picked AddressBar",
+            "explorer: change: request \"bigger\" on AddressBar",
+            "explorer: change: step Reading File Explorer's source",
+            "explorer: change: step Restarting File Explorer",
+            "explorer: change: no coding agent is connected, so nothing was changed",
+            "explorer: change: closed (Esc or Enter)",
             "explorer: closed",
             "explorer_test: explorer closed",
             "xtask: screen ok",
@@ -23934,7 +23947,10 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// (explorer_test's `open` mode); a file a Linux process writes then
 /// shows without a refresh (screen 11); its context menu's Properties
 /// shows the Linux permissions (screen 13); F2 renames it; Ctrl+Shift+2
-/// is the icon view (screen 15); Alt+F4 closes it. Each step waits for explorer's
+/// is the icon view (screen 15); the window menu's "Change this
+/// program..." opens its request card (screen 18), Inspect picks the
+/// address bar (screen 20) and the request runs its steps to the card
+/// that says nothing was changed (screen 23); Alt+F4 closes it. Each step waits for explorer's
 /// own log line of the one before (`explorer: navigate ...`).
 const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
     marker: "explorer_test: ready",
@@ -24108,7 +24124,60 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(355, 170, 60, 60, 0xf8c84a), // a 48-pixel folder
             ],
         },
-        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+        // "Change this program..." (no coding agent connected): Alt+Space
+        // opens the window menu; Up, Up (past Close and the separator),
+        // Enter.
+        ScreenStep { after: "", input: &["sendkey alt-spc"], pixels: &[] },
+        ScreenStep {
+            after: "explorer: window menu",
+            input: &["sendkey up", "sendkey up", "sendkey ret"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 18: the request card (client 279, 183, 520 x 300): its
+            // accent strip and title, a request typed.
+            after: "explorer: change: request card opened",
+            input: &["sendkey b", "sendkey i", "sendkey g", "sendkey g", "sendkey e", "sendkey r"],
+            pixels: &[
+                PixelCheck::At(600, 257, 0x005fb8),
+                PixelCheck::AnyIn(400, 274, 200, 18, 0x1b1b1b),
+            ],
+        },
+        ScreenStep {
+            // Inspect (832, 458).
+            after: "",
+            input: &["mouse_move 255 152", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 20: inspecting: the band over the status bar; the pointer
+            // over the address bar (401, 95) outlines it (its left edge
+            // at x 185-186).
+            after: "explorer: change: inspecting",
+            input: &["mouse_move -255 -255", "mouse_move -150 -108"],
+            pixels: &[PixelCheck::At(1100, 735, 0x005fb8), PixelCheck::At(186, 95, 0x005fb8)],
+        },
+        ScreenStep {
+            // A click picks it; Enter sends the request.
+            after: "",
+            input: &["mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "explorer: change: picked AddressBar",
+            input: &["sendkey ret"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 23: the steps ran: the last card (client 279, 238) with
+            // its Close button (790, 453).
+            after: "explorer: change: no coding agent is connected",
+            input: &[],
+            pixels: &[PixelCheck::At(600, 312, 0x005fb8), PixelCheck::At(795, 458, 0x005fb8)],
+        },
+        // Enter closes it.
+        ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
+        ScreenStep { after: "explorer: change: closed", input: &["sendkey alt-f4"], pixels: &[] },
     ],
 };
 
@@ -24755,9 +24824,42 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
+            // Alt+Space: the window menu under the caption's left end, at
+            // the client origin (101, 133), over the red rectangle.
+            input: &["sendkey alt-spc"],
+            pixels: &[
+                PixelCheck::At(231, 192, 0xf9f9f9),            // the menu
+                PixelCheck::AnyIn(130, 166, 60, 20, 0x1b1b1b), // "Move"
+            ],
+        },
+        ScreenStep {
+            after: "gui_test: window menu",
+            // Up to the last item, the program's "Mark", and Enter:
+            // WM_SYSCOMMAND 0x110, its yellow square; the menu goes.
+            input: &["sendkey up", "sendkey ret"],
+            pixels: &[
+                PixelCheck::At(487, 379, 0xffff00), // the mark
+                PixelCheck::At(231, 192, 0xff0000), // the menu gone
+            ],
+        },
+        ScreenStep {
+            after: "gui_test: window menu Mark",
+            // A right click on the caption at (300, 115): the window
+            // menu there, over the client area.
+            input: &["mouse_move -96 -161", "mouse_button 2", "mouse_button 0"],
+            pixels: &[PixelCheck::At(400, 265, 0xf9f9f9)],
+        },
+        ScreenStep {
+            after: "",
+            // Esc dismisses it.
+            input: &["sendkey esc"],
+            pixels: &[PixelCheck::At(400, 265, 0xffffff)],
+        },
+        ScreenStep {
+            after: "",
             // The close button (x 453..498 of the caption): the program
             // ends (WM_SYSCOMMAND SC_CLOSE; no screendump).
-            input: &["mouse_move 80 -159", "mouse_button 1", "mouse_button 0"],
+            input: &["mouse_move 176 2", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },
     ],

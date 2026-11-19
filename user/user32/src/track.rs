@@ -50,6 +50,7 @@ const WM_MOUSEACTIVATE: u32 = 0x0021;
 const WM_MEASUREITEM: u32 = 0x002c;
 const WM_DRAWITEM: u32 = 0x002b;
 const WM_COMMAND: u32 = 0x0111;
+const WM_SYSCOMMAND: u32 = 0x0112;
 const WM_INITMENU: u32 = 0x0116;
 const WM_INITMENUPOPUP: u32 = 0x0117;
 const WM_MENUSELECT: u32 = 0x011f;
@@ -432,6 +433,8 @@ struct Tracking {
     right: bool,
     chosen: Option<u32>,
     done: bool,
+    /// The window menu (WM_INITMENUPOPUP's HIWORD(lParam) TRUE).
+    system: bool,
 }
 
 const IDLE: Tracking = Tracking {
@@ -445,6 +448,7 @@ const IDLE: Tracking = Tracking {
     right: false,
     chosen: None,
     done: false,
+    system: false,
 };
 
 struct Shared(UnsafeCell<Tracking>);
@@ -569,7 +573,8 @@ fn open(level: usize, menu: usize, pos: usize, x: i32, y: i32, flags: u32, fx: i
     close_from(level);
     let (owner, notify) = (st().owner, st().notify);
     if notify {
-        SendMessageW(owner, WM_INITMENUPOPUP, menu, pos as isize);
+        let system = level == 0 && st().system;
+        SendMessageW(owner, WM_INITMENUPOPUP, menu, (pos | usize::from(system) << 16) as isize);
     }
     if menu::count(menu) == 0 {
         return;
@@ -986,6 +991,36 @@ pub(crate) fn track_bar(hwnd: Hwnd, x: i32, y: i32) {
     }
     if let Some(id) = end() {
         crate::window::PostMessageW(hwnd, WM_COMMAND, id as usize & 0xffff, 0);
+    }
+}
+
+/// The window menu of top-level window `hwnd` at screen point (x, y)
+/// (Alt+Space, a right-click on the caption): its items enabled as the
+/// window's state allows, the choice posted as WM_SYSCOMMAND.
+pub(crate) fn track_system(hwnd: Hwnd, x: i32, y: i32) {
+    let menu = menu::GetSystemMenu(hwnd, 0);
+    if menu == 0 {
+        return;
+    }
+    let (zoomed, iconic) = (crate::tree::IsZoomed(hwnd) != 0, crate::tree::IsIconic(hwnd) != 0);
+    const MF_GRAYED: u32 = 1;
+    for (id, on) in [
+        (0xf120, zoomed || iconic),
+        (0xf010, !zoomed && !iconic),
+        (0xf000, !zoomed && !iconic),
+        (0xf020, !iconic),
+        (0xf030, !zoomed),
+    ] {
+        menu::EnableMenuItem(menu, id, if on { 0 } else { MF_GRAYED });
+    }
+    if !begin(hwnd, 0, menu, 0) {
+        return;
+    }
+    st().system = true;
+    open(0, menu, 0, x, y, 0, x, y);
+    run();
+    if let Some(id) = end() {
+        crate::window::PostMessageW(hwnd, WM_SYSCOMMAND, id as usize & 0xffff, 0);
     }
 }
 
