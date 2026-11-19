@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use super::elf::{self, ElfError, ElfImage, Kind, LoadPlan};
+use super::machine;
 use super::mm::{self, PAGE, STACK_END, STACK_SIZE};
 use super::stack::{self, Aux, StackError, StackParams};
 use super::state;
@@ -448,6 +449,17 @@ fn spawn_inner(start: Start<'_>) -> Result<KArc<Process>, ExecError> {
         .map_zeroed(first, (STACK_END - first) / PAGE, vm::flags_for(p.stack_protect))
         .map_err(|_| ExecError::OutOfMemory)?;
     space.write_initial(p.initial.sp, &p.initial.bytes).map_err(|_| ExecError::OutOfMemory)?;
+    if !machine::SIGRETURN_CODE.is_empty() {
+        let page = super::mm::SIGRETURN_PAGE;
+        vad.map_exact(page, page + PAGE, vad::PAGE_EXECUTE_READ, vad::MEM_PRIVATE)
+            .map_err(|s| ExecError::Map("rt_sigreturn page", s))?;
+        space
+            .map_zeroed(page, 1, vm::flags_for(vad::PAGE_EXECUTE_READ))
+            .map_err(|_| ExecError::OutOfMemory)?;
+        space
+            .write_initial(page, machine::SIGRETURN_CODE)
+            .map_err(|_| ExecError::Map("rt_sigreturn page", NtStatus::ACCESS_VIOLATION))?;
+    }
 
     let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(path);
     let name = process::intern(name)?;
@@ -786,6 +798,11 @@ fn replace_image(process: &KArc<Process>, p: &Prepared) -> Result<(), ExecError>
         }
         vad.map_exact(stack_bottom, STACK_END, vad::PAGE_READWRITE, vad::MEM_PRIVATE)
             .map_err(|s| ExecError::Map("stack", s))?;
+        if !machine::SIGRETURN_CODE.is_empty() {
+            let page = super::mm::SIGRETURN_PAGE;
+            vad.map_exact(page, page + PAGE, vad::PAGE_READWRITE, vad::MEM_PRIVATE)
+                .map_err(|s| ExecError::Map("rt_sigreturn page", s))?;
+        }
         mm::sync(process, &vad, vad::USER_MIN, vad::USER_MAX);
     }
     for (plan, data) in p.images() {
@@ -800,6 +817,11 @@ fn replace_image(process: &KArc<Process>, p: &Prepared) -> Result<(), ExecError>
     process
         .write(p.initial.sp, &p.initial.bytes)
         .map_err(|_| ExecError::Map("stack", NtStatus::ACCESS_VIOLATION))?;
+    if !machine::SIGRETURN_CODE.is_empty() {
+        process
+            .write(super::mm::SIGRETURN_PAGE, machine::SIGRETURN_CODE)
+            .map_err(|_| ExecError::Map("rt_sigreturn page", NtStatus::ACCESS_VIOLATION))?;
+    }
     let mut vad = process.vad.lock();
     for &(start, end, prot) in &ranges {
         vad.protect(start, end - start, mm::protect_of(prot))
@@ -807,6 +829,10 @@ fn replace_image(process: &KArc<Process>, p: &Prepared) -> Result<(), ExecError>
     }
     vad.protect(stack_bottom, STACK_SIZE, p.stack_protect)
         .map_err(|s| ExecError::Map("stack", s))?;
+    if !machine::SIGRETURN_CODE.is_empty() {
+        vad.protect(super::mm::SIGRETURN_PAGE, PAGE, vad::PAGE_EXECUTE_READ)
+            .map_err(|s| ExecError::Map("rt_sigreturn page", s))?;
+    }
     mm::sync(process, &vad, vad::USER_MIN, vad::USER_MAX);
     Ok(())
 }
