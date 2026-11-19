@@ -20709,10 +20709,16 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
-/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
-/// so n machines boot the whole set between them (CI's boot jobs). The VMs
-/// are dealt out after `plan_vms`, so a batch stays in one shard; the
-/// shard says what it took.
+/// `XTASK_SHARD=i/n` (1-based): the VMs whose first scenario's name
+/// hashes to share i of n (FNV-1a), so n machines boot the whole set
+/// between them (CI's boot jobs). By name, not by position: a scenario
+/// added or removed moves no other VM to another shard, so each shard's
+/// cache of downloads (CI's per-shard prebuilt cache) keeps holding what
+/// its scenarios need; a round-robin deal moved scenarios between shards
+/// whenever one was added, and their first runs elsewhere downloaded
+/// everything again (GitHub's release host answered 429). The VMs are
+/// dealt out after `plan_vms`, so a batch stays in one shard; the shard
+/// says what it took.
 fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
     let Ok(spec) = env::var("XTASK_SHARD") else {
         return Ok(vms);
@@ -20724,8 +20730,11 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
     };
     let total = vms.len();
-    let mine: Vec<Vm<'_>> =
-        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let first = |vm: &Vm<'_>| match vm {
+        Vm::Single(s) => s.name,
+        Vm::Batch(group) => group.first().map_or("", |s| s.name),
+    };
+    let mine: Vec<Vm<'_>> = vms.into_iter().filter(|vm| shard_of(first(vm), n) == i - 1).collect();
     let scenarios: usize = mine
         .iter()
         .map(|vm| match vm {
@@ -20735,6 +20744,17 @@ fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
         .sum();
     eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
     Ok(mine)
+}
+
+/// The share (0-based, of `n`) scenario `name` falls in: FNV-1a of its
+/// name, stable across runs, hosts and Rust versions.
+fn shard_of(name: &str, n: usize) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (h % n as u64) as usize
 }
 
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
@@ -30308,6 +30328,22 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         modules.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+
+    /// A scenario's shard depends on its name alone, the same on every
+    /// host and run (FNV-1a), and every share is reached.
+    #[test]
+    fn shards_are_by_name() {
+        assert_eq!(shard_of("hello", 6), 3);
+        assert_eq!(shard_of("hello", 7), 5);
+        let reached: std::collections::BTreeSet<usize> =
+            scenarios().iter().map(|s| shard_of(s.name, 6)).collect();
+        assert_eq!(reached.len(), 6);
+    }
 }
 
 #[cfg(test)]
