@@ -6643,6 +6643,22 @@ exact name (`cargo xtask boot-test office_install`).
 
 Wanted, not scheduled. Each becomes an item with a section when it is.
 
+- **No binaries in the repository** (the owner): `user/bin` (about
+  400 files, 71 MB, rewritten by most changes to a DLL) goes; what is
+  built from source is built, not checked in. Building the test
+  programs on Windows, to run them there, is that machine's job (the
+  Rust ones are freestanding and link with rust-lld, so cargo builds
+  them on Windows; the C ones need mingw-w64 there), not a reason to
+  keep copies. Steps: the scenarios, um-test and the module graph read
+  what the build just made in `target/` (which also ends the pitfall
+  of a scenario running a stale copy until `export-tests`); the
+  third-party programs (Go, mingw-w64) are built by xtask from their
+  pinned sources and cached in CI, keyed by the build script and the
+  source's checksum; `run-all.ps1` takes the folder a build made;
+  then `user/bin`, `export-tests`' copying and CI's `git diff
+  --exit-code user/bin` check go, with README, WORKFLOW and
+  ARCHITECTURE's mentions. History is not rewritten.
+
 - **Hygiene sweep** (the owner; in a few months, not now): first
   enumerate the practices gala's code should not follow, by sweeping
   the code (e.g. large arrays on the stack in kernel and DLL code,
