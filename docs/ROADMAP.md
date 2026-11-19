@@ -1845,19 +1845,21 @@ need gala's.
     `d2d1_test` runs on Windows too, which is where its expectations
     come from (its first run, issue #94, stopped at D2D1CreateFactory:
     IID_ID2D1Factory had two bytes wrong in both the test and the DLL,
-    now d2d1.h's value). Two differences between gala and Direct2D are
-    left, each with an `info` line of its own and the checks around it
-    banded rather than exact. A half-covered or half-transparent
+    now d2d1.h's value). The bounds are Direct2D's own now, each
+    measured on Windows and checked in the test: GetBounds is the
+    fill's, with hollow figures out of it and +inf corners and +FLT_MAX
+    extents for a geometry with nothing to measure, and
+    GetWidenedBounds is the stroke outline's, widened in the geometry's
+    own coordinates (the transform applies to the outline afterwards)
+    with the stroke style's caps, joins and miter limit in it
+    (ARCHITECTURE "Direct2D"). One difference between gala and Direct2D
+    is left, with an `info` line of its own and the checks around it
+    banded rather than exact: a half-covered or half-transparent
     channel can be one off, as gala composes in float and rounds half
     up where Direct2D quantises the source's alpha to 8 bits first and
     blends in integers (so 50% red over white is ff8080 here and
     ff7f7f there) -- to be settled by blending the way Direct2D does,
-    not by widening the bands further. And
-    ID2D1PathGeometry::GetBounds counts the points of hollow figures,
-    which real Direct2D leaves out of the fill bounds (it keeps them
-    for GetWidenedBounds): that one stops the test's `geometries`
-    section on Windows and is the next thing to fix, by splitting
-    `Path::bounds` in two.
+    not by widening the bands further.
 - **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
   LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
   ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
@@ -1879,9 +1881,13 @@ need gala's.
    brightest) and the active window's pill on the taskbar, which the
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
-   Neither run draws the window its check wants yet. Word's puts an
-   untitled window on the screen and ends with WINWORD.EXE raising
-   0xe0000002 after 29 s, where the ladder below has got to. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   Neither run draws the window its check wants yet. Word's puts its
+   untitled splash window (MsoSplash) on the screen, walks the whole
+   Direct2D and DirectWrite path the ladder below answers -- its last
+   recorded call is ID2D1DeviceContext::SetTarget, S_OK -- and then,
+   within a second of it and with nothing of the frame drawn, prints
+   "Word was unable to start. (13)" and exits with status 0 after
+   30.5 s. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's

@@ -15,8 +15,8 @@
 
 use crate::{
     ComRef, E_POINTER, Guid, HResult, IID_DRAWING_STATE_BLOCK, IID_DRAWING_STATE_BLOCK1,
-    IID_RESOURCE, Matrix, Obj, Res, Spin, VTable, add_ref, com_add_ref, get_factory, give, put,
-    query, read, release_object, vtable_of,
+    IID_RESOURCE, Matrix, Obj, Res, Spin, VTable, add_ref, answered, com_add_ref, get_factory,
+    give, put, query, reached, read, release_object, vtable_of,
 };
 
 /// D2D1_DRAWING_STATE_DESCRIPTION.
@@ -91,12 +91,16 @@ pub fn create(factory: Obj, desc: *const StateDesc, params: Obj, out: *mut Obj) 
     if let Some(base) = read(desc) {
         d.base = base;
     }
-    new_block(factory, d, params, out)
+    let hr = new_block(factory, d, params, out);
+    answered(b"ID2D1Factory::CreateDrawingStateBlock", hr);
+    hr
 }
 
 /// ID2D1Factory1::CreateDrawingStateBlock(description1, params, &block).
 pub fn create1(factory: Obj, desc: *const StateDesc1, params: Obj, out: *mut Obj) -> HResult {
-    new_block(factory, read(desc).unwrap_or(StateDesc1::DEFAULT), params, out)
+    let hr = new_block(factory, read(desc).unwrap_or(StateDesc1::DEFAULT), params, out);
+    answered(b"ID2D1Factory1::CreateDrawingStateBlock", hr);
+    hr
 }
 
 fn new_block(factory: Obj, desc: StateDesc1, params: Obj, out: *mut Obj) -> HResult {
@@ -169,24 +173,28 @@ extern "system" fn block_release(this: Obj) -> u32 {
 }
 
 extern "system" fn b_GetDescription(this: Obj, out: *mut StateDesc) {
+    reached!(b"ID2D1DrawingStateBlock::GetDescription");
     put(out, with(this, |s| s.desc.base));
 }
 
 /// The 1.0 SetDescription: the primitive blend and the unit mode are
 /// left as they stand (Windows does the same).
 extern "system" fn b_SetDescription(this: Obj, desc: *const StateDesc) {
+    reached!(b"ID2D1DrawingStateBlock::SetDescription");
     if let Some(d) = read(desc) {
         with(this, |s| s.desc.base = d);
     }
 }
 
 extern "system" fn b_SetTextRenderingParams(this: Obj, params: Obj) {
+    reached!(b"ID2D1DrawingStateBlock::SetTextRenderingParams");
     let new = ComRef::new(params);
     let old = with(this, |s| core::mem::replace(&mut s.params, new));
     drop(old);
 }
 
 extern "system" fn b_GetTextRenderingParams(this: Obj, out: *mut Obj) {
+    reached!(b"ID2D1DrawingStateBlock::GetTextRenderingParams");
     let p = with(this, |s| s.params.0);
     if !p.is_null() {
         com_add_ref(p);
@@ -195,10 +203,12 @@ extern "system" fn b_GetTextRenderingParams(this: Obj, out: *mut Obj) {
 }
 
 extern "system" fn b1_GetDescription(this: Obj, out: *mut StateDesc1) {
+    reached!(b"ID2D1DrawingStateBlock1::GetDescription");
     put(out, with(this, |s| s.desc));
 }
 
 extern "system" fn b1_SetDescription(this: Obj, desc: *const StateDesc1) {
+    reached!(b"ID2D1DrawingStateBlock1::SetDescription");
     if let Some(d) = read(desc) {
         with(this, |s| s.desc = d);
     }

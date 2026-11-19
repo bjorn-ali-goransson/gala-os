@@ -11192,9 +11192,26 @@ over a surface of one, the path Word takes instead).
   (one sink), then closed; an out-of-order sink call puts it in error,
   and its queries and Close answer D2DERR_WRONG_STATE (Wine's
   test_path_geometry); a closed figure counts its closing line as a
-  segment. GetBounds, GetWidenedBounds, FillContainsPoint,
-  StrokeContainsPoint, ComputeArea and ComputeLength work on the
-  flattened figures.
+  segment. FillContainsPoint, StrokeContainsPoint, ComputeArea and
+  ComputeLength work on the flattened figures, ComputeArea on the filled
+  ones alone while ComputeLength measures the hollow ones too.
+- **The two bounds are two queries** (all measured, `d2d1_test`):
+  GetBounds is the fill's, so a hollow figure is not in it (a fill does
+  not draw one) and a path of nothing but hollow figures has no bounds
+  at all -- the rectangle Direct2D answers for a geometry with nothing
+  to measure has +inf corners and +FLT_MAX extents, not the inverted
+  infinities one would guess. GetWidenedBounds is the stroke's: at width
+  zero the points of every figure, hollow ones included, and above it
+  the bounds of the outline the rasterizer would stroke, so the caps,
+  the joins and the miter limit of the stroke style are in it. That
+  widening happens in the geometry's own coordinates and the transform
+  applies to the outline afterwards, as Direct2D does it, so a transform
+  that scales the axes differently is not the same as widening what it
+  already scaled. A negative width is its absolute value; a figure of
+  one point has no outline although stroking it draws its cap; and a
+  closed figure of two points doubles back on itself, so its join has no
+  miter tip of its own and Direct2D takes it to the miter limit along
+  the segment, whatever the segment's length.
 - **Meshes** (`mesh.rs`, ID2D1Mesh and ID2D1TessellationSink): a list of
   triangles a program tessellated itself, which Direct2D hands to the
   hardware as they are. A mesh takes its triangles once: Open gives the

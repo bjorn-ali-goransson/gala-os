@@ -278,6 +278,18 @@ const fn translate(x: f32, y: f32) -> Matrix {
     Matrix { m: [1.0, 0.0, 0.0, 1.0, x, y] }
 }
 
+/// D2D1_STROKE_STYLE_PROPERTIES.
+#[repr(C)]
+struct StrokeProps {
+    start_cap: u32,
+    end_cap: u32,
+    dash_cap: u32,
+    join: u32,
+    miter_limit: f32,
+    dash_style: u32,
+    dash_offset: f32,
+}
+
 /// D2D1_DRAWING_STATE_DESCRIPTION.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
@@ -677,6 +689,7 @@ const F_GET_DESKTOP_DPI: usize = 4;
 const F_CREATE_RECT_GEOMETRY: usize = 5;
 const F_CREATE_ELLIPSE_GEOMETRY: usize = 7;
 const F_CREATE_PATH_GEOMETRY: usize = 10;
+const F_CREATE_STROKE_STYLE: usize = 11;
 const F_CREATE_STATE_BLOCK: usize = 12;
 const F_CREATE_WIC_TARGET: usize = 13;
 const F_CREATE_HWND_TARGET: usize = 14;
@@ -1448,6 +1461,22 @@ fn path(f: Obj, figs: &[(&[Point], bool)], winding: bool) -> Obj {
     g
 }
 
+/// ID2D1Geometry::GetBounds through `mat` (null: no transform).
+fn get_bounds(g: Obj, mat: *const Matrix) -> (Hr, RectF) {
+    let mut r = RectF::default();
+    let f: extern "system" fn(Obj, *const Matrix, *mut RectF) -> Hr = unsafe { m(g, 4) };
+    (f(g, mat, &mut r), r)
+}
+
+/// ID2D1Geometry::GetWidenedBounds for a stroke `width` wide in `style`
+/// (null: the default style) through `mat`.
+fn widened(g: Obj, width: f32, style: Obj, mat: *const Matrix) -> (Hr, RectF) {
+    let mut r = RectF::default();
+    let f: extern "system" fn(Obj, f32, Obj, *const Matrix, f32, *mut RectF) -> Hr =
+        unsafe { m(g, 5) };
+    (f(g, width, style, mat, 0.25, &mut r), r)
+}
+
 fn fill_contains(g: Obj, p: Point) -> (Hr, i32) {
     let mut v = -1;
     let f: extern "system" fn(Obj, Point, *const Matrix, f32, *mut i32) -> Hr = unsafe { m(g, 7) };
@@ -1718,14 +1747,109 @@ fn geometries(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     c.ok(fill_contains(g, pt(2.0, 2.0)) == (S_OK, 1), 0)?;
     c.ok(fill_contains(g, pt(14.0, 14.0)) == (S_OK, 0), 0)?;
     c.ok(fill_contains(g, pt(24.0, 25.0)) == (S_OK, 0), 0)?;
-    let mut bounds = RectF::default();
-    let gb: extern "system" fn(Obj, *const Matrix, *mut RectF) -> Hr = unsafe { m(g, 4) };
-    c.hr(gb(g, null(), &mut bounds), S_OK)?;
-    c.near(bounds.l, 0.0, 0.01)?;
-    c.near(bounds.b, 30.0, 0.01)?;
+    // GetBounds is the fill's: the hollow Bézier figure is not in it,
+    // although the widened bounds below cover it (all measured).
+    let (r, fill) = get_bounds(g, null());
+    c.hr(r, S_OK)?;
+    c.ok(fill == rc(0.0, 0.0, 16.0, 16.0), u64::from(fill.b.to_bits()))?;
+    // A width of zero asks for every figure's points, hollow ones too.
+    let (r, zero) = widened(g, 0.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(zero.l, 0.0, 0.01)?;
+    c.near(zero.t, 0.0, 0.01)?;
     // The Bézier's farthest point: x = 20 + 0.75 * 10.
-    c.near(bounds.r, 27.5, 0.05)?;
+    c.near(zero.r, 27.5, 0.05)?;
+    c.near(zero.b, 30.0, 0.01)?;
+    // A width of its own: the outline that stroke would cover, with the
+    // triangle's right-angled corner mitered out to (-1,-1) and the
+    // Bézier's ends capped flat.
+    let (r, wide) = widened(g, 2.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(wide.l, -1.0, 0.01)?;
+    c.near(wide.t, -1.0, 0.01)?;
+    c.near(wide.r, 28.5, 0.05)?;
+    c.near(wide.b, 31.0, 0.05)?;
+    // A negative width is its absolute value.
+    let (_, same) = widened(g, -2.0, null_mut(), null());
+    c.ok(same == wide, u64::from(same.r.to_bits()))?;
     release(g);
+
+    // Nothing but hollow figures: a fill draws none of them, so there
+    // are no fill bounds at all -- the rectangle Direct2D gives a
+    // geometry with nothing to measure has +inf corners and +FLT_MAX
+    // extents -- while the widened bounds are the stroke's outline, so
+    // they honour its caps and joins: flat caps and a mitered corner
+    // reach (20,19)-(31,30) and round ones (19,19)-(31,31).
+    let (_, hollow) = obj0(f, F_CREATE_PATH_GEOMETRY);
+    let (_, hsink) = obj0(hollow, 17);
+    call2(hsink, 5, pt(20.0, 20.0), 1u32); // BeginFigure, hollow
+    call1(hsink, 10, pt(30.0, 20.0));
+    call1(hsink, 10, pt(30.0, 30.0));
+    call1(hsink, 8, 0u32); // EndFigure, open
+    c.hr(hr0(hsink, 9), S_OK)?;
+    release(hsink);
+    let (r, empty) = get_bounds(hollow, null());
+    c.hr(r, S_OK)?;
+    c.ok(
+        empty.l.to_bits() == 0x7f80_0000
+            && empty.t.to_bits() == 0x7f80_0000
+            && empty.r.to_bits() == 0x7f7f_ffff
+            && empty.b.to_bits() == 0x7f7f_ffff,
+        u64::from(empty.r.to_bits()),
+    )?;
+    let (_, points) = widened(hollow, 0.0, null_mut(), null());
+    c.ok(points == rc(20.0, 20.0, 30.0, 30.0), u64::from(points.r.to_bits()))?;
+    let (_, flat) = widened(hollow, 2.0, null_mut(), null());
+    c.near(flat.l, 20.0, 0.01)?;
+    c.near(flat.t, 19.0, 0.01)?;
+    c.near(flat.r, 31.0, 0.01)?;
+    c.near(flat.b, 30.0, 0.01)?;
+    let props = StrokeProps {
+        start_cap: 2,
+        end_cap: 2,
+        dash_cap: 0,
+        join: 2,
+        miter_limit: 10.0,
+        dash_style: 0,
+        dash_offset: 0.0,
+    };
+    let (r, style) =
+        obj3(f, F_CREATE_STROKE_STYLE, &props as *const StrokeProps, null::<f32>(), 0u32);
+    c.hr(r, S_OK)?;
+    let (_, round) = widened(hollow, 2.0, style, null());
+    c.near(round.l, 19.0, 0.05)?;
+    c.near(round.t, 19.0, 0.05)?;
+    c.near(round.r, 31.0, 0.05)?;
+    c.near(round.b, 31.0, 0.05)?;
+    release(style);
+    release(hollow);
+
+    // A closed figure of two points doubles back on itself, so its join
+    // has no miter of its own: Direct2D takes it to the limit (10 by
+    // default) past each end, whatever the segment is long (measured).
+    let back = path(f, &[(&[pt(20.0, 20.0), pt(30.0, 20.0)], true)], false);
+    let (r, spike) = widened(back, 2.0, null_mut(), null());
+    c.hr(r, S_OK)?;
+    c.near(spike.l, 10.0, 0.01)?;
+    c.near(spike.t, 19.0, 0.01)?;
+    c.near(spike.r, 40.0, 0.01)?;
+    c.near(spike.b, 21.0, 0.01)?;
+    release(back);
+
+    // The widening happens in the geometry's own coordinates and the
+    // transform applies to the outline afterwards: a rectangle widened
+    // by 2 and then scaled by 2 in x keeps 1 of outline on each side in
+    // x, where widening the scaled rectangle would give 2 (measured).
+    let (_, wide_rect) = obj1(f, F_CREATE_RECT_GEOMETRY, &rc(4.0, 4.0, 12.0, 12.0) as *const RectF);
+    let twice = Matrix { m: [2.0, 0.0, 0.0, 1.0, 0.0, 0.0] };
+    let (_, scaled) = widened(wide_rect, 2.0, null_mut(), &twice);
+    c.near(scaled.l, 6.0, 0.01)?;
+    c.near(scaled.t, 3.0, 0.01)?;
+    c.near(scaled.r, 26.0, 0.01)?;
+    c.near(scaled.b, 13.0, 0.01)?;
+    let (_, scaled_fill) = get_bounds(wide_rect, &twice);
+    c.ok(scaled_fill == rc(8.0, 4.0, 24.0, 12.0), u64::from(scaled_fill.r.to_bits()))?;
+    release(wide_rect);
 
     // Nested squares, both clockwise: alternate leaves a hole, winding not.
     let outer = [pt(0.0, 0.0), pt(16.0, 0.0), pt(16.0, 16.0), pt(0.0, 16.0)];
@@ -1774,8 +1898,9 @@ fn geometries(c: &mut Checks, f: Obj, wic: Obj) -> Result<(), u32> {
     let ell = Ellipse { c: pt(10.0, 10.0), rx: 5.0, ry: 3.0 };
     let (r, eg) = obj1(f, F_CREATE_ELLIPSE_GEOMETRY, &ell as *const Ellipse);
     c.hr(r, S_OK)?;
-    c.hr(gb(eg, null(), &mut bounds), S_OK)?;
-    c.ok(bounds == rc(5.0, 7.0, 15.0, 13.0), u64::from(bounds.l.to_bits()))?;
+    let (r, eb) = get_bounds(eg, null());
+    c.hr(r, S_OK)?;
+    c.ok(eb == rc(5.0, 7.0, 15.0, 13.0), u64::from(eb.l.to_bits()))?;
     release(eg);
     release(rg);
     release(black);

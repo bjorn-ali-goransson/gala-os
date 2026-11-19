@@ -20,8 +20,35 @@ use crate::{
     IID_GEOMETRY, IID_GEOMETRY_REALIZATION, IID_GEOMETRY_SINK, IID_PATH_GEOMETRY,
     IID_RECTANGLE_GEOMETRY, IID_RESOURCE, IID_ROUNDED_RECTANGLE_GEOMETRY, IID_SIMPLIFIED_SINK,
     Matrix, Obj, Point, RectF, Res, S_OK, Spin, VTable, add_ref, get_factory, give,
-    not_implemented, pt, push, put, query, read, release_object, vtable_of,
+    not_implemented, pt, push, put, query, reached, read, release_object, vtable_of,
 };
+
+/// The rectangle Direct2D answers for a geometry with nothing to
+/// measure: its corners are +inf and its extents +FLT_MAX, not the
+/// inverted infinities one would guess (measured).
+const NOTHING: RectF =
+    RectF { left: f32::INFINITY, top: f32::INFINITY, right: f32::MAX, bottom: f32::MAX };
+
+/// The bounds of the points added to it, `NOTHING` while there are none.
+struct Bounds(Option<RectF>);
+
+impl Bounds {
+    fn add(&mut self, q: Point) {
+        match &mut self.0 {
+            None => self.0 = Some(RectF { left: q.x, top: q.y, right: q.x, bottom: q.y }),
+            Some(r) => {
+                r.left = r.left.min(q.x);
+                r.top = r.top.min(q.y);
+                r.right = r.right.max(q.x);
+                r.bottom = r.bottom.max(q.y);
+            }
+        }
+    }
+
+    fn rect(self) -> RectF {
+        self.0.unwrap_or(NOTHING)
+    }
+}
 
 /// A segment of a figure, ending at its last point.
 #[derive(Clone, Copy)]
@@ -161,24 +188,54 @@ impl Path {
         self.figs.iter().map(|f| f.segs.len() as u32 + u32::from(f.closed)).sum()
     }
 
-    /// The bounds of every point through `m` (curves as flattened); an
-    /// empty path's are inverted infinities.
-    fn bounds(&self, m: &Matrix) -> Option<RectF> {
-        let mut r = RectF {
-            left: f32::INFINITY,
-            top: f32::INFINITY,
-            right: f32::NEG_INFINITY,
-            bottom: f32::NEG_INFINITY,
-        };
+    /// GetBounds: the bounds of the filled figures' points through `m`
+    /// (curves as flattened). A hollow figure is not in them -- a fill
+    /// does not draw it -- so a path of nothing but hollow figures has
+    /// no bounds at all (measured; `GetWidenedBounds` keeps them).
+    fn fill_bounds(&self, m: &Matrix) -> Option<RectF> {
+        let mut b = Bounds(None);
         for p in self.flatten(m)? {
-            for q in p.pts {
-                r.left = r.left.min(q.x);
-                r.top = r.top.min(q.y);
-                r.right = r.right.max(q.x);
-                r.bottom = r.bottom.max(q.y);
+            if p.filled {
+                for q in p.pts {
+                    b.add(q);
+                }
             }
         }
-        Some(r)
+        Some(b.rect())
+    }
+
+    /// GetWidenedBounds: the bounds of the outline a stroke `width` wide
+    /// in `style` covers, hollow figures included (a stroke draws them).
+    /// The widening is done in the geometry's own coordinates and `m`
+    /// applied to the outline afterwards, as Direct2D does it, so a
+    /// transform that scales the axes differently is not the same as
+    /// widening what it already scaled (measured). A width of zero asks
+    /// for the points alone, and a figure of one point has no outline at
+    /// all although stroking it draws its cap.
+    fn widened_bounds(&self, width: f32, style: &raster::StrokeStyle, m: &Matrix) -> Option<RectF> {
+        let mut b = Bounds(None);
+        let width = width.abs();
+        if width == 0.0 {
+            for p in self.flatten(m)? {
+                for q in p.pts {
+                    b.add(q);
+                }
+            }
+            return Some(b.rect());
+        }
+        let mut figs = Vec::new();
+        for p in self.flatten(&Matrix::IDENTITY)? {
+            let two = p.pts.first().is_some_and(|f| p.pts.iter().any(|q| q != f));
+            if two && !push(&mut figs, p) {
+                return None;
+            }
+        }
+        for poly in raster::stroke(&figs, width, style)? {
+            for q in poly {
+                b.add(m.apply(q));
+            }
+        }
+        Some(b.rect())
     }
 
     /// Whether `p` is inside the filled figures through `m`.
@@ -375,11 +432,12 @@ fn matrix_or_identity(m: *const Matrix) -> Matrix {
 }
 
 extern "system" fn geo_GetBounds(this: Obj, m: *const Matrix, out: *mut RectF) -> HResult {
+    reached!(b"ID2D1Geometry::GetBounds");
     if out.is_null() {
         return E_INVALIDARG;
     }
     let m = matrix_or_identity(m);
-    match with_path(this, |p| p.bounds(&m)) {
+    match with_path(this, |p| p.fill_bounds(&m)) {
         Ok(Some(r)) => {
             put(out, r);
             S_OK
@@ -392,27 +450,20 @@ extern "system" fn geo_GetBounds(this: Obj, m: *const Matrix, out: *mut RectF) -
 extern "system" fn geo_GetWidenedBounds(
     this: Obj,
     width: f32,
-    _style: Obj,
+    style: Obj,
     m: *const Matrix,
     _tolerance: f32,
     out: *mut RectF,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::GetWidenedBounds");
     if out.is_null() {
         return E_INVALIDARG;
     }
     let m = matrix_or_identity(m);
-    let h = width.abs() / 2.0 * m.max_scale();
-    match with_path(this, |p| p.bounds(&m)) {
+    let st = crate::factory::stroke_style_of(style);
+    match with_path(this, |p| p.widened_bounds(width, &st, &m)) {
         Ok(Some(r)) => {
-            put(
-                out,
-                RectF {
-                    left: r.left - h,
-                    top: r.top - h,
-                    right: r.right + h,
-                    bottom: r.bottom + h,
-                },
-            );
+            put(out, r);
             S_OK
         }
         Ok(None) => E_OUTOFMEMORY,
@@ -429,6 +480,7 @@ extern "system" fn geo_StrokeContainsPoint(
     _tolerance: f32,
     out: *mut i32,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::StrokeContainsPoint");
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -456,6 +508,7 @@ extern "system" fn geo_FillContainsPoint(
     _tolerance: f32,
     out: *mut i32,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::FillContainsPoint");
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -477,6 +530,7 @@ extern "system" fn geo_CompareWithGeometry(
     _tolerance: f32,
     _out: *mut u32,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::CompareWithGeometry");
     not_implemented(b"ID2D1Geometry::CompareWithGeometry")
 }
 
@@ -487,6 +541,7 @@ extern "system" fn geo_Simplify(
     _tolerance: f32,
     _sink: Obj,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::Simplify");
     not_implemented(b"ID2D1Geometry::Simplify")
 }
 
@@ -496,6 +551,7 @@ extern "system" fn geo_Tessellate(
     _tolerance: f32,
     _sink: Obj,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::Tessellate");
     not_implemented(b"ID2D1Geometry::Tessellate")
 }
 
@@ -507,6 +563,7 @@ extern "system" fn geo_CombineWithGeometry(
     _tolerance: f32,
     _sink: Obj,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::CombineWithGeometry");
     not_implemented(b"ID2D1Geometry::CombineWithGeometry")
 }
 
@@ -516,6 +573,7 @@ extern "system" fn geo_Outline(
     _tolerance: f32,
     _sink: Obj,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::Outline");
     not_implemented(b"ID2D1Geometry::Outline")
 }
 
@@ -527,6 +585,7 @@ extern "system" fn geo_ComputeArea(
     _tolerance: f32,
     out: *mut f32,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::ComputeArea");
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -561,6 +620,7 @@ extern "system" fn geo_ComputeLength(
     _tolerance: f32,
     out: *mut f32,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::ComputeLength");
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -596,6 +656,7 @@ extern "system" fn geo_ComputePointAtLength(
     _point: *mut Point,
     _tangent: *mut Point,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::ComputePointAtLength");
     not_implemented(b"ID2D1Geometry::ComputePointAtLength")
 }
 
@@ -607,10 +668,12 @@ extern "system" fn geo_Widen(
     _tolerance: f32,
     _sink: Obj,
 ) -> HResult {
+    reached!(b"ID2D1Geometry::Widen");
     not_implemented(b"ID2D1Geometry::Widen")
 }
 
 extern "system" fn rect_GetRect(this: Obj, out: *mut RectF) {
+    reached!(b"ID2D1RectangleGeometry::GetRect");
     if let Shape::Rect(r) = &geo(this).shape {
         put(out, *r);
     }
@@ -635,12 +698,14 @@ pub struct Ellipse {
 }
 
 extern "system" fn rounded_GetRoundedRect(this: Obj, out: *mut RoundedRect) {
+    reached!(b"ID2D1RoundedRectangleGeometry::GetRoundedRect");
     if let Shape::Rounded(rect, rx, ry) = &geo(this).shape {
         put(out, RoundedRect { rect: *rect, rx: *rx, ry: *ry });
     }
 }
 
 extern "system" fn ellipse_GetEllipse(this: Obj, out: *mut Ellipse) {
+    reached!(b"ID2D1EllipseGeometry::GetEllipse");
     if let Shape::Ellipse(center, rx, ry) = &geo(this).shape {
         put(out, Ellipse { center: *center, rx: *rx, ry: *ry });
     }
@@ -656,6 +721,7 @@ fn path_state<R>(this: Obj, f: impl FnOnce(&mut PathState) -> R) -> Option<R> {
 /// Open: the sink, once (a second Open, or one after Close,
 /// D2DERR_WRONG_STATE).
 extern "system" fn path_Open(this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1PathGeometry::Open");
     if out.is_null() {
         return crate::E_POINTER;
     }
@@ -680,6 +746,7 @@ extern "system" fn path_Open(this: Obj, out: *mut Obj) -> HResult {
 }
 
 extern "system" fn path_Stream(_this: Obj, _sink: Obj) -> HResult {
+    reached!(b"ID2D1PathGeometry::Stream");
     not_implemented(b"ID2D1PathGeometry::Stream")
 }
 
@@ -699,10 +766,12 @@ fn closed_count(this: Obj, out: *mut u32, f: impl FnOnce(&Path) -> u32) -> HResu
 }
 
 extern "system" fn path_GetSegmentCount(this: Obj, out: *mut u32) -> HResult {
+    reached!(b"ID2D1PathGeometry::GetSegmentCount");
     closed_count(this, out, |p| p.segment_count())
 }
 
 extern "system" fn path_GetFigureCount(this: Obj, out: *mut u32) -> HResult {
+    reached!(b"ID2D1PathGeometry::GetFigureCount");
     closed_count(this, out, |p| p.figs.len() as u32)
 }
 
@@ -777,10 +846,12 @@ fn add_segs(this: Obj, segs: impl Iterator<Item = Seg>) {
 }
 
 extern "system" fn sink_SetFillMode(this: Obj, mode: u32) {
+    reached!(b"ID2D1GeometrySink::SetFillMode");
     sink_with(this, |s| s.path.winding = mode == 1);
 }
 
 extern "system" fn sink_SetSegmentFlags(this: Obj, flags: u32) {
+    reached!(b"ID2D1GeometrySink::SetSegmentFlags");
     sink_with(this, |s| {
         // D2D1_PATH_SEGMENT_FORCE_UNSTROKED | FORCE_ROUND_LINE_JOIN.
         if flags & !3 != 0 {
@@ -792,6 +863,7 @@ extern "system" fn sink_SetSegmentFlags(this: Obj, flags: u32) {
 }
 
 extern "system" fn sink_BeginFigure(this: Obj, start: Point, begin: u32) {
+    reached!(b"ID2D1GeometrySink::BeginFigure");
     sink_with(this, |s| {
         if s.in_figure {
             s.phase = PathPhase::Error;
@@ -808,6 +880,7 @@ extern "system" fn sink_BeginFigure(this: Obj, start: Point, begin: u32) {
 }
 
 extern "system" fn sink_EndFigure(this: Obj, end: u32) {
+    reached!(b"ID2D1GeometrySink::EndFigure");
     sink_with(this, |s| {
         if !s.in_figure {
             s.phase = PathPhase::Error;
@@ -822,6 +895,7 @@ extern "system" fn sink_EndFigure(this: Obj, end: u32) {
 }
 
 extern "system" fn sink_Close(this: Obj) -> HResult {
+    reached!(b"ID2D1GeometrySink::Close");
     // SAFETY: one of our sinks.
     let path = unsafe { (*(this as *const Sink)).path };
     path_state(path, |s| match s.phase {
@@ -882,18 +956,22 @@ pub struct Arc {
 }
 
 extern "system" fn sink_AddLines(this: Obj, pts: *const Point, n: u32) {
+    reached!(b"ID2D1GeometrySink::AddLines");
     add_segs(this, items(pts, n).iter().map(|&p| Seg::Line(p)));
 }
 
 extern "system" fn sink_AddBeziers(this: Obj, b: *const Bezier, n: u32) {
+    reached!(b"ID2D1GeometrySink::AddBeziers");
     add_segs(this, items(b, n).iter().map(|b| Seg::Cubic(b.p1, b.p2, b.p3)));
 }
 
 extern "system" fn sink_AddLine(this: Obj, p: Point) {
+    reached!(b"ID2D1GeometrySink::AddLine");
     add_segs(this, core::iter::once(Seg::Line(p)));
 }
 
 extern "system" fn sink_AddBezier(this: Obj, b: *const Bezier) {
+    reached!(b"ID2D1GeometrySink::AddBezier");
     if let Some(b) = read(b) {
         add_segs(this, core::iter::once(Seg::Cubic(b.p1, b.p2, b.p3)));
     }
@@ -924,10 +1002,12 @@ fn quad_to_cubic(p0: Point, q: &Quadratic) -> Seg {
 }
 
 extern "system" fn sink_AddQuadraticBezier(this: Obj, q: *const Quadratic) {
+    reached!(b"ID2D1GeometrySink::AddQuadraticBezier");
     sink_AddQuadraticBeziers(this, q, 1);
 }
 
 extern "system" fn sink_AddQuadraticBeziers(this: Obj, q: *const Quadratic, n: u32) {
+    reached!(b"ID2D1GeometrySink::AddQuadraticBeziers");
     for q in items(q, n) {
         let p0 = current_point(this).unwrap_or(q.p1);
         add_segs(this, core::iter::once(quad_to_cubic(p0, q)));
@@ -938,6 +1018,7 @@ extern "system" fn sink_AddQuadraticBeziers(this: Obj, q: *const Quadratic, n: u
 /// quarter turn each (the endpoint-to-centre conversion of the SVG
 /// specification's implementation notes, F.6.5); zero radii draw a line.
 extern "system" fn sink_AddArc(this: Obj, a: *const Arc) {
+    reached!(b"ID2D1GeometrySink::AddArc");
     let Some(a) = read(a) else { return };
     let Some(p0) = current_point(this) else {
         add_segs(this, core::iter::once(Seg::Line(a.point)));

@@ -222,6 +222,26 @@ pub fn stroke(figs: &[Poly], width: f32, style: &StrokeStyle) -> Option<Polys> {
                     // The miter's tip: where the two outer edges meet.
                     let m = mul(add(sub(o0, c), sub(o1, c)), 0.5);
                     let ml = len(m);
+                    if ml <= 1e-9 {
+                        // The figure doubles back on itself: the outer
+                        // edges are parallel and meet nowhere, so the
+                        // miter has no tip of its own. Direct2D takes it
+                        // to the limit along the segment, whatever the
+                        // segment's length (measured, `d2d1_test`); a
+                        // join that may bevel does that instead.
+                        let ok = if style.join == JOIN_MITER {
+                            let d = sub(c, p[prev]);
+                            let u = mul(d, 1.0 / len(d));
+                            let tip = add(c, mul(u, style.miter_limit.max(1.0) * h));
+                            add_piece(&mut out, piece([c, o0, tip, o1])?)
+                        } else {
+                            add_piece(&mut out, piece([c, o0, o1])?)
+                        };
+                        if !ok {
+                            return None;
+                        }
+                        continue;
+                    }
                     let ratio = if ml > 1e-9 { h * h / (ml * ml) } else { f32::INFINITY };
                     let tip = add(c, mul(m, ratio));
                     if ratio * ml / h <= style.miter_limit.max(1.0) {
