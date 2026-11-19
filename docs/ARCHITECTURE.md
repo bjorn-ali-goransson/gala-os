@@ -8039,7 +8039,18 @@ session's is shown by nothing unless GalaSession attaches a presenter
   match: `user/user32/src/window.rs` BORDER/CAPTION), light grey, the
   window's icon (16 x 16) and the title at the left (greyed when
   inactive), minimize, maximize/restore and close buttons (46 px each;
-  close turns red under the pointer, the others grey).
+  close turns red under the pointer, the others grey). A window smaller
+  than its own frame is kept and drawn like any other -- as much of its
+  caption as it has room for, and what is left of it (nothing at all)
+  as client area, both clipped by `Canvas::put` -- because a program's
+  size is no reason to refuse its window: what the window API takes is
+  what the state can represent (`winstate::size_fits`: up to MAX_SIDE,
+  with `client_dims` saturating), as on Windows, where Office's shared
+  runtime makes such a window before Word's first real one. The
+  minimum that keeps a caption worth pointing at
+  (`winstate::DRAG_MIN`) is the desktop's own rule, held against what
+  the desktop does to a window (`Action::Place`, drags and snaps) and
+  never against the program.
 - **Taskbar**: the bottom 48 rows, translucent: centred, the fortress
   as the start button and a 44-px button per window the programs show
   (in creation order; the window's icon at 24 x 24, scaled by area
@@ -8676,8 +8687,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup style 1 is for menus and lists) (the
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
-  `user32_test` (custom_frame). Limits: uneven borders take the left one
-  (ledger); gala's own frame has 1-pixel sides, Windows 11's
+  `user32_test` (custom_frame, tiny_windows). A window smaller than its
+  own frame keeps the size it was asked for and reports it
+  (GetWindowRect), and is given a desktop window large enough for one
+  pixel of client area (`desktop_rect`), because every client area here
+  is a shared section of at least a pixel: GetClientRect then answers
+  1 x 1 where Windows answers 0 x 0 (ledger). Limits: uneven borders
+  take the left one (ledger); gala's own frame has 1-pixel sides, Windows 11's
   WS_OVERLAPPEDWINDOW 8 (a 320-wide window's client is 318 here, 304
   there; user32_test asserts only that WM_SIZE and GetClientRect agree). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the

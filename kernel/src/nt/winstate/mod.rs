@@ -91,15 +91,31 @@ pub const STYLE_POPUP: u32 = 0x1;
 /// a framed window (active, on the taskbar, in the usual order).
 pub const STYLE_FRAMELESS: u32 = 0x2;
 
-/// Whether an outer size suits a window (a framed one needs room for its
-/// caption and buttons).
-pub fn size_fits(w: u32, h: u32, popup: bool) -> bool {
-    let (min_w, min_h) = if popup {
-        (1, 1)
-    } else {
-        (2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40, 2 * BORDER + CAPTION + 1)
-    };
-    w >= min_w && h >= min_h && w <= MAX_SIDE && h <= MAX_SIDE
+/// The smallest a framed window is made by the desktop itself -- a
+/// drag of its frame, a snap, a named `Action::Place` -- so that what
+/// the user is pointing at keeps a caption worth pointing at. It is the
+/// desktop's own rule and not the window API's: a program may ask for
+/// any size `size_fits` allows.
+pub const DRAG_MIN: (u32, u32) =
+    (2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40, 2 * BORDER + CAPTION + 1);
+
+/// Whether an outer size suits a window: the limit is what the window
+/// state can represent, not what a frame looks good at. A window
+/// smaller than its own frame has no client pixels and a caption with
+/// no room for its buttons; both are drawn clipped (`Canvas::put`), and
+/// Windows makes such windows -- Office's shared runtime creates one,
+/// hidden, before Word's first real window -- so their size is no
+/// reason to refuse them. What the desktop itself may do to a window is
+/// `DRAG_MIN`.
+pub fn size_fits(w: u32, h: u32) -> bool {
+    w <= MAX_SIDE && h <= MAX_SIDE
+}
+
+/// The client size inside an outer size with that frame: what is left
+/// of the window, and nothing at all when the frame is the whole of it
+/// (never a wrapped subtraction).
+pub fn client_dims(w: u32, h: u32, b: u32, top: u32) -> (u32, u32) {
+    (w.saturating_sub(2 * b), h.saturating_sub(top + b))
 }
 
 /// Input for a program's window: a window message and its parameters
@@ -330,7 +346,7 @@ impl<X> Window<X> {
 
     pub fn client_size(&self) -> (u32, u32) {
         let (b, top) = self.frame();
-        (self.w - 2 * b, self.h - top - b)
+        client_dims(self.w, self.h, b, top)
     }
 
     pub fn shown(&self) -> bool {
@@ -575,15 +591,14 @@ impl<X: Default> State<X> {
     ) -> Result<u32, NtStatus> {
         let popup = style & STYLE_POPUP != 0;
         let frameless = style & STYLE_FRAMELESS != 0;
-        if style & !(STYLE_POPUP | STYLE_FRAMELESS) != 0
-            || (popup && frameless)
-            || !size_fits(w, h, popup || frameless)
+        if style & !(STYLE_POPUP | STYLE_FRAMELESS) != 0 || (popup && frameless) || !size_fits(w, h)
         {
             return Err(NtStatus::INVALID_PARAMETER);
         }
         let (b, top) = if popup || frameless { (0, 0) } else { (BORDER, BORDER + CAPTION) };
         let mut client = Vec::new();
-        let n = ((w - 2 * b) * (h - top - b)) as usize;
+        let (cw, ch) = client_dims(w, h, b, top);
+        let n = (cw * ch) as usize;
         client.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
         client.resize(n, 0x00_ff_ff_ff);
         let mut name = Vec::new();
@@ -716,15 +731,14 @@ impl<X: Default> State<X> {
     ) -> Result<Rect, NtStatus> {
         let shadow = self.shadow;
         let win = self.find(id, owner)?;
-        let popup = win.popup || win.frameless;
-        if !size_fits(w, h, popup) {
+        if !size_fits(w, h) {
             return Err(NtStatus::INVALID_PARAMETER);
         }
         let old = win.bounds(shadow);
         if (w, h) != (win.w, win.h) {
             let (ow, oh) = win.client_size();
             let (b, top) = win.frame();
-            let (nw, nh) = (w - 2 * b, h - top - b);
+            let (nw, nh) = client_dims(w, h, b, top);
             let mut client = Vec::new();
             client.try_reserve_exact((nw * nh) as usize).map_err(|_| NtStatus::NO_MEMORY)?;
             client.resize((nw * nh) as usize, 0x00_ff_ff_ff);
@@ -1187,7 +1201,8 @@ impl<X: Default> State<X> {
             Action::Close => self.send(id, WM_SYSCOMMAND, SC_CLOSE, 0),
             Action::Snap(to) => self.snap(id, to)?,
             Action::Place { x, y, w, h } => {
-                if !size_fits(w, h, false) {
+                // The desktop's own placement, so its own minimum.
+                if !size_fits(w, h) || w < DRAG_MIN.0 || h < DRAG_MIN.1 {
                     return Err(NtStatus::INVALID_PARAMETER);
                 }
                 if minimized {

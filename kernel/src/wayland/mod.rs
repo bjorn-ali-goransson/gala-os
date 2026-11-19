@@ -759,16 +759,17 @@ fn utf16(text: &[u8], out: &mut [u16; 256]) -> usize {
 }
 
 /// A window's outer size for a `width` x `height` client area: framed
-/// (`decorated`), at least what a framed window needs; frameless, the
-/// surface's size; at most what the desktop takes.
+/// (`decorated`), at least the desktop's own minimum for a window its
+/// user drags (`winstate::DRAG_MIN`, the frame being the desktop's
+/// here); frameless, the surface's size; at most what the desktop
+/// takes.
 fn outer(width: u32, height: u32, decorated: bool) -> (u32, u32) {
     if !decorated {
         return (width.clamp(1, winstate::MAX_SIDE), height.clamp(1, winstate::MAX_SIDE));
     }
     let (b, top) = (winstate::BORDER, winstate::BORDER + winstate::CAPTION);
-    let min_w = 2 * b + 2 * winstate::CAPTION_BUTTON as u32 + 40;
-    let w = (width + 2 * b).clamp(min_w, winstate::MAX_SIDE);
-    let h = (height + top + b).clamp(top + b + 1, winstate::MAX_SIDE);
+    let w = (width + 2 * b).clamp(winstate::DRAG_MIN.0, winstate::MAX_SIDE);
+    let h = (height + top + b).clamp(winstate::DRAG_MIN.1, winstate::MAX_SIDE);
     (w, h)
 }
 
