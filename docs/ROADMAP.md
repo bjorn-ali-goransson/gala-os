@@ -6987,8 +6987,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      with no map to the source to keep. The pick is a reference, not a
      boundary: it says where the user is looking, and the change may
      be only partly there, or entirely beside it (a new column next to
-     the picked one), or reach well past it (the data the program
-     reads). Nothing confines the agent to the picked element, its
+     the picked one), or reach well past it (other parts of the
+     program). Nothing confines the agent to the picked element, its
      component or its file.
   3. The request (`-2-request`): a small dialog beside the window
      titled "Change <program>", a text box, a line saying the agent
@@ -7016,8 +7016,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      logged, and the card's steps are those events. Before it edits
      anything, the agent may ask the user clarifying questions (a
      fourth tool, ask). It asks when the request or the pick leaves
-     the change open: which column "the space used" means, or whether
-     a change that needs the kernel is wanted. The card shows the
+     the change open, for example which column "the space used"
+     means. The card shows the
      question, with choices where the agent offers them and an answer
      box. The loop waits for the answer, and Cancel still ends it. The
      questions, the answers and the decision not to ask are logged with
@@ -7029,22 +7029,19 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      tools are item MCP's (the ledger, screenshots, UIA), so it checks
      its change on the running desktop; the change is a branch or diff
      the user can read.
-     The use cases it is measured by (the owner), on Task Manager:
+     A request that needs the kernel or another part of the system
+     is not refused, but this small loop is not expected to carry it
+     through, and no such request is part of its measure. One example
+     is a Disk I/O column in Task Manager, which needs per-process I/O
+     in the kernel's record. Changes like that are the work of a full
+     coding agent such as Claude Code once it runs on gala (the owner).
+     The use case it is measured by (the owner), on Task Manager:
      - "Add sparklines to the space used": "space used" could be
        Memory, which already has one, or Commit size, which does not.
        Unless the pick settles which, the agent asks before it starts,
        then adds the sparkline. The
        existing sparklines (`Trails`, `line`) are in the program's
        other files, not in the picked element.
-     - "A Disk I/O column with its sparkline": the user picks a column
-       next to where the new one goes. The change is mostly outside
-       the pick and outside the program. The kernel's per-process
-       record (GalaTasks op 0, `kernel/src/nt/tasks.rs`) has no I/O
-       bytes yet, so the agent has to add them there, in taskmgr's
-       parser, and in a new column with its own trail. Swapping the
-       running program cannot apply a kernel change, so before it
-       starts the agent asks whether the user wants a change that needs
-       a rebuild of the system and a reboot.
   5. Updated (`-4-updated`): the new build in the same window, folder
      and selection; a toast "<program> was updated" with Undo and
      Details. The swap: the program writes its state as a versioned
@@ -7073,7 +7070,7 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   then Explorer as UI components (item LY); the agent loop, its first
   demo a change to the change card's component, built and the program
   restarted (the stopgap above until gala builds it itself); the state
-  record and the swap, Undo; the item on Task Manager, its use cases
+  record and the swap, Undo; the item on Task Manager, its use case
   (step 4) as the measure.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
