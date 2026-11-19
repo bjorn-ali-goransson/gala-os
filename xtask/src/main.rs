@@ -11026,6 +11026,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("trace_from_test", "windowscodecs.dll", "Windows/System32"),
     ("trace_from_test", "d2d1.dll", "Windows/System32"),
     ("trace_from_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_answer_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_answer_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_answer_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_answer_test", "user32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_answer_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_answer_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_answer_test", "dwrite.dll", "Windows/System32"),
     ("trace_from_budget_test", "ntdll.dll", "Windows/System32"),
     ("trace_from_budget_test", "kernel32.dll", "Windows/System32"),
     ("trace_from_budget_test", "advapi32.dll", "Windows/System32"),
@@ -18803,6 +18815,26 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             "trace: 10 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=); the budget is spent, \
              so the trace stops here, not the program",
+        ],
+    },
+    Scenario {
+        // What a call answered, which the trace used to leave out
+        // (OBSERVABILITY "Call tracing"): armed one method earlier
+        // than the two scenarios above, at ReloadSystemMetrics, the
+        // run records all 30 calls the program makes and the answers
+        // of the 5 made to a method that returns an HRESULT. The 25
+        // made to a method that returns nothing record no answer,
+        // which is the control: an answer is recorded where there is
+        // one to record, not per call.
+        name: "trace_from_answer_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::ReloadSystemMetrics",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: 30 calls recorded from d2d1.dll!ID2D1Factory::ReloadSystemMetrics (trace_from=)",
+            "trace: 5 of those calls recorded what they answered (trace_from=)",
         ],
     },
     Scenario {

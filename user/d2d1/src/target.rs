@@ -2242,7 +2242,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::CreateBitmap", [this, size, src, pitch, props, out]);
-        super::dc1_CreateBitmap(this, size, src, pitch, props, out)
+        let answer = super::dc1_CreateBitmap(this, size, src, pitch, props, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateBitmap", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateBitmapBrush, traced.
     pub(super) extern "system" fn dc1_CreateBitmapBrush(
@@ -2256,7 +2258,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateBitmapBrush",
             [this, bitmap, bprops, props, out]
         );
-        super::dc1_CreateBitmapBrush(this, bitmap, bprops, props, out)
+        let answer = super::dc1_CreateBitmapBrush(this, bitmap, bprops, props, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateBitmapBrush", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateBitmapFromDxgiSurface, traced.
     pub(super) extern "system" fn dc1_CreateBitmapFromDxgiSurface(
@@ -2269,7 +2273,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateBitmapFromDxgiSurface",
             [this, surface, props, out]
         );
-        super::dc1_CreateBitmapFromDxgiSurface(this, surface, props, out)
+        let answer = super::dc1_CreateBitmapFromDxgiSurface(this, surface, props, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateBitmapFromDxgiSurface", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateBitmapFromWicBitmap, traced.
     pub(super) extern "system" fn dc1_CreateBitmapFromWicBitmap(
@@ -2282,7 +2288,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateBitmapFromWicBitmap",
             [this, source, props, out]
         );
-        super::dc1_CreateBitmapFromWicBitmap(this, source, props, out)
+        let answer = super::dc1_CreateBitmapFromWicBitmap(this, source, props, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateBitmapFromWicBitmap", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateColorContext, traced.
     pub(super) extern "system" fn dc1_CreateColorContext(
@@ -2296,7 +2304,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateColorContext",
             [_this, _space, _profile, _size, out]
         );
-        super::dc1_CreateColorContext(_this, _space, _profile, _size, out)
+        let answer = super::dc1_CreateColorContext(_this, _space, _profile, _size, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateColorContext", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateColorContextFromFilename, traced.
     pub(super) extern "system" fn dc1_CreateColorContextFromFilename(
@@ -2305,7 +2315,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::CreateColorContextFromFilename", [_this, _name, out]);
-        super::dc1_CreateColorContextFromFilename(_this, _name, out)
+        let answer = super::dc1_CreateColorContextFromFilename(_this, _name, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateColorContextFromFilename", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateColorContextFromWicColorContext, traced.
     pub(super) extern "system" fn dc1_CreateColorContextFromWicColorContext(
@@ -2317,12 +2329,16 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateColorContextFromWicColorContext",
             [_this, _wic, out]
         );
-        super::dc1_CreateColorContextFromWicColorContext(_this, _wic, out)
+        let answer = super::dc1_CreateColorContextFromWicColorContext(_this, _wic, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateCommandList, traced.
     pub(super) extern "system" fn dc1_CreateCommandList(_this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::CreateCommandList", [_this, out]);
-        super::dc1_CreateCommandList(_this, out)
+        let answer = super::dc1_CreateCommandList(_this, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateCommandList", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateEffect, traced.
     pub(super) extern "system" fn dc1_CreateEffect(
@@ -2331,7 +2347,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::CreateEffect", [_this, class_id, out]);
-        super::dc1_CreateEffect(_this, class_id, out)
+        let answer = super::dc1_CreateEffect(_this, class_id, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateEffect", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateGradientStopCollection, traced.
     pub(super) extern "system" fn dc1_CreateGradientStopCollection(
@@ -2349,7 +2367,7 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateGradientStopCollection",
             [_this, _stops, _count, _pre, _post, _precision, _extend, _interpolation, out]
         );
-        super::dc1_CreateGradientStopCollection(
+        let answer = super::dc1_CreateGradientStopCollection(
             _this,
             _stops,
             _count,
@@ -2359,7 +2377,9 @@ pub(crate) mod traced {
             _extend,
             _interpolation,
             out,
-        )
+        );
+        crate::answered_call!(b"ID2D1DeviceContext::CreateGradientStopCollection", answer);
+        answer
     }
     /// ID2D1DeviceContext::CreateImageBrush, traced.
     pub(super) extern "system" fn dc1_CreateImageBrush(
@@ -2373,7 +2393,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::CreateImageBrush",
             [_this, _image, _iprops, _props, out]
         );
-        super::dc1_CreateImageBrush(_this, _image, _iprops, _props, out)
+        let answer = super::dc1_CreateImageBrush(_this, _image, _iprops, _props, out);
+        crate::answered_call!(b"ID2D1DeviceContext::CreateImageBrush", answer);
+        answer
     }
     /// ID2D1DeviceContext::DrawBitmap, traced.
     pub(super) extern "system" fn dc1_DrawBitmap(
@@ -2456,7 +2478,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::GetEffectInvalidRectangleCount",
             [_this, _effect, count]
         );
-        super::dc1_GetEffectInvalidRectangleCount(_this, _effect, count)
+        let answer = super::dc1_GetEffectInvalidRectangleCount(_this, _effect, count);
+        crate::answered_call!(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetEffectInvalidRectangles, traced.
     pub(super) extern "system" fn dc1_GetEffectInvalidRectangles(
@@ -2469,7 +2493,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::GetEffectInvalidRectangles",
             [_this, _effect, _rects, _count]
         );
-        super::dc1_GetEffectInvalidRectangles(_this, _effect, _rects, _count)
+        let answer = super::dc1_GetEffectInvalidRectangles(_this, _effect, _rects, _count);
+        crate::answered_call!(b"ID2D1DeviceContext::GetEffectInvalidRectangles", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetEffectRequiredInputRectangles, traced.
     pub(super) extern "system" fn dc1_GetEffectRequiredInputRectangles(
@@ -2484,14 +2510,16 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::GetEffectRequiredInputRectangles",
             [_this, _effect, _image_rect, _descriptions, _required, _count]
         );
-        super::dc1_GetEffectRequiredInputRectangles(
+        let answer = super::dc1_GetEffectRequiredInputRectangles(
             _this,
             _effect,
             _image_rect,
             _descriptions,
             _required,
             _count,
-        )
+        );
+        crate::answered_call!(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetGlyphRunWorldBounds, traced.
     pub(super) extern "system" fn dc1_GetGlyphRunWorldBounds(
@@ -2505,7 +2533,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::GetGlyphRunWorldBounds",
             [_this, _origin, _run, _measuring, bounds]
         );
-        super::dc1_GetGlyphRunWorldBounds(_this, _origin, _run, _measuring, bounds)
+        let answer = super::dc1_GetGlyphRunWorldBounds(_this, _origin, _run, _measuring, bounds);
+        crate::answered_call!(b"ID2D1DeviceContext::GetGlyphRunWorldBounds", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetImageLocalBounds, traced.
     pub(super) extern "system" fn dc1_GetImageLocalBounds(
@@ -2514,7 +2544,9 @@ pub(crate) mod traced {
         bounds: *mut RectF,
     ) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::GetImageLocalBounds", [_this, _image, bounds]);
-        super::dc1_GetImageLocalBounds(_this, _image, bounds)
+        let answer = super::dc1_GetImageLocalBounds(_this, _image, bounds);
+        crate::answered_call!(b"ID2D1DeviceContext::GetImageLocalBounds", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetImageWorldBounds, traced.
     pub(super) extern "system" fn dc1_GetImageWorldBounds(
@@ -2523,12 +2555,16 @@ pub(crate) mod traced {
         bounds: *mut RectF,
     ) -> HResult {
         crate::traced!(b"ID2D1DeviceContext::GetImageWorldBounds", [_this, _image, bounds]);
-        super::dc1_GetImageWorldBounds(_this, _image, bounds)
+        let answer = super::dc1_GetImageWorldBounds(_this, _image, bounds);
+        crate::answered_call!(b"ID2D1DeviceContext::GetImageWorldBounds", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetPrimitiveBlend, traced.
     pub(super) extern "system" fn dc1_GetPrimitiveBlend(this: Obj) -> u32 {
         crate::traced!(b"ID2D1DeviceContext::GetPrimitiveBlend", [this]);
-        super::dc1_GetPrimitiveBlend(this)
+        let answer = super::dc1_GetPrimitiveBlend(this);
+        crate::answered_call!(b"ID2D1DeviceContext::GetPrimitiveBlend", answer);
+        answer
     }
     /// ID2D1DeviceContext::GetRenderingControls, traced.
     pub(super) extern "system" fn dc1_GetRenderingControls(this: Obj, out: *mut RenderingControls) {
@@ -2543,7 +2579,9 @@ pub(crate) mod traced {
     /// ID2D1DeviceContext::GetUnitMode, traced.
     pub(super) extern "system" fn dc1_GetUnitMode(this: Obj) -> u32 {
         crate::traced!(b"ID2D1DeviceContext::GetUnitMode", [this]);
-        super::dc1_GetUnitMode(this)
+        let answer = super::dc1_GetUnitMode(this);
+        crate::answered_call!(b"ID2D1DeviceContext::GetUnitMode", answer);
+        answer
     }
     /// ID2D1DeviceContext::InvalidateEffectInputRectangle, traced.
     pub(super) extern "system" fn dc1_InvalidateEffectInputRectangle(
@@ -2556,7 +2594,9 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext::InvalidateEffectInputRectangle",
             [_this, _effect, _input, _rect]
         );
-        super::dc1_InvalidateEffectInputRectangle(_this, _effect, _input, _rect)
+        let answer = super::dc1_InvalidateEffectInputRectangle(_this, _effect, _input, _rect);
+        crate::answered_call!(b"ID2D1DeviceContext::InvalidateEffectInputRectangle", answer);
+        answer
     }
     /// ID2D1DeviceContext::IsBufferPrecisionSupported, traced.
     pub(super) extern "system" fn dc1_IsBufferPrecisionSupported(
@@ -2564,12 +2604,16 @@ pub(crate) mod traced {
         precision: u32,
     ) -> i32 {
         crate::traced!(b"ID2D1DeviceContext::IsBufferPrecisionSupported", [_this, precision]);
-        super::dc1_IsBufferPrecisionSupported(_this, precision)
+        let answer = super::dc1_IsBufferPrecisionSupported(_this, precision);
+        crate::answered_call!(b"ID2D1DeviceContext::IsBufferPrecisionSupported", answer);
+        answer
     }
     /// ID2D1DeviceContext::IsDxgiFormatSupported, traced.
     pub(super) extern "system" fn dc1_IsDxgiFormatSupported(_this: Obj, format: u32) -> i32 {
         crate::traced!(b"ID2D1DeviceContext::IsDxgiFormatSupported", [_this, format]);
-        super::dc1_IsDxgiFormatSupported(_this, format)
+        let answer = super::dc1_IsDxgiFormatSupported(_this, format);
+        crate::answered_call!(b"ID2D1DeviceContext::IsDxgiFormatSupported", answer);
+        answer
     }
     /// ID2D1DeviceContext::PushLayer, traced.
     pub(super) extern "system" fn dc1_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
@@ -2610,7 +2654,10 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext1::CreateFilledGeometryRealization",
             [this, g, _flattening_tolerance, out]
         );
-        super::dc2_CreateFilledGeometryRealization(this, g, _flattening_tolerance, out)
+        let answer =
+            super::dc2_CreateFilledGeometryRealization(this, g, _flattening_tolerance, out);
+        crate::answered_call!(b"ID2D1DeviceContext1::CreateFilledGeometryRealization", answer);
+        answer
     }
     /// ID2D1DeviceContext1::CreateStrokedGeometryRealization, traced.
     pub(super) extern "system" fn dc2_CreateStrokedGeometryRealization(
@@ -2625,14 +2672,16 @@ pub(crate) mod traced {
             b"ID2D1DeviceContext1::CreateStrokedGeometryRealization",
             [this, g, _flattening_tolerance, width, style, out]
         );
-        super::dc2_CreateStrokedGeometryRealization(
+        let answer = super::dc2_CreateStrokedGeometryRealization(
             this,
             g,
             _flattening_tolerance,
             width,
             style,
             out,
-        )
+        );
+        crate::answered_call!(b"ID2D1DeviceContext1::CreateStrokedGeometryRealization", answer);
+        answer
     }
     /// ID2D1DeviceContext1::DrawGeometryRealization, traced.
     pub(super) extern "system" fn dc2_DrawGeometryRealization(
@@ -2650,7 +2699,9 @@ pub(crate) mod traced {
         rect: *const [i32; 4],
     ) -> HResult {
         crate::traced!(b"ID2D1DCRenderTarget::BindDC", [this, hdc, rect]);
-        super::dc_BindDC(this, hdc, rect)
+        let answer = super::dc_BindDC(this, hdc, rect);
+        crate::answered_call!(b"ID2D1DCRenderTarget::BindDC", answer);
+        answer
     }
     /// ID2D1Factory::CreateDCRenderTarget, traced.
     pub(crate) extern "system" fn f_CreateDCRenderTarget(
@@ -2659,7 +2710,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateDCRenderTarget", [factory, props, out]);
-        super::f_CreateDCRenderTarget(factory, props, out)
+        let answer = super::f_CreateDCRenderTarget(factory, props, out);
+        crate::answered_call!(b"ID2D1Factory::CreateDCRenderTarget", answer);
+        answer
     }
     /// ID2D1Factory::CreateDxgiSurfaceRenderTarget, traced.
     pub(crate) extern "system" fn f_CreateDxgiSurfaceRenderTarget(
@@ -2672,7 +2725,9 @@ pub(crate) mod traced {
             b"ID2D1Factory::CreateDxgiSurfaceRenderTarget",
             [factory, surface, props, out]
         );
-        super::f_CreateDxgiSurfaceRenderTarget(factory, surface, props, out)
+        let answer = super::f_CreateDxgiSurfaceRenderTarget(factory, surface, props, out);
+        crate::answered_call!(b"ID2D1Factory::CreateDxgiSurfaceRenderTarget", answer);
+        answer
     }
     /// ID2D1Factory::CreateHwndRenderTarget, traced.
     pub(crate) extern "system" fn f_CreateHwndRenderTarget(
@@ -2682,7 +2737,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateHwndRenderTarget", [factory, props, hprops, out]);
-        super::f_CreateHwndRenderTarget(factory, props, hprops, out)
+        let answer = super::f_CreateHwndRenderTarget(factory, props, hprops, out);
+        crate::answered_call!(b"ID2D1Factory::CreateHwndRenderTarget", answer);
+        answer
     }
     /// ID2D1Factory::CreateWicBitmapRenderTarget, traced.
     pub(crate) extern "system" fn f_CreateWicBitmapRenderTarget(
@@ -2692,22 +2749,30 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateWicBitmapRenderTarget", [factory, bitmap, props, out]);
-        super::f_CreateWicBitmapRenderTarget(factory, bitmap, props, out)
+        let answer = super::f_CreateWicBitmapRenderTarget(factory, bitmap, props, out);
+        crate::answered_call!(b"ID2D1Factory::CreateWicBitmapRenderTarget", answer);
+        answer
     }
     /// ID2D1HwndRenderTarget::CheckWindowState, traced.
     pub(super) extern "system" fn hwnd_CheckWindowState(this: Obj) -> u32 {
         crate::traced!(b"ID2D1HwndRenderTarget::CheckWindowState", [this]);
-        super::hwnd_CheckWindowState(this)
+        let answer = super::hwnd_CheckWindowState(this);
+        crate::answered_call!(b"ID2D1HwndRenderTarget::CheckWindowState", answer);
+        answer
     }
     /// ID2D1HwndRenderTarget::GetHwnd, traced.
     pub(super) extern "system" fn hwnd_GetHwnd(this: Obj) -> usize {
         crate::traced!(b"ID2D1HwndRenderTarget::GetHwnd", [this]);
-        super::hwnd_GetHwnd(this)
+        let answer = super::hwnd_GetHwnd(this);
+        crate::answered_call!(b"ID2D1HwndRenderTarget::GetHwnd", answer);
+        answer
     }
     /// ID2D1HwndRenderTarget::Resize, traced.
     pub(super) extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
         crate::traced!(b"ID2D1HwndRenderTarget::Resize", [this, size]);
-        super::hwnd_Resize(this, size)
+        let answer = super::hwnd_Resize(this, size);
+        crate::answered_call!(b"ID2D1HwndRenderTarget::Resize", answer);
+        answer
     }
     /// ID2D1RenderTarget::BeginDraw, traced.
     pub(super) extern "system" fn t_BeginDraw(this: Obj) {
@@ -2729,7 +2794,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateBitmap", [this, size, src, pitch, props, out]);
-        super::t_CreateBitmap(this, size, src, pitch, props, out)
+        let answer = super::t_CreateBitmap(this, size, src, pitch, props, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateBitmap", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateBitmapBrush, traced.
     pub(super) extern "system" fn t_CreateBitmapBrush(
@@ -2740,7 +2807,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateBitmapBrush", [this, bitmap, bprops, props, out]);
-        super::t_CreateBitmapBrush(this, bitmap, bprops, props, out)
+        let answer = super::t_CreateBitmapBrush(this, bitmap, bprops, props, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateBitmapBrush", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateBitmapFromWicBitmap, traced.
     pub(super) extern "system" fn t_CreateBitmapFromWicBitmap(
@@ -2750,7 +2819,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateBitmapFromWicBitmap", [this, source, props, out]);
-        super::t_CreateBitmapFromWicBitmap(this, source, props, out)
+        let answer = super::t_CreateBitmapFromWicBitmap(this, source, props, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateBitmapFromWicBitmap", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateCompatibleRenderTarget, traced.
     pub(super) extern "system" fn t_CreateCompatibleRenderTarget(
@@ -2765,7 +2836,16 @@ pub(crate) mod traced {
             b"ID2D1RenderTarget::CreateCompatibleRenderTarget",
             [_this, _size, _pixel_size, _format, _options, out]
         );
-        super::t_CreateCompatibleRenderTarget(_this, _size, _pixel_size, _format, _options, out)
+        let answer = super::t_CreateCompatibleRenderTarget(
+            _this,
+            _size,
+            _pixel_size,
+            _format,
+            _options,
+            out,
+        );
+        crate::answered_call!(b"ID2D1RenderTarget::CreateCompatibleRenderTarget", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateGradientStopCollection, traced.
     pub(super) extern "system" fn t_CreateGradientStopCollection(
@@ -2780,7 +2860,9 @@ pub(crate) mod traced {
             b"ID2D1RenderTarget::CreateGradientStopCollection",
             [this, stops, n, gamma, extend, out]
         );
-        super::t_CreateGradientStopCollection(this, stops, n, gamma, extend, out)
+        let answer = super::t_CreateGradientStopCollection(this, stops, n, gamma, extend, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateGradientStopCollection", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateLayer, traced.
     pub(super) extern "system" fn t_CreateLayer(
@@ -2789,7 +2871,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateLayer", [_this, _size, out]);
-        super::t_CreateLayer(_this, _size, out)
+        let answer = super::t_CreateLayer(_this, _size, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateLayer", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateLinearGradientBrush, traced.
     pub(super) extern "system" fn t_CreateLinearGradientBrush(
@@ -2803,12 +2887,16 @@ pub(crate) mod traced {
             b"ID2D1RenderTarget::CreateLinearGradientBrush",
             [this, lprops, props, stops, out]
         );
-        super::t_CreateLinearGradientBrush(this, lprops, props, stops, out)
+        let answer = super::t_CreateLinearGradientBrush(this, lprops, props, stops, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateLinearGradientBrush", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateMesh, traced.
     pub(super) extern "system" fn t_CreateMesh(this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateMesh", [this, out]);
-        super::t_CreateMesh(this, out)
+        let answer = super::t_CreateMesh(this, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateMesh", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateRadialGradientBrush, traced.
     pub(super) extern "system" fn t_CreateRadialGradientBrush(
@@ -2822,7 +2910,9 @@ pub(crate) mod traced {
             b"ID2D1RenderTarget::CreateRadialGradientBrush",
             [this, rprops, props, stops, out]
         );
-        super::t_CreateRadialGradientBrush(this, rprops, props, stops, out)
+        let answer = super::t_CreateRadialGradientBrush(this, rprops, props, stops, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateRadialGradientBrush", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateSharedBitmap, traced.
     pub(super) extern "system" fn t_CreateSharedBitmap(
@@ -2833,7 +2923,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateSharedBitmap", [_this, _iid, _data, _props, out]);
-        super::t_CreateSharedBitmap(_this, _iid, _data, _props, out)
+        let answer = super::t_CreateSharedBitmap(_this, _iid, _data, _props, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateSharedBitmap", answer);
+        answer
     }
     /// ID2D1RenderTarget::CreateSolidColorBrush, traced.
     pub(super) extern "system" fn t_CreateSolidColorBrush(
@@ -2843,7 +2935,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::CreateSolidColorBrush", [this, color, props, out]);
-        super::t_CreateSolidColorBrush(this, color, props, out)
+        let answer = super::t_CreateSolidColorBrush(this, color, props, out);
+        crate::answered_call!(b"ID2D1RenderTarget::CreateSolidColorBrush", answer);
+        answer
     }
     /// ID2D1RenderTarget::DrawBitmap, traced.
     pub(super) extern "system" fn t_DrawBitmap(
@@ -2958,7 +3052,9 @@ pub(crate) mod traced {
     /// ID2D1RenderTarget::EndDraw, traced.
     pub(super) extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::EndDraw", [this, tag1, tag2]);
-        super::t_EndDraw(this, tag1, tag2)
+        let answer = super::t_EndDraw(this, tag1, tag2);
+        crate::answered_call!(b"ID2D1RenderTarget::EndDraw", answer);
+        answer
     }
     /// ID2D1RenderTarget::FillEllipse, traced.
     pub(super) extern "system" fn t_FillEllipse(this: Obj, e: *const Ellipse, brush: Obj) {
@@ -3012,12 +3108,16 @@ pub(crate) mod traced {
     /// ID2D1RenderTarget::Flush, traced.
     pub(super) extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
         crate::traced!(b"ID2D1RenderTarget::Flush", [this, a, b]);
-        super::t_Flush(this, a, b)
+        let answer = super::t_Flush(this, a, b);
+        crate::answered_call!(b"ID2D1RenderTarget::Flush", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetAntialiasMode, traced.
     pub(super) extern "system" fn t_GetAntialiasMode(this: Obj) -> u32 {
         crate::traced!(b"ID2D1RenderTarget::GetAntialiasMode", [this]);
-        super::t_GetAntialiasMode(this)
+        let answer = super::t_GetAntialiasMode(this);
+        crate::answered_call!(b"ID2D1RenderTarget::GetAntialiasMode", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetDpi, traced.
     pub(super) extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
@@ -3027,7 +3127,9 @@ pub(crate) mod traced {
     /// ID2D1RenderTarget::GetMaximumBitmapSize, traced.
     pub(super) extern "system" fn t_GetMaximumBitmapSize(_this: Obj) -> u32 {
         crate::traced!(b"ID2D1RenderTarget::GetMaximumBitmapSize", [_this]);
-        super::t_GetMaximumBitmapSize(_this)
+        let answer = super::t_GetMaximumBitmapSize(_this);
+        crate::answered_call!(b"ID2D1RenderTarget::GetMaximumBitmapSize", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetPixelFormat, traced.
     pub(super) extern "system" fn t_GetPixelFormat(
@@ -3035,17 +3137,23 @@ pub(crate) mod traced {
         ret: *mut PixelFormat,
     ) -> *mut PixelFormat {
         crate::traced!(b"ID2D1RenderTarget::GetPixelFormat", [this, ret]);
-        super::t_GetPixelFormat(this, ret)
+        let answer = super::t_GetPixelFormat(this, ret);
+        crate::answered_call!(b"ID2D1RenderTarget::GetPixelFormat", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetPixelSize, traced.
     pub(super) extern "system" fn t_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
         crate::traced!(b"ID2D1RenderTarget::GetPixelSize", [this, ret]);
-        super::t_GetPixelSize(this, ret)
+        let answer = super::t_GetPixelSize(this, ret);
+        crate::answered_call!(b"ID2D1RenderTarget::GetPixelSize", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetSize, traced.
     pub(super) extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
         crate::traced!(b"ID2D1RenderTarget::GetSize", [this, ret]);
-        super::t_GetSize(this, ret)
+        let answer = super::t_GetSize(this, ret);
+        crate::answered_call!(b"ID2D1RenderTarget::GetSize", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetTags, traced.
     pub(super) extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
@@ -3055,7 +3163,9 @@ pub(crate) mod traced {
     /// ID2D1RenderTarget::GetTextAntialiasMode, traced.
     pub(super) extern "system" fn t_GetTextAntialiasMode(this: Obj) -> u32 {
         crate::traced!(b"ID2D1RenderTarget::GetTextAntialiasMode", [this]);
-        super::t_GetTextAntialiasMode(this)
+        let answer = super::t_GetTextAntialiasMode(this);
+        crate::answered_call!(b"ID2D1RenderTarget::GetTextAntialiasMode", answer);
+        answer
     }
     /// ID2D1RenderTarget::GetTextRenderingParams, traced.
     pub(super) extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
@@ -3070,7 +3180,9 @@ pub(crate) mod traced {
     /// ID2D1RenderTarget::IsSupported, traced.
     pub(super) extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
         crate::traced!(b"ID2D1RenderTarget::IsSupported", [this, props]);
-        super::t_IsSupported(this, props)
+        let answer = super::t_IsSupported(this, props);
+        crate::answered_call!(b"ID2D1RenderTarget::IsSupported", answer);
+        answer
     }
     /// ID2D1RenderTarget::PopAxisAlignedClip, traced.
     pub(super) extern "system" fn t_PopAxisAlignedClip(this: Obj) {

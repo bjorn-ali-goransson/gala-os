@@ -66,6 +66,10 @@ static LEFT: AtomicU32 = AtomicU32::new(0);
 /// Calls recorded.
 static RECORDED: AtomicU64 = AtomicU64::new(0);
 
+/// Answers recorded, which is as many of those calls as were made to a
+/// method that returns anything at all.
+static ANSWERED: AtomicU64 = AtomicU64::new(0);
+
 /// `trace_from=<dll>!<Interface>::<Method>[:<n>]`. A value that is not
 /// one is refused outright rather than cut to the default: a budget that
 /// silently differed from the one asked for reads afterwards as the
@@ -150,18 +154,7 @@ pub fn record(process: &str, pid: u64, name: &[u8], args: &[u64]) -> bool {
     if !wanted() || !events::enabled(Category::Call) || !events::syscall_pid_wanted(pid) {
         return false;
     }
-    // The budget is taken before the event is written, so two CPUs
-    // recording at once cannot both spend the last call.
-    let mut left = LEFT.load(Ordering::Relaxed);
-    loop {
-        if left == 0 {
-            return false;
-        }
-        match LEFT.compare_exchange_weak(left, left - 1, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(now) => left = now,
-        }
-    }
+    let Some(left) = take_line() else { return false };
     let text = core::str::from_utf8(name).unwrap_or("?");
     events::emit(
         Category::Call,
@@ -169,7 +162,43 @@ pub fn record(process: &str, pid: u64, name: &[u8], args: &[u64]) -> bool {
         format_args!("{}", Fields { pid, process, call: text, args }),
     );
     RECORDED.fetch_add(1, Ordering::Relaxed);
-    left > 1
+    left > 0
+}
+
+/// Records what one call answered, and says whether the DLL should keep
+/// recording. An answer is a line like any other and comes out of the
+/// same budget as the calls, so a trace can end between a call and its
+/// answer -- never the other way about, which would read as an answer to
+/// a call the program never made.
+pub fn record_answer(process: &str, pid: u64, name: &[u8], answer: u64) -> bool {
+    if !wanted() || !events::enabled(Category::Call) || !events::syscall_pid_wanted(pid) {
+        return false;
+    }
+    let Some(left) = take_line() else { return false };
+    let text = core::str::from_utf8(name).unwrap_or("?");
+    events::emit(
+        Category::Call,
+        "ret",
+        format_args!("{}", Answer { pid, process, call: text, answer }),
+    );
+    ANSWERED.fetch_add(1, Ordering::Relaxed);
+    left > 0
+}
+
+/// Takes one line from the budget: what is left after it, or None once
+/// the budget is spent. Taken before the event is written, so two CPUs
+/// recording at once cannot both spend the last line.
+fn take_line() -> Option<u32> {
+    let mut left = LEFT.load(Ordering::Relaxed);
+    loop {
+        if left == 0 {
+            return None;
+        }
+        match LEFT.compare_exchange_weak(left, left - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(left - 1),
+            Err(now) => left = now,
+        }
+    }
 }
 
 /// What the run traced, for the end of a run. A trace that recorded
@@ -196,6 +225,14 @@ pub fn log_stats() {
     } else {
         info!("trace: {done} calls recorded from {name} (trace_from=)");
     }
+    // A separate line, because it counts a different thing: how many of
+    // those calls were made to a method that returns anything at all.
+    // None of them is an answer too -- a trace of methods that all
+    // return nothing says so, rather than look like answers were lost.
+    let answers = ANSWERED.load(Ordering::Relaxed);
+    if done != 0 {
+        info!("trace: {answers} of those calls recorded what they answered (trace_from=)");
+    }
 }
 
 /// One `call` event's fields: the JSON members [`events::emit`] writes
@@ -221,6 +258,24 @@ impl fmt::Display for Fields<'_> {
     }
 }
 
+/// One `ret` event's fields: what a call answered, as the one word the
+/// wrapper took it for. A type for the same reason as [`Fields`]: so a
+/// host test can read the line the stream would carry.
+struct Answer<'a> {
+    pid: u64,
+    process: &'a str,
+    call: &'a str,
+    answer: u64,
+}
+
+impl fmt::Display for Answer<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (pid, answer) = (self.pid, self.answer);
+        let (process, call) = (Str(self.process), Str(self.call));
+        write!(f, r#""pid":{pid},"process":{process},"call":{call},"answer":{answer}"#)
+    }
+}
+
 /// An argument list, as a JSON array of unsigned words.
 struct Words<'a>(&'a [u64]);
 
@@ -239,7 +294,7 @@ impl fmt::Display for Words<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET, Fields, MAX_BUDGET, split_budget};
+    use super::{Answer, BUDGET, Fields, MAX_BUDGET, split_budget};
 
     /// What the event stream carries, which no boot scenario sees: the
     /// scenarios match the serial log, and the events are split out of
@@ -268,6 +323,26 @@ mod tests {
         assert_eq!(
             alloc::format!("{fields}"),
             "\"pid\":1,\"process\":\"a.exe\",\"call\":\"d2d1.dll!X::Y\",\"args\":[]"
+        );
+    }
+
+    /// What a method answered is a line of its own, naming the same
+    /// call: a reader pairs the two by name and by order. The word is
+    /// what the wrapper was handed, so an HRESULT is its bits rather
+    /// than a negative number.
+    #[test]
+    fn an_answer_is_the_fields_of_one_json_event() {
+        let fields = Answer {
+            pid: 12,
+            process: "WINWORD.EXE",
+            call: "d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush",
+            answer: 0x8007_000e,
+        };
+        assert_eq!(
+            alloc::format!("{{\"ev\":\"ret\",{fields}}}"),
+            "{\"ev\":\"ret\",\"pid\":12,\"process\":\"WINWORD.EXE\",\"call\":\
+             \"d2d1.dll!ID2D1RenderTarget::CreateSolidColorBrush\",\"answer\":\
+             2147942414}"
         );
     }
 

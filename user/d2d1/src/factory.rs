@@ -509,7 +509,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::CreateDrawingStateBlock", [this, desc, params, out]);
-        super::f1_CreateDrawingStateBlock(this, desc, params, out)
+        let answer = super::f1_CreateDrawingStateBlock(this, desc, params, out);
+        crate::answered_call!(b"ID2D1Factory1::CreateDrawingStateBlock", answer);
+        answer
     }
     /// ID2D1Factory1::CreateGdiMetafile, traced.
     pub(super) extern "system" fn f1_CreateGdiMetafile(
@@ -518,12 +520,16 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::CreateGdiMetafile", [_this, _stream, out]);
-        super::f1_CreateGdiMetafile(_this, _stream, out)
+        let answer = super::f1_CreateGdiMetafile(_this, _stream, out);
+        crate::answered_call!(b"ID2D1Factory1::CreateGdiMetafile", answer);
+        answer
     }
     /// ID2D1Factory1::CreatePathGeometry, traced.
     pub(super) extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1Factory1::CreatePathGeometry", [_this, out]);
-        super::f1_CreatePathGeometry(_this, out)
+        let answer = super::f1_CreatePathGeometry(_this, out);
+        crate::answered_call!(b"ID2D1Factory1::CreatePathGeometry", answer);
+        answer
     }
     /// ID2D1Factory1::CreateStrokeStyle, traced.
     pub(super) extern "system" fn f1_CreateStrokeStyle(
@@ -534,7 +540,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::CreateStrokeStyle", [_this, _props, _dashes, _count, out]);
-        super::f1_CreateStrokeStyle(_this, _props, _dashes, _count, out)
+        let answer = super::f1_CreateStrokeStyle(_this, _props, _dashes, _count, out);
+        crate::answered_call!(b"ID2D1Factory1::CreateStrokeStyle", answer);
+        answer
     }
     /// ID2D1Factory1::GetEffectProperties, traced.
     pub(super) extern "system" fn f1_GetEffectProperties(
@@ -543,7 +551,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::GetEffectProperties", [_this, class_id, out]);
-        super::f1_GetEffectProperties(_this, class_id, out)
+        let answer = super::f1_GetEffectProperties(_this, class_id, out);
+        crate::answered_call!(b"ID2D1Factory1::GetEffectProperties", answer);
+        answer
     }
     /// ID2D1Factory1::GetRegisteredEffects, traced.
     pub(super) extern "system" fn f1_GetRegisteredEffects(
@@ -557,7 +567,9 @@ pub(crate) mod traced {
             b"ID2D1Factory1::GetRegisteredEffects",
             [_this, _effects, _count, returned, registered]
         );
-        super::f1_GetRegisteredEffects(_this, _effects, _count, returned, registered)
+        let answer = super::f1_GetRegisteredEffects(_this, _effects, _count, returned, registered);
+        crate::answered_call!(b"ID2D1Factory1::GetRegisteredEffects", answer);
+        answer
     }
     /// ID2D1Factory1::RegisterEffectFromStream, traced.
     pub(super) extern "system" fn f1_RegisterEffectFromStream(
@@ -572,7 +584,10 @@ pub(crate) mod traced {
             b"ID2D1Factory1::RegisterEffectFromStream",
             [_this, class_id, _xml, _bindings, _count, _factory]
         );
-        super::f1_RegisterEffectFromStream(_this, class_id, _xml, _bindings, _count, _factory)
+        let answer =
+            super::f1_RegisterEffectFromStream(_this, class_id, _xml, _bindings, _count, _factory);
+        crate::answered_call!(b"ID2D1Factory1::RegisterEffectFromStream", answer);
+        answer
     }
     /// ID2D1Factory1::RegisterEffectFromString, traced.
     pub(super) extern "system" fn f1_RegisterEffectFromString(
@@ -587,7 +602,10 @@ pub(crate) mod traced {
             b"ID2D1Factory1::RegisterEffectFromString",
             [_this, class_id, _xml, _bindings, _count, _factory]
         );
-        super::f1_RegisterEffectFromString(_this, class_id, _xml, _bindings, _count, _factory)
+        let answer =
+            super::f1_RegisterEffectFromString(_this, class_id, _xml, _bindings, _count, _factory);
+        crate::answered_call!(b"ID2D1Factory1::RegisterEffectFromString", answer);
+        answer
     }
     /// ID2D1Factory1::UnregisterEffect, traced.
     pub(super) extern "system" fn f1_UnregisterEffect(
@@ -595,7 +613,9 @@ pub(crate) mod traced {
         _class_id: *const Guid,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::UnregisterEffect", [_this, _class_id]);
-        super::f1_UnregisterEffect(_this, _class_id)
+        let answer = super::f1_UnregisterEffect(_this, _class_id);
+        crate::answered_call!(b"ID2D1Factory1::UnregisterEffect", answer);
+        answer
     }
     /// ID2D1Factory::CreateDrawingStateBlock, traced.
     pub(super) extern "system" fn f_CreateDrawingStateBlock(
@@ -605,7 +625,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateDrawingStateBlock", [this, desc, params, out]);
-        super::f_CreateDrawingStateBlock(this, desc, params, out)
+        let answer = super::f_CreateDrawingStateBlock(this, desc, params, out);
+        crate::answered_call!(b"ID2D1Factory::CreateDrawingStateBlock", answer);
+        answer
     }
     /// ID2D1Factory::CreateEllipseGeometry, traced.
     pub(super) extern "system" fn f_CreateEllipseGeometry(
@@ -614,7 +636,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateEllipseGeometry", [this, e, out]);
-        super::f_CreateEllipseGeometry(this, e, out)
+        let answer = super::f_CreateEllipseGeometry(this, e, out);
+        crate::answered_call!(b"ID2D1Factory::CreateEllipseGeometry", answer);
+        answer
     }
     /// ID2D1Factory::CreateGeometryGroup, traced.
     pub(super) extern "system" fn f_CreateGeometryGroup(
@@ -628,12 +652,16 @@ pub(crate) mod traced {
             b"ID2D1Factory::CreateGeometryGroup",
             [_this, _mode, _geometries, _count, out]
         );
-        super::f_CreateGeometryGroup(_this, _mode, _geometries, _count, out)
+        let answer = super::f_CreateGeometryGroup(_this, _mode, _geometries, _count, out);
+        crate::answered_call!(b"ID2D1Factory::CreateGeometryGroup", answer);
+        answer
     }
     /// ID2D1Factory::CreatePathGeometry, traced.
     pub(super) extern "system" fn f_CreatePathGeometry(this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1Factory::CreatePathGeometry", [this, out]);
-        super::f_CreatePathGeometry(this, out)
+        let answer = super::f_CreatePathGeometry(this, out);
+        crate::answered_call!(b"ID2D1Factory::CreatePathGeometry", answer);
+        answer
     }
     /// ID2D1Factory::CreateRectangleGeometry, traced.
     pub(super) extern "system" fn f_CreateRectangleGeometry(
@@ -642,7 +670,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateRectangleGeometry", [this, r, out]);
-        super::f_CreateRectangleGeometry(this, r, out)
+        let answer = super::f_CreateRectangleGeometry(this, r, out);
+        crate::answered_call!(b"ID2D1Factory::CreateRectangleGeometry", answer);
+        answer
     }
     /// ID2D1Factory::CreateRoundedRectangleGeometry, traced.
     pub(super) extern "system" fn f_CreateRoundedRectangleGeometry(
@@ -651,7 +681,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateRoundedRectangleGeometry", [this, r, out]);
-        super::f_CreateRoundedRectangleGeometry(this, r, out)
+        let answer = super::f_CreateRoundedRectangleGeometry(this, r, out);
+        crate::answered_call!(b"ID2D1Factory::CreateRoundedRectangleGeometry", answer);
+        answer
     }
     /// ID2D1Factory::CreateStrokeStyle, traced.
     pub(super) extern "system" fn f_CreateStrokeStyle(
@@ -662,7 +694,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateStrokeStyle", [this, props, dashes, count, out]);
-        super::f_CreateStrokeStyle(this, props, dashes, count, out)
+        let answer = super::f_CreateStrokeStyle(this, props, dashes, count, out);
+        crate::answered_call!(b"ID2D1Factory::CreateStrokeStyle", answer);
+        answer
     }
     /// ID2D1Factory::CreateTransformedGeometry, traced.
     pub(super) extern "system" fn f_CreateTransformedGeometry(
@@ -672,7 +706,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory::CreateTransformedGeometry", [_this, _source, _m, out]);
-        super::f_CreateTransformedGeometry(_this, _source, _m, out)
+        let answer = super::f_CreateTransformedGeometry(_this, _source, _m, out);
+        crate::answered_call!(b"ID2D1Factory::CreateTransformedGeometry", answer);
+        answer
     }
     /// ID2D1Factory::GetDesktopDpi, traced.
     pub(super) extern "system" fn f_GetDesktopDpi(_this: Obj, x: *mut f32, y: *mut f32) {
@@ -682,7 +718,9 @@ pub(crate) mod traced {
     /// ID2D1Factory::ReloadSystemMetrics, traced.
     pub(super) extern "system" fn f_ReloadSystemMetrics(_this: Obj) -> HResult {
         crate::traced!(b"ID2D1Factory::ReloadSystemMetrics", [_this]);
-        super::f_ReloadSystemMetrics(_this)
+        let answer = super::f_ReloadSystemMetrics(_this);
+        crate::answered_call!(b"ID2D1Factory::ReloadSystemMetrics", answer);
+        answer
     }
     /// ID2D1Multithread::Enter, traced.
     pub(super) extern "system" fn mt_Enter(this: Obj) {
@@ -692,7 +730,9 @@ pub(crate) mod traced {
     /// ID2D1Multithread::GetMultithreadProtected, traced.
     pub(super) extern "system" fn mt_GetMultithreadProtected(this: Obj) -> i32 {
         crate::traced!(b"ID2D1Multithread::GetMultithreadProtected", [this]);
-        super::mt_GetMultithreadProtected(this)
+        let answer = super::mt_GetMultithreadProtected(this);
+        crate::answered_call!(b"ID2D1Multithread::GetMultithreadProtected", answer);
+        answer
     }
     /// ID2D1Multithread::Leave, traced.
     pub(super) extern "system" fn mt_Leave(this: Obj) {
@@ -702,17 +742,23 @@ pub(crate) mod traced {
     /// ID2D1StrokeStyle::GetDashCap, traced.
     pub(super) extern "system" fn s_GetDashCap(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetDashCap", [this]);
-        super::s_GetDashCap(this)
+        let answer = super::s_GetDashCap(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetDashCap", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetDashOffset, traced.
     pub(super) extern "system" fn s_GetDashOffset(this: Obj) -> f32 {
         crate::traced!(b"ID2D1StrokeStyle::GetDashOffset", [this]);
-        super::s_GetDashOffset(this)
+        let answer = super::s_GetDashOffset(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetDashOffset", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetDashStyle, traced.
     pub(super) extern "system" fn s_GetDashStyle(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetDashStyle", [this]);
-        super::s_GetDashStyle(this)
+        let answer = super::s_GetDashStyle(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetDashStyle", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetDashes, traced.
     pub(super) extern "system" fn s_GetDashes(this: Obj, out: *mut f32, n: u32) {
@@ -722,26 +768,36 @@ pub(crate) mod traced {
     /// ID2D1StrokeStyle::GetDashesCount, traced.
     pub(super) extern "system" fn s_GetDashesCount(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetDashesCount", [this]);
-        super::s_GetDashesCount(this)
+        let answer = super::s_GetDashesCount(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetDashesCount", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetEndCap, traced.
     pub(super) extern "system" fn s_GetEndCap(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetEndCap", [this]);
-        super::s_GetEndCap(this)
+        let answer = super::s_GetEndCap(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetEndCap", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetLineJoin, traced.
     pub(super) extern "system" fn s_GetLineJoin(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetLineJoin", [this]);
-        super::s_GetLineJoin(this)
+        let answer = super::s_GetLineJoin(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetLineJoin", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetMiterLimit, traced.
     pub(super) extern "system" fn s_GetMiterLimit(this: Obj) -> f32 {
         crate::traced!(b"ID2D1StrokeStyle::GetMiterLimit", [this]);
-        super::s_GetMiterLimit(this)
+        let answer = super::s_GetMiterLimit(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetMiterLimit", answer);
+        answer
     }
     /// ID2D1StrokeStyle::GetStartCap, traced.
     pub(super) extern "system" fn s_GetStartCap(this: Obj) -> u32 {
         crate::traced!(b"ID2D1StrokeStyle::GetStartCap", [this]);
-        super::s_GetStartCap(this)
+        let answer = super::s_GetStartCap(this);
+        crate::answered_call!(b"ID2D1StrokeStyle::GetStartCap", answer);
+        answer
     }
 }

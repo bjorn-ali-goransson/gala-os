@@ -1170,7 +1170,9 @@ pub(crate) mod traced {
             b"ID2D1Geometry::CombineWithGeometry",
             [_this, _other, _mode, _m, _tolerance, _sink]
         );
-        super::geo_CombineWithGeometry(_this, _other, _mode, _m, _tolerance, _sink)
+        let answer = super::geo_CombineWithGeometry(_this, _other, _mode, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::CombineWithGeometry", answer);
+        answer
     }
     /// ID2D1Geometry::CompareWithGeometry, traced.
     pub(super) extern "system" fn geo_CompareWithGeometry(
@@ -1184,7 +1186,9 @@ pub(crate) mod traced {
             b"ID2D1Geometry::CompareWithGeometry",
             [_this, _other, _m, _tolerance, _out]
         );
-        super::geo_CompareWithGeometry(_this, _other, _m, _tolerance, _out)
+        let answer = super::geo_CompareWithGeometry(_this, _other, _m, _tolerance, _out);
+        crate::answered_call!(b"ID2D1Geometry::CompareWithGeometry", answer);
+        answer
     }
     /// ID2D1Geometry::ComputeArea, traced.
     pub(super) extern "system" fn geo_ComputeArea(
@@ -1194,7 +1198,9 @@ pub(crate) mod traced {
         out: *mut f32,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::ComputeArea", [this, m, _tolerance, out]);
-        super::geo_ComputeArea(this, m, _tolerance, out)
+        let answer = super::geo_ComputeArea(this, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::ComputeArea", answer);
+        answer
     }
     /// ID2D1Geometry::ComputeLength, traced.
     pub(super) extern "system" fn geo_ComputeLength(
@@ -1204,7 +1210,9 @@ pub(crate) mod traced {
         out: *mut f32,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::ComputeLength", [this, m, _tolerance, out]);
-        super::geo_ComputeLength(this, m, _tolerance, out)
+        let answer = super::geo_ComputeLength(this, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::ComputeLength", answer);
+        answer
     }
     /// ID2D1Geometry::ComputePointAtLength, traced.
     pub(super) extern "system" fn geo_ComputePointAtLength(
@@ -1219,7 +1227,10 @@ pub(crate) mod traced {
             b"ID2D1Geometry::ComputePointAtLength",
             [_this, _length, _m, _tolerance, _point, _tangent]
         );
-        super::geo_ComputePointAtLength(_this, _length, _m, _tolerance, _point, _tangent)
+        let answer =
+            super::geo_ComputePointAtLength(_this, _length, _m, _tolerance, _point, _tangent);
+        crate::answered_call!(b"ID2D1Geometry::ComputePointAtLength", answer);
+        answer
     }
     /// ID2D1Geometry::FillContainsPoint, traced.
     pub(super) extern "system" fn geo_FillContainsPoint(
@@ -1230,7 +1241,9 @@ pub(crate) mod traced {
         out: *mut i32,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::FillContainsPoint", [this, p, m, _tolerance, out]);
-        super::geo_FillContainsPoint(this, p, m, _tolerance, out)
+        let answer = super::geo_FillContainsPoint(this, p, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::FillContainsPoint", answer);
+        answer
     }
     /// ID2D1Geometry::GetBounds, traced.
     pub(super) extern "system" fn geo_GetBounds(
@@ -1239,7 +1252,9 @@ pub(crate) mod traced {
         out: *mut RectF,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::GetBounds", [this, m, out]);
-        super::geo_GetBounds(this, m, out)
+        let answer = super::geo_GetBounds(this, m, out);
+        crate::answered_call!(b"ID2D1Geometry::GetBounds", answer);
+        answer
     }
     /// ID2D1Geometry::GetWidenedBounds, traced.
     pub(super) extern "system" fn geo_GetWidenedBounds(
@@ -1254,7 +1269,9 @@ pub(crate) mod traced {
             b"ID2D1Geometry::GetWidenedBounds",
             [this, width, style, m, _tolerance, out]
         );
-        super::geo_GetWidenedBounds(this, width, style, m, _tolerance, out)
+        let answer = super::geo_GetWidenedBounds(this, width, style, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::GetWidenedBounds", answer);
+        answer
     }
     /// ID2D1Geometry::Outline, traced.
     pub(super) extern "system" fn geo_Outline(
@@ -1264,7 +1281,9 @@ pub(crate) mod traced {
         _sink: Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::Outline", [_this, _m, _tolerance, _sink]);
-        super::geo_Outline(_this, _m, _tolerance, _sink)
+        let answer = super::geo_Outline(_this, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Outline", answer);
+        answer
     }
     /// ID2D1Geometry::Simplify, traced.
     pub(super) extern "system" fn geo_Simplify(
@@ -1275,7 +1294,9 @@ pub(crate) mod traced {
         _sink: Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::Simplify", [_this, _option, _m, _tolerance, _sink]);
-        super::geo_Simplify(_this, _option, _m, _tolerance, _sink)
+        let answer = super::geo_Simplify(_this, _option, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Simplify", answer);
+        answer
     }
     /// ID2D1Geometry::StrokeContainsPoint, traced.
     pub(super) extern "system" fn geo_StrokeContainsPoint(
@@ -1291,7 +1312,9 @@ pub(crate) mod traced {
             b"ID2D1Geometry::StrokeContainsPoint",
             [this, p, width, style, m, _tolerance, out]
         );
-        super::geo_StrokeContainsPoint(this, p, width, style, m, _tolerance, out)
+        let answer = super::geo_StrokeContainsPoint(this, p, width, style, m, _tolerance, out);
+        crate::answered_call!(b"ID2D1Geometry::StrokeContainsPoint", answer);
+        answer
     }
     /// ID2D1Geometry::Tessellate, traced.
     pub(super) extern "system" fn geo_Tessellate(
@@ -1301,7 +1324,9 @@ pub(crate) mod traced {
         _sink: Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::Tessellate", [_this, _m, _tolerance, _sink]);
-        super::geo_Tessellate(_this, _m, _tolerance, _sink)
+        let answer = super::geo_Tessellate(_this, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Tessellate", answer);
+        answer
     }
     /// ID2D1Geometry::Widen, traced.
     pub(super) extern "system" fn geo_Widen(
@@ -1313,27 +1338,37 @@ pub(crate) mod traced {
         _sink: Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Geometry::Widen", [_this, _width, _style, _m, _tolerance, _sink]);
-        super::geo_Widen(_this, _width, _style, _m, _tolerance, _sink)
+        let answer = super::geo_Widen(_this, _width, _style, _m, _tolerance, _sink);
+        crate::answered_call!(b"ID2D1Geometry::Widen", answer);
+        answer
     }
     /// ID2D1PathGeometry::GetFigureCount, traced.
     pub(super) extern "system" fn path_GetFigureCount(this: Obj, out: *mut u32) -> HResult {
         crate::traced!(b"ID2D1PathGeometry::GetFigureCount", [this, out]);
-        super::path_GetFigureCount(this, out)
+        let answer = super::path_GetFigureCount(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::GetFigureCount", answer);
+        answer
     }
     /// ID2D1PathGeometry::GetSegmentCount, traced.
     pub(super) extern "system" fn path_GetSegmentCount(this: Obj, out: *mut u32) -> HResult {
         crate::traced!(b"ID2D1PathGeometry::GetSegmentCount", [this, out]);
-        super::path_GetSegmentCount(this, out)
+        let answer = super::path_GetSegmentCount(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::GetSegmentCount", answer);
+        answer
     }
     /// ID2D1PathGeometry::Open, traced.
     pub(super) extern "system" fn path_Open(this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1PathGeometry::Open", [this, out]);
-        super::path_Open(this, out)
+        let answer = super::path_Open(this, out);
+        crate::answered_call!(b"ID2D1PathGeometry::Open", answer);
+        answer
     }
     /// ID2D1PathGeometry::Stream, traced.
     pub(super) extern "system" fn path_Stream(_this: Obj, _sink: Obj) -> HResult {
         crate::traced!(b"ID2D1PathGeometry::Stream", [_this, _sink]);
-        super::path_Stream(_this, _sink)
+        let answer = super::path_Stream(_this, _sink);
+        crate::answered_call!(b"ID2D1PathGeometry::Stream", answer);
+        answer
     }
     /// ID2D1RectangleGeometry::GetRect, traced.
     pub(super) extern "system" fn rect_GetRect(this: Obj, out: *mut RectF) {
@@ -1388,7 +1423,9 @@ pub(crate) mod traced {
     /// ID2D1GeometrySink::Close, traced.
     pub(super) extern "system" fn sink_Close(this: Obj) -> HResult {
         crate::traced!(b"ID2D1GeometrySink::Close", [this]);
-        super::sink_Close(this)
+        let answer = super::sink_Close(this);
+        crate::answered_call!(b"ID2D1GeometrySink::Close", answer);
+        answer
     }
     /// ID2D1GeometrySink::EndFigure, traced.
     pub(super) extern "system" fn sink_EndFigure(this: Obj, end: u32) {

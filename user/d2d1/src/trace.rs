@@ -15,9 +15,10 @@
 //! compares no names at all.
 //!
 //! Once armed, each call is one system call carrying the method's name
-//! and its arguments as words. The kernel answers whether to keep going,
-//! so a spent budget stops the trace where it is rather than letting a
-//! run pay for lines nobody will read.
+//! and its arguments as words, and a second carrying what the method
+//! answered, for a method that returns anything at all. The kernel
+//! answers whether to keep going, so a spent budget stops the trace
+//! where it is rather than letting a run pay for lines nobody will read.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -33,6 +34,7 @@ const ARGS: usize = 8;
 /// GalaTrace's operations.
 const OP_ASK: u64 = 0;
 const OP_RECORD: u64 = 1;
+const OP_ANSWER: u64 = 2;
 
 /// Whether the armed method has been reached, and so whether every call
 /// is being recorded. One relaxed load a call; nothing else is paid
@@ -98,6 +100,23 @@ pub fn record(what: &[u8], args: &[u64]) {
     // Anything but success is the kernel saying to stop: the budget is
     // spent, or this process is not one `events_pid=` asked for. Either
     // way there is no point paying a system call a call from here on.
+    if status != 0 {
+        ON.store(false, Ordering::Release);
+    }
+}
+
+/// Records what one call answered. Only reached once [`on`] is true,
+/// and only from the wrapper of a method that returns something: a
+/// method that returns nothing has no answer to record. The answer is
+/// passed by value rather than through a buffer -- it is one word, and a
+/// word is cheaper to hand over than a pointer to read back.
+pub fn record_answer(what: &[u8], answer: u64) {
+    let mut name = [0u8; NAME_LEN];
+    let len = full_name(what, &mut name);
+    // SAFETY: a buffer this frame owns, of the length given; the
+    // service reads it and writes nothing.
+    let status = unsafe { GalaTrace(OP_ANSWER, name.as_ptr() as u64, len as u64, answer) };
+    // As for a call: anything but success is the kernel saying to stop.
     if status != 0 {
         ON.store(false, Ordering::Release);
     }

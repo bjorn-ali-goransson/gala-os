@@ -15,6 +15,11 @@
 //! - `trace_from_budget`: with `:10`, ten are recorded and the trace
 //!   stops itself there, so a long run cannot be made to pay a system
 //!   call a call for longer than it was asked to.
+//! - `trace_from_answer`: armed one method earlier, at
+//!   ID2D1Factory::ReloadSystemMetrics, every call is recorded and the
+//!   [`RELOADS`] made to the method that returns an HRESULT also record
+//!   what it answered, while the [`CALLS`] made to the one that returns
+//!   nothing record no answer -- there is none to record.
 //!
 //! A count that reaches the kernel at all also says the rest of the
 //! chain holds: the value parsed, the DLL asked for it and armed the
@@ -38,6 +43,11 @@ const NAME: &str = "trace_from_test";
 /// whole point; small enough that the `:10` scenario's budget bites.
 const CALLS: usize = 25;
 
+/// How many times the method that answers is called, before the one
+/// that does not. Before, so that a trace armed at the one that does
+/// not never sees these: the two counts stay each other's control.
+const RELOADS: usize = 5;
+
 type Handle = usize;
 type Hr = i32;
 type Guid = [u8; 16];
@@ -48,6 +58,10 @@ const S_OK: Hr = 0;
 /// ID2D1Factory's slot for GetDesktopDpi (d2d1.h: IUnknown's three, then
 /// ReloadSystemMetrics).
 const SLOT_GET_DESKTOP_DPI: usize = 4;
+
+/// ID2D1Factory's slot for ReloadSystemMetrics, which answers an
+/// HRESULT where GetDesktopDpi answers nothing at all.
+const SLOT_RELOAD_SYSTEM_METRICS: usize = 3;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -81,6 +95,17 @@ fn run() -> Result<(), u32> {
     let hr = unsafe { D2D1CreateFactory(0, &IID_FACTORY, null(), &mut factory) };
     check(1, hr == S_OK, hr as u32 as u64)?;
     check(2, !factory.is_null(), 0)?;
+
+    // SAFETY: `factory` is a live ID2D1Factory, whose slot 3 is
+    // ReloadSystemMetrics(this) -> HRESULT.
+    let reload: extern "system" fn(Obj) -> Hr = unsafe {
+        let vtable = *(factory as *const *const usize);
+        core::mem::transmute_copy(&*vtable.add(SLOT_RELOAD_SYSTEM_METRICS))
+    };
+    for _ in 0..RELOADS {
+        let hr = reload(factory);
+        check(4, hr == S_OK, hr as u32 as u64)?;
+    }
 
     // SAFETY: `factory` is a live ID2D1Factory, whose slot 4 is
     // GetDesktopDpi(this, *mut f32, *mut f32).

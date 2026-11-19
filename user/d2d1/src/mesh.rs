@@ -221,7 +221,9 @@ pub(crate) mod traced {
     /// ID2D1Mesh::Open, traced.
     pub(super) extern "system" fn mesh_Open(this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1Mesh::Open", [this, out]);
-        super::mesh_Open(this, out)
+        let answer = super::mesh_Open(this, out);
+        crate::answered_call!(b"ID2D1Mesh::Open", answer);
+        answer
     }
     /// ID2D1TessellationSink::AddTriangles, traced.
     pub(super) extern "system" fn sink_AddTriangles(this: Obj, tris: *const Triangle, count: u32) {
@@ -231,6 +233,8 @@ pub(crate) mod traced {
     /// ID2D1TessellationSink::Close, traced.
     pub(super) extern "system" fn sink_Close(this: Obj) -> HResult {
         crate::traced!(b"ID2D1TessellationSink::Close", [this]);
-        super::sink_Close(this)
+        let answer = super::sink_Close(this);
+        crate::answered_call!(b"ID2D1TessellationSink::Close", answer);
+        answer
     }
 }

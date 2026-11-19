@@ -203,6 +203,21 @@ macro_rules! traced {
     }};
 }
 
+/// What a traced call answered, recorded right after the call itself
+/// (`trace_from=`). The generator puts this in the wrapper of every slot
+/// whose method returns anything; a method that returns nothing has no
+/// answer to record. An answer costs what a call costs and comes out of
+/// the same budget, so a trace can end between a call and its answer but
+/// can never show an answer whose call it did not record.
+#[macro_export]
+macro_rules! answered_call {
+    ($what:expr, $answer:expr) => {{
+        if $crate::trace::on() {
+            $crate::trace::record_answer($what, $crate::trace::Arg::word(&$answer));
+        }
+    }};
+}
+
 /// `reached!`'s record. Call it through the macro, which keeps it to the
 /// first time.
 pub fn reached_now(what: &[u8]) {

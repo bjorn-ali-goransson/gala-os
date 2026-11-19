@@ -61,6 +61,9 @@ struct Slot {
     sig: String,
     /// Its parameters' names, in order, to pass on.
     args: Vec<String>,
+    /// Whether it returns anything at all, and so whether its wrapper
+    /// has an answer to record.
+    returns: bool,
 }
 
 /// What a file says about its own names (its `// gen-trace` directives).
@@ -172,12 +175,20 @@ fn read_defs(path: &Path, text: &str) -> Result<BTreeMap<String, Slot>> {
                     f.sig.ident
                 ));
             };
+            if id.ident == "answer" {
+                return Err(format!(
+                    "gen-trace: {}: a parameter of {} is called `answer`, which is                      the name the wrapper gives what the method returns",
+                    path.display(),
+                    f.sig.ident
+                ));
+            }
             args.push(id.ident.to_string());
         }
         let span = f.sig.span();
+        let returns = matches!(f.sig.output, syn::ReturnType::Type(..));
         defs.insert(
             f.sig.ident.to_string(),
-            Slot { sig: slice(&lines, span.start(), span.end()), args },
+            Slot { sig: slice(&lines, span.start(), span.end()), args, returns },
         );
     }
     Ok(defs)
@@ -265,16 +276,27 @@ fn path_spans(text: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
-/// The wrapper of one slot: the record, then the method. It is as visible
-/// as its slot lists need and no more, so a wrapper of a method whose
-/// arguments are this module's own types is not a more public item than
-/// the types it takes.
+/// The wrapper of one slot: the record, the method, and what the method
+/// answered. A method that returns nothing has no answer to record, so
+/// its wrapper is the record and the call. It is as visible as its slot
+/// lists need and no more, so a wrapper of a method whose arguments are
+/// this module's own types is not a more public item than the types it
+/// takes.
 fn wrapper(f: &str, slot: &Slot, name: &str, elsewhere: bool) -> String {
     let vis = if elsewhere { "pub(crate)" } else { "pub(super)" };
+    let args = slot.args.join(", ");
+    let body = if slot.returns {
+        format!(
+            "crate::traced!(b\"{name}\", [{args}]);\n\
+             let answer = super::{f}({args});\n\
+             crate::answered_call!(b\"{name}\", answer);\nanswer\n"
+        )
+    } else {
+        format!("crate::traced!(b\"{name}\", [{args}]);\nsuper::{f}({args})\n")
+    };
     format!(
-        "/// {name}, traced.\n{sig} {{\ncrate::traced!(b\"{name}\", [{args}]);\nsuper::{f}({args})\n}}\n",
+        "/// {name}, traced.\n{sig} {{\n{body}}}\n",
         sig = slot.sig.replacen("extern", &format!("{vis} extern"), 1),
-        args = slot.args.join(", "),
     )
 }
 

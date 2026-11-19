@@ -3982,12 +3982,15 @@ fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer
 /// and C takes the length written as a `u64` (0: nothing is traced, or
 /// the buffer is too short for all of it). Op 1 records one call: A is
 /// the method's ASCII name, B its length, and C a `[u64; 1 + ARGS]`
-/// whose first word says how many argument words follow.
+/// whose first word says how many argument words follow. Op 2 records
+/// what one call answered: A and B name the method as op 1 does, and C
+/// is the answer itself, one word by value.
 ///
-/// The answer to op 1 is what stops a trace: NO_MORE_ENTRIES once the
-/// budget is spent, or once this process is not one `events_pid=` wants,
-/// so a DLL that would otherwise make a system call a call stops making
-/// them. SUCCESS means the call was written and more are wanted.
+/// The answer to op 1 and op 2 is what stops a trace: NO_MORE_ENTRIES
+/// once the budget is spent, or once this process is not one
+/// `events_pid=` wants, so a DLL that would otherwise make a system call
+/// a call stops making them. SUCCESS means the line was written and more
+/// are wanted.
 fn gala_trace(call: &mut Call<'_>) -> NtStatus {
     const WORDS: usize = 1 + super::tracecall::ARGS;
     match arg!(call, 0) {
@@ -4025,6 +4028,21 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
                 call.process.id,
                 &name[..len],
                 &words[1..1 + count],
+            );
+            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        2 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(name.len());
+            if call.process.read(ptr, &mut name[..len]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let keep = super::tracecall::record_answer(
+                call.process.name,
+                call.process.id,
+                &name[..len],
+                arg!(call, 3),
             );
             if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
         }

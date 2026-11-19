@@ -345,12 +345,16 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Device1::CreateDeviceContext", [this, options, out]);
-        super::d1_CreateDeviceContext(this, options, out)
+        let answer = super::d1_CreateDeviceContext(this, options, out);
+        crate::answered_call!(b"ID2D1Device1::CreateDeviceContext", answer);
+        answer
     }
     /// ID2D1Device1::GetRenderingPriority, traced.
     pub(super) extern "system" fn d1_GetRenderingPriority(this: Obj) -> u32 {
         crate::traced!(b"ID2D1Device1::GetRenderingPriority", [this]);
-        super::d1_GetRenderingPriority(this)
+        let answer = super::d1_GetRenderingPriority(this);
+        crate::answered_call!(b"ID2D1Device1::GetRenderingPriority", answer);
+        answer
     }
     /// ID2D1Device1::SetRenderingPriority, traced.
     pub(super) extern "system" fn d1_SetRenderingPriority(this: Obj, priority: u32) {
@@ -369,7 +373,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Device::CreateDeviceContext", [this, options, out]);
-        super::d_CreateDeviceContext(this, options, out)
+        let answer = super::d_CreateDeviceContext(this, options, out);
+        crate::answered_call!(b"ID2D1Device::CreateDeviceContext", answer);
+        answer
     }
     /// ID2D1Device::CreatePrintControl, traced.
     pub(super) extern "system" fn d_CreatePrintControl(
@@ -380,12 +386,16 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Device::CreatePrintControl", [_this, _wic, _target, _props, out]);
-        super::d_CreatePrintControl(_this, _wic, _target, _props, out)
+        let answer = super::d_CreatePrintControl(_this, _wic, _target, _props, out);
+        crate::answered_call!(b"ID2D1Device::CreatePrintControl", answer);
+        answer
     }
     /// ID2D1Device::GetMaximumTextureMemory, traced.
     pub(super) extern "system" fn d_GetMaximumTextureMemory(this: Obj) -> u64 {
         crate::traced!(b"ID2D1Device::GetMaximumTextureMemory", [this]);
-        super::d_GetMaximumTextureMemory(this)
+        let answer = super::d_GetMaximumTextureMemory(this);
+        crate::answered_call!(b"ID2D1Device::GetMaximumTextureMemory", answer);
+        answer
     }
     /// ID2D1Device::SetMaximumTextureMemory, traced.
     pub(super) extern "system" fn d_SetMaximumTextureMemory(this: Obj, bytes: u64) {
@@ -399,7 +409,9 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory1::CreateDevice", [factory, dxgi, out]);
-        super::f1_CreateDevice(factory, dxgi, out)
+        let answer = super::f1_CreateDevice(factory, dxgi, out);
+        crate::answered_call!(b"ID2D1Factory1::CreateDevice", answer);
+        answer
     }
     /// ID2D1Factory2::CreateDevice, traced.
     pub(crate) extern "system" fn f2_CreateDevice(
@@ -408,6 +420,8 @@ pub(crate) mod traced {
         out: *mut Obj,
     ) -> HResult {
         crate::traced!(b"ID2D1Factory2::CreateDevice", [factory, dxgi, out]);
-        super::f2_CreateDevice(factory, dxgi, out)
+        let answer = super::f2_CreateDevice(factory, dxgi, out);
+        crate::answered_call!(b"ID2D1Factory2::CreateDevice", answer);
+        answer
     }
 }

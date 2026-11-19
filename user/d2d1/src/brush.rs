@@ -1166,22 +1166,30 @@ pub(crate) mod traced {
     /// ID2D1Bitmap1::GetOptions, traced.
     pub(super) extern "system" fn b1_GetOptions(this: Obj) -> u32 {
         crate::traced!(b"ID2D1Bitmap1::GetOptions", [this]);
-        super::b1_GetOptions(this)
+        let answer = super::b1_GetOptions(this);
+        crate::answered_call!(b"ID2D1Bitmap1::GetOptions", answer);
+        answer
     }
     /// ID2D1Bitmap1::GetSurface, traced.
     pub(super) extern "system" fn b1_GetSurface(this: Obj, out: *mut Obj) -> HResult {
         crate::traced!(b"ID2D1Bitmap1::GetSurface", [this, out]);
-        super::b1_GetSurface(this, out)
+        let answer = super::b1_GetSurface(this, out);
+        crate::answered_call!(b"ID2D1Bitmap1::GetSurface", answer);
+        answer
     }
     /// ID2D1Bitmap1::Map, traced.
     pub(super) extern "system" fn b1_Map(_this: Obj, _options: u32, _mapped: *mut u8) -> HResult {
         crate::traced!(b"ID2D1Bitmap1::Map", [_this, _options, _mapped]);
-        super::b1_Map(_this, _options, _mapped)
+        let answer = super::b1_Map(_this, _options, _mapped);
+        crate::answered_call!(b"ID2D1Bitmap1::Map", answer);
+        answer
     }
     /// ID2D1Bitmap1::Unmap, traced.
     pub(super) extern "system" fn b1_Unmap(_this: Obj) -> HResult {
         crate::traced!(b"ID2D1Bitmap1::Unmap", [_this]);
-        super::b1_Unmap(_this)
+        let answer = super::b1_Unmap(_this);
+        crate::answered_call!(b"ID2D1Bitmap1::Unmap", answer);
+        answer
     }
     /// ID2D1BitmapBrush::GetBitmap, traced.
     pub(super) extern "system" fn bb_GetBitmap(this: Obj, out: *mut Obj) {
@@ -1191,17 +1199,23 @@ pub(crate) mod traced {
     /// ID2D1BitmapBrush::GetExtendModeX, traced.
     pub(super) extern "system" fn bb_GetExtendModeX(this: Obj) -> u32 {
         crate::traced!(b"ID2D1BitmapBrush::GetExtendModeX", [this]);
-        super::bb_GetExtendModeX(this)
+        let answer = super::bb_GetExtendModeX(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetExtendModeX", answer);
+        answer
     }
     /// ID2D1BitmapBrush::GetExtendModeY, traced.
     pub(super) extern "system" fn bb_GetExtendModeY(this: Obj) -> u32 {
         crate::traced!(b"ID2D1BitmapBrush::GetExtendModeY", [this]);
-        super::bb_GetExtendModeY(this)
+        let answer = super::bb_GetExtendModeY(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetExtendModeY", answer);
+        answer
     }
     /// ID2D1BitmapBrush::GetInterpolationMode, traced.
     pub(super) extern "system" fn bb_GetInterpolationMode(this: Obj) -> u32 {
         crate::traced!(b"ID2D1BitmapBrush::GetInterpolationMode", [this]);
-        super::bb_GetInterpolationMode(this)
+        let answer = super::bb_GetInterpolationMode(this);
+        crate::answered_call!(b"ID2D1BitmapBrush::GetInterpolationMode", answer);
+        answer
     }
     /// ID2D1BitmapBrush::SetBitmap, traced.
     pub(super) extern "system" fn bb_SetBitmap(this: Obj, b: Obj) {
@@ -1231,7 +1245,9 @@ pub(crate) mod traced {
         src: *const RectU,
     ) -> HResult {
         crate::traced!(b"ID2D1Bitmap::CopyFromBitmap", [this, at, other, src]);
-        super::bitmap_CopyFromBitmap(this, at, other, src)
+        let answer = super::bitmap_CopyFromBitmap(this, at, other, src);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromBitmap", answer);
+        answer
     }
     /// ID2D1Bitmap::CopyFromMemory, traced.
     pub(super) extern "system" fn bitmap_CopyFromMemory(
@@ -1241,7 +1257,9 @@ pub(crate) mod traced {
         pitch: u32,
     ) -> HResult {
         crate::traced!(b"ID2D1Bitmap::CopyFromMemory", [this, dst, src, pitch]);
-        super::bitmap_CopyFromMemory(this, dst, src, pitch)
+        let answer = super::bitmap_CopyFromMemory(this, dst, src, pitch);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromMemory", answer);
+        answer
     }
     /// ID2D1Bitmap::CopyFromRenderTarget, traced.
     pub(super) extern "system" fn bitmap_CopyFromRenderTarget(
@@ -1251,7 +1269,9 @@ pub(crate) mod traced {
         _src: *const RectU,
     ) -> HResult {
         crate::traced!(b"ID2D1Bitmap::CopyFromRenderTarget", [_this, _at, _target, _src]);
-        super::bitmap_CopyFromRenderTarget(_this, _at, _target, _src)
+        let answer = super::bitmap_CopyFromRenderTarget(_this, _at, _target, _src);
+        crate::answered_call!(b"ID2D1Bitmap::CopyFromRenderTarget", answer);
+        answer
     }
     /// ID2D1Bitmap::GetDpi, traced.
     pub(super) extern "system" fn bitmap_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
@@ -1264,22 +1284,30 @@ pub(crate) mod traced {
         ret: *mut PixelFormat,
     ) -> *mut PixelFormat {
         crate::traced!(b"ID2D1Bitmap::GetPixelFormat", [this, ret]);
-        super::bitmap_GetPixelFormat(this, ret)
+        let answer = super::bitmap_GetPixelFormat(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetPixelFormat", answer);
+        answer
     }
     /// ID2D1Bitmap::GetPixelSize, traced.
     pub(super) extern "system" fn bitmap_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
         crate::traced!(b"ID2D1Bitmap::GetPixelSize", [this, ret]);
-        super::bitmap_GetPixelSize(this, ret)
+        let answer = super::bitmap_GetPixelSize(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetPixelSize", answer);
+        answer
     }
     /// ID2D1Bitmap::GetSize, traced.
     pub(super) extern "system" fn bitmap_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
         crate::traced!(b"ID2D1Bitmap::GetSize", [this, ret]);
-        super::bitmap_GetSize(this, ret)
+        let answer = super::bitmap_GetSize(this, ret);
+        crate::answered_call!(b"ID2D1Bitmap::GetSize", answer);
+        answer
     }
     /// ID2D1Brush::GetOpacity, traced.
     pub(super) extern "system" fn brush_GetOpacity(this: Obj) -> f32 {
         crate::traced!(b"ID2D1Brush::GetOpacity", [this]);
-        super::brush_GetOpacity(this)
+        let answer = super::brush_GetOpacity(this);
+        crate::answered_call!(b"ID2D1Brush::GetOpacity", answer);
+        answer
     }
     /// ID2D1Brush::GetTransform, traced.
     pub(super) extern "system" fn brush_GetTransform(this: Obj, out: *mut Matrix) {
@@ -1304,12 +1332,16 @@ pub(crate) mod traced {
     /// ID2D1LinearGradientBrush::GetEndPoint, traced.
     pub(super) extern "system" fn linear_GetEndPoint(this: Obj, ret: *mut Point) -> *mut Point {
         crate::traced!(b"ID2D1LinearGradientBrush::GetEndPoint", [this, ret]);
-        super::linear_GetEndPoint(this, ret)
+        let answer = super::linear_GetEndPoint(this, ret);
+        crate::answered_call!(b"ID2D1LinearGradientBrush::GetEndPoint", answer);
+        answer
     }
     /// ID2D1LinearGradientBrush::GetStartPoint, traced.
     pub(super) extern "system" fn linear_GetStartPoint(this: Obj, ret: *mut Point) -> *mut Point {
         crate::traced!(b"ID2D1LinearGradientBrush::GetStartPoint", [this, ret]);
-        super::linear_GetStartPoint(this, ret)
+        let answer = super::linear_GetStartPoint(this, ret);
+        crate::answered_call!(b"ID2D1LinearGradientBrush::GetStartPoint", answer);
+        answer
     }
     /// ID2D1LinearGradientBrush::SetEndPoint, traced.
     pub(super) extern "system" fn linear_SetEndPoint(this: Obj, p: Point) {
@@ -1324,7 +1356,9 @@ pub(crate) mod traced {
     /// ID2D1RadialGradientBrush::GetCenter, traced.
     pub(super) extern "system" fn radial_GetCenter(this: Obj, ret: *mut Point) -> *mut Point {
         crate::traced!(b"ID2D1RadialGradientBrush::GetCenter", [this, ret]);
-        super::radial_GetCenter(this, ret)
+        let answer = super::radial_GetCenter(this, ret);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetCenter", answer);
+        answer
     }
     /// ID2D1RadialGradientBrush::GetGradientOriginOffset, traced.
     pub(super) extern "system" fn radial_GetGradientOriginOffset(
@@ -1332,17 +1366,23 @@ pub(crate) mod traced {
         ret: *mut Point,
     ) -> *mut Point {
         crate::traced!(b"ID2D1RadialGradientBrush::GetGradientOriginOffset", [this, ret]);
-        super::radial_GetGradientOriginOffset(this, ret)
+        let answer = super::radial_GetGradientOriginOffset(this, ret);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetGradientOriginOffset", answer);
+        answer
     }
     /// ID2D1RadialGradientBrush::GetRadiusX, traced.
     pub(super) extern "system" fn radial_GetRadiusX(this: Obj) -> f32 {
         crate::traced!(b"ID2D1RadialGradientBrush::GetRadiusX", [this]);
-        super::radial_GetRadiusX(this)
+        let answer = super::radial_GetRadiusX(this);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetRadiusX", answer);
+        answer
     }
     /// ID2D1RadialGradientBrush::GetRadiusY, traced.
     pub(super) extern "system" fn radial_GetRadiusY(this: Obj) -> f32 {
         crate::traced!(b"ID2D1RadialGradientBrush::GetRadiusY", [this]);
-        super::radial_GetRadiusY(this)
+        let answer = super::radial_GetRadiusY(this);
+        crate::answered_call!(b"ID2D1RadialGradientBrush::GetRadiusY", answer);
+        answer
     }
     /// ID2D1RadialGradientBrush::SetCenter, traced.
     pub(super) extern "system" fn radial_SetCenter(this: Obj, p: Point) {
@@ -1367,7 +1407,9 @@ pub(crate) mod traced {
     /// ID2D1SolidColorBrush::GetColor, traced.
     pub(super) extern "system" fn solid_GetColor(this: Obj, ret: *mut ColorF) -> *mut ColorF {
         crate::traced!(b"ID2D1SolidColorBrush::GetColor", [this, ret]);
-        super::solid_GetColor(this, ret)
+        let answer = super::solid_GetColor(this, ret);
+        crate::answered_call!(b"ID2D1SolidColorBrush::GetColor", answer);
+        answer
     }
     /// ID2D1SolidColorBrush::SetColor, traced.
     pub(super) extern "system" fn solid_SetColor(this: Obj, c: *const ColorF) {
@@ -1377,17 +1419,23 @@ pub(crate) mod traced {
     /// ID2D1GradientStopCollection::GetColorInterpolationGamma, traced.
     pub(super) extern "system" fn stops_GetColorInterpolationGamma(this: Obj) -> u32 {
         crate::traced!(b"ID2D1GradientStopCollection::GetColorInterpolationGamma", [this]);
-        super::stops_GetColorInterpolationGamma(this)
+        let answer = super::stops_GetColorInterpolationGamma(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetColorInterpolationGamma", answer);
+        answer
     }
     /// ID2D1GradientStopCollection::GetExtendMode, traced.
     pub(super) extern "system" fn stops_GetExtendMode(this: Obj) -> u32 {
         crate::traced!(b"ID2D1GradientStopCollection::GetExtendMode", [this]);
-        super::stops_GetExtendMode(this)
+        let answer = super::stops_GetExtendMode(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetExtendMode", answer);
+        answer
     }
     /// ID2D1GradientStopCollection::GetGradientStopCount, traced.
     pub(super) extern "system" fn stops_GetGradientStopCount(this: Obj) -> u32 {
         crate::traced!(b"ID2D1GradientStopCollection::GetGradientStopCount", [this]);
-        super::stops_GetGradientStopCount(this)
+        let answer = super::stops_GetGradientStopCount(this);
+        crate::answered_call!(b"ID2D1GradientStopCollection::GetGradientStopCount", answer);
+        answer
     }
     /// ID2D1GradientStopCollection::GetGradientStops, traced.
     pub(super) extern "system" fn stops_GetGradientStops(this: Obj, out: *mut Stop, n: u32) {

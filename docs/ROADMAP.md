@@ -5995,11 +5995,20 @@ among the slowest hand-offs.
      trace ended rather than the program -- a stream that simply stopped
      would read as a program that stopped calling
      (`kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs`, scenarios
-     `trace_from_test` and `trace_from_budget_test`, OBSERVABILITY
-     "Call tracing"). Its gaps: one armed method a run, and once armed
-     every traced call in that process is recorded, not only the method
-     named; the OpenTelemetry export does not map `call` events yet (the
-     same gap `ledger:` rows have, OT5).
+     `trace_from_test`, `trace_from_budget_test` and
+     `trace_from_answer_test`, OBSERVABILITY "Call tracing"). What a
+     call answered is recorded with it: the generator knows which
+     methods return something and puts a second record in those
+     wrappers, so the answer is a `ret` event naming the same method,
+     one word, out of the same budget as the calls. That it comes out
+     of the same budget is what keeps the pairing honest -- a trace can
+     end between a call and its answer, never the other way about. It
+     closes the blind spot the first reading of Word's window ran into,
+     where six identical calls read the same whether each one succeeded
+     or each one failed. Its gaps: one armed method a run, and once
+     armed every traced call in that process is recorded, not only the
+     method named; the OpenTelemetry export does not map `call` or
+     `ret` events yet (the same gap `ledger:` rows have, OT5).
    - **Import thunks in the loader, for the DLLs gala did not write.**
      gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
      under a rule each resolved import can point at a thunk that
