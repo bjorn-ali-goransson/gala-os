@@ -10,6 +10,10 @@ pub const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 pub const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 pub const SYSTEM_PROCESS_INFORMATION: u32 = 5;
 pub const SYSTEM_PAGEFILE_INFORMATION: u32 = 18;
+/// The system file cache's working-set limits, which
+/// SetSystemFileCacheSize sets; the Ex form carries the flags.
+pub const SYSTEM_FILE_CACHE_INFORMATION: u32 = 21;
+pub const SYSTEM_FILE_CACHE_INFORMATION_EX: u32 = 81;
 pub const SYSTEM_FIRMWARE_TABLE_INFORMATION: u32 = 76;
 pub const SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION: u32 = 124;
 

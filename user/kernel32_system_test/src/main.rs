@@ -6,6 +6,14 @@
 //!   VirtualAllocExNuma, AllocateUserPhysicalPages without the privilege
 //!   (ERROR_PRIVILEGE_NOT_HELD), HeapQueryInformation (the
 //!   low-fragmentation heap, 2).
+//! - The system file cache, which Word asks to trim as it starts:
+//!   kernelbase's GetSystemFileCacheSize (1 MiB and 16 TiB where the
+//!   size was never set) and SetSystemFileCacheSize, and ntdll's
+//!   NtSetSystemInformation with SystemFileCacheInformation, which
+//!   Word falls back to. Reading the sizes needs no privilege; setting
+//!   them needs SeIncreaseQuotaPrivilege, and a process without it is
+//!   refused with ERROR_ACCESS_DENIED / STATUS_ACCESS_DENIED, not the
+//!   PRIVILEGE_NOT_HELD the name would suggest.
 //! - psapi's K32EnumProcessModules (the executable first; also through
 //!   psapi.dll's EnumProcessModules and GetModuleFileNameExA) and
 //!   K32EnumProcessModulesEx (LIST_MODULES_DEFAULT and LIST_MODULES_ALL
@@ -96,6 +104,8 @@ unsafe extern "system" {
     fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
     fn GetModuleFileNameA(module: Handle, buf: *mut u8, size: u32) -> u32;
     fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn LoadLibraryA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn GetModuleHandleExA(flags: u32, name: *const u8, module: *mut Handle) -> Bool;
     fn GetEnvironmentStrings() -> *mut u8;
@@ -157,6 +167,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn RtlVerifyVersionInfo(info: *const OsVersionInfoExW, kind: u32, mask: u64) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn NtSetSystemInformation(class: u32, buf: *mut u8, len: u32) -> u32;
 }
 
 #[allow(dead_code)]
@@ -224,6 +235,12 @@ struct OsVersionInfoExW {
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_PRIVILEGE_NOT_HELD: u32 = 1314;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
+/// NtQuerySystemInformation/NtSetSystemInformation's
+/// SystemFileCacheInformation, and the size of its structure on x64.
+const SYSTEM_FILE_CACHE_INFORMATION: u32 = 21;
+const FILE_CACHE_LEN: u32 = 64;
 const ERROR_OLD_WIN_VERSION: u32 = 1150;
 const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 const INVALID_HANDLE_VALUE: Handle = usize::MAX as Handle;
@@ -384,6 +401,41 @@ fn memory(c: &mut Checks) -> Result<(), u32> {
             0,
         )?;
         c.eq(info.into(), 2)?; // HeapCompatibilityInformation: LFH
+
+        // The system file cache, which Word asks to trim at startup: the
+        // Win32 pair through kernelbase, where Word looks for it, and
+        // the native call it falls back to. Reading the sizes needs no
+        // privilege; setting them needs SeIncreaseQuotaPrivilege, which
+        // this process does not hold.
+        type GetCache = unsafe extern "system" fn(*mut usize, *mut usize, *mut u32) -> Bool;
+        type SetCache = unsafe extern "system" fn(usize, usize, u32) -> Bool;
+        let base = LoadLibraryA(c"kernelbase.dll".as_ptr().cast());
+        c.ok(!base.is_null(), GetLastError().into())?;
+        let get = GetProcAddress(base, c"GetSystemFileCacheSize".as_ptr().cast());
+        c.ok(!get.is_null(), GetLastError().into())?;
+        let set = GetProcAddress(base, c"SetSystemFileCacheSize".as_ptr().cast());
+        c.ok(!set.is_null(), GetLastError().into())?;
+        let get = core::mem::transmute::<*mut c_void, GetCache>(get);
+        let set = core::mem::transmute::<*mut c_void, SetCache>(set);
+        let (mut min, mut max, mut flags) = (0usize, 0usize, 0u32);
+        c.ok(get(&mut min, &mut max, &mut flags) != 0, GetLastError().into())?;
+        c.eq(min as u64, 0x10_0000)?;
+        c.eq(max as u64, 0x1000_0000_0000)?;
+        c.eq(flags.into(), 0)?;
+        SetLastError(0);
+        c.eq(set(min, max, flags) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_ACCESS_DENIED.into())?;
+
+        let mut cache = [0u8; FILE_CACHE_LEN as usize];
+        c.eq(
+            NtSetSystemInformation(
+                SYSTEM_FILE_CACHE_INFORMATION,
+                cache.as_mut_ptr(),
+                FILE_CACHE_LEN,
+            )
+            .into(),
+            STATUS_ACCESS_DENIED.into(),
+        )?;
     }
     Ok(())
 }

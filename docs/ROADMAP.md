@@ -2191,17 +2191,37 @@ need gala's.
      at all afterwards. Direct2D is not where it gives up. What the
      ledger shows in the ~900 ms that follow, in order: GetModuleHandle
      for tbarcode10.dll and tbarcode10_x64.dll, the Word\Security
-     keys, then kernelbase's SetSystemFileCacheSize and ntdll's
-     NtSetSystemInformation, missing export, six hits each across
-     39074-39536 ms, then the absent GracefulExit\WINWORD\12 key and
-     GetModuleHandle(mscoree.dll) before the box. Those two missing
-     exports are the only named gaps in the window, and measuring them
-     on Windows is the next step here. Two blind spots stand beside
-     them, both named in OBSERVABILITY: a trace records a call's
-     arguments and not its answer, and QueryInterface, AddRef and
-     Release are hand-written slots every object shares, which the
-     generator does not wrap -- so a refused interface query would
-     leave nothing in the trace.
+     keys, then the gap of the day and, behind it, the next one, and
+     GetModuleHandle(mscoree.dll) before the box. Two blind spots
+     stand beside the trace, both named in OBSERVABILITY: it records a
+     call's arguments and not its answer, and QueryInterface, AddRef
+     and Release are hand-written slots every object shares, which the
+     generator does not wrap -- a refused interface is in the ledger,
+     but where it falls in the sequence is not.
+     The gaps in that window come one behind another, each hiding the
+     next, because the ledger names a missing export only until it
+     exists. Closed so far: kernelbase's SetSystemFileCacheSize and
+     ntdll's NtSetSystemInformation (six hits each, the same retry
+     shape), measured on Windows first -- reading the file cache's
+     limits needs no privilege and gives 1 MiB and 16 TiB on a system
+     whose size was never set, setting them needs
+     SeIncreaseQuotaPrivilege, and a process without it is refused
+     ACCESS_DENIED rather than the PRIVILEGE_NOT_HELD the name
+     suggests (`kernel32_system_test`; `GetSystemFileCacheSize` and
+     `SetSystemFileCacheSize` in `user/kernel32/src/sysmem.rs`,
+     `NtSetSystemInformation` in `kernel/src/nt/syscalls.rs`). Both
+     rows are gone from the run that follows, and Word fails the same
+     way at the same place: the file cache is not what decided it.
+     What stood behind them is
+     `kernelbase.dll!PrivIsDllSynchronizationHeld`, missing export,
+     six hits across 37835-38293 ms -- the last named gap before the
+     absent GracefulExit\WINWORD\12 key at 38297 ms and the box. That
+     is the next one to measure.
+     The machine's size is not the cause either, and that question is
+     closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
+     Word fails identically, and gala itself never came near the edge
+     (fewest frames free 38129, about 149 MiB, pagefile untouched).
+     The office scenarios stay at their old size.
      Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,

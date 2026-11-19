@@ -8726,6 +8726,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "bcrypt.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
+    ("kernel32_system_test", "kernelbase.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_py_test", "kernel32.dll", "Windows/System32"),

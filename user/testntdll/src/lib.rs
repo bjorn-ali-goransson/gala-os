@@ -484,6 +484,7 @@ syscall_stubs! {
         process: isize, address: usize, class: u32, buf: *mut u8, len: usize, ret: *mut usize
     );
     NtQuerySystemInformation = 0x36, fn(class: u32, buf: *mut u8, len: u32, ret: *mut u32);
+    NtSetSystemInformation = 0x1c6, fn(class: u32, buf: *mut u8, len: u32);
     NtDuplicateObject = 0x3c, fn(
         source_process: isize, source: usize, target_process: isize, target: *mut usize,
         access: u32, attributes: u32, options: u32

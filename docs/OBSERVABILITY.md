@@ -1089,8 +1089,10 @@ trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)
   today: `DLLS` in `xtask/src/gentrace.rs`), and one armed method a run.
   QueryInterface, AddRef and Release are not among the wrapped slots:
   every object shares one implementation of each, so they are written by
-  hand and the generator does not reach them. A program that gives up
-  after asking an object for an interface leaves nothing in the trace.
+  hand and the generator does not reach them. An interface a DLL refuses
+  is still in the ledger (`<object> QueryInterface`, with the IID's first
+  dword), so what the trace misses there is the order: which object was
+  asked, between which other calls.
   Arming is per process, because the flag lives in the DLL's own data;
   the budget is the run's, shared by every process that traces. Once
   armed, *every* traced call in that process is recorded, not only the

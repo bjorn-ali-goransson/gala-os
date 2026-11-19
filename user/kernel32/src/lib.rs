@@ -231,6 +231,7 @@ unsafe extern "system" {
         ret: *mut usize,
     ) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn NtSetSystemInformation(class: u32, buf: *mut u8, len: u32) -> u32;
     fn NtDuplicateObject(
         source_process: Handle,
         source: Handle,

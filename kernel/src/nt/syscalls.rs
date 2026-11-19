@@ -260,6 +260,9 @@ pub const NT_LOCK_FILE: u32 = 0x0123;
 pub const NT_UNLOCK_FILE: u32 = 0x01c5;
 pub const NT_CONTINUE: u32 = 0x0043;
 pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
+// NtSetSystemInformation: gala's own number, UNVERIFIED for 26100 (it is
+// reached through ntdll's export, never by number).
+pub const NT_SET_SYSTEM_INFORMATION: u32 = 0x01c6;
 pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
 pub const NT_YIELD_EXECUTION: u32 = 0x0046;
 pub const NT_QUEUE_APC_THREAD: u32 = 0x0045;
@@ -364,6 +367,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_UNLOCK_FILE, "NtUnlockFile", 5, nt_unlock_file),
     (NT_CONTINUE, "NtContinue", 2, nt_continue),
     (NT_QUERY_SYSTEM_INFORMATION, "NtQuerySystemInformation", 4, nt_query_system_information),
+    (NT_SET_SYSTEM_INFORMATION, "NtSetSystemInformation", 3, nt_set_system_information),
     (NT_SET_INFORMATION_THREAD, "NtSetInformationThread", 4, nt_set_information_thread),
     (NT_YIELD_EXECUTION, "NtYieldExecution", 0, nt_yield_execution),
     (NT_QUEUE_APC_THREAD, "NtQueueApcThread", 5, nt_queue_apc_thread),
@@ -4663,6 +4667,31 @@ fn firmware_table(call: &mut Call<'_>, buffer: u64, length: u64, ret_ptr: u64) -
         Ok(()) => NtStatus::SUCCESS,
         Err(_) => NtStatus::ACCESS_VIOLATION,
     }
+}
+
+/// NtSetSystemInformation(Class, Buffer, Length). What asks for it here
+/// is the system file cache's size, which Word tries to trim as it
+/// starts: SystemFileCacheInformation, and the Ex form a caller with
+/// flags uses. Changing it needs SeIncreaseQuotaPrivilege, and a caller
+/// without it is answered STATUS_ACCESS_DENIED rather than
+/// STATUS_PRIVILEGE_NOT_HELD -- measured on the pinned build, and what
+/// every program that is not elevated sees (`kernel32_system_test`).
+/// gala keeps no file cache working set to size, so a caller that does
+/// hold the privilege is a gap, recorded rather than answered. So is
+/// every other class.
+fn nt_set_system_information(call: &mut Call<'_>) -> NtStatus {
+    use super::sysinfo;
+    /// SeIncreaseQuotaPrivilege, as `set_quota_limits` names it.
+    const SE_INCREASE_QUOTA: u64 = 5;
+    let class = arg!(call, 0) as u32;
+    let cache = class == sysinfo::SYSTEM_FILE_CACHE_INFORMATION
+        || class == sysinfo::SYSTEM_FILE_CACHE_INFORMATION_EX;
+    if cache && !security_calls::effective_privilege(call, SE_INCREASE_QUOTA) {
+        return NtStatus::ACCESS_DENIED;
+    }
+    let what = if cache { "file cache size" } else { "class" };
+    super::ledger::record("NtSetSystemInformation", what, u64::from(class));
+    NtStatus::NOT_IMPLEMENTED
 }
 
 /// NtSetInformationProcess(ProcessHandle, Class, Buffer, Length): only
