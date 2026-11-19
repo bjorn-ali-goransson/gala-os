@@ -2166,11 +2166,27 @@ need gala's.
      an unwind, so some of those words are data rather than return
      addresses (the bare `Mso40UIwin32client.dll+0x0` is a module
      base), but the layer is unambiguous: Word hands the failure to
-     MSO's UI client DLLs and they raise the box. Which gap they are
-     reacting to is still open -- no system call separates
-     CreateSolidColorBrush from the `Options\Debug` read -- so the next
-     step is a capture armed further back, on what MSO calls before it
-     decides. Still unexplained beside it, and to be measured on Windows
+     MSO's UI client DLLs and they raise the box, whose text is
+     Office's generic "Sorry, something went wrong and Word was unable
+     to start. (13)".
+     The decision is made in 9.2 ms of pure user-mode code, between
+     CreateSolidColorBrush at 63926.5 ms and the `Word\Options\Debug`
+     read at 63935.7 ms that is Word checking whether to break before
+     it gives up; everything after is the box (GalaScreenInfo, uxtheme,
+     the Common-Controls probes, the two writes). Nothing in that
+     window failed: of the 660 calls the thread made in its last three
+     seconds the only non-zero statuses are absent keys and paths, and
+     every Direct2D call that records its answer at all recorded S_OK
+     (`answered`, `user/d2d1/src/lib.rs`). CreateMesh and
+     CreateSolidColorBrush have no `answered` site, so their silence
+     says nothing either way.
+     What hides the deciding call is that `reached!` is one-shot per
+     site: a *repeat* of a method Word already called leaves no record,
+     so the 9.2 ms window is invisible by construction. Lifting that
+     for a window is OT3b piece 2 -- `trace_from=<dll>!<interface>::
+     <method>` and a `call` event category -- which is the next step
+     here, not another stack capture: the stack already names the
+     layer, and what is missing is the sequence. Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
      PAGE_READWRITE) against 685 that succeed -- gala's own loader
