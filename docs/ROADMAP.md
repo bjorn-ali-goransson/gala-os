@@ -2130,7 +2130,7 @@ need gala's.
      "(13)" message box an untraced run does, so the failure window
      can be read as a syscall stream after all. The box is two
      NtWriteFile calls on one thread, 21 bytes ("Microsoft Word 16.0")
-     then 64 (the message), 64.4 s in. Everything that fails in the
+     then 64 (the message), 65.3 s in. Everything that fails in the
      twelve seconds before them is routine: absent registry keys,
      empty window queues, and the private-assembly probes
      `Model::resolve` (`user/kernel32/src/actctx/manifest.rs`) makes
@@ -2139,13 +2139,31 @@ need gala's.
      failure -- `CreateActCtxW` returns Ok. Word also writes no log of
      its own: Office's ULS logging under HKCU `Office\16.0\Common\
      Logging` is read but produces nothing, so the %TEMP% dumps hold
-     only OFFICECL's. What decides the box is still unnamed; the one
-     thing in the window that is not plainly routine is ten
-     NtAllocateVirtualMemory calls refused with CONFLICTING_ADDRESSES
-     (MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE) against 685 that
-     succeed, which has to be measured on Windows before it is called
-     a divergence -- gala's own loader probes addresses the same way
-     (`thread.rs`).
+     only OFFICECL's.
+     What decides the box is pure user-mode code, and the stream says
+     where it sits. Word never begins a frame: BeginDraw, Clear,
+     FillRectangle, DrawRectangle and EndDraw all carry `reached!` and
+     sit in the traced vtable, and none of them is in the ledger
+     anywhere in the run. The last graphics call Word ever makes is
+     ID2D1RenderTarget::CreateSolidColorBrush, which succeeds
+     (`brush::create_brush` fails only on OOM). Nine milliseconds
+     later, with no system call in between, the main thread reads
+     `16.0\Word\Options\Debug` (absent), and everything after that is
+     the box being built: uxtheme, the Common-Controls probes,
+     GalaScreenInfo three times to place it, `Common\CrashPersistence\
+     WINWORD\12`, the absent `Word\Security` policy keys, and the two
+     writes. So Word sets its whole drawing apparatus up, gets a brush
+     back, and gives up without drawing with it.
+     Naming the code that decides needs the frames above MessageBoxW.
+     `stack_at=NtWriteFile stack_from=user32` captures the box, but
+     MessageBoxW's own kilobyte of locals pushes Word's callers past
+     SCAN_WORDS (128 words), so the capture stops in WWINTL/WWLIB:
+     `stack_words=<n>` in `kernel/src/nt/stack_at.rs` is the next
+     step. Still unexplained beside it, and to be measured on Windows
+     before it is called a divergence: ten NtAllocateVirtualMemory
+     calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
+     PAGE_READWRITE) against 685 that succeed -- gala's own loader
+     probes addresses the same way (`thread.rs`).
      What a dying thread called last is in the crash report
      (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
      where Word used to raise are closed, each measured on Windows
