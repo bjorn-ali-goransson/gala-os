@@ -7013,13 +7013,39 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      program). Nothing confines the agent to the picked element, its
      component or its file.
   3. The request (`-2-request`): a small dialog beside the window
-     titled "Change <program>", a text box, a line saying the agent
-     will edit, build and restart the program with the open folder and
-     selection kept, Cancel and "Make the change".
-  4. Progress (`-3-progress`): a checklist with live state (reading
-     the source, editing <n> files, building with its time,
-     restarting), a progress bar, "Show the change" opening the diff;
-     the program stays usable meanwhile. The agent and the build run
+     titled "Change <program>", a text box, Inspect, Cancel and "Make
+     the change". "Make the change" hands the request to the agent
+     panel (below) by WM_COPYDATA: the text, the picked element's
+     automation id, label and rectangle, the program and its window.
+     The card closes; the panel shows the request and handles it.
+  4. The agent panel (the owner): `agent.exe`, a user-mode gala_ui
+     program started with the session, docked on the right edge of the
+     whole monitor at full height as a Windows app bar
+     (SHAppBarMessage ABM_NEW, ABM_QUERYPOS, ABM_SETPOS, ABM_REMOVE).
+     The work area shrinks by its width and the taskbar ends at its
+     left edge (the clock and tray move left), but the start button
+     and the taskbar's group stay centred on the whole monitor. It can
+     be hidden: it then collapses to a small topmost dock tab on the
+     right edge, the strip goes back to the work area, a click on the
+     tab brings it back, and the hidden state is remembered. A context
+     chip at its top names the active window's program and title
+     ("File Explorer - tmp"), from EVENT_SYSTEM_FOREGROUND
+     (SetWinEventHook), the panel itself ignored. The user can also
+     type a request into the panel directly; it applies to the program
+     the chip names. The panel shows each request, the agent's steps
+     as they happen, and the result; the program stays usable
+     meanwhile.
+     Tools, in order (the owner): first a command line run in the
+     active program's context (`run`: cmd.exe in a Windows folder,
+     `wsl -d <distro>` busybox sh in a Linux folder; "compress all the
+     files" uses busybox tar and gzip until 7-Zip comes through `gala
+     install`); later tool calling into the programs themselves, by an
+     MCP server or per program (item MCP), and the source tools below.
+     Model calls go through a relay on the development host (`cargo
+     xtask agent-relay`, reached from the guest through QEMU's
+     guestfwd as `serve-page` is), which adds the key; stopgap until
+     gala calls HTTPS itself with a credential store.
+     For changing a program's source, the agent and the build run
      on the machine itself, never on another host (no second machine
      the feature depends on): the agent is a gala program calling the
      model's API over gala's own network stack, and the build uses a
@@ -7035,19 +7061,19 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      reach the program's whole source - read a file, replace an exact
      piece of text, build - and compiler errors go back to it
      for a bounded number of rounds; every round, edit and build is
-     logged, and the card's steps are those events. Before it edits
+     logged, and the panel's steps are those events. Before it edits
      anything, the agent may ask the user clarifying questions (a
      fourth tool, ask). It asks when the request or the pick leaves
      the change open, for example which column "the space used"
-     means. The card shows the
+     means. The panel shows the
      question, with choices where the agent offers them and an answer
      box. The loop waits for the answer, and Cancel still ends it. The
      questions, the answers and the decision not to ask are logged with
      the request. The agent does not ask once it has started editing:
-     anything it finds then is reported with the change. Stopgap until gala
-     runs rustc and calls HTTPS itself: the loop runs on the
-     development host against the real source and API, to prove it;
-     the same loop moves onto gala unchanged. The agent's
+     anything it finds then is reported with the change. Stopgap until
+     gala runs rustc: the source tools run on the development host
+     against the real source, to prove the loop; the same loop moves
+     onto gala unchanged. The agent's
      tools are item MCP's (the ledger, screenshots, UIA), so it checks
      its change on the running desktop; the change is a branch or diff
      the user can read.
@@ -7099,16 +7125,18 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   token only, and a replaced system program is signed under R8's rule
   or runs as the user's own build, never silently as gala's.
   Status: the window menu is on the screen (Alt+Space, a caption right
-  click) and File Explorer has the flow as a preview with no agent
-  behind it (ARCHITECTURE "The file explorer", "Change this program"):
-  the menu item, the request card, Inspect over the window's parts by
-  automation id, the steps on a timer, a last card saying nothing was
-  changed; scenario `explorer` drives it. Next: the change card and
-  then Explorer as UI components (item LY); the agent loop, its first
-  demo a change to the change card's component, built and the program
-  restarted (the stopgap above until gala builds it itself); the state
-  record and the swap, Undo; the item on Task Manager, its use case
-  (step 4) as the measure.
+  click) and File Explorer has the menu item and the request card with
+  Inspect over the window's parts by automation id, as gala_ui views
+  (ARCHITECTURE "The file explorer", "Change this program"); scenario
+  `explorer` drives it. The card still ends in a preview (steps on a
+  timer, a last card saying nothing was changed) until the panel takes
+  the hand-off. Next, in order: app bars (`appbar_test`, SHAppBarMessage,
+  the desktop's reserved strip); `agent.exe` docked, hideable, with its
+  context chip; the hand-off from Explorer's card (the timer and the
+  progress cards go); the relay with record and replay, the chat and the
+  `run` tool ("compress all the files" in Explorer); then the source
+  tools, the state record and the swap, Undo, and the item on Task
+  Manager with its use case as the measure.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's
