@@ -6984,7 +6984,12 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      header"). gala's own programs make that exact: their windows are
      UI components (item LY) whose element ids are the AutomationIds,
      so the picked id leads to the element in the window's one file,
-     with no map to the source to keep.
+     with no map to the source to keep. The pick is a reference, not a
+     boundary: it says where the user is looking, and the change may
+     be only partly there, or entirely beside it (a new column next to
+     the picked one), or reach well past it (the data the program
+     reads). Nothing confines the agent to the picked element, its
+     component or its file.
   3. The request (`-2-request`): a small dialog beside the window
      titled "Change <program>", a text box, a line saying the agent
      will edit, build and restart the program with the open folder and
@@ -7004,8 +7009,9 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      small loop, not a general coding assistant (running one such as
      Claude Code on gala needs Node.js on gala, a separate goal): the
      request, the picked part's automation id and that part's source
-     files go to the model with three tools - read a file, replace an
-     exact piece of text, build - and compiler errors go back to it
+     files go to the model as a starting point, with three tools that
+     reach the program's whole source - read a file, replace an exact
+     piece of text, build - and compiler errors go back to it
      for a bounded number of rounds; every round, edit and build is
      logged, and the card's steps are those events. Stopgap until gala
      runs rustc and calls HTTPS itself: the loop runs on the
@@ -7014,6 +7020,21 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      tools are item MCP's (the ledger, screenshots, UIA), so it checks
      its change on the running desktop; the change is a branch or diff
      the user can read.
+     The use cases it is measured by (the owner), on Task Manager:
+     - "Add sparklines to the space used": the user picks a column
+       that shows space used and has no sparkline yet (Commit size;
+       CPU and Memory have theirs), and the agent adds one. The
+       existing sparklines (`Trails`, `line`) are in the program's
+       other files, not in the picked element.
+     - "A Disk I/O column with its sparkline": the user picks a column
+       next to where the new one goes. The change is mostly outside
+       the pick and outside the program. The kernel's per-process
+       record (GalaTasks op 0, `kernel/src/nt/tasks.rs`) has no I/O
+       bytes yet, so the agent has to add them there, in taskmgr's
+       parser, and in a new column with its own trail. Swapping the
+       running program cannot apply a kernel change, so the agent says
+       that one needs a rebuild of the system and a reboot, and its
+       steps say so.
   5. Updated (`-4-updated`): the new build in the same window, folder
      and selection; a toast "<program> was updated" with Undo and
      Details. The swap: the program writes its state as a versioned
@@ -7042,7 +7063,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   then Explorer as UI components (item LY); the agent loop, its first
   demo a change to the change card's component, built and the program
   restarted (the stopgap above until gala builds it itself); the state
-  record and the swap, Undo; the item on Task Manager.
+  record and the swap, Undo; the item on Task Manager, its use cases
+  (step 4) as the measure.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's
