@@ -226,7 +226,7 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next (the owner) the desktop on ARM: the boot ends on a usable desktop (done: `desktop_at_boot`), GTK on aarch64 and the popup hang left |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next (the owner) the desktop on ARM: the boot ends on a usable desktop (`desktop_at_boot`) and GTK runs (`arm_lx_gtk`); the popup hang left |
 | VM | Virtual machines on gala | later | wanted, not scheduled (the owner); step 1: QEMU's emulation (TCG) as an ordinary program, a small Linux guest booted inside gala; step 2: gala as the hypervisor (VT-x/AMD-V, ARM's EL2) behind Linux's `/dev/kvm`, then the Windows Hypervisor Platform (`WinHvPlatform.dll`) |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -251,7 +251,7 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
-| IN | The installer: gala onto a machine's disk | planned (the owner: after AR's desktop) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| IN | The installer: gala onto a machine's disk | in progress (step 1: the layout IOCTLs, `partition_test`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -4806,17 +4806,22 @@ on the seams item PT prepared: native ARM64 Windows programs
    on x64: their console programs never made it live);
    `desktop_at_boot` and `arm_desktop_at_boot` boot as the images do and
    check the desktop, the start menu from the Windows key and from a
-   click. Left: items 1 and 2 below (the popup hang, GTK on aarch64),
+   click. Left: item 1 below (the popup hang),
    and the hardware a real machine has (item HW). The aarch64 image's
    command line is the twin's; x64's adds the Go programs.
 1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
    reading its socket in a roundtrip after the "anchor bottom" popup's
    commit while the server's thread waited too (a wakeup lost, or a
-   request answered with nothing); not reproduced locally, loaded or
-   not. The state dump now says which (`a round would find work`, each
+   request answered with nothing; the server had served 79 requests
+   and had no events waiting); not reproduced locally (0 of 224 boots
+   with 4 at once beside 2-3 busy host loops), nor on CI since. The
+   state dump now says which (`a round would find work`, each
    client's socket) and names Linux calls in the flight records.
-2. User mode, the rest: gtk_test on aarch64 (GTK 3's arm64 libraries as its
-   Linux root, as x64's amd64 ones). arch_prctl_test and signal_test stay x86_64's (the
+2. User mode, the rest: the desktop Linux applications run on aarch64
+   from their roots' arm64 builds (`DEBS_ARM64`): GTK (`arm_lx_gtk`,
+   `arm_lx_gtk_x11`), xterm, a distribution's desktop, GIMP and
+   Inkscape (`arm_lx_xterm`, `arm_lx_xdesktop`, `arm_lx_gimp(_batch)`,
+   `arm_lx_inkscape(_batch)`). arch_prctl_test and signal_test stay x86_64's (the
    call and the sigcontext fields they check are x86's; the aarch64
    signal frame is pipe_test's, id_test's, altstack_test's and
    seccomp_test's).
@@ -6324,9 +6329,11 @@ underneath), ntfs-3g's ntfsresize (GPL; Windows shrinks its own
 volume instead).
 
 **Next** (each step test first):
-1. Partitions in the kernel: the disk's GPT read at boot, each partition
-   a device (`\Device\Harddisk0\Partition1`...), the layout IOCTLs
-   above (test program against real Windows).
+1. Partitions in the kernel: the layout IOCTLs done (GET/SET_DRIVE_LAYOUT_EX,
+   CREATE_DISK, UPDATE_PROPERTIES on a GPT: `partition_test`, ARCHITECTURE
+   "Disk"); its run on real Windows (a scratch VHD) next; then each
+   partition a device (`\Device\Harddisk0\Partition1`...) and MBR
+   tables read.
 2. C: in a partition: the persisted volume found by its partition type
    GUID instead of filling the disk; the `persist` scenarios on a
    partitioned disk.

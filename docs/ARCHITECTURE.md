@@ -7493,6 +7493,24 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
   image must hold after the run, checked on the host); host unit tests
   for the IOCTL outputs and sector checks.
+- **Partition tables** (`nt::gpt`, pure and host-tested; ROADMAP IN
+  step 1): the UEFI specification's GPT (protective MBR, primary header
+  and 128-entry array at LBA 1-33, backup array and header at the end,
+  CRC32s) and winioctl.h's structures. IOCTL_DISK_GET_DRIVE_LAYOUT_EX
+  reads the table at each call (DRIVE_LAYOUT_INFORMATION_EX: 48-byte
+  header, 144-byte PARTITION_INFORMATION_EX each, numbered from 1 in
+  array order; a disk without a valid GPT is PARTITION_STYLE_RAW);
+  IOCTL_DISK_CREATE_DISK writes an empty GPT (at least 128 entries);
+  IOCTL_DISK_SET_DRIVE_LAYOUT_EX writes the partitions given (whole
+  sectors, in the usable range, not overlapping, else
+  STATUS_INVALID_PARAMETER); IOCTL_DISK_UPDATE_PROPERTIES succeeds (there
+  is nothing cached). Each write is logged (`disk: GPT written ...`) and
+  flushed. The write IOCTLs need write access to the handle. Limits: MBR
+  tables are neither read (an MBR disk is RAW) nor written
+  (STATUS_NOT_SUPPORTED); the backup is written but not read when the
+  primary is damaged; no partition devices yet. Test: `partition_test`
+  (as SYSTEM, an empty 64 MiB disk; xtask reads the table back with its
+  own GPT reader).
 - TODO: device interrupts, more than one request in flight.
 
 ### C: kept on the disk
@@ -12615,7 +12633,12 @@ the `unsafe` allow-list). Allocation is fallible (`TryVec`,
   frame: siginfo, the ucontext (its sigcontext with x0-x30, sp, pc and
   pstate, and in its reserved area an fpsimd_context: FPSR, FPCR,
   V0-V31), then the frame record the handler's x29 points at; x30 is
-  sa_restorer; rt_sigreturn reads it back at sp. User mode writes the
+  sa_restorer, or, for an action without SA_RESTORER (aarch64's glibc
+  sets none: Linux returns those through its vDSO's
+  `__kernel_rt_sigreturn`), the process's rt_sigreturn page
+  (`lx::mm::SIGRETURN_PAGE`, just above the stack: `mov x8, #139; svc
+  #0`, read and execute, mapped at exec, copied by fork; gala has no
+  vDSO); rt_sigreturn reads it back at sp. User mode writes the
   thread pointer (TPIDR_EL0) itself, so the scheduler records it at each
   switch away and loads the next thread's (`percpu::live_user_fs_base`).
   Scenarios: the `arm_lx_*` twins (ROADMAP AR).
@@ -13398,7 +13421,7 @@ The running parts (milestone 1; `lxrun=`):
     return address), restores every register (flags filtered by the
     return), the XSAVE state and the mask; a frame it cannot read, or
     whose rip/rsp leave user space, kills with SIGSEGV, as does a frame
-    that cannot be written or an action without SA_RESTORER;
+    that cannot be written or (x86_64) an action without SA_RESTORER;
   - EINTR: blocking pipe reads and writes, wait4 and rt_sigtimedwait
     end with EINTR when a signal is deliverable; read, write, writev and
     wait4 are restarted (rip back over `syscall`, rax the number) after

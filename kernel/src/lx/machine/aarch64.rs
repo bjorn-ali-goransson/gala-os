@@ -64,6 +64,13 @@ pub fn stat_bytes(st: &lx_abi::layout::Stat) -> [u8; 128] {
 /// seccomp_data's and SIGSYS's architecture: AUDIT_ARCH_AARCH64 (EM_AARCH64 with the 64-bit and little-endian bits).
 pub const AUDIT_ARCH: u32 = 0xc000_00b7;
 
+/// Where a handler registered without SA_RESTORER returns: Linux's vDSO
+/// `__kernel_rt_sigreturn`, which aarch64's glibc relies on (it sets no
+/// SA_RESTORER there). gala has no vDSO; each process gets this code on
+/// its own page (`lx::mm::SIGRETURN_PAGE`): `mov x8, #139` (rt_sigreturn),
+/// `svc #0`.
+pub const SIGRETURN_CODE: &[u8] = &[0x68, 0x11, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4];
+
 /// struct epoll_event's data offset: naturally aligned on aarch64.
 pub const EPOLL_DATA_AT: usize = 8;
 

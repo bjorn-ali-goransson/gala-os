@@ -5918,11 +5918,30 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::SUCCESS;
     }
     if matches!(entry.object.body, ObjectBody::Disk(_)) {
-        let _ = (input, input_len, apc);
+        let _ = apc;
         if super::disk::needs_read(code) && entry.access & file::FILE_READ_DATA == 0 {
             return NtStatus::ACCESS_DENIED;
         }
-        let out = tri!(super::disk::control(code, platform::disk_sectors()));
+        if super::disk::needs_write(code) && entry.access & file::FILE_WRITE_DATA == 0 {
+            return NtStatus::ACCESS_DENIED;
+        }
+        let out = if super::disk::is_layout(code) {
+            // A layout's input: a header and its partitions (at most the
+            // 4096 entries a table holds).
+            let len = (input_len as usize)
+                .min(super::gpt::LAYOUT_HEADER + 4096 * super::gpt::PARTITION_INFO);
+            let mut buf = Vec::new();
+            if buf.try_reserve_exact(len).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            buf.resize(len, 0);
+            if call.process.read(input, &mut buf).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            tri!(super::disk::layout(code, &buf))
+        } else {
+            tri!(super::disk::control(code, platform::disk_sectors()))
+        };
         if out.len() > output_len as usize {
             return NtStatus::BUFFER_TOO_SMALL;
         }

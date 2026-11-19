@@ -535,7 +535,14 @@ pub fn transcript_from_log(serial: &str) -> Option<String> {
 /// (what real Linux printed), exactly. A program that is not a user/lx
 /// test (busybox) has one transcript per scenario:
 /// `user/lx/<binary>/<scenario>.txt`. Ok for other scenarios.
-pub fn check_boot(scenario: &str, cmdline: &str, serial: &str) -> std::result::Result<(), String> {
+/// An aarch64 twin (`base`: its x64 scenario) without a transcript of
+/// its own takes its x64 scenario's where that has one.
+pub fn check_boot(
+    scenario: &str,
+    base: Option<&str>,
+    cmdline: &str,
+    serial: &str,
+) -> std::result::Result<(), String> {
     let Some(path) = cmdline.split_whitespace().find_map(|w| w.strip_prefix("lxrun=")) else {
         return Ok(());
     };
@@ -543,7 +550,17 @@ pub fn check_boot(scenario: &str, cmdline: &str, serial: &str) -> std::result::R
     let test = binary.strip_suffix("-pie").unwrap_or(binary);
     // A test run where Linux answers otherwise (gtk_test under X11:
     // `lx_gtk_x11`) has its own transcript beside expected.txt.
-    let own = root().join("user/lx").join(test).join(format!("{scenario}.txt"));
+    let dir = root().join("user/lx").join(test);
+    let scenario = match base {
+        Some(b)
+            if !dir.join(format!("{scenario}.txt")).exists()
+                && dir.join(format!("{b}.txt")).exists() =>
+        {
+            b
+        }
+        _ => scenario,
+    };
+    let own = dir.join(format!("{scenario}.txt"));
     let expected_path = if test.ends_with("_test") && !own.exists() {
         root().join("user/lx").join(test).join("expected.txt")
     } else {
