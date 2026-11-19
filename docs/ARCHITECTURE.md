@@ -1587,9 +1587,18 @@ fault) and used only if the view is still there.
 - A PAGE_GUARD page loses its guard on first touch.
 - Inside the current thread's stack reservation (TEB
   DeallocationStack..StackBase) the guard moves one page down and
-  StackLimit follows, without an exception; when only the
-  never-committed bottom page is left, STATUS_STACK_OVERFLOW is raised
-  (the touched page stays usable for the handler).
+  StackLimit follows, without an exception, while the thread's stack
+  guarantee (TEB GuaranteedStackBytes, which SetThreadStackGuarantee
+  raises; 64-bit stacks) still fits between the new guard and the
+  never-committed bottom page. Otherwise STATUS_STACK_OVERFLOW is raised:
+  the guarantee's pages below the touched one are committed without a
+  guard, StackLimit goes to the lowest, and the exception is dispatched on
+  them and the touched page (the kernel log's `vm: stack overflow` line
+  names both ranges). With no guarantee the handler has the touched page
+  and what is left of the one above it, which is not enough for every
+  Windows' dispatch (an exception frame with AVX-512 state is 3.6 KiB):
+  a program that handles its overflow asks for a guarantee, as
+  guard_test does.
 - Anywhere else the program gets STATUS_GUARD_PAGE_VIOLATION (read/write,
   address).
 - Stacks are laid out as Windows does: a reservation of the executable's

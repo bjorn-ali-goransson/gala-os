@@ -7249,6 +7249,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("exception_test", "ntdll.dll", "Windows/System32"),
     ("seh_test", "ntdll.dll", "Windows/System32"),
     ("guard_test", "ntdll.dll", "Windows/System32"),
+    ("guard_test", "kernel32.dll", "Windows/System32"),
     ("import_test", "ntdll.dll", "Windows/System32"),
     ("import_test", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),

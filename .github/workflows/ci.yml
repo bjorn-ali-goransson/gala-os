@@ -312,9 +312,13 @@ jobs:
       # use (an unpacked tree carries a marker naming it), so an older cache
       # is safe and only what is missing is fetched; a release host's
       # outage (a 504 from GitHub's release downloads) then fails only the
-      # runs that need a new download.
-      - name: Cache the pinned prebuilt programs
-        uses: actions/cache@v4
+      # runs that need a new download. Saved even when a boot fails: what
+      # was fetched is kept, so a download is made once and not on every
+      # run until a whole shard passes (archive.ubuntu.com refusing some
+      # of them would otherwise keep main red).
+      - name: Restore the pinned prebuilt programs
+        id: prebuilt
+        uses: actions/cache/restore@v4
         with:
           path: |
             target/prebuilt
@@ -325,6 +329,14 @@ jobs:
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
         run: cargo xtask boot-test
+      - name: Save the pinned prebuilt programs (also when a boot failed)
+        if: ${{ !cancelled() && steps.prebuilt.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
       # Saved from main's pushes only (pull requests read it), by one shard
       # (all six build the same).
       - name: Save the build cache (main, shard 1)

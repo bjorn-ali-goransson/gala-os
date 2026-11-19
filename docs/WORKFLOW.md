@@ -88,7 +88,9 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     `xtask/src/main.rs` with the shard's older caches restored: every
     download is checked against its pinned checksum at each use, so only
     what is missing is fetched (a release host's outage fails only a run
-    that needs a new download).
+    that needs a new download). The boot shards save that cache even
+    when a boot failed, so a package fetched once is not fetched again on
+    every run until a whole shard passes.
     The runners have hardware virtualization: a step opens /dev/kvm to
     the runner's user, so the boots run under KVM (the boot log's
     `xtask: vm time` line, and a QEMU standard error without "falling
