@@ -6335,9 +6335,26 @@ layer inside them).
 2. A window drawn from the tree (gdi32), clicks and typing through
    `click`/`typed` to `update` with each message logged, its UIA
    elements from the same tree.
-3. The change card as the first component (scenario `explorer`
-   checks it by id); then File Explorer's window.
-4. Task Manager and the start menu.
+3. Move the windows gala has drawn by hand onto components, one at a
+   time, each its own change with its scenario passing before and
+   after (same ids, same log lines; the screendumps may change only
+   where the look was meant to):
+   - Explorer's "Change this program..." cards and Inspect's outline
+     (`user/explorer/src/change_ui.rs`): first, the smallest, and the
+     one the change agent edits first.
+   - File Explorer's window (`user/explorer/src/main.rs`: address
+     bar, navigation pane, the list of files from data). Needs
+     scrolling (`gala_ui` has none yet).
+   - Task Manager (`user/taskmgr`: tabs, the process list).
+   - The taskbar and start menu: drawn by the kernel's desktop
+     (`kernel/src/nt/desktop/paint.rs`), where allocation must be
+     fallible and `gala_ui` and Taffy allocate infallibly. Open:
+     move them into a user-mode program on user32 (as Windows' shell
+     is) or make the crate fallible; decided when it is reached.
+   Not moved: the console window (`user/conhost`), a grid of
+   character cells rather than a tree of elements.
+   Done when no window of gala's own computes rectangles or hit tests
+   by hand.
 
 ### IN. The installer: gala onto a machine's disk
 
