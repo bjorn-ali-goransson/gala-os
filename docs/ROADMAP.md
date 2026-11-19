@@ -6334,9 +6334,9 @@ volume instead).
    CREATE_DISK, UPDATE_PROPERTIES, GET_PARTITION_INFO_EX) and each
    partition a device (`\Device\Harddisk0\Partition1`...). Open: its
    run on real Windows (GitHub issue #206), MBR tables read.
-2. C: in a partition: the persisted volume found by its partition type
-   GUID instead of filling the disk; the `persist` scenarios on a
-   partitioned disk.
+2. C: in a partition: done (`persist_partition`; ARCHITECTURE "C: kept
+   on the disk"): on a GPT disk C: is the partition of gala's C: type;
+   a partitioned disk without one, or an MBR disk, is never formatted.
 3. Booting from the installed disk: the EFI system partition with
    Limine, the kernel, the sealed config and the manifest (R8), the
    firmware's boot entry; Secure Boot's enrollment with R8 step 1.

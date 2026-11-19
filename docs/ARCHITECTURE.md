@@ -7529,12 +7529,27 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
 ### C: kept on the disk
 
 With `persist`, the disk keeps what programs change on C: (the whole
-disk; no partitions). The ramfs stays the tree of names and attributes;
+disk, or gala's partition of a GPT disk: below). The ramfs stays the tree of names and attributes;
 the disk holds a log of the changes since the boot's files were laid
 down, replayed over them at the next boot. On a volume of layout 3 (every
 new one) files' pages live in the data area ("A disk-backed C:" below);
 on an older layout 1 or 2 volume they live in memory and the log
 carries their data (Write records).
+
+- **Where** (`persist::volume_range`, ROADMAP IN step 2): on a disk with
+  a GPT, C: is the partition of gala's C: type,
+  {6A1A0C0D-E000-4C3A-8000-67616C614300} (`gpt::GALA_C_TYPE`), and the
+  volume's sectors are that partition's (`DiskBlocks { first, sectors }`;
+  the data area's and crash area's starts it reports are made the disk's
+  by adding `first`); a GPT without one keeps no C:. A disk with an MBR
+  boot signature and no gala volume in sector 0 keeps no C: either: a
+  disk gala did not make is never formatted. Otherwise the whole disk, as
+  before partitions. Each choice is logged (`persist: C: is partition N
+  of the disk (LBA ..., ... sectors)`). Test: `persist_partition` (an EFI
+  system partition before C:'s; the table, the gap and partition 1 stay
+  as written). xtask boots BIOS scenarios from the CD first (`-boot
+  order=d`): SeaBIOS otherwise boots a disk whose protective MBR carries
+  the boot signature.
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
