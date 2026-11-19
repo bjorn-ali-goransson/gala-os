@@ -28,7 +28,15 @@
 //! 9. the face's GetGlyphRunOutline for 'A' (em 32) drives a geometry
 //!    sink: closed figures with lines or Béziers, above the baseline
 //!    (y < 0); the sink is not closed (its owner closes it, as Direct2D's
-//!    samples do after GetGlyphRunOutline).
+//!    samples do after GetGlyphRunOutline);
+//! 10. text-rendering parameters (CreateRenderingParams, as Direct2D's
+//!     drawing state blocks carry them): the factory's own set and a
+//!     monitor's hold values in range with the default rendering mode and
+//!     grid fit mode; a custom set holds exactly what it was made with;
+//!     a gamma outside (0, 256], a negative contrast or ClearType level,
+//!     and a pixel geometry or rendering mode past the enumeration are
+//!     E_INVALIDARG; one object answers IDWriteRenderingParams 1, 2 and
+//!     3, and each call gives a new object.
 
 #![no_std]
 #![no_main]
@@ -88,6 +96,12 @@ const IID_FACTORY: Iid =
 const IID_LOCAL_LOADER: Iid =
     guid(0xb2d9f3ec, 0xc9fe, 0x4a11, [0xa2, 0xec, 0xd8, 0x62, 0x08, 0xf7, 0xc0, 0xa2]);
 const IID_UNKNOWN: Iid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+const IID_PARAMS1: Iid =
+    guid(0x94413cf4, 0xa6fc, 0x4248, [0x8b, 0x50, 0x66, 0x74, 0x34, 0x8f, 0xca, 0xd3]);
+const IID_PARAMS2: Iid =
+    guid(0xf9d711c3, 0x9777, 0x40ae, [0x87, 0xe8, 0x3e, 0x5a, 0xf9, 0xbf, 0x09, 0x48]);
+const IID_PARAMS3: Iid =
+    guid(0xb7924baa, 0x391b, 0x412a, [0x8c, 0x5c, 0xe4, 0x4c, 0xc2, 0xd8, 0x67, 0xdc]);
 
 /// The test's objects' QueryInterface: themselves for IUnknown and their
 /// own interface, E_NOINTERFACE (and NULL) for anything else. DirectWrite
@@ -155,6 +169,43 @@ type GetPtr = extern "system" fn(*mut c_void, *mut *mut c_void) -> HResult;
 type GetIndexed = extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> HResult;
 type GetU32 = extern "system" fn(*mut c_void) -> u32;
 type GetPtr1 = extern "system" fn(*mut c_void, *mut c_void) -> HResult;
+type GetF32 = extern "system" fn(*mut c_void) -> f32;
+
+/// IDWriteFactory::CreateCustomRenderingParams (slot 12).
+type MakeCustom =
+    extern "system" fn(*mut c_void, f32, f32, f32, u32, u32, *mut *mut c_void) -> HResult;
+
+/// The seven values a parameter set holds, read through the four
+/// interfaces one object answers (dwrite.h, dwrite_1.h, dwrite_2.h,
+/// dwrite_3.h): gamma, enhanced contrast, ClearType level, pixel
+/// geometry, rendering mode, grayscale enhanced contrast, grid fit mode
+/// and the rendering mode ...3 reports.
+///
+/// # Safety
+/// `params` is an IDWriteRenderingParams of this DirectWrite.
+unsafe fn values_of(params: *mut c_void) -> (f32, f32, f32, u32, u32, f32, u32, u32) {
+    // SAFETY: as the caller promises; the slots are the headers'.
+    unsafe {
+        let gamma: GetF32 = method(params, 3);
+        let contrast: GetF32 = method(params, 4);
+        let cleartype: GetF32 = method(params, 5);
+        let geometry: GetU32 = method(params, 6);
+        let mode: GetU32 = method(params, 7);
+        let grayscale: GetF32 = method(params, 8);
+        let grid_fit: GetU32 = method(params, 9);
+        let mode1: GetU32 = method(params, 10);
+        (
+            gamma(params),
+            contrast(params),
+            cleartype(params),
+            geometry(params),
+            mode(params),
+            grayscale(params),
+            grid_fit(params),
+            mode1(params),
+        )
+    }
+}
 
 /// Step 8's texture buffer (static: a frame over a page would need a
 /// stack probe).
@@ -766,6 +817,82 @@ fn tests() {
         check(figures >= 1 && ended == figures && segments >= 3, 9);
         check(sink::ABOVE.load(core::sync::atomic::Ordering::Relaxed), 9);
         check(sink::CLOSED.load(core::sync::atomic::Ordering::Relaxed) == 0, 9);
+
+        // 10. Text-rendering parameters: the factory's own set
+        // (CreateRenderingParams, 10).
+        let make_params: GetPtr = method(factory, 10);
+        let mut params: *mut c_void = core::ptr::null_mut();
+        check(make_params(factory, &mut params) == 0 && !params.is_null(), 10);
+        let (gamma, contrast, cleartype, geometry, mode, grayscale, grid_fit, mode1) =
+            values_of(params);
+        // The gamma and the contrasts are the display's, so only their
+        // ranges are Windows' everywhere; the modes are not a display's.
+        check(gamma > 0.0 && gamma <= 256.0, 10);
+        check(contrast >= 0.0 && grayscale >= 0.0, 10);
+        check(cleartype == 1.0, 10);
+        check(geometry <= 2, 10);
+        check(mode == 0 && mode1 == 0 && grid_fit == 0, 10);
+        // One object, four interfaces.
+        let params_qi: extern "system" fn(*mut c_void, *const Iid, *mut *mut c_void) -> HResult =
+            method(params, 0);
+        for iid in [IID_PARAMS1, IID_PARAMS2, IID_PARAMS3] {
+            let mut same: *mut c_void = core::ptr::null_mut();
+            check(params_qi(params, &iid, &mut same) == 0 && same == params, 10);
+            let release: GetU32 = method(same, 2);
+            release(same);
+        }
+        // A monitor's set (CreateMonitorRenderingParams, 11): the same
+        // values, a new object. Windows takes a NULL monitor.
+        let monitor_params: GetIndexed = method(factory, 11);
+        let mut other: *mut c_void = core::ptr::null_mut();
+        check(monitor_params(factory, 0, &mut other) == 0 && !other.is_null(), 10);
+        check(other != params, 10);
+        check(
+            values_of(other)
+                == (gamma, contrast, cleartype, geometry, mode, grayscale, grid_fit, mode1),
+            10,
+        );
+        let release: GetU32 = method(other, 2);
+        release(other);
+        // A new object per call.
+        let mut again_params: *mut c_void = core::ptr::null_mut();
+        check(make_params(factory, &mut again_params) == 0 && again_params != params, 10);
+        let release: GetU32 = method(again_params, 2);
+        release(again_params);
+        // A custom set (CreateCustomRenderingParams, 12) holds exactly
+        // what it was made with; the grayscale contrast and the grid fit
+        // mode stay the system's.
+        let custom_params: MakeCustom = method(factory, 12);
+        let mut mine: *mut c_void = core::ptr::null_mut();
+        check(custom_params(factory, 2.2, 0.75, 0.25, 2, 5, &mut mine) == 0, 10);
+        check(values_of(mine) == (2.2, 0.75, 0.25, 2, 5, grayscale, grid_fit, 5), 10);
+        let release: GetU32 = method(mine, 2);
+        release(mine);
+        // What it refuses, and the edges it does not: a contrast or a
+        // ClearType level above 1 is taken, and so is the largest gamma.
+        const E_INVALIDARG: HResult = 0x8007_0057_u32 as i32;
+        for (gamma, contrast, cleartype, geometry, mode) in [
+            (0.0, 1.0, 1.0, 1, 0),
+            (-1.0, 1.0, 1.0, 1, 0),
+            (256.1, 1.0, 1.0, 1, 0),
+            (1.8, -1.0, 1.0, 1, 0),
+            (1.8, 1.0, -1.0, 1, 0),
+            (1.8, 1.0, 1.0, 3, 0),
+            (1.8, 1.0, 1.0, 1, 7),
+        ] {
+            let mut none: *mut c_void = core::ptr::null_mut();
+            let hr = custom_params(factory, gamma, contrast, cleartype, geometry, mode, &mut none);
+            check(hr == E_INVALIDARG && none.is_null(), 10);
+        }
+        for (gamma, contrast, cleartype) in [(256.0, 1.0, 1.0), (1.8, 2.0, 2.0)] {
+            let mut taken: *mut c_void = core::ptr::null_mut();
+            check(custom_params(factory, gamma, contrast, cleartype, 1, 0, &mut taken) == 0, 10);
+            check(!taken.is_null(), 10);
+            let release: GetU32 = method(taken, 2);
+            release(taken);
+        }
+        let release: GetU32 = method(params, 2);
+        release(params);
 
         // Release what we were given (each Release is slot 2).
         for o in

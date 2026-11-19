@@ -32,12 +32,17 @@
 //!   clips, and source-over compositing of a paint (a colour, a gradient
 //!   or a bitmap).
 //!
+//! - Drawing state blocks (`state`): a target's transform, antialias
+//!   modes, tags and text-rendering parameters (and a device context's
+//!   primitive blend and unit mode) held away from the target, which
+//!   SaveDrawingState writes and RestoreDrawingState reads back. Word
+//!   makes two before it draws.
+//!
 //! What it does not do is recorded in the ledger (`d2d1.dll!...`): text
 //! (DrawText, DrawTextLayout, DrawGlyphRun: gala's DirectWrite has no
-//! text layout yet), layers, meshes, opacity masks, drawing state blocks,
-//! compatible render targets, effects, command lists, colour contexts,
-//! dashes, CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface,
-//! which device contexts replace), and the GDI interop interface.
+//! text layout yet), layers, meshes, opacity masks, compatible render
+//! targets, effects, command lists, colour contexts, dashes, and the GDI
+//! interop interface.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -49,7 +54,9 @@ mod brush;
 mod device;
 mod factory;
 mod geometry;
+mod mesh;
 mod raster;
+mod state;
 mod target;
 
 use core::cell::UnsafeCell;
@@ -102,6 +109,12 @@ pub const E_INVALIDARG: HResult = 0x8007_0057_u32 as i32;
 pub const D2DERR_WRONG_STATE: HResult = 0x8899_0001_u32 as i32;
 pub const D2DERR_NOT_INITIALIZED: HResult = 0x8899_0002_u32 as i32;
 pub const D2DERR_PUSH_POP_UNBALANCED: HResult = 0x8899_0016_u32 as i32;
+/// D2DERR_WRONG_FACTORY: the resource was made by another factory.
+/// EndDraw answers it, as the drawing call returns nothing.
+pub const D2DERR_WRONG_FACTORY: HResult = 0x8899_0012_u32 as i32;
+/// D2DERR_INVALID_TARGET: the frame was drawn into something that is no
+/// target. EndDraw answers it, as SetTarget returns nothing.
+pub const D2DERR_INVALID_TARGET: HResult = 0x8899_0024_u32 as i32;
 /// WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT (d2derr.h).
 pub const D2DERR_UNSUPPORTED_PIXEL_FORMAT: HResult = 0x8898_2f80_u32 as i32;
 
@@ -179,6 +192,8 @@ pub const IID_ROUNDED_RECTANGLE_GEOMETRY: Guid = d2d_iid(0x2cd9_06a3);
 pub const IID_ELLIPSE_GEOMETRY: Guid = d2d_iid(0x2cd9_06a4);
 pub const IID_PATH_GEOMETRY: Guid = d2d_iid(0x2cd9_06a5);
 pub const IID_GRADIENT_STOPS: Guid = d2d_iid(0x2cd9_06a7);
+pub const IID_TESSELLATION_SINK: Guid = d2d_iid(0x2cd9_06c1);
+pub const IID_MESH: Guid = d2d_iid(0x2cd9_06c2);
 pub const IID_BRUSH: Guid = d2d_iid(0x2cd9_06a8);
 pub const IID_SOLID_BRUSH: Guid = d2d_iid(0x2cd9_06a9);
 pub const IID_BITMAP_BRUSH: Guid = d2d_iid(0x2cd9_06aa);
@@ -212,6 +227,10 @@ pub const IID_DEVICE_CONTEXT1: Guid =
     guid(0xd37f_57e4, 0x6908, 0x459f, [0xa1, 0x99, 0xe7, 0x2f, 0x24, 0xf7, 0x99, 0x87]);
 pub const IID_GEOMETRY_REALIZATION: Guid =
     guid(0xa169_07d7, 0xbc02, 0x4801, [0x99, 0xe8, 0x8c, 0xf7, 0xf4, 0x85, 0xf7, 0x74]);
+pub const IID_DRAWING_STATE_BLOCK: Guid =
+    guid(0x2850_6e39, 0xebf6, 0x46a1, [0xbb, 0x47, 0xfd, 0x85, 0x56, 0x5a, 0xb9, 0x57]);
+pub const IID_DRAWING_STATE_BLOCK1: Guid =
+    guid(0x689f_1f85, 0xc72e, 0x4e33, [0x8f, 0x19, 0x85, 0x75, 0x4e, 0xfd, 0x5a, 0xce]);
 pub const IID_MULTITHREAD: Guid =
     guid(0x31e6_e7bc, 0xe0ff, 0x4d46, [0x8c, 0x64, 0xa0, 0xa8, 0xc4, 0x1c, 0x15, 0xd3]);
 

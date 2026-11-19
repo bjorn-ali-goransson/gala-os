@@ -11050,8 +11050,8 @@ over a surface of one, the path Word takes instead).
   ID2D1Factory2 as well (CreateDevice, below) -- one object, every
   interface, so its vtable is ID2D1Factory2's twenty-eight methods;
   ID2D1Factory3 and later are not answered (recorded), and
-  ID2D1Factory1's own stroke styles, path geometries, drawing state
-  blocks, GDI metafiles and effect registry are recorded and E_NOTIMPL.
+  ID2D1Factory1's own stroke styles, path geometries, GDI metafiles and
+  effect registry are recorded and E_NOTIMPL.
 - **Render targets** (`target.rs`): one object, four backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
@@ -11070,7 +11070,23 @@ over a surface of one, the path Word takes instead).
   (D2D1_UNIT_MODE_PIXELS leaves the DPI scale out, so they are pixels).
   Drawing outside BeginDraw/EndDraw draws nothing and fails the next
   EndDraw with D2DERR_WRONG_STATE; clips or layers left pushed fail it
-  with D2DERR_PUSH_POP_UNBALANCED.
+  with D2DERR_PUSH_POP_UNBALANCED. A frame that failed presents all the
+  same what it drew before it failed, which is what Direct2D leaves in
+  the target (measured, `d2d1_test`).
+- **Drawing state blocks** (`state.rs`, ID2D1DrawingStateBlock and 1.1's
+  ID2D1DrawingStateBlock1): a target's drawing state held away from the
+  target -- its transform, its two antialias modes, its tags and its
+  text-rendering parameters, and from 1.1 the primitive blend and the
+  unit mode -- which SaveDrawingState writes into and RestoreDrawingState
+  reads back (Word makes two of them before it draws anything). One
+  object answers both interfaces, holds the 1.1 description whichever
+  interface made it, and lets the 1.0 SetDescription leave the primitive
+  blend and the unit mode as they stand, as Windows' does; a block of
+  another factory is recorded and does nothing, and restoring a state
+  whose unit mode or primitive blend a plain render target has no use for
+  keeps the state the block holds. The parameters are DirectWrite's
+  (IDWriteRenderingParams, "DirectWrite"): they are kept and handed back,
+  as no text is drawn yet.
 - **The device and its contexts** (`device.rs`, Direct2D 1.1 and 1.2):
   this is how Office draws. ID2D1Factory1::CreateDevice takes the
   program's
@@ -11082,6 +11098,14 @@ over a surface of one, the path Word takes instead).
   swap chain's back buffer): the surface's IDXGISurface::GetDesc gives
   the size and format, and QueryInterface for ID3D11Texture2D the
   texture behind it, whose device's immediate context writes into it.
+  Properties the program gives are taken as they are; without them the
+  bitmap is the surface's own -- its format, premultiplied alpha, 96 dpi
+  and the options the texture's bind flags imply: a render target makes
+  it D2D1_BITMAP_OPTIONS_TARGET and a texture no shader may read
+  CANNOT_DRAW, so a swap chain's back buffer is both. An alpha mode of
+  UNKNOWN is refused here (D2DERR_UNSUPPORTED_PIXEL_FORMAT) although
+  CreateBitmap takes it, and a DPI of zero is left at zero rather than
+  made 96 (all measured, `d2d1_device_test`).
   Drawing stays in software: BeginDraw fills the context's buffer from
   the target bitmap, the rasterizer draws the frame, and EndDraw (or
   Flush) writes the buffer back into the bitmap and through it into the
@@ -11089,7 +11113,9 @@ over a surface of one, the path Word takes instead).
   into a texture the program uses as a render target that needs neither
   a shader nor a staging texture of our own. A context with no target
   is 0 x 0 and its frame fails with D2DERR_WRONG_STATE, as Direct2D's
-  does. Nothing here is linked against: every Direct3D and DXGI call
+  does; a bitmap set as the target that is no target (no
+  D2D1_BITMAP_OPTIONS_TARGET) leaves the frame D2DERR_INVALID_TARGET, as
+  SetTarget itself returns nothing (measured). Nothing here is linked against: every Direct3D and DXGI call
   goes through the vtable slot its interface declares, so d2d1.dll
   imports no Direct3D and works with whichever d3d11.dll the program
   brought. Test: `d2d1_device_test`.
@@ -11155,7 +11181,10 @@ over a surface of one, the path Word takes instead).
   with clamp, wrap and mirror, bitmaps (nearest or bilinear, through
   the bitmap's DPI), each sampled at the pixel's centre through the
   inverse of brush transform x target transform; source-over into 8-bit
-  premultiplied pixels, rounded to nearest.
+  premultiplied pixels, rounded to nearest -- where Direct2D quantises
+  the source's alpha to 8 bits first and blends in integers, so a half
+  transparent channel can come out one off (ROADMAP's Direct2D item
+  names the divergence).
 - **Geometries** (`geometry.rs`): rectangles, rounded rectangles,
   ellipses (four Béziers) and path geometries, kept as figures of lines
   and cubics; quadratics become cubics, arcs become quarter-turn cubics
@@ -11166,11 +11195,24 @@ over a surface of one, the path Word takes instead).
   segment. GetBounds, GetWidenedBounds, FillContainsPoint,
   StrokeContainsPoint, ComputeArea and ComputeLength work on the
   flattened figures.
+- **Meshes** (`mesh.rs`, ID2D1Mesh and ID2D1TessellationSink): a list of
+  triangles a program tessellated itself, which Direct2D hands to the
+  hardware as they are. A mesh takes its triangles once: Open gives the
+  one sink it will ever give (a second Open, before or after the sink's
+  Close, is D2DERR_WRONG_STATE), and until that Close it has no
+  tessellation, so filling it fails the frame. FillMesh puts each
+  triangle through the target's transform and clip and composes it on its
+  own, the way the hardware draws a triangle list, so two triangles of
+  one mesh that overlap blend twice under a half transparent brush; the
+  winding does not matter. It is aliased-only, as Direct2D's is: with the
+  antialias mode at per-primitive the frame fails D2DERR_WRONG_STATE, and
+  a mesh of another factory fails it D2DERR_WRONG_FACTORY (all measured,
+  `d2d1_test`).
 - **Limits** (each recorded in the ledger, `d2d1.dll!...`): text
   (DrawText, DrawTextLayout, DrawGlyphRun: DirectWrite has no text
   layout yet), layers (PushLayer is counted, its mask not applied),
-  opacity masks and FillGeometry's opacity brush, meshes, drawing state
-  blocks, compatible render targets, shared bitmaps,
+  opacity masks and FillGeometry's opacity brush, compatible render
+  targets, shared bitmaps,
   geometry groups and transformed geometries,
   Simplify, Tessellate, Widen, Outline, CombineWithGeometry, dashes
   (drawn solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
@@ -11265,6 +11307,20 @@ CreateCustomFontCollection enumerates the loader's files and, when they
 are system fonts, gives the system collection. A font gala does not ship
 is left out (ledger: `(not a gala font)`); with none, the call fails
 with DWRITE_E_FILENOTFOUND. Test: `dwrite_test` step 7.
+
+Text-rendering parameters (`params.rs`, IDWriteRenderingParams): the
+gamma, the enhanced contrast, the ClearType level, the pixel geometry
+and the rendering mode a program reads before it draws text, which
+Direct2D's drawing state blocks carry and which Word asks the factory
+for before its first frame. One object answers all four interfaces
+(...1's grayscale enhanced contrast, ...2's grid fit mode, ...3's
+rendering mode), as Windows' does. gala has one display and no monitor
+profile, so the factory's own set and a monitor's are the same set, the
+values Windows answers for a plain sRGB display (gamma 1.8, contrast
+1.0, grayscale contrast 1.0, ClearType level 1.0, RGB geometry, default
+mode and grid fit); a custom set keeps what it was given, out-of-range
+values being E_INVALIDARG as Windows has them. Test: `dwrite_test`'s
+`params`.
 
 Glyphs (`glyphs.rs`), as Skia's scaler draws text: CreateGlyphRunAnalysis
 rasterizes the run with fontdue (as gdi32 draws Selawik) into an

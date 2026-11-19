@@ -32,6 +32,8 @@ use crate::{
 const SURFACE_GET_DESC: usize = 8;
 /// ID3D11DeviceChild::GetDevice, which ID3D11Texture2D inherits.
 const TEXTURE_GET_DEVICE: usize = 3;
+/// ID3D11Texture2D::GetDesc, which says what the texture may be bound as.
+const TEXTURE_GET_DESC: usize = 10;
 const DEVICE_GET_IMMEDIATE_CONTEXT: usize = 40;
 const CONTEXT_UPDATE_SUBRESOURCE: usize = 48;
 
@@ -40,6 +42,24 @@ const IID_D3D11_TEXTURE2D: Guid =
 /// IDXGIDevice (dxgi.h): the face of a Direct3D device Direct2D takes.
 const IID_DXGI_DEVICE: Guid =
     guid(0x54ec_77fa, 0x1377, 0x44e6, [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c]);
+
+/// D3D11_TEXTURE2D_DESC (d3d11.h). Only `bind` is read: Direct2D takes
+/// a bitmap's options from it when the program gives none.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Texture2dDesc {
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    array_size: u32,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    usage: u32,
+    bind: u32,
+    cpu_access: u32,
+    misc: u32,
+}
 
 /// DXGI_SURFACE_DESC (dxgi.h).
 #[repr(C)]
@@ -57,6 +77,9 @@ pub struct SurfaceDesc {
 /// context, each with a reference of ours, and what the surface is.
 pub struct DxgiSurface {
     pub surface: ComRef,
+    /// The texture's D3D11_BIND_FLAG set, which says what a bitmap over
+    /// it may be used for when the program asks for no options.
+    pub bind: u32,
     texture: ComRef,
     context: ComRef,
     pub desc: SurfaceDesc,
@@ -105,6 +128,14 @@ pub fn open_surface(surface: Obj) -> Result<DxgiSurface, HResult> {
         gap(b"CreateBitmapFromDxgiSurface(not an ID3D11Texture2D)", 0);
         return Err(E_NOINTERFACE);
     };
+    // What the texture may be bound as: Direct2D derives a bitmap's
+    // options from it (`brush::inferred_options`).
+    let mut tex_desc = Texture2dDesc::default();
+    // SAFETY: ID3D11Texture2D::GetDesc's signature at its own slot; it
+    // writes the whole structure and returns nothing.
+    let get_tex_desc: extern "system" fn(Obj, *mut Texture2dDesc) =
+        unsafe { core::mem::transmute(slot(texture.0, TEXTURE_GET_DESC)) };
+    get_tex_desc(texture.0, &mut tex_desc);
     // The device is only the way to its immediate context, which holds a
     // reference of its own to it.
     let context = com_get(texture.0, TEXTURE_GET_DEVICE)
@@ -113,7 +144,7 @@ pub fn open_surface(surface: Obj) -> Result<DxgiSurface, HResult> {
         gap(b"CreateBitmapFromDxgiSurface(no immediate context)", 0);
         return Err(E_NOINTERFACE);
     };
-    Ok(DxgiSurface { surface: ComRef::new(surface), texture, context, desc })
+    Ok(DxgiSurface { surface: ComRef::new(surface), bind: tex_desc.bind, texture, context, desc })
 }
 
 /// The IDXGIDevice of the Direct3D device a surface belongs to: the

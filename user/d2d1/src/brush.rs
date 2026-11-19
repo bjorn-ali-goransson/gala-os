@@ -8,12 +8,13 @@ use alloc::vec::Vec;
 use crate::device::{self, DxgiSurface};
 use crate::raster::{self, EXTEND_CLAMP, Paint, Pixels, Ramp, Rgba};
 use crate::{
-    ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ColorF, ComRef, D2DERR_UNSUPPORTED_PIXEL_FORMAT,
-    DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, Guid, HResult,
-    IID_BITMAP, IID_BITMAP_BRUSH, IID_BITMAP1, IID_BRUSH, IID_GRADIENT_STOPS, IID_IMAGE,
-    IID_LINEAR_BRUSH, IID_RADIAL_BRUSH, IID_RESOURCE, IID_SOLID_BRUSH, Matrix, Obj, PixelFormat,
-    Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, com_add_ref, get_factory, give,
-    not_implemented, put, query, read, release_object, vtable_of,
+    ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ALPHA_UNKNOWN, ColorF, ComRef,
+    D2DERR_UNSUPPORTED_PIXEL_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, E_INVALIDARG, E_NOINTERFACE,
+    E_OUTOFMEMORY, Guid, HResult, IID_BITMAP, IID_BITMAP_BRUSH, IID_BITMAP1, IID_BRUSH,
+    IID_GRADIENT_STOPS, IID_IMAGE, IID_LINEAR_BRUSH, IID_RADIAL_BRUSH, IID_RESOURCE,
+    IID_SOLID_BRUSH, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable,
+    add_ref, com_add_ref, get_factory, give, not_implemented, put, query, read, release_object,
+    vtable_of,
 };
 
 // ---- Gradient stop collections ----------------------------------------------
@@ -154,6 +155,29 @@ pub struct Bitmap {
 
 /// D2D1_BITMAP_OPTIONS_TARGET: a bitmap a device context may draw into.
 pub const BITMAP_OPTION_TARGET: u32 = 1;
+/// D2D1_BITMAP_OPTIONS_CANNOT_DRAW: a bitmap no draw call may read.
+pub const BITMAP_OPTION_CANNOT_DRAW: u32 = 2;
+
+/// D3D11_BIND_SHADER_RESOURCE and D3D11_BIND_RENDER_TARGET (d3d11.h).
+const BIND_SHADER_RESOURCE: u32 = 0x8;
+const BIND_RENDER_TARGET: u32 = 0x20;
+
+/// The options Direct2D gives a bitmap over a DXGI surface when the
+/// program passes no properties: what the texture may be bound as
+/// decides them (measured on Windows, `d2d1_device_test`): a render
+/// target makes it a TARGET, and a texture no shader may read is
+/// CANNOT_DRAW. So a swap chain's buffer, bound as a render target
+/// alone, is TARGET | CANNOT_DRAW.
+fn inferred_options(bind: u32) -> u32 {
+    let mut options = 0;
+    if bind & BIND_RENDER_TARGET != 0 {
+        options |= BITMAP_OPTION_TARGET;
+    }
+    if bind & BIND_SHADER_RESOURCE == 0 {
+        options |= BITMAP_OPTION_CANNOT_DRAW;
+    }
+    options
+}
 
 macro_rules! bitmap_slots {
     ($($extra:expr),*) => {
@@ -422,6 +446,13 @@ pub fn create_from_wic(
 /// which a multisampled texture has none of. The bitmap starts as the
 /// surface's own pixels are not read back (Direct2D's own does not
 /// promise them either: a target bitmap is drawn before it is shown).
+///
+/// Properties the program gives are taken as they are, and without them
+/// the bitmap is the surface's own: its format, premultiplied alpha, 96
+/// dpi and the options the texture's bind flags imply
+/// (`inferred_options`). An alpha mode of UNKNOWN is refused, which is
+/// Windows' answer for this call although CreateBitmap takes it (both
+/// measured; `d2d1_device_test`).
 pub fn create_from_dxgi(
     factory: Obj,
     surface: Obj,
@@ -441,11 +472,15 @@ pub fn create_from_dxgi(
         return E_INVALIDARG;
     }
     let p = read(props);
-    let want = p.map(|p| p.base.format).unwrap_or_default();
+    let natural = PixelFormat { format: s.desc.format, alpha: ALPHA_PREMULTIPLIED };
+    let want = p.map(|p| p.base.format).unwrap_or(natural);
     if want.format != 0 && want.format != s.desc.format {
         return E_INVALIDARG;
     }
-    let natural = PixelFormat { format: s.desc.format, alpha: ALPHA_PREMULTIPLIED };
+    if want.alpha == ALPHA_UNKNOWN {
+        crate::gap(b"CreateBitmapFromDxgiSurface(D2D1_ALPHA_MODE_UNKNOWN)", 0);
+        return D2DERR_UNSUPPORTED_PIXEL_FORMAT;
+    }
     let format = match bitmap_format(want, natural) {
         Ok(f) => f,
         Err(e) => {
@@ -457,8 +492,11 @@ pub fn create_from_dxgi(
     let Some(pixels) = crate::filled(w as usize * h as usize * 4, 0u8) else {
         return E_OUTOFMEMORY;
     };
-    let options = p.map_or(0, |p| p.options);
-    let dpi = dpi_of(p.map(|p| p.base));
+    let options = p.map_or_else(|| inferred_options(s.bind), |p| p.options);
+    // Properties the program gives carry their own DPI, zero included
+    // (Windows does not put 96 in its place for this call, measured);
+    // without them the bitmap is 96 dpi.
+    let dpi = p.map_or((96.0, 96.0), |p| (p.base.dpi_x, p.base.dpi_y));
     let opts = Options { options, surface: Some(s), bitmap1: true };
     new_bitmap(factory, SizeU { width: w, height: h }, dpi, format, pixels, opts, out)
 }

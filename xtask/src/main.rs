@@ -9873,6 +9873,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_test", "gdi32.dll", "Windows/System32"),
     ("d2d1_test", "windowscodecs.dll", "Windows/System32"),
     ("d2d1_test", "d2d1.dll", "Windows/System32"),
+    ("d2d1_test", "dwrite.dll", "Windows/System32"),
     ("d2d1_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
     ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),

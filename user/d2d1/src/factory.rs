@@ -236,13 +236,12 @@ extern "system" fn f_CreatePathGeometry(this: Obj, out: *mut Obj) -> HResult {
 }
 
 extern "system" fn f_CreateDrawingStateBlock(
-    _this: Obj,
-    _desc: *const u8,
-    _params: Obj,
+    this: Obj,
+    desc: *const crate::state::StateDesc,
+    params: Obj,
     out: *mut Obj,
 ) -> HResult {
-    put(out, core::ptr::null_mut());
-    not_implemented(b"ID2D1Factory::CreateDrawingStateBlock")
+    crate::state::create(this, desc, params, out)
 }
 
 // ---- ID2D1Factory1's own methods ----------------------------------------------
@@ -270,13 +269,12 @@ extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
 }
 
 extern "system" fn f1_CreateDrawingStateBlock(
-    _this: Obj,
-    _desc: *const u8,
-    _params: Obj,
+    this: Obj,
+    desc: *const crate::state::StateDesc1,
+    params: Obj,
     out: *mut Obj,
 ) -> HResult {
-    put(out, core::ptr::null_mut());
-    not_implemented(b"ID2D1Factory1::CreateDrawingStateBlock")
+    crate::state::create1(this, desc, params, out)
 }
 
 extern "system" fn f1_CreateGdiMetafile(_this: Obj, _stream: Obj, out: *mut Obj) -> HResult {

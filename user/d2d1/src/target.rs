@@ -54,17 +54,21 @@ use crate::brush::{
 };
 use crate::device;
 use crate::geometry::{self, Ellipse, Path, RoundedRect};
+use crate::mesh;
 use crate::raster::{self, Clip, IRect, Rgba, Surface};
 use crate::{
     ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ALPHA_STRAIGHT, ALPHA_UNKNOWN, ColorF, ComRef,
-    D2DERR_PUSH_POP_UNBALANCED, D2DERR_UNSUPPORTED_PIXEL_FORMAT, D2DERR_WRONG_STATE,
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, E_INVALIDARG,
-    E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET,
-    IID_DEVICE_CONTEXT, IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET,
-    IID_RESOURCE, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable,
-    add_ref, answered, com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query,
-    read, release_object, slot, vtable_of,
+    D2DERR_INVALID_TARGET, D2DERR_PUSH_POP_UNBALANCED, D2DERR_UNSUPPORTED_PIXEL_FORMAT,
+    D2DERR_WRONG_FACTORY, D2DERR_WRONG_STATE, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
+    E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
+    IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj,
+    PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, answered,
+    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, read,
+    release_object, slot, vtable_of,
 };
+
+use crate::state::{self, StateDesc, StateDesc1};
 
 #[link(name = "gdi32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -239,6 +243,9 @@ pub struct RenderingControls {
 const BUFFER_PRECISION_8BPC_UNORM: u32 = 1;
 const PRIMITIVE_BLEND_SOURCE_OVER: u32 = 0;
 const UNIT_MODE_PIXELS: u32 = 1;
+/// D2D1_ANTIALIAS_MODE.
+const ANTIALIAS_MODE_PER_PRIMITIVE: u32 = 0;
+const ANTIALIAS_MODE_ALIASED: u32 = 1;
 /// D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS.
 const DEVICE_CONTEXT_OPTIONS_KNOWN: u32 = 1;
 
@@ -290,14 +297,20 @@ impl State {
         }
     }
 
+    /// Fails the frame: EndDraw answers `hr` (the first failure wins,
+    /// with the tags that were set when it happened).
+    fn fail(&mut self, hr: HResult) {
+        if self.error == S_OK {
+            self.error = hr;
+            self.error_tags = self.tags;
+        }
+    }
+
     /// A draw call's check: outside BeginDraw/EndDraw it fails the next
     /// EndDraw.
     fn may_draw(&mut self) -> bool {
         if !self.drawing {
-            if self.error == S_OK {
-                self.error = D2DERR_WRONG_STATE;
-                self.error_tags = self.tags;
-            }
+            self.fail(D2DERR_WRONG_STATE);
             return false;
         }
         true
@@ -901,9 +914,8 @@ extern "system" fn t_CreateLayer(_this: Obj, _size: *const SizeF, out: *mut Obj)
     not_implemented(b"ID2D1RenderTarget::CreateLayer")
 }
 
-extern "system" fn t_CreateMesh(_this: Obj, out: *mut Obj) -> HResult {
-    put(out, core::ptr::null_mut());
-    not_implemented(b"ID2D1RenderTarget::CreateMesh")
+extern "system" fn t_CreateMesh(this: Obj, out: *mut Obj) -> HResult {
+    mesh::create(factory_of(this), out)
 }
 
 // ---- Drawing --------------------------------------------------------------------------
@@ -917,7 +929,7 @@ fn fill_path(this: Obj, path: Option<Path>, brush_obj: Obj) {
         let Some(path) = path else { return };
         let device = s.device();
         let clip = s.clip();
-        let aa = s.antialias == 0;
+        let aa = s.antialias == ANTIALIAS_MODE_PER_PRIMITIVE;
         let Some(polys) = path.fill_polys(&device) else { return };
         let Some(mask) = raster::coverage(&polys, path.winding, aa, &clip) else { return };
         if mask.cov.is_empty() {
@@ -939,7 +951,7 @@ fn stroke_path(this: Obj, path: Option<Path>, brush_obj: Obj, width: f32, style:
         let Some(path) = path else { return };
         let device = s.device();
         let clip = s.clip();
-        let aa = s.antialias == 0;
+        let aa = s.antialias == ANTIALIAS_MODE_PER_PRIMITIVE;
         let Some(figs) = path.flatten(&device) else { return };
         let Some(polys) = raster::stroke(&figs, width * device.max_scale(), &st) else { return };
         let Some(mask) = raster::coverage(&polys, true, aa, &clip) else { return };
@@ -1012,8 +1024,74 @@ extern "system" fn t_FillGeometry(this: Obj, g: Obj, brush: Obj, opacity_brush: 
     fill_path(this, path_of(g), brush);
 }
 
-extern "system" fn t_FillMesh(_this: Obj, _mesh: Obj, _brush: Obj) {
-    gap(b"ID2D1RenderTarget::FillMesh", 0);
+/// FillMesh: the mesh's triangles, each on its own as the hardware
+/// draws a triangle list (so two that overlap blend twice), through the
+/// target's transform and clip. Aliased only: Direct2D fails the frame
+/// D2DERR_WRONG_STATE when the mode at the call is per primitive, and
+/// likewise when the mesh has no tessellation yet (measured,
+/// `d2d1_test`).
+extern "system" fn t_FillMesh(this: Obj, mesh_obj: Obj, brush_obj: Obj) {
+    if !mesh::is_mesh(mesh_obj) {
+        if !mesh_obj.is_null() {
+            gap(b"ID2D1RenderTarget::FillMesh(a mesh of another d2d1)", 0);
+        }
+        return;
+    }
+    let foreign = mesh::factory_of(mesh_obj) != factory_of(this);
+    with(this, |s| {
+        if !s.may_draw() {
+            answered(b"ID2D1RenderTarget::FillMesh", D2DERR_WRONG_STATE);
+            return;
+        }
+        if foreign {
+            s.fail(D2DERR_WRONG_FACTORY);
+            answered(b"ID2D1RenderTarget::FillMesh", D2DERR_WRONG_FACTORY);
+            return;
+        }
+        if s.antialias != ANTIALIAS_MODE_ALIASED {
+            s.fail(D2DERR_WRONG_STATE);
+            answered(b"ID2D1RenderTarget::FillMesh", D2DERR_WRONG_STATE);
+            return;
+        }
+        if mesh::with_triangles(mesh_obj, |tris| fill_triangles(s, tris, brush_obj)).is_none() {
+            s.fail(D2DERR_WRONG_STATE);
+            answered(b"ID2D1RenderTarget::FillMesh", D2DERR_WRONG_STATE);
+        }
+    });
+}
+
+/// Draws triangles given in DIPs, one composition each.
+fn fill_triangles(s: &mut State, tris: &[mesh::Triangle], brush_obj: Obj) {
+    if tris.is_empty() {
+        return;
+    }
+    let device = s.device();
+    let clip = s.clip();
+    let Some(mut surf) = s.surface() else { return };
+    // One triangle's polygon, filled again for each (the coverage of a
+    // mesh is never shared: its triangles blend one by one).
+    let mut polys: raster::Polys = Vec::new();
+    if polys.try_reserve_exact(1).is_err() {
+        return;
+    }
+    let mut pts: Vec<Point> = Vec::new();
+    if pts.try_reserve_exact(3).is_err() {
+        return;
+    }
+    pts.extend_from_slice(&[Point::default(); 3]);
+    polys.push(pts);
+    for t in tris {
+        let poly = &mut polys[0];
+        poly[0] = device.apply(t.a);
+        poly[1] = device.apply(t.b);
+        poly[2] = device.apply(t.c);
+        let Some(mask) = raster::coverage(&polys, true, false, &clip) else { return };
+        if mask.cov.is_empty() {
+            continue;
+        }
+        brush::with_paint(brush_obj, &device, |paint| surf.compose(&mask, paint));
+        s.dirty = true;
+    }
 }
 
 extern "system" fn t_FillOpacityMask(
@@ -1064,7 +1142,7 @@ extern "system" fn t_DrawBitmap(
         }
         let device = s.device();
         let clip = s.clip();
-        let aa = s.antialias == 0;
+        let aa = s.antialias == ANTIALIAS_MODE_PER_PRIMITIVE;
         let Some(path) = geometry::rect_path(&dst) else { return };
         let Some(polys) = path.fill_polys(&device) else { return };
         let Some(mask) = raster::coverage(&polys, false, aa, &clip) else { return };
@@ -1193,12 +1271,55 @@ extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
     e
 }
 
-extern "system" fn t_SaveDrawingState(_this: Obj, _block: Obj) {
-    gap(b"ID2D1RenderTarget::SaveDrawingState", 0);
+/// SaveDrawingState: the state this target draws with, written into the
+/// block (`state`). A block of another DLL's making cannot be written
+/// into, which is recorded.
+extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
+    let (desc, params) = with(this, |s| {
+        (
+            StateDesc1 {
+                base: StateDesc {
+                    antialias: s.antialias,
+                    text_antialias: s.text_antialias,
+                    tag1: s.tags.0,
+                    tag2: s.tags.1,
+                    transform: s.transform,
+                },
+                primitive_blend: s.primitive_blend,
+                unit_mode: s.unit_mode,
+            },
+            s.text_params.0,
+        )
+    });
+    if !state::save(block, desc, params) {
+        gap(b"ID2D1RenderTarget::SaveDrawingState(block of another DLL)", 0);
+    }
 }
 
-extern "system" fn t_RestoreDrawingState(_this: Obj, _block: Obj) {
-    gap(b"ID2D1RenderTarget::RestoreDrawingState", 0);
+/// RestoreDrawingState: the block's state, taken whole (a block that was
+/// never saved into holds the state it was made with, which Windows
+/// restores the same way).
+extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
+    let Some((desc, params)) = state::load(block) else {
+        gap(b"ID2D1RenderTarget::RestoreDrawingState(block of another DLL)", 0);
+        return;
+    };
+    if desc.primitive_blend != PRIMITIVE_BLEND_SOURCE_OVER {
+        gap(
+            b"ID2D1RenderTarget::RestoreDrawingState(drawn source-over)",
+            desc.primitive_blend.into(),
+        );
+    }
+    let old = with(this, |s| {
+        s.antialias = desc.base.antialias;
+        s.text_antialias = desc.base.text_antialias;
+        s.tags = (desc.base.tag1, desc.base.tag2);
+        s.transform = desc.base.transform;
+        s.primitive_blend = desc.primitive_blend;
+        s.unit_mode = desc.unit_mode;
+        core::mem::replace(&mut s.text_params, ComRef::owned(params))
+    });
+    drop(old);
 }
 
 /// PushAxisAlignedClip: the rectangle through the current transform (its
@@ -1413,9 +1534,9 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
         }
         let e = core::mem::replace(&mut s.error, S_OK);
         let t = core::mem::take(&mut s.error_tags);
-        if e != S_OK {
-            return (e, t, None);
-        }
+        // A failed frame still presents what it drew before it failed:
+        // that is what Direct2D leaves in the target (measured,
+        // `d2d1_test`, a mesh that fails the frame over a white Clear).
         let dirty = core::mem::take(&mut s.dirty);
         let (w, h) = (s.w as i32, s.h as i32);
         match &s.backing {
@@ -1438,14 +1559,14 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
                 }
             }
             Backing::Wic { bitmap, .. } if dirty => {
-                return (S_OK, (0, 0), Some((ComRef::new(bitmap.0), s.w, s.h)));
+                return (e, t, Some((ComRef::new(bitmap.0), s.w, s.h)));
             }
             Backing::Context { target, buf, .. } if dirty && !target.0.is_null() => {
                 brush::write_pixels(target.0, buf);
             }
             _ => {}
         }
-        (S_OK, (0, 0), None)
+        (e, t, None)
     });
     if let Some((bitmap, w, h)) = wic {
         // Write the frame back, our lock taken only for the copy.
@@ -1812,9 +1933,11 @@ extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
 
 /// SetTarget: the ID2D1Bitmap1 the context draws into, which takes the
 /// context's size and pixel format from it. The bitmap must be one of
-/// gala's and made with D2D1_BITMAP_OPTIONS_TARGET; anything else is
-/// recorded and fails the frame, as Direct2D fails a target it cannot
-/// draw into. NULL clears the target (the context is then 0 x 0).
+/// gala's and made with D2D1_BITMAP_OPTIONS_TARGET; a bitmap without
+/// those options leaves the frame D2DERR_INVALID_TARGET, which is
+/// Windows' answer (measured, `d2d1_device_test`), and an image that is
+/// no bitmap of gala's is recorded as the gap it is. NULL clears the
+/// target (the context is then 0 x 0).
 extern "system" fn dc1_SetTarget(this: Obj, image: Obj) {
     answered(b"ID2D1DeviceContext::SetTarget", S_OK);
     set_target(this, image);
@@ -1841,6 +1964,7 @@ fn set_target(this: Obj, image: Obj) {
     // The bitmap that was the target is released after our lock.
     let mut was = ComRef(core::ptr::null_mut());
     let mut failure = S_OK;
+    let mut refused_options = 0;
     with(this, |s| {
         let Backing::Context { target, buf, .. } = &mut s.backing else {
             return;
@@ -1865,7 +1989,8 @@ fn set_target(this: Obj, image: Obj) {
                     }
                 }
                 if options & BITMAP_OPTION_TARGET == 0 {
-                    failure = E_INVALIDARG;
+                    failure = D2DERR_INVALID_TARGET;
+                    refused_options = options;
                 }
             }
             None => {
@@ -1879,8 +2004,14 @@ fn set_target(this: Obj, image: Obj) {
             s.error_tags = s.tags;
         }
     });
-    if failure == E_INVALIDARG {
-        gap(b"ID2D1DeviceContext::SetTarget(not a D2D1_BITMAP_OPTIONS_TARGET bitmap)", 0);
+    if failure == D2DERR_INVALID_TARGET {
+        // The detail is the bitmap's D2D1_BITMAP_OPTIONS, which says
+        // whether the program asked for none or the ones the surface
+        // implied (`brush::inferred_options`).
+        gap(
+            b"ID2D1DeviceContext::SetTarget(not a D2D1_BITMAP_OPTIONS_TARGET bitmap)",
+            refused_options.into(),
+        );
     }
 }
 

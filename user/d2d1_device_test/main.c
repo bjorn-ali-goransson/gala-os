@@ -36,6 +36,16 @@
  *   corner is 0x336699, the middle 0xffcc00, the square's left edge
  *   0xffcc00 and the middle of the square 0x336699, because a stroked
  *   realization draws the outline and not the inside.
+ * - The options a bitmap over a surface gets when the program passes no
+ *   properties follow the texture's bind flags: a render target alone is
+ *   TARGET | CANNOT_DRAW, a render target a shader may read is TARGET,
+ *   a shader resource alone is NONE and a texture bound as neither is
+ *   CANNOT_DRAW. A bitmap without TARGET is no target: the frame drawn
+ *   into it ends with D2DERR_INVALID_TARGET. Properties that ask for an
+ *   alpha mode of UNKNOWN or STRAIGHT are D2DERR_UNSUPPORTED_PIXEL_FORMAT
+ *   (although CreateBitmap takes UNKNOWN), a pixel format of UNKNOWN
+ *   takes the surface's, and a DPI the program gives is kept as it is,
+ *   0 included (96 is what a bitmap made without properties gets).
  * - Present(0, 0) puts that frame on the screen, which xtask checks; a
  *   click in the window ends the program (it waits up to 60 s for one:
  *   without one, a failure).
@@ -160,6 +170,109 @@ static void *vslot(void *o, int index) {
 static unsigned pixel(const D3D11_MAPPED_SUBRESOURCE *m, int x, int y) {
     const unsigned char *p = (const unsigned char *)m->pData + (size_t)y * m->RowPitch + (size_t)x * 4;
     return (unsigned)p[2] << 16 | (unsigned)p[1] << 8 | p[0];
+}
+
+/* The options a bitmap over a DXGI surface gets, and the pixel formats
+ * a program may ask for: textures of this test's own, one per bind-flag
+ * set, each read back through ID2D1Bitmap1::GetOptions and tried as the
+ * context's target. The context has no target when this returns. */
+static void surface_bitmaps(ID3D11Device *dev, ID2D1DeviceContext *dc) {
+    static const struct {
+        UINT bind;
+        UINT options;
+    } cases[] = {
+        {D3D11_BIND_RENDER_TARGET,
+         D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW},
+        {D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, D2D1_BITMAP_OPTIONS_TARGET},
+        {D3D11_BIND_SHADER_RESOURCE, D2D1_BITMAP_OPTIONS_NONE},
+        {0, D2D1_BITMAP_OPTIONS_CANNOT_DRAW},
+    };
+    const D2D1_COLOR_F white = {1.0f, 1.0f, 1.0f, 1.0f};
+    D3D11_TEXTURE2D_DESC td;
+    unsigned i;
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        memset(&td, 0, sizeof td);
+        td.Width = 64;
+        td.Height = 32;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.BindFlags = cases[i].bind;
+        ID3D11Texture2D *tex = NULL;
+        HR(ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex));
+        IDXGISurface *surf = NULL;
+        HR(qi(tex, &IID_IDXGISurface, (void **)&surf));
+        ID2D1Bitmap1 *b = NULL;
+        HR(dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, NULL, &b));
+        CHECK(b != NULL);
+        CHECK(b->lpVtbl->GetOptions(b) == cases[i].options);
+        D2D1_SIZE_U size = pixel_size(b);
+        CHECK(size.width == 64 && size.height == 32);
+        FLOAT dpi_x = 0.0f, dpi_y = 0.0f;
+        b->lpVtbl->Base.GetDpi((ID2D1Bitmap *)b, &dpi_x, &dpi_y);
+        CHECK(dpi_x == 96.0f && dpi_y == 96.0f);
+        /* Only a TARGET bitmap may be drawn into. */
+        dc->lpVtbl->SetTarget(dc, (struct ID2D1Image *)b);
+        dc->lpVtbl->Base.BeginDraw((ID2D1RenderTarget *)dc);
+        dc->lpVtbl->Base.Clear((ID2D1RenderTarget *)dc, &white);
+        last = dc->lpVtbl->Base.EndDraw((ID2D1RenderTarget *)dc, NULL, NULL);
+        if (cases[i].options & D2D1_BITMAP_OPTIONS_TARGET)
+            CHECK(last == S_OK);
+        else
+            CHECK(last == D2DERR_INVALID_TARGET);
+        dc->lpVtbl->SetTarget(dc, NULL);
+        rel(b);
+        IDXGISurface_Release(surf);
+        ID3D11Texture2D_Release(tex);
+    }
+
+    /* The pixel format and the DPI a program may ask for. */
+    memset(&td, 0, sizeof td);
+    td.Width = 64;
+    td.Height = 32;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Texture2D *tex = NULL;
+    HR(ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex));
+    IDXGISurface *surf = NULL;
+    HR(qi(tex, &IID_IDXGISurface, (void **)&surf));
+    D2D1_BITMAP_PROPERTIES1 props;
+    ID2D1Bitmap1 *b = NULL;
+    memset(&props, 0, sizeof props);
+    props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_UNKNOWN;
+    props.dpiX = 96.0f;
+    props.dpiY = 96.0f;
+    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    last = dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b);
+    CHECK(last == D2DERR_UNSUPPORTED_PIXEL_FORMAT && b == NULL);
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_STRAIGHT;
+    last = dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b);
+    CHECK(last == D2DERR_UNSUPPORTED_PIXEL_FORMAT && b == NULL);
+    /* An UNKNOWN format takes the surface's, and 0 dpi means 96. */
+    props.pixelFormat.format = DXGI_FORMAT_UNKNOWN;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    props.dpiX = 0.0f;
+    props.dpiY = 0.0f;
+    HR(dc->lpVtbl->CreateBitmapFromDxgiSurface(dc, surf, &props, &b));
+    CHECK(b != NULL);
+    CHECK(b->lpVtbl->GetOptions(b) == D2D1_BITMAP_OPTIONS_TARGET);
+    D2D1_PIXEL_FORMAT fmt;
+    ((void (WINAPI *)(void *, D2D1_PIXEL_FORMAT *))vslot(b, 6))(b, &fmt);
+    CHECK(fmt.format == DXGI_FORMAT_B8G8R8A8_UNORM);
+    CHECK(fmt.alphaMode == D2D1_ALPHA_MODE_PREMULTIPLIED);
+    /* The DPI is the program's own, 0 included: Direct2D puts 96 in its
+     * place only when the program gives no properties at all. */
+    FLOAT dpi_x = -1.0f, dpi_y = -1.0f;
+    b->lpVtbl->Base.GetDpi((ID2D1Bitmap *)b, &dpi_x, &dpi_y);
+    CHECK(dpi_x == 0.0f && dpi_y == 0.0f);
+    rel(b);
+    IDXGISurface_Release(surf);
+    ID3D11Texture2D_Release(tex);
 }
 
 int main(void) {
@@ -433,6 +546,8 @@ int main(void) {
     CHECK(middle2 == 0xffcc00);
     CHECK(edge == 0xffcc00);
     CHECK(inside == 0x336699);
+
+    surface_bitmaps(dev, dc);
 
     HR(IDXGISwapChain_Present(swap, 0, 0));
     printf("d2d1_device_test: presented\n");
