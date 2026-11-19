@@ -904,18 +904,55 @@ pub fn dump() {
         v
     };
     for s in bound {
-        crate::info!("dump: unix: {}", Described(&s));
+        let d = Described::of(&s);
+        crate::info!("dump: unix: {d}");
     }
 }
 
 /// A socket as the state dump shows it: kind, owner, name, phase (a
 /// connection's records queued to this side, shutdown, the peer), the
 /// threads waiting on it.
-pub struct Described<'a>(pub &'a Socket);
+///
+/// Written out when it is made, not when it is printed: describing takes
+/// the socket's locks, and the console holds its own while it prints, so
+/// a description written inside `info!` takes them in the opposite order
+/// to the socket code that logs (lockdep stops the kernel on it).
+pub struct Described {
+    buf: [u8; DESCRIBED],
+    len: usize,
+}
 
-impl fmt::Display for Described<'_> {
+const DESCRIBED: usize = 192;
+
+impl Described {
+    pub fn of(s: &Socket) -> Self {
+        let mut d = Described { buf: [0; DESCRIBED], len: 0 };
+        let _ = s.describe(&mut d);
+        d
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?")
+    }
+}
+
+impl fmt::Write for Described {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for c in s.chars() {
+            let n = c.len_utf8();
+            if self.len + n > DESCRIBED {
+                break;
+            }
+            c.encode_utf8(&mut self.buf[self.len..]);
+            self.len += n;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Described {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.describe(f)
+        f.write_str(self.as_str())
     }
 }
 

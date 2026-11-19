@@ -1616,6 +1616,12 @@ Test programs are freestanding Windows executables on `user/ntrt` (or
 kernel32 through `raw-dylib`), run under gala and under Windows
 (`user/bin/run-all.ps1`).
 
+- **A scenario runs `user/bin`'s binaries, not the build's.** A program
+  or DLL a scenario's file table names as `user/bin/<file>` (agent.exe,
+  conhost.exe, the test DLLs) is copied from there into the image:
+  after changing its source, run `cargo xtask export-tests` before the
+  boot test, or the run uses the last exported build.
+
 - **System call numbers.** Long-stable x64 numbers are used directly
   (list in `kernel/src/nt/syscalls.rs`). Numbers that change between
   builds are gala's own choices, unverified: tests must call those
@@ -1741,10 +1747,12 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   the xmm registers clobbered (Rust has no ymm operands without the avx
   target feature) and check only what Windows keeps across a system call
   (the upper halves, and ymm6-15 whole: xmm0-5 are volatile).
-- **Hover without a screen**: under gala the cursor is at (0, 0) and
-  GetCursorPos follows moves over the program's own windows only; tests
-  that hover put their window under GetCursorPos's point, so the same
-  check holds on Windows (comctl32_test).
+- **Hover without a screen**: without a desktop to ask (no screen and
+  no `presenter=`) the cursor is at (0, 0) and GetCursorPos follows
+  moves over the program's own windows only; tests that hover put their
+  window under GetCursorPos's point, so the same check holds on Windows
+  (comctl32_test). With a screen GetCursorPos is the desktop's pointer
+  (GalaCursorPos), the same for every process, starting in the middle.
 - **Windows in another session**: a GUI test run with `as=system` is in
   session 0: on a machine with a screen its windows are kept with their
   pixels but nothing shows them and they get no input (`desktop: session
@@ -3888,6 +3896,22 @@ guest's state dump, and is the scenario's verdict. Such scenarios must boot by
 UEFI (BIOS boots have no framebuffer), unless their desktop is headless
 (`presenter=test`, below).
 
+- **What a step clicks is found by name, and pixels only check
+  drawing.** A test program finds what the scenario clicks through UI
+  Automation, as an accessibility tool does (`user/uia_client`:
+  CUIAutomation, FindFirst by AutomationId), checks its name, control
+  type and rectangle, and announces it (`uia_client::announce`: `<who>:
+  <id> at X,Y (pointer at PX,PY)`); the step's input `click_on <who>:
+  <id>` moves the pointer by the difference and clicks (xtask's
+  `expand_input`). So a layout change moves the click with the element,
+  and the elements' names are tested where they matter. Pixel checks
+  are for what only pixels show: that a window or a part of it is drawn
+  where it should be (`Most` of a surface's colour), wallpaper, cursor,
+  composition. New screen scenarios use `click_on` for anything a test
+  program can find (gala_ui windows answer UI Automation across
+  processes: uiautomationcore's providers.rs); the older ones that aim
+  by position are converted as their windows move to gala_ui (ROADMAP
+  LY, SH). `agent` is the example.
 - A step first sends QEMU monitor commands: `mouse_move dx dy`,
   `mouse_button 1` (bit 0 the left button, bit 1 the right:
   `mouse_button 2` is a right press), `sendkey`, each once the guest

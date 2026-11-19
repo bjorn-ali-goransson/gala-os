@@ -688,8 +688,15 @@ extern "system" fn client(_: *mut c_void) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    let options =
-        win::Options { title: "ui_test", x: 120, y: 120, width: 360, height: 280, topmost: true };
+    let options = win::Options {
+        title: "ui_test",
+        x: 120,
+        y: 120,
+        width: 360,
+        height: 280,
+        topmost: true,
+        popup: false,
+    };
     let Some(hwnd) = win::open(Counter { count: 0, name: String::new() }, &options, log) else {
         line("FAIL 1: the window");
         // SAFETY: ends the process.

@@ -432,6 +432,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     {
         error!("wayland: cannot start the server: {e:?}");
     }
+    // The agent panel (ARCHITECTURE "The agent panel"): started with the
+    // session where the desktop has a shell (not bare) and agent.exe is
+    // installed, before the programs; `agent=off` leaves it out.
+    if cmdline.value("agent") == Some("off") {
+        info!("desktop: no agent panel: agent=off");
+    } else if nt::desktop::is_bare() {
+        info!("desktop: no agent panel: the desktop is bare (no screen and no presenter=)");
+    } else {
+        nt::action::start_agent();
+    }
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot. `start_as=system`: they run as SYSTEM (services,

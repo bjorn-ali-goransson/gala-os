@@ -902,8 +902,15 @@ impl Host for KernelHost {
     }
 
     fn work_area(&mut self) -> (u32, u32) {
-        let (w, h) = self.screen();
-        (w, h.saturating_sub(winstate::TASKBAR).max(1))
+        let work =
+            crate::nt::process::by_id(self.pid).and_then(|p| desktop::work_area(&p.desk.shell));
+        match work {
+            Some(r) => (r.w.max(1) as u32, r.h.max(1) as u32),
+            None => {
+                let (w, h) = self.screen();
+                (w, h.saturating_sub(winstate::TASKBAR).max(1))
+            }
+        }
     }
 
     fn surface_size(&mut self, width: u32, height: u32, decorated: bool) -> (u32, u32) {
@@ -1113,7 +1120,8 @@ pub fn dump() {
             runtime::ticks(),
             c.client.output().len()
         );
-        crate::info!("statedump:   socket: {}", crate::unix::Described(&c.sock));
+        let d = crate::unix::Described::of(&c.sock);
+        crate::info!("statedump:   socket: {d}");
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));
     }
     s.x_dump();

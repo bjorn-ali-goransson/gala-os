@@ -1,0 +1,27 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# gala's agent panel (ROADMAP LY "Change this program", step 4;
+# ARCHITECTURE "The agent panel"): the panel's state, view and update
+# are the library, tested on the host with `cargo test -p agent`; the
+# program (the docked window, the app bar, the context) is
+# `src/main.rs`.
+
+[lib]
+bench = false
+
+[[bin]]
+name = "agent"
+test = false
+bench = false
+
+[dependencies]
+gala_ui = { path = "../ui" }
+
+[target.'cfg(windows)'.dependencies]
+# The bin's allocator (the host tests have std's).
+gala_heap = { path = "../gala_heap" }

@@ -274,7 +274,7 @@ has a section under "Open items".
 | GR | Gap reports from real runs, straight to GitHub | planned | the ledger of a run that hit a gap or ended badly kept as a report, redacted, sent with the owner's consent, and turned into (or counted on) a `gap` issue; `gala gaps`, an intake beside the update feed |
 | SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | CS | Crash-safe: no hard resets, a kind crash screen | planned | the kernel restarts itself through R9's handover; the last-resort path saves and explains |
-| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait) and a Copy button for pasting a view into an agent |
+| TM | A task manager for Windows and Linux programs alike | in progress | steps 1-4 done (`taskmgr`: one list of both personalities, gala's taskmgr.exe ending one of each, "Not responding", every metric's last minute as a sparkline); inspection next, then statistics (p50/p95/p99, the busiest threads, where they wait), a Copy button for pasting a view into an agent, and "Ask the agent" on a process's right-click menu |
 | EX | A file explorer over every file system | in progress | steps 1-2 done (the drives and the WSL distributions in one tree) and part of 3-4 (`explorer`); next the namespace's rest (Desktop, Recycle Bin, context menus), file dialogs, drag and drop |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | SN | Snapshots: whole machines, then single programs, from the command line | in progress | machine snapshots in xtask done (step 1); hot swapping gala's DLLs into a resumed snapshot done (step 1d: at your own risk, never a real run); the kernel too, alone or with DLLs in one plan (step 1e, the same rule); modules no process maps replaced whole and new ones added, every changed module taken by the flag alone (step 1f); next a failing CI run's snapshot as an artifact; program snapshots on R9's state format; `gala snapshot`, `restore`, `export`, `import` |
@@ -6231,6 +6231,17 @@ tests in `nt::tasks`, `nt::desktop` and `cargo test -p taskmgr`):
    each with its sparkline as CPU and Memory have (gala counts disk and
    network bytes for the machine, not per process: ledgered
    `taskmgr.exe!Processes(Disk)`, `(Network)`).
+6. Ask the agent (the owner): right-clicking a process (in Processes
+   or Details) offers "Ask the agent about this process", which opens
+   the docked agent panel (ROADMAP LY "Change this program", step 4)
+   with the process as its context: name, pid, personality, command
+   line, and the row's values with their recent sparkline history, the
+   same text Copy gives (step 4). The user then asks about it in the
+   panel ("why is this using so much CPU?"); the agent's tools can read
+   more about it (threads and their stacks, handles, from step 1's
+   inspection). Handed to the panel by WM_COPYDATA, as Explorer's
+   request card is; the panel shows it if it is hidden. Needs the
+   panel's chat and the relay first.
 
 **Done when**: a scenario with Windows programs and a WSL distribution
 running shows them all in one list, ends one of each from it, and its
@@ -6632,6 +6643,18 @@ Each entry: what, why it matters, the structural fix, the owning item.
   wakeup. The state dump now lists each Linux process's children
   (running, zombies) and its wait4/waitid waiters with the pid each
   wants, so the next stall names what the threads waited for.
+  Seen on x86_64 too (`lx_inkscape`, once in a full local run): both
+  glycin loaders ended (0xe4c58009), the window never came, both CPUs
+  idle, the main thread in ppoll; its rerun passed. Its log's state dump
+  is where to start.
+- **`arm_lx_thread` died at `kill(the process, SIGUSR2)`** (once in a
+  full local run, again 1 of 7 in its history; reruns pass): thread_test
+  ended with 0xe4c5800c right after a process-directed signal sent
+  while its other thread blocks SIGUSR2 and waits for it in
+  rt_sigtimedwait, before either thread printed what it saw. The choice
+  of the thread a process-directed signal goes to (the one not blocking
+  it) racing the other thread's rt_sigtimedwait is the suspect; not yet
+  reproduced alone.
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread
@@ -7020,11 +7043,12 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      The card closes; the panel shows the request and handles it.
   4. The agent panel (the owner): `agent.exe`, a user-mode gala_ui
      program started with the session, docked on the right edge of the
-     whole monitor at full height as a Windows app bar
-     (SHAppBarMessage ABM_NEW, ABM_QUERYPOS, ABM_SETPOS, ABM_REMOVE).
-     The work area shrinks by its width and the taskbar ends at its
-     left edge (the clock and tray move left), but the start button
-     and the taskbar's group stay centred on the whole monitor. It can
+     monitor as a Windows app bar (SHAppBarMessage ABM_NEW,
+     ABM_QUERYPOS, ABM_SETPOS, ABM_REMOVE), from the top down to the
+     taskbar (the owner): it never covers the taskbar or takes space
+     from it. The work area shrinks by its width; the taskbar keeps the
+     whole width, its group centred and the clock and tray where they
+     are. It can
      be hidden: it then collapses to a small topmost dock tab on the
      right edge, the strip goes back to the work area, a click on the
      tab brings it back, and the hidden state is remembered. A context
@@ -7130,10 +7154,17 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   (ARCHITECTURE "The file explorer", "Change this program"); scenario
   `explorer` drives it. The card still ends in a preview (steps on a
   timer, a last card saying nothing was changed) until the panel takes
-  the hand-off. Next, in order: app bars (`appbar_test`, SHAppBarMessage,
-  the desktop's reserved strip); `agent.exe` docked, hideable, with its
-  context chip; the hand-off from Explorer's card (the timer and the
-  progress cards go); the relay with record and replay, the chat and the
+  the hand-off. App bars are in (`appbar_test`: SHAppBarMessage's
+  ABM_NEW/QUERYPOS/SETPOS/REMOVE, the reserved strip ending above the
+  taskbar, ABN_POSCHANGED; ARCHITECTURE
+  "App bars"). `agent.exe` is in: started with the session, docked as
+  an app bar, hideable to its dock tab (remembered), with its context
+  chip and a prompt that lists requests (scenario `agent`; ARCHITECTURE
+  "The agent panel"). Its screen scenario finds what it clicks through
+  UI Automation (`uia_client`, `click_on`), the way older scenarios'
+  position-aimed clicks are to go as their windows move to gala_ui
+  (WORKFLOW "Screen checks"). Next, in order: the hand-off from
+  Explorer's card (the timer and the progress cards go); the relay with record and replay, the chat and the
   `run` tool ("compress all the files" in Explorer); then the source
   tools, the state record and the swap, Undo, and the item on Task
   Manager with its use case as the measure.

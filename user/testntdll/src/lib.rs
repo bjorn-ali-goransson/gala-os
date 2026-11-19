@@ -460,6 +460,10 @@ syscall_stubs! {
     GalaWinEventTake = 0x7f73, fn(records: *mut u8, max: u32, count: *mut u32);
     // The notification area (Shell_NotifyIcon, Shell_NotifyIconGetRect).
     GalaTrayIcon = 0x7f74, fn(op: u32, request: *const u8, length: usize, rect: *mut i32);
+    // App bars (SHAppBarMessage's own bars).
+    GalaAppBar = 0x7f75, fn(op: u32, request: *mut u8, length: usize);
+    // The desktop's pointer (GetCursorPos).
+    GalaCursorPos = 0x7f76, fn(point: *mut i32);
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);

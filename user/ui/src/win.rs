@@ -201,6 +201,9 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
+const WS_POPUP: u32 = 0x8000_0000;
+const WM_COPYDATA: u32 = 0x004a;
+const WM_USER: u32 = 0x0400;
 const SW_SHOW: i32 = 5;
 const GWLP_USERDATA: i32 = -21;
 /// The class's extra bytes: the window's shared part (`shared_of`).
@@ -273,6 +276,9 @@ pub struct Options<'a> {
     pub height: i32,
     /// Above other windows (WS_EX_TOPMOST).
     pub topmost: bool,
+    /// Without a frame and a caption (WS_POPUP): a panel the program
+    /// places itself; not on the taskbar.
+    pub popup: bool,
 }
 
 /// What other threads read of the window, behind `busy`.
@@ -452,6 +458,12 @@ impl<C: Component> Window for Host<C> {
                 release(root);
                 return Some(r);
             }
+            WM_COPYDATA | WM_USER.. => {
+                let m = self.component.message(hwnd as usize, msg, wparam, lparam)?;
+                self.handle(hwnd, "message", &format!("{msg:#x}"), m);
+                // WM_COPYDATA's TRUE: taken.
+                return Some(1);
+            }
             _ => return None,
         }
         Some(0)
@@ -547,7 +559,7 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
             ex,
             class.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
+            if o.popup { WS_POPUP } else { WS_OVERLAPPEDWINDOW },
             o.x,
             o.y,
             o.width,

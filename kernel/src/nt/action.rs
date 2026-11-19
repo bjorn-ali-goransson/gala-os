@@ -385,6 +385,20 @@ pub fn start_path(
     }
 }
 
+/// Where the agent panel is installed (ARCHITECTURE "The agent panel").
+pub const AGENT: &str = "C:\\Windows\\System32\\agent.exe";
+
+/// Starts the agent panel with the session (the boot user's), when it is
+/// installed; a desktop without one says so.
+pub fn start_agent() {
+    match super::process::open_program(AGENT) {
+        Ok(_) => {
+            let _ = start_path(AGENT, "", None);
+        }
+        Err(e) => crate::info!("desktop: no agent panel: {AGENT} not opened ({e:?})"),
+    }
+}
+
 /// What a start menu tile does (`menu_request`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuRequest {

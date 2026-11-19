@@ -14,8 +14,14 @@
 //! - SHQueryUserNotificationState: QUNS_ACCEPTS_NOTIFICATIONS (nothing
 //!   full-screen, no presentation mode).
 //! - SHAppBarMessage: the taskbar is shasha's, at the bottom of the screen
-//!   below the work area (none without a screen: ABM_GETTASKBARPOS fails), always on top, not auto-hidden; app bars of
-//!   one's own (ABM_NEW, ABM_SETPOS, ...) are not supported (reported, 0).
+//!   below the work area, ending where bars on the right begin (none
+//!   without a screen: ABM_GETTASKBARPOS fails), always on top, not
+//!   auto-hidden. A program's own bars (ABM_NEW, ABM_REMOVE, ABM_QUERYPOS,
+//!   ABM_SETPOS) are the desktop's (GalaAppBar: the work area gives up
+//!   their strips; ARCHITECTURE "App bars"); ABM_ACTIVATE and
+//!   ABM_WINDOWPOSCHANGED return TRUE, as documented, with nothing to do
+//!   (no auto-hidden bars); auto-hide (ABM_SETAUTOHIDEBAR) is reported,
+//!   FALSE.
 //! - ShellExecuteA: ShellExecuteW with the strings converted (CP_ACP).
 //! - SHOpenFolderAndSelectItems, SHGetPropertyStoreForWindow,
 //!   SHCreateAssociationRegistration, SHGetStockIconInfo and
@@ -185,6 +191,10 @@ pub struct AppBarData {
     param: isize,
 }
 
+const ABM_NEW: u32 = 0;
+const ABM_SETPOS: u32 = 3;
+const ABM_ACTIVATE: u32 = 6;
+const ABM_WINDOWPOSCHANGED: u32 = 9;
 const ABM_GETSTATE: u32 = 4;
 const ABM_GETTASKBARPOS: u32 = 5;
 const ABM_GETAUTOHIDEBAR: u32 = 7;
@@ -196,6 +206,8 @@ const SPI_GETWORKAREA: u32 = 0x30;
 #[unsafe(no_mangle)]
 pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> usize {
     match message {
+        ABM_NEW..=ABM_SETPOS => own_bar(message, data),
+        ABM_ACTIVATE | ABM_WINDOWPOSCHANGED => 1,
         ABM_GETSTATE => ABS_ALWAYSONTOP,
         // No auto-hidden bar on any edge.
         ABM_GETAUTOHIDEBAR | ABM_GETAUTOHIDEBAREX => 0,
@@ -224,6 +236,7 @@ pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> u
             // SAFETY: the caller's APPBARDATA.
             unsafe {
                 (*data).edge = ABE_BOTTOM;
+                // The whole width: the bars on the sides end above it.
                 (*data).rect = [0, work[3], w, h];
             }
             1
@@ -233,6 +246,44 @@ pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> u
             0
         }
     }
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GalaAppBar(op: u32, request: *mut u8, length: usize) -> u32;
+}
+
+/// ABM_NEW, ABM_REMOVE, ABM_QUERYPOS and ABM_SETPOS: GalaAppBar's request
+/// (the window, the callback message, the edge, the rectangle and the
+/// result after it), the rectangle given back for QUERYPOS and SETPOS.
+fn own_bar(message: u32, data: *mut AppBarData) -> usize {
+    if data.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's APPBARDATA.
+    let d = unsafe { &mut *data };
+    let mut r = [0u8; 36];
+    r[0..8].copy_from_slice(&(d.window as u64).to_le_bytes());
+    r[8..12].copy_from_slice(&d.message.to_le_bytes());
+    r[12..16].copy_from_slice(&d.edge.to_le_bytes());
+    for (i, v) in d.rect.iter().enumerate() {
+        r[16 + 4 * i..20 + 4 * i].copy_from_slice(&v.to_le_bytes());
+    }
+    // SAFETY: our request of its length.
+    let status = unsafe { GalaAppBar(message, r.as_mut_ptr(), r.len()) };
+    if status != 0 {
+        unsupported(b"shell32.dll!SHAppBarMessage(no desktop to take a strip from)", status.into());
+        return 0;
+    }
+    let at = |o: usize| i32::from_le_bytes([r[o], r[o + 1], r[o + 2], r[o + 3]]);
+    if message >= 2 {
+        d.rect = [at(16), at(20), at(24), at(28)];
+    }
+    at(32) as usize
 }
 
 /// A NUL-terminated ANSI string as UTF-16 in `buf` (None for NULL).

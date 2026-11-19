@@ -226,6 +226,10 @@ pub const GALA_WIN_EVENT_TAKE: u32 = 0x7f73;
 /// The notification area (Shell_NotifyIcon; ARCHITECTURE "The
 /// notification area").
 pub const GALA_TRAY_ICON: u32 = 0x7f74;
+/// GalaAppBar (gala's own: SHAppBarMessage's own bars).
+pub const GALA_APP_BAR: u32 = 0x7f75;
+/// GalaCursorPos (gala's own: GetCursorPos, the desktop's pointer).
+pub const GALA_CURSOR_POS: u32 = 0x7f76;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -464,6 +468,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WIN_EVENT_NOTIFY, "GalaWinEventNotify", 4, gala_win_event_notify),
     (GALA_WIN_EVENT_TAKE, "GalaWinEventTake", 3, gala_win_event_take),
     (GALA_TRAY_ICON, "GalaTrayIcon", 4, gala_tray_icon),
+    (GALA_APP_BAR, "GalaAppBar", 3, gala_app_bar),
+    (GALA_CURSOR_POS, "GalaCursorPos", 1, gala_cursor_pos),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -2897,6 +2903,46 @@ pub fn tray_request(b: &[u8]) -> Result<super::desktop::tray::Data, NtStatus> {
     })
 }
 
+/// GalaAppBar(op, *request, length): SHAppBarMessage's ABM_NEW,
+/// ABM_REMOVE, ABM_QUERYPOS or ABM_SETPOS for the caller's bar. The
+/// request (APP_BAR_REQUEST bytes) is the window (u64), the callback
+/// message (u32), the edge (u32) and the rectangle (left, top, right,
+/// bottom: i32 each); the rectangle comes back adjusted and a u32 after it
+/// is the result (TRUE or FALSE). STATUS_NOT_SUPPORTED where no shell runs.
+fn gala_app_bar(call: &mut Call<'_>) -> NtStatus {
+    use super::winstate::Rect;
+    let op = arg!(call, 0) as u32;
+    let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+    if len != APP_BAR_REQUEST {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut raw = [0u8; APP_BAR_REQUEST];
+    if call.process.read(ptr, &mut raw).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+    let i32_at = |o: usize| i64::from(u32_at(o) as i32);
+    let hwnd = u64::from(u32_at(0)) | u64::from(u32_at(4)) << 32;
+    let (callback, edge) = (u32_at(8), u32_at(12));
+    let (l, t, r, b) = (i32_at(16), i32_at(20), i32_at(24), i32_at(28));
+    let rect = Rect { x: l, y: t, w: r - l, h: b - t };
+    let shell = &call.process.desk.shell;
+    let (ok, out) =
+        tri!(super::desktop::appbar_op(shell, call.process.id, op, hwnd, callback, edge, rect));
+    let mut back = [0u8; 20];
+    for (i, v) in [out.x, out.y, out.x + out.w, out.y + out.h].into_iter().enumerate() {
+        back[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_le_bytes());
+    }
+    back[16..20].copy_from_slice(&u32::from(ok).to_le_bytes());
+    if call.process.write(ptr + 16, &back).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaAppBar's request: window, callback, edge, rectangle, result.
+const APP_BAR_REQUEST: usize = 36;
+
 /// GalaTrayIcon(op, *request, length, *rect): Shell_NotifyIcon's
 /// message `op` (NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETFOCUS,
 /// NIM_SETVERSION) on the caller's session's notification area, or
@@ -2996,11 +3042,31 @@ fn gala_screen_info(call: &mut Call<'_>) -> NtStatus {
     let Some((w, h)) = super::desktop::screen(&call.process.desk.shell) else {
         return NtStatus::NOT_SUPPORTED;
     };
-    let work_bottom = h.saturating_sub(super::desktop::TASKBAR);
+    let work = super::desktop::work_area(&call.process.desk.shell);
+    let (wl, wt, wr, wb) = match work {
+        Some(r) => (r.x as u32, r.y as u32, (r.x + r.w) as u32, (r.y + r.h) as u32),
+        None => (0, 0, w, h.saturating_sub(super::desktop::TASKBAR)),
+    };
     let mut out = [0u8; 32];
-    for (i, v) in [0, 0, w, h, 0, 0, w, work_bottom].iter().enumerate() {
+    for (i, v) in [0, 0, w, h, wl, wt, wr, wb].iter().enumerate() {
         out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
     }
+    if call.process.write(arg!(call, 0), &out).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaCursorPos(*Point): where the desktop's pointer is (two i32, screen
+/// coordinates), as GetCursorPos tells any process whether or not its
+/// windows had a mouse message; STATUS_NOT_SUPPORTED without a screen.
+fn gala_cursor_pos(call: &mut Call<'_>) -> NtStatus {
+    let Some((x, y)) = super::desktop::pointer_pos(&call.process.desk.shell) else {
+        return NtStatus::NOT_SUPPORTED;
+    };
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&(x as i32).to_le_bytes());
+    out[4..].copy_from_slice(&(y as i32).to_le_bytes());
     if call.process.write(arg!(call, 0), &out).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }

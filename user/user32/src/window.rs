@@ -34,6 +34,7 @@ unsafe extern "system" {
         style: u32,
     ) -> u32;
     fn GalaWindowShow(id: u32, show: u8) -> u32;
+    fn GalaCursorPos(point: *mut i32) -> u32;
     fn GalaWindowDrag(id: u32) -> u32;
     fn GalaWindowResize(id: u32, edges: u32) -> u32;
     fn GalaWindowPresent(
@@ -2466,12 +2467,21 @@ pub extern "system" fn GetForegroundWindow() -> Hwnd {
     if window(h).is_some() { h } else { 0 }
 }
 
-/// GetCursorPos: where the last mouse message put the pointer (screen
-/// coordinates); (0, 0) before any.
+/// GetCursorPos: the desktop's pointer (GalaCursorPos), as Windows'
+/// system cursor is the same for every process, whether or not its own
+/// windows had a mouse message yet; without a screen, where our last
+/// mouse message put it ((0, 0) before any).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCursorPos(point: *mut [i32; 2]) -> i32 {
     if point.is_null() {
         return 0;
+    }
+    let mut at = [0i32; 2];
+    // SAFETY: two i32 of ours.
+    if unsafe { GalaCursorPos(at.as_mut_ptr()) } == 0 {
+        // SAFETY: the caller's POINT.
+        unsafe { *point = at };
+        return 1;
     }
     let packed = CURSOR.load(Ordering::Relaxed);
     // SAFETY: the caller's POINT.

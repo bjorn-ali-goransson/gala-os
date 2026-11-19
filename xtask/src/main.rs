@@ -9450,6 +9450,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("uia_test", "uiautomationcore.dll", "Windows/System32"),
     ("uia_test", "comctl32.dll", "Windows/System32"),
     ("uia_test", "user/bin/uia_test.exe", "gala"),
+    // The agent panel (ROADMAP LY "Change this program", step 4):
+    // agent.exe where the desktop starts it with the session, docked as
+    // an app bar; agent_test checks it while the screen scenario clicks.
+    ("agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("agent", "user/bin/agent.exe", "Windows/System32"),
+    ("agent", "ntdll.dll", "Windows/System32"),
+    ("agent", "kernel32.dll", "Windows/System32"),
+    ("agent", "msvcrt.dll", "Windows/System32"),
+    ("agent", "advapi32.dll", "Windows/System32"),
+    ("agent", "bcryptprimitives.dll", "Windows/System32"),
+    ("agent", "user32.dll", "Windows/System32"),
+    ("agent", "gdi32.dll", "Windows/System32"),
+    ("agent", "shell32.dll", "Windows/System32"),
+    ("agent", "ole32.dll", "Windows/System32"),
+    ("agent", "oleaut32.dll", "Windows/System32"),
+    ("agent", "uiautomationcore.dll", "Windows/System32"),
+    ("agent", "comctl32.dll", "Windows/System32"),
     ("ui_test", "ntdll.dll", "Windows/System32"),
     ("ui_test", "kernel32.dll", "Windows/System32"),
     ("ui_test", "msvcrt.dll", "Windows/System32"),
@@ -10799,6 +10816,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("tray_test", "gdi32.dll", "Windows/System32"),
     ("tray_test", "shell32.dll", "Windows/System32"),
     ("tray_test", "comctl32.dll", "Windows/System32"),
+    // App bars (user/appbar_test), on a Test presenter.
+    ("appbar_test", "ntdll.dll", "Windows/System32"),
+    ("appbar_test", "kernel32.dll", "Windows/System32"),
+    ("appbar_test", "user32.dll", "Windows/System32"),
+    ("appbar_test", "gdi32.dll", "Windows/System32"),
+    ("appbar_test", "shell32.dll", "Windows/System32"),
     ("no_i8042", "ntdll.dll", "Windows/System32"),
     ("no_i8042", "kernel32.dll", "Windows/System32"),
     ("no_i8042", "user32.dll", "Windows/System32"),
@@ -11104,6 +11127,8 @@ const USER_PROGRAMS: &[&str] = &[
     "explorer",
     "explorer_test",
     "ui_test",
+    "agent",
+    "agent_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -11182,6 +11207,7 @@ const USER_PROGRAMS: &[&str] = &[
     "gdiplus_test",
     "uisettings_test",
     "tray_test",
+    "appbar_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -11847,6 +11873,8 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "explorer", "--lib"]))?;
     // UI components for gala's own programs (ROADMAP LY).
     run_cmd(cargo().args(["test", "--package", "gala_ui"]))?;
+    // The agent panel's view and update (ROADMAP LY "Change this program").
+    run_cmd(cargo().args(["test", "--package", "agent", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -13442,6 +13470,8 @@ const UEFI_SCENARIOS: &[&str] = &[
     "linux_menu",
     "tray_test",
     "d2d1_window",
+    // A framebuffer for the docked agent panel (AGENT_SCREEN).
+    "agent",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -16177,6 +16207,54 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "desktop: notification-area icon added: window",
             "wow64_tray_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // App bars (user/appbar_test): SHAppBarMessage's registration, a
+        // right strip reserved from the work area (a maximized window
+        // fitted to it), a second bar beside the first, ABN_POSCHANGED,
+        // and the strip given back; on a Test presenter.
+        name: "appbar_test",
+        cmdline: "qemu_exit presenter=test run=appbar_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: app bar registered: window",
+            "desktop: work area changed: right edge reserved by 1 app bar",
+            "appbar_test: the first bar was told",
+            "desktop: app bar removed: window",
+            "appbar_test: the strip is given back",
+            "appbar_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The agent panel (ROADMAP LY "Change this program", step 4;
+        // ARCHITECTURE "The agent panel"): started with the session,
+        // docked at the right edge as an app bar (the work area and the
+        // taskbar end at it), its context the active window; the screen
+        // scenario (AGENT_SCREEN) clicks Hide, then the dock tab.
+        name: "agent",
+        cmdline: "qemu_exit wallpaper=night events=window run=agent_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: started C:\\Windows\\System32\\agent.exe (pid",
+            "agent: started docked",
+            "desktop: app bar registered: window",
+            "agent: docked at 960,0 320x752",
+            "agent_test: the taskbar [0,752,1280,800]",
+            "agent: context agent_test: Agent test window",
+            "agent_test: HideButton at 1240,24 (pointer at",
+            "agent_test: docked",
+            "agent: click HideButton: Hide",
+            "agent: hidden: the dock tab at 1224,380 56x40",
+            "desktop: app bar removed: window",
+            "agent_test: DockTab at 1252,400 (pointer at",
+            "agent_test: hidden",
+            "agent: click DockTab: Show",
+            "agent_test: TestWindow at",
+            "agent_test: docked again",
+            "agent_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -23196,7 +23274,10 @@ struct ScreenStep {
     /// `sendkey`), 250 ms apart (time for the guest to read the device, also
     /// when the host is busy). Keep each move within 255 pixels per axis:
     /// QEMU queues a few PS/2 packets of at most 255 and hands the rest of a
-    /// larger move over with later events.
+    /// larger move over with later events. `click_on <who>: <element>`
+    /// clicks an element where a test program found it through UI
+    /// Automation (`expand_input`): what a test clicks is found by name,
+    /// not by a position written here.
     input: &'static [&'static str],
     pixels: &'static [PixelCheck],
 }
@@ -23982,6 +24063,46 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// address bar (screen 20) and the request runs its steps to the card
 /// that says nothing was changed (screen 23); Alt+F4 closes it. Each step waits for explorer's
 /// own log line of the one before (`explorer: navigate ...`).
+/// The agent panel (scenario `agent`) on a 1280 x 800 screen. What is
+/// clicked, agent_test finds through UI Automation and announces
+/// (`click_on`); the pixels only check that the panel is drawn where its
+/// app bar strip is (x 960, 320 wide, its surface 0xf3f3f3) and the dock
+/// tab where agent_test found it hidden (1224, 380, 56 x 40, accent
+/// 0x005fb8). Names, control types and rectangles are agent_test's
+/// checks.
+const AGENT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "agent_test: docked",
+    // A step's pixels are checked after its input: each step checks what
+    // its click made.
+    steps: &[
+        ScreenStep {
+            // 1: docked, the panel's surface down the right of the screen.
+            after: "agent_test: docked",
+            input: &[],
+            pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
+        },
+        ScreenStep {
+            // 2: Hide (found by name): only the dock tab is left.
+            after: "",
+            input: &["click_on agent_test: HideButton"],
+            pixels: &[PixelCheck::Most(1224, 380, 56, 40, 0x005fb8, 50)],
+        },
+        ScreenStep {
+            // 3: the dock tab (found by name): docked again.
+            after: "agent_test: hidden",
+            input: &["click_on agent_test: DockTab"],
+            pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
+        },
+        ScreenStep {
+            // 4: a click on the test's own window ends it (the run ends
+            // after the last input, with no pixels left to check).
+            after: "agent_test: docked again",
+            input: &["click_on agent_test: TestWindow"],
+            pixels: &[],
+        },
+    ],
+};
+
 const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
     marker: "explorer_test: ready",
     steps: &[
@@ -25074,6 +25195,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("desktop_at_boot", DESKTOP_AT_BOOT_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
+    ("agent", AGENT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
@@ -25678,7 +25800,12 @@ fn check_screen(
                 );
             }
         }
-        for command in step.input {
+        let mut commands = Vec::new();
+        for &command in step.input {
+            let mut more = expand_input(command, &log).map_err(|e| format!("step {n}: {e}"))?;
+            commands.append(&mut more);
+        }
+        for command in &commands {
             // Each command only once the guest has read what QEMU queued
             // for the ones before: QEMU's PS/2 queues hold 16 bytes, and
             // what does not fit is lost (InputPace).
@@ -25713,6 +25840,54 @@ fn check_screen(
         }
     }
     Ok(waits)
+}
+
+/// A screen step's input command as the monitor commands it stands for.
+/// `click_on <who>: <element>` is a left click at the middle of an
+/// element a test program found through UI Automation: the serial log's
+/// last line `<who>: <element> at X,Y (pointer at PX,PY)` names where it
+/// is and where the pointer is, and the click is the moves between them
+/// (at most 255 pixels per axis each, as `ScreenStep::input` says) and a
+/// press and release. Any other command is itself.
+fn expand_input(command: &str, log: &Path) -> Result<Vec<String>> {
+    let Some(who) = command.strip_prefix("click_on ") else {
+        return Ok(vec![command.to_string()]);
+    };
+    let text = fs::read_to_string(log).map_err(|e| format!("reading {log:?}: {e}"))?;
+    let want = format!("{who} at ");
+    let line = text.lines().rev().find_map(|l| l.find(&want).map(|i| &l[i + want.len()..]));
+    let line = line.ok_or_else(|| {
+        format!("click_on: no line {want:?}X,Y (pointer at PX,PY) in the serial log")
+    })?;
+    let (target, pointer) = parse_click_line(line)
+        .ok_or_else(|| format!("click_on: unreadable {want:?} line: {line:?}"))?;
+    Ok(click_commands(target, pointer))
+}
+
+/// `X,Y (pointer at PX,PY)` as the two points.
+fn parse_click_line(s: &str) -> Option<((i64, i64), (i64, i64))> {
+    let pair = |p: &str| -> Option<(i64, i64)> {
+        let (x, y) = p.trim().split_once(',')?;
+        Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+    };
+    let (at, rest) = s.split_once(" (pointer at ")?;
+    Some((pair(at)?, pair(rest.split_once(')')?.0)?))
+}
+
+/// The monitor commands that move the pointer from `pointer` to `target`
+/// in steps of at most 255 per axis, then click there.
+fn click_commands(target: (i64, i64), pointer: (i64, i64)) -> Vec<String> {
+    let (mut dx, mut dy) = (target.0 - pointer.0, target.1 - pointer.1);
+    let mut out = Vec::new();
+    while dx != 0 || dy != 0 {
+        let (sx, sy) = (dx.clamp(-255, 255), dy.clamp(-255, 255));
+        out.push(format!("mouse_move {sx} {sy}"));
+        dx -= sx;
+        dy -= sy;
+    }
+    out.push("mouse_button 1".to_string());
+    out.push("mouse_button 0".to_string());
+    out
 }
 
 /// Whether QEMU has closed its end of the monitor socket (it exited): a
@@ -31159,6 +31334,26 @@ mod ps2_pace {
         assert!(ps2_bytes("screendump x", 4, &mut b).is_err());
     }
 
+    #[test]
+    fn click_on_is_moves_and_a_click() {
+        assert_eq!(
+            parse_click_line("1240,24 (pointer at 640,400)"),
+            Some(((1240, 24), (640, 400)))
+        );
+        assert_eq!(parse_click_line("1240,24"), None);
+        assert_eq!(
+            click_commands((1240, 24), (640, 400)),
+            [
+                "mouse_move 255 -255",
+                "mouse_move 255 -121",
+                "mouse_move 90 0",
+                "mouse_button 1",
+                "mouse_button 0"
+            ]
+        );
+        assert_eq!(click_commands((5, 5), (5, 5)), ["mouse_button 1", "mouse_button 0"]);
+    }
+
     /// Every screen step's input is a command whose bytes are known and
     /// fit QEMU's queue.
     #[test]
@@ -31169,7 +31364,13 @@ mod ps2_pace {
             let twin = ARM64_TWINS.contains(name);
             let (mut b, mut v) = (0, 0);
             for (n, step) in check.steps.iter().enumerate() {
-                for command in step.input {
+                // A click_on stands for the longest moves it can make.
+                let input = step.input.iter().flat_map(|c| match c.strip_prefix("click_on ") {
+                    Some(_) => click_commands((1279, 799), (0, 0)),
+                    None => vec![c.to_string()],
+                });
+                for command in input {
+                    let command = command.as_str();
                     if let Err(e) = ps2_bytes(command, 4, &mut b) {
                         panic!("{name} step {n}: {e}");
                     }

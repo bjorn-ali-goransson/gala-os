@@ -8303,6 +8303,115 @@ through the screen check).
   than a gone window is a warning; gone windows' icons are logged as
   removed.
 
+#### App bars
+
+Code: `desktop/appbar.rs` (the bars, QUERYPOS's placement, the insets;
+host tests there), `Desktop::appbar_op` and `work_changed` in
+`desktop/mod.rs`, `WinState::work` (the work area), shell32's
+SHAppBarMessage (`browser.rs`). Test: `appbar_test` (Windows'
+expectations from Microsoft's "Using Application Desktop Toolbars"
+and the SHAppBarMessage reference).
+
+- **Registration**: ABM_NEW registers a window once, with its callback
+  message (a second ABM_NEW of it answers 0); ABM_REMOVE gives its strip
+  back. A bar goes with its process, or when a message to its window
+  fails because the window is gone. shell32 hands ABM_NEW, ABM_REMOVE,
+  ABM_QUERYPOS and ABM_SETPOS to GalaAppBar (0x7f75; a 36-byte request:
+  hwnd, callback, edge, rectangle; the adjusted rectangle and the
+  result come back in it); ABM_ACTIVATE and ABM_WINDOWPOSCHANGED answer
+  1 and do nothing (gala has no auto-hide bars to raise).
+- **Placement** (QUERYPOS, and SETPOS which places what QUERYPOS
+  gives): a bar on the left or the right keeps its width and reaches
+  from the top of the screen down to the taskbar, never over it,
+  against the edge or the bars already on it; a bar at the top or the
+  bottom keeps its height and gets the whole width, the bottom one
+  above the taskbar. The taskbar is never given to a bar: it keeps the
+  whole width, its clock and notification area at the screen's right
+  edge, and bars coming and going do not redraw it (ABM_GETTASKBARPOS
+  is the whole width too).
+- **The work area** is the screen without the taskbar's rows and the
+  bars' insets (`WinState::work`): SPI_GETWORKAREA and GalaScreenInfo
+  report it, maximized and docked windows fill it, Snap halves it, a
+  moved window's top is kept in it, and the Wayland side's output takes
+  it. When a SETPOS or a removal changes it, every maximized window is
+  told its new place (the program moves its own window, "Window
+  behaviour").
+- **ABN_POSCHANGED**: when a bar is set or removed, the other bars on
+  its edge get their callback message with wParam ABN_POSCHANGED,
+  posted as the system's after the desktop's lock is let go (as the
+  notification area's messages are). ABN_STATECHANGE,
+  ABN_FULLSCREENAPP and ABN_WINDOWARRANGE are not sent (no auto-hide,
+  no full-screen detection yet).
+- **Where nothing shows the desktop** there is no taskbar and no work
+  area to share: GalaAppBar is STATUS_NOT_SUPPORTED and
+  SHAppBarMessage answers 0.
+- **Limits**: one monitor; no auto-hide bars (ABM_GETAUTOHIDEBAR(EX)
+  answer none); a maximized window on gala equals the work area, where
+  Windows lets its frame overhang it.
+- **Observability**: `desktop: app bar registered/removed: window
+  <hwnd>, pid <p> (<n> bars)`, `desktop: app bar placed: window <hwnd>
+  on edge <e> at x,y wxh`, `desktop: work area changed: <edge> edge
+  reserved by <n> app bar(s), <v> px` with `desktop: work area
+  [l,t,r,b]`, `desktop: maximized window <id> fitted to the work area`,
+  `desktop: app bars told ABN_POSCHANGED: <n> window(s)`, and `desktop:
+  app bars of pid <p> removed (its end)`.
+
+#### The agent panel
+
+Code: `user/agent` (`agent.exe`: the panel's state, view and update in
+`lib.rs`, a `gala_ui` component host-tested there; the window, the app
+bar, the context and the remembered state in `main.rs`),
+`nt::action::start_agent` (started with the session). Test: `agent`
+(`user/agent_test`, which finds the panel's elements through UI
+Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
+"Change this program".
+
+- **Started with the session**: once the desktop is up (not on a bare
+  desktop; `agent=off` on the command line leaves it out), the kernel
+  starts `C:\Windows\System32\agent.exe` as any program (`desktop:
+  started ... (pid N)`); an image without it logs `desktop: no agent
+  panel: ... not opened`, and the other two cases say which they are
+  (`desktop: no agent panel: agent=off`, `...: the desktop is bare`).
+  A screen scenario that shows it boots with a framebuffer
+  (`UEFI_SCENARIOS`), else the desktop is bare and there is no panel.
+- **Docked**: a topmost popup window (class `GalaUiWindow`, title
+  `Agent`) that is an app bar on the right edge ("App bars"): ABM_NEW,
+  then QUERYPOS and SETPOS for a strip `WIDTH` (320) wide from the top
+  of the screen down to the taskbar (it asks for the whole height and
+  takes what SETPOS gives). The work area ends at its left edge; the
+  taskbar keeps the whole width under both. It is never activated by
+  its own placing (SWP_NOACTIVATE).
+- **Hidden**: Hide removes the bar (ABM_REMOVE: the strip is given
+  back) and makes the window the dock tab, `TAB` (56 x 40) at the
+  middle of the right edge; a click on the tab docks it again. The
+  state is remembered in HKCU\Software\gala\Agent `Hidden` (DWORD)
+  and the next session starts that way.
+- **Context**: a WinEvent hook (EVENT_SYSTEM_FOREGROUND, out of
+  context) gives the active window; the panel's own is ignored. The
+  chip names its program (`program_name`: gala's own programs by
+  Windows' names, any other by its file name) and its title. The hook
+  is set before the first placement, so a window activated once the
+  panel is docked is always its context (a hook set after it misses a
+  program that waited for the panel and then activated its window).
+- **Placing outside the view's handling**: the window is moved from
+  the panel's message loop (its own messages WM_APP+1..3: the context,
+  a placing, the bar's callback), not from inside gala_ui's handling of
+  a click, so the WM_SIZE a move sends does not re-enter the host.
+  ABN_POSCHANGED places it again.
+- **Accessibility**: every part a user acts on has an AutomationId and a
+  name (`HideButton` "Hide", `DockTab` "Agent", `ContextProgram`,
+  `ContextTitle`, `Prompt`, `SendButton`), from gala_ui's tree, and
+  other processes see them (uiautomationcore's providers).
+- **Not there yet** (ROADMAP): Explorer's "Make the change" handing its
+  request over (WM_COPYDATA), the model relay and the `run` tool.
+- **Observability**: `agent: started docked` / `started hidden
+  (remembered)`, `agent: docked at x,y wxh`, `agent: hidden: the dock
+  tab at x,y wxh`, `agent: docked without a strip: ABM_NEW refused`,
+  `agent: ABN_POSCHANGED: placed again`, `agent: context <program>:
+  <title>`, gala_ui's `agent: click <id>: <message>`, `agent: request
+  ...`, `agent: the state is not saved: ...`, `agent: no context:
+  SetWinEventHook failed`, `agent: panic: ...` and `agent: ended`.
+
 #### Window behaviour
 
 Every action on a window (taskbar, caption buttons, Snap keys, the
@@ -8412,7 +8521,7 @@ registry ("Plan: windows across processes").
 | 0x7f33 | GalaWindowDestroy(id) | |
 | 0x7f34 | GalaWindowListen(event) | the event set when input is queued |
 | 0x7f35 | GalaWindowInput(records, max, *count) | takes queued input (24-byte records) |
-| 0x7f36 | GalaScreenInfo(*rects) | the screen and the work area above the taskbar |
+| 0x7f36 | GalaScreenInfo(*rects) | the screen and the work area (without the taskbar and the app bars) |
 | 0x7f37 | GalaWindowPlace(id, x, y, w, h) | moves/resizes; a new client buffer keeping what fits |
 | 0x7f38 | GalaWindowSetTitle(id, *text, length) | |
 | 0x7f39 | GalaWindowCapture(id) | mouse capture; 0 ends it |
@@ -8422,6 +8531,8 @@ registry ("Plan: windows across processes").
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
 | 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
+| 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS and ABM_SETPOS ("App bars") |
+| 0x7f76 | GalaCursorPos(*point) | GetCursorPos: the desktop's pointer (two i32), whichever process last had a mouse message |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
@@ -9223,9 +9334,10 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   whose text is not shown gives its text when the parent gives none.
 - TODO: rounded corners (desktop popups are square), balloons and
   titles, TTS_ALWAYSTIP's absence (tips show for inactive windows too),
-  TTM_HITTEST/WINDOWFROMPOINT/GETBUBBLESIZE, the pointer leaving to the
-  desktop or another program (user32's GetCursorPos only follows moves
-  over the program's windows: the autopop hides the tip then).
+  TTM_HITTEST/WINDOWFROMPOINT/GETBUBBLESIZE; without a screen, the
+  pointer leaving to the desktop or another program (GetCursorPos then
+  only follows moves over the program's windows: the autopop hides the
+  tip then; with a screen it is the desktop's pointer, GalaCursorPos).
 
 ### Rich edit
 

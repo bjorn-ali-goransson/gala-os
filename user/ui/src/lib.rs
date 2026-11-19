@@ -65,7 +65,8 @@
 //!   UI Automation elements of it (those with an id). [`win`] (Windows
 //!   only) is a window holding a component: drawn with gdi32, clicks and
 //!   typing to `update` (each message logged), its UIA provider made
-//!   from the same list.
+//!   from the same list; [`Component::message`] gives the program the
+//!   window messages that are its own.
 
 #![no_std]
 
@@ -98,6 +99,21 @@ pub trait Component {
     type Msg: Clone + fmt::Debug;
     fn view(&self) -> Node<Self::Msg>;
     fn update(&mut self, msg: Self::Msg);
+    /// A window message the window does not handle itself (WM_COPYDATA,
+    /// WM_USER and up: the program's own, a notification's callback):
+    /// the program's message for it, if any, handled as a click's is
+    /// (logged, `update`, the view built again). `window` is the
+    /// window's handle.
+    fn message(
+        &mut self,
+        window: usize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> Option<Self::Msg> {
+        let _ = (window, msg, wparam, lparam);
+        None
+    }
 }
 
 /// The kinds of element.

@@ -46,9 +46,10 @@
 //!   that answers WM_GETOBJECT (UiaRootObjectId) through
 //!   UiaReturnRawElementProvider gives its element's properties first;
 //!   the window's fill what it leaves empty (UiaHostProviderFromHwnd).
-//!
-//! Not there yet: other processes' providers (their windows give the
-//! HWND properties), providers' patterns and fragments.
+//!   Another process's provider answers the same way: what the client
+//!   asks of it goes as gala's GALA_UIA message to the window's thread
+//!   (providers.rs), so a test finds a gala_ui program's elements from
+//!   its own process (uia_client).
 
 #![no_std]
 #![allow(non_snake_case)]

@@ -28,6 +28,7 @@
 //! Design: docs/ARCHITECTURE.md, "Windows on the screen", "Server and
 //! desktop workloads" and "Presenters (B3a)".
 
+pub mod appbar;
 pub mod linux;
 mod paint;
 pub mod pkg;
@@ -764,6 +765,9 @@ pub struct Desktop {
     win_used: bool,
     /// The notification area's icons and balloon (`tray`).
     tray: tray::Tray,
+    /// The app bars (SHAppBarMessage): the strips they take from the
+    /// work area (`s.reserved`).
+    appbars: appbar::AppBars,
     /// The card above the notification area (the balloon, else the tip
     /// of the icon under the pointer) and where it is.
     card: Option<(Rect, Canvas)>,
@@ -821,6 +825,7 @@ impl Desktop {
             win_key: false,
             win_used: false,
             tray: tray::Tray::new(),
+            appbars: appbar::AppBars::new(),
             card: None,
             card_dirty: false,
         }
@@ -1001,6 +1006,10 @@ impl Desktop {
     /// Removes `owner`'s windows (a process's end).
     pub fn destroy_owned(&mut self, owner: u64) {
         self.s.destroy_owned(owner);
+        if self.appbars.drop_owned(owner) == appbar::Changed::Yes {
+            crate::info!("desktop: app bars of pid {owner} removed (its end)");
+            self.work_changed();
+        }
         if self.tray.drop_owned(owner) {
             self.tray_changed();
         }
@@ -1086,6 +1095,108 @@ impl Desktop {
     /// caller once the desktop's lock is let go).
     fn take_tray_posts(&mut self) -> Vec<tray::Post> {
         core::mem::take(&mut self.tray.posts)
+    }
+
+    // ---- App bars -----------------------------------------------------------
+
+    /// SHAppBarMessage's `op` (appbar::ABM_*) for window `hwnd` of
+    /// process `owner`: its result (TRUE or FALSE) and the rectangle
+    /// QUERYPOS and SETPOS give back.
+    pub fn appbar_op(
+        &mut self,
+        owner: u64,
+        op: u32,
+        hwnd: u64,
+        callback: u32,
+        edge: u32,
+        rect: Rect,
+    ) -> Result<(bool, Rect), NtStatus> {
+        let (screen, tb) = (self.s.screen, i64::from(TASKBAR));
+        match op {
+            appbar::ABM_NEW => {
+                let new = self.appbars.add(owner, hwnd, callback)?;
+                if new {
+                    crate::info!(
+                        "desktop: app bar registered: window {hwnd:#x}, pid {owner} ({} bars)",
+                        self.appbars.len()
+                    );
+                }
+                Ok((new, rect))
+            }
+            appbar::ABM_REMOVE => {
+                let (was, changed) = self.appbars.remove(hwnd);
+                if was {
+                    crate::info!(
+                        "desktop: app bar removed: window {hwnd:#x}, pid {owner} ({} bars)",
+                        self.appbars.len()
+                    );
+                }
+                if changed == appbar::Changed::Yes {
+                    self.work_changed();
+                }
+                Ok((true, rect))
+            }
+            appbar::ABM_QUERYPOS => match self.appbars.query(hwnd, edge, rect, screen, tb) {
+                Some(r) => Ok((true, r)),
+                None => Ok((false, rect)),
+            },
+            appbar::ABM_SETPOS => match self.appbars.set(hwnd, edge, rect, screen, tb) {
+                Some(r) => {
+                    crate::info!(
+                        "desktop: app bar placed: window {hwnd:#x} on edge {edge} at {},{} {}x{}",
+                        r.x,
+                        r.y,
+                        r.w,
+                        r.h
+                    );
+                    self.work_changed();
+                    Ok((true, r))
+                }
+                None => Ok((false, rect)),
+            },
+            _ => Err(NtStatus::INVALID_PARAMETER),
+        }
+    }
+
+    /// The app bars changed what they take: the work area follows and the
+    /// maximized windows are fitted to it (as Windows' shell refits them).
+    /// The taskbar stays as it is: bars end above it.
+    fn work_changed(&mut self) {
+        let reserved = self.appbars.insets(self.s.screen, i64::from(TASKBAR));
+        if reserved == self.s.reserved {
+            return;
+        }
+        self.s.reserved = reserved;
+        let work = self.s.work();
+        let edges = ["left", "top", "right", "bottom"];
+        for (i, v) in reserved.iter().enumerate() {
+            if *v > 0 {
+                crate::info!(
+                    "desktop: work area changed: {} edge reserved by {} app bar(s), {v} px",
+                    edges[i],
+                    self.appbars.on(i as u32)
+                );
+            }
+        }
+        crate::info!(
+            "desktop: work area [{},{},{},{}]",
+            work.x,
+            work.y,
+            work.x + work.w,
+            work.y + work.h
+        );
+        self.card_dirty = true;
+        for id in self.s.visible_windows() {
+            if self.s.window(id).is_some_and(|w| w.maximized && !w.minimized) {
+                crate::info!("desktop: maximized window {id} fitted to the work area");
+                self.s.send_place(id, (work.x as i32, work.y as i32, work.w as u32, work.h as u32));
+            }
+        }
+        self.refresh();
+    }
+
+    fn take_appbar_posts(&mut self) -> Vec<tray::Post> {
+        self.appbars.take_posts()
     }
 
     /// The icons of window `hwnd` go: it no longer exists.
@@ -1249,6 +1360,8 @@ impl Desktop {
 
     // ---- The shell's layout --------------------------------------------
 
+    /// The taskbar: the screen's bottom rows, the whole width (the app
+    /// bars on the sides end above it).
     fn taskbar_rect(&self) -> Rect {
         let h = i64::from(TASKBAR);
         Rect { x: 0, y: self.s.screen.1 - h, w: self.s.screen.0, h }
@@ -1288,7 +1401,7 @@ impl Desktop {
     fn tray_slots(&self) -> Vec<((u64, u32), Rect)> {
         let n = self.tray.visible().count() as i64;
         let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
-        let x0 = self.s.screen.0 - CLOCK_W - n * tray::SLOT;
+        let x0 = self.taskbar_rect().w - CLOCK_W - n * tray::SLOT;
         let mut out = Vec::new();
         for (i, icon) in self.tray.visible().enumerate() {
             let r = Rect { x: x0 + i as i64 * tray::SLOT, y: top, w: tray::SLOT, h: 40 };
@@ -1301,9 +1414,10 @@ impl Desktop {
     /// the right, a tip centred over its icon (kept on the screen).
     fn card_rect(&self, w: i64, h: i64, over: Option<Rect>) -> Rect {
         let bottom = self.s.screen.1 - i64::from(TASKBAR) - 12;
+        let right = self.taskbar_rect().w;
         let x = match over {
-            Some(r) => (r.x + r.w / 2 - w / 2).clamp(8, (self.s.screen.0 - w - 8).max(8)),
-            None => self.s.screen.0 - w - 12,
+            Some(r) => (r.x + r.w / 2 - w / 2).clamp(8, (right - w - 8).max(8)),
+            None => right - w - 12,
         };
         Rect { x, y: bottom - h, w, h }
     }
@@ -2431,7 +2545,7 @@ impl Desktop {
     /// pill on a lit button; the others: a short grey one); the clock and
     /// date at the right.
     fn render_taskbar(&self) -> Option<Canvas> {
-        let (w, h) = (self.s.screen.0, i64::from(TASKBAR));
+        let (w, h) = (self.taskbar_rect().w, i64::from(TASKBAR));
         let mut c = Canvas::new(w, h, 0)?;
         for y in 0..h {
             let (row, a) =
@@ -4441,6 +4555,75 @@ pub fn tray_list(shell: &Shell) -> Result<Vec<TrayListed>, NtStatus> {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     Ok(shell.d.lock().tray_list())
+}
+
+/// SHAppBarMessage's `op` for window `hwnd` of process `owner`
+/// (GalaAppBar): its result and the rectangle it gives back;
+/// STATUS_NOT_SUPPORTED without shasha's shell (no work area to take
+/// from). The other bars' ABN_POSCHANGED are posted after.
+pub fn appbar_op(
+    shell: &Shell,
+    owner: u64,
+    op: u32,
+    hwnd: u64,
+    callback: u32,
+    edge: u32,
+    rect: Rect,
+) -> Result<(bool, Rect), NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = shell.d.lock();
+    let result = d.appbar_op(owner, op, hwnd, callback, edge, rect);
+    redraw_damage(&mut d);
+    let posts = d.take_appbar_posts();
+    drop(d);
+    if !posts.is_empty() {
+        crate::info!("desktop: app bars told ABN_POSCHANGED: {} window(s)", posts.len());
+    }
+    let Some(desk) = super::session::desk(shell.session) else { return result };
+    let mut gone: Option<u64> = None;
+    for p in posts {
+        match desk.windows.post_from_system(p.hwnd, p.message, p.wparam, p.lparam) {
+            Ok(Some(e)) => {
+                super::wait::set_signal(&e, 1);
+            }
+            Ok(None) => {}
+            Err(NtStatus::INVALID_HANDLE) => gone = Some(p.hwnd),
+            Err(e) => crate::warn!(
+                "desktop: app bar: message {:#x} to window {:#x} not posted: {e:?}",
+                p.message,
+                p.hwnd
+            ),
+        }
+    }
+    // A bar whose window is gone gives its strip back.
+    if let Some(hwnd) = gone {
+        crate::info!("desktop: app bar of gone window {hwnd:#x} removed");
+        let mut d = shell.d.lock();
+        let _ = d.appbar_op(0, appbar::ABM_REMOVE, hwnd, 0, 0, Rect { x: 0, y: 0, w: 0, h: 0 });
+        d.appbars.take_posts();
+        redraw_damage(&mut d);
+    }
+    result
+}
+
+/// Where the pointer's hot spot is on the screen (GetCursorPos: the
+/// system's pointer, whichever process last had a mouse message), None
+/// before the screen's size is known.
+pub fn pointer_pos(shell: &Shell) -> Option<(i64, i64)> {
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d).ok()?;
+    Some(d.pointer)
+}
+
+/// The work area (the screen without the taskbar and the app bars'
+/// strips), None before the screen's size is known.
+pub fn work_area(shell: &Shell) -> Option<Rect> {
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d).ok()?;
+    let w = d.s.work();
+    (w.w > 0).then_some(w)
 }
 
 /// Posts the tray's callback messages through the session's window

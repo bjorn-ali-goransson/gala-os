@@ -398,6 +398,10 @@ pub struct State<X> {
     pub live: bool,
     /// The desktop's size (0 x 0 until known).
     pub screen: (i64, i64),
+    /// What app bars take from the screen besides the taskbar: left, top,
+    /// right and bottom insets (`desktop::appbar`); the work area is the
+    /// rest (`work`).
+    pub reserved: [i64; 4],
     pub active: Option<u32>,
     /// The window with the mouse capture (GalaWindowCapture): it gets all
     /// mouse input, wherever the pointer is.
@@ -468,6 +472,7 @@ impl<X: Default> State<X> {
             next_id: 1,
             live: false,
             screen: (0, 0),
+            reserved: [0; 4],
             active: None,
             captured: None,
             popup_grab: None,
@@ -743,14 +748,15 @@ impl<X: Default> State<X> {
         }
         win.x = x;
         win.y = y;
-        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
+        let work = self.work();
         let win = self.find(id, owner)?;
-        win.maximized = (x, y) == (0, 0) && (i64::from(w), i64::from(h)) == work && work.0 > 0;
+        let (x, y, w, h) = (i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+        win.maximized = (x, y, w, h) == (work.x, work.y, work.w, work.h) && work.w > 0;
         win.docked = !win.maximized
-            && work.0 > 0
-            && y == 0
-            && i64::from(h) == work.1
-            && (x == 0 || i64::from(x) + i64::from(w) == work.0);
+            && work.w > 0
+            && y == work.y
+            && h == work.h
+            && (x == work.x || x + w == work.x + work.w);
         win.restyled();
         let new = win.bounds(shadow);
         self.add_damage(old);
@@ -1218,12 +1224,27 @@ impl<X: Default> State<X> {
         );
     }
 
+    /// The work area: the screen without the taskbar and the app bars'
+    /// strips (`reserved`); empty until the screen's size is known.
+    pub fn work(&self) -> Rect {
+        let [l, t, r, b] = self.reserved;
+        let (sw, sh) = self.screen;
+        if sw <= 0 {
+            return Rect { x: 0, y: 0, w: 0, h: 0 };
+        }
+        let x = l.min(sw);
+        let y = t.min(sh);
+        let w = (sw - l - r).max(0);
+        let h = (sh - i64::from(TASKBAR) - t - b).max(0);
+        Rect { x, y, w, h }
+    }
+
     /// Snap, as Windows 11 does it with the Windows key: Left and Right
     /// put the window on that half of the work area, Up maximizes it,
     /// Down restores it (a maximized or snapped one) or minimizes it.
     /// The program moves its window (GALA_WM_PLACE, WM_SYSCOMMAND).
     fn snap(&mut self, id: u32, to: SnapTo) -> Result<(), NtStatus> {
-        let (sw, sh) = self.screen;
+        let sw = self.screen.0;
         let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
         if sw <= 0 {
             return Err(NtStatus::NOT_SUPPORTED);
@@ -1240,7 +1261,8 @@ impl<X: Default> State<X> {
         }
         // restore() raises it: its index may have changed.
         let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
-        let work_h = (sh - i64::from(TASKBAR)).max(1) as u32;
+        let work = self.work();
+        let work_h = work.h.max(1) as u32;
         match to {
             SnapTo::Up if !maximized => self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
             SnapTo::Up => {}
@@ -1250,9 +1272,12 @@ impl<X: Default> State<X> {
                 None => self.minimize(id),
             },
             SnapTo::Left | SnapTo::Right => {
-                let half = (sw / 2) as u32;
-                let (x, width) =
-                    if to == SnapTo::Left { (0, half) } else { (half as i32, sw as u32 - half) };
+                let half = (work.w / 2) as u32;
+                let (x, width) = if to == SnapTo::Left {
+                    (work.x as i32, half)
+                } else {
+                    ((work.x + i64::from(half)) as i32, work.w as u32 - half)
+                };
                 let w = &self.windows[i];
                 if w.unsnapped.is_none() && !maximized {
                     self.windows[i].unsnapped = Some((w.x, w.y, w.w, w.h));
@@ -1281,7 +1306,7 @@ impl<X: Default> State<X> {
     /// The windows the taskbar shows (in its order).
     pub fn list(&self) -> Vec<Listed> {
         let mut out = Vec::new();
-        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
+        let work = self.work();
         for id in self.visible_windows() {
             let Some(w) = self.window(id) else { continue };
             let mut flags = 0;
@@ -1294,7 +1319,7 @@ impl<X: Default> State<X> {
             if self.active == Some(id) {
                 flags |= LISTED_ACTIVE;
             }
-            if w.docked && work.0 > 0 {
+            if w.docked && work.w > 0 {
                 flags |= LISTED_SNAPPED;
             }
             let mut title = [0u16; LISTED_TITLE];
@@ -1386,13 +1411,14 @@ impl<X: Default> State<X> {
 
     /// Moves a window to (x, y), its caption kept on the screen.
     pub fn move_to(&mut self, id: u32, x: i64, y: i64) {
-        let (sw, sh) = self.screen;
+        let sw = self.screen.0;
         let shadow = self.shadow;
         let Some(i) = self.index(id) else { return };
         let w = &self.windows[i];
         let ww = i64::from(w.w);
         let x = x.clamp(-ww + 80, (sw - 80).max(0));
-        let y = y.clamp(0, (sh - i64::from(TASKBAR) - i64::from(CAPTION)).max(0));
+        let work = self.work();
+        let y = y.clamp(work.y, (work.y + work.h - i64::from(CAPTION)).max(work.y));
         if (x, y) == (i64::from(w.x), i64::from(w.y)) {
             return;
         }
