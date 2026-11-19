@@ -2186,7 +2186,8 @@ need gala's.
      for a window is OT3b piece 2 -- `trace_from=<dll>!<interface>::
      <method>` and a `call` event category -- which is the next step
      here, not another stack capture: the stack already names the
-     layer, and what is missing is the sequence. Still unexplained beside it, and to be measured on Windows
+     layer, and what is missing is the sequence.
+     Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
      PAGE_READWRITE) against 685 that succeed -- gala's own loader
