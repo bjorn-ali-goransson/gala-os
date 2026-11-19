@@ -2,7 +2,8 @@
 //! `stack_at=<service>[:<n>]` logs the calling thread's user stack the
 //! first `n` times a process reaches that system call, and
 //! `stack_from=<text>` keeps only the calls a module whose name contains
-//! `text` is on the stack of.
+//! `text` is on the stack of. `stack_words=<n>` reads further up the
+//! stack than the default, for a service whose own frame is large.
 //!
 //! What it answers: a program stops and nothing gala owns records a gap,
 //! because the decision was made inside a DLL whose source we do not
@@ -34,7 +35,8 @@
 //!
 //! Scope and cost. Off unless `stack_at=` is given, and then one relaxed
 //! load on the system-call path (`armed`); a capture reads at most
-//! [`SCAN_WORDS`] words of the caller's stack and allocates nothing.
+//! [`SCAN_WORDS`] words of the caller's stack, or what `stack_words=`
+//! asks for up to [`MAX_SCAN_WORDS`], and allocates nothing.
 //! With `stack_from=` the stack is read before the count is claimed, so
 //! a passed-over call costs that read -- the service is already the one
 //! named, and it buys the trigger the program's own call path. Which
@@ -54,10 +56,19 @@ use super::platform::{self, UserRegs};
 use super::process::Process;
 use super::syscalls::Call;
 
-/// Words of the caller's stack a capture reads (1 KiB, as a crash
-/// report's deep stack): enough for several frames of a Windows DLL,
-/// and bounded because this runs on a kernel stack.
+/// Words of the caller's stack a capture reads unless `stack_words=`
+/// says otherwise (1 KiB, as a crash report's deep stack): enough for
+/// several frames of a Windows DLL.
 const SCAN_WORDS: usize = 128;
+
+/// The most `stack_words=` may ask for: 4 KiB of a 64 KiB kernel stack
+/// (`arch::context::STACK_PAGES`), read at the system-call boundary
+/// where the kernel's own stack is still shallow. A deeper scan is for
+/// the service whose own frame hides the caller: user32's MessageBoxW
+/// keeps about a kilobyte of locals, which puts the program's frames
+/// past [`SCAN_WORDS`], and a program that wraps its message boxes puts
+/// them further again.
+const MAX_SCAN_WORDS: usize = 512;
 
 /// Captures when `stack_at=` gives no count.
 const DEFAULT_CAPTURES: u32 = 4;
@@ -86,6 +97,8 @@ static FILTERED: AtomicBool = AtomicBool::new(false);
 /// Captures asked for, and how many are left.
 static ASKED: AtomicU32 = AtomicU32::new(0);
 static LEFT: AtomicU32 = AtomicU32::new(0);
+/// Words of the caller's stack a capture reads (`stack_words=`).
+static WORDS: AtomicU32 = AtomicU32::new(SCAN_WORDS as u32);
 /// Calls of the service that `stack_from=` passed over.
 static PASSED: AtomicU32 = AtomicU32::new(0);
 /// Whether the line saying the count is spent has been logged.
@@ -159,6 +172,32 @@ pub fn only_from(text: &str) {
     );
 }
 
+/// `<n>` as a word count, or None when it is not one from 1 to
+/// [`MAX_SCAN_WORDS`] (a depth that silently stayed the default would
+/// be read as the one that was asked for).
+fn parse_words(text: &str) -> Option<usize> {
+    text.parse::<usize>().ok().filter(|n| (1..=MAX_SCAN_WORDS).contains(n))
+}
+
+/// Sets how far up the caller's stack a capture reads (a `stack_words=`
+/// value). Ignored without `stack_at=`, as `stack_from=` is: a depth
+/// alone captures nothing, and saying so is more use than a silent
+/// setting.
+pub fn scan_words(text: &str) {
+    let Some(n) = parse_words(text) else {
+        warn!(
+            "stack: stack_words={text} is not a number from 1 to {MAX_SCAN_WORDS}:              the default {SCAN_WORDS} words stand"
+        );
+        return;
+    };
+    if !armed() {
+        warn!("stack: stack_words={text} without stack_at=<service>: nothing to capture");
+        return;
+    }
+    WORDS.store(n as u32, Ordering::Relaxed);
+    info!("stack: {n} words of each caller's stack are read (stack_words=)");
+}
+
 /// Whether a capture is armed. The system-call path asks this first, so
 /// the option costs one relaxed load when it is not given.
 #[inline]
@@ -219,8 +258,9 @@ pub(super) fn on_call(call: &Call<'_>, name: &str) {
         return;
     }
     let regs = call.frame.return_regs();
-    let mut bytes = [0u8; SCAN_WORDS * 8];
-    let read = read_stack(&call.process, regs.sp(), &mut bytes);
+    let mut bytes = [0u8; MAX_SCAN_WORDS * 8];
+    let words = (WORDS.load(Ordering::Relaxed) as usize).clamp(1, MAX_SCAN_WORDS);
+    let read = read_stack(&call.process, regs.sp(), &mut bytes[..words * 8]);
     // The filter decides before the count is claimed, so the calls it
     // passes over cannot spend the captures the wanted one needs.
     if !from_wanted(&call.process, regs.ip(), &bytes[..read]) {
@@ -345,7 +385,10 @@ fn capture(process: &Process, regs: &UserRegs, stack: &[u8], sp: u64, name: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_CAPTURES, MAX_CAPTURES, NAME_LEN, contains_ignore_case, parse};
+    use super::{
+        DEFAULT_CAPTURES, MAX_CAPTURES, MAX_SCAN_WORDS, NAME_LEN, contains_ignore_case, parse,
+        parse_words,
+    };
 
     #[test]
     fn parses_a_service_and_a_count() {
@@ -366,6 +409,25 @@ mod tests {
         assert_eq!(parse(":4"), None);
         let long = "N".repeat(NAME_LEN + 1);
         assert_eq!(parse(&long), None);
+    }
+
+    #[test]
+    fn parses_a_word_count() {
+        assert_eq!(parse_words("256"), Some(256));
+        assert_eq!(parse_words("1"), Some(1));
+        assert_eq!(parse_words(&MAX_SCAN_WORDS.to_string()), Some(MAX_SCAN_WORDS));
+    }
+
+    #[test]
+    fn refuses_a_word_count_that_is_not_one() {
+        // Out of range is refused rather than cut to the limit: a scan
+        // that quietly became a different depth would be read as the
+        // depth that was asked for.
+        assert_eq!(parse_words(&(MAX_SCAN_WORDS + 1).to_string()), None);
+        assert_eq!(parse_words("0"), None);
+        assert_eq!(parse_words(""), None);
+        assert_eq!(parse_words("deep"), None);
+        assert_eq!(parse_words("-8"), None);
     }
 
     #[test]

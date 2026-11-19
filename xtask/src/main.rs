@@ -8684,6 +8684,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("stack_at_test", "kernel32.dll", "Windows/System32"),
     ("stack_at_from_test", "ntdll.dll", "Windows/System32"),
     ("stack_at_from_test", "kernel32.dll", "Windows/System32"),
+    ("stack_at_words_test", "ntdll.dll", "Windows/System32"),
+    ("stack_at_words_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_env_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_env_test", "kernel32.dll", "Windows/System32"),
     ("prng_test", "ntdll.dll", "Windows/System32"),
@@ -18554,6 +18556,24 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "capture 2 of 2",
             "the 2 captures asked for are spent (3 calls so far did not reach stack_from=kernel32)",
             "stack: NtWriteFile: 2 captures of the 2 asked for, 3 calls passed over by stack_from=kernel32",
+        ],
+    },
+    Scenario {
+        // How far up the stack a capture reads (`stack_words=`): the
+        // default 128 words stop inside a service that keeps a large
+        // frame of its own (user32's MessageBoxW puts Word's frames at
+        // about 148), so the depth is a knob. The capture's closing
+        // line counts the words it read, which is what says the option
+        // took effect rather than the default.
+        name: "stack_at_words_test",
+        cmdline: "qemu_exit run=stack_at_test.exe stack_at=NtWriteFile:1 stack_words=400 events_match=stack_at_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "stack_at_test: ok",
+            "exited with status 0x00000000",
+            "stack: 400 words of each caller's stack are read (stack_words=)",
+            "stack: NtWriteFile from stack_at_test.exe",
+            "of the 400 stack words read from",
         ],
     },
     Scenario {

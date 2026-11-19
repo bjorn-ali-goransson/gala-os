@@ -2154,12 +2154,23 @@ need gala's.
      WINWORD\12`, the absent `Word\Security` policy keys, and the two
      writes. So Word sets its whole drawing apparatus up, gets a brush
      back, and gives up without drawing with it.
-     Naming the code that decides needs the frames above MessageBoxW.
-     `stack_at=NtWriteFile stack_from=user32` captures the box, but
-     MessageBoxW's own kilobyte of locals pushes Word's callers past
-     SCAN_WORDS (128 words), so the capture stops in WWINTL/WWLIB:
-     `stack_words=<n>` in `kernel/src/nt/stack_at.rs` is the next
-     step. Still unexplained beside it, and to be measured on Windows
+     The code that decides sits in Office's shared layer, not in Word
+     alone. `stack_at=NtWriteFile stack_from=user32` captures the box,
+     and `stack_words=400` (OBSERVABILITY "Stack captures") reads past
+     MessageBoxW's own kilobyte of locals, which the default 128 words
+     stop inside. Both writes capture the same chain: above user32 at
+     [rsp+0x090] the words pointing into an image are WWLIB.DLL, then
+     MSO.DLL+0xbb0450, Mso30win32client.dll+0x8646f3,
+     Mso40UIwin32client.dll+0x1b8170 and Mso20win32client.dll+0x8fb560,
+     with WINWORD.EXE's own base only at [rsp+0xa08]. The scan is not
+     an unwind, so some of those words are data rather than return
+     addresses (the bare `Mso40UIwin32client.dll+0x0` is a module
+     base), but the layer is unambiguous: Word hands the failure to
+     MSO's UI client DLLs and they raise the box. Which gap they are
+     reacting to is still open -- no system call separates
+     CreateSolidColorBrush from the `Options\Debug` read -- so the next
+     step is a capture armed further back, on what MSO calls before it
+     decides. Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
      PAGE_READWRITE) against 685 that succeed -- gala's own loader

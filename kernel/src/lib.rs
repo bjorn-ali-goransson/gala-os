@@ -389,6 +389,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("stack_from") {
         nt::stack_at::only_from(text);
     }
+    // `stack_words=<n>`: how far up the caller's stack a capture reads,
+    // for a service whose own frame hides the caller (nt::stack_at).
+    if let Some(text) = cmdline.value("stack_words") {
+        nt::stack_at::scan_words(text);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }

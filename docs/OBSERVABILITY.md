@@ -38,7 +38,7 @@ rather than free text.
 | Hang watchdog | `kernel/src/flight.rs` | `watchdog:` lines |
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
-| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`; `stack:` lines |
+| Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -938,11 +938,12 @@ the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
   helper's DLL or function not found): `delay load of DLL!function` (or
   `ordinal N`), from the DelayLoadInfo its first parameter points to.
 
-### Stack captures (`stack_at=`, `stack_from=`)
+### Stack captures (`stack_at=`, `stack_from=`, `stack_words=`)
 
 `stack_at=<service>[:<n>]` logs the calling thread's user stack the first
 `n` times a process reaches that system call, and `stack_from=<module>`
-keeps only the calls a module of that name is on the stack of (`n`
+keeps only the calls a module of that name is on the stack of, while
+`stack_words=<n>` says how far up the stack to read (`n`
 default 4, at most 512; `kernel/src/nt/stack_at.rs`, scenarios
 `stack_at_test` and `stack_at_from_test`). It answers what the other
 facilities leave open: the event stream says which calls a program made
@@ -972,6 +973,15 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   without spending a capture. The text is part of a module's name, in
   either case; without `stack_at=` there is nothing to filter and the
   option says so.
+- **`stack_words=<n>` reaches past the service's own frame.** The
+  default 128 words are several frames of a Windows DLL, but a service
+  that keeps a large frame of its own buries the caller below them:
+  user32's `MessageBoxW` holds about a kilobyte of locals, which puts
+  the program's frames at about 148 words, past the default, so the
+  capture stops in the DLL that called it. `stack_words=400` reads
+  further up, to at most 512 words (4 KiB of a 64 KiB kernel stack).
+  A number out of that range is refused rather than cut to it, and
+  without `stack_at=` there is nothing to read and the option says so.
 - **Scanned, not unwound.** Every word of the stack that falls inside a
   loaded image is named `<module>+<offset>`, dead values from earlier
   frames with it, so a line is evidence rather than proof. The real
@@ -996,15 +1006,16 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
   service nobody called, and that difference is the next thing to type.
 - **Cost**: off unless the option is given, and then one relaxed load on
   the system-call path. A capture reads at most 128 words (1 KiB) of the
-  caller's stack, a page's part at a time, and allocates nothing. With
+  caller's stack, or what `stack_words=` asks for up to 512 words
+  (4 KiB), a page's part at a time, and allocates nothing. With
   `stack_from=` the stack is read before the count is claimed, so a
   passed-over call costs that read -- it is already a call to the named
   service, and the read is what buys the trigger its aim.
 - **Limits**: the capture is at the system-call boundary, which in a
   WOW64 process is the 64-bit thunk, so a 32-bit program's own frames
-  are above what is scanned and are not placed by this yet; and 128
-  words reach several frames of a Windows DLL, not an arbitrarily deep
-  stack.
+  are above what is scanned and are not placed by this yet; and the
+  scan is bounded (512 words at the most, `stack_words=`) because it
+  runs on a kernel stack, so an arbitrarily deep stack is not reached.
 
 ### Guest files (`dump=`)
 
