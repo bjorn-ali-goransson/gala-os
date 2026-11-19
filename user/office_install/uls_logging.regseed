@@ -1,0 +1,15 @@
+; Office's own verbose logging, the switch Microsoft's own
+; troubleshooting guide asks for ("Enable enterprise logging for
+; Microsoft 365 Apps"): EnableLogging under the user's
+; Office\16.0\Common\Logging, which Word reads on startup, and the
+; Click-to-Run override's LogLevel and PipelineLogging. All three keys
+; are in office_word's ledger as absent. The logs land in %TEMP% as
+; MachineName-Date-time.log, which is why the scenario dumps the user's
+; Temp. Loaded after registry.seed (module string `registry`).
+
+[\Registry\User\S-1-5-21-1000000001-1000000002-1000000003-1001\Software\Microsoft\Office\16.0\Common\Logging]
+"EnableLogging"=dword:1
+
+[\Registry\Machine\SOFTWARE\Microsoft\ClickToRun\OverRide]
+"LogLevel"=dword:3
+"PipelineLogging"=dword:1

@@ -10649,6 +10649,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_word", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("office_word", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("office_word", "user/mesa/lavapipe.regseed", "registry"),
+    ("office_word", "user/office_install/uls_logging.regseed", "registry"),
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
@@ -19172,6 +19173,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
                   dump=C:/Users/Public,C:/Windows/Temp,\
+                  C:/Users/gala/AppData/Local/Temp,\
                   C:/gala/winword_d3d11.log,C:/gala/winword_dxgi.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[

@@ -2368,6 +2368,53 @@ need gala's.
      warning in the file (external memory features unsupported), and
      `winword_dxgi.log` holds only the monitor-metadata errors named
      above.
+     Word can be asked to log for itself, and what it logs says the last
+     thing it does over the Click-to-Run channel is licensing, and that
+     licensing is not what stops it. Microsoft's own public switches
+     seed it (`user/office_install/uls_logging.regseed`: `EnableLogging`
+     under the user's `Office\16.0\Common\Logging`, `LogLevel` and
+     `PipelineLogging` under `ClickToRun\OverRide`), and the scenario
+     dumps the Temp directories they write into, which takes the dump
+     from 13 guest files to 16. Two of the new files are ULS logs of
+     OfficeClickToRun's own and not Word's -- with EnableLogging set
+     Word still writes none, so this instrument gives the service's view
+     and Word's Click-to-Run client's, not Word's own -- and the third
+     is that client's log, which ends on `ProductReleaseId =
+     O365ProPlusRetail`, `HrGetDeviceBasedLicensing:
+     deviceBasedLicensing for o365proplusretail=0` and a
+     `SharedComputerLicensing` with an empty value. That is what a
+     retail product with no device-based licensing answers on Windows
+     too, and the service's matching
+     `ClickToRunData::GetConfigurationSetting - Failed to get value for
+     o365proplusretail.devicebasedlicensing` is the same non-answer from
+     the other end. Word asks, is answered as it would be, and goes on;
+     the identity and telemetry activities that fail beside it
+     (`Office.Identity.ConfigService` five times,
+     `RequestMsaDeviceToken` with REGDB_E_CLASSNOTREG) are the service's
+     own and want a network.
+     The ledger's largest row is Word's own impatience and not the
+     cause. The 86 refusals of `rpcrt4.dll!no server at
+     pipe(LRPC-C2RClientAPI_Server_System16)` are Word reaching for the
+     Click-to-Run service before it has registered its endpoint: in the
+     traced run Word tries 117 times, is refused 116 of them
+     (0xC0000034) from 11940.7 ms, connects at 56709.3 ms on its main
+     thread -- and raises the same box with the connection in hand. In
+     the untraced run the service registers its interface at 32782 ms,
+     after Word has given up at 30774 ms. gala's SCM does start
+     `ClickToRunSvc` on demand and it reaches RUNNING; that the service
+     needs 24 s to get from started to registered is a divergence of its
+     own to measure, and not this failure.
+     Nothing in the run throws: the process dispatches no exception at
+     all (not one `exception` event for pid 12), so what Word gives up
+     on is a value it was handed, as the window above says, and not a
+     status and not a throw. Of the calls in that window the ones gala
+     answers are the four activation-context functions MSO reaches there
+     -- QueryActCtxW, ActivateActCtx, FindActCtxSectionStringW,
+     DeactivateActCtx -- and what they answer is content, which the
+     ledger does not see. Next, in that order: a test program that asks
+     those four what Windows answers for an Office-style manifest
+     (`user/actctx_test`), and then the same questions put to gala from
+     Word's own context.
      Who raises the box is measured rather than inferred, by the
      facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
      stack_from=user32 stack_words=400` catches gala's MessageBoxW
