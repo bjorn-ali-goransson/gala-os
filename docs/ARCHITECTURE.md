@@ -7508,9 +7508,22 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   flushed. The write IOCTLs need write access to the handle. Limits: MBR
   tables are neither read (an MBR disk is RAW) nor written
   (STATUS_NOT_SUPPORTED); the backup is written but not read when the
-  primary is damaged; no partition devices yet. Test: `partition_test`
-  (as SYSTEM, an empty 64 MiB disk; xtask reads the table back with its
-  own GPT reader).
+  primary is damaged. Test: `partition_test` (as SYSTEM, an empty 64 MiB
+  disk; xtask reads the table back with its own GPT reader).
+- **Partition devices**: each GPT partition is a disk device of its own,
+  `\Device\Harddisk0\Partition<N>` in table order (a `Range`: its
+  first sector and length; DR0's is the whole disk, number 0), named at
+  boot and named again after each table written (the old ones unlinked;
+  each logged). An open reads and writes at the partition's offsets,
+  nothing past its end (STATUS_INVALID_PARAMETER);
+  IOCTL_DISK_GET_LENGTH_INFO is its length, the geometry the disk's,
+  IOCTL_DISK_GET_PARTITION_INFO_EX its layout entry (the whole disk: its
+  style, offset 0, its size, number 0). Win32 reaches them through
+  `\??\GLOBALROOT` (a link to the namespace's root:
+  `\\?\GLOBALROOT\Device\Harddisk0\Partition2`). Limits: Windows'
+  partitions are `\Device\HarddiskVolume<N>` with these names as links,
+  and an open handle keeps the range it was opened with across a new
+  table.
 - TODO: device interrupts, more than one request in flight.
 
 ### C: kept on the disk

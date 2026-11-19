@@ -25,14 +25,29 @@ pub const IOCTL_DISK_GET_DRIVE_LAYOUT_EX: u32 = 0x0007_0050;
 pub const IOCTL_DISK_SET_DRIVE_LAYOUT_EX: u32 = 0x0007_c054;
 pub const IOCTL_DISK_CREATE_DISK: u32 = 0x0007_c058;
 pub const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
+pub const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
 /// MEDIA_TYPE FixedMedia.
 const FIXED_MEDIA: u32 = 12;
 /// The geometry Windows reports for disks (LBA translation).
 const HEADS: u64 = 255;
 const SECTORS_PER_TRACK: u64 = 63;
 
-/// An open of the disk.
+/// What a disk device covers: the whole disk (number 0) or partition
+/// `number`'s sectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Range {
+    pub first: u64,
+    pub sectors: u64,
+    pub number: u32,
+}
+
+/// A sector's bytes, for offsets.
+pub const SECTOR_BYTES: u64 = SECTOR as u64;
+
+/// An open of the disk or of a partition.
 pub struct DiskFile {
+    /// What it reads and writes (offsets are relative to `range.first`).
+    pub range: Range,
     /// The file pointer of a synchronous handle.
     pub position: IrqMutex<u64>,
     pub synchronous: bool,
@@ -41,8 +56,9 @@ pub struct DiskFile {
 }
 
 impl DiskFile {
-    pub fn new(synchronous: bool) -> Self {
+    pub fn new(synchronous: bool, range: Range) -> Self {
         Self {
+            range,
             position: IrqMutex::named("disk.position", 0),
             synchronous,
             dispatcher: Dispatcher::new(1),
@@ -93,15 +109,69 @@ pub fn init() -> Result<(), NtStatus> {
         return Ok(());
     }
     namespace::create_directory(&wide("\\Device\\Harddisk0")?)?;
-    let device =
-        KObject::with_permanence(ObjectBody::DiskDevice, true).map_err(|_| NtStatus::NO_MEMORY)?;
+    let whole = Range { first: 0, sectors: platform::disk_sectors(), number: 0 };
+    let device = KObject::with_permanence(ObjectBody::DiskDevice(whole), true)
+        .map_err(|_| NtStatus::NO_MEMORY)?;
     *device.security.lock() = Some(admin_only()?);
     namespace::create(None, &wide(DEVICE)?, device, false, false)?;
     for name in ["\\Device\\Harddisk0\\Partition0", "\\??\\PhysicalDrive0"] {
         let link = namespace::new_symbolic_link(&wide(DEVICE)?)?;
         namespace::create(None, &wide(name)?, link, false, false)?;
     }
+    publish_partitions(platform::disk_sectors())
+}
+
+/// The partition devices named now (`publish_partitions`).
+static PARTITIONS: IrqMutex<Vec<super::object::ObjectRef>> =
+    IrqMutex::named("disk.partitions", Vec::new());
+
+/// Names a device for each partition of the disk's GPT,
+/// `\Device\Harddisk0\Partition1`... in table order, after removing the
+/// ones named before: at boot and after each table written. Each is
+/// logged.
+fn publish_partitions(sectors: u64) -> Result<(), NtStatus> {
+    let gpt = read_gpt(sectors)?;
+    let old = core::mem::take(&mut *PARTITIONS.lock());
+    for object in &old {
+        namespace::unlink(object);
+    }
+    let Some(gpt) = gpt else { return Ok(()) };
+    let mut named = Vec::new();
+    named.try_reserve_exact(gpt.partitions.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+    for (i, p) in gpt.partitions.iter().enumerate() {
+        let number = i as u32 + 1;
+        let range = Range { first: p.first, sectors: p.last - p.first + 1, number };
+        let device = KObject::with_permanence(ObjectBody::DiskDevice(range), true)
+            .map_err(|_| NtStatus::NO_MEMORY)?;
+        *device.security.lock() = Some(admin_only()?);
+        let mut buf = [0u8; 40];
+        let name = partition_name(&mut buf, number);
+        namespace::create(None, &wide(name)?, device.clone(), false, false)?;
+        named.try_push(device).map_err(|_| NtStatus::NO_MEMORY)?;
+        crate::info!("disk: {name}: LBA {} for {} sectors", range.first, range.sectors);
+    }
+    *PARTITIONS.lock() = named;
     Ok(())
+}
+
+/// `\Device\Harddisk0\Partition<number>`, written into `buf`.
+fn partition_name(buf: &mut [u8; 40], number: u32) -> &str {
+    let prefix = b"\\Device\\Harddisk0\\Partition";
+    buf[..prefix.len()].copy_from_slice(prefix);
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (number, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        buf[prefix.len() + i] = digits[len - 1 - i];
+    }
+    core::str::from_utf8(&buf[..prefix.len() + len]).unwrap_or("")
 }
 
 pub fn status(e: DiskError) -> NtStatus {
@@ -204,6 +274,7 @@ pub fn is_layout(code: u32) -> bool {
             | IOCTL_DISK_SET_DRIVE_LAYOUT_EX
             | IOCTL_DISK_CREATE_DISK
             | IOCTL_DISK_UPDATE_PROPERTIES
+            | IOCTL_DISK_GET_PARTITION_INFO_EX
     )
 }
 
@@ -224,14 +295,18 @@ fn write_gpt(gpt: &super::gpt::Gpt, sectors: u64) -> Result<(), NtStatus> {
 /// PARTITION_STYLE_RAW); CREATE_DISK writes an empty GPT; SET_DRIVE_LAYOUT_EX
 /// writes the table it is given; UPDATE_PROPERTIES has nothing to re-read
 /// (each GET reads the disk). Each change is logged.
-pub fn layout(code: u32, input: &[u8]) -> Result<Vec<u8>, NtStatus> {
+pub fn layout(code: u32, input: &[u8], range: Range) -> Result<Vec<u8>, NtStatus> {
     let sectors = platform::disk_sectors();
     match code {
         IOCTL_DISK_GET_DRIVE_LAYOUT_EX => super::gpt::layout(read_gpt(sectors)?.as_ref(), sectors),
+        IOCTL_DISK_GET_PARTITION_INFO_EX => {
+            super::gpt::partition_info(read_gpt(sectors)?.as_ref(), sectors, range.number)
+        }
         IOCTL_DISK_CREATE_DISK => {
             let gpt = super::gpt::create(input, sectors)?;
             write_gpt(&gpt, sectors)?;
             crate::info!("disk: an empty GPT written ({} entries)", gpt.entries);
+            publish_partitions(sectors)?;
             Ok(Vec::new())
         }
         IOCTL_DISK_SET_DRIVE_LAYOUT_EX => {
@@ -241,6 +316,7 @@ pub fn layout(code: u32, input: &[u8]) -> Result<Vec<u8>, NtStatus> {
             for (i, p) in gpt.partitions.iter().enumerate() {
                 crate::info!("disk: partition {}: LBA {}..={}", i + 1, p.first, p.last);
             }
+            publish_partitions(sectors)?;
             Ok(Vec::new())
         }
         _ => Ok(Vec::new()),

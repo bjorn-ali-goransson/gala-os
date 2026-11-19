@@ -17,6 +17,10 @@
 //!   back numbers them 1 and 2 with what was given.
 //! - Sector 0 is the protective MBR (one partition of type 0xEE, 0x55AA),
 //!   sector 1 starts "EFI PART".
+//! - Partition 2 opens as `\\?\GLOBALROOT\Device\Harddisk0\Partition2`:
+//!   its length (32 MiB), IOCTL_DISK_GET_PARTITION_INFO_EX (its entry,
+//!   numbered 2); its first sector written through it is the disk's sector
+//!   at 17 MiB (read back through PhysicalDrive0; xtask checks it too).
 //!
 //! Before any of it, the disk must be that scratch disk (64 MiB, no
 //! partition table): otherwise the program writes nothing and exits with
@@ -84,6 +88,7 @@ const IOCTL_DISK_GET_DRIVE_LAYOUT_EX: u32 = 0x0007_0050;
 const IOCTL_DISK_SET_DRIVE_LAYOUT_EX: u32 = 0x0007_c054;
 const IOCTL_DISK_CREATE_DISK: u32 = 0x0007_c058;
 const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
+const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
 
 const PARTITION_STYLE_GPT: u32 = 1;
 const PARTITION_STYLE_RAW: u32 = 2;
@@ -282,6 +287,28 @@ fn check_partition(
 }
 
 const REFUSED: u32 = 0xd15c;
+/// What the program writes at the start of partition 2 (xtask checks it).
+const PART2_TEXT: &[u8] = b"written by partition_test to partition 2";
+
+/// CreateFileW of `name` for reading and writing, shared.
+fn open(name: &str) -> Handle {
+    let mut w = [0u16; 64];
+    for (d, b) in w.iter_mut().zip(name.bytes()) {
+        *d = u16::from(b);
+    }
+    // SAFETY: a NUL-terminated name.
+    unsafe {
+        CreateFileW(
+            w.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            core::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            core::ptr::null_mut(),
+        )
+    }
+}
 
 fn run(c: &mut Checks) -> Result<(), u32> {
     let path: [u16; 19] = {
@@ -381,8 +408,34 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     c.eq(sector[511].into(), 0xaa)?;
     c.ok(read_sector(disk, 1, &mut sector), last_error())?;
     c.same(&sector[..8], b"EFI PART")?;
-    // SAFETY: an open handle.
-    unsafe { CloseHandle(disk) };
+
+    // Partition 2 as its own device: offsets are the partition's.
+    let part = open(r"\\?\GLOBALROOT\Device\Harddisk0\Partition2");
+    c.ok(part as isize != -1, last_error())?;
+    c.ok(control(part, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut len).is_ok(), last_error())?;
+    c.eq(u64_at(&len, 0), 32 * MIB)?;
+    let mut info = [0u8; PARTITION];
+    let n = control(part, IOCTL_DISK_GET_PARTITION_INFO_EX, &[], &mut info);
+    c.ok(n.is_ok(), n.err().unwrap_or(0))?;
+    c.eq(u32_at(&info, 0).into(), PARTITION_STYLE_GPT.into())?;
+    c.eq(u64_at(&info, 8), 17 * MIB)?;
+    c.eq(u64_at(&info, 16), 32 * MIB)?;
+    c.eq(u32_at(&info, 24).into(), 2)?;
+    c.same(&info[32..48], &DATA_TYPE)?;
+    c.same(&info[48..64], &DATA_ID)?;
+    let mut text = [0u8; 512];
+    text[..PART2_TEXT.len()].copy_from_slice(PART2_TEXT);
+    let mut n = 0;
+    // SAFETY: valid buffers.
+    let wrote = unsafe { WriteFile(part, text.as_ptr(), 512, &mut n, core::ptr::null_mut()) };
+    c.ok(wrote != 0 && n == 512, last_error())?;
+    c.ok(read_sector(disk, 17 * MIB / SECTOR, &mut sector), last_error())?;
+    c.same(&sector[..PART2_TEXT.len()], PART2_TEXT)?;
+    // SAFETY: open handles.
+    unsafe {
+        CloseHandle(part);
+        CloseHandle(disk);
+    }
     Ok(())
 }
 
