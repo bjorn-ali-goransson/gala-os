@@ -7544,6 +7544,42 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   table.
 - TODO: device interrupts, more than one request in flight.
 
+### Installing gala onto a disk
+
+`gala setup <disk> --erase [--from <release.tar>]` (user/gala's module
+`setup`, over the `setup` library; ROADMAP IN step 4) installs gala onto
+`\\.\PhysicalDrive<disk>`, run as an administrator:
+
+- It reads a release tar (by default `C:\gala\release.tar`): the
+  release tree `cargo xtask release-tree` makes (kernel, system DLLs,
+  Limine, the sealed config with an empty command line, the manifest),
+  as ustar (`setup::tar`: checksums checked, regular files).
+- Through Windows' disk IOCTLs ("Disk"): IOCTL_DISK_CREATE_DISK (GPT, a
+  new disk GUID, 128 entries), IOCTL_DISK_SET_DRIVE_LAYOUT_EX with an EFI
+  system partition (256 MiB at 1 MiB) and gala's C: partition over the
+  rest of the usable range (whole MiB; at least 64 MiB, else refused
+  with the size needed), IOCTL_DISK_UPDATE_PROPERTIES.
+- The EFI system partition, opened as
+  `\\?\GLOBALROOT\Device\Harddisk<disk>\Partition1`, gets a FAT32
+  volume of the release's files (`setup::fat32`: Microsoft's FAT32
+  geometry, contiguous clusters, long names, a fixed date: the same
+  release makes the same volume), then both are flushed.
+- C: is not written: the first boot from the disk formats it. A machine
+  whose disk has gala's C: partition keeps C: without `persist` on its
+  command line (`persist::installed`, logged), as a release's is empty.
+- Without `--erase` nothing is written. Each step is printed (`gala
+  setup: disk partitioned: ...`, `EFI system partition written: FAT32,
+  N files, M of T MiB`, `done: ...`). Exit codes: 0, 1 usage, 4 failed
+  (what failed printed), 6 needs an administrator.
+- Test: `install_to_disk` (the first boot, from its own CD image as
+  SYSTEM, runs it on an empty 512 MiB disk with xtask's release tar,
+  `INSTALL_RELEASE_TAR`; the last boot is from the disk alone, ends on
+  the desktop with C: in partition 2, and the start menu answers).
+  `cargo test -p setup` reads the FAT32 back with its own reader and with
+  mtools' `mtype` where the host has it.
+- Limits: the whole disk only (no free-space install), no graphical
+  installer yet, only `install_to_disk`'s image carries the release tar.
+
 ### C: kept on the disk
 
 With `persist`, the disk keeps what programs change on C: (the whole

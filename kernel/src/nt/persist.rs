@@ -271,6 +271,26 @@ fn registry_due() -> bool {
                 >= REGISTRY_FLUSH_NS)
 }
 
+/// Whether the disk is an installed gala's (its GPT has a partition of
+/// gala's C: type): C: is kept then without `persist` on the command line
+/// (a release's is empty). Logged when so.
+pub fn installed() -> bool {
+    let sectors = platform::disk_sectors();
+    if sectors == 0 {
+        return false;
+    }
+    let read =
+        |lba: u64, buf: &mut [u8]| platform::disk_read(lba, buf).map_err(super::disk::status);
+    let yes = super::gpt::read(sectors, read)
+        .ok()
+        .flatten()
+        .is_some_and(|g| g.partitions.iter().any(|p| p.kind == super::gpt::GALA_C_TYPE));
+    if yes {
+        info!("persist: the disk has gala's C: partition (an installed machine): C: is kept");
+    }
+    yes
+}
+
 /// Where C: is kept (ROADMAP IN step 2), by what the disk holds: on a GPT
 /// disk, its partition of gala's C: type (`gpt::GALA_C_TYPE`; none: C:
 /// is not kept); on a disk with another partition table (an MBR's boot
