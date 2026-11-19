@@ -27,6 +27,14 @@
 //!   device name DisplayConfigGetDeviceInfo gives for that source, at the
 //!   same depth and frequency, and the target's active size is the same
 //!   size again while the scaling is identity.
+//! - EnumDisplayDevicesW lists the adapter the source names, with a
+//!   human string, an id and the Video class key, and the monitor under it
+//!   as a second level: named after the adapter, active and attached, with
+//!   a string, an id under the monitor class and that class's key -- and
+//!   with EDD_GET_DEVICE_INTERFACE_NAME the device-interface path the
+//!   target's name gave, the same string. A second monitor and a name it
+//!   does not have are both no device, and a `cb` with room for nothing
+//!   still answers TRUE and writes nothing.
 //! - The target's name carries the same output technology as the path and
 //!   a device-interface path under GUID_DEVINTERFACE_MONITOR; the
 //!   adapter's is a device path as well. A wrong structure size, an
@@ -68,6 +76,7 @@ unsafe extern "system" {
     ) -> i32;
     fn DisplayConfigGetDeviceInfo(packet: *mut u8) -> i32;
     fn EnumDisplaySettingsW(device: *const u16, mode: u32, devmode: *mut u8) -> i32;
+    fn EnumDisplayDevicesW(device: *const u16, index: u32, info: *mut u8, flags: u32) -> i32;
 }
 
 const QDC_ALL_PATHS: u32 = 1;
@@ -77,6 +86,16 @@ const INVALID_PARAMETER: i32 = 87;
 const INSUFFICIENT_BUFFER: i32 = 122;
 const GEN_FAILURE: i32 = 31;
 const ENUM_CURRENT_SETTINGS: u32 = 0xffff_ffff;
+const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+
+/// DISPLAY_DEVICEW: cb, DeviceName[32], DeviceString[128], StateFlags,
+/// DeviceID[128], DeviceKey[128].
+const DISPLAY_DEVICE: usize = 840;
+const DD_NAME: usize = 4;
+const DD_STRING: usize = 68;
+const DD_FLAGS: usize = 324;
+const DD_ID: usize = 328;
+const DD_KEY: usize = 584;
 
 /// A path record is 72 bytes, a mode record 64; the room here is for 64
 /// paths and 128 modes, which is more than a machine with sixteen screens
@@ -230,6 +249,42 @@ fn wide_len(w: &[u8]) -> usize {
         i += 1;
     }
     i
+}
+
+/// Whether a wide string in bytes begins with one in u16s (to its NUL).
+fn starts_wide(w: &[u8], s: &[u16]) -> bool {
+    for (i, &c) in s.iter().enumerate() {
+        if c == 0 {
+            return true;
+        }
+        if 2 * i + 1 >= w.len() || u16::from_le_bytes([w[2 * i], w[2 * i + 1]]) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn wide_len16(s: &[u16]) -> usize {
+    let mut i = 0;
+    while i < s.len() && s[i] != 0 {
+        i += 1;
+    }
+    i
+}
+
+/// Whether two wide strings in bytes are the same string.
+fn wide_same(a: &[u8], b: &[u8]) -> bool {
+    let n = wide_len(a);
+    n == wide_len(b) && a[..2 * n] == b[..2 * n]
+}
+
+/// The wide string of ASCII text, for a call that takes a name.
+fn wide(text: &[u8]) -> [u16; 36] {
+    let mut w = [0u16; 36];
+    for (i, &c) in text.iter().enumerate() {
+        w[i] = u16::from(c);
+    }
+    w
 }
 
 fn ends_with(w: &[u8], text: &[u8]) -> bool {
@@ -477,6 +532,114 @@ fn run() -> Result<(), u32> {
     c.ret(r, 0)?;
     info_text(b"adapter device path", &adapter_packet[20..276]);
     c.ok(starts_with(&adapter_packet[20..276], br"\\?\"), 0)?;
+
+    // EnumDisplayDevicesW: the adapter the source above names, and the
+    // monitor under it -- a second level, named after the adapter -- whose
+    // id with EDD_GET_DEVICE_INTERFACE_NAME is the same device-interface
+    // path the target's name gave, which is how a program ties a GDI
+    // device to a CCD target.
+    let mut dev = [0u8; DISPLAY_DEVICE];
+    let mut found = false;
+    for i in 0..8u32 {
+        dev = [0; DISPLAY_DEVICE];
+        dev[..4].copy_from_slice(&(DISPLAY_DEVICE as u32).to_le_bytes());
+        // SAFETY: our DISPLAY_DEVICEW, whose cb says how much is there.
+        let r = unsafe { EnumDisplayDevicesW(core::ptr::null(), i, dev.as_mut_ptr(), 0) };
+        if r != 0
+            && starts_wide(&dev[DD_NAME..DD_STRING], &device)
+            && wide_len(&dev[DD_NAME..DD_STRING]) == wide_len16(&device)
+        {
+            found = true;
+            break;
+        }
+    }
+    c.ok(found, 0)?;
+    info_text(b"adapter name", &dev[DD_NAME..DD_STRING]);
+    info_text(b"adapter string", &dev[DD_STRING..DD_FLAGS]);
+    info(b"adapter state", u64::from(u32at(&dev, DD_FLAGS)));
+    info_text(b"adapter id", &dev[DD_ID..DD_KEY]);
+    info_text(b"adapter key", &dev[DD_KEY..DISPLAY_DEVICE]);
+    let state = u32at(&dev, DD_FLAGS);
+    c.ok(state & 0x1 != 0, u64::from(state))?; // ATTACHED_TO_DESKTOP
+    c.ok(wide_len(&dev[DD_STRING..DD_FLAGS]) > 0, 0)?;
+    c.ok(wide_len(&dev[DD_ID..DD_KEY]) > 0, 0)?;
+    c.ok(
+        starts_with(
+            &dev[DD_KEY..DISPLAY_DEVICE],
+            b"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Video\\",
+        ),
+        0,
+    )?;
+
+    // The monitor under it.
+    let mut adapter_name = [0u16; 32];
+    for (i, w) in adapter_name.iter_mut().enumerate() {
+        *w = u16::from_le_bytes([dev[DD_NAME + 2 * i], dev[DD_NAME + 1 + 2 * i]]);
+    }
+    let mut mon = [0u8; DISPLAY_DEVICE];
+    mon[..4].copy_from_slice(&(DISPLAY_DEVICE as u32).to_le_bytes());
+    // SAFETY: the adapter's name from above, and our DISPLAY_DEVICEW.
+    let r = unsafe { EnumDisplayDevicesW(adapter_name.as_ptr(), 0, mon.as_mut_ptr(), 0) };
+    c.ok(r != 0, 0)?;
+    info_text(b"monitor name", &mon[DD_NAME..DD_STRING]);
+    info_text(b"monitor string", &mon[DD_STRING..DD_FLAGS]);
+    info(b"monitor state", u64::from(u32at(&mon, DD_FLAGS)));
+    info_text(b"monitor id", &mon[DD_ID..DD_KEY]);
+    info_text(b"monitor key", &mon[DD_KEY..DISPLAY_DEVICE]);
+    c.ok(starts_wide(&mon[DD_NAME..DD_STRING], &adapter_name), 0)?;
+    let alen = wide_len16(&adapter_name);
+    c.ok(starts_with(&mon[DD_NAME + 2 * alen..DD_STRING], br"\Monitor"), 0)?;
+    let state = u32at(&mon, DD_FLAGS);
+    c.ok(state & 0x1 != 0, u64::from(state))?; // ACTIVE
+    c.ok(state & 0x2 != 0, u64::from(state))?; // ATTACHED
+    c.ok(wide_len(&mon[DD_STRING..DD_FLAGS]) > 0, 0)?;
+    c.ok(starts_with(&mon[DD_ID..DD_KEY], b"MONITOR\\"), 0)?;
+    c.ok(
+        starts_with(
+            &mon[DD_KEY..DISPLAY_DEVICE],
+            b"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\",
+        ),
+        0,
+    )?;
+
+    // Its device interface is the target's device path.
+    let mut iface = [0u8; DISPLAY_DEVICE];
+    iface[..4].copy_from_slice(&(DISPLAY_DEVICE as u32).to_le_bytes());
+    // SAFETY: the adapter's name, and our DISPLAY_DEVICEW.
+    let r = unsafe {
+        EnumDisplayDevicesW(
+            adapter_name.as_ptr(),
+            0,
+            iface.as_mut_ptr(),
+            EDD_GET_DEVICE_INTERFACE_NAME,
+        )
+    };
+    c.ok(r != 0, 0)?;
+    info_text(b"monitor interface", &iface[DD_ID..DD_KEY]);
+    c.ok(wide_same(&iface[DD_ID..DD_KEY], &packet[164..420]), 0)?;
+
+    // What it answers for a second monitor, a name it does not have, and a
+    // cb under the structure: no device, no device, and the fields that
+    // fit (a cb of 0 or 4 is room for none of them, and writes none).
+    let mut small = [0u8; DISPLAY_DEVICE];
+    small[..4].copy_from_slice(&(DISPLAY_DEVICE as u32).to_le_bytes());
+    // SAFETY: the adapter's name, and our DISPLAY_DEVICEW.
+    let r = unsafe { EnumDisplayDevicesW(adapter_name.as_ptr(), 1, small.as_mut_ptr(), 0) };
+    c.ok(r == 0, 0)?;
+    let absent = wide(br"\\.\DISPLAY99");
+    // SAFETY: a name of ours, and our DISPLAY_DEVICEW.
+    let r = unsafe { EnumDisplayDevicesW(absent.as_ptr(), 0, small.as_mut_ptr(), 0) };
+    c.ok(r == 0, 0)?;
+    let mut small = [0u8; DISPLAY_DEVICE];
+    // SAFETY: our DISPLAY_DEVICEW, with a cb of zero.
+    let r = unsafe { EnumDisplayDevicesW(core::ptr::null(), 0, small.as_mut_ptr(), 0) };
+    c.ok(r != 0, 0)?;
+    c.ok(small.iter().all(|&b| b == 0), 0)?;
+    small[..4].copy_from_slice(&4u32.to_le_bytes());
+    // SAFETY: our DISPLAY_DEVICEW, with room for the cb alone.
+    let r = unsafe { EnumDisplayDevicesW(core::ptr::null(), 0, small.as_mut_ptr(), 0) };
+    c.ok(r != 0, 0)?;
+    c.ok(small[4..].iter().all(|&b| b == 0), 0)?;
 
     // What it refuses: a size that is not the structure's, a target and an
     // adapter it does not have, and no packet at all.

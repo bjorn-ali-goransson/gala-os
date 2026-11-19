@@ -86,10 +86,27 @@ const VIDEO_STANDARD_OTHER: u32 = 255;
 /// GUID_DEVINTERFACE_MONITOR, and the adapter's under
 /// GUID_DEVINTERFACE_DISPLAY_ADAPTER. The instance in the monitor's path
 /// ends in its target's id, as a monitor's UID does on Windows.
-const MONITOR_NAME: &[u8] = b"gala display";
-const MONITOR_PATH: &[u8] =
+/// EnumDisplayDevicesW answers with these too (`session.rs`), so a
+/// program that reaches gala's display through GDI and through the CCD
+/// finds the same monitor.
+pub(crate) const MONITOR_NAME: &[u8] = b"gala display";
+pub(crate) const MONITOR_PATH: &[u8] =
     br"\\?\DISPLAY#GALA0001#1&gala&0&UID1#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
 const ADAPTER_PATH: &[u8] = br"\\?\ROOT#DISPLAY#0000#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}";
+
+/// The two devices as the Plug and Play tree would name them: the
+/// monitor's instance id under GUID_DEVCLASS_MONITOR (whose hardware id
+/// and instance are the ones in its device path above) and that class's
+/// key, and the adapter's instance id -- gala's display hangs off the
+/// root and not off a bus, as its device path says -- and the Video key
+/// a display adapter's settings live under. Nothing in gala's registry
+/// answers at either key yet, so a program that opens one gets the
+/// ledger's `absent key` and not a wrong answer.
+pub(crate) const MONITOR_DEVICE_ID: &[u8] =
+    br"MONITOR\GALA0001\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001";
+pub(crate) const MONITOR_CLASS_KEY: &[u8] = b"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0001";
+pub(crate) const ADAPTER_DEVICE_ID: &[u8] = br"ROOT\DISPLAY\0000";
+pub(crate) const ADAPTER_VIDEO_KEY: &[u8] = b"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Video\\{67616c61-0001-4000-8000-000000000000}\\0000";
 
 /// The screen, as every other answer in this DLL has it.
 fn size() -> (u32, u32) {

@@ -2444,29 +2444,41 @@ need gala's.
      puts the box on the screen for it. A scan is evidence and not
      proof (OBSERVABILITY "Stack captures"), but it names the DLL to
      ask about, which no other facility here does.
-     Measured beside it, and the display's remaining gaps: gala's
-     EnumDisplayDevicesW lists one adapter and no monitor under it, and
-     there is no monitor device interface for setupapi to find, which is
-     where both Word's walk above and DXVK's three warnings and two
-     errors in `winword_dxgi.log` end up. Windows answers the monitor as
-     a second level of EnumDisplayDevicesW -- name
-     `\\.\DISPLAY1\Monitor0`, string "Generic PnP Monitor",
-     ACTIVE | ATTACHED, the device instance id
-     `MONITOR\<EDID id>\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001`
-     and the Class key beside it, and with
+     Measured beside it: the display is answered further now, and one
+     call is all that is left of it. EnumDisplayDevicesW has the second
+     level Windows has -- the monitor under the adapter, name
+     `\\.\DISPLAY1\Monitor0`, ACTIVE | ATTACHED, the CCD target's
+     friendly name, a device instance id under GUID_DEVCLASS_MONITOR
+     with that class's key beside it, and with
      EDD_GET_DEVICE_INTERFACE_NAME the same device-interface path
-     DisplayConfigGetDeviceInfo gives for that target -- and it gives
-     the adapter an id and a key too, which gala
-     leaves empty. It also takes any `cb`, filling what fits (`cb` 0 and
-     4 answer TRUE and write nothing, 328 fills the names and not the
-     ids), where gala refuses a `cb` under the whole structure with
-     ERROR_INVALID_PARAMETER: a divergence of its own. Without the
-     monitor level DXVK finds "monitors not associated with any adapter"
-     and falls back; without the device interface its `getMonitorEdid`
-     fails and it uses blank display metadata, which is what a monitor
-     with no HDR metadata gives anyway. Next, test first: the monitor
-     level and the two ids in `display_test`, then setupapi's monitor
-     device interface. (gdi32's `D3DKMTEnumAdapters2` and
+     DisplayConfigGetDeviceInfo gives for that target -- and the adapter
+     has an instance id and the Video key now, and any `cb` is filled as
+     far as it reaches instead of refused (`cb` 0 and 4 answer TRUE and
+     write nothing, 328 fills the names and not the ids): measured on
+     Windows first, checked by `display_test` on both. It does not move
+     Word, and DXVK's source says why not, line by line.
+     `getMonitorEdid` does not go through the CCD at all: it wants a
+     Plug and Play device tree, enumerating GUID_DEVINTERFACE_MONITOR,
+     matching each DevicePath against the CCD target's without regard to
+     case, opening that device's registry key and reading an `EDID`
+     value. gala has no device tree, and says so once --
+     `setupapi.dll!SetupDiGetClassDevsW(no device tree)` unsupported
+     3874519903 (the interface GUID's first word) at 38.1 s -- so the
+     blank display metadata that follows is that missing EDID and
+     nothing else, and is what a monitor with no HDR metadata gives
+     anyway. The warning that reads like a gap, "Found monitors not
+     associated with any adapter", is none: DXVK takes a monitor off its
+     list only for an adapter whose Vulkan `luidIsValid` is set, and
+     gala's Vulkan driver reports no device LUID, which is what DXVK's
+     own "Adapter LUID 0: 0:10006e" says -- that number is a LUID its
+     `GetAdapterLUID` asked gala's `AllocateLocallyUniqueId` for, in the
+     branch it takes only when Vulkan has none. So the loop never runs,
+     every monitor stays on the list, and the fallback is to enumerate
+     them all, which for one monitor is the same answer; gala's CCD
+     adapter LUID is never compared with anything. Next, then:
+     setupapi's monitor device interface and an EDID written from the
+     VESA spec for gala's panel, which is what `getMonitorEdid` and
+     Word's own walk both want. (gdi32's `D3DKMTEnumAdapters2` and
      `D3DKMTQueryAdapterInfo` are not among these: GetProcAddress must
      keep answering NULL for them, which is how the Vulkan loader learns
      to skip them -- `user/gdi32/src/absent.rs`.)

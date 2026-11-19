@@ -8828,7 +8828,24 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (DEFAULT_SIZE, 1280 x 800, for a desktop nothing shows, in both
   kernels; user32 assumes the same if the call fails). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
   by the default flags), GetMonitorInfoW/A (`\\.\DISPLAY1`) and
-  GetSystemMetrics' screen metrics come from it.
+  GetSystemMetrics' screen metrics come from it. EnumDisplayDevicesW
+  answers at the two levels Windows has: the adapter (`\\.\DISPLAY1`,
+  attached to the desktop and primary, whose instance id is
+  `ROOT\DISPLAY\0000` -- gala's display hangs off the root and not off a
+  bus -- and whose key is the Video one a display adapter's settings
+  live under), and, for a caller that names that adapter, the monitor
+  under it (`\\.\DISPLAY1\Monitor0`, active and attached, named with the CCD
+  target's friendly name, with an instance id under the monitor class
+  and that class's key, or with EDD_GET_DEVICE_INTERFACE_NAME the
+  target's device-interface path instead) -- the same path `ccd.rs`
+  gives, so a program that reaches gala's display through GDI and one
+  that reaches it through the CCD find one monitor. Each call fills
+  what the caller's `cb` leaves room for and answers TRUE even when
+  that is nothing at all, rather than refusing a short structure, and
+  an adapter gala does not have is no device: measured, like the rest
+  of it, on Windows first (`display_test`). Nothing in gala's registry
+  answers at either key yet, so a program that opens one finds the
+  ledger's `absent key`.
 - **The display configuration** (`ccd.rs`, the CCD calls
   GetDisplayConfigBufferSizes, QueryDisplayConfig and
   DisplayConfigGetDeviceInfo): one adapter, one source and one target on
