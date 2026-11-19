@@ -27307,6 +27307,45 @@ const MADE_BOOT_DISKS: &[&str] = &["boot_from_disk"];
 const BOOT_DISK_SIZE: usize = 256 << 20;
 const BOOT_DISK_ESP_SECTORS: u64 = 128 << 11;
 
+/// Removes `dir` and everything under it, the owner's write permission
+/// given back first on every directory in it. `xorriso -extract` restores
+/// the permissions the ISO records, and an ISO carries no write bit on
+/// anything, so a tree extracted from one cannot have its entries
+/// unlinked -- not by `remove_dir_all`, not by `rm -rf` as its owner. A
+/// failure is reported and not swallowed: a tree left behind is a tree
+/// the next extract cannot overwrite, which is the whole of how
+/// `boot_from_disk` used to fail on its second run on a host.
+fn remove_extracted(dir: &Path) -> Result {
+    if !dir.exists() {
+        return Ok(());
+    }
+    make_writable(dir);
+    fs::remove_dir_all(dir).map_err(|e| format!("clearing {dir:?}: {e}"))
+}
+
+/// Gives the owner write permission on `path` and, for a directory,
+/// everything under it. A directory is made writable before it is read,
+/// since that is what unlinking its entries needs. Quiet: what a missed
+/// one costs is reported by whatever then fails on it.
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(path) else { return };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o200 == 0 {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200));
+    }
+    if meta.is_dir()
+        && let Ok(entries) = fs::read_dir(path)
+    {
+        for entry in entries.filter_map(|e| e.ok()) {
+            make_writable(&entry.path());
+        }
+    }
+}
+
 /// Lays out disk image `disk` as an installed gala disk (ROADMAP IN step
 /// 3): a GPT with an EFI system partition at 1 MiB (FAT32, `mformat`,
 /// holding the tree of `iso`: EFI/BOOT/BOOTX64.EFI, Limine, the kernel,
@@ -27315,7 +27354,7 @@ const BOOT_DISK_ESP_SECTORS: u64 = 128 << 11;
 /// was loaded from, so the tree works as it is on the CD.
 fn boot_disk(iso: &Path, disk: &Path) -> Result {
     let work = iso.with_extension("boot-disk");
-    let _ = fs::remove_dir_all(&work);
+    remove_extracted(&work)?;
     let tree = work.join("tree");
     fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
     run_quiet(
@@ -27325,6 +27364,10 @@ fn boot_disk(iso: &Path, disk: &Path) -> Result {
             .args(["-extract", "/"])
             .arg(&tree),
     )?;
+    // The ISO's own permissions came with its tree, and an ISO records
+    // no write bit on anything. Made writable here, the tree can be
+    // removed again -- by the next run, by a cleanup, by a person.
+    make_writable(&tree);
     let esp = work.join("esp.img");
     let esp_sectors = BOOT_DISK_ESP_SECTORS;
     run_quiet(
@@ -30785,6 +30828,36 @@ fn release_tree(release: bool, dir: &Path) -> Result {
         modules.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod extracted_tree_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A tree with no write bit anywhere -- what `xorriso -extract`
+    /// leaves, the ISO's own permissions -- is removable through
+    /// [`remove_extracted`]. A plain `remove_dir_all` of it fails for
+    /// anyone but root, which is why `boot_from_disk` failed on every
+    /// run after its first on the same host.
+    #[test]
+    fn a_read_only_tree_is_removable() {
+        let root = std::env::temp_dir().join(format!("xtask-extracted-{}", std::process::id()));
+        remove_extracted(&root).expect("clearing an earlier run's");
+        let inner = root.join("EFI").join("BOOT");
+        fs::create_dir_all(&inner).expect("staging the tree");
+        fs::write(inner.join("BOOTX64.EFI"), b"boot").expect("staging a file");
+        for path in [inner.join("BOOTX64.EFI"), inner.clone(), root.join("EFI"), root.clone()] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).expect("read-only");
+        }
+        // Not asserted as a failure: as root nothing is denied. Where it
+        // is denied -- the case this guards -- nothing may have gone.
+        if fs::remove_dir_all(&root).is_err() {
+            assert!(inner.join("BOOTX64.EFI").exists());
+        }
+        remove_extracted(&root).expect("removing a read-only tree");
+        assert!(!root.exists());
+    }
 }
 
 #[cfg(test)]
