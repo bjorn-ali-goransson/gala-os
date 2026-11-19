@@ -544,6 +544,9 @@ version = "0.1.0"
 [[package]]
 name = "d3d10_1"
 version = "0.1.0"
+dependencies = [
+ "gala_heap",
+]
 
 [[package]]
 name = "d3d11"

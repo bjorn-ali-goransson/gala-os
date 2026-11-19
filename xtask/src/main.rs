@@ -7770,6 +7770,38 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("d2d1_device_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("d2d1_device_test", "user/bin/d2d1_device_test.exe", "gala"),
+    // d3d10_1_test (GPU G2): Direct3D 10.1 over the program's own
+    // Direct3D 11 and Direct2D 1.0 over that, the path Word takes when
+    // it does not use Direct2D's device, so it ships d2d1_device_test's
+    // stack plus gala's d3d10_1.dll.
+    ("d3d10_1_test", "ntdll.dll", "Windows/System32"),
+    ("d3d10_1_test", "kernel32.dll", "Windows/System32"),
+    ("d3d10_1_test", "msvcrt.dll", "Windows/System32"),
+    ("d3d10_1_test", "ucrtbase.dll", "Windows/System32"),
+    ("d3d10_1_test", "user32.dll", "Windows/System32"),
+    ("d3d10_1_test", "gdi32.dll", "Windows/System32"),
+    ("d3d10_1_test", "advapi32.dll", "Windows/System32"),
+    ("d3d10_1_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("d3d10_1_test", "version.dll", "Windows/System32"),
+    ("d3d10_1_test", "setupapi.dll", "Windows/System32"),
+    ("d3d10_1_test", "cfgmgr32.dll", "Windows/System32"),
+    ("d3d10_1_test", "dxgi.dll", "Windows/System32"),
+    ("d3d10_1_test", "shell32.dll", "Windows/System32"),
+    ("d3d10_1_test", "shlwapi.dll", "Windows/System32"),
+    ("d3d10_1_test", "ole32.dll", "Windows/System32"),
+    ("d3d10_1_test", "d2d1.dll", "Windows/System32"),
+    ("d3d10_1_test", "d3d10_1.dll", "Windows/System32"),
+    (
+        "d3d10_1_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("d3d10_1_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("d3d10_1_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("d3d10_1_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("d3d10_1_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -15221,6 +15253,25 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=d2d1_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["d2d1_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Direct3D 10.1 over the program's own Direct3D 11, and Direct2D
+        // 1.0 over that (user/d3d10_1_test): the path Word takes when it
+        // does not use Direct2D's device -- a texture made by
+        // ID3D10Device1::CreateTexture2D, that texture as a DXGI surface,
+        // and ID2D1Factory::CreateDxgiSurfaceRenderTarget over it, with
+        // the colours and geometry of d2d1_device_test's frame read back
+        // through a staging texture. The Direct3D 11 under it is DXVK on
+        // lavapipe, which the adapter's name says.
+        name: "d3d10_1_test",
+        cmdline: "qemu_exit run=d3d10_1_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3d10_1_test: device llvmpipe",
+            "d3d10_1_test: read back 0x336699 0xffcc00",
+            "d3d10_1_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // Direct2D 1.1 on the program's own Direct3D 11 device

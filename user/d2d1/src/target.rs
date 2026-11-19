@@ -23,6 +23,13 @@
 //!   (`device`): that is how a frame drawn in software becomes a render
 //!   target of the program's own Direct3D 11 device. A context without a
 //!   target is 0 x 0 and its frames fail, as Direct2D's do.
+//! - A DXGI surface (ID2D1Factory::CreateDxgiSurfaceRenderTarget): a
+//!   buffer of its own, of the surface's size, written into the surface
+//!   at EndDraw the way a device context's target bitmap is (`device`).
+//!   That is Direct2D 1.0's way onto a texture of the program's own
+//!   Direct3D, which is how a program that makes its own device draws
+//!   without Direct2D's (Word, ROADMAP OF). The surface's own pixels are
+//!   not read back at BeginDraw, as a target bitmap's are not either.
 //!
 //! Drawing outside BeginDraw/EndDraw does nothing and makes the next
 //! EndDraw D2DERR_WRONG_STATE; EndDraw without BeginDraw is
@@ -188,6 +195,13 @@ enum Backing {
         target: ComRef,
         buf: Vec<u8>,
     },
+    /// A DXGI surface render target: the surface (with the Direct3D 11
+    /// texture behind it and that texture's immediate context) and the
+    /// buffer the frame is drawn in, of the surface's size.
+    Surface {
+        surface: device::DxgiSurface,
+        buf: Vec<u8>,
+    },
 }
 
 struct State {
@@ -253,7 +267,9 @@ impl State {
 
     fn surface(&mut self) -> Option<Surface> {
         let ptr = match &mut self.backing {
-            Backing::Wic { buf, .. } | Backing::Context { buf, .. } => buf.as_mut_ptr(),
+            Backing::Wic { buf, .. }
+            | Backing::Context { buf, .. }
+            | Backing::Surface { buf, .. } => buf.as_mut_ptr(),
             Backing::Dc { dib: Some(d), .. } | Backing::Hwnd { dib: Some(d), .. } => d.bits,
             _ => return None,
         };
@@ -358,6 +374,10 @@ macro_rules! target_slots {
 }
 
 static WIC_VTBL: VTable<57> = VTable(target_slots!());
+/// A DXGI surface render target is an ID2D1RenderTarget and nothing
+/// more, so its vtable is the same fifty-seven slots; it is its own
+/// static because a target says which kind it is by its vtable.
+static SURFACE_VTBL: VTable<57> = VTable(target_slots!());
 /// ID2D1DeviceContext1 (d2d1_2.h): ID2D1RenderTarget's fifty-seven
 /// methods, the thirty-five ID2D1DeviceContext adds, then the three
 /// 1.2's geometry realizations add. One object answers every one of
@@ -518,6 +538,74 @@ pub extern "system" fn f_CreateWicBitmapRenderTarget(
     };
     let backing = Backing::Wic { bitmap: ComRef::new(bitmap), buf };
     make(factory, WIC_VTBL.addr(), new_state(backing, w, h, natural, dpi), out)
+}
+
+/// CreateDxgiSurfaceRenderTarget: Direct2D 1.0's render target over a
+/// surface of the program's own Direct3D, which is what a program that
+/// made its own device draws into without asking Direct2D for one
+/// (ROADMAP OF, GPU G2). The surface has to be one this DLL can write
+/// whole rows of pixels into: a Direct3D 11 texture
+/// (`device::open_surface`) that is not multisampled, in a format gala
+/// draws. The properties' format must be the surface's, UNKNOWN taking
+/// it, with premultiplied or ignored alpha; straight alpha or another
+/// format is D2DERR_UNSUPPORTED_PIXEL_FORMAT, as it is for the other
+/// kinds. The target starts as the surface is not read back: Direct2D
+/// does not promise a render target's old pixels either, and a frame
+/// that draws over all of its own is what a program does.
+pub extern "system" fn f_CreateDxgiSurfaceRenderTarget(
+    factory: Obj,
+    surface: Obj,
+    props: *const TargetProps,
+    out: *mut Obj,
+) -> HResult {
+    let r = create_dxgi_target(factory, surface, props, out);
+    answered(b"ID2D1Factory::CreateDxgiSurfaceRenderTarget", r);
+    r
+}
+
+fn create_dxgi_target(
+    factory: Obj,
+    surface: Obj,
+    props: *const TargetProps,
+    out: *mut Obj,
+) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    let Some(p) = read(props) else { return E_INVALIDARG };
+    let dpi = match dpi_of(&p) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    note_type(&p);
+    let s = match device::open_surface(surface) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if s.desc.samples > 1 {
+        gap(b"CreateDxgiSurfaceRenderTarget(multisampled)", s.desc.samples.into());
+        return E_INVALIDARG;
+    }
+    if s.desc.format != DXGI_FORMAT_B8G8R8A8_UNORM && s.desc.format != DXGI_FORMAT_R8G8B8A8_UNORM {
+        gap(b"CreateDxgiSurfaceRenderTarget(surface format)", s.desc.format.into());
+        return D2DERR_UNSUPPORTED_PIXEL_FORMAT;
+    }
+    if p.format.format != DXGI_FORMAT_UNKNOWN && p.format.format != s.desc.format {
+        return E_INVALIDARG;
+    }
+    let alpha = match p.format.alpha {
+        ALPHA_UNKNOWN | ALPHA_PREMULTIPLIED => ALPHA_PREMULTIPLIED,
+        ALPHA_IGNORE => ALPHA_IGNORE,
+        _ => return D2DERR_UNSUPPORTED_PIXEL_FORMAT,
+    };
+    let (w, h) = (s.desc.width, s.desc.height);
+    let Some(buf) = crate::filled(w as usize * h as usize * 4, 0u8) else {
+        return E_OUTOFMEMORY;
+    };
+    let format = PixelFormat { format: s.desc.format, alpha };
+    let backing = Backing::Surface { surface: s, buf };
+    make(factory, SURFACE_VTBL.addr(), new_state(backing, w, h, format, dpi), out)
 }
 
 /// CreateDCRenderTarget: B8G8R8A8, premultiplied or ignoring alpha;
@@ -1315,6 +1403,11 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
             }
             Backing::Context { target, buf, .. } if dirty && !target.0.is_null() => {
                 brush::write_pixels(target.0, buf);
+            }
+            // The frame into the program's own texture, the one write
+            // into a render target that needs no shader (`device`).
+            Backing::Surface { surface, buf } if dirty => {
+                device::write_surface(surface, buf);
             }
             _ => {}
         }

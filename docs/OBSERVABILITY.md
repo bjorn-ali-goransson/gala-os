@@ -446,12 +446,33 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   `ID2D1Device::CreateDeviceContext` and
   `ID2D1Device1::CreateDeviceContext`,
   `ID2D1DeviceContext::CreateBitmapFromDxgiSurface`,
-  `ID2D1DeviceContext::SetTarget` and `ID2D1RenderTarget::EndDraw`.
+  `ID2D1DeviceContext::SetTarget`,
+  `ID2D1Factory::CreateDxgiSurfaceRenderTarget` (Direct2D 1.0's way onto
+  a surface, which a program with its own Direct3D 10 device takes) and
+  `ID2D1RenderTarget::EndDraw`.
   Which version's interface a program took, how far down that path it
   got and how many frames it ended leave nothing behind otherwise, and
   a program that gives up after them (Word) shows nothing of why. A failed WIC
   bitmap lock at BeginDraw or EndDraw is `BeginDraw(WIC bitmap lock)` or
   `EndDraw(...)` with the HRESULT, and EndDraw returns it.
+  Direct3D 10.1 (d3d10_1): `d3d10_1.dll!ID3D10Device1::<method>`, "not
+  implemented", for each of the eighty-seven methods not built (the
+  pipeline, the views, the states, the queries), so a run names the ones
+  a program asks for and nothing else is guessed; the device and the
+  calls that work, "other" with the HRESULT as the detail (0 for
+  success): `D3D10CreateDevice1`, `ID3D10Device::CreateTexture2D` and
+  `ID3D10Device::CopyResource`. A device this DLL turns away is
+  "unsupported" with what was asked for as the detail (`level << 32 |
+  flags << 8 | driver type`): `D3D10CreateDevice1 driver type` (one
+  Direct3D 11 has no name for), `D3D10CreateDevice1 feature level` (none
+  asked for) and `D3D10CreateDevice1 flags` (the flags dropped, as the
+  detail); one Direct3D 11 itself refused, or whose d3d11.dll is not
+  there, is "other" with the reason in the name
+  (`D3D10CreateDevice1 (Direct3D 11 refused)`, `(no d3d11.dll)`, `(no
+  D3D11CreateDevice)`). `ID3D10Device1 QueryInterface` and
+  `ID3D10Texture2D QueryInterface` carry the IID's first dword for an
+  interface neither this DLL nor the Direct3D 11 object under it
+  answers.
   NtSetInformationKey's flags classes, "NtSetInformationKey" with
   `control flags: no registry virtualization` (or `wow64 flags`), the
   flags as detail: what a program asked of the virtualization gala has

@@ -11033,7 +11033,8 @@ values are those of Wine's d2d1 tests (run on Windows) and Microsoft's
 documentation, the `d2d1_window` screen scenario (a window drawn
 through a window render target; `d2d1_test window`) and
 `d2d1_device_test` (Direct2D 1.1 and 1.2 over a program's own Direct3D
-11 device, the path Office draws with).
+11 device, the path Office draws with) and `d3d10_1_test` (Direct2D 1.0
+over a surface of one, the path Word takes instead).
 
 - **Objects**: every object starts with a vtable and a reference count
   (as windowscodecs's); every resource (brush, bitmap, geometry, stroke
@@ -11051,7 +11052,7 @@ through a window render target; `d2d1_test window`) and
   ID2D1Factory3 and later are not answered (recorded), and
   ID2D1Factory1's own stroke styles, path geometries, drawing state
   blocks, GDI metafiles and effect registry are recorded and E_NOTIMPL.
-- **Render targets** (`target.rs`): one object, four backings. A WIC
+- **Render targets** (`target.rs`): one object, five backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
   IWICBitmap: gala's windowscodecs or the caller's); its format is the
@@ -11062,7 +11063,8 @@ through a window render target; `d2d1_test window`) and
   only when something was drawn (GDI's drawing between them survives an
   empty frame). A window target keeps its DIB section between frames
   and copies it to the window's DC at EndDraw. A device context
-  (below) is the fourth. The transform then the
+  (below) is the fourth and a DXGI surface target (below) the fifth.
+  The transform then the
   DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs
   (D2D1_UNIT_MODE_PIXELS leaves the DPI scale out, so they are pixels).
   Drawing outside BeginDraw/EndDraw draws nothing and fails the next
@@ -11105,6 +11107,21 @@ through a window render target; `d2d1_test window`) and
   DrawGeometryRealization fills or strokes it like FillGeometry or
   DrawGeometry -- the same pixels, at the rasterizer's own tolerance
   rather than the one asked for. Test: `d2d1_device_test`.
+- **A DXGI surface render target**
+  (`target.rs`, ID2D1Factory::CreateDxgiSurfaceRenderTarget): Direct2D
+  1.0's way onto a texture of the program's own Direct3D, which is what
+  a program draws into when it makes its own device without asking
+  Direct2D for one -- Word, over the Direct3D 10.1 device below. It is a
+  buffer of the surface's size written into the surface at EndDraw
+  exactly as a device context's target bitmap is (`device`,
+  UpdateSubresource on the ID3D11Texture2D behind it), so the two paths
+  share the one write into a program's render target. The surface has to
+  be a Direct3D 11 texture and not multisampled (E_INVALIDARG,
+  recorded), in a format gala draws; the properties' format must be the
+  surface's, UNKNOWN taking it, with premultiplied or ignored alpha
+  (D2DERR_UNSUPPORTED_PIXEL_FORMAT otherwise). The surface's own pixels
+  are not read back at BeginDraw, as a target bitmap's are not either:
+  a frame draws over all of its own. Test: `d3d10_1_test`.
 - **No GPU of its own**: every target draws in software, also when
   D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's own
   d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives
@@ -11142,8 +11159,7 @@ through a window render target; `d2d1_test window`) and
   layout yet), layers (PushLayer is counted, its mask not applied),
   opacity masks and FillGeometry's opacity brush, meshes, drawing state
   blocks, compatible render targets, shared bitmaps,
-  CreateDxgiSurfaceRenderTarget (the 1.0 way to a DXGI surface, which
-  device contexts replace), geometry groups and transformed geometries,
+  geometry groups and transformed geometries,
   Simplify, Tessellate, Widen, Outline, CombineWithGeometry, dashes
   (drawn solid), D2D1_GAMMA_1_0 (interpolated as 2.2), the GDI interop
   interface, bitmaps from WIC formats other than 32bppPBGRA and
@@ -11151,6 +11167,69 @@ through a window render target; `d2d1_test window`) and
   effects, command lists, colour contexts, image brushes, DrawImage,
   DrawGdiMetafile, a primitive blend other than source-over and a
   perspective transform on DrawBitmap.
+
+### Direct3D 10.1
+
+`user/d3d10_1`. What Word asks for when it does not take Direct2D's own
+device: `D3D10CreateDevice1` for a feature level 10.1 device, which it
+then draws into through Direct2D 1.0's
+ID2D1Factory::CreateDxgiSurfaceRenderTarget (above). gala has no
+Direct3D of its own (GPU G0), so this DLL is Direct3D 10.1 over
+Direct3D 11: it loads the program's own `d3d11.dll` by name -- on gala
+DXVK over Mesa's lavapipe, beside the exe (GPU G2) -- and every object
+it hands out is a Direct3D 11 object with a Direct3D 10 face. The
+expected answers are those of `user/d3d10_1_test` run on Windows.
+
+- **Nothing is linked against**: every call into Direct3D 11 goes
+  through the vtable slot d3d11.h declares, so this DLL imports no
+  Direct3D at all and works with whichever `d3d11.dll` the program
+  brought. D3D10CreateDevice1 loads it by bare name (LoadLibraryW, so
+  the executable's directory before System32) and takes
+  D3D11CreateDevice from it.
+- **The structures are the same** (d3d10.h, d3d10_1.h, d3d11.h): a
+  D3D10_TEXTURE2D_DESC has the fields, the order and the values of a
+  D3D11_TEXTURE2D_DESC, and so do the usages, the bind flags, the
+  CPU-access and misc flags, D3D10_MAP, the resource dimensions, the
+  format-support bits and the feature-level numbers, so what a caller
+  passes is passed on as it is. Two things differ and are translated:
+  the driver type (D3D10_DRIVER_TYPE_HARDWARE is 0 where Direct3D 11's
+  is 1, and so on down the enum) and D3D10_MAPPED_TEXTURE2D, which has
+  no depth pitch. D3D10_CREATE_DEVICE_BGRA_SUPPORT is asked of
+  Direct3D 11 whatever the caller asked for: Direct2D needs it.
+- **The device** (`device.rs`): one object answering ID3D10Device and
+  ID3D10Device1 alike, so its vtable is the longer one (a hundred and
+  one slots), holding the Direct3D 11 device and its immediate context.
+  CreateTexture2D, CopyResource, Flush, GetFeatureLevel,
+  GetCreationFlags, GetDeviceRemovedReason, CheckFormatSupport,
+  CheckMultisampleQualityLevels and the private data are its own;
+  QueryInterface for an interface that is not one of its own is
+  forwarded to the Direct3D 11 device, which is how a program reaches
+  the IDXGIDevice under it (the adapter's name comes from there).
+- **The textures** (`texture.rs`): an ID3D10Texture2D over the
+  Direct3D 11 texture, with GetDesc, the private data, GetType and the
+  eviction priority forwarded to it and Map and Unmap made into the
+  Direct3D 11 context's. QueryInterface for anything else goes to the
+  real texture, so the IDXGISurface a program hands Direct2D and the
+  ID3D11Texture2D Direct2D looks for behind it are the real ones: a
+  frame drawn in software reaches the texture through the same
+  UpdateSubresource as a device context's target bitmap, and on Windows
+  the two interfaces are two faces of one object as well.
+- **Everything else is recorded**: ID3D10Device1's other eighty-seven
+  methods -- the pipeline (shaders, input layouts, buffers, draws), the
+  views, the states, the queries, the other resources -- answer
+  E_NOTIMPL under their own name (`d3d10_1.dll!ID3D10Device1::...`), so
+  a run says which of them a program asks for and what is implemented
+  is what is asked for rather than what the header declares.
+  D3D10CreateDevice1 and the calls that work are recorded with their
+  HRESULT (0 for success), and a request this DLL turns away -- a driver
+  type Direct3D 11 has none of, no feature level, flags it drops -- with
+  what was asked for (`level << 32 | flags << 8 | driver type`), so a
+  program that gets no device says why (OBSERVABILITY "Missing-features
+  ledger").
+- **Limits**: a device asked for with an SDK version other than
+  D3D10_1_SDK_VERSION is E_INVALIDARG (Windows'), D3D10CreateStateBlock
+  is still G0's stub, and `d3d10.dll` (Direct3D 10.0 and its effects)
+  stays one too. Test: `d3d10_1_test`.
 
 ### DirectWrite
 
@@ -15083,7 +15162,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 | Stage | Content | Tests | Status |
 |---|---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`, and for Office's shared code `d3d10_1.dll` (D3D10CreateDevice1, D3D10CreateStateBlock) and `d3d10.dll` (D3D10CreateEffectFromMemory), as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`, and for Office's shared code `d3d10_1.dll` (D3D10CreateStateBlock; its D3D10CreateDevice1 is a real device now, "Direct3D 10.1") and `d3d10.dll` (D3D10CreateEffectFromMemory), as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G0 (Office's Click-to-Run UI) | `d3dcompiler_47.dll` (`user/d3dcompiler`, x64): D3DCreateBlob gives a real ID3DBlob; D3DCompile, D3DCompile2 and D3DCompileFromFile fail with E_NOTIMPL, no code and an error-message blob, recorded with the profile (no HLSL compiler until DXVK brings a device that can use shaders: ROADMAP G2) | `office_api_test` | stopgap |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL, Vulkan and Direct3D 11 built (`gl_test`, `vk_test`, `d3d11_test`); d3d12 and shaders to come |
@@ -15338,7 +15417,10 @@ GPU or a screen (`presenter=test`).
   imports gala had already, beyond gdi32's `D3DKMT*` thunks (above).
   `d3d9`, `d3d8` and `d3d10core` are in the same release and follow
   with the programs that want them; DXVK ships no `d3d10`/`d3d10_1`
-  front-end, so Office's shared code keeps G0's stubs there.
+  front-end (it dropped Direct3D 10 in 2.0), so gala's own
+  `d3d10_1.dll` answers Direct3D 10.1 over DXVK's Direct3D 11
+  ("Direct3D 10.1"), which is the device Word draws with, and
+  `d3d10.dll` keeps G0's stub.
 - **Test**: `d3d11_test` (user/d3d11_test, C): d3d11.dll loaded at run
   time, D3D11CreateDeviceAndSwapChain at feature level 11_0 with a
   swap chain on a 400 x 300 window, the adapter behind the device named

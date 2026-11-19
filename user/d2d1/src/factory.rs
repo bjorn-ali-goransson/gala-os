@@ -67,7 +67,7 @@ static FACTORY_VTBL: VTable<28> = VTable([
     f_CreateDrawingStateBlock as *const (),
     crate::target::f_CreateWicBitmapRenderTarget as *const (),
     crate::target::f_CreateHwndRenderTarget as *const (),
-    f_CreateDxgiSurfaceRenderTarget as *const (),
+    crate::target::f_CreateDxgiSurfaceRenderTarget as *const (),
     crate::target::f_CreateDCRenderTarget as *const (),
     crate::device::f1_CreateDevice as *const (),
     f1_CreateStrokeStyle as *const (),
@@ -243,16 +243,6 @@ extern "system" fn f_CreateDrawingStateBlock(
 ) -> HResult {
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateDrawingStateBlock")
-}
-
-extern "system" fn f_CreateDxgiSurfaceRenderTarget(
-    _this: Obj,
-    _surface: Obj,
-    _props: *const u8,
-    out: *mut Obj,
-) -> HResult {
-    put(out, core::ptr::null_mut());
-    not_implemented(b"ID2D1Factory::CreateDxgiSurfaceRenderTarget")
 }
 
 // ---- ID2D1Factory1's own methods ----------------------------------------------
