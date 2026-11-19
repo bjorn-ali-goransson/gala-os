@@ -268,40 +268,11 @@ pub extern "system" fn EnumDisplayDevicesW(
                 out.add(at + 2 * i).cast::<u16>().write_unaligned(u16::from(c));
             }
         };
-        put(4, b"\\\\.\\DISPLAY1");
+        put(4, super::monitor::DISPLAY_NAME);
         put(68, b"gala display");
         out.add(324).cast::<u32>().write_unaligned(0x1 | 0x4); // ATTACHED | PRIMARY
     }
     1
-}
-
-/// GetDisplayConfigBufferSizes / QueryDisplayConfig /
-/// DisplayConfigGetDeviceInfo: the CCD display configuration is not
-/// supported (ERROR_NOT_SUPPORTED, their documented "not available").
-#[unsafe(no_mangle)]
-pub extern "system" fn GetDisplayConfigBufferSizes(
-    _flags: u32,
-    _paths: *mut u32,
-    _modes: *mut u32,
-) -> i32 {
-    50
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryDisplayConfig(
-    _flags: u32,
-    _paths: *mut u32,
-    _path_info: *mut u8,
-    _modes: *mut u32,
-    _mode_info: *mut u8,
-    _topology: *mut u32,
-) -> i32 {
-    50
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn DisplayConfigGetDeviceInfo(_packet: *mut u8) -> i32 {
-    50
 }
 
 /// GetPointerType / GetPointerDevice / GetPointerPenInfo: there are no

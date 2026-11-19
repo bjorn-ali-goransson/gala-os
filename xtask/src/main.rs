@@ -10847,6 +10847,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_tray_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/shell32.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/comctl32.dll", "Windows/SysWOW64"),
+    // The display configuration: CCD, EnumDisplaySettings and the monitor
+    // (user/display_test).
+    ("display_test", "ntdll.dll", "Windows/System32"),
+    ("display_test", "kernel32.dll", "Windows/System32"),
+    ("display_test", "user32.dll", "Windows/System32"),
+    ("display_test", "gdi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11254,6 +11260,7 @@ const USER_PROGRAMS: &[&str] = &[
     "writeback_test",
     "gdiplus_test",
     "uisettings_test",
+    "display_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -16355,6 +16362,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "tray_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // The display configuration (CCD): the buffer sizes, the active
+        // path and its two mode records, the source's and target's and
+        // adapter's names, and what each of them refuses
+        // (user/display_test).
+        name: "display_test",
+        cmdline: "qemu_exit run=display_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["display_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,

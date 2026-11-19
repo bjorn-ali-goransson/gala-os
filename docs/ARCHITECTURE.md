@@ -8829,6 +8829,33 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   kernels; user32 assumes the same if the call fails). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
   by the default flags), GetMonitorInfoW/A (`\\.\DISPLAY1`) and
   GetSystemMetrics' screen metrics come from it.
+- **The display configuration** (`ccd.rs`, the CCD calls
+  GetDisplayConfigBufferSizes, QueryDisplayConfig and
+  DisplayConfigGetDeviceInfo): one adapter, one source and one target on
+  a path that is always active, which is one DISPLAYCONFIG_PATH_INFO and
+  two DISPLAYCONFIG_MODE_INFO records -- the target's signal (its active
+  size, its total size and a pixel rate from them) and the source's size
+  -- all of it the screen `monitor.rs` answers with and the refresh
+  EnumDisplaySettingsW gives, so a program that reads the display twice
+  reads it the same. Every call names exactly one topology: no QDC_* bit,
+  or two of them, is ERROR_INVALID_PARAMETER, while a flag beside one
+  (QDC_VIRTUAL_MODE_AWARE) is not another topology; a count of zero is
+  ERROR_INVALID_PARAMETER and too little room ERROR_INSUFFICIENT_BUFFER,
+  and a topology id is taken only with QDC_DATABASE_CURRENT.
+  DisplayConfigGetDeviceInfo gives the source's GDI device name
+  (`\\.\DISPLAY1`, `monitor::DISPLAY_NAME`, which EnumDisplayDevicesW
+  and GetMonitorInfoW give too), the target's friendly name and its
+  device-interface path under GUID_DEVINTERFACE_MONITOR, and the
+  adapter's device path. There is no EDID behind any of it, so the
+  target's name is gala's own rather than a monitor's, and a program that
+  keys a per-monitor setting by that path keys it to gala. Three things
+  are deliberately absent, each recording a ledger row rather than
+  inventing an answer: an adapter that is not gala's and an unknown
+  DISPLAYCONFIG_DEVICE_INFO type (ERROR_INVALID_PARAMETER and
+  ERROR_NOT_SUPPORTED, as Windows answers for an adapter it does not
+  have), and DisplayConfigSetDeviceInfo, since gala's display is not
+  something a program can change. Measured on Windows first and checked
+  on both: `display_test`.
 - **TrackMouseEvent**: TME_LEAVE watches one window (process-wide),
   which gets WM_MOUSELEAVE when the pointer's next WM_MOUSEMOVE goes to
   another window. TODO: leaving the top-level window, TME_HOVER.

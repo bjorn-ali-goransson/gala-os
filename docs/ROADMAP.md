@@ -2415,13 +2415,23 @@ need gala's.
      classes (the skipped mask, 26); no lookup in the whole run asks for
      one of them, which `FindActCtxSection(section not built)` would
      record and does not. What Word holds, it was given earlier. The
-     nearest thing already measured and not explained is the display
-     configuration: `GetDisplayConfigBufferSizes` answers
-     ERROR_NOT_SUPPORTED and DXVK carries on with blank display
-     metadata, and a display's metadata is content a graphics init reads
-     rather than a status it checks. Next, test first: what Windows
-     answers for the display-configuration calls, and what Word is given
-     for them here.
+     nearest thing already measured was the display configuration, and
+     it is answered now and is not the cause. The three CCD calls are
+     implemented, measured on Windows first (`display_test`,
+     ARCHITECTURE "The display configuration"), and the import trace
+     taken after them shows Word walking straight through:
+     `GetDisplayConfigBufferSizes` at 32874.7 ms, `QueryDisplayConfig`
+     at 32878.2 ms, `DisplayConfigGetDeviceInfo` at 32881.6 ms, a
+     `wcscmp` of two names, then `SETUPAPI.dll!SetupDiGetClassDevsW`
+     with DIGCF_DEVICEINTERFACE at 32894.0 ms and
+     `SetupDiEnumDeviceInterfaces` at 32906.1 ms, both of which gala
+     refuses. So Word takes the active path, asks for the target's name
+     and goes looking for that monitor's EDID -- and raises the same box
+     931 ms later, at 33813.0 ms, with nothing gala refused in between
+     (the ledger rows in that window are "reached" and the DLLs' own,
+     and the box's 21-byte `WriteFile` closes it). The display
+     configuration was a gap and not the cause; what stands behind it is
+     the monitor's own description (next, below).
      Who raises the box is measured rather than inferred, by the
      facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
      stack_from=user32 stack_words=400` catches gala's MessageBoxW
@@ -2434,10 +2444,32 @@ need gala's.
      puts the box on the screen for it. A scan is evidence and not
      proof (OBSERVABILITY "Stack captures"), but it names the DLL to
      ask about, which no other facility here does.
-     Measured beside it and not yet explained:
-     `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
-     which falls back to blank display metadata and carries on
-     (`winword_dxgi.log` in the dump).
+     Measured beside it, and the display's remaining gaps: gala's
+     EnumDisplayDevicesW lists one adapter and no monitor under it, and
+     there is no monitor device interface for setupapi to find, which is
+     where both Word's walk above and DXVK's three warnings and two
+     errors in `winword_dxgi.log` end up. Windows answers the monitor as
+     a second level of EnumDisplayDevicesW -- name
+     `\\.\DISPLAY1\Monitor0`, string "Generic PnP Monitor",
+     ACTIVE | ATTACHED, the device instance id
+     `MONITOR\<EDID id>\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001`
+     and the Class key beside it, and with
+     EDD_GET_DEVICE_INTERFACE_NAME the same device-interface path
+     DisplayConfigGetDeviceInfo gives for that target -- and it gives
+     the adapter an id and a key too, which gala
+     leaves empty. It also takes any `cb`, filling what fits (`cb` 0 and
+     4 answer TRUE and write nothing, 328 fills the names and not the
+     ids), where gala refuses a `cb` under the whole structure with
+     ERROR_INVALID_PARAMETER: a divergence of its own. Without the
+     monitor level DXVK finds "monitors not associated with any adapter"
+     and falls back; without the device interface its `getMonitorEdid`
+     fails and it uses blank display metadata, which is what a monitor
+     with no HDR metadata gives anyway. Next, test first: the monitor
+     level and the two ids in `display_test`, then setupapi's monitor
+     device interface. (gdi32's `D3DKMTEnumAdapters2` and
+     `D3DKMTQueryAdapterInfo` are not among these: GetProcAddress must
+     keep answering NULL for them, which is how the Vulkan loader learns
+     to skip them -- `user/gdi32/src/absent.rs`.)
      The machine's size is not the cause either, and that question is
      closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
      Word fails identically, and gala itself never came near the edge
