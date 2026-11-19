@@ -138,6 +138,14 @@ impl TrapFrame {
         ]
     }
 
+    /// Replaces every integer register holding `find` with `put`; true
+    /// when at least one did. x86-64's `swap_reg`, over x0-x30: for a
+    /// fault at an address a register holds a stale copy of (`imports=`,
+    /// nt::traceimports). The stack pointer is not one of them.
+    pub fn swap_reg(&mut self, find: u64, put: u64) -> bool {
+        self.regs.swap_gpr(find, put)
+    }
+
     pub fn page_fault_access(&self) -> Option<FaultAccess> {
         (self.kind() == TrapKind::PageFault).then(|| self.access())
     }

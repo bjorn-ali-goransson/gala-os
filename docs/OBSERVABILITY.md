@@ -1135,11 +1135,14 @@ it makes, is exactly that (ROADMAP OT3b).
 ```
 imports: the first call through each import of iat_trace_test.exe from testdll.dll, 4096 at most (imports=)
 {"t":..,"cpu":1,"by":8,"ev":"import","pid":4,"process":"iat_trace_test.exe","call":"testdll.dll!gala_add","args":[2,3,131072,161]}
-imports: 2 first calls recorded of 2 slots armed (imports=)
+imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)
 ```
 
 The program there imports three names from testdll.dll and two slots are
-armed: the third is a variable, which cannot be trapped (below).
+armed: the third is a variable, which cannot be trapped (below). One of
+the two it calls, which is the `import` event; the other it reads as
+data first, which disarms the slot (below), so that one leaves a
+`ledger:` row and the count at the end of the summary line instead.
 
 - **A trap page, not a thunk.** The loader reserves a region it never
   commits, and the kernel writes `base + index * 16` into each armed
@@ -1161,11 +1164,29 @@ armed: the third is a variable, which cannot be trapped (below).
   afterwards, which is what keeps a pointer the program copied out of
   its IAT before the repair working -- such a call faults again and is
   answered again, and only the recording is once.
-- **Functions only.** A slot the program reads as data cannot be
-  trapped: the value it reads *is* the trap address, and no fault
-  announces a read. So the loader arms a slot only when the address the
-  import resolved to is in an executable section of the module holding
-  it (`in_code`), which leaves imported variables alone.
+- **Functions only.** An imported variable cannot be trapped: the value
+  a read of its slot gives *is* what the program then uses, and no fault
+  announces that read. So the loader arms a slot only when the address
+  the import resolved to is in an executable section of the module
+  holding it (`in_code`), which leaves imported variables alone.
+- **A function's slot read as data disarms it.** Reading the slot of a
+  function announces nothing either -- the value it gives is the trap
+  address -- but *using* that value as a pointer faults at the trap
+  address with no instruction fetch in sight, which is what a hook
+  installer does when it reads the bytes it is about to patch. The bytes
+  it wants are the export's, which no page here can hold, so the fault is
+  answered as the state the program would have been in with nothing
+  armed: the export's address goes back in the slot and into every
+  register holding the stale trap address, and the instruction is taken
+  again. The slot is recorded as read and not called -- a `ledger:` row
+  (`read as data, not called`) and `, <n> read as data` at the end of the
+  summary line -- and left disarmed, a program that read it once being
+  certain to read it again. Where no register holds the trap address
+  itself, because the program computed an address from it, there is
+  nothing to repair: a warn line says which import it was and the access
+  violation is delivered as it would be without `imports=`. Word's own
+  `AppvIsvSubsystems64.dll` reads an import this way, so without this the
+  option could not trace Word at all.
 - **Cost when nothing is traced**: one relaxed load per page fault. The
   kernel keeps the lowest and highest trap address it has armed, and an
   ordinary fault -- demand paging, a guard page, a real access

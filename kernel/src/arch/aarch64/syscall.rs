@@ -110,6 +110,19 @@ impl UserRegs {
         self.x[r as usize] = value;
     }
 
+    /// Replaces every one of x0-x30 holding `find` with `put`; true when
+    /// at least one did (`TrapFrame::swap_reg`, for `imports=`).
+    pub fn swap_gpr(&mut self, find: u64, put: u64) -> bool {
+        let mut swapped = false;
+        for reg in &mut self.x {
+            if *reg == find {
+                *reg = put;
+                swapped = true;
+            }
+        }
+        swapped
+    }
+
     /// x0-x30, sp, pc, pstate.
     pub fn to_words(&self) -> [u64; Self::WORDS] {
         let mut w = [0u64; Self::WORDS];

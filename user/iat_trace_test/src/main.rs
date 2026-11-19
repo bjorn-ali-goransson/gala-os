@@ -8,10 +8,15 @@
 //! answers what it always did, the slot afterwards is the export's
 //! address, and every later call goes straight there.
 //!
-//! Data imports are left alone: a slot read as data cannot be repaired
-//! from a fault, because the value the program read *is* the trap
-//! address. This checks that too -- `GALA_VALUE`'s slot is the export's
-//! address before anything is called.
+//! Data imports are left alone, since the value a program reads from
+//! such a slot *is* what it then uses: `GALA_VALUE`'s slot holds the
+//! export's address throughout. A slot of a function can be read as
+//! data too -- a hook installer reads the import's value and then the
+//! bytes it points at -- and that read faults at the trap address. The
+//! kernel answers it as the state the program would have had with
+//! nothing armed: the export's address back in the slot and in the
+//! register the stale value sits in, the read taken again. So reading
+//! an import's first byte gives the export's first byte, armed or not.
 //!
 //! Prints `iat_trace_test: trapped` (on gala, with the option given) or
 //! `: direct` (on Windows, or with no option), then `iat_trace_test: ok`
@@ -75,6 +80,16 @@ fn u64_at(addr: usize) -> u64 {
 fn slot(addr: usize) -> usize {
     // SAFETY: the address of one of our own IAT entries.
     unsafe { core::ptr::read_volatile(addr as *const usize) }
+}
+
+/// The first byte of the code at `addr`: what a hook installer reads of
+/// a function it is about to patch, and the only reason this test
+/// dereferences an import's value.
+fn byte_at(addr: usize) -> u8 {
+    // SAFETY: the address of an exported function -- or, where the slot
+    // is armed, of the trap the kernel wrote in its place, which the
+    // kernel repairs to that same export.
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
 }
 
 /// A NUL-terminated string in our image.
@@ -160,6 +175,17 @@ fn run() -> Result<(), u32> {
         c.eq(mbi.state.into(), MEM_RESERVE.into())?;
         c.ok(mbi.allocation_base != dll, mbi.allocation_base as u64)?;
     }
+
+    // A slot read as data, and dereferenced: the byte an import's value
+    // points at is the export's first byte, armed or not. On gala with
+    // the option this is a fault at a trap address that is not an
+    // instruction fetch, which the kernel repairs; on Windows the slot
+    // holds the export's address and nothing faults.
+    c.eq(byte_at(slot(get)).into(), byte_at(direct[1]).into())?;
+    // The read put the slot back, so `gala_get_value` below is a direct
+    // call and the kernel records a read of this slot in place of a
+    // first call through it.
+    c.ok(slot(get) == direct[1], slot(get) as u64)?;
 
     // The calls themselves answer what they always did, armed or not.
     // SAFETY: imported from testdll, bound by the loader.

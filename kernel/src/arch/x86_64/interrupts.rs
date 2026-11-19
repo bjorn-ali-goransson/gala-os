@@ -173,6 +173,39 @@ impl TrapFrame {
         [self.rcx, self.rdx, self.r8, self.r9]
     }
 
+    /// Replaces every integer register holding `find` with `put`; true
+    /// when at least one did. For a fault at an address a register holds
+    /// a stale copy of (`imports=`: an import's value read as data,
+    /// nt::traceimports), which the right value in the register and the
+    /// instruction taken again answer. rsp and rip are not registers an
+    /// address operand is read from, and are left alone.
+    pub fn swap_reg(&mut self, find: u64, put: u64) -> bool {
+        let mut swapped = false;
+        for reg in [
+            &mut self.rax,
+            &mut self.rbx,
+            &mut self.rcx,
+            &mut self.rdx,
+            &mut self.rsi,
+            &mut self.rdi,
+            &mut self.rbp,
+            &mut self.r8,
+            &mut self.r9,
+            &mut self.r10,
+            &mut self.r11,
+            &mut self.r12,
+            &mut self.r13,
+            &mut self.r14,
+            &mut self.r15,
+        ] {
+            if *reg == find {
+                *reg = put;
+                swapped = true;
+            }
+        }
+        swapped
+    }
+
     /// A page fault's access (the error code's bits: 1 write, 4
     /// instruction fetch); None for other traps.
     pub fn page_fault_access(&self) -> Option<FaultAccess> {

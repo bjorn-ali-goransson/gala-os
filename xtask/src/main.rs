@@ -18954,7 +18954,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             "imports: the first call through each import of iat_trace_test.exe \
              from testdll.dll, 4096 at most (imports=)",
-            "imports: 2 first calls recorded of 2 slots armed (imports=)",
+            "imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)",
         ],
     },
     Scenario {

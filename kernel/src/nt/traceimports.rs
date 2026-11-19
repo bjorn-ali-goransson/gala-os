@@ -24,6 +24,17 @@
 //! on, answers what it always would, and every later call through that
 //! slot goes straight to the export with nothing in the way at all.
 //!
+//! A slot is not always called, though: a program may read an import's
+//! value and use it as a pointer, which a hook installer does to read
+//! the bytes it is about to patch. That read faults at the trap address
+//! and no instruction fetch is in sight, and the bytes it wants are the
+//! export's, which no page here can hold. So such a fault is answered
+//! as the state the program would have been in with nothing armed: the
+//! export's address goes back in the slot and into every register
+//! holding the stale trap address, and the instruction is taken again.
+//! The slot is recorded as read rather than called -- it was not a call
+//! -- and left disarmed, since a reader will read it again.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
 //! write the slot), and nothing after it. What it cannot do is in
@@ -88,6 +99,9 @@ static LEFT: AtomicU32 = AtomicU32::new(0);
 /// Slots armed, and first calls recorded through them.
 static ARMED: AtomicU64 = AtomicU64::new(0);
 static RECORDED: AtomicU64 = AtomicU64::new(0);
+/// Slots whose value was read as data before any call through them, and
+/// so disarmed: the program used the import, but not by calling it.
+static READ: AtomicU64 = AtomicU64::new(0);
 
 /// One armed import slot.
 #[derive(Clone, Copy)]
@@ -108,6 +122,10 @@ struct Trap {
     /// through a trap address the program kept a copy of is sent on like
     /// the first, and recorded no more than once.
     reached: bool,
+    /// Whether the value has been read as data, which disarms the slot:
+    /// recorded once, like a call, however many copies of the value the
+    /// program then dereferences.
+    read: bool,
 }
 
 static TRAPS: IrqMutex<Vec<Trap>> = IrqMutex::new(Vec::new());
@@ -263,6 +281,7 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
         name: [0; NAME_LEN],
         len: len as u8,
         reached: false,
+        read: false,
     };
     entry.name[..len].copy_from_slice(&name[..len]);
     {
@@ -294,11 +313,14 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
     true
 }
 
-/// A fault at a trap address: records the call the first time, puts the
-/// export's address back in the slot and sends the call on. True when
-/// `addr` was one of this process's trap addresses, in which case the
-/// frame's instruction pointer is the export's and the fault is over.
-pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
+/// A fault at a trap address. An instruction fetch is the call the trap
+/// is there for: it is recorded the first time, the export's address goes
+/// back in the slot and the call is sent on. Any other access is the
+/// program using the import's value as a pointer (`call` false), which
+/// is answered by disarming the slot and repairing the register the value
+/// is in, so that the instruction can be taken again. True when the fault
+/// is over, in which case the frame is the one to return to.
+pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) -> bool {
     if addr < LOW.load(Ordering::Relaxed) || addr > HIGH.load(Ordering::Relaxed) {
         return false;
     }
@@ -310,10 +332,17 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
         let Some(entry) = traps.iter_mut().find(|t| t.trap == addr && t.pid == process.id) else {
             return false;
         };
-        let first = !entry.reached;
-        entry.reached = true;
+        let first = if call { !entry.reached } else { !entry.read };
+        if call {
+            entry.reached = true;
+        } else {
+            entry.read = true;
+        }
         (*entry, first)
     };
+    if !call {
+        return read_as_data(process, frame, &entry, addr, first);
+    }
     if first {
         record(process, frame, &entry);
     }
@@ -334,6 +363,51 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
     // instruction fetch went wrong.
     frame.set_ip(entry.target);
     true
+}
+
+/// A trap address read or written as data: the slot goes back to the
+/// export's address, which is what the program's next read of it gives,
+/// and the register holding the stale value is repaired so that the
+/// instruction can be taken again. True when it was, so the fault is
+/// over; false leaves the access violation to be delivered, the program
+/// having put the value somewhere this cannot reach (an address
+/// computed from it, say, rather than the value itself).
+fn read_as_data(
+    process: &Process,
+    frame: &mut TrapFrame,
+    entry: &Trap,
+    addr: u64,
+    first: bool,
+) -> bool {
+    if first {
+        READ.fetch_add(1, Ordering::Relaxed);
+        super::ledger::record_user_bulk(
+            &entry.name[..usize::from(entry.len)],
+            "read as data, not called (imports=)",
+            addr,
+        );
+        if let Err(status) = put(process, entry.slot, entry.target) {
+            warn!(
+                "imports: the slot at {:#x} of {} could not be put back ({:#x}) \
+                 after its value was read as data",
+                entry.slot,
+                Name(entry),
+                status.0
+            );
+        }
+    }
+    if frame.swap_reg(addr, entry.target) {
+        return true;
+    }
+    warn!(
+        "imports: {} at {:#x} was read as data at {} {:#x} from no register of its own, \
+         so the read cannot be repaired: it faults as it would without `imports=` (imports=)",
+        Name(entry),
+        addr,
+        super::platform::IP_NAME,
+        frame.ip()
+    );
+    false
 }
 
 /// Records one first call: the same `call` the event stream carries for
@@ -413,6 +487,7 @@ pub fn log_stats() {
         return;
     }
     let (armed, done) = (ARMED.load(Ordering::Relaxed), RECORDED.load(Ordering::Relaxed));
+    let read = Reads(READ.load(Ordering::Relaxed));
     let (mut named, mut source) = ([0u8; NAME_LEN], [0u8; NAME_LEN]);
     let (named_len, source_len) = {
         let stored = SPEC.lock();
@@ -442,11 +517,25 @@ pub fn log_stats() {
     }
     if LEFT.load(Ordering::Relaxed) == 0 {
         info!(
-            "imports: {done} first calls recorded of {armed} slots armed (imports=); \
+            "imports: first calls recorded: {done} of {armed} slots armed{read} (imports=); \
              the budget is spent, so the imports past it were left alone"
         );
     } else {
-        info!("imports: {done} first calls recorded of {armed} slots armed (imports=)");
+        info!("imports: first calls recorded: {done} of {armed} slots armed{read} (imports=)");
+    }
+}
+
+/// `, <n> read as data` for the end of the summary line, or nothing at
+/// all where no slot was: a run that met no reader should not have to
+/// say so, and one that met readers must.
+struct Reads(u64);
+
+impl fmt::Display for Reads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => Ok(()),
+            n => write!(f, ", {n} read as data"),
+        }
     }
 }
 
@@ -483,7 +572,17 @@ impl fmt::Display for Name<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET, Fields, MAX_BUDGET, STRIDE, split_budget, trap_at};
+    use super::{BUDGET, Fields, MAX_BUDGET, READ, Reads, STRIDE, split_budget, trap_at};
+
+    /// The summary line says nothing of reads where there were none,
+    /// and says them where there were: a slot read as data is the one
+    /// case in which a program used an import without calling it.
+    #[test]
+    fn reads_are_in_the_summary_only_where_there_are_some() {
+        assert_eq!(alloc::format!("{}", Reads(0)), "");
+        assert_eq!(alloc::format!("{}", Reads(1)), ", 1 read as data");
+        assert_eq!(READ.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
 
     /// What the event stream carries, which no boot scenario sees. The
     /// fields are `trace_from=`'s own, under a name of their own: a

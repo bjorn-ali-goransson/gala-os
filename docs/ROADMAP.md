@@ -6065,9 +6065,15 @@ among the slowest hand-offs.
      not a sequence (the opposite trade from `trace_from=`); the first
      four integer argument registers only, read whether the function
      takes that many or not; static imports only, so no delay-load
-     import and nothing a program resolved with GetProcAddress; a slot
-     read as data is left alone, because the value such a read returns
-     *is* the trap address and no fault announces it; 32-bit programs go
+     import and nothing a program resolved with GetProcAddress; an
+     imported variable is left alone, because the value a read of its
+     slot returns *is* what the program uses and no fault announces that
+     read -- a *function's* slot read as data is answered instead, the
+     dereference of the value faulting at the trap address, which
+     disarms the slot, repairs the register and takes the instruction
+     again, and is recorded as a read rather than a call (without which
+     the option cannot trace Word, whose AppvIsvSubsystems64.dll reads
+     an import that way); 32-bit programs go
      through the same code untested; and entries are not reclaimed when
      a process ends, which the budget is what bounds.
 
