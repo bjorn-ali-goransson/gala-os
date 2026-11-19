@@ -616,15 +616,18 @@ fn draw_into(shared: &Shared, hwnd: Hwnd, dc: Handle) {
 }
 
 /// gdi32 as the measure and the canvas: fonts made as asked (Segoe UI,
-/// by size and weight), deleted with it.
-struct Gdi {
+/// by size and weight), deleted with it and the DC's own font put back.
+/// A program that draws its window itself lays a view out and paints it
+/// into its DC with this (Explorer's "Change this program..." cards).
+pub struct Gdi {
     dc: Handle,
     fonts: Vec<((u32, bool), Handle)>,
     old_font: Handle,
 }
 
 impl Gdi {
-    fn new(dc: Handle) -> Gdi {
+    /// On `dc`, which outlives it.
+    pub fn new(dc: Handle) -> Gdi {
         Gdi { dc, fonts: Vec::new(), old_font: core::ptr::null_mut() }
     }
 

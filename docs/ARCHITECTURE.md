@@ -9389,6 +9389,11 @@ then riched20.dll).
     hyphen) has no width and draws nothing, as Segoe UI's zero-width
     glyphs on Windows (`gdi32_test`; ODT's setup.exe wraps its texts in
     U+202A/U+202C); any other missing glyph is drawn as `?`.
+    **Each face is parsed once per process** (`font::selawik`, a
+    static set filled on first use): metrics and every advance read the
+    parsed face, never the file again. Parsing per call made a line's
+    measure cost a parse per character, and a card of 31 measures took
+    about 200 ms under TCG (20 ms parsed once).
   - Fixed-pitch faces (Courier New, Consolas, Lucida Console, other
     known fixed faces, FIXED_PITCH, or FF_MODERN without a name) are
     Noto Sans Mono's bitmaps (16/20/24/32 px, regular and bold) scaled
@@ -15056,7 +15061,19 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   (`explorer::change::STEPS`, `STEP_MS` each: reading the source,
   editing, building, restarting) and ends on a card saying that nothing
   was changed. The flow's state is the library's (`change.rs`,
-  host-tested); `change_ui.rs` draws it and names the parts.
+  host-tested), and so are the cards: `change::view` is a `gala_ui`
+  view ("UI components") of the state, the window's
+  size and the time, with ids ChangeCard, Title, RequestBox, Request
+  (grows from BOX_H with the text), Part, Inspect (a crosshair
+  before its label, drawn from elements without ids, so a click on it
+  is the button's), Cancel, MakeChange,
+  Step<k>/Step<k>Marker/Step<k>Time, Progress/ProgressDone, Close,
+  and while inspecting InspectBand, Outline/OutlineInner and Tag over
+  the window. `change_ui.rs` lays it out with gdi32 (`gala_ui::win::Gdi`),
+  paints it and routes clicks through `gala_ui::click` to the flow,
+  logging `explorer: change: click <id>`; the parts of the window
+  under Inspect are still named by hand (`element_at`) until File
+  Explorer's own window is a view (ROADMAP LY step 3).
 - **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
   Explorer's PROGRAMS entry as the start menu's tile does (logged
   `desktop: Win+E: File Explorer`); no program sees the E.
@@ -15101,7 +15118,7 @@ The tree (the crate's documentation has a whole component):
   (absent otherwise: not laid out, not in UIA) and `.children(iter)`
   (lists from data).
 - Style is set on the element: `.width .height .min_width .max_width
-  .grow .margin .padding .gap .align .justify .pin .bg .border .radius
+  .min_height .grow .margin .padding .gap .align .justify .pin .bg .border .radius
   .color .size .bold .regular`. `color`, `size` and `bold` are
   inherited inward; nothing else cascades. Shared looks are plain
   functions (`fn primary(b) -> Node`) and constants (the Windows 11
@@ -15149,7 +15166,9 @@ The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
   and paints in WM_PAINT; `win::draw(hwnd, dc)` paints the same into
   any DC (the test reads pixels from a DIB). Fonts are Segoe UI by
   size and weight, cached per window; text is measured with
-  DrawTextW(DT_CALCRECT) so layout and drawing agree.
+  DrawTextW(DT_CALCRECT) so layout and drawing agree. `win::Gdi` is
+  that measure and canvas over a DC, public so a window that paints
+  itself (Explorer's change cards) lays out and draws a view with it.
 - Input: WM_LBUTTONDOWN gives the focus to the input under the
   pointer; WM_LBUTTONUP is `click`, then the log line `click <id>:
   <msg>`, `update`, and the view built and laid out again (WM_SIZE

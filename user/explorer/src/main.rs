@@ -387,7 +387,7 @@ const NAV_W: i32 = 220;
 const NAV_ROW: i32 = 28;
 const HEADER_H: i32 = 28;
 const ROW_H: i32 = 24;
-const STATUS_H: i32 = 26;
+const STATUS_H: i32 = explorer::STATUS_H;
 const MENU_W: i32 = 180;
 const MENU_ROW: i32 = 30;
 

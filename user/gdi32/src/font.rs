@@ -16,7 +16,9 @@
 //! the cell is 4/3 of the em, the ascent 13/16 of the cell.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
 /// LOGFONTW.
@@ -101,6 +103,52 @@ static SELAWIK: [&[u8]; 4] = [
     include_bytes!("../../../fonts/selawik/selawkb.ttf"),
 ];
 
+/// The Selawik files parsed, each once on first use and kept for the
+/// process. A parse reads the table directory and the tables measuring
+/// needs: done per call (and per character measured), it made a text's
+/// measure cost hundreds of parses (ARCHITECTURE "gdi32": text).
+struct Faces {
+    /// Per face: 0 unparsed, 1 being parsed, 2 parsed, 3 unusable.
+    state: [AtomicU8; 4],
+    faces: [UnsafeCell<MaybeUninit<ttf_parser::Face<'static>>>; 4],
+}
+
+// SAFETY: a face's cell is written once, by the thread that moved its
+// state from 0 to 1, before it stores 2 (Release); it is only read after
+// a load of 2 (Acquire), and never written again.
+unsafe impl Sync for Faces {}
+
+static FACES: Faces = Faces {
+    state: [const { AtomicU8::new(0) }; 4],
+    faces: [const { UnsafeCell::new(MaybeUninit::uninit()) }; 4],
+};
+
+/// Selawik weight `face` (an index into SELAWIK), parsed; None if its
+/// file does not parse.
+fn selawik(face: usize) -> Option<&'static ttf_parser::Face<'static>> {
+    let state = FACES.state.get(face)?;
+    loop {
+        match state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire) {
+            Ok(_) => {
+                let done = match ttf_parser::Face::parse(SELAWIK[face], 0) {
+                    Ok(f) => {
+                        // SAFETY: this thread moved the state from 0 to 1:
+                        // no one else writes or reads the cell (Faces).
+                        unsafe { (*FACES.faces[face].get()).write(f) };
+                        2
+                    }
+                    Err(_) => 3,
+                };
+                state.store(done, Ordering::Release);
+            }
+            Err(1) => core::hint::spin_loop(),
+            // SAFETY: state 2: written and never written again (Faces).
+            Err(2) => return Some(unsafe { (*FACES.faces[face].get()).assume_init_ref() }),
+            Err(_) => return None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Mono {
@@ -156,7 +204,7 @@ pub fn metrics(f: &LogFont) -> Metrics {
         551..=650 => 2,
         _ => 3,
     };
-    let Ok(t) = ttf_parser::Face::parse(SELAWIK[face], 0) else { return mono(f, weight) };
+    let Some(t) = selawik(face) else { return mono(f, weight) };
     let upem = i64::from(t.units_per_em());
     let (asc, desc) = match t.tables().os2 {
         Some(os2) => (i64::from(os2.windows_ascender()), i64::from(os2.windows_descender()).abs()),
@@ -269,7 +317,7 @@ impl Metrics {
         match self.kind {
             Kind::Mono { .. } => self.width,
             Kind::Selawik { face, em64 } => {
-                let Ok(t) = ttf_parser::Face::parse(SELAWIK[face], 0) else { return 0 };
+                let Some(t) = selawik(face) else { return 0 };
                 if default_ignorable(c) && t.glyph_index(c).is_none() {
                     return 0;
                 }
@@ -325,8 +373,7 @@ impl Metrics {
             }
             Kind::Selawik { face, .. }
                 if default_ignorable(c)
-                    && ttf_parser::Face::parse(SELAWIK[face], 0)
-                        .is_ok_and(|t| t.glyph_index(c).is_none()) => {}
+                    && selawik(face).is_some_and(|t| t.glyph_index(c).is_none()) => {}
             Kind::Selawik { face, em64 } => with_glyph(face, em64, c, |g| {
                 let top = self.ascent - g.ymin - g.h;
                 for y in 0..g.h {

@@ -212,6 +212,7 @@ pub struct Style {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub min_width: Option<f32>,
+    pub min_height: Option<f32>,
     pub max_width: Option<f32>,
     pub grow: f32,
     pub margin: [f32; 4],
@@ -328,6 +329,11 @@ impl<M> Node<M> {
     }
     pub fn min_width(mut self, v: impl Num) -> Self {
         self.style.min_width = Some(v.f());
+        self
+    }
+    /// At least this high; content taller than it grows the element.
+    pub fn min_height(mut self, v: impl Num) -> Self {
+        self.style.min_height = Some(v.f());
         self
     }
     pub fn max_width(mut self, v: impl Num) -> Self {

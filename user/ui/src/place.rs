@@ -171,6 +171,7 @@ impl<'a, M: Clone> Builder<'a, M> {
         let lpa =
             |v: Option<f32>| v.map_or(LengthPercentageAuto::auto(), LengthPercentageAuto::length);
         st.min_size.width = lpa(s.min_width);
+        st.min_size.height = lpa(s.min_height);
         st.max_size.width = lpa(s.max_width);
         st.flex_grow = s.grow;
         st.margin = sides(s.margin, LengthPercentageAuto::length);
@@ -411,6 +412,17 @@ mod tests {
         let v: Node<()> = row().child(text("a").id("L").grow(1)).child(text("b").id("F").width(50));
         let p = lay(&v, 300.0);
         assert_eq!((at(&p, "L").rect[2], at(&p, "F").rect), (250, [250, 0, 50, 18]));
+    }
+
+    #[test]
+    fn a_minimum_height_holds_and_content_grows_past_it() {
+        let v: Node<()> = column().width(100).child(text("ab").id("S").min_height(40));
+        assert_eq!(at(&lay(&v, 400.0), "S").rect, [0, 0, 100, 40]);
+        // Three lines of 18 (three words a line) outgrow the 40.
+        let v: Node<()> = column()
+            .width(100)
+            .child(text("aaaa bbbb cccc dddd eeee ffff gggg").id("T").min_height(40));
+        assert_eq!(at(&lay(&v, 400.0), "T").rect, [0, 0, 100, 54]);
     }
 
     #[test]

@@ -294,6 +294,9 @@ pub fn new_folder_name(existing: &[String]) -> String {
     }
 }
 
+/// The status bar's height along the window's bottom.
+pub const STATUS_H: i32 = 26;
+
 /// The icon view: tiles of `TILE_W` x `TILE_H` in rows as wide as the
 /// pane; tile `i`'s top-left corner in a pane `width` wide.
 pub const TILE_W: i32 = 112;

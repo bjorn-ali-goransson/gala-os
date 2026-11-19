@@ -21,6 +21,8 @@ bench = false
 
 [dependencies]
 shellns = { path = "../shellns" }
+# The "Change this program..." cards are a gala_ui view (`change::view`).
+gala_ui = { path = "../ui" }
 
 [target.'cfg(windows)'.dependencies]
 # The bin's allocator (the host tests have std's).

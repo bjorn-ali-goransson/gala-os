@@ -24164,13 +24164,16 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            // 18: the request card (client 279, 183, 520 x 300): its
-            // accent strip and title, a request typed.
+            // 18: the request card (gala_ui's layout, centred: client
+            // 279, 173, 520 x 320): its accent strip and title, a
+            // request typed; the Inspect button's left edge (screen
+            // 784, 448-479).
             after: "explorer: change: request card opened",
             input: &["sendkey b", "sendkey i", "sendkey g", "sendkey g", "sendkey e", "sendkey r"],
             pixels: &[
-                PixelCheck::At(600, 257, 0x005fb8),
-                PixelCheck::AnyIn(400, 274, 200, 18, 0x1b1b1b),
+                PixelCheck::At(600, 247, 0x005fb8),
+                PixelCheck::AnyIn(400, 264, 200, 18, 0x1b1b1b),
+                PixelCheck::At(784, 464, 0xd0d0d0),
             ],
         },
         ScreenStep {
@@ -24199,11 +24202,12 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            // 23: the steps ran: the last card (client 279, 238) with
-            // its Close button (790, 453).
+            // 23: the steps ran: the last card (client 279, 250, its
+            // strip at screen y 323-325) with its Close button (screen
+            // 790-879, 441-472).
             after: "explorer: change: no coding agent is connected",
             input: &[],
-            pixels: &[PixelCheck::At(600, 312, 0x005fb8), PixelCheck::At(795, 458, 0x005fb8)],
+            pixels: &[PixelCheck::At(600, 324, 0x005fb8), PixelCheck::At(795, 457, 0x005fb8)],
         },
         // Enter closes it.
         ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },

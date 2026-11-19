@@ -1179,6 +1179,11 @@ scenario with a kernel flag gala-um does not apply (anything not in
 `um_command` refuses it; um-test's last lines list every program
 scenario it did not run and why (`um_gap`).
 
+- **Boot images take the checked-in programs**: File Explorer, Task
+  Manager and the other programs a scenario starts are copied from
+  `user/bin`, so a change to one reaches a boot test only after
+  `cargo xtask export-tests` (a boot test of the old program passes or
+  fails as the old one did).
 - **gala-um's modules are the checked-in ones**: it ships
   `user/bin`'s copies of the DLLs, and the module set is read from them
   too (ARCHITECTURE "The module graph"), so a change to a DLL reaches

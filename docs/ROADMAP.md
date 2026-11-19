@@ -6344,9 +6344,10 @@ layer inside them).
    time, each its own change with its scenario passing before and
    after (same ids, same log lines; the screendumps may change only
    where the look was meant to):
-   - Explorer's "Change this program..." cards and Inspect's outline
-     (`user/explorer/src/change_ui.rs`): first, the smallest, and the
-     one the change agent edits first.
+   - Done: Explorer's "Change this program..." cards and Inspect's
+     outline (`explorer::change::view`, drawn by `change_ui.rs`);
+     Inspect still names the window's parts by hand until File
+     Explorer's window below is a view.
    - File Explorer's window (`user/explorer/src/main.rs`: address
      bar, navigation pane, the list of files from data). Needs
      scrolling (`gala_ui` has none yet).
