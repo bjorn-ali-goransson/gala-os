@@ -1676,8 +1676,21 @@ fn deb_arm64(d: &Deb) -> Result<Deb> {
         .ok_or(format!("{}: no arm64 build in DEBS_ARM64", d.pool))?;
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     let pool = leak(d.pool.replace("_amd64.deb", "_arm64.deb"));
-    let files: Vec<&'static str> =
-        d.files.iter().map(|f| leak(f.replace("x86_64-linux-gnu", "aarch64-linux-gnu"))).collect();
+    // Files built for an x86-64 microarchitecture level (babl's
+    // `x86-64-v3-CIE.so`, GEGL's `gegl-common-cxx-x86_64-v2.so`, beside
+    // their baselines) and x86-64's
+    // `lib64` directories have no arm64 counterpart.
+    let files: Vec<&'static str> = d
+        .files
+        .iter()
+        .filter(|f| {
+            !f.contains("x86-64-v")
+                && !f.contains("x86_64-v")
+                && !f.starts_with("usr/lib64/")
+                && !f.starts_with("lib64/")
+        })
+        .map(|f| leak(f.replace("x86_64-linux-gnu", "aarch64-linux-gnu")))
+        .collect();
     Ok(Deb { pool, sha256, files: Vec::leak(files) })
 }
 
@@ -12182,7 +12195,9 @@ fn make_iso_unchecked(
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
         if file.starts_with("target/prebuilt/") {
-            fetch_prebuilt(file.trim_end_matches('/'))?;
+            // `<source>@<name>`: the source's file is the one fetched.
+            let source = file.split_once('@').map_or(*file, |(source, _)| source);
+            fetch_prebuilt(source.trim_end_matches('/'))?;
         }
         // The WSL scenarios' rootfs tarballs, made from busybox.
         if file.starts_with("target/wsl/") {
@@ -20319,6 +20334,12 @@ const GLIBC_ARM64: &[(Module, Module)] = &[
     (
         ("target/prebuilt/libffi/libffi.so.8", "lib/x86_64-linux-gnu"),
         ("target/prebuilt/libffi-arm64/libffi.so.8", "lib/aarch64-linux-gnu"),
+    ),
+    // The scripts' busybox (the batch scenarios' checksums): Alpine's
+    // static aarch64 one, under busybox.net's x86_64 one's name.
+    (
+        ("target/prebuilt/busybox-linux/busybox", "lx"),
+        ("target/prebuilt/busybox-linux-aarch64/busybox.static@busybox", "lx"),
     ),
 ];
 

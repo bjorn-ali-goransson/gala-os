@@ -4815,9 +4815,11 @@ on the seams item PT prepared: native ARM64 Windows programs
    request answered with nothing); not reproduced locally, loaded or
    not. The state dump now says which (`a round would find work`, each
    client's socket) and names Linux calls in the flight records.
-2. User mode, the rest: GTK on aarch64 done (`arm_lx_gtk`: the "gtk3"
-   root's arm64 build, `DEBS_ARM64`); the other Linux roots (x11, gimp,
-   inkscape) have no arm64 build yet. arch_prctl_test and signal_test stay x86_64's (the
+2. User mode, the rest: the desktop Linux applications run on aarch64
+   from their roots' arm64 builds (`DEBS_ARM64`): GTK (`arm_lx_gtk`,
+   `arm_lx_gtk_x11`), xterm, a distribution's desktop, GIMP and
+   Inkscape (`arm_lx_xterm`, `arm_lx_xdesktop`, `arm_lx_gimp(_batch)`,
+   `arm_lx_inkscape(_batch)`). arch_prctl_test and signal_test stay x86_64's (the
    call and the sigcontext fields they check are x86's; the aarch64
    signal frame is pipe_test's, id_test's, altstack_test's and
    seccomp_test's).

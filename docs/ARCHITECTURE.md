@@ -12615,7 +12615,12 @@ the `unsafe` allow-list). Allocation is fallible (`TryVec`,
   frame: siginfo, the ucontext (its sigcontext with x0-x30, sp, pc and
   pstate, and in its reserved area an fpsimd_context: FPSR, FPCR,
   V0-V31), then the frame record the handler's x29 points at; x30 is
-  sa_restorer; rt_sigreturn reads it back at sp. User mode writes the
+  sa_restorer, or, for an action without SA_RESTORER (aarch64's glibc
+  sets none: Linux returns those through its vDSO's
+  `__kernel_rt_sigreturn`), the process's rt_sigreturn page
+  (`lx::mm::SIGRETURN_PAGE`, just above the stack: `mov x8, #139; svc
+  #0`, read and execute, mapped at exec, copied by fork; gala has no
+  vDSO); rt_sigreturn reads it back at sp. User mode writes the
   thread pointer (TPIDR_EL0) itself, so the scheduler records it at each
   switch away and loads the next thread's (`percpu::live_user_fs_base`).
   Scenarios: the `arm_lx_*` twins (ROADMAP AR).
@@ -13398,7 +13403,7 @@ The running parts (milestone 1; `lxrun=`):
     return address), restores every register (flags filtered by the
     return), the XSAVE state and the mask; a frame it cannot read, or
     whose rip/rsp leave user space, kills with SIGSEGV, as does a frame
-    that cannot be written or an action without SA_RESTORER;
+    that cannot be written or (x86_64) an action without SA_RESTORER;
   - EINTR: blocking pipe reads and writes, wait4 and rt_sigtimedwait
     end with EINTR when a signal is deliverable; read, write, writev and
     wait4 are restarted (rip back over `syscall`, rax the number) after
