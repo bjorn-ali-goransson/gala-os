@@ -122,6 +122,7 @@ pub const D2DERR_UNSUPPORTED_PIXEL_FORMAT: HResult = 0x8898_2f80_u32 as i32;
 const LEDGER_UNSUPPORTED: u32 = 2;
 const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 const LEDGER_OTHER: u32 = 5;
+const LEDGER_REACHED: u32 = 9;
 
 fn record_kind(what: &[u8], kind: u32, detail: u64) {
     let mut name = [0u8; 96];
@@ -152,6 +153,28 @@ pub fn gap(what: &[u8], detail: u64) {
 /// ledger").
 pub fn answered(what: &[u8], hr: HResult) {
     record_kind(what, LEDGER_OTHER, hr as u32 as u64);
+}
+
+/// Records `d2d1.dll!<what>` the first time a program reaches the call
+/// site: a call that works leaves nothing else behind, so the ledger
+/// would go quiet exactly where a program stops in the middle of a path
+/// this DLL answers. Once per site -- the record is the path a program
+/// took through this DLL, not a count, and a drawing loop pays one
+/// relaxed atomic a call (OBSERVABILITY "Missing-features ledger").
+#[macro_export]
+macro_rules! reached {
+    ($what:expr) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            $crate::reached_now($what);
+        }
+    }};
+}
+
+/// `reached!`'s record. Call it through the macro, which keeps it to the
+/// first time.
+pub fn reached_now(what: &[u8]) {
+    record_kind(what, LEDGER_REACHED, 0);
 }
 
 /// A method gala does not implement: recorded, E_NOTIMPL.

@@ -12055,6 +12055,19 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         &[r#"!"ev":"syscall","pid":4,"#, r#""ev":"syscall","pid":12,"#],
     ),
     (
+        // An exception handed to a program's own dispatcher is an event
+        // although the program handles it and lives: seh_test's bad
+        // write (an access violation) and the exceptions it raises
+        // itself are all there, each with the thread it was handed to
+        // and the address it was raised at.
+        "seh_test",
+        &[
+            r#""ev":"exception","pid":4,"#,
+            r#""name":"access violation","#,
+            r#""status":3221225477,"#,
+        ],
+    ),
+    (
         // The mask set aside at boot is set again by the waiting thread.
         "events_from",
         &[r#""ev":"syscall","pid":4,"#],
@@ -17466,7 +17479,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // P1: frame-based exception handling (unwind data, language
         // handlers, RtlVirtualUnwind/RtlUnwindEx/RtlRaiseException).
         name: "seh_test",
-        cmdline: "qemu_exit run=seh_test.exe",
+        cmdline: "qemu_exit events=fault run=seh_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["seh_test: ok", "exited with status 0x00000000"],
     },

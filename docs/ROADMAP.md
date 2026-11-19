@@ -1882,12 +1882,17 @@ need gala's.
    bare desktop has nothing near -- then Alt+F4, and consolerun ends
    with the app's own status, 0.
    Neither run draws the window its check wants yet. Word's puts its
-   untitled splash window (MsoSplash) on the screen, walks the whole
-   Direct2D and DirectWrite path the ladder below answers -- its last
-   recorded call is ID2D1DeviceContext::SetTarget, S_OK -- and then,
-   within a second of it and with nothing of the frame drawn, prints
-   "Word was unable to start. (13)" and exits with status 0 after
-   30.5 s. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   untitled splash window (MsoSplash) on the screen and walks the whole
+   Direct2D and DirectWrite path the ladder below answers: every method
+   of both DLLs records the first call that reaches it (OBSERVABILITY
+   "Missing-features ledger"), and the last one Word makes is
+   ID2D1RenderTarget::CreateSolidColorBrush. Nothing follows it -- no
+   method on the brush it asked for, no BeginDraw, no geometry, and no
+   exception the program handles itself -- and with nothing of the frame
+   drawn Word prints "Word was unable to start. (13)" and exits with
+   status 0 after 31.2 s. What it does between that call and the message
+   is the next thing to read, from the system-call stream rather than
+   from the DLLs. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's

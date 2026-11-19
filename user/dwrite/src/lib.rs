@@ -174,6 +174,40 @@ static FACTORY_VTBL: VTable<24> = VTable([
     glyphs::create_glyph_run_analysis as *const (),
 ]);
 
+/// Records `dwrite.dll!<what>` the first time a program reaches the call
+/// site: a call that works leaves nothing else behind, so the ledger
+/// would go quiet exactly where a program stops in the middle of a path
+/// this DLL answers. Once per site -- what it leaves is the path a
+/// program took through this DLL, not a count, and a drawing loop pays
+/// one relaxed atomic a call (OBSERVABILITY "Missing-features ledger").
+#[macro_export]
+macro_rules! reached {
+    ($what:expr) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            $crate::reached_now($what);
+        }
+    }};
+}
+
+/// `reached!`'s record (ledger kind 9, "reached"): the first call that
+/// reached a method, which is a path and not a gap -- nor a call
+/// answered S_OK, which `answered` records. Call it through the macro,
+/// which keeps it to the first time.
+pub fn reached_now(what: &[u8]) {
+    let mut name = [0u8; 96];
+    let mut n = 0;
+    for &b in b"dwrite.dll!".iter().chain(what) {
+        if n == name.len() {
+            break;
+        }
+        name[n] = b;
+        n += 1;
+    }
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(name.as_ptr(), n, 9, 0) };
+}
+
 /// Writes `object` to `out` if `riid` is one of `iids`.
 pub fn query(
     object: *const c_void,
@@ -191,8 +225,14 @@ pub fn query(
             return S_OK;
         }
         *out = core::ptr::null();
+        missing(b"dwrite.dll!QueryInterface(refused)", data1(&*riid));
     }
     E_NOINTERFACE
+}
+
+/// The first dword of a GUID (a ledger detail), as DEFINE_GUID writes it.
+pub fn data1(g: &Iid) -> u64 {
+    u64::from(u32::from_le_bytes([g[0], g[1], g[2], g[3]]))
 }
 
 /// AddRef/Release of the static objects: they live for the process.
@@ -217,6 +257,7 @@ extern "system" fn factory_get_system_font_collection(
     out: *mut *const c_void,
     _check_for_updates: i32,
 ) -> HResult {
+    reached!(b"IDWriteFactory::GetSystemFontCollection");
     if out.is_null() {
         return E_POINTER;
     }
@@ -247,6 +288,7 @@ extern "system" fn factory_create_custom_font_collection(
     key_size: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFactory::CreateCustomFontCollection");
     if out.is_null() || loader.is_null() {
         return E_INVALIDARG;
     }
@@ -278,6 +320,7 @@ extern "system" fn factory_create_custom_font_collection(
 /// (the loaders are only used by the custom collections and files that
 /// are not supported yet, which say so themselves).
 extern "system" fn factory_register_loader(_this: *const c_void, loader: *const c_void) -> HResult {
+    reached!(b"IDWriteFactory::Register/UnregisterLoader");
     if loader.is_null() { E_INVALIDARG } else { S_OK }
 }
 
@@ -287,6 +330,7 @@ extern "system" fn factory_create_font_file_reference(
     _write_time: *const u64,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFactory::CreateFontFileReference");
     if path.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
@@ -315,6 +359,7 @@ extern "system" fn factory_create_custom_font_file_reference(
     loader: *const c_void,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFactory::CreateCustomFontFileReference");
     if out.is_null() || loader.is_null() {
         return E_INVALIDARG;
     }
@@ -342,6 +387,7 @@ extern "system" fn factory_create_font_face(
     simulations: u32,
     out: *mut *const c_void,
 ) -> HResult {
+    reached!(b"IDWriteFactory::CreateFontFace");
     if out.is_null() || file_list.is_null() || files == 0 {
         return E_INVALIDARG;
     }

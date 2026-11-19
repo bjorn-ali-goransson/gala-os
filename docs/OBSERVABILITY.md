@@ -239,7 +239,7 @@ stream (office_install's staging, half an hour in:
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; `"elevated"`: its primary token is elevated (TokenElevation; the log line ends in `, elevated token`); scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line); `process terminate` (TerminateProcess of another process: `by`, pid, status; with the log line `process: pid B (x.exe) terminates pid P (y.exe) with status S`, so who ended a process is in the log); the task manager's (`nt::tasks`, ARCHITECTURE "The task manager"): `tasks query` (each GalaTasks list: `by`, `nt`, `linux` and `hung` counts; the first query of each caller also a `tasks: pid P (x.exe) lists the processes: ...` line, and each process's first "Not responding" a `tasks: pid P (x.exe) is not responding: ...` line), `tasks end` (End task of a Linux process or distribution: `by`, `what`, pid, `detail` (the signal, or the distribution and how many processes ended), status; always a `tasks: pid P (x.exe) ends ...` line), and `lx signal` for the signal itself; scenario `taskmgr` |
-| `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
+| `fault` | every user-mode CPU exception, before it is resolved or delivered (`fault`: pid, vector, rip, cr2, error), and the ones handed to the program's own dispatcher once the frame is on its stack (`exception`: pid, tid, `status`, `name` as the crash report names it, `ip`, `address` for an access violation). The second is the only record of an exception a program catches itself, which is what a program that gives up over one of its own leaves behind (scenario `seh_test`) |
 | `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled: in the kernel by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too, and in user mode by its own tick (exact there, as user mode runs with interrupts on; an NMI landing in user mode records nothing, so user samples never depend on the neighbor's vCPU getting host time, and both kinds come at the same rate); the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts the samples asked of another CPU, written in user mode and in the kernel, lost to a full ring, interrupts off for over 8 sample periods, and those that landed while the tick was writing samples, which are not kept, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued); Linux memfds: `lx memfd` (pid, fd, name, flags, node) and `lx memfd seal` (pid, fd, seals asked for, errno or 0). Linux AF_UNIX sockets: `lx unix` (pid, fd, op: socketpair, bind, listen, connect, accept with `new_fd` and `peer_pid`, close of a named socket; the name, a path or `@` and an abstract name; errno or 0: a refused bind, listen or connect is here) and `lx unix rights` (pid, fd, what: sent, received, dropped; count). The window station's clipboard: `clipboard` (pid, tid, session, station; op `open`, `open denied` with the holder, `empty` with the previous owner, `set` and `get` with format, kind and size, `get`'s `source` for a synthesized format and `from_pid`, `close` with `changed` and the listeners told, `listener`; ARCHITECTURE "The clipboard"; scenario `clipboard_test`). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
@@ -416,8 +416,11 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   about and lives with), `missing dll`, `load failed` (a DLL the loader
   found and could not load, its detail the status: what names the DLL
   behind a process that dies STATUS_DLL_INIT_FAILED), `stub` (an export
-  that only reports itself and ends the process, `gala_stubs`) and
-  `other`. Both
+  that only reports itself and ends the process, `gala_stubs`),
+  `reached` (not a gap at all: the first call that reached a method gala
+  answers, so that a program stopping in the middle of a path leaves the
+  path it took; it is told from a call answered S_OK, which `other`
+  records with the HRESULT as its detail) and `other`. Both
   `stub` and `not implemented` are also logged as they happen, because a
   run cut short by a snapshot never dumps the ledger; only `stub`'s line
   says the process ended. The Windows Runtime's:
@@ -439,14 +442,25 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   pixel format)` with the format GUID's first dword, `draw(a brush not
   made by gala's d2d1)`), and `<interface> QueryInterface` with the IID's
   first dword for an interface it does not answer (ID2D1Factory1's
-  0xbb12d362, the GDI interop interface's 0xe0db51c3). The device path
-  Office draws through is also recorded when it works, "other" with the
-  HRESULT as the detail (0 for success):
+  0xbb12d362, the GDI interop interface's 0xe0db51c3).
+  **A call that works is recorded too**, "other" with the HRESULT as
+  the detail (0 for success), because a call that works leaves nothing
+  else behind: the ledger would otherwise go quiet exactly where a
+  program stops in the middle of a path this DLL answers, which is what
+  a program that gives up over graphics (Word) leaves behind. Every
+  method of the factory's render targets, of ID2D1RenderTarget and of
+  the ID2D1DeviceContext interfaces over it records the first time a
+  program reaches it (`reached!`, one `AtomicBool` a call site, so a
+  drawing loop pays one relaxed atomic a call and the rows are the path
+  a program took through the DLL, not a count: a row's `first` is when
+  the program got there). The calls whose answer is worth keeping record
+  it every time instead, with their HRESULT as the detail:
   `ID2D1Factory1::CreateDevice` and `ID2D1Factory2::CreateDevice`,
   `ID2D1Device::CreateDeviceContext` and
   `ID2D1Device1::CreateDeviceContext`,
   `ID2D1DeviceContext::CreateBitmapFromDxgiSurface`,
   `ID2D1DeviceContext::SetTarget`,
+  `ID2D1Factory::CreateDrawingStateBlock`,
   `ID2D1Factory::CreateDxgiSurfaceRenderTarget` (Direct2D 1.0's way onto
   a surface, which a program with its own Direct3D 10 device takes) and
   `ID2D1RenderTarget::EndDraw`.
@@ -457,12 +471,23 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   means the program asked for one. What it refuses is named instead:
   `CreateDxgiSurfaceRenderTarget(multisampled)` with the sample count,
   `(surface format)` with the DXGI format (only B8G8R8A8 is drawn) and
-  `(no IDXGIDevice behind the surface)`.
-  Which version's interface a program took, how far down that path it
-  got and how many frames it ended leave nothing behind otherwise, and
-  a program that gives up after them (Word) shows nothing of why. A failed WIC
+  `(no IDXGIDevice behind the surface)`. A failed WIC
   bitmap lock at BeginDraw or EndDraw is `BeginDraw(WIC bitmap lock)` or
   `EndDraw(...)` with the HRESULT, and EndDraw returns it.
+  DirectWrite (dwrite) keeps the same two halves:
+  `dwrite.dll!IDWriteFactory::<method>`, "unsupported", for the factory
+  methods not built (CreateTextFormat, CreateTextLayout,
+  CreateTextAnalyzer, GetGdiInterop, ...) and for the cases a built one
+  turns away (`CreateGlyphRunAnalysis(sideways)`, `CreateFontFace(file
+  or options)`, and `font file (Windows\Fonts\selawk*.ttf)` with the
+  font's index when gala's own font cannot be read, so a text run with
+  no font behind it says so), and `QueryInterface(refused)` with the
+  IID's first dword for an interface it does not answer; while the
+  factory, the font collection, a family, a font, a face, a font file,
+  its loader and its stream record the first time a program reaches
+  each of their methods, so a program's way from
+  GetSystemFontCollection to a glyph run's alpha texture is in the
+  ledger whether or not it ends in a gap.
   Direct3D 10.1 (d3d10_1): `d3d10_1.dll!ID3D10Device1::<method>`, "not
   implemented", for each of the eighty-seven methods not built (the
   pipeline, the views, the states, the queries), so a run names the ones

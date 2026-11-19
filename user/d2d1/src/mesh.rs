@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use crate::{
     D2DERR_WRONG_STATE, E_OUTOFMEMORY, Guid, HResult, Header, IID_MESH, IID_RESOURCE,
     IID_TESSELLATION_SINK, Obj, Point, Res, S_OK, Spin, VTable, add_ref, get_factory, give, push,
-    put, query, release_object, vtable_of,
+    put, query, reached, release_object, vtable_of,
 };
 
 /// D2D1_TRIANGLE.
@@ -134,6 +134,7 @@ extern "system" fn mesh_release(this: Obj) -> u32 {
 /// ID2D1Mesh::Open: the one sink the mesh gives.
 #[allow(non_snake_case)]
 extern "system" fn mesh_Open(this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Mesh::Open");
     put(out, core::ptr::null_mut());
     if out.is_null() {
         return crate::E_POINTER;
@@ -175,6 +176,7 @@ fn mesh_of(sink: Obj) -> Obj {
 /// (after it they are dropped, as Direct2D drops them).
 #[allow(non_snake_case)]
 extern "system" fn sink_AddTriangles(this: Obj, tris: *const Triangle, count: u32) {
+    reached!(b"ID2D1TessellationSink::AddTriangles");
     let mesh = mesh_of(this);
     state(mesh, |s| {
         if s.phase != Phase::Open || count == 0 || tris.is_null() {
@@ -198,6 +200,7 @@ extern "system" fn sink_AddTriangles(this: Obj, tris: *const Triangle, count: u3
 /// Close is D2DERR_WRONG_STATE.
 #[allow(non_snake_case)]
 extern "system" fn sink_Close(this: Obj) -> HResult {
+    reached!(b"ID2D1TessellationSink::Close");
     state(mesh_of(this), |s| match s.phase {
         Phase::Open => {
             s.phase = Phase::Closed;

@@ -17,8 +17,8 @@ use crate::raster::StrokeStyle;
 use crate::{
     E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Header, IID_FACTORY, IID_FACTORY1,
     IID_FACTORY2, IID_IUNKNOWN, IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj,
-    RectF, Res, S_OK, VTable, add_ref, gap, get_factory, give, not_implemented, put, query, read,
-    release_object, try_box, vtable_of,
+    RectF, Res, S_OK, VTable, add_ref, gap, get_factory, give, not_implemented, put, query,
+    reached, read, release_object, try_box, vtable_of,
 };
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -158,10 +158,12 @@ extern "system" fn mt_release(this: Obj) -> u32 {
 }
 
 extern "system" fn mt_GetMultithreadProtected(this: Obj) -> i32 {
+    reached!(b"ID2D1Multithread::GetMultithreadProtected");
     i32::from(factory(from_mt(this)).multithreaded)
 }
 
 extern "system" fn mt_Enter(this: Obj) {
+    reached!(b"ID2D1Multithread::Enter");
     let f = factory(from_mt(this));
     if f.multithreaded {
         // SAFETY: the factory's initialized critical section.
@@ -170,6 +172,7 @@ extern "system" fn mt_Enter(this: Obj) {
 }
 
 extern "system" fn mt_Leave(this: Obj) {
+    reached!(b"ID2D1Multithread::Leave");
     let f = factory(from_mt(this));
     if f.multithreaded {
         // SAFETY: as above; the caller entered it.
@@ -182,16 +185,19 @@ extern "system" fn factory_query_fn(this: Obj, riid: *const Guid, out: *mut Obj)
 }
 
 extern "system" fn f_ReloadSystemMetrics(_this: Obj) -> HResult {
+    reached!(b"ID2D1Factory::ReloadSystemMetrics");
     S_OK
 }
 
 /// GetDesktopDpi: gala's screen is 96 DPI (user32's GetDpiForSystem).
 extern "system" fn f_GetDesktopDpi(_this: Obj, x: *mut f32, y: *mut f32) {
+    reached!(b"ID2D1Factory::GetDesktopDpi");
     put(x, 96.0);
     put(y, 96.0);
 }
 
 extern "system" fn f_CreateRectangleGeometry(this: Obj, r: *const RectF, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Factory::CreateRectangleGeometry");
     let Some(r) = read(r) else { return E_INVALIDARG };
     geometry::create(this, Shape::Rect(r), out)
 }
@@ -201,11 +207,13 @@ extern "system" fn f_CreateRoundedRectangleGeometry(
     r: *const RoundedRect,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateRoundedRectangleGeometry");
     let Some(r) = read(r) else { return E_INVALIDARG };
     geometry::create(this, Shape::Rounded(r.rect, r.rx, r.ry), out)
 }
 
 extern "system" fn f_CreateEllipseGeometry(this: Obj, e: *const Ellipse, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Factory::CreateEllipseGeometry");
     let Some(e) = read(e) else { return E_INVALIDARG };
     geometry::create(this, Shape::Ellipse(e.center, e.rx, e.ry), out)
 }
@@ -217,6 +225,7 @@ extern "system" fn f_CreateGeometryGroup(
     _count: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateGeometryGroup");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateGeometryGroup")
 }
@@ -227,11 +236,13 @@ extern "system" fn f_CreateTransformedGeometry(
     _m: *const Matrix,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateTransformedGeometry");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateTransformedGeometry")
 }
 
 extern "system" fn f_CreatePathGeometry(this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Factory::CreatePathGeometry");
     geometry::create(this, geometry::new_path_shape(), out)
 }
 
@@ -259,11 +270,13 @@ extern "system" fn f1_CreateStrokeStyle(
     _count: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory1::CreateStrokeStyle");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreateStrokeStyle")
 }
 
 extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Factory1::CreatePathGeometry");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreatePathGeometry")
 }
@@ -278,6 +291,7 @@ extern "system" fn f1_CreateDrawingStateBlock(
 }
 
 extern "system" fn f1_CreateGdiMetafile(_this: Obj, _stream: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1Factory1::CreateGdiMetafile");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreateGdiMetafile")
 }
@@ -290,6 +304,7 @@ extern "system" fn f1_RegisterEffectFromStream(
     _count: u32,
     _factory: *const (),
 ) -> HResult {
+    reached!(b"ID2D1Factory1::RegisterEffectFromStream");
     gap(b"ID2D1Factory1::RegisterEffectFromStream", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
 }
@@ -302,11 +317,13 @@ extern "system" fn f1_RegisterEffectFromString(
     _count: u32,
     _factory: *const (),
 ) -> HResult {
+    reached!(b"ID2D1Factory1::RegisterEffectFromString");
     gap(b"ID2D1Factory1::RegisterEffectFromString", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
 }
 
 extern "system" fn f1_UnregisterEffect(_this: Obj, _class_id: *const Guid) -> HResult {
+    reached!(b"ID2D1Factory1::UnregisterEffect");
     not_implemented(b"ID2D1Factory1::UnregisterEffect")
 }
 
@@ -319,6 +336,7 @@ extern "system" fn f1_GetRegisteredEffects(
     returned: *mut u32,
     registered: *mut u32,
 ) -> HResult {
+    reached!(b"ID2D1Factory1::GetRegisteredEffects");
     put(returned, 0);
     put(registered, 0);
     S_OK
@@ -329,6 +347,7 @@ extern "system" fn f1_GetEffectProperties(
     class_id: *const Guid,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory1::GetEffectProperties");
     put(out, core::ptr::null_mut());
     gap(b"ID2D1Factory1::GetEffectProperties", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
@@ -385,6 +404,7 @@ extern "system" fn f_CreateStrokeStyle(
     count: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateStrokeStyle");
     if out.is_null() {
         return E_POINTER;
     }

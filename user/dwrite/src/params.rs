@@ -15,7 +15,8 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
-    E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, HResult, Iid, S_OK, VTable, answered, guid, query, vt,
+    E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, HResult, Iid, S_OK, VTable, answered, guid, query,
+    reached, vt,
 };
 
 pub const IID_PARAMS: Iid =
@@ -219,32 +220,39 @@ extern "system" fn params_release(this: *const c_void) -> u32 {
 }
 
 extern "system" fn params_GetGamma(this: *const c_void) -> f32 {
+    reached!(b"IDWriteRenderingParams::GetGamma");
     values(this).gamma
 }
 
 extern "system" fn params_GetEnhancedContrast(this: *const c_void) -> f32 {
+    reached!(b"IDWriteRenderingParams::GetEnhancedContrast");
     values(this).contrast
 }
 
 extern "system" fn params_GetClearTypeLevel(this: *const c_void) -> f32 {
+    reached!(b"IDWriteRenderingParams::GetClearTypeLevel");
     values(this).cleartype_level
 }
 
 extern "system" fn params_GetPixelGeometry(this: *const c_void) -> u32 {
+    reached!(b"IDWriteRenderingParams::GetPixelGeometry");
     values(this).geometry
 }
 
 extern "system" fn params_GetRenderingMode(this: *const c_void) -> u32 {
+    reached!(b"IDWriteRenderingParams::GetRenderingMode");
     values(this).mode
 }
 
 /// IDWriteRenderingParams1::GetGrayscaleEnhancedContrast.
 extern "system" fn params_GetGrayscaleEnhancedContrast(this: *const c_void) -> f32 {
+    reached!(b"IDWriteRenderingParams1::GetGrayscaleEnhancedContrast");
     values(this).grayscale_contrast
 }
 
 /// IDWriteRenderingParams2::GetGridFitMode.
 extern "system" fn params_GetGridFitMode(this: *const c_void) -> u32 {
+    reached!(b"IDWriteRenderingParams2::GetGridFitMode");
     values(this).grid_fit
 }
 
@@ -252,5 +260,6 @@ extern "system" fn params_GetGridFitMode(this: *const c_void) -> u32 {
 /// rendering mode (DWRITE_RENDERING_MODE1 extends the enumeration gala's
 /// values come from, and Windows answers the mode the set was made with).
 extern "system" fn params_GetRenderingMode1(this: *const c_void) -> u32 {
+    reached!(b"IDWriteRenderingParams3::GetRenderingMode1");
     values(this).mode
 }

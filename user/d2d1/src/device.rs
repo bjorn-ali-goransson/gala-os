@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::{
     ComRef, E_INVALIDARG, E_NOINTERFACE, E_POINTER, Guid, HResult, IID_DEVICE, IID_DEVICE1,
     IID_RESOURCE, Obj, Res, S_OK, VTable, add_ref, answered, gap, get_factory, give, guid,
-    not_implemented, put, query, release_object, slot,
+    not_implemented, put, query, reached, release_object, slot,
 };
 
 /// The slots this DLL calls on the program's DXGI and Direct3D 11
@@ -283,20 +283,25 @@ extern "system" fn d_CreatePrintControl(
     _props: *const u8,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Device::CreatePrintControl");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Device::CreatePrintControl")
 }
 
 extern "system" fn d_SetMaximumTextureMemory(this: Obj, bytes: u64) {
+    reached!(b"ID2D1Device::SetMaximumTextureMemory");
     device(this).texture_memory.store(bytes, Ordering::Relaxed);
 }
 
 extern "system" fn d_GetMaximumTextureMemory(this: Obj) -> u64 {
+    reached!(b"ID2D1Device::GetMaximumTextureMemory");
     device(this).texture_memory.load(Ordering::Relaxed)
 }
 
 /// ClearResources: gala's Direct2D keeps no cache of its own to drop.
-extern "system" fn d_ClearResources(_this: Obj, _milliseconds_since_use: u32) {}
+extern "system" fn d_ClearResources(_this: Obj, _milliseconds_since_use: u32) {
+    reached!(b"ID2D1Device::ClearResources");
+}
 
 // ---- ID2D1Device1 (Direct2D 1.2) -----------------------------------------------
 
@@ -305,12 +310,14 @@ const RENDERING_PRIORITY_NORMAL: u32 = 0;
 const RENDERING_PRIORITY_LOW: u32 = 1;
 
 extern "system" fn d1_GetRenderingPriority(this: Obj) -> u32 {
+    reached!(b"ID2D1Device1::GetRenderingPriority");
     device(this).priority.load(Ordering::Relaxed)
 }
 
 /// A priority other than NORMAL or LOW is not one Direct2D has: it is
 /// recorded and the device keeps the priority it had.
 extern "system" fn d1_SetRenderingPriority(this: Obj, priority: u32) {
+    reached!(b"ID2D1Device1::SetRenderingPriority");
     if priority != RENDERING_PRIORITY_NORMAL && priority != RENDERING_PRIORITY_LOW {
         gap(b"ID2D1Device1::SetRenderingPriority(unknown)", priority.into());
         return;

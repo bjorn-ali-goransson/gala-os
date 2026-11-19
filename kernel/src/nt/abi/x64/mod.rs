@@ -709,6 +709,27 @@ pub(in crate::nt) fn deliver_to_user(
         warn!("user exception: cannot push the dispatcher frame (rsp {stack:#x})");
         return false;
     };
+    // Every exception a program is handed is an event: one the program
+    // catches itself leaves nothing else behind, so a program that gives
+    // up over an exception of its own looks from outside like one that
+    // simply stopped (OBSERVABILITY "What a failure leaves behind").
+    crate::events::emit(
+        crate::events::Category::Fault,
+        "exception",
+        format_args!(
+            r#""pid":{},"tid":{},"status":{},"name":"{}","ip":{rip},"address":{}"#,
+            process.id,
+            thread::current()
+                .and_then(|t| match &t.body {
+                    ObjectBody::Thread(t) => Some(t.id),
+                    _ => None,
+                })
+                .unwrap_or(0),
+            status.0,
+            crate::nt::crashreport::exception_name(status),
+            cr2.unwrap_or(0),
+        ),
+    );
     frame.set_ip(dispatcher);
     frame.set_sp(new_rsp);
     if x86 {

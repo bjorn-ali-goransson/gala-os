@@ -64,7 +64,7 @@ use crate::{
     E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
     IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj,
     PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, answered,
-    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, read,
+    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, reached, read,
     release_object, slot, vtable_of,
 };
 
@@ -500,6 +500,7 @@ pub extern "system" fn f_CreateWicBitmapRenderTarget(
     props: *const TargetProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateWicBitmapRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -668,6 +669,7 @@ pub extern "system" fn f_CreateDCRenderTarget(
     props: *const TargetProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateDCRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -697,6 +699,7 @@ pub extern "system" fn f_CreateHwndRenderTarget(
     hprops: *const HwndProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1Factory::CreateHwndRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -785,6 +788,7 @@ extern "system" fn t_CreateBitmap(
     props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateBitmap");
     let format = with(this, |s| s.format);
     let rows = brush::Rows { src, pitch };
     brush::create_bitmap(factory_of(this), format, size, rows, props, Options::plain(), out)
@@ -796,6 +800,7 @@ extern "system" fn t_CreateBitmapFromWicBitmap(
     props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateBitmapFromWicBitmap");
     brush::create_from_wic(factory_of(this), source, props, Options::plain(), out)
 }
 
@@ -806,6 +811,7 @@ extern "system" fn t_CreateSharedBitmap(
     _props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateSharedBitmap");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateSharedBitmap")
 }
@@ -820,6 +826,7 @@ extern "system" fn t_CreateBitmapBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateBitmapBrush");
     if !bitmap.is_null() && !brush::is_bitmap(bitmap) {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -835,6 +842,7 @@ extern "system" fn t_CreateSolidColorBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateSolidColorBrush");
     let Some(c) = read(color) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -850,6 +858,7 @@ extern "system" fn t_CreateGradientStopCollection(
     extend: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateGradientStopCollection");
     brush::create_stops(factory_of(this), stops, n, gamma, extend, out)
 }
 
@@ -860,6 +869,7 @@ extern "system" fn t_CreateLinearGradientBrush(
     stops: Obj,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateLinearGradientBrush");
     let (Some(l), Some(stops)) = (read(lprops), brush::stops_ref(stops)) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -889,6 +899,7 @@ extern "system" fn t_CreateRadialGradientBrush(
     stops: Obj,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateRadialGradientBrush");
     let (Some(r), Some(stops)) = (read(rprops), brush::stops_ref(stops)) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -905,16 +916,19 @@ extern "system" fn t_CreateCompatibleRenderTarget(
     _options: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateCompatibleRenderTarget");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateCompatibleRenderTarget")
 }
 
 extern "system" fn t_CreateLayer(_this: Obj, _size: *const SizeF, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateLayer");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateLayer")
 }
 
 extern "system" fn t_CreateMesh(this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1RenderTarget::CreateMesh");
     mesh::create(factory_of(this), out)
 }
 
@@ -965,15 +979,18 @@ fn stroke_path(this: Obj, path: Option<Path>, brush_obj: Obj, width: f32, style:
 }
 
 extern "system" fn t_DrawLine(this: Obj, a: Point, b: Point, brush: Obj, width: f32, style: Obj) {
+    reached!(b"ID2D1RenderTarget::DrawLine");
     stroke_path(this, geometry::line_path(a, b), brush, width, style);
 }
 
 extern "system" fn t_DrawRectangle(this: Obj, r: *const RectF, brush: Obj, width: f32, style: Obj) {
+    reached!(b"ID2D1RenderTarget::DrawRectangle");
     let path = read(r).and_then(|r| geometry::rect_path(&r));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillRectangle(this: Obj, r: *const RectF, brush: Obj) {
+    reached!(b"ID2D1RenderTarget::FillRectangle");
     fill_path(this, read(r).and_then(|r| geometry::rect_path(&r)), brush);
 }
 
@@ -984,20 +1001,24 @@ extern "system" fn t_DrawRoundedRectangle(
     width: f32,
     style: Obj,
 ) {
+    reached!(b"ID2D1RenderTarget::DrawRoundedRectangle");
     let path = read(r).and_then(|r| geometry::rounded_path(&r.rect, r.rx, r.ry));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillRoundedRectangle(this: Obj, r: *const RoundedRect, brush: Obj) {
+    reached!(b"ID2D1RenderTarget::FillRoundedRectangle");
     fill_path(this, read(r).and_then(|r| geometry::rounded_path(&r.rect, r.rx, r.ry)), brush);
 }
 
 extern "system" fn t_DrawEllipse(this: Obj, e: *const Ellipse, brush: Obj, width: f32, style: Obj) {
+    reached!(b"ID2D1RenderTarget::DrawEllipse");
     let path = read(e).and_then(|e| geometry::ellipse_path(e.center, e.rx, e.ry));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillEllipse(this: Obj, e: *const Ellipse, brush: Obj) {
+    reached!(b"ID2D1RenderTarget::FillEllipse");
     fill_path(this, read(e).and_then(|e| geometry::ellipse_path(e.center, e.rx, e.ry)), brush);
 }
 
@@ -1014,10 +1035,12 @@ fn path_of(g: Obj) -> Option<Path> {
 }
 
 extern "system" fn t_DrawGeometry(this: Obj, g: Obj, brush: Obj, width: f32, style: Obj) {
+    reached!(b"ID2D1RenderTarget::DrawGeometry");
     stroke_path(this, path_of(g), brush, width, style);
 }
 
 extern "system" fn t_FillGeometry(this: Obj, g: Obj, brush: Obj, opacity_brush: Obj) {
+    reached!(b"ID2D1RenderTarget::FillGeometry");
     if !opacity_brush.is_null() {
         gap(b"ID2D1RenderTarget::FillGeometry(opacity brush)", 0);
     }
@@ -1102,6 +1125,7 @@ extern "system" fn t_FillOpacityMask(
     _dst: *const RectF,
     _src: *const RectF,
 ) {
+    reached!(b"ID2D1RenderTarget::FillOpacityMask");
     gap(b"ID2D1RenderTarget::FillOpacityMask", 0);
 }
 
@@ -1116,6 +1140,7 @@ extern "system" fn t_DrawBitmap(
     interp: u32,
     src: *const RectF,
 ) {
+    reached!(b"ID2D1RenderTarget::DrawBitmap");
     if !brush::is_bitmap(bitmap) {
         if !bitmap.is_null() {
             gap(b"DrawBitmap(a bitmap not made by gala's d2d1)", 0);
@@ -1167,6 +1192,7 @@ extern "system" fn t_DrawText(
     _options: u32,
     _measuring: u32,
 ) {
+    reached!(b"ID2D1RenderTarget::DrawText");
     gap(b"ID2D1RenderTarget::DrawText(no text layout)", length.into());
 }
 
@@ -1177,6 +1203,7 @@ extern "system" fn t_DrawTextLayout(
     _brush: Obj,
     _options: u32,
 ) {
+    reached!(b"ID2D1RenderTarget::DrawTextLayout");
     gap(b"ID2D1RenderTarget::DrawTextLayout(no text layout)", 0);
 }
 
@@ -1187,44 +1214,53 @@ extern "system" fn t_DrawGlyphRun(
     _brush: Obj,
     _mode: u32,
 ) {
+    reached!(b"ID2D1RenderTarget::DrawGlyphRun");
     gap(b"ID2D1RenderTarget::DrawGlyphRun", 0);
 }
 
 // ---- State ------------------------------------------------------------------------------
 
 extern "system" fn t_SetTransform(this: Obj, m: *const Matrix) {
+    reached!(b"ID2D1RenderTarget::SetTransform");
     if let Some(m) = read(m) {
         with(this, |s| s.transform = m);
     }
 }
 
 extern "system" fn t_GetTransform(this: Obj, out: *mut Matrix) {
+    reached!(b"ID2D1RenderTarget::GetTransform");
     put(out, with(this, |s| s.transform));
 }
 
 extern "system" fn t_SetAntialiasMode(this: Obj, mode: u32) {
+    reached!(b"ID2D1RenderTarget::SetAntialiasMode");
     with(this, |s| s.antialias = mode);
 }
 
 extern "system" fn t_GetAntialiasMode(this: Obj) -> u32 {
+    reached!(b"ID2D1RenderTarget::GetAntialiasMode");
     with(this, |s| s.antialias)
 }
 
 extern "system" fn t_SetTextAntialiasMode(this: Obj, mode: u32) {
+    reached!(b"ID2D1RenderTarget::SetTextAntialiasMode");
     with(this, |s| s.text_antialias = mode);
 }
 
 extern "system" fn t_GetTextAntialiasMode(this: Obj) -> u32 {
+    reached!(b"ID2D1RenderTarget::GetTextAntialiasMode");
     with(this, |s| s.text_antialias)
 }
 
 extern "system" fn t_SetTextRenderingParams(this: Obj, params: Obj) {
+    reached!(b"ID2D1RenderTarget::SetTextRenderingParams");
     let new = ComRef::new(params);
     let old = with(this, |s| core::mem::replace(&mut s.text_params, new));
     drop(old);
 }
 
 extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
+    reached!(b"ID2D1RenderTarget::GetTextRenderingParams");
     let p = with(this, |s| s.text_params.0);
     if !p.is_null() {
         crate::com_add_ref(p);
@@ -1233,10 +1269,12 @@ extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
 }
 
 extern "system" fn t_SetTags(this: Obj, a: u64, b: u64) {
+    reached!(b"ID2D1RenderTarget::SetTags");
     with(this, |s| s.tags = (a, b));
 }
 
 extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
+    reached!(b"ID2D1RenderTarget::GetTags");
     let t = with(this, |s| s.tags);
     put(a, t.0);
     put(b, t.1);
@@ -1245,15 +1283,18 @@ extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
 /// PushLayer: the layer's mask, geometry and opacity are not applied
 /// (recorded); the push is counted so PopLayer balances.
 extern "system" fn t_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
+    reached!(b"ID2D1RenderTarget::PushLayer");
     gap(b"ID2D1RenderTarget::PushLayer(content not masked)", 0);
     with(this, |s| s.layers += 1);
 }
 
 extern "system" fn t_PopLayer(this: Obj) {
+    reached!(b"ID2D1RenderTarget::PopLayer");
     with(this, |s| s.layers = s.layers.saturating_sub(1));
 }
 
 extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
+    reached!(b"ID2D1RenderTarget::Flush");
     // A device context's frame reaches its target bitmap, and the DXGI
     // surface behind it, at Flush as at EndDraw: Flush is what a program
     // calls when it wants the pixels without ending the frame.
@@ -1275,6 +1316,7 @@ extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
 /// block (`state`). A block of another DLL's making cannot be written
 /// into, which is recorded.
 extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
+    reached!(b"ID2D1RenderTarget::SaveDrawingState");
     let (desc, params) = with(this, |s| {
         (
             StateDesc1 {
@@ -1300,6 +1342,7 @@ extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
 /// never saved into holds the state it was made with, which Windows
 /// restores the same way).
 extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
+    reached!(b"ID2D1RenderTarget::RestoreDrawingState");
     let Some((desc, params)) = state::load(block) else {
         gap(b"ID2D1RenderTarget::RestoreDrawingState(block of another DLL)", 0);
         return;
@@ -1326,6 +1369,7 @@ extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
 /// bounding box), intersected with the clip below it; aliased clips are
 /// rounded to whole pixels.
 extern "system" fn t_PushAxisAlignedClip(this: Obj, r: *const RectF, mode: u32) {
+    reached!(b"ID2D1RenderTarget::PushAxisAlignedClip");
     let Some(r) = read(r) else { return };
     with(this, |s| {
         let m = s.device();
@@ -1377,6 +1421,7 @@ extern "system" fn t_PushAxisAlignedClip(this: Obj, r: *const RectF, mode: u32) 
 }
 
 extern "system" fn t_PopAxisAlignedClip(this: Obj) {
+    reached!(b"ID2D1RenderTarget::PopAxisAlignedClip");
     with(this, |s| {
         s.clips.pop();
     });
@@ -1385,6 +1430,7 @@ extern "system" fn t_PopAxisAlignedClip(this: Obj) {
 /// Clear: the colour (transparent black for NULL) replaces what is inside
 /// the clip; the transform does not apply.
 extern "system" fn t_Clear(this: Obj, c: *const ColorF) {
+    reached!(b"ID2D1RenderTarget::Clear");
     let c = read(c).unwrap_or_default();
     with(this, |s| {
         if !s.may_draw() {
@@ -1444,6 +1490,7 @@ fn with_wic_pixels(
 }
 
 extern "system" fn t_BeginDraw(this: Obj) {
+    reached!(b"ID2D1RenderTarget::BeginDraw");
     // A WIC target reads its bitmap first, without our lock held.
     let wic = with(this, |s| match &s.backing {
         Backing::Wic { bitmap, .. } => Some((ComRef::new(bitmap.0), s.w, s.h)),
@@ -1595,6 +1642,7 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
 }
 
 extern "system" fn t_GetPixelFormat(this: Obj, ret: *mut PixelFormat) -> *mut PixelFormat {
+    reached!(b"ID2D1RenderTarget::GetPixelFormat");
     put(ret, with(this, |s| s.format));
     ret
 }
@@ -1602,6 +1650,7 @@ extern "system" fn t_GetPixelFormat(this: Obj, ret: *mut PixelFormat) -> *mut Pi
 /// SetDpi: 0, 0 is 96 (the desktop's); a negative value, or one 0, leaves
 /// it as it is (Wine's test_clip).
 extern "system" fn t_SetDpi(this: Obj, x: f32, y: f32) {
+    reached!(b"ID2D1RenderTarget::SetDpi");
     with(this, |s| {
         if x == 0.0 && y == 0.0 {
             s.dpi = (96.0, 96.0);
@@ -1612,6 +1661,7 @@ extern "system" fn t_SetDpi(this: Obj, x: f32, y: f32) {
 }
 
 extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
+    reached!(b"ID2D1RenderTarget::GetDpi");
     let d = with(this, |s| s.dpi);
     put(x, d.0);
     put(y, d.1);
@@ -1620,6 +1670,7 @@ extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
 /// GetSize: in DIPs, which for a device context in
 /// D2D1_UNIT_MODE_PIXELS are pixels.
 extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
+    reached!(b"ID2D1RenderTarget::GetSize");
     let v = with(this, |s| SizeF {
         width: s.w as f32 * 96.0 / s.dpi.0,
         height: s.h as f32 * 96.0 / s.dpi.1,
@@ -1629,17 +1680,20 @@ extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
 }
 
 extern "system" fn t_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
+    reached!(b"ID2D1RenderTarget::GetPixelSize");
     put(ret, with(this, |s| SizeU { width: s.w, height: s.h }));
     ret
 }
 
 extern "system" fn t_GetMaximumBitmapSize(_this: Obj) -> u32 {
+    reached!(b"ID2D1RenderTarget::GetMaximumBitmapSize");
     16384
 }
 
 /// IsSupported: a software target of this one's pixel format (UNKNOWN
 /// parts match anything).
 extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
+    reached!(b"ID2D1RenderTarget::IsSupported");
     let Some(p) = read(props) else { return 0 };
     let f = with(this, |s| s.format);
     let format_ok = p.format.format == DXGI_FORMAT_UNKNOWN || p.format.format == f.format;
@@ -1655,6 +1709,7 @@ extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
 /// there was (Wine's test_dc_target). The target's size becomes the
 /// rectangle's.
 extern "system" fn dc_BindDC(this: Obj, hdc: usize, rect: *const [i32; 4]) -> HResult {
+    reached!(b"ID2D1DCRenderTarget::BindDC");
     let Some(r) = read(rect) else { return E_INVALIDARG };
     // SAFETY: a plain GDI query.
     let kind = unsafe { GetObjectType(hdc) };
@@ -1683,6 +1738,7 @@ extern "system" fn dc_BindDC(this: Obj, hdc: usize, rect: *const [i32; 4]) -> HR
 
 /// D2D1_WINDOW_STATE: OCCLUDED (1) while minimized.
 extern "system" fn hwnd_CheckWindowState(this: Obj) -> u32 {
+    reached!(b"ID2D1HwndRenderTarget::CheckWindowState");
     let hwnd = hwnd_of(this);
     // SAFETY: a plain user32 query.
     u32::from(unsafe { IsIconic(hwnd) } != 0)
@@ -1694,6 +1750,7 @@ fn hwnd_of(this: Obj) -> usize {
 
 /// Resize: a new back buffer of the size (its contents start black).
 extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
+    reached!(b"ID2D1HwndRenderTarget::Resize");
     let Some(size) = read(size) else { return E_INVALIDARG };
     let (w, h) = window_size(hwnd_of(this), size);
     let Some(d) = Dib::new(w, h) else { return E_OUTOFMEMORY };
@@ -1710,6 +1767,7 @@ extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
 }
 
 extern "system" fn hwnd_GetHwnd(this: Obj) -> usize {
+    reached!(b"ID2D1HwndRenderTarget::GetHwnd");
     hwnd_of(this)
 }
 
@@ -1765,6 +1823,7 @@ extern "system" fn dc1_CreateBitmap(
     props: *const BitmapProps1,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateBitmap");
     let (base, opts) = props1(props);
     let format = with(this, |s| s.format);
     let rows = brush::Rows { src, pitch };
@@ -1777,6 +1836,7 @@ extern "system" fn dc1_CreateBitmapFromWicBitmap(
     props: *const BitmapProps1,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateBitmapFromWicBitmap");
     let (base, opts) = props1(props);
     brush::create_from_wic(factory_of(this), source, as_ptr(&base), opts, out)
 }
@@ -1788,6 +1848,7 @@ extern "system" fn dc1_CreateColorContext(
     _size: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateColorContext");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContext")
 }
@@ -1797,6 +1858,7 @@ extern "system" fn dc1_CreateColorContextFromFilename(
     _name: *const u16,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateColorContextFromFilename");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContextFromFilename")
 }
@@ -1806,6 +1868,7 @@ extern "system" fn dc1_CreateColorContextFromWicColorContext(
     _wic: Obj,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext")
 }
@@ -1822,6 +1885,7 @@ extern "system" fn dc1_CreateBitmapFromDxgiSurface(
 }
 
 extern "system" fn dc1_CreateEffect(_this: Obj, class_id: *const Guid, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateEffect");
     put(out, core::ptr::null_mut());
     // The effect's CLSID is the detail: which effects a program wants is
     // what the ledger is for.
@@ -1841,6 +1905,7 @@ extern "system" fn dc1_CreateGradientStopCollection(
     _interpolation: u32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateGradientStopCollection");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateGradientStopCollection")
 }
@@ -1852,6 +1917,7 @@ extern "system" fn dc1_CreateImageBrush(
     _props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateImageBrush");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateImageBrush")
 }
@@ -1866,6 +1932,7 @@ extern "system" fn dc1_CreateBitmapBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateBitmapBrush");
     let mut p = read(bprops);
     if let Some(p) = &mut p
         && p.interp > 1
@@ -1881,27 +1948,32 @@ extern "system" fn dc1_CreateBitmapBrush(
 }
 
 extern "system" fn dc1_CreateCommandList(_this: Obj, out: *mut Obj) -> HResult {
+    reached!(b"ID2D1DeviceContext::CreateCommandList");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateCommandList")
 }
 
 /// IsDxgiFormatSupported: B8G8R8A8 is what gala's rasterizer writes.
 extern "system" fn dc1_IsDxgiFormatSupported(_this: Obj, format: u32) -> i32 {
+    reached!(b"ID2D1DeviceContext::IsDxgiFormatSupported");
     i32::from(format == DXGI_FORMAT_B8G8R8A8_UNORM)
 }
 
 /// IsBufferPrecisionSupported: eight bits a channel, which is what a
 /// software target holds.
 extern "system" fn dc1_IsBufferPrecisionSupported(_this: Obj, precision: u32) -> i32 {
+    reached!(b"ID2D1DeviceContext::IsBufferPrecisionSupported");
     i32::from(precision == BUFFER_PRECISION_8BPC_UNORM)
 }
 
 extern "system" fn dc1_GetImageLocalBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetImageLocalBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetImageLocalBounds")
 }
 
 extern "system" fn dc1_GetImageWorldBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetImageWorldBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetImageWorldBounds")
 }
@@ -1913,6 +1985,7 @@ extern "system" fn dc1_GetGlyphRunWorldBounds(
     _measuring: u32,
     bounds: *mut RectF,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetGlyphRunWorldBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetGlyphRunWorldBounds")
 }
@@ -1921,6 +1994,7 @@ extern "system" fn dc1_GetGlyphRunWorldBounds(
 /// not one (a context's methods are only on a context's vtable, so this
 /// is the context's own device).
 extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
+    reached!(b"ID2D1DeviceContext::GetDevice");
     let d = with(this, |s| match &s.backing {
         Backing::Context { device, .. } => device.0,
         _ => core::ptr::null_mut(),
@@ -2016,6 +2090,7 @@ fn set_target(this: Obj, image: Obj) {
 }
 
 extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
+    reached!(b"ID2D1DeviceContext::GetTarget");
     let t = with(this, |s| match &s.backing {
         Backing::Context { target, .. } => target.0,
         _ => core::ptr::null_mut(),
@@ -2027,6 +2102,7 @@ extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
 }
 
 extern "system" fn dc1_SetRenderingControls(this: Obj, controls: *const RenderingControls) {
+    reached!(b"ID2D1DeviceContext::SetRenderingControls");
     if let Some(c) = read(controls) {
         if c.precision != BUFFER_PRECISION_8BPC_UNORM {
             gap(b"ID2D1DeviceContext::SetRenderingControls(buffer precision)", c.precision.into());
@@ -2036,10 +2112,12 @@ extern "system" fn dc1_SetRenderingControls(this: Obj, controls: *const Renderin
 }
 
 extern "system" fn dc1_GetRenderingControls(this: Obj, out: *mut RenderingControls) {
+    reached!(b"ID2D1DeviceContext::GetRenderingControls");
     put(out, with(this, |s| s.controls));
 }
 
 extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
+    reached!(b"ID2D1DeviceContext::SetPrimitiveBlend");
     if blend != PRIMITIVE_BLEND_SOURCE_OVER {
         gap(b"ID2D1DeviceContext::SetPrimitiveBlend(drawn source-over)", blend.into());
     }
@@ -2047,14 +2125,17 @@ extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
 }
 
 extern "system" fn dc1_GetPrimitiveBlend(this: Obj) -> u32 {
+    reached!(b"ID2D1DeviceContext::GetPrimitiveBlend");
     with(this, |s| s.primitive_blend)
 }
 
 extern "system" fn dc1_SetUnitMode(this: Obj, mode: u32) {
+    reached!(b"ID2D1DeviceContext::SetUnitMode");
     with(this, |s| s.unit_mode = mode);
 }
 
 extern "system" fn dc1_GetUnitMode(this: Obj) -> u32 {
+    reached!(b"ID2D1DeviceContext::GetUnitMode");
     with(this, |s| s.unit_mode)
 }
 
@@ -2066,6 +2147,7 @@ extern "system" fn dc1_DrawGlyphRun(
     _brush: Obj,
     _measuring: u32,
 ) {
+    reached!(b"ID2D1DeviceContext::DrawGlyphRun");
     gap(b"ID2D1DeviceContext::DrawGlyphRun", 0);
 }
 
@@ -2077,10 +2159,12 @@ extern "system" fn dc1_DrawImage(
     _interpolation: u32,
     _composite: u32,
 ) {
+    reached!(b"ID2D1DeviceContext::DrawImage");
     gap(b"ID2D1DeviceContext::DrawImage", 0);
 }
 
 extern "system" fn dc1_DrawGdiMetafile(_this: Obj, _metafile: Obj, _offset: *const Point) {
+    reached!(b"ID2D1DeviceContext::DrawGdiMetafile");
     gap(b"ID2D1DeviceContext::DrawGdiMetafile", 0);
 }
 
@@ -2098,6 +2182,7 @@ extern "system" fn dc1_DrawBitmap(
     src: *const RectF,
     perspective: *const u8,
 ) {
+    reached!(b"ID2D1DeviceContext::DrawBitmap");
     if !perspective.is_null() {
         gap(b"ID2D1DeviceContext::DrawBitmap(perspective transform)", 0);
         return;
@@ -2112,6 +2197,7 @@ extern "system" fn dc1_DrawBitmap(
 }
 
 extern "system" fn dc1_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
+    reached!(b"ID2D1DeviceContext::PushLayer");
     gap(b"ID2D1DeviceContext::PushLayer(content not masked)", 0);
     with(this, |s| s.layers += 1);
 }
@@ -2122,6 +2208,7 @@ extern "system" fn dc1_InvalidateEffectInputRectangle(
     _input: u32,
     _rect: *const RectF,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::InvalidateEffectInputRectangle");
     not_implemented(b"ID2D1DeviceContext::InvalidateEffectInputRectangle")
 }
 
@@ -2130,6 +2217,7 @@ extern "system" fn dc1_GetEffectInvalidRectangleCount(
     _effect: Obj,
     count: *mut u32,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount");
     put(count, 0);
     not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount")
 }
@@ -2140,6 +2228,7 @@ extern "system" fn dc1_GetEffectInvalidRectangles(
     _rects: *mut RectF,
     _count: u32,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangles");
     not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangles")
 }
 
@@ -2151,6 +2240,7 @@ extern "system" fn dc1_GetEffectRequiredInputRectangles(
     _required: *mut RectF,
     _count: u32,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles");
     not_implemented(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles")
 }
 
@@ -2161,6 +2251,7 @@ extern "system" fn dc1_FillOpacityMask(
     _dst: *const RectF,
     _src: *const RectF,
 ) {
+    reached!(b"ID2D1DeviceContext::FillOpacityMask");
     gap(b"ID2D1DeviceContext::FillOpacityMask", 0);
 }
 
@@ -2193,6 +2284,7 @@ extern "system" fn dc2_CreateFilledGeometryRealization(
     _flattening_tolerance: f32,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext1::CreateFilledGeometryRealization");
     create_realization(this, g, None, out)
 }
 
@@ -2204,10 +2296,12 @@ extern "system" fn dc2_CreateStrokedGeometryRealization(
     style: Obj,
     out: *mut Obj,
 ) -> HResult {
+    reached!(b"ID2D1DeviceContext1::CreateStrokedGeometryRealization");
     create_realization(this, g, Some((width, style)), out)
 }
 
 extern "system" fn dc2_DrawGeometryRealization(this: Obj, realization: Obj, brush: Obj) {
+    reached!(b"ID2D1DeviceContext1::DrawGeometryRealization");
     let Some((path, stroke)) = geometry::realization_of(realization) else {
         gap(b"ID2D1DeviceContext1::DrawGeometryRealization(not a realization of ours)", 0);
         return;
