@@ -36,7 +36,8 @@
 //!   lines);
 //! - SHCreateDirectory, imported by its ordinal 165 as App-V's
 //!   AppVCatalog.dll imports it, and SHCreateDirectoryExW
-//!   (`create_directory`).
+//!   (`create_directory`);
+//! - the per-user cache folders every profile holds (`cache_folders`).
 //!
 //! The same source builds `wow64_knownfolder_test`, the 32-bit (x86)
 //! program (FOLDERID_ProgramFilesX64 and FOLDERID_ProgramFilesCommonX64
@@ -1063,9 +1064,41 @@ fn create_directory(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// The per-user cache folders a Windows profile holds: INetCache
+/// (FOLDERID_InternetCache), INetCookies (FOLDERID_Cookies) and History
+/// (FOLDERID_History), which Windows makes when it makes the profile
+/// although their definitions are not marked KFDF_PRECREATE (measured on
+/// Windows: all three are there in a profile nothing has asked for them
+/// in). The path is asked for without KF_FLAG_CREATE, so what is checked
+/// is the profile and not the creating: a program writes below one of
+/// them and never makes the folders above it, as creating a directory
+/// does not (Word's start-up writes INetCache\Content.MSO and gives up
+/// when it cannot; ROADMAP OF).
+fn cache_folders(c: &mut Checks) -> Result<(), u32> {
+    for what in ["InternetCache", "Cookies", "History"] {
+        let found = FOLDERS.iter().find(|k| k.what == what);
+        c.ok(found.is_some(), 0)?;
+        let Some(kf) = found else { continue };
+        let mut path: *mut u16 = null_mut();
+        // SAFETY: a folder's id and an output pointer.
+        let hr = unsafe { SHGetKnownFolderPath(&kf.id, KF_FLAG_DONT_VERIFY, 0, &mut path) };
+        c.hr(hr, S_OK)?;
+        // SAFETY: the NUL-terminated path the call gave.
+        let attrs = unsafe { GetFileAttributesW(path) };
+        let dir = attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_DIRECTORY != 0;
+        if !dir {
+            info().s(b"no folder ").w(path).s(b"\r\n").print();
+        }
+        c.note(dir, u64::from(attrs), what);
+        free(path);
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0, 0);
     create_directory(&mut c)?;
+    cache_folders(&mut c)?;
     // SAFETY: plain call.
     c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) }, S_OK)?;
     let mut manager: Obj = null_mut();
