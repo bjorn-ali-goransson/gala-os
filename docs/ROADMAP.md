@@ -2120,12 +2120,32 @@ need gala's.
      which the Vulkan loader tries before the registry's list of
      drivers) with the interface gala's dxgi refuses CreateDXGIFactory1
      (three times).
-     A run with every system call traced takes a different path, not a
-     slower one: it stops in `MsoSplash`, asking RoGetActivationFactory
-     for
+     A run with every system call traced from boot takes a different
+     path, not a slower one: it stops in `MsoSplash`, asking
+     RoGetActivationFactory for
      `Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator`
-     over and over, a runtime class gala has none of -- so what Word
-     does has to be read from an untraced run.
+     over and over, a runtime class gala has none of. `events_from=`
+     (OBSERVABILITY "Event stream") is the way past that:
+     started 35 s in, after the splash, the stream reaches the same
+     "(13)" message box an untraced run does, so the failure window
+     can be read as a syscall stream after all. The box is two
+     NtWriteFile calls on one thread, 21 bytes ("Microsoft Word 16.0")
+     then 64 (the message), 64.4 s in. Everything that fails in the
+     twelve seconds before them is routine: absent registry keys,
+     empty window queues, and the private-assembly probes
+     `Model::resolve` (`user/kernel32/src/actctx/manifest.rs`) makes
+     for `Microsoft.Windows.Common-Controls` before it falls back to
+     the Microsoft-key system assembly, which are expected and not a
+     failure -- `CreateActCtxW` returns Ok. Word also writes no log of
+     its own: Office's ULS logging under HKCU `Office\16.0\Common\
+     Logging` is read but produces nothing, so the %TEMP% dumps hold
+     only OFFICECL's. What decides the box is still unnamed; the one
+     thing in the window that is not plainly routine is ten
+     NtAllocateVirtualMemory calls refused with CONFLICTING_ADDRESSES
+     (MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE) against 685 that
+     succeed, which has to be measured on Windows before it is called
+     a divergence -- gala's own loader probes addresses the same way
+     (`thread.rs`).
      What a dying thread called last is in the crash report
      (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
      where Word used to raise are closed, each measured on Windows
