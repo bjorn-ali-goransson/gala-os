@@ -6657,7 +6657,15 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   source's checksum; `run-all.ps1` takes the folder a build made;
   then `user/bin`, `export-tests`' copying and CI's `git diff
   --exit-code user/bin` check go, with README, WORKFLOW and
-  ARCHITECTURE's mentions. History is not rewritten.
+  ARCHITECTURE's mentions. Last, the history (the owner): every past
+  binary is removed from it (`git filter-repo` over a full clone,
+  dropping `user/bin` and the other built files), which rewrites every
+  commit from the first binary on: main is force-pushed (its ruleset
+  allows that for the step), open pull requests and every clone and
+  session branch are rebased or remade, and GitHub support is asked to
+  drop the old commits that pull request refs keep reachable. Done in
+  a quiet moment, with no work in flight; the old hashes in docs and
+  commit messages stop resolving.
 
 - **Hygiene sweep** (the owner; in a few months, not now): first
   enumerate the practices gala's code should not follow, by sweeping
