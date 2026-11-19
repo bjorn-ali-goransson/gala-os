@@ -1,7 +1,7 @@
 //! Build, boot and test driver: `cargo xtask <command>`.
 //!
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
-//! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
+//! (UEFI) firmware image; `mtools` for the disk-boot scenarios. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
 // The kernel's file-system modules (`diskimage`) use `alloc::` paths.
 extern crate alloc;
@@ -13397,6 +13397,8 @@ fn named_only(name: &str) -> bool {
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
     "presenter_test",
+    // Booted from its disk's EFI system partition (DISK_BOOT_SCENARIOS).
+    "boot_from_disk",
     // A framebuffer to show the installer's windows (XTASK_SHOTS).
     "office_install_gui",
     // A framebuffer for Word's and Excel's windows (XTASK_SHOTS).
@@ -14175,7 +14177,16 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
                 .arg(format!("if=pflash,format=raw,unit=1,file={}", copy_path.display()));
         }
     }
-    cmd.arg("-cdrom").arg(iso);
+    // The image's CD boots, whatever a scenario's disk holds: SeaBIOS
+    // otherwise boots the first disk with an MBR boot signature (a GPT's
+    // protective MBR has one) and runs what its sector 0 holds.
+    if boot != Boot::Uefi {
+        cmd.args(["-boot", "order=d"]);
+    }
+    // A machine booted from its own disk has no CD (DISK_BOOT_SCENARIOS).
+    if !DISK_BOOT_SCENARIOS.contains(&iso_scenario(iso)) {
+        cmd.arg("-cdrom").arg(iso);
+    }
     // Extra arguments for debugging, e.g. "-d int,cpu_reset -D qemu.log".
     cmd.args(extra.split_whitespace());
     Ok(cmd)
@@ -15845,6 +15856,36 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit persist run=persist_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["persist_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // IN step 2: C: kept in a partition. persist_test's two boots on a
+        // GPT disk whose partition 2 has gala's C: type
+        // (DISK_SCENARIOS: an EFI system partition before it, filled
+        // with a marker; the check finds the volume at partition 2's
+        // start and the table, the gap and partition 1 untouched).
+        name: "persist_partition",
+        cmdline: "qemu_exit persist run=persist_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA 34816",
+            "persist_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // IN step 3: a machine boots from its own disk, as an installed one
+        // does: no CD; the disk is a GPT with an EFI system partition
+        // holding the image's boot tree (Limine, the kernel, the sealed
+        // config, the modules) and gala's C: partition (`boot_disk`).
+        name: "boot_from_disk",
+        cmdline: "qemu_exit persist run=hello.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "persist: C: is partition 2 of the disk (LBA",
+            "persist: formatted the disk",
+            "Hello from user mode!",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // P1 (JDK): locale and time (en-US, UTC).
@@ -20226,6 +20267,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("runas_declined", "runas_test"),
     ("reparse_test_user", "reparse_test"),
     ("handover_disk", "persist_test"),
+    ("persist_partition", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
     ("handover_net", "handover_net_test"),
@@ -26719,6 +26761,29 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // Made by `boot_disk` from the scenario's image (setup is not used).
+        name: "boot_from_disk",
+        size: BOOT_DISK_SIZE,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        name: "persist_partition",
+        size: 64 << 20,
+        host_mib: None,
+        setup: persist_partition_setup,
+        check: persist_partition_check,
+        earlier_boots: &[&[
+            "persist: C: is partition 2 of the disk (LBA 34816",
+            "persist_test: first boot",
+            "exited with status 0x00000000",
+        ]],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_test",
         size: 32 << 20,
         host_mib: None,
@@ -26867,6 +26932,168 @@ fn partition_test_check(image: &[u8]) -> Result {
     Ok(())
 }
 
+/// Scenarios booted from their disk alone (no CD): the disk is made by
+/// `boot_disk` from the scenario's image.
+const DISK_BOOT_SCENARIOS: &[&str] = &["boot_from_disk"];
+/// An installed disk's size in those scenarios, and its EFI system
+/// partition's (FAT32: at least 32 MiB) from 1 MiB.
+const BOOT_DISK_SIZE: usize = 256 << 20;
+const BOOT_DISK_ESP_SECTORS: u64 = 128 << 11;
+
+/// Lays out disk image `disk` as an installed gala disk (ROADMAP IN step
+/// 3): a GPT with an EFI system partition at 1 MiB (FAT32, `mformat`,
+/// holding the tree of `iso`: EFI/BOOT/BOOTX64.EFI, Limine, the kernel,
+/// the sealed config, the modules, copied with `mcopy`) and gala's C:
+/// partition after it, to the end. Limine's `boot():` is the partition it
+/// was loaded from, so the tree works as it is on the CD.
+fn boot_disk(iso: &Path, disk: &Path) -> Result {
+    let work = iso.with_extension("boot-disk");
+    let _ = fs::remove_dir_all(&work);
+    let tree = work.join("tree");
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(
+        Command::new("xorriso")
+            .args(["-osirrox", "on", "-indev"])
+            .arg(iso)
+            .args(["-extract", "/"])
+            .arg(&tree),
+    )?;
+    let esp = work.join("esp.img");
+    let esp_sectors = BOOT_DISK_ESP_SECTORS;
+    run_quiet(
+        Command::new("mformat")
+            .args(["-C", "-F", "-T", &esp_sectors.to_string(), "-h", "64", "-s", "32", "-i"])
+            .arg(&esp)
+            .arg("::"),
+    )
+    .map_err(|e| format!("{e} (mformat is in mtools)"))?;
+    let entries: Vec<PathBuf> = fs::read_dir(&tree)
+        .map_err(|e| format!("reading {tree:?}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    run_quiet(Command::new("mcopy").args(["-s", "-i"]).arg(&esp).args(&entries).arg("::/"))
+        .map_err(|e| format!("{e} (mcopy is in mtools)"))?;
+    let mut image = vec![0u8; BOOT_DISK_SIZE];
+    let sectors = (BOOT_DISK_SIZE / 512) as u64;
+    let (first, last) = (2048, 2048 + esp_sectors - 1);
+    write_gpt(
+        &mut image,
+        PARTITION_TEST_DISK_ID,
+        &[
+            (PARTITION_TEST_ESP_TYPE, PARTITION_TEST_ESP_ID, first, last, "EFI system partition"),
+            (GALA_C_TYPE, PARTITION_TEST_DATA_ID, last + 1, sectors - 34, "gala C:"),
+        ],
+    );
+    let fat = fs::read(&esp).map_err(|e| format!("reading {esp:?}: {e}"))?;
+    image[first as usize * 512..first as usize * 512 + fat.len()].copy_from_slice(&fat);
+    fs::write(disk, &image).map_err(|e| format!("writing {disk:?}: {e}"))?;
+    let _ = fs::remove_dir_all(&work);
+    Ok(())
+}
+
+/// gala's C: partition type, {6A1A0C0D-E000-4C3A-8000-67616C614300} (the
+/// kernel's `nt::gpt::GALA_C_TYPE`), in the GPT's byte order.
+const GALA_C_TYPE: [u8; 16] =
+    gpt_guid(0x6a1a_0c0d, 0xe000, 0x4c3a, [0x80, 0, 0x67, 0x61, 0x6c, 0x61, 0x43, 0]);
+/// persist_partition's layout: an EFI system partition at 1 MiB (16 MiB,
+/// filled with PERSIST_PARTITION_FILL), then gala's C: to the end.
+const PERSIST_PARTITION_ESP: (u64, u64) = (2048, 2048 + 32768 - 1);
+const PERSIST_PARTITION_FILL: u8 = 0x5a;
+
+/// A GPT on `image` (128 entries; `parts`: type, GUID, first and last
+/// LBA, name), as UEFI's specification lays it out: the protective MBR,
+/// the primary header and array, the backup array and header.
+/// A GPT entry for `write_gpt`: type, GUID, first and last LBA, name.
+type GptPart<'a> = ([u8; 16], [u8; 16], u64, u64, &'a str);
+
+fn write_gpt(image: &mut [u8], disk_id: [u8; 16], parts: &[GptPart]) {
+    let sectors = (image.len() / 512) as u64;
+    let mut array = vec![0u8; 128 * 128];
+    for (i, (kind, id, first, last, name)) in parts.iter().enumerate() {
+        let e = &mut array[i * 128..(i + 1) * 128];
+        e[..16].copy_from_slice(kind);
+        e[16..32].copy_from_slice(id);
+        e[32..40].copy_from_slice(&first.to_le_bytes());
+        e[40..48].copy_from_slice(&last.to_le_bytes());
+        for (j, b) in name.bytes().enumerate() {
+            e[56 + 2 * j] = b;
+        }
+    }
+    let array_crc = crc32(&array);
+    let header = |me: u64, other: u64, at: u64| {
+        let mut h = vec![0u8; 512];
+        h[..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&me.to_le_bytes());
+        h[32..40].copy_from_slice(&other.to_le_bytes());
+        h[40..48].copy_from_slice(&34u64.to_le_bytes());
+        h[48..56].copy_from_slice(&(sectors - 34).to_le_bytes());
+        h[56..72].copy_from_slice(&disk_id);
+        h[72..80].copy_from_slice(&at.to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        h[88..92].copy_from_slice(&array_crc.to_le_bytes());
+        let crc = crc32(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    };
+    let mbr = &mut image[..512];
+    mbr[446..454].copy_from_slice(&[0, 0, 2, 0, 0xee, 0xff, 0xff, 0xff]);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    mbr[458..462].copy_from_slice(&u32::try_from(sectors - 1).unwrap_or(u32::MAX).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xaa;
+    let put = |image: &mut [u8], lba: u64, bytes: &[u8]| {
+        image[lba as usize * 512..lba as usize * 512 + bytes.len()].copy_from_slice(bytes);
+    };
+    put(image, 1, &header(1, sectors - 1, 2));
+    put(image, 2, &array);
+    put(image, sectors - 33, &array);
+    put(image, sectors - 1, &header(sectors - 1, 1, sectors - 33));
+}
+
+fn persist_partition_setup(image: &mut [u8]) {
+    let sectors = (image.len() / 512) as u64;
+    let (first, last) = PERSIST_PARTITION_ESP;
+    write_gpt(
+        image,
+        PARTITION_TEST_DISK_ID,
+        &[
+            (PARTITION_TEST_ESP_TYPE, PARTITION_TEST_ESP_ID, first, last, "EFI system partition"),
+            (GALA_C_TYPE, PARTITION_TEST_DATA_ID, last + 1, sectors - 34, "gala C:"),
+        ],
+    );
+    image[first as usize * 512..(last as usize + 1) * 512].fill(PERSIST_PARTITION_FILL);
+}
+
+/// After persist_partition's boots: the volume (gala's superblock magic)
+/// at partition 2's first sector, and nothing outside partition 2 changed
+/// (the GPT and its backup as written, the gap before partition 1 still
+/// zero, partition 1 still the marker).
+fn persist_partition_check(image: &[u8]) -> Result {
+    let mut want = vec![0u8; image.len()];
+    persist_partition_setup(&mut want);
+    let (_, last) = PERSIST_PARTITION_ESP;
+    let sectors = (image.len() / 512) as u64;
+    let at = |lba: u64| lba as usize * 512;
+    if image[..at(last + 1)] != want[..at(last + 1)] {
+        return Err("the GPT, the gap or partition 1 changed (only partition 2 is C:'s)".into());
+    }
+    if image[at(sectors - 33)..] != want[at(sectors - 33)..] {
+        return Err("the backup GPT changed".into());
+    }
+    let c = &image[at(last + 1)..at(last + 2)];
+    if !c.starts_with(b"GALAFS\0") {
+        return Err(format!(
+            "no gala volume at partition 2's start (LBA {}), {:?}",
+            last + 1,
+            &c[..8]
+        ));
+    }
+    Ok(())
+}
+
 /// GUIDs as partition_test gives them, in the GPT's byte order.
 const PARTITION_TEST_DISK_ID: [u8; 16] =
     gpt_guid(0x6a1a_d15c, 0x0001, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 1]);
@@ -26960,8 +27187,10 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         );
         return Ok(Some(kept));
     }
-    // What setup writes goes in the first MiB; the rest is a sparse file.
-    let mut image = vec![0u8; d.size.min(1 << 20)];
+    // Images up to 64 MiB are set up whole (a GPT's backup is at the
+    // end); of larger ones setup writes the first MiB and the rest is a
+    // sparse file.
+    let mut image = vec![0u8; if d.size <= 64 << 20 { d.size } else { 1 << 20 }];
     (d.setup)(&mut image);
     let path = iso.with_extension("disk.img");
     let made = fs::File::create(&path).and_then(|f| {
@@ -26970,6 +27199,9 @@ fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
         (&f).write_all(&image)
     });
     made.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if DISK_BOOT_SCENARIOS.contains(&name) {
+        boot_disk(iso, &path)?;
+    }
     if name == "office_install_local" || name == "office_install_gui" {
         let source = office_source()?;
         let t = Instant::now();

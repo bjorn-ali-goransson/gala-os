@@ -464,6 +464,15 @@ faults, its exit).
    (test ISO only) it ends by exiting QEMU through `isa-debug-exit`
    (status 33 = success, 35 = panic); otherwise it halts.
 
+An installed disk (ROADMAP IN step 3; scenario `boot_from_disk`, its
+disk made by xtask's `boot_disk`) boots the same way: a GPT with an EFI
+system partition (FAT32, at 1 MiB) holding the image's tree unchanged
+(`EFI/BOOT/BOOTX64.EFI` is the firmware's removable-media path, so no
+boot entry is needed; Limine's `boot():` is the partition it was loaded
+from, and its enrolled hashes still match) and gala's C: partition after
+it (`persist`, "C: kept on the disk"). xtask attaches no CD to such a
+scenario.
+
 ## CPU tables
 
 The GDT uses the x64 Windows selector values because user mode can
@@ -7538,12 +7547,27 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
 ### C: kept on the disk
 
 With `persist`, the disk keeps what programs change on C: (the whole
-disk; no partitions). The ramfs stays the tree of names and attributes;
+disk, or gala's partition of a GPT disk: below). The ramfs stays the tree of names and attributes;
 the disk holds a log of the changes since the boot's files were laid
 down, replayed over them at the next boot. On a volume of layout 3 (every
 new one) files' pages live in the data area ("A disk-backed C:" below);
 on an older layout 1 or 2 volume they live in memory and the log
 carries their data (Write records).
+
+- **Where** (`persist::volume_range`, ROADMAP IN step 2): on a disk with
+  a GPT, C: is the partition of gala's C: type,
+  {6A1A0C0D-E000-4C3A-8000-67616C614300} (`gpt::GALA_C_TYPE`), and the
+  volume's sectors are that partition's (`DiskBlocks { first, sectors }`;
+  the data area's and crash area's starts it reports are made the disk's
+  by adding `first`); a GPT without one keeps no C:. A disk with an MBR
+  boot signature and no gala volume in sector 0 keeps no C: either: a
+  disk gala did not make is never formatted. Otherwise the whole disk, as
+  before partitions. Each choice is logged (`persist: C: is partition N
+  of the disk (LBA ..., ... sectors)`). Test: `persist_partition` (an EFI
+  system partition before C:'s; the table, the gap and partition 1 stay
+  as written). xtask boots BIOS scenarios from the CD first (`-boot
+  order=d`): SeaBIOS otherwise boots a disk whose protective MBR carries
+  the boot signature.
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a

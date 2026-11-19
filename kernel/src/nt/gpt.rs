@@ -19,6 +19,12 @@ pub const SECTOR: usize = 512;
 const ENTRY: usize = 128;
 /// Entries an array holds at least (what Windows and UEFI make).
 pub const MIN_ENTRIES: u32 = 128;
+/// gala's C: partition type, {6A1A0C0D-E000-4C3A-8000-67616C614300}
+/// ("gala C" in its last bytes), as the GPT stores it: the partition the
+/// kernel keeps C: in (`persist`) and an installer makes.
+pub const GALA_C_TYPE: [u8; 16] = [
+    0x0d, 0x0c, 0x1a, 0x6a, 0x00, 0xe0, 0x3a, 0x4c, 0x80, 0x00, 0x67, 0x61, 0x6c, 0x61, 0x43, 0x00,
+];
 /// winioctl.h's PARTITION_STYLE.
 pub const STYLE_MBR: u32 = 0;
 pub const STYLE_GPT: u32 = 1;

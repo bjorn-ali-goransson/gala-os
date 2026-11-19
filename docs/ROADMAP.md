@@ -6334,12 +6334,16 @@ volume instead).
    CREATE_DISK, UPDATE_PROPERTIES, GET_PARTITION_INFO_EX) and each
    partition a device (`\Device\Harddisk0\Partition1`...). Open: its
    run on real Windows (GitHub issue #206), MBR tables read.
-2. C: in a partition: the persisted volume found by its partition type
-   GUID instead of filling the disk; the `persist` scenarios on a
-   partitioned disk.
-3. Booting from the installed disk: the EFI system partition with
-   Limine, the kernel, the sealed config and the manifest (R8), the
-   firmware's boot entry; Secure Boot's enrollment with R8 step 1.
+2. C: in a partition: done (`persist_partition`; ARCHITECTURE "C: kept
+   on the disk"): on a GPT disk C: is the partition of gala's C: type;
+   a partitioned disk without one, or an MBR disk, is never formatted.
+3. Booting from the installed disk: the layout done (`boot_from_disk`,
+   ARCHITECTURE "Boot"): a GPT whose EFI system partition (FAT32) holds
+   the image's boot tree as it is, found by the firmware's removable-media
+   path `EFI/BOOT/BOOTX64.EFI` with no boot entry, and gala's C:
+   partition after it. Open: a firmware boot entry (UEFI variables),
+   BIOS machines (Limine's `bios-install` on the disk), Secure Boot's
+   enrollment with R8 step 1.
 4. The installer program: pick a disk, erase it or use its free space,
    confirm, install, report; every step and failure as events, an
    answer file for unattended runs (Windows' autounattend is the

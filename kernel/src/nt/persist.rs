@@ -36,18 +36,23 @@ use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// The kernel's disk as a `Blocks` device.
-pub struct DiskBlocks;
+/// C:'s part of the kernel's disk as a `Blocks` device: the whole disk,
+/// or gala's partition of a GPT disk (`volume_range`). Sectors are the
+/// volume's; the disk's are `first` on.
+pub struct DiskBlocks {
+    first: u64,
+    sectors: u64,
+}
 
 impl Blocks for DiskBlocks {
     fn sectors(&self) -> u64 {
-        platform::disk_sectors()
+        self.sectors
     }
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        platform::disk_read(sector, buf).map_err(|_| IoError)
+        platform::disk_read(self.first + sector, buf).map_err(|_| IoError)
     }
     fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), IoError> {
-        platform::disk_write(sector, data).map_err(|_| IoError)
+        platform::disk_write(self.first + sector, data).map_err(|_| IoError)
     }
     fn flush(&mut self) -> Result<(), IoError> {
         platform::disk_flush().map_err(|_| IoError)
@@ -266,6 +271,57 @@ fn registry_due() -> bool {
                 >= REGISTRY_FLUSH_NS)
 }
 
+/// Where C: is kept (ROADMAP IN step 2), by what the disk holds: on a GPT
+/// disk, its partition of gala's C: type (`gpt::GALA_C_TYPE`; none: C:
+/// is not kept); on a disk with another partition table (an MBR's boot
+/// signature) and no gala volume, nowhere (a disk gala did not make is
+/// not formatted); otherwise the whole disk, as before partitions. Logged.
+fn volume_range() -> Option<DiskBlocks> {
+    let sectors = platform::disk_sectors();
+    let read =
+        |lba: u64, buf: &mut [u8]| platform::disk_read(lba, buf).map_err(super::disk::status);
+    match super::gpt::read(sectors, read) {
+        Ok(Some(gpt)) => {
+            let found =
+                gpt.partitions.iter().enumerate().find(|(_, p)| p.kind == super::gpt::GALA_C_TYPE);
+            let Some((i, p)) = found else {
+                warn!(
+                    "persist: the disk's GPT has no partition of gala's C: type ({} partitions); C: is not kept",
+                    gpt.partitions.len()
+                );
+                return None;
+            };
+            let blocks = DiskBlocks { first: p.first, sectors: p.last - p.first + 1 };
+            info!(
+                "persist: C: is partition {} of the disk (LBA {}, {} sectors)",
+                i + 1,
+                blocks.first,
+                blocks.sectors
+            );
+            Some(blocks)
+        }
+        Ok(None) => {
+            let mut s = [0u8; 512];
+            if platform::disk_read(0, &mut s).is_err() {
+                warn!("persist: the disk's first sector cannot be read; C: is not kept");
+                return None;
+            }
+            let ours = s.starts_with(b"GALAFS\0");
+            if !ours && s[510] == 0x55 && s[511] == 0xaa {
+                warn!(
+                    "persist: the disk has a partition table gala does not read (an MBR) and no gala volume; C: is not kept"
+                );
+                return None;
+            }
+            Some(DiskBlocks { first: 0, sectors })
+        }
+        Err(e) => {
+            warn!("persist: the disk's partition table cannot be read ({e:?}); C: is not kept");
+            None
+        }
+    }
+}
+
 /// Mounts the disk's volume over C: (formatting an empty disk) and starts
 /// recording changes.
 pub fn mount() {
@@ -273,7 +329,9 @@ pub fn mount() {
         warn!("persist: no disk; C: is not kept");
         return;
     }
-    let (volume, mounted) = match Volume::mount(DiskBlocks) {
+    let Some(blocks) = volume_range() else { return };
+    let base = blocks.first;
+    let (volume, mounted) = match Volume::mount(blocks) {
         Ok(v) => v,
         Err(e) => {
             warn!("persist: cannot mount the disk ({e:?}); C: is not kept");
@@ -282,7 +340,8 @@ pub fn mount() {
     };
     // The crash record a panic of the previous boot left (version 2
     // volumes); `crashtest` panics on purpose when there is none.
-    let had_record = volume.crash_area().is_some_and(|(first, _)| crate::crash::mounted(first));
+    let had_record =
+        volume.crash_area().is_some_and(|(first, _)| crate::crash::mounted(base + first));
     if CRASH_TEST.load(Ordering::Relaxed) && !had_record {
         panic!("crashtest: a deliberate panic to test the crash record");
     }
@@ -308,7 +367,7 @@ pub fn mount() {
     if let Some((first, count)) = volume.data_area() {
         match file::with_fs(|fs| fs.attach_area(count)) {
             Ok((used, dropped)) => {
-                DATA_START.store(first, Ordering::Release);
+                DATA_START.store(base + first, Ordering::Release);
                 info!(
                     "persist: data area of {} MiB at sector {first}, {} KiB in use",
                     u64::from(count) * 4 / 1024,
