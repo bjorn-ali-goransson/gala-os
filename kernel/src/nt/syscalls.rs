@@ -5348,7 +5348,7 @@ impl Call<'_> {
         };
         let ci = attributes & OBJ_CASE_INSENSITIVE != 0;
         Ok(match namespace::lookup_parse(None, &name, ci) {
-            Ok((device, rest)) if matches!(device.body, ObjectBody::DiskDevice) => {
+            Ok((device, rest)) if matches!(device.body, ObjectBody::DiskDevice(_)) => {
                 // Nothing below the device: it has no file system.
                 if !rest.is_empty() {
                     return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
@@ -5421,7 +5421,10 @@ impl Call<'_> {
             let synchronous = options
                 & (file::FILE_SYNCHRONOUS_IO_ALERT | file::FILE_SYNCHRONOUS_IO_NONALERT)
                 != 0;
-            let disk = super::disk::DiskFile::new(synchronous);
+            let ObjectBody::DiskDevice(range) = device.body else {
+                return NtStatus::OBJECT_TYPE_MISMATCH;
+            };
+            let disk = super::disk::DiskFile::new(synchronous, range);
             let Ok(object) = KObject::new(ObjectBody::Disk(disk)) else {
                 return NtStatus::NO_MEMORY;
             };
@@ -5917,8 +5920,9 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         finish_io(&entry.object, event.as_ref(), None, NtStatus::SUCCESS);
         return NtStatus::SUCCESS;
     }
-    if matches!(entry.object.body, ObjectBody::Disk(_)) {
+    if let ObjectBody::Disk(disk) = &entry.object.body {
         let _ = apc;
+        let disk_range = disk.range;
         if super::disk::needs_read(code) && entry.access & file::FILE_READ_DATA == 0 {
             return NtStatus::ACCESS_DENIED;
         }
@@ -5938,7 +5942,10 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
             if call.process.read(input, &mut buf).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
-            tri!(super::disk::layout(code, &buf))
+            tri!(super::disk::layout(code, &buf, disk_range))
+        } else if code == super::disk::IOCTL_DISK_GET_LENGTH_INFO {
+            // A partition's length; the geometry is the disk's.
+            tri!(super::disk::control(code, disk_range.sectors))
         } else {
             tri!(super::disk::control(code, platform::disk_sectors()))
         };
@@ -6768,7 +6775,13 @@ fn disk_io(
         Some(o) if o >= 0 => o as u64,
         _ => return NtStatus::INVALID_PARAMETER,
     };
+    // A partition's offsets are its own; nothing past its end.
     let first = tri!(super::disk::sector_of(offset));
+    let count = u64::from(length).div_ceil(super::disk::SECTOR_BYTES);
+    if first.saturating_add(count) > disk.range.sectors {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let first = disk.range.first + first;
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let mut data = Vec::new();
     if data.try_reserve_exact(length as usize).is_err() {

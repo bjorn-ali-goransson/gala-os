@@ -261,6 +261,27 @@ pub fn layout(gpt: Option<&Gpt>, sectors: u64) -> Result<Vec<u8>, NtStatus> {
     Ok(out)
 }
 
+/// IOCTL_DISK_GET_PARTITION_INFO_EX's answer for partition `number` (its
+/// layout entry); for the whole disk (0), the disk as one partition of
+/// its style, number 0.
+pub fn partition_info(gpt: Option<&Gpt>, sectors: u64, number: u32) -> Result<Vec<u8>, NtStatus> {
+    if number == 0 {
+        let mut out = Vec::new();
+        out.try_reserve_exact(PARTITION_INFO).map_err(no_memory)?;
+        out.resize(PARTITION_INFO, 0);
+        let style = if gpt.is_some() { STYLE_GPT } else { STYLE_RAW };
+        out[0..4].copy_from_slice(&style.to_le_bytes());
+        out[16..24].copy_from_slice(&(sectors * SECTOR as u64).to_le_bytes());
+        return Ok(out);
+    }
+    let all = layout(gpt, sectors)?;
+    let at = LAYOUT_HEADER + (number as usize - 1) * PARTITION_INFO;
+    let entry = all.get(at..at + PARTITION_INFO).ok_or(NtStatus::INVALID_DEVICE_REQUEST)?;
+    let mut out = Vec::new();
+    out.try_extend_from_slice(entry).map_err(no_memory)?;
+    Ok(out)
+}
+
 /// IOCTL_DISK_CREATE_DISK's input for a GPT: an empty table with the
 /// given disk GUID and entry count (at least MIN_ENTRIES). Other styles:
 /// STATUS_NOT_SUPPORTED (MBR is not written yet).

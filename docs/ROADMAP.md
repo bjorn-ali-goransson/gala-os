@@ -6329,11 +6329,11 @@ underneath), ntfs-3g's ntfsresize (GPL; Windows shrinks its own
 volume instead).
 
 **Next** (each step test first):
-1. Partitions in the kernel: the layout IOCTLs done (GET/SET_DRIVE_LAYOUT_EX,
-   CREATE_DISK, UPDATE_PROPERTIES on a GPT: `partition_test`, ARCHITECTURE
-   "Disk"); its run on real Windows (a scratch VHD) next; then each
-   partition a device (`\Device\Harddisk0\Partition1`...) and MBR
-   tables read.
+1. Partitions in the kernel: done for GPT disks (`partition_test`,
+   ARCHITECTURE "Disk"): the layout IOCTLs (GET/SET_DRIVE_LAYOUT_EX,
+   CREATE_DISK, UPDATE_PROPERTIES, GET_PARTITION_INFO_EX) and each
+   partition a device (`\Device\Harddisk0\Partition1`...). Open: its
+   run on real Windows (GitHub issue #206), MBR tables read.
 2. C: in a partition: the persisted volume found by its partition type
    GUID instead of filling the disk; the `persist` scenarios on a
    partitioned disk.

@@ -26665,6 +26665,11 @@ fn partition_test_check(image: &[u8]) -> Result {
     if primary[256..].iter().any(|&b| b != 0) {
         return Err("GPT entries past the second are not empty".into());
     }
+    // Written through partition 2's device: the disk's sector at 17 MiB.
+    let text = b"written by partition_test to partition 2";
+    if !sector(34816).starts_with(text) {
+        return Err("partition 2's first sector does not hold what partition_test wrote".into());
+    }
     Ok(())
 }
 

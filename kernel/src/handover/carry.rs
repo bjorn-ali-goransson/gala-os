@@ -854,7 +854,7 @@ fn check_object(
         }
         ObjectBody::Volume
         | ObjectBody::VolumeFile(_)
-        | ObjectBody::DiskDevice
+        | ObjectBody::DiskDevice(_)
         | ObjectBody::Disk(_)
         | ObjectBody::NullDevice
         | ObjectBody::MupDevice
