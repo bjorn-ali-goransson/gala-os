@@ -18,12 +18,12 @@
 //! d3d11.h), so gala's d2d1.dll imports no Direct3D at all and works
 //! with whichever d3d11.dll the program brought.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{
-    ComRef, E_INVALIDARG, E_NOINTERFACE, E_POINTER, Guid, HResult, IID_DEVICE, IID_RESOURCE, Obj,
-    Res, S_OK, VTable, add_ref, gap, get_factory, give, guid, not_implemented, put, query,
-    release_object, slot,
+    ComRef, E_INVALIDARG, E_NOINTERFACE, E_POINTER, Guid, HResult, IID_DEVICE, IID_DEVICE1,
+    IID_RESOURCE, Obj, Res, S_OK, VTable, add_ref, answered, gap, get_factory, give, guid,
+    not_implemented, put, query, release_object, slot,
 };
 
 /// The slots this DLL calls on the program's DXGI and Direct3D 11
@@ -141,9 +141,15 @@ pub struct Device {
     dxgi: ComRef,
     /// SetMaximumTextureMemory's value, answered as it was given.
     texture_memory: AtomicU64,
+    /// ID2D1Device1's rendering priority, answered as it was given:
+    /// NORMAL (0) or LOW (1). It asks Direct2D to yield the GPU to other
+    /// programs, and gala draws on the calling thread either way.
+    priority: AtomicU32,
 }
 
-static DEVICE_VTBL: VTable<9> = VTable([
+/// ID2D1Device1 (d2d1_2.h): ID2D1Device's nine methods, then its three.
+/// One object answers both interfaces, so it has the longer vtable.
+static DEVICE_VTBL: VTable<12> = VTable([
     device_query as *const (),
     add_ref as *const (),
     device_release as *const (),
@@ -153,11 +159,31 @@ static DEVICE_VTBL: VTable<9> = VTable([
     d_SetMaximumTextureMemory as *const (),
     d_GetMaximumTextureMemory as *const (),
     d_ClearResources as *const (),
+    d1_GetRenderingPriority as *const (),
+    d1_SetRenderingPriority as *const (),
+    d1_CreateDeviceContext as *const (),
 ]);
 
 /// ID2D1Factory1::CreateDevice: a Direct2D device over the program's own
-/// Direct3D 11 device, given as its IDXGIDevice.
+/// Direct3D 11 device, given as its IDXGIDevice. Which interface the
+/// program asked through is in the ledger, so a run says whether it took
+/// 1.1's factory or 1.2's.
 pub extern "system" fn f1_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
+    let r = create_device(factory, dxgi, out);
+    answered(b"ID2D1Factory1::CreateDevice", r);
+    r
+}
+
+/// ID2D1Factory2::CreateDevice: the same device, which answers
+/// ID2D1Device1 as well (its vtable has 1.2's three methods and its
+/// QueryInterface the interface).
+pub extern "system" fn f2_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
+    let r = create_device(factory, dxgi, out);
+    answered(b"ID2D1Factory2::CreateDevice", r);
+    r
+}
+
+fn create_device(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }
@@ -171,6 +197,7 @@ pub extern "system" fn f1_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -
             res: Res::new(DEVICE_VTBL.addr(), factory),
             dxgi: ComRef::new(dxgi),
             texture_memory: AtomicU64::new(0),
+            priority: AtomicU32::new(RENDERING_PRIORITY_NORMAL),
         },
     )
 }
@@ -186,7 +213,7 @@ pub fn factory_of(o: Obj) -> Obj {
 }
 
 extern "system" fn device_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
-    query(this, b"ID2D1Device", &[IID_RESOURCE, IID_DEVICE], riid, out)
+    query(this, b"ID2D1Device", &[IID_RESOURCE, IID_DEVICE, IID_DEVICE1], riid, out)
 }
 
 extern "system" fn device_release(this: Obj) -> u32 {
@@ -194,7 +221,9 @@ extern "system" fn device_release(this: Obj) -> u32 {
 }
 
 extern "system" fn d_CreateDeviceContext(this: Obj, options: u32, out: *mut Obj) -> HResult {
-    crate::target::create_device_context(this, options, out)
+    let r = crate::target::create_device_context(this, options, out);
+    answered(b"ID2D1Device::CreateDeviceContext", r);
+    r
 }
 
 extern "system" fn d_CreatePrintControl(
@@ -218,3 +247,31 @@ extern "system" fn d_GetMaximumTextureMemory(this: Obj) -> u64 {
 
 /// ClearResources: gala's Direct2D keeps no cache of its own to drop.
 extern "system" fn d_ClearResources(_this: Obj, _milliseconds_since_use: u32) {}
+
+// ---- ID2D1Device1 (Direct2D 1.2) -----------------------------------------------
+
+/// D2D1_RENDERING_PRIORITY_NORMAL (d2d1_2.h); LOW is 1.
+const RENDERING_PRIORITY_NORMAL: u32 = 0;
+const RENDERING_PRIORITY_LOW: u32 = 1;
+
+extern "system" fn d1_GetRenderingPriority(this: Obj) -> u32 {
+    device(this).priority.load(Ordering::Relaxed)
+}
+
+/// A priority other than NORMAL or LOW is not one Direct2D has: it is
+/// recorded and the device keeps the priority it had.
+extern "system" fn d1_SetRenderingPriority(this: Obj, priority: u32) {
+    if priority != RENDERING_PRIORITY_NORMAL && priority != RENDERING_PRIORITY_LOW {
+        gap(b"ID2D1Device1::SetRenderingPriority(unknown)", priority.into());
+        return;
+    }
+    device(this).priority.store(priority, Ordering::Relaxed);
+}
+
+/// ID2D1Device1::CreateDeviceContext: the same context, which answers
+/// ID2D1DeviceContext1 as well (`target`).
+extern "system" fn d1_CreateDeviceContext(this: Obj, options: u32, out: *mut Obj) -> HResult {
+    let r = crate::target::create_device_context(this, options, out);
+    answered(b"ID2D1Device1::CreateDeviceContext", r);
+    r
+}

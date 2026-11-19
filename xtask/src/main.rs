@@ -15228,18 +15228,30 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // ID2D1Factory1 over the program's IDXGIDevice, a device context
         // targeting a bitmap over the swap chain's DXGI surface, a frame
         // drawn into it with the colours and geometry of d3d11_test's,
-        // read back through a staging texture and presented. The device
-        // is DXVK on lavapipe; Direct2D itself is gala's software
-        // rasterizer, so what it draws has to reach the DXGI surface.
+        // read back through a staging texture; then the same frame again
+        // through Direct2D 1.2 (ID2D1Factory2, ID2D1Device1,
+        // ID2D1DeviceContext1, the interfaces Word asks for) with the
+        // rectangle as a filled geometry realization and a square as a
+        // stroked one, and that one is presented. The device is DXVK on
+        // lavapipe; Direct2D itself is gala's software rasterizer, so
+        // what it draws has to reach the DXGI surface.
         name: "d2d1_device_test",
         cmdline: "qemu_exit presenter=test run=d2d1_device_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "d2d1_device_test: device llvmpipe",
             "d2d1_device_test: read back 0x336699 0xffcc00",
+            "d2d1_device_test: realized 0x336699 0xffcc00 0xffcc00 0x336699",
             "d2d1_device_test: presented",
             "xtask: screen ok",
             "d2d1_device_test: ok",
+            // The device path's calls are in the ledger when they work
+            // (OBSERVABILITY "Missing-features ledger"): what says how
+            // far a program that stops on this path got, so a run of
+            // this test has to leave them.
+            r#"ledger: {"service":"d2d1.dll!ID2D1Factory2::CreateDevice","what":"other","detail":0"#,
+            r#"ledger: {"service":"d2d1.dll!ID2D1Device1::CreateDeviceContext","what":"other","detail":0"#,
+            r#"ledger: {"service":"d2d1.dll!ID2D1RenderTarget::EndDraw","what":"other","detail":0"#,
             "exited with status 0x00000000",
         ],
     },

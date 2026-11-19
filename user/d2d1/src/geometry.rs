@@ -16,11 +16,11 @@ use alloc::vec::Vec;
 
 use crate::raster::{self, Poly};
 use crate::{
-    D2DERR_WRONG_STATE, E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, IID_ELLIPSE_GEOMETRY,
-    IID_GEOMETRY, IID_GEOMETRY_SINK, IID_PATH_GEOMETRY, IID_RECTANGLE_GEOMETRY, IID_RESOURCE,
-    IID_ROUNDED_RECTANGLE_GEOMETRY, IID_SIMPLIFIED_SINK, Matrix, Obj, Point, RectF, Res, S_OK,
-    Spin, VTable, add_ref, get_factory, give, not_implemented, pt, push, put, query, read,
-    release_object, vtable_of,
+    ComRef, D2DERR_WRONG_STATE, E_INVALIDARG, E_OUTOFMEMORY, Guid, HResult, IID_ELLIPSE_GEOMETRY,
+    IID_GEOMETRY, IID_GEOMETRY_REALIZATION, IID_GEOMETRY_SINK, IID_PATH_GEOMETRY,
+    IID_RECTANGLE_GEOMETRY, IID_RESOURCE, IID_ROUNDED_RECTANGLE_GEOMETRY, IID_SIMPLIFIED_SINK,
+    Matrix, Obj, Point, RectF, Res, S_OK, Spin, VTable, add_ref, get_factory, give,
+    not_implemented, pt, push, put, query, read, release_object, vtable_of,
 };
 
 /// A segment of a figure, ending at its last point.
@@ -202,6 +202,20 @@ pub fn contains_point(polys: &[Vec<Point>], p: Point, winding: bool) -> bool {
         }
     }
     if winding { w != 0 } else { w & 1 != 0 }
+}
+
+/// A copy of a path (fallibly: a path is figures of segments, each in
+/// its own allocation).
+pub fn copy_path(p: &Path) -> Option<Path> {
+    let mut figs = Vec::new();
+    figs.try_reserve_exact(p.figs.len()).ok()?;
+    for f in &p.figs {
+        let mut segs = Vec::new();
+        segs.try_reserve_exact(f.segs.len()).ok()?;
+        segs.extend_from_slice(&f.segs);
+        figs.push(Fig { start: f.start, segs, closed: f.closed, filled: f.filled });
+    }
+    Some(Path { figs, winding: p.winding })
 }
 
 // ---- The geometry objects -------------------------------------------------
@@ -1005,4 +1019,71 @@ fn arc_to_cubics(p0: Point, a: &Arc, out: &mut Vec<Seg>) -> Option<()> {
         t = t_next;
     }
     Some(())
+}
+
+// ---- Geometry realizations (ID2D1GeometryRealization, Direct2D 1.2) -------
+
+/// A geometry prepared for drawing. Direct2D 1.2 tessellates the geometry
+/// once, at a flattening tolerance, and draws that tessellation whenever
+/// DrawGeometryRealization is called; gala's rasterizer flattens every
+/// path as it draws it, so a realization keeps the path itself (and, for
+/// a stroked one, the width and stroke style it was made with) and draws
+/// like FillGeometry or DrawGeometry would. The pixels are the same; the
+/// tolerance asked for has no effect, because nothing is flattened in
+/// advance (ARCHITECTURE "Direct2D").
+#[repr(C)]
+pub struct Realization {
+    res: Res,
+    path: Path,
+    /// A stroked realization's width and its stroke style (None: a
+    /// filled one).
+    stroke: Option<(f32, ComRef)>,
+}
+
+static REALIZATION_VTBL: VTable<4> = VTable([
+    realization_query as *const (),
+    add_ref as *const (),
+    realization_release as *const (),
+    get_factory as *const (),
+]);
+
+/// Whether `o` is one of this DLL's geometry realizations.
+pub fn is_realization(o: Obj) -> bool {
+    vtable_of(o) == REALIZATION_VTBL.addr()
+}
+
+/// A realization of `path`, filled (`stroke` None) or stroked.
+pub fn create_realization(
+    factory: Obj,
+    path: Path,
+    stroke: Option<(f32, Obj)>,
+    out: *mut Obj,
+) -> HResult {
+    give(
+        out,
+        Realization {
+            res: Res::new(REALIZATION_VTBL.addr(), factory),
+            path,
+            stroke: stroke.map(|(width, style)| (width, ComRef::new(style))),
+        },
+    )
+}
+
+/// How to draw a realization: a copy of its path, and a stroked one's
+/// width and style. None when `o` is not one of ours, or on OOM.
+pub fn realization_of(o: Obj) -> Option<(Path, Option<(f32, Obj)>)> {
+    if !is_realization(o) {
+        return None;
+    }
+    // SAFETY: one of our realizations (its vtable says so).
+    let r = unsafe { &*(o as *const Realization) };
+    Some((copy_path(&r.path)?, r.stroke.as_ref().map(|(width, style)| (*width, style.0))))
+}
+
+extern "system" fn realization_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
+    query(this, b"ID2D1GeometryRealization", &[IID_RESOURCE, IID_GEOMETRY_REALIZATION], riid, out)
+}
+
+extern "system" fn realization_release(this: Obj) -> u32 {
+    release_object::<Realization>(this)
 }

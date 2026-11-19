@@ -16,9 +16,9 @@ use crate::geometry::{self, Ellipse, RoundedRect, Shape};
 use crate::raster::StrokeStyle;
 use crate::{
     E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Header, IID_FACTORY, IID_FACTORY1,
-    IID_IUNKNOWN, IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj, RectF, Res, S_OK,
-    VTable, add_ref, gap, get_factory, give, not_implemented, put, query, read, release_object,
-    try_box, vtable_of,
+    IID_FACTORY2, IID_IUNKNOWN, IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj,
+    RectF, Res, S_OK, VTable, add_ref, gap, get_factory, give, not_implemented, put, query, read,
+    release_object, try_box, vtable_of,
 };
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -51,7 +51,7 @@ impl Drop for Factory {
 /// ID2D1Factory, and ID2D1Factory1's ten further methods after it
 /// (d2d1_1.h). CreateDevice is the one Office needs: everything else of
 /// 1.1 hangs off the device.
-static FACTORY_VTBL: VTable<27> = VTable([
+static FACTORY_VTBL: VTable<28> = VTable([
     factory_query_fn as *const (),
     add_ref as *const (),
     factory_release_fn as *const (),
@@ -79,6 +79,10 @@ static FACTORY_VTBL: VTable<27> = VTable([
     f1_UnregisterEffect as *const (),
     f1_GetRegisteredEffects as *const (),
     f1_GetEffectProperties as *const (),
+    // ID2D1Factory2::CreateDevice gives an ID2D1Device1, which is
+    // what CreateDevice already makes: one device object answers both
+    // interfaces (`device`).
+    crate::device::f2_CreateDevice as *const (),
 ]);
 
 static MT_VTBL: VTable<6> = VTable([
@@ -124,7 +128,7 @@ pub fn factory_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResult {
         put(out, (&factory(this).mt_vtbl as *const *const ()).cast_mut().cast());
         return S_OK;
     }
-    query(this, b"ID2D1Factory", &[IID_FACTORY, IID_FACTORY1], riid, out)
+    query(this, b"ID2D1Factory", &[IID_FACTORY, IID_FACTORY1, IID_FACTORY2], riid, out)
 }
 
 pub fn factory_release(this: Obj) -> u32 {

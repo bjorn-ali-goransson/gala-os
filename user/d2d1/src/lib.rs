@@ -17,6 +17,12 @@
 //!   G2), a context drawing into the ID2D1Bitmap1 SetTarget gave it, and
 //!   a bitmap over a DXGI surface writing its pixels into that surface
 //!   when the frame ends. This is how Office draws.
+//! - Direct2D 1.2 (d2d1_2.h) over the same code, which is the version
+//!   Word asks for: ID2D1Factory2 (one more CreateDevice, for an
+//!   ID2D1Device1), ID2D1Device1 (a rendering priority, and a
+//!   CreateDeviceContext for an ID2D1DeviceContext1) and
+//!   ID2D1DeviceContext1 (geometry realizations). One object answers
+//!   each interface and the one it inherits from.
 //! - Brushes, gradient stop collections and bitmaps (`brush`).
 //! - Geometries: rectangles, rounded rectangles, ellipses, paths and their
 //!   sinks (`geometry`).
@@ -124,6 +130,17 @@ pub fn gap(what: &[u8], detail: u64) {
     record_kind(what, LEDGER_UNSUPPORTED, detail);
 }
 
+/// Records `d2d1.dll!<what>`: a call a program made and was answered,
+/// the HRESULT it was answered with as the detail (0 for success). The
+/// device path Office draws through (CreateDevice, CreateDeviceContext,
+/// a target bitmap over a DXGI surface, the frames that end on it)
+/// leaves nothing in the ledger when it works, so a program that stops
+/// after it shows how far it got (OBSERVABILITY "Missing-features
+/// ledger").
+pub fn answered(what: &[u8], hr: HResult) {
+    record_kind(what, LEDGER_OTHER, hr as u32 as u64);
+}
+
 /// A method gala does not implement: recorded, E_NOTIMPL.
 pub fn not_implemented(method: &[u8]) -> HResult {
     record_kind(method, LEDGER_NOT_IMPLEMENTED, 0);
@@ -186,6 +203,15 @@ pub const IID_DEVICE_CONTEXT: Guid =
     guid(0xe8f7_fe7a, 0x191c, 0x466d, [0xad, 0x95, 0x97, 0x56, 0x78, 0xbd, 0xa9, 0x98]);
 pub const IID_BITMAP1: Guid =
     guid(0xa898_a84c, 0x3873, 0x4588, [0xb0, 0x8b, 0xeb, 0xbf, 0x97, 0x8d, 0xf0, 0x41]);
+/// The Direct2D 1.2 interfaces (d2d1_2.h).
+pub const IID_FACTORY2: Guid =
+    guid(0x94f8_1a73, 0x9212, 0x4376, [0x9c, 0x58, 0xb1, 0x6a, 0x3a, 0x0d, 0x39, 0x92]);
+pub const IID_DEVICE1: Guid =
+    guid(0xd217_68e1, 0x23a4, 0x4823, [0xa1, 0x4b, 0x7c, 0x3e, 0xba, 0x85, 0xd6, 0x58]);
+pub const IID_DEVICE_CONTEXT1: Guid =
+    guid(0xd37f_57e4, 0x6908, 0x459f, [0xa1, 0x99, 0xe7, 0x2f, 0x24, 0xf7, 0x99, 0x87]);
+pub const IID_GEOMETRY_REALIZATION: Guid =
+    guid(0xa169_07d7, 0xbc02, 0x4801, [0x99, 0xe8, 0x8c, 0xf7, 0xf4, 0x85, 0xf7, 0x74]);
 pub const IID_MULTITHREAD: Guid =
     guid(0x31e6_e7bc, 0xe0ff, 0x4d46, [0x8c, 0x64, 0xa0, 0xa8, 0xc4, 0x1c, 0x15, 0xd3]);
 

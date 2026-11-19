@@ -239,7 +239,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 is there now (ID2D1Factory1, the device, device contexts and target bitmaps over DXGI surfaces: `d2d1_device_test`), and Word asks for ID2D1Factory2 instead, falls back to the 1.0 path's D3D10CreateDevice1 stub and ends with status 0 after 30 s with no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there now (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and Word, which takes ID2D1Factory2 as a version probe and calls CreateDevice on neither, falls back to the 1.0 path's D3D10CreateDevice1 stub twenty times and ends on "Word was unable to start. (13)" with status 0 after 30 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1793,7 +1793,8 @@ need gala's.
     (WINCODEC_ERR_FRAMEMISSING).
   - Direct2D (`d2d1`, ARCHITECTURE "Direct2D"; `d2d1_test`, x64, the
     `d2d1_window` screen scenario and `d2d1_device_test`): done for the
-    factory (both kinds, ID2D1Multithread, ID2D1Factory1; the ordinals
+    factory (both kinds, ID2D1Multithread, ID2D1Factory1 and
+    ID2D1Factory2; the ordinals
     Office imports), the matrix
     helpers, software render targets over WIC bitmaps, device contexts
     (BindDC) and windows (hardware requests drawn in software), solid,
@@ -1801,10 +1802,12 @@ need gala's.
     rectangles, rounded rectangles, ellipses, lines and path geometries
     (lines, Béziers, arcs, fill modes) filled and stroked with widths,
     caps and joins, antialiased or aliased, transforms and axis-aligned
-    clips, DrawBitmap; and Direct2D 1.1 over the program's own Direct3D
-    11 device (GPU G2's DXVK): ID2D1Factory1::CreateDevice,
-    ID2D1Device::CreateDeviceContext, a target bitmap over a DXGI
-    surface (CreateBitmapFromDxgiSurface) and a frame drawn in software
+    clips, DrawBitmap; and Direct2D 1.1 and 1.2 over the program's own
+    Direct3D 11 device (GPU G2's DXVK): CreateDevice on either factory,
+    CreateDeviceContext on either device (rendering priority),
+    a target bitmap over a DXGI
+    surface (CreateBitmapFromDxgiSurface), geometry realizations drawn
+    at the rasterizer's own tolerance, and a frame drawn in software
     written back into that surface with UpdateSubresource. Next, as
     Office's use shows it (the ledger names
     each): text (DrawText/DrawTextLayout, which needs DirectWrite's text
@@ -1991,35 +1994,50 @@ need gala's.
      d3d10_1.dll (0xc06d007e over D3D10CreateDevice1). Both are
      implemented, each answer measured on Windows first (`msi_test`,
      `gpu_stub_test`; ARCHITECTURE "Other DLLs", GPU G0).
-     What stops Word now is Direct2D's version. The rendering device
-     it asks
-     for is there: the scenario ships DXVK's `d3d11.dll` and `dxgi.dll`
-     beside WINWORD.EXE, the directory the loader searches before
-     System32, over the Vulkan stack in System32 (GPU G2), and DXVK
-     creates a D3D_FEATURE_LEVEL_11_0 device on Mesa's lavapipe -- its
-     own logs say so, and the scenario's `dump=` keeps them
-     (C:/gala/winword_d3d11.log and winword_dxgi.log, OBSERVABILITY
-     "Guest files"). With a device in hand Word no longer raises
-     0xe0000002, the fail-fast it took when nothing answered. Direct2D
-     1.1 over that device is there too (the Direct2D item above):
-     ID2D1Factory1, ID2D1Device, device contexts, and a target bitmap
-     over a DXGI surface whose frames reach the program's Direct3D 11
-     device -- `d2d1_device_test` draws one through DXVK on lavapipe
-     and presents it. Word takes the ID2D1Factory1 it is given and then
-     asks the factory for **ID2D1Factory2** (Direct2D 1.2,
-     {94f81a73-...}; recorded, E_NOINTERFACE, 37.2 s), never calls
-     CreateDevice, falls back to Direct2D
-     1.0's own device with D3D10CreateDevice1 twenty times
-     (DXGI_ERROR_UNSUPPORTED: G0's stub, and DXVK ships no d3d10), and
-     ends with status 0 after 30 s -- which is the status the scenario
-     asks for, so only its screen check fails now, with the untitled
-     window on the screen and no document drawn.
-     So the next step is ID2D1Factory2: its CreateDevice gives an
-     ID2D1Device1 (rendering priority, and a CreateDeviceContext that
-     gives an ID2D1DeviceContext1: geometry realizations), each over
-     what 1.1 already does, until Word stops asking for a newer one.
-     After that comes text, which needs
-     DirectWrite's text layout first -- a document is text.
+     What stops Word now is a Direct3D 10.1 device. The rendering
+     device it asks for is there: the scenario ships DXVK's `d3d11.dll`
+     and `dxgi.dll` beside WINWORD.EXE, the directory the loader
+     searches before System32, over the Vulkan stack in System32 (GPU
+     G2), and DXVK creates a D3D_FEATURE_LEVEL_11_0 device on Mesa's
+     lavapipe -- its own logs say so, and the scenario's `dump=` keeps
+     them (C:/gala/winword_d3d11.log and winword_dxgi.log,
+     OBSERVABILITY "Guest files"). With a device in hand Word no longer
+     raises 0xe0000002, the fail-fast it took when nothing answered.
+     Direct2D 1.1 and 1.2 over that device are there too (the Direct2D
+     item above): ID2D1Factory1 and ID2D1Factory2, ID2D1Device and
+     ID2D1Device1, their device contexts, geometry realizations, and a
+     target bitmap over a DXGI surface whose frames reach the program's
+     Direct3D 11 device -- `d2d1_device_test` draws one through DXVK on
+     lavapipe and presents it. Word asks the factory for ID2D1Factory2
+     ({94f81a73-...}) and is answered, but that is a version probe, not
+     the way in: it calls CreateDevice on neither interface, and the
+     whole device path leaves nothing in its ledger, where the calls
+     that work are recorded (OBSERVABILITY "Missing-features ledger").
+     What it does instead is Direct2D 1.0's own device:
+     D3D10CreateDevice1 twenty times (DXGI_ERROR_UNSUPPORTED, G0's
+     stub; DXVK dropped Direct3D 10 in 2.0, so nothing beside the exe
+     answers it either), 50 ms before the message box it ends on --
+     "Sorry, something went wrong and Word was unable to start. (13)",
+     on the untitled window, exit status 0 after 30 s, which is the
+     status the scenario asks for, so only its screen check fails.
+     Office's own switch does not avoid that path: with
+     HKCU\Software\Microsoft\Office\16.0\Common\Graphics
+     "DisableHardwareAcceleration"=1 seeded, the attempts drop from
+     twenty to fifteen -- so the setting is read -- and Word fails the
+     same way.
+     So the next step is a real ID3D10Device1 (d3d10_1.dll) over the
+     program's own Direct3D 11, the way d2d1 already works: load the
+     d3d11.dll beside the exe, create a device there, and answer
+     Direct3D 10's merged device and context over it, its resources
+     answering QueryInterface for the Direct3D 11 objects underneath so
+     d2d1's surface path keeps working unchanged. With that device
+     comes ID2D1Factory::CreateDxgiSurfaceRenderTarget (recorded,
+     E_NOTIMPL today), Direct2D 1.0's way onto its texture. Which of
+     ID3D10Device1's ninety-six methods Office calls is measured first,
+     by a vtable whose methods record their own names, so what is
+     implemented is what is asked for rather than what the header
+     declares. After that comes text, which needs DirectWrite's text
+     layout first -- a document is text.
      The other gaps the ledger names around that exit, each to be
      measured on Windows before it is answered: kernelbase's
      SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six
@@ -3051,7 +3069,7 @@ need gala's.
      links (FileHardLinkInformation).
      Also seen: the client's `OfficeC2RClient.exe
      /installupdatesdx` (session 1) ends with 3 after asking d2d1 for
-     ID2D1Factory1/2/3 (Direct2D 1.1+, recorded); the gadget needs .NET
+     ID2D1Factory1/2/3 (1 and 2 answered, 3 recorded); the gadget needs .NET
      Framework.
      Its log also warns per file that kernel32's GetCachedSigningLevel and
      SetCachedSigningLevel are missing (`GetTrustLevelOnFile failed

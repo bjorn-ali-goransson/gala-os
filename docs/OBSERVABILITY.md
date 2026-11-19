@@ -439,7 +439,17 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   pixel format)` with the format GUID's first dword, `draw(a brush not
   made by gala's d2d1)`), and `<interface> QueryInterface` with the IID's
   first dword for an interface it does not answer (ID2D1Factory1's
-  0xbb12d362, the GDI interop interface's 0xe0db51c3). A failed WIC
+  0xbb12d362, the GDI interop interface's 0xe0db51c3). The device path
+  Office draws through is also recorded when it works, "other" with the
+  HRESULT as the detail (0 for success):
+  `ID2D1Factory1::CreateDevice` and `ID2D1Factory2::CreateDevice`,
+  `ID2D1Device::CreateDeviceContext` and
+  `ID2D1Device1::CreateDeviceContext`,
+  `ID2D1DeviceContext::CreateBitmapFromDxgiSurface`,
+  `ID2D1DeviceContext::SetTarget` and `ID2D1RenderTarget::EndDraw`.
+  Which version's interface a program took, how far down that path it
+  got and how many frames it ended leave nothing behind otherwise, and
+  a program that gives up after them (Word) shows nothing of why. A failed WIC
   bitmap lock at BeginDraw or EndDraw is `BeginDraw(WIC bitmap lock)` or
   `EndDraw(...)` with the HRESULT, and EndDraw returns it.
   NtSetInformationKey's flags classes, "NtSetInformationKey" with

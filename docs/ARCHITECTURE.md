@@ -11032,8 +11032,8 @@ those ordinals). `user/d2d1`, x64 only; `d2d1_test`, whose expected
 values are those of Wine's d2d1 tests (run on Windows) and Microsoft's
 documentation, the `d2d1_window` screen scenario (a window drawn
 through a window render target; `d2d1_test window`) and
-`d2d1_device_test` (Direct2D 1.1 over a program's own Direct3D 11
-device, the path Office draws with).
+`d2d1_device_test` (Direct2D 1.1 and 1.2 over a program's own Direct3D
+11 device, the path Office draws with).
 
 - **Objects**: every object starts with a vtable and a reference count
   (as windowscodecs's); every resource (brush, bitmap, geometry, stroke
@@ -11045,11 +11045,12 @@ device, the path Office draws with).
 - **The factory**: each D2D1CreateFactory is a new object; it answers
   ID2D1Factory and ID2D1Multithread (on both kinds, as Windows 10's
   does; Enter/Leave hold a critical section on a multi-threaded factory,
-  nothing on a single-threaded one). It answers ID2D1Factory1 as well
-  (CreateDevice, below); ID2D1Factory2 and later are not answered
-  (recorded), and ID2D1Factory1's own stroke styles, path geometries,
-  drawing state blocks, GDI metafiles and effect registry are recorded
-  and E_NOTIMPL.
+  nothing on a single-threaded one). It answers ID2D1Factory1 and
+  ID2D1Factory2 as well (CreateDevice, below) -- one object, every
+  interface, so its vtable is ID2D1Factory2's twenty-eight methods;
+  ID2D1Factory3 and later are not answered (recorded), and
+  ID2D1Factory1's own stroke styles, path geometries, drawing state
+  blocks, GDI metafiles and effect registry are recorded and E_NOTIMPL.
 - **Render targets** (`target.rs`): one object, four backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
@@ -11067,8 +11068,9 @@ device, the path Office draws with).
   Drawing outside BeginDraw/EndDraw draws nothing and fails the next
   EndDraw with D2DERR_WRONG_STATE; clips or layers left pushed fail it
   with D2DERR_PUSH_POP_UNBALANCED.
-- **The device and its contexts** (`device.rs`, Direct2D 1.1): this is
-  how Office draws. ID2D1Factory1::CreateDevice takes the program's
+- **The device and its contexts** (`device.rs`, Direct2D 1.1 and 1.2):
+  this is how Office draws. ID2D1Factory1::CreateDevice takes the
+  program's
   IDXGIDevice (on gala, DXVK's over lavapipe: GPU G2) and gives an
   ID2D1Device; its CreateDeviceContext gives a render target of the
   fourth kind, with a buffer of its own and no size until SetTarget
@@ -11088,6 +11090,21 @@ device, the path Office draws with).
   goes through the vtable slot its interface declares, so d2d1.dll
   imports no Direct3D and works with whichever d3d11.dll the program
   brought. Test: `d2d1_device_test`.
+- **Direct2D 1.2** (d2d1_2.h), the version Word asks the factory for:
+  one more interface at each step, each answered by the same object as
+  the one it inherits from, so a device's vtable is ID2D1Device1's
+  twelve methods and a context's ID2D1DeviceContext1's ninety-five.
+  ID2D1Factory2::CreateDevice gives an ID2D1Device1, whose rendering
+  priority (NORMAL or LOW: a hint to yield the GPU, which gala's
+  software drawing does not need) is answered as it was set, and whose
+  CreateDeviceContext gives an ID2D1DeviceContext1. That context adds
+  geometry realizations: Direct2D tessellates a geometry once at a
+  flattening tolerance and draws the tessellation many times, while
+  gala's rasterizer flattens as it draws, so a realization keeps the
+  path itself (and a stroked one its width and stroke style) and
+  DrawGeometryRealization fills or strokes it like FillGeometry or
+  DrawGeometry -- the same pixels, at the rasterizer's own tolerance
+  rather than the one asked for. Test: `d2d1_device_test`.
 - **No GPU of its own**: every target draws in software, also when
   D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's own
   d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives

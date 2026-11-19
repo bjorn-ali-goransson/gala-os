@@ -48,9 +48,10 @@ use crate::{
     D2DERR_PUSH_POP_UNBALANCED, D2DERR_UNSUPPORTED_PIXEL_FORMAT, D2DERR_WRONG_STATE,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, E_INVALIDARG,
     E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
-    IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj, PixelFormat, Point,
-    RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, com_add_ref, gap, get_factory, give,
-    not_implemented, pt, push, put, query, read, release_object, slot, vtable_of,
+    IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj,
+    PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, answered,
+    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, read,
+    release_object, slot, vtable_of,
 };
 
 #[link(name = "gdi32", kind = "raw-dylib")]
@@ -357,9 +358,11 @@ macro_rules! target_slots {
 }
 
 static WIC_VTBL: VTable<57> = VTable(target_slots!());
-/// ID2D1DeviceContext (d2d1_1.h): ID2D1RenderTarget's methods, then its
-/// own thirty-five.
-static CONTEXT_VTBL: VTable<92> = VTable(target_slots!(
+/// ID2D1DeviceContext1 (d2d1_2.h): ID2D1RenderTarget's fifty-seven
+/// methods, the thirty-five ID2D1DeviceContext adds, then the three
+/// 1.2's geometry realizations add. One object answers every one of
+/// those interfaces, so it has the longest vtable.
+static CONTEXT_VTBL: VTable<95> = VTable(target_slots!(
     dc1_CreateBitmap,
     dc1_CreateBitmapFromWicBitmap,
     dc1_CreateColorContext,
@@ -394,7 +397,10 @@ static CONTEXT_VTBL: VTable<92> = VTable(target_slots!(
     dc1_GetEffectInvalidRectangleCount,
     dc1_GetEffectInvalidRectangles,
     dc1_GetEffectRequiredInputRectangles,
-    dc1_FillOpacityMask
+    dc1_FillOpacityMask,
+    dc2_CreateFilledGeometryRealization,
+    dc2_CreateStrokedGeometryRealization,
+    dc2_DrawGeometryRealization
 ));
 static DC_VTBL: VTable<58> = VTable(target_slots!(dc_BindDC));
 static HWND_VTBL: VTable<60> =
@@ -611,6 +617,17 @@ extern "system" fn t_query(this: Obj, riid: *const Guid, out: *mut Obj) -> HResu
     };
     let what: &[u8] =
         if v == CONTEXT_VTBL.addr() { b"ID2D1DeviceContext" } else { b"ID2D1RenderTarget" };
+    // A context answers ID2D1DeviceContext1 as well: its vtable has
+    // 1.2's three methods.
+    if v == CONTEXT_VTBL.addr() {
+        return query(
+            this,
+            what,
+            &[IID_RESOURCE, IID_RENDER_TARGET, own, IID_DEVICE_CONTEXT1],
+            riid,
+            out,
+        );
+    }
     query(this, what, &[IID_RESOURCE, IID_RENDER_TARGET, own], riid, out)
 }
 
@@ -854,19 +871,7 @@ fn path_of(g: Obj) -> Option<Path> {
         }
         return None;
     }
-    geometry::with_path(g, |p| {
-        let mut figs = Vec::new();
-        figs.try_reserve_exact(p.figs.len()).ok()?;
-        for f in &p.figs {
-            let mut segs = Vec::new();
-            segs.try_reserve_exact(f.segs.len()).ok()?;
-            segs.extend_from_slice(&f.segs);
-            figs.push(geometry::Fig { start: f.start, segs, closed: f.closed, filled: f.filled });
-        }
-        Some(Path { figs, winding: p.winding })
-    })
-    .ok()
-    .flatten()
+    geometry::with_path(g, geometry::copy_path).ok().flatten()
 }
 
 extern "system" fn t_DrawGeometry(this: Obj, g: Obj, brush: Obj, width: f32, style: Obj) {
@@ -1337,6 +1342,7 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
     }
     put(tag1, tags.0);
     put(tag2, tags.1);
+    answered(b"ID2D1RenderTarget::EndDraw", r);
     r
 }
 
@@ -1562,7 +1568,9 @@ extern "system" fn dc1_CreateBitmapFromDxgiSurface(
     props: *const BitmapProps1,
     out: *mut Obj,
 ) -> HResult {
-    brush::create_from_dxgi(factory_of(this), surface, props, out)
+    let r = brush::create_from_dxgi(factory_of(this), surface, props, out);
+    answered(b"ID2D1DeviceContext::CreateBitmapFromDxgiSurface", r);
+    r
 }
 
 extern "system" fn dc1_CreateEffect(_this: Obj, class_id: *const Guid, out: *mut Obj) -> HResult {
@@ -1681,6 +1689,7 @@ extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
 /// recorded and fails the frame, as Direct2D fails a target it cannot
 /// draw into. NULL clears the target (the context is then 0 x 0).
 extern "system" fn dc1_SetTarget(this: Obj, image: Obj) {
+    answered(b"ID2D1DeviceContext::SetTarget", S_OK);
     if !image.is_null() && !brush::is_bitmap(image) {
         gap(b"ID2D1DeviceContext::SetTarget(not a bitmap of gala's d2d1)", 0);
         with(this, |s| {
@@ -1888,4 +1897,58 @@ extern "system" fn dc1_FillOpacityMask(
     _src: *const RectF,
 ) {
     gap(b"ID2D1DeviceContext::FillOpacityMask", 0);
+}
+
+// ---- ID2D1DeviceContext1 (Direct2D 1.2) ----------------------------------------
+//
+// A realization is a geometry tessellated once and drawn many times.
+// gala's rasterizer flattens as it draws, so a realization keeps the
+// path (`geometry::Realization`) and drawing one is filling or stroking
+// that path: the same pixels, and the flattening tolerance the caller
+// asks for has no effect because nothing is flattened in advance.
+
+/// The realization of a geometry, filled or stroked. A geometry that is
+/// not one of ours, or a path geometry still open, is recorded by
+/// `path_of` and E_INVALIDARG, as Direct2D answers a geometry it cannot
+/// use.
+fn create_realization(this: Obj, g: Obj, stroke: Option<(f32, Obj)>, out: *mut Obj) -> HResult {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    put(out, core::ptr::null_mut());
+    let Some(path) = path_of(g) else {
+        return E_INVALIDARG;
+    };
+    geometry::create_realization(factory_of(this), path, stroke, out)
+}
+
+extern "system" fn dc2_CreateFilledGeometryRealization(
+    this: Obj,
+    g: Obj,
+    _flattening_tolerance: f32,
+    out: *mut Obj,
+) -> HResult {
+    create_realization(this, g, None, out)
+}
+
+extern "system" fn dc2_CreateStrokedGeometryRealization(
+    this: Obj,
+    g: Obj,
+    _flattening_tolerance: f32,
+    width: f32,
+    style: Obj,
+    out: *mut Obj,
+) -> HResult {
+    create_realization(this, g, Some((width, style)), out)
+}
+
+extern "system" fn dc2_DrawGeometryRealization(this: Obj, realization: Obj, brush: Obj) {
+    let Some((path, stroke)) = geometry::realization_of(realization) else {
+        gap(b"ID2D1DeviceContext1::DrawGeometryRealization(not a realization of ours)", 0);
+        return;
+    };
+    match stroke {
+        None => fill_path(this, Some(path), brush),
+        Some((width, style)) => stroke_path(this, Some(path), brush, width, style),
+    }
 }
