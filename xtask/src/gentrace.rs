@@ -272,7 +272,7 @@ fn path_spans(text: &str) -> Vec<(usize, usize, String)> {
 fn wrapper(f: &str, slot: &Slot, name: &str, elsewhere: bool) -> String {
     let vis = if elsewhere { "pub(crate)" } else { "pub(super)" };
     format!(
-        "/// {name}, traced.\n{sig} {{\ncrate::reached!(b\"{name}\");\nsuper::{f}({args})\n}}\n",
+        "/// {name}, traced.\n{sig} {{\ncrate::traced!(b\"{name}\", [{args}]);\nsuper::{f}({args})\n}}\n",
         sig = slot.sig.replacen("extern", &format!("{vis} extern"), 1),
         args = slot.args.join(", "),
     )
@@ -459,8 +459,9 @@ fn one_dll(root: &Path, dir: &Path) -> Result<usize> {
             body.push('\n');
             body.push_str(MARK);
             body.push_str(
-                "\n/// The wrapper of every vtable slot of this module, each recording\n\
-                 /// the first call that reaches its method (`cargo xtask gen-trace`).\n\
+                "\n/// The wrapper of every vtable slot of this module: each records\n\
+                 /// the first call that reaches its method, and every call at all\n\
+                 /// once `trace_from=` has armed one (`cargo xtask gen-trace`).\n\
                  pub(crate) mod traced {\nuse super::*;\n",
             );
             for (f, name) in fns {

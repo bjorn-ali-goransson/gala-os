@@ -2182,11 +2182,14 @@ need gala's.
      says nothing either way.
      What hides the deciding call is that `reached!` is one-shot per
      site: a *repeat* of a method Word already called leaves no record,
-     so the 9.2 ms window is invisible by construction. Lifting that
-     for a window is OT3b piece 2 -- `trace_from=<dll>!<interface>::
-     <method>` and a `call` event category -- which is the next step
-     here, not another stack capture: the stack already names the
-     layer, and what is missing is the sequence.
+     so the 9.2 ms window is invisible by construction. What lifts it
+     is OT3b piece 2, now built:
+     `trace_from=d2d1.dll!<Interface>::<Method>` with `events=call`
+     records every call into d2d1 from the first time Word reaches that
+     method, repeats and all (OBSERVABILITY "Call tracing"). Reading
+     that window is the next step here, not another stack capture: the
+     stack already names the layer, and what is missing is the
+     sequence.
      Still unexplained beside it, and to be measured on Windows
      before it is called a divergence: ten NtAllocateVirtualMemory
      calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
@@ -5941,17 +5944,30 @@ among the slowest hand-offs.
      (`collection_family_count`), so they are renamed to d2d1's
      `<prefix>_<Method>` convention first and the generator then derives
      their names like the rest.
-   - **A trigger, so a long run records only what is wanted.** The
-     one-shot record a slot leaves is free (a relaxed atomic a call),
-     but a record of every call needs a system call per call, which a
-     drawing loop cannot pay. `trace_from=<dll>!<interface>::<method>`
-     arms the DLL at the slot named: before it, nothing but the one-shot
-     records; after it, every call with its arguments, within a budget.
-     The decision is made where the call is, before anything is
-     formatted (OBSERVABILITY "Volume": decide before the cost), and
-     the arming lives in the rules rather than in a DLL's source, so an
-     investigation needs no edit. A `call` event category carries them,
-     so the OpenTelemetry export maps them like every other kind.
+   - **A trigger, so a long run records only what is wanted.** Done.
+     The one-shot record a slot leaves is free (a relaxed atomic a
+     call), but a record of every call needs a system call per call,
+     which a drawing loop cannot pay.
+     `trace_from=<dll>!<Interface>::<Method>[:<n>]` arms the DLL at the
+     slot named: before it, nothing but the one-shot records; after it,
+     every call with its arguments as `call` events, `n` at most
+     (default 4096). The decision is made where the call is, before
+     anything is formatted (OBSERVABILITY "Volume": decide before the
+     cost), and the arming lives in the boot options rather than in a
+     DLL's source, so an investigation needs no edit. The name compared
+     is the one the ledger's rows spell, so a value is read straight off
+     a ledger row, and it is compared once per slot, inside that slot's
+     existing one-shot: a call nobody is tracing costs two relaxed loads
+     and no string compare at all. A spent budget is answered to the
+     DLL, which stops making the call, and the closing line says the
+     trace ended rather than the program -- a stream that simply stopped
+     would read as a program that stopped calling
+     (`kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs`, scenarios
+     `trace_from_test` and `trace_from_budget_test`, OBSERVABILITY
+     "Call tracing"). Its gaps: one armed method a run, and once armed
+     every traced call in that process is recorded, not only the method
+     named; the OpenTelemetry export does not map `call` events yet (the
+     same gap `ledger:` rows have, OT5).
    - **Import thunks in the loader, for the DLLs gala did not write.**
      gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
      under a rule each resolved import can point at a thunk that

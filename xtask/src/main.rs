@@ -10942,6 +10942,30 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d2d1_test", "windowscodecs.dll", "Windows/System32"),
     ("d2d1_test", "d2d1.dll", "Windows/System32"),
     ("d2d1_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_test", "user32.dll", "Windows/System32"),
+    ("trace_from_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_test", "dwrite.dll", "Windows/System32"),
+    ("trace_from_budget_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_budget_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_budget_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "oleaut32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_budget_test", "user32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_budget_test", "windowscodecs.dll", "Windows/System32"),
+    ("trace_from_budget_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_budget_test", "dwrite.dll", "Windows/System32"),
     ("d2d1_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
     ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -11152,6 +11176,7 @@ const USER_PROGRAMS: &[&str] = &[
     "knownfolder_test",
     "windowscodecs_test",
     "d2d1_test",
+    "trace_from_test",
     "winhttp_cb_test",
     "runas_test",
     "combase_test",
@@ -18574,6 +18599,46 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "stack: 400 words of each caller's stack are read (stack_words=)",
             "stack: NtWriteFile from stack_at_test.exe",
             "of the 400 stack words read from",
+        ],
+    },
+    Scenario {
+        // `trace_from=` (nt::tracecall, OBSERVABILITY "Call
+        // tracing"): a *repeat* of a call into a DLL gala wrote,
+        // which the one-shot `reached!` record cannot show. The
+        // program calls ID2D1Factory::GetDesktopDpi 25 times; where
+        // the ledger keeps one row, the trace records all 25. The
+        // count also says the rest of the chain held: the value
+        // parsed, the DLL asked for it and armed the slot whose name
+        // matched, and `events=call` named a category the stream
+        // knows -- a call the stream drops is never counted.
+        name: "trace_from_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::GetDesktopDpi",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)",
+            "trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)",
+        ],
+    },
+    Scenario {
+        // The budget `:<n>`: ten calls recorded, and the trace stops
+        // itself there, so no run can be made to pay a system call a
+        // call for longer than it was asked to. The program still
+        // makes all 25 and still ends ok -- what stops is the
+        // recording, not the program, and the line says so rather
+        // than let a short trace read as a program that stopped
+        // calling.
+        name: "trace_from_budget_test",
+        cmdline: "qemu_exit run=trace_from_test.exe events=call \
+                  trace_from=d2d1.dll!ID2D1Factory::GetDesktopDpi:10",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "trace_from_test: ok",
+            "exited with status 0x00000000",
+            "trace: 10 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=); the budget is spent, \
+             so the trace stops here, not the program",
         ],
     },
     Scenario {

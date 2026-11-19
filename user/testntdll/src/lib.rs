@@ -542,6 +542,10 @@ syscall_stubs! {
     // gala's own service: report a gap to the kernel's missing-features
     // ledger (not part of Windows; gala's DLLs only).
     GalaRecordMissing = 0x7f00, fn(name: *const u8, length: usize, what: u32, detail: u64);
+    // gala's own: call tracing (`trace_from=`, nt::tracecall). Op 0
+    // asks for the value the run was given, op 1 records a call.
+    // 64-bit only: no DLL whose slots are traced is built for WOW64.
+    GalaTrace = 0x7f2b, fn(op: u64, a: u64, b: u64, c: u64);
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
     // describes it whatever status the process then ends with.

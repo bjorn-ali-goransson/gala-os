@@ -64,9 +64,16 @@ pub enum Category {
     /// processes started, terminated and its tree removed, each with the
     /// distribution's name and the caller's pid.
     Wsl = 131072,
+    /// Calls a program makes into a DLL gala wrote, once
+    /// `trace_from=` has armed one (nt::tracecall): the process, the
+    /// method's full name and its arguments as words. A vtable call
+    /// is an indirect call inside the program, so the DLL reports it;
+    /// without `trace_from=` nothing is reported and nothing is paid.
+    Call = 262144,
 }
 
-const NAMES: [(&str, u32); 18] = [
+const NAMES: [(&str, u32); 19] = [
+    ("call", Category::Call as u32),
     ("wsl", Category::Wsl as u32),
     ("service", Category::Service as u32),
     ("wayland", Category::Wayland as u32),

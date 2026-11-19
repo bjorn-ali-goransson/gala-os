@@ -394,6 +394,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(text) = cmdline.value("stack_words") {
         nt::stack_at::scan_words(text);
     }
+    // `trace_from=<dll>!<Interface>::<Method>[:<n>]`: every call a
+    // program makes into one of gala's DLLs, from the first time it
+    // reaches that method (nt::tracecall). Needs `events=call`.
+    if let Some(spec) = cmdline.value("trace_from") {
+        nt::tracecall::set_from(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }
@@ -600,6 +606,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     input::log_stats();
     nt::desktop::log_clock_stats();
     nt::stack_at::log_stats();
+    nt::tracecall::log_stats();
     info!("nt: {}", nt::stats::Summary);
     if nt::persist::has_area() {
         info!("persist: {}", nt::persist::Summary);

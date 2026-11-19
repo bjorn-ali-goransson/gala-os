@@ -326,6 +326,8 @@ pub const NT_DUPLICATE_OBJECT: u32 = 0x003c;
 pub const NT_CLEAR_EVENT: u32 = 0x003e;
 /// NtPulseEvent: gala's number, UNVERIFIED.
 pub const NT_PULSE_EVENT: u32 = 0x7f2a;
+/// GalaTrace: gala's own service, not part of Windows.
+pub const GALA_TRACE: u32 = 0x7f2b;
 pub const NT_CREATE_EVENT: u32 = 0x0048;
 pub const NT_QUERY_EVENT: u32 = 0x0056;
 pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
@@ -384,6 +386,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_SET_IO_COMPLETION, "NtSetIoCompletion", 5, nt_set_io_completion),
     (NT_GET_CONTEXT_THREAD, "NtGetContextThread", 2, nt_get_context_thread),
     (GALA_RECORD_MISSING, "GalaRecordMissing", 4, gala_record_missing),
+    (GALA_TRACE, "GalaTrace", 4, gala_trace),
     (
         NT_GET_CURRENT_PROCESSOR_NUMBER,
         "NtGetCurrentProcessorNumber",
@@ -3968,6 +3971,61 @@ fn set_ideal_processor(call: &Call<'_>, t: &thread::NtThread, class: u64, buffer
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// GalaTrace(Op, A, B, C): the DLL half of `trace_from=`
+/// (nt::tracecall). Op 0 asks for the value: A is a buffer of B bytes
+/// and C takes the length written as a `u64` (0: nothing is traced, or
+/// the buffer is too short for all of it). Op 1 records one call: A is
+/// the method's ASCII name, B its length, and C a `[u64; 1 + ARGS]`
+/// whose first word says how many argument words follow.
+///
+/// The answer to op 1 is what stops a trace: NO_MORE_ENTRIES once the
+/// budget is spent, or once this process is not one `events_pid=` wants,
+/// so a DLL that would otherwise make a system call a call stops making
+/// them. SUCCESS means the call was written and more are wanted.
+fn gala_trace(call: &mut Call<'_>) -> NtStatus {
+    const WORDS: usize = 1 + super::tracecall::ARGS;
+    match arg!(call, 0) {
+        0 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut value = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(value.len());
+            let written = super::tracecall::value(&mut value[..len]);
+            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            if written != 0 && call.process.write(ptr, &value[..written]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        1 => {
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::tracecall::NAME_LEN];
+            let len = len.min(name.len());
+            if call.process.read(ptr, &mut name[..len]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let mut bytes = [0u8; WORDS * 8];
+            if call.process.read(arg!(call, 3), &mut bytes).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let mut words = [0u64; WORDS];
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+                *word = u64::from_ne_bytes(chunk.try_into().unwrap_or_default());
+            }
+            let count = (words[0] as usize).min(super::tracecall::ARGS);
+            let keep = super::tracecall::record(
+                call.process.name,
+                call.process.id,
+                &name[..len],
+                &words[1..1 + count],
+            );
+            if keep { NtStatus::SUCCESS } else { NtStatus::NO_MORE_ENTRIES }
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
 }
 
 /// GalaRecordMissing(Name, NameLength, What, Detail): counts a gap that

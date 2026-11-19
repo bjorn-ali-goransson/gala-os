@@ -186,7 +186,8 @@ fn parse_words(text: &str) -> Option<usize> {
 pub fn scan_words(text: &str) {
     let Some(n) = parse_words(text) else {
         warn!(
-            "stack: stack_words={text} is not a number from 1 to {MAX_SCAN_WORDS}:              the default {SCAN_WORDS} words stand"
+            "stack: stack_words={text} is not a number from 1 to \
+             {MAX_SCAN_WORDS}: the default {SCAN_WORDS} words stand"
         );
         return;
     };

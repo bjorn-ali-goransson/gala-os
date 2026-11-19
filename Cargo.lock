@@ -2802,6 +2802,13 @@ name = "token_test"
 version = "0.1.0"
 
 [[package]]
+name = "trace_from_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "tray_test"
 version = "0.1.0"
 dependencies = [
