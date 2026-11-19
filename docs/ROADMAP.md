@@ -6650,6 +6650,36 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   kept mapped for return addresses, vtables and callbacks still
   pointing at it (as the hot swap keeps it). Restarting stays the
   default; migration is for programs that cannot be restarted.
+- **Change this program: a coding agent from the window menu** (the
+  owner): gala's own user-mode programs (Explorer, the task manager,
+  the start menu once SH moves it out of the kernel) get a "Change
+  this program..." entry in their window menu. The user describes the
+  change; a coding agent edits the program's source, builds it, and the
+  running program is replaced by the new build, its state kept. Scope:
+  programs whose source gala has; a window maps to its source by its
+  module (the image's crate), and the entry only appears where that
+  map has an answer, never on third-party programs. Pieces: (1) the
+  window menu entry and the prompt, a desktop action reached first by
+  the `gala` command (item SD), e.g. `gala change <window or program>
+  "<request>"`; (2) the agent and the build on a build host at first
+  (the source fetched at the image's commit, the agent's change as a
+  branch or diff the user can read, a release build of the one crate,
+  which takes seconds once its dependencies are built), on gala itself
+  once self-hosting (above) runs rustc; (3) the swap: the program
+  writes its state as a versioned record (folder, selection, window
+  place, tabs), the new build reads it, the old process exits; a
+  record whose format changed goes through a migration the agent
+  writes with the change, as R9's handover readers are its
+  migrations. In-place migration (above) is for programs that cannot
+  restart; (4) the old build kept, one click back to it, and an
+  automatic return when the new one crashes before it is up; (5) the
+  agent's tools are item MCP's (the ledger, screenshots, UIA) so it
+  checks its change on the running desktop. Observability: every
+  request, the agent's change, the build, the swap and a rollback in
+  the event stream; the running build's commit and change in the
+  program's About and crash reports. Security: the agent works with the
+  user's token only, and a replaced system program is signed under
+  R8's rule or runs as the user's own build, never silently as gala's.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's
