@@ -1572,6 +1572,11 @@ fn set_window_pos_remote(
 const WM_NCLBUTTONDOWN: u32 = 0x00a1;
 const HTMENU: usize = 5;
 const SC_MOUSEMENU: usize = 0xf090;
+const SC_KEYMENU: usize = 0xf100;
+const WM_SYSCHAR: u32 = 0x0106;
+const WM_NCRBUTTONUP: u32 = 0x00a5;
+const WM_CONTEXTMENU: u32 = 0x007b;
+const HTCAPTION: usize = 2;
 
 /// What DefWindowProc does for the messages of this module.
 pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
@@ -1616,7 +1621,40 @@ pub fn def_window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Op
                         (lparam >> 16) as i16 as i32,
                     );
                 }
+                // Alt+Space (lParam ' '): the window menu under the
+                // caption's left end.
+                SC_KEYMENU if lparam == 0x20 => {
+                    if let Some(w) = window(hwnd) {
+                        let (b, t) = crate::window::desktop_frame(&w);
+                        crate::track::track_system(hwnd, w.x + b, w.y + t);
+                    }
+                }
                 _ => {}
+            }
+            Some(0)
+        }
+        // Alt+Space: SC_KEYMENU to the top-level window.
+        WM_SYSCHAR if wparam == 0x20 => {
+            let top = GetAncestor(hwnd, 2);
+            SendMessageW(if top == 0 { hwnd } else { top }, WM_SYSCOMMAND, SC_KEYMENU, 0x20);
+            Some(0)
+        }
+        // A right click on the caption: WM_CONTEXTMENU (the screen point).
+        WM_NCRBUTTONUP if wparam == HTCAPTION => {
+            SendMessageW(hwnd, WM_CONTEXTMENU, hwnd, lparam);
+            Some(0)
+        }
+        // A child's goes on to its parent; a top-level window's, at a
+        // point on its caption, is its window menu there.
+        WM_CONTEXTMENU => {
+            let w = window(hwnd)?;
+            if w.parent != 0 && !w.popup {
+                return Some(SendMessageW(w.parent, WM_CONTEXTMENU, wparam, lparam));
+            }
+            let (x, y) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+            let (_, t) = crate::window::desktop_frame(&w);
+            if !w.popup && y >= w.y && y < w.y + t && x >= w.x && x < w.x + w.w {
+                crate::track::track_system(hwnd, x, y);
             }
             Some(0)
         }

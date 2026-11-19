@@ -6712,6 +6712,14 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   About and crash reports. Security: the agent works with the user's
   token only, and a replaced system program is signed under R8's rule
   or runs as the user's own build, never silently as gala's.
+  Status: the window menu is on the screen (Alt+Space, a caption right
+  click) and File Explorer has the flow as a preview with no agent
+  behind it (ARCHITECTURE "The file explorer", "Change this program"):
+  the menu item, the request card, Inspect over the window's parts by
+  automation id, the steps on a timer, a last card saying nothing was
+  changed; scenario `explorer` drives it. Next: the agent (a build
+  host first), the AutomationId-to-source map, the state record and
+  the swap, Undo; the item on Task Manager.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's

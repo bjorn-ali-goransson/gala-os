@@ -16,7 +16,9 @@
 //! - [`mode_text`]: a Linux file's permissions (`-rw-r--r--`), shown in
 //!   Properties;
 //! - [`new_folder_name`]: "New folder", then "New folder (2)", ...;
-//! - [`icon_grid`]: the icon view's layout.
+//! - [`icon_grid`]: the icon view's layout;
+//! - [`change`]: "Change this program..." from the window menu, the flow
+//!   with no coding agent behind it yet (the request, Inspect, the steps).
 //!
 //! `no_std` with `alloc`: `explorer.exe` is freestanding (`gala_heap`).
 
@@ -30,6 +32,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::Write;
+
+pub mod change;
 
 /// What an entry is (its icon).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

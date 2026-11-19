@@ -8924,8 +8924,21 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   is a posted WM_COMMAND (or TrackPopupMenu's result with
   TPM_RETURNCMD). One loop at a time per process; a disabled window's
   bar takes no input (a modal dialog is up).
+- **The window menu** (`track::track_system`): Alt+Space (WM_SYSCHAR
+  ' ', which DefWindowProc turns into WM_SYSCOMMAND SC_KEYMENU) opens
+  GetSystemMenu's menu at the client area's top left; a right click on
+  the caption (the desktop sends WM_NCRBUTTONDOWN/UP HTCAPTION with the
+  screen point; DefWindowProc's WM_CONTEXTMENU of a top-level window
+  in its caption band) opens it at the pointer. Restore, Move, Size,
+  Minimize and Maximize are enabled or greyed by IsZoomed and IsIconic
+  first; WM_INITMENUPOPUP's HIWORD(lParam) is TRUE for it; the choice is
+  a posted WM_SYSCOMMAND (a program's own items, below 0xF000, are its
+  to handle). Test: gui_test (Alt+Space, a program item "Mark", a
+  caption right click), the desktop's host test of the caption's right
+  click.
 - Not yet: item bitmaps (hbmpItem), Alt/F10 keyboard access to the bar,
-  mnemonic underlines, the system menu on the screen.
+  mnemonic underlines, the caption icon (no window draws one) and Alt+-
+  (an MDI child's menu).
 
 #### Scroll bars
 
@@ -14872,6 +14885,23 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   MsgWaitForMultipleObjects); a change made by anyone (a Windows
   program, a Linux process in the distribution: both reach the one file
   system's change journal, `nt::notify`) re-reads the folder.
+- **Change this program** (ROADMAP "Change this program", no coding
+  agent connected yet: a preview of the flow). The window menu gets
+  "Change this program..." before Close (InsertMenuW into
+  GetSystemMenu; WM_SYSCOMMAND 0x0200). It opens a request card over
+  the window (modal: clicks, keys and the wheel go to it): the request
+  typed, the part it is about ("The whole window" by default) and
+  Inspect, Cancel, "Make the change". Inspect hides the card; the part
+  of the window under the pointer is outlined with its automation id in
+  a tag (`change_ui::element_at`: AddressBar, BackButton, UpButton,
+  SearchBox, CommandBar.<command>, ViewButton.<view>,
+  NavigationPane.<row>, ColumnHeader.<column>, ItemsView.Item.<name>,
+  ItemsView, StatusBar); a click picks it, Esc goes back. "Make the
+  change" (or Enter) walks the agent's steps on a timer
+  (`explorer::change::STEPS`, `STEP_MS` each: reading the source,
+  editing, building, restarting) and ends on a card saying that nothing
+  was changed. The flow's state is the library's (`change.rs`,
+  host-tested); `change_ui.rs` draws it and names the parts.
 - **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
   Explorer's PROGRAMS entry as the start menu's tile does (logged
   `desktop: Win+E: File Explorer`); no program sees the E.
@@ -14880,7 +14910,9 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   <parsing name> (<n> items)`, `explorer: open <path>: started`,
   `explorer: copy ...`, `explorer: paste <n> item(s) into <dir>: ok`,
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
-  rename ...`, `explorer: properties ...`, `explorer: closed`): a
+  rename ...`, `explorer: properties ...`, `explorer: window menu`,
+  `explorer: change: ...` for each card, pick, request and step,
+  `explorer: closed`): a
   program the desktop starts writes to the
   serial line. What it cannot do goes to the ledger
   (`explorer.exe!<what>`).

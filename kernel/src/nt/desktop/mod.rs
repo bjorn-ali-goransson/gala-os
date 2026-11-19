@@ -41,11 +41,12 @@ use super::status::NtStatus;
 /// named actions use them).
 pub use super::winstate::{
     Action, BORDER, CAPTION, GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_PLACE,
-    GALA_WM_POINTER_LEFT, ICON, InputEvent, LISTED_ACTIVE, LISTED_MAXIMIZED, LISTED_MINIMIZED,
-    LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect, SC_CLOSE, SC_MAXIMIZE, SC_RESTORE,
-    SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR, WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, scale_icon, scale_icon_to,
+    GALA_WM_POINTER_LEFT, HTCAPTION, ICON, InputEvent, LISTED_ACTIVE, LISTED_MAXIMIZED,
+    LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect, SC_CLOSE, SC_MAXIMIZE,
+    SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR, WHEEL_DELTA, WM_CLOSE,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
+    WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, scale_icon, scale_icon_to,
 };
 use super::winstate::{CAPTION_BUTTON, Shadow, State, VK_MENU, Window};
 use crate::mm::heap::TryVec;
@@ -1685,6 +1686,24 @@ impl Desktop {
             let lp = self.s.client_lparam(id, x, y);
             self.s.note_button(id, WM_RBUTTONDOWN, x, y, false);
             self.s.send(id, WM_RBUTTONDOWN, keys, lp);
+        }
+        // A right click on a caption: WM_NCRBUTTONDOWN/UP (HTCAPTION, the
+        // screen point) for the program's DefWindowProc, which shows the
+        // window menu there (WM_CONTEXTMENU). Not for a window a kernel
+        // thread serves (a Wayland client's has no window menu).
+        if (pressed | released) & 2 != 0
+            && let Hit::Caption(id) = hit
+            && self.s.window(id).is_some_and(|w| !self.s.served(w.owner))
+        {
+            let pt = ((y as i16 as u16 as u64) << 16) | x as i16 as u16 as u64;
+            if pressed & 2 != 0 {
+                self.s.raise(id);
+                self.s.activate(Some(id));
+                self.s.send(id, WM_NCRBUTTONDOWN, HTCAPTION, pt);
+            }
+            if released & 2 != 0 {
+                self.s.send(id, WM_NCRBUTTONUP, HTCAPTION, pt);
+            }
         }
         if released & 2 != 0
             && let Hit::Client(id) = hit
