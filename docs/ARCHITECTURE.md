@@ -11052,7 +11052,7 @@ over a surface of one, the path Word takes instead).
   ID2D1Factory3 and later are not answered (recorded), and
   ID2D1Factory1's own stroke styles, path geometries, drawing state
   blocks, GDI metafiles and effect registry are recorded and E_NOTIMPL.
-- **Render targets** (`target.rs`): one object, five backings. A WIC
+- **Render targets** (`target.rs`): one object, four backings. A WIC
   bitmap target keeps a buffer of its own, read from the bitmap at
   BeginDraw and written back at EndDraw through IWICBitmap::Lock (any
   IWICBitmap: gala's windowscodecs or the caller's); its format is the
@@ -11063,7 +11063,8 @@ over a surface of one, the path Word takes instead).
   only when something was drawn (GDI's drawing between them survives an
   empty frame). A window target keeps its DIB section between frames
   and copies it to the window's DC at EndDraw. A device context
-  (below) is the fourth and a DXGI surface target (below) the fifth.
+  (below) is the fourth, and a Direct2D 1.0 DXGI surface render target
+  (below) is one of those built over the program's surface.
   The transform then the
   DPI scale (DPI/96) take DIPs to device pixels; GetSize is in DIPs
   (D2D1_UNIT_MODE_PIXELS leaves the DPI scale out, so they are pixels).
@@ -11111,17 +11112,28 @@ over a surface of one, the path Word takes instead).
   (`target.rs`, ID2D1Factory::CreateDxgiSurfaceRenderTarget): Direct2D
   1.0's way onto a texture of the program's own Direct3D, which is what
   a program draws into when it makes its own device without asking
-  Direct2D for one -- Word, over the Direct3D 10.1 device below. It is a
-  buffer of the surface's size written into the surface at EndDraw
-  exactly as a device context's target bitmap is (`device`,
-  UpdateSubresource on the ID3D11Texture2D behind it), so the two paths
-  share the one write into a program's render target. The surface has to
-  be a Direct3D 11 texture and not multisampled (E_INVALIDARG,
-  recorded), in a format gala draws; the properties' format must be the
-  surface's, UNKNOWN taking it, with premultiplied or ignored alpha
-  (D2DERR_UNSUPPORTED_PIXEL_FORMAT otherwise). The surface's own pixels
-  are not read back at BeginDraw, as a target bitmap's are not either:
-  a frame draws over all of its own. Test: `d3d10_1_test`.
+  Direct2D for one -- Word, over the Direct3D 10.1 device below. From
+  Windows 8 on every render target is a device context as well (Direct2D
+  1.1 merged the interfaces), and a program on the 1.0 path counts on
+  it: it asks the target it is given for ID2D1DeviceContext1 and for the
+  ID2D1Device behind it. So this is not a backing of its own but the
+  fourth kind built from the surface -- the surface's ID3D11Texture2D
+  names its Direct3D 11 device, that device's IDXGIDevice gives an
+  ID2D1Device, that device a context, and an ID2D1Bitmap1 over the very
+  surface (D2D1_BITMAP_OPTIONS_TARGET) is the context's target. So the
+  frame reaches the texture through the one UpdateSubresource write
+  every Direct2D path here shares, and a program that asks the target
+  for its own target (GetTarget, then ID2D1Bitmap1::GetSurface) is
+  handed back the surface it passed in, as Windows' Direct2D hands it
+  back. Those three calls are gala's own rather than the program's, so
+  they are not recorded (OBSERVABILITY). The surface has to be a
+  Direct3D 11 texture, not multisampled (E_INVALIDARG, recorded) and
+  B8G8R8A8, the format every bitmap of this Direct2D has (another one is
+  recorded and D2DERR_UNSUPPORTED_PIXEL_FORMAT); the properties' format
+  must be the surface's, UNKNOWN taking it, with premultiplied or
+  ignored alpha. The surface's own pixels are not read back at
+  BeginDraw, as a target bitmap's are not either: a frame draws over all
+  of its own. Test: `d3d10_1_test`.
 - **No GPU of its own**: every target draws in software, also when
   D2D1_RENDER_TARGET_TYPE_HARDWARE is asked for (recorded): gala's own
   d3d11 has no device (GPU G0), and this is what Windows' Direct2D gives

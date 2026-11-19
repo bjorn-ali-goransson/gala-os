@@ -15261,13 +15261,18 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // ID3D10Device1::CreateTexture2D, that texture as a DXGI surface,
         // and ID2D1Factory::CreateDxgiSurfaceRenderTarget over it, with
         // the colours and geometry of d2d1_device_test's frame read back
-        // through a staging texture. The Direct3D 11 under it is DXVK on
-        // lavapipe, which the adapter's name says.
+        // through a staging texture. That render target is a device
+        // context as well, with the surface's own device behind it and a
+        // bitmap over the surface itself as its target, which is what
+        // Word asks a 1.0 surface render target for. The Direct3D 11
+        // under it is DXVK on lavapipe, which the adapter's name says.
         name: "d3d10_1_test",
         cmdline: "qemu_exit run=d3d10_1_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "d3d10_1_test: device llvmpipe",
+            "d3d10_1_test: context 0x00000000 0x00000000",
+            "d3d10_1_test: target 0x00000000 0x00000000 1",
             "d3d10_1_test: read back 0x336699 0xffcc00",
             "d3d10_1_test: ok",
             "exited with status 0x00000000",

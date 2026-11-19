@@ -37,6 +37,9 @@ const CONTEXT_UPDATE_SUBRESOURCE: usize = 48;
 
 const IID_D3D11_TEXTURE2D: Guid =
     guid(0x6f15_aaf2, 0xd208, 0x4e89, [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c]);
+/// IDXGIDevice (dxgi.h): the face of a Direct3D device Direct2D takes.
+const IID_DXGI_DEVICE: Guid =
+    guid(0x54ec_77fa, 0x1377, 0x44e6, [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c]);
 
 /// DXGI_SURFACE_DESC (dxgi.h).
 #[repr(C)]
@@ -113,6 +116,18 @@ pub fn open_surface(surface: Obj) -> Result<DxgiSurface, HResult> {
     Ok(DxgiSurface { surface: ComRef::new(surface), texture, context, desc })
 }
 
+/// The IDXGIDevice of the Direct3D device a surface belongs to: the
+/// surface's ID3D11Texture2D asked for its device, and that device for
+/// DXGI's face of itself. A Direct2D 1.0 surface render target is built
+/// on it, because the target it hands the program is a device context
+/// and a device context comes from a device
+/// (`target::create_dxgi_target`).
+pub fn dxgi_device(surface: Obj) -> Option<ComRef> {
+    let texture = com_query(surface, &IID_D3D11_TEXTURE2D).map(ComRef::owned)?;
+    let device = com_get(texture.0, TEXTURE_GET_DEVICE)?;
+    com_query(device.0, &IID_DXGI_DEVICE).map(ComRef::owned)
+}
+
 /// Writes `pixels` (premultiplied BGRA, rows `width * 4` bytes apart)
 /// into the whole surface. UpdateSubresource takes the rows as they are:
 /// Direct3D copies them into the texture itself, so a frame drawn in
@@ -183,7 +198,11 @@ pub extern "system" fn f2_CreateDevice(factory: Obj, dxgi: Obj, out: *mut Obj) -
     r
 }
 
-fn create_device(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
+/// The device itself, without a ledger record: what the factory's two
+/// methods above do, and what a surface render target does for itself
+/// (the program asked for a render target, not for a device, and the
+/// ledger says what the program asked for).
+pub fn create_device(factory: Obj, dxgi: Obj, out: *mut Obj) -> HResult {
     if out.is_null() {
         return E_POINTER;
     }

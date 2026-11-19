@@ -23,6 +23,14 @@
  *   the middle 0xffcc00 (the colours and the geometry of
  *   d2d1_device_test's frame, drawn onto a Direct3D 10 texture instead
  *   of a swap chain's surface).
+ * - That render target is a device context as well: from Windows 8 on
+ *   every Direct2D render target is one (Direct2D 1.1 merged the
+ *   interfaces), so it answers ID2D1DeviceContext and
+ *   ID2D1DeviceContext1, knows the ID2D1Device behind it, and its
+ *   target is an ID2D1Bitmap1 whose GetSurface is the surface the
+ *   factory was given. That is what Word asks a surface render target
+ *   for, and what it gives up on when the answer is E_NOINTERFACE
+ *   (ROADMAP OF).
  *
  * Without d3d10_1.dll, or where it has no device (a machine with no
  * GPU), it prints "d3d10_1_test: skipped" and exits with 0; gala's
@@ -34,6 +42,8 @@
 #include <d3d10_1.h>
 #include <dxgi.h>
 #include <d2d1.h>
+#include <d2d1_1.h>
+#include <d2d1_2.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -181,6 +191,35 @@ int main(void) {
     HR(ID2D1Factory_CreateDxgiSurfaceRenderTarget(factory, surface, &props, &rt));
     CHECK(rt != NULL);
 
+    /* From Windows 8 on a render target is a device context too. */
+    ID2D1DeviceContext *dc = NULL;
+    ID2D1DeviceContext1 *dc1 = NULL;
+    HRESULT qdc = qi(rt, &IID_ID2D1DeviceContext, (void **)&dc);
+    HRESULT qdc1 = qi(rt, &IID_ID2D1DeviceContext1, (void **)&dc1);
+    printf("d3d10_1_test: context 0x%08lx 0x%08lx\n", (unsigned long)qdc,
+           (unsigned long)qdc1);
+    fflush(stdout);
+    CHECK(SUCCEEDED(qdc) && dc != NULL);
+    CHECK(SUCCEEDED(qdc1) && dc1 != NULL);
+
+    /* A device context knows its device, and this one's target is a
+     * bitmap over the surface the factory was given. */
+    ID2D1Device *d2device = NULL;
+    ID2D1DeviceContext_GetDevice(dc, &d2device);
+    CHECK(d2device != NULL);
+    struct ID2D1Image *image = NULL;
+    ID2D1DeviceContext_GetTarget(dc, &image);
+    ID2D1Bitmap1 *target_bitmap = NULL;
+    HRESULT qbm = image ? qi(image, &IID_ID2D1Bitmap1, (void **)&target_bitmap)
+                        : E_POINTER;
+    IDXGISurface *target_surface = NULL;
+    HRESULT qsurf = target_bitmap
+                        ? ID2D1Bitmap1_GetSurface(target_bitmap, &target_surface)
+                        : E_POINTER;
+    printf("d3d10_1_test: target 0x%08lx 0x%08lx %d\n", (unsigned long)qbm,
+           (unsigned long)qsurf, target_surface == surface);
+    fflush(stdout);
+
     D2D1_COLOR_F fill;
     fill.r = 1.0f;
     fill.g = 0.8f;
@@ -218,6 +257,18 @@ int main(void) {
     CHECK(corner == 0x336699);
     CHECK(centre == 0xffcc00);
 
+    if (target_surface) {
+        rel(target_surface);
+    }
+    if (target_bitmap) {
+        rel(target_bitmap);
+    }
+    if (image) {
+        rel(image);
+    }
+    rel(d2device);
+    rel(dc1);
+    rel(dc);
     rel(brush);
     rel(rt);
     rel(factory);

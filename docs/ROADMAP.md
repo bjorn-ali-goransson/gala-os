@@ -239,7 +239,7 @@ has a section under "Open items".
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them (`d3d10_1_test`), every call of which Word now gets S_OK from; it stops where those render targets refuse ID2D1DeviceContext1, which Windows' answer, and ends on "Word was unable to start. (13)" with status 0 after 30 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from; it stops one call later, on ID2D1Factory::CreateDrawingStateBlock (E_NOTIMPL) with IDWriteFactory::CreateRenderingParams beside it, and ends on "Word was unable to start. (13)" with status 0 after 31.5 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -1825,12 +1825,12 @@ need gala's.
     written back into that surface with UpdateSubresource. Direct2D
     1.0's own way onto such a surface is there too, which is the one
     Word takes: CreateDxgiSurfaceRenderTarget over a texture of a
-    Direct3D 10.1 device (`d3d10_1_test`). Next, as
+    Direct3D 10.1 device, and the target it gives is a device context
+    over a bitmap of that surface, which is what every Direct2D render
+    target has been since Windows 8 and what a program on the 1.0 path
+    asks it for (`d3d10_1_test`). Next, as
     Office's use shows it (the ledger names
-    each): a surface render target's ID2D1DeviceContext and
-    ID2D1DeviceContext1 faces, which every Direct2D render target has
-    had since Windows 8 and which is what Word asks for and leaves on
-    (ROADMAP OF); text (DrawText/DrawTextLayout, which needs
+    each): text (DrawText/DrawTextLayout, which needs
     DirectWrite's text
     layout first), layers, compatible render targets, drawing state
     blocks, the GDI interop interface, dashes, effects and command
@@ -2032,29 +2032,34 @@ need gala's.
      the whole device path leaves nothing in its ledger, where the
      calls that work are recorded (OBSERVABILITY "Missing-features
      ledger").
-     What it does instead, 39.0 s in and 140 ms before it gives up, is
-     Direct2D 1.0's own path, which is there now: one
-     D3D10CreateDevice1 at feature level 10.1 -- gala's own
-     `d3d10_1.dll` over the Direct3D 11 beside the exe, ARCHITECTURE
-     "Direct3D 10.1" -- then three ID3D10Device1::CreateTexture2D and
-     six ID2D1Factory::CreateDxgiSurfaceRenderTarget, every one S_OK
-     and in the ledger. Then it asks each render target for
-     ID2D1DeviceContext1 ({d37f57e4-...}), is told E_NOINTERFACE three
-     times, and stops: the "(13)" message box ("Sorry, something went
+     What it does instead, 39.0 s in, is Direct2D 1.0's own path,
+     which is there now: one D3D10CreateDevice1 at feature level 10.1
+     -- gala's own `d3d10_1.dll` over the Direct3D 11 beside the exe,
+     ARCHITECTURE "Direct3D 10.1" -- then one
+     ID3D10Device1::CreateTexture2D and one
+     ID2D1Factory::CreateDxgiSurfaceRenderTarget over that texture,
+     both S_OK and in the ledger. The target it is given is a device
+     context as well (ARCHITECTURE "A DXGI surface render target"), and
+     Word uses it as one: it takes the ID2D1Device behind it and makes
+     a context of its own, ID2D1Device::CreateDeviceContext, S_OK, 2 ms
+     later. That is where it used to ask for ID2D1DeviceContext1, be
+     refused, and stop.
+     It stops 20 ms further on all the same, and the last call it makes
+     before the message box is in the log right above it:
+     ID2D1Factory::CreateDrawingStateBlock, E_NOTIMPL, twice. A
+     drawing state block is a render target's transform, antialias
+     modes, tags and text-rendering parameters, saved and restored
+     around a frame (SaveDrawingState, RestoreDrawingState; 1.1's
+     ID2D1DrawingStateBlock1 adds the primitive blend and the unit
+     mode), and the parameters it carries are DirectWrite's, which is
+     the other gap of that millisecond:
+     IDWriteFactory::CreateRenderingParams, unsupported. So the two are
+     one step, and the next one -- each answer measured on Windows
+     first. Then comes the "(13)" message box ("Sorry, something went
      wrong and Word was unable to start. (13)") on the untitled window,
-     exit status 0 after 30 s, which is the status the scenario asks
-     for, so only its screen check fails.
-     That refusal is the bug: since Windows 8 every Direct2D render
-     target is a device context (1.1 merged the interfaces), so a
-     surface render target has to answer ID2D1DeviceContext and
-     ID2D1DeviceContext1 and hand out the ID2D1Device behind it --
-     gala's answers only ID2D1RenderTarget. That is the next step, its
-     answers measured on Windows first (`d3d10_1_test` grows the
-     QueryInterface). Named in the same 20 ms of the ledger, and so
-     probably the step after, is IDWriteFactory::CreateRenderingParams
-     (three asks, unsupported): the text-rendering parameters Word
-     reads before it draws a glyph. After them comes text itself, which
-     needs DirectWrite's text layout -- a document is text.
+     exit status 0 after 31.5 s, which is the status the scenario asks
+     for, so only its screen check fails. After them comes text itself,
+     which needs DirectWrite's text layout -- a document is text.
      The other gaps the ledger names around that exit, each to be
      measured on Windows before it is answered: kernelbase's
      SetSystemFileCacheSize over ntdll's NtSetSystemInformation (six

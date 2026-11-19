@@ -450,6 +450,14 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   `ID2D1Factory::CreateDxgiSurfaceRenderTarget` (Direct2D 1.0's way onto
   a surface, which a program with its own Direct3D 10 device takes) and
   `ID2D1RenderTarget::EndDraw`.
+  A surface render target builds itself out of three of those calls (a
+  device, a context, a bitmap over the surface: ARCHITECTURE), and they
+  are gala's own, so the ledger shows the program's
+  CreateDxgiSurfaceRenderTarget alone and a CreateDevice line always
+  means the program asked for one. What it refuses is named instead:
+  `CreateDxgiSurfaceRenderTarget(multisampled)` with the sample count,
+  `(surface format)` with the DXGI format (only B8G8R8A8 is drawn) and
+  `(no IDXGIDevice behind the surface)`.
   Which version's interface a program took, how far down that path it
   got and how many frames it ended leave nothing behind otherwise, and
   a program that gives up after them (Word) shows nothing of why. A failed WIC

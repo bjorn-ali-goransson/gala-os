@@ -23,13 +23,18 @@
 //!   (`device`): that is how a frame drawn in software becomes a render
 //!   target of the program's own Direct3D 11 device. A context without a
 //!   target is 0 x 0 and its frames fail, as Direct2D's do.
-//! - A DXGI surface (ID2D1Factory::CreateDxgiSurfaceRenderTarget): a
-//!   buffer of its own, of the surface's size, written into the surface
-//!   at EndDraw the way a device context's target bitmap is (`device`).
-//!   That is Direct2D 1.0's way onto a texture of the program's own
-//!   Direct3D, which is how a program that makes its own device draws
-//!   without Direct2D's (Word, ROADMAP OF). The surface's own pixels are
-//!   not read back at BeginDraw, as a target bitmap's are not either.
+//!
+//! Direct2D 1.0's own way onto a texture of the program's Direct3D,
+//! ID2D1Factory::CreateDxgiSurfaceRenderTarget, is how a program that
+//! made its own device draws without asking Direct2D for one (Word,
+//! ROADMAP OF). It is not a fifth backing: from Windows 8 on every
+//! render target is a device context (Direct2D 1.1 merged the
+//! interfaces), and a program on the 1.0 path asks the target it is
+//! given for ID2D1DeviceContext1 and for the ID2D1Device behind it. So
+//! that target is built as the fourth kind -- the Direct2D device of the
+//! surface's own Direct3D device, a context of that device, and an
+//! ID2D1Bitmap1 over the very surface as its target, which is what
+//! carries the frame into the texture.
 //!
 //! Drawing outside BeginDraw/EndDraw does nothing and makes the next
 //! EndDraw D2DERR_WRONG_STATE; EndDraw without BeginDraw is
@@ -54,11 +59,11 @@ use crate::{
     ALPHA_IGNORE, ALPHA_PREMULTIPLIED, ALPHA_STRAIGHT, ALPHA_UNKNOWN, ColorF, ComRef,
     D2DERR_PUSH_POP_UNBALANCED, D2DERR_UNSUPPORTED_PIXEL_FORMAT, D2DERR_WRONG_STATE,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN, E_INVALIDARG,
-    E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
-    IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj,
-    PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, answered,
-    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, read,
-    release_object, slot, vtable_of,
+    E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET,
+    IID_DEVICE_CONTEXT, IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET,
+    IID_RESOURCE, Matrix, Obj, PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable,
+    add_ref, answered, com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query,
+    read, release_object, slot, vtable_of,
 };
 
 #[link(name = "gdi32", kind = "raw-dylib")]
@@ -195,13 +200,6 @@ enum Backing {
         target: ComRef,
         buf: Vec<u8>,
     },
-    /// A DXGI surface render target: the surface (with the Direct3D 11
-    /// texture behind it and that texture's immediate context) and the
-    /// buffer the frame is drawn in, of the surface's size.
-    Surface {
-        surface: device::DxgiSurface,
-        buf: Vec<u8>,
-    },
 }
 
 struct State {
@@ -267,9 +265,7 @@ impl State {
 
     fn surface(&mut self) -> Option<Surface> {
         let ptr = match &mut self.backing {
-            Backing::Wic { buf, .. }
-            | Backing::Context { buf, .. }
-            | Backing::Surface { buf, .. } => buf.as_mut_ptr(),
+            Backing::Wic { buf, .. } | Backing::Context { buf, .. } => buf.as_mut_ptr(),
             Backing::Dc { dib: Some(d), .. } | Backing::Hwnd { dib: Some(d), .. } => d.bits,
             _ => return None,
         };
@@ -374,10 +370,6 @@ macro_rules! target_slots {
 }
 
 static WIC_VTBL: VTable<57> = VTable(target_slots!());
-/// A DXGI surface render target is an ID2D1RenderTarget and nothing
-/// more, so its vtable is the same fifty-seven slots; it is its own
-/// static because a target says which kind it is by its vtable.
-static SURFACE_VTBL: VTable<57> = VTable(target_slots!());
 /// ID2D1DeviceContext1 (d2d1_2.h): ID2D1RenderTarget's fifty-seven
 /// methods, the thirty-five ID2D1DeviceContext adds, then the three
 /// 1.2's geometry realizations add. One object answers every one of
@@ -545,13 +537,14 @@ pub extern "system" fn f_CreateWicBitmapRenderTarget(
 /// made its own device draws into without asking Direct2D for one
 /// (ROADMAP OF, GPU G2). The surface has to be one this DLL can write
 /// whole rows of pixels into: a Direct3D 11 texture
-/// (`device::open_surface`) that is not multisampled, in a format gala
-/// draws. The properties' format must be the surface's, UNKNOWN taking
-/// it, with premultiplied or ignored alpha; straight alpha or another
-/// format is D2DERR_UNSUPPORTED_PIXEL_FORMAT, as it is for the other
-/// kinds. The target starts as the surface is not read back: Direct2D
-/// does not promise a render target's old pixels either, and a frame
-/// that draws over all of its own is what a program does.
+/// (`device::open_surface`) that is not multisampled, B8G8R8A8 as every
+/// bitmap of gala's Direct2D is. The properties' format must be the
+/// surface's, UNKNOWN taking it, with premultiplied or ignored alpha;
+/// straight alpha or another format is D2DERR_UNSUPPORTED_PIXEL_FORMAT,
+/// as it is for the other kinds. The target starts as the surface is not
+/// read back: Direct2D does not promise a render target's old pixels
+/// either, and a frame that draws over all of its own is what a program
+/// does.
 pub extern "system" fn f_CreateDxgiSurfaceRenderTarget(
     factory: Obj,
     surface: Obj,
@@ -579,19 +572,19 @@ fn create_dxgi_target(
         Err(e) => return e,
     };
     note_type(&p);
-    let s = match device::open_surface(surface) {
-        Ok(s) => s,
+    let desc = match device::open_surface(surface) {
+        Ok(s) => s.desc,
         Err(e) => return e,
     };
-    if s.desc.samples > 1 {
-        gap(b"CreateDxgiSurfaceRenderTarget(multisampled)", s.desc.samples.into());
+    if desc.samples > 1 {
+        gap(b"CreateDxgiSurfaceRenderTarget(multisampled)", desc.samples.into());
         return E_INVALIDARG;
     }
-    if s.desc.format != DXGI_FORMAT_B8G8R8A8_UNORM && s.desc.format != DXGI_FORMAT_R8G8B8A8_UNORM {
-        gap(b"CreateDxgiSurfaceRenderTarget(surface format)", s.desc.format.into());
+    if desc.format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        gap(b"CreateDxgiSurfaceRenderTarget(surface format)", desc.format.into());
         return D2DERR_UNSUPPORTED_PIXEL_FORMAT;
     }
-    if p.format.format != DXGI_FORMAT_UNKNOWN && p.format.format != s.desc.format {
+    if p.format.format != DXGI_FORMAT_UNKNOWN && p.format.format != desc.format {
         return E_INVALIDARG;
     }
     let alpha = match p.format.alpha {
@@ -599,13 +592,59 @@ fn create_dxgi_target(
         ALPHA_IGNORE => ALPHA_IGNORE,
         _ => return D2DERR_UNSUPPORTED_PIXEL_FORMAT,
     };
-    let (w, h) = (s.desc.width, s.desc.height);
-    let Some(buf) = crate::filled(w as usize * h as usize * 4, 0u8) else {
-        return E_OUTOFMEMORY;
+    // The device context the program is given is a context of the
+    // program's own Direct3D device, which is where the surface comes
+    // from: that is the device a program on the 1.0 path asks the target
+    // for (ID2D1DeviceContext::GetDevice), and the device whose textures
+    // it may hand us next. None of these three calls is the program's,
+    // so none is recorded.
+    let Some(dxgi) = device::dxgi_device(surface) else {
+        gap(b"CreateDxgiSurfaceRenderTarget(no IDXGIDevice behind the surface)", 0);
+        return E_NOINTERFACE;
     };
-    let format = PixelFormat { format: s.desc.format, alpha };
-    let backing = Backing::Surface { surface: s, buf };
-    make(factory, SURFACE_VTBL.addr(), new_state(backing, w, h, format, dpi), out)
+    let mut d2device = core::ptr::null_mut();
+    let r = device::create_device(factory, dxgi.0, &mut d2device);
+    if r != S_OK {
+        return r;
+    }
+    let d2device = ComRef::owned(d2device);
+    let mut context = core::ptr::null_mut();
+    let r = create_device_context(d2device.0, 0, &mut context);
+    if r != S_OK {
+        return r;
+    }
+    let context = ComRef::owned(context);
+    // Its target is a bitmap over the very surface, which is what
+    // carries the frame into the texture at EndDraw, and what the
+    // program finds when it asks the target for its own (GetTarget,
+    // ID2D1Bitmap1::GetSurface).
+    let bp = BitmapProps1 {
+        base: BitmapProps {
+            format: PixelFormat { format: desc.format, alpha },
+            dpi_x: dpi.0,
+            dpi_y: dpi.1,
+        },
+        options: BITMAP_OPTION_TARGET,
+        color_context: core::ptr::null_mut(),
+    };
+    let mut bitmap = core::ptr::null_mut();
+    let r = brush::create_from_dxgi(factory, surface, &bp, &mut bitmap);
+    if r != S_OK {
+        return r;
+    }
+    let bitmap = ComRef::owned(bitmap);
+    set_target(context.0, bitmap.0);
+    t_SetDpi(context.0, dpi.0, dpi.1);
+    // SetTarget records a failure in the target rather than returning
+    // one; here it is the creation that fails, and the program never
+    // sees the half-built target.
+    let failed = with(context.0, |s| s.error);
+    if failed != S_OK {
+        return failed;
+    }
+    put(out, context.0);
+    core::mem::forget(context);
+    S_OK
 }
 
 /// CreateDCRenderTarget: B8G8R8A8, premultiplied or ignoring alpha;
@@ -1404,11 +1443,6 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
             Backing::Context { target, buf, .. } if dirty && !target.0.is_null() => {
                 brush::write_pixels(target.0, buf);
             }
-            // The frame into the program's own texture, the one write
-            // into a render target that needs no shader (`device`).
-            Backing::Surface { surface, buf } if dirty => {
-                device::write_surface(surface, buf);
-            }
             _ => {}
         }
         (S_OK, (0, 0), None)
@@ -1783,6 +1817,13 @@ extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
 /// draw into. NULL clears the target (the context is then 0 x 0).
 extern "system" fn dc1_SetTarget(this: Obj, image: Obj) {
     answered(b"ID2D1DeviceContext::SetTarget", S_OK);
+    set_target(this, image);
+}
+
+/// SetTarget without the ledger record: the method above, and what a
+/// surface render target does to itself when it is built
+/// (`create_dxgi_target`).
+fn set_target(this: Obj, image: Obj) {
     if !image.is_null() && !brush::is_bitmap(image) {
         gap(b"ID2D1DeviceContext::SetTarget(not a bitmap of gala's d2d1)", 0);
         with(this, |s| {
