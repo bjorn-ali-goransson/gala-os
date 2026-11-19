@@ -3,7 +3,12 @@
 //! vectored handler registered through ntdll) and then behaves normally;
 //! the main thread's stack grows past its initial commit without any
 //! exception (TEB StackLimit moves down); runaway recursion on a thread
-//! with a Windows-style stack raises STATUS_STACK_OVERFLOW. Prints
+//! with a Windows-style stack raises STATUS_STACK_OVERFLOW (the thread
+//! first keeps 16 KiB for its handler with kernel32's
+//! SetThreadStackGuarantee where kernel32 is mapped: Windows otherwise
+//! leaves the handler whatever the last guard page left, which with
+//! a randomized stack start was now and then too little for its own
+//! dispatch, and the process died of a second fault). Prints
 //! `guard_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -113,7 +118,17 @@ fn runaway(depth: u64) -> u64 {
     runaway(depth + 1) + u64::from(black_box(&buf)[1])
 }
 
+type SetGuarantee = extern "system" fn(*mut u32) -> i32;
+
 extern "C" fn overflow_thread(_: usize) -> ! {
+    let guarantee = find_system_image("\\System32\\kernel32.dll")
+        .and_then(|k32| find_export(k32, b"SetThreadStackGuarantee"));
+    if let Some(f) = guarantee {
+        // SAFETY: the documented signature of the export.
+        let f = unsafe { core::mem::transmute::<usize, SetGuarantee>(f) };
+        let mut size = 16 * 1024;
+        f(&mut size);
+    }
     black_box(runaway(0));
     exit_thread(0)
 }
