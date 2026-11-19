@@ -12591,8 +12591,9 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
-    eprintln!("xtask: fetching {} ({})", p.name, p.url);
-    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    let url = ubuntu_mirror(p.url);
+    eprintln!("xtask: fetching {} ({url})", p.name);
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(&url))?;
     // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
     let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
     let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;
@@ -12822,6 +12823,22 @@ fn compile_gsettings_schemas(dir: &Path) -> Result {
     Ok(())
 }
 
+/// `url` with Ubuntu's archive replaced by the mirror `XTASK_UBUNTU_MIRROR`
+/// names (its `.../ubuntu` base), if set: CI's runners reach
+/// archive.ubuntu.com badly (connections reset or hung for minutes) and
+/// their own apt uses Azure's mirror of it (`ci.yml`). The pool's paths
+/// and files are the same, and each download is checked against its
+/// pinned SHA-256 whatever serves it.
+fn ubuntu_mirror(url: &str) -> String {
+    const ARCHIVE: &str = "https://archive.ubuntu.com/ubuntu/";
+    match (url.strip_prefix(ARCHIVE), env::var("XTASK_UBUNTU_MIRROR")) {
+        (Some(rest), Ok(base)) if !base.is_empty() => {
+            format!("{}/{rest}", base.trim_end_matches('/'))
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// The package `d` in the package cache, `target/prebuilt/debs/<file>`
 /// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
 /// (curl, to a `.part` file renamed when whole) and checked against its
@@ -12832,7 +12849,7 @@ fn fetch_deb(d: &Deb, arm64: bool) -> Result<(PathBuf, String)> {
     let url = if arm64 {
         format!("https://ports.ubuntu.com/ubuntu-ports/pool/{}", d.pool)
     } else {
-        format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool)
+        ubuntu_mirror(&format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool))
     };
     let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
     let cache = root().join("target/prebuilt/debs");
