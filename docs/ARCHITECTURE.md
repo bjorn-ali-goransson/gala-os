@@ -8402,14 +8402,32 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   name (`HideButton` "Hide", `DockTab` "Agent", `ContextProgram`,
   `ContextTitle`, `Prompt`, `SendButton`), from gala_ui's tree, and
   other processes see them (uiautomationcore's providers).
-- **Not there yet** (ROADMAP): Explorer's "Make the change" handing its
-  request over (WM_COPYDATA), the model relay and the `run` tool.
+- **Hand-off**: a program hands a request to the panel with
+  WM_COPYDATA (SendMessageW to the window FindWindowW finds by
+  `handoff::CLASS` and `TITLE`), `dwData` `handoff::KIND`
+  (0x67616c31, "gal1"). The bytes are `handoff::encode`'s: UTF-8
+  fields each ended by a NUL, in order `gala-handoff 1`, the program,
+  its window's title, its window (hex), the request, then the picked
+  element's automation id, label and rectangle (`x,y,w,h`), the three
+  empty for the whole window; at most `handoff::MAX` (4096) bytes.
+  The panel answers TRUE when it took it (it docks if hidden, the
+  context becomes that program and window, the request is listed with
+  "On: <label>"), FALSE for another kind or bytes `decode` refuses
+  (TooLong, NotUtf8, Malformed). user32 marshals WM_COPYDATA's block
+  across processes. Explorer's "Make the change" is the first sender
+  ("The file explorer"); test `agent` sends one of each, and scenario
+  `explorer_agent` drives Explorer's end to end.
+- **Not there yet** (ROADMAP): the model relay, the chat and the `run`
+  tool.
 - **Observability**: `agent: started docked` / `started hidden
   (remembered)`, `agent: docked at x,y wxh`, `agent: hidden: the dock
   tab at x,y wxh`, `agent: docked without a strip: ABM_NEW refused`,
   `agent: ABN_POSCHANGED: placed again`, `agent: context <program>:
   <title>`, gala_ui's `agent: click <id>: <message>`, `agent: request
-  ...`, `agent: the state is not saved: ...`, `agent: no context:
+  ...`, `agent: handoff from <program> (window 0x..): "<text>" on
+  <element id | the whole window>`, `agent: handoff refused (<n>
+  bytes): <why>`, `agent: WM_COPYDATA of kind 0x.. not taken`,
+  `agent: the state is not saved: ...`, `agent: no context:
   SetWinEventHook failed`, `agent: panic: ...` and `agent: ended`.
 
 #### Window behaviour
@@ -15175,8 +15193,8 @@ explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu
   MsgWaitForMultipleObjects); a change made by anyone (a Windows
   program, a Linux process in the distribution: both reach the one file
   system's change journal, `nt::notify`) re-reads the folder.
-- **Change this program** (ROADMAP "Change this program", no coding
-  agent connected yet: a preview of the flow). The window menu gets
+- **Change this program** (ROADMAP "Change this program"). The window
+  menu gets
   "Change this program..." before Close (InsertMenuW into
   GetSystemMenu; WM_SYSCOMMAND 0x0200). It opens a request card over
   the window (modal: clicks, keys and the wheel go to it): the request
@@ -15185,8 +15203,13 @@ explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu
   of the window under the pointer is outlined with its automation id in
   a tag (`change_ui::element_at`: `gala_ui::hit` on the window's view,
   the ids above, labelled by `window::describe`); a click picks it, Esc
-  goes back. "Make the
-  change" (or Enter) walks the agent's steps on a timer
+  goes back. "Make the change" (or Enter) hands the request to the
+  docked agent panel ("The agent panel", Hand-off: the text, the
+  window's title, the picked element's id, label and rectangle) and
+  the card closes. The card says so when it opens with the panel
+  there (`Change::panel`, its Note). Without a panel (`agent=off`, an
+  image without `agent.exe`, as scenario `explorer`'s) the card is a
+  preview: "Make the change" walks the agent's steps on a timer
   (`explorer::change::STEPS`, `STEP_MS` each: reading the source,
   editing, building, restarting) and ends on a card saying that nothing
   was changed. The flow's state is the library's (`change.rs`,
@@ -15204,6 +15227,11 @@ explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu
 - **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
   Explorer's PROGRAMS entry as the start menu's tile does (logged
   `desktop: Win+E: File Explorer`); no program sees the E.
+- **Its place**: the window opens at 100,40, 1080 x 700, moved and if
+  need be narrowed into the work area (`explorer::fit` on
+  SPI_GETWORKAREA), so it opens beside an app bar such as the docked
+  agent panel, not under it (logged `explorer: window at x,y wxh (work
+  area [l, t, r, b])`).
 - **Observability**: each navigation, open, operation, change and
   Properties is a line on its standard output (`explorer: navigate
   <parsing name> (<n> items)`, `explorer: open <path>: started`,
@@ -15211,7 +15239,11 @@ explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
   rename ...`, `explorer: properties ...`, `explorer: window menu`,
   `explorer: click <id>` for each click on a part,
-  `explorer: change: ...` for each card, pick, request and step,
+  `explorer: change: ...` for each card (`request card opened (for the
+  agent panel)` or `(no agent panel: a preview)`), pick, request,
+  hand-off (`handed to the agent panel (window 0x.., n bytes)`, `not
+  taken by the agent panel`, `no agent panel to hand the request to`)
+  and step,
   `explorer: view: <why>` when gala_ui refuses the view,
   `explorer: closed`): a
   program the desktop starts writes to the

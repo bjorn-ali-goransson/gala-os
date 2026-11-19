@@ -201,6 +201,7 @@ unsafe extern "system" {
         param: *mut c_void,
     ) -> Hwnd;
     fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> Bool;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
     fn PeekMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32, remove: u32) -> Bool;
     fn MsgWaitForMultipleObjects(
@@ -1681,19 +1682,29 @@ pub extern "C" fn mainCRTStartup() -> ! {
         class_name: class.as_ptr(),
     };
     let null = core::ptr::null_mut();
+    // Its usual place (the screen checks click in it), kept inside the
+    // work area: beside the docked agent panel, not under it.
+    let mut work = [0i32; 4];
+    // SAFETY: SPI_GETWORKAREA fills a RECT (four i32s).
+    if unsafe { SystemParametersInfoW(0x30, 0, work.as_mut_ptr().cast(), 0) } == 0 {
+        record_missing("SystemParametersInfoW(SPI_GETWORKAREA)");
+        work = [0, 0, i32::MAX / 2, i32::MAX / 2];
+    }
+    let [x, y, w, h] = explorer::fit([100, 40, 1080, 700], work);
+    log(&alloc::format!("window at {x},{y} {w}x{h} (work area {work:?})"));
     // SAFETY: a valid class and strings.
     let hwnd = unsafe {
         RegisterClassW(&wc);
-        // WS_OVERLAPPEDWINDOW at a fixed place (the screen checks click in it).
+        // WS_OVERLAPPEDWINDOW.
         CreateWindowExW(
             0,
             class.as_ptr(),
             title.as_ptr(),
             0x00cf_0000,
-            100,
-            40,
-            1080,
-            700,
+            x,
+            y,
+            w,
+            h,
             null,
             null,
             null,

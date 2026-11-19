@@ -9467,6 +9467,24 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("agent", "oleaut32.dll", "Windows/System32"),
     ("agent", "uiautomationcore.dll", "Windows/System32"),
     ("agent", "comctl32.dll", "Windows/System32"),
+    // Explorer's "Make the change" handed to the docked panel (ROADMAP
+    // LY "Change this program", step 3): both programs, nothing else.
+    ("explorer_agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("explorer_agent", "user/bin/explorer.exe", "Windows"),
+    ("explorer_agent", "user/bin/agent.exe", "Windows/System32"),
+    ("explorer_agent", "ntdll.dll", "Windows/System32"),
+    ("explorer_agent", "kernel32.dll", "Windows/System32"),
+    ("explorer_agent", "msvcrt.dll", "Windows/System32"),
+    ("explorer_agent", "advapi32.dll", "Windows/System32"),
+    ("explorer_agent", "bcryptprimitives.dll", "Windows/System32"),
+    ("explorer_agent", "user32.dll", "Windows/System32"),
+    ("explorer_agent", "gdi32.dll", "Windows/System32"),
+    ("explorer_agent", "shell32.dll", "Windows/System32"),
+    ("explorer_agent", "shlwapi.dll", "Windows/System32"),
+    ("explorer_agent", "ole32.dll", "Windows/System32"),
+    ("explorer_agent", "oleaut32.dll", "Windows/System32"),
+    ("explorer_agent", "uiautomationcore.dll", "Windows/System32"),
+    ("explorer_agent", "comctl32.dll", "Windows/System32"),
     ("ui_test", "ntdll.dll", "Windows/System32"),
     ("ui_test", "kernel32.dll", "Windows/System32"),
     ("ui_test", "msvcrt.dll", "Windows/System32"),
@@ -13472,6 +13490,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "d2d1_window",
     // A framebuffer for the docked agent panel (AGENT_SCREEN).
     "agent",
+    "explorer_agent",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -16233,7 +16252,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // ARCHITECTURE "The agent panel"): started with the session,
         // docked at the right edge as an app bar (the work area and the
         // taskbar end at it), its context the active window; the screen
-        // scenario (AGENT_SCREEN) clicks Hide, then the dock tab.
+        // scenario (AGENT_SCREEN) clicks Hide, then the dock tab; a
+        // request handed over by WM_COPYDATA is listed.
         name: "agent",
         cmdline: "qemu_exit wallpaper=night events=window run=agent_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -16252,10 +16272,40 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "agent_test: DockTab at 1252,400 (pointer at",
             "agent_test: hidden",
             "agent: click DockTab: Show",
+            "agent: WM_COPYDATA of kind 0x67616c32 not taken",
+            "agent: handoff refused (21 bytes): Malformed",
+            "agent: handoff from agent_test (window 0x20010): \"make the header bigger\" on Header",
+            "agent_test: handed off",
             "agent_test: TestWindow at",
             "agent_test: docked again",
             "agent_test: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // "Make the change" in File Explorer goes to the docked agent
+        // panel (ROADMAP LY "Change this program", step 3; ARCHITECTURE
+        // "The agent panel"): EXPLORER_AGENT_SCREEN opens Explorer
+        // (Win+E), its window menu's "Change this program..." (Alt+Space,
+        // Up, Up, Enter), types a request and sends it (Enter); the
+        // panel lists it and the card closes. xtask stops the machine
+        // after the screen check.
+        name: "explorer_agent",
+        cmdline: "wallpaper=night events=window run=hello.exe",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "agent: started docked",
+            "agent: docked at 960,0 320x752",
+            "desktop: Win+E: File Explorer",
+            "explorer: window at 0,40 960x700 (work area [0, 0, 960, 752])",
+            "explorer: window menu",
+            "explorer: change: request card opened (for the agent panel)",
+            "explorer: change: request \"bigger\" on the whole window",
+            "agent: handoff from File Explorer (window",
+            "\"bigger\" on the whole window",
+            "explorer: change: handed to the agent panel (window",
+            "explorer: change: closed (handed to the agent panel)",
+            "xtask: screen ok",
         ],
     },
     Scenario {
@@ -20204,10 +20254,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "Permissions: -rw-r--r--",
             "explorer: rename \\\\wsl.localhost\\bb\\tmp\\notes.galatxt to renamed.txt: ok",
             "explorer: window menu",
-            "explorer: change: request card opened (no coding agent is connected)",
+            "explorer: change: request card opened (no agent panel: a preview)",
             "explorer: change: inspecting",
             "explorer: change: picked AddressBar",
             "explorer: change: request \"bigger\" on AddressBar",
+            "explorer: change: no agent panel to hand the request to",
             "explorer: change: step Reading File Explorer's source",
             "explorer: change: step Restarting File Explorer",
             "explorer: change: no coding agent is connected, so nothing was changed",
@@ -24094,12 +24145,65 @@ const AGENT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
         },
         ScreenStep {
-            // 4: a click on the test's own window ends it (the run ends
+            // 4: a hand-off listed: its white card under the context.
+            after: "agent_test: handed off",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff)],
+        },
+        ScreenStep {
+            // 5: a click on the test's own window ends it (the run ends
             // after the last input, with no pixels left to check).
             after: "agent_test: docked again",
             input: &["click_on agent_test: TestWindow"],
             pixels: &[],
         },
+    ],
+};
+
+/// The hand-off (scenario `explorer_agent`): the panel docked, Win+E
+/// opens Explorer beside it; Alt+Space, Up, Up, Enter opens "Change this
+/// program..."; a request typed and sent with Enter (no element picked:
+/// the whole window); the panel lists it on a white card under its
+/// context.
+const EXPLORER_AGENT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "agent: docked at",
+    steps: &[
+        ScreenStep { after: "agent: docked at", input: &["sendkey meta_l-e"], pixels: &[] },
+        ScreenStep {
+            // 2: Explorer opened beside the docked panel (inside the work
+            // area: its place is in the log), the panel's surface intact.
+            after: "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
+            input: &["sendkey alt-spc"],
+            pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
+        },
+        ScreenStep {
+            after: "explorer: window menu",
+            input: &["sendkey up", "sendkey up", "sendkey ret"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "explorer: change: request card opened",
+            input: &["sendkey b", "sendkey i", "sendkey g", "sendkey g", "sendkey e", "sendkey r"],
+            // 4: the card (centred on Explorer's client area: screen
+            // 220-740), its title, the request typed.
+            pixels: &[
+                PixelCheck::AnyIn(240, 264, 200, 18, 0x1b1b1b),
+                PixelCheck::AnyIn(240, 320, 100, 30, 0x1b1b1b),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
+        ScreenStep {
+            // 6: listed: the panel's white card; the card over Explorer
+            // gone, Explorer's white list where its grey (0xf9f9f9) title
+            // and description were.
+            after: "explorer: change: closed (handed to the agent panel)",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff),
+                PixelCheck::Most(240, 262, 400, 40, 0xffffff, 95),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
     ],
 };
 
@@ -25196,6 +25300,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("agent", AGENT_SCREEN),
+    ("explorer_agent", EXPLORER_AGENT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),

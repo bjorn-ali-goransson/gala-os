@@ -19,6 +19,10 @@
 //!   panel's own window does not change it. The hook is set before the
 //!   first placement, so a window activated once the panel is docked is
 //!   always its context.
+//! - **Hand-off**: WM_COPYDATA of kind `handoff::KIND` from another
+//!   program (Explorer's "Make the change"): the panel docks if hidden
+//!   and lists the request; any other kind, or a malformed one, is
+//!   logged and not taken.
 //!
 //! The view and what a message does to it are the library (`agent`);
 //! this file does what is outside it. The window is placed from the
@@ -28,6 +32,8 @@
 //! Observability: each line on standard output (`agent: ...`, the serial
 //! log for a program the desktop starts): the start and the remembered
 //! state, every placement with its rectangle, every context, every
+//! hand-off (its program, window, text and element) or why one was not
+//! taken, every
 //! message the panel handled (gala_ui's `click HideButton: Hide`), and
 //! what failed (an app bar refused, the state not saved) with its error.
 
@@ -44,7 +50,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use agent::{Context, Msg, Panel, TAB, WIDTH, program_name};
+use agent::{Context, Msg, Panel, TAB, WIDTH, handoff, program_name};
 use gala_ui::{Component, Node, win};
 
 type Handle = *mut c_void;
@@ -103,6 +109,15 @@ const RRF_RT_REG_DWORD: u32 = 0x10;
 
 /// The active window changed: wParam is it (from the WinEvent hook).
 const WM_APP_CONTEXT: u32 = 0x8001;
+const WM_COPYDATA: u32 = 0x004a;
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    kind: usize,
+    size: u32,
+    data: *const u8,
+}
 /// Place the window as the panel's state says (the message loop's).
 const WM_APP_PLACE: u32 = 0x8002;
 /// The app bar's callback message (ABN_*: wParam).
@@ -377,7 +392,17 @@ impl Component for App {
     }
 
     fn update(&mut self, msg: Msg) {
-        let placing = matches!(msg, Msg::Hide | Msg::Show);
+        let placing = matches!(msg, Msg::Hide | Msg::Show)
+            || matches!(msg, Msg::Handoff(_)) && self.panel.hidden;
+        if let Msg::Handoff(h) = &msg {
+            log(&format!(
+                "handoff from {} (window {:#x}): {:?} on {}",
+                h.program,
+                h.window,
+                h.text,
+                h.element.as_ref().map_or("the whole window", |e| e.id.as_str())
+            ));
+        }
         if let Msg::Context(c) = &msg {
             log(&format!("context {}: {}", c.program, c.title));
         }
@@ -393,8 +418,30 @@ impl Component for App {
         }
     }
 
-    fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<Msg> {
+    fn message(&mut self, _: usize, msg: u32, wparam: usize, lparam: isize) -> Option<Msg> {
         match msg {
+            WM_COPYDATA => {
+                // SAFETY: WM_COPYDATA's lParam is a COPYDATASTRUCT valid
+                // for the message (user32 copied it in from the sender).
+                let cds = unsafe { (lparam as *const CopyData).as_ref() }?;
+                if cds.kind != handoff::KIND {
+                    log(&format!("WM_COPYDATA of kind {:#x} not taken", cds.kind));
+                    return None;
+                }
+                let bytes = if cds.size == 0 || cds.data.is_null() {
+                    &[][..]
+                } else {
+                    // SAFETY: as above: `size` bytes at `data`.
+                    unsafe { core::slice::from_raw_parts(cds.data, cds.size as usize) }
+                };
+                match handoff::decode(bytes) {
+                    Ok(h) => Some(Msg::Handoff(h)),
+                    Err(e) => {
+                        log(&format!("handoff refused ({} bytes): {e:?}", bytes.len()));
+                        None
+                    }
+                }
+            }
             WM_APP_CONTEXT => {
                 let c = context_of(wparam as Handle);
                 (self.panel.context.as_ref() != Some(&c)).then_some(Msg::Context(c))

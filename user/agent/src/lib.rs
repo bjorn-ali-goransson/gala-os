@@ -10,6 +10,11 @@
 //! - **Hidden**: only the dock tab ("DockTab"), `TAB` in size; a click
 //!   on it docks the panel again.
 //!
+//! - **Hand-off** ([`handoff`]): a request another program made for
+//!   itself (Explorer's "Make the change"), received by WM_COPYDATA; the
+//!   panel docks if hidden, takes the program as its context and lists
+//!   the request with the part of the window it is about.
+//!
 //! The program (main.rs) does what a message means outside the view:
 //! the app bar's strip, the window's place, the remembered state.
 
@@ -51,6 +56,124 @@ pub struct Context {
 pub struct Request {
     pub program: String,
     pub text: String,
+    /// The part of the program's window it is about (a hand-off's
+    /// picked element: its label), if any.
+    pub element: Option<String>,
+}
+
+/// WM_COPYDATA's hand-off of a request to the panel (ROADMAP LY
+/// "Change this program", step 3): what a program sends, and its wire
+/// form, which both ends build from this module.
+pub mod handoff {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// COPYDATASTRUCT's dwData for a hand-off ("gal1").
+    pub const KIND: usize = 0x6761_6c31;
+    /// The window the panel is: its class and title (FindWindowW).
+    pub const CLASS: &str = "GalaUiWindow";
+    pub const TITLE: &str = "Agent";
+    /// The longest hand-off taken (bytes).
+    pub const MAX: usize = 4096;
+
+    /// The part of the window picked (Inspect): its automation id, the
+    /// words for it, its rectangle in the window's client coordinates.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Element {
+        pub id: String,
+        pub label: String,
+        pub rect: [i32; 4],
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Handoff {
+        /// The program's name ("File Explorer").
+        pub program: String,
+        /// Its window's title.
+        pub title: String,
+        /// Its window (the sender's HWND).
+        pub window: u64,
+        pub text: String,
+        pub element: Option<Element>,
+    }
+
+    /// Why a hand-off was not taken.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Refused {
+        TooLong,
+        NotUtf8,
+        /// Not `gala-handoff 1` and its fields.
+        Malformed,
+    }
+
+    const MAGIC: &str = "gala-handoff 1";
+
+    /// The wire form: UTF-8, fields separated by NUL (no field holds
+    /// one; a NUL typed into a field is dropped): the magic, program,
+    /// title, window (hex), text, then the element's id, label and
+    /// rectangle (x, y, w, h in decimal), empty when there is none.
+    pub fn encode(h: &Handoff) -> Vec<u8> {
+        let mut out = String::new();
+        let mut field = |s: &str| {
+            out.extend(s.chars().filter(|&c| c != '\0'));
+            out.push('\0');
+        };
+        field(MAGIC);
+        field(&h.program);
+        field(&h.title);
+        field(&alloc::format!("{:x}", h.window));
+        field(&h.text);
+        match &h.element {
+            Some(e) => {
+                field(&e.id);
+                field(&e.label);
+                let [x, y, w, hh] = e.rect;
+                field(&alloc::format!("{x},{y},{w},{hh}"));
+            }
+            None => {
+                field("");
+                field("");
+                field("");
+            }
+        }
+        out.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Handoff, Refused> {
+        if bytes.len() > MAX {
+            return Err(Refused::TooLong);
+        }
+        let s = core::str::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
+        let s = s.strip_suffix('\0').ok_or(Refused::Malformed)?;
+        let f: Vec<&str> = s.split('\0').collect();
+        let [magic, program, title, window, text, id, label, rect] = f[..] else {
+            return Err(Refused::Malformed);
+        };
+        if magic != MAGIC {
+            return Err(Refused::Malformed);
+        }
+        let window = u64::from_str_radix(window, 16).map_err(|_| Refused::Malformed)?;
+        let element = if id.is_empty() {
+            None
+        } else {
+            let mut r = [0i32; 4];
+            let mut parts = rect.split(',');
+            for v in &mut r {
+                *v = parts.next().and_then(|p| p.parse().ok()).ok_or(Refused::Malformed)?;
+            }
+            if parts.next().is_some() {
+                return Err(Refused::Malformed);
+            }
+            Some(Element { id: id.into(), label: label.into(), rect: r })
+        };
+        Ok(Handoff {
+            program: program.into(),
+            title: title.into(),
+            window,
+            text: text.into(),
+            element,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +184,8 @@ pub enum Msg {
     Send,
     /// The active window changed (the program's, from its WinEvent).
     Context(Context),
+    /// A program handed a request over (WM_COPYDATA).
+    Handoff(handoff::Handoff),
 }
 
 #[derive(Default)]
@@ -140,7 +265,14 @@ impl Panel {
                     .bg(CARD)
                     .border(LINE)
                     .child(text(r.program.clone()).size(12).bold().color(MUTED))
-                    .child(text(r.text.clone()).size(14))
+                    .child(text(r.text.clone()).id(alloc::format!("Request{i}Text")).size(14))
+                    .child_if(
+                        r.element.is_some(),
+                        text(alloc::format!("On: {}", r.element.as_deref().unwrap_or("")))
+                            .id(alloc::format!("Request{i}Element"))
+                            .size(12)
+                            .color(MUTED),
+                    )
             })
             .collect();
         let empty = self.requests.is_empty();
@@ -205,9 +337,18 @@ impl Panel {
                     return;
                 }
                 let program = self.context.as_ref().map(|c| c.program.clone()).unwrap_or_default();
-                self.requests.push(Request { program, text });
+                self.requests.push(Request { program, text, element: None });
             }
             Msg::Context(c) => self.context = Some(c),
+            Msg::Handoff(h) => {
+                self.hidden = false;
+                self.context = Some(Context { program: h.program.clone(), title: h.title });
+                self.requests.push(Request {
+                    program: h.program,
+                    text: h.text,
+                    element: h.element.map(|e| e.label),
+                });
+            }
         }
     }
 }
@@ -282,7 +423,11 @@ mod tests {
         p.update(Msg::Send);
         assert_eq!(
             p.requests,
-            [Request { program: "File Explorer".into(), text: "compress all the files".into() }]
+            [Request {
+                program: "File Explorer".into(),
+                text: "compress all the files".into(),
+                element: None
+            }]
         );
         assert!(p.draft.is_empty());
         // A blank request is not one.
@@ -293,5 +438,55 @@ mod tests {
         assert!(placed.iter().any(|e| e.id.as_deref() == Some("Request0")));
         // The prompt stays at the bottom.
         assert_eq!(at(&placed, "Prompt").rect[1] + 32 + 12, 800);
+    }
+
+    fn sample() -> handoff::Handoff {
+        handoff::Handoff {
+            program: "File Explorer".into(),
+            title: "tmp".into(),
+            window: 0x20010,
+            text: "bigger, with\ntwo lines".into(),
+            element: Some(handoff::Element {
+                id: "AddressBar".into(),
+                label: "the address bar".into(),
+                rect: [64, -2, 600, 32],
+            }),
+        }
+    }
+
+    #[test]
+    fn handoff_round_trips_and_refuses() {
+        use handoff::{Refused, decode, encode};
+        let h = sample();
+        assert_eq!(decode(&encode(&h)), Ok(h.clone()));
+        let none = handoff::Handoff { element: None, ..h.clone() };
+        assert_eq!(decode(&encode(&none)), Ok(none));
+        // A NUL typed into a field cannot split it.
+        let nul = handoff::Handoff { text: "a\0b".into(), ..h.clone() };
+        assert_eq!(decode(&encode(&nul)).map(|d| d.text), Ok("ab".into()));
+        assert_eq!(decode(b"gala-handoff 2\0a\0b\x001\0t\0\0\0\0"), Err(Refused::Malformed));
+        assert_eq!(decode(b"gala-handoff 1\0a\0b\0zz\0t\0\0\0\0"), Err(Refused::Malformed));
+        assert_eq!(
+            decode(b"gala-handoff 1\0a\0b\x001\0t\0id\0l\x001,2,3\0"),
+            Err(Refused::Malformed)
+        );
+        assert_eq!(decode(b"gala-handoff 1\0a"), Err(Refused::Malformed));
+        assert_eq!(decode(&[0xff, 0]), Err(Refused::NotUtf8));
+        assert_eq!(decode(&[b'a'; handoff::MAX + 1]), Err(Refused::TooLong));
+    }
+
+    #[test]
+    fn handoff_docks_and_lists_the_request() {
+        let mut p = Panel { hidden: true, ..Panel::default() };
+        p.update(Msg::Handoff(sample()));
+        assert!(!p.hidden);
+        assert_eq!(
+            p.context,
+            Some(Context { program: "File Explorer".into(), title: "tmp".into() })
+        );
+        let placed = lay(&p, WIDTH, 752);
+        assert_eq!(at(&placed, "Request0Text").text, "bigger, with\ntwo lines");
+        assert_eq!(at(&placed, "Request0Element").text, "On: the address bar");
+        assert_eq!(at(&placed, "ContextProgram").text, "File Explorer");
     }
 }

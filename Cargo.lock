@@ -814,6 +814,7 @@ dependencies = [
 name = "explorer"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "gala_heap",
  "gala_ui",
  "shellns",

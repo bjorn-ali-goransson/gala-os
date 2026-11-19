@@ -1,8 +1,11 @@
 //! "Change this program..." on the window (the flow's state is the
 //! library's `explorer::change`): the window menu's item, the cards drawn
 //! over the window, Inspect's outline and what the window's parts are
-//! called, the clock that walks the steps. No coding agent is connected:
-//! the last card says so and nothing is changed.
+//! called. "Make the change" hands the request to the docked agent
+//! panel (agent.exe) by WM_COPYDATA (`agent::handoff`) and closes the
+//! card. Without a panel to take it, the stand-in remains: a clock walks
+//! the steps an agent would take, and the last card says no coding agent
+//! is connected and nothing was changed.
 
 use super::*;
 use explorer::change::{Change, Element, KeyResult, Msg, STEPS, Stage, view};
@@ -19,6 +22,64 @@ unsafe extern "system" {
     fn InsertMenuW(menu: Handle, position: u32, flags: u32, id: usize, text: *const u16) -> Bool;
     fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, proc_: *const c_void) -> usize;
     fn KillTimer(hwnd: Hwnd, id: usize) -> Bool;
+    fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
+    fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+}
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    kind: usize,
+    size: u32,
+    data: *const u8,
+}
+
+/// The docked agent panel's window (null when there is none).
+fn find_panel() -> Hwnd {
+    let (class, title) = (wide(agent::handoff::CLASS), wide(agent::handoff::TITLE));
+    // SAFETY: valid strings.
+    unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) }
+}
+
+/// The request goes to the docked agent panel: whether it took it
+/// (WM_COPYDATA's TRUE). Logged either way.
+fn hand_off(s: &State, c: &Change) -> bool {
+    use agent::handoff::{self, Handoff};
+    let panel = find_panel();
+    if panel.is_null() {
+        log("change: no agent panel to hand the request to");
+        return false;
+    }
+    let mut t = [0u16; 256];
+    // SAFETY: our window; a buffer of its size.
+    let n = unsafe { GetWindowTextW(s.hwnd, t.as_mut_ptr(), t.len() as i32) };
+    let h = Handoff {
+        program: String::from("File Explorer"),
+        title: String::from_utf16_lossy(&t[..n.clamp(0, 256) as usize]),
+        window: s.hwnd as u64,
+        text: c.request.clone(),
+        element: c.target.as_ref().map(|e| handoff::Element {
+            id: e.id.clone(),
+            label: e.label.clone(),
+            rect: e.rect,
+        }),
+    };
+    let bytes = handoff::encode(&h);
+    let cds = CopyData { kind: handoff::KIND, size: bytes.len() as u32, data: bytes.as_ptr() };
+    // SAFETY: the panel's window; the structure and its bytes live across
+    // the call (user32 copies them to the panel's process).
+    let taken = unsafe { SendMessageW(panel, 0x004a, s.hwnd as usize, &cds as *const _ as isize) };
+    let mut l = String::new();
+    let _ = write!(
+        l,
+        "change: {} the agent panel (window {:#x}, {} bytes)",
+        if taken != 0 { "handed to" } else { "not taken by" },
+        panel as usize,
+        bytes.len()
+    );
+    log(&l);
+    taken != 0
 }
 
 /// The window menu gets "Change this program..." and a separator before
@@ -44,8 +105,14 @@ pub fn open(s: &mut State) {
     if s.change.is_none() {
         s.menu = None;
         s.properties = None;
-        s.change = Some(Change::new());
-        log("change: request card opened (no coding agent is connected)");
+        let mut c = Change::new();
+        c.panel = !find_panel().is_null();
+        log(if c.panel {
+            "change: request card opened (for the agent panel)"
+        } else {
+            "change: request card opened (no agent panel: a preview)"
+        });
+        s.change = Some(c);
     }
 }
 
@@ -65,8 +132,8 @@ fn now() -> u32 {
 }
 
 fn submit(s: &mut State) {
-    let Some(c) = s.change.as_mut() else { return };
-    if !c.submit(now()) {
+    let Some(c) = s.change.as_ref() else { return };
+    if !c.can_submit() {
         return;
     }
     let mut l = String::from("change: request \"");
@@ -74,6 +141,12 @@ fn submit(s: &mut State) {
     l.push_str("\" on ");
     l.push_str(if c.target.is_some() { c.target_id() } else { "the whole window" });
     log(&l);
+    if hand_off(s, c) {
+        close(s, "handed to the agent panel");
+        return;
+    }
+    let Some(c) = s.change.as_mut() else { return };
+    c.submit(now());
     let mut l = String::from("change: step ");
     l.push_str(STEPS[0]);
     log(&l);

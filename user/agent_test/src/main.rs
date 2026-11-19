@@ -23,14 +23,19 @@
 //!   the right edge), its "DockTab" element a Button named "Agent" that
 //!   fills it, and HKCU\Software\gala\Agent's `Hidden` is 1;
 //! - docked again (the scenario clicks the tab): as at first, `Hidden` 0;
-//!   then this test's own window is announced and the test waits for the
+//! - a hand-off (gala's own: WM_COPYDATA of kind "gal1" and the wire form
+//!   `agent::handoff` defines, written out here): another kind or a
+//!   malformed one is not taken (0), a request on an element is (1) and
+//!   is listed: "Request0Text" named with its text, "Request0Element"
+//!   `On: <the element's label>`;
+//! - then this test's own window is announced and the test waits for the
 //!   scenario's click on it, so the run ends after the last screen step.
 //!
 //! Assumed and not pinned: that agent.exe is gala's own, so its sizes
 //! are gala's choice (the same on Windows were it run there).
 //!
 //! Prints `agent_test: docked`, `agent_test: hidden`, `agent_test:
-//! docked again` and `agent_test: ok`, or `agent_test: check N got X
+//! docked again`, `agent_test: handed off` and `agent_test: ok`, or `agent_test: check N got X
 //! (line L)` and exits with N.
 
 #![no_std]
@@ -82,6 +87,28 @@ unsafe extern "system" {
     fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> i32;
     fn SystemParametersInfoW(action: u32, param: u32, out: *mut Rect, ini: u32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
+    fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
+}
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    kind: usize,
+    size: u32,
+    data: *const u8,
+}
+
+/// The panel's hand-off (agent::handoff, written out here so the wire
+/// form is pinned by the test): its dwData and a request on an element.
+const HANDOFF: usize = 0x6761_6c31;
+const REQUEST: &[u8] = b"gala-handoff 1\0agent_test\0Agent test window\x0020010\0\
+make the header bigger\0Header\0the header\x0010,20,300,40\0";
+
+/// WM_COPYDATA of `kind` with `data` to `hwnd`: its result.
+fn copy_data(hwnd: Handle, kind: usize, data: &[u8]) -> isize {
+    let cds = CopyData { kind, size: data.len() as u32, data: data.as_ptr() };
+    // SAFETY: the structure and its bytes live across the call.
+    unsafe { SendMessageW(hwnd, 0x004a, 0, &cds as *const _ as isize) }
 }
 
 #[link(name = "shell32", kind = "raw-dylib")]
@@ -486,9 +513,23 @@ fn run() -> Result<(), u32> {
             pump(STEP_MS, || work_area().right == sw - WIDTH && window_rect(panel) == docked);
         c.ok(again, work_area().right.into())?;
         c.eq(hidden_value(), 0)?;
+
+        // A hand-off (Explorer's "Make the change" sends the same): taken,
+        // listed with the part of the window it is about.
+        c.eq(copy_data(panel, HANDOFF + 1, REQUEST) as i64, 0)?;
+        c.eq(copy_data(panel, HANDOFF, b"gala-handoff 1\0short\0") as i64, 0)?;
+        c.eq(copy_data(panel, HANDOFF, REQUEST) as i64, 1)?;
+        let listed = pump(STEP_MS, || {
+            find("Request0Text").is_some_and(|e| e.name() == "make the header bigger")
+        });
+        c.ok(listed, 0)?;
+        c.ok(find("Request0Element").is_some_and(|e| e.name() == "On: the header"), 0)?;
+        c.ok(find("Request1Text").is_none(), 0)?;
+        say(b"handed off");
         // This test's own window, found as the panel's elements are, is
         // the last click: the screen scenario checks the docked panel
-        // before it, and the run ends after it.
+        // (with the hand-off listed) before it, and the run ends after
+        // it.
         let window = uia.window(own);
         c.ok(window.is_some(), 0)?;
         let window = window.unwrap_or_else(|| unreachable!());

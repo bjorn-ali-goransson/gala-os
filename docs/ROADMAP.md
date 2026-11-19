@@ -6646,7 +6646,18 @@ Each entry: what, why it matters, the structural fix, the owning item.
   Seen on x86_64 too (`lx_inkscape`, once in a full local run): both
   glycin loaders ended (0xe4c58009), the window never came, both CPUs
   idle, the main thread in ppoll; its rerun passed. Its log's state dump
-  is where to start.
+  is where to start. `arm_lx_gimp` shows the same signature (glycin-svg
+  ended 0xe4c58009 after about 32 s, the GIMP window never shown,
+  its threads idle but one in user mode), twice running in one
+  local session, first at its step 8 and then before its first
+  window; the next step is to compare the glycin loader's end in its
+  dump with Inkscape's.
+- **`taskmgr`'s Processes sparkline check came up short once** (step 4:
+  189 of the 240 pixels of the CPU cell's area under the line, 80%
+  asked, on a host with 17 s waiting for a CPU; the rerun passed): the
+  area under the line follows the samples the view took, which a
+  starved guest takes fewer of; the check should wait for the samples
+  it needs (as the sidebar's do), not for wall time.
 - **`arm_lx_thread` died at `kill(the process, SIGUSR2)`** (once in a
   full local run, again 1 of 7 in its history; reruns pass): thread_test
   ended with 0xe4c5800c right after a process-directed signal sent
@@ -7152,9 +7163,11 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   click) and File Explorer has the menu item and the request card with
   Inspect over the window's parts by automation id, as gala_ui views
   (ARCHITECTURE "The file explorer", "Change this program"); scenario
-  `explorer` drives it. The card still ends in a preview (steps on a
-  timer, a last card saying nothing was changed) until the panel takes
-  the hand-off. App bars are in (`appbar_test`: SHAppBarMessage's
+  `explorer` drives it. "Make the change" hands the request to the
+  docked panel by WM_COPYDATA and the card closes (scenario
+  `explorer_agent`, end to end; ARCHITECTURE "The agent panel",
+  Hand-off); only without a panel does the card stay a preview (steps
+  on a timer, a last card saying nothing was changed). App bars are in (`appbar_test`: SHAppBarMessage's
   ABM_NEW/QUERYPOS/SETPOS/REMOVE, the reserved strip ending above the
   taskbar, ABN_POSCHANGED; ARCHITECTURE
   "App bars"). `agent.exe` is in: started with the session, docked as
@@ -7163,8 +7176,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   "The agent panel"). Its screen scenario finds what it clicks through
   UI Automation (`uia_client`, `click_on`), the way older scenarios'
   position-aimed clicks are to go as their windows move to gala_ui
-  (WORKFLOW "Screen checks"). Next, in order: the hand-off from
-  Explorer's card (the timer and the progress cards go); the relay with record and replay, the chat and the
+  (WORKFLOW "Screen checks"). Next, in order: the relay with record
+  and replay, the chat and the
   `run` tool ("compress all the files" in Explorer); then the source
   tools, the state record and the swap, Undo, and the item on Task
   Manager with its use case as the measure.

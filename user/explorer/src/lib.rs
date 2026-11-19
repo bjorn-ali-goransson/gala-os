@@ -322,6 +322,18 @@ pub fn icon_at(x: i32, y: i32, width: i32) -> Option<usize> {
     Some(((y / TILE_H) * per_row + col) as usize)
 }
 
+/// Where the window opens: its usual place (x, y, width, height) moved
+/// and, when it must, narrowed to stay inside `work` (SPI_GETWORKAREA's
+/// left, top, right, bottom), which ends where an app bar such as the
+/// docked agent panel begins.
+pub fn fit(want: [i32; 4], work: [i32; 4]) -> [i32; 4] {
+    let [x, y, w, h] = want;
+    let [l, t, r, b] = work;
+    let w = w.min(r - l).max(0);
+    let h = h.min(b - t).max(0);
+    [x.min(r - w).max(l), y.min(b - h).max(t), w, h]
+}
+
 /// The Linux path of a file below `\\wsl.localhost\<distro>` (its
 /// distribution, then `/a/b`), for "Open in Terminal" and Properties.
 pub fn linux_path(parsing: &str) -> Option<(String, String)> {
@@ -343,6 +355,18 @@ pub fn linux_path(parsing: &str) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use std::vec;
+
+    #[test]
+    fn the_window_fits_the_work_area() {
+        // The whole screen above the taskbar: where it always was.
+        assert_eq!(fit([100, 40, 1080, 700], [0, 0, 1280, 752]), [100, 40, 1080, 700]);
+        // The agent panel docked (the work area ends at 960): moved left.
+        assert_eq!(fit([100, 40, 1080, 700], [0, 0, 960, 752]), [0, 40, 960, 700]);
+        assert_eq!(fit([100, 40, 800, 700], [0, 0, 960, 752]), [100, 40, 800, 700]);
+        assert_eq!(fit([300, 40, 800, 700], [0, 0, 960, 752]), [160, 40, 800, 700]);
+        // A bar at the left and a short screen.
+        assert_eq!(fit([100, 40, 1080, 700], [320, 0, 1280, 600]), [320, 0, 960, 600]);
+    }
 
     fn e(name: &str, kind: Kind, size: u64, modified: u64) -> Entry {
         Entry { name: String::from(name), parsing: String::from(name), kind, size, modified }

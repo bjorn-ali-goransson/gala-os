@@ -73,6 +73,10 @@ pub struct Change {
     pub target: Option<Element>,
     /// While inspecting: the element under the pointer.
     pub hover: Option<Element>,
+    /// The docked agent panel was there when the card opened: Make the
+    /// change hands the request to it (otherwise the steps are a
+    /// preview).
+    pub panel: bool,
 }
 
 impl Default for Change {
@@ -83,7 +87,13 @@ impl Default for Change {
 
 impl Change {
     pub fn new() -> Change {
-        Change { stage: Stage::Request, request: String::new(), target: None, hover: None }
+        Change {
+            stage: Stage::Request,
+            request: String::new(),
+            target: None,
+            hover: None,
+            panel: false,
+        }
     }
 
     /// The request can be sent: some words typed.
@@ -329,7 +339,14 @@ fn request(c: &Change) -> Node<Msg> {
                 .child(text(c.target_label()).id("Part").grow(1))
                 .child(inspect_button()),
         )
-        .child(small("Preview: no coding agent is connected yet, so nothing will be changed."))
+        .child(
+            small(if c.panel {
+                "Make the change hands this request to the agent panel."
+            } else {
+                "Preview: no coding agent is connected yet, so nothing will be changed."
+            })
+            .id("Note"),
+        )
         .child(
             row()
                 .margin((8, 0, 0, 0))
@@ -649,6 +666,19 @@ mod tests {
         assert_eq!(at(&p, "Progress").rect[2], CARD_W - 40);
         assert_eq!(at(&p, "ProgressDone").rect[2], (CARD_W - 40) * 2 / 4);
         assert!(!has(&p, "MakeChange"));
+    }
+
+    #[test]
+    fn the_card_says_where_the_request_goes() {
+        let mut c = Change::new();
+        let p = lay(&c, 0);
+        assert_eq!(
+            at(&p, "Note").text,
+            "Preview: no coding agent is connected yet, so nothing will be changed."
+        );
+        c.panel = true;
+        let p = lay(&c, 0);
+        assert_eq!(at(&p, "Note").text, "Make the change hands this request to the agent panel.");
     }
 
     #[test]
