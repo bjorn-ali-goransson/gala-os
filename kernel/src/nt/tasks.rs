@@ -59,6 +59,7 @@
 use alloc::vec::Vec;
 
 use crate::mm::heap::{AllocError, TryVec};
+use crate::nt::status::NtStatus;
 
 /// The layout's version (the header's first word).
 pub const VERSION: u32 = 1;
@@ -187,6 +188,40 @@ pub fn encode_perf(p: &Perf) -> Result<Vec<u8>, AllocError> {
     Ok(out)
 }
 
+/// The records of the processes in `list` that are still themselves:
+/// `read` gathers one's record, and `ended` says whether its exit status
+/// is set. A process is skipped when it has ended before its read and
+/// dropped when it has ended by the end of it, so a record is kept only
+/// if the process was not yet ending when every part of it had been
+/// read. Teardown (a Linux process's `comm`, root and Linux state going)
+/// starts only after the exit status is set, so a record read from a
+/// process that its end overtook mid-read never reaches the list: one
+/// check before the read alone listed `sleep`, killed while it was being
+/// read, as an `sh` of no distribution, a row End task then aimed at
+/// (arm_taskmgr). The records, and how many processes ended during
+/// their read.
+pub fn still_themselves<P>(
+    list: &[P],
+    ended: impl Fn(&P) -> bool,
+    mut read: impl FnMut(&P) -> Result<Task, NtStatus>,
+) -> Result<(Vec<Task>, usize), NtStatus> {
+    let mut tasks: Vec<Task> = Vec::new();
+    tasks.try_reserve_exact(list.len()).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut overtaken = 0;
+    for p in list {
+        if ended(p) {
+            continue;
+        }
+        let t = read(p)?;
+        if ended(p) {
+            overtaken += 1;
+            continue;
+        }
+        tasks.try_push(t).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    Ok((tasks, overtaken))
+}
+
 fn put32(out: &mut [u8], at: usize, v: u32) {
     out[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -307,17 +342,10 @@ mod live {
     /// Every running process of both personalities (GalaTasks op 0), for
     /// `caller`.
     pub fn processes(caller: &Process) -> Result<Vec<u8>, NtStatus> {
-        let mut list = process::running().map_err(no_memory)?;
-        // Not one that is ending. `terminate` records the exit status
-        // before the threads unwind, and from then on what the process
-        // is cannot be told truthfully: a Linux one's `comm` and root
-        // are being dismantled, so the image falls back to the one its
-        // NT process was created from (`sh` for one that had exec'd
-        // `sleep`). Task Manager showed such a row, and "End task" on
-        // it reached a pid the kernel no longer had
-        // (STATUS_INVALID_CID). `process::running` keeps them: the
-        // state dump must still show a process stuck in teardown.
-        list.retain(|p| p.exit_status().is_none());
+        // `process::running` keeps the ending ones (the state dump must
+        // still show a process stuck in teardown); the list does not
+        // (`still_themselves`).
+        let list = process::running().map_err(no_memory)?;
         let users = crate::nt::accounts::local_users().unwrap_or_default();
         let distros = crate::nt::desktop::distro_roots();
         // The taskbar windows of each session the processes are in (one
@@ -330,10 +358,7 @@ mod live {
             let listed = crate::nt::desktop::list_windows(&p.desk.shell).unwrap_or_default();
             windows.try_push((p.session, listed)).map_err(no_memory)?;
         }
-        let mut tasks: Vec<Task> = Vec::new();
-        tasks.try_reserve_exact(list.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-        let (mut nt, mut linux, mut hung) = (0usize, 0usize, 0usize);
-        for p in &list {
+        let read = |p: &KArc<Process>| -> Result<Task, NtStatus> {
             let mut t = Task {
                 pid: p.id,
                 parent: p.parent_id,
@@ -355,17 +380,14 @@ mod live {
             t.texts[1].try_extend_from_slice(&p.command_line.lock()).map_err(no_memory)?;
             user_of(p, &users, &mut t.texts[2])?;
             if p.personality == Personality::Linux {
-                linux += 1;
                 t.flags |= FLAG_LINUX;
                 linux_parts(p, &distros, &mut t)?;
             } else {
-                nt += 1;
                 t.handles = p.handles.lock().iter().count() as u32;
                 t.texts[0].try_extend_from_slice(p.name.as_bytes()).map_err(no_memory)?;
             }
             if crate::nt::desktop::not_responding(&p.desk.shell, p.id) {
                 t.flags |= FLAG_HUNG;
-                hung += 1;
                 if first_hung(p.id) {
                     crate::info!(
                         "tasks: pid {} ({}) is not responding: its input has waited untaken \
@@ -381,7 +403,21 @@ mod live {
                 t.hwnd = p.desk.windows.hwnd_of_desktop(p.id as u32, w.id).unwrap_or(0);
                 utf8_of(&w.title[..w.title_len], &mut t.texts[4]).map_err(no_memory)?;
             }
-            tasks.try_push(t).map_err(no_memory)?;
+            Ok(t)
+        };
+        let (tasks, overtaken) = still_themselves(&list, |p| p.exit_status().is_some(), read)?;
+        let linux = tasks.iter().filter(|t| t.flags & FLAG_LINUX != 0).count();
+        let nt = tasks.len() - linux;
+        let hung = tasks.iter().filter(|t| t.flags & FLAG_HUNG != 0).count();
+        if overtaken != 0 {
+            // The race `still_themselves` closes: rare, and what a stale
+            // or missing row in Task Manager would be explained by.
+            crate::info!(
+                "tasks: pid {} ({}) lists the processes: left out {overtaken} that ended while \
+                 being read",
+                caller.id,
+                caller.name
+            );
         }
         let cpus = platform::online_count();
         let out = encode(platform::monotonic_ns(), cpus, &tasks).map_err(no_memory)?;
@@ -399,7 +435,10 @@ mod live {
         crate::events::emit(
             crate::events::Category::Process,
             "tasks query",
-            format_args!(r#""by":{},"nt":{nt},"linux":{linux},"hung":{hung}"#, caller.id),
+            format_args!(
+                r#""by":{},"nt":{nt},"linux":{linux},"hung":{hung},"ended":{overtaken}"#,
+                caller.id
+            ),
         );
         Ok(out)
     }
@@ -701,6 +740,42 @@ mod tests {
         assert_eq!(u32_at(&b, 72), 2);
         assert_eq!((u32_at(&b, 76), u32_at(&b, 80), u32_at(&b, 84)), (6, 20, 300));
         assert_eq!((u64_at(&b, PERF_HEADER + 16), u64_at(&b, PERF_HEADER + 24)), (50, 50));
+    }
+
+    /// A process that ends while its record is read is not listed: its
+    /// parts may already be teardown's (a Linux process's `comm` and
+    /// distribution gone: `sleep` read as an `sh` of no distribution).
+    /// One that had ended before is not read at all.
+    #[test]
+    fn a_process_ending_while_read_is_left_out() {
+        use core::cell::Cell;
+        // (pid, ended before the read, ends during it)
+        let list = [(1u64, false, false), (2, true, false), (3, false, true), (4, false, false)];
+        let ended: [Cell<bool>; 4] = core::array::from_fn(|i| Cell::new(list[i].1));
+        let index = |pid: u64| list.iter().position(|e| e.0 == pid).unwrap();
+        let mut read_pids = vec![];
+        let (tasks, overtaken) = still_themselves(
+            &list,
+            |e| ended[index(e.0)].get(),
+            |e| {
+                read_pids.push(e.0);
+                if e.2 {
+                    ended[index(e.0)].set(true);
+                }
+                Ok(Task { pid: e.0, ..Task::default() })
+            },
+        )
+        .unwrap();
+        assert_eq!(read_pids, [1, 3, 4]);
+        assert_eq!(tasks.iter().map(|t| t.pid).collect::<Vec<_>>(), [1, 4]);
+        assert_eq!(overtaken, 1);
+    }
+
+    /// A read that fails fails the list.
+    #[test]
+    fn a_failed_read_fails_the_list() {
+        let r = still_themselves(&[1u64], |_| false, |_| Err(NtStatus::NO_MEMORY));
+        assert!(matches!(r, Err(s) if s == NtStatus::NO_MEMORY));
     }
 
     #[test]

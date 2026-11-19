@@ -7495,6 +7495,37 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
   image must hold after the run, checked on the host); host unit tests
   for the IOCTL outputs and sector checks.
+- **Partition tables** (`nt::gpt`, pure and host-tested; ROADMAP IN
+  step 1): the UEFI specification's GPT (protective MBR, primary header
+  and 128-entry array at LBA 1-33, backup array and header at the end,
+  CRC32s) and winioctl.h's structures. IOCTL_DISK_GET_DRIVE_LAYOUT_EX
+  reads the table at each call (DRIVE_LAYOUT_INFORMATION_EX: 48-byte
+  header, 144-byte PARTITION_INFORMATION_EX each, numbered from 1 in
+  array order; a disk without a valid GPT is PARTITION_STYLE_RAW);
+  IOCTL_DISK_CREATE_DISK writes an empty GPT (at least 128 entries);
+  IOCTL_DISK_SET_DRIVE_LAYOUT_EX writes the partitions given (whole
+  sectors, in the usable range, not overlapping, else
+  STATUS_INVALID_PARAMETER); IOCTL_DISK_UPDATE_PROPERTIES succeeds (there
+  is nothing cached). Each write is logged (`disk: GPT written ...`) and
+  flushed. The write IOCTLs need write access to the handle. Limits: MBR
+  tables are neither read (an MBR disk is RAW) nor written
+  (STATUS_NOT_SUPPORTED); the backup is written but not read when the
+  primary is damaged. Test: `partition_test` (as SYSTEM, an empty 64 MiB
+  disk; xtask reads the table back with its own GPT reader).
+- **Partition devices**: each GPT partition is a disk device of its own,
+  `\Device\Harddisk0\Partition<N>` in table order (a `Range`: its
+  first sector and length; DR0's is the whole disk, number 0), named at
+  boot and named again after each table written (the old ones unlinked;
+  each logged). An open reads and writes at the partition's offsets,
+  nothing past its end (STATUS_INVALID_PARAMETER);
+  IOCTL_DISK_GET_LENGTH_INFO is its length, the geometry the disk's,
+  IOCTL_DISK_GET_PARTITION_INFO_EX its layout entry (the whole disk: its
+  style, offset 0, its size, number 0). Win32 reaches them through
+  `\??\GLOBALROOT` (a link to the namespace's root:
+  `\\?\GLOBALROOT\Device\Harddisk0\Partition2`). Limits: Windows'
+  partitions are `\Device\HarddiskVolume<N>` with these names as links,
+  and an open handle keeps the range it was opened with across a new
+  table.
 - TODO: device interrupts, more than one request in flight.
 
 ### C: kept on the disk
@@ -8427,7 +8458,14 @@ draws nothing; user32 loads gdi32 lazily).
 - **Lazy desktop**: a session's desktop goes live at its first GUI call
   (`desktop::with`, `desktop::screen`) and is drawn only when something
   shows it (the screen, `presenter=`); on a machine nothing shows it is
-  bare (below) and nothing is laid out or drawn.
+  bare (below) and nothing is laid out or drawn. A boot that keeps
+  running (no `qemu_exit`: a machine, the downloadable images) makes the
+  console session's desktop live when the boot's own work ends
+  (`desktop::show_console_at_boot_end`, logged either way), so a boot
+  whose programs are console programs ends on the desktop, not on the
+  splash (or, on virtio-gpu, a screen never flushed); a test boot exits
+  first and draws nothing it did not ask for (`desktop_at_boot`, its
+  twin).
 - **Bare desktops.** A machine with no screen and no `presenter=` (BIOS
   boots, gala-um) or in the server profile has nothing that can show a
   desktop (`desktop::bare`, fixed before any program runs). There each
@@ -8571,7 +8609,10 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries), filtered by
-  thread. Waking: each thread waiting for a message (GetMessage,
+  thread. A message that finds every entry taken is lost (PostMessage
+  returns 0, a key `pump` takes or the WM_CHAR TranslateMessage makes
+  goes nowhere): ledgered `user32.dll!message queue full`, the detail
+  the message. Waking: each thread waiting for a message (GetMessage,
   MsgWaitForMultipleObjects, WaitMessage) waits on an auto-reset event
   of its own (made before its first look at the queue, so a wake between
   the look and the wait is kept) and on the process's event, which the
@@ -12788,7 +12829,12 @@ the `unsafe` allow-list). Allocation is fallible (`TryVec`,
   frame: siginfo, the ucontext (its sigcontext with x0-x30, sp, pc and
   pstate, and in its reserved area an fpsimd_context: FPSR, FPCR,
   V0-V31), then the frame record the handler's x29 points at; x30 is
-  sa_restorer; rt_sigreturn reads it back at sp. User mode writes the
+  sa_restorer, or, for an action without SA_RESTORER (aarch64's glibc
+  sets none: Linux returns those through its vDSO's
+  `__kernel_rt_sigreturn`), the process's rt_sigreturn page
+  (`lx::mm::SIGRETURN_PAGE`, just above the stack: `mov x8, #139; svc
+  #0`, read and execute, mapped at exec, copied by fork; gala has no
+  vDSO); rt_sigreturn reads it back at sp. User mode writes the
   thread pointer (TPIDR_EL0) itself, so the scheduler records it at each
   switch away and loads the next thread's (`percpu::live_user_fs_base`).
   Scenarios: the `arm_lx_*` twins (ROADMAP AR).
@@ -13571,7 +13617,7 @@ The running parts (milestone 1; `lxrun=`):
     return address), restores every register (flags filtered by the
     return), the XSAVE state and the mask; a frame it cannot read, or
     whose rip/rsp leave user space, kills with SIGSEGV, as does a frame
-    that cannot be written or an action without SA_RESTORER;
+    that cannot be written or (x86_64) an action without SA_RESTORER;
   - EINTR: blocking pipe reads and writes, wait4 and rt_sigtimedwait
     end with EINTR when a signal is deliverable; read, write, writev and
     wait4 are restarted (rip back over `syscall`, rax the number) after
@@ -14842,12 +14888,22 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   threads unwind, and from then on a Linux process's `comm` and root
   are being dismantled, so its image would be the one its NT process
   was created from (`sh` for one that had exec'd `sleep`) and its
-  distribution empty. Task Manager showed such a row and "End task" on
-  it reached a pid the kernel no longer had (STATUS_INVALID_CID).
-  `process::running` keeps them, since the state dump must still show a
-  process stuck in teardown; this list drops them. `taskmgr_test` ends
-  a Linux process of its own and watches what the list says of it while
-  it goes.
+  distribution empty: a row of its own, in a group ahead of the
+  distribution's. Invariant: the exit status is checked again after a
+  record's parts are read (`tasks::still_themselves`), and the record
+  is dropped if it is set by then; teardown starts only after the
+  status is recorded, so a part read from teardown always comes with
+  that second check failing. Checking only before the read left a
+  window as long as the read (wide on a starved processor): `sleep`,
+  killed while it was being read, was listed as such an `sh`, and End
+  task on `sh` aimed at it (STATUS_INVALID_CID). A query that drops one
+  says so (`tasks: ... left out N that ended while being read`, the
+  `tasks query` event's `ended`). `process::running` keeps them, since
+  the state dump must still show a process stuck in teardown.
+  `taskmgr_test` ends a Linux process of its own and watches what the
+  list says of it while it goes; on a loaded host
+  (`XTASK_REPEAT=20 XTASK_REPEAT_JOBS=4` beside busy loops) it is what
+  reports the race (`listed as "sh", not sleep`).
 - **Windows' contents stay Windows'**: NtQuerySystemInformation's
   SystemProcessInformation (and so Toolhelp and psapi) lists NT
   processes only; a Linux process is no Windows process. `/proc` inside

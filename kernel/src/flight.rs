@@ -16,8 +16,12 @@ pub enum Kind {
     /// A system call starts: a = number | pid << 32, b = thread id
     /// (a Linux call's number carries [`LINUX`]).
     Syscall = 1,
-    /// It ends: a = number (with [`LINUX`] for a Linux call), b = its
-    /// status (a Linux call's return value).
+    /// It ends: a = number (with [`LINUX`] for a Linux call) | thread
+    /// id << 32, b = its status (a Linux call's return value). The thread
+    /// is named because a call need not end on the CPU, or right after
+    /// the records, it started with: a call that blocks or is preempted
+    /// resumes on whichever CPU picks the thread, after other threads'
+    /// records.
     SyscallDone = 2,
     /// A process ended: a = pid, b = exit status.
     ProcessExit = 3,
@@ -110,58 +114,66 @@ pub struct Call {
 /// after it (eleven in a `crash_raise` run).
 pub const CALLS: usize = 24;
 
+/// Call ends kept while pairing them with their calls: one per call kept,
+/// and room for ends of calls older than those (a call a callback was made
+/// from, whose end comes after the calls inside it).
+const ENDS: usize = CALLS + 8;
+
 /// The last calls of thread `tid` in `rings`, oldest first, into `out`;
-/// the count written. A call's status is the `syscall-done` record that
-/// followed it on the same CPU: a thread runs its call on the CPU it
-/// started it on, and the records of a CPU are in the order they
-/// happened, so what a ring holds between a thread's call and the next
-/// call of any thread is that call's own end.
+/// the count written. A call's status is the `syscall-done` record of the
+/// same thread and number that followed it in time, on any CPU: a call
+/// that blocks or is preempted resumes on whichever CPU picks its thread,
+/// and other threads' records come between its start and its end even on
+/// one CPU. A call with no such end had not returned when the records were
+/// read (the call the thread died in, one a frame above is still in, or one
+/// that does not return, as NtContinue).
 #[cfg_attr(feature = "hosted", allow(dead_code))]
 fn calls_of<'a>(rings: impl Iterator<Item = &'a Ring>, tid: u64, out: &mut [Call]) -> usize {
-    let mut n = 0;
-    let mut keep = |call: Call| {
-        if n < out.len() {
-            out[n] = call;
-            n += 1;
-        } else if let Some(oldest) = out[..n].iter_mut().min_by_key(|c| c.at)
-            && oldest.at < call.at
+    // The latest of `item` by its time into `kept` (holding `*n`).
+    fn keep<T: Copy>(kept: &mut [T], n: &mut usize, item: T, at: impl Fn(&T) -> u64) {
+        if *n < kept.len() {
+            kept[*n] = item;
+            *n += 1;
+        } else if let Some(oldest) = kept[..*n].iter_mut().min_by_key(|c| at(c))
+            && at(oldest) < at(&item)
         {
-            *oldest = call;
+            *oldest = item;
         }
-    };
+    }
+    let mut n = 0;
+    // The thread's call ends: (time, number, status).
+    let mut ends = [(0u64, 0u64, 0u32); ENDS];
+    let mut m = 0;
+    let room = ENDS.min(out.len() + (ENDS - CALLS));
     for ring in rings {
-        // The thread whose call this CPU is in, and that call until its
-        // end is known (a record of another thread ends the wait for it:
-        // this CPU went on to something else).
-        let mut whose = 0;
-        let mut open: Option<Call> = None;
         for (at, kind, a, b) in ring.records() {
             match kind {
-                k if k == Kind::Syscall as u8 => {
-                    whose = b;
-                    if let Some(call) = open.take() {
-                        keep(call);
-                    }
-                    if b == tid {
-                        open = Some(Call { at, number: a & 0xffff_ffff, status: None });
-                    }
+                k if k == Kind::Syscall as u8 && b == tid => {
+                    let call = Call { at, number: a & 0xffff_ffff, status: None };
+                    keep(out, &mut n, call, |c| c.at);
                 }
-                k if k == Kind::SyscallDone as u8 => {
-                    if let Some(mut call) = open.take() {
-                        if whose == tid {
-                            call.status = Some(b as u32);
-                        }
-                        keep(call);
-                    }
+                k if k == Kind::SyscallDone as u8 && a >> 32 == tid => {
+                    keep(&mut ends[..room], &mut m, (at, a & 0xffff_ffff, b as u32), |e| e.0);
                 }
                 _ => {}
             }
         }
-        if let Some(call) = open.take() {
-            keep(call);
-        }
     }
     out[..n].sort_unstable_by_key(|c| c.at);
+    ends[..m].sort_unstable_by_key(|e| e.0);
+    // Each end, oldest first, closes the latest call of its number that
+    // started before it and is still open (a callback's calls end before
+    // the call they were made from).
+    for &(at, number, status) in &ends[..m] {
+        if let Some(call) = out[..n]
+            .iter_mut()
+            .rev()
+            .skip_while(|c| c.at > at)
+            .find(|c| c.number == number && c.status.is_none())
+        {
+            call.status = Some(status);
+        }
+    }
     n
 }
 
@@ -234,9 +246,10 @@ pub fn dump(cpus: u64, max: usize, mut print: impl FnMut(core::fmt::Arguments)) 
                 a >> 32
             )),
             2 => print(format_args!(
-                "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} status {b:#010x})",
+                "flight: {t} cpu {cpu} {} {a:#x} {b:#x} ({} status {b:#010x} tid {})",
                 Kind::name(kind),
-                service(a)
+                service(a & 0xffff_ffff),
+                a >> 32
             )),
             _ => print(format_args!("flight: {t} cpu {cpu} {} {a:#x} {b:#x}", Kind::name(kind))),
         }
@@ -414,11 +427,11 @@ mod tests {
         // Two threads on one CPU: 16 opens a key that is not there, 20
         // waits, then 16 writes.
         ring.push(10, Kind::Syscall, 0x12, 16);
-        ring.push(20, Kind::SyscallDone, 0x12, 0xc000_0034);
+        ring.push(20, Kind::SyscallDone, 0x12 | 16 << 32, 0xc000_0034);
         ring.push(30, Kind::Syscall, 0x4, 20);
-        ring.push(40, Kind::SyscallDone, 0x4, 0x102);
+        ring.push(40, Kind::SyscallDone, 0x4 | 20 << 32, 0x102);
         ring.push(50, Kind::Syscall, 0x8, 16);
-        ring.push(60, Kind::SyscallDone, 0x8, 0);
+        ring.push(60, Kind::SyscallDone, 0x8 | 16 << 32, 0);
         let mut out = [Call::default(); CALLS];
         let n = calls_of([&ring].into_iter(), 16, &mut out);
         assert_eq!(
@@ -440,12 +453,75 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_ends_on_another_cpu_keeps_its_status() {
+        // arm_crash_raise: thread 8's NtWriteFile (0x8) blocks on CPU 0,
+        // thread 12 makes a call there, and 8 resumes on CPU 1, where its
+        // call ends and the next one starts.
+        let (cpu0, cpu1) = (Ring::new(), Ring::new());
+        cpu0.push(10, Kind::Syscall, 0x8, 8);
+        cpu0.push(20, Kind::Syscall, 0x4, 12);
+        cpu1.push(30, Kind::SyscallDone, 0x8 | 8 << 32, 0);
+        cpu1.push(40, Kind::Syscall, 0x23, 8);
+        cpu1.push(50, Kind::SyscallDone, 0x23 | 8 << 32, 0);
+        cpu0.push(60, Kind::SyscallDone, 0x4 | 12 << 32, 0x102);
+        let mut out = [Call::default(); CALLS];
+        let n = calls_of([&cpu0, &cpu1].into_iter(), 8, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                Call { at: 10, number: 0x8, status: Some(0) },
+                Call { at: 40, number: 0x23, status: Some(0) },
+            ]
+        );
+    }
+
+    #[test]
+    fn another_threads_call_between_a_call_and_its_end_takes_nothing_from_it() {
+        // One CPU: 16's wait (0x4) is preempted, 20 makes the same call
+        // and it ends with its own status, then 16's ends.
+        let ring = Ring::new();
+        ring.push(10, Kind::Syscall, 0x4, 16);
+        ring.push(20, Kind::Syscall, 0x4, 20);
+        ring.push(30, Kind::SyscallDone, 0x4 | 20 << 32, 0x102);
+        ring.push(40, Kind::SyscallDone, 0x4 | 16 << 32, 0);
+        let mut out = [Call::default(); CALLS];
+        let n = calls_of([&ring].into_iter(), 16, &mut out);
+        assert_eq!(&out[..n], &[Call { at: 10, number: 0x4, status: Some(0) }]);
+    }
+
+    #[test]
+    fn a_callbacks_calls_end_before_the_call_they_were_made_from() {
+        // 16 makes 0x50, a callback inside it makes 0x50 and 0x8 (which
+        // return) and 0x1 (the callback's return, which does not), then
+        // the outer 0x50 ends.
+        let ring = Ring::new();
+        ring.push(10, Kind::Syscall, 0x50, 16);
+        ring.push(20, Kind::Syscall, 0x50, 16);
+        ring.push(30, Kind::SyscallDone, 0x50 | 16 << 32, 0xc000_000d);
+        ring.push(40, Kind::Syscall, 0x8, 16);
+        ring.push(50, Kind::SyscallDone, 0x8 | 16 << 32, 0);
+        ring.push(60, Kind::Syscall, 0x1, 16);
+        ring.push(70, Kind::SyscallDone, 0x50 | 16 << 32, 0);
+        let mut out = [Call::default(); CALLS];
+        let n = calls_of([&ring].into_iter(), 16, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                Call { at: 10, number: 0x50, status: Some(0) },
+                Call { at: 20, number: 0x50, status: Some(0xc000_000d) },
+                Call { at: 40, number: 0x8, status: Some(0) },
+                Call { at: 60, number: 0x1, status: None },
+            ]
+        );
+    }
+
+    #[test]
     fn the_calls_kept_are_the_last_ones_whatever_cpu_they_ran_on() {
         let (first, second) = (Ring::new(), Ring::new());
         for i in 0..20u64 {
             let ring = if i % 2 == 0 { &first } else { &second };
             ring.push(100 + i, Kind::Syscall, i, 16);
-            ring.push(100 + i, Kind::SyscallDone, i, 0);
+            ring.push(100 + i, Kind::SyscallDone, i | 16 << 32, 0);
         }
         let mut out = [Call::default(); 4];
         let n = calls_of([&first, &second].into_iter(), 16, &mut out);

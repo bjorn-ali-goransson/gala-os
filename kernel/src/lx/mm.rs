@@ -56,6 +56,11 @@ pub const TASK_SIZE: u64 = super::elf::USER_END;
 /// size (RLIMIT_STACK's usual 8 MiB, committed, given frames on touch).
 pub const STACK_END: u64 = 0x7fff_fffe_0000;
 pub const STACK_SIZE: u64 = 8 << 20;
+/// The page holding `machine::SIGRETURN_CODE` (where it has any), read
+/// and execute, mapped at exec just above the stack: a handler
+/// registered without SA_RESTORER returns there (Linux: the vDSO's
+/// rt_sigreturn). Forks copy it with the address space.
+pub const SIGRETURN_PAGE: u64 = STACK_END;
 /// mmap without a usable hint places mappings top-down from here (below
 /// the stack, as Linux's mmap base is).
 pub const MMAP_TOP: u64 = STACK_END - STACK_SIZE - (16 << 20);

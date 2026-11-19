@@ -64,9 +64,22 @@ The ordering rules in force (set by the owner):
 
 ## Current focus
 
-**The next big thing (the owner): Microsoft Office, item OF, with
-everything it depends on.** It goes before the list below (work in
-flight finishes: LD's first GTK program). Its chain, in order:
+**Next (the owner): a laptop that runs gala and takes every release by
+itself.** In order:
+1. **The desktop on ARM** (item AR, "Next" 0): the downloadable
+   aarch64 image boots to a desktop that keyboard and mouse can use,
+   GTK programs on aarch64, `arm_lx_wl_popup`'s hang.
+2. **The installer** (item IN): gala installed from its USB image onto
+   a machine's disk, which then boots by itself.
+3. **Live update working end to end** (items R8 and R9, on item HW's
+   machine): R8's updater in gala takes each release from
+   `updates.gala-os.com` and hands it to R9; the user-mode half of R9.
+   The machine also needs item HW's drivers (its disk, USB input, a
+   network: a wired USB adapter first, Wi-Fi, item WF, after).
+
+**Then (the owner): Microsoft Office, item OF, with everything it
+depends on.** It goes before the list below (work in flight finishes:
+LD's first GTK program). Its chain, in order:
 OF step 1's gap analysis (what the apps import and register, ranked
 against gala); GPU G2's rest (DXVK: Direct3D 11 in software over
 lavapipe, which the apps' rendering expects); COM/OLE depth and the
@@ -213,7 +226,8 @@ has a section under "Open items".
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
 | LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
-| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next the remaining test programs |
+| AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next (the owner) the desktop on ARM: the boot ends on a usable desktop (`desktop_at_boot`) and GTK runs (`arm_lx_gtk`); the popup hang left |
+| VM | Virtual machines on gala | later | wanted, not scheduled (the owner); step 1: QEMU's emulation (TCG) as an ordinary program, a small Linux guest booted inside gala; step 2: gala as the hypervisor (VT-x/AMD-V, ARM's EL2) behind Linux's `/dev/kvm`, then the Windows Hypervisor Platform (`WinHvPlatform.dll`) |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
@@ -237,6 +251,8 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
+| IN | The installer: gala onto a machine's disk | in progress (step 1: the layout IOCTLs, `partition_test`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 30.5 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
@@ -4860,14 +4876,28 @@ on the seams item PT prepared: native ARM64 Windows programs
   emulation (TCG on GitHub's x86-64 runners).
 
 **Next**:
+0. **The desktop on ARM** (the owner: the next work). Done: a boot
+   that keeps running ends on the console session's desktop (the
+   downloadable images showed a black screen on aarch64 and the splash
+   on x64: their console programs never made it live);
+   `desktop_at_boot` and `arm_desktop_at_boot` boot as the images do and
+   check the desktop, the start menu from the Windows key and from a
+   click. Left: item 1 below (the popup hang),
+   and the hardware a real machine has (item HW). The aarch64 image's
+   command line is the twin's; x64's adds the Go programs.
 1. `arm_lx_wl_popup`'s hang (open): once on CI, wl_popup_test blocked
    reading its socket in a roundtrip after the "anchor bottom" popup's
    commit while the server's thread waited too (a wakeup lost, or a
-   request answered with nothing); not reproduced locally, loaded or
-   not. The state dump now says which (`a round would find work`, each
+   request answered with nothing; the server had served 79 requests
+   and had no events waiting); not reproduced locally (0 of 224 boots
+   with 4 at once beside 2-3 busy host loops), nor on CI since. The
+   state dump now says which (`a round would find work`, each
    client's socket) and names Linux calls in the flight records.
-2. User mode, the rest: gtk_test on aarch64 (GTK 3's arm64 libraries as its
-   Linux root, as x64's amd64 ones). arch_prctl_test and signal_test stay x86_64's (the
+2. User mode, the rest: the desktop Linux applications run on aarch64
+   from their roots' arm64 builds (`DEBS_ARM64`): GTK (`arm_lx_gtk`,
+   `arm_lx_gtk_x11`), xterm, a distribution's desktop, GIMP and
+   Inkscape (`arm_lx_xterm`, `arm_lx_xdesktop`, `arm_lx_gimp(_batch)`,
+   `arm_lx_inkscape(_batch)`). arch_prctl_test and signal_test stay x86_64's (the
    call and the sigcontext fields they check are x86's; the aarch64
    signal frame is pipe_test's, id_test's, altstack_test's and
    seccomp_test's).
@@ -5460,7 +5490,9 @@ floor in the superblock's sector. Next:
      update feed"), then a publish that proves what the local tests
      cannot (R2's 404 for an absent file at the public URL, `aws`
      against R2's endpoint, the head-object guard, the job summary).
-   - The updater in gala (test first): a scenario where xtask serves a
+   - The updater in gala (test first; the owner: next after item IN,
+     so that item HW's laptop takes every release by itself): a
+     scenario where xtask serves a
      feed from a local directory (a fake bucket) and gala's updater
      (`tuf::update` over winhttp and C:, the trusted root in the image)
      takes a release, and hands the staged release to R9's live update;
@@ -6405,6 +6437,131 @@ a refresh.
 **Design**: ARCHITECTURE "The file explorer" (and "The WSL facade" for
 `\\wsl.localhost`).
 
+### IN. The installer: gala onto a machine's disk
+
+**Goal** (the owner): a machine booted from gala's USB image comes up
+to the desktop, and a graphical installer there puts gala on its disk;
+the machine then boots gala from that disk alone.
+
+**Today**: gala boots from its ISO (Limine on the image's EFI system
+partition, ARCHITECTURE "Boot"); with `persist` it uses the whole
+virtio disk as C: with no partition table (ARCHITECTURE "C: kept on the
+disk"). `\\.\PhysicalDrive0` opens the raw disk for Administrators and
+SYSTEM, with the length and geometry IOCTLs and no partition ones.
+
+**Shape**: a native gala program (a Rust Windows executable on
+gala's user32, as taskmgr and explorer are), not a Linux one. The raw
+disk is an NT device behind the security model, which a Linux
+distribution's root does not reach; Windows' own disk IOCTLs
+(IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+IOCTL_DISK_UPDATE_PROPERTIES) are what it calls, so its test program
+runs on real Windows against a scratch disk and gives the expected
+results, as every other test program's do. Windows Setup has the same
+shape. A small Windows-side tool (shrink C: with Windows' own volume
+APIs, write the USB stick) is later, for installs beside Windows.
+
+**Libraries** (permissive; recorded in THIRD_PARTY.md when taken):
+`gpt` or `gptman` (GPT tables), `mbrman` (MBR disks), `fatfs` (the EFI
+system partition), Limine's own `bios-install` for BIOS machines. Not
+taken: GNU parted/libparted (GPL-3), Calamares (GPL, Qt, assumes Linux
+underneath), ntfs-3g's ntfsresize (GPL; Windows shrinks its own
+volume instead).
+
+**Next** (each step test first):
+1. Partitions in the kernel: done for GPT disks (`partition_test`,
+   ARCHITECTURE "Disk"): the layout IOCTLs (GET/SET_DRIVE_LAYOUT_EX,
+   CREATE_DISK, UPDATE_PROPERTIES, GET_PARTITION_INFO_EX) and each
+   partition a device (`\Device\Harddisk0\Partition1`...). Open: its
+   run on real Windows (GitHub issue #206), MBR tables read.
+2. C: in a partition: the persisted volume found by its partition type
+   GUID instead of filling the disk; the `persist` scenarios on a
+   partitioned disk.
+3. Booting from the installed disk: the EFI system partition with
+   Limine, the kernel, the sealed config and the manifest (R8), the
+   firmware's boot entry; Secure Boot's enrollment with R8 step 1.
+4. The installer program: pick a disk, erase it or use its free space,
+   confirm, install, report; every step and failure as events, an
+   answer file for unattended runs (Windows' autounattend is the
+   model). Scenario: a first boot installs onto an empty virtio disk
+   unattended; a second boot starts from that disk alone and reaches
+   the desktop.
+5. Beside Windows: the Windows-side tool shrinks C:, the installer uses
+   the space; the boot menu offers both.
+
+**Needs**: item AR's desktop on the image (and x64's), item HW's
+drivers for a real machine's disk.
+
+**Done when**: step 4's two-boot scenario passes on both architectures,
+and the owner's laptop is installed by it.
+
+### VM. Virtual machines on gala
+
+**Not scheduled** (the owner): in the backlog until it is picked.
+
+**Goal**: virtual machines run on gala, first by emulation, then with
+the processor's virtualization, through the interfaces existing
+virtual machine programs already use.
+
+**Today**: nothing. CT's containers run on LX with no virtual machine;
+WSL2, the Hyper-V backends and Docker Desktop's own VM are out of CT's
+scope.
+
+**Next** (each step test first):
+1. QEMU's emulation (TCG) as an ordinary program: its Windows build,
+   and its Linux build in a distribution, boot a small Linux guest
+   inside gala (a scenario checks the guest's serial output). It needs
+   what JITs already use (executable memory written at run time,
+   threads, timers); 10-50x slower than hardware, enough for small
+   guests and tests.
+2. gala as the hypervisor: one in-kernel core for both architectures
+   (a virtual CPU's run loop and exits, the guest's second-level page
+   tables, interrupt injection, the scheduler preempting a CPU running
+   guest code); VT-x and AMD-V on x86-64, EL2 on aarch64 (the kernel
+   already runs at EL2 with VHE, as KVM does there). Guests are
+   isolated as processes are (SECURITY).
+3. Linux's `/dev/kvm` on that core (QEMU, Firecracker,
+   cloud-hypervisor, crosvm), test programs against real Linux's KVM.
+4. The Windows Hypervisor Platform (`WinHvPlatform.dll`, the `WHv*`
+   functions, Microsoft's public documentation) on the same core:
+   QEMU's `whpx`, the Android emulator, VirtualBox and VMware in their
+   Hyper-V modes; test programs against real Windows.
+
+Tests run in CI under emulation: QEMU's TCG emulates AMD's SVM on
+x86-64 and EL2 on aarch64 (`virtualization=on`).
+
+**Out of scope**: VirtualBox's and VMware's own kernel drivers (gala
+loads no Windows kernel drivers), Hyper-V itself (its manager and
+services), device passthrough (GPU's G3 note).
+
+**Done when**: each step's scenario passes; a Linux guest boots under
+QEMU with `/dev/kvm` and with `whpx`.
+
+### HW. A real laptop: gala on hardware, waiting for updates
+
+**Goal** (the owner): a laptop installed by item IN runs gala, stays on,
+and takes every release from the update feed by itself (R8's updater,
+R9's live update).
+
+**Today**: gala runs in QEMU only (virtio disk, network, GPU and input;
+PS/2 on x86-64). On a machine without PS/2 the input thread says so and
+stops (item USB).
+
+**Next** (each test first, in QEMU with the same device, then on the
+owner's laptop):
+1. Disks: AHCI (`-device ahci`) and NVMe (`-device nvme`) drivers from
+   their published specifications, as disks under gala's file systems
+   and `\\.\PhysicalDrive<n>`.
+2. Input: item USB's device interrupts, xHCI and HID.
+3. A network: a wired USB Ethernet adapter (CDC-ECM/NCM) first, with
+   WF layer 1's DHCP; then Wi-Fi (item WF).
+4. The screen: the firmware's framebuffer (GOP) on x86-64; on ARM
+   laptops what their firmware gives.
+5. Power: the lid, the battery's state, the backlight, sleep (ACPI).
+6. A machine-sized test: R8's updater and R9's handover on the laptop,
+   every release taken for a week with nothing restarted by hand.
+
+**Done when**: step 6 holds on the owner's laptop.
+
 ## Known issues and stopgaps
 
 Each entry: what, why it matters, the structural fix, the owning item.
@@ -6729,8 +6886,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   0xE0000008, ChromeDriver not exiting, the WPT run), and Widevine and
   the proprietary codecs are a piece apart for either browser.
 - **gala's own drivers** against published standards: after virtio,
-  AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
-  item SND).
+  e1000 (AHCI and NVMe: item HW; xHCI and device interrupts: item USB;
+  sound: item SND).
 - **Raspberry Pi** (on item AR's port): Pi 4/5, QEMU's `raspi4b`/`virt`
   first; Limine or the Pi's firmware loading the kernel, the GIC and the
   generic timer, the PL011 UART, the mailbox framebuffer, then EMMC2/SD,

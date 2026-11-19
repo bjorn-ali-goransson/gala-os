@@ -641,6 +641,18 @@ export const planned: Planned[] = [
     name: "Sound and USB",
     what: "virtio-sound with WASAPI on top; xHCI with keyboards, mice and storage",
   },
+  {
+    name: "An installer",
+    what: "boot the USB image to the desktop and install gala onto the machine's disk, which then boots it by itself",
+  },
+  {
+    name: "Real laptops",
+    what: "disk, USB, network and power drivers, so a laptop runs gala and takes every update by itself",
+  },
+  {
+    name: "Virtual machines",
+    what: "QEMU running inside gala, then gala as the hypervisor behind Linux's /dev/kvm and the Windows Hypervisor Platform",
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -937,4 +949,4 @@ export const images: Image[] = [
 
 /** What a downloaded image does when it boots (xtask DEMO_CMDLINE*). */
 export const imageDemo =
-  "Each image is a developer build of main's latest commit that passed every test, rebuilt nightly. It boots the kernel, assembles C:, and runs a few demonstration programs: a minimal Windows program on both machines, and on x86_64 also a Go program and one that starts a thousand goroutines across both processors. Their output and the kernel's log go to the serial console, which the command's serial option shows in your terminal; the window stays on the boot screen (x86_64) or blank (aarch64), since there is no interactive desktop on these images yet. Expect lines such as “Hello from user mode!” and, at the end, “gala: boot ok”. Close QEMU's window, or press Ctrl+C in the terminal, to stop it.";
+  "Each image is a developer build of main's latest commit that passed every test, rebuilt nightly. It boots the kernel, assembles C:, and runs a few demonstration programs: a minimal Windows program on both machines, and on x86_64 also a Go program and one that starts a thousand goroutines across both processors. Their output and the kernel's log go to the serial console, which the command's serial option shows in your terminal: expect lines such as “Hello from user mode!” and “gala: boot ok”. Then QEMU's window shows gala's desktop: the taskbar, the clock, and the start menu, which the Windows key or a click on the start button opens. Close QEMU's window, or press Ctrl+C in the terminal, to stop it.";

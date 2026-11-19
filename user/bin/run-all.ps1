@@ -57,6 +57,7 @@ $standardUserOnly = [ordered]@{
     kernel32_file_test = "an administrator may open \\.\C: for reading, which its checks expect to be ERROR_ACCESS_DENIED"
     kernel32_pool_test = "an administrator holds SeCreateSymbolicLinkPrivilege, which its checks assert is not held"
     disk_test          = "an administrator opens PhysicalDrive0, which is not xtask's 16 MiB scratch disk"
+    partition_test     = "an administrator opens PhysicalDrive0, which is not xtask's empty 64 MiB scratch disk"
 }
 ("# run-all.ps1 as $who" + [Environment]::NewLine) | Set-Content -Path $outAll -Encoding UTF8
 

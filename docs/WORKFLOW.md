@@ -532,7 +532,9 @@ xtask that change how a scenario boots:
   sqllocaldb and postgres get 3 GiB (`qemu()` in xtask).
 - **Servers**: a server never exits; scenarios with exit status
   `XTASK_STOPS` are stopped by xtask once their net client has finished,
-  and pass if it succeeded.
+  and pass if it succeeded. One with a screen check and no client (a
+  machine left running, `desktop_at_boot`) is stopped once the check
+  has passed.
 - **A server and a client at once**: `run=` starts programs one after
   another, so the client starts the server itself (CreateProcessW) and
   waits for it, as `tds_test` does with sqlservr; or the scenario starts
@@ -2634,7 +2636,12 @@ source).
 ### Linux roots from Ubuntu 26.04 (ROADMAP LD)
 
 The Linux roots (`LINUX_ROOTS`, the "glibc", "wayland_client" and
-"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket.
+"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket. An aarch64 twin
+ships a root's arm64 build (`<root>-arm64`, assembled from the same
+packages' `_arm64.deb` on ports.ubuntu.com): each new amd64 package of a
+root a twin uses needs its arm64 SHA-256 in `DEBS_ARM64`, from the
+release's signed arm64 `Packages` index (`dists/resolute/<component>/
+binary-arm64/Packages.xz`).
 A root is what its workload opened on real 26.04, traced:
 
 - `tools/linux-roots/mkchroot.sh <base.tar.gz> <dir> <packages>` makes a
@@ -3968,7 +3975,11 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   check that the list has been filtered (`TASKMGR_FILTERED`, the list's
   background where unfiltered there are rows). Otherwise a loaded host
   clicks where the row is about to be, the row arrives unselected, and
-  only the step's screendump says so.
+  only the step's screendump says so. The check must also tell this
+  search's list from the previous step's: two searches that each leave
+  one group with one row look alike, and a check both pass is met by
+  the screen still showing the last one (the `sh` step checks that the
+  name cell is blank right of "sh", where `sleep`'s name goes on).
 - Windows-key chords are one `sendkey` (`sendkey meta_l-right`: Snap).
   The wheel: `mouse_move 0 0 1` is one notch up (away from the user; a
   negative dz is down).

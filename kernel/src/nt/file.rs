@@ -148,6 +148,10 @@ pub fn init() -> Result<(), NtStatus> {
     namespace::create(None, &wide("\\Device\\Null")?, null, false, false)?;
     let link = namespace::new_symbolic_link(&wide("\\Device\\Null")?)?;
     namespace::create(None, &wide("\\??\\NUL")?, link, false, false)?;
+    // `\??\GLOBALROOT`: the namespace's root, as Windows links it
+    // (`\\?\GLOBALROOT\Device\...` names a device from Win32).
+    let root = namespace::new_symbolic_link(&[])?;
+    namespace::create(None, &wide("\\??\\GLOBALROOT")?, root, false, false)?;
     // UNC paths (`\??\UNC\server\share`) reach the multiple UNC
     // provider's device; nt::wslfs serves WSL's servers below it.
     let mup =
