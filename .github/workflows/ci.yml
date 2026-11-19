@@ -181,6 +181,7 @@ jobs:
           cargo clippy -p kernel --lib --features hosted -- -D warnings
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
+          cargo clippy -p setup --tests -- -D warnings
           cargo clippy -p wsl --lib --tests -- -D warnings
           cargo clippy -p taskmgr --lib --tests -- -D warnings
           cargo clippy -p shellns --tests -- -D warnings

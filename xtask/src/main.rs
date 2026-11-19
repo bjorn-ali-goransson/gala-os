@@ -11844,6 +11844,8 @@ fn unit_tests() -> Result {
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The installer's FAT32 and tar (ROADMAP IN step 4).
+    run_cmd(cargo().args(["test", "--package", "setup"]))?;
     // The XML reader galapkg and msxml6.dll share.
     run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
