@@ -1138,6 +1138,16 @@ beside the program, never in System32. When one fails:
   no psql (apt install postgresql-client); `cargo xtask docker-test` runs
   the tests in an image that carries it`. A client says it before the
   boot instead of after it.
+- **A tree extracted from an ISO cannot be removed as it is.** `xorriso
+  -extract` restores the permissions the ISO records, and an ISO carries
+  no write bit on anything, so the entries of such a tree cannot be
+  unlinked -- not by `fs::remove_dir_all`, not by `rm -rf` as its owner.
+  xtask makes a freshly extracted tree writable and clears an old one
+  the same way (`make_writable`, `remove_extracted`). Swallowing that
+  removal's failure is what made `boot_from_disk` fail on every run
+  after its first on one host: the leftover `EFI/BOOT` was a directory
+  the next extract could not overwrite, reported as xorriso's exit 5
+  with no hint of the tree behind it.
 - **The whole suite needs a machine as wide as its parallelism.**
   `cargo xtask test` boots as many VMs at once as the host has logical
   CPUs, each with 2 vCPUs, and the run-time limit is what keeps the host's
