@@ -518,8 +518,9 @@ pub enum ObjectBody {
     NullDevice,
     /// `\Device\Mup` (`\??\UNC`): UNC paths; WSL's servers (nt::wslfs).
     MupDevice,
-    /// `\Device\Harddisk0\DR0` (`\??\PhysicalDrive0`): the disk (nt::disk).
-    DiskDevice,
+    /// `\Device\Harddisk0\DR0` (`\??\PhysicalDrive0`): the disk, or
+    /// `\Device\Harddisk0\PartitionN`: one of its partitions (nt::disk).
+    DiskDevice(super::disk::Range),
     /// An open of the disk: raw sector access.
     Disk(super::disk::DiskFile),
     /// An open of the volume itself (`\\.\C:`, `\??\Volume{...}` without a
@@ -668,7 +669,7 @@ impl KObject {
             ObjectBody::NullDevice => "Device",
             ObjectBody::MupDevice => "Device",
             ObjectBody::Null(_) => "File",
-            ObjectBody::DiskDevice => "Device",
+            ObjectBody::DiskDevice(_) => "Device",
             ObjectBody::Disk(_) => "File",
             ObjectBody::VolumeFile(_) => "File",
             ObjectBody::Key(_) => "Key",
@@ -722,7 +723,7 @@ impl KObject {
             | ObjectBody::NamedPipeDevice
             | ObjectBody::NullDevice
             | ObjectBody::MupDevice
-            | ObjectBody::DiskDevice
+            | ObjectBody::DiskDevice(_)
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
             | ObjectBody::KeyedEvent(_)
@@ -754,7 +755,7 @@ impl KObject {
             | ObjectBody::NullDevice
             | ObjectBody::MupDevice
             | ObjectBody::Null(_)
-            | ObjectBody::DiskDevice
+            | ObjectBody::DiskDevice(_)
             | ObjectBody::Disk(_)
             | ObjectBody::VolumeFile(_) => FILE_MAPPING,
             ObjectBody::Process(_) => PROCESS_MAPPING,

@@ -1358,6 +1358,22 @@ cannot be fetched, it dates everything now (a full build, never a stale
 one), and the stamp then names HEAD for the next save. The `linux` and
 `windows` jobs have no build cache.
 
+The Linux roots' Ubuntu packages (`target/prebuilt/debs`) are fetched once
+per run by the `debs` job (`cargo xtask fetch-debs`: every root's pinned
+packages, amd64 and arm64, and the prebuilts that are Ubuntu packages
+(glibc, libwayland-client, libffi, weston: `fetch_prebuilt` takes them
+from this cache), checked, the ones no longer pinned removed)
+into one cache, `gala-debs-<hash of xtask/src/main.rs>` (the newest
+restored first, so only new pins are downloaded); the boot shards restore
+exactly that key (`fail-on-cache-miss`) and keep it out of their own
+prebuilt caches. Six shards each fetching them had Ubuntu's archive reset
+their connections whenever the scenarios moved between shards. CI fetches
+amd64 packages (and the prebuilts from Ubuntu's pool) through the mirror
+the runners' apt uses, `XTASK_UBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu`:
+archive.ubuntu.com resets or hangs the runners' connections even one
+download at a time. Every download is checked against its pinned
+SHA-256, whatever serves it.
+
 ### Downloadable images
 
 `.github/workflows/images.yml`: nightly (02:23 UTC) and on a manual run
@@ -2585,7 +2601,12 @@ source).
 ### Linux roots from Ubuntu 26.04 (ROADMAP LD)
 
 The Linux roots (`LINUX_ROOTS`, the "glibc", "wayland_client" and
-"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket.
+"weston" prebuilts) are Ubuntu 26.04 LTS's (resolute) release pocket. An aarch64 twin
+ships a root's arm64 build (`<root>-arm64`, assembled from the same
+packages' `_arm64.deb` on ports.ubuntu.com): each new amd64 package of a
+root a twin uses needs its arm64 SHA-256 in `DEBS_ARM64`, from the
+release's signed arm64 `Packages` index (`dists/resolute/<component>/
+binary-arm64/Packages.xz`).
 A root is what its workload opened on real 26.04, traced:
 
 - `tools/linux-roots/mkchroot.sh <base.tar.gz> <dir> <packages>` makes a

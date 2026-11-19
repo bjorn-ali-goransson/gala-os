@@ -520,6 +520,23 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["usr/lib/x86_64-linux-gnu/libffi.so.8"],
         excludes: &[],
     },
+    // The same two for aarch64 (twins of Wayland client scenarios), the
+    // release's arm64 packages from ports.ubuntu.com (SHA-256s from its
+    // signed Packages index).
+    Prebuilt {
+        name: "libwayland-client-arm64",
+        url: "https://ports.ubuntu.com/ubuntu-ports/pool/main/w/wayland/libwayland-client0_1.24.0-2_arm64.deb",
+        checksum: "8459ccec5bdd6aa15dd1e75ea450d97e514f8448e529c4fd08cc036f23f4235a",
+        members: &["usr/lib/aarch64-linux-gnu/libwayland-client.so.0"],
+        excludes: &[],
+    },
+    Prebuilt {
+        name: "libffi-arm64",
+        url: "https://ports.ubuntu.com/ubuntu-ports/pool/main/libf/libffi/libffi8_3.5.2-4_arm64.deb",
+        checksum: "cfab73343f076b79df0f4a9d5430319fdb6153760d3e8c2964c448b49edad084",
+        members: &["usr/lib/aarch64-linux-gnu/libffi.so.8"],
+        excludes: &[],
+    },
     // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
     // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
     // 7.1.1 manifest's): an Inno Setup installer built with
@@ -642,6 +659,1116 @@ struct Deb {
     /// program looks for with nothing used beneath it (GIMP's plug-ins
     /// check that `usr/share/locale/` is there).
     files: &'static [&'static str],
+}
+
+/// The arm64 builds of LINUX_ROOTS' packages, for the aarch64 twins of
+/// their scenarios: each amd64 package's pool path and the SHA-256 of the
+/// arm64 package of the same version (`_arm64.deb`, on ports.ubuntu.com),
+/// from the release's signed arm64 Packages index (dists/resolute/
+/// <component>/binary-arm64/Packages.xz, its hash in the signed
+/// InRelease). Architecture-independent packages (`_all.deb`) are the
+/// same file on both. A root built for arm64 (`<name>-arm64`) has its
+/// files at the multiarch path `aarch64-linux-gnu` instead of
+/// `x86_64-linux-gnu`.
+const DEBS_ARM64: &[(&str, &str)] = &[
+    (
+        "main/b/bubblewrap/bubblewrap_0.11.1-1_amd64.deb",
+        "b26ca6b2e5c2bf2ebbec87a2f7e6872f9fd72078838425faa4c80f081e950208",
+    ),
+    (
+        "main/d/dconf/dconf-gsettings-backend_0.49.0-4_amd64.deb",
+        "1f1ea3eb96ca070f8fbd39c81be10df13b1e1083220d4ea5767cc9e37dee5deb",
+    ),
+    (
+        "main/f/fontconfig/fontconfig-config_2.17.1-3ubuntu1_amd64.deb",
+        "67f5256ce2bccb0d1962d6db31be081579765f9848268421eab29f5d643dc8ae",
+    ),
+    (
+        "main/g/glycin/glycin-loaders_2.1.1+ds-0ubuntu1_amd64.deb",
+        "9009ffdca7ba439a4cae1b77050e4eb546ca77e29f03b32964f5b8f76ffadf29",
+    ),
+    (
+        "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.60.0-1_amd64.deb",
+        "062a814e82026abaa732af0c8950ba9e7c830245920e97eac07b49f2f75974f2",
+    ),
+    (
+        "main/a/at-spi2-core/libatk1.0-0t64_2.60.0-1_amd64.deb",
+        "46fd6a6954ea7027501e0b20d6156660549f6e1f35f133f9fec2917066bd0f7f",
+    ),
+    (
+        "main/g/gcc-16/libatomic1_16-20260322-1ubuntu1_amd64.deb",
+        "b9b2c94062924229201e25b694536119b153146abb8f464e31afa9e422d07d22",
+    ),
+    (
+        "main/a/at-spi2-core/libatspi2.0-0t64_2.60.0-1_amd64.deb",
+        "47e1a704478bd59f36bc4f3543ad771db5d41b74ff91021375d4d30466cb98d9",
+    ),
+    (
+        "main/u/util-linux/libblkid1_2.41.3-3ubuntu2_amd64.deb",
+        "f64a0255b485a68859f6324e478a1e00fd86c3d5a858353d75db546de576c64c",
+    ),
+    (
+        "main/b/brotli/libbrotli1_1.2.0-3build1_amd64.deb",
+        "14b47a091b6e04fa18baf42f456a25844f67904f15a900f07de651842fa74e62",
+    ),
+    (
+        "main/libb/libbsd/libbsd0_0.12.2-2build2_amd64.deb",
+        "21ceca917fdee4d568dd616121be4b436801448d7f436ca1b8a7604ed6fd9f30",
+    ),
+    (
+        "main/b/bzip2/libbz2-1.0_1.0.8-6build2_amd64.deb",
+        "206a6ef6e7bacf4a36cbf7bce75f6a0afa22b17c66cffc073a9a6f94e2cd68a3",
+    ),
+    (
+        "main/c/cairo/libcairo-gobject2_1.18.4-3_amd64.deb",
+        "b23ae4a4e60a0212f82c3b08b84810a53df33ed458b420c222a35d05f8d6d66c",
+    ),
+    (
+        "main/c/cairo/libcairo2_1.18.4-3_amd64.deb",
+        "5ea92d9d5a23668872c99b3d79ae7e3b0f9391d70532c9c2aeeddb8a6e776bcb",
+    ),
+    (
+        "main/libc/libcap2/libcap2_2.75-10ubuntu2_amd64.deb",
+        "52c249af074c215f6372f9cd911ae70c63a8bddefdc1aca80350b47d39888829",
+    ),
+    (
+        "main/libd/libdatrie/libdatrie1_0.2.14-1_amd64.deb",
+        "bc2143b8e7e48ae97edbdb123aeb27affebb24d44019a07be1181ea3d7c0b4e8",
+    ),
+    (
+        "main/d/dbus/libdbus-1-3_1.16.2-2ubuntu4_amd64.deb",
+        "128ce7419eb70f4ce4286660743b952c2861a56c56fba3255ed4697dee8e15d9",
+    ),
+    (
+        "main/libd/libdrm/libdrm-amdgpu1_2.4.131-1_amd64.deb",
+        "68967e70e7b658980be666823d42e253fb5cea40f0e4d93793b5b62517744532",
+    ),
+    (
+        "main/libd/libdrm/libdrm-intel1_2.4.131-1_amd64.deb",
+        "da4351f85e97e3222b9f325033c474979032633938f3dcc85b5b913cc31c0307",
+    ),
+    (
+        "main/libd/libdrm/libdrm2_2.4.131-1_amd64.deb",
+        "7b9c0ca3b76cd7aab77422ea459be250cc04357a62cc081854a6e4c7fa24ca3f",
+    ),
+    (
+        "main/libe/libedit/libedit2_3.1-20251016-1_amd64.deb",
+        "a184af2ab98ee85ed2b7616a995b93bd9d0b65c7552b4f799ee27ada2b52707f",
+    ),
+    (
+        "main/e/elfutils/libelf1t64_0.194-4_amd64.deb",
+        "2cb6cbc4045b07ff9deff1a8bc29d855e11a5ad09e0f532206698ffb74b29634",
+    ),
+    (
+        "main/libe/libepoxy/libepoxy0_1.5.10-2build1_amd64.deb",
+        "0c00d71141f570ba416a82e9c9d1b9efd673749fd230a23a28a223aa5d6542e5",
+    ),
+    (
+        "main/e/expat/libexpat1_2.7.4-1_amd64.deb",
+        "00ed4c10629966b9b758734b5331ea581fd13782cd3efd7373d721f584a2b45e",
+    ),
+    (
+        "main/libf/libffi/libffi8_3.5.2-4_amd64.deb",
+        "cfab73343f076b79df0f4a9d5430319fdb6153760d3e8c2964c448b49edad084",
+    ),
+    (
+        "main/f/fontconfig/libfontconfig1_2.17.1-3ubuntu1_amd64.deb",
+        "e1c360515d50f700709fa001f94eb25f8e658532137b6589fbba5c098c90279a",
+    ),
+    (
+        "main/f/freetype/libfreetype6_2.14.2+dfsg-1_amd64.deb",
+        "43d97c00daa00b7e868fa671f9b20effef8164124726fe8cbc6c351a05ebdf5b",
+    ),
+    (
+        "main/f/fribidi/libfribidi0_1.0.16-5_amd64.deb",
+        "5f359a93f44fa0e837277541c7780485f479105c030afbe24f4a0eb7deced215",
+    ),
+    (
+        "main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_amd64.deb",
+        "106e53a42bebdc55f253d737a818991eba5b4f22c8b1a035a4202b133ade9743",
+    ),
+    (
+        "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.44.5+dfsg-4ubuntu1_amd64.deb",
+        "e20d0b3375178dc014bc3d3b7471e8e340d5b30d0ce40bd6c266ec4ec73a8104",
+    ),
+    (
+        "main/libg/libglvnd/libgl1_1.7.0-3_amd64.deb",
+        "730d556bcdc978b65adecb4868ade95130201224af7ed9e55f48fc3eda2df717",
+    ),
+    (
+        "main/m/mesa/libgl1-mesa-dri_26.0.3-1ubuntu1_amd64.deb",
+        "63b04f452aee312a7b70368b3852b7a0e32c106191939542c04c60535c2778f5",
+    ),
+    (
+        "main/g/glib2.0/libglib2.0-0t64_2.88.0-1_amd64.deb",
+        "ef3511a432c0d22d183f46d64dd0cae9437bd3e0050547503a288ec6220e233d",
+    ),
+    (
+        "main/libg/libglvnd/libglvnd0_1.7.0-3_amd64.deb",
+        "6881ac107fb88b7133aaf68cd346bc656ce30bd930a08a06471a3461da5d3e26",
+    ),
+    (
+        "main/m/mesa/libglx-mesa0_26.0.3-1ubuntu1_amd64.deb",
+        "1e975ed69c50c70a1a77f6e364404964293c00859b9cdd129e01867a9016c5cc",
+    ),
+    (
+        "main/libg/libglvnd/libglx0_1.7.0-3_amd64.deb",
+        "9faaf5467b6ee9fd34ad5f847ae80137c03c133ac98491588a9eb5e8d3c27eb0",
+    ),
+    (
+        "main/g/glycin/libglycin-2-0_2.1.1+ds-0ubuntu1_amd64.deb",
+        "38dc11f7572f0ea0f91122b838ae7aa7f778039936c540eb1e96628b389406e5",
+    ),
+    (
+        "main/g/graphite2/libgraphite2-3_1.3.14-11ubuntu1_amd64.deb",
+        "31ea8971fa082b563b8c9fa09759913dd4c3f8c1f600c33f0764ffe5c81eedb4",
+    ),
+    (
+        "main/g/gtk+3.0/libgtk-3-0t64_3.24.52-0ubuntu1_amd64.deb",
+        "67978b2d629b4739bfe16b3ac49773daf66e11bb67512abd9137f32230834dfe",
+    ),
+    (
+        "main/h/harfbuzz/libharfbuzz0b_12.3.2-2_amd64.deb",
+        "95e817f1079eea2bc15d685a9d37e6bc9374188ecdaa588981b60c380d65c6b8",
+    ),
+    (
+        "main/l/lcms2/liblcms2-2_2.17-1_amd64.deb",
+        "29de0db4d3d96169ea1020d59742f6c30911d106d8799dbf2ec934f05217c395",
+    ),
+    (
+        "main/l/llvm-toolchain-21/libllvm21_21.1.8-6ubuntu1_amd64.deb",
+        "f2b6894d77b02a629b689e07ee5431f0155f1b8f857ac1e3f2153337dfcc1fcb",
+    ),
+    (
+        "main/libm/libmd/libmd0_1.1.0-2build4_amd64.deb",
+        "20d4f22076064b7cbfc20b58fff9630aeeb19a78e16a54ce2b7557a22015cfc0",
+    ),
+    (
+        "main/u/util-linux/libmount1_2.41.3-3ubuntu2_amd64.deb",
+        "9d4fb5397521bb398268d44cfef4de5f647de2b5a72dd41e90f096f508b69b1c",
+    ),
+    (
+        "main/p/pango1.0/libpango-1.0-0_1.57.0-1_amd64.deb",
+        "50f960f52ae6ebe7dde9aa363e06eb27aee7d3dcacb6e5922b3a277708d27227",
+    ),
+    (
+        "main/p/pango1.0/libpangocairo-1.0-0_1.57.0-1_amd64.deb",
+        "be644bbc1add414a8f42595a448d1a9bf09ece1e4c5176fa812f99a8ae3d8566",
+    ),
+    (
+        "main/p/pango1.0/libpangoft2-1.0-0_1.57.0-1_amd64.deb",
+        "1c2afaeb28d94ab80193b725e3e75a2b0216abad05cbbf062183c1a208fd1161",
+    ),
+    (
+        "main/libp/libpciaccess/libpciaccess0_0.18.1-1ubuntu4_amd64.deb",
+        "24c5fc1b51c8d5a9fe3827dc1a0aecec6d4bc9e25a24a83e8e3c0822338cd7ee",
+    ),
+    (
+        "main/p/pcre2/libpcre2-8-0_10.46-1build1_amd64.deb",
+        "f4219ccd273c6987cf3abcba8d2486e43cc771f89a9300fb7da8413015245660",
+    ),
+    (
+        "main/p/pixman/libpixman-1-0_0.46.4-1_amd64.deb",
+        "698cfdd737b50da27a926c262b7ce25370d4e95f182151b2b916ceb9a857c0bb",
+    ),
+    (
+        "main/libp/libpng1.6/libpng16-16t64_1.6.57-1_amd64.deb",
+        "5d455489a958be0a231da0fc64bffa47fc1b0b790fbff4ecc421041af7fc76ef",
+    ),
+    (
+        "main/libr/librsvg/librsvg2-2_2.61.3+dfsg-3_amd64.deb",
+        "cfde71f8fc47717ee41cd6877368a09cab2ce319e8cc085b6aab41027a6f9e31",
+    ),
+    (
+        "main/libs/libseccomp/libseccomp2_2.6.0-2ubuntu5_amd64.deb",
+        "ac0a0e897efd60374a1dc3b4264423109bae86210dd2bcd9ec96fba04d478599",
+    ),
+    (
+        "main/libs/libselinux/libselinux1_3.9-4build1_amd64.deb",
+        "7d9f767f51d35025fc8a1eefcf61a28d03f94540fd3a79904659d8b52806e627",
+    ),
+    (
+        "main/l/lm-sensors/libsensors5_3.6.2-2build1_amd64.deb",
+        "dc63821eccb23cf1784bad5287f9d6bed4e461c836372f5edd30fd5c609ff8af",
+    ),
+    (
+        "main/g/gcc-16/libstdc++6_16-20260322-1ubuntu1_amd64.deb",
+        "4ec527bc695f4221b97aee9ac0c2f4f068b514a810db5d18465a8636dc5b2948",
+    ),
+    (
+        "main/s/systemd/libsystemd0_259.5-0ubuntu3_amd64.deb",
+        "8f1e5b23ad8d0eeb88cc7a6730dc7c0e421cd88c0d7f8b39d3041121e5b6dcfd",
+    ),
+    (
+        "main/libt/libthai/libthai0_0.1.30-1_amd64.deb",
+        "d1d8da47cc345689ef0d117791b2e00b801765a53cbf3d0ce7f6b91b7d15be1b",
+    ),
+    (
+        "main/n/ncurses/libtinfo6_6.6+20251231-1_amd64.deb",
+        "9da3b65c7d025c0e8d08d438f35e70aadbc40596e6ae191d8b4399f263b62805",
+    ),
+    (
+        "main/w/wayland/libwayland-client0_1.24.0-2_amd64.deb",
+        "8459ccec5bdd6aa15dd1e75ea450d97e514f8448e529c4fd08cc036f23f4235a",
+    ),
+    (
+        "main/w/wayland/libwayland-cursor0_1.24.0-2_amd64.deb",
+        "3335233608016b05401f0c95cd81c9d830cf7be92b3681829e2f26cbf55dd394",
+    ),
+    (
+        "main/w/wayland/libwayland-egl1_1.24.0-2_amd64.deb",
+        "c45add63e3f928c6f1b11580ac10c7b06a9c3c8d5f302c409138033e8d682357",
+    ),
+    (
+        "main/libx/libx11/libx11-6_1.8.13-1_amd64.deb",
+        "955ede3dfadc55c6257f5d8d2d7ed2f60891afc79c310c76f238bc2f1c83f7de",
+    ),
+    (
+        "main/libx/libx11/libx11-xcb1_1.8.13-1_amd64.deb",
+        "89a98329e5251691050be79fccb10a4bee31cd538c310300795893cb9a46a2c8",
+    ),
+    (
+        "main/libx/libxau/libxau6_1.0.11-1build2_amd64.deb",
+        "2df4a14fea0c98f2e52c8ad3e2cfed6f5d40b66e5aa15af01eba24edfe2686ae",
+    ),
+    (
+        "main/libx/libxcb/libxcb-dri3-0_1.17.0-2ubuntu1_amd64.deb",
+        "a3f538fb0f99824a36ce248d91d87bba985006cc19554c44eee214482c588368",
+    ),
+    (
+        "main/libx/libxcb/libxcb-glx0_1.17.0-2ubuntu1_amd64.deb",
+        "d9dea4d64d7b5c33cabdaf0cccc67c4eed1a6f400e8ea2e71d0d581f9672b0c8",
+    ),
+    (
+        "main/libx/libxcb/libxcb-present0_1.17.0-2ubuntu1_amd64.deb",
+        "511b6c9afab2790d10f808c1bd1a24c81cedeb6600ed1ad517a17c8e9a5ef23b",
+    ),
+    (
+        "main/libx/libxcb/libxcb-randr0_1.17.0-2ubuntu1_amd64.deb",
+        "64bce047a66f7f8ce5a64f93fd43c946e74c2cf679ee142e9502891ad362963f",
+    ),
+    (
+        "main/libx/libxcb/libxcb-render0_1.17.0-2ubuntu1_amd64.deb",
+        "2a623dd24bc7cf5e80f2fc8ee537dab02b70dbb72a68903676a99a629cd40356",
+    ),
+    (
+        "main/libx/libxcb/libxcb-shm0_1.17.0-2ubuntu1_amd64.deb",
+        "dbcf77b20a17a95fbe3ca52c5cd607a682ada8f70eb7c36dbcf1d8b2aab84533",
+    ),
+    (
+        "main/libx/libxcb/libxcb-sync1_1.17.0-2ubuntu1_amd64.deb",
+        "4904208813f265e5cc452d0eac62501d3b42a9d0c326d447d8e81bacd0604c78",
+    ),
+    (
+        "main/libx/libxcb/libxcb-xfixes0_1.17.0-2ubuntu1_amd64.deb",
+        "619b45cdb525ed16a9ff466dd11497d1361482dbefa31da2029cb209fd8dbab2",
+    ),
+    (
+        "main/libx/libxcb/libxcb1_1.17.0-2ubuntu1_amd64.deb",
+        "59fa782e45c93a024851df6fb92d5a0d5c84416898b9640c35ece50d1f2fdfda",
+    ),
+    (
+        "main/libx/libxcomposite/libxcomposite1_0.4.6-1build1_amd64.deb",
+        "25305e0f072a874e3ae78cbb435d9b8486a1ab32e76a13b5517efebc5ebec976",
+    ),
+    (
+        "main/libx/libxcursor/libxcursor1_1.2.3-1build1_amd64.deb",
+        "2cb3b07531a725c004d8d1adf15ed4af0b06388f73c7b1afb67c56b786a445ce",
+    ),
+    (
+        "main/libx/libxdamage/libxdamage1_1.1.7-1_amd64.deb",
+        "907d9fe1af56e15a8048c3c90cf8d02a5ea3d0b017cf03b4bdd6c0d64f1bd1e6",
+    ),
+    (
+        "main/libx/libxdmcp/libxdmcp6_1.1.5-2_amd64.deb",
+        "e90265c37e823b293a4c0db30a906772d6f675d15a73c747c7431b5a5b0db8e6",
+    ),
+    (
+        "main/libx/libxext/libxext6_1.3.4-1build3_amd64.deb",
+        "ca31152c03800241e64bb8623a642493bfc76bcfa151398931e92f277dc85fb7",
+    ),
+    (
+        "main/libx/libxfixes/libxfixes3_6.0.0-2build2_amd64.deb",
+        "04c2b8fb6d291f09b61a8ff0f1272af986989a53272706593c96f52604c20383",
+    ),
+    (
+        "main/libx/libxi/libxi6_1.8.2-2_amd64.deb",
+        "6307d8b29391ff2cb3ff1e38d2ef8c98978d6383351a7b5e3f81b37227875099",
+    ),
+    (
+        "main/libx/libxinerama/libxinerama1_1.1.4-3build2_amd64.deb",
+        "8631c4a359284e44a8ad21159d1d5647e4f36cd4fc405877d569006ec4722863",
+    ),
+    (
+        "main/libx/libxkbcommon/libxkbcommon0_1.13.1-1_amd64.deb",
+        "5e38f3f1edc2518779a1f687e92c105d8a75a80a3d72907b164565b9b951d264",
+    ),
+    (
+        "main/libx/libxml2/libxml2-16_2.15.2+dfsg-0.1_amd64.deb",
+        "2d2c8c56f50f5ae2371aec0dcf62a291db858bd11adaacbb29816557d0498e3c",
+    ),
+    (
+        "main/libx/libxrandr/libxrandr2_1.5.4-1build1_amd64.deb",
+        "227fed6b5ac4b5d8c489e327f7ae923ec3df994003de631e4d70d328b85e65af",
+    ),
+    (
+        "main/libx/libxrender/libxrender1_0.9.12-1build1_amd64.deb",
+        "68d8632814a9152392467aec92d93ea1c37ef254592fb263bee7c4fe946393b7",
+    ),
+    (
+        "main/libx/libxres/libxres1_1.2.1-1build2_amd64.deb",
+        "8451f55bb76efd7c06707f248883ca59a3a8d6e5348de50255faa265f20c7947",
+    ),
+    (
+        "main/libx/libxshmfence/libxshmfence1_1.3.3-1build1_amd64.deb",
+        "4b288951c1ce9fa001640ee8f080505fa88f4b82039719199109c82082c9c7dd",
+    ),
+    (
+        "main/libx/libxxf86vm/libxxf86vm1_1.1.4-2_amd64.deb",
+        "e76a55383d516ee68fed55ec15f94cf375a6f0f1ca349958ce0f02d72d507112",
+    ),
+    (
+        "main/libz/libzstd/libzstd1_1.5.7+dfsg-3_amd64.deb",
+        "af32dd47238a84108c46536baddb7f7b6b0ca7914707dfe1beb95f56ef3a37dd",
+    ),
+    (
+        "main/m/mesa/mesa-libgallium_26.0.3-1ubuntu1_amd64.deb",
+        "45bbeddbbe8e7b3d6b391e4e4499bc98563d321bb3d43e0e6795ff7da864144a",
+    ),
+    (
+        "main/s/shared-mime-info/shared-mime-info_2.4-5build3_amd64.deb",
+        "31df0e1a9241404b6d34d1c8fb0187fd78728500a8fe01e06ce1379348c266c9",
+    ),
+    (
+        "main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu3_amd64.deb",
+        "3f4ef035018933af69033a5391ba8cf7b793afbdd9d82c65de57cc4666156f5a",
+    ),
+    (
+        "main/d/dash/dash_0.5.12-12ubuntu3_amd64.deb",
+        "55d2de41583e56ced56cdd0ed830704a936fd78a00435ad7ba142797546e8758",
+    ),
+    (
+        "main/g/glibc/libc6_2.43-2ubuntu2_amd64.deb",
+        "6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0",
+    ),
+    (
+        "main/e/e2fsprogs/libcom-err2_1.47.2-3ubuntu4_amd64.deb",
+        "18260b3a2bfcd02b8833cd36ff47e509bb71a46d1352e937c9a1479823da5e15",
+    ),
+    (
+        "main/libd/libdecor-0/libdecor-0-0_0.2.5-1_amd64.deb",
+        "c42d5f37f4388e64f84a07d0566957738a19cc2649af9dec308a3de010101c8c",
+    ),
+    (
+        "main/libe/libei/libei1_1.5.0-3_amd64.deb",
+        "c6f886d23333309482d505fa45d24472d2e5392560512230b7b4dca7952a05a9",
+    ),
+    (
+        "main/libf/libfontenc/libfontenc1_1.1.8-1build2_amd64.deb",
+        "8a263e3b5eed747dbd71213192f9001840cbdd55d49670ca440b8847d1e62a75",
+    ),
+    (
+        "main/m/mesa/libgbm1_26.0.3-1ubuntu1_amd64.deb",
+        "de8166e8225a1fe2565e7ebdb5cd879cb1be3de8c0bcaa34f02b2235d016dd57",
+    ),
+    (
+        "main/libg/libgcrypt20/libgcrypt20_1.12.0-2_amd64.deb",
+        "042d505553d39fd8e44e44e36d5fe80835446552c85f5830e19df08647e9af94",
+    ),
+    (
+        "main/libg/libgpg-error/libgpg-error0_1.58-2_amd64.deb",
+        "36bfef06ca8d020656e3b6f37e3c99c0fc45929b6a275a844247987bc9819c33",
+    ),
+    (
+        "main/k/krb5/libgssapi-krb5-2_1.22.1-2ubuntu4_amd64.deb",
+        "087955b4be36a4c966b663d2807437ce88567e5b9c12756cf41ad3b0d1a29849",
+    ),
+    (
+        "main/libi/libice/libice6_1.1.1-1build1_amd64.deb",
+        "c4c1771030d364b679cb8dfe67b51ddaa65d9e51377895d37b5cf3b14e02c87a",
+    ),
+    (
+        "main/k/krb5/libk5crypto3_1.22.1-2ubuntu4_amd64.deb",
+        "9382152d71c334a5de7856c21889b14fdf0bf429d04364e40a9e2d7da0902d9e",
+    ),
+    (
+        "main/k/keyutils/libkeyutils1_1.6.3-6ubuntu3_amd64.deb",
+        "0c0b4da672ca8e3e9ce972e3482a06f4cff5b4ebe774d2d04b2ad50d07bb566b",
+    ),
+    (
+        "main/k/krb5/libkrb5-3_1.22.1-2ubuntu4_amd64.deb",
+        "5d57ba9cf4361669b02b0f00856a2d6bf04e4a617cf034b5787060c2c95402a3",
+    ),
+    (
+        "main/k/krb5/libkrb5support0_1.22.1-2ubuntu4_amd64.deb",
+        "ad474ab8e4cd82a3513b55307d1bdd81b6d3976e1ea75824c3b8e0e43120f491",
+    ),
+    (
+        "main/libe/libei/liboeffis1_1.5.0-3_amd64.deb",
+        "d8c9b439fc6f1dc3e60c540eeccc4cf00d2b1e6abaca70359306bc4b3ac58752",
+    ),
+    (
+        "main/libs/libsm/libsm6_1.2.6-1build1_amd64.deb",
+        "ff3db9035a79798eb66bdc46547d7f07c88cb64fc701cea3d0133f88843e141a",
+    ),
+    (
+        "main/libt/libtirpc/libtirpc3t64_1.3.7-0.1_amd64.deb",
+        "7979a282196e6ad1be6a1a63fde1b693b9e906ae04c45254a43c65b5f34409aa",
+    ),
+    (
+        "main/libu/libutempter/libutempter0_1.2.1-4build1_amd64.deb",
+        "0d2b5c2486606ba15bcb52d2453eeceab673898004ec061e9db5a9d06bf1638b",
+    ),
+    (
+        "main/u/util-linux/libuuid1_2.41.3-3ubuntu2_amd64.deb",
+        "d92d53eda45f09d0a7be3394ffcb8171057e4b41e7425817e8e7392275f195f9",
+    ),
+    (
+        "main/libx/libxaw/libxaw7_1.0.16-1build1_amd64.deb",
+        "a1e47e8c7d1762b7378ed3778f5ddeffe6417a51edf10cff9c0b1e637f6496f5",
+    ),
+    (
+        "main/libx/libxcvt/libxcvt0_0.1.3-1build1_amd64.deb",
+        "f169050b86cc94801ec3df5f55b84652220f6899129f7fa11549e8dae364a8c1",
+    ),
+    (
+        "main/libx/libxfont/libxfont2_2.0.6-2_amd64.deb",
+        "366922544e366e5bcac68cf75f5d3a2365d7e7d9d51614de76f94ec284227114",
+    ),
+    (
+        "main/x/xft/libxft2_2.3.6-1build2_amd64.deb",
+        "a34388c5ede0cec7876951fa48fce8afbc8df7f0157ae06bc1ec85ebe802d13d",
+    ),
+    (
+        "main/libx/libxkbfile/libxkbfile1_1.1.0-1build5_amd64.deb",
+        "26529adc7b3e28a327a50496061fcedfae4ff84af6d555df7a301813ba6e1708",
+    ),
+    (
+        "main/libx/libxmu/libxmu6_1.1.3-4_amd64.deb",
+        "d22319638134d0ece7fbc6a71c7762349068c66b9b43cc24d4fdb7b8e6bf962d",
+    ),
+    (
+        "main/libx/libxpm/libxpm4_3.5.17-1build3_amd64.deb",
+        "b04a859bc3dd445f8dbbedc54e09d3635eaabe324521cad6cf1502df8ad0807d",
+    ),
+    (
+        "main/libx/libxt/libxt6t64_1.2.1-1.3build1_amd64.deb",
+        "d3bd4c4e60b622e842a59a8c69ff8280b802c3c61aca737cc7d74c9d6f27c1ee",
+    ),
+    (
+        "main/r/rust-coreutils/rust-coreutils_0.8.0-0ubuntu3_amd64.deb",
+        "ecf0674fd32d304ee920c6a39dee497700e0669d0bbf96bea099b65105df6a35",
+    ),
+    (
+        "universe/t/twm/twm_1.0.10-1build3_amd64.deb",
+        "15001d23c8dde995d7a2fa9a32f68483422821fb61038367f66cb8b82d24c7c9",
+    ),
+    (
+        "main/x/x11-xkb-utils/x11-xkb-utils_7.7+9build1_amd64.deb",
+        "1bf9cb0b2730f0fcc7bf29cf3fb215df0bbf89bb717fa46d131214505134d0fe",
+    ),
+    (
+        "universe/x/xterm/xterm_407-1ubuntu1_amd64.deb",
+        "48add527550d7771ce7ccca0cc2d5f28bfdec1c557ec06063a94c1fc0059fc9e",
+    ),
+    (
+        "main/x/xwayland/xwayland_24.1.10-1_amd64.deb",
+        "2d6d640774bc8ef9377564fe8d87c8723546244935b17aedc0f72cab78731b36",
+    ),
+    (
+        "universe/g/gimp/gimp_3.2.2-1_amd64.deb",
+        "8d2ea712f53b1b33e331116a91ad6ab1b4257b5385f531a1a89d708afe5fbef6",
+    ),
+    (
+        "main/a/at-spi2-core/gir1.2-atk-1.0_2.60.0-1_amd64.deb",
+        "dd79e752f6ec4bcf950a760d012177a6c7faf4f1bd1a5b8417932267656d38e7",
+    ),
+    (
+        "universe/b/babl/gir1.2-babl-0.1_0.1.124-1_amd64.deb",
+        "82b73eb936b7d269559153da5c7f7d08d678d49fe5b81c094af992812c396bf6",
+    ),
+    (
+        "main/g/gobject-introspection/gir1.2-freedesktop_1.86.0-6build1_amd64.deb",
+        "008789d27ac35d2141fb4abf5a2ea4aeda078baee5627cf085a58c7647974599",
+    ),
+    (
+        "main/g/gdk-pixbuf/gir1.2-gdkpixbuf-2.0_2.44.5+dfsg-4ubuntu1_amd64.deb",
+        "9f7ae928218f22cbff7dce8d0b75b77e6cc1fa882b5ecabf011e028b2a224840",
+    ),
+    (
+        "universe/g/gegl/gir1.2-gegl-0.4_0.4.70-1_amd64.deb",
+        "41b24d1845c17106b3d12e10ae6ddf9d1ebc186e414cdd3a44be5088884c679f",
+    ),
+    (
+        "main/g/gexiv2/gir1.2-gexiv2-0.10_0.14.6-2_amd64.deb",
+        "42ca91b0deed06f7f84e027b3fea92a2c088c8496526d688a509d9fac94dc2ed",
+    ),
+    (
+        "universe/g/gimp/gir1.2-gimp-3.0_3.2.2-1_amd64.deb",
+        "91b1a43b0bdf2da81729d8bf24810e851bb373b9cc6c04520403dba11b8a1fd3",
+    ),
+    (
+        "main/g/glib2.0/gir1.2-glib-2.0_2.88.0-1_amd64.deb",
+        "621e2fb47d7008eb83f09a04f8eb8b6bd96f2354caa6c88cd13b69426960d02d",
+    ),
+    (
+        "main/g/gtk+3.0/gir1.2-gtk-3.0_3.24.52-0ubuntu1_amd64.deb",
+        "9e9b102a43365541ec87a1e62f67110fc897a0d3f6c0d7c173f5d8f85a8f0f4a",
+    ),
+    (
+        "main/h/harfbuzz/gir1.2-harfbuzz-0.0_12.3.2-2_amd64.deb",
+        "9899d4d75e0fff894eea92cdfa13795750bfd5d8f58a758d60d3bce6a1ce8646",
+    ),
+    (
+        "main/p/pango1.0/gir1.2-pango-1.0_1.57.0-1_amd64.deb",
+        "f35bbd6912b9b38374948841b81e136a98819f1816bdcfb932bbc8be045c94f1",
+    ),
+    (
+        "main/a/acl/libacl1_2.3.2-2_amd64.deb",
+        "ac01c2baa155198aec7431e774c6101249969f0df444943fa2c9e6be63893e13",
+    ),
+    (
+        "universe/s/suitesparse/libamd3_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "f27959d4b95346d2329677c6d70f0978b6a4e03caf89932b93bc7a8bb5497138",
+    ),
+    (
+        "main/a/apparmor/libapparmor1_5.0.0~beta1-0ubuntu7_amd64.deb",
+        "97bc3adba874fdda34afba6a206d3fcd5b531bb8681ba27c4442ee1379834cfa",
+    ),
+    (
+        "main/a/appstream/libappstream5_1.1.2-1_amd64.deb",
+        "6bc44106442f0e8448395c2d3166d1aff9f927f06fb6ab825917e0d13a651b83",
+    ),
+    (
+        "main/liba/libarchive/libarchive13t64_3.8.5-1ubuntu2_amd64.deb",
+        "6eb915846769e71fdf8c27704e7875c92290401bd35ba937c6c8f02d248b053d",
+    ),
+    (
+        "main/a/alsa-lib/libasound2t64_1.2.15.3-1ubuntu1_amd64.deb",
+        "d63988a3869ab50caad49a2cfbd7173f0d8c7851bc70d5c22b21e571146c795e",
+    ),
+    (
+        "main/liba/libassuan/libassuan9_3.0.2-2build1_amd64.deb",
+        "6096b288a27c7ca57f805ce750d64b8e19917a31cf834a6702050ff759271ecf",
+    ),
+    (
+        "main/liba/libasyncns/libasyncns0_0.8-7_amd64.deb",
+        "da7ccced49197d066898fedf68089c7be20db4bba15371fe84955469cb4a12f7",
+    ),
+    (
+        "main/a/attr/libattr1_2.5.2-4_amd64.deb",
+        "3135a458178528872ca22b2adf90033447791ae49754fff3a68dfaff07222093",
+    ),
+    (
+        "universe/b/babl/libbabl-0.1-0_0.1.124-1_amd64.deb",
+        "5e7a91eb7dcd9a5521a6288e9512b49d3a4bbd3448b9ce9b0e7a9f5655955947",
+    ),
+    (
+        "main/l/lapack/libblas3_3.12.1-7ubuntu1_amd64.deb",
+        "e80a0b11711b2e8ac6241196a52c63c3a616d9a2cf26a3f4662706d6d1f6078a",
+    ),
+    (
+        "universe/s/suitesparse/libcamd3_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "923d1c4eb17e97b7ef9c98015b4c28715f97723addddcb9ec20edb64e3cd6aac",
+    ),
+    (
+        "universe/s/suitesparse/libccolamd3_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "28676d921a00c21ea3001249d97516e99d0c87ab89597290747f419d4af2a68d",
+    ),
+    (
+        "universe/s/suitesparse/libcholmod5_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "8902f46b45e54ee3358f99849cedadc74abd84cb23daf16dae3c8ea1132c9c3d",
+    ),
+    (
+        "main/s/suitesparse/libcolamd3_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "51eb620a26c98872151f2f321bc00af682526d1a6da3147b55f6be54f9c337a4",
+    ),
+    (
+        "main/c/curl/libcurl3t64-gnutls_8.18.0-1ubuntu2_amd64.deb",
+        "afe8eaeebb14acc433d96e7b56f533dfd23999dc10fbe75ff15d57006973529e",
+    ),
+    (
+        "main/libd/libdeflate/libdeflate0_1.23-2ubuntu1_amd64.deb",
+        "34335dd181a647b3e73104593d770b74c0e4963f8ddeabf1075017854001c6c9",
+    ),
+    (
+        "main/e/exiv2/libexiv2-28_0.28.8+dfsg-1_amd64.deb",
+        "f7311b970fbef1aec1212194aac6d2b0062dc91d981a08e3b75db319317a259f",
+    ),
+    (
+        "main/f/flac/libflac14_1.5.0+ds-5_amd64.deb",
+        "25f12a5187f301a3248d998c2bd06828bb66015a90232365b5b7be2f08673c4f",
+    ),
+    (
+        "main/libf/libfyaml/libfyaml0_0.9.4-1_amd64.deb",
+        "bf953296b51e54024bb8d8b7320ee79f21af44bc0b5218db83b4c253edc0e153",
+    ),
+    (
+        "universe/g/gegl/libgegl-0.4-0t64_0.4.70-1_amd64.deb",
+        "df43d11e80fc28473acd90d1f6d60a93e034f08902eb5bbfdf0a7d79ee3f3bd1",
+    ),
+    (
+        "main/g/gexiv2/libgexiv2-2_0.14.6-2_amd64.deb",
+        "3c2653fe14f31a3d5cae0e46137e26ed52efc1d5a35452383630aafd68769428",
+    ),
+    (
+        "main/g/gcc-16/libgfortran5_16-20260322-1ubuntu1_amd64.deb",
+        "c1e5c5fb8e0987bf65da2e9994578b4ed73a326824b77f039915616b7d773562",
+    ),
+    (
+        "universe/g/gimp/libgimp-3.0-0_3.2.2-1_amd64.deb",
+        "79772b2c68129bda37da59efe32d40ca2464178b0923fb00d8d6aaf75a75b6ac",
+    ),
+    (
+        "main/g/gobject-introspection/libgirepository-1.0-1_1.86.0-6build1_amd64.deb",
+        "ba7c144138dd09fc0974d0213639b214db8d772fce1353d746b417f728b2e16f",
+    ),
+    (
+        "main/g/gmp/libgmp10_6.3.0+dfsg-5ubuntu2_amd64.deb",
+        "d7e393a6f350c62c4ca009a61e176824d2b97ceab211797eacde06d98eeb6749",
+    ),
+    (
+        "main/g/gnutls28/libgnutls30t64_3.8.12-2ubuntu1_amd64.deb",
+        "9ba0dd2f5dc0be90fd7e517907041a89c26c35a6b91ccf98756010086d0c498c",
+    ),
+    (
+        "main/g/gcc-16/libgomp1_16-20260322-1ubuntu1_amd64.deb",
+        "a9d1fc09eebccb7049b408ef51362ad6c44d0421570d47410af072b52d14481e",
+    ),
+    (
+        "main/g/gpgme1.0/libgpgme45_2.0.1-2build1_amd64.deb",
+        "4ff13ab09a8d5efb444ff01fb45f8c3ba5fbe4bf68498898e22f70a35ae498df",
+    ),
+    (
+        "main/g/gpgmepp/libgpgmepp7_2.0.0-2_amd64.deb",
+        "9c535708cea590e127534a067bc272fa03c3bafd6af193e4c4302b73eab6dc6f",
+    ),
+    (
+        "main/libg/libgudev/libgudev-1.0-0_238-7build1_amd64.deb",
+        "59187dafd345c4369883a5ad47874a16247c078f7272e7a10bd1c7222bf697d5",
+    ),
+    (
+        "main/n/nettle/libhogweed6t64_3.10.2-1_amd64.deb",
+        "d6b297d01eb4a37a5f5277f8285221567c54537c20d730fc5f5c4bde72ffd2ce",
+    ),
+    (
+        "main/libi/libidn2/libidn2-0_2.3.8-4build1_amd64.deb",
+        "8c0daa227474b787790f62fd15c9ad05890e22a66c2eaeabee12b4ccdb5102c6",
+    ),
+    (
+        "universe/i/imath/libimath-3-1-29t64_3.1.12-1ubuntu5_amd64.deb",
+        "8915f83b72834523a1ebed9fb40a94a1cb11426f27e23f7b5e8c0201c8c2fe64",
+    ),
+    (
+        "main/libi/libinih/libinih1_61-1ubuntu1_amd64.deb",
+        "bc9877d7946113dd792f17719e736b6179e3f28d6da02a1f9c49669171acc07c",
+    ),
+    (
+        "main/libi/libinih/libinireader0_61-1ubuntu1_amd64.deb",
+        "c05891c3c9ab12e34ff57970f0fcbdad1f65efb4d632e30728fb33bcb9fc11cf",
+    ),
+    (
+        "main/j/jbigkit/libjbig0_2.1-6.1ubuntu3_amd64.deb",
+        "fa390eabb2ff3e247cc0104ee5b2a5b33003a8270730c50008815425a6eeef52",
+    ),
+    (
+        "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-4ubuntu4_amd64.deb",
+        "cd6cac6155d81d8d2e4a53693a7c91b42b26d1e84d018792d319c24cddaaf9d8",
+    ),
+    (
+        "main/j/json-c/libjson-c5_0.18+ds-3_amd64.deb",
+        "a033c711ab0a969c1baf77111a0507b6b9ef8de8f24ce7a8fb9554239135a636",
+    ),
+    (
+        "main/j/json-glib/libjson-glib-1.0-0_1.10.8+ds-2_amd64.deb",
+        "bd4b79d59b2d0dbbdaebb6dbb5d49e66dd3395e0c1c03c942a2922655a478162",
+    ),
+    (
+        "main/l/lapack/liblapack3_3.12.1-7ubuntu1_amd64.deb",
+        "9d2fc660514ca2b2e17c307790e09e26d0c44547050b20fc799520c9b6732a81",
+    ),
+    (
+        "main/o/openldap/libldap2_2.6.10+dfsg-1ubuntu5_amd64.deb",
+        "da7c275bd1c86fc25221d94c81bd044d09be1596ef24cb59d9379f6819d031ec",
+    ),
+    (
+        "main/l/lerc/liblerc4_4.0.0+ds-5ubuntu2_amd64.deb",
+        "e8a9b9854e127b0d3cacf88e221666cc32e4d79b78ace17ec6dcf3b6b6d99ed8",
+    ),
+    (
+        "main/l/lz4/liblz4-1_1.10.0-8_amd64.deb",
+        "ca11fc27b14497c683b477e4e5a5c9de20ff845bb16b1b36ced2aaca73776d62",
+    ),
+    (
+        "main/x/xz-utils/liblzma5_5.8.3-1_amd64.deb",
+        "7344ae4ce20c58e12b31d0b48c37f270b4cd8d592485fe0a06bdbac42e0abcaf",
+    ),
+    (
+        "main/l/lame/libmp3lame0_3.101~svn6525+dfsg-2_amd64.deb",
+        "8d4155de686eb6fe6b32a4cb77a2e149451feeb7cf39580a2e1ca62661e45416",
+    ),
+    (
+        "main/m/mpg123/libmpg123-0t64_1.33.3-2_amd64.deb",
+        "5ec259600c153a109bcc8a68a168b8eaba8d4752cbba0ba2bfe78547260193c1",
+    ),
+    (
+        "universe/libm/libmypaint/libmypaint-1.5-1_1.6.0-4build1_amd64.deb",
+        "034471dd0cc3f2cf2c021983052c0f0c5bf309d4774d2f8cf4da1955556b0f4a",
+    ),
+    (
+        "main/n/nettle/libnettle8t64_3.10.2-1_amd64.deb",
+        "922ad03de441c26ca6e2a437545b7afdec5cfb6aeb123ee51b6b6a4e5b5a0975",
+    ),
+    (
+        "main/n/nghttp2/libnghttp2-14_1.68.0-2_amd64.deb",
+        "ad1df50280467c43dde216819268f7d9e2659eaec93f3a07325f11a857bc806c",
+    ),
+    (
+        "main/n/nspr/libnspr4_4.38.2-1ubuntu1_amd64.deb",
+        "68fbec4a0cf03f76274be9f3f999119ca2ba45c61dc65d64473afe1076f1fb09",
+    ),
+    (
+        "main/n/nss/libnss3_3.120-1ubuntu2_amd64.deb",
+        "a20c803742476c8b08ae1389f1ffca486075eefe7463e3fa34640873156f931a",
+    ),
+    (
+        "main/libo/libogg/libogg0_1.3.6-2_amd64.deb",
+        "53f0b4dfa389feb269bf46318b60b992f5c650d5febf82258638e89e88680ef5",
+    ),
+    (
+        "universe/o/openexr/libopenexr-3-1-30_3.1.13-2build1_amd64.deb",
+        "82be887ad7f6be06fb8d2c56508d99669dbd8cbb6d17bb87329726531f735fa0",
+    ),
+    (
+        "main/o/openjpeg2/libopenjp2-7_2.5.4-1_amd64.deb",
+        "aaedf05c7fbed7650cfc61d6d77e94804bf36ced9fb1ea586103988777e3b9e3",
+    ),
+    (
+        "main/o/opus/libopus0_1.6.1-1_amd64.deb",
+        "f87955a9649c7e76c575843047a2cbf309d29248de439d1cb84f95ebdd959eed",
+    ),
+    (
+        "main/p/p11-kit/libp11-kit0_0.26.2-2_amd64.deb",
+        "0776f4755a37442e4e4c7f2e0c8fbe4bea021ad9652fe5702d0cc003cf9f5683",
+    ),
+    (
+        "main/p/poppler/libpoppler-glib8t64_26.01.0-2build2_amd64.deb",
+        "ad26d3e0772529d689b021a4370d98a960c58fa9b9fe360e8f9fe0518a833bb8",
+    ),
+    (
+        "main/p/poppler/libpoppler156_26.01.0-2build2_amd64.deb",
+        "c379e13ac15b9e1f29360374286bf1af230484cd395d2b78528fda80641df03c",
+    ),
+    (
+        "main/libp/libpsl/libpsl5t64_0.21.2-1.1build2_amd64.deb",
+        "1ba472a3fffd896653cbabb67813fa481e76e0ab0b459e3e69f294ed56a1c075",
+    ),
+    (
+        "main/p/pulseaudio/libpulse0_17.0+dfsg1-2ubuntu4_amd64.deb",
+        "069e82fc14dfbe3a69caec1b50524e025c38ab8560bb96576e49f3c21897be46",
+    ),
+    (
+        "main/libr/libraw/libraw23t64_0.21.5b-1ubuntu1_amd64.deb",
+        "dd3e519063eaacd266117fcf7287c32a8802554ea81ab8b9aa697bd4d2f1d271",
+    ),
+    (
+        "main/r/rtmpdump/librtmp1_2.4+20151223.gitfa8646d.1-3_amd64.deb",
+        "a86935b5ca9454a51360b8995944ee09c89804088eaf91ef9f18a4ba64b7d540",
+    ),
+    (
+        "main/libs/libsamplerate/libsamplerate0_0.2.2-4build2_amd64.deb",
+        "17484c4dde6fbd56c05dd902fecfd2ecdb8182f0da07cee37d8fbec926bcdfe4",
+    ),
+    (
+        "main/c/cyrus-sasl2/libsasl2-2_2.1.28+dfsg1-9ubuntu3_amd64.deb",
+        "58ae0fc34067c27aa5ee50c6ca3823919057f1a4fb092478f9ff47a3dfe36496",
+    ),
+    (
+        "main/libs/libsdl2/libsdl2-classic_2.32.10+dfsg-6_amd64.deb",
+        "afb06f8ed8a6ef987158ce1ad2efec6540620464abf067889b9a6b9c0861e4f2",
+    ),
+    (
+        "main/libw/libwebp/libsharpyuv0_1.5.0-0.1build1_amd64.deb",
+        "69ef3640114dd49c912ceadddd3ebb4eec5c90784b35665d7eae3f0fe7533360",
+    ),
+    (
+        "main/libs/libsndfile/libsndfile1_1.2.2-4_amd64.deb",
+        "660bdfb201fffe57324a6373c62f735cf29af03b0df1a8fe8ccb5df84968ad87",
+    ),
+    (
+        "main/libs/libssh2/libssh2-1t64_1.11.1-1build2_amd64.deb",
+        "fb76fc0001e345fdfa30fa2883e530f1878e28adabc2c645569a4d7dea310621",
+    ),
+    (
+        "main/o/openssl/libssl3t64_3.5.5-1ubuntu3_amd64.deb",
+        "9ada8cf212787ead17a496fa39c3e727d7273b2e900da96aa921949d404b16bb",
+    ),
+    (
+        "main/s/snowball/libstemmer0d_3.0.1-1_amd64.deb",
+        "21f433045e054bc98a5c3750e761ef15d8a7dbf9e060a470506524e7e4bd2b0a",
+    ),
+    (
+        "main/s/suitesparse/libsuitesparseconfig7_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "efd76d6d9d3f8b58da4297243500ec71242a686db0d69499f63170f0dda155a7",
+    ),
+    (
+        "main/libt/libtasn1-6/libtasn1-6_4.21.0-2_amd64.deb",
+        "63d38a74ad15cc88fec21f408cdabf857d5c5a9d83887a21915c24b428fa6576",
+    ),
+    (
+        "main/t/tiff/libtiff6_4.7.0-3ubuntu4_amd64.deb",
+        "911693e0375318a33391ae42762dff6f7b81caac9909ef798cee7efd34b482bb",
+    ),
+    (
+        "main/s/systemd/libudev1_259.5-0ubuntu3_amd64.deb",
+        "a20b26e8207f70c51e5455a68be58fa1ed524ae090d438740d888d003cde9dc3",
+    ),
+    (
+        "universe/s/suitesparse/libumfpack6_7.12.2+dfsg-1ubuntu1_amd64.deb",
+        "540bebb2016229aaa2a0e93f8eb582b1f2ffa3f0e86067e4666ed159f055cac7",
+    ),
+    (
+        "main/libu/libunistring/libunistring5_1.3-2build1_amd64.deb",
+        "1a73d3d7690e26f926d7af025b44d6d57c2dd1e0abb35c0d5b1b11f4b9b7f4da",
+    ),
+    (
+        "main/libv/libvorbis/libvorbis0a_1.3.7-3build2_amd64.deb",
+        "d4adfb77a7ea7f68f73862ce2e7f2786d997f992508981bb2e37f81c539a878f",
+    ),
+    (
+        "main/libv/libvorbis/libvorbisenc2_1.3.7-3build2_amd64.deb",
+        "543fd0c07887df036cad5a913057dd0c58a60fd6de2709a721900bfce87dfa28",
+    ),
+    (
+        "main/libw/libwebp/libwebp7_1.5.0-0.1build1_amd64.deb",
+        "aca21b829ef323edfc017b35e26c41e3841cf938494d4177e520dc8c11bb029a",
+    ),
+    (
+        "main/libx/libxmlb/libxmlb2_0.3.24-2_amd64.deb",
+        "a9fd67cbc702de660746caffd26ae290fd4981a5c275a51a1af5ad35a300a270",
+    ),
+    (
+        "main/libx/libxss/libxss1_1.2.3-1build4_amd64.deb",
+        "8a46d061e3b6a048dcfad6b8439e2f292e33e26c19634635904d7b8bb3e144a9",
+    ),
+    (
+        "main/x/xxhash/libxxhash0_0.8.3-2build1_amd64.deb",
+        "f42050b57b43fdccb5ce91684cf7dafd01a2d9e38119c2643c718b3fb3607efd",
+    ),
+    (
+        "main/x/xfonts-utils/xfonts-utils_7.7+7build1_amd64.deb",
+        "29a99d6fa04d4b25482f60520d37179624b8f52279fffa81cb52c34204b0ce89",
+    ),
+    (
+        "universe/i/inkscape/inkscape_1.4.3-0ubuntu2_amd64.deb",
+        "99d0e2a9e18c9ae711feb25c4796e6456afb34efae226d4e8d54a1bdae304618",
+    ),
+    (
+        "universe/lib2/lib2geom/lib2geom1.4.0_1.4-5_amd64.deb",
+        "12c19590937bee4345c34f099cb295d3e1dc5a144849e94cf8e6b7eaf55e3255",
+    ),
+    (
+        "main/a/atkmm1.6/libatkmm-1.6-1v5_2.28.4-2_amd64.deb",
+        "ae1c2b90a5a8de940dfdb0047f28a1a51315a97bf97313073256c8ddece53ded",
+    ),
+    (
+        "main/b/boost1.90/libboost-filesystem1.90.0_1.90.0-6ubuntu1_amd64.deb",
+        "fd1f59743857b766e7b766682c7628d3222394d1d88e5329ff5c5c6716d019f6",
+    ),
+    (
+        "main/c/cairomm/libcairomm-1.0-1v5_1.14.5-3_amd64.deb",
+        "098cd204439bcdaf26aa90c9d3c468061f13124e4cf82fa00fd1ec4e232e4118",
+    ),
+    (
+        "main/libc/libcdr/libcdr-0.1-1_0.1.7-1build4_amd64.deb",
+        "4ced5c6361bf702087612d04d14c4b7e4c9b03887a9be99a6c8568e5f46838a5",
+    ),
+    (
+        "universe/d/double-conversion/libdouble-conversion3_3.4.0-1_amd64.deb",
+        "87e599f275fba0c9a919b0c1d2b63f97f3e16a0696a0efb303ee87cfdc623e4f",
+    ),
+    (
+        "main/e/enchant-2/libenchant-2-2_2.8.2+dfsg1-3build1_amd64.deb",
+        "dda4f8d48e0ce20457a4bf33ff813ca796cfa505806ff27ff7f2d513ce1e1506",
+    ),
+    (
+        "main/libg/libgc/libgc1_8.2.12-1_amd64.deb",
+        "2d4b89a2ea6cb9e6552b0d8d7b224aa3bdb50c76b483a1458f85ebca51927567",
+    ),
+    (
+        "main/g/glibmm2.4/libglibmm-2.4-1t64_2.66.8-3_amd64.deb",
+        "785c62e63b9b3546cc0a26d49a7bbda16441e3bc54b38ef1ebc1dca12f0590cb",
+    ),
+    (
+        "universe/g/gsl/libgsl28_2.8+dfsg-6_amd64.deb",
+        "8e68fe69d30c2090240b7fa0a1899ed4bbf48ff26db789e3cd391a55523fdf24",
+    ),
+    (
+        "universe/g/gsl/libgslcblas0_2.8+dfsg-6_amd64.deb",
+        "12fb6f1f75e6e8a349a073db1682244f625213b682050bdc6e26298d897b7f46",
+    ),
+    (
+        "universe/g/gspell/libgspell-1-3_1.14.2-2_amd64.deb",
+        "8fbe5baf19222cc85de015fec1a2ba1b3129a20d1001b076a63c736d4e78561f",
+    ),
+    (
+        "main/g/gtkmm3.0/libgtkmm-3.0-1t64_3.24.10-2_amd64.deb",
+        "c9f2a2b4af89596a3519df9c5503aa264eb2a912c5e4d78d1b73ae85f6d185f2",
+    ),
+    (
+        "universe/g/gtksourceview4/libgtksourceview-4-0_4.8.4-9_amd64.deb",
+        "f67844d163e24ae9d5c68d9e152c0b709fee72fa7565181bc17d0c5334423a6f",
+    ),
+    (
+        "main/i/icu/libicu78_78.2-2ubuntu1_amd64.deb",
+        "b5c465f39aa3f13cb9840007a195053af81b35b372c769d9ee26a11625088980",
+    ),
+    (
+        "main/p/pangomm/libpangomm-1.4-1v5_2.46.4-2_amd64.deb",
+        "2b503728403e0e419f4e5c3aea8f63994e1581b353e2d3335e5596a761af2e98",
+    ),
+    (
+        "universe/p/potrace/libpotrace0_1.16-2build2_amd64.deb",
+        "8e9629907a8524fc5346b5f4426bda3addeccb621edf76b59910a0cf645828e1",
+    ),
+    (
+        "main/r/readline/libreadline8t64_8.3-4_amd64.deb",
+        "743fbc80917aba8d9361e6305eeea92b08935f4403c6b4feb7ef3e195d1bf90f",
+    ),
+    (
+        "main/libr/librevenge/librevenge-0.0-0_0.0.5-3build2_amd64.deb",
+        "e7a313344e03c154dc1d3ec5ff29b221f580d3b0a4ee22c2c0b296105394f529",
+    ),
+    (
+        "main/libs/libsigc++-2.0/libsigc++-2.0-0v5_2.12.1-4build1_amd64.deb",
+        "3e3a75d373a8e945286e04c47fe3cd1efea1753531eadf01ae862af9fdd34560",
+    ),
+    (
+        "main/libv/libvisio/libvisio-0.1-1_0.1.10-1build1_amd64.deb",
+        "6a704c3f96e081a39484b87621d53ede37068c1cf757f122e02f151dfd921f3f",
+    ),
+    (
+        "main/libw/libwpd/libwpd-0.10-10_0.10.3-2build3_amd64.deb",
+        "119b812c47604a97a2a558819677814cfba7936961cdb7b00a747e1d1f440c2c",
+    ),
+    (
+        "main/libw/libwpg/libwpg-0.3-3_0.3.4-3build2_amd64.deb",
+        "5f22b9caefa0aab4fce638e8b3af5a9b46bfc533a803bd01b45b3586f00e524f",
+    ),
+    (
+        "main/libx/libxslt/libxslt1.1_1.1.45-0.1_amd64.deb",
+        "d8291aa7a247935a9e3a7a4316385e414073d42afe3da9073d4694fee315e28d",
+    ),
+    (
+        "main/p/python3.14/python3.14_3.14.4-1_amd64.deb",
+        "4b87d66f9d0cc8558f39d44d221569af6612a98112f43c352c44bca2c067291a",
+    ),
+];
+
+/// Prebuilt `p` as a package of Ubuntu's pool (its URL under
+/// archive.ubuntu.com's or ports.ubuntu.com's `pool/`), if it is one.
+fn ubuntu_deb(p: &Prebuilt) -> Option<Deb> {
+    let pool = p
+        .url
+        .strip_prefix("https://archive.ubuntu.com/ubuntu/pool/")
+        .or_else(|| p.url.strip_prefix("https://ports.ubuntu.com/ubuntu-ports/pool/"))?;
+    pool.ends_with(".deb").then_some(Deb { pool, sha256: p.checksum, files: &[] })
+}
+
+/// `cargo xtask fetch-debs`: every package of every Linux root, amd64 and
+/// arm64 builds (LINUX_ROOTS, DEBS_ARM64), and the prebuilts that are
+/// Ubuntu packages (glibc, libwayland-client, libffi, weston), into the package cache
+/// `target/prebuilt/debs`, each checked against its SHA-256 (`fetch_deb`);
+/// files there that no root pins any more are removed. One after another:
+/// CI runs it once (its `debs` job) for every boot shard, so the shards
+/// download nothing from Ubuntu's archives (WORKFLOW "CI build caches").
+fn fetch_debs() -> Result {
+    let mut wanted = std::collections::BTreeSet::new();
+    let (mut have, mut fetched) = (0, 0);
+    let cache = root().join("target/prebuilt/debs");
+    for r in LINUX_ROOTS {
+        for d in r.debs {
+            for (deb, arm64) in [
+                (Deb { pool: d.pool, sha256: d.sha256, files: d.files }, false),
+                (deb_arm64(d)?, true),
+            ] {
+                let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+                if !wanted.insert(name.clone()) {
+                    continue;
+                }
+                if cache.join(&name).exists() {
+                    have += 1;
+                } else {
+                    fetched += 1;
+                }
+                fetch_deb(&deb, arm64)?;
+            }
+        }
+    }
+    for p in PREBUILT {
+        let Some(deb) = ubuntu_deb(p) else { continue };
+        let name = deb.pool.rsplit('/').next().unwrap_or(deb.pool).to_string();
+        if !wanted.insert(name.clone()) {
+            continue;
+        }
+        if cache.join(&name).exists() {
+            have += 1;
+        } else {
+            fetched += 1;
+        }
+        fetch_deb(&deb, deb.pool.ends_with("_arm64.deb"))?;
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&cache).map_err(|e| format!("reading {cache:?}: {e}"))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !wanted.contains(&name) {
+            fs::remove_file(entry.path()).map_err(|e| format!("removing {name}: {e}"))?;
+            removed += 1;
+        }
+    }
+    eprintln!(
+        "xtask: fetch-debs: {} packages ({have} cached, {fetched} fetched), {removed} no longer pinned removed",
+        wanted.len()
+    );
+    Ok(())
+}
+
+/// Deb `d`'s arm64 build (DEBS_ARM64).
+fn deb_arm64(d: &Deb) -> Result<Deb> {
+    if d.pool.ends_with("_all.deb") {
+        return Ok(Deb { pool: d.pool, sha256: d.sha256, files: d.files });
+    }
+    let (_, sha256) = DEBS_ARM64
+        .iter()
+        .find(|(pool, _)| *pool == d.pool)
+        .ok_or(format!("{}: no arm64 build in DEBS_ARM64", d.pool))?;
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let pool = leak(d.pool.replace("_amd64.deb", "_arm64.deb"));
+    // Files built for an x86-64 microarchitecture level (babl's
+    // `x86-64-v3-CIE.so`, GEGL's `gegl-common-cxx-x86_64-v2.so`, beside
+    // their baselines) and x86-64's
+    // `lib64` directories have no arm64 counterpart.
+    let files: Vec<&'static str> = d
+        .files
+        .iter()
+        .filter(|f| {
+            !f.contains("x86-64-v")
+                && !f.contains("x86_64-v")
+                && !f.starts_with("usr/lib64/")
+                && !f.starts_with("lib64/")
+        })
+        .map(|f| leak(f.replace("x86_64-linux-gnu", "aarch64-linux-gnu")))
+        .collect();
+    Ok(Deb { pool, sha256, files: Vec::leak(files) })
+}
+
+/// A module path in a Linux root's tree (`target/prebuilt/<root>/...`)
+/// as the same path in the root's arm64 build (`<root>-arm64`).
+fn linux_root_arm64(path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("target/prebuilt/")?;
+    let (name, tail) = rest.split_once('/')?;
+    LINUX_ROOTS.iter().find(|r| r.name == name)?;
+    Some(Box::leak(format!("target/prebuilt/{name}-arm64/{tail}").into_boxed_str()))
 }
 
 const LINUX_ROOTS: &[LinuxRoot] = &[
@@ -7424,6 +8551,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("disk_test", "bcryptprimitives.dll", "Windows/System32"),
     ("disk_test", "bcrypt.dll", "Windows/System32"),
     ("disk_test", "user/access_test/access_test.regseed", "registry"),
+    ("partition_test", "ntdll.dll", "Windows/System32"),
+    ("partition_test", "kernel32.dll", "Windows/System32"),
     ("persist_test", "ntdll.dll", "Windows/System32"),
     ("persist_test", "kernel32.dll", "Windows/System32"),
     ("persist_test", "advapi32.dll", "Windows/System32"),
@@ -9952,6 +11081,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_py_test",
     "kernel32_locale_test",
     "disk_test",
+    "partition_test",
     "rtl_test",
     "gui_test",
     "paint_thread_test",
@@ -10435,6 +11565,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("fetch-debs") => fetch_debs(),
             Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
@@ -11137,7 +12268,9 @@ fn make_iso_unchecked(
         // A path with a slash is a file in the repository (checked-in
         // binaries, configuration); otherwise a built DLL.
         if file.starts_with("target/prebuilt/") {
-            fetch_prebuilt(file.trim_end_matches('/'))?;
+            // `<source>@<name>`: the source's file is the one fetched.
+            let source = file.split_once('@').map_or(*file, |(source, _)| source);
+            fetch_prebuilt(source.trim_end_matches('/'))?;
         }
         // The WSL scenarios' rootfs tarballs, made from busybox.
         if file.starts_with("target/wsl/") {
@@ -11452,7 +12585,12 @@ fn fetch_prebuilt(path: &str) -> Result {
     let full = root().join(path);
     let name = path.split('/').nth(2).ok_or(format!("bad prebuilt path {path}"))?;
     if let Some(r) = LINUX_ROOTS.iter().find(|r| r.name == name) {
-        return fetch_linux_root(r, path);
+        return fetch_linux_root(r, path, false);
+    }
+    if let Some(r) =
+        name.strip_suffix("-arm64").and_then(|n| LINUX_ROOTS.iter().find(|r| r.name == n))
+    {
+        return fetch_linux_root(r, path, true);
     }
     let p = PREBUILT.iter().find(|p| p.name == name).ok_or(format!("no prebuilt {name:?}"))?;
     let dir = root().join("target/prebuilt").join(p.name);
@@ -11478,8 +12616,15 @@ fn fetch_prebuilt(path: &str) -> Result {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
-    eprintln!("xtask: fetching {} ({})", p.name, p.url);
-    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    if let Some(d) = ubuntu_deb(p) {
+        // An Ubuntu package: from the package cache (`fetch-debs` fills it
+        // once for CI's shards), copied as the download.
+        let (deb, _) = fetch_deb(&d, d.pool.ends_with("_arm64.deb"))?;
+        fs::copy(&deb, &zip).map_err(|e| format!("copying {deb:?}: {e}"))?;
+    } else {
+        eprintln!("xtask: fetching {} ({})", p.name, p.url);
+        run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&zip).arg(p.url))?;
+    }
     // SHA-256 or SHA-512 (Microsoft publishes the latter), by length.
     let tool = if p.checksum.len() == 128 { "sha512sum" } else { "sha256sum" };
     let sum = Command::new(tool).arg(&zip).output().map_err(|e| format!("{tool}: {e}"))?;
@@ -11588,12 +12733,18 @@ fn fetch_prebuilt(path: &str) -> Result {
 /// whole selection makes a changed table or an interrupted run assemble
 /// it again from nothing (the packages already fetched are not fetched
 /// again). The caller holds the fetch lock.
-fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
-    let dir = root().join("target/prebuilt").join(r.name);
+fn fetch_linux_root(r: &LinuxRoot, path: &str, arm64: bool) -> Result {
+    let name = if arm64 { format!("{}-arm64", r.name) } else { r.name.to_string() };
+    let dir = root().join("target/prebuilt").join(&name);
+    let debs: Vec<Deb> = if arm64 {
+        r.debs.iter().map(deb_arm64).collect::<Result<_>>()?
+    } else {
+        r.debs.iter().map(|d| Deb { pool: d.pool, sha256: d.sha256, files: d.files }).collect()
+    };
     let selection = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for d in r.debs {
+        for d in &debs {
             (d.pool, d.sha256, d.files).hash(&mut h);
         }
         h.finish()
@@ -11603,18 +12754,18 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
         return if root().join(path).exists() {
             Ok(())
         } else {
-            Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name))
+            Err(format!("{path} is not in the Linux root {name:?} (LINUX_ROOTS)"))
         };
     }
     if dir.exists() {
-        eprintln!("xtask: {}: not assembled from the pinned packages; clearing {dir:?}", r.name);
+        eprintln!("xtask: {name}: not assembled from the pinned packages; clearing {dir:?}");
         fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
     }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
-    eprintln!("xtask: assembling the Linux root {} from {} packages", r.name, r.debs.len());
+    eprintln!("xtask: assembling the Linux root {name} from {} packages", debs.len());
     let tree = dir.join("deb");
-    for d in r.debs {
-        let (deb, url) = fetch_deb(d)?;
+    for d in &debs {
+        let (deb, url) = fetch_deb(d, arm64)?;
         let _ = fs::remove_dir_all(&tree);
         fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
         run_quiet(Command::new("dpkg-deb").arg("-x").arg(&deb).arg(&tree))
@@ -11645,9 +12796,9 @@ fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
     }
     update_mime_database(&dir)?;
     compile_gsettings_schemas(&dir)?;
-    write(&done, &format!("{} packages\n", r.debs.len()))?;
+    write(&done, &format!("{} packages\n", debs.len()))?;
     if !root().join(path).exists() {
-        return Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name));
+        return Err(format!("{path} is not in the Linux root {name:?} (LINUX_ROOTS)"));
     }
     Ok(())
 }
@@ -11703,12 +12854,34 @@ fn compile_gsettings_schemas(dir: &Path) -> Result {
     Ok(())
 }
 
+/// `url` with Ubuntu's archive replaced by the mirror `XTASK_UBUNTU_MIRROR`
+/// names (its `.../ubuntu` base), if set: CI's runners reach
+/// archive.ubuntu.com badly (connections reset or hung for minutes) and
+/// their own apt uses Azure's mirror of it (`ci.yml`). The pool's paths
+/// and files are the same, and each download is checked against its
+/// pinned SHA-256 whatever serves it.
+fn ubuntu_mirror(url: &str) -> String {
+    const ARCHIVE: &str = "https://archive.ubuntu.com/ubuntu/";
+    match (url.strip_prefix(ARCHIVE), env::var("XTASK_UBUNTU_MIRROR")) {
+        (Some(rest), Ok(base)) if !base.is_empty() => {
+            format!("{}/{rest}", base.trim_end_matches('/'))
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// The package `d` in the package cache, `target/prebuilt/debs/<file>`
 /// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
 /// (curl, to a `.part` file renamed when whole) and checked against its
 /// SHA-256 at each use. Gives the path and the URL.
-fn fetch_deb(d: &Deb) -> Result<(PathBuf, String)> {
-    let url = format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool);
+fn fetch_deb(d: &Deb, arm64: bool) -> Result<(PathBuf, String)> {
+    // arm64 packages are on Ubuntu's ports mirror (architecture-independent
+    // ones on both).
+    let url = if arm64 {
+        format!("https://ports.ubuntu.com/ubuntu-ports/pool/{}", d.pool)
+    } else {
+        ubuntu_mirror(&format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool))
+    };
     let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
     let cache = root().join("target/prebuilt/debs");
     fs::create_dir_all(&cache).map_err(|e| format!("creating {cache:?}: {e}"))?;
@@ -11921,7 +13094,8 @@ fn qemu_aarch64(iso: &Path) -> Result<Command> {
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary_aarch64());
     let cpus = telemetry::vm_cpus(iso).to_string();
-    cmd.args(["-machine", "virt,gic-version=3", "-cpu", "max", "-m", "512M", "-smp", &cpus]);
+    let memory = format!("{}M", base_memory_mib(iso));
+    cmd.args(["-machine", "virt,gic-version=3", "-cpu", "max", "-m", &memory, "-smp", &cpus]);
     cmd.args(["-name", &vmtime::qemu_name(iso_scenario(iso))]);
     if !extra.split_whitespace().any(|a| a == "-accel") {
         cmd.args(["-accel", "tcg"]);
@@ -12686,6 +13860,14 @@ const ARM64_TWINS: &[&str] = &[
     "lx_wl_popup",
     "lx_dyn",
     "lx_dyn_pie",
+    "lx_gtk",
+    "lx_gtk_x11",
+    "lx_xterm",
+    "lx_xdesktop",
+    "lx_gimp",
+    "lx_gimp_batch",
+    "lx_inkscape",
+    "lx_inkscape_batch",
     "lx_wl_input",
     "safepoint_test",
     "handover_refused",
@@ -12914,14 +14096,21 @@ fn build_qemu() -> Result {
     Ok(())
 }
 
+/// A VM's memory before a scenario's own needs, on both architectures:
+/// 512 MiB, plus twice the image for images with large programs (the
+/// boot modules stay in memory, and programs like a JVM map them; a
+/// GTK root did not fit beside them in 512 MiB: Limine's "High memory
+/// allocation failed").
+fn base_memory_mib(iso: &Path) -> u64 {
+    let image_mib = fs::metadata(iso).map_or(0, |m| m.len() >> 20);
+    if image_mib > 64 { 512 + 2 * image_mib } else { 512 }
+}
+
 fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
     if boot == Boot::UefiAarch64 {
         return qemu_aarch64(iso);
     }
-    // 512 MiB, plus twice the image for images with large programs (the
-    // boot modules stay in memory, and programs like a JVM map them).
-    let image_mib = fs::metadata(iso).map_or(0, |m| m.len() >> 20);
-    let mut memory = if image_mib > 64 { 512 + 2 * image_mib } else { 512 };
+    let mut memory = base_memory_mib(iso);
     // Elasticsearch: a 256 MiB heap pre-touched, its launcher's JVM, and
     // the files it writes on C: (in memory) need more than that; with
     // ~1.5 GiB it ran out of frames (Elastic asks for several GiB).
@@ -14567,6 +15756,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=disk_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["disk_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // IN step 1: a GPT made on an empty disk through Windows' disk
+        // IOCTLs (DISK_SCENARIOS attaches it and reads the table back
+        // with xtask's own GPT reader). As SYSTEM.
+        name: "partition_test",
+        cmdline: "qemu_exit as=system run=partition_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["partition_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // R1 invariant 4: disk_test with the device reset under the
@@ -19225,8 +20423,8 @@ fn aarch64_display(name: &str) -> bool {
 /// A boot module: (file, directory in the image).
 type Module = (&'static str, &'static str);
 
-/// glibc's files and places on x86-64 and their aarch64 counterparts, which
-/// a twin ships instead: the program interpreter where PT_INTERP names it
+/// glibc's (and the Wayland client library's) files and places on x86-64
+/// and their aarch64 counterparts, which a twin ships instead: the program interpreter where PT_INTERP names it
 /// (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`) and in
 /// the multiarch system directory, libc and libm there.
 const GLIBC_ARM64: &[(Module, Module)] = &[
@@ -19246,6 +20444,20 @@ const GLIBC_ARM64: &[(Module, Module)] = &[
         ("target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
         ("target/prebuilt/glibc-arm64/libm.so.6", "lib/aarch64-linux-gnu"),
     ),
+    (
+        ("target/prebuilt/libwayland-client/libwayland-client.so.0", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/libwayland-client-arm64/libwayland-client.so.0", "lib/aarch64-linux-gnu"),
+    ),
+    (
+        ("target/prebuilt/libffi/libffi.so.8", "lib/x86_64-linux-gnu"),
+        ("target/prebuilt/libffi-arm64/libffi.so.8", "lib/aarch64-linux-gnu"),
+    ),
+    // The scripts' busybox (the batch scenarios' checksums): Alpine's
+    // static aarch64 one, under busybox.net's x86_64 one's name.
+    (
+        ("target/prebuilt/busybox-linux/busybox", "lx"),
+        ("target/prebuilt/busybox-linux-aarch64/busybox.static@busybox", "lx"),
+    ),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -19258,6 +20470,10 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
         for m in &mut modules {
             if let Some((_, arm)) = GLIBC_ARM64.iter().find(|(x64, _)| x64 == m) {
                 *m = *arm;
+            } else if let Some(arm) = linux_root_arm64(m.0) {
+                // A Linux root's tree: the root assembled from the
+                // packages' arm64 builds (`<name>-arm64`).
+                m.0 = arm;
             }
         }
         modules.sort_unstable();
@@ -25316,6 +26532,15 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        name: "partition_test",
+        size: 64 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: partition_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "disk_test",
         size: 16 << 20,
         host_mib: None,
@@ -25552,6 +26777,116 @@ fn disk_test_setup(image: &mut [u8]) {
     image[512..512 + text.len()].copy_from_slice(text);
 }
 
+/// partition_test's GPT, read as UEFI's specification lays it out (xtask's
+/// own reader, apart from the kernel's): the protective MBR, the primary
+/// header and entries with their CRC32s, the backup header at the last
+/// sector pointing at its entries' copy, and the two partitions the
+/// program made (types, GUIDs, ranges, names).
+fn partition_test_check(image: &[u8]) -> Result {
+    let sectors = (image.len() / 512) as u64;
+    let sector = |lba: u64| &image[lba as usize * 512..(lba as usize + 1) * 512];
+    let u32_at =
+        |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or_default());
+    let u64_at =
+        |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or_default());
+    let mbr = sector(0);
+    if mbr[450] != 0xee || u32_at(mbr, 454) != 1 || mbr[510..512] != [0x55, 0xaa] {
+        return Err("sector 0 is not a protective MBR".into());
+    }
+    let check_header = |lba: u64, other: u64, entries_at: u64| -> Result<Vec<u8>> {
+        let h = sector(lba);
+        if &h[..8] != b"EFI PART" || u32_at(h, 8) != 0x0001_0000 || u32_at(h, 12) != 92 {
+            return Err(format!("LBA {lba}: no GPT header"));
+        }
+        let mut copy = h[..92].to_vec();
+        copy[16..20].fill(0);
+        if crc32(&copy) != u32_at(h, 16) {
+            return Err(format!("LBA {lba}: the header's CRC32 is wrong"));
+        }
+        let fields = [u64_at(h, 24), u64_at(h, 32), u64_at(h, 40), u64_at(h, 48), u64_at(h, 72)];
+        if fields != [lba, other, 34, sectors - 34, entries_at] {
+            return Err(format!(
+                "LBA {lba}: header fields {fields:?}, not {:?}",
+                [lba, other, 34, sectors - 34, entries_at]
+            ));
+        }
+        if h[56..72] != PARTITION_TEST_DISK_ID || u32_at(h, 80) != 128 || u32_at(h, 84) != 128 {
+            return Err(format!("LBA {lba}: disk GUID or entry count/size"));
+        }
+        let start = entries_at as usize * 512;
+        let entries = image[start..start + 128 * 128].to_vec();
+        if crc32(&entries) != u32_at(h, 88) {
+            return Err(format!("LBA {lba}: the entries' CRC32 is wrong"));
+        }
+        Ok(entries)
+    };
+    let primary = check_header(1, sectors - 1, 2)?;
+    let backup = check_header(sectors - 1, 1, sectors - 33)?;
+    if primary != backup {
+        return Err("the backup entries differ from the primary ones".into());
+    }
+    let name = |s: &str| -> Vec<u8> {
+        let mut n = vec![0u8; 72];
+        for (i, b) in s.bytes().enumerate() {
+            n[2 * i] = b;
+        }
+        n
+    };
+    // (type, GUID, first LBA, last LBA, name)
+    type Entry<'a> = (&'a [u8; 16], &'a [u8; 16], u64, u64, &'a str);
+    let want: [Entry; 2] = [
+        (
+            &PARTITION_TEST_ESP_TYPE,
+            &PARTITION_TEST_ESP_ID,
+            2048,
+            2048 + 32768 - 1,
+            "EFI system partition",
+        ),
+        (&PARTITION_TEST_DATA_TYPE, &PARTITION_TEST_DATA_ID, 34816, 34816 + 65536 - 1, "gala"),
+    ];
+    for (i, (kind, id, first, last, n)) in want.iter().enumerate() {
+        let e = &primary[i * 128..(i + 1) * 128];
+        if &e[..16] != *kind
+            || &e[16..32] != *id
+            || u64_at(e, 32) != *first
+            || u64_at(e, 40) != *last
+            || u64_at(e, 48) != 0
+            || e[56..128] != name(n)[..]
+        {
+            return Err(format!("GPT entry {i} is not what partition_test made"));
+        }
+    }
+    if primary[256..].iter().any(|&b| b != 0) {
+        return Err("GPT entries past the second are not empty".into());
+    }
+    // Written through partition 2's device: the disk's sector at 17 MiB.
+    let text = b"written by partition_test to partition 2";
+    if !sector(34816).starts_with(text) {
+        return Err("partition 2's first sector does not hold what partition_test wrote".into());
+    }
+    Ok(())
+}
+
+/// GUIDs as partition_test gives them, in the GPT's byte order.
+const PARTITION_TEST_DISK_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0001, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 1]);
+const PARTITION_TEST_ESP_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0002, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 2]);
+const PARTITION_TEST_DATA_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0003, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 3]);
+const PARTITION_TEST_ESP_TYPE: [u8; 16] =
+    gpt_guid(0xc12a_7328, 0xf81f, 0x11d2, [0xba, 0x4b, 0, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b]);
+const PARTITION_TEST_DATA_TYPE: [u8; 16] =
+    gpt_guid(0xebd0_a0a2, 0xb9e5, 0x4433, [0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7]);
+
+const fn gpt_guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
+    let (a, b, c) = (d1.to_le_bytes(), d2.to_le_bytes(), d3.to_le_bytes());
+    [
+        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5],
+        d4[6], d4[7],
+    ]
+}
+
 /// disk_test wrote sector 2: its text, then each byte's offset (mod 256).
 fn disk_test_check(image: &[u8]) -> Result {
     let text = b"written by disk_test";
@@ -25764,8 +27099,9 @@ fn office_source_command(args: &[String]) -> Result {
 /// Checks scenario `name`'s disk image after its run.
 fn check_disk(name: &str, path: &Path) -> Result {
     let Some(d) = disk_scenario(name) else { return Ok(()) };
-    // The first MiB (what checks look at; images can be large).
-    let mut image = vec![0u8; d.size.min(1 << 20)];
+    // Images up to 64 MiB whole (a GPT's backup is at the end); of larger
+    // ones the first MiB (what their checks look at).
+    let mut image = vec![0u8; if d.size <= 64 << 20 { d.size } else { 1 << 20 }];
     fs::File::open(path)
         .and_then(|mut f| f.read_exact(&mut image))
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -27731,7 +29067,9 @@ fn judge_log_inner(
         }
         // A user/lx program: its output and exit status exactly as real
         // Linux's (its expected.txt).
-        _ => lx_expect::check_boot(scenario.name, scenario.cmdline, serial),
+        _ => {
+            lx_expect::check_boot(scenario.name, twin_base(scenario.name), scenario.cmdline, serial)
+        }
     }
 }
 

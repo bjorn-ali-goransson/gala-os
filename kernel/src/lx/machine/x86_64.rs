@@ -63,6 +63,11 @@ pub fn stat_bytes(st: &lx_abi::layout::Stat) -> [u8; 144] {
 /// seccomp_data's and SIGSYS's architecture: AUDIT_ARCH_X86_64 (EM_X86_64 with the 64-bit and little-endian bits).
 pub const AUDIT_ARCH: u32 = 0xc000_003e;
 
+/// No return path for a handler without SA_RESTORER: x86_64's C
+/// libraries always give one, as Linux requires there (aarch64's
+/// `SIGRETURN_CODE`).
+pub const SIGRETURN_CODE: &[u8] = &[];
+
 /// struct epoll_event's data offset: packed on x86_64 (the kernel's EPOLL_PACKED).
 pub const EPOLL_DATA_AT: usize = 4;
 

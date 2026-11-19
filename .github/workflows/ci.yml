@@ -234,11 +234,38 @@ jobs:
       - name: Checked-in test binaries match their sources
         run: cargo xtask export-tests && git diff --exit-code user/bin
 
+  # The Linux roots' Ubuntu packages, fetched once for all boot shards
+  # (`cargo xtask fetch-debs`) and kept in one cache they restore: six
+  # shards fetching the same packages from Ubuntu's archive had their
+  # connections reset (WORKFLOW "CI build caches"). The newest cache is
+  # restored first, so only packages new to the pins are downloaded.
+  debs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache the Linux roots' packages
+        uses: actions/cache@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-debs-
+      - name: Fetch what the pins name and the cache lacks
+        # Through the mirror the runner's own apt uses: archive.ubuntu.com
+        # resets or hangs the runners' connections (xtask ubuntu_mirror).
+        env:
+          XTASK_UBUNTU_MIRROR: http://azure.archive.ubuntu.com/ubuntu
+        run: cargo xtask fetch-debs
+
   # Every boot scenario, dealt out over parallel runners (xtask's
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
-  # Each shard builds what it boots and fetches the prebuilt programs.
+  # Each shard builds what it boots and fetches the prebuilt programs; the
+  # Linux roots' packages come from the `debs` job's cache.
   boot:
-    needs: changes
+    needs: [changes, debs]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-26.04
     strategy:
@@ -314,8 +341,7 @@ jobs:
       # outage (a 504 from GitHub's release downloads) then fails only the
       # runs that need a new download. Saved even when a boot fails: what
       # was fetched is kept, so a download is made once and not on every
-      # run until a whole shard passes (archive.ubuntu.com refusing some
-      # of them would otherwise keep main red).
+      # run until a whole shard passes.
       - name: Restore the pinned prebuilt programs
         id: prebuilt
         uses: actions/cache/restore@v4
@@ -323,11 +349,19 @@ jobs:
           path: |
             target/prebuilt
             !target/prebuilt/chromium-syms
+            !target/prebuilt/debs
           key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
           restore-keys: gala-prebuilt-${{ matrix.shard }}-
+      - name: Restore the Linux roots' packages (the debs job's)
+        uses: actions/cache/restore@v4
+        with:
+          path: target/prebuilt/debs
+          key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
+          fail-on-cache-miss: true
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
+          XTASK_UBUNTU_MIRROR: http://azure.archive.ubuntu.com/ubuntu
         run: cargo xtask boot-test
       - name: Save the pinned prebuilt programs (also when a boot failed)
         if: ${{ !cancelled() && steps.prebuilt.outputs.cache-hit != 'true' }}
@@ -336,6 +370,7 @@ jobs:
           path: |
             target/prebuilt
             !target/prebuilt/chromium-syms
+            !target/prebuilt/debs
           key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
       # Saved from main's pushes only (pull requests read it), by one shard
       # (all six build the same).

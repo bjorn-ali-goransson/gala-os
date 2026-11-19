@@ -55,10 +55,13 @@ done
 # release's arm64 packages from ports.ubuntu.com, each checked against
 # the SHA-256 in its signed Packages index and unpacked once into
 # target/lx-aarch64-glibc (/lib is /usr/lib, as on Ubuntu).
-AARCH64_GLIBC_TESTS="dyn_test"
+AARCH64_GLIBC_TESTS="dyn_test gtk_test"
+# gtk_test links against GTK 3 by soname, as build.sh does (the libraries
+# of the release's arm64 libgtk-3-0t64 and libglib2.0-0t64 in the sysroot).
+GTK_LIBS="-l:libgtk-3.so.0 -l:libgdk-3.so.0 -l:libgobject-2.0.so.0 -l:libglib-2.0.so.0 -Wl,--allow-shlib-undefined"
 gcache=$root/target/lx-aarch64-glibc
 sysroot=$gcache/sysroot
-if [ ! -f "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
+if [ ! -f "$sysroot/usr/lib/aarch64-linux-gnu/libgtk-3.so.0" ]; then
 	mkdir -p "$gcache/debs"
 	rm -rf "$sysroot"
 	mkdir -p "$sysroot"
@@ -73,12 +76,15 @@ if [ ! -f "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
 	pool/main/g/gcc-15/libgcc-15-dev_15.2.0-16ubuntu1_arm64.deb d088c97ff459ab243eb369666dfc43b92f278556e45d72c2def4d7657d728fe4
 	pool/main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_arm64.deb 106e53a42bebdc55f253d737a818991eba5b4f22c8b1a035a4202b133ade9743
 	pool/main/l/linux/linux-libc-dev_7.0.0-14.14_arm64.deb e86f6bbf7bebdc1958241b546ca9467c35fc29f57c01d4f0336c1908ca21f2fe
+	pool/main/g/gtk+3.0/libgtk-3-0t64_3.24.52-0ubuntu1_arm64.deb 67978b2d629b4739bfe16b3ac49773daf66e11bb67512abd9137f32230834dfe
+	pool/main/g/glib2.0/libglib2.0-0t64_2.88.0-1_arm64.deb ef3511a432c0d22d183f46d64dd0cae9437bd3e0050547503a288ec6220e233d
 	EOF
 	ln -s usr/lib "$sysroot/lib"
 fi
 gcc_glibc="clang --target=aarch64-linux-gnu --sysroot=$sysroot --gcc-toolchain=$sysroot/usr -fuse-ld=lld -Wl,--build-id=none"
 for dir in $AARCH64_GLIBC_TESTS; do
 	libs=
+	[ "$dir" = gtk_test ] && libs=$GTK_LIBS
 	for src in "$here/$dir"/lib*.c; do
 		[ -f "$src" ] || continue
 		lib=$(basename "$src" .c)

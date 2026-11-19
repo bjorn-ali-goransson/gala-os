@@ -673,11 +673,18 @@ fn push_frame(
     action: &KSigaction,
     old_mask: SigSet,
 ) -> core::result::Result<UserRegs, &'static str> {
-    if action.flags & SA_RESTORER == 0 {
-        // x86_64 programs always give one (the C library's rt_sigreturn
-        // stub); without it the handler has nowhere to return.
+    // Without SA_RESTORER the handler returns to the process's
+    // rt_sigreturn page (aarch64: Linux's vDSO trampoline, which glibc
+    // relies on there); x86_64 programs always give one.
+    let with_page;
+    let action = if action.flags & SA_RESTORER != 0 {
+        action
+    } else if !machine::SIGRETURN_CODE.is_empty() {
+        with_page = KSigaction { restorer: super::mm::SIGRETURN_PAGE, ..*action };
+        &with_page
+    } else {
         return Err("no SA_RESTORER");
-    }
+    };
     // The alternate stack, as the interrupted code had it (uc_stack), and
     // where the frame goes.
     let alt = lx.altstack(tid);
