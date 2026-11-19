@@ -9450,6 +9450,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("uia_test", "uiautomationcore.dll", "Windows/System32"),
     ("uia_test", "comctl32.dll", "Windows/System32"),
     ("uia_test", "user/bin/uia_test.exe", "gala"),
+    ("ui_test", "ntdll.dll", "Windows/System32"),
+    ("ui_test", "kernel32.dll", "Windows/System32"),
+    ("ui_test", "msvcrt.dll", "Windows/System32"),
+    ("ui_test", "user32.dll", "Windows/System32"),
+    ("ui_test", "gdi32.dll", "Windows/System32"),
+    ("ui_test", "ole32.dll", "Windows/System32"),
+    ("ui_test", "oleaut32.dll", "Windows/System32"),
+    ("ui_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("ui_test", "uiautomationcore.dll", "Windows/System32"),
+    ("ui_test", "comctl32.dll", "Windows/System32"),
     ("msvcrt_test", "ntdll.dll", "Windows/System32"),
     ("msvcrt_test", "kernel32.dll", "Windows/System32"),
     ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
@@ -11093,6 +11103,7 @@ const USER_PROGRAMS: &[&str] = &[
     "taskmgr_test",
     "explorer",
     "explorer_test",
+    "ui_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -16944,6 +16955,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=uia_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["uia_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala_ui's window (ROADMAP LY step 2): a component drawn with
+        // gdi32, clicks and typing to its update (each message logged),
+        // its UIA elements from the same tree, checked by a UIA client
+        // thread (user/ui_test).
+        name: "ui_test",
+        cmdline: "qemu_exit run=ui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ui_test: click Inc: Inc",
+            "ui_test: click Reset: Reset",
+            "ui_test: input Name: Name(\"hi\")",
+            "ui_test: input Name: Name(\"h\")",
+            "ui_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // H3: gala's msvcrt against documented msvcrt behaviour

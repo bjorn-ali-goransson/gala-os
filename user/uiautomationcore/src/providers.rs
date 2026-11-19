@@ -93,6 +93,10 @@ enum Op {
     /// The Value pattern's SetValue (handle; the text, NUL-terminated
     /// UTF-16, in the buffer, which goes in: GALA_UIA_INPUT; as Invoke).
     SetValue = 7,
+    /// The fragment root's ElementProviderFromPoint (cookie; the screen
+    /// point, two i32, in the buffer, which goes in: a handle, -1 for the
+    /// root itself, 0 for none).
+    FromPoint = 8,
 }
 
 /// wParam's flag (the direction byte's top bit) for an operation whose
@@ -389,7 +393,44 @@ struct Fragment {
     /// IRawElementProviderFragment (one reference).
     ptr: *mut c_void,
     identity: usize,
+    /// The runtime id the provider gives (`given_id`), when it does.
+    rid: Rid,
     handle: u32,
+}
+
+/// The longest runtime id kept for matching; a longer one is matched by
+/// the object's identity only.
+const RID_MAX: usize = 8;
+
+/// A provider's own runtime id (empty: none given).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Rid {
+    len: u8,
+    ids: [i32; RID_MAX],
+}
+
+/// The runtime id fragment `f` gives (GetRuntimeId, slot 4) as it gives
+/// it (with UiaAppendRuntimeId's 3 when it starts with it): what makes
+/// two provider objects one element. Providers may make a new object
+/// each time they hand out an element; the runtime id is the element's
+/// identity (as for CompareElements), not the object.
+fn given_id(f: *mut c_void) -> Rid {
+    let mut rid = Rid { len: 0, ids: [0; RID_MAX] };
+    let mut sa: *mut c_void = core::ptr::null_mut();
+    // SAFETY: IRawElementProviderFragment::GetRuntimeId.
+    let call: extern "system" fn(*mut c_void, *mut *mut c_void) -> HResult =
+        unsafe { core::mem::transmute(method(f, 4)) };
+    if call(f, &mut sa) == S_OK && !sa.is_null() {
+        let given = i4s(sa);
+        // SAFETY: the provider's SAFEARRAY, ours now.
+        unsafe { crate::SafeArrayDestroy(sa) };
+        let given = given.as_slice();
+        if !given.is_empty() && given.len() <= RID_MAX {
+            rid.ids[..given.len()].copy_from_slice(given);
+            rid.len = given.len() as u8;
+        }
+    }
+    rid
 }
 
 static FRAGS: Table<Fragment, FRAGMENTS> =
@@ -399,14 +440,19 @@ static NEXT_SLOT: AtomicU32 = AtomicU32::new(0);
 static GENERATIONS: AtomicU32 = AtomicU32::new(0);
 
 /// Keeps fragment `f` (its reference becomes the table's) of window
-/// `hwnd`: its handle (the one it has when it is there already).
+/// `hwnd`: its handle (the one it has when it is there already: the
+/// same runtime id, or for a provider that gives none, the same object).
 fn keep_fragment(hwnd: Hwnd, f: *mut c_void) -> u32 {
     let id = identity(f);
+    let rid = given_id(f);
     let known = FRAGS.with(|slots| {
         slots
             .iter()
             .flatten()
-            .find(|x| x.hwnd == hwnd && id != 0 && x.identity == id)
+            .find(|x| {
+                x.hwnd == hwnd
+                    && if rid.len != 0 { x.rid == rid } else { id != 0 && x.identity == id }
+            })
             .map(|x| x.handle)
     });
     if let Some(handle) = known {
@@ -418,7 +464,7 @@ fn keep_fragment(hwnd: Hwnd, f: *mut c_void) -> u32 {
         GENERATIONS.fetch_add(1, Ordering::Relaxed) % ((1 << (32 - SLOT_BITS)) - 1) + 1;
     let handle = generation << SLOT_BITS | slot;
     let evicted = FRAGS.with(|slots| {
-        slots[slot as usize].replace(Fragment { hwnd, ptr: f, identity: id, handle })
+        slots[slot as usize].replace(Fragment { hwnd, ptr: f, identity: id, rid, handle })
     });
     if let Some(old) = evicted {
         release(old.ptr);
@@ -471,7 +517,7 @@ pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) ->
         Some(unsafe { core::slice::from_raw_parts_mut(lparam as *mut u8, UIA_VALUE_SIZE) })
     };
     match op {
-        0 | 1 => {
+        0 | 1 | 8 => {
             let Some(p) = claim(hwnd, arg) else {
                 crate::missing(
                     b"UIAutomationCore.dll!GalaUiaServe(no such answer)",
@@ -479,7 +525,39 @@ pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) ->
                 );
                 return 0;
             };
-            let r = if op == 0 {
+            let r = if op == 8 {
+                let Some(buf) = out else {
+                    release(p);
+                    return 0;
+                };
+                let x = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let y = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                let root = query(p, &IID_IRAW_ELEMENT_PROVIDER_FRAGMENT_ROOT);
+                if root.is_null() {
+                    0
+                } else {
+                    let mut to: *mut c_void = core::ptr::null_mut();
+                    // SAFETY: IRawElementProviderFragmentRoot::
+                    // ElementProviderFromPoint (slot 3).
+                    let call: extern "system" fn(
+                        *mut c_void,
+                        f64,
+                        f64,
+                        *mut *mut c_void,
+                    ) -> HResult = unsafe { core::mem::transmute(method(root, 3)) };
+                    let hr = call(root, f64::from(x), f64::from(y), &mut to);
+                    release(root);
+                    if hr != S_OK {
+                        crate::missing(
+                            b"UIAutomationCore.dll!ElementProviderFromPoint(failed)",
+                            hr as u32 as u64,
+                        );
+                        0
+                    } else {
+                        handle_of(hwnd, to)
+                    }
+                }
+            } else if op == 0 {
                 match out {
                     Some(out) => {
                         let mut v = property(p, id);
@@ -606,7 +684,7 @@ fn bounding_rectangle(f: *mut c_void) -> Variant {
 /// process's window, else through GALA_UIA. `buf` is a UIA_VALUE_SIZE
 /// buffer for a value, or null.
 fn ask(hwnd: Hwnd, op: Op, dir: u8, arg: u32, id: i32, buf: *mut u8) -> isize {
-    let input = if matches!(op, Op::SetValue) { GALA_UIA_INPUT } else { 0 };
+    let input = if matches!(op, Op::SetValue | Op::FromPoint) { GALA_UIA_INPUT } else { 0 };
     let wparam = (id as u16 as u64
         | (op as u64) << 16
         | u64::from(dir) << 24
@@ -683,6 +761,25 @@ pub fn root_child(hwnd: Hwnd, dir: u8) -> Option<u32> {
         h if h > 0 => Some(h as u32),
         _ => None,
     }
+}
+
+/// The fragment at screen point (`x`, `y`) of window `hwnd`'s fragment
+/// root (ElementProviderFromPoint): None when the window has no
+/// fragment root, or the point is on the root itself.
+pub fn fragment_at(hwnd: Hwnd, x: i32, y: i32) -> Option<u32> {
+    let c = cookie(hwnd)?;
+    let buf = alloc(UIA_VALUE_SIZE);
+    if buf.is_null() {
+        return None;
+    }
+    // SAFETY: our buffer of UIA_VALUE_SIZE bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(x.to_le_bytes().as_ptr(), buf, 4);
+        core::ptr::copy_nonoverlapping(y.to_le_bytes().as_ptr(), buf.add(4), 4);
+    }
+    let r = ask(hwnd, Op::FromPoint, 0, c, 0, buf);
+    free(buf);
+    (r > 0).then_some(r as u32)
 }
 
 /// Where Navigate goes from a fragment.

@@ -17,7 +17,7 @@ pub(crate) const GALA_UIA: u32 = 0x03f3;
 /// The value buffer's size (UIAutomationCore's providers.rs agrees).
 pub(crate) const UIA_VALUE_SIZE: usize = 4096;
 /// wParam's flag for an operation whose buffer goes in (SetValue's
-/// text), not out.
+/// text, FromPoint's point), not out.
 pub(crate) const GALA_UIA_INPUT: usize = 1 << 31;
 
 type Handle = *mut c_void;

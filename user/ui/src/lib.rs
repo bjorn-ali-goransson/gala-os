@@ -61,7 +61,11 @@
 //!   Errors (a duplicate id, a handler without an id, the limits
 //!   [`MAX_ELEMENTS`] and [`MAX_DEPTH`]) name the element by its path.
 //!
-//! Drawing is the program's (gdi32), from the [`Placed`] list.
+//! - [`paint`] draws the [`Placed`] list on a [`Canvas`]; [`uia`] makes
+//!   UI Automation elements of it (those with an id). [`win`] (Windows
+//!   only) is a window holding a component: drawn with gdi32, clicks and
+//!   typing to `update` (each message logged), its UIA provider made
+//!   from the same list.
 
 #![no_std]
 
@@ -69,8 +73,14 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod fmod;
+mod paint;
 mod place;
+pub mod uia;
+#[cfg(windows)]
+pub mod win;
 
+pub use paint::{Canvas, FOCUS, FOCUS_BAR, PLACEHOLDER, Set, paint};
 pub use place::{DEFAULT_SIZE, Measure, Placed, click, hit, place, typed};
 
 use alloc::string::String;

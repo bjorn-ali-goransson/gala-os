@@ -2868,6 +2868,14 @@ name = "udp_test"
 version = "0.1.0"
 
 [[package]]
+name = "ui_test"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "gala_ui",
+]
+
+[[package]]
 name = "uiautomationcore"
 version = "0.1.0"
 

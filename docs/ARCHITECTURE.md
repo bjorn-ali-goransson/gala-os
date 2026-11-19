@@ -15134,13 +15134,59 @@ Invariants:
   fixed advance in the tests); `text` and `button` wrap to their width,
   `input` is one line (an empty one is a line high).
 
-Limits: no window yet draws from it (ROADMAP LY step 2), no scrolling,
-no images beyond a named picture.
+The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
+- `win::open(component, &Options, log)` registers a class, creates the
+  window hidden, lays out the view for the client rectangle and shows
+  it; `win::pump()` runs the thread's messages until the window is
+  destroyed (it posts WM_QUIT). The component lives behind the window
+  (GWLP_USERDATA) and is used only on the window's thread.
+- Drawing: `paint` turns `Placed` elements into calls on a `Canvas`
+  (fill, frame, text, each with its rectangle; a recorder in the host
+  tests, gdi32 in the window): background, then border, then text
+  inset by padding (`text` wrapped, `button` centred on one line,
+  `input` one line with its placeholder in gray when empty), and a bar
+  under the input that has the focus. The window fills its background
+  and paints in WM_PAINT; `win::draw(hwnd, dc)` paints the same into
+  any DC (the test reads pixels from a DIB). Fonts are Segoe UI by
+  size and weight, cached per window; text is measured with
+  DrawTextW(DT_CALCRECT) so layout and drawing agree.
+- Input: WM_LBUTTONDOWN gives the focus to the input under the
+  pointer; WM_LBUTTONUP is `click`, then the log line `click <id>:
+  <msg>`, `update`, and the view built and laid out again (WM_SIZE
+  too); WM_CHAR edits the focused input's text (backspace removes a
+  character, other printable characters are appended) and sends
+  `typed`'s message, logged `input <id>: <msg>`.
+- UI Automation from the same tree (`gala_ui::uia`): WM_GETOBJECT
+  (UiaRootObjectId) answers with the window's fragment root; the
+  elements are those with an id, each under the nearest element
+  holding it that has one, in view order. Each has its control type
+  (column/row/grid Group, text Text, button Button, input Edit, image
+  Image, rule Separator), name (the text, an input's placeholder),
+  AutomationId, screen rectangle, a runtime id from its id, and
+  keyboard focus for inputs; ElementProviderFromPoint is `hit`. UIA
+  calls come on other threads: the window's last laid-out elements
+  (without handlers) and the focus are kept in a shared block that
+  the providers hold and the window's extra bytes point to, read under
+  a flag rather than from the component. An element whose id is no
+  longer in the view, or a destroyed window, answers
+  UIA_E_ELEMENTNOTAVAILABLE.
+
+Limits: no scrolling; images are laid out but not drawn; no UIA
+control patterns yet (Invoke, Value), so UIA clients read the tree
+but act through the mouse and keyboard; elements without an id are
+not in UIA; typing has no caret, selection or keyboard navigation
+(Tab) and takes no surrogate pairs; one window per thread; messages
+come only from the window's own clicks and typing (no timers, nothing
+posted from another thread) and a component has no child components
+(ROADMAP LY: subscriptions, `Node::map`).
 
 Observability: a refused view names the element by its path and says
-what was wrong (the tests check the exact messages); a handled message
-is logged with the element's id (ROADMAP LY step 2), so a log shows
-what was clicked and what it did.
+what was wrong (the tests check the exact messages), and in a window
+it is logged `view: <error>` with the previous view kept on screen; a
+handled message is logged with the element's id (`click Inc: Inc`,
+`input Name: Name("hi")`), so a log shows what was clicked and what
+it did. `ui_test` checks the UIA tree, the log lines and pixels at
+elements found through UIA.
 
 ## Plan: graphics and GPU
 
@@ -15561,7 +15607,8 @@ condition), never by trusting the caller.
 
 - **IUIAutomation**: ElementFromHandle (E_INVALIDARG for no window),
   GetRootElement (the desktop), ElementFromPoint (WindowFromPoint, else
-  the root), GetFocusedElement, CompareElements, the condition factories
+  the root; within a window whose provider is a fragment root, the
+  fragment its ElementProviderFromPoint gives), GetFocusedElement, CompareElements, the condition factories
   (true, false, property and property-ex, and, or, not, the native-array
   forms), the raw/control/content view conditions and walkers,
   CreateTreeWalker, IntNativeArrayToSafeArray, RectToVariant,
@@ -15940,7 +15987,9 @@ ignored.
     (IValueProvider::SetValue; its text, NUL-terminated UTF-16 cut at
     2047 characters (recorded), goes in the buffer: wParam's bit 31,
     GALA_UIA_INPUT, makes `foreign` marshal the buffer in instead of
-    out). Invoke and SetValue give 1 for S_OK or the provider's failure
+    out), the root's ElementProviderFromPoint (cookie; the screen point,
+    two i32, in the buffer as SetValue's text; a handle, -1 for the root
+    itself). Invoke and SetValue give 1 for S_OK or the provider's failure
     HRESULT; 0 (not served) becomes UIA_E_ELEMENTNOTAVAILABLE. A value
     operation's
     0 is recorded on the client ("GALA_UIA(not served)"), and the missing
@@ -15958,9 +16007,14 @@ ignored.
     reference to each fragment handed out; the handle is the slot (10
     bits) and a generation (22 bits), so a handle whose slot was reused
     (round robin) names nothing and its element is not available. A
-    fragment already in the table (same IUnknown identity, same window)
-    keeps its handle, so elements for one fragment are equal
-    (CompareElements compares nodes). A fragment's parent is Navigate's
+    fragment already in the table keeps its handle, so elements for one
+    fragment are equal (CompareElements compares nodes, and the walker
+    finds a sibling by the element's place among its parent's
+    children): the same window and the same runtime id as the provider
+    gives it (up to 8 parts), or, for a provider that gives none, the
+    same IUnknown identity. The runtime id, not the object, is the
+    element: a provider may make a new object each time it hands an
+    element out (`gala_ui`'s windows do). A fragment's parent is Navigate's
     Parent (a fragment root: the window), its children FirstChild and
     the siblings. Its properties: the provider's GetPropertyValue (QI
     IRawElementProviderSimple); RuntimeId from GetRuntimeId (after the
@@ -16045,8 +16099,8 @@ TODO (ROADMAP UIA):
   fragment tree and their fragments' Invoke and Value patterns; not the
   other patterns, nor a root provider's own patterns (the window's
   element has the window's), focus
-  (GetFocus, SetFocus), ElementProviderFromPoint (ElementFromPoint
-  gives the window), embedded fragment roots or ProviderOptions;
+  (GetFocus, SetFocus), embedded fragment roots (ElementFromPoint
+  stops at the fragment the window's root gives) or ProviderOptions;
   provider elements raise no events; 32-bit processes have no
   UIAutomationCore, so no providers; UiaRaise* do nothing;
 - events only through IUIAutomation's own Add*EventHandler;

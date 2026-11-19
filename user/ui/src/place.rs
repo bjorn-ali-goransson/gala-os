@@ -44,6 +44,8 @@ pub struct Placed<M> {
     pub bold: bool,
     /// The padding (top, right, bottom, left): the text's inset.
     pub padding: [i32; 4],
+    /// The element holding it (its index in the list), None for the root.
+    pub parent: Option<usize>,
 }
 
 /// The element under (x, y) that has an id: the last such in paint
@@ -235,6 +237,7 @@ impl<'a, M: Clone> Builder<'a, M> {
             size,
             bold,
             padding: s.padding.map(|v| v as i32),
+            parent: None,
         };
         let id = if n.kind.is_container() {
             let id = self.tree.new_leaf(st).map_err(|e| self.err(format!("layout: {e:?}")))?;
@@ -320,10 +323,11 @@ pub fn place<M: Clone>(
     let mut out = Vec::with_capacity(b.order.len());
     for (id, mut p) in b.order {
         let l = b.tree.layout(id).map_err(fail)?;
-        let parent = b.tree.parent(id);
-        let base = parent
-            .and_then(|pid| origin.iter().rev().find(|(n, _)| *n == pid))
-            .map_or((0.0, 0.0), |(_, o)| *o);
+        // The parent was placed before its children: it is in `origin`,
+        // at its index in `out`.
+        let parent = b.tree.parent(id).and_then(|pid| origin.iter().rposition(|(n, _)| *n == pid));
+        let base = parent.map_or((0.0, 0.0), |i| origin[i].1);
+        p.parent = parent;
         let (x, y) = (base.0 + l.location.x, base.1 + l.location.y);
         origin.push((id, (x, y)));
         p.rect = [x as i32, y as i32, l.size.width as i32, l.size.height as i32];

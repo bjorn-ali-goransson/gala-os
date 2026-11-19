@@ -3834,6 +3834,7 @@ and panics red). The boot splash replaces the text console: add
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
+    cargo xtask screenshot --uefi --name ui --at 100 run=ui_test.exe args=hold
 
 `cargo xtask screenshot` boots a bare ISO: no serial log, no disk, no
 network to the outside. To watch a scenario as its boot test runs it

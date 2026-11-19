@@ -152,11 +152,23 @@ extern "system" fn from_handle(_this: usize, h: Hwnd, out: *mut *mut c_void) -> 
     put_element(out, Node::window(h))
 }
 
-/// ElementFromPoint (the POINT comes by value, in one register).
+/// ElementFromPoint (the POINT comes by value, in one register): the
+/// window under the point, or, when its provider is a fragment root,
+/// the fragment its ElementProviderFromPoint gives.
 extern "system" fn from_point(_this: usize, point: Point, out: *mut *mut c_void) -> HResult {
+    let (x, y) = (point.x, point.y);
     // SAFETY: a plain call.
     let h = unsafe { WindowFromPoint(point) };
-    element_or_null(out, if h == 0 { desktop() } else { h })
+    if h == 0 {
+        return element_or_null(out, desktop());
+    }
+    if out.is_null() {
+        return E_POINTER;
+    }
+    match crate::providers::fragment_at(h, x, y) {
+        Some(handle) => put_element(out, Node::fragment(h, handle)),
+        None => element_or_null(out, h),
+    }
 }
 
 extern "system" fn focused(_this: usize, out: *mut *mut c_void) -> HResult {

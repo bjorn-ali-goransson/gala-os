@@ -6325,6 +6325,11 @@ layer inside them).
   a set width. Child order is paint order and reading order.
 - Handlers are messages; each handled message is logged with its
   element's id.
+- One-way data flow (as Elm, and React's reducers): the state is the
+  component's, `view` builds the whole tree from it, events become
+  messages, `update` changes the state, the view is built again.
+  There is no separate engine: the pieces below join `gala_ui` when a
+  window in step 3 needs them, each with its test.
 - Layout by Taffy (`no_std` + `alloc`, THIRD_PARTY.md).
 - Tests check elements by id (rectangle, text, state) through the
   tree, not pixels at coordinates.
@@ -6332,9 +6337,9 @@ layer inside them).
 **Next**:
 1. Done: the tree and its builder, the checks, layout (Taffy) and hit
    testing, `user/ui` (ARCHITECTURE "UI components"), host-tested.
-2. A window drawn from the tree (gdi32), clicks and typing through
-   `click`/`typed` to `update` with each message logged, its UIA
-   elements from the same tree.
+2. Done: a window drawn from the tree (gdi32), clicks and typing
+   through `click`/`typed` to `update` with each message logged, its
+   UIA elements from the same tree (`gala_ui::win`, `user/ui_test`).
 3. Move the windows gala has drawn by hand onto components, one at a
    time, each its own change with its scenario passing before and
    after (same ids, same log lines; the screendumps may change only
@@ -6351,6 +6356,20 @@ layer inside them).
      fallible and `gala_ui` and Taffy allocate infallibly. Open:
      move them into a user-mode program on user32 (as Windows' shell
      is) or make the crate fallible; decided when it is reached.
+   Added to `gala_ui` only when a window being moved needs it, not
+   ahead of it:
+   - Subscriptions and messages from outside: a component says which
+     timers it wants (`subscriptions()`, from its state), and work on
+     another thread posts a message into the window's message loop,
+     logged as any other. Task Manager's refresh needs it first, then
+     the change agent's replies.
+   - Nested components: `Node::map` turns a child component's messages
+     into its parent's, so a piece two windows share (the change card)
+     is one component, with one state tree and one log (no hooks, no
+     state hidden in the tree).
+   - Keyed lists and diffing only if measured: the whole tree is built
+     and laid out again for each message (microseconds for these
+     windows); File Explorer's long lists are where a cost would show.
    Not moved: the console window (`user/conhost`), a grid of
    character cells rather than a tree of elements.
    Done when no window of gala's own computes rectangles or hit tests
@@ -7029,6 +7048,21 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      tools are item MCP's (the ledger, screenshots, UIA), so it checks
      its change on the running desktop; the change is a branch or diff
      the user can read.
+     The loop's tests record, then replay (the owner; as R7's
+     record/replay): a recording run calls the real API and stores
+     each exchange (the request as sent, the response as received)
+     under a hash of the request (model, messages, tools, options); a
+     replaying run answers from the recording and never reaches the
+     network. A request that is not in the recording fails the run,
+     naming its hash and the recorded request nearest to it, so a
+     changed prompt or tool is seen, not quietly sent. A recording is
+     redone on purpose when the prompts or tools change, and its diff
+     is read like code. The recordings hold no key: the key is added
+     after what is recorded (by the development host's proxy for the
+     stopgap; by the credential store on gala), never stored with the
+     exchanges. Replayed runs make the loop's tests deterministic, and the
+     use case below is checked from its recording in CI and against
+     the real API by hand.
      A request that needs the kernel or another part of the system
      is not refused, but this small loop is not expected to carry it
      through, and no such request is part of its measure. One example
