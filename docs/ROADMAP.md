@@ -7013,7 +7013,16 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      reach the program's whole source - read a file, replace an exact
      piece of text, build - and compiler errors go back to it
      for a bounded number of rounds; every round, edit and build is
-     logged, and the card's steps are those events. Stopgap until gala
+     logged, and the card's steps are those events. Before it edits
+     anything, the agent may ask the user clarifying questions (a
+     fourth tool, ask). It asks when the request or the pick leaves
+     the change open: which column "the space used" means, or whether
+     a change that needs the kernel is wanted. The card shows the
+     question, with choices where the agent offers them and an answer
+     box. The loop waits for the answer, and Cancel still ends it. The
+     questions, the answers and the decision not to ask are logged with
+     the request. The agent does not ask once it has started editing:
+     anything it finds then is reported with the change. Stopgap until gala
      runs rustc and calls HTTPS itself: the loop runs on the
      development host against the real source and API, to prove it;
      the same loop moves onto gala unchanged. The agent's
@@ -7021,9 +7030,10 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      its change on the running desktop; the change is a branch or diff
      the user can read.
      The use cases it is measured by (the owner), on Task Manager:
-     - "Add sparklines to the space used": the user picks a column
-       that shows space used and has no sparkline yet (Commit size;
-       CPU and Memory have theirs), and the agent adds one. The
+     - "Add sparklines to the space used": "space used" could be
+       Memory, which already has one, or Commit size, which does not.
+       Unless the pick settles which, the agent asks before it starts,
+       then adds the sparkline. The
        existing sparklines (`Trails`, `line`) are in the program's
        other files, not in the picked element.
      - "A Disk I/O column with its sparkline": the user picks a column
@@ -7032,9 +7042,9 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
        record (GalaTasks op 0, `kernel/src/nt/tasks.rs`) has no I/O
        bytes yet, so the agent has to add them there, in taskmgr's
        parser, and in a new column with its own trail. Swapping the
-       running program cannot apply a kernel change, so the agent says
-       that one needs a rebuild of the system and a reboot, and its
-       steps say so.
+       running program cannot apply a kernel change, so before it
+       starts the agent asks whether the user wants a change that needs
+       a rebuild of the system and a reboot.
   5. Updated (`-4-updated`): the new build in the same window, folder
      and selection; a toast "<program> was updated" with Undo and
      Details. The swap: the program writes its state as a versioned
