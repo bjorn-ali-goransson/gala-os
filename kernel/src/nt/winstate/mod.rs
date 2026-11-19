@@ -78,6 +78,10 @@ pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
+/// A right click on a caption (wParam HTCAPTION, lParam the screen point).
+pub const WM_NCRBUTTONDOWN: u32 = 0x00a4;
+pub const WM_NCRBUTTONUP: u32 = 0x00a5;
+pub const HTCAPTION: u64 = 2;
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_SYSKEYDOWN: u32 = 0x0104;

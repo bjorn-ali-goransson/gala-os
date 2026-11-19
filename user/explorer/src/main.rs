@@ -30,6 +30,10 @@
 //! - **Live**: the folder shown is watched (ReadDirectoryChangesW); a
 //!   change made anywhere (a Windows program, a Linux process in the
 //!   distribution) shows without a refresh.
+//! - **Change this program...** (the window menu; `change_ui`): a
+//!   preview of changing this program by a request to a coding agent,
+//!   none connected yet: the request card, Inspect over the window's
+//!   parts (by automation id), the steps, a card saying nothing changed.
 //!
 //! Observability: each navigation, open, operation and change is a line
 //! on its standard output (`explorer: ...`: the serial log for a program
@@ -47,6 +51,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::fmt::Write;
+
+mod change_ui;
 
 use explorer::{COLUMNS, Column, Entry, Kind, Sort, TILE_H, TILE_W};
 
@@ -315,6 +321,10 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
 const WM_RBUTTONDOWN: u32 = 0x0204;
 const WM_MOUSEWHEEL: u32 = 0x020a;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_TIMER: u32 = 0x0113;
+const WM_SYSCOMMAND: u32 = 0x0112;
+const WM_INITMENUPOPUP: u32 = 0x0117;
 const VK_F5: usize = 0x74;
 const VK_F2: usize = 0x71;
 const VK_DELETE: usize = 0x2e;
@@ -451,6 +461,8 @@ struct State {
     scroll: usize,
     menu: Option<Menu>,
     properties: Option<Vec<String>>,
+    /// "Change this program...": its cards, over the window (modal).
+    change: Option<explorer::change::Change>,
     last_click: (u32, Option<usize>),
     /// The watch on the folder shown: its directory handle and event.
     watch: Option<(Handle, Handle)>,
@@ -1577,6 +1589,7 @@ fn paint(s: &State, dc: &Dc) {
         }
         dc.text(px + 20, py + ph - 30, pw - 40, "Esc closes", s.small, TEXT_DIM, false);
     }
+    change_ui::paint(s, dc);
 }
 
 // ---- Input ------------------------------------------------------------------
@@ -1887,10 +1900,17 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
         }
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let (x, y) = point();
-            click(state(), x, y, msg == WM_LBUTTONDBLCLK);
+            let s = state();
+            if s.change.is_some() {
+                change_ui::click(s, x, y);
+            } else {
+                click(s, x, y, msg == WM_LBUTTONDBLCLK);
+            }
             redraw(hwnd);
             0
         }
+        WM_RBUTTONDOWN if state().change.is_some() => 0,
+        WM_MOUSEWHEEL if state().change.is_some() => 0,
         WM_RBUTTONDOWN => {
             let (x, y) = point();
             right_click(state(), x, y);
@@ -1905,6 +1925,8 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             redraw(hwnd);
             0
         }
+        // The change flow takes its keys as characters.
+        WM_KEYDOWN if state().change.is_some() => 0,
         WM_KEYDOWN => {
             if key(state(), wparam) {
                 redraw(hwnd);
@@ -1917,7 +1939,34 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             if c < 0x20 && !matches!(c, 0x08 | 0x0d | 0x1b) {
                 return 0;
             }
-            character(state(), c);
+            let s = state();
+            if s.change.is_some() {
+                change_ui::character(s, c);
+            } else {
+                character(s, c);
+            }
+            redraw(hwnd);
+            0
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = point();
+            if change_ui::mouse_move(state(), x, y) {
+                redraw(hwnd);
+            }
+            0
+        }
+        WM_TIMER if change_ui::timer(state(), wparam) => {
+            redraw(hwnd);
+            0
+        }
+        // The window menu opens (HIWORD(lParam) TRUE): its items are the
+        // system's and ours (change_ui::add_menu_item).
+        WM_INITMENUPOPUP if (lparam >> 16) & 0xffff != 0 => {
+            log("window menu");
+            0
+        }
+        WM_SYSCOMMAND if wparam & 0xfff0 == change_ui::ID_CHANGE => {
+            change_ui::open(state());
             redraw(hwnd);
             0
         }
@@ -1998,6 +2047,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
             scroll: 0,
             menu: None,
             properties: None,
+            change: None,
             last_click: (0, None),
             watch: None,
             watch_buffer: [0; 4096],
@@ -2061,6 +2111,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
             s.navigate(COMPUTER, false);
         }
     }
+    change_ui::add_menu_item(hwnd);
     // SAFETY: our window.
     unsafe { ShowWindow(hwnd, 5) };
     // The message loop, also woken by the watched folder's changes.

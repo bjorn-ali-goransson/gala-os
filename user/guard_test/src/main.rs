@@ -3,12 +3,10 @@
 //! vectored handler registered through ntdll) and then behaves normally;
 //! the main thread's stack grows past its initial commit without any
 //! exception (TEB StackLimit moves down); runaway recursion on a thread
-//! with a Windows-style stack raises STATUS_STACK_OVERFLOW (the thread
-//! first keeps 16 KiB for its handler with kernel32's
-//! SetThreadStackGuarantee where kernel32 is mapped: Windows otherwise
-//! leaves the handler whatever the last guard page left, which with
-//! a randomized stack start was now and then too little for its own
-//! dispatch, and the process died of a second fault). Prints
+//! with a Windows-style stack raises STATUS_STACK_OVERFLOW, and the
+//! handler has the stack the thread asked for with SetThreadStackGuarantee
+//! (as a program that handles its overflow does: what is left of the
+//! last page is not enough for every Windows' exception dispatch). Prints
 //! `guard_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -26,6 +24,11 @@ const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const TEB_STACK_LIMIT: usize = 0x10;
 const TEB_DEALLOCATION_STACK: usize = 0x1478;
 const CTX_RSP: usize = 0x98;
+/// What the overflowing thread asks SetThreadStackGuarantee for.
+const GUARANTEE: u32 = 32 * 1024;
+/// The least stack its handler may find left: the guarantee less the
+/// exception dispatch's own frames.
+const LEFT_AT_LEAST: u64 = 16 * 1024;
 const CTX_RIP: usize = 0xf8;
 
 #[repr(C)]
@@ -34,9 +37,15 @@ struct ExceptionPointers {
     context: *mut u8,
 }
 
-/// Last exception seen: code, information[0], information[1]; and the
-/// number of handler calls.
-static SEEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Last exception seen: code, information[0], information[1]; the
+/// number of handler calls; the stack left below the handler's frame at
+/// STATUS_STACK_OVERFLOW; SetThreadStackGuarantee's result.
+static SEEN: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SetThreadStackGuarantee(size: *mut u32) -> i32;
+}
 
 fn rd(p: *const u8, off: usize) -> u64 {
     // SAFETY: offsets inside the record/context the system passes.
@@ -57,6 +66,9 @@ extern "system" fn handler(pointers: *mut ExceptionPointers) -> i32 {
     SEEN[2].store(rd(record, 0x28), Ordering::SeqCst);
     SEEN[3].fetch_add(1, Ordering::SeqCst);
     if code == STATUS_STACK_OVERFLOW {
+        let here = black_box(0u8);
+        let left = (&here as *const u8 as usize).saturating_sub(teb_field(TEB_DEALLOCATION_STACK));
+        SEEN[4].store(left as u64, Ordering::SeqCst);
         // Leave the exhausted stack frames behind: continue in
         // `overflow_exit`, on a call-aligned rsp.
         let rsp = (rd(context, CTX_RSP) & !0xf) - 8;
@@ -118,17 +130,11 @@ fn runaway(depth: u64) -> u64 {
     runaway(depth + 1) + u64::from(black_box(&buf)[1])
 }
 
-type SetGuarantee = extern "system" fn(*mut u32) -> i32;
-
 extern "C" fn overflow_thread(_: usize) -> ! {
-    let guarantee = find_system_image("\\System32\\kernel32.dll")
-        .and_then(|k32| find_export(k32, b"SetThreadStackGuarantee"));
-    if let Some(f) = guarantee {
-        // SAFETY: the documented signature of the export.
-        let f = unsafe { core::mem::transmute::<usize, SetGuarantee>(f) };
-        let mut size = 16 * 1024;
-        f(&mut size);
-    }
+    let mut size = GUARANTEE;
+    // SAFETY: a writable u32, as documented.
+    let ok = unsafe { SetThreadStackGuarantee(&mut size) };
+    SEEN[5].store(u64::from(ok != 0), Ordering::SeqCst);
     black_box(runaway(0));
     exit_thread(0)
 }
@@ -188,6 +194,8 @@ fn run() -> Result<(), u32> {
     c.eq(thread_basic_info(t).1.into(), STATUS_STACK_OVERFLOW.into())?;
     c.eq(seen(0), STATUS_STACK_OVERFLOW.into())?;
     c.eq(seen(3), 3)?;
+    c.eq(seen(5), 1)?; // SetThreadStackGuarantee succeeded
+    c.ok(seen(4) >= LEFT_AT_LEAST, seen(4))?; // the handler had the guarantee
     close(t);
     Ok(())
 }

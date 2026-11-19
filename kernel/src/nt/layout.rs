@@ -14,6 +14,9 @@ pub mod teb {
     pub const PEB: u64 = 0x60;
     /// The bottom of the stack reservation.
     pub const DEALLOCATION_STACK: u64 = 0x1478;
+    /// The stack kept for the thread's stack-overflow handling, in bytes
+    /// (a u32 that SetThreadStackGuarantee raises).
+    pub const GUARANTEED_STACK_BYTES: u64 = 0x1748;
     /// Size of the x64 TEB, rounded up to pages.
     pub const PAGES: u64 = 2;
 }
