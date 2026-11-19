@@ -216,6 +216,7 @@ const DT_WORDBREAK: u32 = 0x10;
 const DT_SINGLELINE: u32 = 0x20;
 const DT_CALCRECT: u32 = 0x400;
 const DT_NOPREFIX: u32 = 0x800;
+const DT_END_ELLIPSIS: u32 = 0x8000;
 const S_OK: HResult = 0;
 const E_NOINTERFACE: HResult = 0x8000_4002_u32 as i32;
 const E_INVALIDARG: HResult = 0x8007_0057_u32 as i32;
@@ -340,6 +341,7 @@ fn strip<M>(placed: &[Placed<M>]) -> Vec<Placed<()>> {
             size: p.size,
             bold: p.bold,
             padding: p.padding,
+            ellipsis: p.ellipsis,
             parent: p.parent,
         })
         .collect()
@@ -763,6 +765,7 @@ impl Canvas for Gdi {
             Set::Wrap => DT_WORDBREAK,
             Set::Centre => DT_SINGLELINE | DT_CENTER | DT_VCENTER,
             Set::Line => DT_SINGLELINE | DT_VCENTER,
+            Set::Cut => DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         };
         // SAFETY: our DC.
         unsafe {

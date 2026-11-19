@@ -44,6 +44,8 @@ pub struct Placed<M> {
     pub bold: bool,
     /// The padding (top, right, bottom, left): the text's inset.
     pub padding: [i32; 4],
+    /// One line, cut with "..." (`Node::ellipsis`).
+    pub ellipsis: bool,
     /// The element holding it (its index in the list), None for the root.
     pub parent: Option<usize>,
 }
@@ -73,6 +75,8 @@ pub fn typed<M>(placed: &[Placed<M>], id: &str, text: String) -> Option<M> {
 /// What the measure needs of a leaf.
 struct Leaf {
     kind: Kind,
+    /// One line: measured without wrapping.
+    line: bool,
     text: String,
     size: f32,
     bold: bool,
@@ -222,6 +226,10 @@ impl<'a, M: Clone> Builder<'a, M> {
             }
             _ => {}
         }
+        if s.ellipsis {
+            // Its text is cut, so it may be narrower than the text.
+            st.min_size.width = LengthPercentageAuto::length(0.0);
+        }
         let placed = Placed {
             kind: n.kind,
             id: n.id.clone(),
@@ -238,6 +246,7 @@ impl<'a, M: Clone> Builder<'a, M> {
             size,
             bold,
             padding: s.padding.map(|v| v as i32),
+            ellipsis: s.ellipsis,
             parent: None,
         };
         let id = if n.kind.is_container() {
@@ -255,7 +264,13 @@ impl<'a, M: Clone> Builder<'a, M> {
             } else {
                 n.text.clone()
             };
-            self.leaves.push(Leaf { kind: n.kind, text: measured, size, bold });
+            self.leaves.push(Leaf {
+                kind: n.kind,
+                line: n.kind == Kind::Input || s.ellipsis,
+                text: measured,
+                size,
+                bold,
+            });
             let id = self
                 .tree
                 .new_leaf_with_context(st, self.leaves.len() - 1)
@@ -306,8 +321,9 @@ pub fn place<M: Clone>(
                         AvailableSpace::Definite(w) => Some(w),
                         _ => None,
                     });
-                    // An input is one line: measure without wrapping.
-                    let wrap = if leaf.kind == Kind::Input { None } else { max };
+                    // An input, and a text cut with "...", are one line:
+                    // measured without wrapping.
+                    let wrap = if leaf.line { None } else { max };
                     let (w, h) = measure.text(&leaf.text, leaf.size, leaf.bold, wrap);
                     let h = if leaf.kind == Kind::Input && leaf.text.is_empty() {
                         measure.text("Ag", leaf.size, leaf.bold, None).1
@@ -423,6 +439,19 @@ mod tests {
             .width(100)
             .child(text("aaaa bbbb cccc dddd eeee ffff gggg").id("T").min_height(40));
         assert_eq!(at(&lay(&v, 400.0), "T").rect, [0, 0, 100, 54]);
+    }
+
+    #[test]
+    fn an_ellipsis_text_is_one_line_and_shrinks_to_its_room() {
+        // Wrapped, the text would take two lines; cut, it keeps one and
+        // the row's 100 px.
+        let v: Node<()> = row().width(100).child(text("aaaa bbbb cccc dddd").id("T").ellipsis());
+        let p = lay(&v, 400.0);
+        assert_eq!(at(&p, "T").rect, [0, 0, 100, 18]);
+        assert!(at(&p, "T").ellipsis);
+        // Shorter than its room, it is as wide as its text.
+        let v: Node<()> = row().width(100).child(text("ab").id("T").ellipsis());
+        assert_eq!(at(&lay(&v, 400.0), "T").rect, [0, 0, 14, 18]);
     }
 
     #[test]

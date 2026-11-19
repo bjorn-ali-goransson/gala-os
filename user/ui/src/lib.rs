@@ -229,6 +229,8 @@ pub struct Style {
     pub color: Option<u32>,
     pub size: Option<f32>,
     pub bold: Option<bool>,
+    /// One line, cut with "..." to its width (`text`).
+    pub ellipsis: bool,
 }
 
 /// An element of a view and what it holds; `M` is the program's message.
@@ -393,6 +395,12 @@ impl<M> Node<M> {
     }
     pub fn bold(mut self) -> Self {
         self.style.bold = Some(true);
+        self
+    }
+    /// One line, cut with "..." where it is wider than its room (a
+    /// name in a column); it shrinks to that room.
+    pub fn ellipsis(mut self) -> Self {
+        self.style.ellipsis = true;
         self
     }
     /// Not bold, where a parent is.

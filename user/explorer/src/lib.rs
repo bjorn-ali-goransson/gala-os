@@ -34,6 +34,7 @@ use core::cmp::Ordering;
 use core::fmt::Write;
 
 pub mod change;
+pub mod window;
 
 /// What an entry is (its icon).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

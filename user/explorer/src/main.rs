@@ -54,7 +54,10 @@ use core::fmt::Write;
 
 mod change_ui;
 
-use explorer::{COLUMNS, Column, Entry, Kind, Sort, TILE_H, TILE_W};
+use explorer::window::{self, Command, Look, MENU_ROW, MENU_W, Menu, NavRow, View};
+use explorer::{Entry, Kind, Sort};
+use gala_ui::Placed;
+use gala_ui::win::Gdi;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -212,7 +215,6 @@ unsafe extern "system" {
     fn PostQuitMessage(code: i32);
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
-    fn FillRect(hdc: Handle, rect: *const Rect, brush: Handle) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: Bool) -> Bool;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
@@ -227,30 +229,7 @@ unsafe extern "system" {
 
 #[link(name = "gdi32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn CreateSolidBrush(color: u32) -> Handle;
-    #[allow(clippy::too_many_arguments)]
-    fn CreateFontW(
-        height: i32,
-        width: i32,
-        escapement: i32,
-        orientation: i32,
-        weight: i32,
-        italic: u32,
-        underline: u32,
-        strike: u32,
-        charset: u32,
-        out_precision: u32,
-        clip_precision: u32,
-        quality: u32,
-        pitch: u32,
-        face: *const u16,
-    ) -> Handle;
-    fn SelectObject(hdc: Handle, object: Handle) -> Handle;
-    fn DeleteObject(object: Handle) -> Bool;
-    fn SetTextColor(hdc: Handle, color: u32) -> u32;
     fn SetBkMode(hdc: Handle, mode: i32) -> i32;
-    fn TextOutW(hdc: Handle, x: i32, y: i32, text: *const u16, n: i32) -> Bool;
-    fn GetTextExtentPoint32W(hdc: Handle, text: *const u16, n: i32, size: *mut [i32; 2]) -> Bool;
 }
 
 #[link(name = "shell32", kind = "raw-dylib")]
@@ -352,89 +331,6 @@ const SIGDN_FILESYSPATH: u32 = 0x8005_8000;
 const SFGAO_FOLDER: u32 = 0x2000_0000;
 const SFGAO_HIDDEN: u32 = 0x8_0000;
 
-// Windows 11's light look (COLORREF: 0x00BBGGRR).
-const fn rgb(r: u32, g: u32, b: u32) -> u32 {
-    r | g << 8 | b << 16
-}
-const BACKGROUND: u32 = rgb(0xf3, 0xf3, 0xf3);
-const CONTENT: u32 = rgb(0xff, 0xff, 0xff);
-const TEXT: u32 = rgb(0x1b, 0x1b, 0x1b);
-const TEXT_DIM: u32 = rgb(0x5d, 0x5d, 0x5d);
-const LINE: u32 = rgb(0xe5, 0xe5, 0xe5);
-const ACCENT: u32 = rgb(0x00, 0x5f, 0xb8);
-const SELECTED: u32 = rgb(0xcc, 0xe4, 0xf7);
-const NAV_SELECTED: u32 = rgb(0xe3, 0xe3, 0xe3);
-const FOLDER_COLOR: u32 = rgb(0xf8, 0xc8, 0x4a);
-const FOLDER_TAB: u32 = rgb(0xe0, 0x9b, 0x1a);
-const FILE_COLOR: u32 = rgb(0xfa, 0xfa, 0xfa);
-const FILE_EDGE: u32 = rgb(0x8a, 0x8a, 0x8a);
-const DRIVE_COLOR: u32 = rgb(0x7a, 0x86, 0x94);
-const LINUX_COLOR: u32 = rgb(0xe9, 0x54, 0x20);
-const COMPUTER_COLOR: u32 = rgb(0x3b, 0x9a, 0xe1);
-const MENU_BG: u32 = rgb(0xf9, 0xf9, 0xf9);
-
-// The layout (client coordinates).
-const BAR_Y: i32 = 6;
-const BAR_H: i32 = 32;
-const BACK_X: i32 = 8;
-const UP_X: i32 = 44;
-const ADDRESS_X: i32 = 84;
-const SEARCH_W: i32 = 240;
-const CMD_Y: i32 = 44;
-const CMD_H: i32 = 32;
-const PANE_Y: i32 = 84;
-const NAV_W: i32 = 220;
-const NAV_ROW: i32 = 28;
-const HEADER_H: i32 = 28;
-const ROW_H: i32 = 24;
-const STATUS_H: i32 = explorer::STATUS_H;
-const MENU_W: i32 = 180;
-const MENU_ROW: i32 = 30;
-
-/// The command bar's buttons, left to right, and the view buttons right.
-const COMMANDS: [(Command, &str, i32); 6] = [
-    (Command::NewFolder, "New folder", 104),
-    (Command::Copy, "Copy", 64),
-    (Command::Paste, "Paste", 64),
-    (Command::Delete, "Delete", 70),
-    (Command::Properties, "Properties", 96),
-    (Command::Terminal, "Open in Terminal", 146),
-];
-const VIEW_BUTTONS: [(View, &str, i32); 2] =
-    [(View::Details, "Details", 80), (View::Icons, "Icons", 64)];
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Command {
-    Open,
-    NewFolder,
-    Copy,
-    Paste,
-    Delete,
-    Properties,
-    Terminal,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Details,
-    Icons,
-}
-
-/// A navigation pane row: its text, what it opens, its depth, its icon.
-struct NavRow {
-    name: String,
-    parsing: String,
-    depth: i32,
-    kind: Kind,
-}
-
-/// The context menu: where, and its items.
-struct Menu {
-    x: i32,
-    y: i32,
-    items: Vec<(Command, &'static str)>,
-}
-
 struct State {
     hwnd: Hwnd,
     size: (i32, i32),
@@ -468,9 +364,6 @@ struct State {
     watch: Option<(Handle, Handle)>,
     watch_buffer: [u8; 4096],
     watch_ov: Overlapped,
-    font: Handle,
-    bold: Handle,
-    small: Handle,
 }
 
 struct Global(core::cell::UnsafeCell<Option<State>>);
@@ -1284,416 +1177,133 @@ fn lx_stat(path: &str) -> Option<(u32, u32, u32)> {
 
 // ---- Drawing ----------------------------------------------------------------
 
-struct Dc(Handle);
+// ---- The window: explorer::window's view ------------------------------------
 
-impl Dc {
-    fn fill(&self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        let r = Rect { left: x, top: y, right: x + w, bottom: y + h };
-        // SAFETY: a brush made and freed here.
-        unsafe {
-            let b = CreateSolidBrush(color);
-            FillRect(self.0, &r, b);
-            DeleteObject(b);
-        }
-    }
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetDC(hwnd: Hwnd) -> Handle;
+    fn ReleaseDC(hwnd: Hwnd, dc: Handle) -> i32;
+}
 
-    fn frame(&self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        self.fill(x, y, w, 1, color);
-        self.fill(x, y + h - 1, w, 1, color);
-        self.fill(x, y, 1, h, color);
-        self.fill(x + w - 1, y, 1, h, color);
-    }
-
-    fn width(&self, text: &[u16]) -> i32 {
-        let mut size = [0i32; 2];
-        // SAFETY: a valid string with its length.
-        unsafe { GetTextExtentPoint32W(self.0, text.as_ptr(), text.len() as i32, &mut size) };
-        size[0]
-    }
-
-    /// `text` at (x, y) in `font` and `color`, cut with "..." to `max`
-    /// pixels; right-aligned in `max` with `right`.
-    #[allow(clippy::too_many_arguments)]
-    fn text(&self, x: i32, y: i32, max: i32, text: &str, font: Handle, color: u32, right: bool) {
-        // SAFETY: plain calls on our DC.
-        unsafe {
-            SelectObject(self.0, font);
-            SetTextColor(self.0, color);
-        }
-        let mut t: Vec<u16> = text.encode_utf16().collect();
-        if self.width(&t) > max {
-            let dots: [u16; 3] = [46, 46, 46];
-            while !t.is_empty() && self.width(&t) + self.width(&dots) > max {
-                t.pop();
-            }
-            t.extend_from_slice(&dots);
-        }
-        let x = if right { x + max - self.width(&t) } else { x };
-        // SAFETY: a valid string with its length.
-        unsafe { TextOutW(self.0, x, y, t.as_ptr(), t.len() as i32) };
-    }
-
-    /// An icon of `kind`, `size` pixels square, at (x, y).
-    fn icon(&self, x: i32, y: i32, size: i32, kind: Kind) {
-        let u = size / 16;
-        match kind {
-            Kind::Folder => {
-                self.fill(x, y + 2 * u, 7 * u, 2 * u, FOLDER_TAB);
-                self.fill(x, y + 4 * u, 16 * u, 10 * u, FOLDER_COLOR);
-            }
-            Kind::File => {
-                self.fill(x + 3 * u, y + u, 10 * u, 14 * u, FILE_COLOR);
-                self.frame(x + 3 * u, y + u, 10 * u, 14 * u, FILE_EDGE);
-                for k in 0..3 {
-                    self.fill(x + 5 * u, y + (5 + 3 * k) * u, 6 * u, u.max(1), FILE_EDGE);
-                }
-            }
-            Kind::Drive => {
-                self.fill(x, y + 5 * u, 16 * u, 7 * u, DRIVE_COLOR);
-                self.fill(x + 11 * u, y + 9 * u, 3 * u, u.max(1), rgb(0x6c, 0xd0, 0x6c));
-            }
-            Kind::Distro | Kind::Linux => {
-                self.fill(x + u, y + u, 14 * u, 14 * u, LINUX_COLOR);
-                self.fill(x + 5 * u, y + 4 * u, 6 * u, 8 * u, rgb(0x1b, 0x1b, 0x1b));
-                self.fill(x + 6 * u, y + 6 * u, 4 * u, 5 * u, rgb(0xff, 0xff, 0xff));
-            }
-            Kind::Computer => {
-                self.fill(x, y + 2 * u, 16 * u, 10 * u, COMPUTER_COLOR);
-                self.fill(x + 6 * u, y + 12 * u, 4 * u, 2 * u, DRIVE_COLOR);
-                self.fill(x + 3 * u, y + 14 * u, 10 * u, u.max(1), DRIVE_COLOR);
-            }
-        }
-    }
-
-    fn button(&self, x: i32, y: i32, w: i32, label: &str, font: Handle, on: bool) {
-        if on {
-            self.fill(x, y, w, CMD_H, NAV_SELECTED);
-        }
-        self.text(x + 10, y + 8, w - 16, label, font, TEXT, false);
+/// What the window shows, from the state.
+fn look(s: &State) -> Look<'_> {
+    Look {
+        size: s.size,
+        crumbs: &s.crumbs,
+        editing: s.editing.as_deref(),
+        search: &s.search,
+        can_back: !s.history.is_empty(),
+        can_up: s.crumb_paths.len() > 1,
+        view: s.view,
+        sort: s.sort,
+        nav: &s.nav,
+        current: &s.current,
+        entries: &s.entries,
+        rows: &s.rows,
+        scroll: s.scroll,
+        selected: s.selected_index(),
+        renaming: s.renaming.as_deref(),
+        menu: s.menu.as_ref(),
+        properties: s.properties.as_deref(),
     }
 }
 
-/// The content pane's left edge and the rows' first y.
-fn content_x() -> i32 {
-    NAV_W + 1
-}
-fn rows_y(view: View) -> i32 {
-    if view == View::Details { PANE_Y + HEADER_H } else { PANE_Y + 8 }
-}
-fn address_w(w: i32) -> i32 {
-    w - ADDRESS_X - SEARCH_W - 20
+/// The window's view laid out, measured with `g`; None (logged) when
+/// gala_ui refuses it.
+fn laid_out(s: &State, g: &mut Gdi) -> Option<Vec<Placed<window::Msg>>> {
+    match gala_ui::place(&window::view(&look(s)), s.size.0 as f32, Some(s.size.1 as f32), g) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            let mut l = String::from("view: ");
+            let _ = write!(l, "{e}");
+            log(&l);
+            None
+        }
+    }
 }
 
-fn paint(s: &State, dc: &Dc) {
-    let (w, h) = s.size;
-    dc.fill(0, 0, w, h, BACKGROUND);
-    // Back, Up, the address bar, the search box.
-    dc.text(
-        BACK_X + 9,
-        BAR_Y + 7,
-        24,
-        "<",
-        s.bold,
-        if s.history.is_empty() { LINE } else { TEXT },
-        false,
-    );
-    dc.text(
-        UP_X + 9,
-        BAR_Y + 7,
-        24,
-        "^",
-        s.bold,
-        if s.crumb_paths.len() > 1 { TEXT } else { LINE },
-        false,
-    );
-    let aw = address_w(w);
-    dc.fill(ADDRESS_X, BAR_Y, aw, BAR_H, CONTENT);
-    dc.frame(ADDRESS_X, BAR_Y, aw, BAR_H, rgb(0xd0, 0xd0, 0xd0));
-    match &s.editing {
-        Some(text) => {
-            dc.fill(ADDRESS_X + 1, BAR_Y + BAR_H - 2, aw - 2, 2, ACCENT);
-            let mut t = text.clone();
-            t.push('|');
-            dc.text(ADDRESS_X + 10, BAR_Y + 8, aw - 20, &t, s.font, TEXT, false);
-        }
-        None => dc.text(
-            ADDRESS_X + 10,
-            BAR_Y + 8,
-            aw - 20,
-            &explorer::breadcrumbs(&s.crumbs),
-            s.font,
-            TEXT,
-            false,
-        ),
+/// `f` on the window's view as it is drawn: laid out again, measured on
+/// the window's DC. None when there is no DC or no layout (logged).
+fn with_layout<R>(s: &State, f: impl FnOnce(&[Placed<window::Msg>]) -> R) -> Option<R> {
+    // SAFETY: our window's DC, released below after the Gdi is dropped.
+    let hdc = unsafe { GetDC(s.hwnd) };
+    if hdc.is_null() {
+        record_missing("GetDC (the window's layout)");
+        return None;
     }
-    let sx = w - SEARCH_W - 12;
-    dc.fill(sx, BAR_Y, SEARCH_W, BAR_H, CONTENT);
-    dc.frame(sx, BAR_Y, SEARCH_W, BAR_H, rgb(0xd0, 0xd0, 0xd0));
-    if s.search.is_empty() {
-        let mut hint = String::from("Search ");
-        hint.push_str(s.crumbs.last().map_or("", |c| c.as_str()));
-        dc.text(sx + 10, BAR_Y + 8, SEARCH_W - 20, &hint, s.font, TEXT_DIM, false);
-    } else {
-        dc.fill(sx + 1, BAR_Y + BAR_H - 2, SEARCH_W - 2, 2, ACCENT);
-        let mut t = s.search.clone();
-        t.push('|');
-        dc.text(sx + 10, BAR_Y + 8, SEARCH_W - 20, &t, s.font, TEXT, false);
+    let p = laid_out(s, &mut Gdi::new(hdc));
+    // SAFETY: the DC GetDC gave.
+    unsafe { ReleaseDC(s.hwnd, hdc) };
+    p.map(|p| f(&p))
+}
+
+fn paint(s: &State, hdc: Handle) {
+    let mut g = Gdi::new(hdc);
+    if let Some(p) = laid_out(s, &mut g) {
+        gala_ui::paint(&p, None, &mut g);
     }
-    // The command bar.
-    let mut x = 8;
-    for (_, label, bw) in COMMANDS {
-        dc.button(x, CMD_Y, bw, label, s.font, false);
-        x += bw + 4;
-    }
-    let mut x = w - 12;
-    for (view, label, bw) in VIEW_BUTTONS.iter().rev() {
-        x -= bw;
-        dc.button(x, CMD_Y, *bw, label, s.font, *view == s.view);
-        x -= 4;
-    }
-    dc.fill(0, PANE_Y - 4, w, 1, LINE);
-    // The navigation pane.
-    let pane_h = h - PANE_Y - STATUS_H;
-    for (i, row) in s.nav.iter().enumerate() {
-        let y = PANE_Y + 4 + NAV_ROW * i as i32;
-        if y + NAV_ROW > PANE_Y + pane_h {
-            break;
-        }
-        if row.parsing == s.current {
-            dc.fill(4, y, NAV_W - 8, NAV_ROW - 2, NAV_SELECTED);
-            dc.fill(4, y + 7, 3, NAV_ROW - 16, ACCENT);
-        }
-        let x = 14 + 16 * row.depth;
-        dc.icon(x, y + 5, 16, row.kind);
-        dc.text(x + 22, y + 6, NAV_W - x - 28, &row.name, s.font, TEXT, false);
-    }
-    // The content pane.
-    let cx = content_x();
-    let cw = w - cx;
-    dc.fill(cx, PANE_Y, cw, pane_h, CONTENT);
-    dc.fill(cx - 1, PANE_Y, 1, pane_h, LINE);
-    let selected = s.selected_index();
-    match s.view {
-        View::Details => {
-            let mut x = cx + 12;
-            for (column, label, width) in COLUMNS {
-                let mut t = String::from(label);
-                if s.sort.column == column {
-                    t.push_str(if s.sort.descending { "  v" } else { "  ^" });
-                }
-                dc.text(x, PANE_Y + 6, width - 12, &t, s.font, TEXT_DIM, column == Column::Size);
-                x += width;
-            }
-            dc.fill(cx, PANE_Y + HEADER_H - 1, cw, 1, LINE);
-            let first = rows_y(View::Details);
-            for (k, &i) in s.rows.iter().enumerate().skip(s.scroll) {
-                let y = first + ROW_H * (k - s.scroll) as i32;
-                if y + ROW_H > PANE_Y + pane_h {
-                    break;
-                }
-                let e = &s.entries[i];
-                if Some(i) == selected {
-                    dc.fill(cx + 4, y, cw - 8, ROW_H - 1, SELECTED);
-                }
-                let mut x = cx + 12;
-                for (column, _, width) in COLUMNS {
-                    let (text, right) = match column {
-                        Column::Name => {
-                            dc.icon(x, y + 4, 16, e.kind);
-                            (e.name.clone(), false)
-                        }
-                        Column::Modified => (explorer::time_text(e.modified), false),
-                        Column::Type => (explorer::type_text(e), false),
-                        Column::Size => (explorer::size_text(e), true),
-                    };
-                    let tx = if column == Column::Name { x + 24 } else { x };
-                    let tw = if column == Column::Name { width - 36 } else { width - 12 };
-                    if column == Column::Name
-                        && Some(i) == selected
-                        && let Some(edit) = &s.renaming
-                    {
-                        // F2: the new name being typed, in a box.
-                        dc.fill(tx - 4, y + 1, tw + 8, ROW_H - 3, CONTENT);
-                        dc.frame(tx - 4, y + 1, tw + 8, ROW_H - 3, ACCENT);
-                        let mut t = edit.clone();
-                        t.push('|');
-                        dc.text(tx, y + 4, tw, &t, s.font, TEXT, false);
-                        x += width;
-                        continue;
-                    }
-                    dc.text(
-                        tx,
-                        y + 4,
-                        tw,
-                        &text,
-                        s.font,
-                        if column == Column::Name { TEXT } else { TEXT_DIM },
-                        right,
-                    );
-                    x += width;
-                }
-            }
-        }
-        View::Icons => {
-            let first = rows_y(View::Icons);
-            for (k, &i) in s.rows.iter().enumerate().skip(s.scroll) {
-                let (tx, ty) = explorer::icon_grid(k - s.scroll, cw - 16);
-                let (x, y) = (cx + 8 + tx, first + ty);
-                if y + TILE_H > PANE_Y + pane_h {
-                    break;
-                }
-                let e = &s.entries[i];
-                if Some(i) == selected {
-                    dc.fill(x + 4, y, TILE_W - 8, TILE_H - 4, SELECTED);
-                }
-                dc.icon(x + (TILE_W - 48) / 2, y + 6, 48, e.kind);
-                dc.text(x + 8, y + 62, TILE_W - 16, &e.name, s.small, TEXT, false);
-            }
-        }
-    }
-    // The status bar.
-    let mut status = String::new();
-    let n = s.rows.len();
-    let _ = write!(status, "{n} {}", if n == 1 { "item" } else { "items" });
-    if selected.is_some() {
-        status.push_str("    1 item selected");
-    }
-    dc.text(12, h - STATUS_H + 5, w - 24, &status, s.small, TEXT_DIM, false);
-    // The context menu.
-    if let Some(m) = &s.menu {
-        let mh = MENU_ROW * m.items.len() as i32 + 8;
-        dc.fill(m.x, m.y, MENU_W, mh, MENU_BG);
-        dc.frame(m.x, m.y, MENU_W, mh, rgb(0xc8, 0xc8, 0xc8));
-        for (k, (_, label)) in m.items.iter().enumerate() {
-            dc.text(
-                m.x + 16,
-                m.y + 4 + MENU_ROW * k as i32 + 7,
-                MENU_W - 24,
-                label,
-                s.font,
-                TEXT,
-                false,
-            );
-        }
-    }
-    // Properties.
-    if let Some(lines) = &s.properties {
-        let (pw, ph) = (520, 40 + 26 * lines.len() as i32 + 30);
-        let (px, py) = ((w - pw) / 2, (h - ph) / 2);
-        dc.fill(px, py, pw, ph, MENU_BG);
-        dc.frame(px, py, pw, ph, rgb(0xa0, 0xa0, 0xa0));
-        dc.fill(px, py, pw, 3, ACCENT);
-        for (k, l) in lines.iter().enumerate() {
-            let font = if k == 0 { s.bold } else { s.font };
-            dc.text(px + 20, py + 18 + 26 * k as i32, pw - 40, l, font, TEXT, false);
-        }
-        dc.text(px + 20, py + ph - 30, pw - 40, "Esc closes", s.small, TEXT_DIM, false);
-    }
-    change_ui::paint(s, dc);
+    change_ui::paint(s, &mut g);
 }
 
 // ---- Input ------------------------------------------------------------------
 
-/// The row (index into entries) at (x, y) in the content pane.
-fn row_at(s: &State, x: i32, y: i32) -> Option<usize> {
-    let cx = content_x();
-    if x < cx || y < PANE_Y || y >= s.size.1 - STATUS_H {
-        return None;
-    }
-    let k = match s.view {
-        View::Details => {
-            let first = rows_y(View::Details);
-            if y < first {
-                return None;
-            }
-            ((y - first) / ROW_H) as usize + s.scroll
-        }
-        View::Icons => {
-            explorer::icon_at(x - cx - 8, y - rows_y(View::Icons), s.size.0 - cx - 16)? + s.scroll
-        }
-    };
-    s.rows.get(k).copied()
+/// What a click at (x, y) hits: the part's id (logged) and its message.
+fn clicked(s: &State, x: i32, y: i32) -> Option<window::Msg> {
+    let (id, m) =
+        with_layout(s, |p| gala_ui::click(p, x, y).map(|(id, m)| (String::from(id), m)))??;
+    let mut l = String::from("click ");
+    l.push_str(&id);
+    log(&l);
+    Some(m)
 }
 
 fn click(s: &mut State, x: i32, y: i32, double: bool) {
-    let (w, _) = s.size;
+    let msg = clicked(s, x, y);
     // The context menu and Properties take the click first.
-    if let Some(m) = s.menu.take() {
-        if x >= m.x && x < m.x + MENU_W && y >= m.y + 4 {
-            let k = ((y - m.y - 4) / MENU_ROW) as usize;
-            if let Some(&(c, _)) = m.items.get(k) {
-                s.command(c);
-            }
+    if s.menu.take().is_some() {
+        if let Some(window::Msg::Menu(c)) = msg {
+            s.command(c);
         }
         return;
     }
     if s.properties.take().is_some() {
         return;
     }
-    if (BAR_Y..BAR_Y + BAR_H).contains(&y) {
-        if (BACK_X..BACK_X + 32).contains(&x) {
-            s.editing = None;
-            s.back();
-        } else if (UP_X..UP_X + 32).contains(&x) {
-            s.editing = None;
-            s.up();
-        } else if (ADDRESS_X..ADDRESS_X + address_w(w)).contains(&x) {
-            // Editing: the folder's path (or name), all of it replaced by
-            // what is typed first.
-            let text = s
-                .current_path
-                .clone()
-                .unwrap_or_else(|| s.crumbs.last().cloned().unwrap_or_default());
-            s.editing = Some(text);
-            EDIT_FRESH.store(true, core::sync::atomic::Ordering::Relaxed);
-        } else {
-            s.editing = None;
-        }
+    if msg == Some(window::Msg::Address) {
+        // Editing: the folder's path (or name), all of it replaced by what
+        // is typed first.
+        let text =
+            s.current_path.clone().unwrap_or_else(|| s.crumbs.last().cloned().unwrap_or_default());
+        s.editing = Some(text);
+        EDIT_FRESH.store(true, core::sync::atomic::Ordering::Relaxed);
         return;
     }
     s.editing = None;
-    if (CMD_Y..CMD_Y + CMD_H).contains(&y) {
-        let mut bx = 8;
-        for (c, _, bw) in COMMANDS {
-            if (bx..bx + bw).contains(&x) {
-                s.command(c);
-                return;
+    let hit = match msg {
+        Some(window::Msg::Back) => return s.back(),
+        Some(window::Msg::Up) => return s.up(),
+        Some(window::Msg::Command(c)) | Some(window::Msg::Menu(c)) => return s.command(c),
+        Some(window::Msg::View(v)) => {
+            s.view = v;
+            s.scroll = 0;
+            return;
+        }
+        Some(window::Msg::Nav(k)) => {
+            if let Some(row) = s.nav.get(k) {
+                let target = row.parsing.clone();
+                s.navigate(&target, true);
             }
-            bx += bw + 4;
+            return;
         }
-        let mut bx = w - 12;
-        for (view, _, bw) in VIEW_BUTTONS.iter().rev() {
-            bx -= bw;
-            if (bx..bx + bw).contains(&x) {
-                s.view = *view;
-                s.scroll = 0;
-                return;
-            }
-            bx -= 4;
+        Some(window::Msg::Sort(c)) => {
+            s.sort = s.sort.clicked(c);
+            s.resort();
+            return;
         }
-        return;
-    }
-    if x < NAV_W && y >= PANE_Y + 4 {
-        let k = ((y - PANE_Y - 4) / NAV_ROW) as usize;
-        if let Some(row) = s.nav.get(k) {
-            let target = row.parsing.clone();
-            s.navigate(&target, true);
-        }
-        return;
-    }
-    if s.view == View::Details && (PANE_Y..PANE_Y + HEADER_H).contains(&y) {
-        let mut cx = content_x() + 12;
-        for (column, _, width) in COLUMNS {
-            if x >= cx && x < cx + width {
-                s.sort = s.sort.clicked(column);
-                s.resort();
-                return;
-            }
-            cx += width;
-        }
-        return;
-    }
-    let hit = row_at(s, x, y);
+        Some(window::Msg::Item(i)) => Some(i),
+        Some(window::Msg::Pane) => None,
+        Some(window::Msg::Address) | None => return,
+    };
     // SAFETY: a plain call.
     let now = unsafe { GetTickCount() };
     let again = hit.is_some() && s.last_click.1 == hit && now.wrapping_sub(s.last_click.0) < 600;
@@ -1710,7 +1320,11 @@ fn click(s: &mut State, x: i32, y: i32, double: bool) {
 fn right_click(s: &mut State, x: i32, y: i32) {
     s.properties = None;
     s.editing = None;
-    let hit = row_at(s, x, y);
+    s.menu = None;
+    let hit = match clicked(s, x, y) {
+        Some(window::Msg::Item(i)) => Some(i),
+        _ => None,
+    };
     s.selected = hit.map(|i| s.entries[i].parsing.clone());
     let items: Vec<(Command, &'static str)> = match hit.map(|i| s.entries[i].kind) {
         Some(Kind::File) => alloc::vec![
@@ -1893,7 +1507,7 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             // SAFETY: our DC.
             unsafe { SetBkMode(hdc, TRANSPARENT) };
-            paint(s, &Dc(hdc));
+            paint(s, hdc);
             // SAFETY: the paint structure BeginPaint filled.
             unsafe { EndPaint(hwnd, &ps) };
             0
@@ -1986,12 +1600,6 @@ fn redraw(hwnd: Hwnd) {
     unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
 }
 
-fn font(height: i32, weight: i32) -> Handle {
-    let face = wide("Segoe UI");
-    // SAFETY: a valid face name.
-    unsafe { CreateFontW(height, 0, 0, 0, weight, 0, 0, 0, 0, 0, 0, 0, 0, face.as_ptr()) }
-}
-
 /// The folder to open first: the command line's argument (as Windows'
 /// `explorer.exe <folder>`), else This PC.
 fn first_folder() -> String {
@@ -2057,9 +1665,6 @@ pub extern "C" fn mainCRTStartup() -> ! {
                 offset: 0,
                 event: core::ptr::null_mut(),
             },
-            font: font(-13, 400),
-            bold: font(-13, 600),
-            small: font(-12, 400),
         });
     }
     let wc = WndClassW {

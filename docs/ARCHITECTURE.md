@@ -14927,8 +14927,8 @@ File Explorer, with the WSL distributions beside the drives. Code:
 `user/shellns` (the namespace's model, host-tested with `cargo test -p
 shellns`), `user/shell32/src/namespace.rs` (IShellFolder, IShellItem and
 the item ID list functions), `user/explorer` (gala's `explorer.exe`: the
-library is the view's model, `cargo test -p explorer`; `main.rs` the
-window), `nt::desktop` (Win+E, the start menu's tile). Test:
+library is the view's model and the window's view, `cargo test -p
+explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu's tile). Test:
 `explorer_test`, scenario `explorer` (screen check `EXPLORER_SCREEN`).
 
 ### The namespace (step 1)
@@ -15014,6 +15014,24 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   it shows comes from the namespace (SHCreateItemFromParsingName,
   BHID_EnumItems, GetDisplayName, GetAttributes; sizes and times from
   GetFileAttributesExW of FILESYSPATH); hidden items are not shown.
+- **The window is a `gala_ui` view** ("UI components"):
+  `explorer::window::view` builds it from a borrowed `Look` of the
+  state (the bars, the command bar, the navigation pane, Details or
+  Icons, the status bar, the context menu and Properties over them),
+  host-tested for each part's rectangle and message. Every part that
+  is clicked or inspected has its automation id (BackButton, UpButton,
+  AddressBar, SearchBox, CommandBar and CommandBar.<command>,
+  ViewButton.<view>, NavigationPane and NavigationPane.<row>,
+  ColumnHeaders and ColumnHeader.<column>, ItemsView and
+  ItemsView.Item.<name>, StatusBar, Menu and Menu.<item>, Properties;
+  a name met twice gets `.2`, `.3`, ...). `main.rs` paints the laid-out
+  view with `gala_ui::win::Gdi`; a click lays the view out again for
+  the state as it is and goes through `gala_ui::click` (logged
+  `explorer: click <id>`) to the window's message (`window::Msg`).
+  Only the rows and tiles that fit are built (from the scroll
+  position). The layout is the one the window had when drawn by hand:
+  bars at client y 6 and 44, the panes from y 84, the navigation pane
+  220 wide with rows of 28, Details rows of 24, tiles of 112 x 96.
 - **Navigation pane**: This PC and its drives, Linux and its
   distributions, and below the current folder's drive or distribution
   the folders down to it. **Address bar**: the names from the root
@@ -15053,10 +15071,9 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   typed, the part it is about ("The whole window" by default) and
   Inspect, Cancel, "Make the change". Inspect hides the card; the part
   of the window under the pointer is outlined with its automation id in
-  a tag (`change_ui::element_at`: AddressBar, BackButton, UpButton,
-  SearchBox, CommandBar.<command>, ViewButton.<view>,
-  NavigationPane.<row>, ColumnHeader.<column>, ItemsView.Item.<name>,
-  ItemsView, StatusBar); a click picks it, Esc goes back. "Make the
+  a tag (`change_ui::element_at`: `gala_ui::hit` on the window's view,
+  the ids above, labelled by `window::describe`); a click picks it, Esc
+  goes back. "Make the
   change" (or Enter) walks the agent's steps on a timer
   (`explorer::change::STEPS`, `STEP_MS` each: reading the source,
   editing, building, restarting) and ends on a card saying that nothing
@@ -15071,9 +15088,7 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   and while inspecting InspectBand, Outline/OutlineInner and Tag over
   the window. `change_ui.rs` lays it out with gdi32 (`gala_ui::win::Gdi`),
   paints it and routes clicks through `gala_ui::click` to the flow,
-  logging `explorer: change: click <id>`; the parts of the window
-  under Inspect are still named by hand (`element_at`) until File
-  Explorer's own window is a view (ROADMAP LY step 3).
+  logging `explorer: change: click <id>`.
 - **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
   Explorer's PROGRAMS entry as the start menu's tile does (logged
   `desktop: Win+E: File Explorer`); no program sees the E.
@@ -15083,7 +15098,9 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   `explorer: copy ...`, `explorer: paste <n> item(s) into <dir>: ok`,
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:
   rename ...`, `explorer: properties ...`, `explorer: window menu`,
+  `explorer: click <id>` for each click on a part,
   `explorer: change: ...` for each card, pick, request and step,
+  `explorer: view: <why>` when gala_ui refuses the view,
   `explorer: closed`): a
   program the desktop starts writes to the
   serial line. What it cannot do goes to the ledger
@@ -15119,7 +15136,9 @@ The tree (the crate's documentation has a whole component):
   (lists from data).
 - Style is set on the element: `.width .height .min_width .max_width
   .min_height .grow .margin .padding .gap .align .justify .pin .bg .border .radius
-  .color .size .bold .regular`. `color`, `size` and `bold` are
+  .color .size .bold .regular .ellipsis`. `.ellipsis` makes a text one
+  line cut with "..." to its width (DT_END_ELLIPSIS), and lets it
+  shrink below its text's width. `color`, `size` and `bold` are
   inherited inward; nothing else cascades. Shared looks are plain
   functions (`fn primary(b) -> Node`) and constants (the Windows 11
   palette of item W4), not classes.
@@ -15149,7 +15168,8 @@ Invariants:
   input's message for its text.
 - Text is measured by the program (`Measure`: gdi32 in a program, a
   fixed advance in the tests); `text` and `button` wrap to their width,
-  `input` is one line (an empty one is a line high).
+  `input` and an `.ellipsis` text are one line (an empty input is a
+  line high).
 
 The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
 - `win::open(component, &Options, log)` registers a class, creates the

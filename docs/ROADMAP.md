@@ -4572,8 +4572,9 @@ the next breakthroughs).
    taken far longer than on an idle host (521 ms and 1670 ms), while
    gimp-console was still running (it exited 5.7 s later). Both sightings
    are a slow plug-in on a loaded host, which puts the question at the
-   plug-in's last write and not at a reader that had gone; the cause is
-   not found yet.
+   plug-in's last write and not at a reader that had gone. A third
+   sighting, in a full local `cargo xtask test` on TCG at load 5.5 for 4
+   CPUs, was file-png again. The cause is not found yet.
 10. Inkscape (the owner): Ubuntu 26.04's Inkscape 1.4.3 (LINUX_ROOTS
    "inkscape"), first in batch mode (`lx_inkscape_batch`: in.svg rendered
    to a PNG Ubuntu's byte for byte; WORKFLOW "Inkscape") and its window
@@ -6345,12 +6346,13 @@ layer inside them).
    after (same ids, same log lines; the screendumps may change only
    where the look was meant to):
    - Done: Explorer's "Change this program..." cards and Inspect's
-     outline (`explorer::change::view`, drawn by `change_ui.rs`);
-     Inspect still names the window's parts by hand until File
-     Explorer's window below is a view.
-   - File Explorer's window (`user/explorer/src/main.rs`: address
-     bar, navigation pane, the list of files from data). Needs
-     scrolling (`gala_ui` has none yet).
+     outline (`explorer::change::view`, drawn by `change_ui.rs`).
+   - Done: File Explorer's window (`explorer::window::view`: the bars,
+     the navigation pane, Details and Icons, the menu and Properties;
+     clicks and Inspect through `gala_ui::click`/`hit`; `gala_ui`
+     gained `.ellipsis` for it). Scrolling stays the program's: the
+     view holds the rows from the scroll position that fit, so
+     `gala_ui` needed no scrolling for it.
    - Task Manager (`user/taskmgr`: tabs, the process list).
    - The taskbar and start menu: drawn by the kernel's desktop
      (`kernel/src/nt/desktop/paint.rs`), where allocation must be

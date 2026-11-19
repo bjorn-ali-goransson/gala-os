@@ -19,6 +19,9 @@ pub enum Set {
     Centre,
     /// One line, from the left, centred upright (`input`).
     Line,
+    /// One line, from the left, centred upright, cut with "..." where
+    /// it is wider than the rectangle (`text` with `ellipsis`).
+    Cut,
 }
 
 /// Where the elements are drawn; rectangles are (x, y, w, h), colours
@@ -55,7 +58,8 @@ pub fn paint<M>(placed: &[Placed<M>], focus: Option<&str>, canvas: &mut dyn Canv
         let inner = [x + l, y + t, (w - l - r).max(0), (h - t - b).max(0)];
         match p.kind {
             Kind::Text if !p.text.is_empty() => {
-                canvas.text(inner, &p.text, p.color, p.size, p.bold, Set::Wrap)
+                let set = if p.ellipsis { Set::Cut } else { Set::Wrap };
+                canvas.text(inner, &p.text, p.color, p.size, p.bold, set)
             }
             Kind::Button if !p.text.is_empty() => {
                 canvas.text(inner, &p.text, p.color, p.size, p.bold, Set::Centre)
@@ -149,6 +153,12 @@ mod tests {
         // Typed text in the text's colour; no bar without the focus.
         let v: Node<()> = column().child(input("I", "hi").color(0x123456));
         assert_eq!(draw(&v, Some("J")), ["text [0, 0, 200, 18] \"hi\" 123456 14 false Line"]);
+    }
+
+    #[test]
+    fn an_ellipsis_text_is_set_cut() {
+        let v: Node<()> = column().child(text("a long name").ellipsis());
+        assert_eq!(draw(&v, None), ["text [0, 0, 200, 18] \"a long name\" 000000 14 false Cut"]);
     }
 
     #[test]

@@ -6,8 +6,6 @@
 
 use super::*;
 use explorer::change::{Change, Element, KeyResult, Msg, STEPS, Stage, view};
-use gala_ui::Placed;
-use gala_ui::win::Gdi;
 
 /// The window menu's item (below 0xF000, the low four bits clear).
 pub const ID_CHANGE: usize = 0x0200;
@@ -21,8 +19,6 @@ unsafe extern "system" {
     fn InsertMenuW(menu: Handle, position: u32, flags: u32, id: usize, text: *const u16) -> Bool;
     fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, proc_: *const c_void) -> usize;
     fn KillTimer(hwnd: Hwnd, id: usize) -> Bool;
-    fn GetDC(hwnd: Hwnd) -> Handle;
-    fn ReleaseDC(hwnd: Hwnd, dc: Handle) -> i32;
 }
 
 /// The window menu gets "Change this program..." and a separator before
@@ -125,6 +121,9 @@ pub fn character(s: &mut State, c: u16) {
 /// The pointer moved: while inspecting, the element under it is
 /// outlined. Whether to draw again.
 pub fn mouse_move(s: &mut State, x: i32, y: i32) -> bool {
+    if s.change.as_ref().is_none_or(|c| c.stage != Stage::Inspecting) {
+        return false;
+    }
     let hit = element_at(s, x, y);
     s.change.as_mut().is_some_and(|c| c.hover(hit))
 }
@@ -184,120 +183,22 @@ pub fn click(s: &mut State, x: i32, y: i32) {
     }
 }
 
-fn element(id: &str, label: &str, rect: [i32; 4]) -> Option<Element> {
-    Some(Element { id: String::from(id), label: String::from(label), rect })
-}
-
-fn named(id: &str, name: &str, kind: &str, rect: [i32; 4]) -> Option<Element> {
-    let mut i = String::from(id);
-    i.push('.');
-    i.push_str(&name.replace(' ', ""));
-    let mut l = String::from(kind);
-    l.push_str(" \"");
-    l.push_str(name);
-    l.push('"');
-    element(&i, &l, rect)
-}
-
 /// The part of the window at client point (x, y), by its automation id
-/// (the id an agent maps to the source that draws it).
+/// (the id an agent maps to the source that draws it): the window's view
+/// hit where it is drawn.
 pub fn element_at(s: &State, x: i32, y: i32) -> Option<Element> {
-    let (w, h) = s.size;
-    if x < 0 || y < 0 || x >= w || y >= h {
-        return None;
-    }
-    if (BAR_Y..BAR_Y + BAR_H).contains(&y) {
-        let aw = address_w(w);
-        let sx = w - SEARCH_W - 12;
-        return if (BACK_X..BACK_X + 32).contains(&x) {
-            element("BackButton", "The Back button", [BACK_X, BAR_Y, 32, BAR_H])
-        } else if (UP_X..UP_X + 32).contains(&x) {
-            element("UpButton", "The Up button", [UP_X, BAR_Y, 32, BAR_H])
-        } else if (ADDRESS_X..ADDRESS_X + aw).contains(&x) {
-            element("AddressBar", "The address bar", [ADDRESS_X, BAR_Y, aw, BAR_H])
-        } else if (sx..sx + SEARCH_W).contains(&x) {
-            element("SearchBox", "The search box", [sx, BAR_Y, SEARCH_W, BAR_H])
-        } else {
-            None
-        };
-    }
-    if (CMD_Y..CMD_Y + CMD_H).contains(&y) {
-        let mut bx = 8;
-        for (_, label, bw) in COMMANDS {
-            if (bx..bx + bw).contains(&x) {
-                return named("CommandBar", label, "The command", [bx, CMD_Y, bw, CMD_H]);
-            }
-            bx += bw + 4;
-        }
-        let mut bx = w - 12;
-        for (_, label, bw) in VIEW_BUTTONS.iter().rev() {
-            bx -= bw;
-            if (bx..bx + bw).contains(&x) {
-                return named("ViewButton", label, "The view button", [bx, CMD_Y, *bw, CMD_H]);
-            }
-            bx -= 4;
-        }
-        return element("CommandBar", "The command bar", [0, CMD_Y, w, CMD_H]);
-    }
-    if y >= h - STATUS_H {
-        return element("StatusBar", "The status bar", [0, h - STATUS_H, w, STATUS_H]);
-    }
-    if y < PANE_Y {
-        return None;
-    }
-    let pane_h = h - PANE_Y - STATUS_H;
-    if x < NAV_W {
-        let k = (y - PANE_Y - 4) / NAV_ROW;
-        if y >= PANE_Y + 4
-            && let Some(row) = s.nav.get(k as usize)
-        {
-            let ry = PANE_Y + 4 + NAV_ROW * k;
-            return named(
-                "NavigationPane",
-                &row.name,
-                "The navigation pane's",
-                [4, ry, NAV_W - 8, NAV_ROW - 2],
-            );
-        }
-        return element("NavigationPane", "The navigation pane", [0, PANE_Y, NAV_W, pane_h]);
-    }
-    let cx = content_x();
-    let cw = w - cx;
-    if s.view == View::Details && y < PANE_Y + HEADER_H {
-        let mut hx = cx + 12;
-        for (_, label, width) in COLUMNS {
-            if (hx..hx + width).contains(&x) {
-                return named(
-                    "ColumnHeader",
-                    label,
-                    "The column header",
-                    [hx - 6, PANE_Y + 1, width, HEADER_H - 2],
-                );
-            }
-            hx += width;
-        }
-        return element("ColumnHeaders", "The column headers", [cx, PANE_Y, cw, HEADER_H]);
-    }
-    if let Some(i) = row_at(s, x, y) {
-        let k = s.rows.iter().position(|&r| r == i).unwrap_or(0).saturating_sub(s.scroll) as i32;
-        let rect = match s.view {
-            View::Details => [cx + 4, rows_y(View::Details) + ROW_H * k, cw - 8, ROW_H - 1],
-            View::Icons => {
-                let (tx, ty) = explorer::icon_grid(k as usize, cw - 16);
-                [cx + 8 + tx + 4, rows_y(View::Icons) + ty, TILE_W - 8, TILE_H - 4]
-            }
-        };
-        return named("ItemsView.Item", &s.entries[i].name, "The item", rect);
-    }
-    element("ItemsView", "The list of items", [cx, PANE_Y, cw, pane_h])
+    with_layout(s, |p| {
+        let e = gala_ui::hit(p, x, y)?;
+        let id = e.id.as_deref()?;
+        Some(Element { id: String::from(id), label: window::describe(&look(s), id), rect: e.rect })
+    })?
 }
 
 /// Draws the flow over the window: the view laid out and painted with
 /// gdi32.
-pub fn paint(s: &State, dc: &Dc) {
+pub fn paint(s: &State, g: &mut Gdi) {
     let Some(c) = &s.change else { return };
-    let mut g = Gdi::new(dc.0);
-    if let Some(p) = placed(c, s.size, &mut g) {
-        gala_ui::paint(&p, None, &mut g);
+    if let Some(p) = placed(c, s.size, g) {
+        gala_ui::paint(&p, None, g);
     }
 }

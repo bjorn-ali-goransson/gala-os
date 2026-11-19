@@ -24084,7 +24084,12 @@ const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
                 "mouse_button 0",
                 "sendkey ret",
             ],
-            pixels: &[PixelCheck::At(620, 205, 0xcce4f7)],
+            pixels: &[
+                PixelCheck::At(620, 205, 0xcce4f7),
+                // The search box, taking typing, underlined across its
+                // width.
+                PixelCheck::At(1000, 110, 0x005fb8),
+            ],
         },
         ScreenStep {
             // 10: opened; Esc clears the search.
