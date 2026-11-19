@@ -12248,6 +12248,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "console_window",
     "wsl_terminal",
     "start_menu",
+    "desktop_at_boot",
     "taskmgr",
     "explorer",
     "linux_menu",
@@ -12368,8 +12369,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
 ];
 
 /// Scenarios whose program serves until stopped: once the net client has
-/// finished, xtask stops the VM (QEMU_EXIT_SUCCESS cannot come) and the
-/// scenario passes if the client succeeded.
+/// finished (or, with no client, the screen check has passed), xtask
+/// stops the VM (QEMU_EXIT_SUCCESS cannot come) and the scenario passes
+/// if the client (the check) succeeded.
 const XTASK_STOPS: i32 = -1;
 /// Scenarios that are meant to time out (a program that hangs on
 /// purpose): xtask asks for the state dump, which must have the expected
@@ -12701,6 +12703,7 @@ const ARM64_TWINS: &[&str] = &[
     "handover_same",
     "gui_test",
     "start_menu",
+    "desktop_at_boot",
     "tray_test",
     "d2d1_window",
     "taskmgr",
@@ -14250,6 +14253,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // console window) and an install-on-click tile (7-Zip, not
         // installed: `gala install 7zip.7zip` without a window, its
         // progress on the tile); START_MENU_SCREEN clicks them.
+        name: "desktop_at_boot",
+        // A machine booted as the downloadable images are (no qemu_exit,
+        // a console program and nothing else): once the boot's work is
+        // done the console session's desktop is on the screen, the
+        // taskbar and start button drawn, the start menu answering the
+        // keyboard and the mouse (DESKTOP_AT_BOOT_SCREEN). xtask stops
+        // the machine after the screen check.
+        cmdline: "run=hello.exe",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "Hello from user mode!",
+            "boot: the boot thread's work is done; it ends",
+            "desktop: session 1 is live",
+            "xtask: screen ok",
+        ],
+    },
+    Scenario {
         name: "start_menu",
         cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -19987,6 +20007,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
     ("start_menu", "needs a screen (the start menu is on the desktop)"),
+    ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
@@ -21248,6 +21269,17 @@ fn run_vm_once(
                 let text = plain_text(&String::from_utf8_lossy(&b));
                 LIMINE_HALTED.iter().any(|m| text.contains(m))
             })
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            stopped = true;
+            break None;
+        }
+        // One with a screen check and no client (a machine that keeps
+        // running, as the downloadable images do) once the check passed.
+        if stop_after_client
+            && port.is_none()
+            && screen_verdict.as_deref().is_some_and(|v| v.starts_with("xtask: screen ok"))
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -23154,6 +23186,43 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
 /// aims at what an earlier key in the same step changed".
 const TASKMGR_FILTERED: PixelCheck = PixelCheck::Most(310, 300, 800, 260, 0xfbfbfb, 99);
 
+/// desktop_at_boot's screen: the desktop with no window, the start button
+/// alone in the taskbar's middle (640, 776), the pointer at the screen's
+/// (640, 400). The Windows key opens the start menu, Esc closes it, and a
+/// click on the start button opens it again (a click on an open menu
+/// would close it: the last step also says Esc did).
+const DESKTOP_AT_BOOT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: session 1 is live",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
+                PixelCheck::AnyIn(600, 760, 80, 30, 0x167fd6), // the fortress
+                PixelCheck::Varied(0, 0, 1280, 700, 2),        // a wallpaper
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &["sendkey meta_l"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
+        ScreenStep {
+            after: "",
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+            ],
+        },
+    ],
+};
+
 const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
     marker: "start_menu_test: ready",
     steps: &[
@@ -23645,6 +23714,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("office_word", OFFICE_WORD_SCREEN),
     ("office_excel", OFFICE_EXCEL_SCREEN),
     ("start_menu", START_MENU_SCREEN),
+    ("desktop_at_boot", DESKTOP_AT_BOOT_SCREEN),
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),

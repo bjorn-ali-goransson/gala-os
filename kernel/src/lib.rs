@@ -776,6 +776,9 @@ fn stop(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
     }
+    // A machine that keeps running shows its desktop (the downloadable
+    // images: their programs are console programs).
+    nt::desktop::show_console_at_boot_end();
     info!("boot: the boot thread's work is done; it ends");
     sched::exit()
 }

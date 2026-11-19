@@ -506,7 +506,9 @@ xtask that change how a scenario boots:
   sqllocaldb and postgres get 3 GiB (`qemu()` in xtask).
 - **Servers**: a server never exits; scenarios with exit status
   `XTASK_STOPS` are stopped by xtask once their net client has finished,
-  and pass if it succeeded.
+  and pass if it succeeded. One with a screen check and no client (a
+  machine left running, `desktop_at_boot`) is stopped once the check
+  has passed.
 - **A server and a client at once**: `run=` starts programs one after
   another, so the client starts the server itself (CreateProcessW) and
   waits for it, as `tds_test` does with sqlservr; or the scenario starts

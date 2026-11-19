@@ -8425,7 +8425,14 @@ draws nothing; user32 loads gdi32 lazily).
 - **Lazy desktop**: a session's desktop goes live at its first GUI call
   (`desktop::with`, `desktop::screen`) and is drawn only when something
   shows it (the screen, `presenter=`); on a machine nothing shows it is
-  bare (below) and nothing is laid out or drawn.
+  bare (below) and nothing is laid out or drawn. A boot that keeps
+  running (no `qemu_exit`: a machine, the downloadable images) makes the
+  console session's desktop live when the boot's own work ends
+  (`desktop::show_console_at_boot_end`, logged either way), so a boot
+  whose programs are console programs ends on the desktop, not on the
+  splash (or, on virtio-gpu, a screen never flushed); a test boot exits
+  first and draws nothing it did not ask for (`desktop_at_boot`, its
+  twin).
 - **Bare desktops.** A machine with no screen and no `presenter=` (BIOS
   boots, gala-um) or in the server profile has nothing that can show a
   desktop (`desktop::bare`, fixed before any program runs). There each
