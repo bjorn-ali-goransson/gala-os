@@ -236,6 +236,20 @@ starts now`): a failure late in a long run without the run's whole
 stream (office_install's staging, half an hour in:
 `XTASK_CMDLINE=events_from=2100`).
 
+What the stream costs is its formatting, which matters for reading a
+traced run and not only for how long it takes: every event is written
+to port 0xe9 a byte at a time through `core::fmt`, so `office_word`'s
+31 s of run time becomes 74 s with `events=syscall` and 441 s with
+`events=all`, and the run's own profile is mostly that. Of the 3123
+kernel samples taken inside one Direct3D device creation in such a
+run, 90% sit under `DebugCon::write_fmt`, reached from
+`nt::syscalls::syscall_event` and `nt::process::on_user_exception`
+(the fault event). So in a traced run only the user-mode samples say
+where a program's time goes, the kernel's share is the instrument's,
+and a wall-clock figure from one measures the stream rather than the
+system: `events=syscall`, `events_pid=` or `events_match=` is what
+keeps the cost near the question.
+
 | Category | Events |
 |---|---|
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); a Linux process's are `lx syscall` events (pid, tid, nr, name, the six arguments as entered, `ret`: the result or a negative errno, ns), what strace shows, under the same `events_pid` and `events_match`; `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |

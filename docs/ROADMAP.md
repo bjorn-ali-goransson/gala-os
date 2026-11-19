@@ -2330,6 +2330,44 @@ need gala's.
      CreateSolidColorBrush, nothing after -- so what Word concludes is
      reached from both, and neither the DXGI surface nor the Direct3D
      device is what it concludes it from.
+     Safe mode is the same failure, which rules out everything safe
+     mode skips. Launched `/safe` (the scenario's own `args=` replaced
+     through `XTASK_CMDLINE`, `cmdline::value` reading the last word of
+     a key) Word loads no add-ins, no global templates, no
+     Normal.dotm, no toolbar or customization file and no resiliency
+     list, and it fails with the same message after 30817 ms against
+     30774 ms, with the same splash on the screen. None of those is
+     what it reads and gives up on, which leaves the decision where
+     the stack capture put it: Word's core boot, in wwlib.
+     Word never reaches a template at all. It creates
+     `C:\Users\gala\AppData\Roaming\Microsoft\Templates` 285.7 s in
+     -- path not found, created, then opened, and the eight opens of the
+     whole run that name a template are all of that directory itself -- and that is as far as it gets: `Normal.dotm`
+     is neither opened nor created anywhere in the run, and neither is
+     the `Default.dotx` the scenario passes it with `/t`. So Word
+     concludes what it concludes before a document or a template of
+     its own exists, and nothing it was refused on the way there is
+     the cause, because it never asked.
+     The time the traced run spends inside D3D10CreateDevice1 is
+     lavapipe's, and the untraced run's 631 ms is the honest figure for
+     it. With every event recorded the one call runs from 290749 ms to
+     336451 ms, and of the 1244 user-mode sampler ticks in that window
+     941 sit in `vulkan_lvp.dll` and 230 in ntdll's allocator under it
+     (`cargo xtask profile <events.jsonl> --pid 12 --from 290.749 --to
+     336.451`), with 7574 of the 9822 user faults Word raises there in
+     lavapipe too. Nothing in the call waits on a lock
+     or a reply: it is Mesa's software rasterizer building a pipeline,
+     so the stretch before the box is not Word deliberating. The
+     window's 3123 kernel samples are the instrument and not the
+     system (OBSERVABILITY "Event stream"), which is why only the
+     user-mode share of a traced run is a measurement at all.
+     DXVK's own logs end clean beside it, which says the device is not
+     merely created but unobjected-to: `winword_d3d11.log` in the dump
+     ends on a feature level 10.1 device, then an 11_0 one and its
+     8 MiB resource descriptor heap, with nothing after it and one
+     warning in the file (external memory features unsupported), and
+     `winword_dxgi.log` holds only the monitor-metadata errors named
+     above.
      Who raises the box is measured rather than inferred, by the
      facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
      stack_from=user32 stack_words=400` catches gala's MessageBoxW
