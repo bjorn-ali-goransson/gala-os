@@ -163,6 +163,16 @@ impl TrapFrame {
         self.rcx
     }
 
+    /// The registers a call's first four integer arguments arrive in
+    /// (x86-64: rcx, rdx, r8, r9). An import trap takes a call at the
+    /// callee's entry, before any of its own code has run, so these are
+    /// that call's arguments. An argument past the fourth is on the
+    /// stack and a floating-point one is in an SSE register: neither is
+    /// read (docs/OBSERVABILITY.md, "Import tracing").
+    pub fn arg_regs(&self) -> [u64; 4] {
+        [self.rcx, self.rdx, self.r8, self.r9]
+    }
+
     /// A page fault's access (the error code's bits: 1 write, 4
     /// instruction fetch); None for other traps.
     pub fn page_fault_access(&self) -> Option<FaultAccess> {

@@ -1110,6 +1110,13 @@ name = "http_client"
 version = "0.1.0"
 
 [[package]]
+name = "iat_trace_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "iced-x86"
 version = "1.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

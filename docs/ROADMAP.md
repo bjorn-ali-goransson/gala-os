@@ -2236,9 +2236,14 @@ need gala's.
      not what decides it either, and the question is no longer what
      gala refused but what Word concluded in the 150 ms of user-mode
      work after the last brush, where it makes no syscalls at all.
-     That is what OT3b piece 3 (the loader's IAT thunks) is for: it is
-     the only instrument that can see a call which never leaves user
-     mode. Measured beside it and not yet explained:
+     That is what OT3b piece 3 is for, and it exists now:
+     `imports=<program>[!<dll>][:<n>]` records the first call through
+     each of a program's import slots, which is the only instrument
+     that sees a call into a DLL gala did not write (OBSERVABILITY
+     "Import tracing"). What it gives for that window is the set of
+     Microsoft entry points Word reaches in it; what it cannot give is
+     the order, one record being all a slot leaves.
+     Measured beside it and not yet explained:
      `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
      which falls back to blank display metadata and carries on
      (`winword_dxgi.log` in the dump).
@@ -6034,13 +6039,37 @@ among the slowest hand-offs.
      armed every traced call in that process is recorded, not only the
      method named; the OpenTelemetry export does not map `call` or
      `ret` events yet (the same gap `ledger:` rows have, OT5).
-   - **Import thunks in the loader, for the DLLs gala did not write.**
-     gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
-     under a rule each resolved import can point at a thunk that
-     records `<program>` called `<dll>!<export>`. That covers exported
-     entry points of Microsoft's DLLs too, which the vtable wrappers
-     cannot reach; what it does not cover is the COM vtable slots behind
-     an export, which is why both pieces exist.
+   - **The import slots, for the DLLs gala did not write.** Done.
+     `imports=<program>[!<dll>][:<n>]` records the first call a program
+     makes through each of its import slots, `n` at most (default
+     4096), as `import` events. That reaches the exported entry points
+     of Microsoft's own DLLs, which the vtable wrappers cannot; what it
+     does not reach is the COM vtable slots behind such an export,
+     which is why both pieces exist.
+     A trap page rather than thunks: gala's loader fills the IAT
+     (`user/testntdll/src/lib.rs`), so it reserves a region it never
+     commits and reports each bound import, and the kernel writes
+     `base + index * 16` into the slot. The first call through it
+     fetches an instruction from an absent page and arrives in the
+     kernel's own page-fault path, with the call's arguments in
+     registers and its return address on the stack; the kernel records
+     it, puts the export's address back in the slot and sets the
+     instruction pointer there, and the call runs on. Thunks would have
+     meant generating code at run time for x64, ARM64 and WOW64 alike,
+     new `unsafe` on both sides, and a system call on every call for
+     ever; this way the only cost after the first call through a slot is
+     the slot itself (`kernel/src/nt/traceimports.rs`, `arm_imports` in
+     the loader, scenario `iat_trace_test` with an ARM64 twin,
+     OBSERVABILITY "Import tracing").
+     Its gaps: one record a slot, so the stream is a set of names and
+     not a sequence (the opposite trade from `trace_from=`); the first
+     four integer argument registers only, read whether the function
+     takes that many or not; static imports only, so no delay-load
+     import and nothing a program resolved with GetProcAddress; a slot
+     read as data is left alone, because the value such a read returns
+     *is* the trap address and no fault announces it; 32-bit programs go
+     through the same code untested; and entries are not reclaimed when
+     a process ends, which the budget is what bounds.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

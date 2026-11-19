@@ -547,6 +547,11 @@ syscall_stubs! {
     // asks for the value the run was given, op 1 records a call.
     // 64-bit only: no DLL whose slots are traced is built for WOW64.
     GalaTrace = 0x7f2b, fn(op: u64, a: u64, b: u64, c: u64);
+    // gala's own: import tracing (`imports=`, nt::traceimports). Op 0
+    // asks whether this process's import slots are armed and for the DLL
+    // they must come from, op 1 reports imports just bound so that the
+    // kernel can arm them.
+    GalaImports = 0x7f2c, fn(op: u64, a: u64, b: u64, c: u64);
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
     // describes it whatever status the process then ends with.
@@ -653,31 +658,38 @@ fn directory(base: usize, index: usize) -> (usize, usize) {
     (rd32(opt + 8 * index) as usize, rd32(opt + 4 + 8 * index) as usize)
 }
 
+/// The section headers of the image at `base`: for each, its address
+/// (the name is the first 8 bytes, Characteristics 36 in) and the
+/// addresses the section covers.
+fn sections(base: usize) -> impl Iterator<Item = (usize, core::ops::Range<usize>)> {
+    let nt = base + rd32(base + 0x3c) as usize;
+    let count = (rd32(nt + 4) >> 16) as usize; // NumberOfSections
+    let table = nt + 24 + (rd32(nt + 20) & 0xffff) as usize; // past the optional header
+    (0..count).map(move |i| {
+        let s = table + 40 * i;
+        let start = base + rd32(s + 12) as usize; // VirtualAddress
+        (s, start..start + rd32(s + 8) as usize) // VirtualSize
+    })
+}
+
 /// Whether `address` is code in a loaded DLL's `.gstub` section: the
 /// exports gala's DLLs define for functions not implemented yet
 /// (`gala_stubs`). Imports bind to them so that programs load, but a
 /// program probing with GetProcAddress gets "not found", as it did before
 /// the stub existed, and takes its fallback.
 fn is_unimplemented_stub(address: usize) -> bool {
-    let base = with_modules(|m| {
-        m.iter().map(|e| e.base).find(|&b| {
-            b != 0 && address >= b && {
-                let size = rd32(b + rd32(b + 0x3c) as usize + 24 + 56) as usize;
-                address < b + size
-            }
-        })
-    });
-    let Some(base) = base else { return false };
-    let nt = base + rd32(base + 0x3c) as usize;
-    let count = (rd32(nt + 4) >> 16) as usize; // NumberOfSections
-    let optional_size = (rd32(nt + 20) & 0xffff) as usize;
-    let table = nt + 24 + optional_size;
-    (0..count).any(|i| {
-        let s = table + 40 * i;
-        let start = base + rd32(s + 12) as usize;
-        rd64(s) == u64::from_le_bytes(*b".gstub\0\0")
-            && (start..start + rd32(s + 8) as usize).contains(&address)
+    let Some(base) = image_of(address) else { return false };
+    sections(base).any(|(s, covers)| {
+        rd64(s) == u64::from_le_bytes(*b".gstub\0\0") && covers.contains(&address)
     })
+}
+
+/// Whether `address` is in an executable section of the image at `base`.
+/// What tells an import of a function from an import of a variable: see
+/// `arm_imports`.
+fn in_code(base: usize, address: usize) -> bool {
+    // IMAGE_SCN_MEM_EXECUTE.
+    sections(base).any(|(s, covers)| rd32(s + 36) & 0x2000_0000 != 0 && covers.contains(&address))
 }
 
 /// Export `name` (or `ordinal` if `name` is empty) of the image at `base`.
@@ -1939,6 +1951,14 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         }
         let (mut at, mut size, mut ignored) = (iat, count * PTR, 0u32);
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
+        // `imports=`: the kernel arms these slots so that the first call
+        // through each is recorded, which is the only way to see a call
+        // into a DLL gala did not write (nt::traceimports). After the
+        // protection is back as it was, because the kernel writes the
+        // slots itself, as a debugger's write does.
+        if imports_traced(&name[..len]) {
+            arm_imports(base, desc, iat, count, c_str(base + rd32(desc + 12) as usize));
+        }
         desc += 20;
     }
     missing.map_or(Ok(()), Err)
@@ -1951,11 +1971,31 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
 /// run time, which the program is told about and lives with.
 fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option<&[u8]>) {
     let mut text = [0u8; 128];
+    let mut n = import_name(dll, name, ordinal, &mut text);
+    if let Some(importer) = importer {
+        for part in [&b"(imported by "[..], importer, b")"] {
+            for &b in part {
+                if n < text.len() {
+                    text[n] = b;
+                    n += 1;
+                }
+            }
+        }
+    }
+    let what = if importer.is_some() { 8 } else { 1 };
+    GalaRecordMissing(text.as_ptr(), n, what, u64::from(ordinal));
+}
+
+/// `dll!name` (or `dll!#ordinal` for an import by ordinal) in `out`,
+/// truncated to its length: how an import is named wherever gala names
+/// one, so that a ledger entry and an import trace spell the same import
+/// the same way. The length written.
+fn import_name(dll: &[u8], name: &[u8], ordinal: u32, out: &mut [u8]) -> usize {
     let mut n = 0;
     let mut push = |bytes: &[u8]| {
         for &b in bytes {
-            if n < text.len() {
-                text[n] = b;
+            if n < out.len() {
+                out[n] = b;
                 n += 1;
             }
         }
@@ -1978,13 +2018,172 @@ fn report_missing_export(dll: &[u8], name: &[u8], ordinal: u32, importer: Option
     } else {
         push(name);
     }
-    if let Some(importer) = importer {
-        push(b"(imported by ");
-        push(importer);
-        push(b")");
+    n
+}
+
+/// `imports=`: whether the kernel arms this process's import slots and,
+/// if so, the name of the DLL they must come from (length 0: every DLL).
+/// Asked of the kernel once (`GalaImports` op 0), so that a process the
+/// option does not name pays one system call for its whole life. Used
+/// under the loader lock.
+#[derive(Clone, Copy)]
+struct Traced {
+    asked: bool,
+    wanted: bool,
+    dll: [u8; MAX_NAME],
+    dll_len: usize,
+}
+
+struct TracedImports(core::cell::UnsafeCell<Traced>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for TracedImports {}
+
+static TRACED_IMPORTS: TracedImports = TracedImports(core::cell::UnsafeCell::new(Traced {
+    asked: false,
+    wanted: false,
+    dll: [0; MAX_NAME],
+    dll_len: 0,
+}));
+
+/// Whether the imports this image takes from `dll` are to be armed
+/// (`imports=`; see `arm_imports`). `dll` is a normalized name, compared
+/// with the option's as a file name is: without regard to case.
+fn imports_traced(dll: &[u8]) -> bool {
+    // SAFETY: the loader lock is held (see `TracedImports`).
+    let state = unsafe { &mut *TRACED_IMPORTS.0.get() };
+    if !state.asked {
+        state.asked = true;
+        let mut len = 0usize;
+        let status = GalaImports(
+            0,
+            state.dll.as_mut_ptr() as u64,
+            state.dll.len() as u64,
+            &mut len as *mut usize as u64,
+        );
+        state.wanted = status == STATUS_SUCCESS;
+        state.dll_len = if state.wanted { len.min(state.dll.len()) } else { 0 };
     }
-    let what = if importer.is_some() { 8 } else { 1 };
-    GalaRecordMissing(text.as_ptr(), n, what, u64::from(ordinal));
+    state.wanted && (state.dll_len == 0 || state.dll[..state.dll_len].eq_ignore_ascii_case(dll))
+}
+
+/// One import reported to the kernel (`GalaImports` op 1): the address of
+/// its IAT slot, the export's address the slot holds, and the import's
+/// name and its length. Four words whatever the build's pointer size, so
+/// that the kernel reads one shape of entry.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ImportEntry {
+    slot: u64,
+    target: u64,
+    name: u64,
+    name_len: u64,
+}
+
+impl ImportEntry {
+    const NONE: Self = Self { slot: 0, target: 0, name: 0, name_len: 0 };
+}
+
+/// Asks the kernel to arm the imports this image takes from one DLL: it
+/// writes each slot with an address in a region reserved here and never
+/// committed, so that the first call through the slot faults and is
+/// recorded (`imports=`, nt::traceimports). The slot holds the export's
+/// address again afterwards, so only the first call through it costs
+/// anything.
+///
+/// Imports of functions only. An import of a variable is left as it is:
+/// the value the program reads from such a slot *is* the trap address,
+/// and nothing faults on a read of it, so the program would get the
+/// address of a reserved page in place of its variable. An import whose
+/// target is not in an executable section is one of those.
+///
+/// Nothing at all is armed for a descriptor with no lookup table of its
+/// own (no OriginalFirstThunk): there the IAT *was* the lookup table, so
+/// the binding just done overwrote the names, and a slot whose import
+/// cannot be named is worth less than the ledger row that says so.
+fn arm_imports(base: usize, desc: usize, iat: usize, count: usize, dll: &[u8]) {
+    /// One trap address per armed slot, 16 bytes apart: the kernel's
+    /// `traceimports::STRIDE`, which is what makes a trap address name
+    /// the slot it came from.
+    const STRIDE: usize = 16;
+    /// Imports reported per system call. Small enough that the entries
+    /// and their names are a stack array in a loader that recurses,
+    /// large enough that a DLL's imports take a few calls and not one
+    /// each.
+    const CHUNK: usize = 16;
+    /// Room for `dll!name`, as much of it as the kernel keeps.
+    const NAME_LEN: usize = 96;
+    // A descriptor with no imports left to bind: there is nothing to
+    // reserve for, and a reservation of nothing would be refused and
+    // read as a gap.
+    if count == 0 {
+        return;
+    }
+    if rd32(desc) == 0 {
+        let what = b"ntdll.dll!LdrpBindImports(imports= needs OriginalFirstThunk)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, count as u64);
+        return;
+    }
+    let lookup = base + rd32(desc) as usize;
+    let (mut region, mut size) = (0usize, count * STRIDE);
+    // MEM_RESERVE | PAGE_NOACCESS: reserved and never committed, which
+    // is what turns the first call through an armed slot into the fault
+    // the kernel answers.
+    if NtAllocateVirtualMemory(-1, &mut region, 0, &mut size, 0x2000, 0x01) != STATUS_SUCCESS {
+        let what = b"ntdll.dll!LdrpBindImports(no region for import traps)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, count as u64);
+        return;
+    }
+    let mut entries = [ImportEntry::NONE; CHUNK];
+    let mut names = [[0u8; NAME_LEN]; CHUNK];
+    let (mut held, mut reported) = (0, 0);
+    for i in 0..count {
+        let target = rdp(iat + PTR * i);
+        // Not bound (the load is failing), or not a function.
+        if target == 0 || !image_of(target).is_some_and(|image| in_code(image, target)) {
+            continue;
+        }
+        let entry = rdp(lookup + PTR * i);
+        // IMAGE_ORDINAL_FLAG: the top bit, as in `bind_imports`.
+        let (name, ordinal) = if entry >> (8 * PTR - 1) != 0 {
+            (&[][..], (entry & 0xffff) as u32)
+        } else {
+            (c_str(base + (entry & 0x7fff_ffff) + 2), 0)
+        };
+        let len = import_name(dll, name, ordinal, &mut names[held]);
+        entries[held] = ImportEntry {
+            slot: (iat + PTR * i) as u64,
+            target: target as u64,
+            name: names[held].as_ptr() as u64,
+            name_len: len as u64,
+        };
+        held += 1;
+        if held == CHUNK {
+            report_imports(&entries[..held], region, size, reported);
+            reported += held;
+            held = 0;
+        }
+    }
+    if held != 0 {
+        report_imports(&entries[..held], region, size, reported);
+        reported += held;
+    }
+    if reported == 0 {
+        // Nothing to trap (every import here is of a variable, or none
+        // bound): the address space goes back rather than staying
+        // reserved for the life of the process.
+        let (mut at, mut len) = (region, 0usize);
+        NtFreeVirtualMemory(-1, &mut at, &mut len, 0x8000); // MEM_RELEASE
+    }
+}
+
+/// Reports one chunk of imports (`GalaImports` op 1). Their trap
+/// addresses are the `entries.len()` starting at `first` in the region at
+/// `region` (`size` bytes), so that the chunks of one image's imports
+/// from one DLL share a region.
+fn report_imports(entries: &[ImportEntry], region: usize, size: usize, first: usize) {
+    let block = [region as u64, size as u64, first as u64];
+    GalaImports(1, entries.as_ptr() as u64, entries.len() as u64, block.as_ptr() as u64);
 }
 
 /// The normalized name in a UNICODE_STRING.
