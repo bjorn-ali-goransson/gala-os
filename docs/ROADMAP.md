@@ -251,7 +251,7 @@ has a section under "Open items".
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
 | USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; HID is what a laptop with no PS/2 devices needs to be touched at all |
-| IN | The installer: gala onto a machine's disk | planned (the owner: after AR's desktop) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
+| IN | The installer: gala onto a machine's disk | in progress (step 1: the layout IOCTLs, `partition_test`) | a native gala program on the USB image's desktop: GPT partitions, an EFI system partition with Limine and the kernel, C: in a partition; erase-the-disk and free-space installs first, beside Windows later; a two-boot scenario (install unattended, then boot from the disk alone) |
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -6329,9 +6329,11 @@ underneath), ntfs-3g's ntfsresize (GPL; Windows shrinks its own
 volume instead).
 
 **Next** (each step test first):
-1. Partitions in the kernel: the disk's GPT read at boot, each partition
-   a device (`\Device\Harddisk0\Partition1`...), the layout IOCTLs
-   above (test program against real Windows).
+1. Partitions in the kernel: the layout IOCTLs done (GET/SET_DRIVE_LAYOUT_EX,
+   CREATE_DISK, UPDATE_PROPERTIES on a GPT: `partition_test`, ARCHITECTURE
+   "Disk"); its run on real Windows (a scratch VHD) next; then each
+   partition a device (`\Device\Harddisk0\Partition1`...) and MBR
+   tables read.
 2. C: in a partition: the persisted volume found by its partition type
    GUID instead of filling the disk; the `persist` scenarios on a
    partitioned disk.

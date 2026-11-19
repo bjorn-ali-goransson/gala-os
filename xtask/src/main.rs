@@ -8482,6 +8482,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("disk_test", "bcryptprimitives.dll", "Windows/System32"),
     ("disk_test", "bcrypt.dll", "Windows/System32"),
     ("disk_test", "user/access_test/access_test.regseed", "registry"),
+    ("partition_test", "ntdll.dll", "Windows/System32"),
+    ("partition_test", "kernel32.dll", "Windows/System32"),
     ("persist_test", "ntdll.dll", "Windows/System32"),
     ("persist_test", "kernel32.dll", "Windows/System32"),
     ("persist_test", "advapi32.dll", "Windows/System32"),
@@ -11010,6 +11012,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_py_test",
     "kernel32_locale_test",
     "disk_test",
+    "partition_test",
     "rtl_test",
     "gui_test",
     "paint_thread_test",
@@ -15657,6 +15660,15 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit as=system run=disk_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["disk_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // IN step 1: a GPT made on an empty disk through Windows' disk
+        // IOCTLs (DISK_SCENARIOS attaches it and reads the table back
+        // with xtask's own GPT reader). As SYSTEM.
+        name: "partition_test",
+        cmdline: "qemu_exit as=system run=partition_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["partition_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // R1 invariant 4: disk_test with the device reset under the
@@ -26326,6 +26338,15 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        name: "partition_test",
+        size: 64 << 20,
+        host_mib: None,
+        setup: |_| {},
+        check: partition_test_check,
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "disk_test",
         size: 16 << 20,
         host_mib: None,
@@ -26562,6 +26583,111 @@ fn disk_test_setup(image: &mut [u8]) {
     image[512..512 + text.len()].copy_from_slice(text);
 }
 
+/// partition_test's GPT, read as UEFI's specification lays it out (xtask's
+/// own reader, apart from the kernel's): the protective MBR, the primary
+/// header and entries with their CRC32s, the backup header at the last
+/// sector pointing at its entries' copy, and the two partitions the
+/// program made (types, GUIDs, ranges, names).
+fn partition_test_check(image: &[u8]) -> Result {
+    let sectors = (image.len() / 512) as u64;
+    let sector = |lba: u64| &image[lba as usize * 512..(lba as usize + 1) * 512];
+    let u32_at =
+        |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or_default());
+    let u64_at =
+        |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or_default());
+    let mbr = sector(0);
+    if mbr[450] != 0xee || u32_at(mbr, 454) != 1 || mbr[510..512] != [0x55, 0xaa] {
+        return Err("sector 0 is not a protective MBR".into());
+    }
+    let check_header = |lba: u64, other: u64, entries_at: u64| -> Result<Vec<u8>> {
+        let h = sector(lba);
+        if &h[..8] != b"EFI PART" || u32_at(h, 8) != 0x0001_0000 || u32_at(h, 12) != 92 {
+            return Err(format!("LBA {lba}: no GPT header"));
+        }
+        let mut copy = h[..92].to_vec();
+        copy[16..20].fill(0);
+        if crc32(&copy) != u32_at(h, 16) {
+            return Err(format!("LBA {lba}: the header's CRC32 is wrong"));
+        }
+        let fields = [u64_at(h, 24), u64_at(h, 32), u64_at(h, 40), u64_at(h, 48), u64_at(h, 72)];
+        if fields != [lba, other, 34, sectors - 34, entries_at] {
+            return Err(format!(
+                "LBA {lba}: header fields {fields:?}, not {:?}",
+                [lba, other, 34, sectors - 34, entries_at]
+            ));
+        }
+        if h[56..72] != PARTITION_TEST_DISK_ID || u32_at(h, 80) != 128 || u32_at(h, 84) != 128 {
+            return Err(format!("LBA {lba}: disk GUID or entry count/size"));
+        }
+        let start = entries_at as usize * 512;
+        let entries = image[start..start + 128 * 128].to_vec();
+        if crc32(&entries) != u32_at(h, 88) {
+            return Err(format!("LBA {lba}: the entries' CRC32 is wrong"));
+        }
+        Ok(entries)
+    };
+    let primary = check_header(1, sectors - 1, 2)?;
+    let backup = check_header(sectors - 1, 1, sectors - 33)?;
+    if primary != backup {
+        return Err("the backup entries differ from the primary ones".into());
+    }
+    let name = |s: &str| -> Vec<u8> {
+        let mut n = vec![0u8; 72];
+        for (i, b) in s.bytes().enumerate() {
+            n[2 * i] = b;
+        }
+        n
+    };
+    // (type, GUID, first LBA, last LBA, name)
+    type Entry<'a> = (&'a [u8; 16], &'a [u8; 16], u64, u64, &'a str);
+    let want: [Entry; 2] = [
+        (
+            &PARTITION_TEST_ESP_TYPE,
+            &PARTITION_TEST_ESP_ID,
+            2048,
+            2048 + 32768 - 1,
+            "EFI system partition",
+        ),
+        (&PARTITION_TEST_DATA_TYPE, &PARTITION_TEST_DATA_ID, 34816, 34816 + 65536 - 1, "gala"),
+    ];
+    for (i, (kind, id, first, last, n)) in want.iter().enumerate() {
+        let e = &primary[i * 128..(i + 1) * 128];
+        if &e[..16] != *kind
+            || &e[16..32] != *id
+            || u64_at(e, 32) != *first
+            || u64_at(e, 40) != *last
+            || u64_at(e, 48) != 0
+            || e[56..128] != name(n)[..]
+        {
+            return Err(format!("GPT entry {i} is not what partition_test made"));
+        }
+    }
+    if primary[256..].iter().any(|&b| b != 0) {
+        return Err("GPT entries past the second are not empty".into());
+    }
+    Ok(())
+}
+
+/// GUIDs as partition_test gives them, in the GPT's byte order.
+const PARTITION_TEST_DISK_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0001, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 1]);
+const PARTITION_TEST_ESP_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0002, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 2]);
+const PARTITION_TEST_DATA_ID: [u8; 16] =
+    gpt_guid(0x6a1a_d15c, 0x0003, 0x4000, [0x80, 0, 0, 0, 0, 0, 0, 3]);
+const PARTITION_TEST_ESP_TYPE: [u8; 16] =
+    gpt_guid(0xc12a_7328, 0xf81f, 0x11d2, [0xba, 0x4b, 0, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b]);
+const PARTITION_TEST_DATA_TYPE: [u8; 16] =
+    gpt_guid(0xebd0_a0a2, 0xb9e5, 0x4433, [0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7]);
+
+const fn gpt_guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
+    let (a, b, c) = (d1.to_le_bytes(), d2.to_le_bytes(), d3.to_le_bytes());
+    [
+        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5],
+        d4[6], d4[7],
+    ]
+}
+
 /// disk_test wrote sector 2: its text, then each byte's offset (mod 256).
 fn disk_test_check(image: &[u8]) -> Result {
     let text = b"written by disk_test";
@@ -26774,8 +26900,9 @@ fn office_source_command(args: &[String]) -> Result {
 /// Checks scenario `name`'s disk image after its run.
 fn check_disk(name: &str, path: &Path) -> Result {
     let Some(d) = disk_scenario(name) else { return Ok(()) };
-    // The first MiB (what checks look at; images can be large).
-    let mut image = vec![0u8; d.size.min(1 << 20)];
+    // Images up to 64 MiB whole (a GPT's backup is at the end); of larger
+    // ones the first MiB (what their checks look at).
+    let mut image = vec![0u8; if d.size <= 64 << 20 { d.size } else { 1 << 20 }];
     fs::File::open(path)
         .and_then(|mut f| f.read_exact(&mut image))
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;

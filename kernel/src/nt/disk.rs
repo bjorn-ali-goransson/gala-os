@@ -21,6 +21,10 @@ pub const DEVICE: &str = "\\Device\\Harddisk0\\DR0";
 pub const IOCTL_DISK_GET_DRIVE_GEOMETRY: u32 = 0x0007_0000;
 pub const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00a0;
 pub const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405c;
+pub const IOCTL_DISK_GET_DRIVE_LAYOUT_EX: u32 = 0x0007_0050;
+pub const IOCTL_DISK_SET_DRIVE_LAYOUT_EX: u32 = 0x0007_c054;
+pub const IOCTL_DISK_CREATE_DISK: u32 = 0x0007_c058;
+pub const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
 /// MEDIA_TYPE FixedMedia.
 const FIXED_MEDIA: u32 = 12;
 /// The geometry Windows reports for disks (LBA translation).
@@ -185,6 +189,62 @@ pub fn storage_property(input: &[u8]) -> Result<Vec<u8>, NtStatus> {
 /// Whether IOCTL `code` needs read access (its RequiredAccess bits).
 pub fn needs_read(code: u32) -> bool {
     code >> 14 & 1 != 0
+}
+
+/// Whether IOCTL `code` needs write access (its RequiredAccess bits).
+pub fn needs_write(code: u32) -> bool {
+    code >> 15 & 1 != 0
+}
+
+/// Whether `code` is one of the partition table's IOCTLs (`layout`).
+pub fn is_layout(code: u32) -> bool {
+    matches!(
+        code,
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX
+            | IOCTL_DISK_SET_DRIVE_LAYOUT_EX
+            | IOCTL_DISK_CREATE_DISK
+            | IOCTL_DISK_UPDATE_PROPERTIES
+    )
+}
+
+/// The disk's partition table through the platform's disk (`nt::gpt`).
+fn read_gpt(sectors: u64) -> Result<Option<super::gpt::Gpt>, NtStatus> {
+    super::gpt::read(sectors, |lba, buf| platform::disk_read(lba, buf).map_err(status))
+}
+
+fn write_gpt(gpt: &super::gpt::Gpt, sectors: u64) -> Result<(), NtStatus> {
+    for (lba, bytes) in super::gpt::write(gpt, sectors)? {
+        platform::disk_write(lba, &bytes).map_err(status)?;
+    }
+    platform::disk_flush().map_err(status)
+}
+
+/// The partition table's IOCTLs (`is_layout`) with their `input`: the
+/// output. GET_DRIVE_LAYOUT_EX reads the GPT (a disk without one is
+/// PARTITION_STYLE_RAW); CREATE_DISK writes an empty GPT; SET_DRIVE_LAYOUT_EX
+/// writes the table it is given; UPDATE_PROPERTIES has nothing to re-read
+/// (each GET reads the disk). Each change is logged.
+pub fn layout(code: u32, input: &[u8]) -> Result<Vec<u8>, NtStatus> {
+    let sectors = platform::disk_sectors();
+    match code {
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX => super::gpt::layout(read_gpt(sectors)?.as_ref(), sectors),
+        IOCTL_DISK_CREATE_DISK => {
+            let gpt = super::gpt::create(input, sectors)?;
+            write_gpt(&gpt, sectors)?;
+            crate::info!("disk: an empty GPT written ({} entries)", gpt.entries);
+            Ok(Vec::new())
+        }
+        IOCTL_DISK_SET_DRIVE_LAYOUT_EX => {
+            let gpt = super::gpt::set(input, sectors)?;
+            write_gpt(&gpt, sectors)?;
+            crate::info!("disk: GPT written with {} partitions", gpt.partitions.len());
+            for (i, p) in gpt.partitions.iter().enumerate() {
+                crate::info!("disk: partition {}: LBA {}..={}", i + 1, p.first, p.last);
+            }
+            Ok(Vec::new())
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// FileStandardInformation of the disk: allocation size and end of file

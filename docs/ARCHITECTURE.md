@@ -7493,6 +7493,24 @@ clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
   (`DISK_SCENARIOS`: size, what to write into the fresh image, what the
   image must hold after the run, checked on the host); host unit tests
   for the IOCTL outputs and sector checks.
+- **Partition tables** (`nt::gpt`, pure and host-tested; ROADMAP IN
+  step 1): the UEFI specification's GPT (protective MBR, primary header
+  and 128-entry array at LBA 1-33, backup array and header at the end,
+  CRC32s) and winioctl.h's structures. IOCTL_DISK_GET_DRIVE_LAYOUT_EX
+  reads the table at each call (DRIVE_LAYOUT_INFORMATION_EX: 48-byte
+  header, 144-byte PARTITION_INFORMATION_EX each, numbered from 1 in
+  array order; a disk without a valid GPT is PARTITION_STYLE_RAW);
+  IOCTL_DISK_CREATE_DISK writes an empty GPT (at least 128 entries);
+  IOCTL_DISK_SET_DRIVE_LAYOUT_EX writes the partitions given (whole
+  sectors, in the usable range, not overlapping, else
+  STATUS_INVALID_PARAMETER); IOCTL_DISK_UPDATE_PROPERTIES succeeds (there
+  is nothing cached). Each write is logged (`disk: GPT written ...`) and
+  flushed. The write IOCTLs need write access to the handle. Limits: MBR
+  tables are neither read (an MBR disk is RAW) nor written
+  (STATUS_NOT_SUPPORTED); the backup is written but not read when the
+  primary is damaged; no partition devices yet. Test: `partition_test`
+  (as SYSTEM, an empty 64 MiB disk; xtask reads the table back with its
+  own GPT reader).
 - TODO: device interrupts, more than one request in flight.
 
 ### C: kept on the disk
