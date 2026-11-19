@@ -2406,15 +2406,22 @@ need gala's.
      own to measure, and not this failure.
      Nothing in the run throws: the process dispatches no exception at
      all (not one `exception` event for pid 12), so what Word gives up
-     on is a value it was handed, as the window above says, and not a
-     status and not a throw. Of the calls in that window the ones gala
-     answers are the four activation-context functions MSO reaches there
-     -- QueryActCtxW, ActivateActCtx, FindActCtxSectionStringW,
-     DeactivateActCtx -- and what they answer is content, which the
-     ledger does not see. Next, in that order: a test program that asks
-     those four what Windows answers for an Office-style manifest
-     (`user/actctx_test`), and then the same questions put to gala from
-     Word's own context.
+     on is a value it was handed, and not a status and not a throw. Nor
+     is anything in that window gala's answer. The four activation-
+     context functions MSO reaches there are the box's own -- the side-
+     by-side context its Common-Controls manifest needs -- and the run's
+     only activation-context row is `CreateActCtxW(manifest sections not
+     built)` at 32602 ms, one manifest's typelibs, proxy/stubs and CLR
+     classes (the skipped mask, 26); no lookup in the whole run asks for
+     one of them, which `FindActCtxSection(section not built)` would
+     record and does not. What Word holds, it was given earlier. The
+     nearest thing already measured and not explained is the display
+     configuration: `GetDisplayConfigBufferSizes` answers
+     ERROR_NOT_SUPPORTED and DXVK carries on with blank display
+     metadata, and a display's metadata is content a graphics init reads
+     rather than a status it checks. Next, test first: what Windows
+     answers for the display-configuration calls, and what Word is given
+     for them here.
      Who raises the box is measured rather than inferred, by the
      facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
      stack_from=user32 stack_words=400` catches gala's MessageBoxW
