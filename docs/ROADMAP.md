@@ -6655,8 +6655,12 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   (Explorer, the task manager, the start menu once SH moves it out of
   the kernel) by saying what they want; a coding agent edits the
   program's source, builds it, and the running program is replaced by
-  the new build, its window and state kept. The look is the owner's
-  mockups, `docs/images/change-program-<n>-<step>.png`, one per step:
+  the new build, its window and state kept. The owner's mockups,
+  `docs/images/change-program-<n>-<step>.png`, show the flow, one per
+  step; only this feature's elements in them are its scope (the menu
+  entry, the dialog, the progress, the toasts), the rest of what they
+  draw (Explorer's tabs and toolbar, the taskbar, file names) is
+  illustration, not a target:
   1. The window menu (`-1-menu`): "Change this program..." between
      Maximize and Close, with a wand icon. It appears only on programs
      whose source gala has: a window maps to its source by its module
