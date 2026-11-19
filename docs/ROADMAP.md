@@ -5814,10 +5814,59 @@ among the slowest hand-offs.
 2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
    ALPC/RPC; sockets and events signaled across processes as links like
    pipes and completion ports.
-3. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
+3. OT3b: **what a program does inside a DLL gala wrote**, without a
+   record typed per method. The ledger says what was missing and the
+   event stream what crossed the kernel, but a COM call from a program
+   into one of gala's DLLs is an indirect call through a vtable in the
+   program's own address space: the kernel cannot see it, and the
+   `reached` records that found Word's last call are typed by hand, so
+   the gap is always the method nobody instrumented. Three pieces:
+   - **A wrapper per vtable slot, generated.** Done for d2d1:
+     `cargo xtask gen-trace` reads each slot list and the interface each
+     slot belongs to (`// gen-trace` directives beside the list), and
+     writes a wrapper per slot into the DLL's own source -- a generated
+     block, checked in and verified in CI as `user/bin`'s binaries are
+     (WORKFLOW "Generated code") -- which records the first call that
+     reaches the method and then calls it. The slot list is the only
+     place a method is named, and a slot no directive explains fails the
+     generator, so a new method cannot be left unrecorded. Generated
+     typed wrappers rather than assembly thunks: no `unsafe`, no
+     per-architecture code, the compiler checks each signature against
+     the function it wraps, and a wrapper that knows its arguments can
+     record them when asked to. 225 slots of d2d1 are wrapped, against
+     the 204 that were written by hand; the hand-written records are
+     gone. Next: dwrite, whose functions are named in snake_case
+     (`collection_family_count`), so they are renamed to d2d1's
+     `<prefix>_<Method>` convention first and the generator then derives
+     their names like the rest.
+   - **A trigger, so a long run records only what is wanted.** The
+     one-shot record a slot leaves is free (a relaxed atomic a call),
+     but a record of every call needs a system call per call, which a
+     drawing loop cannot pay. `trace_from=<dll>!<interface>::<method>`
+     arms the DLL at the slot named: before it, nothing but the one-shot
+     records; after it, every call with its arguments, within a budget.
+     The decision is made where the call is, before anything is
+     formatted (OBSERVABILITY "Volume": decide before the cost), and
+     the arming lives in the rules rather than in a DLL's source, so an
+     investigation needs no edit. A `call` event category carries them,
+     so the OpenTelemetry export maps them like every other kind.
+   - **Import thunks in the loader, for the DLLs gala did not write.**
+     gala's own loader fills the IAT (`user/testntdll/src/lib.rs`), so
+     under a rule each resolved import can point at a thunk that
+     records `<program>` called `<dll>!<export>`. That covers exported
+     entry points of Microsoft's DLLs too, which the vtable wrappers
+     cannot reach; what it does not cover is the COM vtable slots behind
+     an export, which is why both pieces exist.
+
+   What this is for: every program whose compatibility is worked on
+   next runs into the same wall Word did, and the answer should not be
+   another round of records typed by hand. Its gaps when done: the
+   32-bit DLLs (WOW64) are not generated for yet, and a slot's
+   arguments are recorded by value, not followed.
+4. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
    what Windows programs emit into OTel logs and spans; later the same
    for LX.
-4. OT5: the in-guest OTLP exporter for servers, controlled from the
+5. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling rules, endpoint), metrics pushed to
    Prometheus' OTLP receiver on the same host (diagnosis, not
    availability; `/metrics` for scraping as an option); later, anomalies against a key's own baseline
@@ -5825,7 +5874,7 @@ among the slowest hand-offs.
    defaults: metrics, failures, ledger, crash reports and the flight
    recorder always on, traces and the profiler on demand
    (OBSERVABILITY "Volume").
-5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
+6. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
    flows, samples). Next, one way to query a run for every session,
    people's and agents' alike (OBSERVABILITY "Querying a run"):

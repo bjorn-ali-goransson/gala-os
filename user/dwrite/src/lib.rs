@@ -184,7 +184,11 @@ static FACTORY_VTBL: VTable<24> = VTable([
 macro_rules! reached {
     ($what:expr) => {{
         static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        if !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        // A relaxed load once it has been recorded, not a locked
+        // exchange: the call is on a drawing loop.
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
             $crate::reached_now($what);
         }
     }};

@@ -448,12 +448,19 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   else behind: the ledger would otherwise go quiet exactly where a
   program stops in the middle of a path this DLL answers, which is what
   a program that gives up over graphics (Word) leaves behind. Every
-  method of the factory's render targets, of ID2D1RenderTarget and of
-  the ID2D1DeviceContext interfaces over it records the first time a
-  program reaches it (`reached!`, one `AtomicBool` a call site, so a
-  drawing loop pays one relaxed atomic a call and the rows are the path
-  a program took through the DLL, not a count: a row's `first` is when
-  the program got there). The calls whose answer is worth keeping record
+  method a vtable of the DLL points at records the first time a program
+  reaches it. The recording is not written by hand: `cargo xtask
+  gen-trace` reads the slot lists and generates a wrapper for each slot,
+  the slot list points at the wrapper, and a method added to a vtable is
+  recorded by having been added (WORKFLOW "Generated code"; a slot whose
+  name no `// gen-trace` directive explains fails the generator, so a new
+  interface cannot be left unnamed). A wrapper is one `AtomicBool` a call
+  site -- a relaxed load once it has fired -- so a drawing loop pays
+  nothing to speak of and the rows are the path a program took through
+  the DLL, not a count: a row's `first` is when the program got there.
+  IUnknown's three methods are the exception, never wrapped: every
+  program calls them on every object and they say nothing about what it
+  is trying to do. The calls whose answer is worth keeping record
   it every time instead, with their HRESULT as the detail:
   `ID2D1Factory1::CreateDevice` and `ID2D1Factory2::CreateDevice`,
   `ID2D1Device::CreateDeviceContext` and

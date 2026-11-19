@@ -17,8 +17,8 @@ use crate::raster::StrokeStyle;
 use crate::{
     E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Header, IID_FACTORY, IID_FACTORY1,
     IID_FACTORY2, IID_IUNKNOWN, IID_MULTITHREAD, IID_RESOURCE, IID_STROKE_STYLE, Matrix, Obj,
-    RectF, Res, S_OK, VTable, add_ref, gap, get_factory, give, not_implemented, put, query,
-    reached, read, release_object, try_box, vtable_of,
+    RectF, Res, S_OK, VTable, add_ref, gap, give, not_implemented, put, query, read,
+    release_object, try_box, vtable_of,
 };
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -51,47 +51,53 @@ impl Drop for Factory {
 /// ID2D1Factory, and ID2D1Factory1's ten further methods after it
 /// (d2d1_1.h). CreateDevice is the one Office needs: everything else of
 /// 1.1 hangs off the device.
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace prefix f_ ID2D1Factory
+// gen-trace prefix f1_ ID2D1Factory1
+// gen-trace prefix mt_ ID2D1Multithread
+// gen-trace prefix s_ ID2D1StrokeStyle
 static FACTORY_VTBL: VTable<28> = VTable([
     factory_query_fn as *const (),
     add_ref as *const (),
     factory_release_fn as *const (),
-    f_ReloadSystemMetrics as *const (),
-    f_GetDesktopDpi as *const (),
-    f_CreateRectangleGeometry as *const (),
-    f_CreateRoundedRectangleGeometry as *const (),
-    f_CreateEllipseGeometry as *const (),
-    f_CreateGeometryGroup as *const (),
-    f_CreateTransformedGeometry as *const (),
-    f_CreatePathGeometry as *const (),
-    f_CreateStrokeStyle as *const (),
-    f_CreateDrawingStateBlock as *const (),
-    crate::target::f_CreateWicBitmapRenderTarget as *const (),
-    crate::target::f_CreateHwndRenderTarget as *const (),
-    crate::target::f_CreateDxgiSurfaceRenderTarget as *const (),
-    crate::target::f_CreateDCRenderTarget as *const (),
-    crate::device::f1_CreateDevice as *const (),
-    f1_CreateStrokeStyle as *const (),
-    f1_CreatePathGeometry as *const (),
-    f1_CreateDrawingStateBlock as *const (),
-    f1_CreateGdiMetafile as *const (),
-    f1_RegisterEffectFromStream as *const (),
-    f1_RegisterEffectFromString as *const (),
-    f1_UnregisterEffect as *const (),
-    f1_GetRegisteredEffects as *const (),
-    f1_GetEffectProperties as *const (),
+    traced::f_ReloadSystemMetrics as *const (),
+    traced::f_GetDesktopDpi as *const (),
+    traced::f_CreateRectangleGeometry as *const (),
+    traced::f_CreateRoundedRectangleGeometry as *const (),
+    traced::f_CreateEllipseGeometry as *const (),
+    traced::f_CreateGeometryGroup as *const (),
+    traced::f_CreateTransformedGeometry as *const (),
+    traced::f_CreatePathGeometry as *const (),
+    traced::f_CreateStrokeStyle as *const (),
+    traced::f_CreateDrawingStateBlock as *const (),
+    crate::target::traced::f_CreateWicBitmapRenderTarget as *const (),
+    crate::target::traced::f_CreateHwndRenderTarget as *const (),
+    crate::target::traced::f_CreateDxgiSurfaceRenderTarget as *const (),
+    crate::target::traced::f_CreateDCRenderTarget as *const (),
+    crate::device::traced::f1_CreateDevice as *const (),
+    traced::f1_CreateStrokeStyle as *const (),
+    traced::f1_CreatePathGeometry as *const (),
+    traced::f1_CreateDrawingStateBlock as *const (),
+    traced::f1_CreateGdiMetafile as *const (),
+    traced::f1_RegisterEffectFromStream as *const (),
+    traced::f1_RegisterEffectFromString as *const (),
+    traced::f1_UnregisterEffect as *const (),
+    traced::f1_GetRegisteredEffects as *const (),
+    traced::f1_GetEffectProperties as *const (),
     // ID2D1Factory2::CreateDevice gives an ID2D1Device1, which is
     // what CreateDevice already makes: one device object answers both
     // interfaces (`device`).
-    crate::device::f2_CreateDevice as *const (),
+    crate::device::traced::f2_CreateDevice as *const (),
 ]);
 
 static MT_VTBL: VTable<6> = VTable([
     mt_query as *const (),
     mt_add_ref as *const (),
     mt_release as *const (),
-    mt_GetMultithreadProtected as *const (),
-    mt_Enter as *const (),
-    mt_Leave as *const (),
+    traced::mt_GetMultithreadProtected as *const (),
+    traced::mt_Enter as *const (),
+    traced::mt_Leave as *const (),
 ]);
 
 /// A new factory with one reference.
@@ -158,12 +164,10 @@ extern "system" fn mt_release(this: Obj) -> u32 {
 }
 
 extern "system" fn mt_GetMultithreadProtected(this: Obj) -> i32 {
-    reached!(b"ID2D1Multithread::GetMultithreadProtected");
     i32::from(factory(from_mt(this)).multithreaded)
 }
 
 extern "system" fn mt_Enter(this: Obj) {
-    reached!(b"ID2D1Multithread::Enter");
     let f = factory(from_mt(this));
     if f.multithreaded {
         // SAFETY: the factory's initialized critical section.
@@ -172,7 +176,6 @@ extern "system" fn mt_Enter(this: Obj) {
 }
 
 extern "system" fn mt_Leave(this: Obj) {
-    reached!(b"ID2D1Multithread::Leave");
     let f = factory(from_mt(this));
     if f.multithreaded {
         // SAFETY: as above; the caller entered it.
@@ -185,19 +188,16 @@ extern "system" fn factory_query_fn(this: Obj, riid: *const Guid, out: *mut Obj)
 }
 
 extern "system" fn f_ReloadSystemMetrics(_this: Obj) -> HResult {
-    reached!(b"ID2D1Factory::ReloadSystemMetrics");
     S_OK
 }
 
 /// GetDesktopDpi: gala's screen is 96 DPI (user32's GetDpiForSystem).
 extern "system" fn f_GetDesktopDpi(_this: Obj, x: *mut f32, y: *mut f32) {
-    reached!(b"ID2D1Factory::GetDesktopDpi");
     put(x, 96.0);
     put(y, 96.0);
 }
 
 extern "system" fn f_CreateRectangleGeometry(this: Obj, r: *const RectF, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1Factory::CreateRectangleGeometry");
     let Some(r) = read(r) else { return E_INVALIDARG };
     geometry::create(this, Shape::Rect(r), out)
 }
@@ -207,13 +207,11 @@ extern "system" fn f_CreateRoundedRectangleGeometry(
     r: *const RoundedRect,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateRoundedRectangleGeometry");
     let Some(r) = read(r) else { return E_INVALIDARG };
     geometry::create(this, Shape::Rounded(r.rect, r.rx, r.ry), out)
 }
 
 extern "system" fn f_CreateEllipseGeometry(this: Obj, e: *const Ellipse, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1Factory::CreateEllipseGeometry");
     let Some(e) = read(e) else { return E_INVALIDARG };
     geometry::create(this, Shape::Ellipse(e.center, e.rx, e.ry), out)
 }
@@ -225,7 +223,6 @@ extern "system" fn f_CreateGeometryGroup(
     _count: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateGeometryGroup");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateGeometryGroup")
 }
@@ -236,13 +233,11 @@ extern "system" fn f_CreateTransformedGeometry(
     _m: *const Matrix,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateTransformedGeometry");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory::CreateTransformedGeometry")
 }
 
 extern "system" fn f_CreatePathGeometry(this: Obj, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1Factory::CreatePathGeometry");
     geometry::create(this, geometry::new_path_shape(), out)
 }
 
@@ -270,13 +265,11 @@ extern "system" fn f1_CreateStrokeStyle(
     _count: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory1::CreateStrokeStyle");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreateStrokeStyle")
 }
 
 extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1Factory1::CreatePathGeometry");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreatePathGeometry")
 }
@@ -291,7 +284,6 @@ extern "system" fn f1_CreateDrawingStateBlock(
 }
 
 extern "system" fn f1_CreateGdiMetafile(_this: Obj, _stream: Obj, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1Factory1::CreateGdiMetafile");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1Factory1::CreateGdiMetafile")
 }
@@ -304,7 +296,6 @@ extern "system" fn f1_RegisterEffectFromStream(
     _count: u32,
     _factory: *const (),
 ) -> HResult {
-    reached!(b"ID2D1Factory1::RegisterEffectFromStream");
     gap(b"ID2D1Factory1::RegisterEffectFromStream", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
 }
@@ -317,13 +308,11 @@ extern "system" fn f1_RegisterEffectFromString(
     _count: u32,
     _factory: *const (),
 ) -> HResult {
-    reached!(b"ID2D1Factory1::RegisterEffectFromString");
     gap(b"ID2D1Factory1::RegisterEffectFromString", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
 }
 
 extern "system" fn f1_UnregisterEffect(_this: Obj, _class_id: *const Guid) -> HResult {
-    reached!(b"ID2D1Factory1::UnregisterEffect");
     not_implemented(b"ID2D1Factory1::UnregisterEffect")
 }
 
@@ -336,7 +325,6 @@ extern "system" fn f1_GetRegisteredEffects(
     returned: *mut u32,
     registered: *mut u32,
 ) -> HResult {
-    reached!(b"ID2D1Factory1::GetRegisteredEffects");
     put(returned, 0);
     put(registered, 0);
     S_OK
@@ -347,7 +335,6 @@ extern "system" fn f1_GetEffectProperties(
     class_id: *const Guid,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory1::GetEffectProperties");
     put(out, core::ptr::null_mut());
     gap(b"ID2D1Factory1::GetEffectProperties", read(class_id).map_or(0, |g| crate::data1(&g)));
     crate::E_NOTIMPL
@@ -379,16 +366,16 @@ static STROKE_VTBL: VTable<13> = VTable([
     stroke_query as *const (),
     add_ref as *const (),
     stroke_release as *const (),
-    get_factory as *const (),
-    s_GetStartCap as *const (),
-    s_GetEndCap as *const (),
-    s_GetDashCap as *const (),
-    s_GetMiterLimit as *const (),
-    s_GetLineJoin as *const (),
-    s_GetDashOffset as *const (),
-    s_GetDashStyle as *const (),
-    s_GetDashesCount as *const (),
-    s_GetDashes as *const (),
+    crate::traced::get_factory as *const (),
+    traced::s_GetStartCap as *const (),
+    traced::s_GetEndCap as *const (),
+    traced::s_GetDashCap as *const (),
+    traced::s_GetMiterLimit as *const (),
+    traced::s_GetLineJoin as *const (),
+    traced::s_GetDashOffset as *const (),
+    traced::s_GetDashStyle as *const (),
+    traced::s_GetDashesCount as *const (),
+    traced::s_GetDashes as *const (),
 ]);
 
 const DASH_SOLID: u32 = 0;
@@ -404,7 +391,6 @@ extern "system" fn f_CreateStrokeStyle(
     count: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateStrokeStyle");
     if out.is_null() {
         return E_POINTER;
     }
@@ -506,5 +492,243 @@ extern "system" fn s_GetDashes(this: Obj, out: *mut f32, n: u32) {
     for (i, d) in stroke(this).dashes.iter().take(n as usize).enumerate() {
         // SAFETY: the caller's array of `n` floats.
         unsafe { out.add(i).write_unaligned(*d) };
+    }
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module, each recording
+/// the first call that reaches its method (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1Factory1::CreateDrawingStateBlock, traced.
+    pub(super) extern "system" fn f1_CreateDrawingStateBlock(
+        this: Obj,
+        desc: *const crate::state::StateDesc1,
+        params: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::CreateDrawingStateBlock");
+        super::f1_CreateDrawingStateBlock(this, desc, params, out)
+    }
+    /// ID2D1Factory1::CreateGdiMetafile, traced.
+    pub(super) extern "system" fn f1_CreateGdiMetafile(
+        _this: Obj,
+        _stream: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::CreateGdiMetafile");
+        super::f1_CreateGdiMetafile(_this, _stream, out)
+    }
+    /// ID2D1Factory1::CreatePathGeometry, traced.
+    pub(super) extern "system" fn f1_CreatePathGeometry(_this: Obj, out: *mut Obj) -> HResult {
+        crate::reached!(b"ID2D1Factory1::CreatePathGeometry");
+        super::f1_CreatePathGeometry(_this, out)
+    }
+    /// ID2D1Factory1::CreateStrokeStyle, traced.
+    pub(super) extern "system" fn f1_CreateStrokeStyle(
+        _this: Obj,
+        _props: *const u8,
+        _dashes: *const f32,
+        _count: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::CreateStrokeStyle");
+        super::f1_CreateStrokeStyle(_this, _props, _dashes, _count, out)
+    }
+    /// ID2D1Factory1::GetEffectProperties, traced.
+    pub(super) extern "system" fn f1_GetEffectProperties(
+        _this: Obj,
+        class_id: *const Guid,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::GetEffectProperties");
+        super::f1_GetEffectProperties(_this, class_id, out)
+    }
+    /// ID2D1Factory1::GetRegisteredEffects, traced.
+    pub(super) extern "system" fn f1_GetRegisteredEffects(
+        _this: Obj,
+        _effects: *mut Guid,
+        _count: u32,
+        returned: *mut u32,
+        registered: *mut u32,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::GetRegisteredEffects");
+        super::f1_GetRegisteredEffects(_this, _effects, _count, returned, registered)
+    }
+    /// ID2D1Factory1::RegisterEffectFromStream, traced.
+    pub(super) extern "system" fn f1_RegisterEffectFromStream(
+        _this: Obj,
+        class_id: *const Guid,
+        _xml: Obj,
+        _bindings: *const u8,
+        _count: u32,
+        _factory: *const (),
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::RegisterEffectFromStream");
+        super::f1_RegisterEffectFromStream(_this, class_id, _xml, _bindings, _count, _factory)
+    }
+    /// ID2D1Factory1::RegisterEffectFromString, traced.
+    pub(super) extern "system" fn f1_RegisterEffectFromString(
+        _this: Obj,
+        class_id: *const Guid,
+        _xml: *const u16,
+        _bindings: *const u8,
+        _count: u32,
+        _factory: *const (),
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::RegisterEffectFromString");
+        super::f1_RegisterEffectFromString(_this, class_id, _xml, _bindings, _count, _factory)
+    }
+    /// ID2D1Factory1::UnregisterEffect, traced.
+    pub(super) extern "system" fn f1_UnregisterEffect(
+        _this: Obj,
+        _class_id: *const Guid,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory1::UnregisterEffect");
+        super::f1_UnregisterEffect(_this, _class_id)
+    }
+    /// ID2D1Factory::CreateDrawingStateBlock, traced.
+    pub(super) extern "system" fn f_CreateDrawingStateBlock(
+        this: Obj,
+        desc: *const crate::state::StateDesc,
+        params: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateDrawingStateBlock");
+        super::f_CreateDrawingStateBlock(this, desc, params, out)
+    }
+    /// ID2D1Factory::CreateEllipseGeometry, traced.
+    pub(super) extern "system" fn f_CreateEllipseGeometry(
+        this: Obj,
+        e: *const Ellipse,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateEllipseGeometry");
+        super::f_CreateEllipseGeometry(this, e, out)
+    }
+    /// ID2D1Factory::CreateGeometryGroup, traced.
+    pub(super) extern "system" fn f_CreateGeometryGroup(
+        _this: Obj,
+        _mode: u32,
+        _geometries: *const Obj,
+        _count: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateGeometryGroup");
+        super::f_CreateGeometryGroup(_this, _mode, _geometries, _count, out)
+    }
+    /// ID2D1Factory::CreatePathGeometry, traced.
+    pub(super) extern "system" fn f_CreatePathGeometry(this: Obj, out: *mut Obj) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreatePathGeometry");
+        super::f_CreatePathGeometry(this, out)
+    }
+    /// ID2D1Factory::CreateRectangleGeometry, traced.
+    pub(super) extern "system" fn f_CreateRectangleGeometry(
+        this: Obj,
+        r: *const RectF,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateRectangleGeometry");
+        super::f_CreateRectangleGeometry(this, r, out)
+    }
+    /// ID2D1Factory::CreateRoundedRectangleGeometry, traced.
+    pub(super) extern "system" fn f_CreateRoundedRectangleGeometry(
+        this: Obj,
+        r: *const RoundedRect,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateRoundedRectangleGeometry");
+        super::f_CreateRoundedRectangleGeometry(this, r, out)
+    }
+    /// ID2D1Factory::CreateStrokeStyle, traced.
+    pub(super) extern "system" fn f_CreateStrokeStyle(
+        this: Obj,
+        props: *const StrokeProps,
+        dashes: *const f32,
+        count: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateStrokeStyle");
+        super::f_CreateStrokeStyle(this, props, dashes, count, out)
+    }
+    /// ID2D1Factory::CreateTransformedGeometry, traced.
+    pub(super) extern "system" fn f_CreateTransformedGeometry(
+        _this: Obj,
+        _source: Obj,
+        _m: *const Matrix,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateTransformedGeometry");
+        super::f_CreateTransformedGeometry(_this, _source, _m, out)
+    }
+    /// ID2D1Factory::GetDesktopDpi, traced.
+    pub(super) extern "system" fn f_GetDesktopDpi(_this: Obj, x: *mut f32, y: *mut f32) {
+        crate::reached!(b"ID2D1Factory::GetDesktopDpi");
+        super::f_GetDesktopDpi(_this, x, y)
+    }
+    /// ID2D1Factory::ReloadSystemMetrics, traced.
+    pub(super) extern "system" fn f_ReloadSystemMetrics(_this: Obj) -> HResult {
+        crate::reached!(b"ID2D1Factory::ReloadSystemMetrics");
+        super::f_ReloadSystemMetrics(_this)
+    }
+    /// ID2D1Multithread::Enter, traced.
+    pub(super) extern "system" fn mt_Enter(this: Obj) {
+        crate::reached!(b"ID2D1Multithread::Enter");
+        super::mt_Enter(this)
+    }
+    /// ID2D1Multithread::GetMultithreadProtected, traced.
+    pub(super) extern "system" fn mt_GetMultithreadProtected(this: Obj) -> i32 {
+        crate::reached!(b"ID2D1Multithread::GetMultithreadProtected");
+        super::mt_GetMultithreadProtected(this)
+    }
+    /// ID2D1Multithread::Leave, traced.
+    pub(super) extern "system" fn mt_Leave(this: Obj) {
+        crate::reached!(b"ID2D1Multithread::Leave");
+        super::mt_Leave(this)
+    }
+    /// ID2D1StrokeStyle::GetDashCap, traced.
+    pub(super) extern "system" fn s_GetDashCap(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetDashCap");
+        super::s_GetDashCap(this)
+    }
+    /// ID2D1StrokeStyle::GetDashOffset, traced.
+    pub(super) extern "system" fn s_GetDashOffset(this: Obj) -> f32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetDashOffset");
+        super::s_GetDashOffset(this)
+    }
+    /// ID2D1StrokeStyle::GetDashStyle, traced.
+    pub(super) extern "system" fn s_GetDashStyle(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetDashStyle");
+        super::s_GetDashStyle(this)
+    }
+    /// ID2D1StrokeStyle::GetDashes, traced.
+    pub(super) extern "system" fn s_GetDashes(this: Obj, out: *mut f32, n: u32) {
+        crate::reached!(b"ID2D1StrokeStyle::GetDashes");
+        super::s_GetDashes(this, out, n)
+    }
+    /// ID2D1StrokeStyle::GetDashesCount, traced.
+    pub(super) extern "system" fn s_GetDashesCount(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetDashesCount");
+        super::s_GetDashesCount(this)
+    }
+    /// ID2D1StrokeStyle::GetEndCap, traced.
+    pub(super) extern "system" fn s_GetEndCap(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetEndCap");
+        super::s_GetEndCap(this)
+    }
+    /// ID2D1StrokeStyle::GetLineJoin, traced.
+    pub(super) extern "system" fn s_GetLineJoin(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetLineJoin");
+        super::s_GetLineJoin(this)
+    }
+    /// ID2D1StrokeStyle::GetMiterLimit, traced.
+    pub(super) extern "system" fn s_GetMiterLimit(this: Obj) -> f32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetMiterLimit");
+        super::s_GetMiterLimit(this)
+    }
+    /// ID2D1StrokeStyle::GetStartCap, traced.
+    pub(super) extern "system" fn s_GetStartCap(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1StrokeStyle::GetStartCap");
+        super::s_GetStartCap(this)
     }
 }

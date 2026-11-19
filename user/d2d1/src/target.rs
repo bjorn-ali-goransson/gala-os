@@ -64,8 +64,8 @@ use crate::{
     E_OUTOFMEMORY, E_POINTER, Guid, HResult, IID_DC_RENDER_TARGET, IID_DEVICE_CONTEXT,
     IID_DEVICE_CONTEXT1, IID_HWND_RENDER_TARGET, IID_RENDER_TARGET, IID_RESOURCE, Matrix, Obj,
     PixelFormat, Point, RectF, Res, S_OK, SizeF, SizeU, Spin, VTable, add_ref, answered,
-    com_add_ref, gap, get_factory, give, not_implemented, pt, push, put, query, reached, read,
-    release_object, slot, vtable_of,
+    com_add_ref, gap, give, not_implemented, pt, push, put, query, read, release_object, slot,
+    vtable_of,
 };
 
 use crate::state::{self, StateDesc, StateDesc1};
@@ -317,66 +317,74 @@ impl State {
     }
 }
 
+// The interfaces this module's vtable slots belong to: `cargo xtask
+// gen-trace` names each wrapper's method from them (xtask/src/gentrace.rs).
+// gen-trace prefix t_ ID2D1RenderTarget
+// gen-trace prefix dc_ ID2D1DCRenderTarget
+// gen-trace prefix dc1_ ID2D1DeviceContext
+// gen-trace prefix dc2_ ID2D1DeviceContext1
+// gen-trace prefix hwnd_ ID2D1HwndRenderTarget
+// gen-trace prefix f_ ID2D1Factory
 macro_rules! target_slots {
     ($($extra:expr),*) => {
         [
             t_query as *const (),
             add_ref as *const (),
             t_release as *const (),
-            get_factory as *const (),
-            t_CreateBitmap as *const (),
-            t_CreateBitmapFromWicBitmap as *const (),
-            t_CreateSharedBitmap as *const (),
-            t_CreateBitmapBrush as *const (),
-            t_CreateSolidColorBrush as *const (),
-            t_CreateGradientStopCollection as *const (),
-            t_CreateLinearGradientBrush as *const (),
-            t_CreateRadialGradientBrush as *const (),
-            t_CreateCompatibleRenderTarget as *const (),
-            t_CreateLayer as *const (),
-            t_CreateMesh as *const (),
-            t_DrawLine as *const (),
-            t_DrawRectangle as *const (),
-            t_FillRectangle as *const (),
-            t_DrawRoundedRectangle as *const (),
-            t_FillRoundedRectangle as *const (),
-            t_DrawEllipse as *const (),
-            t_FillEllipse as *const (),
-            t_DrawGeometry as *const (),
-            t_FillGeometry as *const (),
-            t_FillMesh as *const (),
-            t_FillOpacityMask as *const (),
-            t_DrawBitmap as *const (),
-            t_DrawText as *const (),
-            t_DrawTextLayout as *const (),
-            t_DrawGlyphRun as *const (),
-            t_SetTransform as *const (),
-            t_GetTransform as *const (),
-            t_SetAntialiasMode as *const (),
-            t_GetAntialiasMode as *const (),
-            t_SetTextAntialiasMode as *const (),
-            t_GetTextAntialiasMode as *const (),
-            t_SetTextRenderingParams as *const (),
-            t_GetTextRenderingParams as *const (),
-            t_SetTags as *const (),
-            t_GetTags as *const (),
-            t_PushLayer as *const (),
-            t_PopLayer as *const (),
-            t_Flush as *const (),
-            t_SaveDrawingState as *const (),
-            t_RestoreDrawingState as *const (),
-            t_PushAxisAlignedClip as *const (),
-            t_PopAxisAlignedClip as *const (),
-            t_Clear as *const (),
-            t_BeginDraw as *const (),
-            t_EndDraw as *const (),
-            t_GetPixelFormat as *const (),
-            t_SetDpi as *const (),
-            t_GetDpi as *const (),
-            t_GetSize as *const (),
-            t_GetPixelSize as *const (),
-            t_GetMaximumBitmapSize as *const (),
-            t_IsSupported as *const (),
+            crate::traced::get_factory as *const (),
+            traced::t_CreateBitmap as *const (),
+            traced::t_CreateBitmapFromWicBitmap as *const (),
+            traced::t_CreateSharedBitmap as *const (),
+            traced::t_CreateBitmapBrush as *const (),
+            traced::t_CreateSolidColorBrush as *const (),
+            traced::t_CreateGradientStopCollection as *const (),
+            traced::t_CreateLinearGradientBrush as *const (),
+            traced::t_CreateRadialGradientBrush as *const (),
+            traced::t_CreateCompatibleRenderTarget as *const (),
+            traced::t_CreateLayer as *const (),
+            traced::t_CreateMesh as *const (),
+            traced::t_DrawLine as *const (),
+            traced::t_DrawRectangle as *const (),
+            traced::t_FillRectangle as *const (),
+            traced::t_DrawRoundedRectangle as *const (),
+            traced::t_FillRoundedRectangle as *const (),
+            traced::t_DrawEllipse as *const (),
+            traced::t_FillEllipse as *const (),
+            traced::t_DrawGeometry as *const (),
+            traced::t_FillGeometry as *const (),
+            traced::t_FillMesh as *const (),
+            traced::t_FillOpacityMask as *const (),
+            traced::t_DrawBitmap as *const (),
+            traced::t_DrawText as *const (),
+            traced::t_DrawTextLayout as *const (),
+            traced::t_DrawGlyphRun as *const (),
+            traced::t_SetTransform as *const (),
+            traced::t_GetTransform as *const (),
+            traced::t_SetAntialiasMode as *const (),
+            traced::t_GetAntialiasMode as *const (),
+            traced::t_SetTextAntialiasMode as *const (),
+            traced::t_GetTextAntialiasMode as *const (),
+            traced::t_SetTextRenderingParams as *const (),
+            traced::t_GetTextRenderingParams as *const (),
+            traced::t_SetTags as *const (),
+            traced::t_GetTags as *const (),
+            traced::t_PushLayer as *const (),
+            traced::t_PopLayer as *const (),
+            traced::t_Flush as *const (),
+            traced::t_SaveDrawingState as *const (),
+            traced::t_RestoreDrawingState as *const (),
+            traced::t_PushAxisAlignedClip as *const (),
+            traced::t_PopAxisAlignedClip as *const (),
+            traced::t_Clear as *const (),
+            traced::t_BeginDraw as *const (),
+            traced::t_EndDraw as *const (),
+            traced::t_GetPixelFormat as *const (),
+            traced::t_SetDpi as *const (),
+            traced::t_GetDpi as *const (),
+            traced::t_GetSize as *const (),
+            traced::t_GetPixelSize as *const (),
+            traced::t_GetMaximumBitmapSize as *const (),
+            traced::t_IsSupported as *const (),
             $($extra as *const ()),*
         ]
     };
@@ -388,48 +396,48 @@ static WIC_VTBL: VTable<57> = VTable(target_slots!());
 /// 1.2's geometry realizations add. One object answers every one of
 /// those interfaces, so it has the longest vtable.
 static CONTEXT_VTBL: VTable<95> = VTable(target_slots!(
-    dc1_CreateBitmap,
-    dc1_CreateBitmapFromWicBitmap,
-    dc1_CreateColorContext,
-    dc1_CreateColorContextFromFilename,
-    dc1_CreateColorContextFromWicColorContext,
-    dc1_CreateBitmapFromDxgiSurface,
-    dc1_CreateEffect,
-    dc1_CreateGradientStopCollection,
-    dc1_CreateImageBrush,
-    dc1_CreateBitmapBrush,
-    dc1_CreateCommandList,
-    dc1_IsDxgiFormatSupported,
-    dc1_IsBufferPrecisionSupported,
-    dc1_GetImageLocalBounds,
-    dc1_GetImageWorldBounds,
-    dc1_GetGlyphRunWorldBounds,
-    dc1_GetDevice,
-    dc1_SetTarget,
-    dc1_GetTarget,
-    dc1_SetRenderingControls,
-    dc1_GetRenderingControls,
-    dc1_SetPrimitiveBlend,
-    dc1_GetPrimitiveBlend,
-    dc1_SetUnitMode,
-    dc1_GetUnitMode,
-    dc1_DrawGlyphRun,
-    dc1_DrawImage,
-    dc1_DrawGdiMetafile,
-    dc1_DrawBitmap,
-    dc1_PushLayer,
-    dc1_InvalidateEffectInputRectangle,
-    dc1_GetEffectInvalidRectangleCount,
-    dc1_GetEffectInvalidRectangles,
-    dc1_GetEffectRequiredInputRectangles,
-    dc1_FillOpacityMask,
-    dc2_CreateFilledGeometryRealization,
-    dc2_CreateStrokedGeometryRealization,
-    dc2_DrawGeometryRealization
+    traced::dc1_CreateBitmap,
+    traced::dc1_CreateBitmapFromWicBitmap,
+    traced::dc1_CreateColorContext,
+    traced::dc1_CreateColorContextFromFilename,
+    traced::dc1_CreateColorContextFromWicColorContext,
+    traced::dc1_CreateBitmapFromDxgiSurface,
+    traced::dc1_CreateEffect,
+    traced::dc1_CreateGradientStopCollection,
+    traced::dc1_CreateImageBrush,
+    traced::dc1_CreateBitmapBrush,
+    traced::dc1_CreateCommandList,
+    traced::dc1_IsDxgiFormatSupported,
+    traced::dc1_IsBufferPrecisionSupported,
+    traced::dc1_GetImageLocalBounds,
+    traced::dc1_GetImageWorldBounds,
+    traced::dc1_GetGlyphRunWorldBounds,
+    traced::dc1_GetDevice,
+    traced::dc1_SetTarget,
+    traced::dc1_GetTarget,
+    traced::dc1_SetRenderingControls,
+    traced::dc1_GetRenderingControls,
+    traced::dc1_SetPrimitiveBlend,
+    traced::dc1_GetPrimitiveBlend,
+    traced::dc1_SetUnitMode,
+    traced::dc1_GetUnitMode,
+    traced::dc1_DrawGlyphRun,
+    traced::dc1_DrawImage,
+    traced::dc1_DrawGdiMetafile,
+    traced::dc1_DrawBitmap,
+    traced::dc1_PushLayer,
+    traced::dc1_InvalidateEffectInputRectangle,
+    traced::dc1_GetEffectInvalidRectangleCount,
+    traced::dc1_GetEffectInvalidRectangles,
+    traced::dc1_GetEffectRequiredInputRectangles,
+    traced::dc1_FillOpacityMask,
+    traced::dc2_CreateFilledGeometryRealization,
+    traced::dc2_CreateStrokedGeometryRealization,
+    traced::dc2_DrawGeometryRealization
 ));
-static DC_VTBL: VTable<58> = VTable(target_slots!(dc_BindDC));
+static DC_VTBL: VTable<58> = VTable(target_slots!(traced::dc_BindDC));
 static HWND_VTBL: VTable<60> =
-    VTable(target_slots!(hwnd_CheckWindowState, hwnd_Resize, hwnd_GetHwnd));
+    VTable(target_slots!(traced::hwnd_CheckWindowState, traced::hwnd_Resize, traced::hwnd_GetHwnd));
 
 fn target<'a>(o: Obj) -> &'a Target {
     // SAFETY: one of our render targets.
@@ -500,7 +508,6 @@ pub extern "system" fn f_CreateWicBitmapRenderTarget(
     props: *const TargetProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateWicBitmapRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -669,7 +676,6 @@ pub extern "system" fn f_CreateDCRenderTarget(
     props: *const TargetProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateDCRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -699,7 +705,6 @@ pub extern "system" fn f_CreateHwndRenderTarget(
     hprops: *const HwndProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1Factory::CreateHwndRenderTarget");
     if out.is_null() {
         return E_POINTER;
     }
@@ -788,7 +793,6 @@ extern "system" fn t_CreateBitmap(
     props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateBitmap");
     let format = with(this, |s| s.format);
     let rows = brush::Rows { src, pitch };
     brush::create_bitmap(factory_of(this), format, size, rows, props, Options::plain(), out)
@@ -800,7 +804,6 @@ extern "system" fn t_CreateBitmapFromWicBitmap(
     props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateBitmapFromWicBitmap");
     brush::create_from_wic(factory_of(this), source, props, Options::plain(), out)
 }
 
@@ -811,7 +814,6 @@ extern "system" fn t_CreateSharedBitmap(
     _props: *const BitmapProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateSharedBitmap");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateSharedBitmap")
 }
@@ -826,7 +828,6 @@ extern "system" fn t_CreateBitmapBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateBitmapBrush");
     if !bitmap.is_null() && !brush::is_bitmap(bitmap) {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -842,7 +843,6 @@ extern "system" fn t_CreateSolidColorBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateSolidColorBrush");
     let Some(c) = read(color) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -858,7 +858,6 @@ extern "system" fn t_CreateGradientStopCollection(
     extend: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateGradientStopCollection");
     brush::create_stops(factory_of(this), stops, n, gamma, extend, out)
 }
 
@@ -869,7 +868,6 @@ extern "system" fn t_CreateLinearGradientBrush(
     stops: Obj,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateLinearGradientBrush");
     let (Some(l), Some(stops)) = (read(lprops), brush::stops_ref(stops)) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -899,7 +897,6 @@ extern "system" fn t_CreateRadialGradientBrush(
     stops: Obj,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateRadialGradientBrush");
     let (Some(r), Some(stops)) = (read(rprops), brush::stops_ref(stops)) else {
         put(out, core::ptr::null_mut());
         return E_INVALIDARG;
@@ -916,19 +913,16 @@ extern "system" fn t_CreateCompatibleRenderTarget(
     _options: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateCompatibleRenderTarget");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateCompatibleRenderTarget")
 }
 
 extern "system" fn t_CreateLayer(_this: Obj, _size: *const SizeF, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateLayer");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1RenderTarget::CreateLayer")
 }
 
 extern "system" fn t_CreateMesh(this: Obj, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1RenderTarget::CreateMesh");
     mesh::create(factory_of(this), out)
 }
 
@@ -979,18 +973,15 @@ fn stroke_path(this: Obj, path: Option<Path>, brush_obj: Obj, width: f32, style:
 }
 
 extern "system" fn t_DrawLine(this: Obj, a: Point, b: Point, brush: Obj, width: f32, style: Obj) {
-    reached!(b"ID2D1RenderTarget::DrawLine");
     stroke_path(this, geometry::line_path(a, b), brush, width, style);
 }
 
 extern "system" fn t_DrawRectangle(this: Obj, r: *const RectF, brush: Obj, width: f32, style: Obj) {
-    reached!(b"ID2D1RenderTarget::DrawRectangle");
     let path = read(r).and_then(|r| geometry::rect_path(&r));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillRectangle(this: Obj, r: *const RectF, brush: Obj) {
-    reached!(b"ID2D1RenderTarget::FillRectangle");
     fill_path(this, read(r).and_then(|r| geometry::rect_path(&r)), brush);
 }
 
@@ -1001,24 +992,20 @@ extern "system" fn t_DrawRoundedRectangle(
     width: f32,
     style: Obj,
 ) {
-    reached!(b"ID2D1RenderTarget::DrawRoundedRectangle");
     let path = read(r).and_then(|r| geometry::rounded_path(&r.rect, r.rx, r.ry));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillRoundedRectangle(this: Obj, r: *const RoundedRect, brush: Obj) {
-    reached!(b"ID2D1RenderTarget::FillRoundedRectangle");
     fill_path(this, read(r).and_then(|r| geometry::rounded_path(&r.rect, r.rx, r.ry)), brush);
 }
 
 extern "system" fn t_DrawEllipse(this: Obj, e: *const Ellipse, brush: Obj, width: f32, style: Obj) {
-    reached!(b"ID2D1RenderTarget::DrawEllipse");
     let path = read(e).and_then(|e| geometry::ellipse_path(e.center, e.rx, e.ry));
     stroke_path(this, path, brush, width, style);
 }
 
 extern "system" fn t_FillEllipse(this: Obj, e: *const Ellipse, brush: Obj) {
-    reached!(b"ID2D1RenderTarget::FillEllipse");
     fill_path(this, read(e).and_then(|e| geometry::ellipse_path(e.center, e.rx, e.ry)), brush);
 }
 
@@ -1035,12 +1022,10 @@ fn path_of(g: Obj) -> Option<Path> {
 }
 
 extern "system" fn t_DrawGeometry(this: Obj, g: Obj, brush: Obj, width: f32, style: Obj) {
-    reached!(b"ID2D1RenderTarget::DrawGeometry");
     stroke_path(this, path_of(g), brush, width, style);
 }
 
 extern "system" fn t_FillGeometry(this: Obj, g: Obj, brush: Obj, opacity_brush: Obj) {
-    reached!(b"ID2D1RenderTarget::FillGeometry");
     if !opacity_brush.is_null() {
         gap(b"ID2D1RenderTarget::FillGeometry(opacity brush)", 0);
     }
@@ -1125,7 +1110,6 @@ extern "system" fn t_FillOpacityMask(
     _dst: *const RectF,
     _src: *const RectF,
 ) {
-    reached!(b"ID2D1RenderTarget::FillOpacityMask");
     gap(b"ID2D1RenderTarget::FillOpacityMask", 0);
 }
 
@@ -1140,7 +1124,6 @@ extern "system" fn t_DrawBitmap(
     interp: u32,
     src: *const RectF,
 ) {
-    reached!(b"ID2D1RenderTarget::DrawBitmap");
     if !brush::is_bitmap(bitmap) {
         if !bitmap.is_null() {
             gap(b"DrawBitmap(a bitmap not made by gala's d2d1)", 0);
@@ -1192,7 +1175,6 @@ extern "system" fn t_DrawText(
     _options: u32,
     _measuring: u32,
 ) {
-    reached!(b"ID2D1RenderTarget::DrawText");
     gap(b"ID2D1RenderTarget::DrawText(no text layout)", length.into());
 }
 
@@ -1203,7 +1185,6 @@ extern "system" fn t_DrawTextLayout(
     _brush: Obj,
     _options: u32,
 ) {
-    reached!(b"ID2D1RenderTarget::DrawTextLayout");
     gap(b"ID2D1RenderTarget::DrawTextLayout(no text layout)", 0);
 }
 
@@ -1214,53 +1195,44 @@ extern "system" fn t_DrawGlyphRun(
     _brush: Obj,
     _mode: u32,
 ) {
-    reached!(b"ID2D1RenderTarget::DrawGlyphRun");
     gap(b"ID2D1RenderTarget::DrawGlyphRun", 0);
 }
 
 // ---- State ------------------------------------------------------------------------------
 
 extern "system" fn t_SetTransform(this: Obj, m: *const Matrix) {
-    reached!(b"ID2D1RenderTarget::SetTransform");
     if let Some(m) = read(m) {
         with(this, |s| s.transform = m);
     }
 }
 
 extern "system" fn t_GetTransform(this: Obj, out: *mut Matrix) {
-    reached!(b"ID2D1RenderTarget::GetTransform");
     put(out, with(this, |s| s.transform));
 }
 
 extern "system" fn t_SetAntialiasMode(this: Obj, mode: u32) {
-    reached!(b"ID2D1RenderTarget::SetAntialiasMode");
     with(this, |s| s.antialias = mode);
 }
 
 extern "system" fn t_GetAntialiasMode(this: Obj) -> u32 {
-    reached!(b"ID2D1RenderTarget::GetAntialiasMode");
     with(this, |s| s.antialias)
 }
 
 extern "system" fn t_SetTextAntialiasMode(this: Obj, mode: u32) {
-    reached!(b"ID2D1RenderTarget::SetTextAntialiasMode");
     with(this, |s| s.text_antialias = mode);
 }
 
 extern "system" fn t_GetTextAntialiasMode(this: Obj) -> u32 {
-    reached!(b"ID2D1RenderTarget::GetTextAntialiasMode");
     with(this, |s| s.text_antialias)
 }
 
 extern "system" fn t_SetTextRenderingParams(this: Obj, params: Obj) {
-    reached!(b"ID2D1RenderTarget::SetTextRenderingParams");
     let new = ComRef::new(params);
     let old = with(this, |s| core::mem::replace(&mut s.text_params, new));
     drop(old);
 }
 
 extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
-    reached!(b"ID2D1RenderTarget::GetTextRenderingParams");
     let p = with(this, |s| s.text_params.0);
     if !p.is_null() {
         crate::com_add_ref(p);
@@ -1269,12 +1241,10 @@ extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
 }
 
 extern "system" fn t_SetTags(this: Obj, a: u64, b: u64) {
-    reached!(b"ID2D1RenderTarget::SetTags");
     with(this, |s| s.tags = (a, b));
 }
 
 extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
-    reached!(b"ID2D1RenderTarget::GetTags");
     let t = with(this, |s| s.tags);
     put(a, t.0);
     put(b, t.1);
@@ -1283,18 +1253,15 @@ extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
 /// PushLayer: the layer's mask, geometry and opacity are not applied
 /// (recorded); the push is counted so PopLayer balances.
 extern "system" fn t_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
-    reached!(b"ID2D1RenderTarget::PushLayer");
     gap(b"ID2D1RenderTarget::PushLayer(content not masked)", 0);
     with(this, |s| s.layers += 1);
 }
 
 extern "system" fn t_PopLayer(this: Obj) {
-    reached!(b"ID2D1RenderTarget::PopLayer");
     with(this, |s| s.layers = s.layers.saturating_sub(1));
 }
 
 extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
-    reached!(b"ID2D1RenderTarget::Flush");
     // A device context's frame reaches its target bitmap, and the DXGI
     // surface behind it, at Flush as at EndDraw: Flush is what a program
     // calls when it wants the pixels without ending the frame.
@@ -1316,7 +1283,6 @@ extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
 /// block (`state`). A block of another DLL's making cannot be written
 /// into, which is recorded.
 extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
-    reached!(b"ID2D1RenderTarget::SaveDrawingState");
     let (desc, params) = with(this, |s| {
         (
             StateDesc1 {
@@ -1342,7 +1308,6 @@ extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
 /// never saved into holds the state it was made with, which Windows
 /// restores the same way).
 extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
-    reached!(b"ID2D1RenderTarget::RestoreDrawingState");
     let Some((desc, params)) = state::load(block) else {
         gap(b"ID2D1RenderTarget::RestoreDrawingState(block of another DLL)", 0);
         return;
@@ -1369,7 +1334,6 @@ extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
 /// bounding box), intersected with the clip below it; aliased clips are
 /// rounded to whole pixels.
 extern "system" fn t_PushAxisAlignedClip(this: Obj, r: *const RectF, mode: u32) {
-    reached!(b"ID2D1RenderTarget::PushAxisAlignedClip");
     let Some(r) = read(r) else { return };
     with(this, |s| {
         let m = s.device();
@@ -1421,7 +1385,6 @@ extern "system" fn t_PushAxisAlignedClip(this: Obj, r: *const RectF, mode: u32) 
 }
 
 extern "system" fn t_PopAxisAlignedClip(this: Obj) {
-    reached!(b"ID2D1RenderTarget::PopAxisAlignedClip");
     with(this, |s| {
         s.clips.pop();
     });
@@ -1430,7 +1393,6 @@ extern "system" fn t_PopAxisAlignedClip(this: Obj) {
 /// Clear: the colour (transparent black for NULL) replaces what is inside
 /// the clip; the transform does not apply.
 extern "system" fn t_Clear(this: Obj, c: *const ColorF) {
-    reached!(b"ID2D1RenderTarget::Clear");
     let c = read(c).unwrap_or_default();
     with(this, |s| {
         if !s.may_draw() {
@@ -1490,7 +1452,6 @@ fn with_wic_pixels(
 }
 
 extern "system" fn t_BeginDraw(this: Obj) {
-    reached!(b"ID2D1RenderTarget::BeginDraw");
     // A WIC target reads its bitmap first, without our lock held.
     let wic = with(this, |s| match &s.backing {
         Backing::Wic { bitmap, .. } => Some((ComRef::new(bitmap.0), s.w, s.h)),
@@ -1642,7 +1603,6 @@ extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResu
 }
 
 extern "system" fn t_GetPixelFormat(this: Obj, ret: *mut PixelFormat) -> *mut PixelFormat {
-    reached!(b"ID2D1RenderTarget::GetPixelFormat");
     put(ret, with(this, |s| s.format));
     ret
 }
@@ -1650,7 +1610,6 @@ extern "system" fn t_GetPixelFormat(this: Obj, ret: *mut PixelFormat) -> *mut Pi
 /// SetDpi: 0, 0 is 96 (the desktop's); a negative value, or one 0, leaves
 /// it as it is (Wine's test_clip).
 extern "system" fn t_SetDpi(this: Obj, x: f32, y: f32) {
-    reached!(b"ID2D1RenderTarget::SetDpi");
     with(this, |s| {
         if x == 0.0 && y == 0.0 {
             s.dpi = (96.0, 96.0);
@@ -1661,7 +1620,6 @@ extern "system" fn t_SetDpi(this: Obj, x: f32, y: f32) {
 }
 
 extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
-    reached!(b"ID2D1RenderTarget::GetDpi");
     let d = with(this, |s| s.dpi);
     put(x, d.0);
     put(y, d.1);
@@ -1670,7 +1628,6 @@ extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
 /// GetSize: in DIPs, which for a device context in
 /// D2D1_UNIT_MODE_PIXELS are pixels.
 extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
-    reached!(b"ID2D1RenderTarget::GetSize");
     let v = with(this, |s| SizeF {
         width: s.w as f32 * 96.0 / s.dpi.0,
         height: s.h as f32 * 96.0 / s.dpi.1,
@@ -1680,20 +1637,17 @@ extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
 }
 
 extern "system" fn t_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
-    reached!(b"ID2D1RenderTarget::GetPixelSize");
     put(ret, with(this, |s| SizeU { width: s.w, height: s.h }));
     ret
 }
 
 extern "system" fn t_GetMaximumBitmapSize(_this: Obj) -> u32 {
-    reached!(b"ID2D1RenderTarget::GetMaximumBitmapSize");
     16384
 }
 
 /// IsSupported: a software target of this one's pixel format (UNKNOWN
 /// parts match anything).
 extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
-    reached!(b"ID2D1RenderTarget::IsSupported");
     let Some(p) = read(props) else { return 0 };
     let f = with(this, |s| s.format);
     let format_ok = p.format.format == DXGI_FORMAT_UNKNOWN || p.format.format == f.format;
@@ -1709,7 +1663,6 @@ extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
 /// there was (Wine's test_dc_target). The target's size becomes the
 /// rectangle's.
 extern "system" fn dc_BindDC(this: Obj, hdc: usize, rect: *const [i32; 4]) -> HResult {
-    reached!(b"ID2D1DCRenderTarget::BindDC");
     let Some(r) = read(rect) else { return E_INVALIDARG };
     // SAFETY: a plain GDI query.
     let kind = unsafe { GetObjectType(hdc) };
@@ -1738,7 +1691,6 @@ extern "system" fn dc_BindDC(this: Obj, hdc: usize, rect: *const [i32; 4]) -> HR
 
 /// D2D1_WINDOW_STATE: OCCLUDED (1) while minimized.
 extern "system" fn hwnd_CheckWindowState(this: Obj) -> u32 {
-    reached!(b"ID2D1HwndRenderTarget::CheckWindowState");
     let hwnd = hwnd_of(this);
     // SAFETY: a plain user32 query.
     u32::from(unsafe { IsIconic(hwnd) } != 0)
@@ -1750,7 +1702,6 @@ fn hwnd_of(this: Obj) -> usize {
 
 /// Resize: a new back buffer of the size (its contents start black).
 extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
-    reached!(b"ID2D1HwndRenderTarget::Resize");
     let Some(size) = read(size) else { return E_INVALIDARG };
     let (w, h) = window_size(hwnd_of(this), size);
     let Some(d) = Dib::new(w, h) else { return E_OUTOFMEMORY };
@@ -1767,7 +1718,6 @@ extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
 }
 
 extern "system" fn hwnd_GetHwnd(this: Obj) -> usize {
-    reached!(b"ID2D1HwndRenderTarget::GetHwnd");
     hwnd_of(this)
 }
 
@@ -1823,7 +1773,6 @@ extern "system" fn dc1_CreateBitmap(
     props: *const BitmapProps1,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateBitmap");
     let (base, opts) = props1(props);
     let format = with(this, |s| s.format);
     let rows = brush::Rows { src, pitch };
@@ -1836,7 +1785,6 @@ extern "system" fn dc1_CreateBitmapFromWicBitmap(
     props: *const BitmapProps1,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateBitmapFromWicBitmap");
     let (base, opts) = props1(props);
     brush::create_from_wic(factory_of(this), source, as_ptr(&base), opts, out)
 }
@@ -1848,7 +1796,6 @@ extern "system" fn dc1_CreateColorContext(
     _size: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateColorContext");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContext")
 }
@@ -1858,7 +1805,6 @@ extern "system" fn dc1_CreateColorContextFromFilename(
     _name: *const u16,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateColorContextFromFilename");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContextFromFilename")
 }
@@ -1868,7 +1814,6 @@ extern "system" fn dc1_CreateColorContextFromWicColorContext(
     _wic: Obj,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext")
 }
@@ -1885,7 +1830,6 @@ extern "system" fn dc1_CreateBitmapFromDxgiSurface(
 }
 
 extern "system" fn dc1_CreateEffect(_this: Obj, class_id: *const Guid, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateEffect");
     put(out, core::ptr::null_mut());
     // The effect's CLSID is the detail: which effects a program wants is
     // what the ledger is for.
@@ -1905,7 +1849,6 @@ extern "system" fn dc1_CreateGradientStopCollection(
     _interpolation: u32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateGradientStopCollection");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateGradientStopCollection")
 }
@@ -1917,7 +1860,6 @@ extern "system" fn dc1_CreateImageBrush(
     _props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateImageBrush");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateImageBrush")
 }
@@ -1932,7 +1874,6 @@ extern "system" fn dc1_CreateBitmapBrush(
     props: *const BrushProps,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateBitmapBrush");
     let mut p = read(bprops);
     if let Some(p) = &mut p
         && p.interp > 1
@@ -1948,32 +1889,27 @@ extern "system" fn dc1_CreateBitmapBrush(
 }
 
 extern "system" fn dc1_CreateCommandList(_this: Obj, out: *mut Obj) -> HResult {
-    reached!(b"ID2D1DeviceContext::CreateCommandList");
     put(out, core::ptr::null_mut());
     not_implemented(b"ID2D1DeviceContext::CreateCommandList")
 }
 
 /// IsDxgiFormatSupported: B8G8R8A8 is what gala's rasterizer writes.
 extern "system" fn dc1_IsDxgiFormatSupported(_this: Obj, format: u32) -> i32 {
-    reached!(b"ID2D1DeviceContext::IsDxgiFormatSupported");
     i32::from(format == DXGI_FORMAT_B8G8R8A8_UNORM)
 }
 
 /// IsBufferPrecisionSupported: eight bits a channel, which is what a
 /// software target holds.
 extern "system" fn dc1_IsBufferPrecisionSupported(_this: Obj, precision: u32) -> i32 {
-    reached!(b"ID2D1DeviceContext::IsBufferPrecisionSupported");
     i32::from(precision == BUFFER_PRECISION_8BPC_UNORM)
 }
 
 extern "system" fn dc1_GetImageLocalBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetImageLocalBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetImageLocalBounds")
 }
 
 extern "system" fn dc1_GetImageWorldBounds(_this: Obj, _image: Obj, bounds: *mut RectF) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetImageWorldBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetImageWorldBounds")
 }
@@ -1985,7 +1921,6 @@ extern "system" fn dc1_GetGlyphRunWorldBounds(
     _measuring: u32,
     bounds: *mut RectF,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetGlyphRunWorldBounds");
     put(bounds, RectF::default());
     not_implemented(b"ID2D1DeviceContext::GetGlyphRunWorldBounds")
 }
@@ -1994,7 +1929,6 @@ extern "system" fn dc1_GetGlyphRunWorldBounds(
 /// not one (a context's methods are only on a context's vtable, so this
 /// is the context's own device).
 extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
-    reached!(b"ID2D1DeviceContext::GetDevice");
     let d = with(this, |s| match &s.backing {
         Backing::Context { device, .. } => device.0,
         _ => core::ptr::null_mut(),
@@ -2090,7 +2024,6 @@ fn set_target(this: Obj, image: Obj) {
 }
 
 extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
-    reached!(b"ID2D1DeviceContext::GetTarget");
     let t = with(this, |s| match &s.backing {
         Backing::Context { target, .. } => target.0,
         _ => core::ptr::null_mut(),
@@ -2102,7 +2035,6 @@ extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
 }
 
 extern "system" fn dc1_SetRenderingControls(this: Obj, controls: *const RenderingControls) {
-    reached!(b"ID2D1DeviceContext::SetRenderingControls");
     if let Some(c) = read(controls) {
         if c.precision != BUFFER_PRECISION_8BPC_UNORM {
             gap(b"ID2D1DeviceContext::SetRenderingControls(buffer precision)", c.precision.into());
@@ -2112,12 +2044,10 @@ extern "system" fn dc1_SetRenderingControls(this: Obj, controls: *const Renderin
 }
 
 extern "system" fn dc1_GetRenderingControls(this: Obj, out: *mut RenderingControls) {
-    reached!(b"ID2D1DeviceContext::GetRenderingControls");
     put(out, with(this, |s| s.controls));
 }
 
 extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
-    reached!(b"ID2D1DeviceContext::SetPrimitiveBlend");
     if blend != PRIMITIVE_BLEND_SOURCE_OVER {
         gap(b"ID2D1DeviceContext::SetPrimitiveBlend(drawn source-over)", blend.into());
     }
@@ -2125,17 +2055,14 @@ extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
 }
 
 extern "system" fn dc1_GetPrimitiveBlend(this: Obj) -> u32 {
-    reached!(b"ID2D1DeviceContext::GetPrimitiveBlend");
     with(this, |s| s.primitive_blend)
 }
 
 extern "system" fn dc1_SetUnitMode(this: Obj, mode: u32) {
-    reached!(b"ID2D1DeviceContext::SetUnitMode");
     with(this, |s| s.unit_mode = mode);
 }
 
 extern "system" fn dc1_GetUnitMode(this: Obj) -> u32 {
-    reached!(b"ID2D1DeviceContext::GetUnitMode");
     with(this, |s| s.unit_mode)
 }
 
@@ -2147,7 +2074,6 @@ extern "system" fn dc1_DrawGlyphRun(
     _brush: Obj,
     _measuring: u32,
 ) {
-    reached!(b"ID2D1DeviceContext::DrawGlyphRun");
     gap(b"ID2D1DeviceContext::DrawGlyphRun", 0);
 }
 
@@ -2159,12 +2085,10 @@ extern "system" fn dc1_DrawImage(
     _interpolation: u32,
     _composite: u32,
 ) {
-    reached!(b"ID2D1DeviceContext::DrawImage");
     gap(b"ID2D1DeviceContext::DrawImage", 0);
 }
 
 extern "system" fn dc1_DrawGdiMetafile(_this: Obj, _metafile: Obj, _offset: *const Point) {
-    reached!(b"ID2D1DeviceContext::DrawGdiMetafile");
     gap(b"ID2D1DeviceContext::DrawGdiMetafile", 0);
 }
 
@@ -2182,7 +2106,6 @@ extern "system" fn dc1_DrawBitmap(
     src: *const RectF,
     perspective: *const u8,
 ) {
-    reached!(b"ID2D1DeviceContext::DrawBitmap");
     if !perspective.is_null() {
         gap(b"ID2D1DeviceContext::DrawBitmap(perspective transform)", 0);
         return;
@@ -2197,7 +2120,6 @@ extern "system" fn dc1_DrawBitmap(
 }
 
 extern "system" fn dc1_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
-    reached!(b"ID2D1DeviceContext::PushLayer");
     gap(b"ID2D1DeviceContext::PushLayer(content not masked)", 0);
     with(this, |s| s.layers += 1);
 }
@@ -2208,7 +2130,6 @@ extern "system" fn dc1_InvalidateEffectInputRectangle(
     _input: u32,
     _rect: *const RectF,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::InvalidateEffectInputRectangle");
     not_implemented(b"ID2D1DeviceContext::InvalidateEffectInputRectangle")
 }
 
@@ -2217,7 +2138,6 @@ extern "system" fn dc1_GetEffectInvalidRectangleCount(
     _effect: Obj,
     count: *mut u32,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount");
     put(count, 0);
     not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount")
 }
@@ -2228,7 +2148,6 @@ extern "system" fn dc1_GetEffectInvalidRectangles(
     _rects: *mut RectF,
     _count: u32,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangles");
     not_implemented(b"ID2D1DeviceContext::GetEffectInvalidRectangles")
 }
 
@@ -2240,7 +2159,6 @@ extern "system" fn dc1_GetEffectRequiredInputRectangles(
     _required: *mut RectF,
     _count: u32,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles");
     not_implemented(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles")
 }
 
@@ -2251,7 +2169,6 @@ extern "system" fn dc1_FillOpacityMask(
     _dst: *const RectF,
     _src: *const RectF,
 ) {
-    reached!(b"ID2D1DeviceContext::FillOpacityMask");
     gap(b"ID2D1DeviceContext::FillOpacityMask", 0);
 }
 
@@ -2284,7 +2201,6 @@ extern "system" fn dc2_CreateFilledGeometryRealization(
     _flattening_tolerance: f32,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext1::CreateFilledGeometryRealization");
     create_realization(this, g, None, out)
 }
 
@@ -2296,12 +2212,10 @@ extern "system" fn dc2_CreateStrokedGeometryRealization(
     style: Obj,
     out: *mut Obj,
 ) -> HResult {
-    reached!(b"ID2D1DeviceContext1::CreateStrokedGeometryRealization");
     create_realization(this, g, Some((width, style)), out)
 }
 
 extern "system" fn dc2_DrawGeometryRealization(this: Obj, realization: Obj, brush: Obj) {
-    reached!(b"ID2D1DeviceContext1::DrawGeometryRealization");
     let Some((path, stroke)) = geometry::realization_of(realization) else {
         gap(b"ID2D1DeviceContext1::DrawGeometryRealization(not a realization of ours)", 0);
         return;
@@ -2309,5 +2223,837 @@ extern "system" fn dc2_DrawGeometryRealization(this: Obj, realization: Obj, brus
     match stroke {
         None => fill_path(this, Some(path), brush),
         Some((width, style)) => stroke_path(this, Some(path), brush, width, style),
+    }
+}
+
+// ==== generated by `cargo xtask gen-trace`: do not edit ====
+/// The wrapper of every vtable slot of this module, each recording
+/// the first call that reaches its method (`cargo xtask gen-trace`).
+pub(crate) mod traced {
+    use super::*;
+    /// ID2D1DeviceContext::CreateBitmap, traced.
+    pub(super) extern "system" fn dc1_CreateBitmap(
+        this: Obj,
+        size: SizeU,
+        src: *const u8,
+        pitch: u32,
+        props: *const BitmapProps1,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateBitmap");
+        super::dc1_CreateBitmap(this, size, src, pitch, props, out)
+    }
+    /// ID2D1DeviceContext::CreateBitmapBrush, traced.
+    pub(super) extern "system" fn dc1_CreateBitmapBrush(
+        this: Obj,
+        bitmap: Obj,
+        bprops: *const BitmapBrushProps,
+        props: *const BrushProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateBitmapBrush");
+        super::dc1_CreateBitmapBrush(this, bitmap, bprops, props, out)
+    }
+    /// ID2D1DeviceContext::CreateBitmapFromDxgiSurface, traced.
+    pub(super) extern "system" fn dc1_CreateBitmapFromDxgiSurface(
+        this: Obj,
+        surface: Obj,
+        props: *const BitmapProps1,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateBitmapFromDxgiSurface");
+        super::dc1_CreateBitmapFromDxgiSurface(this, surface, props, out)
+    }
+    /// ID2D1DeviceContext::CreateBitmapFromWicBitmap, traced.
+    pub(super) extern "system" fn dc1_CreateBitmapFromWicBitmap(
+        this: Obj,
+        source: Obj,
+        props: *const BitmapProps1,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateBitmapFromWicBitmap");
+        super::dc1_CreateBitmapFromWicBitmap(this, source, props, out)
+    }
+    /// ID2D1DeviceContext::CreateColorContext, traced.
+    pub(super) extern "system" fn dc1_CreateColorContext(
+        _this: Obj,
+        _space: u32,
+        _profile: *const u8,
+        _size: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateColorContext");
+        super::dc1_CreateColorContext(_this, _space, _profile, _size, out)
+    }
+    /// ID2D1DeviceContext::CreateColorContextFromFilename, traced.
+    pub(super) extern "system" fn dc1_CreateColorContextFromFilename(
+        _this: Obj,
+        _name: *const u16,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateColorContextFromFilename");
+        super::dc1_CreateColorContextFromFilename(_this, _name, out)
+    }
+    /// ID2D1DeviceContext::CreateColorContextFromWicColorContext, traced.
+    pub(super) extern "system" fn dc1_CreateColorContextFromWicColorContext(
+        _this: Obj,
+        _wic: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateColorContextFromWicColorContext");
+        super::dc1_CreateColorContextFromWicColorContext(_this, _wic, out)
+    }
+    /// ID2D1DeviceContext::CreateCommandList, traced.
+    pub(super) extern "system" fn dc1_CreateCommandList(_this: Obj, out: *mut Obj) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateCommandList");
+        super::dc1_CreateCommandList(_this, out)
+    }
+    /// ID2D1DeviceContext::CreateEffect, traced.
+    pub(super) extern "system" fn dc1_CreateEffect(
+        _this: Obj,
+        class_id: *const Guid,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateEffect");
+        super::dc1_CreateEffect(_this, class_id, out)
+    }
+    /// ID2D1DeviceContext::CreateGradientStopCollection, traced.
+    pub(super) extern "system" fn dc1_CreateGradientStopCollection(
+        _this: Obj,
+        _stops: *const Stop,
+        _count: u32,
+        _pre: u32,
+        _post: u32,
+        _precision: u32,
+        _extend: u32,
+        _interpolation: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateGradientStopCollection");
+        super::dc1_CreateGradientStopCollection(
+            _this,
+            _stops,
+            _count,
+            _pre,
+            _post,
+            _precision,
+            _extend,
+            _interpolation,
+            out,
+        )
+    }
+    /// ID2D1DeviceContext::CreateImageBrush, traced.
+    pub(super) extern "system" fn dc1_CreateImageBrush(
+        _this: Obj,
+        _image: Obj,
+        _iprops: *const u8,
+        _props: *const BrushProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::CreateImageBrush");
+        super::dc1_CreateImageBrush(_this, _image, _iprops, _props, out)
+    }
+    /// ID2D1DeviceContext::DrawBitmap, traced.
+    pub(super) extern "system" fn dc1_DrawBitmap(
+        this: Obj,
+        bitmap: Obj,
+        dst: *const RectF,
+        opacity: f32,
+        interpolation: u32,
+        src: *const RectF,
+        perspective: *const u8,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::DrawBitmap");
+        super::dc1_DrawBitmap(this, bitmap, dst, opacity, interpolation, src, perspective)
+    }
+    /// ID2D1DeviceContext::DrawGdiMetafile, traced.
+    pub(super) extern "system" fn dc1_DrawGdiMetafile(
+        _this: Obj,
+        _metafile: Obj,
+        _offset: *const Point,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::DrawGdiMetafile");
+        super::dc1_DrawGdiMetafile(_this, _metafile, _offset)
+    }
+    /// ID2D1DeviceContext::DrawGlyphRun, traced.
+    pub(super) extern "system" fn dc1_DrawGlyphRun(
+        _this: Obj,
+        _origin: Point,
+        _run: *const u8,
+        _description: *const u8,
+        _brush: Obj,
+        _measuring: u32,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::DrawGlyphRun");
+        super::dc1_DrawGlyphRun(_this, _origin, _run, _description, _brush, _measuring)
+    }
+    /// ID2D1DeviceContext::DrawImage, traced.
+    pub(super) extern "system" fn dc1_DrawImage(
+        _this: Obj,
+        _image: Obj,
+        _offset: *const Point,
+        _rect: *const RectF,
+        _interpolation: u32,
+        _composite: u32,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::DrawImage");
+        super::dc1_DrawImage(_this, _image, _offset, _rect, _interpolation, _composite)
+    }
+    /// ID2D1DeviceContext::FillOpacityMask, traced.
+    pub(super) extern "system" fn dc1_FillOpacityMask(
+        _this: Obj,
+        _mask: Obj,
+        _brush: Obj,
+        _dst: *const RectF,
+        _src: *const RectF,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::FillOpacityMask");
+        super::dc1_FillOpacityMask(_this, _mask, _brush, _dst, _src)
+    }
+    /// ID2D1DeviceContext::GetDevice, traced.
+    pub(super) extern "system" fn dc1_GetDevice(this: Obj, out: *mut Obj) {
+        crate::reached!(b"ID2D1DeviceContext::GetDevice");
+        super::dc1_GetDevice(this, out)
+    }
+    /// ID2D1DeviceContext::GetEffectInvalidRectangleCount, traced.
+    pub(super) extern "system" fn dc1_GetEffectInvalidRectangleCount(
+        _this: Obj,
+        _effect: Obj,
+        count: *mut u32,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangleCount");
+        super::dc1_GetEffectInvalidRectangleCount(_this, _effect, count)
+    }
+    /// ID2D1DeviceContext::GetEffectInvalidRectangles, traced.
+    pub(super) extern "system" fn dc1_GetEffectInvalidRectangles(
+        _this: Obj,
+        _effect: Obj,
+        _rects: *mut RectF,
+        _count: u32,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetEffectInvalidRectangles");
+        super::dc1_GetEffectInvalidRectangles(_this, _effect, _rects, _count)
+    }
+    /// ID2D1DeviceContext::GetEffectRequiredInputRectangles, traced.
+    pub(super) extern "system" fn dc1_GetEffectRequiredInputRectangles(
+        _this: Obj,
+        _effect: Obj,
+        _image_rect: *const RectF,
+        _descriptions: *const u8,
+        _required: *mut RectF,
+        _count: u32,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetEffectRequiredInputRectangles");
+        super::dc1_GetEffectRequiredInputRectangles(
+            _this,
+            _effect,
+            _image_rect,
+            _descriptions,
+            _required,
+            _count,
+        )
+    }
+    /// ID2D1DeviceContext::GetGlyphRunWorldBounds, traced.
+    pub(super) extern "system" fn dc1_GetGlyphRunWorldBounds(
+        _this: Obj,
+        _origin: Point,
+        _run: *const u8,
+        _measuring: u32,
+        bounds: *mut RectF,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetGlyphRunWorldBounds");
+        super::dc1_GetGlyphRunWorldBounds(_this, _origin, _run, _measuring, bounds)
+    }
+    /// ID2D1DeviceContext::GetImageLocalBounds, traced.
+    pub(super) extern "system" fn dc1_GetImageLocalBounds(
+        _this: Obj,
+        _image: Obj,
+        bounds: *mut RectF,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetImageLocalBounds");
+        super::dc1_GetImageLocalBounds(_this, _image, bounds)
+    }
+    /// ID2D1DeviceContext::GetImageWorldBounds, traced.
+    pub(super) extern "system" fn dc1_GetImageWorldBounds(
+        _this: Obj,
+        _image: Obj,
+        bounds: *mut RectF,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::GetImageWorldBounds");
+        super::dc1_GetImageWorldBounds(_this, _image, bounds)
+    }
+    /// ID2D1DeviceContext::GetPrimitiveBlend, traced.
+    pub(super) extern "system" fn dc1_GetPrimitiveBlend(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1DeviceContext::GetPrimitiveBlend");
+        super::dc1_GetPrimitiveBlend(this)
+    }
+    /// ID2D1DeviceContext::GetRenderingControls, traced.
+    pub(super) extern "system" fn dc1_GetRenderingControls(this: Obj, out: *mut RenderingControls) {
+        crate::reached!(b"ID2D1DeviceContext::GetRenderingControls");
+        super::dc1_GetRenderingControls(this, out)
+    }
+    /// ID2D1DeviceContext::GetTarget, traced.
+    pub(super) extern "system" fn dc1_GetTarget(this: Obj, out: *mut Obj) {
+        crate::reached!(b"ID2D1DeviceContext::GetTarget");
+        super::dc1_GetTarget(this, out)
+    }
+    /// ID2D1DeviceContext::GetUnitMode, traced.
+    pub(super) extern "system" fn dc1_GetUnitMode(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1DeviceContext::GetUnitMode");
+        super::dc1_GetUnitMode(this)
+    }
+    /// ID2D1DeviceContext::InvalidateEffectInputRectangle, traced.
+    pub(super) extern "system" fn dc1_InvalidateEffectInputRectangle(
+        _this: Obj,
+        _effect: Obj,
+        _input: u32,
+        _rect: *const RectF,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext::InvalidateEffectInputRectangle");
+        super::dc1_InvalidateEffectInputRectangle(_this, _effect, _input, _rect)
+    }
+    /// ID2D1DeviceContext::IsBufferPrecisionSupported, traced.
+    pub(super) extern "system" fn dc1_IsBufferPrecisionSupported(
+        _this: Obj,
+        precision: u32,
+    ) -> i32 {
+        crate::reached!(b"ID2D1DeviceContext::IsBufferPrecisionSupported");
+        super::dc1_IsBufferPrecisionSupported(_this, precision)
+    }
+    /// ID2D1DeviceContext::IsDxgiFormatSupported, traced.
+    pub(super) extern "system" fn dc1_IsDxgiFormatSupported(_this: Obj, format: u32) -> i32 {
+        crate::reached!(b"ID2D1DeviceContext::IsDxgiFormatSupported");
+        super::dc1_IsDxgiFormatSupported(_this, format)
+    }
+    /// ID2D1DeviceContext::PushLayer, traced.
+    pub(super) extern "system" fn dc1_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
+        crate::reached!(b"ID2D1DeviceContext::PushLayer");
+        super::dc1_PushLayer(this, _params, _layer)
+    }
+    /// ID2D1DeviceContext::SetPrimitiveBlend, traced.
+    pub(super) extern "system" fn dc1_SetPrimitiveBlend(this: Obj, blend: u32) {
+        crate::reached!(b"ID2D1DeviceContext::SetPrimitiveBlend");
+        super::dc1_SetPrimitiveBlend(this, blend)
+    }
+    /// ID2D1DeviceContext::SetRenderingControls, traced.
+    pub(super) extern "system" fn dc1_SetRenderingControls(
+        this: Obj,
+        controls: *const RenderingControls,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext::SetRenderingControls");
+        super::dc1_SetRenderingControls(this, controls)
+    }
+    /// ID2D1DeviceContext::SetTarget, traced.
+    pub(super) extern "system" fn dc1_SetTarget(this: Obj, image: Obj) {
+        crate::reached!(b"ID2D1DeviceContext::SetTarget");
+        super::dc1_SetTarget(this, image)
+    }
+    /// ID2D1DeviceContext::SetUnitMode, traced.
+    pub(super) extern "system" fn dc1_SetUnitMode(this: Obj, mode: u32) {
+        crate::reached!(b"ID2D1DeviceContext::SetUnitMode");
+        super::dc1_SetUnitMode(this, mode)
+    }
+    /// ID2D1DeviceContext1::CreateFilledGeometryRealization, traced.
+    pub(super) extern "system" fn dc2_CreateFilledGeometryRealization(
+        this: Obj,
+        g: Obj,
+        _flattening_tolerance: f32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext1::CreateFilledGeometryRealization");
+        super::dc2_CreateFilledGeometryRealization(this, g, _flattening_tolerance, out)
+    }
+    /// ID2D1DeviceContext1::CreateStrokedGeometryRealization, traced.
+    pub(super) extern "system" fn dc2_CreateStrokedGeometryRealization(
+        this: Obj,
+        g: Obj,
+        _flattening_tolerance: f32,
+        width: f32,
+        style: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1DeviceContext1::CreateStrokedGeometryRealization");
+        super::dc2_CreateStrokedGeometryRealization(
+            this,
+            g,
+            _flattening_tolerance,
+            width,
+            style,
+            out,
+        )
+    }
+    /// ID2D1DeviceContext1::DrawGeometryRealization, traced.
+    pub(super) extern "system" fn dc2_DrawGeometryRealization(
+        this: Obj,
+        realization: Obj,
+        brush: Obj,
+    ) {
+        crate::reached!(b"ID2D1DeviceContext1::DrawGeometryRealization");
+        super::dc2_DrawGeometryRealization(this, realization, brush)
+    }
+    /// ID2D1DCRenderTarget::BindDC, traced.
+    pub(super) extern "system" fn dc_BindDC(
+        this: Obj,
+        hdc: usize,
+        rect: *const [i32; 4],
+    ) -> HResult {
+        crate::reached!(b"ID2D1DCRenderTarget::BindDC");
+        super::dc_BindDC(this, hdc, rect)
+    }
+    /// ID2D1Factory::CreateDCRenderTarget, traced.
+    pub(crate) extern "system" fn f_CreateDCRenderTarget(
+        factory: Obj,
+        props: *const TargetProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateDCRenderTarget");
+        super::f_CreateDCRenderTarget(factory, props, out)
+    }
+    /// ID2D1Factory::CreateDxgiSurfaceRenderTarget, traced.
+    pub(crate) extern "system" fn f_CreateDxgiSurfaceRenderTarget(
+        factory: Obj,
+        surface: Obj,
+        props: *const TargetProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateDxgiSurfaceRenderTarget");
+        super::f_CreateDxgiSurfaceRenderTarget(factory, surface, props, out)
+    }
+    /// ID2D1Factory::CreateHwndRenderTarget, traced.
+    pub(crate) extern "system" fn f_CreateHwndRenderTarget(
+        factory: Obj,
+        props: *const TargetProps,
+        hprops: *const HwndProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateHwndRenderTarget");
+        super::f_CreateHwndRenderTarget(factory, props, hprops, out)
+    }
+    /// ID2D1Factory::CreateWicBitmapRenderTarget, traced.
+    pub(crate) extern "system" fn f_CreateWicBitmapRenderTarget(
+        factory: Obj,
+        bitmap: Obj,
+        props: *const TargetProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1Factory::CreateWicBitmapRenderTarget");
+        super::f_CreateWicBitmapRenderTarget(factory, bitmap, props, out)
+    }
+    /// ID2D1HwndRenderTarget::CheckWindowState, traced.
+    pub(super) extern "system" fn hwnd_CheckWindowState(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1HwndRenderTarget::CheckWindowState");
+        super::hwnd_CheckWindowState(this)
+    }
+    /// ID2D1HwndRenderTarget::GetHwnd, traced.
+    pub(super) extern "system" fn hwnd_GetHwnd(this: Obj) -> usize {
+        crate::reached!(b"ID2D1HwndRenderTarget::GetHwnd");
+        super::hwnd_GetHwnd(this)
+    }
+    /// ID2D1HwndRenderTarget::Resize, traced.
+    pub(super) extern "system" fn hwnd_Resize(this: Obj, size: *const SizeU) -> HResult {
+        crate::reached!(b"ID2D1HwndRenderTarget::Resize");
+        super::hwnd_Resize(this, size)
+    }
+    /// ID2D1RenderTarget::BeginDraw, traced.
+    pub(super) extern "system" fn t_BeginDraw(this: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::BeginDraw");
+        super::t_BeginDraw(this)
+    }
+    /// ID2D1RenderTarget::Clear, traced.
+    pub(super) extern "system" fn t_Clear(this: Obj, c: *const ColorF) {
+        crate::reached!(b"ID2D1RenderTarget::Clear");
+        super::t_Clear(this, c)
+    }
+    /// ID2D1RenderTarget::CreateBitmap, traced.
+    pub(super) extern "system" fn t_CreateBitmap(
+        this: Obj,
+        size: SizeU,
+        src: *const u8,
+        pitch: u32,
+        props: *const BitmapProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateBitmap");
+        super::t_CreateBitmap(this, size, src, pitch, props, out)
+    }
+    /// ID2D1RenderTarget::CreateBitmapBrush, traced.
+    pub(super) extern "system" fn t_CreateBitmapBrush(
+        this: Obj,
+        bitmap: Obj,
+        bprops: *const BitmapBrushProps,
+        props: *const BrushProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateBitmapBrush");
+        super::t_CreateBitmapBrush(this, bitmap, bprops, props, out)
+    }
+    /// ID2D1RenderTarget::CreateBitmapFromWicBitmap, traced.
+    pub(super) extern "system" fn t_CreateBitmapFromWicBitmap(
+        this: Obj,
+        source: Obj,
+        props: *const BitmapProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateBitmapFromWicBitmap");
+        super::t_CreateBitmapFromWicBitmap(this, source, props, out)
+    }
+    /// ID2D1RenderTarget::CreateCompatibleRenderTarget, traced.
+    pub(super) extern "system" fn t_CreateCompatibleRenderTarget(
+        _this: Obj,
+        _size: *const SizeF,
+        _pixel_size: *const SizeU,
+        _format: *const PixelFormat,
+        _options: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateCompatibleRenderTarget");
+        super::t_CreateCompatibleRenderTarget(_this, _size, _pixel_size, _format, _options, out)
+    }
+    /// ID2D1RenderTarget::CreateGradientStopCollection, traced.
+    pub(super) extern "system" fn t_CreateGradientStopCollection(
+        this: Obj,
+        stops: *const Stop,
+        n: u32,
+        gamma: u32,
+        extend: u32,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateGradientStopCollection");
+        super::t_CreateGradientStopCollection(this, stops, n, gamma, extend, out)
+    }
+    /// ID2D1RenderTarget::CreateLayer, traced.
+    pub(super) extern "system" fn t_CreateLayer(
+        _this: Obj,
+        _size: *const SizeF,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateLayer");
+        super::t_CreateLayer(_this, _size, out)
+    }
+    /// ID2D1RenderTarget::CreateLinearGradientBrush, traced.
+    pub(super) extern "system" fn t_CreateLinearGradientBrush(
+        this: Obj,
+        lprops: *const [Point; 2],
+        props: *const BrushProps,
+        stops: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateLinearGradientBrush");
+        super::t_CreateLinearGradientBrush(this, lprops, props, stops, out)
+    }
+    /// ID2D1RenderTarget::CreateMesh, traced.
+    pub(super) extern "system" fn t_CreateMesh(this: Obj, out: *mut Obj) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateMesh");
+        super::t_CreateMesh(this, out)
+    }
+    /// ID2D1RenderTarget::CreateRadialGradientBrush, traced.
+    pub(super) extern "system" fn t_CreateRadialGradientBrush(
+        this: Obj,
+        rprops: *const RadialProps,
+        props: *const BrushProps,
+        stops: Obj,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateRadialGradientBrush");
+        super::t_CreateRadialGradientBrush(this, rprops, props, stops, out)
+    }
+    /// ID2D1RenderTarget::CreateSharedBitmap, traced.
+    pub(super) extern "system" fn t_CreateSharedBitmap(
+        _this: Obj,
+        _iid: *const Guid,
+        _data: Obj,
+        _props: *const BitmapProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateSharedBitmap");
+        super::t_CreateSharedBitmap(_this, _iid, _data, _props, out)
+    }
+    /// ID2D1RenderTarget::CreateSolidColorBrush, traced.
+    pub(super) extern "system" fn t_CreateSolidColorBrush(
+        this: Obj,
+        color: *const ColorF,
+        props: *const BrushProps,
+        out: *mut Obj,
+    ) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::CreateSolidColorBrush");
+        super::t_CreateSolidColorBrush(this, color, props, out)
+    }
+    /// ID2D1RenderTarget::DrawBitmap, traced.
+    pub(super) extern "system" fn t_DrawBitmap(
+        this: Obj,
+        bitmap: Obj,
+        dst: *const RectF,
+        opacity: f32,
+        interp: u32,
+        src: *const RectF,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawBitmap");
+        super::t_DrawBitmap(this, bitmap, dst, opacity, interp, src)
+    }
+    /// ID2D1RenderTarget::DrawEllipse, traced.
+    pub(super) extern "system" fn t_DrawEllipse(
+        this: Obj,
+        e: *const Ellipse,
+        brush: Obj,
+        width: f32,
+        style: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawEllipse");
+        super::t_DrawEllipse(this, e, brush, width, style)
+    }
+    /// ID2D1RenderTarget::DrawGeometry, traced.
+    pub(super) extern "system" fn t_DrawGeometry(
+        this: Obj,
+        g: Obj,
+        brush: Obj,
+        width: f32,
+        style: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawGeometry");
+        super::t_DrawGeometry(this, g, brush, width, style)
+    }
+    /// ID2D1RenderTarget::DrawGlyphRun, traced.
+    pub(super) extern "system" fn t_DrawGlyphRun(
+        _this: Obj,
+        _origin: Point,
+        _run: *const u8,
+        _brush: Obj,
+        _mode: u32,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawGlyphRun");
+        super::t_DrawGlyphRun(_this, _origin, _run, _brush, _mode)
+    }
+    /// ID2D1RenderTarget::DrawLine, traced.
+    pub(super) extern "system" fn t_DrawLine(
+        this: Obj,
+        a: Point,
+        b: Point,
+        brush: Obj,
+        width: f32,
+        style: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawLine");
+        super::t_DrawLine(this, a, b, brush, width, style)
+    }
+    /// ID2D1RenderTarget::DrawRectangle, traced.
+    pub(super) extern "system" fn t_DrawRectangle(
+        this: Obj,
+        r: *const RectF,
+        brush: Obj,
+        width: f32,
+        style: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawRectangle");
+        super::t_DrawRectangle(this, r, brush, width, style)
+    }
+    /// ID2D1RenderTarget::DrawRoundedRectangle, traced.
+    pub(super) extern "system" fn t_DrawRoundedRectangle(
+        this: Obj,
+        r: *const RoundedRect,
+        brush: Obj,
+        width: f32,
+        style: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawRoundedRectangle");
+        super::t_DrawRoundedRectangle(this, r, brush, width, style)
+    }
+    /// ID2D1RenderTarget::DrawText, traced.
+    pub(super) extern "system" fn t_DrawText(
+        _this: Obj,
+        _text: *const u16,
+        length: u32,
+        _format: Obj,
+        _rect: *const RectF,
+        _brush: Obj,
+        _options: u32,
+        _measuring: u32,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawText");
+        super::t_DrawText(_this, _text, length, _format, _rect, _brush, _options, _measuring)
+    }
+    /// ID2D1RenderTarget::DrawTextLayout, traced.
+    pub(super) extern "system" fn t_DrawTextLayout(
+        _this: Obj,
+        _origin: Point,
+        _layout: Obj,
+        _brush: Obj,
+        _options: u32,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::DrawTextLayout");
+        super::t_DrawTextLayout(_this, _origin, _layout, _brush, _options)
+    }
+    /// ID2D1RenderTarget::EndDraw, traced.
+    pub(super) extern "system" fn t_EndDraw(this: Obj, tag1: *mut u64, tag2: *mut u64) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::EndDraw");
+        super::t_EndDraw(this, tag1, tag2)
+    }
+    /// ID2D1RenderTarget::FillEllipse, traced.
+    pub(super) extern "system" fn t_FillEllipse(this: Obj, e: *const Ellipse, brush: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::FillEllipse");
+        super::t_FillEllipse(this, e, brush)
+    }
+    /// ID2D1RenderTarget::FillGeometry, traced.
+    pub(super) extern "system" fn t_FillGeometry(
+        this: Obj,
+        g: Obj,
+        brush: Obj,
+        opacity_brush: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::FillGeometry");
+        super::t_FillGeometry(this, g, brush, opacity_brush)
+    }
+    /// ID2D1RenderTarget::FillMesh, traced.
+    pub(super) extern "system" fn t_FillMesh(this: Obj, mesh_obj: Obj, brush_obj: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::FillMesh");
+        super::t_FillMesh(this, mesh_obj, brush_obj)
+    }
+    /// ID2D1RenderTarget::FillOpacityMask, traced.
+    pub(super) extern "system" fn t_FillOpacityMask(
+        _this: Obj,
+        _mask: Obj,
+        _brush: Obj,
+        _content: u32,
+        _dst: *const RectF,
+        _src: *const RectF,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::FillOpacityMask");
+        super::t_FillOpacityMask(_this, _mask, _brush, _content, _dst, _src)
+    }
+    /// ID2D1RenderTarget::FillRectangle, traced.
+    pub(super) extern "system" fn t_FillRectangle(this: Obj, r: *const RectF, brush: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::FillRectangle");
+        super::t_FillRectangle(this, r, brush)
+    }
+    /// ID2D1RenderTarget::FillRoundedRectangle, traced.
+    pub(super) extern "system" fn t_FillRoundedRectangle(
+        this: Obj,
+        r: *const RoundedRect,
+        brush: Obj,
+    ) {
+        crate::reached!(b"ID2D1RenderTarget::FillRoundedRectangle");
+        super::t_FillRoundedRectangle(this, r, brush)
+    }
+    /// ID2D1RenderTarget::Flush, traced.
+    pub(super) extern "system" fn t_Flush(this: Obj, a: *mut u64, b: *mut u64) -> HResult {
+        crate::reached!(b"ID2D1RenderTarget::Flush");
+        super::t_Flush(this, a, b)
+    }
+    /// ID2D1RenderTarget::GetAntialiasMode, traced.
+    pub(super) extern "system" fn t_GetAntialiasMode(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1RenderTarget::GetAntialiasMode");
+        super::t_GetAntialiasMode(this)
+    }
+    /// ID2D1RenderTarget::GetDpi, traced.
+    pub(super) extern "system" fn t_GetDpi(this: Obj, x: *mut f32, y: *mut f32) {
+        crate::reached!(b"ID2D1RenderTarget::GetDpi");
+        super::t_GetDpi(this, x, y)
+    }
+    /// ID2D1RenderTarget::GetMaximumBitmapSize, traced.
+    pub(super) extern "system" fn t_GetMaximumBitmapSize(_this: Obj) -> u32 {
+        crate::reached!(b"ID2D1RenderTarget::GetMaximumBitmapSize");
+        super::t_GetMaximumBitmapSize(_this)
+    }
+    /// ID2D1RenderTarget::GetPixelFormat, traced.
+    pub(super) extern "system" fn t_GetPixelFormat(
+        this: Obj,
+        ret: *mut PixelFormat,
+    ) -> *mut PixelFormat {
+        crate::reached!(b"ID2D1RenderTarget::GetPixelFormat");
+        super::t_GetPixelFormat(this, ret)
+    }
+    /// ID2D1RenderTarget::GetPixelSize, traced.
+    pub(super) extern "system" fn t_GetPixelSize(this: Obj, ret: *mut SizeU) -> *mut SizeU {
+        crate::reached!(b"ID2D1RenderTarget::GetPixelSize");
+        super::t_GetPixelSize(this, ret)
+    }
+    /// ID2D1RenderTarget::GetSize, traced.
+    pub(super) extern "system" fn t_GetSize(this: Obj, ret: *mut SizeF) -> *mut SizeF {
+        crate::reached!(b"ID2D1RenderTarget::GetSize");
+        super::t_GetSize(this, ret)
+    }
+    /// ID2D1RenderTarget::GetTags, traced.
+    pub(super) extern "system" fn t_GetTags(this: Obj, a: *mut u64, b: *mut u64) {
+        crate::reached!(b"ID2D1RenderTarget::GetTags");
+        super::t_GetTags(this, a, b)
+    }
+    /// ID2D1RenderTarget::GetTextAntialiasMode, traced.
+    pub(super) extern "system" fn t_GetTextAntialiasMode(this: Obj) -> u32 {
+        crate::reached!(b"ID2D1RenderTarget::GetTextAntialiasMode");
+        super::t_GetTextAntialiasMode(this)
+    }
+    /// ID2D1RenderTarget::GetTextRenderingParams, traced.
+    pub(super) extern "system" fn t_GetTextRenderingParams(this: Obj, out: *mut Obj) {
+        crate::reached!(b"ID2D1RenderTarget::GetTextRenderingParams");
+        super::t_GetTextRenderingParams(this, out)
+    }
+    /// ID2D1RenderTarget::GetTransform, traced.
+    pub(super) extern "system" fn t_GetTransform(this: Obj, out: *mut Matrix) {
+        crate::reached!(b"ID2D1RenderTarget::GetTransform");
+        super::t_GetTransform(this, out)
+    }
+    /// ID2D1RenderTarget::IsSupported, traced.
+    pub(super) extern "system" fn t_IsSupported(this: Obj, props: *const TargetProps) -> i32 {
+        crate::reached!(b"ID2D1RenderTarget::IsSupported");
+        super::t_IsSupported(this, props)
+    }
+    /// ID2D1RenderTarget::PopAxisAlignedClip, traced.
+    pub(super) extern "system" fn t_PopAxisAlignedClip(this: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::PopAxisAlignedClip");
+        super::t_PopAxisAlignedClip(this)
+    }
+    /// ID2D1RenderTarget::PopLayer, traced.
+    pub(super) extern "system" fn t_PopLayer(this: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::PopLayer");
+        super::t_PopLayer(this)
+    }
+    /// ID2D1RenderTarget::PushAxisAlignedClip, traced.
+    pub(super) extern "system" fn t_PushAxisAlignedClip(this: Obj, r: *const RectF, mode: u32) {
+        crate::reached!(b"ID2D1RenderTarget::PushAxisAlignedClip");
+        super::t_PushAxisAlignedClip(this, r, mode)
+    }
+    /// ID2D1RenderTarget::PushLayer, traced.
+    pub(super) extern "system" fn t_PushLayer(this: Obj, _params: *const u8, _layer: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::PushLayer");
+        super::t_PushLayer(this, _params, _layer)
+    }
+    /// ID2D1RenderTarget::RestoreDrawingState, traced.
+    pub(super) extern "system" fn t_RestoreDrawingState(this: Obj, block: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::RestoreDrawingState");
+        super::t_RestoreDrawingState(this, block)
+    }
+    /// ID2D1RenderTarget::SaveDrawingState, traced.
+    pub(super) extern "system" fn t_SaveDrawingState(this: Obj, block: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::SaveDrawingState");
+        super::t_SaveDrawingState(this, block)
+    }
+    /// ID2D1RenderTarget::SetAntialiasMode, traced.
+    pub(super) extern "system" fn t_SetAntialiasMode(this: Obj, mode: u32) {
+        crate::reached!(b"ID2D1RenderTarget::SetAntialiasMode");
+        super::t_SetAntialiasMode(this, mode)
+    }
+    /// ID2D1RenderTarget::SetDpi, traced.
+    pub(super) extern "system" fn t_SetDpi(this: Obj, x: f32, y: f32) {
+        crate::reached!(b"ID2D1RenderTarget::SetDpi");
+        super::t_SetDpi(this, x, y)
+    }
+    /// ID2D1RenderTarget::SetTags, traced.
+    pub(super) extern "system" fn t_SetTags(this: Obj, a: u64, b: u64) {
+        crate::reached!(b"ID2D1RenderTarget::SetTags");
+        super::t_SetTags(this, a, b)
+    }
+    /// ID2D1RenderTarget::SetTextAntialiasMode, traced.
+    pub(super) extern "system" fn t_SetTextAntialiasMode(this: Obj, mode: u32) {
+        crate::reached!(b"ID2D1RenderTarget::SetTextAntialiasMode");
+        super::t_SetTextAntialiasMode(this, mode)
+    }
+    /// ID2D1RenderTarget::SetTextRenderingParams, traced.
+    pub(super) extern "system" fn t_SetTextRenderingParams(this: Obj, params: Obj) {
+        crate::reached!(b"ID2D1RenderTarget::SetTextRenderingParams");
+        super::t_SetTextRenderingParams(this, params)
+    }
+    /// ID2D1RenderTarget::SetTransform, traced.
+    pub(super) extern "system" fn t_SetTransform(this: Obj, m: *const Matrix) {
+        crate::reached!(b"ID2D1RenderTarget::SetTransform");
+        super::t_SetTransform(this, m)
     }
 }

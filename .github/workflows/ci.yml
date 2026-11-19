@@ -233,6 +233,8 @@ jobs:
         run: cargo xtask test --no-boot
       - name: Checked-in test binaries match their sources
         run: cargo xtask export-tests && git diff --exit-code user/bin
+      - name: Generated vtable tracing matches its sources
+        run: cargo xtask gen-trace && git diff --exit-code user/d2d1
 
   # Every boot scenario, dealt out over parallel runners (xtask's
   # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).

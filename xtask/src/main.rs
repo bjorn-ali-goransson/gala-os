@@ -52,6 +52,7 @@ mod alloc_audit;
 mod clockcheck;
 mod diskimage;
 mod feed;
+mod gentrace;
 mod lint;
 mod lx_expect;
 mod stub_audit;
@@ -10307,6 +10308,8 @@ commands:
                <new> <new.map>, DLLs or the kernel (lld maps: a DLL's in
                target/<target>/release/deps, the kernel's beside it as
                kernel.map; XTASK_HOTSWAP_WHY=1: why each changed)
+  gen-trace    generate the wrapper of every vtable slot of gala's DLLs, each
+               recording the first call that reaches its method (checked in)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -10415,6 +10418,7 @@ fn main() -> ExitCode {
             Some("boot-test") => boot_test_command(release, &args),
             Some("snapshots") => snapshot::cli(&target_dir(), &args[1..]),
             Some("hotswap-diff") => hotswap_diff(&args[1..]),
+            Some("gen-trace") => gentrace::gen_trace(&root()),
             Some("export-tests") => build_kernel(release)
                 .and_then(|()| build_arm64_programs())
                 .and_then(|()| export_tests()),
