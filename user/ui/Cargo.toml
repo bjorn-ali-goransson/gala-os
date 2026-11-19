@@ -1,0 +1,18 @@
+[package]
+name = "gala_ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# UI components for gala's own programs (ROADMAP LY; ARCHITECTURE "UI
+# components"): the element tree a window's Rust builds, its layout
+# (Taffy's flexbox and grid), checks and hit testing. `no_std` with
+# `alloc`; tested on the host with `cargo test -p gala_ui`. Drawing is
+# the program's (gdi32).
+
+[lib]
+bench = false
+
+[dependencies]
+taffy = { version = "0.15.1", default-features = false, features = ["alloc", "flexbox", "grid", "taffy_tree"] }

@@ -185,6 +185,7 @@ jobs:
           cargo clippy -p taskmgr --lib --tests -- -D warnings
           cargo clippy -p shellns --tests -- -D warnings
           cargo clippy -p explorer --lib --tests -- -D warnings
+          cargo clippy -p gala_ui --tests -- -D warnings
           cargo clippy -p gala_xml --tests -- -D warnings
           cargo clippy -p lx_abi --tests -- -D warnings
           cargo clippy -p wl_abi --tests -- -D warnings

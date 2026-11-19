@@ -6298,6 +6298,47 @@ a refresh.
 **Design**: ARCHITECTURE "The file explorer" (and "The WSL facade" for
 `\\wsl.localhost`).
 
+### LY. UI components for gala's own programs
+
+**Goal** (the owner): gala's own programs (File Explorer, Task
+Manager, the start menu, the change card) build their windows from one
+element tree, so a change to how a window looks or behaves is a small
+diff to one file, not edits to drawing, hit testing and pixel checks
+kept in step by hand. Win32 underneath is unchanged (the programs stay
+ordinary Windows programs on gala's user32 and gdi32; the tree is a
+layer inside them).
+
+**Design** (agreed; ARCHITECTURE "UI components"):
+- Components in Rust, as in React with styles in the component: one
+  file per window with its state, a `view` built with chained calls
+  and inline styles, and an `update` for its messages. Every change
+  is compiled (the programs are small and builds incremental); no
+  templating language or layout file, since handlers tie markup to
+  the program's code anyway.
+- Every element that can be acted on has a stable id, its UI
+  Automation AutomationId: what Inspect picks, what UIA clients and
+  the tests see.
+- Familiar names (column, row, grid, gap, padding, text, ...) for a
+  small closed set of element kinds and flexbox/grid properties;
+  shared looks are functions and constants. Limits are errors.
+- Flow first; pinning only where flow cannot (overlays, badges), with
+  a set width. Child order is paint order and reading order.
+- Handlers are messages; each handled message is logged with its
+  element's id.
+- Layout by Taffy (`no_std` + `alloc`, THIRD_PARTY.md).
+- Tests check elements by id (rectangle, text, state) through the
+  tree, not pixels at coordinates.
+
+**Next**:
+1. Done: the tree and its builder, the checks, layout (Taffy) and hit
+   testing, `user/ui` (ARCHITECTURE "UI components"), host-tested.
+2. A window drawn from the tree (gdi32), clicks and typing through
+   `click`/`typed` to `update` with each message logged, its UIA
+   elements from the same tree.
+3. The change card as the first component (scenario `explorer`
+   checks it by id); then File Explorer's window.
+4. Task Manager and the start menu.
+
 ### IN. The installer: gala onto a machine's disk
 
 **Goal** (the owner): a machine booted from gala's USB image comes up
@@ -6923,11 +6964,10 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
      elements included) and outlines it on the screen, as browsers'
      developer tools do; the click attaches the element, its path up
      the tree and a screenshot of it to the request ("this column
-     header"). gala's own programs make that exact: every control gets
-     a stable AutomationId, and the build writes a map from each
-     AutomationId to the source that creates it (file and line, as
-     lld's map gives the hot swap its functions), so the agent starts
-     at the right line instead of searching.
+     header"). gala's own programs make that exact: their windows are
+     UI components (item LY) whose element ids are the AutomationIds,
+     so the picked id leads to the element in the window's one file,
+     with no map to the source to keep.
   3. The request (`-2-request`): a small dialog beside the window
      titled "Change <program>", a text box, a line saying the agent
      will edit, build and restart the program with the open folder and
@@ -6981,9 +7021,11 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   behind it (ARCHITECTURE "The file explorer", "Change this program"):
   the menu item, the request card, Inspect over the window's parts by
   automation id, the steps on a timer, a last card saying nothing was
-  changed; scenario `explorer` drives it. Next: the agent loop
-  (the stopgap above first), the AutomationId-to-source map, the state record and
-  the swap, Undo; the item on Task Manager.
+  changed; scenario `explorer` drives it. Next: the change card and
+  then Explorer as UI components (item LY); the agent loop, its first
+  demo a change to the change card's component, built and the program
+  restarted (the stopgap above until gala builds it itself); the state
+  record and the swap, Undo; the item on Task Manager.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its
   gdb stub (`-s`, `-S` to wait) and prints the gdb command line (the
   kernel ELF's symbols, the target port), on a boot or on a snapshot's

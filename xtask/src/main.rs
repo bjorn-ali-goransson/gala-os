@@ -11834,6 +11834,8 @@ fn unit_tests() -> Result {
     // gala's shell namespace's model and explorer.exe's (ROADMAP EX).
     run_cmd(cargo().args(["test", "--package", "shellns"]))?;
     run_cmd(cargo().args(["test", "--package", "explorer", "--lib"]))?;
+    // UI components for gala's own programs (ROADMAP LY).
+    run_cmd(cargo().args(["test", "--package", "gala_ui"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;

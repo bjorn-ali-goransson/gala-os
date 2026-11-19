@@ -15078,6 +15078,70 @@ window), `nt::desktop` (Win+E, the start menu's tile). Test:
   thumbnails (step 4); search is of the folder shown, not below it;
   SHBrowseForFolderW and IFileDialog are not this window yet.
 
+## UI components
+
+ROADMAP LY: each of gala's own windows (the change card, File Explorer,
+Task Manager, the start menu) is one Rust file holding its state, a
+`view` that builds its element tree from the state with chained calls
+and inline styles, and an `update` that changes the state for a
+message. Logic, behaviour, markup and appearance of a window are in
+that one file, so a change (by a person or the change agent) is read
+and made there, and compiled like any other; no templating language,
+no layout file loaded beside the program. The programs stay ordinary
+Windows programs drawing with gala's gdi32. Code: `user/ui` (`gala_ui`,
+`no_std` with `alloc`, host-tested with `cargo test -p gala_ui`); the
+layout engine is Taffy's flexbox and grid (THIRD_PARTY.md), the tree,
+its checks and hit testing gala's own.
+
+The tree (the crate's documentation has a whole component):
+- Elements: `column()`, `row()`, `grid([px(200), fr(1), fr(2)])` place
+  what they hold; `text(..)`, `button(id, label)`, `input(id, value)`,
+  `image(src)` (a picture the program draws, of a set size) and
+  `rule()` are leaves. Children by `.child`, `.child_if(cond, ..)`
+  (absent otherwise: not laid out, not in UIA) and `.children(iter)`
+  (lists from data).
+- Style is set on the element: `.width .height .min_width .max_width
+  .grow .margin .padding .gap .align .justify .pin .bg .border .radius
+  .color .size .bold .regular`. `color`, `size` and `bold` are
+  inherited inward; nothing else cascades. Shared looks are plain
+  functions (`fn primary(b) -> Node`) and constants (the Windows 11
+  palette of item W4), not classes.
+- Flow first: containers place children with `gap`, `padding`,
+  `align` (stretch, start, center, end), `justify` (start, center, end,
+  between), `grow`. `.pin(x, y)` takes an element out of the flow to
+  that place in its parent; it sets its width.
+- Child order is paint order (later on top) and reading order.
+- `id` is the element's UI Automation AutomationId: unique; `button`
+  and `input` take one, and an element with a handler must have one.
+- Handlers are messages (the `Component` trait's `Msg`): `.on_click(m)`
+  is the message a click sends, `.on_input(Msg::Request)` makes the
+  message for the text typed. The program logs each message it handles
+  with the element's id, calls `update`, and builds and lays out the
+  view again.
+
+Invariants:
+- `place` checks the view before anything is laid out and refuses it
+  (a handler without an id, `on_input` off an `input`, children in a
+  leaf, a pin without a width, more than `MAX_ELEMENTS` elements or
+  deeper than `MAX_DEPTH`, an id used twice), naming the element by its
+  path (`ChangeCard > row 3 > text 1`).
+- `place` gives `Placed` elements in paint order with absolute
+  rectangles and their handlers. `hit` is the last element with an id
+  under a point, so the innermost and topmost: one function answers
+  clicks (`click`, the id and message) and Inspect; `typed` gives an
+  input's message for its text.
+- Text is measured by the program (`Measure`: gdi32 in a program, a
+  fixed advance in the tests); `text` and `button` wrap to their width,
+  `input` is one line (an empty one is a line high).
+
+Limits: no window yet draws from it (ROADMAP LY step 2), no scrolling,
+no images beyond a named picture.
+
+Observability: a refused view names the element by its path and says
+what was wrong (the tests check the exact messages); a handled message
+is logged with the element's id (ROADMAP LY step 2), so a log shows
+what was clicked and what it did.
+
 ## Plan: graphics and GPU
 
 GPU support serves the browser first (ROADMAP BR stages 2 and 5), then
