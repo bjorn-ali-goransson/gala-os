@@ -259,13 +259,6 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         }
     }
 
-    // The monitor's EDID, where a program looks for it: the display
-    // device the seed describes, with the panel's block written from the
-    // screen's own size (nt::desktop::edid).
-    if let Err(e) = nt::desktop::edid::publish() {
-        warn!("display: cannot publish the monitor's EDID: {e:?}");
-    }
-
     // Profiles among the boot's files belong to their users.
     if let Err(e) = nt::accounts::assign_boot_profiles() {
         warn!("profiles: {e:?}");

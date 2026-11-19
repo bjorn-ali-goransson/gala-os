@@ -8905,9 +8905,11 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   something a program can change. Measured on Windows first and checked
   on both: `display_test`.
 - **The monitor's EDID** (`kernel/src/nt/desktop/edid.rs`): one VESA
-  E-EDID 1.4 base block, written from the standard at boot into the
-  monitor's `Device Parameters` as the REG_BINARY `EDID` value that
-  setupapi's device key hands out. It is generated and not seeded,
+  E-EDID 1.4 base block, written from the standard into the monitor's
+  `Device Parameters` as the REG_BINARY `EDID` value that setupapi's
+  device key hands out. It is published as the registry comes up
+  (`nt::init`, right after the seed) and not from the boot path, so
+  gala-um's display answers exactly as the machine's does. It is generated and not seeded,
   because gala's screen size is the host window's: the manufacturer id
   and product code spell the monitor's hardware id, the one detailed
   timing is the screen's own size at 60 Hz with the blanking a panel
