@@ -8390,6 +8390,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iat_unwind", "testdll.dll", "gala"),
     ("iat_answers", "ntdll.dll", "Windows/System32"),
     ("iat_answers", "testdll.dll", "gala"),
+    ("iat_except", "ntdll.dll", "Windows/System32"),
+    ("iat_except", "testdll.dll", "gala"),
     ("iat_repeat", "ntdll.dll", "Windows/System32"),
     ("iat_repeat", "testdll.dll", "gala"),
     ("import_cost_test", "ntdll.dll", "Windows/System32"),
@@ -13852,6 +13854,7 @@ const ARM64_TWINS: &[&str] = &[
     "iat_repeat",
     "iat_ret_test",
     "iat_answers",
+    "iat_except",
     "iat_unwind_test",
     "iat_unwind",
     "import_cost_test",
@@ -19043,6 +19046,32 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 3 later calls recorded of 3, the budget spent: a slot is \
              repaired on the next call through it and only first calls are \
              recorded past that (imports_repeat=)",
+        ],
+    },
+    Scenario {
+        // OT3b: `imports_except=`, the names a wide trace must not
+        // spend its budget on. This program imports four functions from
+        // testdll; two of them are excluded, one named as it is spelled
+        // and one in the wrong case, and what is armed is the other
+        // two. A slot never armed costs no slot of the budget, no fault
+        // and no record, which is what makes a window of a big
+        // program's life affordable: the heap and string imports it is
+        // full of are kept out by name and the rest is recorded whole.
+        name: "iat_except",
+        cmdline: "qemu_exit events=call run=iat_ret_test.exe \
+                  imports=iat_ret_test.exe!testdll.dll \
+                  imports_except=gala_call_back,GALA_RETURN_ADDRESS",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "imports: an import whose name holds one of 2 texts \
+             (gala_call_back,GALA_RETURN_ADDRESS) is left unarmed, so it takes no \
+             slot of the budget, no fault and no record (imports_except=)",
+            "iat_ret_test: direct",
+            "iat_ret_test: ok",
+            "exited with status 0x00000000",
+            "imports: 2 imports were left unarmed by imports_except=: they took no \
+             slot of the budget, no fault and no record (imports_except=)",
+            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
         ],
     },
     Scenario {

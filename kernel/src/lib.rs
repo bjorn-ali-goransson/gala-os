@@ -423,6 +423,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_strings") {
         nt::traceimports::set_strings(spec);
     }
+    // `imports_except=<text>[,<text>...]`: leave the imports whose
+    // `<dll>!<name>` holds one of the texts unarmed, so that the budget
+    // and the records go to the rest of them (nt::traceimports). Needs
+    // `imports=`.
+    if let Some(spec) = cmdline.value("imports_except") {
+        nt::traceimports::set_except(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }
