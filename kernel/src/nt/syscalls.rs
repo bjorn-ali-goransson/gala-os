@@ -8259,10 +8259,10 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
     let len = (arg!(call, 1) as u32 as usize).min(action::REQUEST_HEADER + 2 * action::MAX_TEXT);
     let request = tri!(read_vec(call, arg!(call, 0), len));
     let request = tri!(action::Request::parse(&request));
-    // Start runs the program as the caller (a copy of its primary token,
-    // as CreateProcess); window actions pass UIPI against the window's
-    // process.
-    let token = if request.action == action::ACTION_START {
+    // The launches run their program as the caller (a copy of its
+    // primary token, as CreateProcess); window actions pass UIPI against
+    // the window's process.
+    let token = if action::is_launch(request.action) {
         let own = call.process.token.lock().clone();
         Some(tri!(super::token::for_new_process(Some(&own))))
     } else {
@@ -8274,7 +8274,29 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
         token,
         desk: call.process.desk.clone(),
     };
-    let out = tri!(action::run(&request, &caller, |pid| process::integrity_level(u64::from(pid))));
+    let output =
+        tri!(action::run(&request, &caller, |pid| process::integrity_level(u64::from(pid))));
+    let mut out = output.bytes;
+    // A launch's process handle (LAUNCH_HANDLE), after its id: full
+    // access, as CreateProcess gives the creator. Without room for it the
+    // program still runs (it has started) and the caller hears
+    // STATUS_BUFFER_TOO_SMALL with no handle made.
+    let mut handle = None;
+    if let Some(started) = output.process {
+        if (arg!(call, 3) as u32 as usize) < out.len() + 8 {
+            return NtStatus::BUFFER_TOO_SMALL;
+        }
+        let object =
+            tri!(KObject::new(ObjectBody::Process(started)).map_err(|_| NtStatus::NO_MEMORY));
+        let entry = HandleEntry { object, access: PROCESS_ALL_ACCESS, attributes: 0 };
+        let h = tri!(call.process.handles.lock().insert(entry));
+        handle = Some(h);
+        if out.try_extend_from_slice(&h.0.to_le_bytes()).is_err() {
+            let closed = call.process.handles.lock().close(h);
+            drop(closed);
+            return NtStatus::NO_MEMORY;
+        }
+    }
     let (ptr, room, ret) = (arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4));
     let entry = match request.action {
         action::ACTION_WINDOWS => action::WINDOW_ENTRY,
@@ -8289,6 +8311,10 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::BUFFER_TOO_SMALL;
     };
     if n > 0 && call.process.write(ptr, &out[..n]).is_err() {
+        if let Some(h) = handle {
+            let closed = call.process.handles.lock().close(h);
+            drop(closed);
+        }
         return NtStatus::ACCESS_VIOLATION;
     }
     if ret != 0 {

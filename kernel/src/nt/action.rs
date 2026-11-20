@@ -60,6 +60,45 @@ pub const ACTION_LINUX_PROGRESS: u32 = 14;
 /// installing, 3 done, 4 failed), args[1] the percent downloaded,
 /// args[2] the exit code gala fails with (galapkg's `Kind`).
 pub const ACTION_INSTALL_PROGRESS: u32 = 15;
+/// A user-mode shell's start menu (ROADMAP SH step 1, part 4): install a
+/// catalog package as the caller, without a window (`gala install
+/// <id>`, which reports through ACTION_INSTALL_PROGRESS): the text the
+/// winget id (letters, digits, `.`, `-`, `_`, `+`), args[0] the launch
+/// flags.
+pub const ACTION_INSTALL: u32 = 16;
+/// A user-mode shell's Linux section, as the caller: the text the
+/// distribution's name, args[0] the launch flags, args[1] what to start
+/// (LINUX_*), args[2] the install's suggestion (`SUGGESTIONS` index) or
+/// the application (its index among the distribution's applications).
+pub const ACTION_LINUX: u32 = 17;
+
+/// The launch verbs' flags (Start, Install, Linux: args[0]): start a
+/// console program in a console window of its own (conhost.exe, as
+/// Explorer's CreateProcess without a console to inherit gives it; the
+/// Linux verb's terminal always has one); give the caller a handle to
+/// the process (PROCESS_ALL_ACCESS) after its id, as ShellExecuteEx's
+/// SEE_MASK_NOCLOSEPROCESS does.
+pub const LAUNCH_CONSOLE_WINDOW: i32 = 1;
+pub const LAUNCH_HANDLE: i32 = 2;
+/// ACTION_LINUX's operations: install a suggested distribution (`gala
+/// linux-install`), start its desktop session, a terminal (`wsl -d`), or
+/// one of its applications (`wsl -d <name> --exec ...`).
+pub const LINUX_INSTALL: i32 = 0;
+pub const LINUX_DESKTOP: i32 = 1;
+pub const LINUX_TERMINAL: i32 = 2;
+pub const LINUX_APP: i32 = 3;
+
+/// Whether `action` starts a program (as the caller: GalaDesktopAction
+/// gives it a copy of the caller's primary token).
+pub fn is_launch(action: u32) -> bool {
+    matches!(action, ACTION_START | ACTION_INSTALL | ACTION_LINUX)
+}
+
+/// A program a launch started.
+pub struct Started {
+    pub pid: u64,
+    pub process: crate::mm::heap::KArc<super::process::Process>,
+}
 
 /// The list outputs' version and header size.
 pub const LIST_VERSION: u32 = 1;
@@ -157,11 +196,117 @@ pub struct Caller {
     pub desk: crate::mm::heap::KArc<super::session::Desk>,
 }
 
+/// What a request gives back: the bytes it writes to the caller and, for
+/// a launch with LAUNCH_HANDLE, the process to give it a handle to
+/// (written after the bytes).
+pub struct Output {
+    pub bytes: Vec<u8>,
+    pub process: Option<crate::mm::heap::KArc<super::process::Process>>,
+}
+
 /// Runs request `r` for `caller`; what it writes to the caller. A window
 /// action needs the caller to pass UIPI against the window's process (an
 /// equal or higher integrity level: STATUS_ACCESS_DENIED otherwise);
 /// `level_of` gives a process's level (None: it has ended).
 pub fn run(
+    r: &Request,
+    caller: &Caller,
+    level_of: impl Fn(u32) -> Option<u32>,
+) -> Result<Output, NtStatus> {
+    if is_launch(r.action) {
+        return run_launch(r, caller);
+    }
+    run_other(r, caller, level_of).map(|bytes| Output { bytes, process: None })
+}
+
+/// A launch verb: the process id, and the process when the caller asked
+/// for a handle. Logged with the caller, with a `window` event `launch`.
+fn run_launch(r: &Request, caller: &Caller) -> Result<Output, NtStatus> {
+    let flags = r.args[0];
+    if flags & !(LAUNCH_CONSOLE_WINDOW | LAUNCH_HANDLE) != 0 {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let mut buf = [0u8; MAX_TEXT];
+    let text = ascii(&r.text, &mut buf);
+    let token = caller.token.clone();
+    let (op, started) = match r.action {
+        ACTION_START => {
+            let window = flags & LAUNCH_CONSOLE_WINDOW != 0;
+            ("start", start(&r.text, window, token, &caller.desk.shell))
+        }
+        ACTION_INSTALL => {
+            let id = text.filter(|id| package_id(id)).ok_or(NtStatus::INVALID_PARAMETER)?;
+            ("install", start_install(id, token))
+        }
+        _ => {
+            let r = linux_request(text, r.args[1], r.args[2])?;
+            ("linux", launch_linux(r, token))
+        }
+    };
+    let text = text.unwrap_or("");
+    let (pid, status) = match &started {
+        Ok(s) => (s.pid, 0),
+        Err(e) => (0, e.0),
+    };
+    crate::info!(
+        "desktop: pid {} asks for {op} {text:?} (flags {flags:#x}): {}",
+        caller.pid,
+        if status == 0 { "started" } else { "not started" }
+    );
+    crate::events::emit(
+        crate::events::Category::Window,
+        "launch",
+        format_args!(
+            r#""op":"{op}","by":{},"text":{},"flags":{flags},"pid":{pid},"status":{status}"#,
+            caller.pid,
+            crate::events::Str(text)
+        ),
+    );
+    let started = started?;
+    let mut bytes = Vec::new();
+    bytes.try_extend_from_slice(&started.pid.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
+    let process = (flags & LAUNCH_HANDLE != 0).then_some(started.process);
+    Ok(Output { bytes, process })
+}
+
+/// Whether `id` is a package id `gala install` takes as one argument
+/// (winget's `Publisher.Package[.Variant]`: letters, digits, `.`, `-`,
+/// `_`, `+`).
+fn package_id(id: &str) -> bool {
+    (1..=MAX_ID).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_+".contains(&b))
+}
+
+/// ACTION_LINUX's request: distribution `name`, operation `op`, `index`
+/// its suggestion or application. STATUS_INVALID_PARAMETER for a name
+/// that is not a distribution's, an operation or a suggestion out of
+/// range; STATUS_OBJECT_NAME_NOT_FOUND for an application of a
+/// distribution that is not registered or has no such application.
+fn linux_request(
+    name: Option<&str>,
+    op: i32,
+    index: i32,
+) -> Result<desktop::linux::Request, NtStatus> {
+    use desktop::linux::{Name, Request, SUGGESTIONS, valid_name};
+    let name = name
+        .filter(|n| valid_name(n.as_bytes()))
+        .and_then(|n| Name::new(n.as_bytes()))
+        .ok_or(NtStatus::INVALID_PARAMETER)?;
+    let index = usize::try_from(index).map_err(|_| NtStatus::INVALID_PARAMETER)?;
+    Ok(match op {
+        LINUX_INSTALL if index < SUGGESTIONS.len() => Request::Install(name, index),
+        LINUX_DESKTOP => Request::Desktop(name),
+        LINUX_TERMINAL => Request::Terminal(name),
+        LINUX_APP => Request::App(
+            name,
+            desktop::linux_app(name.as_bytes(), index).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?,
+        ),
+        _ => return Err(NtStatus::INVALID_PARAMETER),
+    })
+}
+
+/// The requests that are not launches.
+fn run_other(
     r: &Request,
     caller: &Caller,
     level_of: impl Fn(u32) -> Option<u32>,
@@ -201,10 +346,6 @@ pub fn run(
         return Ok(out);
     }
     match r.action {
-        ACTION_START => {
-            let pid = start(&r.text, caller.token.clone(), &caller.desk.shell)?;
-            out.try_extend_from_slice(&pid.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
-        }
         ACTION_WINDOWS => {
             let listed = desktop::list_windows(&caller.desk.shell)?;
             list_header(&mut out, listed.len())?;
@@ -362,13 +503,15 @@ const SEARCH: [&str; 3] = ["C:\\gala\\", "C:\\", "C:\\Windows\\System32\\"];
 /// Starts the program `text` names (a path on C:, a start menu name, or a
 /// file name found in SEARCH, `.exe` added if missing), with the rest of
 /// `text` as its arguments, under primary token `token` (see
-/// `start_path`); its process id. STATUS_OBJECT_NAME_NOT_FOUND when there
-/// is no such program.
+/// `start_path`), a console program in a console window of its own when
+/// `window` says so (`start_in_window`). STATUS_OBJECT_NAME_NOT_FOUND
+/// when there is no such program.
 pub fn start(
     text: &[u16],
+    window: bool,
     token: Option<super::object::ObjectRef>,
     shell: &desktop::Shell,
-) -> Result<u64, NtStatus> {
+) -> Result<Started, NtStatus> {
     let mut buf = [0u8; MAX_TEXT];
     let text = ascii(text, &mut buf).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
     let (program, args) = split_program(text);
@@ -376,21 +519,22 @@ pub fn start(
         return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
     }
     let path = resolve(program, shell)?;
-    start_path(path, args, token)
+    if window { start_in_window(path, args, token) } else { start_path(path, args, token) }
 }
 
 /// Starts the program at `path` (shasha's start menu: `token` None, the
-/// boot user; `gala start`: a copy of the caller's primary token); its
-/// process id, logged.
+/// boot user; `gala start` and the launch verbs: a copy of the caller's
+/// primary token), logged.
 pub fn start_path(
     path: &'static str,
     args: &str,
     token: Option<super::object::ObjectRef>,
-) -> Result<u64, NtStatus> {
+) -> Result<Started, NtStatus> {
     match super::process::launch(path, args, token, None) {
-        Ok(pid) => {
+        Ok(process) => {
+            let pid = process.id;
             crate::info!("desktop: started {path} (pid {pid})");
-            Ok(pid)
+            Ok(Started { pid, process })
         }
         Err(e) => {
             crate::warn!("desktop: cannot start {path}: {e:?}");
@@ -451,6 +595,20 @@ fn first_existing(paths: &'static [&'static str]) -> Option<&'static str> {
     super::process::intern(path).ok()
 }
 
+/// Installs catalog package `id` (a `package_id`) under primary token
+/// `token` (None: the boot user's): `gala install <id>` with no window.
+/// Its output is in the log (a process without a console writes there)
+/// and its progress comes back through ACTION_INSTALL_PROGRESS.
+fn start_install(id: &str, token: Option<super::object::ObjectRef>) -> Result<Started, NtStatus> {
+    let Some(gala) = first_existing(GALA_EXE) else {
+        crate::warn!("desktop: cannot install {id}: no gala.exe at {}", GALA_EXE[0]);
+        return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
+    };
+    let mut buf = [0u8; 160];
+    let args = join(&mut buf, &[b"install ", id.as_bytes()]).ok_or(NtStatus::BUFFER_TOO_SMALL)?;
+    start_path(gala, args, token)
+}
+
 /// A desktop's start menu asked for `program` (the mouse or keys on the
 /// console, or injected input): started as the boot user, whose session
 /// is the console's at boot; a catalog entry not installed yet runs
@@ -500,7 +658,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
                 return;
             };
             crate::info!("desktop: start menu starts {}: {path}", program.name);
-            ("start", path, start_in_window(path, ""))
+            ("start", path, start_in_window(path, "", None))
         }
         MenuRequest::Install(id) => {
             let Some(gala) = first_existing(GALA_EXE) else {
@@ -520,12 +678,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             // ACTION_INSTALL_PROGRESS and the tile draws it, as a Linux
             // distribution's install does. Its output is still in the
             // log (a process without a console writes there).
-            let mut buf = [0u8; 160];
-            let started = match join(&mut buf, &[b"install ", id.as_bytes()]) {
-                Some(args) => start_path(gala, args, None),
-                None => Err(NtStatus::BUFFER_TOO_SMALL),
-            };
-            ("install", id, started)
+            ("install", id, start_install(id, None))
         }
         MenuRequest::Missing => {
             crate::warn!(
@@ -537,7 +690,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
         }
     };
     let (pid, status) = match started {
-        Ok(pid) => (pid, 0),
+        Ok(s) => (s.pid, 0),
         Err(e) => (0, e.0),
     };
     crate::events::emit(
@@ -645,14 +798,60 @@ fn install_progress_noted(id: &str, state: i32, percent: i32, exit: i32) {
     );
 }
 
-/// What the start menu's Linux section asked for: an install (`gala
-/// linux-install <name> <url>`, no window: its progress is on the tile),
-/// a distribution's desktop (wsl.exe running LD step 6's session, no
-/// window of its own), a terminal (`wsl -d <name>` in a console window)
-/// or an application (`wsl -d <name> --exec <its Exec>`). Logged, with a
-/// `window` event `start menu` (op `linux install`, `linux desktop`,
-/// `linux terminal`, `linux app`).
+/// What the start menu's Linux section asked for, from the boot user's
+/// menu (`launch_linux` as the boot user), with a `window` event `start
+/// menu` (op `linux install`, `linux desktop`, `linux terminal`, `linux
+/// app`); an install's tile hears what became of it.
 pub fn start_linux(session: u32, r: desktop::linux::Request) {
+    use desktop::linux::Request;
+    let name = match r {
+        Request::Install(n, _)
+        | Request::Desktop(n)
+        | Request::Terminal(n)
+        | Request::App(n, _) => n,
+    };
+    let op = match r {
+        Request::Install(..) => "linux install",
+        Request::Desktop(_) => "linux desktop",
+        Request::Terminal(_) => "linux terminal",
+        Request::App(..) => "linux app",
+    };
+    let target = match r {
+        Request::App(_, app) => app.name,
+        _ => desktop::linux::Text::cut(op),
+    };
+    let (pid, status) = match launch_linux(r, None) {
+        Ok(s) => (s.pid, 0),
+        Err(e) => (0, e.0),
+    };
+    crate::events::emit(
+        crate::events::Category::Window,
+        "start menu",
+        format_args!(
+            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
+            crate::events::Str(name.as_str()),
+            crate::events::Str(target.as_str())
+        ),
+    );
+    // As a package's install does, the tile hears what became of it.
+    if matches!(r, Request::Install(..)) {
+        desktop::linux_install_started(session, name, (status == 0).then_some(pid));
+    }
+}
+
+/// Starts what a Linux section asks for under primary token `token`
+/// (None: the boot user's): an install (`gala linux-install <name>
+/// <url>`, no window: its progress is on the tile), a distribution's
+/// desktop (wsl.exe running LD step 6's session, no window of its own),
+/// a terminal (`wsl -d <name>` in a console window) or an application
+/// (`wsl -d <name> --exec <its Exec>`). Logged; STATUS_INVALID_PARAMETER
+/// for a name that is not a distribution's, STATUS_OBJECT_NAME_NOT_FOUND
+/// for a desktop the distribution has no session for or a missing
+/// program.
+pub fn launch_linux(
+    r: desktop::linux::Request,
+    token: Option<super::object::ObjectRef>,
+) -> Result<Started, NtStatus> {
     use desktop::linux::{Request, SUGGESTIONS, exec_words, source_url, valid_name};
     let name = match r {
         Request::Install(n, _)
@@ -663,7 +862,7 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
     let name_text = name.as_str();
     if !valid_name(name.as_bytes()) {
         crate::warn!("desktop: start menu: {name_text:?} is not a distribution's name");
-        return;
+        return Err(NtStatus::INVALID_PARAMETER);
     }
     let mut args = [0u8; 512];
     let (op, program, args, window): (&str, Option<&'static str>, Option<&str>, bool) = match r {
@@ -688,16 +887,7 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
                     "desktop: start menu: {name_text} has no desktop session ({DESKTOP_SESSION} is not in it): not started"
                 );
                 super::ledger::record("start menu", "linux desktop session missing", 0);
-                crate::events::emit(
-                    crate::events::Category::Window,
-                    "start menu",
-                    format_args!(
-                        r#""op":"linux desktop","session":{session},"name":{},"target":"{DESKTOP_SESSION}","pid":0,"status":{}"#,
-                        crate::events::Str(name_text),
-                        NtStatus::OBJECT_NAME_NOT_FOUND.0
-                    ),
-                );
-                return;
+                return Err(NtStatus::OBJECT_NAME_NOT_FOUND);
             }
             let args = join(
                 &mut args,
@@ -732,14 +922,14 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
             ("linux app", first_existing(WSL_EXE), a, false)
         }
     };
-    let target = match r {
-        Request::App(_, app) => app.name,
-        _ => desktop::linux::Text::cut(op),
-    };
-    let started = match (program, args) {
+    match (program, args) {
         (Some(program), Some(args)) => {
             crate::info!("desktop: start menu: {op} {name_text}: {program} {args}");
-            if window { start_in_window(program, args) } else { start_path(program, args, None) }
+            if window {
+                start_in_window(program, args, token)
+            } else {
+                start_path(program, args, token)
+            }
         }
         (None, _) => {
             crate::warn!(
@@ -752,35 +942,23 @@ pub fn start_linux(session: u32, r: desktop::linux::Request) {
             crate::warn!("desktop: start menu: {op} {name_text}: its command line does not fit");
             Err(NtStatus::BUFFER_TOO_SMALL)
         }
-    };
-    let (pid, status) = match started {
-        Ok(pid) => (pid, 0),
-        Err(e) => (0, e.0),
-    };
-    crate::events::emit(
-        crate::events::Category::Window,
-        "start menu",
-        format_args!(
-            r#""op":"{op}","session":{session},"name":{},"target":{},"pid":{pid},"status":{status}"#,
-            crate::events::Str(name_text),
-            crate::events::Str(target.as_str())
-        ),
-    );
-    // As a package's install does, the tile hears what became of it.
-    if matches!(r, Request::Install(..)) {
-        desktop::linux_install_started(session, name, (status == 0).then_some(pid));
     }
 }
 
-/// Starts the program at `path` with `args` as the boot user (`start_path`)
-/// and, when it is a console program, in a new console window: a console
+/// Starts the program at `path` with `args` under primary token `token`
+/// (`start_path`) and, when it is a console program, in a new console
+/// window: a console
 /// session hosted by conhost.exe, started first with the session's id and
 /// the program's file name, as `console=` does at boot. On Windows a
 /// console program started from Explorer gets its own console the same
 /// way (CreateProcess without a console to inherit).
-fn start_in_window(path: &'static str, args: &str) -> Result<u64, NtStatus> {
+fn start_in_window(
+    path: &'static str,
+    args: &str,
+    token: Option<super::object::ObjectRef>,
+) -> Result<Started, NtStatus> {
     if !super::process::is_console_program(path)? {
-        return start_path(path, args, None);
+        return start_path(path, args, token);
     }
     let Some(host) = first_existing(CONHOST_EXE) else {
         crate::warn!("desktop: no conhost.exe for {path}'s console window ({CONHOST_EXE:?})");
@@ -803,11 +981,16 @@ fn start_in_window(path: &'static str, args: &str) -> Result<u64, NtStatus> {
     let mut buf = [0u8; 128];
     let host_args =
         join(&mut buf, &[&digits[d..], b" ", file.as_bytes()]).ok_or(NtStatus::BUFFER_TOO_SMALL)?;
-    start_path(host, host_args, None)?;
-    match super::process::launch(path, args, None, Some(session)) {
-        Ok(pid) => {
+    // The console window's host runs as the program does: a Low
+    // program's conhost is Low too, so the program's console is no way
+    // up to a higher level (conhost.exe under the caller's token, as
+    // Windows starts it for a CreateProcess with CREATE_NEW_CONSOLE).
+    start_path(host, host_args, token.clone())?;
+    match super::process::launch(path, args, token, Some(session)) {
+        Ok(process) => {
+            let pid = process.id;
             crate::info!("desktop: started {path} (pid {pid}) in a console window ({host})");
-            Ok(pid)
+            Ok(Started { pid, process })
         }
         Err(e) => {
             crate::warn!("desktop: cannot start {path}: {e:?}");
@@ -994,5 +1177,42 @@ mod tests {
         program_entry(&mut out, "Hello window", "C:\\gui_test.exe").unwrap();
         assert_eq!(out.len(), PROGRAM_ENTRY);
         assert_eq!(out[0..4], 12u32.to_le_bytes());
+    }
+
+    #[test]
+    fn an_install_takes_one_package_id_and_nothing_more() {
+        for id in ["7zip.7zip", "Microsoft.VisualStudioCode", "Python.Python.3.12", "a-b_c+d"] {
+            assert!(package_id(id), "{id}");
+        }
+        let long = "a".repeat(MAX_ID + 1);
+        for id in ["", "7zip 7zip", "\"7zip\"", "x;y", "--force", "a/b", long.as_str()] {
+            // "--force" is letters and dashes: one word, which gala reads
+            // as a (bad) id, never as more than one argument.
+            assert_eq!(package_id(id), id == "--force", "{id}");
+        }
+    }
+
+    #[test]
+    fn a_linux_request_needs_a_distributions_name_and_a_known_operation() {
+        use desktop::linux::{Request, SUGGESTIONS};
+        let name = desktop::linux::Name::new(b"Debian").unwrap();
+        assert_eq!(linux_request(Some("Debian"), LINUX_TERMINAL, 0), Ok(Request::Terminal(name)));
+        assert_eq!(linux_request(Some("Debian"), LINUX_DESKTOP, 0), Ok(Request::Desktop(name)));
+        assert_eq!(linux_request(Some("Debian"), LINUX_INSTALL, 0), Ok(Request::Install(name, 0)));
+        let past = SUGGESTIONS.len() as i32;
+        for (text, op, index) in [
+            (Some("Debian"), LINUX_INSTALL, past),
+            (Some("Debian"), LINUX_INSTALL, -1),
+            (Some("Debian"), 9, 0),
+            (Some("../etc"), LINUX_TERMINAL, 0),
+            (Some(""), LINUX_TERMINAL, 0),
+            (None, LINUX_TERMINAL, 0),
+        ] {
+            assert_eq!(
+                linux_request(text, op, index),
+                Err(NtStatus::INVALID_PARAMETER),
+                "{text:?} {op} {index}"
+            );
+        }
     }
 }

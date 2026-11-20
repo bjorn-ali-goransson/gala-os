@@ -840,9 +840,15 @@ shell part) leaves it.
       it holds them; Win+arrows stay the kernel's. Test: `hotkey_test`
       (ARCHITECTURE "Hot keys", "The shell's window and the shell's
       keys").
-   4. Launches: what the start menu starts from the input thread today
-      (Linux distributions, installs, console programs in conhost)
-      through GalaDesktopAction verbs under the caller's token.
+   4. Done: launches: what the start menu starts (Linux distributions,
+      installs, console programs in a console window) through
+      GalaDesktopAction's Start (its console-window flag), Install and
+      Linux under the caller's token, conhost.exe included, with a
+      process handle given back on request (SEE_MASK_NOCLOSEPROCESS).
+      Test: `launch_test` (ARCHITECTURE "Server and desktop workloads",
+      GalaDesktopAction). What is left for shasha.exe: an install's
+      progress reaches the kernel's tiles (ACTION_INSTALL_PROGRESS,
+      ACTION_LINUX_PROGRESS), not the shell that started it.
    5. The taskbar's strip reserved as an app bar (ABE_BOTTOM) instead
       of the kernel's fixed `TASKBAR`.
    Then `shasha.exe` itself, and the kernel's shell code (about 4-5k

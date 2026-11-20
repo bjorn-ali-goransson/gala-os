@@ -268,6 +268,9 @@ SendMessage and ChangeWindowMessageFilter(Ex):
   minimize, close, snap, move, ...) need the same level as the window's
   process (STATUS_ACCESS_DENIED; `gala` says "access denied", exit 4);
   shasha's own mouse and keys act on any window, as Windows' taskbar
-  does. `gala start` runs the program under a copy of the caller's
-  primary token, as CreateProcess would; shasha's start menu starts
-  programs as the boot user.
+  does. `gala start` and the start menu's launches as a user-mode shell
+  asks for them (GalaDesktopAction's Start, Install, Linux) run the
+  program, and the conhost.exe of its console window, under a copy of
+  the caller's primary token, as CreateProcess would; the kernel's own
+  start menu starts programs as the boot user until it leaves the
+  kernel (ROADMAP SH).

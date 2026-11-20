@@ -1875,14 +1875,14 @@ pub fn expand_environment<'b>(text: &str, buf: &'b mut [u8]) -> Option<&'b str> 
 /// console handles, under primary token `token` (None: the boot user's,
 /// shasha's start menu; GalaDesktopAction's Start passes a copy of the
 /// caller's, as CreateProcess would), in console session `console` (a
-/// console window's, `nt::action::start_from_menu`; None: none); its
-/// process id.
+/// console window's, `nt::action::start_from_menu`; None: none); the
+/// process.
 pub fn launch(
     path: &'static str,
     args: &str,
     token: Option<ObjectRef>,
     console: Option<KArc<super::conhost::Session>>,
-) -> Result<u64, NtStatus> {
+) -> Result<KArc<Process>, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1916,7 +1916,7 @@ pub fn launch(
         LoadError::Pe(_) => NtStatus::INVALID_IMAGE_FORMAT,
         _ => NtStatus::NO_MEMORY,
     })?;
-    Ok(process.id)
+    Ok(process)
 }
 
 /// Creates a service's process (nt::scm_run): the executable at Win32

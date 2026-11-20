@@ -8741,6 +8741,29 @@ CLI-first.
   - Start: a path on C:, a start menu name, or a file name looked up in
     C:\gala, C:\ and System32 (`.exe` optional); the rest of the text is
     the arguments; output: the process id. Works everywhere.
+  - Install (`gala install <id>` with no window; the text one package
+    id: letters, digits, `.`, `-`, `_`, `+`, so it is one argument) and
+    Linux (the start menu's Linux section: the text a distribution's
+    name, the second argument what to start: 0 an install of the third
+    argument's suggestion, 1 its desktop session, 2 a terminal, 3 its
+    application whose index is the third argument; STATUS_INVALID_PARAMETER for a
+    name that is not a distribution's or an operation or suggestion out
+    of range, STATUS_OBJECT_NAME_NOT_FOUND for a desktop without a
+    session or an application not there). What a user-mode shell's
+    start menu starts (ROADMAP SH step 1, part 4); the kernel's own
+    menu runs the same code (`launch_linux`, `start_install`,
+    `start_in_window`) as the boot user.
+  - The launches' flags (Start, Install, Linux: the first argument): 1
+    a console program gets a console window of its own (conhost.exe,
+    started first, as Explorer's CreateProcess without a console to
+    inherit gives one; a Linux terminal always has one); 2 a handle to
+    the process (PROCESS_ALL_ACCESS) is written after its id, as
+    ShellExecuteEx's SEE_MASK_NOCLOSEPROCESS gives it, so a shell waits
+    for an install and reads its exit code. Without room for the handle
+    the program still runs and the caller gets STATUS_BUFFER_TOO_SMALL
+    with no handle made. Each launch is logged with its caller ("desktop:
+    pid N asks for install ...: started") and a `window` event `launch`
+    (op, caller, text, flags, pid, status).
   - Windows (the taskbar's list: HWND, process id, screen id, flags
     minimized/maximized/active/snapped, the outer rectangle, the title;
     a versioned list header), Programs (the start menu's existing
@@ -8765,11 +8788,14 @@ CLI-first.
   (the caller's integrity level at least the window's:
   `window::may_act_on`; else STATUS_ACCESS_DENIED; the message filters
   do not apply: these are no messages). shasha's own mouse and keys are
-  not checked (Windows' taskbar acts on elevated windows too). Start
-  runs the program under a copy of the caller's primary token
-  (`token::for_new_process` of it, as NtCreateUserProcess:
-  `process::launch`'s token argument; the start menu passes None, the
-  boot user); its parent id stays 0.
+  not checked (Windows' taskbar acts on elevated windows too). The
+  launches (Start, Install, Linux) run their program under a copy of
+  the caller's primary token (`token::for_new_process` of it, as
+  NtCreateUserProcess: `process::launch`'s token argument; the kernel's
+  start menu passes None, the boot user), and so does the conhost.exe
+  of its console window, so a Low caller's console is Low end to end;
+  the parent id stays 0. Tested by `launch_test` (a Low caller's
+  launches run Low).
 
 #### The `gala` command
 

@@ -4202,6 +4202,15 @@ fn reg_text<const N: usize>(v: &super::registry::Value) -> Option<linux::Text<N>
 /// boot user's registered distributions (Lxss keys in State 1, each with
 /// its applications) and their choices. Reads the registry and the
 /// distributions' files: never under the desktop's lock.
+/// Registered distribution `name`'s application `index` (as its start
+/// menu tile's context menu lists them), or None: no such distribution
+/// or application.
+pub fn linux_app(name: &[u8], index: usize) -> Option<linux::App> {
+    let listing = linux_listing();
+    let distro = listing.installed.iter().find(|d| d.name.as_bytes() == name)?;
+    distro.apps().nth(index).copied()
+}
+
 fn linux_listing() -> linux::Listing {
     use super::registry::{self, ROOT};
     let mut listing = linux::Listing::default();

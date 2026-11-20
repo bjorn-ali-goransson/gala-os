@@ -8539,6 +8539,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("start_menu", "user/bin/conhost.exe", "Windows/System32"),
     ("start_menu", "advapi32.dll", "Windows/System32"),
     ("start_menu", "bcryptprimitives.dll", "Windows/System32"),
+    // launch_test: what the launch verbs start (conhost.exe for console
+    // windows, wsl.exe for Linux terminals, in System32 as on Windows) and
+    // what the test and `gala install` load.
+    ("launch_test", "user32.dll", "Windows/System32"),
+    ("launch_test", "gdi32.dll", "Windows/System32"),
+    ("launch_test", "user/bin/conhost.exe", "Windows/System32"),
+    ("launch_test", "user/bin/wsl.exe", "Windows/System32"),
+    ("launch_test", "advapi32.dll", "Windows/System32"),
+    ("launch_test", "bcryptprimitives.dll", "Windows/System32"),
     ("console_window", "ntdll.dll", "Windows/System32"),
     ("console_window", "kernel32.dll", "Windows/System32"),
     ("console_window", "user32.dll", "Windows/System32"),
@@ -11276,6 +11285,7 @@ const USER_PROGRAMS: &[&str] = &[
     "topmost_test",
     "shell_events_test",
     "linux_hwnd_test",
+    "launch_test",
     "hotkey_test",
     "wintrust_test",
     "cab_probe",
@@ -16358,6 +16368,25 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "linux_hwnd_test: restored by the shell",
             "linux_hwnd_test: closed by the shell",
             "linux_hwnd_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The start menu's launches as a user-mode shell asks for them
+        // (user/launch_test; ROADMAP SH step 1, part 4): a Low integrity
+        // caller's Start in a console window, Install and Linux terminal
+        // run Low (the caller's token, not the boot user's), with a
+        // process handle given back; bad names and ids are refused.
+        name: "launch_test",
+        cmdline: "qemu_exit run=launch_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "launch_test: console program: its own console window, as its caller",
+            "launch_test: started without a handle",
+            "launch_test: install: gala install as its caller",
+            "launch_test: linux: wsl as its caller",
+            "launch_test: caller ok",
+            "launch_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -21557,6 +21586,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
     ("clipboard_test", "a child process (one NT process per Linux process)"),
+    (
+        "launch_test",
+        "its launches are child processes, one in a console window (one NT process per Linux process; no screen)",
+    ),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
