@@ -2355,6 +2355,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial_line_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "session_test"
 version = "0.1.0"
 

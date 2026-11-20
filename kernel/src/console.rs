@@ -317,137 +317,228 @@ pub fn emergency_line(args: fmt::Arguments) {
     std::eprintln!("{args}");
 }
 
-/// The serial line discipline: while a program's output line is open
-/// (the last user byte written to the port was not a newline), kernel
-/// lines are held here and go out when the program ends its line, so a
-/// log line never lands inside a program's line (a test looking for
-/// that line would miss it: msvcrt writes a line in pieces). A program
-/// cannot hold the log back: after [`HOLD_NS`] the next kernel print or
-/// timer tick breaks the line and releases what is held, and so does
-/// the program's exit ([`end_program_line`]) and a full buffer.
-/// One line state for all programs: two programs writing at once can
-/// still share a line (each has its own console on Windows); a
-/// program's exit ends only the line it opened ([`exit_ends_line`]).
-#[cfg(not(feature = "hosted"))]
-struct Held {
-    bytes: [u8; HELD_BYTES],
+/// The serial line discipline: programs and the kernel log share the
+/// serial port, and programs write a line in pieces (msvcrt is
+/// unbuffered; `puts` is two writes), several programs at once. Each
+/// program's unfinished line waits here, per process, and goes out whole
+/// when the program ends it, so nothing lands inside it: not a kernel log
+/// line, not another program's line (a chrome.exe's stderr inside
+/// uia_chromium_test's line made the scenario miss it). Whole lines go
+/// out at once.
+///
+/// A program cannot hold its line back for long: after [`HOLD_NS`] the
+/// timer tick shows it as it is (a prompt waiting for input never ends
+/// its line), and so does a line too long to hold, or the need for its
+/// slot when [`OPEN_LINES`] programs have one. A shown line the program
+/// continues goes on on the port; anyone else's output first ends it
+/// with a newline. The program's exit ends its line ([`Lines::end`]).
+pub struct Lines {
+    open: [Partial; OPEN_LINES],
+    /// The process whose line is on the port, unfinished.
+    shown: Option<u64>,
+}
+
+/// Programs that can have an unfinished line held at once.
+pub const OPEN_LINES: usize = 8;
+/// The longest unfinished line held.
+pub const LINE_BYTES: usize = 1024;
+/// How long a program's unfinished line is held.
+pub const HOLD_NS: u64 = 100_000_000;
+
+/// One program's unfinished line (`len` 0: a free slot).
+struct Partial {
+    pid: u64,
+    /// When its first byte was held (monotonic ns).
+    since: u64,
     len: usize,
+    bytes: [u8; LINE_BYTES],
 }
 
-#[cfg(not(feature = "hosted"))]
-const HELD_BYTES: usize = 4096;
-/// How long an open program line holds kernel lines back.
-#[cfg(not(feature = "hosted"))]
-const HOLD_NS: u64 = 100_000_000;
-
-/// When the open program line began (monotonic ns; 0: none). Written
-/// only under the COM1 lock; read without it by the tick's check.
-#[cfg(not(feature = "hosted"))]
-static LINE_OPEN_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// The process whose output opened that line (its id; set with it).
-#[cfg(not(feature = "hosted"))]
-static LINE_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// Whether `exiting`'s exit ends the open program line: only its own
-/// line. Another program's exit leaves it open (a chrome.exe exiting
-/// between the two writes msvcrt made of uia_chromium_test's last line
-/// broke it, and the scenario missed the line).
-pub fn exit_ends_line(open: bool, owner: u64, exiting: u64) -> bool {
-    open && owner == exiting
+/// Where the lines go: the serial port (a test's buffer on the host).
+pub trait Sink {
+    fn put(&mut self, bytes: &[u8]);
 }
 
-/// Kernel lines waiting for the program's line to end. Taken only under
-/// the COM1 lock.
-#[cfg(not(feature = "hosted"))]
-static HELD: IrqMutex<Held> = IrqMutex::new(Held { bytes: [0; HELD_BYTES], len: 0 });
-
-#[cfg(not(feature = "hosted"))]
-impl Held {
-    /// Ends the program's line (a newline if it is still open: the
-    /// program did not end it) and writes the held kernel lines.
-    fn release(&mut self, port: &mut serial::SerialPort) {
-        use core::sync::atomic::Ordering;
-        if LINE_OPEN_SINCE.swap(0, Ordering::Relaxed) != 0 {
-            port.write_byte(b'\r');
-            port.write_byte(b'\n');
-        }
-        for &b in self.bytes.get(..self.len).unwrap_or(&[]) {
-            port.write_byte(b);
-        }
-        self.len = 0;
+impl Default for Lines {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// A kernel print under the line discipline.
-#[cfg(not(feature = "hosted"))]
-struct KernelOut<'a> {
-    port: &'a mut serial::SerialPort,
-    held: &'a mut Held,
-}
+impl Lines {
+    pub const fn new() -> Self {
+        const FREE: Partial = Partial { pid: 0, since: 0, len: 0, bytes: [0; LINE_BYTES] };
+        Self { open: [FREE; OPEN_LINES], shown: None }
+    }
 
-#[cfg(not(feature = "hosted"))]
-impl fmt::Write for KernelOut<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        use core::sync::atomic::Ordering;
-        if LINE_OPEN_SINCE.load(Ordering::Relaxed) != 0 {
-            let start = self.held.len;
-            let mut end = start;
-            for &b in s.as_bytes() {
-                let extra = usize::from(b == b'\n');
-                if end + extra + 1 > HELD_BYTES {
-                    // Full: the program's line is broken after all.
-                    self.held.len = start;
-                    self.held.release(self.port);
-                    return self.port.write_str(s);
-                }
-                if extra == 1 {
-                    self.held.bytes[end] = b'\r';
-                }
-                self.held.bytes[end + extra] = b;
-                end += extra + 1;
+    fn slot_of(&self, pid: u64) -> Option<usize> {
+        self.open.iter().position(|p| p.len != 0 && p.pid == pid)
+    }
+
+    /// Ends the unfinished line on the port, if any: someone else writes.
+    fn end_shown(&mut self, out: &mut impl Sink) {
+        if self.shown.take().is_some() {
+            out.put(b"\r\n");
+        }
+    }
+
+    /// Shows slot `i`'s held line on the port, unfinished.
+    fn show(&mut self, i: usize, out: &mut impl Sink) {
+        self.end_shown(out);
+        let p = &mut self.open[i];
+        out.put(&p.bytes[..p.len]);
+        self.shown = Some(p.pid);
+        p.len = 0;
+    }
+
+    /// Before a kernel log line: an unfinished line on the port ends.
+    pub fn before_kernel(&mut self, out: &mut impl Sink) {
+        self.end_shown(out);
+    }
+
+    /// Process `pid` writes `bytes` at `now` (0: no clock yet, nothing
+    /// is held).
+    pub fn write(&mut self, pid: u64, bytes: &[u8], now: u64, out: &mut impl Sink) {
+        let Some(&last) = bytes.last() else { return };
+        if self.shown == Some(pid) {
+            // Its line is on the port already: it goes on there.
+            out.put(bytes);
+            if last == b'\n' {
+                self.shown = None;
             }
-            self.held.len = end;
-            return Ok(());
+            return;
         }
-        self.port.write_str(s)
+        self.end_shown(out);
+        let (whole, rest) = match bytes.iter().rposition(|&b| b == b'\n') {
+            Some(i) => bytes.split_at(i + 1),
+            None => (&[][..], bytes),
+        };
+        if !whole.is_empty() {
+            if let Some(i) = self.slot_of(pid) {
+                let p = &mut self.open[i];
+                out.put(&p.bytes[..p.len]);
+                p.len = 0;
+            }
+            out.put(whole);
+        }
+        if rest.is_empty() {
+            return;
+        }
+        let i = match self.slot_of(pid) {
+            Some(i) => i,
+            None if now == 0 => {
+                out.put(rest);
+                self.shown = Some(pid);
+                return;
+            }
+            None => {
+                let i = match self.open.iter().position(|p| p.len == 0) {
+                    Some(i) => i,
+                    None => {
+                        // Every slot taken: the oldest line is shown.
+                        let oldest =
+                            (0..OPEN_LINES).min_by_key(|&i| self.open[i].since).unwrap_or(0);
+                        self.show(oldest, out);
+                        oldest
+                    }
+                };
+                self.open[i].pid = pid;
+                self.open[i].since = now;
+                i
+            }
+        };
+        let p = &mut self.open[i];
+        if p.len + rest.len() > LINE_BYTES {
+            // Too long to hold: shown as it is.
+            self.end_shown(out);
+            let p = &mut self.open[i];
+            out.put(&p.bytes[..p.len]);
+            out.put(rest);
+            p.len = 0;
+            self.shown = Some(pid);
+            return;
+        }
+        p.bytes[p.len..p.len + rest.len()].copy_from_slice(rest);
+        p.len += rest.len();
+    }
+
+    /// The tick at `now`: lines held past [`HOLD_NS`] are shown.
+    pub fn release_overdue(&mut self, now: u64, out: &mut impl Sink) {
+        for i in 0..OPEN_LINES {
+            let p = &self.open[i];
+            if p.len != 0 && now.saturating_sub(p.since) > HOLD_NS {
+                self.show(i, out);
+            }
+        }
+    }
+
+    /// Whether a held line is past [`HOLD_NS`] at `now`.
+    pub fn overdue(&self, now: u64) -> bool {
+        self.open.iter().any(|p| p.len != 0 && now.saturating_sub(p.since) > HOLD_NS)
+    }
+
+    /// Process `pid` is gone: the line it left unfinished ends (a
+    /// newline). Other programs' lines stay.
+    pub fn end(&mut self, pid: u64, out: &mut impl Sink) {
+        if let Some(i) = self.slot_of(pid) {
+            self.show(i, out);
+        }
+        if self.shown == Some(pid) {
+            self.end_shown(out);
+        }
     }
 }
 
-/// True if the open program line has held kernel lines long enough.
 #[cfg(not(feature = "hosted"))]
-fn line_overdue() -> bool {
-    use core::sync::atomic::Ordering;
-    let since = LINE_OPEN_SINCE.load(Ordering::Relaxed);
-    since != 0 && crate::time::raw_monotonic_ns().saturating_sub(since) > HOLD_NS
+impl Sink for serial::SerialPort {
+    fn put(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_byte(b);
+        }
+    }
 }
 
-/// From the timer tick: releases kernel lines an open program line has
-/// held past [`HOLD_NS`] (a prompt waiting for input never ends its
-/// line). Skips the tick if the port is busy.
+/// The programs' lines. Taken only under the COM1 lock.
+#[cfg(not(feature = "hosted"))]
+static LINES: IrqMutex<Lines> = IrqMutex::new(Lines::new());
+
+/// Whether a held line is overdue; read by the tick without the lock.
+#[cfg(not(feature = "hosted"))]
+static OLDEST_HELD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Records when the oldest held line was held (u64::MAX: none), for the
+/// tick's check without locks.
+#[cfg(not(feature = "hosted"))]
+fn note_oldest(lines: &Lines) {
+    let oldest = lines.open.iter().filter(|p| p.len != 0).map(|p| p.since).min();
+    OLDEST_HELD.store(oldest.unwrap_or(u64::MAX), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// From the timer tick: shows the lines held past [`HOLD_NS`]. Skips the
+/// tick if the port is busy.
 #[cfg(not(feature = "hosted"))]
 pub fn release_overdue() {
-    if !line_overdue() {
+    let oldest = OLDEST_HELD.load(core::sync::atomic::Ordering::Relaxed);
+    let now = crate::time::raw_monotonic_ns();
+    if oldest == u64::MAX || now.saturating_sub(oldest) <= HOLD_NS {
         return;
     }
     if let Some(mut port) = serial::COM1.try_lock()
-        && let Some(mut held) = HELD.try_lock()
-        && held.len != 0
+        && let Some(mut lines) = LINES.try_lock()
     {
-        held.release(&mut port);
+        lines.release_overdue(now, &mut *port);
+        note_oldest(&lines);
     }
 }
 
-/// Process `pid` is gone: the line it left open ends (a newline) and held
-/// kernel lines go out. Another program's open line stays.
+/// Process `pid` is gone: the line it left unfinished ends (a newline).
+/// Another program's line stays.
 #[cfg(not(feature = "hosted"))]
 pub fn end_program_line(pid: u64) {
-    use core::sync::atomic::Ordering;
-    let open = LINE_OPEN_SINCE.load(Ordering::Relaxed) != 0;
-    if !exit_ends_line(open, LINE_OWNER.load(Ordering::Relaxed), pid) {
-        return;
-    }
     let mut port = serial::COM1.lock();
-    HELD.lock().release(&mut port);
+    let mut lines = LINES.lock();
+    lines.end(pid, &mut *port);
+    note_oldest(&lines);
 }
 
 #[cfg(feature = "hosted")]
@@ -461,36 +552,23 @@ pub fn release_overdue() {}
 pub fn print(args: fmt::Arguments) {
     {
         let mut port = serial::COM1.lock();
-        let mut held = HELD.lock();
-        if line_overdue() {
-            held.release(&mut port);
-        }
-        let _ = KernelOut { port: &mut port, held: &mut held }.write_fmt(args);
+        LINES.lock().before_kernel(&mut *port);
+        let _ = port.write_fmt(args);
     }
     if let Some(screen) = SCREEN.lock().as_mut() {
         let _ = screen.write_fmt(args);
     }
 }
 
-/// Writes raw bytes (no newline translation): process `pid`'s output.
+/// Writes raw bytes (no newline translation): process `pid`'s output,
+/// under the line discipline ([`Lines`]).
 #[cfg(not(feature = "hosted"))]
 pub fn write_bytes(pid: u64, bytes: &[u8]) {
-    use core::sync::atomic::Ordering;
     {
         let mut port = serial::COM1.lock();
-        for &b in bytes {
-            port.write_byte(b);
-        }
-        if let Some(&last) = bytes.last() {
-            if last == b'\n' {
-                LINE_OPEN_SINCE.store(0, Ordering::Relaxed);
-                HELD.lock().release(&mut port);
-            } else if LINE_OPEN_SINCE.load(Ordering::Relaxed) == 0 || bytes.contains(&b'\n') {
-                // A new line opened (0 before the clock runs: no holding).
-                LINE_OPEN_SINCE.store(crate::time::raw_monotonic_ns(), Ordering::Relaxed);
-                LINE_OWNER.store(pid, Ordering::Relaxed);
-            }
-        }
+        let mut lines = LINES.lock();
+        lines.write(pid, bytes, crate::time::raw_monotonic_ns(), &mut *port);
+        note_oldest(&lines);
     }
     if let Some(screen) = SCREEN.lock().as_mut() {
         for &b in bytes {
@@ -525,10 +603,9 @@ fn emergency_write(args: fmt::Arguments) {
     let start = crate::time::raw_monotonic_ns();
     loop {
         if let Some(mut port) = serial::COM1.try_lock_untracked() {
-            // Kernel lines held for a program's line go first (a panic
-            // may come before anything else releases them).
-            if let Some(mut held) = HELD.try_lock_untracked() {
-                held.release(&mut port);
+            // A program's unfinished line on the port ends first.
+            if let Some(mut lines) = LINES.try_lock_untracked() {
+                lines.before_kernel(&mut *port);
             }
             let _ = port.write_fmt(args);
             return;
@@ -585,14 +662,70 @@ macro_rules! error {
 
 #[cfg(test)]
 mod line_tests {
-    use super::exit_ends_line;
+    use super::{HOLD_NS, LINE_BYTES, Lines, OPEN_LINES, Sink};
+
+    struct Out(Vec<u8>);
+    impl Sink for Out {
+        fn put(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
+    fn text(o: &Out) -> &str {
+        core::str::from_utf8(&o.0).unwrap()
+    }
 
     #[test]
-    fn only_the_programs_own_exit_ends_its_open_line() {
-        // uia_chromium_test (pid 4) has half a line out; a chrome.exe
-        // (pid 12) exits: the line stays open for the rest of it.
-        assert!(!exit_ends_line(true, 4, 12));
-        assert!(exit_ends_line(true, 4, 4));
-        assert!(!exit_ends_line(false, 4, 4));
+    fn another_programs_line_never_lands_inside_an_unfinished_one() {
+        // uia_chromium_test (pid 4) has half a line out when a chrome.exe
+        // (pid 12) writes a whole one, and a kernel line comes between.
+        let (mut l, mut o) = (Lines::new(), Out(Vec::new()));
+        l.write(4, b"test: link f", 1, &mut o);
+        l.write(12, b"chrome: error\r\n", 2, &mut o);
+        l.before_kernel(&mut o);
+        o.put(b"[info ] kernel\r\n");
+        l.write(4, b"ollowed\r\n", 3, &mut o);
+        assert_eq!(text(&o), "chrome: error\r\n[info ] kernel\r\ntest: link followed\r\n");
+    }
+
+    #[test]
+    fn a_line_held_too_long_is_shown_and_broken_only_by_someone_elses_output() {
+        let (mut l, mut o) = (Lines::new(), Out(Vec::new()));
+        l.write(4, b"Password: ", 1, &mut o);
+        assert!(!l.overdue(1 + HOLD_NS));
+        l.release_overdue(2 + HOLD_NS, &mut o);
+        assert_eq!(text(&o), "Password: ");
+        // The program goes on on the port; then the kernel breaks the line.
+        l.write(4, b"x", 3 + HOLD_NS, &mut o);
+        l.before_kernel(&mut o);
+        l.write(4, b"y\r\n", 4 + HOLD_NS, &mut o);
+        assert_eq!(text(&o), "Password: x\r\ny\r\n");
+    }
+
+    #[test]
+    fn an_exit_ends_only_the_exiting_programs_line() {
+        let (mut l, mut o) = (Lines::new(), Out(Vec::new()));
+        l.write(4, b"parent's ", 1, &mut o);
+        l.write(8, b"child's half", 2, &mut o);
+        l.end(8, &mut o);
+        l.write(4, b"line\r\n", 3, &mut o);
+        l.end(4, &mut o);
+        assert_eq!(text(&o), "child's half\r\nparent's line\r\n");
+    }
+
+    #[test]
+    fn without_a_clock_or_a_free_slot_or_room_a_line_is_shown() {
+        let (mut l, mut o) = (Lines::new(), Out(Vec::new()));
+        l.write(4, b"early", 0, &mut o);
+        assert_eq!(text(&o), "early");
+        l.write(4, b"\r\n", 0, &mut o);
+        for pid in 0..OPEN_LINES as u64 {
+            l.write(100 + pid, b"a", 10 + pid, &mut o);
+        }
+        l.write(200, b"b", 50, &mut o);
+        // The oldest (pid 100) is shown to make room.
+        assert_eq!(text(&o), "early\r\na");
+        let long = [b'z'; LINE_BYTES + 1];
+        l.write(300, &long, 60, &mut o);
+        assert!(o.0.ends_with(&long));
     }
 }

@@ -8575,6 +8575,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
     ("bcrypt_test", "ntdll.dll", "Windows/System32"),
+    ("serial_line_test", "ntdll.dll", "Windows/System32"),
+    ("serial_line_test", "kernel32.dll", "Windows/System32"),
     ("console_test", "ntdll.dll", "Windows/System32"),
     ("console_test", "kernel32.dll", "Windows/System32"),
     ("bcrypt_test", "kernel32.dll", "Windows/System32"),
@@ -11286,6 +11288,7 @@ const USER_PROGRAMS: &[&str] = &[
     "shell_events_test",
     "linux_hwnd_test",
     "launch_test",
+    "serial_line_test",
     "hotkey_test",
     "wintrust_test",
     "cab_probe",
@@ -15430,6 +15433,20 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=console_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["console_test: split-line", "console_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Two programs on the serial line at once (user/serial_line_test):
+        // each program's line stays whole, a line left open at exit ends.
+        name: "serial_line_test",
+        cmdline: "qemu_exit run=serial_line_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "serial_line_test: child's line",
+            "serial_line_test: child's half",
+            "serial_line_test: parent's line",
+            "serial_line_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // P1 (PowerShell): CNG random numbers and hashes (.NET's crypto).
@@ -21586,6 +21603,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
     ("clipboard_test", "a child process (one NT process per Linux process)"),
+    ("serial_line_test", "a child process (one NT process per Linux process)"),
     (
         "launch_test",
         "its launches are child processes, one in a console window (one NT process per Linux process; no screen)",

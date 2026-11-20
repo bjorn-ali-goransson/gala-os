@@ -2814,18 +2814,22 @@ with a console (Caddy logs differently; `kernel32_sys_test` and
 `winsock_test` expect redirected handles), so the serial-line handles stay
 non-consoles.
 
-**The serial line's discipline** (`kernel/src/console.rs`): programs
-and the kernel log share the serial port, and programs write a line in
-pieces (msvcrt is unbuffered; `puts` is two writes). While a program's
-line is open (the last user byte written was not a newline), kernel
-lines are held in a 4 KiB buffer and written when the program ends its
-line, so a log line never lands inside a program's line. A program
-cannot hold the log back: past 100 ms the next kernel print or timer
-tick ends the line with a newline and releases what is held; so do the
-process's exit (before its exit line), a full buffer and emergency
-output. There is one line state for all programs: two programs writing
-at once can still share a line. `console_test` checks a line written
-around a thread exit's log line.
+**The serial line's discipline** (`kernel/src/console.rs`, `Lines`):
+programs and the kernel log share the serial port, programs write a
+line in pieces (msvcrt is unbuffered; `puts` is two writes), and several
+programs write at once. Each program's unfinished line is held per
+process (8 programs at once, 1 KiB each) and goes out whole when the
+program ends it; whole lines go out at once, kernel lines too. Nothing
+lands inside a program's line, neither a kernel line nor another
+program's. A program cannot hold its line back: past 100 ms the timer
+tick shows it as it is (a prompt waiting for input), and so does a line
+longer than the slot or the need for its slot (the oldest goes); a shown
+line the program continues goes on on the port, and anyone else's
+output ends it with a newline first, as does the program's exit (before
+its exit line) and emergency output. `serial_line_test` checks two
+programs' lines and a line left open at exit, `console_test` a line
+written around a thread exit's log line; the host tests `line_tests`
+the rest.
 
 **Without a session** (kernel32 `console.rs`):
 
