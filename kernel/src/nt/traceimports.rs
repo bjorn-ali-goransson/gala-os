@@ -153,8 +153,13 @@ const MAX_STRINGS: u32 = 1 << 20;
 /// The most texts `imports_except=` may name. Each is matched against
 /// every import of the traced program as its slots are reported, so
 /// this bounds that scan and keeps the option a filter and not a
-/// language.
-const MAX_EXCEPT: usize = 8;
+/// language. Sixteen because of what one measured wide trace needs:
+/// eleven families (the CRT shims, ntdll's Rtl exports, VCRUNTIME's
+/// memory functions, the core heap, KERNEL32's heap, MSVCP's mutex,
+/// the SRW locks, the last-error pair, Fls, the critical sections and
+/// GetCurrentThreadId) cover 96% of the records of Word's startup, and
+/// a bound a real question already fills is no bound at all.
+const MAX_EXCEPT: usize = 16;
 
 /// The bytes read at one argument to see whether it is text, and never
 /// past the end of the page it points into. An argument is a register,

@@ -1362,8 +1362,13 @@ data first, which disarms the slot (below), so that one leaves a
   and the program calls it as it would with nothing armed. The texts
   are substrings and not patterns, which is what lets one of them name
   a family -- `api-ms-win-crt-` is every CRT shim, `ntdll.dll!Rtl`
-  every Rtl export -- and eight at most of 96 bytes each; a value that
-  is not that is refused outright, as the budgets' own are. How many
+  every Rtl export -- and sixteen at most of 96 bytes each; a value
+  that is not that is refused outright, as the budgets' own are.
+  Sixteen is what one measured question needs with room to spare:
+  eleven families cover 96% of the records of Word's startup (the CRT
+  shims, ntdll's Rtl exports, VCRUNTIME's memory functions, the core
+  heap, KERNEL32's heap, MSVCP's mutex, the SRW locks, the last-error
+  pair, Fls, the critical sections and `GetCurrentThreadId`). How many
   slots they left alone is a summary line, because a name missing from
   a trace must read as the filter's doing and not as a call the program
   never made. Scenario `iat_except`, with an ARM64 twin: four imports
