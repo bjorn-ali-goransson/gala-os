@@ -261,11 +261,13 @@ impl fmt::Display for Fields<'_> {
 /// One `ret` event's fields: what a call answered, as the one word the
 /// wrapper took it for. A type for the same reason as [`Fields`]: so a
 /// host test can read the line the stream would carry.
-struct Answer<'a> {
-    pid: u64,
-    process: &'a str,
-    call: &'a str,
-    answer: u64,
+/// Shared with `traceimports`, which records the same shape of answer
+/// for a call through an import slot (`imports_answers=`).
+pub(super) struct Answer<'a> {
+    pub(super) pid: u64,
+    pub(super) process: &'a str,
+    pub(super) call: &'a str,
+    pub(super) answer: u64,
 }
 
 impl fmt::Display for Answer<'_> {

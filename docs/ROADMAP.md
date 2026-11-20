@@ -2244,7 +2244,9 @@ need gala's.
      Microsoft entry points Word reaches in it, and with
      `imports_repeat=<n>` beside it the sequence of calls through those
      slots rather than the set: the slot stays armed, so every call
-     through it faults and is recorded, at a fault a call.
+     through it faults and is recorded, at a fault a call. What each of
+     those calls answered is `imports_answers=<n>`, which traps the
+     return as well.
      The reading needs every slot armed to be a reading at all:
      `imports=WINWORD.EXE:65536` arms 23375 of them and records 1876
      first calls without spending the budget, where 8192 is spent on
@@ -6339,9 +6341,20 @@ among the slowest hand-offs.
      Repairing the slot is only what makes the next call free -- the
      instruction pointer is what sends the call on -- so the repeat is
      not writing it, and what it costs is a fault a call while a slot is
-     armed, which is what the budget bounds. What is left of the gap is
-     the answer: the kernel is out of the call before it returns, so a
-     record says what a call was handed and not what it gave back.
+     armed, which is what the budget bounds. Nor is the answer:
+     `imports_answers=<n>` keeps the return address the call left and
+     puts the slot's second trap address in its place, so the return
+     faults too, with the answer still in the register the ABI returns
+     it in (scenarios `iat_ret_test` and `iat_answers`, both with ARM64
+     twins -- the return address is on the stack on x86-64 and in the
+     link register there). Pending returns are a stack per thread,
+     matched to their calls by the stack pointer a return arrives with,
+     which is also what notices a call that never returned. What is
+     left of the gap: the first four integer argument registers and the
+     one return register, so a wide or indirect argument is not in
+     reach, and a callee that reads its own return address while that
+     return is trapped sees the trap and not its caller -- which is why
+     both budgets are read narrow (OBSERVABILITY "Import tracing").
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

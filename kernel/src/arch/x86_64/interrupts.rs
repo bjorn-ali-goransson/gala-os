@@ -173,6 +173,37 @@ impl TrapFrame {
         [self.rcx, self.rdx, self.r8, self.r9]
     }
 
+    /// The register a call's answer comes back in. Read at a fault on a
+    /// return, where the callee has run nothing since its `ret`, so it
+    /// still holds what the call gave back (`imports_answers=`,
+    /// nt::traceimports).
+    pub fn answer(&self) -> u64 {
+        self.rax
+    }
+
+    /// Where the call this frame is in left its return address: on
+    /// x86-64 the call pushed it, so it is the word at the stack
+    /// pointer and `read` is what fetches it from the program's memory.
+    /// None when that word cannot be read.
+    pub fn return_address(&self, read: impl FnOnce(u64) -> Option<u64>) -> Option<u64> {
+        read(self.rsp)
+    }
+
+    /// Puts `value` where the call left its return address, so that it
+    /// returns there instead; true when it did. `write` is the
+    /// program's memory, for the same reason as above.
+    pub fn set_return_address(&mut self, value: u64, write: impl FnOnce(u64, u64) -> bool) -> bool {
+        write(self.rsp, value)
+    }
+
+    /// The stack pointer a return from the call this frame is in will
+    /// arrive with: on x86-64 the `ret` pops the address the call
+    /// pushed, so it is eight bytes above this one. What matches a
+    /// return to the call it belongs to (`imports_answers=`).
+    pub fn call_return_sp(&self) -> u64 {
+        self.rsp.wrapping_add(8)
+    }
+
     /// Replaces every integer register holding `find` with `put`; true
     /// when at least one did. For a fault at an address a register holds
     /// a stale copy of (`imports=`: an import's value read as data,
