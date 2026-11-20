@@ -4070,10 +4070,12 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
 /// starts at (so that one region serves several calls). Each entry that
 /// the budget covers has its slot written with `base + index * STRIDE`,
 /// so the next call through it faults there. Op 2 says that a walk of
-/// the calling thread's frames begins at the stack pointer A, so that
-/// the returns its calls through armed slots are still waiting for go
-/// back where those calls left them: only the program knows, an
-/// exception raised in user mode reaching no kernel path.
+/// the calling thread's frames begins at the stack pointer A with the pc
+/// B, so that the returns its calls through armed slots are still
+/// waiting for go back where those calls left them; C takes a `u64`, the
+/// return address of the call the walk begins in where B is that call's
+/// return trap and 0 where it is not. Only the program knows a walk has
+/// begun, an exception raised in user mode reaching no kernel path.
 fn gala_imports(call: &mut Call<'_>) -> NtStatus {
     /// One reported import: slot, target, name, name length.
     const ENTRY: u64 = 4 * 8;
@@ -4142,7 +4144,11 @@ fn gala_imports(call: &mut Call<'_>) -> NtStatus {
             NtStatus::SUCCESS
         }
         2 => {
-            super::traceimports::unwinding(&call.process, arg!(call, 1));
+            let pc = arg!(call, 2);
+            let ret = super::traceimports::unwinding(&call.process, arg!(call, 1), pc);
+            if call.process.write(arg!(call, 3), &ret.to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
             NtStatus::SUCCESS
         }
         _ => NtStatus::INVALID_PARAMETER,

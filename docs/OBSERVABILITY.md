@@ -1237,15 +1237,31 @@ data first, which disarms the slot (below), so that one leaves a
   written back where its call left it: the word the call pushed on
   x86-64, wherever the callee saved the link register on ARM64, looked
   for in the 512 words below the stack pointer that return would have
-  arrived with. Those calls are then
-  recorded without an answer, which the summary says -- the program's
-  own unwinding is worth more than one answer, and an exception caught
-  deeper than the call pays the same price, there being no telling the
-  two apart before the program has walked. A return not found to put
-  back is counted and said as well, because the walk of that frame
-  ends at the trap. Scenarios `iat_unwind_test` (the unwinds with
-  nothing armed) and `iat_unwind` (the same program with the slots
-  armed), both with ARM64 twins.
+  arrived with. Those calls are then recorded without an answer, which
+  the summary says -- the program's own unwinding is worth more than
+  one answer, and an exception caught deeper than the call pays the
+  same price, there being no telling the two apart before the program
+  has walked. A return not found to put back is counted and said as
+  well, because the walk of that frame ends at the trap.
+- **The frame the walk begins in is its own.** An exception raised in
+  user mode is reported at the frame of the call that raised, by the
+  address that call would have returned to: where the raise itself went
+  through an armed slot, the pc the walk starts from *is* the slot's
+  return trap, and the walk ends on its first frame with not one
+  handler asked. That one return is answered and not only put back: a
+  walk begins from a pc and not from the stack, so ntdll writes the
+  address into the CONTEXT it walks from, and over the record's
+  ExceptionAddress where that named the trap as well. It goes back in
+  memory too -- the word the call pushed on x86-64, wherever the callee
+  saved the link register on ARM64 -- because the unwind pass that
+  follows the handler search crosses the frame of the callee that
+  raised and reads it there. Word's C++ throw has exactly that shape,
+  every one of `_CxxThrowException`, `RaiseException` and
+  `RtlRaiseException` being an import of its own. Scenarios
+  `iat_unwind_test` (the unwinds with nothing armed) and `iat_unwind`
+  (the same program with the slots armed, raising both through a
+  resolved pointer and through a slot of its own), both with ARM64
+  twins.
 - **Functions only.** An imported variable cannot be trapped: the value
   a read of its slot gives *is* what the program then uses, and no fault
   announces that read. So the loader arms a slot only when the address

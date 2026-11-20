@@ -125,6 +125,17 @@ const MAX_ANSWERS: u32 = 1 << 20;
 /// summary says.
 const MAX_PENDING: usize = 1024;
 
+/// How many walks and how many returns put back are named in the log,
+/// the rest being left to the summary lines. A program that unwinds for
+/// a living (Office does) would fill the log with them, and what these
+/// lines are for is the first walks of a run, where the question is
+/// which frames a walk crossed and which calls were still waiting in
+/// them.
+const WALKS_SAID: u64 = 8;
+
+/// How many put-back returns are named, for the same reason.
+const RESTORES_SAID: u64 = 64;
+
 /// How many pending returns are put back at once when an exception is
 /// dispatched. One batch is a fixed array on the kernel's stack, so that
 /// path allocates nothing; more than a batch's worth is taken in further
@@ -203,6 +214,16 @@ static UNWOUND: AtomicU64 = AtomicU64::new(0);
 /// the program's own walk ends at.
 static RESTORED: AtomicU64 = AtomicU64::new(0);
 static RESTORE_MISSED: AtomicU64 = AtomicU64::new(0);
+/// Walks answered with the return address of the call they begin in,
+/// the pc they would have walked from being that call's return trap,
+/// and walks that began at a trap address no call of the thread was
+/// waiting for. Both are summary lines, for the same reason as the two
+/// above: the first is a call whose answer will never arrive, the
+/// second a walk that ends on its first frame.
+static WALKED_FROM: AtomicU64 = AtomicU64::new(0);
+static WALKED_MISSED: AtomicU64 = AtomicU64::new(0);
+/// Walks announced, which is what [`WALKS_SAID`] is counted against.
+static WALKS: AtomicU64 = AtomicU64::new(0);
 
 /// One call whose return is trapped, from the call until the return
 /// arrives: the thread that made it, the stack pointer its return will
@@ -755,26 +776,69 @@ fn forget(waited: &Pending) {
 /// program's own unwinding is worth more than one answer, and the
 /// summary says how many were given up this way.
 ///
+/// The frame the walk begins in is its own, and the answer is that
+/// frame's pc: ntdll reports it by the return address the call that
+/// raised left, which is the word that call pushed on x86-64 and the
+/// link register on ARM64 -- the slot's return trap, where that call
+/// went through an armed slot. A walk from a trap address ends on its
+/// first frame, so the call's real return address is answered here as
+/// well as put back ([`walked_from`]); 0 where the pc is no trap of
+/// ours, which is every hardware fault.
+///
 /// Asked for by gala's own ntdll as it begins to walk (`GalaImports`
-/// op 2), with the stack pointer of the CONTEXT it walks from: frames
-/// below that are the dispatcher's own and hold no return of ours. It
-/// has to be the program that asks, because an exception raised in user
-/// mode (RtlRaiseException, and with it every C++ throw) is dispatched
-/// without a single system call, so no kernel path sees it coming.
-pub fn unwinding(process: &Process, sp: u64) {
+/// op 2), with the stack pointer and the pc of the CONTEXT it walks
+/// from: other frames below that stack pointer are the dispatcher's own
+/// and hold no return of ours. It has to be the program that asks,
+/// because an exception raised in user mode (RtlRaiseException, and
+/// with it every C++ throw) is dispatched without a single system call,
+/// so no kernel path sees it coming.
+pub fn unwinding(process: &Process, sp: u64, pc: u64) -> u64 {
     if ANSWERS_ASKED.load(Ordering::Relaxed) == 0 {
-        return;
+        return 0;
+    }
+    if WALKS.fetch_add(1, Ordering::Relaxed) < WALKS_SAID {
+        let (above, own, below) = waiting(process.id, sp);
+        info!(
+            "imports: a walk of this thread's frames begins at {sp:#x}: {above} \
+             return{} to put back, {own} in the frame it begins in, {below} \
+             waiting below it (imports_answers=)",
+            if above == 1 { "" } else { "s" }
+        );
     }
     loop {
         let mut batch = [None; RESTORE_BATCH];
         let taken = take_above(process.id, sp, &mut batch);
         if taken == 0 {
-            return;
+            break;
         }
         for waited in batch[..taken].iter().flatten() {
             restore(process, sp, waited);
         }
     }
+    walked_from(process, sp, pc)
+}
+
+/// How many returns the running thread is waiting for above `sp`, which
+/// the walk will put back; how many in the frame the walk begins in,
+/// whose return would arrive with exactly that stack pointer
+/// ([`walked_from`]); and how many below it, which the walk cannot
+/// reach at all, a call waiting there being one whose frame is deeper
+/// than the walk's own start or is gone already. Said with the walk,
+/// for the first [`WALKS_SAID`] of them.
+fn waiting(pid: u64, sp: u64) -> (usize, usize, usize) {
+    let thread = platform::current();
+    let pending = PENDING.lock();
+    let (mut above, mut own, mut below) = (0, 0, 0);
+    for entry in pending.iter().filter(|e| e.thread == thread && e.pid == pid) {
+        if entry.sp > sp {
+            above += 1;
+        } else if entry.sp == sp {
+            own += 1;
+        } else {
+            below += 1;
+        }
+    }
+    (above, own, below)
 }
 
 /// Takes up to `batch.len()` entries of the running thread whose frames
@@ -799,18 +863,23 @@ fn take_above(pid: u64, sp: u64, batch: &mut [Option<Pending>]) -> usize {
 
 /// Puts one call's return address back where the call left it: the word
 /// holding the slot's return trap, looked for from just below the stack
-/// pointer the return would have arrived with and down to the
-/// exception's own, [`RESTORE_WORDS`] at most.
-fn restore(process: &Process, sp: u64, waited: &Pending) {
+/// pointer the return would have arrived with and down to `floor`,
+/// which is the walk's own stack pointer for the frames it crosses and
+/// [`RESTORE_WORDS`] words down for the frame it begins in -- that
+/// one's trap address is below it, in the frame of the callee that
+/// reported the exception at its caller's ([`walked_from`]).
+fn restore(process: &Process, floor: u64, waited: &Pending) {
     let want = waited.trap + RET_OFFSET;
-    let floor = sp.max(waited.sp.saturating_sub(RESTORE_WORDS * 8));
+    let floor = floor.max(waited.sp.saturating_sub(RESTORE_WORDS * 8));
     let mut at = waited.sp;
     while at > floor {
         at -= 8;
         match process.read_u64(at) {
             Ok(word) if word == want => {
                 if process.write_u64(at, waited.ret).is_ok() {
-                    RESTORED.fetch_add(1, Ordering::Relaxed);
+                    if RESTORED.fetch_add(1, Ordering::Relaxed) < RESTORES_SAID {
+                        said_restored(at, waited);
+                    }
                     return;
                 }
                 break;
@@ -822,6 +891,120 @@ fn restore(process: &Process, sp: u64, waited: &Pending) {
         }
     }
     missed(waited);
+}
+
+/// One put-back return, named: which call was waiting in the frame the
+/// walk is about to cross, and where on the stack its trap address was.
+/// The name is read with no lock held over the program's memory, the
+/// write having finished.
+fn said_restored(at: u64, waited: &Pending) {
+    let entry = {
+        let traps = TRAPS.lock();
+        traps.iter().find(|t| t.trap == waited.trap && t.pid == waited.pid).copied()
+    };
+    match entry {
+        Some(entry) => info!(
+            "imports: put back the return {:#x} of the call to {} at {at:#x}, which \
+             held the slot's return trap (imports_answers=)",
+            waited.ret,
+            Name(&entry)
+        ),
+        None => info!(
+            "imports: put back the return {:#x} of the call through the slot trapped \
+             at {:#x} at {at:#x} (imports_answers=)",
+            waited.ret, waited.trap
+        ),
+    }
+}
+
+/// The return address of the call the walk itself begins in, when the
+/// pc it walks from is that call's return trap; 0 when it is not.
+///
+/// Answered and not only put back, because a walk begins from a pc and
+/// not from the stack: the address is handed to ntdll for the CONTEXT
+/// it walks from. It goes back in memory as well, in the frame of the
+/// callee that reported the exception at its caller's -- the word the
+/// call pushed on x86-64, wherever that callee saved the link register
+/// on ARM64 -- because the unwind pass that follows the handler search
+/// crosses that frame and reads it there. The entry is taken out like
+/// a put-back return and the call recorded without an answer for the
+/// same reason: the program has the address its return would have
+/// faulted at, so no answer can arrive now.
+fn walked_from(process: &Process, sp: u64, pc: u64) -> u64 {
+    let Some(waited) = take_walked_from(process.id, sp, pc) else {
+        return walked_from_nothing(process.id, pc);
+    };
+    if WALKED_FROM.fetch_add(1, Ordering::Relaxed) < RESTORES_SAID {
+        said_walked_from(&waited);
+    }
+    // And back on the stack as well, below the walk's own stack
+    // pointer: the handlers are found by walking from the pc, but the
+    // unwind that follows crosses the frame of the callee that raised
+    // and reads the word there, where the call left its return address
+    // and the kernel left the trap.
+    restore(process, 0, &waited);
+    waited.ret
+}
+
+/// The entry of the running thread whose return would arrive at `sp`
+/// with `pc` as its trap: the call the walk begins in. Under the lock
+/// and touching none of the program's memory, as every reader of the
+/// pending entries is.
+fn take_walked_from(pid: u64, sp: u64, pc: u64) -> Option<Pending> {
+    let thread = platform::current();
+    let mut pending = PENDING.lock();
+    let i = pending.iter().rposition(|e| {
+        e.thread == thread && e.pid == pid && e.sp == sp && e.trap + RET_OFFSET == pc
+    })?;
+    Some(pending.remove(i))
+}
+
+/// A walk whose pc is a return trap of this process that no call of
+/// this thread is waiting for at that stack pointer: said once and
+/// counted after that, because the walk ends on its first frame and not
+/// one handler of the program is asked. There is no address to answer.
+fn walked_from_nothing(pid: u64, pc: u64) -> u64 {
+    let entry = {
+        let traps = TRAPS.lock();
+        traps.iter().find(|t| t.pid == pid && t.trap + RET_OFFSET == pc).copied()
+    };
+    if let Some(entry) = entry
+        && WALKED_MISSED.fetch_add(1, Ordering::Relaxed) == 0
+    {
+        warn!(
+            "imports: a walk of this thread's frames begins at the return trap \
+             of {} with no call of this thread waiting for it, so the walk ends \
+             on its first frame and no handler is asked; the summary line counts \
+             the rest (imports_answers=)",
+            Name(&entry)
+        );
+    }
+    0
+}
+
+/// The call a walk begins in, named: its return address answered in
+/// place of the trap address the walk would have started from. The name
+/// is read with no lock over the pending entries held.
+fn said_walked_from(waited: &Pending) {
+    let entry = {
+        let traps = TRAPS.lock();
+        traps.iter().find(|t| t.trap == waited.trap && t.pid == waited.pid).copied()
+    };
+    match entry {
+        Some(entry) => info!(
+            "imports: the walk begins in the call to {}, whose return trap is the pc \
+             it would have walked from: answered with the call's own return address \
+             {:#x} and put back where the call left it, and the call recorded \
+             without an answer (imports_answers=)",
+            Name(&entry),
+            waited.ret
+        ),
+        None => info!(
+            "imports: the walk begins in the call through the slot trapped at {:#x}: \
+             answered with the call's own return address {:#x} (imports_answers=)",
+            waited.trap, waited.ret
+        ),
+    }
 }
 
 /// One pending return that could not be put back. Said once and counted
@@ -1111,6 +1294,23 @@ fn log_answers() {
         info!(
             "imports: {missed} of those could not be put back, so a walk of \
              those frames ends at the trap address (imports_answers=)"
+        );
+    }
+    let walked = WALKED_FROM.load(Ordering::Relaxed);
+    if walked != 0 {
+        info!(
+            "imports: {walked} walks began in a call through an armed slot and were \
+             answered with its return address, the pc they would have walked from \
+             being that call's return trap: it is put back where the call left it \
+             as well, and the call recorded without an answer (imports_answers=)"
+        );
+    }
+    let missed_walk = WALKED_MISSED.load(Ordering::Relaxed);
+    if missed_walk != 0 {
+        info!(
+            "imports: {missed_walk} walks began at a return trap no call of the \
+             thread was waiting for, and ended on their first frame \
+             (imports_answers=)"
         );
     }
     let waiting = PENDING.lock().len();

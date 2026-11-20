@@ -551,7 +551,8 @@ syscall_stubs! {
     // asks whether this process's import slots are armed and for the DLL
     // they must come from, op 1 reports imports just bound so that the
     // kernel can arm them, op 2 says that a walk of this thread's frames
-    // is about to begin (`unwinding`).
+    // is about to begin and asks for the return address of the call it
+    // begins in (`walking`).
     GalaImports = 0x7f2c, fn(op: u64, a: u64, b: u64, c: u64);
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
@@ -2039,28 +2040,42 @@ struct Traced {
 /// through the armed slots are trapped as well (`imports_answers=`), so
 /// a walk of this thread's own frames has to ask for the pending ones
 /// back first. Its own static and not a field of [`Traced`], which is
-/// read under the loader lock, because [`unwinding`] is called from
+/// read under the loader lock, because [`walking`] is called from
 /// exception dispatch on any thread; relaxed, the loader having written
 /// it before any import of ours could have been called.
 static ANSWERS_TRAPPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Says that a walk of this thread's frames begins at `sp`, so that the
-/// kernel puts the returns this thread's calls through armed import
-/// slots are waiting for back where those calls left them.
+/// Says that a walk of this thread's frames begins at the CONTEXT
+/// `context`, so that the kernel puts the returns this thread's calls
+/// through armed import slots are waiting for back where those calls
+/// left them -- and gives back the return address of the call the walk
+/// begins in, which is what that CONTEXT's pc is: the exception is
+/// reported at the frame of the call that raised, by the address it
+/// would have returned to. Answers the trap address it put the real one
+/// in place of, so that a record naming the same address can be
+/// repaired with it, and 0 where there was nothing to replace.
 ///
 /// A trap address is in no image and in no function table, so a frame
-/// still holding one is where the walk ends: the handlers above it are
-/// never asked and an exception the program would have caught kills it
-/// instead. Nothing but the program can say when a walk begins, an
-/// exception raised in user mode (RtlRaiseException, and with it every
-/// C++ throw) being dispatched without a single system call. Costs one
-/// relaxed load where the option is not in use, which is every run but
-/// a traced one.
+/// still holding one is where the walk ends -- and a pc that is one
+/// ends it on its first frame: the handlers are never asked and an
+/// exception the program would have caught kills it instead. Nothing
+/// but the program can say when a walk begins, an exception raised in
+/// user mode (RtlRaiseException, and with it every C++ throw) being
+/// dispatched without a single system call. Costs one relaxed load
+/// where the option is not in use, which is every run but a traced one.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn unwinding(sp: u64) {
-    if ANSWERS_TRAPPED.load(core::sync::atomic::Ordering::Relaxed) {
-        GalaImports(2, sp, 0, 0);
+pub(crate) fn walking(context: *mut u8) -> u64 {
+    if !ANSWERS_TRAPPED.load(core::sync::atomic::Ordering::Relaxed) {
+        return 0;
     }
+    let pc = crate::seh::context_pc(context);
+    let mut answer = 0u64;
+    GalaImports(2, crate::seh::context_sp(context), pc, &mut answer as *mut u64 as u64);
+    if answer == 0 {
+        return 0;
+    }
+    crate::seh::set_context_pc(context, answer);
+    pc
 }
 
 struct TracedImports(core::cell::UnsafeCell<Traced>);

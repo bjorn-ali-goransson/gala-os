@@ -990,10 +990,37 @@ fn call_handler(
 // --- Dispatch ----------------------------------------------------------
 
 /// The stack pointer of a CONTEXT: where a walk of the frames it
-/// describes begins (`crate::unwinding`).
+/// describes begins (`crate::walking`).
 pub(crate) fn context_sp(context: *const u8) -> u64 {
     // SAFETY: a CONTEXT, whose Sp is at CTX_SP.
     unsafe { context.add(CTX_SP).cast::<u64>().read_unaligned() }
+}
+
+/// The pc of a CONTEXT: the frame a walk of it begins in, which for an
+/// exception raised in user mode is the frame of the call that raised
+/// and the address it would have returned to (`crate::walking`).
+pub(crate) fn context_pc(context: *const u8) -> u64 {
+    // SAFETY: a CONTEXT, whose Pc is at CTX_PC.
+    unsafe { context.add(CTX_PC).cast::<u64>().read_unaligned() }
+}
+
+/// Puts `pc` there: the kernel has given back the return address of the
+/// call the walk begins in, the pc having been that call's return trap
+/// (`crate::walking`). The link register is the same address on ARM64 --
+/// the call left it there and the raise copied it into both -- so a
+/// frame unwound as a leaf would read the trap from Lr; it is replaced
+/// with the pc wherever it holds the same.
+pub(crate) fn set_context_pc(context: *mut u8, pc: u64) {
+    // SAFETY: a CONTEXT, whose Pc is at CTX_PC and Lr at CTX_LR.
+    unsafe {
+        let at = context.add(CTX_PC).cast::<u64>();
+        let was = at.read_unaligned();
+        at.write_unaligned(pc);
+        let lr = context.add(CTX_LR).cast::<u64>();
+        if lr.read_unaligned() == was {
+            lr.write_unaligned(pc);
+        }
+    }
 }
 
 /// Calls the exception handlers of the frames from `context` outwards;
@@ -1051,8 +1078,10 @@ extern "system" fn unwind_to(
 ) -> ! {
     // A walk of this thread's frames begins here, so the returns its
     // calls through armed import slots are waiting for go back where
-    // those calls left them first (`imports_answers=`).
-    crate::unwinding(context_sp(start));
+    // those calls left them first, and the pc it begins at is given
+    // back where the call that asked for the unwind is one of them
+    // (`imports_answers=`).
+    crate::walking(start.cast_mut());
     let mut own_record = [0u8; RECORD_SIZE];
     let record = if record.is_null() {
         own_record[..4].copy_from_slice(&STATUS_UNWIND.to_le_bytes());

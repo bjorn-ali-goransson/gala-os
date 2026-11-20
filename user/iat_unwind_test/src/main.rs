@@ -18,6 +18,16 @@
 //! one left in place is where the unwind ends. The calls unwound past
 //! never return, so no answer is lost by it.
 //!
+//! The raise can go through a slot of its own as well
+//! (`testdll!gala_raise_at`, which jumps straight on to
+//! RtlRaiseException): the call that raises is then the one whose
+//! return is trapped, so the pc the program's own walk begins at is a
+//! trap address and the walk ends on its first frame -- not one handler
+//! asked -- unless the kernel gives that call's return address back
+//! with it. That is the shape of Word's C++ throw, where
+//! `_CxxThrowException`, `RaiseException` and `RtlRaiseException` are
+//! each an import like any other.
+//!
 //! The expected results are Windows', where nothing is armed and the
 //! unwind simply works: every check holds with the option and without
 //! it, which is the claim. Prints `iat_unwind_test: ok`, or exits with
@@ -26,7 +36,7 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use ntrt::*;
 
@@ -34,6 +44,7 @@ use ntrt::*;
 unsafe extern "C" {
     fn gala_add(a: u64, b: u64) -> u64;
     fn gala_call_back(f: extern "C" fn(u64) -> u64, x: u64) -> u64;
+    fn gala_raise_at(record: *mut u8, raiser: usize);
 }
 
 const EXCEPTION_CONTINUE_SEARCH: u32 = 1;
@@ -65,6 +76,12 @@ static RESUME_NV: AtomicU64 = AtomicU64::new(0);
 /// What the handler saw: calls (the search pass only), the code, the
 /// establisher frame.
 static HANDLER: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Whether `raise` goes through the import slot of testdll's
+/// `gala_raise_at`, which jumps straight on to RtlRaiseException: the
+/// call that raises is then the one whose return is trapped, so the pc
+/// the walk begins at is that slot's return trap and the frame it
+/// begins in is `raise`'s own.
+static THROUGH_SLOT: AtomicBool = AtomicBool::new(false);
 /// The value the handler unwinds with, and the code `step` raises (zero:
 /// answer `PLAIN` instead).
 static UNWIND_VALUE: AtomicU64 = AtomicU64::new(0);
@@ -187,10 +204,18 @@ fn raise(code: u64) -> u64 {
     let mut record = [0u8; RECORD_SIZE];
     let r = record.as_mut_ptr();
     wr(r, ER_CODE, code);
-    // SAFETY: the documented signature of ntdll's RtlRaiseException.
-    let raise: extern "system" fn(*mut u8) =
-        unsafe { core::mem::transmute(RTL_RAISE.load(Ordering::SeqCst)) };
-    raise(r);
+    let raiser = RTL_RAISE.load(Ordering::SeqCst);
+    if THROUGH_SLOT.load(Ordering::SeqCst) {
+        // SAFETY: imported from testdll, bound by the loader; it jumps
+        // straight on to `raiser` with the record, so the exception is
+        // raised at this frame and with the stack pointer the call
+        // through the slot would have returned with.
+        unsafe { gala_raise_at(r, raiser) };
+    } else {
+        // SAFETY: the documented signature of ntdll's RtlRaiseException.
+        let raise: extern "system" fn(*mut u8) = unsafe { core::mem::transmute(raiser) };
+        raise(r);
+    }
     // Not reached: the handler unwinds past this frame.
     0
 }
@@ -273,6 +298,15 @@ fn run() -> Result<(), u32> {
     // frames of a DLL.
     unwound(&mut c, 2, 0x4100)?;
     unwound(&mut c, 3, 0x4200)?;
+
+    // The raise through a slot of its own, across one trapped frame
+    // and three: the pc the walk begins at is the slot's return trap,
+    // so without the call's own return address back with it no handler
+    // is asked at all and the exception kills the program.
+    THROUGH_SLOT.store(true, Ordering::SeqCst);
+    unwound(&mut c, 1, 0x4300)?;
+    unwound(&mut c, 3, 0x4400)?;
+    THROUGH_SLOT.store(false, Ordering::SeqCst);
 
     // And the slot is a slot still: the calls after all that are
     // recorded and answered as the first were.

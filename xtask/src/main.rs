@@ -19084,10 +19084,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // still holding one is where an unwind ends. gala's own ntdll
         // says when a walk of a thread's frames begins and the kernel
         // gives that thread's return addresses back, so the program
-        // sees what it sees without the option: seven unwinds, across
-        // one, two and three trapped frames. Nine of the fifteen calls
-        // therefore never return (the kernel says so, naming what it
-        // put back), and the other six answer.
+        // sees what it sees without the option: nine unwinds, across
+        // one, two and three trapped frames, two of them raised
+        // through a slot of the program's own so that the pc the walk
+        // begins at is a trap address too. Fifteen of the twenty-one
+        // calls therefore never return (the kernel says so, naming
+        // what it put back and what it answered instead), and the
+        // other six answer.
         name: "iat_unwind",
         cmdline: "qemu_exit events=call run=iat_unwind_test.exe \
                   imports=iat_unwind_test.exe!testdll.dll imports_repeat=64 \
@@ -19096,12 +19099,17 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "iat_unwind_test: ok",
             "exited with status 0x00000000",
-            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
-            "imports: 13 later calls recorded of 64 (imports_repeat=)",
+            "imports: first calls recorded: 3 of 3 slots armed (imports=)",
+            "imports: 18 later calls recorded of 64 (imports_repeat=)",
             "imports: 6 answers recorded of 64 (imports_answers=)",
-            "imports: 9 pending returns were put back where their calls left \
+            "imports: 15 pending returns were put back where their calls left \
              them, for an exception to unwind through those frames: the calls \
              are recorded without an answer (imports_answers=)",
+            "imports: 2 walks began in a call through an armed slot and were \
+             answered with its return address, the pc they would have walked \
+             from being that call's return trap: it is put back where the call \
+             left it as well, and the call recorded without an answer \
+             (imports_answers=)",
         ],
     },
     Scenario {
