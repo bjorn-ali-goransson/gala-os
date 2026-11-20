@@ -19352,9 +19352,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // callee's text where its answer is, so the same register is a
         // number at the call and a string at the return -- which is
         // what a call that answers into a buffer (every Windows call
-        // that fills one, and what Word's startup asks mso for 134
-        // times before it gives up) needs read at its return to be
-        // read at all. A return quotes its answer and the arguments
+        // that fills one, and most of what Word's startup asks mso
+        // for) needs read at its return to be read at all. A return quotes its answer and the arguments
         // that were no text at the call, and not what the call already
         // carries: so the three quotes of `import_strings` above are
         // joined by two of this one call's, at the answer and at the

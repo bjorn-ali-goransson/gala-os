@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for the arguments that read as text, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -1359,10 +1359,11 @@ data first, which disarms the slot (below), so that one leaves a
   **A buffer a call filled is read at its return.** A call that fills
   one is handed an empty buffer, so what it is about is in the buffer
   only once the call is over, and a quote of its arguments reads as a
-  call that was handed no text at all -- which is what Word's last
-  conversation before it gives up is made of: 134 calls to one mso
-  ordinal, each answering the buffer it was handed. Where
-  `imports_answers=` trapped the return, the same reading therefore
+  call that was handed no text at all -- which most of the Windows
+  API is made of, and most of what Word's startup asks mso for: one
+  ordinal called over a hundred times, each call answering the buffer
+  it was handed. Where `imports_answers=` trapped the return, the
+  same reading therefore
   runs again there: at the register the answer came back in, and at the
   arguments that were no text at the call (the kernel kept those from
   the call, the callee being free to clobber the registers; an argument
@@ -1506,13 +1507,23 @@ data first, which disarms the slot (below), so that one leaves a
   import is bound by the program's own helper on its first call, and a
   `GetProcAddress` result never goes through an IAT slot at all;
   neither is seen.
+- **A call repeated is often a pump and not a conversation.** An
+  import trace on its own is a sequence of calls into DLLs and nothing
+  else, so a loop that goes round waiting for messages reads exactly
+  like a program asking one question over and over. What tells the two
+  apart is what lies between the calls: `events=syscall,call` puts
+  each call among the waits and window calls of the thread that made
+  it, and `events=file` beside it names the keys and files that thread
+  opened. Word's startup has such a loop (ROADMAP, the Word item), and
+  a reading of it that leaves the syscalls out is a reading of the
+  pump.
 - **Limits**: one record a slot without `imports_repeat=`, so the
   stream is then a set of names and not a sequence; an answer is the
   one register the ABI returns in, so a structure returned by hidden
-  pointer is the pointer and not what it points at; a quote is text at
-  an argument of a call and never at its answer, since what a call
-  wrote into a buffer it was handed is only there once the call is
-  over, which is a fault this option does not take; and a callee that
+  pointer is the pointer and not what it points at; a quote at a
+  return is read only where `imports_answers=` trapped one, so a call
+  whose answer the budget did not reach carries what its arguments
+  held at the call and nothing of what it wrote; and a callee that
   reads its own return address while that return is trapped
   (`_ReturnAddress`, a stack walk of its own) sees the slot's trap
   address rather than the caller's code, which is what the answers

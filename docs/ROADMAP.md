@@ -2289,21 +2289,49 @@ need gala's.
      of the brush -- the `Word\Options\Debug` read at 41773 ms is
      already Word asking whether to break before it gives up -- and on
      a value some call answered S_OK with rather than on a status.
-     Which value came within reach by narrowing the arming to one DLL.
-     `imports=WINWORD.EXE!Mso20Win32Client.dll:8192` with
-     `imports_repeat=`, `imports_answers=` and `imports_strings=`
-     records 76 first calls, 2135 later ones and 2210 answers without
-     spending the budget on the rest of the program, and what it shows
-     is that the last stretch before the box is one call made 134
-     times: `Mso20Win32Client.dll!#16040(out, 0x1fb480, 0x2ae380,
-     <id>)` on the startup thread between 44170 ms and 45403 ms, 126
-     distinct ids, every one of which answers the buffer it was handed
-     -- and then #7228 with the message 48 ms later. So nothing
-     refused Word anything here either: what it acted on is in that
-     buffer, which the instrument could not read while it quoted
-     arguments only. It reads one now (OT3b, text at a return,
-     scenario `import_answer_text`), and the next run of this track is
-     that same narrow arming with those 134 answers quoted.
+     Which value is in no call Word makes next, and the stretch
+     before the box is not a conversation at all. Narrowing the arming
+     to one DLL -- `imports=WINWORD.EXE!Mso20Win32Client.dll:8192`
+     with `imports_repeat=`, `imports_answers=` and
+     `imports_strings=`, which records 76 first calls, 2135 later ones
+     and 2210 answers without spending the budget on the rest of the
+     program -- makes one ordinal stand out, `#16040`, called over a
+     hundred times on the startup thread with the buffer it answers.
+     Joined with its syscalls and the names of what it opens
+     (`events=syscall,call,file`), that ordinal is one third of a loop
+     (`#59438`, `#16040`, `#15239`) which interleaves with another
+     thread's `GalaWindowPosted`/`GalaWindowReceive`/`GalaWindowInput`
+     and `NtWaitForMultipleObjects` timeouts and goes round long after
+     the box, to the end of the run: it is the message pump, and an
+     import trace read without its syscalls reads a pump as a
+     conversation (OBSERVABILITY, "Import tracing").
+     What the arming does show is the work Word names itself, some
+     of those ordinals taking a name as an argument (an ETW event's,
+     or a scope's). The last seven seconds of the deciding thread are
+     `DeviceModeEtw`, `AirSpace::SetDeviceMode`,
+     `AnimationDisabledReason`, `AnimationsEnvironmentChangeEtw`, and
+     on the render thread
+     `AirSpace::RenderThread::Painter::SetDeviceContext`,
+     `Compositor::BeginPainterBatch`,
+     `UpdateDeviceModeCommand::Execute` and
+     `PainterBatchCommand::Execute` -- a graphics stack coming up --
+     and the box itself now carries its own words, `#7228(0x7173716b,
+     0, "Sorry, something went wrong and Word was unable to start.
+     (13)", "Microsoft Word 16.0")`.
+     Nothing is refused beside the decision. In those seven seconds
+     the only failures on that thread are keys a fresh Windows does
+     not have either (`...\Office\16.0\Common\Graphics`,
+     `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
+     own probe for a private `Microsoft.Windows.Common-Controls`
+     assembly -- four paths, twice, `kernel32`'s
+     `actctx/manifest.rs` on its way to the WinSxS assembly it then
+     resolves, which leaves no `CreateActCtxW` row in the ledger.
+     Word goes on running after the box as well: pagelayout.dll
+     0.6 s later, `INetCache\Content.MSO` at 4 s, OProcSessId.dat at
+     7.7 s. So what Word acted on is in an answer some call gave it,
+     and what this track needs next is not another question put to
+     the system but the stack over the box (below) and the answers of
+     the calls that succeeded.
      What those calls were handed and what they gave back is what
      `trace_from=<dll>!<Interface>::<Method>` with `events=call`
      measures, the ledger keeping one row a site and so hiding every
@@ -6429,9 +6457,11 @@ among the slowest hand-offs.
      `imports_strings=` together quote the answer register and the
      arguments that were no text at the call, each quote keyed by the
      place it was read at (`answer`, or the argument's index), which is
-     what Word's own last conversation needs read -- 134 calls to one
-     mso ordinal, every one answering the buffer it was handed
-     (scenario `import_answer_text` with an ARM64 twin). Nor is a budget spent on the names that are noise:
+     what most of what a program asks of a DLL needs read, Word's
+     own startup among it -- one mso ordinal called over a hundred
+     times, every one answering the buffer it was handed (scenario
+     `import_answer_text` with an ARM64 twin).
+     Nor is a budget spent on the names that are noise:
      `imports_except=<text>[,<text>...]` leaves an import whose
      `<dll>!<name>` holds one of the texts unarmed, so that it costs no
      slot of the budget, no fault and no record (scenario `iat_except`
