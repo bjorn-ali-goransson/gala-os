@@ -69,6 +69,20 @@
 //! in place of them, and why the run must be terminated inside the
 //! window and have [`TEXT_LEAST`] characters before it is text at all.
 //!
+//! A wide trace spends most of itself on the same few names: a
+//! program's heap, string and locale imports are called in the
+//! thousands while the ones a question is about are called once, and
+//! the budget goes to them in that order. `imports_except=<text>[,...]`
+//! leaves those imports unarmed. A slot whose `<dll>!<name>` holds one
+//! of the texts, compared without regard to case, is never written with
+//! a trap address at all, so it costs no slot of the budget, no fault
+//! and no record, and the program calls it as it would with nothing
+//! armed. The texts are substrings and not patterns, so one of them
+//! names a family (`api-ms-win-crt-` is every CRT shim, `ntdll.dll!Rtl`
+//! every Rtl export), and how many slots they left alone is a summary
+//! line: a name missing from a trace must read as the filter's doing
+//! and not as the program not having called it.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
 //! write the slot), and nothing after it -- or, under
@@ -135,6 +149,17 @@ const MAX_ANSWERS: u32 = 1 << 20;
 /// a quote is a read of the program's memory and a string in a line,
 /// both of which the budget is what bounds.
 const MAX_STRINGS: u32 = 1 << 20;
+
+/// The most texts `imports_except=` may name. Each is matched against
+/// every import of the traced program as its slots are reported, so
+/// this bounds that scan and keeps the option a filter and not a
+/// language. Sixteen because of what one measured wide trace needs:
+/// eleven families (the CRT shims, ntdll's Rtl exports, VCRUNTIME's
+/// memory functions, the core heap, KERNEL32's heap, MSVCP's mutex,
+/// the SRW locks, the last-error pair, Fls, the critical sections and
+/// GetCurrentThreadId) cover 96% of the records of Word's startup, and
+/// a bound a real question already fills is no bound at all.
+const MAX_EXCEPT: usize = 16;
 
 /// The bytes read at one argument to see whether it is text, and never
 /// past the end of the page it points into. An argument is a register,
@@ -225,6 +250,26 @@ static SPEC: IrqMutex<Spec> =
 /// Whether `imports=` was given at all, so the fault path and the system
 /// call answer with one relaxed load instead of taking a lock.
 static WANTED: AtomicBool = AtomicBool::new(false);
+
+/// What `imports_except=` named: the texts an import's `<dll>!<name>`
+/// is matched against, and how many of them were given.
+struct Except {
+    texts: [[u8; NAME_LEN]; MAX_EXCEPT],
+    lens: [usize; MAX_EXCEPT],
+    held: usize,
+}
+
+static EXCEPT: IrqMutex<Except> =
+    IrqMutex::new(Except { texts: [[0; NAME_LEN]; MAX_EXCEPT], lens: [0; MAX_EXCEPT], held: 0 });
+
+/// Whether `imports_except=` named anything, so that a run without it
+/// pays one relaxed load as a slot is reported and not a lock.
+static EXCEPTING: AtomicBool = AtomicBool::new(false);
+
+/// Slots left unarmed by `imports_except=`, which is a summary line for
+/// the reason the reads are: a name the filter kept out must not read
+/// afterwards as a call the program did not make.
+static UNARMED: AtomicU64 = AtomicU64::new(0);
 
 /// Slots left in the budget.
 static LEFT: AtomicU32 = AtomicU32::new(0);
@@ -375,6 +420,58 @@ pub fn set(spec: &str) {
         "imports: the first call through each import of {program} from \
          {from}, {budget} at most (imports=)"
     );
+}
+
+/// `imports_except=<text>[,<text>...]`: leave the imports whose
+/// `<dll>!<name>` holds one of the texts unarmed, so that the budget,
+/// the faults and the records go to the rest. Needs `imports=`. The
+/// texts are compared without regard to case, as a file name is, and a
+/// value that is not one is refused outright for the reason the budgets
+/// are: a filter that quietly excluded nothing reads afterwards as a
+/// budget the calls it was meant to keep out were entitled to.
+pub fn set_except(spec: &str) {
+    let mut named = Except { texts: [[0; NAME_LEN]; MAX_EXCEPT], lens: [0; MAX_EXCEPT], held: 0 };
+    for text in spec.split(',') {
+        if text.is_empty() || text.len() > NAME_LEN || named.held == MAX_EXCEPT {
+            warn!(
+                "imports: imports_except={spec} reads <text>[,<text>...], such as \
+                 api-ms-win-crt-,ntdll.dll!Rtl, with {MAX_EXCEPT} texts at most of \
+                 {NAME_LEN} bytes each: every import is armed, as without it"
+            );
+            return;
+        }
+        named.texts[named.held][..text.len()].copy_from_slice(text.as_bytes());
+        named.lens[named.held] = text.len();
+        named.held += 1;
+    }
+    let held = named.held;
+    *EXCEPT.lock() = named;
+    EXCEPTING.store(true, Ordering::Release);
+    info!(
+        "imports: an import whose name holds one of {held} texts ({spec}) is left \
+         unarmed, so it takes no slot of the budget, no fault and no record \
+         (imports_except=)"
+    );
+}
+
+/// Whether `imports_except=` named this import, which is what leaves
+/// its slot alone: `name` is the `<dll>!<name>` a record would carry,
+/// and the texts are substrings of it.
+fn excluded(name: &[u8]) -> bool {
+    if !EXCEPTING.load(Ordering::Acquire) {
+        return false;
+    }
+    let named = EXCEPT.lock();
+    (0..named.held).any(|i| holds(name, &named.texts[i][..named.lens[i]]))
+}
+
+/// Whether `name` holds `text`, without regard to case. An empty text
+/// holds nothing: `set_except` refuses one, and a window of no bytes
+/// would otherwise match every name and arm nothing at all.
+fn holds(name: &[u8], text: &[u8]) -> bool {
+    !text.is_empty()
+        && name.len() >= text.len()
+        && name.windows(text.len()).any(|at| at.eq_ignore_ascii_case(text))
 }
 
 /// `imports_repeat=<n>`: leave each armed slot armed, so that every call
@@ -600,6 +697,13 @@ pub fn region(process: &Process, base: u64, size: u64, count: u64) -> bool {
 /// the next call through it faults here.
 pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, name: &[u8]) -> bool {
     if !program_wanted(process.name) || slot == 0 || target == 0 {
+        return false;
+    }
+    // Named by `imports_except=`: the slot keeps the export's address,
+    // so the call costs the program nothing, and the budget keeps its
+    // slot for an import a record is worth having of.
+    if excluded(name) {
+        UNARMED.fetch_add(1, Ordering::Relaxed);
         return false;
     }
     if take_slot().is_none() {
@@ -1430,6 +1534,12 @@ pub fn log_stats() {
                  slot was armed and no answer was recorded"
             );
         }
+        if EXCEPTING.load(Ordering::Relaxed) {
+            info!(
+                "imports: imports_except= was given without imports=, so no \
+                 slot was armed and nothing was excluded"
+            );
+        }
         return;
     }
     let (armed, done) = (ARMED.load(Ordering::Relaxed), RECORDED.load(Ordering::Relaxed));
@@ -1447,6 +1557,13 @@ pub fn log_stats() {
     } else {
         core::str::from_utf8(&source[..source_len]).unwrap_or("?")
     };
+    let unarmed = UNARMED.load(Ordering::Relaxed);
+    if unarmed != 0 {
+        info!(
+            "imports: {unarmed} imports were left unarmed by imports_except=: they took \
+             no slot of the budget, no fault and no record (imports_except=)"
+        );
+    }
     if armed == 0 {
         info!(
             "imports: no import of {program} from {from} was armed: it never ran, \
@@ -1750,7 +1867,7 @@ mod tests {
     use super::{
         ARGS, BUDGET, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT, MAX_STRINGS, Quote, READ,
         RET_OFFSET, Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget,
-        repeat_budget, split_budget, string_budget, text_in, trap_at,
+        holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
     };
 
     /// The quotes of a call built as the fault path builds them, from
@@ -1770,6 +1887,27 @@ mod tests {
     /// endian, with its terminator.
     fn wide(text: &str) -> alloc::vec::Vec<u8> {
         text.encode_utf16().chain(core::iter::once(0)).flat_map(u16::to_le_bytes).collect()
+    }
+
+    /// `imports_except=`'s texts are substrings of an import's
+    /// `<dll>!<name>` and not patterns, which is what lets one of them
+    /// name a family of imports; the comparison ignores case, as a file
+    /// name's does.
+    #[test]
+    fn an_excepted_text_is_a_substring_of_an_import_name() {
+        let name = b"api-ms-win-crt-heap-l1-1-0.dll!malloc";
+        assert!(holds(name, b"api-ms-win-crt-"));
+        assert!(holds(name, b"API-MS-WIN-CRT-HEAP-L1-1-0.DLL!MALLOC"));
+        assert!(holds(name, b"!malloc"));
+        assert!(holds(name, b"HEAP"));
+        assert!(!holds(name, b"ntdll.dll!Rtl"));
+        // The whole name and a byte more: a text longer than the name
+        // holds nothing, and the window must not be taken past its end.
+        assert!(!holds(name, b"api-ms-win-crt-heap-l1-1-0.dll!malloc!"));
+        // The empty text, which `set_except` refuses: it would
+        // otherwise match every name and arm nothing at all.
+        assert!(!holds(name, b""));
+        assert!(!holds(b"", b"x"));
     }
 
     /// The summary line says nothing of reads where there were none,

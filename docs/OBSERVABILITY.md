@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for the arguments that read as text) with `events=call`; `import` and `ret` events, `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for the arguments that read as text, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -1184,6 +1184,9 @@ made and not the set of names it reached (`iat_repeat`, below), and
 trapping the return as well as the call (`iat_answers`, below).
 `imports_strings=<n>` quotes the arguments that read as text, beside
 the registers they were read from (`import_strings`, below).
+`imports_except=<text>[,<text>...]` leaves the imports whose
+`<dll>!<name>` holds one of the texts unarmed, so that the budget goes
+to the rest (`iat_except`, below).
 
 What those budgets bound is the records and not the faults, which is
 what makes `imports=` with `events_from=<seconds>` a trace of **a
@@ -1349,6 +1352,41 @@ data first, which disarms the slot (below), so that one leaves a
   the run. A run longer than 120 characters is cut and ends in `...`,
   and a run that crosses the end of its page is cut at the page with
   nothing to say so.
+- **Minus the names that are noise, with
+  `imports_except=<text>[,<text>...]`.** A program's heap, string and
+  locale imports are called in the thousands while the ones a question
+  is about are called once, so a wide trace spends its budget on them
+  first. An import whose `<dll>!<name>` holds one of the texts, without
+  regard to case, is never armed at all: the slot keeps the export's
+  address, so it costs no slot of the budget, no fault and no record,
+  and the program calls it as it would with nothing armed. The texts
+  are substrings and not patterns, which is what lets one of them name
+  a family -- `api-ms-win-crt-` is every CRT shim, `ntdll.dll!Rtl`
+  every Rtl export -- and sixteen at most of 96 bytes each; a value
+  that is not that is refused outright, as the budgets' own are.
+  Sixteen is what one measured question needs with room to spare:
+  eleven families cover 96% of the records of Word's startup (the CRT
+  shims, ntdll's Rtl exports, VCRUNTIME's memory functions, the core
+  heap, KERNEL32's heap, MSVCP's mutex, the SRW locks, the last-error
+  pair, Fls, the critical sections and `GetCurrentThreadId`). How many
+  slots they left alone is a summary line, because a name missing from
+  a trace must read as the filter's doing and not as a call the program
+  never made. Scenario `iat_except`, with an ARM64 twin: four imports
+  of one program, two of them excluded (one spelled as it is, one in
+  the wrong case) and two armed.
+
+  What it is for, measured on Word: armed whole at `events_from=38`,
+  Word recorded 1264 first calls of 23363 slots and spent the entire
+  65536-call repeat budget on its own noise -- 2339 `RtlAllocateHeap`,
+  1933 `RtlFreeHeap`, 1701 `memcpy`, 1353 `tolower` -- leaving 437
+  calls into the MSO shims among 66800 events, in a 259.7 s run. The
+  same window with one shim armed by name instead
+  (`imports=WINWORD.EXE!Mso20Win32Client.dll`) armed 4130 slots and
+  recorded 76 first calls, 2135 later ones and 2210 answers with the
+  budgets untouched, in 95.6 s against 86.6 s untraced. Narrowing by
+  DLL is what made that affordable, and this is the same narrowing
+  from the other side: keep the program whole and name what to leave
+  out, for the question that spans several DLLs.
 - **Functions only.** An imported variable cannot be trapped: the value
   a read of its slot gives *is* what the program then uses, and no fault
   announces that read. So the loader arms a slot only when the address

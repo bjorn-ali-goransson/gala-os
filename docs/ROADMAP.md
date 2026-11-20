@@ -6411,7 +6411,23 @@ among the slowest hand-offs.
      narrow range is ASCII only, a pointer's own low bytes being a run
      of high bytes and a zero; and text at an argument only, never at
      an answer, since a buffer a call filled holds it only once the
-     call is over.
+     call is over. Nor is a budget spent on the names that are noise:
+     `imports_except=<text>[,<text>...]` leaves an import whose
+     `<dll>!<name>` holds one of the texts unarmed, so that it costs no
+     slot of the budget, no fault and no record (scenario `iat_except`
+     with an ARM64 twin). What that is for, measured: Word armed whole
+     at `events_from=38` recorded 1264 first calls of 23363 slots and
+     spent the whole 65536-call repeat budget on its own heap and
+     string imports (2339 `RtlAllocateHeap`, 1933 `RtlFreeHeap`, 1701
+     `memcpy`, 1353 `tolower`), leaving 437 calls into the MSO shims
+     among 66800 events in a 259.7 s run, where the same window with
+     one shim armed by name recorded 76 first calls, 2135 later ones
+     and 2210 answers with the budgets untouched in 95.6 s against
+     86.6 s untraced. The texts are substrings and not patterns, so one
+     of them names a family (`api-ms-win-crt-`, `ntdll.dll!Rtl`), and
+     it is the same narrowing `imports=<program>!<dll>` is from the
+     other side: keep the program whole and name what to leave out,
+     for a question that spans several DLLs.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the
