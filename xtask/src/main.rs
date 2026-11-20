@@ -8384,6 +8384,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iat_trace_test", "testdll.dll", "gala"),
     ("iat_ret_test", "ntdll.dll", "Windows/System32"),
     ("iat_ret_test", "testdll.dll", "gala"),
+    ("iat_unwind_test", "ntdll.dll", "Windows/System32"),
+    ("iat_unwind_test", "testdll.dll", "gala"),
+    ("iat_unwind", "ntdll.dll", "Windows/System32"),
+    ("iat_unwind", "testdll.dll", "gala"),
     ("iat_answers", "ntdll.dll", "Windows/System32"),
     ("iat_answers", "testdll.dll", "gala"),
     ("iat_repeat", "ntdll.dll", "Windows/System32"),
@@ -11124,6 +11128,7 @@ const USER_PROGRAMS: &[&str] = &[
     "import_test",
     "iat_trace_test",
     "iat_ret_test",
+    "iat_unwind_test",
     "args_test",
     "fpu_test",
     "sysinfo_test",
@@ -13832,6 +13837,8 @@ const ARM64_TWINS: &[&str] = &[
     "iat_repeat",
     "iat_ret_test",
     "iat_answers",
+    "iat_unwind_test",
+    "iat_unwind",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -19057,6 +19064,44 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 9 later calls recorded of 16 (imports_repeat=)",
             "imports: 5 answers recorded of 5, the budget spent: the calls past \
              it are recorded without one (imports_answers=)",
+        ],
+    },
+    Scenario {
+        // OT3b: an exception unwound past a call whose return
+        // `imports_answers=` trapped. This is the program with nothing
+        // armed: the unwind crosses the frames of this program, of the
+        // DLL it called and of the callback the DLL called, and the
+        // handler resumes with the value it unwound with.
+        name: "iat_unwind_test",
+        cmdline: "qemu_exit run=iat_unwind_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["iat_unwind_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: the same program with the returns trapped, which is
+        // what an unwinder cannot be left to meet: a kernel trap
+        // address is in no image and in no function table, so a frame
+        // still holding one is where an unwind ends. gala's own ntdll
+        // says when a walk of a thread's frames begins and the kernel
+        // gives that thread's return addresses back, so the program
+        // sees what it sees without the option: seven unwinds, across
+        // one, two and three trapped frames. Nine of the fifteen calls
+        // therefore never return (the kernel says so, naming what it
+        // put back), and the other six answer.
+        name: "iat_unwind",
+        cmdline: "qemu_exit events=call run=iat_unwind_test.exe \
+                  imports=iat_unwind_test.exe!testdll.dll imports_repeat=64 \
+                  imports_answers=64",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_unwind_test: ok",
+            "exited with status 0x00000000",
+            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
+            "imports: 13 later calls recorded of 64 (imports_repeat=)",
+            "imports: 6 answers recorded of 64 (imports_answers=)",
+            "imports: 9 pending returns were put back where their calls left \
+             them, for an exception to unwind through those frames: the calls \
+             are recorded without an answer (imports_answers=)",
         ],
     },
     Scenario {

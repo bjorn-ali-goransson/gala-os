@@ -258,10 +258,24 @@ fn restore_xmm(ctx: &mut Context, reg: usize, addr: u64, ptrs: &Pointers) {
     ptrs.xmm(reg, addr);
 }
 
+/// Whether `p` is an indirect jump: `FF /4`, with or without a REX
+/// prefix. The ModRM's register field is the whole of what tells it from
+/// the other `FF` instructions, among them the `inc`/`dec` of a 64-bit
+/// operand that follows many a call (`48 ff c0`): reading the prefix and
+/// the opcode alone mistakes the instruction a call returns to for the
+/// end of an epilogue, and the frame is then unwound as if its stack
+/// allocation were already gone.
+fn indirect_jump(p: usize) -> bool {
+    let p = if (0x40..=0x4f).contains(&rd8(p)) { p + 1 } else { p };
+    rd8(p) == 0xff && (rd8(p + 1) >> 3) & 7 == 4
+}
+
 /// If `pc` is in an epilogue of the function (`add rsp, n` or `lea rsp,
-/// [frame register + n]`, then pops of nonvolatile registers, then `ret`
-/// or a jump out of the function), emulates the rest of it and returns
-/// true. These are the only instruction forms an x64 epilogue may use.
+/// [frame register + n]`, then pops of nonvolatile registers, then `ret`,
+/// a relative jump out of the function or an indirect jump), emulates the
+/// rest of it and returns true. These are the only instruction forms an
+/// x64 epilogue may use, so a pc at none of them is in the body and the
+/// unwind codes describe it instead.
 fn unwind_epilogue(
     ctx: &mut Context,
     pc: usize,
@@ -316,8 +330,11 @@ fn unwind_epilogue(
             let target = (p + 5).wrapping_add(rd32(p + 1) as i32 as isize as usize);
             target < function.0 || target >= function.1
         }
-        (0xff, 0x25) | (0x48, 0xff) => true,
-        _ => false,
+        (0xeb, _) => {
+            let target = (p + 2).wrapping_add(rd8(p + 1) as i8 as isize as usize);
+            target < function.0 || target >= function.1
+        }
+        _ => indirect_jump(p),
     };
     if !ends {
         return false;
@@ -600,6 +617,13 @@ pub extern "system" fn RtlCaptureStackBackTrace(
 
 // --- Dispatch ----------------------------------------------------------
 
+/// The stack pointer of a CONTEXT: where a walk of the frames it
+/// describes begins (`crate::unwinding`).
+pub(crate) fn context_sp(context: *const u8) -> u64 {
+    // SAFETY: a CONTEXT, whose Rsp is at CTX_RSP.
+    unsafe { context.add(CTX_RSP).cast::<u64>().read_unaligned() }
+}
+
 /// Calls the exception handlers of the frames from `context` outwards;
 /// true if one returned ExceptionContinueExecution (the caller resumes
 /// `context`). Never inlined: its CONTEXT copies must not enlarge the
@@ -668,6 +692,10 @@ extern "system" fn unwind_to(
     return_value: u64,
     start: *const u8,
 ) -> ! {
+    // A walk of this thread's frames begins here, so the returns its
+    // calls through armed import slots are waiting for go back where
+    // those calls left them first (`imports_answers=`).
+    crate::unwinding(context_sp(start));
     let mut own_record = [0u8; RECORD_SIZE];
     let record = if record.is_null() {
         own_record[..4].copy_from_slice(&STATUS_UNWIND.to_le_bytes());

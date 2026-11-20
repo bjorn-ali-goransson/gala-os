@@ -6353,8 +6353,21 @@ among the slowest hand-offs.
      left of the gap: the first four integer argument registers and the
      one return register, so a wide or indirect argument is not in
      reach, and a callee that reads its own return address while that
-     return is trapped sees the trap and not its caller -- which is why
-     both budgets are read narrow (OBSERVABILITY "Import tracing").
+     return is trapped (`_ReturnAddress`, a stack walk of its own) sees
+     the trap and not its caller -- which is why both budgets are read
+     narrow (OBSERVABILITY "Import tracing"). An exception unwound
+     through such a frame is the one case repaired rather than kept
+     narrow, because it changed what the program did and not only what
+     was recorded of it: the walk ends at the trap address, so no
+     handler above that frame is asked, and Word's run with the whole
+     answers budget ended in a stack overflow inside the exception
+     dispatcher where the same run without it ended in none. So gala's
+     own ntdll says when a walk of a thread's frames begins and the
+     kernel puts that thread's pending returns back where its calls
+     left them, recording those calls without an answer; the ask has to
+     come from the program, an exception raised in user mode reaching
+     no kernel path at all (scenarios `iat_unwind_test` and
+     `iat_unwind`, both with ARM64 twins).
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

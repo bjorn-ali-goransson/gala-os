@@ -125,6 +125,20 @@ const MAX_ANSWERS: u32 = 1 << 20;
 /// summary says.
 const MAX_PENDING: usize = 1024;
 
+/// How many pending returns are put back at once when an exception is
+/// dispatched. One batch is a fixed array on the kernel's stack, so that
+/// path allocates nothing; more than a batch's worth is taken in further
+/// rounds.
+const RESTORE_BATCH: usize = 16;
+
+/// How far below the stack pointer a return would have arrived with its
+/// trap address is looked for, in words. x86-64's is the first word
+/// looked at, the one the call pushed; ARM64's call left it in the link
+/// register, so it is wherever the callee saved it, which is that
+/// callee's own frame just below. A frame's worth is the reach, and a
+/// trap address not found inside it is counted and said.
+const RESTORE_WORDS: u64 = 512;
+
 /// The longest name kept, as the ledger keeps its own
 /// (`tracecall::NAME_LEN`, which a `<dll>!<export>` name shares).
 pub const NAME_LEN: usize = super::tracecall::NAME_LEN;
@@ -182,6 +196,13 @@ static ANSWERS: AtomicU32 = AtomicU32::new(0);
 static ANSWERS_ASKED: AtomicU32 = AtomicU32::new(0);
 static ANSWERS_LOST: AtomicU64 = AtomicU64::new(0);
 static UNWOUND: AtomicU64 = AtomicU64::new(0);
+/// Returns put back where their calls left them for an exception to
+/// unwind through, and those whose trap address could not be found on
+/// the stack to put back. Both are summary lines: a call put back is a
+/// call whose answer will never arrive, and one not put back is a frame
+/// the program's own walk ends at.
+static RESTORED: AtomicU64 = AtomicU64::new(0);
+static RESTORE_MISSED: AtomicU64 = AtomicU64::new(0);
 
 /// One call whose return is trapped, from the call until the return
 /// arrives: the thread that made it, the stack pointer its return will
@@ -720,6 +741,106 @@ fn forget(waited: &Pending) {
     }
 }
 
+/// The returns the running thread is still waiting for that an
+/// exception is about to unwind through, put back where their calls
+/// left them.
+///
+/// A program handed an exception walks its own frames to find a
+/// handler. A trap address is in no image and in no function table, so
+/// a frame still holding one is where that walk ends and the handlers
+/// above it are never asked: a program that would have caught the
+/// exception dies of it instead. So every pending return of this thread
+/// in a frame the walk can reach goes back before the exception is
+/// delivered, and its call is recorded without an answer -- the
+/// program's own unwinding is worth more than one answer, and the
+/// summary says how many were given up this way.
+///
+/// Asked for by gala's own ntdll as it begins to walk (`GalaImports`
+/// op 2), with the stack pointer of the CONTEXT it walks from: frames
+/// below that are the dispatcher's own and hold no return of ours. It
+/// has to be the program that asks, because an exception raised in user
+/// mode (RtlRaiseException, and with it every C++ throw) is dispatched
+/// without a single system call, so no kernel path sees it coming.
+pub fn unwinding(process: &Process, sp: u64) {
+    if ANSWERS_ASKED.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    loop {
+        let mut batch = [None; RESTORE_BATCH];
+        let taken = take_above(process.id, sp, &mut batch);
+        if taken == 0 {
+            return;
+        }
+        for waited in batch[..taken].iter().flatten() {
+            restore(process, sp, waited);
+        }
+    }
+}
+
+/// Takes up to `batch.len()` entries of the running thread whose frames
+/// an exception at `sp` can reach, innermost first; returns how many.
+/// Under the lock and touching none of the program's memory, as every
+/// reader of the pending entries is.
+fn take_above(pid: u64, sp: u64, batch: &mut [Option<Pending>]) -> usize {
+    let thread = platform::current();
+    let mut taken = 0;
+    let mut pending = PENDING.lock();
+    while taken < batch.len() {
+        // The newest entry left is the innermost call the thread is in.
+        let Some(i) = pending.iter().rposition(|e| e.thread == thread && e.pid == pid && e.sp > sp)
+        else {
+            break;
+        };
+        batch[taken] = Some(pending.remove(i));
+        taken += 1;
+    }
+    taken
+}
+
+/// Puts one call's return address back where the call left it: the word
+/// holding the slot's return trap, looked for from just below the stack
+/// pointer the return would have arrived with and down to the
+/// exception's own, [`RESTORE_WORDS`] at most.
+fn restore(process: &Process, sp: u64, waited: &Pending) {
+    let want = waited.trap + RET_OFFSET;
+    let floor = sp.max(waited.sp.saturating_sub(RESTORE_WORDS * 8));
+    let mut at = waited.sp;
+    while at > floor {
+        at -= 8;
+        match process.read_u64(at) {
+            Ok(word) if word == want => {
+                if process.write_u64(at, waited.ret).is_ok() {
+                    RESTORED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                break;
+            }
+            Ok(_) => {}
+            // Off the mapped stack: there is nothing further down to
+            // look at.
+            Err(_) => break,
+        }
+    }
+    missed(waited);
+}
+
+/// One pending return that could not be put back. Said once and counted
+/// after that, because it is the program's walk that pays: it ends at
+/// the trap left in that frame, and an exception the program would have
+/// caught goes unhandled.
+fn missed(waited: &Pending) {
+    if RESTORE_MISSED.fetch_add(1, Ordering::Relaxed) == 0 {
+        warn!(
+            "imports: the return address of the call through the slot trapped at \
+             {:#x} could not be put back for an exception to unwind through its \
+             frame: the trap address is not in the {RESTORE_WORDS} words below \
+             {:#x}, or could not be written. A walk of that frame ends there \
+             (imports_answers=)",
+            waited.trap, waited.sp
+        );
+    }
+}
+
 /// A fault at a slot's return trap: the return of a call whose return
 /// address was taken away. The callee has run nothing since its return
 /// instruction, so the answer is still in its register and is recorded
@@ -855,6 +976,15 @@ fn take_slot() -> Option<u32> {
     }
 }
 
+/// Whether the returns of calls through armed slots are trapped as
+/// well (`imports_answers=`), which is what makes a program's own walk
+/// of its frames need [`unwinding`] first. Answered to the loader once,
+/// with the rest of op 0's answer, so that a program whose returns are
+/// not trapped never asks again.
+pub fn answers_trapped() -> bool {
+    ANSWERS_ASKED.load(Ordering::Relaxed) != 0
+}
+
 /// Whether the budget is spent, so that the loader is not read entry by
 /// entry for imports none of which can be armed.
 pub fn spent() -> bool {
@@ -966,6 +1096,21 @@ fn log_answers() {
             "imports: {unwound} calls never returned to where they were called \
              from: an exception unwound past them, or the thread ended inside \
              them, so the stream holds the call and no answer (imports_answers=)"
+        );
+    }
+    let restored = RESTORED.load(Ordering::Relaxed);
+    if restored != 0 {
+        info!(
+            "imports: {restored} pending returns were put back where their calls \
+             left them, for an exception to unwind through those frames: the \
+             calls are recorded without an answer (imports_answers=)"
+        );
+    }
+    let missed = RESTORE_MISSED.load(Ordering::Relaxed);
+    if missed != 0 {
+        info!(
+            "imports: {missed} of those could not be put back, so a walk of \
+             those frames ends at the trap address (imports_answers=)"
         );
     }
     let waiting = PENDING.lock().len();

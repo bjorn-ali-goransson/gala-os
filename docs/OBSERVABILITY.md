@@ -1222,6 +1222,30 @@ data first, which disarms the slot (below), so that one leaves a
   were recorded without one (a return that could not be trapped, 1024
   calls being all that may wait for their returns at once) and how many
   calls never returned.
+- **Put back for an exception to unwind.** A pending return is also
+  where the program's own unwinder would stop: a trap address is in no
+  image and in no function table, so a frame still holding one ends the
+  walk, the handlers above it are never asked, and a program that would
+  have caught its own exception dies of it instead. So they are put
+  back, and it is the program that says when: gala's own ntdll tells
+  the kernel that a walk of this thread's frames begins at this stack
+  pointer (exception dispatch and RtlUnwindEx; `GalaImports` op 2),
+  because an exception raised in user mode -- RtlRaiseException, and
+  with it every C++ throw -- is dispatched without a single system
+  call, so no kernel path sees it coming. Every return that thread is
+  waiting for in a frame above the walk's own stack pointer is then
+  written back where its call left it: the word the call pushed on
+  x86-64, wherever the callee saved the link register on ARM64, looked
+  for in the 512 words below the stack pointer that return would have
+  arrived with. Those calls are then
+  recorded without an answer, which the summary says -- the program's
+  own unwinding is worth more than one answer, and an exception caught
+  deeper than the call pays the same price, there being no telling the
+  two apart before the program has walked. A return not found to put
+  back is counted and said as well, because the walk of that frame
+  ends at the trap. Scenarios `iat_unwind_test` (the unwinds with
+  nothing armed) and `iat_unwind` (the same program with the slots
+  armed), both with ARM64 twins.
 - **Functions only.** An imported variable cannot be trapped: the value
   a read of its slot gives *is* what the program then uses, and no fault
   announces that read. So the loader arms a slot only when the address
@@ -1297,11 +1321,13 @@ data first, which disarms the slot (below), so that one leaves a
   one register the ABI returns in, so a structure returned by hidden
   pointer is the pointer and not what it points at; and a callee that
   reads its own return address while that return is trapped
-  (`_ReturnAddress`, a stack walk, an unwind through its caller) sees
-  the slot's trap address rather than the caller's code, which is what
-  the answers budget keeps narrow. 64-bit programs are what the
-  scenarios cover, and a 32-bit one goes through the same code
-  untested. The name is the one the ledger spells
+  (`_ReturnAddress`, a stack walk of its own) sees the slot's trap
+  address rather than the caller's code, which is what the answers
+  budget keeps narrow. An exception unwound through such a frame is the
+  one case repaired rather than kept narrow, because it changed what
+  the program did and not only what was recorded of it (above).
+  64-bit programs are what the scenarios cover, and a 32-bit one goes
+  through the same code untested. The name is the one the ledger spells
   (`<dll>!<export>`, from `import_name`, which the ledger's own rows
   use), so a reading and a ledger row name the same import the same
   way.
