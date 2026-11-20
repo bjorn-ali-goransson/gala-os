@@ -11,8 +11,10 @@
 use crate::seh::CTX_FLAGS;
 use crate::{ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, with_handlers};
 
-/// EXCEPTION_RECORD.ExceptionFlags (the 64-bit layout).
+/// EXCEPTION_RECORD.ExceptionFlags and ExceptionAddress (the 64-bit
+/// layout).
 const ER_FLAGS: usize = 0x04;
+const ER_ADDRESS: usize = 0x10;
 const EXCEPTION_SOFTWARE_ORIGINATE: u32 = 0x80;
 /// ContextFlags: a CONTEXT whose pc is a return address (unwound to a
 /// call), not a faulting instruction's (both architectures' bit).
@@ -47,8 +49,22 @@ pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> 
     // The frames are about to be walked, so the returns this thread's
     // calls through armed import slots are waiting for go back where
     // those calls left them first (`imports_answers=`): a trap address
-    // left in a frame is where the walk would end.
-    crate::unwinding(crate::seh::context_sp(context));
+    // left in a frame is where the walk would end, and one in the pc
+    // ends it on the first frame, which is why the kernel gives that
+    // call's return address back as well.
+    let trap = crate::walking(context);
+    if trap != 0 {
+        // RtlRaiseException read the same trapped address for the
+        // record's ExceptionAddress, which is what the handlers and the
+        // crash report name.
+        // SAFETY: the record's ExceptionAddress.
+        unsafe {
+            let at = record.add(ER_ADDRESS).cast::<u64>();
+            if at.read_unaligned() == trap {
+                at.write_unaligned(crate::seh::context_pc(context));
+            }
+        }
+    }
     let mut pointers = ExceptionPointers { record, context };
     // Snapshots, so that handlers may (un)register handlers themselves.
     let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));

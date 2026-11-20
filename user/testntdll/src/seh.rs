@@ -618,10 +618,26 @@ pub extern "system" fn RtlCaptureStackBackTrace(
 // --- Dispatch ----------------------------------------------------------
 
 /// The stack pointer of a CONTEXT: where a walk of the frames it
-/// describes begins (`crate::unwinding`).
+/// describes begins (`crate::walking`).
 pub(crate) fn context_sp(context: *const u8) -> u64 {
     // SAFETY: a CONTEXT, whose Rsp is at CTX_RSP.
     unsafe { context.add(CTX_RSP).cast::<u64>().read_unaligned() }
+}
+
+/// The pc of a CONTEXT: the frame a walk of it begins in, which for an
+/// exception raised in user mode is the frame of the call that raised
+/// and the address it would have returned to (`crate::walking`).
+pub(crate) fn context_pc(context: *const u8) -> u64 {
+    // SAFETY: a CONTEXT, whose Rip is at CTX_RIP.
+    unsafe { context.add(CTX_RIP).cast::<u64>().read_unaligned() }
+}
+
+/// Puts `pc` there: the kernel has given back the return address of the
+/// call the walk begins in, the pc having been that call's return trap
+/// (`crate::walking`).
+pub(crate) fn set_context_pc(context: *mut u8, pc: u64) {
+    // SAFETY: as above, and the CONTEXT is this thread's own.
+    unsafe { context.add(CTX_RIP).cast::<u64>().write_unaligned(pc) }
 }
 
 /// Calls the exception handlers of the frames from `context` outwards;
@@ -694,8 +710,10 @@ extern "system" fn unwind_to(
 ) -> ! {
     // A walk of this thread's frames begins here, so the returns its
     // calls through armed import slots are waiting for go back where
-    // those calls left them first (`imports_answers=`).
-    crate::unwinding(context_sp(start));
+    // those calls left them first, and the pc it begins at is given
+    // back where the call that asked for the unwind is one of them
+    // (`imports_answers=`).
+    crate::walking(start.cast_mut());
     let mut own_record = [0u8; RECORD_SIZE];
     let record = if record.is_null() {
         own_record[..4].copy_from_slice(&STATUS_UNWIND.to_le_bytes());

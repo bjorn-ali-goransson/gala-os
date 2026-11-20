@@ -6366,8 +6366,12 @@ among the slowest hand-offs.
      kernel puts that thread's pending returns back where its calls
      left them, recording those calls without an answer; the ask has to
      come from the program, an exception raised in user mode reaching
-     no kernel path at all (scenarios `iat_unwind_test` and
-     `iat_unwind`, both with ARM64 twins).
+     no kernel path at all. The call the walk itself begins in is
+     answered its return address with the same ask, a walk beginning at
+     the frame of the call that raised and so at a trap address where
+     that call went through an armed slot -- the shape of Word's C++
+     throw (scenarios `iat_unwind_test` and `iat_unwind`, both with
+     ARM64 twins).
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

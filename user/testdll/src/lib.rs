@@ -1,11 +1,13 @@
 //! A tiny DLL for image-section tests: exports a function, a data value
 //! and a function that reads the value through a pointer stored in the
-//! DLL's data (so the image needs a DIR64 base relocation). Two more
-//! exports are what an import trace needs of a callee: one that calls
-//! back out, so that a call through an import slot can be nested inside
-//! another, and one that reads its own return address, which is what a
-//! stack walk sees of a call whose return the kernel trapped
-//! (`imports_answers=`, user/iat_ret_test).
+//! DLL's data (so the image needs a DIR64 base relocation). Three
+//! more exports are what an import trace needs of a callee: one that
+//! calls back out, so that a call through an import slot can be nested
+//! inside another; one that reads its own return address, which is what
+//! a stack walk sees of a call whose return the kernel trapped
+//! (`imports_answers=`, user/iat_ret_test); and one that jumps straight
+//! on to a function it is handed, so that a call through a slot can
+//! raise an exception at its caller's frame (user/iat_unwind_test).
 
 #![no_std]
 
@@ -57,6 +59,31 @@ pub extern "C" fn gala_return_address() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gala_return_address() -> u64 {
     core::arch::naked_asm!("mov x0, x30", "ret")
+}
+
+/// Jumps straight on to `raiser` with `record`: a callee that reports
+/// its *caller's* frame, which is what RtlRaiseException does with the
+/// return address the call left it. The jump keeps the caller's frame,
+/// so an exception raised this way arrives with the stack pointer that
+/// call's return would have arrived with, and -- under
+/// `imports_answers=` -- with the slot's return trap as the pc of the
+/// frame it is raised at (user/iat_unwind_test). A tail jump and not a
+/// call, so this function is in no frame of the walk that follows.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn gala_raise_at(_record: *mut u8, _raiser: usize) {
+    // rcx is the record, which `raiser` takes as its own first
+    // argument, and rdx is `raiser` itself.
+    core::arch::naked_asm!("jmp rdx")
+}
+
+/// As above, with x0 the record and x1 the function to jump to.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn gala_raise_at(_record: *mut u8, _raiser: usize) {
+    core::arch::naked_asm!("br x1")
 }
 
 /// Number of DLL_PROCESS_ATTACH calls DllMain has seen.
