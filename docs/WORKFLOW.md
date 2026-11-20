@@ -559,6 +559,17 @@ VMs have no network card unless the scenario is in `NET_SCENARIOS`,
   files (ssh's key copy and `-v` trace, sftp's transfer, the askpass
   script) are per port in `target/net-client/<port>/`, removed after the
   boot. On failure the end of curl's or ssh's `-v` trace is in the log.
+- The agent panel's model calls (`agent_chat`) go to `xtask
+  agent-relay` at 10.0.2.101:80 (guestfwd), which replays from
+  `xtask/agent-recordings/` and never reaches the network. After a
+  change to the panel's prompts the run fails with the relay's `not
+  recorded` line (the request's hash, and the recorded one nearest to
+  it with the byte where they part); record again with
+  `XTASK_AGENT_RECORD=1 cargo xtask boot-test 'agent_chat$'` in an
+  environment whose proxy adds the API key (the relay sends the
+  placeholder `proxy-injected`), read the new recording's diff and
+  commit it, removing the stale one. The relay's lines are added at
+  the end of the serial log, after the guest's.
 - A guest that only connects out (`office_install` fetching from
   Microsoft's CDN) is a net scenario with `NetClient::Outbound`: the card
   and QEMU's NAT to the host's network, no client run.
@@ -3912,6 +3923,11 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   processes: uiautomationcore's providers.rs); the older ones that aim
   by position are converted as their windows move to gala_ui (ROADMAP
   LY, SH). `agent` is the example.
+- An input's UIA Name is its placeholder, not its text: a test reads
+  what was typed with the Value property (`uia_client`'s `value()`),
+  and waits for the whole text, since a step's keys arrive over time
+  and a button that appears with the first letter is no sign the
+  typing is done.
 - A step first sends QEMU monitor commands: `mouse_move dx dy`,
   `mouse_button 1` (bit 0 the left button, bit 1 the right:
   `mouse_button 2` is a right press), `sendkey`, each once the guest

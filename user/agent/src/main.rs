@@ -23,6 +23,11 @@
 //!   program (Explorer's "Make the change"): the panel docks if hidden
 //!   and lists the request; any other kind, or a malformed one, is
 //!   logged and not taken.
+//! - **Chat**: a request sent is asked of the model on a worker thread
+//!   (`ask`): `agent::chat::body` POSTed to the relay at `chat::HOST`
+//!   over winhttp, loaded on the first ask (a panel that is never asked
+//!   needs no network); the reply comes back to the window as
+//!   WM_APP_ANSWER (wParam the request, lParam the boxed `Reply`).
 //!
 //! The view and what a message does to it are the library (`agent`);
 //! this file does what is outside it. The window is placed from the
@@ -33,9 +38,11 @@
 //! log for a program the desktop starts): the start and the remembered
 //! state, every placement with its rectangle, every context, every
 //! hand-off (its program, window, text and element) or why one was not
-//! taken, every
-//! message the panel handled (gala_ui's `click HideButton: Hide`), and
-//! what failed (an app bar refused, the state not saved) with its error.
+//! taken, every request asked (`asking the model: request N, B bytes`)
+//! and its answer or why there is none (the winhttp call that failed and
+//! its error, the HTTP status, the relay's message), every message the
+//! panel handled (gala_ui's `click HideButton: Hide`), and what failed
+//! (an app bar refused, the state not saved) with its error.
 
 #![no_std]
 #![no_main]
@@ -50,7 +57,8 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use agent::{Context, Msg, Panel, TAB, WIDTH, handoff, program_name};
+use agent::{Context, Msg, Panel, Reply, TAB, WIDTH, chat, handoff, program_name};
+use alloc::boxed::Box;
 use gala_ui::{Component, Node, win};
 
 type Handle = *mut c_void;
@@ -122,6 +130,9 @@ struct CopyData {
 const WM_APP_PLACE: u32 = 0x8002;
 /// The app bar's callback message (ABN_*: wParam).
 const WM_APP_BAR: u32 = 0x8003;
+/// A request's reply (the worker's): wParam the request, lParam a
+/// `Box<Reply>` the window takes back.
+const WM_APP_ANSWER: u32 = 0x8004;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -131,6 +142,17 @@ unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: Bool, pid: u32) -> Handle;
     fn QueryFullProcessImageNameW(h: Handle, flags: u32, name: *mut u16, size: *mut u32) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
+    fn CreateThread(
+        attributes: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn GetLastError() -> u32;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -380,6 +402,224 @@ extern "system" fn foreground(
     }
 }
 
+// ---- Asking the model ------------------------------------------------------
+
+type Open = extern "system" fn(*const u16, u32, *const u16, *const u16, u32) -> usize;
+type Connect = extern "system" fn(usize, *const u16, u16, u32) -> usize;
+type OpenRequest = extern "system" fn(
+    usize,
+    *const u16,
+    *const u16,
+    *const u16,
+    *const u16,
+    *const *const u16,
+    u32,
+) -> usize;
+type Send = extern "system" fn(usize, *const u16, u32, *const u8, u32, u32, usize) -> Bool;
+type Receive = extern "system" fn(usize, usize) -> Bool;
+type QueryHeaders = extern "system" fn(usize, u32, *const u16, *mut u8, *mut u32, *mut u32) -> Bool;
+type Available = extern "system" fn(usize, *mut u32) -> Bool;
+type Read = extern "system" fn(usize, *mut u8, u32, *mut u32) -> Bool;
+type Close = extern "system" fn(usize) -> Bool;
+
+/// WinHTTP's functions, from winhttp.dll loaded on the first ask.
+#[derive(Clone, Copy)]
+struct WinHttp {
+    open: Open,
+    connect: Connect,
+    open_request: OpenRequest,
+    send: Send,
+    receive: Receive,
+    query_headers: QueryHeaders,
+    available: Available,
+    read: Read,
+    close: Close,
+}
+
+const WINHTTP_ACCESS_TYPE_NO_PROXY: u32 = 1;
+const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+
+fn winhttp() -> Result<WinHttp, String> {
+    let name = wide("winhttp.dll");
+    // SAFETY: a NUL-terminated name.
+    let module = unsafe { LoadLibraryW(name.as_ptr()) };
+    if module.is_null() {
+        // SAFETY: plain call.
+        return Err(format!("winhttp.dll not loaded (error {})", unsafe { GetLastError() }));
+    }
+    let f = |n: &[u8]| -> Result<*const c_void, String> {
+        // SAFETY: a NUL-terminated name in a loaded module.
+        let p = unsafe { GetProcAddress(module, n.as_ptr()) };
+        if p.is_null() {
+            Err(format!(
+                "winhttp.dll has no {}",
+                core::str::from_utf8(&n[..n.len() - 1]).unwrap_or("?")
+            ))
+        } else {
+            Ok(p)
+        }
+    };
+    // SAFETY: each pointer is the export of that name, whose signature
+    // (WinHTTP's, as documented) is the field's.
+    unsafe {
+        Ok(WinHttp {
+            open: core::mem::transmute::<*const c_void, Open>(f(b"WinHttpOpen\0")?),
+            connect: core::mem::transmute::<*const c_void, Connect>(f(b"WinHttpConnect\0")?),
+            open_request: core::mem::transmute::<*const c_void, OpenRequest>(f(
+                b"WinHttpOpenRequest\0",
+            )?),
+            send: core::mem::transmute::<*const c_void, Send>(f(b"WinHttpSendRequest\0")?),
+            receive: core::mem::transmute::<*const c_void, Receive>(f(
+                b"WinHttpReceiveResponse\0",
+            )?),
+            query_headers: core::mem::transmute::<*const c_void, QueryHeaders>(f(
+                b"WinHttpQueryHeaders\0",
+            )?),
+            available: core::mem::transmute::<*const c_void, Available>(f(
+                b"WinHttpQueryDataAvailable\0",
+            )?),
+            read: core::mem::transmute::<*const c_void, Read>(f(b"WinHttpReadData\0")?),
+            close: core::mem::transmute::<*const c_void, Close>(f(b"WinHttpCloseHandle\0")?),
+        })
+    }
+}
+
+/// A handle closed when dropped.
+struct H(usize, Close);
+impl Drop for H {
+    fn drop(&mut self) {
+        (self.1)(self.0);
+    }
+}
+
+/// What `call` failed in: the function and GetLastError.
+fn failed(what: &str) -> String {
+    // SAFETY: plain call.
+    format!("{what} failed (error {})", unsafe { GetLastError() })
+}
+
+/// POSTs `body` to the relay: the reply's answer, or why there is none.
+fn call(body: &[u8]) -> Reply {
+    let w = winhttp()?;
+    let (agent, host, verb, path) =
+        (wide("gala-agent/1"), wide(chat::HOST), wide("POST"), wide(chat::PATH));
+    let headers = wide("Content-Type: application/json");
+    let null = core::ptr::null();
+    let session = (w.open)(agent.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, null, null, 0);
+    if session == 0 {
+        return Err(failed("WinHttpOpen"));
+    }
+    let session = H(session, w.close);
+    let connect = (w.connect)(session.0, host.as_ptr(), chat::PORT, 0);
+    if connect == 0 {
+        return Err(failed("WinHttpConnect"));
+    }
+    let connect = H(connect, w.close);
+    let request =
+        (w.open_request)(connect.0, verb.as_ptr(), path.as_ptr(), null, null, core::ptr::null(), 0);
+    if request == 0 {
+        return Err(failed("WinHttpOpenRequest"));
+    }
+    let request = H(request, w.close);
+    let len = u32::try_from(body.len()).map_err(|_| String::from("the request is too long"))?;
+    if (w.send)(request.0, headers.as_ptr(), u32::MAX, body.as_ptr(), len, len, 0) == 0 {
+        return Err(failed("WinHttpSendRequest"));
+    }
+    if (w.receive)(request.0, 0) == 0 {
+        return Err(failed("WinHttpReceiveResponse"));
+    }
+    let (mut status, mut size) = (0u32, 4u32);
+    let level = WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER;
+    let got = (w.query_headers)(
+        request.0,
+        level,
+        null,
+        (&mut status as *mut u32).cast(),
+        &mut size,
+        core::ptr::null_mut(),
+    );
+    if got == 0 {
+        return Err(failed("WinHttpQueryHeaders(status)"));
+    }
+    let mut reply = Vec::new();
+    loop {
+        let mut n = 0u32;
+        if (w.available)(request.0, &mut n) == 0 {
+            return Err(failed("WinHttpQueryDataAvailable"));
+        }
+        if n == 0 {
+            break;
+        }
+        if reply.len() + n as usize > chat::MAX_REPLY {
+            return Err(format!("the reply is longer than {} bytes", chat::MAX_REPLY));
+        }
+        let at = reply.len();
+        reply.resize(at + n as usize, 0);
+        let mut read = 0u32;
+        if (w.read)(request.0, reply[at..].as_mut_ptr(), n, &mut read) == 0 {
+            return Err(failed("WinHttpReadData"));
+        }
+        reply.truncate(at + read as usize);
+    }
+    match (status, chat::answer(&reply)) {
+        (200, a) => a,
+        (s, Err(why)) => Err(format!("HTTP {s}: {why}")),
+        (s, Ok(_)) => Err(format!("HTTP {s}")),
+    }
+}
+
+/// The worker's job: the request and the body to POST.
+struct Job {
+    index: usize,
+    body: String,
+}
+
+extern "system" fn worker(param: *mut c_void) -> u32 {
+    // SAFETY: `ask` made it with Box::into_raw and gave it to this thread
+    // alone.
+    let job = unsafe { Box::from_raw(param.cast::<Job>()) };
+    let reply = call(job.body.as_bytes());
+    match &reply {
+        Ok(t) => log(&format!("answer {}: {t:?}", job.index)),
+        Err(e) => log(&format!("no answer {}: {e}", job.index)),
+    }
+    let reply = Box::into_raw(Box::new(reply));
+    // SAFETY: the panel's window; the window takes the box back.
+    if unsafe { PostMessageW(window(), WM_APP_ANSWER, job.index, reply as isize) } == 0 {
+        // SAFETY: not posted: still ours.
+        drop(unsafe { Box::from_raw(reply) });
+        log(&failed("PostMessageW(WM_APP_ANSWER)"));
+    }
+    0
+}
+
+/// Asks the model for request `index` on a worker thread.
+fn ask(index: usize, body: String) {
+    log(&format!("asking the model: request {index}, {} bytes", body.len()));
+    let job = Box::into_raw(Box::new(Job { index, body }));
+    // SAFETY: the worker owns the job from here.
+    let t = unsafe {
+        CreateThread(core::ptr::null_mut(), 0, worker, job.cast(), 0, core::ptr::null_mut())
+    };
+    if t.is_null() {
+        // SAFETY: no thread took it.
+        drop(unsafe { Box::from_raw(job) });
+        let why = failed("CreateThread");
+        log(&format!("no answer {index}: {why}"));
+        // The request says why.
+        let reply = Box::into_raw(Box::new(Err::<String, String>(why)));
+        // SAFETY: our window; it takes the box back.
+        if unsafe { PostMessageW(window(), WM_APP_ANSWER, index, reply as isize) } == 0 {
+            // SAFETY: not posted: still ours.
+            drop(unsafe { Box::from_raw(reply) });
+        }
+    } else {
+        // SAFETY: the thread's handle, not needed.
+        unsafe { CloseHandle(t) };
+    }
+}
+
 struct App {
     panel: Panel,
 }
@@ -409,7 +649,11 @@ impl Component for App {
         if let Msg::Send = &msg {
             log(&format!("request {:?}", self.panel.draft));
         }
+        let sent = matches!(msg, Msg::Send);
         self.panel.update(msg);
+        if sent && let Some((i, body)) = self.panel.asking() {
+            ask(i, body);
+        }
         if placing {
             HIDDEN.store(self.panel.hidden, Ordering::Release);
             remember(self.panel.hidden);
@@ -441,6 +685,11 @@ impl Component for App {
                         None
                     }
                 }
+            }
+            WM_APP_ANSWER => {
+                // SAFETY: the worker's box, posted once to this window.
+                let reply = unsafe { Box::from_raw(lparam as *mut Reply) };
+                Some(Msg::Answer(wparam, *reply))
             }
             WM_APP_CONTEXT => {
                 let c = context_of(wparam as Handle);

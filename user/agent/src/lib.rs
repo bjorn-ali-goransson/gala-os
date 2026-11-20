@@ -15,14 +15,22 @@
 //!   panel docks if hidden, takes the program as its context and lists
 //!   the request with the part of the window it is about.
 //!
+//! - **Chat** ([`chat`]): a request typed and sent is asked of the model
+//!   (the program POSTs `chat::body` on a worker thread); its reply card
+//!   ("Reply{i}") says it is being asked, then the answer, or why there
+//!   is none.
+//!
 //! The program (main.rs) does what a message means outside the view:
-//! the app bar's strip, the window's place, the remembered state.
+//! the app bar's strip, the window's place, the remembered state, the
+//! call to the model.
 
 #![no_std]
 
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
+
+pub mod chat;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -41,6 +49,7 @@ const INK: u32 = 0x1b1b1b;
 const MUTED: u32 = 0x616161;
 const ACCENT: u32 = 0x005fb8;
 const CHIP: u32 = 0xe6eef8;
+const FAILED: u32 = 0xc42b1c;
 
 /// What the panel is about: the active window's program and title.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -59,7 +68,23 @@ pub struct Request {
     /// The part of the program's window it is about (a hand-off's
     /// picked element: its label), if any.
     pub element: Option<String>,
+    /// What the model said, for a request asked of it (None: a hand-off,
+    /// listed and not asked yet).
+    pub answer: Option<Answer>,
 }
+
+/// A request's answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// Asked, no reply yet.
+    Asking,
+    Said(String),
+    /// Why there is no answer (the relay's or the network's error).
+    Failed(String),
+}
+
+/// What asking the model gave: the answer, or why there is none.
+pub type Reply = Result<String, String>;
 
 /// WM_COPYDATA's hand-off of a request to the panel (ROADMAP LY
 /// "Change this program", step 3): what a program sends, and its wire
@@ -186,6 +211,8 @@ pub enum Msg {
     Context(Context),
     /// A program handed a request over (WM_COPYDATA).
     Handoff(handoff::Handoff),
+    /// The model's reply to request `.0` (the program's worker thread).
+    Answer(usize, Reply),
 }
 
 #[derive(Default)]
@@ -219,6 +246,20 @@ pub fn program_name(file: &str) -> String {
         }
     }
     String::from(stem)
+}
+
+/// A request's reply card: "Reply{i}", named with what it says.
+fn reply(i: usize, a: Option<&Answer>) -> Node<Msg> {
+    let (t, color) = match a {
+        Some(Answer::Said(t)) => (t.clone(), INK),
+        Some(Answer::Failed(e)) => (alloc::format!("No answer: {e}"), FAILED),
+        _ => (String::from("Asking the model..."), MUTED),
+    };
+    column()
+        .padding(8)
+        .radius(6)
+        .bg(CHIP)
+        .child(text(t).id(alloc::format!("Reply{i}")).size(13).color(color))
 }
 
 impl Panel {
@@ -273,6 +314,7 @@ impl Panel {
                             .size(12)
                             .color(MUTED),
                     )
+                    .child_if(r.answer.is_some(), reply(i, r.answer.as_ref()))
             })
             .collect();
         let empty = self.requests.is_empty();
@@ -326,6 +368,14 @@ impl Panel {
             )
     }
 
+    /// The request just sent, to ask the model: its index and the body
+    /// for the conversation so far (`chat::body`).
+    pub fn asking(&self) -> Option<(usize, String)> {
+        let i = self.requests.len().checked_sub(1)?;
+        (self.requests[i].answer == Some(Answer::Asking))
+            .then(|| (i, chat::body(self.context.as_ref(), &self.requests)))
+    }
+
     pub fn update(&mut self, msg: Msg) {
         match msg {
             Msg::Hide => self.hidden = true,
@@ -337,7 +387,23 @@ impl Panel {
                     return;
                 }
                 let program = self.context.as_ref().map(|c| c.program.clone()).unwrap_or_default();
-                self.requests.push(Request { program, text, element: None });
+                self.requests.push(Request {
+                    program,
+                    text,
+                    element: None,
+                    answer: Some(Answer::Asking),
+                });
+            }
+            Msg::Answer(i, r) => {
+                // Only a request still being asked takes one.
+                if let Some(a) = self.requests.get_mut(i).and_then(|q| q.answer.as_mut())
+                    && *a == Answer::Asking
+                {
+                    *a = match r {
+                        Ok(t) => Answer::Said(t),
+                        Err(e) => Answer::Failed(e),
+                    };
+                }
             }
             Msg::Context(c) => self.context = Some(c),
             Msg::Handoff(h) => {
@@ -347,6 +413,7 @@ impl Panel {
                     program: h.program,
                     text: h.text,
                     element: h.element.map(|e| e.label),
+                    answer: None,
                 });
             }
         }
@@ -426,7 +493,8 @@ mod tests {
             [Request {
                 program: "File Explorer".into(),
                 text: "compress all the files".into(),
-                element: None
+                element: None,
+                answer: Some(Answer::Asking),
             }]
         );
         assert!(p.draft.is_empty());
@@ -488,5 +556,38 @@ mod tests {
         assert_eq!(at(&placed, "Request0Text").text, "bigger, with\ntwo lines");
         assert_eq!(at(&placed, "Request0Element").text, "On: the address bar");
         assert_eq!(at(&placed, "ContextProgram").text, "File Explorer");
+    }
+
+    #[test]
+    fn a_sent_request_is_asked_and_answered() {
+        let mut p = Panel::default();
+        p.update(Msg::Context(Context { program: "Notepad".into(), title: "a.txt".into() }));
+        assert_eq!(p.asking(), None);
+        p.update(Msg::Draft("say pong".into()));
+        p.update(Msg::Send);
+        let (i, body) = p.asking().unwrap();
+        assert_eq!(i, 0);
+        assert!(body.ends_with("{\"role\":\"user\",\"content\":\"say pong\"}]}"), "{body}");
+        assert_eq!(at(&lay(&p, WIDTH, 752), "Reply0").text, "Asking the model...");
+        p.update(Msg::Answer(0, Ok("Pong".into())));
+        assert_eq!(p.asking(), None);
+        assert_eq!(at(&lay(&p, WIDTH, 752), "Reply0").text, "Pong");
+        // A second answer to it, or one to no request, changes nothing.
+        p.update(Msg::Answer(0, Ok("again".into())));
+        p.update(Msg::Answer(7, Ok("none".into())));
+        assert_eq!(p.requests[0].answer, Some(Answer::Said("Pong".into())));
+        // The next is asked with the conversation so far.
+        p.update(Msg::Draft("and?".into()));
+        p.update(Msg::Send);
+        let (i, body) = p.asking().unwrap();
+        assert_eq!(i, 1);
+        assert!(body.contains("\"assistant\",\"content\":\"Pong\""), "{body}");
+        p.update(Msg::Answer(1, Err("agent-relay: not recorded".into())));
+        let placed = lay(&p, WIDTH, 752);
+        assert_eq!(at(&placed, "Reply1").text, "No answer: agent-relay: not recorded");
+        // A hand-off is listed, not asked.
+        p.update(Msg::Handoff(sample()));
+        assert_eq!(p.asking(), None);
+        assert!(lay(&p, WIDTH, 752).iter().all(|e| e.id.as_deref() != Some("Reply2")));
     }
 }

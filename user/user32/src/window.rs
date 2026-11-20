@@ -37,6 +37,7 @@ unsafe extern "system" {
     fn GalaCursorPos(point: *mut i32) -> u32;
     fn GalaWindowDrag(id: u32) -> u32;
     fn GalaWindowResize(id: u32, edges: u32) -> u32;
+    fn GalaWindowActivate(id: u32) -> u32;
     fn GalaWindowPresent(
         id: u32,
         x: i32,
@@ -106,6 +107,17 @@ const GALA_WM_ACTIVATE: u32 = 0x0001_0003;
 /// WM_NCHITTEST decides, on its thread, whether it is a caption drag
 /// (HTCAPTION) or the click it was (wParam, lParam: the click's).
 const GALA_WM_NCDOWN: u32 = 0x0001_0004;
+/// The desktop's notice of a press in a popup that is not active
+/// (wParam: the button's message; kernel winstate GALA_WM_MOUSEACTIVATE),
+/// just before the press: its WM_MOUSEACTIVATE decides, on its thread,
+/// whether it becomes the active window (Windows activates a clicked
+/// WS_POPUP window unless it answers MA_NOACTIVATE, as menus and
+/// drop-down lists do, or has WS_EX_NOACTIVATE).
+const GALA_WM_MOUSEACTIVATE: u32 = 0x0001_0013;
+const WM_MOUSEACTIVATE: u32 = 0x0021;
+const MA_ACTIVATE: isize = 1;
+const MA_ACTIVATEANDEAT: isize = 2;
+const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const WM_NCHITTEST: u32 = 0x0084;
 const HTCLIENT: isize = 1;
 const HTCAPTION: isize = 2;
@@ -2175,6 +2187,18 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
         // The desktop draws gala's frames and handles clicks on them, so
         // what reaches a window is its client area.
         WM_NCHITTEST => HTCLIENT,
+        // A click in an inactive window: a child asks its parent (a
+        // nonzero answer stands), a top-level window is activated.
+        WM_MOUSEACTIVATE => {
+            let parent = crate::tree::GetAncestor(hwnd, 1);
+            if window(hwnd).is_none() && parent != 0 && parent != crate::tree::DESKTOP {
+                let r = SendMessageW(parent, WM_MOUSEACTIVATE, wparam, lparam);
+                if r != 0 {
+                    return r;
+                }
+            }
+            MA_ACTIVATE
+        }
         // The caption's state: nothing to draw (the desktop draws it);
         // TRUE lets the change proceed.
         WM_NCACTIVATE => 1,
@@ -2304,6 +2328,31 @@ static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
 /// through it.
 pub(crate) fn set_foreground(hwnd: Hwnd) {
     activate(hwnd, WA_ACTIVE);
+}
+
+/// A press (`button`: WM_LBUTTONDOWN or WM_RBUTTONDOWN) in popup `top`
+/// that is not the active window (the desktop's GALA_WM_MOUSEACTIVATE):
+/// WM_MOUSEACTIVATE (wParam the top-level
+/// window, lParam MAKELONG(HTCLIENT, the button's message)) says whether
+/// it becomes active; the desktop gives it the activation for that press
+/// (GalaWindowActivate). MA_ACTIVATEANDEAT activates and the press is
+/// still dispatched (gala does not eat it).
+fn mouse_activate(top: Hwnd, button: u32) {
+    let Some(w) = window(top) else { return };
+    if w.ex_style & WS_EX_NOACTIVATE != 0 {
+        return;
+    }
+    let lparam = HTCLIENT | (button as isize) << 16;
+    let answer = SendMessageW(top, WM_MOUSEACTIVATE, top, lparam);
+    if answer != MA_ACTIVATE && answer != MA_ACTIVATEANDEAT {
+        return;
+    }
+    // The desktop logs what it did (and a refusal: a press it did not
+    // give this window).
+    // SAFETY: a plain call on our desktop window.
+    if unsafe { GalaWindowActivate(w.desktop) } == 0 {
+        activate(top, WA_CLICKACTIVE);
+    }
 }
 
 /// A left-button press at client point `lparam` of top-level window
@@ -3068,11 +3117,15 @@ fn pump() {
             if let Some((i, thread)) = target {
                 let top = hwnd_of(i);
                 // A click activates the window, on its own thread, before
-                // the click is dispatched; a popup (a menu, a drop-down
-                // list) leaves the activation where it is, as ShowWindow
-                // does.
+                // the click is dispatched; a popup's program is asked
+                // first, when the desktop says so (GALA_WM_MOUSEACTIVATE,
+                // for a popup that is not active).
                 if (message == 0x0201 || message == 0x0204) && !with(|s| s.windows[i].popup) {
                     post_input(thread, message_at(top, GALA_WM_ACTIVATE, WA_CLICKACTIVE, 0));
+                }
+                if message == GALA_WM_MOUSEACTIVATE {
+                    post_input(thread, message_at(top, message, wparam, 0));
+                    continue;
                 }
                 // In a frame the program draws, its WM_NCHITTEST says
                 // whether a press is on its caption.
@@ -3540,6 +3593,10 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
     }
     if m.message == GALA_WM_NCDOWN {
         nc_down(m.hwnd, m.wparam, m.lparam);
+        return 0;
+    }
+    if m.message == GALA_WM_MOUSEACTIVATE {
+        mouse_activate(m.hwnd, m.wparam as u32);
         return 0;
     }
     if m.message == GALA_WM_PLACE {

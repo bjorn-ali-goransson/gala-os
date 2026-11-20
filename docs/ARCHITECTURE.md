@@ -8417,8 +8417,34 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   across processes. Explorer's "Make the change" is the first sender
   ("The file explorer"); test `agent` sends one of each, and scenario
   `explorer_agent` drives Explorer's end to end.
-- **Not there yet** (ROADMAP): the model relay, the chat and the `run`
-  tool.
+- **Chat**: Send lists the prompt as a request and asks the model on a
+  worker thread: `chat::body` (the chat-completions form without a
+  model: a system message naming the context's program and title,
+  then each request asked and each answer, in order; hand-offs are
+  listed, not asked) POSTed over winhttp (loaded on the first ask) to
+  `chat::HOST`:`PORT` `/v1/chat/completions`. The answer
+  (`choices[0].message.content`, read by `chat::answer`, a small JSON
+  reader host-tested in `chat.rs`) or why there is none comes back to
+  the window as WM_APP_ANSWER and shows under the request. The panel
+  holds no model name and no key. Test `agent_chat`
+  (`user/agent_chat_test`, AGENT_CHAT_SCREEN): clicks the prompt, types,
+  reads the Edit's Value, sends and waits for the recorded answer.
+- **Relay** (`cargo xtask agent-relay`, `xtask/src/agent_relay.rs`):
+  QEMU's guestfwd runs it for each connection to 10.0.2.101:80 in the
+  scenarios that ask for it. It adds the model (`MODEL`, or
+  `XTASK_AGENT_MODEL`) and replays the answer from
+  `xtask/agent-recordings/<hash>.response.json` (FNV-1a 64 of the
+  request as sent to the API); a request that is not recorded is
+  answered 502 naming its hash and the nearest recorded request with
+  the byte where they part. `XTASK_AGENT_RECORD=1` sends it to the API
+  instead, the development host's proxy adding the key (the relay
+  sends the placeholder `proxy-injected`), and stores the request and
+  the answer, bytes only: no key, no headers. A recording is redone on
+  purpose when the prompts change, and its diff is read like code.
+  Each exchange is a line `xtask: agent-relay: <hash> replayed |
+  recorded | not recorded (...)`, added to the end of the serial log.
+- **Not there yet** (ROADMAP): the `run` tool and asking on a
+  hand-off.
 - **Observability**: `agent: started docked` / `started hidden
   (remembered)`, `agent: docked at x,y wxh`, `agent: hidden: the dock
   tab at x,y wxh`, `agent: docked without a strip: ABM_NEW refused`,
@@ -8427,6 +8453,9 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   ...`, `agent: handoff from <program> (window 0x..): "<text>" on
   <element id | the whole window>`, `agent: handoff refused (<n>
   bytes): <why>`, `agent: WM_COPYDATA of kind 0x.. not taken`,
+  `agent: asking the model: request N, B bytes`, `agent: answer N:
+  "..."`, `agent: no answer N: <why>` (the winhttp call and its error,
+  the HTTP status, the relay's message),
   `agent: the state is not saved: ...`, `agent: no context:
   SetWinEventHook failed`, `agent: panic: ...` and `agent: ended`.
 
@@ -8483,9 +8512,19 @@ the program always sees WM_SIZE/WM_MOVE.
 - **Popups**: a window created with style 1 (STYLE_POPUP) is frameless,
   all client area (any size from 1 x 1), square with a shadow, kept
   above the framed windows (raising a framed window puts it below
-  them), not on the taskbar and never activated (showing or clicking it
-  leaves the active window as it was): menus, drop-down lists and
-  tooltips.
+  them), not on the taskbar and not activated by showing it: menus,
+  drop-down lists and tooltips. A press in an inactive popup's client
+  area (not a served one: Wayland and X11 popups are never active)
+  queues GALA_WM_MOUSEACTIVATE (wParam the button's down message) just
+  before the press; user32 sends the window WM_MOUSEACTIVATE (a child
+  asks its parent; DefWindowProc answers MA_ACTIVATE, a WS_EX_NOACTIVATE
+  window is not asked) and, for MA_ACTIVATE or MA_ACTIVATEANDEAT, calls
+  GalaWindowActivate (0x7f5d), which activates it only for that press
+  (the desktop remembers the pressed popup; any other press, or a
+  second call, is refused with STATUS_INVALID_DEVICE_STATE, logged
+  `desktop: window N asked for the activation without a press of its
+  own (refused)`). Menus and combo lists answer MA_NOACTIVATE and stay
+  inactive; the agent panel takes the keyboard this way.
 - **Capture** (GalaWindowCapture): the window gets every mouse message
   in its client coordinates (negative outside it) wherever the pointer
   is; captions, the taskbar and the start menu get nothing meanwhile.
@@ -15353,10 +15392,17 @@ The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
   a flag rather than from the component. An element whose id is no
   longer in the view, or a destroyed window, answers
   UIA_E_ELEMENTNOTAVAILABLE.
+- The Value pattern (UIA_ValuePatternId 10002, IValueProvider) on
+  inputs: get_Value is the input's text (its Name stays the
+  placeholder, so a client reads what was typed with the Value
+  property, 30045), IsReadOnly is FALSE, and SetValue sends the
+  window the registered message `GalaUiSetValue` with the id and the
+  text; the window's thread replaces the text and sends `typed`'s
+  message (logged `set value <id>: <msg>`). SetValue on an element
+  that is no longer an input answers UIA_E_ELEMENTNOTENABLED.
 
-Limits: no scrolling; images are laid out but not drawn; no UIA
-control patterns yet (Invoke, Value), so UIA clients read the tree
-but act through the mouse and keyboard; elements without an id are
+Limits: no scrolling; images are laid out but not drawn; no Invoke
+pattern yet, so UIA clients press buttons through the mouse; elements without an id are
 not in UIA; typing has no caret, selection or keyboard navigation
 (Tab) and takes no surrogate pairs; one window per thread; messages
 come only from the window's own clicks and typing (no timers, nothing
@@ -16339,6 +16385,7 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
 | GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
 | GalaWindowResize(id, edges) | 0x7f55 | the caller's window is resized from those edges by the pointer, placed when the button goes up (its own border) |
+| GalaWindowActivate(id) | 0x7f5d | the caller's popup takes the activation for the press just made in it ("Popups") |
 
 **The registry and its record** (step 1):
 

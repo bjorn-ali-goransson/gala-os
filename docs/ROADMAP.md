@@ -7176,9 +7176,14 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   "The agent panel"). Its screen scenario finds what it clicks through
   UI Automation (`uia_client`, `click_on`), the way older scenarios'
   position-aimed clicks are to go as their windows move to gala_ui
-  (WORKFLOW "Screen checks"). Next, in order: the relay with record
-  and replay, the chat and the
-  `run` tool ("compress all the files" in Explorer); then the source
+  (WORKFLOW "Screen checks"). The chat is in: a prompt sent is asked
+  of the model through `cargo xtask agent-relay`, recorded once and
+  replayed by request hash, and the answer shows under it (scenario
+  `agent_chat`; ARCHITECTURE "The agent panel", Chat and Relay); a
+  click in the panel activates it (popups take the activation for
+  their own press, WM_MOUSEACTIVATE), and gala_ui's inputs have the
+  UIA Value pattern. Next, in order: the `run` tool ("compress all
+  the files" in Explorer) and asking on a hand-off; then the source
   tools, the state record and the swap, Undo, and the item on Task
   Manager with its use case as the measure.
 - **A debugger on the kernel**: `boot-test --gdb` starts QEMU with its

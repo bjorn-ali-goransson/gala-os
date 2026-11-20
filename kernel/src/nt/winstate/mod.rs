@@ -70,6 +70,13 @@ pub const GALA_WM_POINTER_LEFT: u32 = 0x0001_0011;
 /// grab's window (the topmost grabbing popup); the press goes nowhere
 /// else.
 pub const GALA_WM_POPUP_DONE: u32 = 0x0001_0012;
+/// gala's notice to a program that the user pressed a button
+/// (wParam: WM_LBUTTONDOWN or WM_RBUTTONDOWN) in its popup that is not
+/// the active window, queued just before the press: user32 asks the
+/// popup's WM_MOUSEACTIVATE and takes the activation for that press
+/// (GalaWindowActivate) unless it says MA_NOACTIVATE. Not for served
+/// owners (a Wayland popup is never active).
+pub const GALA_WM_MOUSEACTIVATE: u32 = 0x0001_0013;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_MOUSEWHEEL: u32 = 0x020a;
 /// One wheel notch (WHEEL_DELTA).

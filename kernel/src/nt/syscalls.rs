@@ -215,6 +215,8 @@ pub const GALA_WINDOW_SURFACE_OPEN: u32 = 0x7f53;
 pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
 /// ... or resize it by its own border.
 pub const GALA_WINDOW_RESIZE: u32 = 0x7f55;
+/// A clicked popup takes the activation (its WM_MOUSEACTIVATE said so).
+pub const GALA_WINDOW_ACTIVATE: u32 = 0x7f5d;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -462,6 +464,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SURFACE_OPEN, "GalaWindowSurfaceOpen", 3, gala_window_surface_open),
     (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
     (GALA_WINDOW_RESIZE, "GalaWindowResize", 2, gala_window_resize),
+    (GALA_WINDOW_ACTIVATE, "GalaWindowActivate", 1, gala_window_activate),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -2453,6 +2456,21 @@ fn gala_window_resize(call: &mut Call<'_>) -> NtStatus {
     let owner = call.process.id;
     tri!(super::desktop::with(&call.process.desk.shell, |d| {
         d.begin_resize(id, owner, edges)?;
+        Ok(((), None))
+    }));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowActivate(id): the caller's popup `id` becomes the active
+/// window for the press the desktop just gave it (user32: its
+/// WM_MOUSEACTIVATE answered MA_ACTIVATE or MA_ACTIVATEANDEAT).
+/// STATUS_INVALID_DEVICE_STATE when the last press was not on it, or it
+/// took the activation for that press already.
+fn gala_window_activate(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.activate_for_press(id, owner)?;
         Ok(((), None))
     }));
     NtStatus::SUCCESS

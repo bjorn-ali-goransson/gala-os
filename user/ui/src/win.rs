@@ -133,6 +133,8 @@ unsafe extern "system" {
     fn FrameRect(dc: Handle, rect: *const Rect, brush: Handle) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: i32) -> i32;
+    fn SendMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn RegisterWindowMessageW(name: *const u16) -> u32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
     fn GetDC(hwnd: Hwnd) -> Handle;
     fn ReleaseDC(hwnd: Hwnd, dc: Handle) -> i32;
@@ -223,6 +225,11 @@ const DT_END_ELLIPSIS: u32 = 0x8000;
 const S_OK: HResult = 0;
 const E_NOINTERFACE: HResult = 0x8000_4002_u32 as i32;
 const E_INVALIDARG: HResult = 0x8007_0057_u32 as i32;
+const E_FAIL: HResult = 0x8000_4005_u32 as i32;
+/// UIA_E_ELEMENTNOTENABLED: SetValue on what is not an input.
+const UIA_E_ELEMENTNOTENABLED: HResult = 0x8004_0200_u32 as i32;
+/// The Value pattern (UIA_ValuePatternId).
+const UIA_VALUE_PATTERN: i32 = 10002;
 const UIA_E_ELEMENTNOTAVAILABLE: HResult = 0x8004_0201_u32 as i32;
 const VT_I4: u16 = 3;
 const VT_BSTR: u16 = 8;
@@ -257,6 +264,9 @@ const IID_FRAGMENT: Guid =
 /// IID_IRawElementProviderFragmentRoot {620ce2a5-ab8f-40a9-86cb-de3c75599b58}.
 const IID_FRAGMENT_ROOT: Guid =
     guid(0x620ce2a5, 0xab8f, 0x40a9, [0x86, 0xcb, 0xde, 0x3c, 0x75, 0x59, 0x9b, 0x58]);
+/// IID_IValueProvider {c7935180-6fb3-4201-b174-7df73adbf64a}.
+const IID_VALUE: Guid =
+    guid(0xc7935180, 0x6fb3, 0x4201, [0xb1, 0x74, 0x7d, 0xf7, 0x3a, 0xdb, 0xf6, 0x4a]);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -402,6 +412,22 @@ impl<C: Component> Window for Host<C> {
 
     fn message(&mut self, hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
         let (x, y) = ((lparam & 0xffff) as i16 as i32, ((lparam >> 16) & 0xffff) as i16 as i32);
+        // UIA's SetValue on an input: typed (1), or not an input (0).
+        if msg == set_value_message() && msg != 0 && lparam != 0 {
+            // SAFETY: `set_value`'s request, alive for its send.
+            let v = unsafe { &*(lparam as *const SetValue) };
+            let input = self
+                .placed
+                .iter()
+                .any(|p| p.kind == crate::Kind::Input && p.id == Some(v.id.clone()));
+            if !input {
+                return Some(0);
+            }
+            if let Some(m) = typed(&self.placed, &v.id, v.text.clone()) {
+                self.handle(hwnd, "set value", &v.id, m);
+            }
+            return Some(1);
+        }
         match msg {
             WM_SIZE => self.layout(hwnd),
             WM_LBUTTONDOWN => {
@@ -803,6 +829,8 @@ struct Provider {
     simple: *const VTable<7>,
     fragment: *const VTable<9>,
     root: *const VTable<5>,
+    /// IValueProvider: an input's (its text; SetValue types it).
+    value: *const VTable<6>,
     refs: AtomicU32,
     shared: Arc<Shared>,
     /// The element's id; None for the window's (the fragment root).
@@ -818,6 +846,7 @@ impl Provider {
             simple: &SIMPLE,
             fragment: &FRAGMENT,
             root: &ROOT,
+            value: &VALUE,
             refs: AtomicU32::new(1),
             shared,
             id,
@@ -839,6 +868,17 @@ impl Provider {
 
     fn as_root(p: *mut Provider) -> *mut c_void {
         p.cast::<u8>().wrapping_add(2 * PTR).cast()
+    }
+
+    fn as_value(p: *mut Provider) -> *mut c_void {
+        p.cast::<u8>().wrapping_add(3 * PTR).cast()
+    }
+
+    /// Whether this element is an input (it has the Value pattern).
+    fn is_input(&self) -> bool {
+        self.shared.with(|s| {
+            self.index(s).ok().flatten().is_some_and(|i| s.tree[i].kind == crate::Kind::Input)
+        })
     }
 
     /// This element's index in the current list, or why there is none.
@@ -887,6 +927,15 @@ static FRAGMENT: VTable<9> = VTable([
     fragment_root as *const (),
 ]);
 
+static VALUE: VTable<6> = VTable([
+    value_query as *const (),
+    value_add_ref as *const (),
+    value_release as *const (),
+    set_value as *const (),
+    get_value as *const (),
+    get_is_read_only as *const (),
+]);
+
 static ROOT: VTable<5> = VTable([
     root_query as *const (),
     root_add_ref as *const (),
@@ -914,6 +963,8 @@ unsafe fn p_query(
         Provider::as_fragment(base)
     } else if *iid == IID_FRAGMENT_ROOT && p.id.is_none() {
         Provider::as_root(base)
+    } else if *iid == IID_VALUE && p.is_input() {
+        Provider::as_value(base)
     } else {
         // SAFETY: the caller's.
         unsafe { *out = core::ptr::null_mut() };
@@ -1003,14 +1054,120 @@ extern "system" fn provider_options(_: *mut c_void, out: *mut i32) -> HResult {
     S_OK
 }
 
-/// No patterns yet (ARCHITECTURE "UI components": limits).
-extern "system" fn pattern_provider(_: *mut c_void, _: i32, out: *mut *mut c_void) -> HResult {
+/// The Value pattern for an input; no other patterns yet (ARCHITECTURE
+/// "UI components": limits).
+extern "system" fn pattern_provider(this: *mut c_void, id: i32, out: *mut *mut c_void) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: COM calls this on our IRawElementProviderSimple.
+    let p = unsafe { Provider::of(this, 0) };
+    let to = if id == UIA_VALUE_PATTERN && p.is_input() {
+        p.refs.fetch_add(1, Ordering::Relaxed);
+        Provider::as_value((p as *const Provider).cast_mut())
+    } else {
+        core::ptr::null_mut()
+    };
+    // SAFETY: the caller's out pointer; the reference is its.
+    unsafe { *out = to };
+    S_OK
+}
+
+extern "system" fn value_query(
+    this: *mut c_void,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> HResult {
+    // SAFETY: COM calls this on our IValueProvider.
+    unsafe { p_query(this, 3 * PTR, iid, out) }
+}
+extern "system" fn value_add_ref(this: *mut c_void) -> u32 {
+    // SAFETY: as above.
+    unsafe { p_add_ref(this, 3 * PTR) }
+}
+extern "system" fn value_release(this: *mut c_void) -> u32 {
+    // SAFETY: as above.
+    unsafe { p_release(this, 3 * PTR) }
+}
+
+/// IValueProvider::get_Value: the input's text.
+extern "system" fn get_value(this: *mut c_void, out: *mut *mut u16) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: COM calls this on our IValueProvider.
+    let p = unsafe { Provider::of(this, 3 * PTR) };
+    let r = p.shared.with(|s| p.index(s).map(|i| i.map(|i| s.tree[i].text.clone())));
+    match r {
+        Err(hr) => hr,
+        Ok(t) => {
+            // SAFETY: the caller's out pointer; the BSTR is its.
+            unsafe { *out = bstr(t.as_deref().unwrap_or("")) as *mut u16 };
+            S_OK
+        }
+    }
+}
+
+/// IValueProvider::get_IsReadOnly: an input is not.
+extern "system" fn get_is_read_only(_: *mut c_void, out: *mut i32) -> HResult {
     if out.is_null() {
         return E_INVALIDARG;
     }
     // SAFETY: the caller's out pointer.
-    unsafe { *out = core::ptr::null_mut() };
+    unsafe { *out = 0 };
     S_OK
+}
+
+/// What IValueProvider::SetValue hands the window's thread
+/// (`set_value_message`, sent: the window's own update path, as typing).
+struct SetValue {
+    id: String,
+    text: String,
+}
+
+/// The message SetValue sends the window (registered, so no program's
+/// own WM_USER message collides with it).
+fn set_value_message() -> u32 {
+    static M: AtomicU32 = AtomicU32::new(0);
+    let m = M.load(Ordering::Relaxed);
+    if m != 0 {
+        return m;
+    }
+    let name: Vec<u16> = "GalaUiSetValue\0".encode_utf16().collect();
+    // SAFETY: a NUL-terminated name.
+    let m = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+    M.store(m, Ordering::Relaxed);
+    m
+}
+
+/// IValueProvider::SetValue: the input's text becomes `text`, as if typed
+/// (its program's message for the new text).
+extern "system" fn set_value(this: *mut c_void, text: *const u16) -> HResult {
+    if text.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: COM calls this on our IValueProvider.
+    let p = unsafe { Provider::of(this, 3 * PTR) };
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    while unsafe { *text.add(n) } != 0 {
+        n += 1;
+    }
+    // SAFETY: as above, `n` units.
+    let t = String::from_utf16_lossy(unsafe { core::slice::from_raw_parts(text, n) });
+    let Some(id) = p.id.clone() else { return UIA_E_ELEMENTNOTENABLED };
+    let hwnd = match p.shared.with(|s| p.index(s).map(|_| s.hwnd)) {
+        Ok(h) => h,
+        Err(hr) => return hr,
+    };
+    let m = set_value_message();
+    if m == 0 {
+        return E_FAIL;
+    }
+    let v = SetValue { id, text: t };
+    // SAFETY: our window; the request outlives the (synchronous) send.
+    let r = unsafe { SendMessageW(hwnd, m, 0, (&v as *const SetValue) as isize) };
+    if r == 1 { S_OK } else { UIA_E_ELEMENTNOTENABLED }
 }
 
 fn bstr(s: &str) -> u64 {

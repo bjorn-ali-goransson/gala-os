@@ -204,6 +204,21 @@ impl Element {
         self.bstr(29)
     }
 
+    /// The Value pattern's value (UIA_ValueValuePropertyId): an edit's
+    /// text; empty without the pattern.
+    pub fn value(&self) -> Text {
+        const VALUE_VALUE: i32 = 30045;
+        let mut v = Variant { vt: 0, reserved: [0; 3], value: 0, extra: 0 };
+        // SAFETY: GetCurrentPropertyValue (slot 10) of a live element.
+        unsafe {
+            let f: extern "system" fn(*mut c_void, i32, *mut Variant) -> HResult =
+                core::mem::transmute(method(self.0, 10));
+            f(self.0, VALUE_VALUE, &mut v);
+        }
+        // A BSTR is ours to free (`take`); nothing else is held.
+        Text::take(if v.vt == VT_BSTR { v.value as *mut u16 } else { core::ptr::null_mut() })
+    }
+
     pub fn control_type(&self) -> i32 {
         let mut t = 0;
         // SAFETY: get_CurrentControlType of a live element.

@@ -1757,3 +1757,62 @@ fn a_tile_initial_from_the_title_or_else_the_program() {
     assert_eq!(tile_initial(&star, &[]), ('*', &star[..]));
     assert_eq!(tile_initial(&[], &[]), ('?', &[][..]));
 }
+
+#[test]
+fn a_clicked_popup_takes_the_activation_only_for_its_press() {
+    // Windows activates a WS_POPUP window the user clicks unless its
+    // WM_MOUSEACTIVATE says MA_NOACTIVATE (a menu, a drop-down list):
+    // user32 asks, on the popup's thread, and the desktop lets the
+    // program take the activation for that press only.
+    let (mut d, a) = desktop_with_window();
+    let p = d.create(7, 320, 150, 100, 60, &title("panel"), STYLE_POPUP).unwrap();
+    d.show(p, 7, true).unwrap();
+    let q = d.create(7, 600, 150, 100, 60, &title("other"), STYLE_POPUP).unwrap();
+    d.show(q, 7, true).unwrap();
+    // No press yet: refused.
+    assert_eq!(d.activate_for_press(p, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    click(&mut d, 330, 160);
+    assert_eq!(d.s.active, Some(a));
+    // Its program is asked, just before the press.
+    let n = d.take_input(7, &mut out);
+    let msgs: Vec<(u32, u32, u64)> =
+        out[..n].iter().map(|e| (e.window, e.message, e.wparam)).collect();
+    assert_eq!(
+        msgs,
+        [
+            (p, WM_MOUSEMOVE, 0),
+            (p, GALA_WM_MOUSEACTIVATE, u64::from(WM_LBUTTONDOWN)),
+            (p, WM_LBUTTONDOWN, 1),
+            (p, WM_LBUTTONUP, 0)
+        ]
+    );
+    // Not the owner's, not the window pressed: refused.
+    assert_eq!(d.activate_for_press(p, 8), Err(NtStatus::INVALID_HANDLE));
+    assert_eq!(d.activate_for_press(q, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    d.activate_for_press(p, 7).unwrap();
+    assert_eq!(d.s.active, Some(p));
+    // Once per press; the active popup's presses are not asked about.
+    assert_eq!(d.activate_for_press(p, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    click(&mut d, 331, 160);
+    let n = d.take_input(7, &mut out);
+    assert!(!out[..n].iter().any(|e| e.message == GALA_WM_MOUSEACTIVATE));
+    assert_eq!(d.activate_for_press(p, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    // A press elsewhere (the frame) activates that window; the popup's
+    // earlier press is spent.
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
+    click(&mut d, ox + 5, oy + 200);
+    assert_eq!(d.s.active, Some(a));
+    assert_eq!(d.activate_for_press(p, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    // A right press counts as well (WM_MOUSEACTIVATE is for any button).
+    go(&mut d, 610, 160, 0);
+    go(&mut d, 610, 160, 2);
+    go(&mut d, 610, 160, 0);
+    d.activate_for_press(q, 7).unwrap();
+    assert_eq!(d.s.active, Some(q));
+    // The active popup that goes away leaves the activation to the
+    // topmost framed window.
+    d.destroy(q, 7).unwrap();
+    assert_eq!(d.s.active, Some(a));
+}

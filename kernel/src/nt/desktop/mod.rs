@@ -41,13 +41,13 @@ use super::status::NtStatus;
 /// The window state's names, as the desktop's (the system calls, the
 /// named actions use them).
 pub use super::winstate::{
-    Action, BORDER, CAPTION, GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_PLACE,
-    GALA_WM_POINTER_LEFT, HTCAPTION, ICON, InputEvent, LISTED_ACTIVE, LISTED_MAXIMIZED,
-    LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect, SC_CLOSE, SC_MAXIMIZE,
-    SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR, WHEEL_DELTA, WM_CLOSE,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
-    WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, scale_icon, scale_icon_to,
+    Action, BORDER, CAPTION, GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_MOUSEACTIVATE,
+    GALA_WM_PLACE, GALA_WM_POINTER_LEFT, HTCAPTION, ICON, InputEvent, LISTED_ACTIVE,
+    LISTED_MAXIMIZED, LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect,
+    SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR,
+    WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, scale_icon, scale_icon_to,
 };
 use super::winstate::{CAPTION_BUTTON, Shadow, State, VK_MENU, Window};
 use crate::mm::heap::TryVec;
@@ -710,6 +710,10 @@ pub struct Desktop {
     /// Buttons whose press ended a popup grab: their release goes
     /// nowhere either.
     swallowed: u8,
+    /// The popup the last press went to (its client area, no capture):
+    /// its program may take the activation for that press once
+    /// (`activate_for_press`, user32's WM_MOUSEACTIVATE).
+    pressed_popup: Option<u32>,
     hover: Hit,
     /// Where the left button went down.
     pressed: Hit,
@@ -800,6 +804,7 @@ impl Desktop {
             pointer: (0, 0),
             buttons: 0,
             swallowed: 0,
+            pressed_popup: None,
             hover: Hit::Nothing,
             pressed: Hit::Nothing,
             drag: None,
@@ -1676,6 +1681,9 @@ impl Desktop {
         self.swallowed &= !up;
         self.buttons &= !up;
         let pressed = buttons & !self.buttons;
+        if pressed != 0 {
+            self.pressed_popup = None;
+        }
         if pressed != 0 && self.s.popup_grab.is_some() {
             let target = match self.s.captured.filter(|&c| self.s.window(c).is_some()) {
                 Some(c) => Some(c),
@@ -1794,9 +1802,7 @@ impl Desktop {
             && let Hit::Client(id) = hit
         {
             self.s.raise(id);
-            if !self.s.window(id).is_some_and(|w| w.popup) {
-                self.s.activate(Some(id));
-            }
+            self.press_client(id, WM_RBUTTONDOWN);
             let lp = self.s.client_lparam(id, x, y);
             self.s.note_button(id, WM_RBUTTONDOWN, x, y, false);
             self.s.send(id, WM_RBUTTONDOWN, keys, lp);
@@ -1910,9 +1916,7 @@ impl Desktop {
             }
             Hit::Client(id) => {
                 self.s.raise(id);
-                if !self.s.window(id).is_some_and(|w| w.popup) {
-                    self.s.activate(Some(id));
-                }
+                self.press_client(id, WM_LBUTTONDOWN);
                 let lp = self.s.client_lparam(id, x, y);
                 self.s.note_button(id, WM_LBUTTONDOWN, x, y, false);
                 self.s.send(id, WM_LBUTTONDOWN, keys, lp);
@@ -1927,6 +1931,41 @@ impl Desktop {
             Hit::Tray(h, u) => self.tray.button((h, u), tray::Button::Left, true, x, y),
             Hit::Nothing | Hit::Taskbar | Hit::Balloon | Hit::BarMenuItem | Hit::BarMenu => {}
         }
+    }
+
+    /// A press (`button`'s down message) in window `id`'s client area: a
+    /// framed window becomes active; a popup that is not active leaves
+    /// the activation where it is and its program is asked first
+    /// (GALA_WM_MOUSEACTIVATE, then `activate_for_press`).
+    fn press_client(&mut self, id: u32, button: u32) {
+        let Some(w) = self.s.window(id) else { return };
+        if !w.popup {
+            self.s.activate(Some(id));
+        } else if self.s.active != Some(id) && !self.s.served(w.owner) {
+            self.pressed_popup = Some(id);
+            self.s.send(id, GALA_WM_MOUSEACTIVATE, u64::from(button), 0);
+        }
+    }
+
+    /// `owner`'s popup `id` takes the activation for the press it was
+    /// just given (user32: its WM_MOUSEACTIVATE answered MA_ACTIVATE, as
+    /// Windows activates a clicked WS_POPUP window). Once per press, and
+    /// only for the window pressed, so no program takes the keyboard
+    /// without the user's click: STATUS_INVALID_DEVICE_STATE otherwise.
+    pub fn activate_for_press(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.s.owned(id, owner).ok_or(NtStatus::INVALID_HANDLE)?;
+        if self.pressed_popup != Some(id) {
+            #[cfg(not(test))]
+            crate::warn!(
+                "desktop: window {id} asked for the activation without a press of its own (refused)"
+            );
+            return Err(NtStatus::INVALID_DEVICE_STATE);
+        }
+        self.pressed_popup = None;
+        self.s.activate(Some(id));
+        #[cfg(not(test))]
+        crate::info!("desktop: popup {id} takes the activation for its press");
+        Ok(())
     }
 
     /// `owner`'s window `id` asks to be dragged by the pointer while the

@@ -48,6 +48,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod agent_relay;
 mod alloc_audit;
 mod clockcheck;
 mod diskimage;
@@ -9469,6 +9470,30 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("agent", "comctl32.dll", "Windows/System32"),
     // Explorer's "Make the change" handed to the docked panel (ROADMAP
     // LY "Change this program", step 3): both programs, nothing else.
+    // The panel's chat (agent_chat_test): agent.exe and the winhttp it
+    // loads on the first ask, with what winhttp loads.
+    ("agent_chat", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("agent_chat", "user/bin/agent.exe", "Windows/System32"),
+    ("agent_chat", "ntdll.dll", "Windows/System32"),
+    ("agent_chat", "kernel32.dll", "Windows/System32"),
+    ("agent_chat", "msvcrt.dll", "Windows/System32"),
+    ("agent_chat", "advapi32.dll", "Windows/System32"),
+    ("agent_chat", "bcryptprimitives.dll", "Windows/System32"),
+    ("agent_chat", "user32.dll", "Windows/System32"),
+    ("agent_chat", "gdi32.dll", "Windows/System32"),
+    ("agent_chat", "shell32.dll", "Windows/System32"),
+    ("agent_chat", "ole32.dll", "Windows/System32"),
+    ("agent_chat", "oleaut32.dll", "Windows/System32"),
+    ("agent_chat", "uiautomationcore.dll", "Windows/System32"),
+    ("agent_chat", "comctl32.dll", "Windows/System32"),
+    ("agent_chat", "winhttp.dll", "Windows/System32"),
+    ("agent_chat", "ws2_32.dll", "Windows/System32"),
+    ("agent_chat", "mswsock.dll", "Windows/System32"),
+    ("agent_chat", "secur32.dll", "Windows/System32"),
+    ("agent_chat", "schannel.dll", "Windows/System32"),
+    ("agent_chat", "crypt32.dll", "Windows/System32"),
+    ("agent_chat", "bcrypt.dll", "Windows/System32"),
+    ("agent_chat", "ncrypt.dll", "Windows/System32"),
     ("explorer_agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("explorer_agent", "user/bin/explorer.exe", "Windows"),
     ("explorer_agent", "user/bin/agent.exe", "Windows/System32"),
@@ -11147,6 +11172,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ui_test",
     "agent",
     "agent_test",
+    "agent_chat_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -11515,6 +11541,11 @@ commands:
                kernel's own code: disk-files <image> [C:/path] [--out DIR]
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
+  agent-relay  the agent panel's model calls, one connection on standard
+               input/output (QEMU runs it per connection to 10.0.2.101:80:
+               AGENT_RELAY_SCENARIOS): replays xtask/agent-recordings, or
+               records them with XTASK_AGENT_RECORD=1 (the host's proxy adds
+               the key)
   relay <port> one connection on standard input/output to 127.0.0.1:<port>
                (QEMU runs it per connection: chromium_wpt's wptserve)
   wpt-compare  chromium_wpt's report against wpt.fyi's Edge on Windows and
@@ -11654,6 +11685,7 @@ fn main() -> ExitCode {
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
             Some("serve-page") => serve_page(),
+            Some("agent-relay") => agent_relay::serve(),
             Some("wpt-compare") => wpt::compare(),
             Some("relay") => {
                 wpt::relay(args.get(1).map_or("", String::as_str), args.get(2).map(String::as_str))
@@ -13491,6 +13523,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     // A framebuffer for the docked agent panel (AGENT_SCREEN).
     "agent",
     "explorer_agent",
+    "agent_chat",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -16280,6 +16313,37 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "agent_test: docked again",
             "agent_test: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The agent panel's chat (ROADMAP LY "Change this program", step
+        // 4; ARCHITECTURE "The agent panel", "Relay"): AGENT_CHAT_SCREEN
+        // clicks the prompt agent_chat_test announces, types `say pong`
+        // and clicks Send; agent.exe POSTs the conversation to
+        // 10.0.2.101:80, which QEMU's guestfwd gives to `xtask
+        // agent-relay`, which replays xtask/agent-recordings (record it
+        // again with XTASK_AGENT_RECORD=1); the answer is listed. The
+        // relay's lines come last: its log is added at the end of the run.
+        name: "agent_chat",
+        cmdline: "qemu_exit wallpaper=night events=window run=agent_chat_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "agent: started docked",
+            "agent: docked at 960,0 320x752",
+            "agent: context agent_chat_test: Agent chat test window",
+            "agent_chat_test: Prompt at",
+            "agent_chat_test: SendButton at",
+            "agent_chat_test: typed",
+            "agent: click SendButton: Send",
+            "agent: request \"say pong\"",
+            "agent: asking the model: request 0,",
+            "agent: answer 0: ",
+            "agent_chat_test: answered: ",
+            "agent_chat_test: TestWindow at",
+            "agent_chat_test: reply listed",
+            "agent_chat_test: ok",
+            "exited with status 0x00000000",
+            "xtask: agent-relay: ",
         ],
     },
     Scenario {
@@ -22499,6 +22563,9 @@ fn run_vm_once(
     } else if host_page_scenario(iso_scenario(iso)) {
         let _ = fs::remove_file(iso.with_extension("serve.log"));
         add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
+    } else if AGENT_RELAY_SCENARIOS.contains(&iso_scenario(iso)) {
+        let _ = fs::remove_file(iso.with_extension("serve.log"));
+        add_agent_relay_net(&mut cmd, &iso.with_extension("serve.log"))?;
     } else if CARD_SCENARIOS.contains(&iso_scenario(iso)) {
         add_card(&mut cmd);
     }
@@ -22784,7 +22851,8 @@ fn run_vm_once(
         // all and passed on the program's exit status alone.
         serial += &format!("xtask: screen: nothing printed \"{}\"\n", check.marker);
     }
-    // The host page's requests (`serve-page`), as they came.
+    // The host page's requests (`serve-page`) and the agent relay's
+    // exchanges, as they came.
     if let Ok(served) = fs::read_to_string(iso.with_extension("serve.log")) {
         serial += &served;
     }
@@ -24160,6 +24228,46 @@ const AGENT_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// The panel's chat (scenario `agent_chat`): the prompt clicked (found
+/// by name) and `say pong` typed; Send clicked; the reply card (the
+/// chip's blue-grey, under the request's white card) shows once the
+/// answer is in; a click on the test's window ends the run.
+const AGENT_CHAT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "agent_chat_test: Prompt at",
+    steps: &[
+        ScreenStep {
+            after: "agent_chat_test: Prompt at",
+            input: &[
+                "click_on agent_chat_test: Prompt",
+                "sendkey s",
+                "sendkey a",
+                "sendkey y",
+                "sendkey spc",
+                "sendkey p",
+                "sendkey o",
+                "sendkey n",
+                "sendkey g",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "agent_chat_test: typed",
+            input: &["click_on agent_chat_test: SendButton"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 3: answered: the reply card under the request's.
+            after: "agent_chat_test: reply listed",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff),
+                PixelCheck::AnyIn(972, 140, 296, 200, 0xe6eef8),
+            ],
+        },
+        ScreenStep { after: "", input: &["click_on agent_chat_test: TestWindow"], pixels: &[] },
+    ],
+};
+
 /// The hand-off (scenario `explorer_agent`): the panel docked, Win+E
 /// opens Explorer beside it; Alt+Space, Up, Up, Enter opens "Change this
 /// program..."; a request typed and sent with Enter (no element picked:
@@ -25301,6 +25409,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("explorer", EXPLORER_SCREEN),
     ("agent", AGENT_SCREEN),
     ("explorer_agent", EXPLORER_AGENT_SCREEN),
+    ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
@@ -26668,6 +26777,31 @@ const CARD_SCENARIOS: &[&str] = &["arm_boot"];
 /// A virtio-net card on QEMU's user network, nothing forwarded to it.
 fn add_card(cmd: &mut Command) {
     cmd.args(["-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]);
+}
+
+/// Scenarios whose agent panel reaches the model through `cargo xtask
+/// agent-relay` at 10.0.2.101:80 (`add_agent_relay_net`), replaying
+/// xtask/agent-recordings unless XTASK_AGENT_RECORD=1.
+const AGENT_RELAY_SCENARIOS: &[&str] = &["agent_chat"];
+
+/// A virtio-net card on QEMU's user network whose address 10.0.2.101
+/// port 80 is forwarded, a connection at a time, to `xtask agent-relay`
+/// (agent_relay.rs), its log (`xtask: agent-relay: ...`) at `log`, which
+/// the run adds to the serial log.
+fn add_agent_relay_net(cmd: &mut Command, log: &Path) -> Result {
+    let exe = env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
+    let exe = exe.display().to_string();
+    if exe.contains(',') || exe.contains(' ') {
+        return Err(format!("xtask's path {exe:?} cannot go in a -netdev option"));
+    }
+    cmd.env("XTASK_AGENT_RELAY_LOG", log);
+    cmd.arg("-netdev")
+        .arg(format!(
+            "user,id=n0,guestfwd=tcp:{}:80-cmd:{exe} agent-relay",
+            agent_relay::GUEST_ADDR
+        ))
+        .args(["-device", "virtio-net-pci,netdev=n0"]);
+    Ok(())
 }
 
 /// Scenarios whose guest fetches `http://10.0.2.100/` from the host

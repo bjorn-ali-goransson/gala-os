@@ -1,0 +1,1 @@
+{"model":"gpt-4.1-mini","messages":[{"role":"system","content":"You are the agent in gala's side panel. The user is working in agent_chat_test (window \"Agent chat test window\"). Answer briefly."},{"role":"user","content":"say pong"}]}
