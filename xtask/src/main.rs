@@ -8396,6 +8396,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_cost_test", "testdll.dll", "gala"),
     ("import_cost", "ntdll.dll", "Windows/System32"),
     ("import_cost", "testdll.dll", "gala"),
+    ("import_window_test", "ntdll.dll", "Windows/System32"),
+    ("import_window_test", "testdll.dll", "gala"),
+    ("import_window", "ntdll.dll", "Windows/System32"),
+    ("import_window", "testdll.dll", "gala"),
     ("import_strings_test", "ntdll.dll", "Windows/System32"),
     ("import_strings_test", "testdll.dll", "gala"),
     ("import_strings", "ntdll.dll", "Windows/System32"),
@@ -11138,6 +11142,7 @@ const USER_PROGRAMS: &[&str] = &[
     "iat_ret_test",
     "iat_unwind_test",
     "import_cost_test",
+    "import_window_test",
     "import_strings_test",
     "args_test",
     "fpu_test",
@@ -13851,6 +13856,8 @@ const ARM64_TWINS: &[&str] = &[
     "iat_unwind",
     "import_cost_test",
     "import_cost",
+    "import_window_test",
+    "import_window",
     "import_strings_test",
     "import_strings",
     "thread_test",
@@ -19158,6 +19165,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: first calls recorded: 1 of 1 slots armed (imports=)",
             "imports: 19999 later calls recorded of 1048576 (imports_repeat=)",
             "imports: 40000 arguments quoted of 1048576, carried by 20000 calls \
+             (imports_strings=)",
+        ],
+    },
+    Scenario {
+        // OT3b: the same program with nothing armed, which is what the
+        // window run above is compared against: the calls answer the
+        // sum of what they were handed and the strings are unchanged,
+        // whether or not a trace read them behind their back.
+        name: "import_window_test",
+        cmdline: "qemu_exit run=import_window_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["import_window_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: a trace of a window and not of a whole run --
+        // `imports=` with `events_from=`. The program makes a batch of
+        // calls through its one armed import, waits 7 s, then makes
+        // the same batch again; the stream starts 4 s after boot, in
+        // the wait, with margin either side (the first batch is over
+        // within a second of boot on both arches, the second begins
+        // after 7). So the whole budget is there for the second batch
+        // although the first faulted a thousand times before it: a
+        // fault whose record is not written takes none of the budget
+        // and leaves the slot armed, the cost being the record and not
+        // the fault (2 ms against 5 us, `import_cost`). The first call
+        // of the second batch is the first recorded call, and the
+        // other 999 come from the repeat budget.
+        name: "import_window",
+        cmdline: "qemu_exit events=call events_from=4 run=import_window_test.exe \
+                  imports=import_window_test.exe!testdll.dll imports_repeat=1024 \
+                  imports_strings=4096",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_window_test: ok",
+            "exited with status 0x00000000",
+            "events: the stream starts 4 s after boot (events_from=)",
+            "imports: first calls recorded: 1 of 1 slots armed (imports=)",
+            "imports: 999 later calls recorded of 1024 (imports_repeat=)",
+            "imports: 2000 arguments quoted of 4096, carried by 1000 calls \
              (imports_strings=)",
         ],
     },

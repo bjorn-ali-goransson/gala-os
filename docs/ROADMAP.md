@@ -6358,8 +6358,12 @@ among the slowest hand-offs.
      later calls at most (scenario `iat_repeat` with an ARM64 twin).
      Repairing the slot is only what makes the next call free -- the
      instruction pointer is what sends the call on -- so the repeat is
-     not writing it, and what it costs is a fault a call while a slot is
-     armed, which is what the budget bounds. Nor is the answer:
+     not writing it, and what a recorded call costs is its record,
+     which is what the budget bounds: a fault whose record is not
+     written takes none of it and leaves the slot armed, so
+     `events_from=` beside the repeat spends the budget on one window
+     of a run and not on its first moments (scenario `import_window`
+     with an ARM64 twin). Nor is the answer:
      `imports_answers=<n>` keeps the return address the call left and
      puts the slot's second trap address in its place, so the return
      faults too, with the answer still in the register the ABI returns

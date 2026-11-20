@@ -650,6 +650,17 @@ run. Narrowing is what makes that true: Word binds some 1900 imports
 across the DLLs it loads, and the busiest of these 226 slots is called
 1720 times on its own.
 
+For a window late in a run, narrow in time as well, with
+`events_from=<seconds>`: what the budget bounds is the records, so the
+calls before the stream starts cost their faults alone (below noise
+beside a record) and the whole budget is there for the window, the
+first call it carries recorded as a first call.
+
+```sh
+XTASK_CMDLINE='events=call events_match=WINWORD events_from=32 imports=WINWORD.EXE!MSO.DLL imports_repeat=65536 imports_strings=65536' \
+  cargo xtask boot-test 'office_word$'
+```
+
 `imports_answers=<n>` adds what each of those calls answered: the
 kernel traps the return as well as the call, so a reading is pairs of
 `import` and `ret` rather than calls alone. It costs a second fault for
