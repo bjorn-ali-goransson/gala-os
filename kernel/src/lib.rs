@@ -420,6 +420,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_answers") {
         nt::traceimports::set_answers(spec);
     }
+    if let Some(spec) = cmdline.value("imports_strings") {
+        nt::traceimports::set_strings(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }

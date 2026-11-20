@@ -1178,6 +1178,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "import_strings_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "import_test"
 version = "0.1.0"
 dependencies = [

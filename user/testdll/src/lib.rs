@@ -7,7 +7,9 @@
 //! a stack walk sees of a call whose return the kernel trapped
 //! (`imports_answers=`, user/iat_ret_test); and one that jumps straight
 //! on to a function it is handed, so that a call through a slot can
-//! raise an exception at its caller's frame (user/iat_unwind_test).
+//! raise an exception at its caller's frame (user/iat_unwind_test);
+//! and one that takes four arguments, which is as many as an import
+//! trace can record of a call (user/import_strings_test).
 
 #![no_std]
 
@@ -84,6 +86,16 @@ pub extern "C" fn gala_raise_at(_record: *mut u8, _raiser: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn gala_raise_at(_record: *mut u8, _raiser: usize) {
     core::arch::naked_asm!("br x1")
+}
+
+/// Adds four numbers: a callee with four arguments of its own, so that
+/// a call through one import slot fills all four registers an import
+/// trace can record (`imports_strings=`, user/import_strings_test).
+/// None of them is read here, which is what lets the caller hand it an
+/// address in no mapping.
+#[unsafe(no_mangle)]
+pub extern "C" fn gala_four(a: u64, b: u64, c: u64, d: u64) -> u64 {
+    a.wrapping_add(b).wrapping_add(c).wrapping_add(d)
 }
 
 /// Number of DLL_PROCESS_ATTACH calls DllMain has seen.
