@@ -16331,6 +16331,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "appbar_test: the first bar was told",
             "desktop: app bar removed: window",
             "appbar_test: the strip is given back",
+            "desktop: work area changed: bottom edge reserved by 2 app bar(s)",
+            "appbar_test: the taskbar stays below the bottom bar",
             "appbar_test: ok",
             "exited with status 0x00000000",
         ],

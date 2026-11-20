@@ -425,9 +425,9 @@ pub struct State<X> {
     pub live: bool,
     /// The desktop's size (0 x 0 until known).
     pub screen: (i64, i64),
-    /// What app bars take from the screen besides the taskbar: left, top,
-    /// right and bottom insets (`desktop::appbar`); the work area is the
-    /// rest (`work`).
+    /// What app bars take from the screen (the taskbar is one, on the
+    /// bottom edge): left, top, right and bottom insets
+    /// (`desktop::appbar`); the work area is the rest (`work`).
     pub reserved: [i64; 4],
     pub active: Option<u32>,
     /// The window with the mouse capture (GalaWindowCapture): it gets all
@@ -1252,8 +1252,9 @@ impl<X: Default> State<X> {
         );
     }
 
-    /// The work area: the screen without the taskbar and the app bars'
-    /// strips (`reserved`); empty until the screen's size is known.
+    /// The work area: the screen without the app bars' strips, the
+    /// taskbar's among them (`reserved`); empty until the screen's size
+    /// is known.
     pub fn work(&self) -> Rect {
         let [l, t, r, b] = self.reserved;
         let (sw, sh) = self.screen;
@@ -1263,7 +1264,7 @@ impl<X: Default> State<X> {
         let x = l.min(sw);
         let y = t.min(sh);
         let w = (sw - l - r).max(0);
-        let h = (sh - i64::from(TASKBAR) - t - b).max(0);
+        let h = (sh - t - b).max(0);
         Rect { x, y, w, h }
     }
 

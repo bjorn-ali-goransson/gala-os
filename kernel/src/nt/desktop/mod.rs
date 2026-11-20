@@ -849,8 +849,36 @@ impl Desktop {
         self.s.screen = (w, h);
         self.pointer = (w / 2, h / 2);
         self.taskbar_dirty = true;
+        self.place_taskbar();
         self.refresh();
         Ok(())
+    }
+
+    /// The taskbar's strip, TASKBAR rows at the bottom of the screen,
+    /// reserved as an app bar (the work area is what the bars leave).
+    fn place_taskbar(&mut self) {
+        let (w, h) = self.s.screen;
+        let tb = i64::from(TASKBAR);
+        let strip = Rect { x: 0, y: h - tb, w, h: tb };
+        let (owner, window) = (0, appbar::TASKBAR_WINDOW);
+        let placed = self.appbars.place_taskbar(owner, window, appbar::ABE_BOTTOM, strip, (w, h));
+        #[cfg(not(test))]
+        match placed {
+            Some(r) => crate::info!(
+                "desktop: the taskbar is an app bar on the bottom edge at {},{} {}x{}",
+                r.x,
+                r.y,
+                r.w,
+                r.h
+            ),
+            // Without its strip the work area takes the whole screen and
+            // maximized windows go under the taskbar.
+            None => crate::warn!("desktop: the taskbar's strip is not reserved (no memory)"),
+        }
+        #[cfg(test)]
+        let _ = placed;
+        self.appbars.take_posts();
+        self.work_changed();
     }
 
     /// Shows the desktop by `presenter` from now on: the desktop takes
@@ -1125,8 +1153,11 @@ impl Desktop {
     // ---- App bars -----------------------------------------------------------
 
     /// SHAppBarMessage's `op` (appbar::ABM_*) for window `hwnd` of
-    /// process `owner`: its result (TRUE or FALSE) and the rectangle
-    /// QUERYPOS and SETPOS give back.
+    /// process `owner`: its result (TRUE or FALSE), the rectangle
+    /// QUERYPOS, SETPOS and GETTASKBARPOS give back and the edge
+    /// GETTASKBARPOS gives. The taskbar's bar (window 0) is the
+    /// desktop's: a program's NEW, REMOVE, QUERYPOS or SETPOS of it is
+    /// FALSE.
     pub fn appbar_op(
         &mut self,
         owner: u64,
@@ -1135,8 +1166,35 @@ impl Desktop {
         callback: u32,
         edge: u32,
         rect: Rect,
+    ) -> Result<(bool, u32, Rect), NtStatus> {
+        let screen = self.s.screen;
+        if op == appbar::ABM_GETTASKBARPOS {
+            return Ok(match self.appbars.taskbar() {
+                Some((e, r)) => (true, e, r),
+                None => (false, edge, rect),
+            });
+        }
+        if hwnd == appbar::TASKBAR_WINDOW && op <= appbar::ABM_SETPOS {
+            #[cfg(not(test))]
+            crate::info!("desktop: pid {owner}: app bar call {op} on the taskbar's bar refused");
+            return Ok((false, edge, rect));
+        }
+        let (ok, rect) = self.own_appbar_op(owner, op, hwnd, callback, edge, rect, screen)?;
+        Ok((ok, edge, rect))
+    }
+
+    /// `appbar_op` for a program's own bar.
+    #[allow(clippy::too_many_arguments)]
+    fn own_appbar_op(
+        &mut self,
+        owner: u64,
+        op: u32,
+        hwnd: u64,
+        callback: u32,
+        edge: u32,
+        rect: Rect,
+        screen: (i64, i64),
     ) -> Result<(bool, Rect), NtStatus> {
-        let (screen, tb) = (self.s.screen, i64::from(TASKBAR));
         match op {
             appbar::ABM_NEW => {
                 let new = self.appbars.add(owner, hwnd, callback)?;
@@ -1161,11 +1219,11 @@ impl Desktop {
                 }
                 Ok((true, rect))
             }
-            appbar::ABM_QUERYPOS => match self.appbars.query(hwnd, edge, rect, screen, tb) {
+            appbar::ABM_QUERYPOS => match self.appbars.query(hwnd, edge, rect, screen) {
                 Some(r) => Ok((true, r)),
                 None => Ok((false, rect)),
             },
-            appbar::ABM_SETPOS => match self.appbars.set(hwnd, edge, rect, screen, tb) {
+            appbar::ABM_SETPOS => match self.appbars.set(hwnd, edge, rect, screen) {
                 Some(r) => {
                     crate::info!(
                         "desktop: app bar placed: window {hwnd:#x} on edge {edge} at {},{} {}x{}",
@@ -1183,18 +1241,35 @@ impl Desktop {
         }
     }
 
-    /// The app bars changed what they take: the work area follows and the
-    /// maximized windows are fitted to it (as Windows' shell refits them).
-    /// The taskbar stays as it is: bars end above it.
+    /// The app bars (the taskbar's too) changed what they take: the work
+    /// area follows and the maximized windows are fitted to it (as
+    /// Windows' shell refits them).
     fn work_changed(&mut self) {
-        let reserved = self.appbars.insets(self.s.screen, i64::from(TASKBAR));
+        let reserved = self.appbars.insets(self.s.screen);
         if reserved == self.s.reserved {
             return;
         }
         self.s.reserved = reserved;
         let work = self.s.work();
+        #[cfg(not(test))]
+        self.log_work(work);
+        self.card_dirty = true;
+        for id in self.s.visible_windows() {
+            if self.s.window(id).is_some_and(|w| w.maximized && !w.minimized) {
+                #[cfg(not(test))]
+                crate::info!("desktop: maximized window {id} fitted to the work area");
+                self.s.send_place(id, (work.x as i32, work.y as i32, work.w as u32, work.h as u32));
+            }
+        }
+        self.refresh();
+    }
+
+    /// What the bars reserve and the work area left (the log's trail of
+    /// a work area change).
+    #[cfg(not(test))]
+    fn log_work(&self, work: Rect) {
         let edges = ["left", "top", "right", "bottom"];
-        for (i, v) in reserved.iter().enumerate() {
+        for (i, v) in self.s.reserved.iter().enumerate() {
             if *v > 0 {
                 crate::info!(
                     "desktop: work area changed: {} edge reserved by {} app bar(s), {v} px",
@@ -1210,14 +1285,6 @@ impl Desktop {
             work.x + work.w,
             work.y + work.h
         );
-        self.card_dirty = true;
-        for id in self.s.visible_windows() {
-            if self.s.window(id).is_some_and(|w| w.maximized && !w.minimized) {
-                crate::info!("desktop: maximized window {id} fitted to the work area");
-                self.s.send_place(id, (work.x as i32, work.y as i32, work.w as u32, work.h as u32));
-            }
-        }
-        self.refresh();
     }
 
     fn take_appbar_posts(&mut self) -> Vec<tray::Post> {
@@ -1433,6 +1500,9 @@ impl Desktop {
     /// The taskbar: the screen's bottom rows, the whole width (the app
     /// bars on the sides end above it).
     fn taskbar_rect(&self) -> Rect {
+        if let Some((_, r)) = self.appbars.taskbar() {
+            return r;
+        }
         let h = i64::from(TASKBAR);
         Rect { x: 0, y: self.s.screen.1 - h, w: self.s.screen.0, h }
     }
@@ -4720,7 +4790,7 @@ pub fn tray_list(shell: &Shell) -> Result<Vec<TrayListed>, NtStatus> {
 }
 
 /// SHAppBarMessage's `op` for window `hwnd` of process `owner`
-/// (GalaAppBar): its result and the rectangle it gives back;
+/// (GalaAppBar): its result, the rectangle it gives back and the edge;
 /// STATUS_NOT_SUPPORTED without shasha's shell (no work area to take
 /// from). The other bars' ABN_POSCHANGED are posted after.
 pub fn appbar_op(
@@ -4731,7 +4801,7 @@ pub fn appbar_op(
     callback: u32,
     edge: u32,
     rect: Rect,
-) -> Result<(bool, Rect), NtStatus> {
+) -> Result<(bool, u32, Rect), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
     }

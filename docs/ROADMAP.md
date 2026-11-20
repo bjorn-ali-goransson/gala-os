@@ -849,8 +849,12 @@ shell part) leaves it.
       GalaDesktopAction). What is left for shasha.exe: an install's
       progress reaches the kernel's tiles (ACTION_INSTALL_PROGRESS,
       ACTION_LINUX_PROGRESS), not the shell that started it.
-   5. The taskbar's strip reserved as an app bar (ABE_BOTTOM) instead
-      of the kernel's fixed `TASKBAR`.
+   5. Done: the taskbar's strip is an app bar on the bottom edge (the
+      desktop's, window 0), placed with the screen; the work area is
+      only what the bars leave, and ABM_GETTASKBARPOS gives the bar's
+      edge and rectangle. Test: `appbar_test` (ARCHITECTURE "App
+      bars"). What is left for shasha.exe: register its own window as
+      that bar instead of the desktop's.
    Then `shasha.exe` itself, and the kernel's shell code (about 4-5k
    lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
    Linux and install tiles) removed.

@@ -8320,21 +8320,28 @@ and the SHAppBarMessage reference).
   message (a second ABM_NEW of it answers 0); ABM_REMOVE gives its strip
   back. A bar goes with its process, or when a message to its window
   fails because the window is gone. shell32 hands ABM_NEW, ABM_REMOVE,
-  ABM_QUERYPOS and ABM_SETPOS to GalaAppBar (0x7f75; a 36-byte request:
-  hwnd, callback, edge, rectangle; the adjusted rectangle and the
-  result come back in it); ABM_ACTIVATE and ABM_WINDOWPOSCHANGED answer
-  1 and do nothing (gala has no auto-hide bars to raise).
+  ABM_QUERYPOS, ABM_SETPOS and ABM_GETTASKBARPOS to GalaAppBar (0x7f75;
+  a 36-byte request: hwnd, callback, edge, rectangle; the edge, the
+  adjusted rectangle and the result come back in it); ABM_ACTIVATE and
+  ABM_WINDOWPOSCHANGED answer 1 and do nothing (gala has no auto-hide
+  bars to raise).
+- **The taskbar is a bar**: the desktop registers it (window 0, process
+  0) on the bottom edge, `TASKBAR` rows high and the whole width, when
+  it learns the screen's size; ABM_GETTASKBARPOS answers its edge and
+  rectangle. A program's NEW, REMOVE, QUERYPOS or SETPOS of window 0 is
+  FALSE (logged). Until `shasha.exe` registers its own window in its
+  place, the kernel draws the taskbar where that bar is.
 - **Placement** (QUERYPOS, and SETPOS which places what QUERYPOS
   gives): a bar on the left or the right keeps its width and reaches
-  from the top of the screen down to the taskbar, never over it,
-  against the edge or the bars already on it; a bar at the top or the
-  bottom keeps its height and gets the whole width, the bottom one
-  above the taskbar. The taskbar is never given to a bar: it keeps the
-  whole width, its clock and notification area at the screen's right
-  edge, and bars coming and going do not redraw it (ABM_GETTASKBARPOS
-  is the whole width too).
-- **The work area** is the screen without the taskbar's rows and the
-  bars' insets (`WinState::work`): SPI_GETWORKAREA and GalaScreenInfo
+  from the top of the screen down to the highest bar on the bottom
+  edge (the taskbar), never over it, against the edge or the bars
+  already on it; a bar at the top or the bottom keeps its height and
+  gets the whole width, a program's bottom bar above the taskbar. The
+  taskbar's bar is placed first and never moved by the others: it keeps
+  the whole width, its clock and notification area at the screen's
+  right edge, and bars coming and going do not redraw it.
+- **The work area** is the screen without the bars' insets, the
+  taskbar's among them (`WinState::work`): SPI_GETWORKAREA and GalaScreenInfo
   report it, maximized and docked windows fill it, Snap halves it, a
   moved window's top is kept in it, and the Wayland side's output takes
   it. When a SETPOS or a removal changes it, every maximized window is
@@ -8348,11 +8355,17 @@ and the SHAppBarMessage reference).
   no full-screen detection yet).
 - **Where nothing shows the desktop** there is no taskbar and no work
   area to share: GalaAppBar is STATUS_NOT_SUPPORTED and
-  SHAppBarMessage answers 0.
+  SHAppBarMessage answers 0 (ABM_GETTASKBARPOS too, quietly). The
+  calls that need a work area without a desktop (a bare session's
+  GalaScreenInfo, the Wayland output) take `TASKBAR` off the screen's
+  height.
 - **Limits**: one monitor; no auto-hide bars (ABM_GETAUTOHIDEBAR(EX)
   answer none); a maximized window on gala equals the work area, where
   Windows lets its frame overhang it.
-- **Observability**: `desktop: app bar registered/removed: window
+- **Observability**: `desktop: the taskbar is an app bar on the bottom
+  edge at x,y wxh` when the screen is set (`desktop: the taskbar's strip
+  is not reserved (no memory)` if not), `desktop: pid <p>: app bar call
+  <op> on the taskbar's bar refused`, `desktop: app bar registered/removed: window
   <hwnd>, pid <p> (<n> bars)`, `desktop: app bar placed: window <hwnd>
   on edge <e> at x,y wxh`, `desktop: work area changed: <edge> edge
   reserved by <n> app bar(s), <v> px` with `desktop: work area
@@ -8639,7 +8652,7 @@ registry ("Plan: windows across processes").
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
 | 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
-| 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS and ABM_SETPOS ("App bars") |
+| 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS and ABM_GETTASKBARPOS ("App bars") |
 | 0x7f76 | GalaCursorPos(*point) | GetCursorPos: the desktop's pointer (two i32), whichever process last had a mouse message |
 | 0x7f77 | GalaHotKey(op, hwnd, id, modifiers, vk) | RegisterHotKey (op 0) and UnregisterHotKey (op 1) ("Hot keys") |
 | 0x7f78 | GalaShellWindow(op, hwnd, *hwnd) | SetShellWindow (op 0) and GetShellWindow (op 1) ("The shell's window and the shell's keys") |

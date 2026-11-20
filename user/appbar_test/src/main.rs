@@ -19,6 +19,13 @@
 //! - ABM_REMOVE returns TRUE and gives the strip back: the work area and
 //!   the maximized window are as before.
 //!
+//! - The taskbar is an app bar itself (ABM_GETTASKBARPOS: TRUE, edge
+//!   ABE_BOTTOM, the screen's width, from the work area's bottom down
+//!   to the screen's). A bar of the program's own on the bottom edge is
+//!   put above it (QUERYPOS: its bottom at the taskbar's top), SETPOS
+//!   takes its strip from the work area (and the maximized window), and
+//!   the taskbar's rectangle stays what it was.
+//!
 //! Assumed and not pinned: where Windows puts a right bar's top and
 //! bottom against a bottom taskbar (QUERYPOS may cut them), so only the
 //! horizontal edges are checked. ABM_GETTASKBARPOS is printed as an
@@ -133,6 +140,7 @@ const ABM_QUERYPOS: u32 = 2;
 const ABM_SETPOS: u32 = 3;
 const ABM_GETTASKBARPOS: u32 = 5;
 const ABE_RIGHT: u32 = 2;
+const ABE_BOTTOM: u32 = 3;
 const ABN_POSCHANGED: usize = 1;
 const SPI_GETWORKAREA: u32 = 0x30;
 const SM_CXSCREEN: i32 = 0;
@@ -145,6 +153,7 @@ const CALLBACK_A: u32 = 0x8000 + 0x41; // WM_APP + 0x41
 const CALLBACK_B: u32 = 0x8000 + 0x42;
 const BAR_W: i32 = 300;
 const SECOND_W: i32 = 100;
+const BOTTOM_H: i32 = 40;
 
 // ---- Output ---------------------------------------------------------------
 
@@ -473,6 +482,39 @@ fn run() -> Result<(), u32> {
         c.ok(back, window_rect(big).right.into())?;
         say(b"the strip is given back");
         DestroyWindow(a);
+
+        // The taskbar is a bar on the bottom edge, the screen's width.
+        let mut t = data(0, 0);
+        c.eq(SHAppBarMessage(ABM_GETTASKBARPOS, &mut t) as i64, 1)?;
+        let tb = t.rect;
+        say_rect(b"taskbar", tb);
+        c.eq(t.edge.into(), ABE_BOTTOM.into())?;
+        c.ok(tb == Rect { left: 0, top: work0.bottom, right: sw, bottom: sh }, tb.top.into())?;
+        // A bottom bar of the program's own goes above it.
+        let bottom_title = W::new("appbar_test bottom bar");
+        let f = bar(&bottom_title);
+        c.ok(f != 0, 0)?;
+        let mut g = data(f, 0);
+        c.eq(SHAppBarMessage(ABM_NEW, &mut g) as i64, 1)?;
+        g.edge = ABE_BOTTOM;
+        g.rect = Rect { left: 0, top: sh - BOTTOM_H, right: sw, bottom: sh };
+        c.eq(SHAppBarMessage(ABM_QUERYPOS, &mut g) as i64, 1)?;
+        c.eq(g.rect.bottom.into(), tb.top.into())?;
+        g.rect.top = g.rect.bottom - BOTTOM_H;
+        c.eq(SHAppBarMessage(ABM_SETPOS, &mut g) as i64, 1)?;
+        say_rect(b"bottom bar", g.rect);
+        c.eq(work_area().bottom.into(), g.rect.top.into())?;
+        let fitted = pump(2000, || window_rect(big).bottom == max0.bottom - BOTTOM_H);
+        c.ok(fitted, window_rect(big).bottom.into())?;
+        // The taskbar stays where it is.
+        let mut t = data(0, 0);
+        c.eq(SHAppBarMessage(ABM_GETTASKBARPOS, &mut t) as i64, 1)?;
+        say_rect(b"taskbar with a bottom bar", t.rect);
+        c.ok(t.rect == tb, t.rect.top.into())?;
+        say(b"the taskbar stays below the bottom bar");
+        c.eq(SHAppBarMessage(ABM_REMOVE, &mut g) as i64, 1)?;
+        c.ok(work_area() == work0, work_area().bottom.into())?;
+        DestroyWindow(f);
         DestroyWindow(big);
     }
     Ok(())

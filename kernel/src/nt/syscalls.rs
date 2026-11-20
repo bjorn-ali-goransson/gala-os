@@ -2945,11 +2945,12 @@ pub fn tray_request(b: &[u8]) -> Result<super::desktop::tray::Data, NtStatus> {
 }
 
 /// GalaAppBar(op, *request, length): SHAppBarMessage's ABM_NEW,
-/// ABM_REMOVE, ABM_QUERYPOS or ABM_SETPOS for the caller's bar. The
-/// request (APP_BAR_REQUEST bytes) is the window (u64), the callback
-/// message (u32), the edge (u32) and the rectangle (left, top, right,
-/// bottom: i32 each); the rectangle comes back adjusted and a u32 after it
-/// is the result (TRUE or FALSE). STATUS_NOT_SUPPORTED where no shell runs.
+/// ABM_REMOVE, ABM_QUERYPOS or ABM_SETPOS for the caller's bar, or
+/// ABM_GETTASKBARPOS. The request (APP_BAR_REQUEST bytes) is the window
+/// (u64), the callback message (u32), the edge (u32) and the rectangle
+/// (left, top, right, bottom: i32 each); the edge and rectangle come back
+/// (adjusted, or the taskbar's for GETTASKBARPOS) and a u32 after them is
+/// the result (TRUE or FALSE). STATUS_NOT_SUPPORTED where no shell runs.
 fn gala_app_bar(call: &mut Call<'_>) -> NtStatus {
     use super::winstate::Rect;
     let op = arg!(call, 0) as u32;
@@ -2968,14 +2969,15 @@ fn gala_app_bar(call: &mut Call<'_>) -> NtStatus {
     let (l, t, r, b) = (i32_at(16), i32_at(20), i32_at(24), i32_at(28));
     let rect = Rect { x: l, y: t, w: r - l, h: b - t };
     let shell = &call.process.desk.shell;
-    let (ok, out) =
+    let (ok, edge, out) =
         tri!(super::desktop::appbar_op(shell, call.process.id, op, hwnd, callback, edge, rect));
-    let mut back = [0u8; 20];
+    let mut back = [0u8; 24];
+    back[0..4].copy_from_slice(&edge.to_le_bytes());
     for (i, v) in [out.x, out.y, out.x + out.w, out.y + out.h].into_iter().enumerate() {
-        back[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_le_bytes());
+        back[4 + 4 * i..8 + 4 * i].copy_from_slice(&(v as i32).to_le_bytes());
     }
-    back[16..20].copy_from_slice(&u32::from(ok).to_le_bytes());
-    if call.process.write(ptr + 16, &back).is_err() {
+    back[20..24].copy_from_slice(&u32::from(ok).to_le_bytes());
+    if call.process.write(ptr + 12, &back).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS

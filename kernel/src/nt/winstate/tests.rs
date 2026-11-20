@@ -14,6 +14,8 @@ fn title(s: &str) -> Vec<u16> {
 fn state() -> State<()> {
     let mut s = State::new(NONE);
     s.screen = (i64::from(DEFAULT_SIZE.0), i64::from(DEFAULT_SIZE.1));
+    // The taskbar's strip, as the desktop reserves it (its app bar).
+    s.reserved = [0, 0, 0, i64::from(super::TASKBAR)];
     s.live = true;
     s
 }

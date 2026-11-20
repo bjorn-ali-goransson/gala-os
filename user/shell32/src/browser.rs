@@ -13,10 +13,10 @@
 //!   so a registration gets an ID and is never notified (reported).
 //! - SHQueryUserNotificationState: QUNS_ACCEPTS_NOTIFICATIONS (nothing
 //!   full-screen, no presentation mode).
-//! - SHAppBarMessage: the taskbar is shasha's, at the bottom of the screen
-//!   below the work area, ending where bars on the right begin (none
-//!   without a screen: ABM_GETTASKBARPOS fails), always on top, not
-//!   auto-hidden. A program's own bars (ABM_NEW, ABM_REMOVE, ABM_QUERYPOS,
+//! - SHAppBarMessage: the taskbar is the desktop's app bar on the bottom
+//!   edge, the whole width (ABM_GETTASKBARPOS gives its edge and
+//!   rectangle, GalaAppBar; none without a screen: it fails), always on
+//!   top, not auto-hidden. A program's own bars (ABM_NEW, ABM_REMOVE, ABM_QUERYPOS,
 //!   ABM_SETPOS) are the desktop's (GalaAppBar: the work area gives up
 //!   their strips; ARCHITECTURE "App bars"); ABM_ACTIVATE and
 //!   ABM_WINDOWPOSCHANGED return TRUE, as documented, with nothing to do
@@ -165,21 +165,6 @@ pub extern "system" fn SHQueryUserNotificationState(state: *mut i32) -> i32 {
     S_OK
 }
 
-/// A user32 function, loaded when first needed (a static import would
-/// make every program that loads shell32 load user32).
-fn user32(name: &core::ffi::CStr) -> Option<*const c_void> {
-    const USER32: [u16; 11] = [117, 115, 101, 114, 51, 50, 46, 100, 108, 108, 0];
-    // SAFETY: NUL-terminated names.
-    unsafe {
-        let module = LoadLibraryW(USER32.as_ptr());
-        if module == 0 {
-            return None;
-        }
-        let f = GetProcAddress(module, name.as_ptr().cast());
-        (!f.is_null()).then_some(f)
-    }
-}
-
 /// APPBARDATA (x64): cbSize, hWnd, uCallbackMessage, uEdge, rc, lParam.
 #[repr(C)]
 pub struct AppBarData {
@@ -200,8 +185,6 @@ const ABM_GETTASKBARPOS: u32 = 5;
 const ABM_GETAUTOHIDEBAR: u32 = 7;
 const ABM_GETAUTOHIDEBAREX: u32 = 0xb;
 const ABS_ALWAYSONTOP: usize = 2;
-const ABE_BOTTOM: u32 = 3;
-const SPI_GETWORKAREA: u32 = 0x30;
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> usize {
@@ -211,36 +194,7 @@ pub extern "system" fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> u
         ABM_GETSTATE => ABS_ALWAYSONTOP,
         // No auto-hidden bar on any edge.
         ABM_GETAUTOHIDEBAR | ABM_GETAUTOHIDEBAREX => 0,
-        ABM_GETTASKBARPOS => {
-            if data.is_null() {
-                return 0;
-            }
-            let mut work = [0i32; 4];
-            let (Some(spi), Some(metrics)) =
-                (user32(c"SystemParametersInfoW"), user32(c"GetSystemMetrics"))
-            else {
-                return 0;
-            };
-            // SAFETY: user32's SystemParametersInfoW(UINT, UINT, PVOID, UINT)
-            // and GetSystemMetrics(int); our RECT; SM_CXSCREEN, SM_CYSCREEN.
-            let (ok, w, h) = unsafe {
-                let spi: extern "system" fn(u32, u32, *mut c_void, u32) -> i32 =
-                    core::mem::transmute(spi);
-                let metrics: extern "system" fn(i32) -> i32 = core::mem::transmute(metrics);
-                (spi(SPI_GETWORKAREA, 0, work.as_mut_ptr().cast(), 0), metrics(0), metrics(1))
-            };
-            // No screen, no taskbar: the work area is the whole screen.
-            if ok == 0 || work[3] >= h {
-                return 0;
-            }
-            // SAFETY: the caller's APPBARDATA.
-            unsafe {
-                (*data).edge = ABE_BOTTOM;
-                // The whole width: the bars on the sides end above it.
-                (*data).rect = [0, work[3], w, h];
-            }
-            1
-        }
+        ABM_GETTASKBARPOS => own_bar(message, data),
         m => {
             unsupported(b"shell32.dll!SHAppBarMessage(an app bar of its own)", u64::from(m));
             0
@@ -257,9 +211,11 @@ unsafe extern "system" {
     fn GalaAppBar(op: u32, request: *mut u8, length: usize) -> u32;
 }
 
-/// ABM_NEW, ABM_REMOVE, ABM_QUERYPOS and ABM_SETPOS: GalaAppBar's request
-/// (the window, the callback message, the edge, the rectangle and the
-/// result after it), the rectangle given back for QUERYPOS and SETPOS.
+/// ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS and ABM_GETTASKBARPOS:
+/// GalaAppBar's request (the window, the callback message, the edge, the
+/// rectangle and the result after it), the rectangle given back for
+/// QUERYPOS and SETPOS, the taskbar's edge and rectangle for
+/// GETTASKBARPOS.
 fn own_bar(message: u32, data: *mut AppBarData) -> usize {
     if data.is_null() {
         return 0;
@@ -276,12 +232,22 @@ fn own_bar(message: u32, data: *mut AppBarData) -> usize {
     // SAFETY: our request of its length.
     let status = unsafe { GalaAppBar(message, r.as_mut_ptr(), r.len()) };
     if status != 0 {
-        unsupported(b"shell32.dll!SHAppBarMessage(no desktop to take a strip from)", status.into());
+        // No screen, no taskbar: GETTASKBARPOS fails quietly, as it does
+        // on Windows without an explorer.
+        if message != ABM_GETTASKBARPOS {
+            unsupported(
+                b"shell32.dll!SHAppBarMessage(no desktop to take a strip from)",
+                status.into(),
+            );
+        }
         return 0;
     }
     let at = |o: usize| i32::from_le_bytes([r[o], r[o + 1], r[o + 2], r[o + 3]]);
     if message >= 2 {
         d.rect = [at(16), at(20), at(24), at(28)];
+    }
+    if message == ABM_GETTASKBARPOS {
+        d.edge = at(12) as u32;
     }
     at(32) as usize
 }
