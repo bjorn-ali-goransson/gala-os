@@ -812,8 +812,30 @@ shell part) leaves it.
    Activate, Minimize/Maximize/Restore, Close, Snap, Wallpaper; the
    window and WinEvent calls for the taskbar's list). Started per
    session under its user's token; the kernel's shell code removed in
-   the same change. Needs keyboard focus per window (W4): the start
-   menu gets keys as a focused window, not through the input thread.
+   the same change. Drawn with `gala_ui` (LY step 3's last windows), so
+   the taskbar and start menu are UIA elements tests click by name.
+   What the window manager needs first, each its own change:
+   1. A topmost band: WS_EX_TOPMOST windows (SetWindowPos
+      HWND_TOPMOST / HWND_NOTOPMOST) stay above the others whichever is
+      active, in user32's order and the kernel's (`winstate` keeps only
+      the popups' layer today). Tool windows (WS_EX_TOOLWINDOW) are
+      activatable, get keys, and stay off the taskbar's list. Test:
+      `topmost_test`.
+   2. What a taskbar listens to: the kernel raises WinEvents for what
+      it does itself (foreground, minimize/restore, Snap, close), and
+      Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists them
+      and the window verbs reach them.
+   3. The shell's keys: the Windows key, Win+E and Ctrl+Shift+Esc reach
+      the shell as hot keys (RegisterHotKey; Win alone as Windows'
+      shell gets it); Win+arrows stay the kernel's.
+   4. Launches: what the start menu starts from the input thread today
+      (Linux distributions, installs, console programs in conhost)
+      through GalaDesktopAction verbs under the caller's token.
+   5. The taskbar's strip reserved as an app bar (ABE_BOTTOM) instead
+      of the kernel's fixed `TASKBAR`.
+   Then `shasha.exe` itself, and the kernel's shell code (about 4-5k
+   lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
+   Linux and install tiles) removed.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash
    record in the event stream; windows stay usable meanwhile (Win+arrows
@@ -6372,9 +6394,9 @@ layer inside them).
      WM_TIMER, as Explorer's scrolling stays Explorer's.
    - The taskbar and start menu: drawn by the kernel's desktop
      (`kernel/src/nt/desktop/paint.rs`), where allocation must be
-     fallible and `gala_ui` and Taffy allocate infallibly. Open:
-     move them into a user-mode program on user32 (as Windows' shell
-     is) or make the crate fallible; decided when it is reached.
+     fallible and `gala_ui` and Taffy allocate infallibly. They move
+     into a user-mode program on user32, as Windows' shell is: SH
+     step 1 (`shasha.exe`), not a fallible `gala_ui`.
    Added to `gala_ui` only when a window being moved needs it, not
    ahead of it:
    - Subscriptions and messages from outside: a component says which
