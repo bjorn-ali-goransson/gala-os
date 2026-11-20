@@ -1360,10 +1360,10 @@ data first, which disarms the slot (below), so that one leaves a
   one is handed an empty buffer, so what it is about is in the buffer
   only once the call is over, and a quote of its arguments reads as a
   call that was handed no text at all -- which most of the Windows
-  API is made of, and most of what Word's startup asks mso for: one
-  ordinal called over a hundred times, each call answering the buffer
-  it was handed. Where `imports_answers=` trapped the return, the
-  same reading therefore
+  API is made of, and what Word's startup spends its last stretch
+  before it gives up on: one mso ordinal called 134 times, each call
+  answering the buffer it was handed. Where `imports_answers=`
+  trapped the return, the same reading therefore
   runs again there: at the register the answer came back in, and at the
   arguments that were no text at the call (the kernel kept those from
   the call, the callee being free to clobber the registers; an argument
@@ -1507,16 +1507,20 @@ data first, which disarms the slot (below), so that one leaves a
   import is bound by the program's own helper on its first call, and a
   `GetProcAddress` result never goes through an IAT slot at all;
   neither is seen.
-- **A call repeated is often a pump and not a conversation.** An
-  import trace on its own is a sequence of calls into DLLs and nothing
-  else, so a loop that goes round waiting for messages reads exactly
-  like a program asking one question over and over. What tells the two
-  apart is what lies between the calls: `events=syscall,call` puts
-  each call among the waits and window calls of the thread that made
-  it, and `events=file` beside it names the keys and files that thread
-  opened. Word's startup has such a loop (ROADMAP, the Word item), and
-  a reading of it that leaves the syscalls out is a reading of the
-  pump.
+- **A stream is read per thread, and a window from the right
+  record.** The records of every thread are one stream in time order,
+  so the calls a pump makes on its own thread sit between the calls
+  another thread makes, and what reads as one loop interleaved with
+  waits is two threads: `by` is what separates them (scenario
+  `import_threads`). The same care goes to the record a window is
+  measured from, because a service reached more than once in a run
+  has a record each time -- Word's give-up box is raised twice in
+  some runs -- and anchoring on the first of them puts everything
+  after the second on the wrong side of it. What a call was doing is
+  read from what its own thread did between its records:
+  `events=syscall,call` puts each call among that thread's waits and
+  window calls, and `events=file` beside it names the keys and files
+  it opened.
 - **Limits**: one record a slot without `imports_repeat=`, so the
   stream is then a set of names and not a sequence; an answer is the
   one register the ABI returns in, so a structure returned by hidden
