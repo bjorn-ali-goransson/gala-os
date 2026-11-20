@@ -13381,6 +13381,29 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // Which thread a recorded call belongs to, which is the `by` of
+        // its line (the thread whose work wrote the event; for a
+        // recorded call, the thread that made it). lock_test holds a
+        // range of a file from its main thread, client 8, while the
+        // waiter thread it starts, client 12, blocks on the same range:
+        // the waiter's LockFileEx is in the stream under its own `by`,
+        // which is what makes a trace of a program with more than one
+        // thread a timeline and not one sequence of calls that is
+        // really several.
+        "import_threads",
+        &[
+            r#""by":8,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!GetTempPathW""#,
+            r#""by":12,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!LockFileEx""#,
+        ],
+    ),
+    (
+        // An answer carries the thread the same way, so that a call and
+        // its answer can be paired in a stream where another thread's
+        // calls sit between them.
+        "iat_answers",
+        &[r#""by":8,"ev":"ret","pid":4,"#],
+    ),
+    (
         // RS step B2: each window is registered in its own session, and
         // HWNDs asked for across sessions are named.
         "session_test",
@@ -13880,6 +13903,7 @@ const ARM64_TWINS: &[&str] = &[
     "import_window",
     "import_strings_test",
     "import_strings",
+    "import_threads",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -19303,6 +19327,25 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OT3b: which thread made a recorded call. lock_test holds a
+        // range of a file from its main thread while a second thread
+        // blocks on it, and both call kernel32 through the armed slots,
+        // so the stream carries two threads' calls and must say which
+        // is which -- a trace of a program with a message pump beside
+        // its startup thread (Word) reads as one sequence of calls and
+        // is not one.
+        name: "import_threads",
+        cmdline: "qemu_exit events=call run=lock_test.exe \
+                  imports=lock_test.exe!kernel32.dll imports_repeat=4096",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "lock_test: ok",
+            "exited with status 0x00000000",
+            "imports: every call through an armed slot, 4096 later calls at most \
+             (imports_repeat=)",
+        ],
+    },
+    Scenario {
         name: "guard_test",
         cmdline: "qemu_exit run=guard_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -20888,6 +20931,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
     ("events_object", "object_test"),
+    ("import_threads", "lock_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),
