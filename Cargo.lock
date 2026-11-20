@@ -1117,6 +1117,13 @@ name = "http_client"
 version = "0.1.0"
 
 [[package]]
+name = "iat_ret_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "iat_trace_test"
 version = "0.1.0"
 dependencies = [

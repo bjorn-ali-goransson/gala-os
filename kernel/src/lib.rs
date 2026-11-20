@@ -414,6 +414,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_repeat") {
         nt::traceimports::set_repeat(spec);
     }
+    // `imports_answers=<n>`: trap the return of each call through an
+    // armed slot too, so that the stream says what a call answered and
+    // not only what it was handed (nt::traceimports). Needs `imports=`.
+    if let Some(spec) = cmdline.value("imports_answers") {
+        nt::traceimports::set_answers(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }

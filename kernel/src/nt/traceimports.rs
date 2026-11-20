@@ -44,13 +44,30 @@
 //! first. The budget is what bounds the cost of that, since a slot left
 //! armed pays a fault a call for as long as it is.
 //!
+//! The answer is the other half of a call, and the slot has room for
+//! it: the loader reserves [`STRIDE`] bytes of trap space per slot and
+//! the call trap takes the first eight, so the next eight are a second
+//! trap address of that same slot's. Under `imports_answers=<n>` the
+//! kernel takes the return address the call left -- on the stack on
+//! x86-64, in the link register on ARM64 -- keeps it under the thread
+//! that made the call, and puts that second address there instead. The
+//! callee therefore returns into the reserved region, which faults with
+//! the answer still in the register the ABI returns it in: the kernel
+//! records the answer and sends the return on to where the call really
+//! came from. Which call a return belongs to is the stack pointer it
+//! arrives with, so a call that never returns -- an unwind, a longjmp,
+//! a thread that exits -- is noticed rather than trusted.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
 //! write the slot), and nothing after it -- or, under
 //! `imports_repeat=`, one such fault per call until the budget is
-//! spent. What it cannot do is in OBSERVABILITY: the first four integer
-//! argument registers and no others, static imports only, and no
-//! answer -- the kernel sees the call, not the return.
+//! spent, and under `imports_answers=` a second fault for each call
+//! answered. What it cannot do is in OBSERVABILITY: the first four
+//! integer argument registers and no others, and static imports only.
+//! A callee that reads its own return address sees the kernel's trap
+//! while its return is trapped, which is the one thing a program can
+//! tell at all.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -59,10 +76,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use super::platform::TrapFrame;
 use super::process::Process;
 use super::status::NtStatus;
-use super::tracecall::Words;
+use super::tracecall::{Answer, Words};
 use super::{vad, vm};
 use crate::events::{self, Category, Str};
 use crate::mm::heap::TryVec;
+use crate::sched::{self, ThreadId};
 use crate::sync::IrqMutex;
 
 /// Slots armed unless `imports=<...>:<n>` asks for another number. A
@@ -87,6 +105,25 @@ const MAX_BUDGET: u32 = 65536;
 /// memory, so what bounds it is the log it is written to and the fault
 /// each call pays while its slot stays armed.
 const MAX_REPEAT: u32 = 1 << 20;
+
+/// Where in a slot's trap space its return's trap address is, the
+/// call's being at the start of it. [`STRIDE`] is what the loader
+/// reserves per slot, so the two are the slot's own and `addr % STRIDE`
+/// says which of them a fault is at ([`region`] refuses a region that
+/// is not a multiple of it, which is what makes that true).
+const RET_OFFSET: u64 = 8;
+
+/// The most `imports_answers=<n>` may ask for, [`MAX_REPEAT`]'s own
+/// ceiling: an answer is a line of the stream, so what bounds it is the
+/// log it is written to and the second fault each answered call pays.
+const MAX_ANSWERS: u32 = 1 << 20;
+
+/// The most calls whose returns may be waited for at one time, over
+/// every thread. An entry is kernel memory held from a call until its
+/// return, so this is what bounds a program whose calls do not return;
+/// a call that finds it spent is recorded without an answer, which the
+/// summary says.
+const MAX_PENDING: usize = 1024;
 
 /// The longest name kept, as the ledger keeps its own
 /// (`tracecall::NAME_LEN`, which a `<dll>!<export>` name shares).
@@ -133,6 +170,37 @@ static READ: AtomicU64 = AtomicU64::new(0);
 static REPEATED: AtomicU64 = AtomicU64::new(0);
 static REPEAT: AtomicU32 = AtomicU32::new(0);
 static REPEAT_ASKED: AtomicU32 = AtomicU32::new(0);
+
+/// Answers recorded, what is left of what `imports_answers=` asked for,
+/// and the two ways one is not recorded: a call whose return could not
+/// be trapped at all (counted here, said once in the log) and a call
+/// whose return never arrived. All four are summary lines, because a
+/// call in the stream with no answer after it is read as the call
+/// having given none.
+static ANSWERED: AtomicU64 = AtomicU64::new(0);
+static ANSWERS: AtomicU32 = AtomicU32::new(0);
+static ANSWERS_ASKED: AtomicU32 = AtomicU32::new(0);
+static ANSWERS_LOST: AtomicU64 = AtomicU64::new(0);
+static UNWOUND: AtomicU64 = AtomicU64::new(0);
+
+/// One call whose return is trapped, from the call until the return
+/// arrives: the thread that made it, the stack pointer its return will
+/// arrive with, and where it really returns to. Kept in the order the
+/// calls were made, so the newest entry of a thread is the innermost
+/// call it is in.
+#[derive(Clone, Copy)]
+struct Pending {
+    pid: u64,
+    thread: ThreadId,
+    sp: u64,
+    ret: u64,
+    trap: u64,
+}
+
+/// The calls whose returns are waited for, over every thread. Read at a
+/// return and written at a call, both under this lock and never while
+/// user memory is touched.
+static PENDING: IrqMutex<Vec<Pending>> = IrqMutex::new(Vec::new());
 
 /// One armed import slot.
 #[derive(Clone, Copy)]
@@ -235,23 +303,60 @@ pub fn set_repeat(spec: &str) {
 /// recorded one call a slot reads afterwards as the program not having
 /// repeated the call.
 fn repeat_budget(text: &str) -> Option<u32> {
-    text.parse::<u32>().ok().filter(|n| (1..=MAX_REPEAT).contains(n))
+    budget_of(text, MAX_REPEAT)
 }
 
-/// Takes one record from `imports_repeat=`'s budget, or false once it is
-/// spent: the slot is then repaired on this call and the stream goes
-/// back to a name a slot.
-fn take_repeat() -> bool {
-    let mut left = REPEAT.load(Ordering::Relaxed);
+/// `imports_answers=`'s value, or None for one that is not a number
+/// from 1 to [`MAX_ANSWERS`]. Refused outright for the reason the other
+/// two are: a trace that quietly recorded no answer reads afterwards as
+/// calls that gave none.
+fn answer_budget(text: &str) -> Option<u32> {
+    budget_of(text, MAX_ANSWERS)
+}
+
+/// A budget of records: a number from 1 to `max`, or None for anything
+/// else at all.
+fn budget_of(text: &str, max: u32) -> Option<u32> {
+    text.parse::<u32>().ok().filter(|n| (1..=max).contains(n))
+}
+
+/// Takes one record from a budget (`imports_repeat=`'s, or the answers
+/// of `imports_answers=`), or false once it is spent. Taken before the
+/// record is made, so two CPUs recording at once cannot both spend the
+/// last one.
+fn take_budget(budget: &AtomicU32) -> bool {
+    let mut left = budget.load(Ordering::Relaxed);
     loop {
         if left == 0 {
             return false;
         }
-        match REPEAT.compare_exchange_weak(left, left - 1, Ordering::Relaxed, Ordering::Relaxed) {
+        match budget.compare_exchange_weak(left, left - 1, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return true,
             Err(now) => left = now,
         }
     }
+}
+
+/// `imports_answers=<n>`: record what each call through an armed slot
+/// answered, `n` calls at most. Needs `imports=` to have armed
+/// something and `events=call` for the records to be written, as the
+/// calls themselves do -- an answer is only recorded for a call the
+/// stream carries.
+pub fn set_answers(spec: &str) {
+    let Some(n) = answer_budget(spec) else {
+        warn!(
+            "imports: imports_answers={spec} reads a number from 1 to \
+             {MAX_ANSWERS}, the answers to record: no return is trapped at all \
+             instead, as without it"
+        );
+        return;
+    };
+    ANSWERS.store(n, Ordering::Relaxed);
+    ANSWERS_ASKED.store(n, Ordering::Relaxed);
+    info!(
+        "imports: the answer of every call through an armed slot, {n} at most \
+         (imports_answers=)"
+    );
 }
 
 /// Splits `<name>[:<n>]` at the last colon. A program's name holds none,
@@ -305,6 +410,17 @@ pub fn dll(out: &mut [u8]) -> usize {
 pub fn region(process: &Process, base: u64, size: u64, count: u64) -> bool {
     if count > u64::from(MAX_BUDGET) {
         warn!("imports: {count} imports reported at once, more than the {MAX_BUDGET} a run arms");
+        return false;
+    }
+    // A slot's two trap addresses are told apart by the offset within
+    // its own space, which needs that space to start at a multiple of
+    // its size (`imports_answers=`; a reserved region is page-aligned,
+    // so this is a check and not a constraint).
+    if !base.is_multiple_of(STRIDE) {
+        warn!(
+            "imports: the region at {base:#x} is not a multiple of {STRIDE}, so a \
+             slot's call and its return could not be told apart: none is armed"
+        );
         return false;
     }
     let Some(needed) = count.checked_mul(STRIDE) else {
@@ -372,9 +488,10 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
         }
     }
     // Before the slot is written, so that no fault can arrive at a trap
-    // address the bounds do not cover yet.
+    // address the bounds do not cover yet -- the slot's return trap
+    // included, which is the higher of its two (`imports_answers=`).
     LOW.fetch_min(trap, Ordering::Relaxed);
-    HIGH.fetch_max(trap, Ordering::Relaxed);
+    HIGH.fetch_max(trap + RET_OFFSET, Ordering::Relaxed);
     if let Err(status) = put(process, slot, trap) {
         // The slot still holds the export's address, so the program is
         // unaffected; the entry stays behind as dead weight and is not
@@ -401,6 +518,13 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     if addr < LOW.load(Ordering::Relaxed) || addr > HIGH.load(Ordering::Relaxed) {
         return false;
     }
+    // Which of a slot's two trap addresses this is: the call's, at the
+    // start of the slot's trap space, or the return's, [`RET_OFFSET`]
+    // into it. A return arrives as an instruction fetch, as the call
+    // did (`imports_answers=`).
+    if call && addr % STRIDE == RET_OFFSET {
+        return answered(process, frame, addr);
+    }
     // The table is read under its lock and nothing else is done there:
     // writing the slot touches user memory, which no lock may be held
     // at, and the event is a line of the stream.
@@ -426,10 +550,8 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     // one is recorded only while there is budget for it, and the budget
     // is taken whether the stream is on or not, the fault being the
     // cost either way.
-    let again = if first { REPEAT.load(Ordering::Relaxed) != 0 } else { take_repeat() };
-    if first || again {
-        record(process, frame, &entry, first);
-    }
+    let again = if first { REPEAT.load(Ordering::Relaxed) != 0 } else { take_budget(&REPEAT) };
+    let logged = (first || again) && record(process, frame, &entry, first);
     if !again && let Err(status) = put(process, entry.slot, entry.target) {
         // The call still goes on (the instruction pointer below is what
         // sends it), so this costs a fault a call from here rather than
@@ -442,9 +564,17 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
             status.0
         );
     }
+    // The call's answer, where `imports_answers=` asks for one and the
+    // stream carries the call: an answer to a call the stream does not
+    // carry would read as an answer to nothing. The budget is taken
+    // here, at the call, which is where the cost is committed.
+    if logged && take_budget(&ANSWERS) {
+        trap_return(process, frame, &entry);
+    }
     // The return address is on the stack (x86-64) or in the link
     // register (ARM64) already: the call made it, and only its first
-    // instruction fetch went wrong.
+    // instruction fetch went wrong -- or it is the slot's return trap,
+    // put there just above.
     frame.set_ip(entry.target);
     true
 }
@@ -500,10 +630,11 @@ fn read_as_data(
 /// `imports_repeat=` kept the slot armed. A later call is the same event
 /// as a first one and is not marked as one: in a stream where a name can
 /// appear twice, the first of them is the first call, and in one where
-/// it cannot, every call is.
-fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) {
+/// it cannot, every call is. True when the stream carries it, which is
+/// what trapping its return waits on (`imports_answers=`).
+fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> bool {
     if !events::enabled(Category::Call) || !events::syscall_pid_wanted(process.id) {
-        return;
+        return false;
     }
     let args = frame.arg_regs();
     events::emit(
@@ -524,6 +655,165 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) {
     } else {
         REPEATED.fetch_add(1, Ordering::Relaxed);
     }
+    true
+}
+
+/// Takes the call's return address away and puts the slot's return trap
+/// where the call left it, so that the return faults here as the call
+/// did. The real address is kept until then under the thread that made
+/// the call: a return is matched to its call by the stack pointer it
+/// arrives with, which is also how an unwind past the call is noticed.
+fn trap_return(process: &Process, frame: &mut TrapFrame, entry: &Trap) {
+    let Some(ret) = frame.return_address(|addr| process.read_u64(addr).ok()) else {
+        lost("its return address could not be read", entry);
+        return;
+    };
+    let waited = Pending {
+        pid: process.id,
+        thread: sched::current(),
+        sp: frame.call_return_sp(),
+        ret,
+        trap: entry.trap,
+    };
+    {
+        let mut pending = PENDING.lock();
+        if pending.len() >= MAX_PENDING {
+            lost("no entry was left to keep its return address in", entry);
+            return;
+        }
+        if pending.try_push(waited).is_err() {
+            lost("there was no memory to keep its return address in", entry);
+            return;
+        }
+    }
+    if !frame.set_return_address(entry.trap + RET_OFFSET, |addr, value| {
+        process.write_u64(addr, value).is_ok()
+    }) {
+        // Nothing has changed for the program, so the entry must go
+        // again: no return will arrive at the trap it was waiting for.
+        forget(&waited);
+        lost("its return address could not be written", entry);
+    }
+}
+
+/// One call recorded without its answer. Said once and counted after
+/// that: the stream then holds a call with no `ret` of its own, which
+/// is what a reader must be told rather than left to infer.
+fn lost(why: &str, entry: &Trap) {
+    if ANSWERS_LOST.fetch_add(1, Ordering::Relaxed) == 0 {
+        warn!(
+            "imports: the answer of {} was not recorded: {why}; the summary line \
+             counts the rest (imports_answers=)",
+            Name(entry)
+        );
+    }
+}
+
+/// Drops one entry again, for a return that will never arrive.
+fn forget(waited: &Pending) {
+    let mut pending = PENDING.lock();
+    if let Some(i) = pending
+        .iter()
+        .rposition(|e| e.thread == waited.thread && e.sp == waited.sp && e.ret == waited.ret)
+    {
+        pending.remove(i);
+    }
+}
+
+/// A fault at a slot's return trap: the return of a call whose return
+/// address was taken away. The callee has run nothing since its return
+/// instruction, so the answer is still in its register and is recorded
+/// here; the return then goes on to where the call really came from.
+/// True when it was sent on, in which case the frame is the one to
+/// return to; false leaves the access violation to be delivered, there
+/// being nowhere to send a return no call is waiting for.
+fn answered(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
+    let trap = addr - RET_OFFSET;
+    let entry = {
+        let traps = TRAPS.lock();
+        traps.iter().find(|t| t.trap == trap && t.pid == process.id).copied()
+    };
+    let Some(entry) = entry else {
+        return false;
+    };
+    let sp = frame.sp();
+    let Some(waited) = take_pending(process.id, sp) else {
+        warn!(
+            "imports: a return to {addr:#x} ({}) arrived with the stack at {sp:#x} \
+             and no call of this thread waiting for it, so there is nowhere to send \
+             it: it faults as it would without `imports_answers=`",
+            Name(&entry)
+        );
+        return false;
+    };
+    answer(process, frame, &entry);
+    frame.set_ip(waited.ret);
+    true
+}
+
+/// The call a return arriving with the stack at `sp` belongs to: the
+/// newest entry of the running thread, with the entries under it that
+/// no return can reach any more discarded. Those are the calls that
+/// never returned -- an unwind, a longjmp, a thread that exits -- and
+/// the stack pointer is what finds them: the stack grows down, so an
+/// entry waiting for a lower one than has arrived is past returning,
+/// and nothing would ever match it.
+fn take_pending(pid: u64, sp: u64) -> Option<Pending> {
+    let thread = sched::current();
+    let (mut found, mut unwound, mut stale) = (None, 0, 0);
+    {
+        let mut pending = PENDING.lock();
+        while let Some(i) = pending.iter().rposition(|e| e.thread == thread && e.pid == pid) {
+            let waited = pending[i];
+            if waited.sp > sp {
+                // Shallower than the return that arrived: not this
+                // call's, and still reachable by a return of its own.
+                break;
+            }
+            pending.remove(i);
+            if waited.sp == sp {
+                found = Some(waited);
+                break;
+            }
+            stale = waited.trap;
+            unwound += 1;
+        }
+    }
+    if unwound != 0 && UNWOUND.fetch_add(unwound, Ordering::Relaxed) == 0 {
+        // Said once, with the slot the innermost of them went through,
+        // because a call whose answer never comes is read as a call
+        // that gave none: the stream holds the call and nothing after.
+        warn!(
+            "imports: {unwound} calls did not return to where they were called \
+             from, the innermost through the slot trapped at {stale:#x}: an \
+             exception unwound past them, or a longjmp did; the summary line \
+             counts the rest (imports_answers=)"
+        );
+    }
+    found
+}
+
+/// Records what one call answered: the same `ret` the event stream
+/// carries for `trace_from=`, under the import's name, so that a call
+/// and its answer read as one pair however they are nested.
+fn answer(process: &Process, frame: &TrapFrame, entry: &Trap) {
+    if !events::enabled(Category::Call) || !events::syscall_pid_wanted(process.id) {
+        return;
+    }
+    events::emit(
+        Category::Call,
+        "ret",
+        format_args!(
+            "{}",
+            Answer {
+                pid: process.id,
+                process: process.name,
+                call: core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?"),
+                answer: frame.answer(),
+            }
+        ),
+    );
+    ANSWERED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Where in the region ntdll reserved the trap address of the entry at
@@ -582,6 +872,12 @@ pub fn log_stats() {
                  slot was armed and no call was recorded"
             );
         }
+        if ANSWERS_ASKED.load(Ordering::Relaxed) != 0 {
+            info!(
+                "imports: imports_answers= was given without imports=, so no \
+                 slot was armed and no answer was recorded"
+            );
+        }
         return;
     }
     let (armed, done) = (ARMED.load(Ordering::Relaxed), RECORDED.load(Ordering::Relaxed));
@@ -622,18 +918,62 @@ pub fn log_stats() {
         info!("imports: first calls recorded: {done} of {armed} slots armed{read} (imports=)");
     }
     let asked = REPEAT_ASKED.load(Ordering::Relaxed);
+    if asked != 0 {
+        let again = REPEATED.load(Ordering::Relaxed);
+        if REPEAT.load(Ordering::Relaxed) == 0 {
+            info!(
+                "imports: {again} later calls recorded of {asked}, the budget spent: \
+                 a slot is repaired on the next call through it and only first calls \
+                 are recorded past that (imports_repeat=)"
+            );
+        } else {
+            info!("imports: {again} later calls recorded of {asked} (imports_repeat=)");
+        }
+    }
+    log_answers();
+}
+
+/// What the run answered, for the end of a run: the answers recorded,
+/// and each way one was not. A call in the stream with no answer after
+/// it is read as a call that gave none, so every one of these is worth
+/// a line of its own.
+fn log_answers() {
+    let asked = ANSWERS_ASKED.load(Ordering::Relaxed);
     if asked == 0 {
         return;
     }
-    let again = REPEATED.load(Ordering::Relaxed);
-    if REPEAT.load(Ordering::Relaxed) == 0 {
+    let done = ANSWERED.load(Ordering::Relaxed);
+    if ANSWERS.load(Ordering::Relaxed) == 0 {
         info!(
-            "imports: {again} later calls recorded of {asked}, the budget spent: \
-             a slot is repaired on the next call through it and only first calls \
-             are recorded past that (imports_repeat=)"
+            "imports: {done} answers recorded of {asked}, the budget spent: the \
+             calls past it are recorded without one (imports_answers=)"
         );
     } else {
-        info!("imports: {again} later calls recorded of {asked} (imports_repeat=)");
+        info!("imports: {done} answers recorded of {asked} (imports_answers=)");
+    }
+    let lost = ANSWERS_LOST.load(Ordering::Relaxed);
+    if lost != 0 {
+        info!(
+            "imports: {lost} calls were recorded with no answer trapped at all: \
+             their return address could not be taken away, or no entry was left \
+             to keep it in ({MAX_PENDING} calls may wait for their return at \
+             once) (imports_answers=)"
+        );
+    }
+    let unwound = UNWOUND.load(Ordering::Relaxed);
+    if unwound != 0 {
+        info!(
+            "imports: {unwound} calls never returned to where they were called \
+             from: an exception unwound past them, or the thread ended inside \
+             them, so the stream holds the call and no answer (imports_answers=)"
+        );
+    }
+    let waiting = PENDING.lock().len();
+    if waiting != 0 {
+        info!(
+            "imports: {waiting} calls were still waiting for their return when \
+             the run ended (imports_answers=)"
+        );
     }
 }
 
@@ -685,8 +1025,8 @@ impl fmt::Display for Name<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET, Fields, MAX_BUDGET, MAX_REPEAT, READ, Reads, STRIDE, repeat_budget, split_budget,
-        trap_at,
+        BUDGET, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT, READ, RET_OFFSET, Reads, STRIDE,
+        answer_budget, repeat_budget, split_budget, trap_at,
     };
 
     /// The summary line says nothing of reads where there were none,
@@ -728,6 +1068,31 @@ mod tests {
         assert_eq!(trap_at(0x1_0000, 1), 0x1_0000 + STRIDE);
         let count = 3;
         assert_eq!(trap_at(0x1_0000, count - 1) + STRIDE, 0x1_0000 + count * STRIDE);
+    }
+
+    /// A slot's two trap addresses: the call's at the start of the
+    /// space the loader reserved for it and the return's
+    /// [`RET_OFFSET`] into that space, both inside it and told apart
+    /// by the offset within it.
+    #[test]
+    fn a_slot_has_a_second_trap_address_for_its_return() {
+        let call = trap_at(0x1_0000, 3);
+        assert_eq!(call % STRIDE, 0);
+        assert_eq!((call + RET_OFFSET) % STRIDE, RET_OFFSET);
+        assert!(call + RET_OFFSET < trap_at(0x1_0000, 4));
+    }
+
+    /// `imports_answers=` takes a number of answers, by the same rule
+    /// as the budgets beside it and for the same reason: a trace that
+    /// quietly recorded no answer reads as calls that gave none.
+    #[test]
+    fn an_answer_budget_is_a_number_of_answers_or_nothing() {
+        assert_eq!(answer_budget("5"), Some(5));
+        assert_eq!(answer_budget(&alloc::format!("{MAX_ANSWERS}")), Some(MAX_ANSWERS));
+        assert_eq!(answer_budget("0"), None);
+        assert_eq!(answer_budget(&alloc::format!("{}", u64::from(MAX_ANSWERS) + 1)), None);
+        assert_eq!(answer_budget(""), None);
+        assert_eq!(answer_budget("every"), None);
     }
 
     /// `imports_repeat=` takes a number of records and nothing else.

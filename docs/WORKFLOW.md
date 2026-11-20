@@ -650,6 +650,14 @@ run. Narrowing is what makes that true: Word binds some 1900 imports
 across the DLLs it loads, and the busiest of these 226 slots is called
 1720 times on its own.
 
+`imports_answers=<n>` adds what each of those calls answered: the
+kernel traps the return as well as the call, so a reading is pairs of
+`import` and `ret` rather than calls alone. It costs a second fault for
+each call answered, and a callee that reads its own return address
+while that return is trapped sees the trap instead of its caller, so it
+is read narrower still -- the sequence the repeat gives is what says
+which calls are worth an answer.
+
 Imports of variables are not armed at all, and nor are delay-load
 imports or anything resolved with GetProcAddress; a function's slot read
 as data is disarmed where it is read, which ends its repeat

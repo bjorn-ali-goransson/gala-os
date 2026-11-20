@@ -138,6 +138,44 @@ impl TrapFrame {
         ]
     }
 
+    /// The register a call's answer comes back in. Read at a fault on a
+    /// return, where the callee has run nothing since its `ret`, so it
+    /// still holds what the call gave back (`imports_answers=`,
+    /// nt::traceimports).
+    pub fn answer(&self) -> u64 {
+        use super::syscall::Gpr;
+        self.regs.gpr(Gpr::X0)
+    }
+
+    /// Where the call this frame is in left its return address: on
+    /// ARM64 the call put it in the link register, so none of the
+    /// program's memory is read and `read` goes unused.
+    pub fn return_address(&self, _read: impl FnOnce(u64) -> Option<u64>) -> Option<u64> {
+        use super::syscall::Gpr;
+        Some(self.regs.gpr(Gpr::X30))
+    }
+
+    /// Puts `value` in the link register, so that the call returns
+    /// there instead; always true, nothing of the program's memory
+    /// being written.
+    pub fn set_return_address(
+        &mut self,
+        value: u64,
+        _write: impl FnOnce(u64, u64) -> bool,
+    ) -> bool {
+        use super::syscall::Gpr;
+        self.regs.set_gpr(Gpr::X30, value);
+        true
+    }
+
+    /// The stack pointer a return from the call this frame is in will
+    /// arrive with: on ARM64 the call pushed nothing, so it is the one
+    /// the call was made with. What matches a return to the call it
+    /// belongs to (`imports_answers=`).
+    pub fn call_return_sp(&self) -> u64 {
+        self.regs.sp()
+    }
+
     /// Replaces every integer register holding `find` with `put`; true
     /// when at least one did. x86-64's `swap_reg`, over x0-x30: for a
     /// fault at an address a register holds a stale copy of (`imports=`,

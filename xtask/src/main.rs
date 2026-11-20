@@ -8382,6 +8382,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_test", "testdll.dll", "gala"),
     ("iat_trace_test", "ntdll.dll", "Windows/System32"),
     ("iat_trace_test", "testdll.dll", "gala"),
+    ("iat_ret_test", "ntdll.dll", "Windows/System32"),
+    ("iat_ret_test", "testdll.dll", "gala"),
+    ("iat_answers", "ntdll.dll", "Windows/System32"),
+    ("iat_answers", "testdll.dll", "gala"),
     ("iat_repeat", "ntdll.dll", "Windows/System32"),
     ("iat_repeat", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
@@ -11119,6 +11123,7 @@ const USER_PROGRAMS: &[&str] = &[
     "guard_test",
     "import_test",
     "iat_trace_test",
+    "iat_ret_test",
     "args_test",
     "fpu_test",
     "sysinfo_test",
@@ -13825,6 +13830,8 @@ const ARM64_TWINS: &[&str] = &[
     "import_test",
     "iat_trace_test",
     "iat_repeat",
+    "iat_ret_test",
+    "iat_answers",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -19008,6 +19015,48 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 3 later calls recorded of 3, the budget spent: a slot is \
              repaired on the next call through it and only first calls are \
              recorded past that (imports_repeat=)",
+        ],
+    },
+    Scenario {
+        // OT3b: `imports_answers=`, the answer a call through an armed
+        // slot gave back. This is the program with nothing armed, which
+        // is what the answering run below is compared against: the
+        // calls answer what they always did, a call nested inside
+        // another answers its own caller, and a callee that reads its
+        // own return address sees the caller's code.
+        name: "iat_ret_test",
+        cmdline: "qemu_exit run=iat_ret_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["iat_ret_test: direct", "iat_ret_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: the same program with the returns trapped. Thirteen
+        // calls go through its four armed slots -- nested, two levels
+        // deep through one slot, and on two threads at once -- and
+        // every one of them answers what it always did, which is the
+        // claim that matters: the kernel took the call's return address
+        // away and gave it back. The budget of five answers is spent
+        // before the last call, so the callee's view of its own return
+        // address is this program's code again, which is the limit the
+        // option is read with. The kernel's lines say what it armed,
+        // recorded and answered; the answers themselves are `ret`
+        // events, which the debug console carries and the serial log
+        // these lines are matched against does not.
+        name: "iat_answers",
+        cmdline: "qemu_exit events=call run=iat_ret_test.exe \
+                  imports=iat_ret_test.exe!testdll.dll imports_repeat=16 \
+                  imports_answers=5",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_ret_test: answering",
+            "iat_ret_test: ok",
+            "exited with status 0x00000000",
+            "imports: the answer of every call through an armed slot, 5 at most \
+             (imports_answers=)",
+            "imports: first calls recorded: 4 of 4 slots armed (imports=)",
+            "imports: 9 later calls recorded of 16 (imports_repeat=)",
+            "imports: 5 answers recorded of 5, the budget spent: the calls past \
+             it are recorded without one (imports_answers=)",
         ],
     },
     Scenario {
