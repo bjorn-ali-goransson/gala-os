@@ -35,12 +35,22 @@
 //! The slot is recorded as read rather than called -- it was not a call
 //! -- and left disarmed, since a reader will read it again.
 //!
+//! Putting the export's address in the slot is what makes the next call
+//! free, and nothing else needs it: the instruction pointer above is
+//! what sends the call on. So `imports_repeat=<n>` simply does not write
+//! the slot, and every call through it faults, is recorded and goes on
+//! as the first did -- which turns the stream from a set of names into
+//! the sequence of calls a program made, for `n` calls past each slot's
+//! first. The budget is what bounds the cost of that, since a slot left
+//! armed pays a fault a call for as long as it is.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
-//! write the slot), and nothing after it. What it cannot do is in
-//! OBSERVABILITY: one record per slot rather than per call, the first
-//! four integer argument registers and no others, static imports only,
-//! and no answer -- the kernel sees the call, not the return.
+//! write the slot), and nothing after it -- or, under
+//! `imports_repeat=`, one such fault per call until the budget is
+//! spent. What it cannot do is in OBSERVABILITY: the first four integer
+//! argument registers and no others, static imports only, and no
+//! answer -- the kernel sees the call, not the return.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -71,6 +81,12 @@ const BUDGET: u32 = 4096;
 /// lets a program of that size be traced whole; the default stays a
 /// window's worth, since most programs are not Word.
 const MAX_BUDGET: u32 = 65536;
+
+/// The most `imports_repeat=<n>` may ask for, which is `trace_from=`'s
+/// own ceiling: a record here is a line of the stream and not kernel
+/// memory, so what bounds it is the log it is written to and the fault
+/// each call pays while its slot stays armed.
+const MAX_REPEAT: u32 = 1 << 20;
 
 /// The longest name kept, as the ledger keeps its own
 /// (`tracecall::NAME_LEN`, which a `<dll>!<export>` name shares).
@@ -108,6 +124,15 @@ static RECORDED: AtomicU64 = AtomicU64::new(0);
 /// Slots whose value was read as data before any call through them, and
 /// so disarmed: the program used the import, but not by calling it.
 static READ: AtomicU64 = AtomicU64::new(0);
+
+/// Later calls recorded through slots that stayed armed, and what is
+/// left of what `imports_repeat=` asked for. No budget at all is the
+/// one-shot behaviour, which is what no `imports_repeat=` leaves; the
+/// number asked for is kept for the summary line, which says what a
+/// spent budget means for what follows it.
+static REPEATED: AtomicU64 = AtomicU64::new(0);
+static REPEAT: AtomicU32 = AtomicU32::new(0);
+static REPEAT_ASKED: AtomicU32 = AtomicU32::new(0);
 
 /// One armed import slot.
 #[derive(Clone, Copy)]
@@ -181,6 +206,52 @@ pub fn set(spec: &str) {
         "imports: the first call through each import of {program} from \
          {from}, {budget} at most (imports=)"
     );
+}
+
+/// `imports_repeat=<n>`: leave each armed slot armed, so that every call
+/// through it faults and is recorded and not only the first, until `n`
+/// later calls have been. Needs `imports=` to have armed something and
+/// `events=call` for the records to be written, as the first calls do.
+pub fn set_repeat(spec: &str) {
+    let Some(n) = repeat_budget(spec) else {
+        warn!(
+            "imports: imports_repeat={spec} reads a number from 1 to \
+             {MAX_REPEAT}, the later calls to record: every slot is repaired \
+             on its first call instead, as without it"
+        );
+        return;
+    };
+    REPEAT.store(n, Ordering::Relaxed);
+    REPEAT_ASKED.store(n, Ordering::Relaxed);
+    info!(
+        "imports: every call through an armed slot, {n} later calls at most \
+         (imports_repeat=)"
+    );
+}
+
+/// `imports_repeat=`'s value, or None for one that is not a number from
+/// 1 to [`MAX_REPEAT`]. Refused outright rather than cut to a default,
+/// for the reason `imports=`'s own count is: a trace that quietly
+/// recorded one call a slot reads afterwards as the program not having
+/// repeated the call.
+fn repeat_budget(text: &str) -> Option<u32> {
+    text.parse::<u32>().ok().filter(|n| (1..=MAX_REPEAT).contains(n))
+}
+
+/// Takes one record from `imports_repeat=`'s budget, or false once it is
+/// spent: the slot is then repaired on this call and the stream goes
+/// back to a name a slot.
+fn take_repeat() -> bool {
+    let mut left = REPEAT.load(Ordering::Relaxed);
+    loop {
+        if left == 0 {
+            return false;
+        }
+        match REPEAT.compare_exchange_weak(left, left - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(now) => left = now,
+        }
+    }
 }
 
 /// Splits `<name>[:<n>]` at the last colon. A program's name holds none,
@@ -349,10 +420,17 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     if !call {
         return read_as_data(process, frame, &entry, addr, first);
     }
-    if first {
-        record(process, frame, &entry);
+    // Whether the slot stays armed, so that the next call through it
+    // faults and is recorded too (`imports_repeat=`). A first call is
+    // recorded whatever happens and takes none of that budget; a later
+    // one is recorded only while there is budget for it, and the budget
+    // is taken whether the stream is on or not, the fault being the
+    // cost either way.
+    let again = if first { REPEAT.load(Ordering::Relaxed) != 0 } else { take_repeat() };
+    if first || again {
+        record(process, frame, &entry, first);
     }
-    if let Err(status) = put(process, entry.slot, entry.target) {
+    if !again && let Err(status) = put(process, entry.slot, entry.target) {
         // The call still goes on (the instruction pointer below is what
         // sends it), so this costs a fault a call from here rather than
         // the call itself; a run that reads as slow says why.
@@ -416,10 +494,14 @@ fn read_as_data(
     false
 }
 
-/// Records one first call: the same `call` the event stream carries for
+/// Records one call: the same `call` the event stream carries for
 /// `trace_from=`, under its own name, because a name appears here once
-/// however many times the program calls it.
-fn record(process: &Process, frame: &TrapFrame, entry: &Trap) {
+/// however many times the program calls it -- or every time, where
+/// `imports_repeat=` kept the slot armed. A later call is the same event
+/// as a first one and is not marked as one: in a stream where a name can
+/// appear twice, the first of them is the first call, and in one where
+/// it cannot, every call is.
+fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) {
     if !events::enabled(Category::Call) || !events::syscall_pid_wanted(process.id) {
         return;
     }
@@ -437,7 +519,11 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap) {
             }
         ),
     );
-    RECORDED.fetch_add(1, Ordering::Relaxed);
+    if first {
+        RECORDED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        REPEATED.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Where in the region ntdll reserved the trap address of the entry at
@@ -490,6 +576,12 @@ pub fn spent() -> bool {
 /// never used, which is as much of an answer as the calls it made.
 pub fn log_stats() {
     if !wanted() {
+        if REPEAT_ASKED.load(Ordering::Relaxed) != 0 {
+            info!(
+                "imports: imports_repeat= was given without imports=, so no \
+                 slot was armed and no call was recorded"
+            );
+        }
         return;
     }
     let (armed, done) = (ARMED.load(Ordering::Relaxed), RECORDED.load(Ordering::Relaxed));
@@ -528,6 +620,20 @@ pub fn log_stats() {
         );
     } else {
         info!("imports: first calls recorded: {done} of {armed} slots armed{read} (imports=)");
+    }
+    let asked = REPEAT_ASKED.load(Ordering::Relaxed);
+    if asked == 0 {
+        return;
+    }
+    let again = REPEATED.load(Ordering::Relaxed);
+    if REPEAT.load(Ordering::Relaxed) == 0 {
+        info!(
+            "imports: {again} later calls recorded of {asked}, the budget spent: \
+             a slot is repaired on the next call through it and only first calls \
+             are recorded past that (imports_repeat=)"
+        );
+    } else {
+        info!("imports: {again} later calls recorded of {asked} (imports_repeat=)");
     }
 }
 
@@ -578,7 +684,10 @@ impl fmt::Display for Name<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUDGET, Fields, MAX_BUDGET, READ, Reads, STRIDE, split_budget, trap_at};
+    use super::{
+        BUDGET, Fields, MAX_BUDGET, MAX_REPEAT, READ, Reads, STRIDE, repeat_budget, split_budget,
+        trap_at,
+    };
 
     /// The summary line says nothing of reads where there were none,
     /// and says them where there were: a slot read as data is the one
@@ -619,6 +728,22 @@ mod tests {
         assert_eq!(trap_at(0x1_0000, 1), 0x1_0000 + STRIDE);
         let count = 3;
         assert_eq!(trap_at(0x1_0000, count - 1) + STRIDE, 0x1_0000 + count * STRIDE);
+    }
+
+    /// `imports_repeat=` takes a number of records and nothing else.
+    /// A value it cannot read leaves the slots repaired on their first
+    /// call, because a trace that recorded one call a slot where every
+    /// call was asked for reads as a program that made one.
+    #[test]
+    fn a_repeat_budget_is_a_number_of_records_or_nothing() {
+        assert_eq!(repeat_budget("3"), Some(3));
+        assert_eq!(repeat_budget("1"), Some(1));
+        assert_eq!(repeat_budget(&alloc::format!("{MAX_REPEAT}")), Some(MAX_REPEAT));
+        assert_eq!(repeat_budget("0"), None);
+        assert_eq!(repeat_budget(&alloc::format!("{}", u64::from(MAX_REPEAT) + 1)), None);
+        assert_eq!(repeat_budget(""), None);
+        assert_eq!(repeat_budget("all"), None);
+        assert_eq!(repeat_budget("3 "), None);
     }
 
     #[test]

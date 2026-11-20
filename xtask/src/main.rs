@@ -8382,6 +8382,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_test", "testdll.dll", "gala"),
     ("iat_trace_test", "ntdll.dll", "Windows/System32"),
     ("iat_trace_test", "testdll.dll", "gala"),
+    ("iat_repeat", "ntdll.dll", "Windows/System32"),
+    ("iat_repeat", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
     ("apc_test", "ntdll.dll", "Windows/System32"),
     ("ioapc_test", "ntdll.dll", "Windows/System32"),
@@ -13822,6 +13824,7 @@ const ARM64_TWINS: &[&str] = &[
     "startup_test",
     "import_test",
     "iat_trace_test",
+    "iat_repeat",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -18979,6 +18982,32 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: the first call through each import of iat_trace_test.exe \
              from testdll.dll, 4096 at most (imports=)",
             "imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)",
+        ],
+    },
+    Scenario {
+        // OT3b: `imports_repeat=`, which keeps an armed slot armed so
+        // that the stream is every call through it and not a set of
+        // names. The program sees the slot stay armed and counts the
+        // calls that go through it while it is -- three recorded and a
+        // fourth that finds the budget spent, which is the sequence as
+        // this side can see it -- and the kernel's lines say it
+        // recorded three of the three asked for. The records are
+        // `import` events, which the debug console carries and the
+        // serial log these lines are matched against does not.
+        name: "iat_repeat",
+        cmdline: "qemu_exit events=call run=iat_trace_test.exe \
+                  imports=iat_trace_test.exe!testdll.dll imports_repeat=3",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_trace_test: repeating",
+            "iat_trace_test: ok",
+            "exited with status 0x00000000",
+            "imports: every call through an armed slot, 3 later calls at most \
+             (imports_repeat=)",
+            "imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)",
+            "imports: 3 later calls recorded of 3, the budget spent: a slot is \
+             repaired on the next call through it and only first calls are \
+             recorded past that (imports_repeat=)",
         ],
     },
     Scenario {

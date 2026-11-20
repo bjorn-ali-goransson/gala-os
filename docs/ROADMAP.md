@@ -2241,8 +2241,10 @@ need gala's.
      each of a program's import slots, which is the only instrument
      that sees a call into a DLL gala did not write (OBSERVABILITY
      "Import tracing"). What it gives for that window is the set of
-     Microsoft entry points Word reaches in it; what it cannot give is
-     the order, one record being all a slot leaves.
+     Microsoft entry points Word reaches in it, and with
+     `imports_repeat=<n>` beside it the sequence of calls through those
+     slots rather than the set: the slot stays armed, so every call
+     through it faults and is recorded, at a fault a call.
      The reading needs every slot armed to be a reading at all:
      `imports=WINWORD.EXE:65536` arms 23375 of them and records 1876
      first calls without spending the budget, where 8192 is spent on
@@ -6312,8 +6314,7 @@ among the slowest hand-offs.
      the slot itself (`kernel/src/nt/traceimports.rs`, `arm_imports` in
      the loader, scenario `iat_trace_test` with an ARM64 twin,
      OBSERVABILITY "Import tracing").
-     Its gaps: one record a slot, so the stream is a set of names and
-     not a sequence (the opposite trade from `trace_from=`); the first
+     Its gaps: the first
      four integer argument registers only, read whether the function
      takes that many or not; static imports only, so no delay-load
      import and nothing a program resolved with GetProcAddress; an
@@ -6331,6 +6332,16 @@ among the slowest hand-offs.
      modules that loaded first and leaves the rest, so the ceiling is
      65536 slots (9 MiB of kernel heap) -- what a program of Word's
      size takes whole -- and the summary line says when it was spent.
+     One record a slot is no longer among them: `imports_repeat=<n>`
+     keeps each armed slot armed instead of repairing it, so that every
+     call through it faults and is recorded and not only the first, `n`
+     later calls at most (scenario `iat_repeat` with an ARM64 twin).
+     Repairing the slot is only what makes the next call free -- the
+     instruction pointer is what sends the call on -- so the repeat is
+     not writing it, and what it costs is a fault a call while a slot is
+     armed, which is what the budget bounds. What is left of the gap is
+     the answer: the kernel is out of the call before it returns, so a
+     record says what a call was handed and not what it gave back.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the
