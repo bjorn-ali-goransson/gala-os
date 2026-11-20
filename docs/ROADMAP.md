@@ -863,13 +863,24 @@ shell part) leaves it.
       the active one; the list follows WinEvents. When shasha ends the
       desktop's own taskbar is back on the same strip. Test:
       `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
-      "The user-mode shell"). Stopgap, to be replaced by shasha's own
-      start menu: its Start button opens the kernel's start menu
-      (ACTION_MENU). Not yet in shasha: the notification area (the
-      tray's icons are the kernel taskbar's), the start menu, the
-      wallpaper, the window buttons' icons; the shell's bar is not
-      told when the screen changes size.
-   Then the start menu, the tray and the wallpaper in `shasha.exe`,
+      "The user-mode shell"). Not yet in shasha: the notification
+      area (the tray's icons are the kernel taskbar's), the wallpaper,
+      the window buttons' icons; the shell's bar is not told when the
+      screen changes size.
+   7. Done: shasha's own start menu, a gala_ui window ("Start", popup,
+      topmost, hidden until opened) centred above the taskbar: the
+      "Search" input (focused when it opens) and a tile per installed
+      program (ACTION_PROGRAMS), filtered as one types; a tile starts
+      its program (ACTION_START) and closes the menu. The Start button
+      and the Windows key (RegisterHotKey MOD_WIN+VK_LWIN, the shell's
+      key) toggle it; another window becoming active closes it. The
+      kernel lets the program that received the last input take the
+      foreground (as Windows does), and GetForegroundWindow answers the
+      desktop's active window whichever process owns it. The kernel's
+      ACTION_MENU stopgap is gone. Test: `shasha_test`, scenario
+      `shasha`. Not yet: pinned/recent programs, the user and power
+      buttons, keyboard navigation of the tiles.
+   Then the tray and the wallpaper in `shasha.exe`,
    shasha the default shell, and the kernel's shell code (about 4-5k
    lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
    Linux and install tiles) removed.

@@ -8416,16 +8416,32 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   shasha's own window and of non-window objects are ignored). A
   button's click activates its window, or minimizes it when it is the
   active one and not minimized (ACTION_ACTIVATE, ACTION_MINIMIZE: the
-  caller passes UIPI as for any program). Start sends ACTION_MENU,
-  which opens or closes the kernel's start menu: a stopgap until
-  shasha has its own (ROADMAP SH).
+  caller passes UIPI as for any program). Start toggles shasha's start
+  menu.
+- **The start menu** (`user/shasha/src/menu.rs`, the view; `main.rs`,
+  the window): a gala_ui window titled "Start" (popup, topmost, created
+  hidden: gala_ui's `Options.hidden`) of `MENU_WIDTH` x `MENU_HEIGHT`,
+  centred `MENU_GAP` above the bar. It holds the `Search` input and a
+  grid of tiles, four to a row, one per installed program
+  (GalaDesktopAction ACTION_PROGRAMS, read each time it opens; a
+  tile's AutomationId is `Program` and the name's letters and digits).
+  Typing filters the tiles (the name holds the search, ignoring case;
+  `NoMatch` says when none does). A tile's click starts the program
+  (ACTION_START, the path quoted, LAUNCH_CONSOLE_WINDOW) and closes
+  the menu. The Start button (a posted WM_APP message) and the Windows
+  key (RegisterHotKey MOD_WIN+VK_LWIN on the menu's window, a key only
+  the shell's process may take) toggle it; opening clears the search,
+  shows the window, asks for the foreground and focuses `Search`
+  (gala_ui's `win::focus`). WM_ACTIVATE with WA_INACTIVE while shown
+  (another window became active) closes it, as Windows' does.
 - **When shasha ends** (its process, or its bar removed) the taskbar's
   bar is gone and the desktop places its own again on the same strip
   (`taskbar_back`), so a session is never without a taskbar. A screen
   size change moves the shell's bar to the new strip (the shell is not
   told yet).
-- **Limits**: no notification area, start menu, wallpaper or window
-  icons in shasha yet; the shell is not restarted when it ends
+- **Limits**: no notification area, wallpaper or window icons in
+  shasha yet; the menu has no pinned or recent programs, user or power
+  buttons, or keyboard navigation of its tiles; the shell is not restarted when it ends
   (ROADMAP SH step 2).
 - **Observability**: shasha's lines (`shasha: started`, `shasha: the
   taskbar at x,y wxh`, or `shasha: the taskbar's strip is not handed
@@ -8436,8 +8452,12 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   longer draws it`, `desktop: pid <p>: the taskbar refused to window
   <hwnd>: not its shell window`, `desktop: pid <p>: the taskbar not
   handed to window <hwnd> (...)`, `desktop: the taskbar's bar is gone:
-  the desktop's taskbar is back`, `desktop: pid <p> opens/closes the
-  start menu`, and the start's `desktop: started ...shasha.exe (pid
+  the desktop's taskbar is back`, the menu's `shasha: the start menu
+  opens: <n> program(s): <names>`, `shasha: the start menu closes:
+  <why>` (toggled, another window is active, a program started),
+  `shasha: start <name> (<path>): pid <p>` or `... refused: <status>`,
+  `shasha: the Windows key is not the start menu's: RegisterHotKey
+  error <e>`, and the start's `desktop: started ...shasha.exe (pid
   <p>)`.
 
 #### The agent panel
@@ -8621,12 +8641,23 @@ the program always sees WM_SIZE/WM_MOVE.
   raises the caller's shown window and makes it active, so it gets the
   keys (a popup too: a tool window the program brings forward). Refused
   with STATUS_ACCESS_DENIED while another program's window is active,
-  as Windows' foreground lock refuses a background program, and
-  SetForegroundWindow then returns 0 without activating locally; both
-  logged (`desktop: window N takes the foreground`, `... asked for the
-  foreground (refused: ...)`). Invariant: user32's foreground window and
-  the desktop's active window agree after a successful call, so keys
-  go where GetForegroundWindow says.
+  as Windows' foreground lock refuses a background program, unless the
+  caller received the last input event (Windows' documented exception:
+  `WinState::last_input`, the owner of the window the last click or
+  key went to, or of the hot key that fired; a shell's menu opened by
+  its own button or key takes the foreground so). SetForegroundWindow
+  then returns 0 without activating locally; both logged (`desktop:
+  window N takes the foreground`, `... asked for the foreground
+  (refused: ...; and the last input went to pid P)`).
+  GetForegroundWindow is the desktop's active window whichever process
+  owns it (GalaShellWindow op 2, mapped to its HWND by the window
+  registry; NULL when none), as on Windows; without a screen it is the
+  process's own last activated window. user32's own activation logic
+  (GetActiveWindow, SetWindowPos's activation) goes by the process's
+  own (`active_here`), which a GALA_WM_ACTIVE on its way may not have
+  updated yet. Invariant: user32's active window and the desktop's
+  agree after a successful call, so keys go where GetForegroundWindow
+  says.
 - **Hot keys** (GalaHotKey, 0x7f77; `window::Windows::register_hot_key`):
   RegisterHotKey's keys go to the hot key's window (or, for hwnd NULL,
   its thread's queue) as WM_HOTKEY (wParam the id, lParam the key in
@@ -8722,7 +8753,7 @@ registry ("Plan: windows across processes").
 | 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS and ABM_GETTASKBARPOS ("App bars") |
 | 0x7f76 | GalaCursorPos(*point) | GetCursorPos: the desktop's pointer (two i32), whichever process last had a mouse message |
 | 0x7f77 | GalaHotKey(op, hwnd, id, modifiers, vk) | RegisterHotKey (op 0) and UnregisterHotKey (op 1) ("Hot keys") |
-| 0x7f78 | GalaShellWindow(op, hwnd, *hwnd) | SetShellWindow (op 0) and GetShellWindow (op 1) ("The shell's window and the shell's keys") |
+| 0x7f78 | GalaShellWindow(op, hwnd, *hwnd) | SetShellWindow (op 0), GetShellWindow (op 1) ("The shell's window and the shell's keys") and GetForegroundWindow (op 2: the desktop's active window, "The foreground") |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
@@ -15582,9 +15613,20 @@ Invariants:
 The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
 - `win::open(component, &Options, log)` registers a class, creates the
   window hidden, lays out the view for the client rectangle and shows
-  it; `win::pump()` runs the thread's messages until the window is
+  it (unless `Options.hidden`: a menu the program shows later);
+  `win::pump()` runs the thread's messages until the window is
   destroyed (it posts WM_QUIT). The component lives behind the window
   (GWLP_USERDATA) and is used only on the window's thread.
+  `Component::message` also sees WM_ACTIVATE (whose default handling
+  still runs) and WM_HOTKEY. `win::focus(hwnd, id)` gives the focus
+  to an input.
+- Re-entry: while the window handles a message the component is taken
+  out of GWLP_USERDATA, so a message its own update causes
+  (ShowWindow's WM_SIZE and WM_ACTIVATE, SetWindowPos) finds none and
+  goes to DefWindowProc rather than aliasing the component; a WM_SIZE
+  met so is replayed once the component is back. WM_DESTROY during
+  the handling marks the window gone and the component is freed when
+  the handling ends.
 - Drawing: `paint` turns `Placed` elements into calls on a `Canvas`
   (fill, frame, text, each with its rectangle; a recorder in the host
   tests, gdi32 in the window): background, then border, then text

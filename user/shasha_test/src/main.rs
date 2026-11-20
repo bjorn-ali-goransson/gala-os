@@ -19,6 +19,17 @@
 //!   announces) makes it the foreground window; a second click, while it
 //!   is active, minimizes it (as Windows' taskbar does); the taskbar's
 //!   window is never activated by them (WS_EX_NOACTIVATE);
+//! - the start menu (part 7): a click on the Start button shows the
+//!   "Start" window (a GalaUiWindow, topmost, above the taskbar) as the
+//!   foreground window, its "Search" input (an Edit, the keyboard focus)
+//!   empty and a tile per installed program (a Button, AutomationId
+//!   `Program` and the name without spaces, named with the program's
+//!   name: here Command Prompt and Task Manager, the programs the
+//!   scenario installs); typing filters the tiles by name (`task`: Task
+//!   Manager's alone); a click on a tile starts the program and hides
+//!   the menu; the Windows key alone (gala's hot key for it, the shell's)
+//!   shows it again with the search cleared; a click on another window
+//!   (which then is active) hides it;
 //! - shasha ended (TerminateProcess): its window is gone, there is no
 //!   shell window, and the desktop's own taskbar holds the strip again
 //!   (ABM_GETTASKBARPOS the same strip, the work area unchanged).
@@ -27,14 +38,16 @@
 //! and the ids of its elements are gala's choice.
 //!
 //! Prints `shasha_test: listed`, `shasha_test: activated`, `shasha_test:
-//! minimized` and `shasha_test: ok`, or `shasha_test: check N got X
+//! minimized`, `shasha_test: menu ready`, `shasha_test: menu open`,
+//! `shasha_test: filtered`, `shasha_test: started`, `shasha_test: menu
+//! again`, `shasha_test: closed` and `shasha_test: ok`, or `shasha_test: check N got X
 //! (line L)` and exits with N.
 
 #![no_std]
 #![no_main]
 
 use ntrt as _;
-use uia_client::{BUTTON, Element, TEXT, Uia};
+use uia_client::{BUTTON, EDIT, Element, TEXT, Uia};
 
 const NAME: &str = "shasha_test";
 
@@ -80,6 +93,8 @@ unsafe extern "system" {
     fn SetForegroundWindow(hwnd: Handle) -> i32;
     fn GetForegroundWindow() -> Handle;
     fn IsIconic(hwnd: Handle) -> i32;
+    fn IsWindowVisible(hwnd: Handle) -> i32;
+    fn PostMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
     fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> i32;
     fn GetShellWindow() -> Handle;
@@ -145,6 +160,7 @@ const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const SW_SHOW: i32 = 5;
+const WM_CLOSE: u32 = 0x0010;
 const PROCESS_TERMINATE: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 /// The taskbar's height (shasha's HEIGHT, the desktop's TASKBAR).
@@ -470,6 +486,95 @@ fn run() -> Result<(), u32> {
         c.ok(pump(STEP_MS, || IsIconic(one) != 0), 0)?;
         c.ok(GetForegroundWindow() != bar, 0)?;
         say(b"minimized");
+
+        // The start menu: the Start button's click shows it, in front.
+        let start = find("StartButton");
+        c.ok(start.is_some(), 0)?;
+        uia_client::announce(NAME, "StartButton", &start.unwrap_or_else(|| unreachable!()));
+        say(b"menu ready");
+        let menu_title = W::new("Start");
+        let shown = pump(STEP_MS, || {
+            let m = FindWindowW(class.ptr(), menu_title.ptr());
+            m != 0 && IsWindowVisible(m) != 0 && GetForegroundWindow() == m
+        });
+        let menu = FindWindowW(class.ptr(), menu_title.ptr());
+        c.ok(menu != 0, 0)?;
+        c.ok(shown, GetForegroundWindow() as i64)?;
+        let r = window_rect(menu);
+        say_rect(b"the start menu", r);
+        // Above the taskbar, within the screen.
+        c.ok(r.bottom <= strip.top && r.top >= 0 && r.left >= 0 && r.right <= sw, r.bottom.into())?;
+        let in_menu = |id: &str| -> Option<Element> { uia.find(&uia.window(menu)?, id) };
+        let search = in_menu("Search");
+        c.ok(search.as_ref().is_some_and(|e| e.name() == "Search"), 0)?;
+        let search = search.unwrap_or_else(|| unreachable!());
+        c.eq(search.control_type().into(), EDIT.into())?;
+        c.ok(search.value().as_str().is_empty(), search.value().as_str().len() as i64)?;
+        let tile = |id: &str, name: &str| in_menu(id).is_some_and(|e| e.name() == name);
+        let both = || {
+            tile("ProgramCommandPrompt", "Command Prompt")
+                && tile("ProgramTaskManager", "Task Manager")
+        };
+        c.ok(pump(STEP_MS, both), 0)?;
+        let t = in_menu("ProgramTaskManager").unwrap_or_else(|| unreachable!());
+        c.eq(t.control_type().into(), BUTTON.into())?;
+        say(b"menu open");
+
+        // Typed into the search (the scenario's keys): Task Manager's
+        // tile alone.
+        let filtered = pump(STEP_MS, || {
+            in_menu("Search").is_some_and(|e| e.value().as_str() == "task")
+                && in_menu("ProgramCommandPrompt").is_none()
+                && tile("ProgramTaskManager", "Task Manager")
+        });
+        c.ok(filtered, 0)?;
+        let t = in_menu("ProgramTaskManager").unwrap_or_else(|| unreachable!());
+        uia_client::announce(NAME, "TaskManagerTile", &t);
+        say(b"filtered");
+
+        // The tile's click: Task Manager started, the menu hidden.
+        let tm_title = W::new("Task Manager");
+        let started = pump(STEP_MS, || {
+            IsWindowVisible(menu) == 0 && FindWindowW(core::ptr::null(), tm_title.ptr()) != 0
+        });
+        c.ok(started, IsWindowVisible(menu).into())?;
+        say(b"started");
+        PostMessageW(FindWindowW(core::ptr::null(), tm_title.ptr()), WM_CLOSE, 0, 0);
+
+        // The Windows key alone (the scenario's): the menu again, the
+        // search cleared.
+        let again = pump(STEP_MS, || {
+            IsWindowVisible(menu) != 0
+                && GetForegroundWindow() == menu
+                && in_menu("Search").is_some_and(|e| e.value().as_str().is_empty())
+                && both()
+        });
+        c.ok(again, GetForegroundWindow() as i64)?;
+        // A click on window two (its caption's middle, above the menu).
+        let w = window_rect(two);
+        let (x, y) = ((w.left + w.right) / 2, w.top + 12);
+        c.ok(y < window_rect(menu).top, y.into())?;
+        let (px, py) = uia_client::pointer();
+        Line::new()
+            .s(NAME.as_bytes())
+            .s(b": WindowTwo at ")
+            .dec(x.into())
+            .s(b",")
+            .dec(y.into())
+            .s(b" (pointer at ")
+            .dec(px.into())
+            .s(b",")
+            .dec(py.into())
+            .s(b")\r\n")
+            .print();
+        say(b"menu again");
+
+        // Clicked away: the menu hides, the window clicked is active.
+        let closed = pump(STEP_MS, || IsWindowVisible(menu) == 0 && GetForegroundWindow() == two);
+        c.ok(closed, GetForegroundWindow() as i64)?;
+        let gone = pump(STEP_MS, || FindWindowW(core::ptr::null(), tm_title.ptr()) == 0);
+        c.ok(gone, 0)?;
+        say(b"closed");
 
         // shasha ended: no shell window, the desktop's taskbar holds the
         // strip again.

@@ -305,3 +305,28 @@ fn the_topmost_band_stays_above_and_the_foreground_is_the_active_programs() {
     s.show(a, 1, false).unwrap();
     assert_eq!(s.foreground(a, 1).err(), Some(NtStatus::INVALID_PARAMETER));
 }
+
+#[test]
+fn the_program_given_the_last_input_may_take_the_foreground() {
+    let mut s = state();
+    let a = s.create(1, 10, 10, 300, 200, &title("A"), 0).unwrap();
+    let bar = s.create(2, 0, 700, 1280, 48, &title("Taskbar"), 0).unwrap();
+    let menu = s.create(2, 380, 300, 520, 400, &title("Start"), 0).unwrap();
+    s.show(bar, 2, true).unwrap();
+    s.show(a, 1, true).unwrap();
+    s.show(menu, 2, true).unwrap();
+    s.activate(Some(a));
+    // Program 2 has had no input: program 1 keeps the foreground.
+    assert_eq!(s.foreground(menu, 2).err(), Some(NtStatus::ACCESS_DENIED));
+    // A press on program 2's taskbar (which does not take the activation):
+    // its menu may come to the front.
+    s.note_button(bar, 0x0201, 10, 710, false);
+    assert_eq!(s.last_input, Some(2));
+    s.foreground(menu, 2).unwrap();
+    assert_eq!(s.active, Some(menu));
+    // A key to program 1's window, active again: program 2's turn is over.
+    s.activate(Some(a));
+    s.key_to_active(b'K', 0x25, false, true, false);
+    assert_eq!(s.last_input, Some(1));
+    assert_eq!(s.foreground(menu, 2).err(), Some(NtStatus::ACCESS_DENIED));
+}

@@ -438,6 +438,11 @@ pub struct State<X> {
     /// as usual); a button pressed outside the owner's windows ends it
     /// (GALA_WM_POPUP_DONE) instead of going there.
     pub popup_grab: Option<u32>,
+    /// The program that received the last input event (a button or a
+    /// key its window was given, a hot key of its): one of the
+    /// conditions on which Windows lets a program take the foreground
+    /// (`foreground`).
+    pub last_input: Option<u64>,
     pub damage: Vec<Rect>,
     /// What the taskbar lists changed (a window shown, hidden, minimized,
     /// activated, renamed, given an icon, gone).
@@ -503,6 +508,7 @@ impl<X: Default> State<X> {
             active: None,
             captured: None,
             popup_grab: None,
+            last_input: None,
             damage: Vec::new(),
             listing_changed: true,
             shadow,
@@ -534,6 +540,7 @@ impl<X: Default> State<X> {
 
     /// Records a delivery in `recent_input`.
     fn note_input(&mut self, note: InputNote) {
+        self.last_input = self.window(note.window).map(|w| w.owner);
         self.recent_input[self.input_at % RECENT_INPUT] = note;
         self.input_at += 1;
     }
@@ -1404,7 +1411,9 @@ impl<X: Default> State<X> {
     /// `owner`'s shown window `id` becomes the foreground window, raised
     /// and active (SetForegroundWindow), when `owner` may take it:
     /// Windows' foreground lock, as far as gala keeps its conditions:
-    /// the active window is `owner`'s already, or none is.
+    /// the active window is `owner`'s already, or none is, or `owner`
+    /// received the last input event (`last_input`: a shell's menu
+    /// opened by a click on its taskbar or by its hot key).
     /// STATUS_ACCESS_DENIED otherwise (another program's window keeps the
     /// keyboard: no program takes it from the user's choice).
     pub fn foreground(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
@@ -1412,7 +1421,7 @@ impl<X: Default> State<X> {
             return Err(NtStatus::INVALID_PARAMETER);
         }
         let holder = self.active.and_then(|a| self.window(a)).map(|w| w.owner);
-        if holder.is_some_and(|h| h != owner) {
+        if holder.is_some_and(|h| h != owner) && self.last_input != Some(owner) {
             return Err(NtStatus::ACCESS_DENIED);
         }
         self.raise(id);

@@ -13,6 +13,12 @@
 //!   there; once gone (or the window is) its provider answers
 //!   UIA_E_ELEMENTNOTAVAILABLE. The window's provider is the fragment
 //!   root over the elements, its host provider the window's.
+//! - Re-entry: while the window's host handles a message, the messages
+//!   a window call it makes sends back to the window (ShowWindow's
+//!   WM_ACTIVATE, SetWindowPos's WM_SIZE) are DefWindowProc's, never
+//!   the host's a second time; a WM_SIZE among them lays the view out
+//!   again once the handling ends, and a DestroyWindow among them frees
+//!   the host then.
 //! - Logged: each message handled (`click <id>: <msg>`, `input <id>:
 //!   <msg>`), and a view that could not be laid out (`view: <error>`:
 //!   the window keeps the last one), through the program's `log`.
@@ -195,6 +201,8 @@ unsafe extern "system" {
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
+const WM_ACTIVATE: u32 = 0x0006;
+const WM_HOTKEY: u32 = 0x0312;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETOBJECT: u32 = 0x003d;
@@ -295,6 +303,9 @@ pub struct Options<'a> {
     /// (WS_EX_NOACTIVATE, SW_SHOWNOACTIVATE): a taskbar, which acts on
     /// the window that is active.
     pub no_activate: bool,
+    /// Made without being shown: a menu the program shows when asked
+    /// (ShowWindow).
+    pub hidden: bool,
 }
 
 /// What other threads read of the window, behind `busy`.
@@ -316,6 +327,9 @@ struct State {
     focus: Option<String>,
     /// False once the window is destroyed.
     alive: bool,
+    /// A WM_SIZE came while the host was handling a message: laid out
+    /// again once it is done.
+    resized: bool,
 }
 
 impl Shared {
@@ -490,6 +504,14 @@ impl<C: Component> Window for Host<C> {
                 release(root);
                 return Some(r);
             }
+            // Activation and hot keys: the program's to act on, and
+            // WM_ACTIVATE's default handling (the focus) still done.
+            WM_ACTIVATE | WM_HOTKEY => {
+                if let Some(m) = self.component.message(hwnd as usize, msg, wparam, lparam) {
+                    self.handle(hwnd, "message", &format!("{msg:#x}"), m);
+                }
+                return (msg == WM_HOTKEY).then_some(0);
+            }
             WM_COPYDATA | WM_USER.. => {
                 let m = self.component.message(hwnd as usize, msg, wparam, lparam)?;
                 self.handle(hwnd, "message", &format!("{msg:#x}"), m);
@@ -500,15 +522,6 @@ impl<C: Component> Window for Host<C> {
         }
         Some(0)
     }
-}
-
-/// The window's host, from its user data (set once it is created), on
-/// the window's thread.
-fn host(hwnd: Hwnd) -> Option<&'static mut Box<dyn Window>> {
-    // SAFETY: our window class's user data: 0 or a `Box<Box<dyn Window>>`
-    // leaked by `open`, freed at WM_DESTROY after being cleared; only the
-    // window's thread (its procedure) takes it.
-    unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Box<dyn Window>).as_mut() }
 }
 
 /// The window's shared part, for any thread: the class's extra bytes
@@ -528,12 +541,16 @@ fn shared_of(hwnd: Hwnd) -> Option<Arc<Shared>> {
 
 extern "system" fn wndproc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     if msg == WM_DESTROY {
+        // Marked gone first: a host taken out to handle a message (the
+        // DestroyWindow came from it) is freed when that ends.
+        if let Some(shared) = shared_of(hwnd) {
+            shared.with(|s| s.alive = false);
+        }
         // SAFETY: our window: the user data is cleared, then freed.
         let raw = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *mut Box<dyn Window>;
         if !raw.is_null() {
             // SAFETY: leaked by `open`, cleared above: freed once.
-            let w = unsafe { Box::from_raw(raw) };
-            w.shared().with(|s| s.alive = false);
+            drop(unsafe { Box::from_raw(raw) });
         }
         // SAFETY: the extra bytes' reference (`open`), cleared, then given up.
         unsafe {
@@ -548,17 +565,72 @@ extern "system" fn wndproc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -
         unsafe { PostQuitMessage(0) };
         return 0;
     }
-    if let Some(r) = host(hwnd).and_then(|w| w.message(hwnd, msg, wparam, lparam)) {
-        return r;
+    // The host is taken out of the user data while it handles the
+    // message (module docs, "Re-entry"): a message sent back meanwhile
+    // finds none.
+    // SAFETY: our window class's user data: 0 or a `Box<Box<dyn Window>>`
+    // leaked by `open`, freed at WM_DESTROY when set, else below; only
+    // the window's thread (its procedure) takes it.
+    let raw = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *mut Box<dyn Window>;
+    if raw.is_null() {
+        if msg == WM_SIZE
+            && let Some(shared) = shared_of(hwnd)
+        {
+            shared.with(|s| s.resized = true);
+        }
+        // SAFETY: the default handling.
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
-    // SAFETY: the default handling.
-    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    // SAFETY: taken out above: ours alone until it is put back or freed.
+    let w = unsafe { &mut *raw };
+    let r = w.message(hwnd, msg, wparam, lparam);
+    let (alive, resized) = w.shared().with(|s| (s.alive, core::mem::take(&mut s.resized)));
+    if !alive {
+        // Destroyed while handling: WM_DESTROY found no host to free.
+        // SAFETY: leaked by `open`, no longer in the user data: freed once.
+        drop(unsafe { Box::from_raw(raw) });
+        return r.unwrap_or(0);
+    }
+    // SAFETY: our window: the host put back.
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize) };
+    if resized {
+        wndproc(hwnd, WM_SIZE, 0, 0);
+    }
+    match r {
+        Some(r) => r,
+        // SAFETY: the default handling.
+        None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Gives the keyboard focus to input `id` of window `hwnd` (a window
+/// from [`open`]), drawn with it: false when the window has no such
+/// input.
+pub fn focus(hwnd: Hwnd, id: &str) -> bool {
+    let Some(shared) = shared_of(hwnd) else { return false };
+    let ok = shared.with(|s| {
+        let input = uia::find(&s.tree, id).is_some_and(|i| s.tree[i].kind == crate::Kind::Input);
+        if input {
+            s.focus = Some(String::from(id));
+        }
+        input
+    });
+    if ok {
+        repaint(hwnd);
+    }
+    ok
+}
+
+/// Asks for window `hwnd`'s WM_PAINT (a handle, never dereferenced here).
+fn repaint(hwnd: Hwnd) {
+    // SAFETY: a window handle; InvalidateRect checks it.
+    unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
 }
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// Opens a window holding `component`, shown. `log` gets each message
-/// handled and each view refused (module docs). None when the window
+/// Opens a window holding `component`, shown unless `o.hidden`. `log`
+/// gets each message handled and each view refused (module docs). None when the window
 /// could not be made. Closing the window ends [`pump`].
 pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) -> Option<Hwnd> {
     let class = wide("GalaUiWindow");
@@ -609,7 +681,13 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
     }
     let shared = Arc::new(Shared {
         busy: AtomicBool::new(false),
-        state: UnsafeCell::new(State { hwnd, tree: Vec::new(), focus: None, alive: true }),
+        state: UnsafeCell::new(State {
+            hwnd,
+            tree: Vec::new(),
+            focus: None,
+            alive: true,
+            resized: false,
+        }),
     });
     let mut h = Host { component, placed: Vec::new(), shared: shared.clone(), log };
     h.layout(hwnd);
@@ -618,7 +696,9 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
     unsafe {
         SetWindowLongPtrW(hwnd, SHARED_SLOT, Arc::into_raw(shared) as isize);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(w) as isize);
-        ShowWindow(hwnd, if o.no_activate { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        if !o.hidden {
+            ShowWindow(hwnd, if o.no_activate { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        }
     }
     Some(hwnd)
 }

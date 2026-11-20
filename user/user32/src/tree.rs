@@ -1319,7 +1319,7 @@ pub extern "system" fn SetWindowPos(
     if top_level
         && flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0
         && !w.popup
-        && crate::window::GetForegroundWindow() != hwnd
+        && crate::window::active_here() != hwnd
     {
         if flags & SWP_NOSENDCHANGING == 0 {
             let mut z = WindowPos {

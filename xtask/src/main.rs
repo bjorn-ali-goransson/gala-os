@@ -9470,6 +9470,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // checks it while the screen scenario clicks its buttons.
     ("shasha", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("shasha", "user/bin/shasha.exe", "Windows/System32"),
+    ("shasha", "user/bin/cmd.exe", "Windows/System32"),
+    ("shasha", "user/bin/taskmgr.exe", "Windows/System32"),
     ("shasha", "ntdll.dll", "Windows/System32"),
     ("shasha", "kernel32.dll", "Windows/System32"),
     ("shasha", "msvcrt.dll", "Windows/System32"),
@@ -16460,7 +16462,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // session; its window is the shell's and takes the taskbar's app
         // bar from the desktop; SHASHA_SCREEN clicks the button of
         // shasha_test's first window twice (activated, then minimized);
-        // shasha ended, the desktop's taskbar is back.
+        // then shasha's start menu (part 7): the Start button opens it,
+        // `task` typed filters it to Task Manager's tile, whose click
+        // starts it; the Windows key opens it again and a click on
+        // another window closes it; shasha ended, the desktop's taskbar
+        // is back. Installed: Command Prompt and Task Manager.
         name: "shasha",
         cmdline: "qemu_exit wallpaper=night events=window agent=off shell=shasha run=shasha_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -16477,6 +16483,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "shasha_test: activated",
             "shasha: minimize window",
             "shasha_test: minimized",
+            "shasha_test: StartButton at",
+            "shasha_test: menu ready",
+            "shasha: the start menu opens: 3 program(s): Command Prompt, Hello window, Task Manager",
+            "shasha_test: menu open",
+            "shasha_test: TaskManagerTile at",
+            "shasha_test: filtered",
+            "shasha: start Task Manager (C:\\Windows\\System32\\Taskmgr.exe): pid",
+            "shasha_test: started",
+            "desktop: hot key",
+            "shasha: the start menu opens: 3 program(s): Command Prompt, Hello window, Task Manager",
+            "shasha_test: menu again",
+            "shasha: the start menu closes: another window is active",
+            "shasha_test: closed",
             "desktop: the taskbar's bar is gone: the desktop's taskbar is back",
             "shasha_test: the taskbar after shasha [0,752,1280,800]",
             "shasha_test: ok",
@@ -24399,7 +24418,12 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// own log line of the one before (`explorer: navigate ...`).
 /// shasha's taskbar (scenario `shasha`): its strip drawn by shasha (the
 /// light surface across the bottom); the first window's button clicked
-/// twice, found by name (activated, then minimized).
+/// twice, found by name (activated, then minimized). Then its start
+/// menu: the Start button clicked (the menu's surface, 520 x 420 centred
+/// above the taskbar from (380, 320), checked where no tile is), `task`
+/// typed, Task Manager's tile clicked; the Windows key alone; a click on
+/// shasha_test's second window (the menu gone: the wallpaper's dark
+/// night where it was).
 const SHASHA_SCREEN: ScreenCheck = ScreenCheck {
     marker: "shasha_test: listed",
     steps: &[
@@ -24413,6 +24437,28 @@ const SHASHA_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep {
             after: "shasha_test: activated",
             input: &["click_on shasha_test: TaskOne"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "shasha_test: menu ready",
+            input: &["click_on shasha_test: StartButton"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 5: typed into the open menu: its surface, the bottom rows.
+            after: "shasha_test: menu open",
+            input: &["sendkey t", "sendkey a", "sendkey s", "sendkey k"],
+            pixels: &[PixelCheck::Most(400, 700, 480, 30, 0xeef1f6, 80)],
+        },
+        ScreenStep {
+            after: "shasha_test: filtered",
+            input: &["click_on shasha_test: TaskManagerTile"],
+            pixels: &[],
+        },
+        ScreenStep { after: "shasha_test: started", input: &["sendkey meta_l"], pixels: &[] },
+        ScreenStep {
+            after: "shasha_test: menu again",
+            input: &["click_on shasha_test: WindowTwo"],
             pixels: &[],
         },
     ],

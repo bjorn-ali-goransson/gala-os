@@ -1233,6 +1233,18 @@ pub extern "system" fn SetShellWindow(hwnd: usize) -> i32 {
     hot_key_result(unsafe { GalaShellWindow(0, hwnd as u64, core::ptr::null_mut()) })
 }
 
+/// The desktop's active window, whichever process owns it (GalaShellWindow
+/// op 2): None without a screen or a window registry (the caller then
+/// answers from its own windows), Some(0) when no window is active.
+pub(crate) fn desktop_foreground() -> Option<Hwnd> {
+    let mut hwnd = 0u64;
+    // SAFETY: our output.
+    if unsafe { GalaShellWindow(2, 0, &mut hwnd) } != 0 {
+        return None;
+    }
+    Some(hwnd as Hwnd)
+}
+
 /// GetShellWindow: the shell's window (SetShellWindow), NULL for none.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetShellWindow() -> usize {

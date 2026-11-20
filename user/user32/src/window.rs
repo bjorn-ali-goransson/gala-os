@@ -2531,12 +2531,26 @@ pub extern "system" fn GetCapture() -> Hwnd {
     CAPTURE.load(Ordering::Relaxed)
 }
 
-/// GetForegroundWindow: the window of ours last shown or clicked (gala's
-/// user32 sees only its own process's windows), else NULL.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetForegroundWindow() -> Hwnd {
+/// The window of ours that is active (the one last activated here: shown,
+/// clicked, or given the activation by the desktop), else 0. What this
+/// process's own activation logic goes by: the desktop's answer can run
+/// ahead of the GALA_WM_ACTIVE still on its way here.
+pub(crate) fn active_here() -> Hwnd {
     let h = FOREGROUND.load(Ordering::Relaxed);
     if window(h).is_some() { h } else { 0 }
+}
+
+/// GetForegroundWindow: the desktop's active window, whichever process
+/// owns it (GalaShellWindow op 2), as on Windows, where it is one for the
+/// whole desktop (a shell's menu, another program's window); NULL when
+/// none is. Without a screen (or a kernel without the query): ours,
+/// [`active_here`].
+#[unsafe(no_mangle)]
+pub extern "system" fn GetForegroundWindow() -> Hwnd {
+    match crate::foreign::desktop_foreground() {
+        Some(h) => h,
+        None => active_here(),
+    }
 }
 
 /// GetCursorPos: the desktop's pointer (GalaCursorPos), as Windows'
@@ -3811,7 +3825,7 @@ pub extern "system" fn GetDialogBaseUnits() -> i32 {
 /// at a time).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetActiveWindow() -> Hwnd {
-    let h = GetForegroundWindow();
+    let h = active_here();
     match window(h) {
         Some(w) if w.thread == me() => h,
         _ => 0,

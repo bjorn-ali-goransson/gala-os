@@ -3187,7 +3187,9 @@ fn gala_hot_key(call: &mut Call<'_>) -> NtStatus {
 /// GalaShellWindow(Op, Hwnd, *Hwnd): Op 0 makes the caller's window Hwnd
 /// the shell's (SetShellWindow: STATUS_OBJECT_NAME_COLLISION when there is
 /// one); Op 1 writes the shell's window (0: none) to *Hwnd
-/// (GetShellWindow).
+/// (GetShellWindow); Op 2 writes the desktop's active window, whichever
+/// process owns it (0: none), to *Hwnd (GetForegroundWindow;
+/// STATUS_NOT_SUPPORTED without a screen).
 fn gala_shell_window(call: &mut Call<'_>) -> NtStatus {
     let (op, hwnd) = (arg!(call, 0) as u32, arg!(call, 1));
     let pid = call.process.id as u32;
@@ -3207,6 +3209,20 @@ fn gala_shell_window(call: &mut Call<'_>) -> NtStatus {
         1 => {
             let shell = call.process.desk.windows.shell_window();
             if call.process.write(arg!(call, 2), &shell.to_le_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        2 => {
+            // Without a screen user32 answers from its own windows.
+            if !super::desktop::has_shell(&call.process.desk.shell) {
+                return NtStatus::NOT_SUPPORTED;
+            }
+            let active = super::desktop::active_window(&call.process.desk.shell);
+            let hwnd = active
+                .and_then(|(owner, id)| call.process.desk.windows.hwnd_of_desktop(owner as u32, id))
+                .unwrap_or(0);
+            if call.process.write(arg!(call, 2), &hwnd.to_le_bytes()).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
             NtStatus::SUCCESS

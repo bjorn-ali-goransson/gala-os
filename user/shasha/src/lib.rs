@@ -1,5 +1,5 @@
 //! shasha's taskbar: its state, view and update (ROADMAP SH step 1,
-//! part 6; ARCHITECTURE "The user-mode shell"), as a gala_ui component,
+//! part 6; its start menu, part 7, is [`StartMenu`]; ARCHITECTURE "The user-mode shell"), as a gala_ui component,
 //! without system calls (host tests below).
 //!
 //! The strip is `HEIGHT` high and the screen's width: the Start button
@@ -24,6 +24,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use gala_ui::{Align, Justify, Node, button, row, text};
+
+mod menu;
+pub use menu::{
+    MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Program, StartMenu, TILES_IN_ROW, parse_programs,
+    program_id,
+};
 
 /// The taskbar's height (the desktop's own taskbar's, TASKBAR).
 pub const HEIGHT: i32 = 48;

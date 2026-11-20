@@ -2180,18 +2180,18 @@ impl Desktop {
     /// (GalaWindowForeground: SetForegroundWindow), or is refused while
     /// another program's window is active; both logged.
     pub fn foreground(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
-        let active = self.s.active;
+        let (active, last) = (self.s.active, self.s.last_input);
         let r = self.s.foreground(id, owner);
         #[cfg(not(test))]
         match r {
             Ok(()) => crate::info!("desktop: window {id} takes the foreground"),
             Err(e) => crate::warn!(
                 "desktop: window {id} asked for the foreground (refused: {e:?}; window {active:?} \
-                 of another program is active)"
+                 of another program is active, and the last input went to pid {last:?})"
             ),
         }
         #[cfg(test)]
-        let _ = active;
+        let _ = (active, last);
         r
     }
 
@@ -4765,6 +4765,18 @@ pub fn window_action(shell: &Shell, owner: u64, id: u32, action: Action) -> Resu
 
 /// The windows the taskbar shows (GalaDesktopAction): none before the
 /// desktop is drawn; STATUS_NOT_SUPPORTED without shasha's shell.
+/// The desktop's active window: its owner's pid and its id on the screen
+/// (None: no window is active, or no screen). GetForegroundWindow's
+/// answer, for every process.
+pub fn active_window(shell: &Shell) -> Option<(u64, u32)> {
+    if !has_shell(shell) {
+        return None;
+    }
+    let d = shell.d.lock();
+    let id = d.s.active?;
+    d.s.window(id).map(|w| (w.owner, id))
+}
+
 pub fn list_windows(shell: &Shell) -> Result<Vec<Listed>, NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
@@ -4954,24 +4966,6 @@ fn tell_tray(shell: &Shell, posts: Vec<tray::Post>) {
 /// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
 /// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
 /// a missing file, STATUS_NOT_SUPPORTED without shasha's shell.
-/// Opens the start menu, or closes it when it is open (a user-mode
-/// shell's start button, ACTION_MENU): whether it is open now.
-pub fn toggle_menu(shell: &Shell) -> Result<bool, NtStatus> {
-    if !has_shell(shell) {
-        return Err(NtStatus::NOT_SUPPORTED);
-    }
-    let mut d = shell.d.lock();
-    ensure_live(shell, &mut d)?;
-    if d.menu.is_some() {
-        d.close_menu();
-    } else {
-        d.open_menu();
-    }
-    d.refresh();
-    redraw_damage(&mut d);
-    Ok(d.menu.is_some())
-}
-
 pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
@@ -5087,6 +5081,8 @@ fn key_on(
         && let Some((taken, posted)) = windows.hot_key(mods, key, repeat)
     {
         d.hot_key_taken(vk, down);
+        // Its program received this input (SetForegroundWindow's rule).
+        d.s.last_input = Some(u64::from(taken.pid));
         hot = Some((taken, posted, repeat));
     }
     if !(hot.is_some() && down) {

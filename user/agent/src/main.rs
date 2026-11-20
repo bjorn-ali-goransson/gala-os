@@ -717,6 +717,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
         topmost: true,
         popup: true,
         no_activate: false,
+        hidden: false,
     };
     let app = App { panel: Panel { hidden, ..Panel::default() } };
     let Some(hwnd) = win::open(app, &options, log) else {
