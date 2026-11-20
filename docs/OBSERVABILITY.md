@@ -212,7 +212,8 @@ real path has.
 ### Event stream
 
 A second output channel for tools: QEMU's `isa-debugcon` on port 0xe9
-(`arch::debugcon`; one `out` per byte, no UART handshake), which xtask
+(`arch::debugcon`; a line held and written in one `rep outsb`, no
+UART handshake), which xtask
 always writes to `<iso>.events.jsonl` next to the serial log. On aarch64
 (QEMU `virt`, no ISA bus) the kernel writes the same file itself through
 Arm semihosting, its path on the command line (`events_file=`, which
@@ -236,19 +237,55 @@ starts now`): a failure late in a long run without the run's whole
 stream (office_install's staging, half an hour in:
 `XTASK_CMDLINE=events_from=2100`).
 
-What the stream costs is its formatting, which matters for reading a
-traced run and not only for how long it takes: every event is written
-to port 0xe9 a byte at a time through `core::fmt`, so `office_word`'s
-31 s of run time becomes 74 s with `events=syscall` and 441 s with
-`events=all`, and the run's own profile is mostly that. Of the 3123
-kernel samples taken inside one Direct3D device creation in such a
-run, 90% sit under `DebugCon::write_fmt`, reached from
-`nt::syscalls::syscall_event` and `nt::process::on_user_exception`
-(the fault event). So in a traced run only the user-mode samples say
-where a program's time goes, the kernel's share is the instrument's,
-and a wall-clock figure from one measures the stream rather than the
-system: `events=syscall`, `events_pid=` or `events_match=` is what
-keeps the cost near the question.
+#### What the stream costs
+
+Its bytes, and nothing else: about 12 us for each one that leaves the
+guest. `user/import_cost_test` makes 20 000 calls through one traced
+import, and four runs of it differ only in what is written, so the
+difference between their in-kernel seconds is the stream itself
+(scenarios `import_cost_test`, the program with nothing armed, and
+`import_cost`, the calls recorded and their arguments quoted; the two
+in between are the same program with `XTASK_CMDLINE=`):
+
+| what the run writes | in the kernel | an event |
+|---|---|---|
+| nothing armed | 0.9 s | -- |
+| every call faults and the slot is rewritten twice, nothing written | 1.0 s | below noise |
+| and `events=call`, 162 bytes an event | 41.6 s | 2.1 ms |
+| and `imports_strings=` too, 214 bytes an event | 59.9 s | 3.0 ms |
+
+So the trap machinery is free and the bytes are everything. It is the
+crossing itself and not the device, QEMU's work or the formatting: the
+same stream written to port 0x80, which has no device behind it at all,
+costs 37.4 s of the 41.6; and holding each line and handing it to the
+port in one `rep outsb`, 162 bytes in one instruction where there were
+162 instructions, changed nothing, because KVM leaves the guest once a
+byte for string I/O as it does for single writes. Word's own traced log
+shows the same figure from the other side: its events stand 2 ms apart,
+one after another, so the give-up box that a traced run reaches at
+863 s and an untraced one at 33 s is 848 s of transport.
+
+The `arm_import_cost` twin of the same scenario costs 18.3 s, writing a
+piece of a line per semihosting trap rather than a byte per exit, which
+is not a like-for-like figure (aarch64 runs under TCG here, x86-64
+under KVM) but is the only other transport there is to compare with.
+
+A traced run's length is therefore the instrument's and not the
+system's, and the kernel's share of its profile is the instrument too:
+of the 3123 kernel samples taken inside one Direct3D device creation in
+such a run, 90% sit under `DebugCon::write_fmt`, reached from
+`nt::syscalls::syscall_event` and `nt::process::on_user_exception` (the
+fault event). `office_word`'s 31 s of run time becomes 74 s with
+`events=syscall` and 441 s with `events=all`. So only the user-mode
+samples say where a program's time goes, and what keeps the cost near
+the question is writing less: `events=syscall` rather than `all`,
+`events_pid=`, `events_match=`, a narrowed `imports=`, and
+`events_from=` for a failure late in a long run. What a run paid is in
+its own log, the summary saying both numbers -- `events: N written to
+the debug console in M writes of the device` -- and the way out is to
+stop crossing a byte at a time at all: the stream by DMA over
+virtio-serial, which is ROADMAP OT2's per-CPU rings (one exit a line,
+or a batch of them, instead of one an event's every byte).
 
 | Category | Events |
 |---|---|
@@ -1334,6 +1371,12 @@ data first, which disarms the slot (below), so that one leaves a
   process's own memory per recorded call, on the fault path and with no
   lock held, and 1 KiB of the fault path's stack. Nothing at all
   without the option, which is one relaxed load.
+- **Cost of writing the records**: each recorded call is an event, and
+  an event costs its bytes' crossing to the host, about 12 us a byte
+  ("What the stream costs"): 2.1 ms for a 162-byte `import` event,
+  3.0 ms with its arguments quoted. The trap itself is below noise
+  beside that, measured, so what a traced run costs is how much of it
+  is written and not how much of it is armed.
 - **Cost when nothing is traced**: one relaxed load per page fault. The
   kernel keeps the lowest and highest trap address it has armed, and an
   ordinary fault -- demand paging, a guard page, a real access
@@ -1841,8 +1884,9 @@ silent):
 
 Order: the Perfetto export first (done), then the live stack, then
 transactions as their own view. The kernel side the live view needs
-(per-CPU rings instead of the debug console, which costs a port write
-per byte under TCG; user-mode stacks on samples) is OT2's.
+(per-CPU rings instead of the debug console, which costs about 12 us
+for every byte that leaves the guest, measured under KVM: "What the
+stream costs"; user-mode stacks on samples) is OT2's.
 
 - **Trace context in the kernel** (ROADMAP OT2..OT5): system calls,
   waits, faults, I/O and network as spans in per-CPU rings; propagation
@@ -1879,7 +1923,7 @@ per byte under TCG; user-mode stacks on samples) is OT2's.
 - **Sampling profiler, next steps**: a short stack per sample (unwind
   data or frame pointers) and folded stacks for a flame graph; samples
   into a per-CPU ring instead of the debug console (each sample costs
-  its bytes' port writes under TCG).
+  its bytes' crossing, about 12 us each: "What the stream costs").
 - **Counters**: per-service call counts and TSC time (the `nt:` line
   has totals), spin iterations on each `IrqMutex` (contention), context
   switches and IPIs per CPU; printed at exit and queryable at run time.

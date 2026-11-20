@@ -8,7 +8,7 @@
 //! argument nothing is written, so a machine with no semihosting host
 //! never traps on it.
 
-use core::sync::atomic::{AtomicI64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use crate::sync::IrqMutex;
 
@@ -71,12 +71,27 @@ fn handle() -> Option<u64> {
     }
 }
 
+/// How many writes the file has taken, for the summary (x86-64 counts
+/// the same thing: its port takes one write a line, this one takes one a
+/// piece of a line, a semihosting call being a trap and not an exit).
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// The number of writes the device has taken.
+pub fn writes() -> u64 {
+    WRITES.load(Ordering::Relaxed)
+}
+
+/// Nothing is held back, so there is nothing to flush (x86-64 holds a
+/// line).
+pub fn flush() {}
+
 pub struct DebugCon;
 
 impl core::fmt::Write for DebugCon {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         if let Some(h) = handle() {
             semihost(SYS_WRITE, &[h, s.as_ptr() as u64, s.len() as u64]);
+            WRITES.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
