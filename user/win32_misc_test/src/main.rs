@@ -2,7 +2,9 @@
 //! (documented contracts):
 //!
 //! - user32: CharNextExA, GetUserObjectInformationA of a null handle
-//!   (ERROR_INVALID_HANDLE).
+//!   (ERROR_INVALID_HANDLE), MessageBoxW with no desktop dialog behind
+//!   it (the caption and the text to standard error, IDOK, and what was
+//!   said in the ledger).
 //! - ws2_32 by ordinal: 111 is WSAGetLastError, 115 WSAStartup, 116
 //!   WSACleanup, 3 closesocket, 23 socket (the standard ordinals).
 //! - comctl32: InitCommonControlsEx.
@@ -166,6 +168,7 @@ unsafe extern "system" {
     fn wvsprintfW(buf: *mut u16, fmt: *const u16, args: *const u64) -> i32;
     fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> Bool;
     fn CharLowerW(s: *mut u16) -> *mut u16;
+    fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
     fn AdjustWindowRectEx(rect: *mut [i32; 4], style: u32, menu: Bool, ex: u32) -> Bool;
     fn AdjustWindowRectExForDpi(
         rect: *mut [i32; 4],
@@ -568,6 +571,17 @@ fn user32_ws2(c: &mut Checks) -> Result<(), u32> {
             0,
         )?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+
+        // A message box. gala has no dialog to show one in, so the
+        // caption and the text go to this program's standard error and
+        // the answer is IDOK (1), as if the only button had been
+        // pressed -- and what was said goes to the ledger, where it
+        // keeps the time it was said and how often, because a program
+        // that gives up says so in a box and leaves nothing else behind
+        // (the boot scenario checks both the text and the ledger's
+        // line).
+        let (text, caption) = (w("a box gala cannot show"), w("win32_misc_test"));
+        c.eq(MessageBoxW(core::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0) as u64, 1)?;
 
         // WSA events: manual-reset events, created unsignaled.
         let e = WSACreateEvent();

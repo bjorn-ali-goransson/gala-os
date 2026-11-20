@@ -348,20 +348,43 @@ pub extern "system" fn MessageBoxA(
     MessageBoxW(window, text, caption, kind)
 }
 
-/// MessageBoxW: no desktop; the caption and text go to standard error and
-/// the answer is IDOK.
+/// The ledger name a message box is kept under, and the most of the
+/// text that fits beside it: a user name there is at most
+/// `ledger::USER_NAME_LEN` bytes (96) of printable ASCII, and the
+/// closing bracket is the last of them.
+const BOX: &[u8] = b"user32.dll!MessageBoxW(";
+const BOX_NAME: usize = 96;
+
+/// MessageBoxW: no dialog on the desktop; the caption and the text go to
+/// standard error, the answer is IDOK as if its only button had been
+/// pressed, and what was said goes to the ledger -- `user32.dll!
+/// MessageBoxW(<the text>)`, the kind as its detail -- which gives it
+/// the time and the count it gives every gap.
+///
+/// A program that gives up says so in a box and leaves nothing else
+/// behind: Word's startup ends in one, and the two lines this used to
+/// write on the program's own standard error carry no time, no process
+/// and no caller, so a run that ended that way said nowhere that it
+/// had. The ledger's dump and the triage's "gaps hit last" now carry the
+/// sentence itself. Which of the program's own frames asked for the box
+/// is the stack at that write, which is `stack_at=`'s question and not
+/// this one (OBSERVABILITY, "The stack at a system call":
+/// `stack_at=NtWriteFile stack_from=user32` names the caller and passes
+/// over every other write the program makes).
 #[unsafe(no_mangle)]
 pub extern "system" fn MessageBoxW(
     _window: usize,
     text: *const u16,
     caption: *const u16,
-    _kind: u32,
+    kind: u32,
 ) -> i32 {
-    for s in [caption, text] {
+    /// The caller's UTF-16 string as ASCII in `buf` (anything else
+    /// '?'), written to standard error with CRLF after it; the length of
+    /// the string itself. A null string writes nothing and is empty.
+    fn say(s: *const u16, buf: &mut [u8; 1024]) -> usize {
         if s.is_null() {
-            continue;
+            return 0;
         }
-        let mut buf = [0u8; 1024];
         let mut n = 0;
         // SAFETY: the caller's NUL-terminated UTF-16 string.
         unsafe {
@@ -376,11 +399,33 @@ pub extern "system" fn MessageBoxW(
         buf[n] = b'\r';
         buf[n + 1] = b'\n';
         let mut written = 0;
-        // SAFETY: a valid buffer.
+        // SAFETY: a valid buffer of n + 2 bytes.
         unsafe {
             WriteFile(GetStdHandle(-12i32 as u32), buf.as_ptr(), (n + 2) as u32, &mut written, 0)
         };
+        n
     }
+    let mut buf = [0u8; 1024];
+    say(caption, &mut buf);
+    let said = say(text, &mut buf);
+
+    // The text in the ledger's name, cut to what fits beside the prefix
+    // and the bracket, with anything the ledger would refuse (a
+    // character that is not printable ASCII, a quote, a backslash) as a
+    // dot: a name it refuses is counted under `?user` and says nothing,
+    // and what a box says is a program's own text and not ours.
+    let mut name = [0u8; BOX_NAME];
+    name[..BOX.len()].copy_from_slice(BOX);
+    let said = said.min(BOX_NAME - BOX.len() - 1);
+    for (at, &byte) in buf[..said].iter().enumerate() {
+        name[BOX.len() + at] = match byte {
+            b'"' | b'\\' => b'.',
+            0x20..=0x7e => byte,
+            _ => b'.',
+        };
+    }
+    name[BOX.len() + said] = b')';
+    record(&name[..BOX.len() + said + 1], kind.into());
     1 // IDOK
 }
 

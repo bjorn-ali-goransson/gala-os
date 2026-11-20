@@ -15295,7 +15295,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         name: "win32_misc_test",
         cmdline: "qemu_exit run=win32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["win32_misc_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "win32_misc_test: ok",
+            // The message box with nothing to show it: its caption and
+            // text on the program's own standard error, and what was
+            // said in the ledger, which is where a run keeps the box a
+            // program gave up in (user/user32, MessageBoxW).
+            "a box gala cannot show",
+            r#"{"service":"user32.dll!MessageBoxW(a box gala cannot show)","what":"unsupported","#,
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // P1 (JDK): SIDs, ACLs, security descriptors, the process token.

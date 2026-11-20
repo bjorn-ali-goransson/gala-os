@@ -487,6 +487,19 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
   PackageManager query answered with no packages (what a program looked
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
+  A message box: `user32.dll!MessageBoxW(<the text>)`, "unsupported",
+  with the kind (MB_*) as the detail, because **a program that gives up
+  says so in a box and leaves nothing else behind**: Word's startup ends
+  in one, and the caption and the text MessageBoxW writes on the
+  program's own standard error (there being no dialog to show) carry no
+  time, no process and no caller, so a run that ended that way said
+  nowhere that it had. The dump and the triage's "gaps hit last" carry
+  the sentence itself, cut to the 96 characters a name keeps and with
+  anything the ledger would refuse as a dot. Which of the program's own
+  frames asked for the box is a different question, and `stack_at=`'s
+  ("The stack at a system call": `stack_at=NtWriteFile stack_from=user32
+  stack_words=400` names the caller and passes over every other write
+  the program makes). Scenario `win32_misc_test`.
   Direct2D (d2d1): `d2d1.dll!<interface>::<method>`, "not
   implemented", for each method not built (CreateLayer,
   CreateCompatibleRenderTarget, ...); "unsupported" with the case in the

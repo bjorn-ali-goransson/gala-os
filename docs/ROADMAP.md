@@ -2313,8 +2313,23 @@ need gala's.
      is the answer of all 134 of those calls (argument 0 in every
      one). So what Word acted on is bytes and not a string. Those
      bytes are read now as well (OT3b, `imports_bytes=`, scenario
-     `import_answer_bytes`), and the next run of this track is that
-     same narrow arming with the 134 answers dumped.
+     `import_answer_bytes`), and read they make the loop innocuous.
+     Each of the 134 answers is a structure beginning with the float
+     1.0, and the two ordinals around it are a parser and a log.
+     `#59438`, 62 calls on that thread, is handed the UTF-16 string
+     `"400"` with 1.0 beside it, answers 3 -- the characters it
+     consumed -- and leaves 0x190 (400) in the companion word: a
+     string-to-number conversion. `#15239`, 148 calls, is handed names
+     and paths (`OFFICE.ODF`, `CoreMessagingXP.dll`, `MSO40UIRES.DLL`,
+     and the `/t Default.dotx` command line the scenario itself gave
+     Word) and answers 1 every time: a logging or formatting call.
+     With the digits the loop reads -- "320", "300", "350", "400",
+     "250", "380", each with that same scale of 1.0 -- the stretch
+     reads as Office parsing a table of numbers (durations, or theme
+     metrics) and not as a verdict on anything gala answered. So the
+     decision is not made in the loop, and the question moves off the
+     mso ordinals: the seven seconds before the box hold no refusal at
+     all.
      The window records interleaved among those calls are another
      thread's. The pump -- `GalaWindowPosted`, `GalaWindowReceive`,
      `GalaWindowInput`, `NtWaitForMultipleObjects` timeouts -- runs on
@@ -2345,6 +2360,19 @@ need gala's.
      assembly -- four paths, twice, `kernel32`'s `actctx/manifest.rs`
      on its way to the WinSxS assembly it then resolves, which leaves
      no `CreateActCtxW` row in the ledger.
+     Nor is it an exception Word swallows: a run armed
+     `events=syscall,fault events_match=WINWORD events_from=38`
+     (47800 events over the last four seconds) dispatches not one
+     `exception` event to the program's own handler anywhere before the
+     box. Nothing faults on the way there, so what Word decides, it
+     decides on something it was told.
+     The box itself is in the ledger now, so a run says it gave up
+     without a capture having been armed first:
+     `user32.dll!MessageBoxW(Sorry, something went wrong and Word was
+     unable to start. (13))`, "unsupported" (user32, OBSERVABILITY
+     "Missing-features ledger"), where before it was two lines on
+     Word's own standard error with no time, no process and no caller
+     to them.
      Word goes on running after the box as well: pagelayout.dll
      0.6 s later, `INetCache\Content.MSO` at 4 s, OProcSessId.dat at
      7.7 s.
