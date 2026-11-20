@@ -59,7 +59,19 @@ pub const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
 /// owner's windows, `Listener::Server`: the Wayland server) that the
 /// window became the active one (wParam 1) or no longer is (0). Only
 /// served owners get it: user32 follows activation itself.
+///
+/// A program's own (user32's) windows hear it too when the desktop moves
+/// the activation itself (a press, a taskbar button, a key, another
+/// window gone), not when the program asked for it (`activate_as`):
+/// wParam 1 with lParam WA_ACTIVE or WA_CLICKACTIVE for its window that
+/// became active, wParam 0 for its window that no longer is when the new
+/// one is another program's. user32 activates as Windows does from it
+/// (WM_ACTIVATE, EVENT_SYSTEM_FOREGROUND).
 pub const GALA_WM_ACTIVE: u32 = 0x0001_0010;
+/// GALA_WM_ACTIVE's lParam: activated other than by a press (a taskbar
+/// button, a key) or by a press in the window (WM_ACTIVATE's states).
+pub const WA_ACTIVE: u64 = 1;
+pub const WA_CLICKACTIVE: u64 = 2;
 /// gala's notice to a window's server that the pointer is no longer over
 /// its client area (it moved onto a frame, another window, the desktop).
 /// Only served owners get it (user32 has TrackMouseEvent).
@@ -668,14 +680,14 @@ impl<X: Default> State<X> {
             let popup = self.window(id).is_some_and(|w| w.popup);
             self.raise(id);
             if !popup {
-                self.activate(Some(id));
+                self.activate_as(Some(id), owner);
             }
         }
         if visible && was && was_minimized {
             // Restored (SC_RESTORE of a minimized window): on top and
             // active again.
             self.raise(id);
-            self.activate(Some(id));
+            self.activate_as(Some(id), owner);
         }
         if !visible && self.active == Some(id) {
             self.activate_top();
@@ -692,7 +704,7 @@ impl<X: Default> State<X> {
         let win = self.find(id, owner)?;
         win.visible = true;
         let bounds = win.bounds(shadow);
-        self.set_minimized(id);
+        self.set_minimized(id, None);
         Ok(bounds)
     }
 
@@ -1403,45 +1415,89 @@ impl<X: Default> State<X> {
             return Err(NtStatus::ACCESS_DENIED);
         }
         self.raise(id);
-        self.activate(Some(id));
+        self.activate_as(Some(id), owner);
         Ok(())
     }
 
-    /// The active window becomes `id`: the old and the new one are told
-    /// if served (GALA_WM_ACTIVE), in that order.
+    /// The desktop makes `id` the active window (not at its program's
+    /// asking): the old and the new one are told (GALA_WM_ACTIVE), in
+    /// that order.
     pub fn activate(&mut self, id: Option<u32>) {
-        if self.active != id {
-            let old = core::mem::replace(&mut self.active, id);
-            if let Some(old) = old {
-                self.notify_served(old, GALA_WM_ACTIVE, 0);
-            }
-            if let Some(new) = id {
-                self.notify_served(new, GALA_WM_ACTIVE, 1);
-            }
-            self.listing_changed = true;
+        self.change_active(id, WA_ACTIVE, None);
+    }
+
+    /// The same for a press in window `id` (WA_CLICKACTIVE).
+    pub fn activate_by_press(&mut self, id: u32) {
+        self.change_active(Some(id), WA_CLICKACTIVE, None);
+    }
+
+    /// The active window becomes `id` at the asking of `owner` (its
+    /// ShowWindow, SetForegroundWindow, a popup's press it took), whose
+    /// user32 activated it already: its own windows are not told.
+    pub fn activate_as(&mut self, id: Option<u32>, owner: u64) {
+        self.change_active(id, WA_ACTIVE, Some(owner));
+    }
+
+    /// Served owners hear of every change (wParam 1 or 0, lParam 0);
+    /// user32 owners hear what they did not ask for (GALA_WM_ACTIVE):
+    /// their window that became active (lParam `how`), and their window
+    /// that no longer is when the new one is not theirs.
+    fn change_active(&mut self, id: Option<u32>, how: u64, by: Option<u64>) {
+        if self.active == id {
+            return;
         }
+        let old = core::mem::replace(&mut self.active, id);
+        let owner_of = |s: &Self, w: Option<u32>| w.and_then(|w| s.window(w)).map(|w| w.owner);
+        let (old_owner, new_owner) = (owner_of(self, old), owner_of(self, id));
+        if let (Some(old), Some(o)) = (old, old_owner) {
+            // A served owner hears every change; a user32 owner only one
+            // to another program's window that it did not ask for.
+            if self.served(o) || (new_owner != Some(o) && by != Some(o)) {
+                self.send(old, GALA_WM_ACTIVE, 0, 0);
+            }
+        }
+        if let (Some(new), Some(o)) = (id, new_owner) {
+            if self.served(o) {
+                self.send(new, GALA_WM_ACTIVE, 1, 0);
+            } else if by != Some(o) {
+                self.send(new, GALA_WM_ACTIVE, 1, how);
+            }
+        }
+        self.listing_changed = true;
     }
 
     /// The topmost shown window becomes active (or none).
     pub fn activate_top(&mut self) {
+        self.activate_top_as(None);
+    }
+
+    /// The same at the asking of `by` (`activate_as`), if a program's.
+    fn activate_top_as(&mut self, by: Option<u64>) {
         let top = self.windows.iter().rev().find(|w| w.shown() && !w.popup).map(|w| w.id);
-        self.activate(top);
+        self.change_active(top, WA_ACTIVE, by);
     }
 
     /// The user minimizes a window: its program is told
     /// (GALA_WM_MINIMIZED), so IsIconic says so.
+    /// Told before the activation moves on, as Windows minimizes first
+    /// (EVENT_SYSTEM_MINIMIZESTART before the next window's
+    /// EVENT_SYSTEM_FOREGROUND).
     fn minimize(&mut self, id: u32) {
-        self.set_minimized(id);
         self.send(id, GALA_WM_MINIMIZED, 1, 0);
+        self.set_minimized(id, None);
     }
 
-    fn set_minimized(&mut self, id: u32) {
+    /// `by`: the program whose own request moved the activation (not
+    /// told of what it did itself); None when the desktop did it, and
+    /// when a program minimized its window (it hears, as on Windows,
+    /// which window is active next).
+    fn set_minimized(&mut self, id: u32, by: Option<u64>) {
         let Some(i) = self.index(id) else { return };
         self.windows[i].minimized = true;
         let bounds = self.windows[i].bounds(self.shadow);
         self.add_damage(bounds);
         if self.active == Some(id) {
-            self.activate_top();
+            self.activate_top_as(by);
         }
         self.listing_changed = true;
     }

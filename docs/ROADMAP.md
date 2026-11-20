@@ -821,10 +821,15 @@ shell part) leaves it.
       desktop (refused while another program is active), so a tool
       window brought forward gets the keys. Test: `topmost_test`
       (ARCHITECTURE "The topmost band", "The foreground").
-   2. What a taskbar listens to: the kernel raises WinEvents for what
-      it does itself (foreground, minimize/restore, Snap, close), and
-      Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists them
-      and the window verbs reach them.
+   2. Done: what a taskbar listens to: the desktop's own activation,
+      minimize and restore (its buttons, Win+arrows, GalaDesktopAction)
+      reach user32 programs (GALA_WM_ACTIVE, GALA_WM_MINIMIZED), which
+      raise EVENT_SYSTEM_FOREGROUND, MINIMIZESTART and MINIMIZEEND in
+      Windows' order. Test: `shell_events_test` (ARCHITECTURE "gala's
+      notices for served owners", WinEvents).
+   2b. Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists
+      them, the window verbs reach them and their activation raises
+      the same events.
    3. The shell's keys: the Windows key, Win+E and Ctrl+Shift+Esc reach
       the shell as hot keys (RegisterHotKey; Win alone as Windows'
       shell gets it); Win+arrows stay the kernel's.

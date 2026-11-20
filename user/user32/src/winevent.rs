@@ -11,7 +11,7 @@
 //! user32 raises the events Windows' user32 and controls raise for the
 //! window tree (EVENT_OBJECT_CREATE, DESTROY, SHOW, HIDE, FOCUS,
 //! NAMECHANGE, VALUECHANGE, STATECHANGE, SELECTION, INVOKED,
-//! EVENT_SYSTEM_FOREGROUND): `raise`.
+//! EVENT_SYSTEM_FOREGROUND, MINIMIZESTART, MINIMIZEEND): `raise`.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -33,6 +33,8 @@ unsafe extern "system" {
 pub type WinEventProc = extern "system" fn(usize, u32, Hwnd, i32, i32, u32, u32);
 
 pub const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+pub const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
+pub const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 pub const EVENT_OBJECT_CREATE: u32 = 0x8000;
 pub const EVENT_OBJECT_DESTROY: u32 = 0x8001;
 pub const EVENT_OBJECT_SHOW: u32 = 0x8002;

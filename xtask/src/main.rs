@@ -10870,6 +10870,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("topmost_test", "kernel32.dll", "Windows/System32"),
     ("topmost_test", "user32.dll", "Windows/System32"),
     ("topmost_test", "gdi32.dll", "Windows/System32"),
+    // The shell's window actions as a taskbar hears them
+    // (user/shell_events_test).
+    ("shell_events_test", "ntdll.dll", "Windows/System32"),
+    ("shell_events_test", "kernel32.dll", "Windows/System32"),
+    ("shell_events_test", "user32.dll", "Windows/System32"),
+    ("shell_events_test", "gdi32.dll", "Windows/System32"),
     ("no_i8042", "ntdll.dll", "Windows/System32"),
     ("no_i8042", "kernel32.dll", "Windows/System32"),
     ("no_i8042", "user32.dll", "Windows/System32"),
@@ -11258,6 +11264,7 @@ const USER_PROGRAMS: &[&str] = &[
     "tray_test",
     "appbar_test",
     "topmost_test",
+    "shell_events_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -13526,6 +13533,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "linux_menu",
     "tray_test",
     "topmost_test",
+    "shell_events_test",
     "d2d1_window",
     // A framebuffer for the docked agent panel (AGENT_SCREEN).
     "agent",
@@ -16301,6 +16309,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "topmost_test: out of the band, under the topmost window at 400,300",
             "topmost_test: the tool window got the key",
             "topmost_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // What a taskbar hears when the desktop changes a window itself
+        // (user/shell_events_test; ROADMAP SH step 1, part 2): the
+        // shell's Activate, Minimize and Restore raise
+        // EVENT_SYSTEM_FOREGROUND, MINIMIZESTART and MINIMIZEEND, and
+        // WM_ACTIVATE reaches both windows.
+        name: "shell_events_test",
+        cmdline: "qemu_exit run=shell_events_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "shell_events_test: activated by the desktop",
+            "shell_events_test: minimized by the desktop",
+            "shell_events_test: restored by the desktop",
+            "shell_events_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -21487,6 +21512,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("topmost_test", "needs a screen (what is on top is checked on it)"),
+    ("shell_events_test", "needs a screen (the desktop's window actions are its shell's)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("no_i8042", "a machine with no PS/2 controller: gala-um has no I/O ports and no input thread"),

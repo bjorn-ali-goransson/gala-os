@@ -1818,7 +1818,7 @@ impl Desktop {
             let pt = ((y as i16 as u16 as u64) << 16) | x as i16 as u16 as u64;
             if pressed & 2 != 0 {
                 self.s.raise(id);
-                self.s.activate(Some(id));
+                self.s.activate_by_press(id);
                 self.s.send(id, WM_NCRBUTTONDOWN, HTCAPTION, pt);
             }
             if released & 2 != 0 {
@@ -1905,14 +1905,14 @@ impl Desktop {
             }
             Hit::Caption(id) => {
                 self.s.raise(id);
-                self.s.activate(Some(id));
+                self.s.activate_by_press(id);
                 if let Some(w) = self.s.window(id) {
                     self.drag = Some((id, x - i64::from(w.x), y - i64::from(w.y)));
                 }
             }
             Hit::Button(id, _) | Hit::Frame(id) => {
                 self.s.raise(id);
-                self.s.activate(Some(id));
+                self.s.activate_by_press(id);
             }
             Hit::Client(id) => {
                 self.s.raise(id);
@@ -1940,7 +1940,7 @@ impl Desktop {
     fn press_client(&mut self, id: u32, button: u32) {
         let Some(w) = self.s.window(id) else { return };
         if !w.popup {
-            self.s.activate(Some(id));
+            self.s.activate_by_press(id);
         } else if self.s.active != Some(id) && !self.s.served(w.owner) {
             self.pressed_popup = Some(id);
             self.s.send(id, GALA_WM_MOUSEACTIVATE, u64::from(button), 0);
@@ -1962,7 +1962,7 @@ impl Desktop {
             return Err(NtStatus::INVALID_DEVICE_STATE);
         }
         self.pressed_popup = None;
-        self.s.activate(Some(id));
+        self.s.activate_as(Some(id), owner);
         #[cfg(not(test))]
         crate::info!("desktop: popup {id} takes the activation for its press");
         Ok(())

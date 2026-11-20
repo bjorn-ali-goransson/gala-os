@@ -9894,7 +9894,12 @@ live in the kernel (`nt::winevent`, its own lock); user32's side is
 - Raised by user32: EVENT_OBJECT_CREATE (after WM_CREATE), SHOW and HIDE
   (ShowWindow of top-level and child windows), HIDE then DESTROY
   (DestroyWindow), FOCUS (SetFocus, OBJID_CLIENT),
-  EVENT_SYSTEM_FOREGROUND (the foreground window changes), NAMECHANGE
+  EVENT_SYSTEM_FOREGROUND (the foreground window changes, whoever
+  changed it: the desktop's own changes reach user32 as GALA_WM_ACTIVE),
+  MINIMIZESTART and MINIMIZEEND (`tree::minimize`, the program's
+  SC_MINIMIZE or the desktop's GALA_WM_MINIMIZED, which the desktop
+  sends before it moves the activation, so MINIMIZESTART comes before
+  the next window's FOREGROUND, as on Windows), NAMECHANGE
   (DefWindowProc's WM_SETTEXT), VALUECHANGE (an edit's text,
   OBJID_CLIENT), STATECHANGE (a check box's or radio button's check),
   INVOKED (a push button's click: gala's choice; Windows documents the
@@ -14253,12 +14258,21 @@ user32 (`kernel/src/wayland/input.rs`, `Client::input`).
   when the process's last connection closes (`unlisten_server`), or with
   the process.
 - **gala's notices for served owners** (only owners with a
-  `Listener::Server` get them; user32 follows activation and
+  `Listener::Server` get them, except GALA_WM_ACTIVE; user32 follows
   TrackMouseEvent itself): `GALA_WM_ACTIVE` (0x10010; wParam 1: the
   window became the active one, 0: it no longer is), queued by
-  `State::activate` for the old window then the new one, so a click that
+  `State::change_active` for the old window then the new one, so a click that
   activates comes before its button and keys after it go to the new
-  focus; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
+  focus. user32's owners get it too (lParam: WA_ACTIVE, or
+  WA_CLICKACTIVE for a press), but only for changes they did not ask
+  for themselves (`activate_as`'s `by`: their SetForegroundWindow,
+  ShowWindow), so a late notice never undoes what user32 already did
+  locally; a program that minimizes its own window does hear which
+  window is active next (WM_ACTIVATE WA_INACTIVE on Windows). The 0
+  goes to the old owner only when the new window is another program's
+  (user32 deactivates its own window itself). user32's thread then runs
+  `activate` (WM_NCACTIVATE, WM_ACTIVATE, EVENT_SYSTEM_FOREGROUND), so a
+  taskbar's Activate, Minimize and Restore reach WinEvent hooks; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
   client area the pointer was over (`State::hovered`: the target of the
   moves, the capture, none during a drag or resize) changes;
   `GALA_WM_POPUP_DONE` (0x10012), when a press outside its windows ended

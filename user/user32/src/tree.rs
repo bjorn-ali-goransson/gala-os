@@ -1490,7 +1490,8 @@ const SIZE_MAXIMIZED: usize = 2;
 /// visible (IsWindowVisible), as on Windows. Its rectangle is kept
 /// (Windows moves a minimized window to -32000, -32000: not done here).
 /// WM_SIZE SIZE_MINIMIZED (0 x 0), then SIZE_RESTORED or SIZE_MAXIMIZED
-/// with the client size, tell the program. `tell_desktop` is false when
+/// with the client size, tell the program, and EVENT_SYSTEM_MINIMIZESTART
+/// or MINIMIZEEND the WinEvent hooks (a shell's taskbar). `tell_desktop` is false when
 /// the desktop did it itself (its minimize button).
 pub(crate) fn minimize(hwnd: Hwnd, on: bool, tell_desktop: bool) {
     let Some(i) = index_of(hwnd) else { return };
@@ -1500,6 +1501,11 @@ pub(crate) fn minimize(hwnd: Hwnd, on: bool, tell_desktop: bool) {
     }
     with(|s| s.windows[i].iconic = on);
     crate::foreign::sync(hwnd);
+    use crate::winevent::{
+        CHILDID_SELF, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, OBJID_WINDOW, raise,
+    };
+    let event = if on { EVENT_SYSTEM_MINIMIZESTART } else { EVENT_SYSTEM_MINIMIZEEND };
+    raise(event, hwnd, OBJID_WINDOW, CHILDID_SELF);
     if tell_desktop && w.desktop != 0 && w.visible {
         // SAFETY: our desktop window; 2 shows it minimized.
         unsafe { GalaWindowShow(w.desktop, if on { 2 } else { 1 }) };

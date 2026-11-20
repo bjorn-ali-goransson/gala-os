@@ -116,6 +116,12 @@ const GALA_WM_NCDOWN: u32 = 0x0001_0004;
 /// WS_POPUP window unless it answers MA_NOACTIVATE, as menus and
 /// drop-down lists do, or has WS_EX_NOACTIVATE).
 const GALA_WM_MOUSEACTIVATE: u32 = 0x0001_0013;
+/// The desktop moved the activation without this program asking (kernel
+/// winstate GALA_WM_ACTIVE): wParam 1, the window became active (lParam
+/// its WA_ state: WA_ACTIVE, or WA_CLICKACTIVE for a press); 0, it no
+/// longer is (another program's window is). Its thread activates it
+/// (`activate`), as SetForegroundWindow would.
+const GALA_WM_ACTIVE: u32 = 0x0001_0010;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
 const MA_ACTIVATE: isize = 1;
 const MA_ACTIVATEANDEAT: isize = 2;
@@ -2412,14 +2418,19 @@ fn nc_down(top: Hwnd, wparam: usize, lparam: isize) {
 /// `hwnd` gets WM_NCACTIVATE (TRUE) and WM_ACTIVATE (`state`, lParam the
 /// old one), whose DefWindowProc gives it the focus. Programs keep their
 /// keyboard focus by these (Chromium's views take keys only once their
-/// window is activated).
+/// window is activated). `hwnd` 0: no window of this program is active
+/// any more (the desktop's GALA_WM_ACTIVE 0).
 pub(crate) fn activate(hwnd: Hwnd, state: usize) {
     let old = FOREGROUND.swap(hwnd, Ordering::Relaxed);
     if old == hwnd {
         return;
     }
     use crate::winevent::{CHILDID_SELF, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, raise};
-    raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    // No window of ours is active any more (another program's is): that
+    // program raises the event.
+    if hwnd != 0 {
+        raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    }
     if let Some(w) = window(old) {
         SendMessageW(old, WM_NCACTIVATE, 0, 0);
         SendMessageW(old, WM_ACTIVATE, WA_INACTIVE | usize::from(w.iconic) << 16, hwnd as isize);
@@ -3150,7 +3161,10 @@ fn pump() {
                     crate::tree::moved_by_desktop(top, lparam);
                 }
                 // Snap: the window's thread moves it (DispatchMessage).
-                if message == GALA_WM_PLACE || message == GALA_WM_MINIMIZED {
+                if message == GALA_WM_PLACE
+                    || message == GALA_WM_MINIMIZED
+                    || message == GALA_WM_ACTIVE
+                {
                     post_input(thread, message_at(top, message, wparam, lparam));
                     continue;
                 }
@@ -3619,6 +3633,14 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
     }
     if m.message == GALA_WM_MINIMIZED {
         crate::tree::minimize(m.hwnd, m.wparam != 0, false);
+        return 0;
+    }
+    if m.message == GALA_WM_ACTIVE {
+        if m.wparam != 0 {
+            activate(m.hwnd, m.lparam as usize);
+        } else if FOREGROUND.load(Ordering::Relaxed) == m.hwnd {
+            activate(0, 0);
+        }
         return 0;
     }
     SendMessageW(m.hwnd, m.message, m.wparam, m.lparam)

@@ -120,8 +120,12 @@ fn named_actions_change_the_state_and_tell_the_program() {
     assert_eq!(
         messages(&mut s, 5),
         [
+            // Minimized, then no longer active (no window is); restored
+            // and active again, as the desktop did both.
             (a, GALA_WM_MINIMIZED, 1, 0),
+            (a, GALA_WM_ACTIVE, 0, 0),
             (a, GALA_WM_MINIMIZED, 0, 0),
+            (a, GALA_WM_ACTIVE, 1, WA_ACTIVE),
             (a, WM_SYSCOMMAND, SC_CLOSE, 0),
             // The left half of the work area (above the taskbar's rows).
             (a, GALA_WM_PLACE, 0, 640 | 752 << 16),
@@ -181,7 +185,12 @@ fn input_waits_for_its_program_and_goes_with_it() {
     assert_eq!(s.captured, None);
     assert_eq!(s.active, Some(a));
     assert!(!s.has_input(2));
-    assert_eq!(messages(&mut s, 1), [(a, WM_MOUSEMOVE, 0, 2)]);
+    // A heard it was no longer active when B (another program's) was
+    // shown, and that it is again when B went.
+    assert_eq!(
+        messages(&mut s, 1),
+        [(a, GALA_WM_ACTIVE, 0, 0), (a, WM_MOUSEMOVE, 0, 2), (a, GALA_WM_ACTIVE, 1, WA_ACTIVE)]
+    );
     assert_eq!(s.windows.len(), 1);
 }
 

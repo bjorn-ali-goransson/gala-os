@@ -183,7 +183,21 @@ pub fn run(
         if !super::window::may_act_on(from, info.pid, level) {
             return Err(NtStatus::ACCESS_DENIED);
         }
-        desktop::window_action(shell, u64::from(info.pid), info.desktop, action)?;
+        // Each named action on a window leaves a line, so a shell's
+        // taskbar click that did nothing says what it asked and why.
+        let (pid, hwnd) = (caller.pid, r.hwnd);
+        match desktop::window_action(shell, u64::from(info.pid), info.desktop, action) {
+            Ok(()) => crate::info!(
+                "desktop: pid {pid} asks for {action:?} of window {hwnd:#x} (pid {})",
+                info.pid
+            ),
+            Err(e) => {
+                crate::warn!(
+                    "desktop: pid {pid} asked for {action:?} of window {hwnd:#x} (refused: {e:?})"
+                );
+                return Err(e);
+            }
+        }
         return Ok(out);
     }
     match r.action {
