@@ -2192,7 +2192,8 @@ need gala's.
      ledger shows in the ~900 ms that follow, in order: GetModuleHandle
      for tbarcode10.dll and tbarcode10_x64.dll, the Word\Security
      keys, then the gap of the day and, behind it, the next one, and
-     GetModuleHandle(mscoree.dll) before the box. One blind spot
+     GetModuleHandle(mscoree.dll) -- which the ledger's own times place
+     after the box and not before it (below). One blind spot
      stands beside the trace, named in OBSERVABILITY: QueryInterface,
      AddRef and Release are hand-written slots every object shares,
      which the generator does not wrap -- a refused interface is in
@@ -2410,6 +2411,39 @@ need gala's.
      concludes what it concludes before a document or a template of
      its own exists, and nothing it was refused on the way there is
      the cause, because it never asked.
+     Nor is it any other file. The whole file picture of a run costs
+     1608 events (308 KB) with `events=file,image
+     events_match=WINWORD`: Word makes 266 opens of its own, 165 of
+     them refused, and all but fifteen of the refusals are DLL probe
+     paths its loader walks. What is left is the Click-to-Run pipe (87,
+     above), `C:\gala\dxvk.conf` (DXVK's own optional config), the
+     private `Microsoft.Windows.Common-Controls` manifests gala probes
+     for (above), the Templates directory before Word creates it, and
+     `INetCache\Content.MSO`, which it asks for after the box. Every
+     data file it opens is answered -- its own Click-to-Run log,
+     `office.odf`, OProcSessId.dat, MSO's `MEMA5D8.tmp`, the Vulkan
+     driver manifest, the walk that creates Templates -- so nothing on
+     disk is refused before the decision, and the question stays a
+     value Word was handed.
+     Where the box falls among the gaps needs no capture: the ledger's
+     `last` times put it there. `d3d10_1.dll!D3D10CreateDevice1` at
+     42691 ms, the box at 42874 ms, and after it everything that reads
+     like the window's tail -- GetModuleHandle for dxgitrace.dll and
+     the two tbarcode10 names, the `Word\Security` policy keys,
+     `Office\Common\Graphics\Blocklist`,
+     `kernelbase.dll!PrivIsDllSynchronizationHeld` (43307-43755 ms),
+     `GracefulExit\WINWORD`, `HeapQueryInformation(class)` and
+     GetModuleHandle(mscoree.dll) at 43836 ms. Those are MSO's failure
+     path, which is why closing one of them moves nothing.
+     Pitfall, so the next run does not chase it: the 26 `missing
+     export <dll>!__register_frame` and `__deregister_frame` rows that
+     land 300 ms before the box, one per loaded module, are not Word's.
+     They are MinGW's unwind registration in DXVK and lavapipe as
+     `vulkan_lvp.dll` loads, with
+     `kernel32.dll!GetModuleHandle(libgcc_s_dw2-1.dll)`,
+     `GetModuleHandle(winevulkan.dll)` and
+     `ntdll.dll!__wine_dbg_output` beside them -- gala's own graphics
+     stack asking Wine's questions, and nothing waits on the answers.
      The time the traced run spends inside D3D10CreateDevice1 is
      lavapipe's, and the untraced run's 631 ms is the honest figure for
      it. With every event recorded the one call runs from 290749 ms to
