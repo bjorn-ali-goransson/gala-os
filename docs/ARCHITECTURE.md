@@ -4308,16 +4308,21 @@ ntdll imports.
     with `CreateActCtxW: no assembly <name>` in the ledger, unless
     optional="yes" or allowDelayedBinding="true".
   - Sections (`sections.rs`, Windows' undocumented layouts as Wine's
-    tests check them): DLL redirection (every file; 20-byte records,
-    PATH_OMITS_ASSEMBLY_ROOT), window classes (`<version>!<class>`
+    tests check them): DLL redirection (every file; a 20-byte record,
+    PATH_OMITS_ASSEMBLY_ROOT without a `loadFrom` path, else that
+    path's entry and its text behind the record and inside its length,
+    kept as the manifest wrote it and unexpanded, with
+    PATH_INCLUDES_BASE_NAME unless it ends in a backslash and
+    PATH_EXPAND when it holds a variable), window classes
+    (`<version>!<class>`
     unless versioned="no", the module after it), COM servers (120-byte
     records indexed by CLSID and by a generated alias GUID) and ProgIDs
     (each pointing to its class's alias in the section's global area).
     Keys are found by RtlHashUnicodeString's X65599 hash of the
     upper-cased key, then compared case-insensitively. typelib,
-    comInterface(External)ProxyStub, clrClass/clrSurrogate,
-    activatableClass and loadFrom are read but build no section yet
-    (recorded at creation, and when such a section is searched).
+    comInterface(External)ProxyStub, clrClass/clrSurrogate and
+    activatableClass are read but build no section yet (recorded at
+    creation, and when such a section is searched).
   - The process default context is the executable's RT_MANIFEST 1, else
     `<exe>.manifest`, made on first use and never freed; a refused one
     is recorded (`process default activation context refused`) and the

@@ -12,8 +12,8 @@
 //! executable's own manifest (RT_MANIFEST 1, else `<exe>.manifest`),
 //! read on first use. QueryActCtxW answers every documented class from
 //! the model. gala's loader does not redirect DLL loads or window
-//! classes through a context: programs that ask see what Windows would
-//! tell them.
+//! classes through a context, `loadFrom` paths included: programs that
+//! ask see what Windows would tell them, and load what they ask for.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -381,10 +381,22 @@ fn create(c: &ActCtx) -> Result<*mut Context, u32> {
     }
     if model.skipped != 0 {
         // Content read but without sections yet (typelibs, proxy/stubs,
-        // CLR classes, WinRT classes, loadFrom): its lookups find nothing.
+        // CLR classes, WinRT classes): its lookups find nothing.
         super::unsupported(
             b"kernel32.dll!CreateActCtxW(manifest sections not built)",
             model.skipped.into(),
+        );
+    }
+    // The section hands these paths out, but gala's loader does
+    // not follow them: a program that asks and loads the file itself
+    // gets what Windows would give it, one that leaves the load to the
+    // loader gets the file beside the assembly instead.
+    let redirected =
+        model.files.as_slice().iter().filter(|f| !f.load_from.is_empty()).count() as u32;
+    if redirected != 0 {
+        super::unsupported(
+            b"kernel32.dll!CreateActCtxW(loadFrom paths the loader does not follow)",
+            redirected.into(),
         );
     }
     static SEED: AtomicU32 = AtomicU32::new(0x9e37_79b9);
@@ -1289,10 +1301,10 @@ pub extern "system" fn FindActCtxSectionStringW(
         };
         let Some(found) = sections::find_string(s, key) else { continue };
         let (length, global) = match section {
-            // The record: size, flags, path data.
-            2 => (rd32(s, found.0), (0, 0)),
-            // The record and its two names with their NULs.
-            3 => (found.1, (0, 0)),
+            // The index's length, which covers what follows a record:
+            // a `loadFrom` path's entry and text, a window class's two
+            // names with their NULs.
+            2 | 3 => (found.1, (0, 0)),
             _ => (rd32(s, found.0), (rd32(s, 36), rd32(s, 40))),
         };
         fill(data, h, flags, s, found, length, global);

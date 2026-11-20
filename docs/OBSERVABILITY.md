@@ -634,9 +634,13 @@ of a rarer kind says a gap was lost and the caps need revisiting.
   <name>` for a dependency found nowhere; `kernel32.dll!process default
   activation context refused` and `a DLL's activation context refused`
   (the error as detail). "unsupported": `CreateActCtxW(manifest sections
-  not built)` (detail: which: 1 typelib, 2 proxy/stub, 4 CLR, 8 WinRT,
-  16 loadFrom) and `FindActCtxSection(section not built)` (the section)
-  when a lookup could have found such content.
+  not built)` (detail: which: 1 typelib, 2 proxy/stub, 4 CLR, 8
+  WinRT) and `FindActCtxSection(section not built)` (the section) when
+  a lookup could have found such content;
+  `CreateActCtxW(loadFrom paths the loader does not follow)` (how many
+  files have one) when a manifest's files name a path to load them
+  from, which the DLL redirection section hands out but the loader
+  does not use.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall
