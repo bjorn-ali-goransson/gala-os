@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, and `imports_answers=<n>` for what each call answered) with `events=call`; `import` and `ret` events, `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for the arguments that read as text) with `events=call`; `import` and `ret` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -1145,6 +1145,8 @@ slots armed, so that what comes out is the sequence of calls the program
 made and not the set of names it reached (`iat_repeat`, below), and
 `imports_answers=<n>` adds what each of those calls answered, by
 trapping the return as well as the call (`iat_answers`, below).
+`imports_strings=<n>` quotes the arguments that read as text, beside
+the registers they were read from (`import_strings`, below).
 
 What it answers that nothing else here can is a call into a DLL **gala
 did not write**. `trace_from=` lives in the wrappers
@@ -1262,6 +1264,36 @@ data first, which disarms the slot (below), so that one leaves a
   (the same program with the slots armed, raising both through a
   resolved pointer and through a slot of its own), both with ARM64
   twins.
+- **And what the arguments point at, with `imports_strings=<n>`.**
+  A register is a number, and what a call means is mostly in what its
+  numbers point at: a name, a path, a message. For each of the four
+  argument registers of a recorded call, the kernel reads up to 256
+  bytes at the address it holds and asks whether they read as text: a
+  run of printable characters ending in a NUL inside the window, four
+  characters at least, two bytes a character where the second byte is
+  zero and one where it is not. What it reads goes into the same
+  `import` event under `"text"`, keyed by the index of the argument it
+  was read at, and the first eight calls carrying any are said in the
+  log as well. A number too small to be an address (below 0x10000) is
+  not read at all, a read is stopped at the end of the page the address
+  points into, and a read that fails leaves the argument as it was
+  found -- a trace must not be able to fault the program it is
+  watching. `n` is a number from 1 to 1048576 as the budgets beside it
+  are, and it counts quotes and not calls: an argument that is a plain
+  number costs none. Scenarios `import_strings_test` (the program with
+  nothing armed) and `import_strings` (the same program with the
+  arguments quoted), both with ARM64 twins.
+
+  Nothing here knows a call's signature, so this is evidence and not
+  proof. A number that happens to point at a printable NUL-terminated
+  run is quoted like a string the call was really handed, which is why
+  the quotes sit beside the registers rather than in place of them. The
+  narrow range is ASCII and no wider, because the low bytes of a
+  pointer are themselves a run of high bytes and a zero; what that
+  gives up is a `*A` string in Latin-1, whose accented characters end
+  the run. A run longer than 120 characters is cut and ends in `...`,
+  and a run that crosses the end of its page is cut at the page with
+  nothing to say so.
 - **Functions only.** An imported variable cannot be trapped: the value
   a read of its slot gives *is* what the program then uses, and no fault
   announces that read. So the loader arms a slot only when the address
@@ -1298,6 +1330,10 @@ data first, which disarms the slot (below), so that one leaves a
   call until its return. So `imports_answers=` is read narrowed as the
   repeat is, and for one reason more: a callee whose own return address
   is read while that return is trapped sees the trap (below).
+- **Cost of a quote**: up to four reads of 256 bytes of the traced
+  process's own memory per recorded call, on the fault path and with no
+  lock held, and 1 KiB of the fault path's stack. Nothing at all
+  without the option, which is one relaxed load.
 - **Cost when nothing is traced**: one relaxed load per page fault. The
   kernel keeps the lowest and highest trap address it has armed, and an
   ordinary fault -- demand paging, a guard page, a real access
@@ -1327,7 +1363,8 @@ data first, which disarms the slot (below), so that one leaves a
   whatever the caller happened to leave there. An argument past the
   fourth is on the stack and a floating-point one is in an SSE
   register, and neither is read. The answer is a `ret` event, which
-  `imports_answers=` asks for (above).
+  `imports_answers=` asks for (above), and what an argument points at
+  is a quote beside it, which `imports_strings=` asks for (above).
 - **Static imports only**, the ones the loader binds. A delay-load
   import is bound by the program's own helper on its first call, and a
   `GetProcAddress` result never goes through an IAT slot at all;
@@ -1335,7 +1372,10 @@ data first, which disarms the slot (below), so that one leaves a
 - **Limits**: one record a slot without `imports_repeat=`, so the
   stream is then a set of names and not a sequence; an answer is the
   one register the ABI returns in, so a structure returned by hidden
-  pointer is the pointer and not what it points at; and a callee that
+  pointer is the pointer and not what it points at; a quote is text at
+  an argument of a call and never at its answer, since what a call
+  wrote into a buffer it was handed is only there once the call is
+  over, which is a fault this option does not take; and a callee that
   reads its own return address while that return is trapped
   (`_ReturnAddress`, a stack walk of its own) sees the slot's trap
   address rather than the caller's code, which is what the answers

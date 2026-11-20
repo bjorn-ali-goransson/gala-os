@@ -8392,6 +8392,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iat_answers", "testdll.dll", "gala"),
     ("iat_repeat", "ntdll.dll", "Windows/System32"),
     ("iat_repeat", "testdll.dll", "gala"),
+    ("import_strings_test", "ntdll.dll", "Windows/System32"),
+    ("import_strings_test", "testdll.dll", "gala"),
+    ("import_strings", "ntdll.dll", "Windows/System32"),
+    ("import_strings", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
     ("apc_test", "ntdll.dll", "Windows/System32"),
     ("ioapc_test", "ntdll.dll", "Windows/System32"),
@@ -11129,6 +11133,7 @@ const USER_PROGRAMS: &[&str] = &[
     "iat_trace_test",
     "iat_ret_test",
     "iat_unwind_test",
+    "import_strings_test",
     "args_test",
     "fpu_test",
     "sysinfo_test",
@@ -13839,6 +13844,8 @@ const ARM64_TWINS: &[&str] = &[
     "iat_answers",
     "iat_unwind_test",
     "iat_unwind",
+    "import_strings_test",
+    "import_strings",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -19110,6 +19117,47 @@ const BASE_SCENARIOS: &[Scenario] = &[
              from being that call's return trap: it is put back where the call \
              left it as well, and the call recorded without an answer \
              (imports_answers=)",
+        ],
+    },
+    Scenario {
+        // OT3b: `imports_strings=`, the arguments of a recorded call
+        // that read as text. This is the program with nothing armed:
+        // the calls answer the sum of what they were handed, which is
+        // what the quoting run below is compared against -- a read
+        // taken behind a call's back must leave the call as it was.
+        name: "import_strings_test",
+        cmdline: "qemu_exit run=import_strings_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["import_strings_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: the same program with its one import armed and the
+        // arguments quoted. Three calls go through the slot: the first
+        // hands it a narrow string, a wide string, a number and a
+        // pointer at bytes that are no text; the second a pointer into
+        // no mapping, a number, that same pointer and a narrow string
+        // at the last argument; the third four numbers. So three
+        // arguments of the twelve read as text, carried by two of the
+        // three calls -- a quote where there is text, nothing where
+        // there is none, and a read that fails leaving the call
+        // untouched, which is the program's own `ok`.
+        name: "import_strings",
+        cmdline: "qemu_exit events=call run=import_strings_test.exe \
+                  imports=import_strings_test.exe!testdll.dll imports_repeat=64 \
+                  imports_strings=64",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_strings_test: ok",
+            "exited with status 0x00000000",
+            "imports: the arguments of a recorded call that read as text, 64 at \
+             most, 120 characters of each (imports_strings=)",
+            "imports: first calls recorded: 1 of 1 slots armed (imports=)",
+            "imports: 2 later calls recorded of 64 (imports_repeat=)",
+            "imports: the call to testdll.dll!gala_four carries text: arg 0 \
+             \"ErrorMessage\" arg 1 \"Document1 - Word\" (imports_strings=)",
+            "imports: the call to testdll.dll!gala_four carries text: arg 3 \
+             \"second string\" (imports_strings=)",
+            "imports: 3 arguments quoted of 64, carried by 2 calls (imports_strings=)",
         ],
     },
     Scenario {

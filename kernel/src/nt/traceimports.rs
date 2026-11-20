@@ -58,13 +58,26 @@
 //! arrives with, so a call that never returns -- an unwind, a longjmp,
 //! a thread that exits -- is noticed rather than trusted.
 //!
+//! A register is a number, and a call's meaning is mostly in what its
+//! numbers point at: a name, a path, a message. Under
+//! `imports_strings=<n>` the kernel reads a window at each argument of
+//! a recorded call and quotes the ones that read as a NUL-terminated
+//! run of printable characters, one byte each or two. That is evidence
+//! and not proof -- nothing here knows a call's signature, so a number
+//! that happens to point at such a run is quoted like a string that is
+//! one -- which is why the quotes sit beside the registers rather than
+//! in place of them, and why the run must be terminated inside the
+//! window and have [`TEXT_LEAST`] characters before it is text at all.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
 //! write the slot), and nothing after it -- or, under
 //! `imports_repeat=`, one such fault per call until the budget is
 //! spent, and under `imports_answers=` a second fault for each call
-//! answered. What it cannot do is in OBSERVABILITY: the first four
-//! integer argument registers and no others, and static imports only.
+//! answered, plus a read of up to [`TEXT_WINDOW`] bytes per argument
+//! under `imports_strings=`. What it cannot do is in OBSERVABILITY: the
+//! first four integer argument registers and no others, static imports
+//! only, and text at an argument of a call and never at its answer.
 //! A callee that reads its own return address sees the kernel's trap
 //! while its return is trapped, which is the one thing a program can
 //! tell at all.
@@ -117,6 +130,42 @@ const RET_OFFSET: u64 = 8;
 /// ceiling: an answer is a line of the stream, so what bounds it is the
 /// log it is written to and the second fault each answered call pays.
 const MAX_ANSWERS: u32 = 1 << 20;
+
+/// The most `imports_strings=<n>` may ask for, [`MAX_ANSWERS`]'s own:
+/// a quote is a read of the program's memory and a string in a line,
+/// both of which the budget is what bounds.
+const MAX_STRINGS: u32 = 1 << 20;
+
+/// The bytes read at one argument to see whether it is text, and never
+/// past the end of the page it points into. An argument is a register,
+/// so what it points at may be anything at all: a window is what makes
+/// a read of it worth trying, and the page is what makes the read
+/// cheap to refuse.
+const TEXT_WINDOW: usize = 256;
+
+/// The characters quoted from one argument at most, a longer run being
+/// quoted to here and marked as cut. A name, a path or a message is
+/// short; a buffer that happens to read as text is not worth a line.
+const TEXT_CHARS: usize = 120;
+
+/// The characters a run must have before it reads as text rather than
+/// as a number that happens to point somewhere. Four is what tells a
+/// name from an array of small integers.
+const TEXT_LEAST: usize = 4;
+
+/// The calls carrying text that are said in the log as well, the rest
+/// being left to the stream and the summary. Enough to read a run's
+/// first few without the events, as [`WALKS_SAID`] is.
+const TEXTS_SAID: u64 = 8;
+
+/// The argument registers a call is recorded with, which is what
+/// `TrapFrame::arg_regs` gives and what a quote is indexed by.
+const ARGS: usize = 4;
+
+/// The lowest address an argument may point at: NT maps nothing in the
+/// first 64 KiB, so an argument below it is a number and not worth a
+/// read.
+const LOWEST_POINTER: u64 = 0x1_0000;
 
 /// The most calls whose returns may be waited for at one time, over
 /// every thread. An entry is kernel memory held from a call until its
@@ -207,6 +256,16 @@ static ANSWERS: AtomicU32 = AtomicU32::new(0);
 static ANSWERS_ASKED: AtomicU32 = AtomicU32::new(0);
 static ANSWERS_LOST: AtomicU64 = AtomicU64::new(0);
 static UNWOUND: AtomicU64 = AtomicU64::new(0);
+/// Arguments quoted as text, what is left of what `imports_strings=`
+/// asked for, and the calls that carried at least one. All three are a
+/// summary line: a trace whose quotes ran out reads afterwards as calls
+/// that were handed no text, and one that quoted nothing at all is
+/// either a program that passes none or a window too small for it.
+static QUOTED: AtomicU64 = AtomicU64::new(0);
+static STRINGS: AtomicU32 = AtomicU32::new(0);
+static STRINGS_ASKED: AtomicU32 = AtomicU32::new(0);
+static TEXT_CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// Returns put back where their calls left them for an exception to
 /// unwind through, and those whose trap address could not be found on
 /// the stack to put back. Both are summary lines: a call put back is a
@@ -399,6 +458,37 @@ pub fn set_answers(spec: &str) {
         "imports: the answer of every call through an armed slot, {n} at most \
          (imports_answers=)"
     );
+}
+
+/// `imports_strings=<n>`: quote the arguments of a recorded call that
+/// read as text, `n` arguments at most. Needs `imports=` to have armed
+/// something and `events=call` for the calls to be recorded, as the
+/// quotes go with the call: the first [`TEXTS_SAID`] of them are said
+/// in the log as well, so a reader who has only the serial log sees
+/// what the option found.
+pub fn set_strings(spec: &str) {
+    let Some(n) = string_budget(spec) else {
+        warn!(
+            "imports: imports_strings={spec} reads a number from 1 to \
+             {MAX_STRINGS}, the arguments to quote: no argument is read as \
+             text at all instead, as without it"
+        );
+        return;
+    };
+    STRINGS.store(n, Ordering::Relaxed);
+    STRINGS_ASKED.store(n, Ordering::Relaxed);
+    info!(
+        "imports: the arguments of a recorded call that read as text, {n} at \
+         most, {TEXT_CHARS} characters of each (imports_strings=)"
+    );
+}
+
+/// `imports_strings=`'s value, or None for one that is not a number
+/// from 1 to [`MAX_STRINGS`]. Refused outright for the reason the
+/// others are: a trace that quietly quoted nothing reads afterwards as
+/// a program that passed no text.
+fn string_budget(text: &str) -> Option<u32> {
+    budget_of(text, MAX_STRINGS)
 }
 
 /// Splits `<name>[:<n>]` at the last colon. A program's name holds none,
@@ -679,25 +769,148 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> bo
         return false;
     }
     let args = frame.arg_regs();
+    let mut bytes = [[0u8; TEXT_WINDOW]; ARGS];
+    let mut found = [None; ARGS];
+    quote_args(process, &args, &mut bytes, &mut found);
+    let text = Texts { found: &found, bytes: &bytes };
+    let name = core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?");
     events::emit(
         Category::Call,
         "import",
         format_args!(
             "{}",
-            Fields {
-                pid: process.id,
-                process: process.name,
-                call: core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?"),
-                args: &args,
-            }
+            Fields { pid: process.id, process: process.name, call: name, args: &args, text }
         ),
     );
+    if text.any() && TEXT_CALLS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+        info!("imports: the call to {name} carries text: {} (imports_strings=)", Said(text));
+    }
     if first {
         RECORDED.fetch_add(1, Ordering::Relaxed);
     } else {
         REPEATED.fetch_add(1, Ordering::Relaxed);
     }
     true
+}
+
+/// Reads a window at each argument that could hold text and says what
+/// it read, one of the budget per quote. Nothing at all where
+/// `imports_strings=` was not given, which is the usual case and one
+/// relaxed load; the budget is taken after the read, so an argument
+/// that is a plain number costs no quote.
+fn quote_args(
+    process: &Process,
+    args: &[u64; ARGS],
+    bytes: &mut [[u8; TEXT_WINDOW]; ARGS],
+    found: &mut [Option<Text>; ARGS],
+) {
+    if STRINGS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    for (i, &arg) in args.iter().enumerate() {
+        let Some(text) = text_at(process, arg, &mut bytes[i]) else {
+            continue;
+        };
+        if !take_budget(&STRINGS) {
+            return;
+        }
+        found[i] = Some(text);
+        QUOTED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Reads the window at `addr` that could hold text into `buf` and says
+/// what it reads as, or None where the address is no pointer, the page
+/// is not there, or the bytes read as no text. Never past the end of
+/// the page `addr` points into: the next page may be unmapped, and a
+/// read stopped at the page is one that cannot be refused for the wrong
+/// reason -- so a run that crosses a page boundary is quoted to the
+/// boundary and no further, which is the one way this cuts a string
+/// without saying so.
+fn text_at(process: &Process, addr: u64, buf: &mut [u8; TEXT_WINDOW]) -> Option<Text> {
+    if addr < LOWEST_POINTER {
+        return None;
+    }
+    let left = usize::try_from(vad::PAGE - (addr % vad::PAGE)).unwrap_or(TEXT_WINDOW);
+    let window = TEXT_WINDOW.min(left);
+    process.read(addr, &mut buf[..window]).ok()?;
+    text_in(&buf[..window])
+}
+
+/// What the bytes at an argument read as: a NUL-terminated run of
+/// printable characters, one byte each or two, and the characters it
+/// has. Neither says what the argument *is* -- nothing here knows a
+/// call's signature -- only that it points at a run that reads as text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Text {
+    /// One byte a character, which is every `*A` call's string and
+    /// every C string besides.
+    Narrow(usize),
+    /// Two, little-endian, which is every `*W` call's.
+    Wide(usize),
+}
+
+impl Text {
+    /// How many characters the run has, which is not how many bytes it
+    /// was read from.
+    fn chars(&self) -> usize {
+        match *self {
+            Text::Narrow(chars) | Text::Wide(chars) => chars,
+        }
+    }
+}
+
+/// A wide character a name, a path or a message may be written with:
+/// not a control character, not a surrogate half, not a noncharacter.
+/// What this excludes is what makes a run of them text and an array of
+/// small numbers or of pointers not. The whole of the BMP is allowed
+/// here, where [`ascii`] allows a narrow run none of it, because a wide
+/// run says what it is in the zero byte above each character.
+fn printable(c: u32) -> bool {
+    (0x20..0x7f).contains(&c) || (0xa0..0xd800).contains(&c) || (0xe000..0xfffe).contains(&c)
+}
+
+/// What a window of bytes read at an argument reads as, or None where
+/// it reads as no text at all: fewer than [`TEXT_LEAST`] characters, a
+/// character that is none, or no terminator inside the window -- a run
+/// that goes on past it is as likely a buffer of something else.
+///
+/// Two bytes a character is tried first, and only where the second byte
+/// is zero: that is the one thing that tells `"C:\\"` in UTF-16 from
+/// `"C:\\"` in bytes, and a call takes whichever its name ends in.
+fn text_in(bytes: &[u8]) -> Option<Text> {
+    if bytes.len() >= 2 && bytes[1] == 0 && printable(u32::from(bytes[0])) {
+        for (chars, pair) in bytes.chunks_exact(2).enumerate() {
+            let c = u32::from(u16::from_le_bytes([pair[0], pair[1]]));
+            if c == 0 {
+                return (chars >= TEXT_LEAST).then_some(Text::Wide(chars));
+            }
+            if !printable(c) {
+                return None;
+            }
+        }
+        return None;
+    }
+    for (chars, &b) in bytes.iter().enumerate() {
+        if b == 0 {
+            return (chars >= TEXT_LEAST).then_some(Text::Narrow(chars));
+        }
+        if !ascii(b) {
+            return None;
+        }
+    }
+    None
+}
+
+/// A byte a narrow run may be written with: ASCII and no more. Wider
+/// than that a pointer reads as text -- the low bytes of one are a run
+/// of high bytes and a zero -- and a narrow argument is the one place
+/// that cannot be told apart by a terminator, so the narrow range is
+/// the one that has to be narrow. What this gives up is a `*A` string
+/// in Latin-1: its accented characters end the run, and the quote is
+/// the ASCII before them.
+fn ascii(b: u8) -> bool {
+    (0x20..0x7f).contains(&b)
 }
 
 /// Takes the call's return address away and puts the slot's return trap
@@ -1244,6 +1457,39 @@ pub fn log_stats() {
         }
     }
     log_answers();
+    log_strings();
+}
+
+/// What the run quoted, for the end of a run: the arguments that read
+/// as text and the calls they belong to. Said even where nothing was
+/// quoted, because that is an answer to the question the option was
+/// asked -- the calls recorded carry no text at all -- and not the
+/// option having been forgotten.
+fn log_strings() {
+    let asked = STRINGS_ASKED.load(Ordering::Relaxed);
+    if asked == 0 {
+        return;
+    }
+    let quoted = QUOTED.load(Ordering::Relaxed);
+    let calls = TEXT_CALLS.load(Ordering::Relaxed);
+    if quoted == 0 {
+        info!(
+            "imports: no argument of a recorded call read as text: a pointer at a \
+             run of printable characters ending in a NUL inside {TEXT_WINDOW} bytes \
+             of its own page, {TEXT_LEAST} characters at least (imports_strings=)"
+        );
+    } else if STRINGS.load(Ordering::Relaxed) == 0 {
+        info!(
+            "imports: {quoted} arguments quoted of {asked}, the budget spent, \
+             carried by {calls} calls: the calls past it are recorded with their \
+             registers and no text (imports_strings=)"
+        );
+    } else {
+        info!(
+            "imports: {quoted} arguments quoted of {asked}, carried by {calls} \
+             calls (imports_strings=)"
+        );
+    }
 }
 
 /// What the run answered, for the end of a run: the answers recorded,
@@ -1347,13 +1593,119 @@ struct Fields<'a> {
     process: &'a str,
     call: &'a str,
     args: &'a [u64],
+    /// What those registers read as where one of them reads as text.
+    /// Beside the registers and never in place of them: the number is
+    /// what the call was given, the quote is what it points at.
+    text: Texts<'a>,
 }
 
 impl fmt::Display for Fields<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (pid, args) = (self.pid, Words(self.args));
+        let (pid, args, text) = (self.pid, Words(self.args), self.text);
         let (process, call) = (Str(self.process), Str(self.call));
-        write!(f, r#""pid":{pid},"process":{process},"call":{call},"args":{args}"#)
+        write!(f, r#""pid":{pid},"process":{process},"call":{call},"args":{args}{text}"#)
+    }
+}
+
+/// The quotes of one call, by the index of the argument each was read
+/// at: `,"text":{"2":"Operation not supported"}` beside `"args"`, and
+/// nothing at all where no argument read as text, which is most calls.
+#[derive(Clone, Copy)]
+struct Texts<'a> {
+    found: &'a [Option<Text>; ARGS],
+    bytes: &'a [[u8; TEXT_WINDOW]; ARGS],
+}
+
+impl Texts<'_> {
+    /// Whether any argument read as text.
+    fn any(&self) -> bool {
+        self.found.iter().any(Option::is_some)
+    }
+
+    /// Each argument that read as text: its index, the bytes read at it
+    /// and what they read as.
+    fn each(&self) -> impl Iterator<Item = (usize, &[u8], Text)> {
+        self.found
+            .iter()
+            .enumerate()
+            .filter_map(|(i, found)| found.map(|text| (i, &self.bytes[i][..], text)))
+    }
+}
+
+impl fmt::Display for Texts<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.any() {
+            return Ok(());
+        }
+        f.write_str(r#","text":{"#)?;
+        for (n, (i, bytes, text)) in self.each().enumerate() {
+            let comma = if n == 0 { "" } else { "," };
+            write!(f, r#"{comma}"{i}":{}"#, Quote(bytes, text))?;
+        }
+        f.write_str("}")
+    }
+}
+
+/// The same quotes for a line of the log, where a key and a brace are
+/// noise: `arg 2 "Operation not supported"`.
+struct Said<'a>(Texts<'a>);
+
+impl fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (n, (i, bytes, text)) in self.0.each().enumerate() {
+            let space = if n == 0 { "" } else { " " };
+            write!(f, "{space}arg {i} {}", Quote(bytes, text))?;
+        }
+        Ok(())
+    }
+}
+
+/// A window read at an argument, written as a JSON string of what it
+/// read as: Latin-1 a byte for a narrow run, UTF-16 for a wide one,
+/// escaped as every other string of the stream is. A run longer than
+/// [`TEXT_CHARS`] ends in `...`, which is the quote saying it was cut
+/// and not the program's own text.
+///
+/// Written from the bytes rather than through [`events::Str`] or
+/// `events::Utf16` because neither can be handed these: a `&str` would
+/// have to be built from bytes that are no UTF-8, and a `&[u16]` from
+/// bytes read at an address aligned however the program left it.
+struct Quote<'a>(&'a [u8], Text);
+
+impl fmt::Display for Quote<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Quote(bytes, text) = *self;
+        f.write_str("\"")?;
+        match text {
+            Text::Narrow(chars) => {
+                for &b in bytes.iter().take(chars.min(TEXT_CHARS)) {
+                    escaped(f, char::from(b))?;
+                }
+            }
+            Text::Wide(chars) => {
+                let pairs = bytes.chunks_exact(2).take(chars.min(TEXT_CHARS));
+                let units = pairs.map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+                for c in char::decode_utf16(units) {
+                    escaped(f, c.unwrap_or(char::REPLACEMENT_CHARACTER))?;
+                }
+            }
+        }
+        if text.chars() > TEXT_CHARS {
+            f.write_str("...")?;
+        }
+        f.write_str("\"")
+    }
+}
+
+/// One character of a JSON string, escaped as [`events::Str`] escapes
+/// it. The same three cases, kept here because the bytes a quote is
+/// written from are no `&str`.
+fn escaped(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result {
+    match c {
+        '"' => f.write_str("\\\""),
+        '\\' => f.write_str("\\\\"),
+        c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32),
+        c => write!(f, "{c}"),
     }
 }
 
@@ -1370,9 +1722,29 @@ impl fmt::Display for Name<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUDGET, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT, READ, RET_OFFSET, Reads, STRIDE,
-        answer_budget, repeat_budget, split_budget, trap_at,
+        ARGS, BUDGET, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT, MAX_STRINGS, Quote, READ,
+        RET_OFFSET, Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget,
+        repeat_budget, split_budget, string_budget, text_in, trap_at,
     };
+
+    /// The quotes of a call built as the fault path builds them, from
+    /// what each argument's window holds: `(index, bytes)` for each
+    /// argument that read as text.
+    fn texts(at: &[(usize, &[u8])]) -> ([Option<Text>; ARGS], [[u8; TEXT_WINDOW]; ARGS]) {
+        let mut found = [None; ARGS];
+        let mut bytes = [[0u8; TEXT_WINDOW]; ARGS];
+        for &(i, raw) in at {
+            bytes[i][..raw.len()].copy_from_slice(raw);
+            found[i] = text_in(&bytes[i]);
+        }
+        (found, bytes)
+    }
+
+    /// The same bytes a `*W` call would be handed: UTF-16, little
+    /// endian, with its terminator.
+    fn wide(text: &str) -> alloc::vec::Vec<u8> {
+        text.encode_utf16().chain(core::iter::once(0)).flat_map(u16::to_le_bytes).collect()
+    }
 
     /// The summary line says nothing of reads where there were none,
     /// and says them where there were: a slot read as data is the one
@@ -1390,17 +1762,98 @@ mod tests {
     /// recorded the first time only.
     #[test]
     fn a_first_call_is_the_fields_of_one_json_event() {
+        let (found, bytes) = texts(&[]);
         let fields = Fields {
             pid: 12,
             process: "WINWORD.EXE",
             call: "d2d1.dll!D2D1CreateFactory",
             args: &[0, 2078216, 0, 2078208],
+            text: Texts { found: &found, bytes: &bytes },
         };
         assert_eq!(
             alloc::format!("{{\"ev\":\"import\",{fields}}}"),
             "{\"ev\":\"import\",\"pid\":12,\"process\":\"WINWORD.EXE\",\"call\":\
              \"d2d1.dll!D2D1CreateFactory\",\"args\":[0,2078216,0,2078208]}"
         );
+    }
+
+    /// What a window of bytes read at an argument reads as. A run of
+    /// printable characters that ends inside the window is text; an
+    /// array of small numbers, a pointer, a buffer with no terminator
+    /// in reach and a run too short to mean anything are not, and a
+    /// reader must not be shown a quote of them.
+    #[test]
+    fn an_argument_reads_as_text_or_as_nothing() {
+        assert_eq!(text_in(b"C:\\Windows\0rest"), Some(Text::Narrow(10)));
+        assert_eq!(text_in(&wide("Document1 - Word")), Some(Text::Wide(16)));
+        // A narrow run whose first character is printable and whose
+        // second byte happens to be zero is one character of UTF-16,
+        // which is how every short `*A` string looks: it is told from a
+        // wide one by its own terminator and not by the call's name, so
+        // a run of one character is no text either way.
+        assert_eq!(text_in(b"A\0\0\0"), None);
+        // The ledger's own numbers, as an array of flags would be.
+        assert_eq!(text_in(&[1, 0, 0, 0, 2, 0, 0, 0]), None);
+        // A pointer, which is what most arguments are: its low bytes
+        // are a run of high bytes, which is why a narrow run is ASCII.
+        assert_eq!(text_in(&0x3ff7_ffeb_f8a8u64.to_le_bytes()), None);
+        // Printable to the last byte: as likely a buffer of something
+        // else, and a quote of it would be cut without saying so.
+        assert_eq!(text_in(b"abcdefgh"), None);
+        assert_eq!(text_in(b"ab\0"), None);
+        assert_eq!(text_in(b"abcd\0"), Some(Text::Narrow(4)));
+        // A control character, a surrogate half and a noncharacter are
+        // each what tells a run of bytes from text.
+        assert_eq!(text_in(b"ab\tcd\0"), None);
+        assert_eq!(text_in(&[0x41, 0, 0x42, 0, 0x00, 0xd8, 0, 0, 0, 0]), None);
+        assert_eq!(text_in(&[0x41, 0, 0x42, 0, 0xfe, 0xff, 0, 0, 0, 0]), None);
+    }
+
+    /// A quote is a JSON string of what the window read as, escaped as
+    /// every other string of the stream is, and a run longer than the
+    /// line is worth says so itself rather than ending mid-word.
+    #[test]
+    fn a_quote_is_escaped_and_says_when_it_was_cut() {
+        let raw = b"say \"no\\yes\"\0";
+        let text = text_in(raw).expect("a run of printable characters");
+        assert_eq!(alloc::format!("{}", Quote(raw, text)), r#""say \"no\\yes\"""#);
+        let long = alloc::format!("{}!\0", "x".repeat(TEXT_CHARS));
+        let text = text_in(long.as_bytes()).expect("a long run");
+        let quoted = alloc::format!("{}", Quote(long.as_bytes(), text));
+        assert_eq!(quoted, alloc::format!("\"{}...\"", "x".repeat(TEXT_CHARS)));
+    }
+
+    /// The quotes go beside the registers and never in place of them,
+    /// by the index of the argument each was read at, and a call whose
+    /// arguments are all numbers carries no `text` at all -- which is
+    /// most calls, and the shape every earlier reader of the stream
+    /// already knows.
+    #[test]
+    fn a_call_s_text_is_keyed_by_the_argument_it_was_read_at() {
+        let (found, bytes) = texts(&[(1, b"ErrorMessage\0"), (2, &wide("Mso20win32client"))]);
+        let text = Texts { found: &found, bytes: &bytes };
+        let shown = alloc::format!("{text}");
+        assert_eq!(shown, r#","text":{"1":"ErrorMessage","2":"Mso20win32client"}"#);
+        let said = alloc::format!("{}", Said(text));
+        assert_eq!(said, r#"arg 1 "ErrorMessage" arg 2 "Mso20win32client""#);
+        let (found, bytes) = texts(&[]);
+        let text = Texts { found: &found, bytes: &bytes };
+        assert_eq!(alloc::format!("{text}"), "");
+        assert_eq!(alloc::format!("{}", Said(text)), "");
+    }
+
+    /// `imports_strings=` takes a number of quotes, by the same rule as
+    /// the budgets beside it: a number out of range is refused outright
+    /// rather than read as a smaller one, because a trace with fewer
+    /// quotes than were asked for reads as calls whose arguments were
+    /// no text.
+    #[test]
+    fn a_string_budget_is_a_number_of_quotes_or_nothing() {
+        assert_eq!(string_budget("8"), Some(8));
+        assert_eq!(string_budget(&alloc::format!("{MAX_STRINGS}")), Some(MAX_STRINGS));
+        assert_eq!(string_budget("0"), None);
+        assert_eq!(string_budget(&alloc::format!("{}", u64::from(MAX_STRINGS) + 1)), None);
+        assert_eq!(string_budget("all"), None);
     }
 
     /// The one number the loader and the kernel must agree on: the

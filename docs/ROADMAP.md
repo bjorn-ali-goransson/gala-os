@@ -6372,6 +6372,24 @@ among the slowest hand-offs.
      that call went through an armed slot -- the shape of Word's C++
      throw (scenarios `iat_unwind_test` and `iat_unwind`, both with
      ARM64 twins).
+     Nor is an argument that is a pointer at text:
+     `imports_strings=<n>` reads up to 256 bytes at each of the four
+     argument registers of a recorded call and quotes what reads as a
+     run of printable characters ending in a NUL inside the window --
+     two bytes a character or one -- beside the registers in the same
+     event, `n` quotes at most (scenarios `import_strings_test` and
+     `import_strings`, both with ARM64 twins). A trace of calls to
+     `WideCharToMultiByte` or `LoadLibraryW` that cannot say which
+     string is a trace of the shape of a program's work and not of the
+     work: Word's own give-up builds its message through exactly those
+     calls. What is left of the gap there: nothing knows a call's
+     signature, so a number that happens to point at such a run is
+     quoted like a string the call was really handed, which is why the
+     quotes sit beside the registers and not in place of them; the
+     narrow range is ASCII only, a pointer's own low bytes being a run
+     of high bytes and a zero; and text at an argument only, never at
+     an answer, since a buffer a call filled holds it only once the
+     call is over.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the
