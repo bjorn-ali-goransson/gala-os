@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for the arguments that read as text, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -289,7 +289,7 @@ or a batch of them, instead of one an event's every byte).
 
 | Category | Events |
 |---|---|
-| `syscall` | each call (pid, tid, nr, name, args, status, ns); a Linux process's are `lx syscall` events (pid, tid, nr, name, the six arguments as entered, `ret`: the result or a negative errno, ns), what strace shows, under the same `events_pid` and `events_match`; `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
+| `syscall` | each call (pid, tid, nr, name, args, status, ns); a Linux process's are `lx syscall` events (pid, tid, nr, name, the six arguments as entered, `ret`: the result or a negative errno, ns), what strace shows, under the same `events_pid` and `events_match`; `wait` on entry to a wait, so a thread blocked for good shows. A wait names the object it waits on and a call that signals one (`NtSetEvent` and the rest of that list, `acts_on`) the object it signals: `obj` its type, `oid` its identity (its address, the same in every process), `on` its name in the namespace where it has one, `h` the handle the call was given; the first object, for a wait on several. A wait that never ends is answerable from the stream alone this way -- the call that should have signalled that `oid` is in it beside the wait, or no call is, which is the answer (scenario `events_object`). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; `"elevated"`: its primary token is elevated (TokenElevation; the log line ends in `, elevated token`); scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line); `process terminate` (TerminateProcess of another process: `by`, pid, status; with the log line `process: pid B (x.exe) terminates pid P (y.exe) with status S`, so who ended a process is in the log); the task manager's (`nt::tasks`, ARCHITECTURE "The task manager"): `tasks query` (each GalaTasks list: `by`, `nt`, `linux` and `hung` counts; the first query of each caller also a `tasks: pid P (x.exe) lists the processes: ...` line, and each process's first "Not responding" a `tasks: pid P (x.exe) is not responding: ...` line), `tasks end` (End task of a Linux process or distribution: `by`, `what`, pid, `detail` (the signal, or the distribution and how many processes ended), status; always a `tasks: pid P (x.exe) ends ...` line), and `lx signal` for the signal itself; scenario `taskmgr` |
@@ -308,7 +308,7 @@ ARCHITECTURE "A package's VFS view"): the `pid`, the path `asked` for and
 the path `served`, so a run shows every file a program found only in its
 package (scenario `pkgview_test`); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this); `key notify` (registry change notification, nt::regnotify: `op` `arm` (pid, key, filter, tree, `requests` waiting, status: STATUS_PENDING or the completion of a kept change, tid, `agnostic`), `fire` (the requests completed, the change bits, `lost`: a change not noted for want of memory), `cleanup` (the key object's end: STATUS_NOTIFY_CLEANUP), `thread end` (its thread-bound requests: STATUS_CANCELLED)); `key rename` (pid, the old full name, the new name, status). Scenario `regnotify_test` |
 | `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
-| `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test`. `imports=` writes to this same category under the event name `import` ("Import tracing"): the first call a program makes through each of its import slots, with `call` the import's name as the ledger spells it (`testdll.dll!gala_add`) and `args` the four integer argument registers; with `imports_repeat=<n>` every call through an armed slot is such an event and not only the first, which is the same trade `trace_from=` makes and makes the stream a sequence. With `imports_answers=<n>` a recorded call is followed by a `ret` event of its own -- the same shape `trace_from=` writes, with `answer` the word the call gave back -- so that a call and its answer read as a pair. Whoever wrote the DLL: an import of Microsoft's own code is reported the same way, which is what no other instrument here can do. Scenario `iat_trace_test` |
+| `call` | calls a program makes into a DLL gala wrote, once `trace_from=` has armed one (nt::tracecall, "Call tracing"): `call` events with the `pid` and `process` that called, `call` (the method's full name, as the ledger spells it: `d2d1.dll!ID2D1RenderTarget::FillRectangle`) and `args` (the words it was handed, a pointer as its address and a float as its bits); the thread that made the call is the line's own `by`, so a trace of a program with more than one thread is read per thread (scenario `import_threads`). A vtable call is an indirect call inside the program, so the DLL reports it rather than the kernel seeing it, and nothing at all is reported without `trace_from=`. What this shows that the ledger cannot is a repeat: the ledger keeps one row a call site. A method that returns something records a second event, `ret`, with the same `call` and the `answer` as one word. Scenarios `trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test`. `imports=` writes to this same category under the event name `import` ("Import tracing"): the first call a program makes through each of its import slots, with `call` the import's name as the ledger spells it (`testdll.dll!gala_add`) and `args` the four integer argument registers; with `imports_repeat=<n>` every call through an armed slot is such an event and not only the first, which is the same trade `trace_from=` makes and makes the stream a sequence. With `imports_answers=<n>` a recorded call is followed by a `ret` event of its own -- the same shape `trace_from=` writes, with `answer` the word the call gave back -- so that a call and its answer read as a pair. Whoever wrote the DLL: an import of Microsoft's own code is reported the same way, which is what no other instrument here can do. Scenario `iat_trace_test` |
 | `wsl` | the WSL facade (`lx::distro`, `nt::wsl_calls`): `wsl import` (`distro`, `by`: wsl.exe's pid, `count`: the nodes made), `wsl start` (`distro`, `by`, `path`, and the Linux `pid` or the `errno`), `wsl terminate` and `wsl shutdown` (`count`: processes ended), `wsl remove` (`count`: names removed). The same as `wsl:` log lines (`wsl: bb: pid 108 /bin/sh started by pid 92`); a process that does not end within 10 s of `--terminate` is a warning; wsl.exe's missing options and gala's gaps are in the ledger (`wsl.exe!<option>`, `wsl.exe!/mnt cwd`, `wsl special file`, `ntio`, `ntio ioctl`). Scenarios `wsl`, `wsl_terminal` |
 | `service` | the service control manager (nt::scm): `service` events with `op` (connected to, opened, created, marked for deletion, asked to start, sent a control to, changed configuration level of, deleted), the caller's `pid`, the service's `name`, the `access` granted or the failing `status` (0xC007xxxx: the SCM's Win32 error xxxx). The same as `scm:` log lines, the first 64 per boot (`scm: pid P (program) opened "OfficeSvc": 0xc0070424 (a Win32 error)`); a service whose key goes with its last handle is logged with the outcome; a running service's side (nt::scm_run) adds `service` events with `op` starting, status, stopped, process ended, exited (before its dispatcher connected), start timed out, cannot start (its executable), start refused, and its `state`, `exit`, `specific` and `service_pid`, and `scm:` lines (the first 96) for its start (pid, command line), its dispatcher's connection, ServiceMain's start, each state it reports and a handler's non-zero answer; a start that times out and a service process that ends while its service runs are warnings; what the SCM cannot start is in the ledger (`GalaServiceControl: start a driver`, `start as an account`, `share process: run alone`). A service's own output does not reach the serial log: its standard handles are NULL, as on Windows; what it did is read from these events, its `syscall` events (`events_pid`) and its exit codes (svcrun_test's service side reports its first failed check as its service-specific exit code). Scenarios `svc_test`, `svcrun_test` and their `wow64_` twins |
 | `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `pointer` (each change of the mouse buttons the desktop takes, wherever it goes: pressed and released bits, x, y and `to`, what got it: the shell's own targets such as `Start` or `LinuxEntry(0)`, `Client(<window>)`, `capture <window>`, `the end of a popup grab`; a screen check that finds the screen behind tells from these whether, and where, its click arrived), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `popup grab ended` (a press outside the windows of a popup grab's owner ended it: the grab's window, owner, the screen point; the press went nowhere else), `other session` (a process asks about, sends or posts to another session's HWND), `start menu` (a tile clicked: op `start`, `install` (`gala install <id>`) or `missing`; session, name, target (the path or the package id), pid, status; scenario `start_menu`; the Linux distributions section's: op `linux install`, `linux desktop`, `linux terminal`, `linux app` with name, target, pid, status; `linux progress` with name, state, percent; `linux prefs` with hidden, collapsed, dismissed, status; scenario `linux_menu`), `tray` (a Shell_NotifyIcon message on the notification area: op, the NIM_ number, session, pid, hwnd, id, flags, status; with `desktop: notification-area icon added/deleted` log lines for adds and deletes; scenario `tray_test`); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
@@ -1183,7 +1183,9 @@ made and not the set of names it reached (`iat_repeat`, below), and
 `imports_answers=<n>` adds what each of those calls answered, by
 trapping the return as well as the call (`iat_answers`, below).
 `imports_strings=<n>` quotes the arguments that read as text, beside
-the registers they were read from (`import_strings`, below).
+the registers they were read from, and the answer and the filled
+buffers of a call whose return was trapped (`import_strings` and
+`import_answer_text`, below).
 `imports_except=<text>[,<text>...]` leaves the imports whose
 `<dll>!<name>` holds one of the texts unarmed, so that the budget goes
 to the rest (`iat_except`, below).
@@ -1200,6 +1202,18 @@ Scenario `import_window`, with an ARM64 twin: two batches of a thousand
 calls through one armed import with the stream starting between them,
 and the second batch recorded whole on a budget the first would
 otherwise have spent.
+
+**A trace of several threads is read per thread.** Every record names
+the thread that made the call in the line's own `by` -- the client id
+every event carries -- and nothing else in the record does. A program
+with a message pump beside its startup thread writes one stream of calls
+that is really several, and a timeline read off it unsplit says things
+that never happened: in Word's startup the pump polling one handle sits
+between the startup thread's calls and reads as the startup thread
+giving up. Split by `by` first, then read each thread. Scenario
+`import_threads`: lock_test holds a range of a file from its main thread
+(client 8) while a second thread (client 12) blocks on the same range,
+and the waiter's `LockFileEx` is in the stream under its own `by`.
 
 What it answers that nothing else here can is a call into a DLL **gala
 did not write**. `trace_from=` lives in the wrappers
@@ -1342,6 +1356,28 @@ data first, which disarms the slot (below), so that one leaves a
   nothing armed) and `import_strings` (the same program with the
   arguments quoted), both with ARM64 twins.
 
+  **A buffer a call filled is read at its return.** A call that fills
+  one is handed an empty buffer, so what it is about is in the buffer
+  only once the call is over, and a quote of its arguments reads as a
+  call that was handed no text at all -- which most of the Windows
+  API is made of, and what Word's startup spends its last stretch
+  before it gives up on: one mso ordinal called 134 times, each call
+  answering the buffer it was handed. Where `imports_answers=`
+  trapped the return, the same reading therefore
+  runs again there: at the register the answer came back in, and at the
+  arguments that were no text at the call (the kernel kept those from
+  the call, the callee being free to clobber the registers; an argument
+  that was text already is not read a second time, its bytes not having
+  changed). Those quotes go into the `ret` event under `"text"` as
+  well, keyed by `answer` and by the argument's own index, and the
+  first eight returns carrying any are said in the log (`imports: the
+  return of <name> carries text: answer "..." arg 0 "..."`). The
+  summary counts them apart from the calls' -- `5 quotes of 64, carried
+  by 2 calls and 1 return` -- because a quote at a return is a quote of
+  what the call wrote. Scenario `import_answer_text` with an ARM64
+  twin, where the answer comes back in the register the first argument
+  was handed in.
+
   Nothing here knows a call's signature, so this is evidence and not
   proof. A number that happens to point at a printable NUL-terminated
   run is quoted like a string the call was really handed, which is why
@@ -1471,13 +1507,27 @@ data first, which disarms the slot (below), so that one leaves a
   import is bound by the program's own helper on its first call, and a
   `GetProcAddress` result never goes through an IAT slot at all;
   neither is seen.
+- **A stream is read per thread, and a window from the right
+  record.** The records of every thread are one stream in time order,
+  so the calls a pump makes on its own thread sit between the calls
+  another thread makes, and what reads as one loop interleaved with
+  waits is two threads: `by` is what separates them (scenario
+  `import_threads`). The same care goes to the record a window is
+  measured from, because a service reached more than once in a run
+  has a record each time -- Word's give-up box is raised twice in
+  some runs -- and anchoring on the first of them puts everything
+  after the second on the wrong side of it. What a call was doing is
+  read from what its own thread did between its records:
+  `events=syscall,call` puts each call among that thread's waits and
+  window calls, and `events=file` beside it names the keys and files
+  it opened.
 - **Limits**: one record a slot without `imports_repeat=`, so the
   stream is then a set of names and not a sequence; an answer is the
   one register the ABI returns in, so a structure returned by hidden
-  pointer is the pointer and not what it points at; a quote is text at
-  an argument of a call and never at its answer, since what a call
-  wrote into a buffer it was handed is only there once the call is
-  over, which is a fault this option does not take; and a callee that
+  pointer is the pointer and not what it points at; a quote at a
+  return is read only where `imports_answers=` trapped one, so a call
+  whose answer the budget did not reach carries what its arguments
+  held at the call and nothing of what it wrote; and a callee that
   reads its own return address while that return is trapped
   (`_ReturnAddress`, a stack walk of its own) sees the slot's trap
   address rather than the caller's code, which is what the answers

@@ -2289,6 +2289,63 @@ need gala's.
      of the brush -- the `Word\Options\Debug` read at 41773 ms is
      already Word asking whether to break before it gives up -- and on
      a value some call answered S_OK with rather than on a status.
+     Which value came within reach by narrowing the arming to one DLL.
+     `imports=WINWORD.EXE!Mso20Win32Client.dll:8192` with
+     `imports_repeat=`, `imports_answers=` and `imports_strings=`
+     records 76 first calls, 2135 later ones and 2210 answers without
+     spending the budget on the rest of the program, and what it shows
+     is that the stretch before the box is a loop of three ordinals on
+     the startup thread -- `#16040` 134 times, `#15239` 64 and
+     `#59438` 62 -- every `#16040` answering the buffer it was handed.
+     It ends 86 ms before the box in one run and 261 ms in another,
+     and where a run raises the box twice the same loop sits between
+     the two, so it is what Word does each time it gives up. Joined
+     with its syscalls (`events=syscall,call,file`) the loop makes
+     almost none: twelve NtProtectVirtualMemory, four GalaScreenInfo,
+     the section map of uxtheme.dll and one NtQueryValueKey across the
+     whole stretch. So it is Word computing and not Word asking,
+     nothing is refused it there, and what it acted on is in those
+     buffers. They are quoted now (OT3b, text at a return, scenario
+     `import_answer_text`) and hold no text, because the ordinal
+     answers a structure by value: the ABI hands it the caller's
+     buffer in an argument register and answers that pointer, which
+     is the answer of all 134 of those calls (argument 0 in every
+     one). So what Word acted on is bytes and not a string, and
+     reading it is the one piece of OT3b still open
+     (`imports_bytes=`, below).
+     The window records interleaved among those calls are another
+     thread's. The pump -- `GalaWindowPosted`, `GalaWindowReceive`,
+     `GalaWindowInput`, `NtWaitForMultipleObjects` timeouts -- runs on
+     a thread of its own throughout, so the stream is read per thread
+     (`by`) and not as one sequence: the box's own thread creates,
+     registers and updates windows and never once asks for a message.
+     What the arming also shows is the work Word names itself, some
+     of those ordinals taking a name as an argument (an ETW event's,
+     or a scope's). The seven seconds before the box are, on the
+     deciding thread, `DeviceModeEtw`, `AirSpace::SetDeviceMode`,
+     `AnimationDisabledReason` and
+     `AnimationsEnvironmentChangeEtw` and then the loop, and on the
+     render thread
+     `AirSpace::RenderThread::Painter::SetDeviceContext`,
+     `Compositor::BeginPainterBatch`,
+     `UpdateDeviceModeCommand::Execute` and
+     `PainterBatchCommand::Execute` -- a graphics stack coming up --
+     and the box itself now carries its own words, `#7228(0x7173716b,
+     0, "Sorry, something went wrong and Word was unable to start.
+     (13)", "Microsoft Word 16.0")`.
+     Nor is anything refused in what little that thread does ask for
+     in those seven seconds -- 44 NtProtectVirtualMemory, 27
+     NtQueryPerformanceCounter, ten value reads, nine GalaScreenInfo
+     and no more. What fails of it is keys a fresh Windows does not
+     have either (`...\Office\16.0\Common\Graphics`,
+     `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
+     own probe for a private `Microsoft.Windows.Common-Controls`
+     assembly -- four paths, twice, `kernel32`'s `actctx/manifest.rs`
+     on its way to the WinSxS assembly it then resolves, which leaves
+     no `CreateActCtxW` row in the ledger.
+     Word goes on running after the box as well: pagelayout.dll
+     0.6 s later, `INetCache\Content.MSO` at 4 s, OProcSessId.dat at
+     7.7 s.
      What those calls were handed and what they gave back is what
      `trace_from=<dll>!<Interface>::<Method>` with `events=call`
      measures, the ledger keeping one row a site and so hiding every
@@ -6409,9 +6466,26 @@ among the slowest hand-offs.
      quoted like a string the call was really handed, which is why the
      quotes sit beside the registers and not in place of them; the
      narrow range is ASCII only, a pointer's own low bytes being a run
-     of high bytes and a zero; and text at an argument only, never at
-     an answer, since a buffer a call filled holds it only once the
-     call is over. Nor is a budget spent on the names that are noise:
+     of high bytes and a zero. What a buffer a call filled holds is
+     read where the call's return is trapped: `imports_answers=` and
+     `imports_strings=` together quote the answer register and the
+     arguments that were no text at the call, each quote keyed by the
+     place it was read at (`answer`, or the argument's index), which is
+     what most of what a program asks of a DLL needs read, Word's
+     own startup among it -- one mso ordinal called over a hundred
+     times, every one answering the buffer it was handed (scenario
+     `import_answer_text` with an ARM64 twin). What is left of the
+     gap there: a structure answered by value is a pointer at bytes
+     and not at text, the ABI handing the callee the caller's buffer
+     in an argument register and answering it (WORKFLOW, "COM methods
+     that return a structure take a hidden pointer"), so a quote of
+     either end reads nothing -- which is what all 134 answers of
+     Word's last stretch are. Reading those needs the bytes
+     themselves: `imports_bytes=<n>` quoting the first `n` at each
+     argument and at the answer as hex, beside the registers as a
+     string quote sits, with the same budget and the same per-thread
+     reading. It is the piece of this question still open.
+     Nor is a budget spent on the names that are noise:
      `imports_except=<text>[,<text>...]` leaves an import whose
      `<dll>!<name>` holds one of the texts unarmed, so that it costs no
      slot of the budget, no fault and no record (scenario `iat_except`

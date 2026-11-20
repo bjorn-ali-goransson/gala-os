@@ -8406,6 +8406,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_strings_test", "testdll.dll", "gala"),
     ("import_strings", "ntdll.dll", "Windows/System32"),
     ("import_strings", "testdll.dll", "gala"),
+    ("import_answer_text", "ntdll.dll", "Windows/System32"),
+    ("import_answer_text", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
     ("apc_test", "ntdll.dll", "Windows/System32"),
     ("ioapc_test", "ntdll.dll", "Windows/System32"),
@@ -13364,6 +13366,57 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // What a call acted on, named: object_test's `gala_object_test_A`
+        // is created named, signalled through one handle and waited on
+        // through another. A wait says which object it waits on, a call
+        // that signals one says which it signals, both say the handle
+        // they were given, and a named object carries its name. That is
+        // what makes a wait that never ends answerable: the object is
+        // the same `oid` in every process, so the call that should have
+        // signalled it is in the stream beside the wait -- or nowhere,
+        // which is the answer.
+        "events_object",
+        &[
+            r#""name":"NtWaitForSingleObject","obj":"Event","oid":"#,
+            r#""name":"NtSetEvent","obj":"Event","oid":"#,
+            r#","on":"gala_object_test_A","h":"#,
+        ],
+    ),
+    (
+        // Which thread a recorded call belongs to, which is the `by` of
+        // its line (the thread whose work wrote the event; for a
+        // recorded call, the thread that made it). lock_test holds a
+        // range of a file from its main thread, client 8, while the
+        // waiter thread it starts, client 12, blocks on the same range:
+        // the waiter's LockFileEx is in the stream under its own `by`,
+        // which is what makes a trace of a program with more than one
+        // thread a timeline and not one sequence of calls that is
+        // really several.
+        "import_threads",
+        &[
+            r#""by":8,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!GetTempPathW""#,
+            r#""by":12,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!LockFileEx""#,
+        ],
+    ),
+    (
+        // An answer carries the thread the same way, so that a call and
+        // its answer can be paired in a stream where another thread's
+        // calls sit between them.
+        "iat_answers",
+        &[r#""by":8,"ev":"ret","pid":4,"#],
+    ),
+    (
+        // Text at a return, keyed by where it was read: the answer
+        // register, and the argument the filled buffer was handed at.
+        // The call itself carries no text, the buffer being empty
+        // then, which is the whole reason to read one at a return.
+        "import_answer_text",
+        &[
+            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","call":"testdll.dll!gala_fill","answer":"#,
+            r#","text":{"answer":"filled at the return","0":"filled at the return"}}"#,
+        ],
+    ),
+    (
         // RS step B2: each window is registered in its own session, and
         // HWNDs asked for across sessions are named.
         "session_test",
@@ -13863,6 +13916,8 @@ const ARM64_TWINS: &[&str] = &[
     "import_window",
     "import_strings_test",
     "import_strings",
+    "import_answer_text",
+    "import_threads",
     "thread_test",
     "sync_test",
     "wait_test",
@@ -15057,6 +15112,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=syscall,process events_pid=4 run=process_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["process_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // What the calls of object_test acted on, named (see
+        // EVENT_EXPECT): its named event, signalled and waited on.
+        name: "events_object",
+        cmdline: "qemu_exit events=syscall run=object_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["object_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // `events_from=` starts the stream late (here at once, after the
@@ -19193,7 +19256,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             "imports: first calls recorded: 1 of 1 slots armed (imports=)",
             "imports: 19999 later calls recorded of 1048576 (imports_repeat=)",
-            "imports: 40000 arguments quoted of 1048576, carried by 20000 calls \
+            "imports: 40000 quotes of 1048576, carried by 20000 calls \
              (imports_strings=)",
         ],
     },
@@ -19232,7 +19295,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "events: the stream starts 4 s after boot (events_from=)",
             "imports: first calls recorded: 1 of 1 slots armed (imports=)",
             "imports: 999 later calls recorded of 1024 (imports_repeat=)",
-            "imports: 2000 arguments quoted of 4096, carried by 1000 calls \
+            "imports: 2000 quotes of 4096, carried by 1000 calls \
              (imports_strings=)",
         ],
     },
@@ -19248,16 +19311,20 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &["import_strings_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // OT3b: the same program with its one import armed and the
-        // arguments quoted. Three calls go through the slot: the first
-        // hands it a narrow string, a wide string, a number and a
-        // pointer at bytes that are no text; the second a pointer into
-        // no mapping, a number, that same pointer and a narrow string
-        // at the last argument; the third four numbers. So three
-        // arguments of the twelve read as text, carried by two of the
-        // three calls -- a quote where there is text, nothing where
-        // there is none, and a read that fails leaving the call
-        // untouched, which is the program's own `ok`.
+        // OT3b: the same program with its imports armed and the
+        // arguments quoted, the returns not trapped. Three calls go
+        // through the first slot: the first hands it a narrow string, a
+        // wide string, a number and a pointer at bytes that are no
+        // text; the second a pointer into no mapping, a number, that
+        // same pointer and a narrow string at the last argument; the
+        // third four numbers. So three arguments of the twelve read as
+        // text, carried by two of the three calls -- a quote where
+        // there is text, nothing where there is none, and a read that
+        // fails leaving the call untouched, which is the program's own
+        // `ok`. The fourth call, through the second slot, is handed an
+        // empty buffer and a length and so carries nothing at all:
+        // what it wrote is at its return, which this run does not trap
+        // and `import_answer_text` below does.
         name: "import_strings",
         cmdline: "qemu_exit events=call run=import_strings_test.exe \
                   imports=import_strings_test.exe!testdll.dll imports_repeat=64 \
@@ -19266,15 +19333,67 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "import_strings_test: ok",
             "exited with status 0x00000000",
-            "imports: the arguments of a recorded call that read as text, 64 at \
-             most, 120 characters of each (imports_strings=)",
-            "imports: first calls recorded: 1 of 1 slots armed (imports=)",
+            "imports: what reads as text at a recorded call -- its arguments, \
+             and at a trapped return its answer and the arguments that were \
+             none at the call -- 64 quotes at most, 120 characters of each \
+             (imports_strings=)",
+            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
             "imports: 2 later calls recorded of 64 (imports_repeat=)",
             "imports: the call to testdll.dll!gala_four carries text: arg 0 \
              \"ErrorMessage\" arg 1 \"Document1 - Word\" (imports_strings=)",
             "imports: the call to testdll.dll!gala_four carries text: arg 3 \
              \"second string\" (imports_strings=)",
-            "imports: 3 arguments quoted of 64, carried by 2 calls (imports_strings=)",
+            "imports: 3 quotes of 64, carried by 2 calls (imports_strings=)",
+        ],
+    },
+    Scenario {
+        // OT3b: text at a return. The buffer this program hands
+        // `gala_fill` is empty where the call is recorded and holds the
+        // callee's text where its answer is, so the same register is a
+        // number at the call and a string at the return -- which is
+        // what a call that answers into a buffer (every Windows call
+        // that fills one, and what Word's startup asks mso for 134
+        // times in its last stretch before it gives up) needs read at
+        // its return to be read at all. A return quotes its answer and the arguments
+        // that were no text at the call, and not what the call already
+        // carries: so the three quotes of `import_strings` above are
+        // joined by two of this one call's, at the answer and at the
+        // buffer's own argument, and the whole run quotes five.
+        name: "import_answer_text",
+        cmdline: "qemu_exit events=call run=import_strings_test.exe \
+                  imports=import_strings_test.exe!testdll.dll imports_repeat=64 \
+                  imports_answers=64 imports_strings=64",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_strings_test: filled",
+            "import_strings_test: ok",
+            "exited with status 0x00000000",
+            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
+            "imports: 4 answers recorded of 64 (imports_answers=)",
+            "imports: the return of testdll.dll!gala_fill carries text: answer \
+             \"filled at the return\" arg 0 \"filled at the return\" \
+             (imports_strings=)",
+            "imports: 5 quotes of 64, carried by 2 calls and 1 return \
+             (imports_strings=)",
+        ],
+    },
+    Scenario {
+        // OT3b: which thread made a recorded call. lock_test holds a
+        // range of a file from its main thread while a second thread
+        // blocks on it, and both call kernel32 through the armed slots,
+        // so the stream carries two threads' calls and must say which
+        // is which -- a trace of a program with a message pump beside
+        // its startup thread (Word) reads as one sequence of calls and
+        // is not one.
+        name: "import_threads",
+        cmdline: "qemu_exit events=call run=lock_test.exe \
+                  imports=lock_test.exe!kernel32.dll imports_repeat=4096",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "lock_test: ok",
+            "exited with status 0x00000000",
+            "imports: every call through an armed slot, 4096 later calls at most \
+             (imports_repeat=)",
         ],
     },
     Scenario {
@@ -20862,6 +20981,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
+    ("events_object", "object_test"),
+    ("import_threads", "lock_test"),
+    ("import_answer_text", "import_strings_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),

@@ -98,6 +98,34 @@ pub extern "C" fn gala_four(a: u64, b: u64, c: u64, d: u64) -> u64 {
     a.wrapping_add(b).wrapping_add(c).wrapping_add(d)
 }
 
+/// The text a filled buffer holds, which is what a reader of a trace
+/// sees quoted at the return and nowhere at the call.
+pub const FILLED: &[u8] = b"filled at the return";
+
+/// Writes [`FILLED`] into the buffer it is handed and answers that
+/// buffer: a call whose text is in what it wrote and not in what it was
+/// given, which is what every Windows call that fills one is. `n` is
+/// the buffer's length in characters; 0 where it is too short, as those
+/// calls answer. What an import trace can read of such a call is at its
+/// return and not at it (`imports_strings=`, user/import_strings_test).
+///
+/// # Safety
+/// `out` must be writable for `n` characters, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gala_fill(out: *mut u16, n: u64) -> u64 {
+    if out.is_null() || n <= FILLED.len() as u64 {
+        return 0;
+    }
+    for (i, &byte) in FILLED.iter().enumerate() {
+        // SAFETY: the caller's buffer of `n` characters, which the
+        // check above leaves room in for the text and its terminator.
+        unsafe { out.add(i).write(u16::from(byte)) };
+    }
+    // SAFETY: inside that same buffer, by the same check.
+    unsafe { out.add(FILLED.len()).write(0) };
+    out as u64
+}
+
 /// Number of DLL_PROCESS_ATTACH calls DllMain has seen.
 #[unsafe(no_mangle)]
 pub static mut GALA_ATTACH_COUNT: u64 = 0;
