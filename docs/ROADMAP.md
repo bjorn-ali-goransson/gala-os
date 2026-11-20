@@ -185,6 +185,7 @@ has a section under "Open items".
 | LN | Lints before every commit | in progress | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
 | PT | Portability seams for a second architecture | in progress | the kernel's seam done (`arch`'s interface, the per-architecture ABIs `nt::abi`/`lx::machine`, an aarch64 stub CI checks); gala's DLLs built for ARM64 in CI (stubs where the port is needed); ntrt and the test programs with AR; the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
+| PS | Performance sweeps | later | wanted, not scheduled (the owner); reads of existing code for one class of performance defect at a time, each finding measured before it is fixed; beside item 12's profile against Windows |
 
 ### NT core services (done, by test)
 
@@ -213,6 +214,7 @@ has a section under "Open items".
 | N1 | Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP | done | `net_echo`, `winsock_test` (also many listeners, a full backlog), `winsock_async_test`, `go_http`, `udp_test`, `udp_echo`; UDP limits, listeners and the socket limit in ARCHITECTURE "Networking" |
 | N2 | Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL) | done | `nginx`, `nginx_master`, `nginx_tls`; WORKFLOW "Nginx" |
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
+| N4 | TCP buffers that grow: receive window auto-tuning | later | wanted, not scheduled (the owner); a socket's buffers are fixed at 64 KiB each way when it is made, which caps one download at 64 KiB per round trip (about 1.3 MB/s at 50 ms) where Windows grows the window; measure first |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
 | WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
@@ -554,6 +556,41 @@ Windows first):
 **Done when**: each leftover has a test whose results match Windows and
 passes on gala and gala-um.
 
+### PS. Performance sweeps
+
+**Goal**: regular reads of existing code for one class of performance
+defect at a time, as HS does for correctness, instead of waiting for a
+slow scenario or a profile to point at each one. It complements "Current
+focus" item 12, which starts from workloads (`bench`, the scenarios'
+programs, Chromium, Python profiled against Windows) and fixes gaps in
+order of size; a sweep starts from the code and finds what those
+workloads do not exercise yet.
+
+**Rules**: a finding is fixed only after a measurement shows it: a
+`bench` entry run on Windows and gala (PERF.md "How to measure"), or a
+scenario's `nt:` line or profile, with the numbers in PERF.md. A finding
+nothing measurable confirms is recorded with why and left alone.
+
+**Classes to sweep** (each a sweep of its own; candidates already known
+in brackets):
+1. Work that grows with the system's size on a hot path: scans of every
+   thread, handle, socket or mapping (the profiler's earlier find:
+   `nt::thread::current` scanned every thread on each system call).
+2. Polling where an event would do (the `net` thread's 1 ms poll while a
+   card exists; virtio devices without interrupts: ARCHITECTURE
+   "Known limits").
+3. Fixed sizes that cap throughput or waste memory (TCP buffers: item
+   N4; virtqueue slot counts).
+4. Copies on data paths (frames copied in and out of virtqueue slots;
+   pixels copied in software on the desktop paths).
+5. Global locks under contention with several CPUs (the network stack's
+   single `STACK` lock; the shared run queue: item S4).
+6. Allocation on fast paths, and memory allocated up front that is
+   mostly unused.
+
+**Done when**: each class has had one sweep, its findings fixed or
+recorded, and its checklist kept in WORKFLOW for new code.
+
 ### S4. SMP, the rest
 
 **Goal**: the remaining multiprocessor pieces, each when a benchmark or
@@ -587,6 +624,43 @@ Linux sockets on the kernel's TCP stack (`lx::socket`, `lx_socket`).
 
 **Next**: busybox-w32's httpd and wget on the NT side, and the tcc-built
 Winsock client.
+
+### N4. TCP buffers that grow: receive window auto-tuning
+
+**Goal**: a TCP connection's buffers sized by its traffic, as Windows
+sizes them: the receive window grows with the connection's
+bandwidth-delay product (Windows' receive window auto-tuning, on by
+default), and a socket that carries little holds little.
+
+**Today**: a socket's buffers are allocated whole when it is made, 64
+KiB each way unless SO_RCVBUF/SO_SNDBUF ask for more (ARCHITECTURE "TCP:
+`net::tcp`"). TCP carries at most one window per round trip, so a
+download on one connection is capped at 64 KiB per round trip: about 64
+MB/s at 1 ms, 3.2 MB/s at 20 ms, 1.3 MB/s at 50 ms. QEMU's user network
+hides it (its round trips are short); a real network (item HW, the
+Office download, Edge) would show it. The same fixed size makes an idle
+connection hold 128 KiB and a listener on 0.0.0.0 256 KiB, against the
+stack's budget of a quarter of memory; that matters only to a workload
+holding thousands of connections, which none of the current targets do.
+
+**Steps**:
+1. Measure: a test program downloading a large file over a link with
+   added latency (about 50 ms) on gala and Windows; if gala's
+   throughput sits at the window-per-round-trip ceiling and Windows'
+   does not, this item is confirmed. If not, it is closed with the
+   numbers.
+2. smoltcp fixes a socket's buffers when it is made and advertises its
+   window from them; a gala patch to the vendored crate (between the
+   `gala: begin`/`gala: end` markers, THIRD_PARTY.md) lets a socket's
+   buffers grow, fallibly and charged to the owner (R6), with window
+   scaling negotiated for the largest size it may reach.
+3. Growth driven by the connection's measured bandwidth and round trip,
+   up to a limit; `events=net` logs each growth with its reason.
+4. Later, if a workload needs it: sockets that start small and grow on
+   demand, so idle connections and listeners cost little.
+
+**Design**: ARCHITECTURE "Networking" (the stack, TCP, the buffer
+budget).
 
 ### P1. Unmodified prebuilt programs
 
