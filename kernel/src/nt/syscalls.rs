@@ -2968,6 +2968,20 @@ fn gala_app_bar(call: &mut Call<'_>) -> NtStatus {
     let (callback, edge) = (u32_at(8), u32_at(12));
     let (l, t, r, b) = (i32_at(16), i32_at(20), i32_at(24), i32_at(28));
     let rect = Rect { x: l, y: t, w: r - l, h: b - t };
+    // The taskbar is handed only to the session's shell (SetShellWindow),
+    // by the process whose window that is (ARCHITECTURE "The user-mode
+    // shell").
+    if op == super::desktop::appbar::ABM_GALA_TASKBAR {
+        let windows = &call.process.desk.windows;
+        let owner = windows.owner_pid(hwnd).map(u64::from);
+        if hwnd == 0 || windows.shell_window() != hwnd || owner != Some(call.process.id) {
+            crate::info!(
+                "desktop: pid {}: the taskbar refused to window {hwnd:#x}: not its shell window",
+                call.process.id
+            );
+            return NtStatus::ACCESS_DENIED;
+        }
+    }
     let shell = &call.process.desk.shell;
     let (ok, edge, out) =
         tri!(super::desktop::appbar_op(shell, call.process.id, op, hwnd, callback, edge, rect));

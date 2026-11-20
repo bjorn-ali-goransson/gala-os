@@ -696,6 +696,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
         height: 280,
         topmost: true,
         popup: false,
+        no_activate: false,
     };
     let Some(hwnd) = win::open(Counter { count: 0, name: String::new() }, &options, log) else {
         line("FAIL 1: the window");

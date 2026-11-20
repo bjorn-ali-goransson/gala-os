@@ -432,6 +432,18 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     {
         error!("wayland: cannot start the server: {e:?}");
     }
+    // The user-mode shell (ARCHITECTURE "The user-mode shell"):
+    // `shell=shasha` starts shasha.exe with the session, before the agent
+    // panel (whose strip goes above the taskbar it takes). Without it the
+    // desktop draws its own taskbar.
+    match cmdline.value("shell") {
+        None | Some("desktop") => {}
+        Some("shasha") if nt::desktop::is_bare() => {
+            info!("desktop: no user-mode shell: the desktop is bare (no screen and no presenter=)");
+        }
+        Some("shasha") => nt::action::start_shell(),
+        Some(other) => warn!("desktop: shell={other} is not a shell (shasha, desktop)"),
+    }
     // The agent panel (ARCHITECTURE "The agent panel"): started with the
     // session where the desktop has a shell (not bare) and agent.exe is
     // installed, before the programs; `agent=off` leaves it out.

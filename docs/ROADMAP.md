@@ -853,9 +853,24 @@ shell part) leaves it.
       desktop's, window 0), placed with the screen; the work area is
       only what the bars leave, and ABM_GETTASKBARPOS gives the bar's
       edge and rectangle. Test: `appbar_test` (ARCHITECTURE "App
-      bars"). What is left for shasha.exe: register its own window as
-      that bar instead of the desktop's.
-   Then `shasha.exe` itself, and the kernel's shell code (about 4-5k
+      bars").
+   6. Done: `shasha.exe`'s taskbar, started with the session by
+      `shell=shasha`: a gala_ui strip (topmost, never activated) that
+      is the shell window and takes the taskbar's app bar from the
+      desktop (GalaAppBar's ABM_GALA_TASKBAR, the shell window's
+      process only); its buttons (Start, one per listed window, the
+      clock) are UIA elements; a click activates a window or minimizes
+      the active one; the list follows WinEvents. When shasha ends the
+      desktop's own taskbar is back on the same strip. Test:
+      `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
+      "The user-mode shell"). Stopgap, to be replaced by shasha's own
+      start menu: its Start button opens the kernel's start menu
+      (ACTION_MENU). Not yet in shasha: the notification area (the
+      tray's icons are the kernel taskbar's), the start menu, the
+      wallpaper, the window buttons' icons; the shell's bar is not
+      told when the screen changes size.
+   Then the start menu, the tray and the wallpaper in `shasha.exe`,
+   shasha the default shell, and the kernel's shell code (about 4-5k
    lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
    Linux and install tiles) removed.
 2. Supervision: the session (RS B4's session manager, the kernel until

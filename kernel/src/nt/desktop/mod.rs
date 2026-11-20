@@ -860,8 +860,16 @@ impl Desktop {
         let (w, h) = self.s.screen;
         let tb = i64::from(TASKBAR);
         let strip = Rect { x: 0, y: h - tb, w, h: tb };
-        let (owner, window) = (0, appbar::TASKBAR_WINDOW);
-        let placed = self.appbars.place_taskbar(owner, window, appbar::ABE_BOTTOM, strip, (w, h));
+        let placed = match self.appbars.taskbar_window() {
+            // The shell's bar keeps being the taskbar, on the new strip.
+            Some(shell) if shell != appbar::TASKBAR_WINDOW => {
+                self.appbars.set(shell, appbar::ABE_BOTTOM, strip, (w, h))
+            }
+            _ => {
+                let (owner, window) = (0, appbar::TASKBAR_WINDOW);
+                self.appbars.place_taskbar(owner, window, appbar::ABE_BOTTOM, strip, (w, h))
+            }
+        };
         #[cfg(not(test))]
         match placed {
             Some(r) => crate::info!(
@@ -1060,7 +1068,9 @@ impl Desktop {
     pub fn destroy_owned(&mut self, owner: u64) {
         self.s.destroy_owned(owner);
         if self.appbars.drop_owned(owner) == appbar::Changed::Yes {
+            #[cfg(not(test))]
             crate::info!("desktop: app bars of pid {owner} removed (its end)");
+            self.taskbar_back();
             self.work_changed();
         }
         if self.tray.drop_owned(owner) {
@@ -1174,6 +1184,36 @@ impl Desktop {
                 None => (false, edge, rect),
             });
         }
+        if op == appbar::ABM_GALA_TASKBAR {
+            // The syscall checked that `hwnd` is the session's shell
+            // window and the caller's.
+            return Ok(match self.appbars.hand_taskbar(owner, hwnd, callback) {
+                Some((e, r)) => {
+                    #[cfg(not(test))]
+                    crate::info!(
+                        "desktop: the taskbar's bar is window {hwnd:#x} of pid {owner} (the \
+                         shell's) at {},{} {}x{}: the desktop no longer draws it",
+                        r.x,
+                        r.y,
+                        r.w,
+                        r.h
+                    );
+                    self.close_menu();
+                    self.taskbar_dirty = true;
+                    self.s.add_damage(r);
+                    self.refresh();
+                    (true, e, r)
+                }
+                None => {
+                    #[cfg(not(test))]
+                    crate::info!(
+                        "desktop: pid {owner}: the taskbar not handed to window {hwnd:#x} \
+                         (none placed, or that window is another bar)"
+                    );
+                    (false, edge, rect)
+                }
+            });
+        }
         if hwnd == appbar::TASKBAR_WINDOW && op <= appbar::ABM_SETPOS {
             #[cfg(not(test))]
             crate::info!("desktop: pid {owner}: app bar call {op} on the taskbar's bar refused");
@@ -1215,6 +1255,7 @@ impl Desktop {
                     );
                 }
                 if changed == appbar::Changed::Yes {
+                    self.taskbar_back();
                     self.work_changed();
                 }
                 Ok((true, rect))
@@ -1497,6 +1538,26 @@ impl Desktop {
 
     // ---- The shell's layout --------------------------------------------
 
+    /// Whether the desktop draws the taskbar and answers clicks on it:
+    /// not once the session's shell took its bar (ARCHITECTURE "The
+    /// user-mode shell"), whose window is then there.
+    fn own_taskbar(&self) -> bool {
+        self.appbars.taskbar_window().is_none_or(|w| w == appbar::TASKBAR_WINDOW)
+    }
+
+    /// The shell's taskbar is gone (its bar removed, its process ended):
+    /// the desktop's own is placed again, so a session never stays
+    /// without one.
+    fn taskbar_back(&mut self) {
+        if self.appbars.taskbar_window().is_some() || self.wallpaper.is_none() {
+            return;
+        }
+        #[cfg(not(test))]
+        crate::info!("desktop: the taskbar's bar is gone: the desktop's taskbar is back");
+        self.taskbar_dirty = true;
+        self.place_taskbar();
+    }
+
     /// The taskbar: the screen's bottom rows, the whole width (the app
     /// bars on the sides end above it).
     fn taskbar_rect(&self) -> Rect {
@@ -1744,7 +1805,7 @@ impl Desktop {
             }
             return Hit::Menu;
         }
-        if self.taskbar_rect().contains(x, y) {
+        if self.own_taskbar() && self.taskbar_rect().contains(x, y) {
             if self.start_rect().contains(x, y) {
                 return Hit::Start;
             }
@@ -3227,7 +3288,8 @@ impl Desktop {
             return c;
         }
         let t = self.taskbar_rect();
-        if t.contains(x, y)
+        if self.own_taskbar()
+            && t.contains(x, y)
             && let Some(bar) = &self.taskbar
         {
             c = over(c, bar.get(x - t.x, y - t.y));
@@ -4892,6 +4954,24 @@ fn tell_tray(shell: &Shell, posts: Vec<tray::Post>) {
 /// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
 /// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
 /// a missing file, STATUS_NOT_SUPPORTED without shasha's shell.
+/// Opens the start menu, or closes it when it is open (a user-mode
+/// shell's start button, ACTION_MENU): whether it is open now.
+pub fn toggle_menu(shell: &Shell) -> Result<bool, NtStatus> {
+    if !has_shell(shell) {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d)?;
+    if d.menu.is_some() {
+        d.close_menu();
+    } else {
+        d.open_menu();
+    }
+    d.refresh();
+    redraw_damage(&mut d);
+    Ok(d.menu.is_some())
+}
+
 pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);

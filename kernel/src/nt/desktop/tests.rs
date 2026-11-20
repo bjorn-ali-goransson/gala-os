@@ -1928,3 +1928,34 @@ fn a_windows_placement_is_its_owners_alone_and_follows_its_state() {
     d.show(a, 7, false).unwrap();
     assert!(!d.placement(a, 7).unwrap().visible);
 }
+
+#[test]
+fn the_shell_takes_the_taskbar_and_the_desktops_comes_back_when_it_ends() {
+    let (mut d, _) = desktop_with_window();
+    let strip = d.taskbar_rect();
+    let start = d.start_rect();
+    let (sx, sy) = (start.x + 10, start.y + 10);
+    assert_eq!(d.hit(sx, sy), Hit::Start);
+    let drawn = d.pixel(sx, strip.y + 1);
+    // The shell (pid 9, window 0x30) takes the bar: the same strip, and
+    // the desktop neither draws the taskbar nor answers clicks on it.
+    let none = Rect { x: 0, y: 0, w: 0, h: 0 };
+    let got = d.appbar_op(9, appbar::ABM_GALA_TASKBAR, 0x30, 0x8043, 0, none).unwrap();
+    assert_eq!(got, (true, appbar::ABE_BOTTOM, strip));
+    assert!(!d.own_taskbar());
+    assert_ne!(d.hit(sx, sy), Hit::Start);
+    assert_ne!(d.pixel(sx, strip.y + 1), drawn);
+    assert_eq!(d.s.work().h, strip.y);
+    // A program cannot take it from the shell by asking.
+    let got = d.appbar_op(4, appbar::ABM_REMOVE, appbar::TASKBAR_WINDOW, 0, 0, none).unwrap();
+    assert!(!got.0);
+    // The toggle a shell's start button sends.
+    d.open_menu();
+    assert!(d.menu_open());
+    // The shell ends: the desktop's own taskbar is back, on the same strip.
+    d.destroy_owned(9);
+    assert!(d.own_taskbar());
+    assert_eq!(d.appbars.taskbar(), Some((appbar::ABE_BOTTOM, strip)));
+    assert_eq!(d.hit(sx, sy), Hit::Start);
+    assert_eq!(d.s.work().h, strip.y);
+}

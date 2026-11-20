@@ -1,0 +1,27 @@
+[package]
+name = "shasha"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# gala's user-mode shell (ROADMAP SH step 1, part 6; ARCHITECTURE "The
+# user-mode shell"): the taskbar's state, view and update are the
+# library, tested on the host with `cargo test -p shasha`; the program
+# (the window, the app bar hand-over, the window list, the clock) is
+# `src/main.rs`.
+
+[lib]
+bench = false
+
+[[bin]]
+name = "shasha"
+test = false
+bench = false
+
+[dependencies]
+gala_ui = { path = "../ui" }
+
+[target.'cfg(windows)'.dependencies]
+# The bin's allocator (the host tests have std's).
+gala_heap = { path = "../gala_heap" }

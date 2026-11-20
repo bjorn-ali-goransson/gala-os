@@ -9465,6 +9465,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The agent panel (ROADMAP LY "Change this program", step 4):
     // agent.exe where the desktop starts it with the session, docked as
     // an app bar; agent_test checks it while the screen scenario clicks.
+    // shasha's taskbar (ROADMAP SH step 1, part 6): shasha.exe where the
+    // desktop starts it with the session (`shell=shasha`); shasha_test
+    // checks it while the screen scenario clicks its buttons.
+    ("shasha", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("shasha", "user/bin/shasha.exe", "Windows/System32"),
+    ("shasha", "ntdll.dll", "Windows/System32"),
+    ("shasha", "kernel32.dll", "Windows/System32"),
+    ("shasha", "msvcrt.dll", "Windows/System32"),
+    ("shasha", "advapi32.dll", "Windows/System32"),
+    ("shasha", "bcryptprimitives.dll", "Windows/System32"),
+    ("shasha", "user32.dll", "Windows/System32"),
+    ("shasha", "gdi32.dll", "Windows/System32"),
+    ("shasha", "shell32.dll", "Windows/System32"),
+    ("shasha", "ole32.dll", "Windows/System32"),
+    ("shasha", "oleaut32.dll", "Windows/System32"),
+    ("shasha", "uiautomationcore.dll", "Windows/System32"),
+    ("shasha", "comctl32.dll", "Windows/System32"),
     ("agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("agent", "user/bin/agent.exe", "Windows/System32"),
     ("agent", "ntdll.dll", "Windows/System32"),
@@ -11205,6 +11222,8 @@ const USER_PROGRAMS: &[&str] = &[
     "agent",
     "agent_test",
     "agent_chat_test",
+    "shasha",
+    "shasha_test",
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
@@ -11963,6 +11982,8 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "gala_ui"]))?;
     // The agent panel's view and update (ROADMAP LY "Change this program").
     run_cmd(cargo().args(["test", "--package", "agent", "--lib"]))?;
+    // shasha's taskbar's view and update (ROADMAP SH).
+    run_cmd(cargo().args(["test", "--package", "shasha", "--lib"]))?;
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
@@ -13565,6 +13586,8 @@ const UEFI_SCENARIOS: &[&str] = &[
     "agent",
     "explorer_agent",
     "agent_chat",
+    // shasha's taskbar, clicked (SHASHA_SCREEN).
+    "shasha",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -16428,6 +16451,35 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "desktop: hot key 4 (Win) to pid",
             "hotkey_test: hot key 4",
             "hotkey_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // shasha's taskbar (ROADMAP SH step 1, part 6; ARCHITECTURE "The
+        // user-mode shell"): `shell=shasha` starts shasha.exe with the
+        // session; its window is the shell's and takes the taskbar's app
+        // bar from the desktop; SHASHA_SCREEN clicks the button of
+        // shasha_test's first window twice (activated, then minimized);
+        // shasha ended, the desktop's taskbar is back.
+        name: "shasha",
+        cmdline: "qemu_exit wallpaper=night events=window agent=off shell=shasha run=shasha_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: started C:\\Windows\\System32\\shasha.exe (pid",
+            "shasha: started",
+            "desktop: the taskbar's bar is window",
+            "shasha: the taskbar at 0,752 1280x48",
+            "shasha_test: the taskbar [0,752,1280,800]",
+            "shasha: 2 window(s) listed",
+            "shasha_test: TaskOne at",
+            "shasha_test: listed",
+            "shasha: activate window",
+            "shasha_test: activated",
+            "shasha: minimize window",
+            "shasha_test: minimized",
+            "desktop: the taskbar's bar is gone: the desktop's taskbar is back",
+            "shasha_test: the taskbar after shasha [0,752,1280,800]",
+            "shasha_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -24345,6 +24397,27 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// address bar (screen 20) and the request runs its steps to the card
 /// that says nothing was changed (screen 23); Alt+F4 closes it. Each step waits for explorer's
 /// own log line of the one before (`explorer: navigate ...`).
+/// shasha's taskbar (scenario `shasha`): its strip drawn by shasha (the
+/// light surface across the bottom); the first window's button clicked
+/// twice, found by name (activated, then minimized).
+const SHASHA_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "shasha_test: listed",
+    steps: &[
+        ScreenStep {
+            // 1: the strip, shasha's surface.
+            after: "shasha_test: listed",
+            input: &[],
+            pixels: &[PixelCheck::Most(0, 760, 1280, 32, 0xeef1f6, 50)],
+        },
+        ScreenStep { after: "", input: &["click_on shasha_test: TaskOne"], pixels: &[] },
+        ScreenStep {
+            after: "shasha_test: activated",
+            input: &["click_on shasha_test: TaskOne"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// The agent panel (scenario `agent`) on a 1280 x 800 screen. What is
 /// clicked, agent_test finds through UI Automation and announces
 /// (`click_on`); the pixels only check that the panel is drawn where its
@@ -25614,6 +25687,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("taskmgr", TASKMGR_SCREEN),
     ("explorer", EXPLORER_SCREEN),
     ("agent", AGENT_SCREEN),
+    ("shasha", SHASHA_SCREEN),
     ("explorer_agent", EXPLORER_AGENT_SCREEN),
     ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),

@@ -203,10 +203,12 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
+const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const WS_POPUP: u32 = 0x8000_0000;
 const WM_COPYDATA: u32 = 0x004a;
 const WM_USER: u32 = 0x0400;
 const SW_SHOW: i32 = 5;
+const SW_SHOWNOACTIVATE: i32 = 4;
 const GWLP_USERDATA: i32 = -21;
 /// The class's extra bytes: the window's shared part (`shared_of`).
 const SHARED_SLOT: i32 = 0;
@@ -289,6 +291,10 @@ pub struct Options<'a> {
     /// Without a frame and a caption (WS_POPUP): a panel the program
     /// places itself; not on the taskbar.
     pub popup: bool,
+    /// Never made the active window, by a click or by being shown
+    /// (WS_EX_NOACTIVATE, SW_SHOWNOACTIVATE): a taskbar, which acts on
+    /// the window that is active.
+    pub no_activate: bool,
 }
 
 /// What other threads read of the window, behind `busy`.
@@ -578,7 +584,8 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
         }
     }
     let title = wide(o.title);
-    let ex = if o.topmost { WS_EX_TOPMOST } else { 0 };
+    let ex = if o.topmost { WS_EX_TOPMOST } else { 0 }
+        | if o.no_activate { WS_EX_NOACTIVATE } else { 0 };
     // SAFETY: the registered class; created hidden, shown once its host is set.
     let hwnd = unsafe {
         CreateWindowExW(
@@ -611,7 +618,7 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
     unsafe {
         SetWindowLongPtrW(hwnd, SHARED_SLOT, Arc::into_raw(shared) as isize);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(w) as isize);
-        ShowWindow(hwnd, SW_SHOW);
+        ShowWindow(hwnd, if o.no_activate { SW_SHOWNOACTIVATE } else { SW_SHOW });
     }
     Some(hwnd)
 }

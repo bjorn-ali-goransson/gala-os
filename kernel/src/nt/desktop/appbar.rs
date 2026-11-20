@@ -32,6 +32,10 @@ pub const ABM_REMOVE: u32 = 1;
 pub const ABM_QUERYPOS: u32 = 2;
 pub const ABM_SETPOS: u32 = 3;
 pub const ABM_GETTASKBARPOS: u32 = 5;
+/// gala's own (no ABM_ has it): the session's shell takes the taskbar's
+/// bar for its window (`AppBars::hand_taskbar`). The syscall lets only
+/// the shell window's process ask.
+pub const ABM_GALA_TASKBAR: u32 = 0x100;
 
 /// The desktop's own taskbar's bar: its window (no program's is 0) and
 /// its process.
@@ -107,6 +111,30 @@ impl AppBars {
         self.add(owner, hwnd, 0).ok()?;
         self.taskbar = Some(hwnd);
         self.set(hwnd, edge, rect, screen)
+    }
+
+    /// The taskbar's window: TASKBAR_WINDOW while the desktop draws it,
+    /// the shell's once it was handed over (`hand_taskbar`).
+    pub fn taskbar_window(&self) -> Option<u64> {
+        self.taskbar
+    }
+
+    /// The shell takes the taskbar (ARCHITECTURE "The user-mode shell"):
+    /// window `hwnd` of process `owner`, told `callback`, becomes the bar
+    /// that is the taskbar, in its place (the same edge and strip, so the
+    /// work area and the other bars are as they were: none is told). Its
+    /// edge and strip, or None when there is no taskbar placed or `hwnd`
+    /// is another bar already.
+    pub fn hand_taskbar(&mut self, owner: u64, hwnd: u64, callback: u32) -> Option<(u32, Rect)> {
+        let old = self.taskbar?;
+        if old != hwnd && self.bars.iter().any(|b| b.hwnd == hwnd) {
+            return None;
+        }
+        let bar = self.bars.iter_mut().find(|b| b.hwnd == old)?;
+        let placed = bar.placed?;
+        *bar = Bar { owner, hwnd, callback, placed: Some(placed) };
+        self.taskbar = Some(hwnd);
+        Some(placed)
     }
 
     /// ABM_NEW: false when `hwnd` is a bar already.
@@ -360,6 +388,38 @@ mod tests {
         assert_eq!(b, r(0, 712, 1280, 752));
         assert_eq!(a.insets(SCREEN), [0, 40, 0, 40 + TB]);
         assert_eq!(a.taskbar(), Some((ABE_BOTTOM, r(0, 752, 1280, 800))));
+    }
+
+    #[test]
+    fn the_shell_takes_the_taskbar_and_gives_it_back_by_going() {
+        let mut a = with_taskbar();
+        a.add(4, 0x10, 0x8041).unwrap();
+        a.set(0x10, ABE_RIGHT, r(980, 0, 1280, 800), SCREEN).unwrap();
+        let _ = a.take_posts();
+        // Another program's bar cannot be made the taskbar.
+        assert_eq!(a.hand_taskbar(5, 0x10, 0x8043), None);
+        let strip = r(0, 752, 1280, 800);
+        assert_eq!(a.hand_taskbar(5, 0x30, 0x8043), Some((ABE_BOTTOM, strip)));
+        assert_eq!(a.taskbar_window(), Some(0x30));
+        assert_eq!(a.taskbar(), Some((ABE_BOTTOM, strip)));
+        // In place: one bar fewer than a new one, nothing moved, no one told.
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.insets(SCREEN), [0, 0, 300, TB]);
+        assert!(a.take_posts().is_empty());
+        // Again by the same window: the same strip.
+        assert_eq!(a.hand_taskbar(5, 0x30, 0x8043), Some((ABE_BOTTOM, strip)));
+        // The shell ends: no taskbar until the desktop places its own.
+        assert_eq!(a.drop_owned(5), Changed::Yes);
+        assert_eq!(a.taskbar_window(), None);
+        assert_eq!(a.insets(SCREEN), [0, 0, 300, 0]);
+        assert_eq!(a.place_taskbar(0, TASKBAR_WINDOW, ABE_BOTTOM, strip, SCREEN), Some(strip));
+        assert_eq!(a.taskbar_window(), Some(TASKBAR_WINDOW));
+    }
+
+    #[test]
+    fn no_taskbar_to_hand_over() {
+        let mut a = AppBars::new();
+        assert_eq!(a.hand_taskbar(5, 0x30, 1), None);
     }
 
     #[test]

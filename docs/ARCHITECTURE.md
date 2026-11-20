@@ -584,6 +584,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `trace` | log every system call (arguments, status) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
+| `shell=shasha` | start the user-mode shell `shasha.exe` with the session; it takes the taskbar ("The user-mode shell"); `shell=desktop` or none: the desktop's own taskbar |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
@@ -8329,8 +8330,9 @@ and the SHAppBarMessage reference).
   0) on the bottom edge, `TASKBAR` rows high and the whole width, when
   it learns the screen's size; ABM_GETTASKBARPOS answers its edge and
   rectangle. A program's NEW, REMOVE, QUERYPOS or SETPOS of window 0 is
-  FALSE (logged). Until `shasha.exe` registers its own window in its
-  place, the kernel draws the taskbar where that bar is.
+  FALSE (logged). While that bar is window 0 the kernel draws the
+  taskbar on its strip; the session's shell may take the bar for its
+  own window ("The user-mode shell").
 - **Placement** (QUERYPOS, and SETPOS which places what QUERYPOS
   gives): a bar on the left or the right keeps its width and reaches
   from the top of the screen down to the highest bar on the bottom
@@ -8372,6 +8374,71 @@ and the SHAppBarMessage reference).
   [l,t,r,b]`, `desktop: maximized window <id> fitted to the work area`,
   `desktop: app bars told ABN_POSCHANGED: <n> window(s)`, and `desktop:
   app bars of pid <p> removed (its end)`.
+
+#### The user-mode shell
+
+Code: `user/shasha` (`shasha.exe`: the taskbar's model, view and
+update in `lib.rs`, host-tested there; the window, the shell window,
+the app bar, the WinEvent hooks and the verbs in `main.rs`),
+`AppBars::hand_taskbar` (`desktop/appbar.rs`), `Desktop::own_taskbar`
+and `taskbar_back` (`desktop/mod.rs`), the shell window check in
+`gala_app_bar` (`syscalls.rs`), `action::start_shell` and the
+`shell=` option (`lib.rs`). Test: `shasha_test`, screen scenario
+`shasha` (ROADMAP SH step 1).
+
+- **Started**: `shell=shasha` on the command line starts
+  `C:\Windows\System32\shasha.exe` with the session, under the boot
+  user's token, before the agent panel; without it (or `shell=desktop`)
+  the desktop draws its own taskbar, as it does when shasha.exe is not
+  installed (`desktop: no user-mode shell: ... not opened`) or the
+  desktop is bare.
+- **Its window**: a gala_ui popup strip at the bottom of the screen,
+  topmost and never activated (WS_EX_NOACTIVATE, shown with
+  SW_SHOWNOACTIVATE: a click on it leaves the active window active, so
+  a click on the active window's button can minimize it). It is the
+  session's shell window (SetShellWindow; a second shell is refused and
+  shasha ends with 2).
+- **Taking the taskbar**: GalaAppBar's ABM_GALA_TASKBAR (0x100, gala's
+  own) with that window makes it the bar that is the taskbar, in the
+  desktop's place: the same edge and strip, so the work area and the
+  other bars are unchanged and none is told. The syscall lets only the
+  process whose window is the shell window ask (else ACCESS_DENIED,
+  logged); `hand_taskbar` refuses a window that is another bar
+  already. From then on the desktop neither draws the taskbar nor
+  answers clicks on its strip (`own_taskbar`); shasha's window is
+  there. ABM_GETTASKBARPOS answers the shell's bar.
+- **The taskbar**: a centred row of buttons (UIA: `StartButton` named
+  "Start", and `Task<hwnd>` named with each window's title, the active
+  one outlined) and the clock (`Clock`, HH:MM) at the right. The list
+  is GalaDesktopAction's ACTION_WINDOWS, fetched again when a WinEvent
+  says a window was created, destroyed, shown, hidden, renamed,
+  activated, minimized or restored (two out-of-context hooks; events of
+  shasha's own window and of non-window objects are ignored). A
+  button's click activates its window, or minimizes it when it is the
+  active one and not minimized (ACTION_ACTIVATE, ACTION_MINIMIZE: the
+  caller passes UIPI as for any program). Start sends ACTION_MENU,
+  which opens or closes the kernel's start menu: a stopgap until
+  shasha has its own (ROADMAP SH).
+- **When shasha ends** (its process, or its bar removed) the taskbar's
+  bar is gone and the desktop places its own again on the same strip
+  (`taskbar_back`), so a session is never without a taskbar. A screen
+  size change moves the shell's bar to the new strip (the shell is not
+  told yet).
+- **Limits**: no notification area, start menu, wallpaper or window
+  icons in shasha yet; the shell is not restarted when it ends
+  (ROADMAP SH step 2).
+- **Observability**: shasha's lines (`shasha: started`, `shasha: the
+  taskbar at x,y wxh`, or `shasha: the taskbar's strip is not handed
+  over: <status>` with `shasha: the desktop keeps its taskbar`, `shasha:
+  <n> window(s) listed`, `shasha: activate/minimize window <hwnd>` and
+  `... refused: <status>`); the kernel's `desktop: the taskbar's bar is
+  window <hwnd> of pid <p> (the shell's) at x,y wxh: the desktop no
+  longer draws it`, `desktop: pid <p>: the taskbar refused to window
+  <hwnd>: not its shell window`, `desktop: pid <p>: the taskbar not
+  handed to window <hwnd> (...)`, `desktop: the taskbar's bar is gone:
+  the desktop's taskbar is back`, `desktop: pid <p> opens/closes the
+  start menu`, and the start's `desktop: started ...shasha.exe (pid
+  <p>)`.
 
 #### The agent panel
 

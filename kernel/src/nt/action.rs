@@ -71,6 +71,10 @@ pub const ACTION_INSTALL: u32 = 16;
 /// (LINUX_*), args[2] the install's suggestion (`SUGGESTIONS` index) or
 /// the application (its index among the distribution's applications).
 pub const ACTION_LINUX: u32 = 17;
+/// A user-mode shell's start button (ROADMAP SH step 1, part 6): opens
+/// the desktop's start menu, or closes it when it is open. A stopgap
+/// until shasha draws its own menu (ROADMAP SH).
+pub const ACTION_MENU: u32 = 18;
 
 /// The launch verbs' flags (Start, Install, Linux: args[0]): start a
 /// console program in a console window of its own (conhost.exe, as
@@ -390,6 +394,14 @@ fn run_other(
             let key = desktop::tray::Key::Id(r.hwnd, r.args[0] as u32);
             desktop::tray_click(&caller.desk.shell, key, button)?;
         }
+        ACTION_MENU => {
+            let open = desktop::toggle_menu(&caller.desk.shell)?;
+            crate::info!(
+                "desktop: pid {} {} the start menu",
+                caller.pid,
+                if open { "opens" } else { "closes" }
+            );
+        }
         ACTION_WALLPAPER => {
             let mut name = [0u8; 32];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
@@ -554,6 +566,23 @@ pub fn start_agent() {
             let _ = start_path(AGENT, "", None);
         }
         Err(e) => crate::info!("desktop: no agent panel: {AGENT} not opened ({e:?})"),
+    }
+}
+
+/// Where the user-mode shell is installed (ARCHITECTURE "The user-mode
+/// shell").
+pub const SHASHA: &str = "C:\\Windows\\System32\\shasha.exe";
+
+/// Starts the user-mode shell with the session (`shell=shasha`), when it
+/// is installed; else the desktop keeps its own taskbar and says why.
+pub fn start_shell() {
+    match super::process::open_program(SHASHA) {
+        Ok(_) => {
+            let _ = start_path(SHASHA, "", None);
+        }
+        Err(e) => crate::info!(
+            "desktop: no user-mode shell: {SHASHA} not opened ({e:?}): the desktop's taskbar stays"
+        ),
     }
 }
 
