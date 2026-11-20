@@ -74,13 +74,13 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::platform::TrapFrame;
+use super::platform::{self, ThreadId};
 use super::process::Process;
 use super::status::NtStatus;
 use super::tracecall::{Answer, Words};
 use super::{vad, vm};
 use crate::events::{self, Category, Str};
 use crate::mm::heap::TryVec;
-use crate::sched::{self, ThreadId};
 use crate::sync::IrqMutex;
 
 /// Slots armed unless `imports=<...>:<n>` asks for another number. A
@@ -670,7 +670,7 @@ fn trap_return(process: &Process, frame: &mut TrapFrame, entry: &Trap) {
     };
     let waited = Pending {
         pid: process.id,
-        thread: sched::current(),
+        thread: platform::current(),
         sp: frame.call_return_sp(),
         ret,
         trap: entry.trap,
@@ -759,7 +759,7 @@ fn answered(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
 /// entry waiting for a lower one than has arrived is past returning,
 /// and nothing would ever match it.
 fn take_pending(pid: u64, sp: u64) -> Option<Pending> {
-    let thread = sched::current();
+    let thread = platform::current();
     let (mut found, mut unwound, mut stale) = (None, 0, 0);
     {
         let mut pending = PENDING.lock();
