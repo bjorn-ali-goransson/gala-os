@@ -434,7 +434,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_REPEAT=n` | boot one scenario's image n times ("Flaky tests and repeats") |
 | `XTASK_REPEAT_JOBS=n` | VMs at once for repeats (default one per two host CPUs) |
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
-| `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots") |
+| `XTASK_SHOTS=<s>\|<line>[+<s>],...` | screendumps of a boot test's screen at those seconds of wall time, or when its serial log holds that line (`target/screenshots/<scenario>-<when>.png`; "Screenshots") |
 | `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
 | `XTASK_SNAPSHOTS=<dir>` | where machine snapshots are saved, listed and resumed from instead of `target/snapshots` (a directory on the file system of the scenario's disk image: `/dev/shm/snapshots` for Office; "Machine snapshots") |
 | `XTASK_REUSE_DISK=1` | boot a disk scenario on the image a failed run kept (`<iso>.disk.img`) instead of a fresh one, and keep it after a pass: a later stage of a long run without its earlier ones ("Disk tests") |
@@ -3960,6 +3960,19 @@ framebuffer (`UEFI_SCENARIOS`). Under TCG the desktop shows about 15 s
 in and a program's first window 30-60 s in.
 
     XTASK_SHOTS=60,120,300,600,1200,1800 cargo xtask boot-test office_install_gui
+
+An entry that is not a number is a piece of a serial log line to wait
+for, with an optional `+<secs>` for a wait after it, and its file is
+named after the line (`office_word-desktop-shown-window-1s.png`):
+
+    XTASK_SHOTS='desktop: shown window+1' cargo xtask boot-test office_word
+
+A second guessed from the outside is missed as often as it is caught --
+Word's splash lives about 2 s of a 90 s run, and the run is as fast as
+the host is free that minute -- while the log knows when the window is
+there. What no file came of is said in the run's own log
+(`xtask: screenshot: ... never came in the serial log`), so a misspelt
+line does not read as a run that was asked for nothing.
 
 #### Watching the screen live
 
