@@ -13364,6 +13364,23 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // What a call acted on, named: object_test's `gala_object_test_A`
+        // is created named, signalled through one handle and waited on
+        // through another. A wait says which object it waits on, a call
+        // that signals one says which it signals, both say the handle
+        // they were given, and a named object carries its name. That is
+        // what makes a wait that never ends answerable: the object is
+        // the same `oid` in every process, so the call that should have
+        // signalled it is in the stream beside the wait -- or nowhere,
+        // which is the answer.
+        "events_object",
+        &[
+            r#""name":"NtWaitForSingleObject","obj":"Event","oid":"#,
+            r#""name":"NtSetEvent","obj":"Event","oid":"#,
+            r#","on":"gala_object_test_A","h":"#,
+        ],
+    ),
+    (
         // RS step B2: each window is registered in its own session, and
         // HWNDs asked for across sessions are named.
         "session_test",
@@ -15057,6 +15074,14 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=syscall,process events_pid=4 run=process_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["process_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // What the calls of object_test acted on, named (see
+        // EVENT_EXPECT): its named event, signalled and waited on.
+        name: "events_object",
+        cmdline: "qemu_exit events=syscall run=object_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["object_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // `events_from=` starts the stream late (here at once, after the
@@ -20862,6 +20887,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
+    ("events_object", "object_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),

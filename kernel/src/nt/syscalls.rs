@@ -858,6 +858,43 @@ pub fn set_trace(on: bool) {
 /// The most arguments a service in `TABLE` takes.
 const MAX_ARGS: usize = 14;
 
+/// How much of a named object's name an event carries.
+const ON_NAME: usize = 64;
+
+/// Where the handle of the object a call acts on is: one of its
+/// arguments, or the first entry of the array an argument points to (a
+/// multiple wait, whose handles are in the program's memory).
+enum Acts {
+    Arg(usize),
+    Array(usize),
+}
+
+/// Which argument holds the handle of the object this call waits on
+/// (`event` "wait", written when the wait starts) or signals (its
+/// finished call), or None where it acts on no object the stream names.
+/// One list, so that what the stream can be asked is one thing to read
+/// and one thing to add to.
+fn acts_on(name: &str, event: &str) -> Option<Acts> {
+    if event == "wait" {
+        return Some(match name {
+            "NtWaitForMultipleObjects" | "NtWaitForMultipleObjects32" => Acts::Array(1),
+            "NtSignalAndWaitForSingleObject" => Acts::Arg(1),
+            _ => Acts::Arg(0),
+        });
+    }
+    match name {
+        "NtSetEvent"
+        | "NtSetEventBoostPriority"
+        | "NtClearEvent"
+        | "NtResetEvent"
+        | "NtPulseEvent"
+        | "NtReleaseSemaphore"
+        | "NtReleaseMutant"
+        | "NtSignalAndWaitForSingleObject" => Some(Acts::Arg(0)),
+        _ => None,
+    }
+}
+
 /// The `syscall` event for a finished call (unreadable arguments: null).
 fn syscall_event(
     call: &Call<'_>,
@@ -893,42 +930,70 @@ fn syscall_event(
     }
     // The calling thread (kept per CPU: no search of the thread table).
     let tid = crate::events::current_client();
-    // A wait names the object it waits on (the first, for several): its
-    // type and identity (its address, the same in every process), so
-    // waits on one object can be told apart and matched. Looked up here
-    // for the same reason: a multiple wait's handle comes from the
-    // program's memory, and the handle table has a lock of its own.
-    let on = (event == "wait")
-        .then(|| {
-            let handle = match name {
-                "NtWaitForMultipleObjects" | "NtWaitForMultipleObjects32" => {
-                    call.arg(1).and_then(|a| call.read_u64(a)).ok()
-                }
-                "NtSignalAndWaitForSingleObject" => call.arg(1).ok(),
-                _ => call.arg(0).ok(),
-            }?;
-            let e = call.process.handles.lock().get(super::object::Handle(handle))?;
-            Some((e.object.type_name(), &*e.object as *const _ as usize))
+    // What the call acted on, named: the object's type and identity (its
+    // address, the same in every process), the handle it was given, and
+    // the name it has in the namespace where it has one. A wait names
+    // what it waits on (the first object, for several) and a call that
+    // signals one names what it signals, which is what makes a wait that
+    // never ends answerable -- the call that should have signalled that
+    // `oid` is in the stream beside it, or no call is, which is the
+    // answer. Read here, before the event is written, because the handle
+    // table and the object's name have locks of their own and writing an
+    // event holds the debug console's
+    // (`sync::lockdep::none_held_at_user_memory`).
+    let on = acts_on(name, event)
+        .and_then(|acts| match acts {
+            Acts::Arg(i) => call.arg(i).ok(),
+            Acts::Array(i) => call.arg(i).and_then(|a| call.read_u64(a)).ok(),
         })
-        .flatten();
-    struct On(Option<(&'static str, usize)>);
-    impl fmt::Display for On {
+        .and_then(|handle| {
+            let entry = call.process.handles.lock().get(super::object::Handle(handle))?;
+            let (mut name, mut len) = ([0u16; ON_NAME], 0);
+            if let Some(named) = entry.object.name.lock().as_ref() {
+                len = named.name.len().min(ON_NAME);
+                name[..len].copy_from_slice(&named.name[..len]);
+            }
+            Some(On {
+                type_name: entry.object.type_name(),
+                oid: &*entry.object as *const _ as usize,
+                handle,
+                name,
+                len,
+            })
+        });
+    /// What a call acted on, as the event carries it. The name is copied
+    /// rather than borrowed because it is read under the object's own
+    /// lock, which is not held while the event is written.
+    struct On {
+        type_name: &'static str,
+        oid: usize,
+        handle: u64,
+        name: [u16; ON_NAME],
+        len: usize,
+    }
+    struct Acted(Option<On>);
+    impl fmt::Display for Acted {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Some((type_name, oid)) = self.0 else { return Ok(()) };
-            write!(f, r#","obj":"{type_name}","oid":{oid}"#)
+            let Some(on) = &self.0 else { return Ok(()) };
+            let (type_name, oid) = (on.type_name, on.oid);
+            write!(f, r#","obj":"{type_name}","oid":{oid}"#)?;
+            if on.len != 0 {
+                write!(f, r#","on":{}"#, crate::events::Utf16(&on.name[..on.len]))?;
+            }
+            write!(f, r#","h":{}"#, on.handle)
         }
     }
     crate::events::emit(
         crate::events::Category::Syscall,
         event,
         format_args!(
-            r#""pid":{},"tid":{tid},"nr":{number},"name":{},"args":[{}],"status":{},"ns":{}{}"#,
+            r#""pid":{},"tid":{tid},"nr":{number},"name":{}{},"args":[{}],"status":{},"ns":{}"#,
             call.process.id,
             crate::events::Str(name),
+            Acted(on),
             Args(args, argc),
             status.0,
-            platform::monotonic_ns().saturating_sub(started),
-            On(on)
+            platform::monotonic_ns().saturating_sub(started)
         ),
     );
 }
@@ -8192,6 +8257,21 @@ fn nt_query_attributes_file(call: &mut Call<'_>) -> NtStatus {
 
 #[cfg(test)]
 mod tests {
+    use super::{Acts, acts_on};
+
+    #[test]
+    fn a_call_that_waits_or_signals_says_where_its_handle_is() {
+        assert!(matches!(acts_on("NtWaitForSingleObject", "wait"), Some(Acts::Arg(0))));
+        assert!(matches!(acts_on("NtWaitForMultipleObjects", "wait"), Some(Acts::Array(1))));
+        assert!(matches!(acts_on("NtSignalAndWaitForSingleObject", "wait"), Some(Acts::Arg(1))));
+        // The same call, finished, names what it signalled instead.
+        assert!(matches!(acts_on("NtSignalAndWaitForSingleObject", "syscall"), Some(Acts::Arg(0))));
+        assert!(matches!(acts_on("NtSetEvent", "syscall"), Some(Acts::Arg(0))));
+        assert!(matches!(acts_on("NtReleaseMutant", "syscall"), Some(Acts::Arg(0))));
+        // A call that acts on no object is not looked up at all.
+        assert!(acts_on("NtReadFile", "syscall").is_none());
+        assert!(acts_on("NtSetEvent", "wait").is_some());
+    }
     use super::*;
 
     #[test]
