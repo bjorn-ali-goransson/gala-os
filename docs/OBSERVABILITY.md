@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, and `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -1185,7 +1185,9 @@ trapping the return as well as the call (`iat_answers`, below).
 `imports_strings=<n>` quotes the arguments that read as text, beside
 the registers they were read from, and the answer and the filled
 buffers of a call whose return was trapped (`import_strings` and
-`import_answer_text`, below).
+`import_answer_text`, below), and `imports_bytes=<n>` writes the places
+that read as no text as hex instead, which is the whole of what a
+structure answered by value says (`import_answer_bytes`, below).
 `imports_except=<text>[,<text>...]` leaves the imports whose
 `<dll>!<name>` holds one of the texts unarmed, so that the budget goes
 to the rest (`iat_except`, below).
@@ -1388,6 +1390,37 @@ data first, which disarms the slot (below), so that one leaves a
   the run. A run longer than 120 characters is cut and ends in `...`,
   and a run that crosses the end of its page is cut at the page with
   nothing to say so.
+- **And what the places that are no text hold, with
+  `imports_bytes=<n>`.** Most of a call says nothing in text. A method
+  that answers a structure by value is handed the caller's own buffer
+  in an argument register and answers that same pointer (WORKFLOW,
+  "COM methods that return a structure take a hidden pointer"), an
+  array of handles is an array of numbers, and a quote of either reads
+  nothing -- which is where a trace of Word's startup ends up: the mso
+  ordinal it calls 134 times before it gives up answers the buffer it
+  was handed, and all 134 of those answers quoted hold no text at all.
+  With this option every place that was read and reads as no text is
+  written as the first 32 bytes there in lowercase hex, in an object of
+  its own: `"bytes":{"answer":"0123456789abcdef...","0":"..."}` beside
+  `"text"` in the same `import` or `ret` event, keyed by the same
+  places, and the first eight calls and the first eight returns
+  carrying one are said in the log (`imports: the return of <name>
+  carries bytes: answer "..." arg 0 "..."`). It takes the same read a
+  quote takes -- one window per place, stopped at the end of that
+  place's page -- and the same arithmetic: `n` from 1 to 1048576,
+  counted in dumps and not in calls, a place that is a plain number
+  costing none. Text wins where the window is text and a quote is
+  left, so the two objects never say the same window twice; a run of
+  text with no quote left falls to the dump rather than disappearing,
+  so a spent string budget cannot read afterwards as a place that held
+  nothing; and given without `imports_strings=` it dumps every
+  readable place, the strings among them, as hex. A place that was
+  only dumped at the call is read again at the return, where a quoted
+  one is not: the bytes of a buffer are what the call changed, which
+  is the whole reason to read one there. Scenario
+  `import_answer_bytes` with an ARM64 twin, where the one armed import
+  answers the buffer it was handed -- 32 zeroes where the call is
+  recorded, a structure's bytes where its answer is.
 - **Minus the names that are noise, with
   `imports_except=<text>[,<text>...]`.** A program's heap, string and
   locale imports are called in the thousands while the ones a question
@@ -1524,7 +1557,9 @@ data first, which disarms the slot (below), so that one leaves a
 - **Limits**: one record a slot without `imports_repeat=`, so the
   stream is then a set of names and not a sequence; an answer is the
   one register the ABI returns in, so a structure returned by hidden
-  pointer is the pointer and not what it points at; a quote at a
+  pointer is the pointer, and what `imports_bytes=` reads at it is the
+  first 32 bytes and no more -- a buffer larger than that belongs in a
+  dump of memory and not in a line per call; a quote at a
   return is read only where `imports_answers=` trapped one, so a call
   whose answer the budget did not reach carries what its arguments
   held at the call and nothing of what it wrote; and a callee that

@@ -8408,6 +8408,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_strings", "testdll.dll", "gala"),
     ("import_answer_text", "ntdll.dll", "Windows/System32"),
     ("import_answer_text", "testdll.dll", "gala"),
+    ("import_answer_bytes", "ntdll.dll", "Windows/System32"),
+    ("import_answer_bytes", "testdll.dll", "gala"),
     ("fpu_test", "ntdll.dll", "Windows/System32"),
     ("apc_test", "ntdll.dll", "Windows/System32"),
     ("ioapc_test", "ntdll.dll", "Windows/System32"),
@@ -13417,6 +13419,21 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // Bytes at a place that reads as no text, keyed by where they
+        // were read the same way a quote is: at the call the buffer is
+        // this program's own zeroes, at the return the structure the
+        // callee wrote and the answer pointing at it. The same place at
+        // the two times, which is what a structure answered by value
+        // needs to be read at all.
+        "import_answer_bytes",
+        &[
+            r#""call":"testdll.dll!gala_bytes","args":["#,
+            r#","bytes":{"0":"0000000000000000000000000000000000000000000000000000000000000000"}}"#,
+            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","call":"testdll.dll!gala_bytes","answer":"#,
+            r#","bytes":{"answer":"0123456789abcdef0123456789abcdef00000000000000000000000000000000","0":"0123456789abcdef0123456789abcdef00000000000000000000000000000000"}}"#,
+        ],
+    ),
+    (
         // RS step B2: each window is registered in its own session, and
         // HWNDs asked for across sessions are named.
         "session_test",
@@ -13917,6 +13934,7 @@ const ARM64_TWINS: &[&str] = &[
     "import_strings_test",
     "import_strings",
     "import_answer_text",
+    "import_answer_bytes",
     "import_threads",
     "thread_test",
     "sync_test",
@@ -19321,10 +19339,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // text, carried by two of the three calls -- a quote where
         // there is text, nothing where there is none, and a read that
         // fails leaving the call untouched, which is the program's own
-        // `ok`. The fourth call, through the second slot, is handed an
-        // empty buffer and a length and so carries nothing at all:
-        // what it wrote is at its return, which this run does not trap
-        // and `import_answer_text` below does.
+        // `ok`. The fourth and fifth calls, through the other two
+        // slots, are handed an empty buffer and a length and so carry
+        // nothing at all: what they wrote is at their returns, which
+        // this run does not trap and `import_answer_text` and
+        // `import_answer_bytes` below do.
         name: "import_strings",
         cmdline: "qemu_exit events=call run=import_strings_test.exe \
                   imports=import_strings_test.exe!testdll.dll imports_repeat=64 \
@@ -19337,7 +19356,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
              and at a trapped return its answer and the arguments that were \
              none at the call -- 64 quotes at most, 120 characters of each \
              (imports_strings=)",
-            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
+            "imports: first calls recorded: 3 of 3 slots armed (imports=)",
             "imports: 2 later calls recorded of 64 (imports_repeat=)",
             "imports: the call to testdll.dll!gala_four carries text: arg 0 \
              \"ErrorMessage\" arg 1 \"Document1 - Word\" (imports_strings=)",
@@ -19368,13 +19387,60 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "import_strings_test: filled",
             "import_strings_test: ok",
             "exited with status 0x00000000",
-            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
-            "imports: 4 answers recorded of 64 (imports_answers=)",
+            "imports: first calls recorded: 3 of 3 slots armed (imports=)",
+            "imports: 5 answers recorded of 64 (imports_answers=)",
             "imports: the return of testdll.dll!gala_fill carries text: answer \
              \"filled at the return\" arg 0 \"filled at the return\" \
              (imports_strings=)",
             "imports: 5 quotes of 64, carried by 2 calls and 1 return \
              (imports_strings=)",
+        ],
+    },
+    Scenario {
+        // OT3b: bytes at a place that reads as no text. `gala_bytes`
+        // answers the buffer it was handed, having written a
+        // structure's bytes into it -- which is what the x64 ABI makes
+        // of a COM method answering a structure by value, and what
+        // Word's startup asks mso for 134 times before it gives up: the
+        // answer is a pointer at bytes, so a quote of it reads nothing
+        // and the bytes themselves are all there is to read. Only that
+        // one import is armed (`imports_except=` leaves the other two
+        // alone), so every register the run reads is this program's own
+        // choosing: the buffer is zeroed where the call is recorded and
+        // holds the structure where its answer is, the length and the
+        // two numbers beside it point at nothing, and the same place
+        // read at the two times is the whole of what the option is for.
+        // `imports_strings=` is given beside it and finds nothing,
+        // which is what sends each of these three places to the dump.
+        name: "import_answer_bytes",
+        cmdline: "qemu_exit events=call run=import_strings_test.exe \
+                  imports=import_strings_test.exe!testdll.dll \
+                  imports_except=gala_four,gala_fill imports_answers=64 \
+                  imports_strings=64 imports_bytes=64",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_strings_test: filled with bytes",
+            "import_strings_test: ok",
+            "exited with status 0x00000000",
+            "imports: the bytes at a place of a recorded call that reads as no \
+             text -- its argument registers, and at a trapped return its answer \
+             and those arguments again -- 64 dumps at most, 32 bytes of each \
+             (imports_bytes=)",
+            "imports: 2 imports were left unarmed by imports_except=",
+            "imports: first calls recorded: 1 of 1 slots armed (imports=)",
+            "imports: 1 answers recorded of 64 (imports_answers=)",
+            "imports: the call to testdll.dll!gala_bytes carries bytes: arg 0 \
+             \"0000000000000000000000000000000000000000000000000000000000000000\" \
+             (imports_bytes=)",
+            "imports: the return of testdll.dll!gala_bytes carries bytes: answer \
+             \"0123456789abcdef0123456789abcdef00000000000000000000000000000000\" \
+             arg 0 \
+             \"0123456789abcdef0123456789abcdef00000000000000000000000000000000\" \
+             (imports_bytes=)",
+            "imports: nothing a recorded call was handed, or answered where its \
+             return was trapped, read as text",
+            "imports: 3 dumps of 64, carried by 1 call and 1 return \
+             (imports_bytes=)",
         ],
     },
     Scenario {
@@ -20984,6 +21050,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_object", "object_test"),
     ("import_threads", "lock_test"),
     ("import_answer_text", "import_strings_test"),
+    ("import_answer_bytes", "import_strings_test"),
     ("events_from", "process_test"),
     ("events_match", "process_test"),
     ("quota_sockets", "quota_test"),

@@ -9,7 +9,10 @@
 //! on to a function it is handed, so that a call through a slot can
 //! raise an exception at its caller's frame (user/iat_unwind_test);
 //! and one that takes four arguments, which is as many as an import
-//! trace can record of a call (user/import_strings_test).
+//! trace can record of a call; and two that fill a buffer the caller
+//! handed them and answer it, one with text and one with the bytes of
+//! a structure, which is what a trace reads at a return and not at a
+//! call (user/import_strings_test).
 
 #![no_std]
 
@@ -123,6 +126,46 @@ pub unsafe extern "C" fn gala_fill(out: *mut u16, n: u64) -> u64 {
     }
     // SAFETY: inside that same buffer, by the same check.
     unsafe { out.add(FILLED.len()).write(0) };
+    out as u64
+}
+
+/// The bytes of a structure a call answers by value, which is what a
+/// reader of a trace sees dumped at the return and nowhere at the call.
+/// Nothing of it reads as text: the first byte is no printable
+/// character, so a quote of this buffer is a quote of nothing and the
+/// bytes themselves are all there is to read (`imports_bytes=`).
+pub const STRUCTURE: [u8; 16] = [
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+];
+
+/// Writes [`STRUCTURE`] into the buffer it is handed and answers that
+/// buffer: the shape of a call that answers a structure by value, which
+/// the x64 ABI makes of every COM method whose result is too large for
+/// a register -- the caller's buffer handed in an argument register and
+/// answered back (WORKFLOW, "COM methods that return a structure take a
+/// hidden pointer"). What a trace can read of such a call is bytes and
+/// not text, at the return and not at the call, which is what Word's
+/// startup asks mso for 134 times before it gives up
+/// (`imports_bytes=`, user/import_strings_test).
+///
+/// `n` is the buffer's length in bytes; 0 where it is too short, as
+/// those calls answer. `a` and `b` are not read at all: they are there
+/// so that the caller fills the two argument registers a trace would
+/// otherwise dump whatever the caller last left in, which is what makes
+/// a run of this call read the same way twice.
+///
+/// # Safety
+/// `out` must be writable for `n` bytes, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gala_bytes(out: *mut u8, n: u64, _a: u64, _b: u64) -> u64 {
+    if out.is_null() || n < STRUCTURE.len() as u64 {
+        return 0;
+    }
+    for (i, &byte) in STRUCTURE.iter().enumerate() {
+        // SAFETY: the caller's buffer of `n` bytes, which the check
+        // above leaves room in for the whole structure.
+        unsafe { out.add(i).write(byte) };
+    }
     out as u64
 }
 
