@@ -75,3 +75,33 @@ impl<T: PortValue> Port<T> {
         unsafe { T::write_to(self.port, value) }
     }
 }
+
+impl Port<u8> {
+    /// Writes every byte of `bytes` to the port in one `rep outsb`.
+    ///
+    /// A virtual machine leaves its hypervisor on each port write, and a
+    /// string write leaves it once for the string rather than once for
+    /// each byte: nested under WSL2 an exit costs about 10 us, which is
+    /// what a byte at a time costs the event stream (OBSERVABILITY
+    /// "What it costs"). The caller sends whole lines.
+    pub fn write_all(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        // SAFETY: upheld by the contract of `Port::new`. `rep outsb` reads
+        // `rcx` bytes forwards from `rsi` and writes each to the port in
+        // `dx`, so the only memory it touches is `bytes`, read-only and
+        // within its length; `cld` sets the direction it reads, this being
+        // the one instruction in the kernel that depends on that flag.
+        unsafe {
+            asm!(
+                "cld",
+                "rep outsb",
+                in("dx") self.port,
+                inout("rsi") bytes.as_ptr() => _,
+                inout("rcx") bytes.len() => _,
+                options(readonly, nostack),
+            );
+        }
+    }
+}

@@ -8392,6 +8392,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iat_answers", "testdll.dll", "gala"),
     ("iat_repeat", "ntdll.dll", "Windows/System32"),
     ("iat_repeat", "testdll.dll", "gala"),
+    ("import_cost_test", "ntdll.dll", "Windows/System32"),
+    ("import_cost_test", "testdll.dll", "gala"),
+    ("import_cost", "ntdll.dll", "Windows/System32"),
+    ("import_cost", "testdll.dll", "gala"),
     ("import_strings_test", "ntdll.dll", "Windows/System32"),
     ("import_strings_test", "testdll.dll", "gala"),
     ("import_strings", "ntdll.dll", "Windows/System32"),
@@ -11133,6 +11137,7 @@ const USER_PROGRAMS: &[&str] = &[
     "iat_trace_test",
     "iat_ret_test",
     "iat_unwind_test",
+    "import_cost_test",
     "import_strings_test",
     "args_test",
     "fpu_test",
@@ -13844,6 +13849,8 @@ const ARM64_TWINS: &[&str] = &[
     "iat_answers",
     "iat_unwind_test",
     "iat_unwind",
+    "import_cost_test",
+    "import_cost",
     "import_strings_test",
     "import_strings",
     "thread_test",
@@ -19117,6 +19124,41 @@ const BASE_SCENARIOS: &[Scenario] = &[
              from being that call's return trap: it is put back where the call \
              left it as well, and the call recorded without an answer \
              (imports_answers=)",
+        ],
+    },
+    Scenario {
+        // OT3b: what the trace costs a call, and the three budgets at
+        // a scale the three-call programs above cannot reach. This is
+        // the loop with nothing armed, which is also the baseline the
+        // cost is measured against: the same 20000 calls run under
+        // each configuration of the trace, and what it costs is the
+        // difference between their in-kernel seconds (WORKFLOW "What
+        // the import trace costs").
+        name: "import_cost_test",
+        cmdline: "qemu_exit run=import_cost_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["import_cost_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // OT3b: the same loop in the trace's costliest configuration
+        // -- every call recorded, the arguments quoted, the stream on
+        // -- which is where the budgets' arithmetic is checked at
+        // scale: one slot armed, the first call recorded free of the
+        // repeat budget, 19999 later calls, and two quotes a call
+        // (the narrow string and the wide one; the number is answered
+        // without a read and the blob is read and thrown away).
+        name: "import_cost",
+        cmdline: "qemu_exit events=call run=import_cost_test.exe \
+                  imports=import_cost_test.exe!testdll.dll imports_repeat=1048576 \
+                  imports_strings=1048576",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_cost_test: ok",
+            "exited with status 0x00000000",
+            "imports: first calls recorded: 1 of 1 slots armed (imports=)",
+            "imports: 19999 later calls recorded of 1048576 (imports_repeat=)",
+            "imports: 40000 arguments quoted of 1048576, carried by 20000 calls \
+             (imports_strings=)",
         ],
     },
     Scenario {
