@@ -1185,6 +1185,19 @@ trapping the return as well as the call (`iat_answers`, below).
 `imports_strings=<n>` quotes the arguments that read as text, beside
 the registers they were read from (`import_strings`, below).
 
+What those budgets bound is the records and not the faults, which is
+what makes `imports=` with `events_from=<seconds>` a trace of **a
+window and not of a run**: a call whose record is not written takes none
+of the repeat budget and leaves its slot armed, so however many calls
+went through a slot before the stream started, the whole budget is there
+for the ones after it, and the first call the stream carries is recorded
+as a first call. What the calls before the window cost is their faults
+alone, which is below noise beside a record ("What the stream costs").
+Scenario `import_window`, with an ARM64 twin: two batches of a thousand
+calls through one armed import with the stream starting between them,
+and the second batch recorded whole on a budget the first would
+otherwise have spent.
+
 What it answers that nothing else here can is a call into a DLL **gala
 did not write**. `trace_from=` lives in the wrappers
 `cargo xtask gen-trace` puts inside gala's own DLLs, so it ends where
@@ -1234,9 +1247,14 @@ data first, which disarms the slot (below), so that one leaves a
   a number in that range is refused and the slots are repaired as
   without the option). A later call is the same `import` event as a
   first one and is not marked as one, the first appearance of a name in
-  such a stream being the first call through its slot. What it costs is
-  one page fault per call while a slot is armed, which is what the
-  budget bounds; the summary line says how many later calls were
+  such a stream being the first call through its slot. What a recorded call
+  costs is its record, and the budget is what bounds that: a fault
+  whose record is not written -- the stream not started yet
+  (`events_from=`), the process not among those wanted -- takes none of
+  the budget and leaves the slot armed, the fault itself being below
+  noise beside a record ("What the stream costs"). Which is what makes
+  the budget spendable on a window late in a run, rather than on
+  whatever came first. The summary line says how many later calls were
   recorded and, when the budget is spent, that the slots are repaired
   from there on. A slot read as data is still disarmed (below), so a
   program that reads an import rather than calling it ends the repeat
@@ -1362,6 +1380,9 @@ data first, which disarms the slot (below), so that one leaves a
   whole run, about 20 s on top of a 51 s one, where the same budget
   spread over every import would be spent in the first seconds of
   startup and say nothing about the window that matters.
+  `events_from=` narrows the same way in time rather than in names: the
+  budget is taken by the records, so the calls before the window cost
+  their faults and nothing of it.
 - **Cost of an answer**: a second fault for each call answered, on the
   same path as the call's, plus one entry of kernel memory from the
   call until its return. So `imports_answers=` is read narrowed as the

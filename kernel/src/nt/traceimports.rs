@@ -438,6 +438,15 @@ fn take_budget(budget: &AtomicU32) -> bool {
     }
 }
 
+/// Whether an `import` event for this process would be written: the
+/// stream carries the category and wants the process. The trap handler
+/// asks before it takes a budget or marks a slot reached, so that what
+/// the budgets bound is the records, which cost, and not the faults,
+/// which do not (`resolve`).
+fn carried(process: &Process) -> bool {
+    events::enabled(Category::Call) && events::syscall_pid_wanted(process.id)
+}
+
 /// `imports_answers=<n>`: record what each call through an armed slot
 /// answered, `n` calls at most. Needs `imports=` to have armed
 /// something and `events=call` for the records to be written, as the
@@ -657,6 +666,17 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     if call && addr % STRIDE == RET_OFFSET {
         return answered(process, frame, addr);
     }
+    // Whether a record of this call would be written at all. The
+    // record is what a traced call costs -- 2.1 ms of bytes leaving
+    // the guest against the fault's 5 us, measured (OBSERVABILITY
+    // "What the stream costs") -- so a call whose record is not
+    // written leaves the slot as it found it, armed and not yet
+    // reached, and takes none of the budget below. That is what makes
+    // `imports=` with `events_from=` a trace of a window and not of a
+    // run's first moments: however many calls went through the slot
+    // before the stream started, its budget is whole when it does and
+    // the first call the stream carries is a first call.
+    let writing = carried(process);
     // The table is read under its lock and nothing else is done there:
     // writing the slot touches user memory, which no lock may be held
     // at, and the event is a line of the stream.
@@ -667,7 +687,7 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
         };
         let first = if call { !entry.reached } else { !entry.read };
         if call {
-            entry.reached = true;
+            entry.reached |= writing;
         } else {
             entry.read = true;
         }
@@ -679,11 +699,17 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     // Whether the slot stays armed, so that the next call through it
     // faults and is recorded too (`imports_repeat=`). A first call is
     // recorded whatever happens and takes none of that budget; a later
-    // one is recorded only while there is budget for it, and the budget
-    // is taken whether the stream is on or not, the fault being the
-    // cost either way.
-    let again = if first { REPEAT.load(Ordering::Relaxed) != 0 } else { take_budget(&REPEAT) };
-    let logged = (first || again) && record(process, frame, &entry, first);
+    // one is recorded only while there is budget for it. Where nothing
+    // is written nothing is taken, and the slot stays armed whatever
+    // the budget, because what it is still holding is its first call.
+    let again = if !writing {
+        true
+    } else if first {
+        REPEAT.load(Ordering::Relaxed) != 0
+    } else {
+        take_budget(&REPEAT)
+    };
+    let logged = writing && (first || again) && record(process, frame, &entry, first);
     if !again && let Err(status) = put(process, entry.slot, entry.target) {
         // The call still goes on (the instruction pointer below is what
         // sends it), so this costs a fault a call from here rather than
@@ -765,7 +791,7 @@ fn read_as_data(
 /// it cannot, every call is. True when the stream carries it, which is
 /// what trapping its return waits on (`imports_answers=`).
 fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> bool {
-    if !events::enabled(Category::Call) || !events::syscall_pid_wanted(process.id) {
+    if !carried(process) {
         return false;
     }
     let args = frame.arg_regs();
