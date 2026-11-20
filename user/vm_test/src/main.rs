@@ -94,6 +94,28 @@ fn run() -> Result<(), u32> {
     c.eq(b as u64, 0x5000_0000)?;
     let (st, _, _) = allocate(0x5001_0000, 0x1000, MEM_RESERVE, PAGE_READWRITE);
     c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+
+    // MEM_COMMIT alongside MEM_RESERVE does not excuse the reservation:
+    // a fixed base needs the whole range free. Part of the reservation,
+    // all of it and a range across its end are refused alike, and the
+    // pages already being committed makes no difference; only
+    // MEM_COMMIT on its own commits inside a reservation. Office's
+    // allocators probe a preferred address this way, so such a refusal
+    // in a Word run is an answer and not a gap (ROADMAP OT3b).
+    let both = MEM_RESERVE | MEM_COMMIT;
+    let (st, _, _) = allocate(0x5000_0000, 0x1000, both, PAGE_READWRITE);
+    c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+    let (st, _, _) = allocate(0x5000_0000, 0x20000, both, PAGE_READWRITE);
+    c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+    let (st, _, _) = allocate(0x5000_1000, 0x1000, both, PAGE_READWRITE);
+    c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+    let (st, _, _) = allocate(0x5001_f000, 0x2000, both, PAGE_READWRITE);
+    c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+    let (st, _, _) = allocate(0x5000_0000, 0x20000, MEM_COMMIT, PAGE_READWRITE);
+    c.eq(st, STATUS_SUCCESS)?;
+    let (st, _, _) = allocate(0x5000_0000, 0x1000, both, PAGE_READWRITE);
+    c.eq(st, STATUS_CONFLICTING_ADDRESSES)?;
+
     let (st, _, _) = free(0x5000_0000, 0, MEM_RELEASE);
     c.eq(st, STATUS_SUCCESS)?;
 
