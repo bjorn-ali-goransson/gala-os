@@ -10865,6 +10865,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("appbar_test", "user32.dll", "Windows/System32"),
     ("appbar_test", "gdi32.dll", "Windows/System32"),
     ("appbar_test", "shell32.dll", "Windows/System32"),
+    // The topmost band and tool windows (user/topmost_test).
+    ("topmost_test", "ntdll.dll", "Windows/System32"),
+    ("topmost_test", "kernel32.dll", "Windows/System32"),
+    ("topmost_test", "user32.dll", "Windows/System32"),
+    ("topmost_test", "gdi32.dll", "Windows/System32"),
     ("no_i8042", "ntdll.dll", "Windows/System32"),
     ("no_i8042", "kernel32.dll", "Windows/System32"),
     ("no_i8042", "user32.dll", "Windows/System32"),
@@ -11252,6 +11257,7 @@ const USER_PROGRAMS: &[&str] = &[
     "uisettings_test",
     "tray_test",
     "appbar_test",
+    "topmost_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -13519,6 +13525,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "explorer",
     "linux_menu",
     "tray_test",
+    "topmost_test",
     "d2d1_window",
     // A framebuffer for the docked agent panel (AGENT_SCREEN).
     "agent",
@@ -16277,6 +16284,23 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "desktop: app bar removed: window",
             "appbar_test: the strip is given back",
             "appbar_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The topmost band and tool windows (user/topmost_test; ROADMAP
+        // SH step 1, part 1): a topmost window above the active one,
+        // HWND_TOPMOST and HWND_NOTOPMOST, a tool window made the
+        // foreground window getting a typed key; TOPMOST_SCREEN checks
+        // what is on top on the screen and types the key.
+        name: "topmost_test",
+        cmdline: "qemu_exit run=topmost_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "topmost_test: the topmost window above the active one at 400,300",
+            "topmost_test: out of the band, under the topmost window at 400,300",
+            "topmost_test: the tool window got the key",
+            "topmost_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -21462,6 +21486,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("desktop_at_boot", "needs a screen (the desktop the boot ends on)"),
     ("linux_menu", "needs a screen (the start menu) and Linux programs (no LX in gala-um yet)"),
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
+    ("topmost_test", "needs a screen (what is on top is checked on it)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("no_i8042", "a machine with no PS/2 controller: gala-um has no I/O ports and no input thread"),
@@ -25020,6 +25045,35 @@ const TRAY_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// user/topmost_test's windows: the normal one red at (100, 100), the
+/// topmost one green at (300, 200), overlapping at (400, 300); the tool
+/// window blue at (760, 120). Each state is checked while the program
+/// waits for its key: `a` into the active normal window, `b` into the
+/// tool window.
+const TOPMOST_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "topmost_test: type a",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(400, 300, 0x00ff00), // the topmost one, on top
+                PixelCheck::At(150, 250, 0xff0000), // the active one, below
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey a"], pixels: &[] },
+        ScreenStep {
+            after: "topmost_test: type b",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(880, 200, 0x0000ff), // the tool window
+                PixelCheck::At(400, 300, 0x00ff00), // still the topmost one
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey b"], pixels: &[] },
+    ],
+};
+
 /// user/d2d1_test's window (`args=window`): at (100, 100), its client
 /// area from (101, 133) as gui_test's; Direct2D drew a blue gradient, a
 /// red rounded rectangle at client (20, 20) - (140, 100), a green circle
@@ -25415,6 +25469,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
+    ("topmost_test", TOPMOST_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),

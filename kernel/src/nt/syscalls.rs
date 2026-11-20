@@ -217,6 +217,10 @@ pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
 pub const GALA_WINDOW_RESIZE: u32 = 0x7f55;
 /// A clicked popup takes the activation (its WM_MOUSEACTIVATE said so).
 pub const GALA_WINDOW_ACTIVATE: u32 = 0x7f5d;
+/// SetForegroundWindow: a window raised and made active.
+pub const GALA_WINDOW_FOREGROUND: u32 = 0x7f5e;
+/// The topmost band: SetWindowPos HWND_TOPMOST / HWND_NOTOPMOST.
+pub const GALA_WINDOW_SET_TOPMOST: u32 = 0x7f5f;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -465,6 +469,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
     (GALA_WINDOW_RESIZE, "GalaWindowResize", 2, gala_window_resize),
     (GALA_WINDOW_ACTIVATE, "GalaWindowActivate", 1, gala_window_activate),
+    (GALA_WINDOW_FOREGROUND, "GalaWindowForeground", 1, gala_window_foreground),
+    (GALA_WINDOW_SET_TOPMOST, "GalaWindowSetTopmost", 2, gala_window_set_topmost),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -2471,6 +2477,31 @@ fn gala_window_activate(call: &mut Call<'_>) -> NtStatus {
     let owner = call.process.id;
     tri!(super::desktop::with(&call.process.desk.shell, |d| {
         d.activate_for_press(id, owner)?;
+        Ok(((), None))
+    }));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowForeground(id): the caller's shown window `id` becomes the
+/// foreground window, raised and active (SetForegroundWindow).
+/// STATUS_ACCESS_DENIED while another program's window is active.
+fn gala_window_foreground(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.foreground(id, owner)?;
+        Ok(((), None))
+    }));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowSetTopmost(id, on): the caller's window `id` into the
+/// topmost band (on 1) or out of it (0), at the top of its layer.
+fn gala_window_set_topmost(call: &mut Call<'_>) -> NtStatus {
+    let (id, on) = (arg!(call, 0) as u32, arg!(call, 1) != 0);
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.set_topmost(id, owner, on)?;
         Ok(((), None))
     }));
     NtStatus::SUCCESS

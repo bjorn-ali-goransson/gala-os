@@ -61,6 +61,12 @@ static TOP: AtomicI64 = AtomicI64::new(0);
 static BOTTOM: AtomicI64 = AtomicI64::new(0);
 static FOCUS: AtomicUsize = AtomicUsize::new(0);
 
+/// A window's place in the z order, smallest first (the top): top-level
+/// windows in the topmost band (WS_EX_TOPMOST) above the rest, then by z.
+pub(crate) fn z_key(w: &crate::window::Window) -> (bool, i64) {
+    (!(w.parent == 0 && w.ex_style & crate::window::WS_EX_TOPMOST != 0), w.z)
+}
+
 pub fn next_z(child: bool) -> i64 {
     if child {
         BOTTOM.fetch_add(1, Ordering::Relaxed) + 1
@@ -603,7 +609,7 @@ fn siblings(hwnd: Hwnd) -> Option<([Hwnd; 64], usize, usize)> {
                     n += 1;
                 }
             }
-            idx[..n].sort_unstable_by_key(|&i| s.windows[i].z);
+            idx[..n].sort_unstable_by_key(|&i| z_key(&s.windows[i]));
             n
         };
         for k in 0..n {
@@ -673,7 +679,7 @@ fn top_levels(thread: u32, out: &mut [Hwnd; 256]) -> usize {
                 n += 1;
             }
         }
-        out[..n].sort_unstable_by_key(|&h| index_of(h).map_or(0, |i| s.windows[i].z));
+        out[..n].sort_unstable_by_key(|&h| index_of(h).map_or((true, 0), |i| z_key(&s.windows[i])));
         n
     })
 }
@@ -1282,10 +1288,17 @@ pub extern "system" fn SetWindowPos(
     if top_level && flags & SWP_FRAMECHANGED != 0 {
         crate::window::calc_frame(hwnd, true);
     }
+    // HWND_TOPMOST (-1) and HWND_NOTOPMOST (-2) move a top-level window
+    // into the topmost band or out of it.
+    if flags & SWP_NOZORDER == 0 && top_level && (after == usize::MAX || after == usize::MAX - 1) {
+        crate::window::set_topmost(hwnd, after == usize::MAX);
+    }
     if flags & SWP_NOZORDER == 0 {
         let z = match after {
-            0 | usize::MAX => next_z(false), // HWND_TOP, HWND_TOPMOST
-            1 => next_z(true),               // HWND_BOTTOM
+            // HWND_TOP, HWND_TOPMOST, HWND_NOTOPMOST: the top of its band.
+            0 | usize::MAX => next_z(false),
+            v if v == usize::MAX - 1 => next_z(false),
+            1 => next_z(true), // HWND_BOTTOM
             sibling => window(sibling).map_or(w.z, |s| s.z + 1),
         };
         with(|s| s.windows[i].z = z);
@@ -2149,7 +2162,8 @@ pub struct Point {
 }
 
 /// WindowFromPoint(point): the deepest visible window at a screen point:
-/// the topmost top-level window containing it (its frame included), then
+/// the top-level window highest in the z order containing it (`z_key`:
+/// the topmost band first; its frame included), then
 /// the topmost visible child containing it, and so on; NULL if none.
 #[unsafe(no_mangle)]
 pub extern "system" fn WindowFromPoint(point: Point) -> Hwnd {
@@ -2170,7 +2184,7 @@ pub extern "system" fn WindowFromPoint(point: Point) -> Hwnd {
             if shown(i)
                 && s.windows[i].parent == 0
                 && inside_top(i)
-                && best.is_none_or(|b| s.windows[i].z > s.windows[b].z)
+                && best.is_none_or(|b| z_key(&s.windows[i]) < z_key(&s.windows[b]))
             {
                 best = Some(i);
             }

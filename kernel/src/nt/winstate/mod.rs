@@ -318,6 +318,9 @@ pub struct Window<X> {
     pub popup: bool,
     /// An application window without gala's frame (STYLE_FRAMELESS).
     pub frameless: bool,
+    /// In the topmost band (WS_EX_TOPMOST, GalaWindowSetTopmost): above
+    /// the other windows whichever is active, with the popups.
+    pub topmost: bool,
     /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
     /// (straight alpha); empty: none (the taskbar shows a lettered tile).
     pub icon: Vec<u32>,
@@ -342,6 +345,11 @@ impl<X> Window<X> {
     pub fn client_size(&self) -> (u32, u32) {
         let (b, top) = self.frame();
         (self.w - 2 * b, self.h - top - b)
+    }
+
+    /// In the upper layer: a popup or in the topmost band.
+    pub fn upper(&self) -> bool {
+        self.popup || self.topmost
     }
 
     pub fn shown(&self) -> bool {
@@ -624,6 +632,7 @@ impl<X: Default> State<X> {
             unsnapped: None,
             popup,
             frameless,
+            topmost: false,
             look: 0,
             chrome: X::default(),
         };
@@ -1347,15 +1356,16 @@ impl<X: Default> State<X> {
         out
     }
 
-    /// To the top of its layer: framed windows stay below the popups.
+    /// To the top of its layer: the other windows stay below the upper
+    /// one (the popups and the topmost band, `Window::upper`).
     pub fn raise(&mut self, id: u32) {
         let Some(i) = self.index(id) else { return };
         let w = self.windows.remove(i);
         let bounds = w.bounds(self.shadow);
-        let at = if w.popup {
+        let at = if w.upper() {
             self.windows.len()
         } else {
-            self.windows.iter().position(|o| o.popup).unwrap_or(self.windows.len())
+            self.windows.iter().position(|o| o.upper()).unwrap_or(self.windows.len())
         };
         // Back in (the capacity it left), then into place.
         let _ = self.windows.try_push(w);
@@ -1363,6 +1373,38 @@ impl<X: Default> State<X> {
         if at != i {
             self.add_damage(bounds);
         }
+    }
+
+    /// `owner`'s window `id` into the topmost band or out of it
+    /// (SetWindowPos HWND_TOPMOST / HWND_NOTOPMOST, WS_EX_TOPMOST): at the
+    /// top of the layer it is now in, as Windows puts it.
+    pub fn set_topmost(&mut self, id: u32, owner: u64, on: bool) -> Result<(), NtStatus> {
+        self.find(id, owner)?.topmost = on;
+        self.raise(id);
+        if let Some(w) = self.window(id) {
+            let bounds = w.bounds(self.shadow);
+            self.add_damage(bounds);
+        }
+        Ok(())
+    }
+
+    /// `owner`'s shown window `id` becomes the foreground window, raised
+    /// and active (SetForegroundWindow), when `owner` may take it:
+    /// Windows' foreground lock, as far as gala keeps its conditions:
+    /// the active window is `owner`'s already, or none is.
+    /// STATUS_ACCESS_DENIED otherwise (another program's window keeps the
+    /// keyboard: no program takes it from the user's choice).
+    pub fn foreground(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        if !self.find(id, owner)?.shown() {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let holder = self.active.and_then(|a| self.window(a)).map(|w| w.owner);
+        if holder.is_some_and(|h| h != owner) {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
+        self.raise(id);
+        self.activate(Some(id));
+        Ok(())
     }
 
     /// The active window becomes `id`: the old and the new one are told

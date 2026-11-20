@@ -38,6 +38,8 @@ unsafe extern "system" {
     fn GalaWindowDrag(id: u32) -> u32;
     fn GalaWindowResize(id: u32, edges: u32) -> u32;
     fn GalaWindowActivate(id: u32) -> u32;
+    fn GalaWindowForeground(id: u32) -> u32;
+    fn GalaWindowSetTopmost(id: u32, on: u32) -> u32;
     fn GalaWindowPresent(
         id: u32,
         x: i32,
@@ -118,6 +120,9 @@ const WM_MOUSEACTIVATE: u32 = 0x0021;
 const MA_ACTIVATE: isize = 1;
 const MA_ACTIVATEANDEAT: isize = 2;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+/// The topmost band: above every window without it (the desktop's
+/// GalaWindowSetTopmost; z order here by `crate::tree::z_key`).
+pub(crate) const WS_EX_TOPMOST: u32 = 0x8;
 const WM_NCHITTEST: u32 = 0x0084;
 const HTCLIENT: isize = 1;
 const HTCAPTION: isize = 2;
@@ -309,6 +314,10 @@ fn set_frame(i: usize, custom: Option<(i32, i32)>) {
             0
         };
         let _ = GalaWindowCreate(x, y, wd as u32, ht as u32, w.title.as_ptr(), len, &mut id, style);
+        // The new desktop window keeps the old one's band.
+        if id != 0 && w.ex_style & WS_EX_TOPMOST != 0 {
+            GalaWindowSetTopmost(id, 1);
+        }
         if id != 0 && w.visible {
             GalaWindowShow(id, 1);
         }
@@ -1185,6 +1194,9 @@ pub extern "system" fn CreateWindowExW(
         let mut id = 0;
         // Without a screen the window exists but is never shown.
         let _ = GalaWindowCreate(x, y, w as u32, h as u32, name, len, &mut id, u32::from(popup));
+        if id != 0 && ex_style & WS_EX_TOPMOST != 0 {
+            GalaWindowSetTopmost(id, 1);
+        }
         (pixels, section, id)
     };
     let mut title = [0u16; 128];
@@ -3816,14 +3828,40 @@ pub extern "system" fn SetActiveWindow(hwnd: Hwnd) -> Hwnd {
 }
 
 /// SetForegroundWindow: the window becomes the foreground (and active)
-/// window, raised on the desktop.
+/// window, raised on the desktop, which gives it the keyboard
+/// (GalaWindowForeground). Refused (0) while another program's window is
+/// active, as Windows' foreground lock refuses a background program; the
+/// desktop logs both.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetForegroundWindow(hwnd: Hwnd) -> i32 {
-    if window(hwnd).is_none() {
+    let Some(w) = window(hwnd) else { return 0 };
+    let top = if w.parent == 0 { hwnd } else { crate::tree::GetAncestor(hwnd, 2) };
+    let Some(t) = window(top) else { return 0 };
+    // SAFETY: a plain call on our desktop window.
+    if t.desktop != 0 && unsafe { GalaWindowForeground(t.desktop) } != 0 {
         return 0;
     }
     set_foreground(hwnd);
     BringWindowToTop(hwnd)
+}
+
+/// The window `hwnd` into the topmost band or out of it (SetWindowPos
+/// HWND_TOPMOST / HWND_NOTOPMOST): WS_EX_TOPMOST, and the desktop's band.
+pub(crate) fn set_topmost(hwnd: Hwnd, on: bool) {
+    let Some(i) = index_of(hwnd) else { return };
+    let w = with(|s| {
+        let v = &mut s.windows[i];
+        if on {
+            v.ex_style |= WS_EX_TOPMOST;
+        } else {
+            v.ex_style &= !WS_EX_TOPMOST;
+        }
+        *v
+    });
+    if w.parent == 0 && w.desktop != 0 {
+        // SAFETY: a plain call on our desktop window.
+        unsafe { GalaWindowSetTopmost(w.desktop, u32::from(on)) };
+    }
 }
 
 /// BringWindowToTop: to the top of the z order (SetWindowPos HWND_TOP).

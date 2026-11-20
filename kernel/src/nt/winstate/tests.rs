@@ -263,3 +263,34 @@ fn input_left_untaken_for_five_seconds_is_not_responding() {
     s.destroy_owned(1);
     assert!(!s.not_responding(1, t2 + 60 * HUNG_NS));
 }
+
+#[test]
+fn the_topmost_band_stays_above_and_the_foreground_is_the_active_programs() {
+    let mut s = state();
+    let top = s.create(1, 0, 0, 300, 200, &title("Top"), 0).unwrap();
+    let a = s.create(1, 10, 10, 300, 200, &title("A"), 0).unwrap();
+    let b = s.create(2, 20, 20, 300, 200, &title("B"), 0).unwrap();
+    s.show(b, 2, true).unwrap();
+    s.show(top, 1, true).unwrap();
+    s.set_topmost(top, 1, true).unwrap();
+    s.show(a, 1, true).unwrap();
+    // Shown and activated after it, A is still under the band.
+    assert_eq!(s.active, Some(a));
+    assert_eq!(s.windows.last().map(|w| w.id), Some(top));
+    // Only the owner moves a window between bands.
+    assert_eq!(s.set_topmost(a, 2, true).err(), Some(NtStatus::INVALID_HANDLE));
+    // While program 1's window is active, program 2 may not take the
+    // foreground; program 1 may give it to its other window.
+    assert_eq!(s.foreground(b, 2).err(), Some(NtStatus::ACCESS_DENIED));
+    s.foreground(top, 1).unwrap();
+    assert_eq!(s.active, Some(top));
+    // Out of the band: raised to the top of the rest, so it stays on top
+    // until another window goes over it.
+    s.set_topmost(top, 1, false).unwrap();
+    assert_eq!(s.windows.last().map(|w| w.id), Some(top));
+    s.foreground(a, 1).unwrap();
+    assert_eq!(s.windows.last().map(|w| w.id), Some(a));
+    // A hidden window is never the foreground.
+    s.show(a, 1, false).unwrap();
+    assert_eq!(s.foreground(a, 1).err(), Some(NtStatus::INVALID_PARAMETER));
+}

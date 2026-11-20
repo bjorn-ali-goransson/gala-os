@@ -8525,6 +8525,24 @@ the program always sees WM_SIZE/WM_MOVE.
   `desktop: window N asked for the activation without a press of its
   own (refused)`). Menus and combo lists answer MA_NOACTIVATE and stay
   inactive; the agent panel takes the keyboard this way.
+- **The topmost band** (GalaWindowSetTopmost, 0x7f5f): a window in it
+  (user32's WS_EX_TOPMOST, at CreateWindowEx or by SetWindowPos
+  HWND_TOPMOST; HWND_NOTOPMOST takes it out, at the top of the rest)
+  is kept with the popups above every other window, whichever is
+  active: `Window::upper` (popup or topmost) is the layer `raise`
+  keeps. user32 orders its own windows the same way (`tree::z_key`:
+  the band first, then z) for WindowFromPoint and the top-level lists.
+  A desktop window user32 recreates (`set_frame`) is put back in it.
+- **The foreground** (GalaWindowForeground, 0x7f5e): SetForegroundWindow
+  raises the caller's shown window and makes it active, so it gets the
+  keys (a popup too: a tool window the program brings forward). Refused
+  with STATUS_ACCESS_DENIED while another program's window is active,
+  as Windows' foreground lock refuses a background program, and
+  SetForegroundWindow then returns 0 without activating locally; both
+  logged (`desktop: window N takes the foreground`, `... asked for the
+  foreground (refused: ...)`). Invariant: user32's foreground window and
+  the desktop's active window agree after a successful call, so keys
+  go where GetForegroundWindow says.
 - **Capture** (GalaWindowCapture): the window gets every mouse message
   in its client coordinates (negative outside it) wherever the pointer
   is; captions, the taskbar and the start menu get nothing meanwhile.
@@ -8962,8 +8980,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   overlapping); an offset whose value does not fit fails with
   ERROR_INVALID_INDEX. A heap failure leaves the window without them
   (recorded).
-- Hit testing and update areas: WindowFromPoint (the topmost visible
-  top-level window at the point, then its topmost visible child,
+- Hit testing and update areas: WindowFromPoint (the visible top-level
+  window highest in the z order at the point, the topmost band first,
+  then its topmost visible child,
   recursively), RealChildWindowFromPoint (one level down, hidden and
   disabled children included, the parent itself for a point over none),
   GetUpdateRgn/GetUpdateRect (the client area while invalid: gala
@@ -16410,6 +16429,8 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
 | GalaWindowResize(id, edges) | 0x7f55 | the caller's window is resized from those edges by the pointer, placed when the button goes up (its own border) |
 | GalaWindowActivate(id) | 0x7f5d | the caller's popup takes the activation for the press just made in it ("Popups") |
+| GalaWindowForeground(id) | 0x7f5e | the caller's shown window raised and active (SetForegroundWindow); refused while another program's window is active ("The foreground") |
+| GalaWindowSetTopmost(id, on) | 0x7f5f | the caller's window into the topmost band or out of it ("The topmost band") |
 
 **The registry and its record** (step 1):
 

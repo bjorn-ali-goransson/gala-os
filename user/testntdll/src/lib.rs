@@ -452,6 +452,8 @@ syscall_stubs! {
     GalaWindowDrag = 0x7f54, fn(id: u32);
     GalaWindowResize = 0x7f55, fn(id: u32, edges: u32);
     GalaWindowActivate = 0x7f5d, fn(id: u32);
+    GalaWindowForeground = 0x7f5e, fn(id: u32);
+    GalaWindowSetTopmost = 0x7f5f, fn(id: u32, on: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
     // WinEvents across processes (SetWinEventHook, NotifyWinEvent).

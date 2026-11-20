@@ -815,12 +815,12 @@ shell part) leaves it.
    the same change. Drawn with `gala_ui` (LY step 3's last windows), so
    the taskbar and start menu are UIA elements tests click by name.
    What the window manager needs first, each its own change:
-   1. A topmost band: WS_EX_TOPMOST windows (SetWindowPos
-      HWND_TOPMOST / HWND_NOTOPMOST) stay above the others whichever is
-      active, in user32's order and the kernel's (`winstate` keeps only
-      the popups' layer today). Tool windows (WS_EX_TOOLWINDOW) are
-      activatable, get keys, and stay off the taskbar's list. Test:
-      `topmost_test`.
+   1. Done: a topmost band (WS_EX_TOPMOST, SetWindowPos HWND_TOPMOST /
+      HWND_NOTOPMOST) above the others whichever is active, in user32's
+      order and the kernel's, and SetForegroundWindow reaching the
+      desktop (refused while another program is active), so a tool
+      window brought forward gets the keys. Test: `topmost_test`
+      (ARCHITECTURE "The topmost band", "The foreground").
    2. What a taskbar listens to: the kernel raises WinEvents for what
       it does itself (foreground, minimize/restore, Snap, close), and
       Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists them

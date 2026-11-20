@@ -1968,6 +1968,37 @@ impl Desktop {
         Ok(())
     }
 
+    /// `owner`'s window `id` into the topmost band or out of it
+    /// (GalaWindowSetTopmost).
+    pub fn set_topmost(&mut self, id: u32, owner: u64, on: bool) -> Result<(), NtStatus> {
+        self.s.set_topmost(id, owner, on)?;
+        #[cfg(not(test))]
+        crate::info!(
+            "desktop: window {id} {} the topmost band",
+            if on { "joins" } else { "leaves" }
+        );
+        Ok(())
+    }
+
+    /// `owner`'s window `id` becomes the foreground window
+    /// (GalaWindowForeground: SetForegroundWindow), or is refused while
+    /// another program's window is active; both logged.
+    pub fn foreground(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        let active = self.s.active;
+        let r = self.s.foreground(id, owner);
+        #[cfg(not(test))]
+        match r {
+            Ok(()) => crate::info!("desktop: window {id} takes the foreground"),
+            Err(e) => crate::warn!(
+                "desktop: window {id} asked for the foreground (refused: {e:?}; window {active:?} \
+                 of another program is active)"
+            ),
+        }
+        #[cfg(test)]
+        let _ = active;
+        r
+    }
+
     /// `owner`'s window `id` asks to be dragged by the pointer while the
     /// left button stays down (a program that draws its own caption:
     /// WM_NCHITTEST answered HTCAPTION). STATUS_INVALID_DEVICE_STATE when
