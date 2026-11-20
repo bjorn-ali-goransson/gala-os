@@ -639,9 +639,16 @@ cost is a fault a call, so narrow the arming first and let the set say
 where to look:
 
 ```sh
-XTASK_CMDLINE='events=call events_match=WINWORD imports=WINWORD.EXE!mso40uiWin32Client.dll imports_repeat=4096' \
+XTASK_CMDLINE='events=call events_match=WINWORD imports=WINWORD.EXE!Mso20Win32Client.dll imports_repeat=65536' \
   cargo xtask boot-test 'office_word$'
 ```
+
+Measured, that is 226 slots armed and 5175 later calls for a whole run
+(the summary lines say both), so one MSO client DLL's sequence fits a
+budget many times under the ceiling, at about 20 s on top of a 51 s
+run. Narrowing is what makes that true: Word binds some 1900 imports
+across the DLLs it loads, and the busiest of these 226 slots is called
+1720 times on its own.
 
 Imports of variables are not armed at all, and nor are delay-load
 imports or anything resolved with GetProcAddress; a function's slot read

@@ -1222,9 +1222,11 @@ data first, which disarms the slot (below), so that one leaves a
 - **Cost of a repeat**: a fault a call, the same path as the first
   call's (a lock, a scan of the armed slots, an event) without the two
   protection changes a repair pays. So `imports_repeat=` is read
-  narrowed -- `imports=WINWORD.EXE!mso40uiWin32Client.dll` with a
-  budget of a few thousand, rather than every import of a program that
-  binds 30 000 of them.
+  narrowed: `imports=WINWORD.EXE!Mso20Win32Client.dll` arms 226 slots
+  of Word's some 1900 imports and records 5175 calls through them for a
+  whole run, about 20 s on top of a 51 s one, where the same budget
+  spread over every import would be spent in the first seconds of
+  startup and say nothing about the window that matters.
 - **Cost when nothing is traced**: one relaxed load per page fault. The
   kernel keeps the lowest and highest trap address it has armed, and an
   ordinary fault -- demand paging, a guard page, a real access
