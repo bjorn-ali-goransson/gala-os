@@ -9922,6 +9922,9 @@ live in the kernel (`nt::winevent`, its own lock); user32's side is
   callback: ERROR_INVALID_FILTER_PROC; WINEVENT_INCONTEXT without a
   module: ERROR_HOOK_NEEDS_HMOD (as Wine's tests check); UnhookWinEvent
   of no hook: ERROR_INVALID_HANDLE; IsWinEventHookInstalled is TRUE.
+- Raised by the Wayland server for Linux windows: EVENT_SYSTEM_FOREGROUND,
+  MINIMIZESTART and MINIMIZEEND ("Linux windows in the window
+  registry").
 - Raised by user32: EVENT_OBJECT_CREATE (after WM_CREATE), SHOW and HIDE
   (ShowWindow of top-level and child windows), HIDE then DESTROY
   (DestroyWindow), FOCUS (SetFocus, OBJID_CLIENT),
@@ -14319,6 +14322,32 @@ user32 (`kernel/src/wayland/input.rs`, `Client::input`).
   MAKELONG(width, height)) are the desktop's sizing ("Configure from the
   desktop"); WM_MOVE and GALA_WM_MINIMIZED mean nothing to a Wayland
   client; any other message is ledgered.
+- **Linux windows in the window registry** (`wayland/hwnd.rs`; test
+  `linux_hwnd_test`): each top-level window the server makes for a
+  client (Xwayland's windows for X programs too) is registered in the
+  session's window registry (`window::Windows`) as a top-level window
+  of the client's process: class `GalaLinuxWindow`, WS_OVERLAPPEDWINDOW
+  (WS_POPUP when the client draws its own frame), its title, its
+  desktop window id (`Info::desktop`), thread id 0 (Linux threads have
+  no Windows thread id). So it has an HWND as a Windows program's
+  window has: FindWindow, EnumWindows, GetWindowText, IsIconic and
+  GetWindowThreadProcessId (the Linux process's id) answer for it, and
+  GalaDesktopAction lists it by that HWND and its verbs (Activate,
+  Minimize, Close...) reach it. The record follows the desktop's
+  window (`Desktop::placement`: rectangle, shown, minimized, maximized),
+  re-read when the server places, sizes or retitles it and at each of
+  the desktop's notices for it (GALA_WM_ACTIVE, GALA_WM_MINIMIZED,
+  GALA_WM_PLACE, WM_MOVE, WM_SYSCOMMAND); it goes with the window
+  (`window_destroy`) or the process. Popups are not registered (no
+  window list shows them). The server raises the WinEvents user32
+  raises for its own windows, as NotifyWinEvent from the client's
+  process (thread 0, OBJID_WINDOW, CHILDID_SELF;
+  `winevent::raise`): EVENT_SYSTEM_FOREGROUND for GALA_WM_ACTIVE 1,
+  MINIMIZESTART and MINIMIZEEND for GALA_WM_MINIMIZED 1 and 0, in the
+  desktop's order (a restore's MINIMIZEEND before its FOREGROUND). The
+  log says which HWND a window got (`wayland: pid P's window N is hwnd
+  H`), a window left without one and why, and with `wayland=trace` each
+  event raised and how many hooking processes it woke.
 - **Activation** (GALA_WM_ACTIVE) sets the seat's active surface, moves
   the keyboard focus (to the topmost grabbing popup while there is one)
   and sends each toplevel whose activation changed a configure; losing

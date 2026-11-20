@@ -827,9 +827,12 @@ shell part) leaves it.
       raise EVENT_SYSTEM_FOREGROUND, MINIMIZESTART and MINIMIZEEND in
       Windows' order. Test: `shell_events_test` (ARCHITECTURE "gala's
       notices for served owners", WinEvents).
-   2b. Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists
-      them, the window verbs reach them and their activation raises
-      the same events.
+   2b. Done: Linux (Wayland, X) windows get HWNDs (the Wayland server
+      registers them in the window registry), so ACTION_WINDOWS lists
+      them, the window calls answer for them, the window verbs reach
+      them, and their activation, minimize and restore raise the same
+      events. Test: `linux_hwnd_test` (ARCHITECTURE "Linux windows in
+      the window registry").
    3. Done: the shell's keys: RegisterHotKey/UnregisterHotKey deliver
       WM_HOTKEY; SetShellWindow's process alone may take Win+E,
       Ctrl+Shift+Esc and the Windows key alone (gala's (MOD_WIN,

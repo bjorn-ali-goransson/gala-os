@@ -76,6 +76,7 @@
 //! objects and its seat (focus, keys down, modifiers).
 
 pub mod client;
+mod hwnd;
 pub mod input;
 pub mod popup;
 pub mod xwayland;
@@ -650,6 +651,8 @@ impl Connection {
                         e.lparam
                     );
                 }
+                let trace = TRACE.load(Ordering::Relaxed);
+                hwnd::notice(self.pid, e.window, e.message, e.wparam, trace);
                 if let Some(i) = input::translate(e.window, e.message, e.wparam, e.lparam) {
                     self.client.input(host, i).map_err(Why::from)?;
                 }
@@ -827,12 +830,14 @@ impl Host for KernelHost {
         let (x, y) = (64 + 32 * step as i32, 48 + 32 * step as i32);
         let owner = self.pid;
         let (program, k) = crate::nt::desktop::program_name(owner);
-        self.desktop(|d| {
+        let id = self.desktop(|d| {
             let id = d.create(owner, x, y, w, h, &text[..n], style)?;
             d.set_program(id, owner, &program[..k])?;
             let shown = d.show(id, owner, true)?;
             Ok((id, Some(shown)))
-        })
+        })?;
+        hwnd::register(owner, id, &text[..n], decorated);
+        Some(id)
     }
 
     fn popup_create(&mut self, x: i32, y: i32, width: u32, height: u32) -> Option<u32> {
@@ -870,12 +875,14 @@ impl Host for KernelHost {
                 d.outer(id, owner).ok_or(crate::nt::status::NtStatus::INVALID_HANDLE)?;
             Ok(((), Some(d.place(id, owner, x, y, w, h)?)))
         });
+        hwnd::update(owner, id, None);
     }
 
     fn window_place(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32, decorated: bool) {
         let (w, h) = outer(width, height, decorated);
         let owner = self.pid;
         self.desktop(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?))));
+        hwnd::update(owner, id, None);
     }
 
     fn window_outer(&mut self, id: u32) -> Option<(i32, i32, u32, u32)> {
@@ -931,10 +938,12 @@ impl Host for KernelHost {
         let n = utf16(title, &mut text);
         let owner = self.pid;
         self.desktop(|d| Ok(((), Some(d.set_title(id, owner, &text[..n])?))));
+        hwnd::update(owner, id, Some(&text[..n]));
     }
 
     fn window_destroy(&mut self, id: u32) {
         let owner = self.pid;
+        hwnd::forget(owner, id);
         self.desktop(|d| Ok(((), Some(d.destroy(id, owner)?))));
     }
 

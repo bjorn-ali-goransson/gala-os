@@ -10876,6 +10876,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell_events_test", "kernel32.dll", "Windows/System32"),
     ("shell_events_test", "user32.dll", "Windows/System32"),
     ("shell_events_test", "gdi32.dll", "Windows/System32"),
+    // A Linux client's window as a taskbar sees it (user/linux_hwnd_test).
+    ("linux_hwnd_test", "ntdll.dll", "Windows/System32"),
+    ("linux_hwnd_test", "kernel32.dll", "Windows/System32"),
+    ("linux_hwnd_test", "user32.dll", "Windows/System32"),
+    ("linux_hwnd_test", "gdi32.dll", "Windows/System32"),
     // Hot keys and the shell's keys (user/hotkey_test).
     ("hotkey_test", "ntdll.dll", "Windows/System32"),
     ("hotkey_test", "kernel32.dll", "Windows/System32"),
@@ -11270,6 +11275,7 @@ const USER_PROGRAMS: &[&str] = &[
     "appbar_test",
     "topmost_test",
     "shell_events_test",
+    "linux_hwnd_test",
     "hotkey_test",
     "wintrust_test",
     "cab_probe",
@@ -16337,6 +16343,25 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // A Linux client's window as a taskbar sees it
+        // (user/linux_hwnd_test; ROADMAP SH step 1, part 2b):
+        // weston-simple-shm's window is listed by an HWND the window calls
+        // answer for, the shell's Minimize, Activate and Close reach it,
+        // and its activation and minimize raise EVENT_SYSTEM_FOREGROUND,
+        // MINIMIZESTART and MINIMIZEEND as a Windows program's do.
+        name: "linux_hwnd_test",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland run=linux_hwnd_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "linux_hwnd_test: listed with its hwnd",
+            "linux_hwnd_test: minimized by the shell",
+            "linux_hwnd_test: restored by the shell",
+            "linux_hwnd_test: closed by the shell",
+            "linux_hwnd_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Hot keys (user/hotkey_test; ROADMAP SH step 1, part 3):
         // RegisterHotKey's errors, a program's Ctrl+Alt+K as WM_HOTKEY
         // to its thread, and the shell's keys (Win+E, the Windows key
@@ -20630,6 +20655,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_simple_shm", "weston"),
     ("lx_simple_shm", "wayland_client"),
     ("lx_simple_shm", "glibc"),
+    ("linux_hwnd_test", "linux_hwnd_test"),
+    ("linux_hwnd_test", "weston"),
+    ("linux_hwnd_test", "wayland_client"),
+    ("linux_hwnd_test", "glibc"),
     ("linux_menu", "linux_menu"),
     ("linux_menu", "x11"),
     ("linux_menu", "gtk3"),

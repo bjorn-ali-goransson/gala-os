@@ -974,6 +974,21 @@ impl Desktop {
         self.s.owned(id, owner).map(|w| (w.x, w.y, w.w, w.h))
     }
 
+    /// `owner`'s window `id`'s place and state, as the window registry
+    /// records a served owner's window (ARCHITECTURE "Linux windows in
+    /// the window registry").
+    pub fn placement(&self, id: u32, owner: u64) -> Option<Placement> {
+        self.s.owned(id, owner).map(|w| Placement {
+            x: w.x,
+            y: w.y,
+            w: w.w,
+            h: w.h,
+            visible: w.visible,
+            minimized: w.minimized,
+            maximized: w.maximized,
+        })
+    }
+
     /// A window's new title (the caption and the taskbar show it).
     pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
         let r = self.s.set_title(id, owner, title)?;
@@ -3676,6 +3691,18 @@ pub fn show_console_at_boot_end() {
     if let Err(e) = ensure_live(&desk.shell, &mut d) {
         crate::warn!("desktop: the boot ends: session {id}'s desktop not shown ({e:?})");
     }
+}
+
+/// A window's outer rectangle and state (Desktop::placement).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub visible: bool,
+    pub minimized: bool,
+    pub maximized: bool,
 }
 
 /// Runs `f` on the desktop and redraws what it changed. Works the same

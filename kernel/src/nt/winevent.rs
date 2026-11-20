@@ -244,6 +244,32 @@ impl Hooks {
     }
 }
 
+/// NotifyWinEvent from thread `tid` of process `pid` in session `desk`
+/// (a program's own, or the kernel's for a window it serves: a Linux
+/// client's, raised by the Wayland server): queued for every hook that
+/// wants it, whose processes' queue events are set; how many processes
+/// were woken.
+#[allow(clippy::too_many_arguments)]
+pub fn raise(
+    desk: &super::session::Desk,
+    pid: u32,
+    tid: u32,
+    event: u32,
+    hwnd: u64,
+    object: i32,
+    child: i32,
+    time: u32,
+) -> usize {
+    let mut wake = [0u32; 16];
+    let n = desk.hooks.notify(pid, tid, event, hwnd, object, child, time, &mut wake);
+    let mut events = Vec::new();
+    listeners(&desk.windows, &wake[..n], &mut events);
+    for e in &events {
+        super::wait::set_signal(e, 1);
+    }
+    n
+}
+
 /// The queue events of the processes in `pids` (the session's window
 /// registry's listeners).
 pub fn listeners(windows: &super::window::Windows, pids: &[u32], out: &mut Vec<ObjectRef>) {

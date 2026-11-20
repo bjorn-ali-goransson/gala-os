@@ -1909,3 +1909,22 @@ fn a_hot_key_takes_its_keys_from_the_desktop_and_the_active_window() {
     d.key(0x5b, 0x5b, true, false);
     assert!(!d.menu_open());
 }
+
+#[test]
+fn a_windows_placement_is_its_owners_alone_and_follows_its_state() {
+    let (mut d, a) = desktop_with_window();
+    let p = d.placement(a, 7).unwrap();
+    assert_eq!((p.x, p.y, p.w, p.h), (300, 100, 400, 300));
+    assert!(p.visible && !p.minimized && !p.maximized);
+    // Another owner's window is not its to read (the window registry
+    // records a served owner's own windows).
+    assert_eq!(d.placement(a, 8), None);
+    assert_eq!(d.placement(a + 99, 7), None);
+    d.act(a, Action::Minimize).unwrap();
+    assert!(d.placement(a, 7).unwrap().minimized);
+    d.act(a, Action::Restore).unwrap();
+    let p = d.placement(a, 7).unwrap();
+    assert!(p.visible && !p.minimized);
+    d.show(a, 7, false).unwrap();
+    assert!(!d.placement(a, 7).unwrap().visible);
+}

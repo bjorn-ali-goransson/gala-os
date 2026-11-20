@@ -2634,22 +2634,8 @@ fn gala_win_event_notify(call: &mut Call<'_>) -> NtStatus {
     let (object, child) = (arg!(call, 2) as u32 as i32, arg!(call, 3) as u32 as i32);
     let tid = thread::current_id().unwrap_or(0) as u32;
     let time = (platform::monotonic_ns() / 1_000_000) as u32;
-    let mut wake = [0u32; 16];
-    let n = call.process.desk.hooks.notify(
-        call.process.id as u32,
-        tid,
-        event,
-        hwnd,
-        object,
-        child,
-        time,
-        &mut wake,
-    );
-    let mut events = Vec::new();
-    super::winevent::listeners(&call.process.desk.windows, &wake[..n], &mut events);
-    for e in &events {
-        wait::set_signal(e, 1);
-    }
+    let pid = call.process.id as u32;
+    super::winevent::raise(&call.process.desk, pid, tid, event, hwnd, object, child, time);
     NtStatus::SUCCESS
 }
 
