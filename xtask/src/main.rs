@@ -10649,6 +10649,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_word", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
     ("office_word", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
     ("office_word", "user/mesa/lavapipe.regseed", "registry"),
+    ("office_word", "user/office_install/uls_logging.regseed", "registry"),
     // office_install_gui: office_install's files (MODULE_SETS) and the
     // configuration that shows ODT's and Click-to-Run's windows.
     ("office_install_gui", "user/office_install/config_full.xml", "gala"),
@@ -10802,6 +10803,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_setupcab_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_setupcab_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_setupcab_test", "x86/setupapi.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     // msi's queries (user/msi_test), x64 and x86.
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
@@ -10846,6 +10849,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_tray_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/shell32.dll", "Windows/SysWOW64"),
     ("wow64_tray_test", "x86/comctl32.dll", "Windows/SysWOW64"),
+    // The display configuration: CCD, EnumDisplaySettings and the monitor
+    // (user/display_test).
+    ("display_test", "ntdll.dll", "Windows/System32"),
+    ("display_test", "kernel32.dll", "Windows/System32"),
+    ("display_test", "user32.dll", "Windows/System32"),
+    ("display_test", "gdi32.dll", "Windows/System32"),
+    ("display_test", "setupapi.dll", "Windows/System32"),
+    ("display_test", "advapi32.dll", "Windows/System32"),
     // Windows.UI.ViewManagement.UISettings (user/uisettings_test), x64
     // and x86.
     ("uisettings_test", "ntdll.dll", "Windows/System32"),
@@ -11253,6 +11264,7 @@ const USER_PROGRAMS: &[&str] = &[
     "writeback_test",
     "gdiplus_test",
     "uisettings_test",
+    "display_test",
     "tray_test",
     "wintrust_test",
     "cab_probe",
@@ -11482,7 +11494,9 @@ commands:
                never a real run: --from-snapshot <name> --hot-swap-unsafe
                [kernel,]<dll>[,<dll>...] splices the new build of the kernel
                and the named DLLs into the resumed machine (docs/WORKFLOW.md,
-               Hot swapping DLLs and the kernel)
+               Hot swapping DLLs and the kernel);
+               XTASK_SHOTS=<secs>|<serial log line>[+<secs>],...: screendumps
+               of the screen as the run goes, in target/screenshots/
   snapshots    list the machine snapshots (target/snapshots): what, when, size,
                build; snapshots rm <name> deletes one
   hotswap-diff what a hot swap would patch: hotswap-diff <old> <old.map>
@@ -16356,6 +16370,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // The display configuration (CCD): the buffer sizes, the active
+        // path and its two mode records, the source's and target's and
+        // adapter's names, and what each of them refuses
+        // (user/display_test).
+        name: "display_test",
+        cmdline: "qemu_exit run=display_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["display_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Windows.UI.ViewManagement.UISettings: its factory and objects,
         // weak references, the theme's and accent's colours, the classic
         // elements' system colours (user/uisettings_test).
@@ -19172,6 +19196,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   WINWORD.EXE%22%20/t%22C:\\Program%20Files\\Microsoft%20Office\\root\\\
                   Office16\\1033\\QuickStyles\\Default.dotx%22 \
                   dump=C:/Users/Public,C:/Windows/Temp,\
+                  C:/Users/gala/AppData/Local/Temp,\
                   C:/gala/winword_d3d11.log,C:/gala/winword_dxgi.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
@@ -20907,6 +20932,27 @@ fn static_imports(file: &str) -> Vec<&'static str> {
     };
     let names = import_names(&image);
     USER_DLLS
+        .iter()
+        .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
+        .map(|d| d.file)
+        .collect()
+}
+
+/// The same for an EXTRA_MODULES file with the `x86/` prefix: the
+/// USER_DLLS_X86 DLLs its i686 copy imports, by their own file names
+/// (without the prefix). Read from the checked-in copy, as
+/// `static_imports` is. Empty if `file` is not one of them. Only the
+/// test below reads it: the 32-bit set is listed and not closed.
+#[cfg(test)]
+fn static_imports_x86(file: &str) -> Vec<&'static str> {
+    let Some(dll) = x86_dll(file) else {
+        return Vec::new();
+    };
+    let Ok(image) = fs::read(root().join("user/bin").join(dll.exported_as)) else {
+        return Vec::new();
+    };
+    let names = import_names(&image);
+    USER_DLLS_X86
         .iter()
         .filter(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d.file)))
         .map(|d| d.file)
@@ -22810,7 +22856,7 @@ fn run_vm_once(
                 }
             }
         }
-        shots.take_due(&socket, start.elapsed());
+        shots.take_due(&socket, start.elapsed(), &log);
         if let Some(check) = screen.filter(|_| screen_verdict.is_none())
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
@@ -22955,6 +23001,7 @@ fn run_vm_once(
         serial.push('\n');
     }
     serial += &snap_note;
+    serial += &shots.missed();
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -23135,40 +23182,83 @@ fn fewer_cpus(got: u32, want: u32) -> String {
     format!("VM got {got} of {want} CPUs (host overloaded?)")
 }
 
-/// `XTASK_SHOTS=120,300,...`: screendumps of a boot test's screen at
-/// those seconds of wall time since QEMU started, written to
-/// `target/screenshots/<scenario>-<t>s.png` (WORKFLOW "Screenshots"): to
-/// watch a long scenario (office_install_gui) with its serial log, disk
-/// and network, which `cargo xtask screenshot` does not set up.
+/// `XTASK_SHOTS=120,300,...`: screendumps of a boot test's screen,
+/// written to `target/screenshots/<scenario>-<when>.png` (WORKFLOW
+/// "Screenshots"): to watch a long scenario (office_install_gui) with its
+/// serial log, disk and network, which `cargo xtask screenshot` does not
+/// set up.
+///
+/// An entry is a number -- seconds of wall time since QEMU started -- or
+/// a piece of a serial log line to wait for, with an optional `+<secs>`
+/// for a wait after it. The log is what knows when something is on the
+/// screen: a window whose second has to be guessed from the host's load
+/// is missed as often as it is caught (Word's splash lives about 2 s of a
+/// 90 s run, and the run is as fast as the host is free), while
+/// `XTASK_SHOTS='desktop: shown window+1'` catches it on every run.
 struct Shots {
-    scenario: String,
-    times: Vec<f64>,
-    next: usize,
+    shots: Vec<Shot>,
+}
+
+/// One screendump: what it waits for, how long it waits after that, the
+/// file it is written to, and where it has got to.
+struct Shot {
+    when: When,
+    after: f64,
+    file: String,
+    /// When `when` came true, once it has.
+    seen: Option<Duration>,
+    taken: bool,
+}
+
+/// What a screendump waits for.
+enum When {
+    /// Seconds of wall time since QEMU started.
+    At(f64),
+    /// Text the serial log holds.
+    Line(String),
 }
 
 impl Shots {
     fn from_env(scenario: &str) -> Result<Self> {
-        let mut times = match env::var("XTASK_SHOTS") {
-            Ok(list) if !list.trim().is_empty() => list
-                .split(',')
-                .map(|t| t.trim().parse().map_err(|_| format!("XTASK_SHOTS: bad time {t:?}")))
-                .collect::<Result<Vec<f64>>>()?,
-            _ => Vec::new(),
-        };
-        times.sort_by(f64::total_cmp);
-        Ok(Self { scenario: scenario.to_string(), times, next: 0 })
+        Self::parse(&env::var("XTASK_SHOTS").unwrap_or_default(), scenario)
+    }
+
+    /// The entries of an `XTASK_SHOTS` list, for the scenario whose name
+    /// their files carry.
+    fn parse(list: &str, scenario: &str) -> Result<Self> {
+        let mut shots = Vec::new();
+        for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            shots.push(Shot::parse(entry, scenario)?);
+        }
+        // The timed ones in their order, so their files are written in
+        // it; the ones a line brings are taken when it comes.
+        shots.sort_by(|a, b| a.order().total_cmp(&b.order()));
+        Ok(Self { shots })
     }
 
     /// Takes the screendumps whose time has come; one that fails is
     /// reported on stderr and the run goes on (a picture is not a verdict).
-    fn take_due(&mut self, socket: &Path, elapsed: Duration) {
-        while let Some(&t) = self.times.get(self.next) {
-            if elapsed < Duration::from_secs_f64(t) {
-                return;
+    fn take_due(&mut self, socket: &Path, elapsed: Duration, log: &Path) {
+        // Read once a poll, and only while a line is still waited for.
+        let mut serial: Option<Vec<u8>> = None;
+        for shot in self.shots.iter_mut().filter(|s| !s.taken) {
+            if shot.seen.is_none() {
+                shot.seen = match &shot.when {
+                    When::At(t) => (elapsed >= Duration::from_secs_f64(*t))
+                        .then(|| Duration::from_secs_f64(*t)),
+                    When::Line(line) => {
+                        let read = serial.get_or_insert_with(|| fs::read(log).unwrap_or_default());
+                        read.windows(line.len()).any(|w| w == line.as_bytes()).then_some(elapsed)
+                    }
+                };
             }
-            self.next += 1;
+            let Some(seen) = shot.seen else { continue };
+            if elapsed < seen + Duration::from_secs_f64(shot.after) {
+                continue;
+            }
+            shot.taken = true;
             let dir = target_dir().join("screenshots");
-            let png = dir.join(format!("{}-{t}s.png", self.scenario));
+            let png = dir.join(&shot.file);
             let taken = fs::create_dir_all(&dir)
                 .map_err(|e| format!("creating {dir:?}: {e}"))
                 .and_then(|()| screendump_png(socket, &png));
@@ -23176,9 +23266,132 @@ impl Shots {
                 Ok(()) => {
                     eprintln!("xtask: wrote {} ({:.0} s in)", png.display(), elapsed.as_secs_f64())
                 }
-                Err(e) => eprintln!("xtask: screenshot at {t} s: {e}"),
+                Err(e) => eprintln!("xtask: screenshot {}: {e}", shot.file),
             }
         }
+    }
+
+    /// The ones the run never reached, for the serial log: a line that
+    /// never came and a misspelt entry both leave no file, which on its
+    /// own looks like a run that was asked for no screendumps at all.
+    fn missed(&self) -> String {
+        let mut note = String::new();
+        for shot in self.shots.iter().filter(|s| !s.taken) {
+            note += &match &shot.when {
+                When::At(t) => format!("xtask: screenshot: the run ended before {t} s\n"),
+                When::Line(line) => {
+                    format!("xtask: screenshot: {line:?} never came in the serial log\n")
+                }
+            };
+        }
+        note
+    }
+}
+
+impl Shot {
+    /// `<secs>`, or a line with an optional `+<secs>` after it.
+    fn parse(entry: &str, scenario: &str) -> Result<Self> {
+        if let Ok(t) = entry.parse::<f64>() {
+            let file = format!("{scenario}-{t}s.png");
+            return Ok(Self { when: When::At(t), after: 0.0, file, seen: None, taken: false });
+        }
+        // A `+` that is not followed by a number is part of the text.
+        let (line, after) = match entry.rsplit_once('+') {
+            Some((line, secs)) => match secs.trim().parse::<f64>() {
+                Ok(secs) => (line.trim(), secs),
+                Err(_) => (entry, 0.0),
+            },
+            None => (entry, 0.0),
+        };
+        // Its name is what it is read back by, so a line of punctuation
+        // alone (or none at all) is a typo rather than a wait.
+        let slug = slug(line);
+        if slug.is_empty() {
+            return Err(format!("XTASK_SHOTS: {entry:?} is neither a second nor a line"));
+        }
+        let file = match after {
+            0.0 => format!("{scenario}-{slug}.png"),
+            _ => format!("{scenario}-{slug}-{after}s.png"),
+        };
+        Ok(Self { when: When::Line(line.to_string()), after, file, seen: None, taken: false })
+    }
+
+    /// Where it falls among the timed ones (a line's time is unknown).
+    fn order(&self) -> f64 {
+        match self.when {
+            When::At(t) => t + self.after,
+            When::Line(_) => f64::INFINITY,
+        }
+    }
+}
+
+/// A file name out of a line's text: its letters and digits, and a `-`
+/// for every run of anything else (`desktop: shown window` becomes
+/// `desktop-shown-window`), to 40 characters.
+fn slug(line: &str) -> String {
+    let mut s = String::new();
+    for c in line.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.is_empty() && !s.ends_with('-') {
+            s.push('-');
+        }
+    }
+    let cut: String = s.chars().take(40).collect();
+    cut.trim_matches('-').to_string()
+}
+
+#[cfg(test)]
+mod shots {
+    use super::*;
+
+    #[test]
+    fn an_entry_is_a_second_or_a_line() {
+        let shots = Shots::parse("3, 49.5, desktop: shown window+1,Word was unable", "office_word")
+            .expect("the list parses");
+        let files: Vec<&str> = shots.shots.iter().map(|s| s.file.as_str()).collect();
+        // The timed ones first, in their order, then the lines.
+        assert_eq!(
+            files,
+            [
+                "office_word-3s.png",
+                "office_word-49.5s.png",
+                "office_word-desktop-shown-window-1s.png",
+                "office_word-word-was-unable.png",
+            ]
+        );
+        let waits: Vec<(bool, f64)> =
+            shots.shots.iter().map(|s| (matches!(s.when, When::Line(_)), s.after)).collect();
+        assert_eq!(waits, [(false, 0.0), (false, 0.0), (true, 1.0), (true, 0.0)]);
+    }
+
+    #[test]
+    fn a_plus_that_is_not_a_wait_stays_in_the_line() {
+        let shots = Shots::parse("C++ runtime", "hello").expect("the list parses");
+        let [shot] = &shots.shots[..] else { panic!("one shot") };
+        assert!(matches!(&shot.when, When::Line(l) if l == "C++ runtime"));
+        assert_eq!(shot.file, "hello-c-runtime.png");
+    }
+
+    #[test]
+    fn an_entry_that_waits_for_nothing_is_an_error() {
+        assert!(Shots::parse("+", "hello").is_err());
+        assert!(Shots::parse(":: ::", "hello").is_err());
+        // A signed number is still a number (`+2` is 2 s in).
+        assert!(matches!(Shots::parse("+2", "hello").expect("parses").shots[..], [Shot {
+            when: When::At(t),
+            ..
+        }] if t == 2.0));
+        // An empty list is no shots, not an error.
+        assert!(Shots::parse("", "hello").expect("empty").shots.is_empty());
+    }
+
+    #[test]
+    fn what_the_run_never_reached_is_said() {
+        let shots = Shots::parse("900,desktop: shown window", "office_word").expect("parses");
+        let missed = shots.missed();
+        assert!(missed.contains("the run ended before 900 s"), "{missed}");
+        assert!(missed.contains("\"desktop: shown window\" never came"), "{missed}");
     }
 }
 
@@ -31419,6 +31632,28 @@ mod module_sets {
                     assert!(
                         modules.iter().any(|(f, _)| *f == dep),
                         "{}: {file} imports {dep}, which the set does not hold",
+                        s.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the 32-bit half of it, which `extra_modules` does not close
+    /// itself (its names carry the `x86/` prefix): a SysWOW64
+    /// dependency nobody listed showed up only as a guest `missing dll`
+    /// and a 0xc0000135 in a boot test, which is late and reads like a
+    /// gap in the DLL rather than a gap in the list.
+    #[test]
+    fn every_scenario_s_32_bit_set_is_closed() {
+        for s in scenarios() {
+            let modules = extra_modules(s.name);
+            for (file, dir) in &modules {
+                for dep in static_imports_x86(file) {
+                    let name = format!("x86/{dep}");
+                    assert!(
+                        modules.iter().any(|(f, d)| *f == name && d == dir),
+                        "{}: {file} imports {dep}, which the set does not hold for {dir}",
                         s.name
                     );
                 }

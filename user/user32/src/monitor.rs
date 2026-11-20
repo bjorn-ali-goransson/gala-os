@@ -16,6 +16,12 @@ unsafe extern "system" {
 }
 
 pub const HMONITOR: usize = 0x0001_0001;
+
+/// The one display's name, as every door that gives a name gives it
+/// (GetMonitorInfoW's MONITORINFOEXW, EnumDisplayDevicesW's adapter,
+/// DisplayConfigGetDeviceInfo's source).
+pub const DISPLAY_NAME: &[u8] = br"\\.\DISPLAY1";
+
 const MONITOR_DEFAULTTONULL: u32 = 0;
 const MONITORINFOF_PRIMARY: u32 = 1;
 
@@ -99,7 +105,7 @@ fn fill(monitor: usize, info: *mut u8, wide: bool) -> i32 {
         }
         info.add(36).cast::<u32>().write_unaligned(MONITORINFOF_PRIMARY);
         if size == ex {
-            let name = b"\\\\.\\DISPLAY1";
+            let name = DISPLAY_NAME;
             for (i, &c) in name.iter().chain(core::iter::once(&0)).enumerate() {
                 if wide {
                     info.add(40 + 2 * i).cast::<u16>().write_unaligned(u16::from(c));

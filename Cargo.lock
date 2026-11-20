@@ -676,6 +676,13 @@ name = "disk_test"
 version = "0.1.0"
 
 [[package]]
+name = "display_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "dpapi_test"
 version = "0.1.0"
 

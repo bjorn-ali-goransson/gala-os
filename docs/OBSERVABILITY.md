@@ -1265,6 +1265,19 @@ ends with the watchdog's warning that thread 0 has been in the kernel
 without blocking: it is the printing, and nothing else of the run is
 affected.
 
+A program's own logging is an instrument of its own, and the cheapest
+one when the program is Microsoft's: Office writes nothing by default
+but turns its logs on from the registry, so a `.regseed` beside the
+scenario (`user/office_install/uls_logging.regseed`, loaded after
+`registry.seed`) sets `EnableLogging` under the user's
+`Office\16.0\Common\Logging` and `LogLevel` and `PipelineLogging` under
+`ClickToRun\OverRide`, and `dump=` lists the Temp directories the logs
+land in. What comes back is the program's own account of its startup.
+What does not come with it is authorship: `office_word`'s two ULS logs
+are OfficeClickToRun's own, and Word itself writes only its Click-to-Run
+client's log, so read the Process column before attributing a line to
+the program you asked about.
+
 ### Machine snapshots
 
 xtask's whole-machine snapshots (`xtask/src/snapshot.rs`; WORKFLOW

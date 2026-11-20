@@ -241,67 +241,102 @@ pub extern "system" fn SetKeyboardState(state: *const u8) -> i32 {
     1
 }
 
+/// DISPLAY_DEVICEW: cb, DeviceName[32], DeviceString[128], StateFlags,
+/// DeviceID[128], DeviceKey[128].
+const DISPLAY_DEVICE: usize = 840;
+const DD_NAME: usize = 4;
+const DD_STRING: usize = 68;
+const DD_FLAGS: usize = 324;
+const DD_ID: usize = 328;
+const DD_KEY: usize = 584;
+
+/// EDD_GET_DEVICE_INTERFACE_NAME: DeviceID is to be the device-interface
+/// path. A monitor has one; an adapter answers with nothing (measured).
+const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+
+/// Whether a caller's wide name is this ASCII one, compared as the object
+/// manager compares a device name: without regard to case.
+fn name_is(name: *const u16, ascii: &[u8]) -> bool {
+    for (i, &c) in ascii.iter().enumerate() {
+        // SAFETY: the caller's name, read up to its NUL -- which ends the
+        // loop, since no byte of `ascii` is zero.
+        let w = unsafe { name.add(i).read() };
+        if w > 0x7f || !(w as u8).eq_ignore_ascii_case(&c) {
+            return false;
+        }
+    }
+    // SAFETY: the character after the text just matched.
+    unsafe { name.add(ascii.len()).read() == 0 }
+}
+
 /// EnumDisplayDevicesW(lpDevice, iDevNum, lpDisplayDevice, dwFlags): one
-/// adapter, `\\.\DISPLAY1`, attached to the desktop and primary.
+/// adapter, `\\.\DISPLAY1`, attached to the desktop and primary, with gala's
+/// one monitor under it (`\\.\DISPLAY1\Monitor0`), which is the second level a caller
+/// asks for by naming the adapter. The ids and the keys are the display's
+/// as `ccd.rs` has them, so a program that finds the monitor here and a
+/// program that finds it through the CCD find the same device path.
+/// Windows fills what the caller's `cb` leaves room for and answers TRUE
+/// even when that is nothing at all (measured), so a short structure is
+/// not an error; an adapter it does not have is no device.
 #[unsafe(no_mangle)]
 pub extern "system" fn EnumDisplayDevicesW(
     device: *const u16,
     index: u32,
     out: *mut u8,
-    _flags: u32,
+    flags: u32,
 ) -> i32 {
-    // DISPLAY_DEVICEW: cb, DeviceName[32], DeviceString[128], StateFlags,
-    // DeviceID[128], DeviceKey[128] (840 bytes).
-    // SAFETY: the caller's structure (its cb says how much is there).
+    if out.is_null() {
+        set_error(87);
+        return 0;
+    }
+    let monitor = !device.is_null();
+    if monitor && !name_is(device, super::monitor::DISPLAY_NAME) {
+        return 0; // the only adapter a monitor can be under is gala's
+    }
+    if index != 0 {
+        return 0; // one adapter, and one monitor under it
+    }
+    let interface = flags & EDD_GET_DEVICE_INTERFACE_NAME != 0;
+    // SAFETY: the caller's structure, whose cb says how much is there;
+    // nothing below writes past it.
     unsafe {
-        if out.is_null() || out.cast::<u32>().read_unaligned() < 4 + 64 + 256 + 4 {
-            set_error(87);
-            return 0;
+        let size = (out.cast::<u32>().read_unaligned() as usize).min(DISPLAY_DEVICE);
+        if size > DD_NAME {
+            core::ptr::write_bytes(out.add(DD_NAME), 0, size - DD_NAME);
         }
-        if !device.is_null() || index != 0 {
-            return 0; // no monitors listed under the adapter, one adapter
-        }
-        let size = out.cast::<u32>().read_unaligned() as usize;
-        core::ptr::write_bytes(out.add(4), 0, size.min(840) - 4);
         let put = |at: usize, text: &[u8]| {
             for (i, &c) in text.iter().enumerate() {
+                if at + 2 * (i + 1) > size {
+                    return; // as much of it as there is room for
+                }
                 out.add(at + 2 * i).cast::<u16>().write_unaligned(u16::from(c));
             }
         };
-        put(4, b"\\\\.\\DISPLAY1");
-        put(68, b"gala display");
-        out.add(324).cast::<u32>().write_unaligned(0x1 | 0x4); // ATTACHED | PRIMARY
+        let state = |bits: u32| {
+            if DD_FLAGS + 4 <= size {
+                out.add(DD_FLAGS).cast::<u32>().write_unaligned(bits);
+            }
+        };
+        put(DD_NAME, super::monitor::DISPLAY_NAME);
+        if monitor {
+            put(DD_NAME + 2 * super::monitor::DISPLAY_NAME.len(), br"\Monitor0");
+            put(DD_STRING, super::ccd::MONITOR_NAME);
+            state(0x1 | 0x2); // DISPLAY_DEVICE_ACTIVE | ..._ATTACHED
+            put(
+                DD_ID,
+                if interface { super::ccd::MONITOR_PATH } else { super::ccd::MONITOR_DEVICE_ID },
+            );
+            put(DD_KEY, super::ccd::MONITOR_CLASS_KEY);
+        } else {
+            put(DD_STRING, b"gala display adapter");
+            state(0x1 | 0x4); // ..._ATTACHED_TO_DESKTOP | ..._PRIMARY_DEVICE
+            if !interface {
+                put(DD_ID, super::ccd::ADAPTER_DEVICE_ID);
+            }
+            put(DD_KEY, super::ccd::ADAPTER_VIDEO_KEY);
+        }
     }
     1
-}
-
-/// GetDisplayConfigBufferSizes / QueryDisplayConfig /
-/// DisplayConfigGetDeviceInfo: the CCD display configuration is not
-/// supported (ERROR_NOT_SUPPORTED, their documented "not available").
-#[unsafe(no_mangle)]
-pub extern "system" fn GetDisplayConfigBufferSizes(
-    _flags: u32,
-    _paths: *mut u32,
-    _modes: *mut u32,
-) -> i32 {
-    50
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryDisplayConfig(
-    _flags: u32,
-    _paths: *mut u32,
-    _path_info: *mut u8,
-    _modes: *mut u32,
-    _mode_info: *mut u8,
-    _topology: *mut u32,
-) -> i32 {
-    50
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn DisplayConfigGetDeviceInfo(_packet: *mut u8) -> i32 {
-    50
 }
 
 /// GetPointerType / GetPointerDevice / GetPointerPenInfo: there are no

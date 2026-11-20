@@ -84,6 +84,13 @@ pub fn init() {
     if let Err(e) = registry::init(platform::system_time()) {
         panic!("registry: {e:?}");
     }
+    // The monitor's EDID, into the display device the seed describes:
+    // written from the screen's own size, which the platform knows by
+    // now, and here rather than in the boot path so that gala-um's
+    // display answers as the kernel's does (desktop::edid).
+    if let Err(e) = desktop::edid::publish() {
+        crate::warn!("display: cannot publish the monitor's EDID: {e:?}");
+    }
     if let Err(e) = timer::init() {
         panic!("timers: {e:?}");
     }

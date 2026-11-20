@@ -255,7 +255,7 @@ has a section under "Open items".
 | HW | A real laptop: gala on hardware, waiting for updates | planned | the target of IN and R8/R9 (the owner): AHCI and NVMe disks, USB input (item USB), a network (a wired USB adapter, then item WF), the firmware's framebuffer, power; the owner's laptop is the first machine |
 | WF | Wi-Fi: a dynamic interface, 802.11 and the Windows APIs | later | nothing yet; four layers (DHCP and address changes, the Windows wireless APIs, 802.11 and a WPA2/WPA3 supplicant, the card's driver through DR); a wired USB adapter is the cheap way to a network on real hardware |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
-| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 30.5 s and no document drawn (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
+| OF | Microsoft 365 apps and the new Outlook | in progress | the gap analysis done; the Click-to-Run install completes (`office_install_local`); the AppV shim's virtual environment comes up and WINWORD loads Word, Office's shared code and its resources and puts an untitled window on the screen; with DXVK beside WINWORD.EXE it creates a feature level 11_0 Direct3D 11 device on lavapipe and no longer raises; Direct2D 1.1 and 1.2 are there (ID2D1Factory1 and ID2D1Factory2, their devices, device contexts, geometry realizations and target bitmaps over DXGI surfaces: `d2d1_device_test`), and so is the 1.0 path Word actually takes: a feature level 10.1 device of gala's own `d3d10_1.dll` over that Direct3D 11, its textures and Direct2D render targets over them, each of those targets a device context whose own device Word takes to make a context of its own (`d3d10_1_test`), every call of which Word gets S_OK from, and so are the steps it stopped on next: Direct2D's drawing state blocks, DirectWrite's text-rendering parameters, a target bitmap over Word's own surface and the meshes it draws tessellated shapes with, so the whole Direct2D and DirectWrite path Word walks is answered and its ledger ends on ID2D1DeviceContext::SetTarget, S_OK (`d2d1_test`, `dwrite_test`, `d2d1_device_test`); the display is answered as far as Word and DXVK ask for it (EnumDisplayDevicesW's monitor level, a Plug and Play device tree setupapi reads out of the registry, and the panel's EDID the kernel writes into the monitor's device key at boot, which is what DXVK's `getMonitorEdid` wanted: `display_test`); Word shows its untitled window and still ends on "Word was unable to start. (13)" with status 0 after 30.7 s and no document drawn, the decision its own, in wwlib, by a stack capture over MessageBoxW (`office_word`); Excel takes the same path, not rerun since (`office_excel`) |
 
 ### Robustness, live update, tooling
 
@@ -2368,6 +2368,70 @@ need gala's.
      warning in the file (external memory features unsupported), and
      `winword_dxgi.log` holds only the monitor-metadata errors named
      above.
+     Word can be asked to log for itself, and what it logs says the last
+     thing it does over the Click-to-Run channel is licensing, and that
+     licensing is not what stops it. Microsoft's own public switches
+     seed it (`user/office_install/uls_logging.regseed`: `EnableLogging`
+     under the user's `Office\16.0\Common\Logging`, `LogLevel` and
+     `PipelineLogging` under `ClickToRun\OverRide`), and the scenario
+     dumps the Temp directories they write into, which takes the dump
+     from 13 guest files to 16. Two of the new files are ULS logs of
+     OfficeClickToRun's own and not Word's -- with EnableLogging set
+     Word still writes none, so this instrument gives the service's view
+     and Word's Click-to-Run client's, not Word's own -- and the third
+     is that client's log, which ends on `ProductReleaseId =
+     O365ProPlusRetail`, `HrGetDeviceBasedLicensing:
+     deviceBasedLicensing for o365proplusretail=0` and a
+     `SharedComputerLicensing` with an empty value. That is what a
+     retail product with no device-based licensing answers on Windows
+     too, and the service's matching
+     `ClickToRunData::GetConfigurationSetting - Failed to get value for
+     o365proplusretail.devicebasedlicensing` is the same non-answer from
+     the other end. Word asks, is answered as it would be, and goes on;
+     the identity and telemetry activities that fail beside it
+     (`Office.Identity.ConfigService` five times,
+     `RequestMsaDeviceToken` with REGDB_E_CLASSNOTREG) are the service's
+     own and want a network.
+     The ledger's largest row is Word's own impatience and not the
+     cause. The 86 refusals of `rpcrt4.dll!no server at
+     pipe(LRPC-C2RClientAPI_Server_System16)` are Word reaching for the
+     Click-to-Run service before it has registered its endpoint: in the
+     traced run Word tries 117 times, is refused 116 of them
+     (0xC0000034) from 11940.7 ms, connects at 56709.3 ms on its main
+     thread -- and raises the same box with the connection in hand. In
+     the untraced run the service registers its interface at 32782 ms,
+     after Word has given up at 30774 ms. gala's SCM does start
+     `ClickToRunSvc` on demand and it reaches RUNNING; that the service
+     needs 24 s to get from started to registered is a divergence of its
+     own to measure, and not this failure.
+     Nothing in the run throws: the process dispatches no exception at
+     all (not one `exception` event for pid 12), so what Word gives up
+     on is a value it was handed, and not a status and not a throw. Nor
+     is anything in that window gala's answer. The four activation-
+     context functions MSO reaches there are the box's own -- the side-
+     by-side context its Common-Controls manifest needs -- and the run's
+     only activation-context row is `CreateActCtxW(manifest sections not
+     built)` at 32602 ms, one manifest's typelibs, proxy/stubs and CLR
+     classes (the skipped mask, 26); no lookup in the whole run asks for
+     one of them, which `FindActCtxSection(section not built)` would
+     record and does not. What Word holds, it was given earlier. The
+     nearest thing already measured was the display configuration, and
+     it is answered now and is not the cause. The three CCD calls are
+     implemented, measured on Windows first (`display_test`,
+     ARCHITECTURE "The display configuration"), and the import trace
+     taken after them shows Word walking straight through:
+     `GetDisplayConfigBufferSizes` at 32874.7 ms, `QueryDisplayConfig`
+     at 32878.2 ms, `DisplayConfigGetDeviceInfo` at 32881.6 ms, a
+     `wcscmp` of two names, then `SETUPAPI.dll!SetupDiGetClassDevsW`
+     with DIGCF_DEVICEINTERFACE at 32894.0 ms and
+     `SetupDiEnumDeviceInterfaces` at 32906.1 ms, both of which gala
+     refuses. So Word takes the active path, asks for the target's name
+     and goes looking for that monitor's EDID -- and raises the same box
+     931 ms later, at 33813.0 ms, with nothing gala refused in between
+     (the ledger rows in that window are "reached" and the DLLs' own,
+     and the box's 21-byte `WriteFile` closes it). The display
+     configuration was a gap and not the cause; what stands behind it is
+     the monitor's own description (next, below).
      Who raises the box is measured rather than inferred, by the
      facility built for it: `events_match=WINWORD stack_at=NtWriteFile:4
      stack_from=user32 stack_words=400` catches gala's MessageBoxW
@@ -2380,10 +2444,54 @@ need gala's.
      puts the box on the screen for it. A scan is evidence and not
      proof (OBSERVABILITY "Stack captures"), but it names the DLL to
      ask about, which no other facility here does.
-     Measured beside it and not yet explained:
-     `GetDisplayConfigBufferSizes` answers ERROR_NOT_SUPPORTED to DXVK,
-     which falls back to blank display metadata and carries on
-     (`winword_dxgi.log` in the dump).
+     Measured beside it: the display is answered further now, and one
+     call is all that is left of it. EnumDisplayDevicesW has the second
+     level Windows has -- the monitor under the adapter, name
+     `\\.\DISPLAY1\Monitor0`, ACTIVE | ATTACHED, the CCD target's
+     friendly name, a device instance id under GUID_DEVCLASS_MONITOR
+     with that class's key beside it, and with
+     EDD_GET_DEVICE_INTERFACE_NAME the same device-interface path
+     DisplayConfigGetDeviceInfo gives for that target -- and the adapter
+     has an instance id and the Video key now, and any `cb` is filled as
+     far as it reaches instead of refused (`cb` 0 and 4 answer TRUE and
+     write nothing, 328 fills the names and not the ids): measured on
+     Windows first, checked by `display_test` on both. It does not move
+     Word, and DXVK's source says why not, line by line.
+     `getMonitorEdid` does not go through the CCD at all: it wants a
+     Plug and Play device tree, enumerating GUID_DEVINTERFACE_MONITOR,
+     matching each DevicePath against the CCD target's without regard to
+     case, opening that device's registry key and reading an `EDID`
+     value. gala answers that walk now -- setupapi reads the device
+     tree out of the registry, where Windows keeps one, and the kernel
+     writes the panel's EDID into the monitor's `Device Parameters` at
+     boot from the screen's own size -- and DXVK's `err:
+     getMonitorEdid: Failed to find device interface for monitor using
+     setupapi.` is gone from the run. Windows settled two things about
+     that walk which `display_test` now checks on both: the DevicePath
+     setupapi hands back is the CCD's in lower case (which is why DXVK
+     compares the two with `_wcsicmp`), and the size a detail call asks
+     for is the path's offset plus the path and its terminator, 168
+     bytes for this laptop's 81-character path, and not the structure's
+     own `cbSize`. The blank display metadata beside it was that
+     missing EDID and nothing else, and is what a monitor with no HDR
+     metadata gives anyway. The warning that reads like a gap, "Found
+     monitors not associated with any adapter", is none: DXVK takes a
+     monitor off its list only for an adapter whose Vulkan
+     `luidIsValid` is set, and
+     gala's Vulkan driver reports no device LUID, which is what DXVK's
+     own "Adapter LUID 0: 0:10006e" says -- that number is a LUID its
+     `GetAdapterLUID` asked gala's `AllocateLocallyUniqueId` for, in the
+     branch it takes only when Vulkan has none. So the loop never runs,
+     every monitor stays on the list, and the fallback is to enumerate
+     them all, which for one monitor is the same answer; gala's CCD
+     adapter LUID is never compared with anything. With that, the
+     display has nothing left that Word's walk or DXVK's asks for and
+     gala refuses, and the run ends where it did: Word's untitled
+     window up, "(13)", status 0 after 30.7 s, the decision in wwlib.
+     (gdi32's `D3DKMTEnumAdapters2` and `D3DKMTQueryAdapterInfo` are
+     not among these: GetProcAddress must keep answering NULL for them,
+     which is how the Vulkan loader learns to skip them --
+     `user/gdi32/src/absent.rs`.)
      The machine's size is not the cause either, and that question is
      closed: on 4 GiB instead of 596 MiB, with 3.5 GiB still free,
      Word fails identically, and gala itself never came near the edge

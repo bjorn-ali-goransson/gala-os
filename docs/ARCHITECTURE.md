@@ -3757,7 +3757,13 @@ clean tree as in a built one. Reading the build instead would leave every
 set open wherever nothing is built yet, and `cargo xtask test` builds only
 um. A dependency neither checked in nor built is left out; the load then
 fails in the guest, where the loader records the name (`missing dll`),
-never silently.
+never silently. The 32-bit half of a set (the `x86/` names under
+SysWOW64) is listed instead of closed, because a module there is named
+with that prefix while an import table names the DLL itself; a host test
+closes the loop over the checked-in i686 copies
+(`every_scenario_s_32_bit_set_is_closed`), so a SysWOW64 dependency
+nobody listed fails `cargo xtask test` rather than a boot, where it
+reads like a gap in the DLL and not a gap in the list.
 
 ### ntdll: the loader
 
@@ -6027,12 +6033,34 @@ of their own, clients of it) is the yardstick.
   collections (so 0% busy until the kernel keeps processor times); other
   objects and counters are recorded and fail as on a machine without
   them; handles carry a generation (`pdh_test`; Chromium's CPU probe).
-  **setupapi**: device information sets over an empty device tree (no
-  Plug and Play manager): every class has no devices, so sets are valid
-  and empty, enumeration is ERROR_NO_MORE_ITEMS and opening a device or
-  interface is ERROR_NO_SUCH_DEVINST / ERROR_NO_SUCH_DEVICE_INTERFACE;
-  each SetupDiGetClassDevsW is recorded ("no device tree", the class's
-  first dword) (`setupapi_test`; Chromium's battery-level provider).
+  **setupapi**: device information sets over the Plug and Play device
+  tree the registry holds, which `devices.rs` walks through advapi32
+  (whose HKEY is a key handle, so the DLL needs nothing of the kernel's
+  that a program could not reach itself): devices under
+  `SYSTEM\CurrentControlSet\Enum\<enumerator>\<hardware id>\<instance>`,
+  their interfaces under `Control\DeviceClasses\{class}` with a
+  `DeviceInstance` naming the device and a linked `#\Control` below
+  them, a device's own values in `Device Parameters` and its driver's
+  under `Control\Class\<Driver>`. A class no device is in still gives a
+  valid empty set, while the display's gives gala's monitor and its
+  adapter: SetupDiGetClassDevsW by device class or, with
+  DIGCF_DEVICEINTERFACE, by interface class, SetupDiEnumDeviceInfo,
+  SetupDiEnumDeviceInterfaces, SetupDiGetDeviceInterfaceDetailW (the
+  two-call size probe: the path's offset plus the path and its
+  terminator, as measured on Windows), SetupDiOpenDeviceInfoW,
+  SetupDiOpenDeviceInterfaceW, SetupDiOpenDevRegKey (DIREG_DEV is the
+  device's `Device Parameters`, DIREG_DRV its driver key) and
+  SetupDiCreateDeviceInfoList / SetupDiDestroyDeviceInfoList.
+  Enumeration past the last member is ERROR_NO_MORE_ITEMS, a device or
+  interface the tree does not have is ERROR_NO_SUCH_DEVINST /
+  ERROR_NO_SUCH_DEVICE_INTERFACE, a device property is ERROR_NOT_FOUND
+  (gala's devices have the registry's values and no property store),
+  and a class devs call that finds no device at all is recorded with
+  the class's first dword. Nothing is cached and nothing allocates:
+  every call walks the keys again, and a devnode id is counted over
+  every device in the tree so it does not depend on which set asked
+  (`setupapi_test`, `display_test`; Chromium's battery-level provider,
+  DXVK's `getMonitorEdid`).
   SetupIterateCabinetW (`cab.rs`, `setupcab_test`, `wow64_setupcab_test`;
   ODT's setup.exe unpacks its version descriptor with it): the cabinet
   read whole and parsed by galapkg's reader (MSZIP, LZX: "Installing
@@ -8828,7 +8856,72 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (DEFAULT_SIZE, 1280 x 800, for a desktop nothing shows, in both
   kernels; user32 assumes the same if the call fails). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
   by the default flags), GetMonitorInfoW/A (`\\.\DISPLAY1`) and
-  GetSystemMetrics' screen metrics come from it.
+  GetSystemMetrics' screen metrics come from it. EnumDisplayDevicesW
+  answers at the two levels Windows has: the adapter (`\\.\DISPLAY1`,
+  attached to the desktop and primary, whose instance id is
+  `ROOT\DISPLAY\0000` -- gala's display hangs off the root and not off a
+  bus -- and whose key is the Video one a display adapter's settings
+  live under), and, for a caller that names that adapter, the monitor
+  under it (`\\.\DISPLAY1\Monitor0`, active and attached, named with the CCD
+  target's friendly name, with an instance id under the monitor class
+  and that class's key, or with EDD_GET_DEVICE_INTERFACE_NAME the
+  target's device-interface path instead) -- the same path `ccd.rs`
+  gives, so a program that reaches gala's display through GDI and one
+  that reaches it through the CCD find one monitor. Each call fills
+  what the caller's `cb` leaves room for and answers TRUE even when
+  that is nothing at all, rather than refusing a short structure, and
+  an adapter gala does not have is no device: measured, like the rest
+  of it, on Windows first (`display_test`). Both keys are in gala's
+  registry, under the Enum tree setupapi reads (**setupapi** above),
+  and the monitor's holds the panel's EDID (below).
+- **The display configuration** (`ccd.rs`, the CCD calls
+  GetDisplayConfigBufferSizes, QueryDisplayConfig and
+  DisplayConfigGetDeviceInfo): one adapter, one source and one target on
+  a path that is always active, which is one DISPLAYCONFIG_PATH_INFO and
+  two DISPLAYCONFIG_MODE_INFO records -- the target's signal (its active
+  size, its total size and a pixel rate from them) and the source's size
+  -- all of it the screen `monitor.rs` answers with and the refresh
+  EnumDisplaySettingsW gives, so a program that reads the display twice
+  reads it the same. Every call names exactly one topology: no QDC_* bit,
+  or two of them, is ERROR_INVALID_PARAMETER, while a flag beside one
+  (QDC_VIRTUAL_MODE_AWARE) is not another topology; a count of zero is
+  ERROR_INVALID_PARAMETER and too little room ERROR_INSUFFICIENT_BUFFER,
+  and a topology id is taken only with QDC_DATABASE_CURRENT.
+  DisplayConfigGetDeviceInfo gives the source's GDI device name
+  (`\\.\DISPLAY1`, `monitor::DISPLAY_NAME`, which EnumDisplayDevicesW
+  and GetMonitorInfoW give too), the target's friendly name and its
+  device-interface path under GUID_DEVINTERFACE_MONITOR, and the
+  adapter's device path. The target's name is gala's own and not one
+  read out of an EDID, so a program that keys a per-monitor setting by
+  that path keys it to gala; the panel's EDID is behind the monitor's
+  device key instead (**The monitor's EDID** below), which is where
+  both Windows and a program that wants the panel's own description
+  look. Three things
+  are deliberately absent, each recording a ledger row rather than
+  inventing an answer: an adapter that is not gala's and an unknown
+  DISPLAYCONFIG_DEVICE_INFO type (ERROR_INVALID_PARAMETER and
+  ERROR_NOT_SUPPORTED, as Windows answers for an adapter it does not
+  have), and DisplayConfigSetDeviceInfo, since gala's display is not
+  something a program can change. Measured on Windows first and checked
+  on both: `display_test`.
+- **The monitor's EDID** (`kernel/src/nt/desktop/edid.rs`): one VESA
+  E-EDID 1.4 base block, written from the standard into the monitor's
+  `Device Parameters` as the REG_BINARY `EDID` value that setupapi's
+  device key hands out. It is published as the registry comes up
+  (`nt::init`, right after the seed) and not from the boot path, so
+  gala-um's display answers exactly as the machine's does. It is generated and not seeded,
+  because gala's screen size is the host window's: the manufacturer id
+  and product code spell the monitor's hardware id, the one detailed
+  timing is the screen's own size at 60 Hz with the blanking a panel
+  this size would have, the preferred-timing bit says so, the monitor
+  name descriptor is the panel's, and the checksum closes the block.
+  There is no extension block: no HDR static metadata, which is what a
+  monitor without it reports anyway, and no audio or CEA block, since
+  gala's display carries neither. Host tests check the ids against the
+  hardware id, the timing against the screen, the name, and that every
+  screen size gala can have gives a block that holds together; what
+  reads it end to end is `display_test`, over the walk DXVK's
+  `getMonitorEdid` makes.
 - **TrackMouseEvent**: TME_LEAVE watches one window (process-wide),
   which gets WM_MOUSELEAVE when the pointer's next WM_MOUSEMOVE goes to
   another window. TODO: leaving the top-level window, TME_HOVER.
@@ -15675,8 +15768,9 @@ GPU or a screen (`presenter=test`).
   `loader_test`). DXVK's d3d11 finds its own dxgi first because a bare
   name is searched in the executable's directory before System32. Its
   CRT is the UCRT through the `api-ms-win-crt-*` sets (gala's
-  ucrtbase), and it reads the adapter's devnode through setupapi and
-  cfgmgr32, which have no device tree to show; everything else it
+  ucrtbase), and it reads the display's devnode through setupapi,
+  which answers from the registry's device tree (**setupapi** above),
+  and through cfgmgr32, which has none to show; everything else it
   imports gala had already, beyond gdi32's `D3DKMT*` thunks (above).
   `d3d9`, `d3d8` and `d3d10core` are in the same release and follow
   with the programs that want them; DXVK ships no `d3d10`/`d3d10_1`
