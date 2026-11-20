@@ -2305,10 +2305,14 @@ need gala's.
      the section map of uxtheme.dll and one NtQueryValueKey across the
      whole stretch. So it is Word computing and not Word asking,
      nothing is refused it there, and what it acted on is in those
-     buffers -- which the instrument could not read while it quoted
-     arguments only. It reads one now (OT3b, text at a return,
-     scenario `import_answer_text`), and the next run of this track is
-     that same narrow arming with those 134 answers quoted.
+     buffers. They are quoted now (OT3b, text at a return, scenario
+     `import_answer_text`) and hold no text, because the ordinal
+     answers a structure by value: the ABI hands it the caller's
+     buffer in an argument register and answers that pointer, which
+     is the answer of all 134 of those calls (argument 0 in every
+     one). So what Word acted on is bytes and not a string, and
+     reading it is the one piece of OT3b still open
+     (`imports_bytes=`, below).
      The window records interleaved among those calls are another
      thread's. The pump -- `GalaWindowPosted`, `GalaWindowReceive`,
      `GalaWindowInput`, `NtWaitForMultipleObjects` timeouts -- runs on
@@ -6470,7 +6474,17 @@ among the slowest hand-offs.
      what most of what a program asks of a DLL needs read, Word's
      own startup among it -- one mso ordinal called over a hundred
      times, every one answering the buffer it was handed (scenario
-     `import_answer_text` with an ARM64 twin).
+     `import_answer_text` with an ARM64 twin). What is left of the
+     gap there: a structure answered by value is a pointer at bytes
+     and not at text, the ABI handing the callee the caller's buffer
+     in an argument register and answering it (WORKFLOW, "COM methods
+     that return a structure take a hidden pointer"), so a quote of
+     either end reads nothing -- which is what all 134 answers of
+     Word's last stretch are. Reading those needs the bytes
+     themselves: `imports_bytes=<n>` quoting the first `n` at each
+     argument and at the answer as hex, beside the registers as a
+     string quote sits, with the same budget and the same per-thread
+     reading. It is the piece of this question still open.
      Nor is a budget spent on the names that are noise:
      `imports_except=<text>[,<text>...]` leaves an import whose
      `<dll>!<name>` holds one of the texts unarmed, so that it costs no
