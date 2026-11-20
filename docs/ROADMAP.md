@@ -2497,11 +2497,17 @@ need gala's.
      Word fails identically, and gala itself never came near the edge
      (fewest frames free 38129, about 149 MiB, pagefile untouched).
      The office scenarios stay at their old size.
-     Still unexplained beside it, and to be measured on Windows
-     before it is called a divergence: ten NtAllocateVirtualMemory
-     calls refused with CONFLICTING_ADDRESSES (MEM_COMMIT|MEM_RESERVE,
-     PAGE_READWRITE) against 685 that succeed -- gala's own loader
-     probes addresses the same way (`thread.rs`).
+     Measured on Windows and no divergence: the ten
+     NtAllocateVirtualMemory calls refused with CONFLICTING_ADDRESSES
+     (MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE) against 685 that
+     succeed. MEM_COMMIT alongside MEM_RESERVE does not excuse the
+     reservation -- a fixed base needs the whole range free -- and
+     build 26200 refuses part of a reservation, all of it, a range
+     across its end and an already committed one alike, with only
+     MEM_COMMIT on its own committing inside a reservation
+     (`vm_test`). Office's allocators probe a preferred address this
+     way, as gala's own loader does (`thread.rs`), so the refusals
+     are answers.
      What a dying thread called last is in the crash report
      (OBSERVABILITY "Crash reports"), and the two gaps the ledger named
      where Word used to raise are closed, each measured on Windows
