@@ -2289,6 +2289,21 @@ need gala's.
      of the brush -- the `Word\Options\Debug` read at 41773 ms is
      already Word asking whether to break before it gives up -- and on
      a value some call answered S_OK with rather than on a status.
+     Which value came within reach by narrowing the arming to one DLL.
+     `imports=WINWORD.EXE!Mso20Win32Client.dll:8192` with
+     `imports_repeat=`, `imports_answers=` and `imports_strings=`
+     records 76 first calls, 2135 later ones and 2210 answers without
+     spending the budget on the rest of the program, and what it shows
+     is that the last stretch before the box is one call made 134
+     times: `Mso20Win32Client.dll!#16040(out, 0x1fb480, 0x2ae380,
+     <id>)` on the startup thread between 44170 ms and 45403 ms, 126
+     distinct ids, every one of which answers the buffer it was handed
+     -- and then #7228 with the message 48 ms later. So nothing
+     refused Word anything here either: what it acted on is in that
+     buffer, which the instrument could not read while it quoted
+     arguments only. It reads one now (OT3b, text at a return,
+     scenario `import_answer_text`), and the next run of this track is
+     that same narrow arming with those 134 answers quoted.
      What those calls were handed and what they gave back is what
      `trace_from=<dll>!<Interface>::<Method>` with `events=call`
      measures, the ledger keeping one row a site and so hiding every
@@ -6409,9 +6424,14 @@ among the slowest hand-offs.
      quoted like a string the call was really handed, which is why the
      quotes sit beside the registers and not in place of them; the
      narrow range is ASCII only, a pointer's own low bytes being a run
-     of high bytes and a zero; and text at an argument only, never at
-     an answer, since a buffer a call filled holds it only once the
-     call is over. Nor is a budget spent on the names that are noise:
+     of high bytes and a zero. What a buffer a call filled holds is
+     read where the call's return is trapped: `imports_answers=` and
+     `imports_strings=` together quote the answer register and the
+     arguments that were no text at the call, each quote keyed by the
+     place it was read at (`answer`, or the argument's index), which is
+     what Word's own last conversation needs read -- 134 calls to one
+     mso ordinal, every one answering the buffer it was handed
+     (scenario `import_answer_text` with an ARM64 twin). Nor is a budget spent on the names that are noise:
      `imports_except=<text>[,<text>...]` leaves an import whose
      `<dll>!<name>` holds one of the texts unarmed, so that it costs no
      slot of the budget, no fault and no record (scenario `iat_except`

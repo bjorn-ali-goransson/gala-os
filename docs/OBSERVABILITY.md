@@ -1183,7 +1183,9 @@ made and not the set of names it reached (`iat_repeat`, below), and
 `imports_answers=<n>` adds what each of those calls answered, by
 trapping the return as well as the call (`iat_answers`, below).
 `imports_strings=<n>` quotes the arguments that read as text, beside
-the registers they were read from (`import_strings`, below).
+the registers they were read from, and the answer and the filled
+buffers of a call whose return was trapped (`import_strings` and
+`import_answer_text`, below).
 `imports_except=<text>[,<text>...]` leaves the imports whose
 `<dll>!<name>` holds one of the texts unarmed, so that the budget goes
 to the rest (`iat_except`, below).
@@ -1353,6 +1355,27 @@ data first, which disarms the slot (below), so that one leaves a
   number costs none. Scenarios `import_strings_test` (the program with
   nothing armed) and `import_strings` (the same program with the
   arguments quoted), both with ARM64 twins.
+
+  **A buffer a call filled is read at its return.** A call that fills
+  one is handed an empty buffer, so what it is about is in the buffer
+  only once the call is over, and a quote of its arguments reads as a
+  call that was handed no text at all -- which is what Word's last
+  conversation before it gives up is made of: 134 calls to one mso
+  ordinal, each answering the buffer it was handed. Where
+  `imports_answers=` trapped the return, the same reading therefore
+  runs again there: at the register the answer came back in, and at the
+  arguments that were no text at the call (the kernel kept those from
+  the call, the callee being free to clobber the registers; an argument
+  that was text already is not read a second time, its bytes not having
+  changed). Those quotes go into the `ret` event under `"text"` as
+  well, keyed by `answer` and by the argument's own index, and the
+  first eight returns carrying any are said in the log (`imports: the
+  return of <name> carries text: answer "..." arg 0 "..."`). The
+  summary counts them apart from the calls' -- `5 quotes of 64, carried
+  by 2 calls and 1 return` -- because a quote at a return is a quote of
+  what the call wrote. Scenario `import_answer_text` with an ARM64
+  twin, where the answer comes back in the register the first argument
+  was handed in.
 
   Nothing here knows a call's signature, so this is evidence and not
   proof. A number that happens to point at a printable NUL-terminated

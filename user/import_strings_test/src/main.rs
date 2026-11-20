@@ -6,8 +6,12 @@
 //! that cannot say which string is a trace of the shape of a program's
 //! work and not of the work.
 //!
-//! This program is the four cases an argument can be, handed to one
-//! import in one call each: a narrow string, a wide string, a number
+//! This program is the four cases an argument can be, and a fifth
+//! that is not a case of an argument at all: a buffer the callee fills,
+//! which holds its text only once the call is over, so a trace reads it
+//! at the answer or not at all.
+//!
+//! The four are handed to one import in one call each: a narrow string, a wide string, a number
 //! too small to be a pointer, and a pointer at bytes that are no text.
 //! A second call hands it a pointer into no mapping at all, where the
 //! read must fail and leave the register as it found it, and a third
@@ -31,6 +35,7 @@ use ntrt::*;
 #[link(name = "testdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn gala_four(a: u64, b: u64, c: u64, d: u64) -> u64;
+    fn gala_fill(out: *mut u16, n: u64) -> u64;
 }
 
 /// A narrow string, as every `*A` call and every C string is handed
@@ -123,6 +128,22 @@ fn run() -> Result<(), u32> {
     four(c, UNMAPPED, SMALL, blob, narrow2)?;
     // Four numbers, which is a call with no text to quote at all.
     four(c, SMALL, SMALL, SMALL, SMALL)?;
+
+    // A buffer of this frame's: empty where the call is recorded and
+    // holding the callee's text where its answer is. So the call
+    // carries no text and its return carries it twice, at the answer
+    // and at the argument the buffer was handed at -- the same register
+    // read at two times, which is the whole of what a filled buffer is.
+    let mut buf = [0u16; 32];
+    let at = buf.as_mut_ptr() as u64;
+    // SAFETY: the DLL's own export, handed this buffer and the number
+    // of characters it has.
+    let got = unsafe { gala_fill(buf.as_mut_ptr(), buf.len() as u64) };
+    print("import_strings_test: filled\r\n");
+    c.eq(got, at)?;
+    c.eq(u64::from(buf[0]), u64::from(b'f'))?;
+    c.eq(u64::from(buf[19]), u64::from(b'n'))?;
+    c.eq(u64::from(buf[20]), 0)?;
 
     // And the strings are as they were: the quoting reads them and
     // nothing else, so a program cannot tell from its own memory that

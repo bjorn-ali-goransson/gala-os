@@ -69,6 +69,19 @@
 //! in place of them, and why the run must be terminated inside the
 //! window and have [`TEXT_LEAST`] characters before it is text at all.
 //!
+//! A buffer is the other half of that. A call that fills one is
+//! handed an empty one, so the text it is about is in the buffer only
+//! once the call is over, and a quote of its arguments reads as a call
+//! that was handed no text at all. Where the return is trapped
+//! (`imports_answers=`) the quoting therefore runs again at the
+//! return: at the register the answer came back in, and at the
+//! arguments that were no text at the call -- the kernel kept those
+//! from the call, the callee having been free to clobber the registers
+//! -- so the same register can be a number at the call and a string at
+//! its return, which is what every `Get*` that fills a buffer is. Each
+//! quote says which place it was read at, because a quote a reader
+//! cannot pair with a number is a quote of nothing.
+//!
 //! A wide trace spends most of itself on the same few names: a
 //! program's heap, string and locale imports are called in the
 //! thousands while the ones a question is about are called once, and
@@ -89,9 +102,10 @@
 //! `imports_repeat=`, one such fault per call until the budget is
 //! spent, and under `imports_answers=` a second fault for each call
 //! answered, plus a read of up to [`TEXT_WINDOW`] bytes per argument
-//! under `imports_strings=`. What it cannot do is in OBSERVABILITY: the
-//! first four integer argument registers and no others, static imports
-//! only, and text at an argument of a call and never at its answer.
+//! under `imports_strings=` -- and, at a trapped return, one more per
+//! argument that was no text at the call and one for the answer. What
+//! it cannot do is in OBSERVABILITY: the first four integer argument
+//! registers and no others, and static imports only.
 //! A callee that reads its own return address sees the kernel's trap
 //! while its return is trapped, which is the one thing a program can
 //! tell at all.
@@ -186,6 +200,19 @@ const TEXTS_SAID: u64 = 8;
 /// The argument registers a call is recorded with, which is what
 /// `TrapFrame::arg_regs` gives and what a quote is indexed by.
 const ARGS: usize = 4;
+
+/// Where a recorded call's quotes are read: its argument registers, in
+/// the order [`TrapFrame::arg_regs`] gives them.
+const CALL_PLACES: [Place; ARGS] = [Place::Arg(0), Place::Arg(1), Place::Arg(2), Place::Arg(3)];
+
+/// Where a trapped return's are: the answer first, then the call's own
+/// arguments, which the kernel kept from the call ([`Pending`]).
+const RETURN_PLACES: [Place; ARGS + 1] =
+    [Place::Answer, Place::Arg(0), Place::Arg(1), Place::Arg(2), Place::Arg(3)];
+
+/// Both lists are written out, so an arch with a fifth argument
+/// register would leave them short in silence.
+const _: () = assert!(ARGS == 4, "CALL_PLACES and RETURN_PLACES list every argument register");
 
 /// The lowest address an argument may point at: NT maps nothing in the
 /// first 64 KiB, so an argument below it is a number and not worth a
@@ -311,6 +338,11 @@ static STRINGS: AtomicU32 = AtomicU32::new(0);
 static STRINGS_ASKED: AtomicU32 = AtomicU32::new(0);
 static TEXT_CALLS: AtomicU64 = AtomicU64::new(0);
 
+/// The returns of which one did, which the same summary line says: a
+/// quote at a return is a quote of what the call wrote, and a reader
+/// weighing what a trace cost needs the two apart.
+static TEXT_RETURNS: AtomicU64 = AtomicU64::new(0);
+
 /// Returns put back where their calls left them for an exception to
 /// unwind through, and those whose trap address could not be found on
 /// the stack to put back. Both are summary lines: a call put back is a
@@ -341,6 +373,15 @@ struct Pending {
     sp: u64,
     ret: u64,
     trap: u64,
+    /// The call's argument registers, which its return no longer has:
+    /// the ABI leaves them to the callee, and a buffer the call filled
+    /// is read at the return through the address it was handed at.
+    args: [u64; ARGS],
+    /// Which of those already read as text at the call, which the
+    /// return does not read again: the bytes have not changed, so a
+    /// second quote of them would be the same string twice and a
+    /// second quote off the budget.
+    quoted: [bool; ARGS],
 }
 
 /// The calls whose returns are waited for, over every thread. Read at a
@@ -576,16 +617,18 @@ pub fn set_strings(spec: &str) {
     let Some(n) = string_budget(spec) else {
         warn!(
             "imports: imports_strings={spec} reads a number from 1 to \
-             {MAX_STRINGS}, the arguments to quote: no argument is read as \
-             text at all instead, as without it"
+             {MAX_STRINGS}, the texts to quote: nothing is read as text at \
+             all instead, as without it"
         );
         return;
     };
     STRINGS.store(n, Ordering::Relaxed);
     STRINGS_ASKED.store(n, Ordering::Relaxed);
     info!(
-        "imports: the arguments of a recorded call that read as text, {n} at \
-         most, {TEXT_CHARS} characters of each (imports_strings=)"
+        "imports: what reads as text at a recorded call -- its arguments, and \
+         at a trapped return its answer and the arguments that were none at \
+         the call -- {n} quotes at most, {TEXT_CHARS} characters of each \
+         (imports_strings=)"
     );
 }
 
@@ -813,7 +856,10 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     } else {
         take_budget(&REPEAT)
     };
-    let logged = writing && (first || again) && record(process, frame, &entry, first);
+    // The record, and with it which arguments it already quoted: a
+    // return reads the others and the answer, and not these again.
+    let quoted =
+        if writing && (first || again) { record(process, frame, &entry, first) } else { None };
     if !again && let Err(status) = put(process, entry.slot, entry.target) {
         // The call still goes on (the instruction pointer below is what
         // sends it), so this costs a fault a call from here rather than
@@ -830,8 +876,10 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     // stream carries the call: an answer to a call the stream does not
     // carry would read as an answer to nothing. The budget is taken
     // here, at the call, which is where the cost is committed.
-    if logged && take_budget(&ANSWERS) {
-        trap_return(process, frame, &entry);
+    if let Some(quoted) = quoted
+        && take_budget(&ANSWERS)
+    {
+        trap_return(process, frame, &entry, &quoted);
     }
     // The return address is on the stack (x86-64) or in the link
     // register (ARM64) already: the call made it, and only its first
@@ -892,17 +940,19 @@ fn read_as_data(
 /// `imports_repeat=` kept the slot armed. A later call is the same event
 /// as a first one and is not marked as one: in a stream where a name can
 /// appear twice, the first of them is the first call, and in one where
-/// it cannot, every call is. True when the stream carries it, which is
-/// what trapping its return waits on (`imports_answers=`).
-fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> bool {
+/// it cannot, every call is. Some where the stream carries it, which is
+/// what trapping its return waits on (`imports_answers=`), and then
+/// which of its arguments read as text -- what its return reads is the
+/// others.
+fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> Option<[bool; ARGS]> {
     if !carried(process) {
-        return false;
+        return None;
     }
     let args = frame.arg_regs();
     let mut bytes = [[0u8; TEXT_WINDOW]; ARGS];
     let mut found = [None; ARGS];
-    quote_args(process, &args, &mut bytes, &mut found);
-    let text = Texts { found: &found, bytes: &bytes };
+    quote(process, &args.map(Some), &mut bytes, &mut found);
+    let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
     let name = core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?");
     events::emit(
         Category::Call,
@@ -920,31 +970,36 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> bo
     } else {
         REPEATED.fetch_add(1, Ordering::Relaxed);
     }
-    true
+    Some(found.map(|found| found.is_some()))
 }
 
-/// Reads a window at each argument that could hold text and says what
-/// it read, one of the budget per quote. Nothing at all where
-/// `imports_strings=` was not given, which is the usual case and one
-/// relaxed load; the budget is taken after the read, so an argument
-/// that is a plain number costs no quote.
-fn quote_args(
+/// Reads a window at each value that could hold text and says what it
+/// read, one of the budget per quote. A `None` is a place not to be
+/// read at all, which is how a return skips the arguments the call
+/// already quoted. Nothing at all where `imports_strings=` was not
+/// given, which is the usual case and one relaxed load; the budget is
+/// taken after the read, so a value that is a plain number costs no
+/// quote.
+fn quote(
     process: &Process,
-    args: &[u64; ARGS],
-    bytes: &mut [[u8; TEXT_WINDOW]; ARGS],
-    found: &mut [Option<Text>; ARGS],
+    at: &[Option<u64>],
+    bytes: &mut [[u8; TEXT_WINDOW]],
+    found: &mut [Option<Text>],
 ) {
     if STRINGS.load(Ordering::Relaxed) == 0 {
         return;
     }
-    for (i, &arg) in args.iter().enumerate() {
-        let Some(text) = text_at(process, arg, &mut bytes[i]) else {
+    for ((&value, buf), found) in at.iter().zip(bytes.iter_mut()).zip(found.iter_mut()) {
+        let Some(value) = value else {
+            continue;
+        };
+        let Some(text) = text_at(process, value, buf) else {
             continue;
         };
         if !take_budget(&STRINGS) {
             return;
         }
-        found[i] = Some(text);
+        *found = Some(text);
         QUOTED.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1048,7 +1103,7 @@ fn ascii(b: u8) -> bool {
 /// did. The real address is kept until then under the thread that made
 /// the call: a return is matched to its call by the stack pointer it
 /// arrives with, which is also how an unwind past the call is noticed.
-fn trap_return(process: &Process, frame: &mut TrapFrame, entry: &Trap) {
+fn trap_return(process: &Process, frame: &mut TrapFrame, entry: &Trap, quoted: &[bool; ARGS]) {
     let Some(ret) = frame.return_address(|addr| process.read_u64(addr).ok()) else {
         lost("its return address could not be read", entry);
         return;
@@ -1059,6 +1114,8 @@ fn trap_return(process: &Process, frame: &mut TrapFrame, entry: &Trap) {
         sp: frame.call_return_sp(),
         ret,
         trap: entry.trap,
+        args: frame.arg_regs(),
+        quoted: *quoted,
     };
     {
         let mut pending = PENDING.lock();
@@ -1393,7 +1450,7 @@ fn answered(process: &Process, frame: &mut TrapFrame, addr: u64) -> bool {
         );
         return false;
     };
-    answer(process, frame, &entry);
+    answer(process, frame, &entry, &waited);
     frame.set_ip(waited.ret);
     true
 }
@@ -1442,24 +1499,41 @@ fn take_pending(pid: u64, sp: u64) -> Option<Pending> {
 
 /// Records what one call answered: the same `ret` the event stream
 /// carries for `trace_from=`, under the import's name, so that a call
-/// and its answer read as one pair however they are nested.
-fn answer(process: &Process, frame: &TrapFrame, entry: &Trap) {
+/// and its answer read as one pair however they are nested -- and what
+/// reads as text now that the call is over, at the answer and at the
+/// arguments it was handed that were no text when it was recorded. A
+/// buffer the call filled is both of those at once: the answer is
+/// often the buffer itself, and the argument it was handed at now
+/// points at what the call wrote.
+fn answer(process: &Process, frame: &TrapFrame, entry: &Trap, waited: &Pending) {
     if !events::enabled(Category::Call) || !events::syscall_pid_wanted(process.id) {
         return;
     }
+    let got = frame.answer();
+    let mut at = [None; ARGS + 1];
+    at[0] = Some(got);
+    for (to, (&arg, &quoted)) in
+        at[1..].iter_mut().zip(waited.args.iter().zip(waited.quoted.iter()))
+    {
+        *to = (!quoted).then_some(arg);
+    }
+    let mut bytes = [[0u8; TEXT_WINDOW]; ARGS + 1];
+    let mut found = [None; ARGS + 1];
+    quote(process, &at, &mut bytes, &mut found);
+    let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
+    let name = core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?");
     events::emit(
         Category::Call,
         "ret",
         format_args!(
-            "{}",
-            Answer {
-                pid: process.id,
-                process: process.name,
-                call: core::str::from_utf8(&entry.name[..usize::from(entry.len)]).unwrap_or("?"),
-                answer: frame.answer(),
-            }
+            "{}{}",
+            Answer { pid: process.id, process: process.name, call: name, answer: got },
+            text
         ),
     );
+    if text.any() && TEXT_RETURNS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+        info!("imports: the return of {name} carries text: {} (imports_strings=)", Said(text));
+    }
     ANSWERED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1615,23 +1689,41 @@ fn log_strings() {
     }
     let quoted = QUOTED.load(Ordering::Relaxed);
     let calls = TEXT_CALLS.load(Ordering::Relaxed);
+    let carried = Carried(TEXT_RETURNS.load(Ordering::Relaxed));
     if quoted == 0 {
         info!(
-            "imports: no argument of a recorded call read as text: a pointer at a \
-             run of printable characters ending in a NUL inside {TEXT_WINDOW} bytes \
-             of its own page, {TEXT_LEAST} characters at least (imports_strings=)"
+            "imports: nothing a recorded call was handed, or answered where its \
+             return was trapped, read as text: a pointer at a run of printable \
+             characters ending in a NUL inside {TEXT_WINDOW} bytes of its own \
+             page, {TEXT_LEAST} characters at least (imports_strings=)"
         );
     } else if STRINGS.load(Ordering::Relaxed) == 0 {
         info!(
-            "imports: {quoted} arguments quoted of {asked}, the budget spent, \
-             carried by {calls} calls: the calls past it are recorded with their \
+            "imports: {quoted} quotes of {asked}, the budget spent, carried by \
+             {calls} calls{carried}: the calls past it are recorded with their \
              registers and no text (imports_strings=)"
         );
     } else {
         info!(
-            "imports: {quoted} arguments quoted of {asked}, carried by {calls} \
-             calls (imports_strings=)"
+            "imports: {quoted} quotes of {asked}, carried by {calls} \
+             calls{carried} (imports_strings=)"
         );
+    }
+}
+
+/// ` and <n> returns` for the end of the quoting summary, or nothing
+/// where every quote was read at a call: a run with the returns
+/// trapped and nothing quoted at one of them has said something, and a
+/// run without them must not read as though it had.
+struct Carried(u64);
+
+impl fmt::Display for Carried {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => Ok(()),
+            1 => f.write_str(" and 1 return"),
+            n => write!(f, " and {n} returns"),
+        }
     }
 }
 
@@ -1750,28 +1842,32 @@ impl fmt::Display for Fields<'_> {
     }
 }
 
-/// The quotes of one call, by the index of the argument each was read
-/// at: `,"text":{"2":"Operation not supported"}` beside `"args"`, and
-/// nothing at all where no argument read as text, which is most calls.
+/// The quotes of one record, by the place each was read at:
+/// `,"text":{"2":"Operation not supported"}` beside `"args"`, and
+/// nothing at all where nothing read as text, which is most records.
 #[derive(Clone, Copy)]
 struct Texts<'a> {
-    found: &'a [Option<Text>; ARGS],
-    bytes: &'a [[u8; TEXT_WINDOW]; ARGS],
+    /// Where each place below is, which is what its key and its line
+    /// say: [`CALL_PLACES`] for a call, [`RETURN_PLACES`] for a return.
+    places: &'a [Place],
+    found: &'a [Option<Text>],
+    bytes: &'a [[u8; TEXT_WINDOW]],
 }
 
 impl Texts<'_> {
-    /// Whether any argument read as text.
+    /// Whether anything read as text.
     fn any(&self) -> bool {
         self.found.iter().any(Option::is_some)
     }
 
-    /// Each argument that read as text: its index, the bytes read at it
-    /// and what they read as.
-    fn each(&self) -> impl Iterator<Item = (usize, &[u8], Text)> {
-        self.found
+    /// Each place that read as text: where it was read, the bytes read
+    /// there and what they read as.
+    fn each(&self) -> impl Iterator<Item = (Place, &[u8], Text)> {
+        self.places
             .iter()
-            .enumerate()
-            .filter_map(|(i, found)| found.map(|text| (i, &self.bytes[i][..], text)))
+            .zip(self.found)
+            .zip(self.bytes)
+            .filter_map(|((&place, found), bytes)| found.map(|text| (place, &bytes[..], text)))
     }
 }
 
@@ -1781,11 +1877,49 @@ impl fmt::Display for Texts<'_> {
             return Ok(());
         }
         f.write_str(r#","text":{"#)?;
-        for (n, (i, bytes, text)) in self.each().enumerate() {
+        for (n, (place, bytes, text)) in self.each().enumerate() {
             let comma = if n == 0 { "" } else { "," };
-            write!(f, r#"{comma}"{i}":{}"#, Quote(bytes, text))?;
+            write!(f, r#"{comma}"{}":{}"#, Key(place), Quote(bytes, text))?;
         }
         f.write_str("}")
+    }
+}
+
+/// Where one quote was read: an argument register of the call, or the
+/// register its answer came back in. Written beside the quote because
+/// the same register can be both -- an argument that was a number at
+/// the call is a string at its return where the call filled the buffer
+/// it points at -- so a quote with no place is one a reader cannot pair
+/// with a number.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Place {
+    /// The argument register at this index of `TrapFrame::arg_regs`.
+    Arg(usize),
+    /// The register the ABI answers in, read at a trapped return.
+    Answer,
+}
+
+impl fmt::Display for Place {
+    /// `arg 2`, `answer`: the place for a line of the log.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Place::Arg(i) => write!(f, "arg {i}"),
+            Place::Answer => f.write_str("answer"),
+        }
+    }
+}
+
+/// A place as the key it is written under in a record's `text` object:
+/// the argument's own index, as every earlier reader of the stream
+/// knows it, and `answer` for the answer, which no index collides with.
+struct Key(Place);
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Place::Arg(i) => write!(f, "{i}"),
+            Place::Answer => f.write_str("answer"),
+        }
     }
 }
 
@@ -1795,9 +1929,9 @@ struct Said<'a>(Texts<'a>);
 
 impl fmt::Display for Said<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (n, (i, bytes, text)) in self.0.each().enumerate() {
+        for (n, (place, bytes, text)) in self.0.each().enumerate() {
             let space = if n == 0 { "" } else { " " };
-            write!(f, "{space}arg {i} {}", Quote(bytes, text))?;
+            write!(f, "{space}{place} {}", Quote(bytes, text))?;
         }
         Ok(())
     }
@@ -1865,17 +1999,21 @@ impl fmt::Display for Name<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARGS, BUDGET, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT, MAX_STRINGS, Quote, READ,
-        RET_OFFSET, Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget,
-        holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
+        ARGS, BUDGET, CALL_PLACES, Carried, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT,
+        MAX_STRINGS, Quote, READ, RET_OFFSET, RETURN_PLACES, Reads, STRIDE, Said, TEXT_CHARS,
+        TEXT_WINDOW, Text, Texts, answer_budget, holds, repeat_budget, split_budget, string_budget,
+        text_in, trap_at,
     };
 
-    /// The quotes of a call built as the fault path builds them, from
-    /// what each argument's window holds: `(index, bytes)` for each
-    /// argument that read as text.
-    fn texts(at: &[(usize, &[u8])]) -> ([Option<Text>; ARGS], [[u8; TEXT_WINDOW]; ARGS]) {
-        let mut found = [None; ARGS];
-        let mut bytes = [[0u8; TEXT_WINDOW]; ARGS];
+    /// The quotes of one record built as the fault path builds them,
+    /// from what the window at each place holds: `(place, bytes)` by
+    /// the place's own index in the record's list of them
+    /// ([`CALL_PLACES`], [`RETURN_PLACES`]).
+    fn quotes<const N: usize>(
+        at: &[(usize, &[u8])],
+    ) -> ([Option<Text>; N], [[u8; TEXT_WINDOW]; N]) {
+        let mut found = [None; N];
+        let mut bytes = [[0u8; TEXT_WINDOW]; N];
         for &(i, raw) in at {
             bytes[i][..raw.len()].copy_from_slice(raw);
             found[i] = text_in(&bytes[i]);
@@ -1926,13 +2064,13 @@ mod tests {
     /// recorded the first time only.
     #[test]
     fn a_first_call_is_the_fields_of_one_json_event() {
-        let (found, bytes) = texts(&[]);
+        let (found, bytes) = quotes::<ARGS>(&[]);
         let fields = Fields {
             pid: 12,
             process: "WINWORD.EXE",
             call: "d2d1.dll!D2D1CreateFactory",
             args: &[0, 2078216, 0, 2078208],
-            text: Texts { found: &found, bytes: &bytes },
+            text: Texts { places: &CALL_PLACES, found: &found, bytes: &bytes },
         };
         assert_eq!(
             alloc::format!("{{\"ev\":\"import\",{fields}}}"),
@@ -1994,16 +2132,56 @@ mod tests {
     /// already knows.
     #[test]
     fn a_call_s_text_is_keyed_by_the_argument_it_was_read_at() {
-        let (found, bytes) = texts(&[(1, b"ErrorMessage\0"), (2, &wide("Mso20win32client"))]);
-        let text = Texts { found: &found, bytes: &bytes };
+        let (found, bytes) =
+            quotes::<ARGS>(&[(1, b"ErrorMessage\0"), (2, &wide("Mso20win32client"))]);
+        let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
         let shown = alloc::format!("{text}");
         assert_eq!(shown, r#","text":{"1":"ErrorMessage","2":"Mso20win32client"}"#);
         let said = alloc::format!("{}", Said(text));
         assert_eq!(said, r#"arg 1 "ErrorMessage" arg 2 "Mso20win32client""#);
-        let (found, bytes) = texts(&[]);
-        let text = Texts { found: &found, bytes: &bytes };
+        let (found, bytes) = quotes::<ARGS>(&[]);
+        let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
         assert_eq!(alloc::format!("{text}"), "");
         assert_eq!(alloc::format!("{}", Said(text)), "");
+    }
+
+    /// A return's quotes are keyed by their places too, and its first
+    /// place is the answer: a call that fills a buffer and answers it
+    /// carries the same string twice, at the answer and at the argument
+    /// the buffer was handed at, so the place and not the value is what
+    /// tells the two apart. The order is the answer first, the
+    /// arguments after it, which is the order a reader of the call
+    /// already has them in.
+    #[test]
+    fn a_return_s_text_is_keyed_by_the_place_it_was_read_at() {
+        let filled = b"filled at the return\0";
+        let (found, bytes) = quotes::<{ ARGS + 1 }>(&[(0, filled), (1, filled)]);
+        let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
+        assert_eq!(
+            alloc::format!("{text}"),
+            r#","text":{"answer":"filled at the return","0":"filled at the return"}"#
+        );
+        assert_eq!(
+            alloc::format!("{}", Said(text)),
+            r#"answer "filled at the return" arg 0 "filled at the return""#
+        );
+        // An answer that is a number and arguments that were text at
+        // the call: the return read nothing, and says nothing.
+        let (found, bytes) = quotes::<{ ARGS + 1 }>(&[]);
+        let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
+        assert_eq!(alloc::format!("{text}"), "");
+        assert_eq!(alloc::format!("{}", Said(text)), "");
+    }
+
+    /// What the quoting summary says about where the quotes were read:
+    /// nothing where every one was read at a call, so that a run
+    /// without the returns trapped reads as it did before there was
+    /// anything to read at one.
+    #[test]
+    fn the_returns_that_carried_text_are_counted_only_where_there_are_some() {
+        assert_eq!(alloc::format!("{}", Carried(0)), "");
+        assert_eq!(alloc::format!("{}", Carried(1)), " and 1 return");
+        assert_eq!(alloc::format!("{}", Carried(134)), " and 134 returns");
     }
 
     /// `imports_strings=` takes a number of quotes, by the same rule as
