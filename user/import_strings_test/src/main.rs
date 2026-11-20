@@ -6,10 +6,12 @@
 //! that cannot say which string is a trace of the shape of a program's
 //! work and not of the work.
 //!
-//! This program is the four cases an argument can be, and a fifth
-//! that is not a case of an argument at all: a buffer the callee fills,
-//! which holds its text only once the call is over, so a trace reads it
-//! at the answer or not at all.
+//! This program is the four cases an argument can be, and two that
+//! are not cases of an argument at all: a buffer the callee fills,
+//! which holds what it wrote only once the call is over, so a trace
+//! reads it at the answer or not at all. One of those two is filled
+//! with text and one with the bytes of a structure, which is what
+//! `imports_bytes=` reads where `imports_strings=` finds nothing.
 //!
 //! The four are handed to one import in one call each: a narrow string, a wide string, a number
 //! too small to be a pointer, and a pointer at bytes that are no text.
@@ -36,6 +38,7 @@ use ntrt::*;
 unsafe extern "C" {
     fn gala_four(a: u64, b: u64, c: u64, d: u64) -> u64;
     fn gala_fill(out: *mut u16, n: u64) -> u64;
+    fn gala_bytes(out: *mut u8, n: u64, a: u64, b: u64) -> u64;
 }
 
 /// A narrow string, as every `*A` call and every C string is handed
@@ -144,6 +147,25 @@ fn run() -> Result<(), u32> {
     c.eq(u64::from(buf[0]), u64::from(b'f'))?;
     c.eq(u64::from(buf[19]), u64::from(b'n'))?;
     c.eq(u64::from(buf[20]), 0)?;
+
+    // A buffer of this frame's again, filled with a structure's bytes
+    // and not with text: empty where the call is recorded and holding
+    // the structure where its answer is, and reading as no text at
+    // either time -- so what a trace can say of this call is the bytes
+    // themselves, at the two places the same register is read at. The
+    // last two arguments are numbers of this program's choosing, so
+    // that the registers a dump would otherwise read whatever was left
+    // in hold nothing.
+    let mut blob = [0u8; 64];
+    let at = blob.as_mut_ptr() as u64;
+    // SAFETY: the DLL's own export, handed this buffer and the number
+    // of bytes it has.
+    let got = unsafe { gala_bytes(blob.as_mut_ptr(), blob.len() as u64, SMALL, SMALL) };
+    print("import_strings_test: filled with bytes\r\n");
+    c.eq(got, at)?;
+    c.eq(u64::from(blob[0]), 0x01)?;
+    c.eq(u64::from(blob[15]), 0xef)?;
+    c.eq(u64::from(blob[16]), 0)?;
 
     // And the strings are as they were: the quoting reads them and
     // nothing else, so a program cannot tell from its own memory that

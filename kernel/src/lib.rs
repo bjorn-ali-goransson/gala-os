@@ -423,6 +423,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_strings") {
         nt::traceimports::set_strings(spec);
     }
+    // `imports_bytes=<n>`: write the bytes at every place of a recorded
+    // call that reads as no text as hex, which is the only reading
+    // there is of a structure answered by value (nt::traceimports).
+    // Needs `imports=`.
+    if let Some(spec) = cmdline.value("imports_bytes") {
+        nt::traceimports::set_bytes(spec);
+    }
     // `imports_except=<text>[,<text>...]`: leave the imports whose
     // `<dll>!<name>` holds one of the texts unarmed, so that the budget
     // and the records go to the rest of them (nt::traceimports). Needs

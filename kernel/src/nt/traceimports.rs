@@ -82,6 +82,18 @@
 //! quote says which place it was read at, because a quote a reader
 //! cannot pair with a number is a quote of nothing.
 //!
+//! Not every call says what it means in text, and the ones that do
+//! not are where a trace of Word's startup ends up: a method that
+//! answers a structure by value is handed the caller's own buffer in
+//! an argument register and answers that same pointer, so the answer
+//! is bytes and no string at all and a quote of either end reads
+//! nothing. `imports_bytes=<n>` writes the first [`BYTE_WINDOW`]
+//! bytes of every place that reads as no text as hex instead, beside
+//! the quotes and in an object of its own: the same window, the same
+//! places and the same budget arithmetic, and the two readings told
+//! apart because what a call said and what it was handed are two
+//! questions.
+//!
 //! A wide trace spends most of itself on the same few names: a
 //! program's heap, string and locale imports are called in the
 //! thousands while the ones a question is about are called once, and
@@ -102,8 +114,9 @@
 //! `imports_repeat=`, one such fault per call until the budget is
 //! spent, and under `imports_answers=` a second fault for each call
 //! answered, plus a read of up to [`TEXT_WINDOW`] bytes per argument
-//! under `imports_strings=` -- and, at a trapped return, one more per
-//! argument that was no text at the call and one for the answer. What
+//! under `imports_strings=` or `imports_bytes=` -- and, at a trapped
+//! return, one more per argument that was no text at the call and one
+//! for the answer. What
 //! it cannot do is in OBSERVABILITY: the first four integer argument
 //! registers and no others, and static imports only.
 //! A callee that reads its own return address sees the kernel's trap
@@ -164,6 +177,11 @@ const MAX_ANSWERS: u32 = 1 << 20;
 /// both of which the budget is what bounds.
 const MAX_STRINGS: u32 = 1 << 20;
 
+/// The most `imports_bytes=<n>` may ask for, [`MAX_STRINGS`]'s own: a
+/// dump is a read of the program's memory and a string in a line, the
+/// same two things a quote is.
+const MAX_BYTES: u32 = 1 << 20;
+
 /// The most texts `imports_except=` may name. Each is matched against
 /// every import of the traced program as its slots are reported, so
 /// this bounds that scan and keeps the option a filter and not a
@@ -186,6 +204,15 @@ const TEXT_WINDOW: usize = 256;
 /// quoted to here and marked as cut. A name, a path or a message is
 /// short; a buffer that happens to read as text is not worth a line.
 const TEXT_CHARS: usize = 120;
+
+/// The bytes written as hex from one place that reads as no text, a
+/// longer window being dumped to here. Thirty-two is the structures
+/// these calls answer by value and a little over -- a GUID, a
+/// rectangle of four floats, a size and a flag -- because what a dump
+/// is for is a call whose answer is one of those. More than that is a
+/// buffer, and a buffer belongs in a dump of memory and not in a line
+/// per call.
+const BYTE_WINDOW: usize = 32;
 
 /// The characters a run must have before it reads as text rather than
 /// as a number that happens to point somewhere. Four is what tells a
@@ -343,6 +370,17 @@ static TEXT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// weighing what a trace cost needs the two apart.
 static TEXT_RETURNS: AtomicU64 = AtomicU64::new(0);
 
+/// The same four for `imports_bytes=`: the places dumped as hex, what
+/// is left of that budget, and the calls and returns that carried one.
+/// Counted apart from the quotes because the two answer different
+/// questions of the same run -- which calls carried text, and what the
+/// calls that carried none were handed and answered.
+static DUMPED: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU32 = AtomicU32::new(0);
+static BYTES_ASKED: AtomicU32 = AtomicU32::new(0);
+static BYTE_CALLS: AtomicU64 = AtomicU64::new(0);
+static BYTE_RETURNS: AtomicU64 = AtomicU64::new(0);
+
 /// Returns put back where their calls left them for an exception to
 /// unwind through, and those whose trap address could not be found on
 /// the stack to put back. Both are summary lines: a call put back is a
@@ -378,9 +416,12 @@ struct Pending {
     /// is read at the return through the address it was handed at.
     args: [u64; ARGS],
     /// Which of those already read as text at the call, which the
-    /// return does not read again: the bytes have not changed, so a
-    /// second quote of them would be the same string twice and a
-    /// second quote off the budget.
+    /// return does not read again: a string a call was handed is the
+    /// same string at its return, so a second quote of it would be the
+    /// same text twice and a second quote off the budget. A place only
+    /// dumped as bytes is not one of these -- the bytes of a buffer
+    /// are what the call changed, which is the whole reason to read
+    /// one at a return (`imports_bytes=`).
     quoted: [bool; ARGS],
 }
 
@@ -638,6 +679,39 @@ pub fn set_strings(spec: &str) {
 /// a program that passed no text.
 fn string_budget(text: &str) -> Option<u32> {
     budget_of(text, MAX_STRINGS)
+}
+
+/// `imports_bytes=<n>`: write the bytes at every place of a recorded
+/// call that reads as no text as hex, `n` places at most. The reading
+/// of a call whose arguments and answer are no strings: a structure
+/// answered by value is the caller's own buffer handed back, an array
+/// of pointers is an array of pointers, and neither has a quote. Needs
+/// `imports=` and `events=call` as the quotes do, and shares their
+/// read: one window per place, text where `imports_strings=` asked for
+/// it and the window is text, these bytes otherwise.
+pub fn set_bytes(spec: &str) {
+    let Some(n) = byte_budget(spec) else {
+        warn!(
+            "imports: imports_bytes={spec} reads a number from 1 to {MAX_BYTES}, \
+             the places to dump: nothing is read as bytes at all instead, as \
+             without it"
+        );
+        return;
+    };
+    BYTES.store(n, Ordering::Relaxed);
+    BYTES_ASKED.store(n, Ordering::Relaxed);
+    info!(
+        "imports: the bytes at a place of a recorded call that reads as no text \
+         -- its argument registers, and at a trapped return its answer and those \
+         arguments again -- {n} dumps at most, {BYTE_WINDOW} bytes of each \
+         (imports_bytes=)"
+    );
+}
+
+/// `imports_bytes=`'s value, or None for one that is not a number from
+/// 1 to [`MAX_BYTES`], by [`string_budget`]'s own rule.
+fn byte_budget(text: &str) -> Option<u32> {
+    budget_of(text, MAX_BYTES)
 }
 
 /// Splits `<name>[:<n>]` at the last colon. A program's name holds none,
@@ -962,70 +1036,90 @@ fn record(process: &Process, frame: &TrapFrame, entry: &Trap, first: bool) -> Op
             Fields { pid: process.id, process: process.name, call: name, args: &args, text }
         ),
     );
-    if text.any() && TEXT_CALLS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+    if text.any_text() && TEXT_CALLS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
         info!("imports: the call to {name} carries text: {} (imports_strings=)", Said(text));
+    }
+    if text.any_bytes() && BYTE_CALLS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+        info!("imports: the call to {name} carries bytes: {} (imports_bytes=)", Dumped(text));
     }
     if first {
         RECORDED.fetch_add(1, Ordering::Relaxed);
     } else {
         REPEATED.fetch_add(1, Ordering::Relaxed);
     }
-    Some(found.map(|found| found.is_some()))
+    Some(found.map(|found| found.is_some_and(|read| read.is_text())))
 }
 
-/// Reads a window at each value that could hold text and says what it
-/// read, one of the budget per quote. A `None` is a place not to be
-/// read at all, which is how a return skips the arguments the call
-/// already quoted. Nothing at all where `imports_strings=` was not
-/// given, which is the usual case and one relaxed load; the budget is
-/// taken after the read, so a value that is a plain number costs no
-/// quote.
+/// Reads a window at each value that could point somewhere and says
+/// what it read, one of a budget per place. A `None` is a place not to
+/// be read at all, which is how a return skips the arguments the call
+/// already quoted. Nothing at all where neither `imports_strings=` nor
+/// `imports_bytes=` was given, which is the usual case and two relaxed
+/// loads; a budget is taken after the read, so a value that is a plain
+/// number costs nothing.
+///
+/// Text first where the window is text and a quote is left: a run of
+/// printable characters is what a reader wants of it, and the bytes
+/// behind that run would say the same thing twice. Everything else
+/// readable is the bytes themselves, which is what a structure
+/// answered by value, an array of pointers or a buffer of numbers
+/// amounts to -- and so is a run of text with no quote left, because a
+/// spent string budget must not read afterwards as a place that held
+/// nothing.
 fn quote(
     process: &Process,
     at: &[Option<u64>],
     bytes: &mut [[u8; TEXT_WINDOW]],
     found: &mut [Option<Text>],
 ) {
-    if STRINGS.load(Ordering::Relaxed) == 0 {
+    if STRINGS.load(Ordering::Relaxed) == 0 && BYTES.load(Ordering::Relaxed) == 0 {
         return;
     }
     for ((&value, buf), found) in at.iter().zip(bytes.iter_mut()).zip(found.iter_mut()) {
         let Some(value) = value else {
             continue;
         };
-        let Some(text) = text_at(process, value, buf) else {
+        let Some(window) = window_at(process, value, buf) else {
             continue;
         };
-        if !take_budget(&STRINGS) {
-            return;
+        if let Some(text) = text_in(&buf[..window])
+            && take_budget(&STRINGS)
+        {
+            *found = Some(text);
+            QUOTED.fetch_add(1, Ordering::Relaxed);
+            continue;
         }
-        *found = Some(text);
-        QUOTED.fetch_add(1, Ordering::Relaxed);
+        if take_budget(&BYTES) {
+            *found = Some(Text::Bytes(window.min(BYTE_WINDOW)));
+            DUMPED.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
-/// Reads the window at `addr` that could hold text into `buf` and says
-/// what it reads as, or None where the address is no pointer, the page
-/// is not there, or the bytes read as no text. Never past the end of
-/// the page `addr` points into: the next page may be unmapped, and a
-/// read stopped at the page is one that cannot be refused for the wrong
-/// reason -- so a run that crosses a page boundary is quoted to the
-/// boundary and no further, which is the one way this cuts a string
+/// Reads the window at `addr` into `buf` and says how much of it was
+/// read, or None where the address is no pointer or the page is not
+/// there. Never past the end of the page `addr` points into: the next
+/// page may be unmapped, and a read stopped at the page is one that
+/// cannot be refused for the wrong reason -- so a run that crosses a
+/// page boundary is read to the boundary and no further, which is the
+/// one way this cuts a string, or a dump short of [`BYTE_WINDOW`],
 /// without saying so.
-fn text_at(process: &Process, addr: u64, buf: &mut [u8; TEXT_WINDOW]) -> Option<Text> {
+fn window_at(process: &Process, addr: u64, buf: &mut [u8; TEXT_WINDOW]) -> Option<usize> {
     if addr < LOWEST_POINTER {
         return None;
     }
     let left = usize::try_from(vad::PAGE - (addr % vad::PAGE)).unwrap_or(TEXT_WINDOW);
     let window = TEXT_WINDOW.min(left);
     process.read(addr, &mut buf[..window]).ok()?;
-    text_in(&buf[..window])
+    Some(window)
 }
 
-/// What the bytes at an argument read as: a NUL-terminated run of
+/// What the bytes at a place read as: a NUL-terminated run of
 /// printable characters, one byte each or two, and the characters it
-/// has. Neither says what the argument *is* -- nothing here knows a
-/// call's signature -- only that it points at a run that reads as text.
+/// has -- or no text at all, and then the bytes themselves where
+/// `imports_bytes=` asked for them. None of the three says what the
+/// place *is* -- nothing here knows a call's signature -- only what a
+/// window at it reads as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Text {
     /// One byte a character, which is every `*A` call's string and
@@ -1033,15 +1127,28 @@ enum Text {
     Narrow(usize),
     /// Two, little-endian, which is every `*W` call's.
     Wide(usize),
+    /// No text: the bytes read there, [`BYTE_WINDOW`] of them at most,
+    /// written as hex. A structure answered by value is this and
+    /// nothing else (`imports_bytes=`).
+    Bytes(usize),
 }
 
 impl Text {
     /// How many characters the run has, which is not how many bytes it
-    /// was read from.
+    /// was read from -- or, for a dump, how many bytes there are to
+    /// write, which is all it has.
     fn chars(&self) -> usize {
         match *self {
-            Text::Narrow(chars) | Text::Wide(chars) => chars,
+            Text::Narrow(chars) | Text::Wide(chars) | Text::Bytes(chars) => chars,
         }
+    }
+
+    /// Whether it reads as text at all, which is what tells a quote
+    /// from a dump: the two go in objects of their own, and a reader
+    /// asking what a call said is asking a different question from one
+    /// asking what it was handed.
+    fn is_text(&self) -> bool {
+        !matches!(*self, Text::Bytes(_))
     }
 }
 
@@ -1531,8 +1638,11 @@ fn answer(process: &Process, frame: &TrapFrame, entry: &Trap, waited: &Pending) 
             text
         ),
     );
-    if text.any() && TEXT_RETURNS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+    if text.any_text() && TEXT_RETURNS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
         info!("imports: the return of {name} carries text: {} (imports_strings=)", Said(text));
+    }
+    if text.any_bytes() && BYTE_RETURNS.fetch_add(1, Ordering::Relaxed) < TEXTS_SAID {
+        info!("imports: the return of {name} carries bytes: {} (imports_bytes=)", Dumped(text));
     }
     ANSWERED.fetch_add(1, Ordering::Relaxed);
 }
@@ -1608,6 +1718,12 @@ pub fn log_stats() {
                  slot was armed and no answer was recorded"
             );
         }
+        if BYTES_ASKED.load(Ordering::Relaxed) != 0 {
+            info!(
+                "imports: imports_bytes= was given without imports=, so no \
+                 slot was armed and nothing was dumped"
+            );
+        }
         if EXCEPTING.load(Ordering::Relaxed) {
             info!(
                 "imports: imports_except= was given without imports=, so no \
@@ -1675,6 +1791,7 @@ pub fn log_stats() {
     }
     log_answers();
     log_strings();
+    log_bytes();
 }
 
 /// What the run quoted, for the end of a run: the arguments that read
@@ -1688,7 +1805,7 @@ fn log_strings() {
         return;
     }
     let quoted = QUOTED.load(Ordering::Relaxed);
-    let calls = TEXT_CALLS.load(Ordering::Relaxed);
+    let calls = Calls(TEXT_CALLS.load(Ordering::Relaxed));
     let carried = Carried(TEXT_RETURNS.load(Ordering::Relaxed));
     if quoted == 0 {
         info!(
@@ -1700,13 +1817,47 @@ fn log_strings() {
     } else if STRINGS.load(Ordering::Relaxed) == 0 {
         info!(
             "imports: {quoted} quotes of {asked}, the budget spent, carried by \
-             {calls} calls{carried}: the calls past it are recorded with their \
+             {calls}{carried}: the calls past it are recorded with their \
              registers and no text (imports_strings=)"
         );
     } else {
         info!(
-            "imports: {quoted} quotes of {asked}, carried by {calls} \
-             calls{carried} (imports_strings=)"
+            "imports: {quoted} quotes of {asked}, carried by {calls}{carried} \
+             (imports_strings=)"
+        );
+    }
+}
+
+/// What the run dumped, for the end of a run: the places that read as
+/// no text and the calls they belong to. Said even where nothing was
+/// dumped, for [`log_strings`]'s own reason -- that every place a
+/// recorded call could be read at held a number or a string is an
+/// answer, and not the option having been forgotten.
+fn log_bytes() {
+    let asked = BYTES_ASKED.load(Ordering::Relaxed);
+    if asked == 0 {
+        return;
+    }
+    let dumped = DUMPED.load(Ordering::Relaxed);
+    let calls = Calls(BYTE_CALLS.load(Ordering::Relaxed));
+    let carried = Carried(BYTE_RETURNS.load(Ordering::Relaxed));
+    if dumped == 0 {
+        info!(
+            "imports: nothing a recorded call was handed, or answered where its \
+             return was trapped, was readable and no text: every place was a \
+             number too small to be a pointer, an address in no mapping, or \
+             text quoted beside this (imports_bytes=)"
+        );
+    } else if BYTES.load(Ordering::Relaxed) == 0 {
+        info!(
+            "imports: {dumped} dumps of {asked}, the budget spent, carried by \
+             {calls}{carried}: the places past it are recorded with their \
+             registers and no bytes (imports_bytes=)"
+        );
+    } else {
+        info!(
+            "imports: {dumped} dumps of {asked}, carried by {calls}{carried} \
+             (imports_bytes=)"
         );
     }
 }
@@ -1723,6 +1874,19 @@ impl fmt::Display for Carried {
             0 => Ok(()),
             1 => f.write_str(" and 1 return"),
             n => write!(f, " and {n} returns"),
+        }
+    }
+}
+
+/// `<n> calls` for the same summaries, one at a time: a run whose
+/// quotes or dumps were all carried by one call says so.
+struct Calls(u64);
+
+impl fmt::Display for Calls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            1 => f.write_str("1 call"),
+            n => write!(f, "{n} calls"),
         }
     }
 }
@@ -1842,9 +2006,12 @@ impl fmt::Display for Fields<'_> {
     }
 }
 
-/// The quotes of one record, by the place each was read at:
-/// `,"text":{"2":"Operation not supported"}` beside `"args"`, and
-/// nothing at all where nothing read as text, which is most records.
+/// What one record's places read as, by the place each was read at:
+/// `,"text":{"2":"Operation not supported"}` beside `"args"`, then
+/// `,"bytes":{"answer":"0123456789abcdef"}` beside that, and nothing at
+/// all where nothing was read, which is most records. Two objects and
+/// not one because the two are different readings of the same window:
+/// a quote is what a call said, a dump is what it was handed.
 #[derive(Clone, Copy)]
 struct Texts<'a> {
     /// Where each place below is, which is what its key and its line
@@ -1855,13 +2022,19 @@ struct Texts<'a> {
 }
 
 impl Texts<'_> {
-    /// Whether anything read as text.
-    fn any(&self) -> bool {
-        self.found.iter().any(Option::is_some)
+    /// Whether anything read as text, and whether anything read as no
+    /// text and was dumped: a record with neither carries nothing here
+    /// at all, and the log line each of them has is its own.
+    fn any_text(&self) -> bool {
+        self.texts().next().is_some()
     }
 
-    /// Each place that read as text: where it was read, the bytes read
-    /// there and what they read as.
+    fn any_bytes(&self) -> bool {
+        self.dumps().next().is_some()
+    }
+
+    /// Each place that was read at all: where it was read, the bytes
+    /// read there and what they read as.
     fn each(&self) -> impl Iterator<Item = (Place, &[u8], Text)> {
         self.places
             .iter()
@@ -1869,20 +2042,42 @@ impl Texts<'_> {
             .zip(self.bytes)
             .filter_map(|((&place, found), bytes)| found.map(|text| (place, &bytes[..], text)))
     }
+
+    /// Those that read as text, and those that read as none.
+    fn texts(&self) -> impl Iterator<Item = (Place, &[u8], Text)> {
+        self.each().filter(|&(_, _, text)| text.is_text())
+    }
+
+    fn dumps(&self) -> impl Iterator<Item = (Place, &[u8], Text)> {
+        self.each().filter(|&(_, _, text)| !text.is_text())
+    }
 }
 
 impl fmt::Display for Texts<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.any() {
-            return Ok(());
-        }
-        f.write_str(r#","text":{"#)?;
-        for (n, (place, bytes, text)) in self.each().enumerate() {
-            let comma = if n == 0 { "" } else { "," };
-            write!(f, r#"{comma}"{}":{}"#, Key(place), Quote(bytes, text))?;
-        }
-        f.write_str("}")
+        object(f, r#","text":{"#, self.texts())?;
+        object(f, r#","bytes":{"#, self.dumps())
     }
+}
+
+/// One of a record's two objects of reads, opened by `open` and keyed
+/// by each place, or nothing at all where no place read that way: a
+/// record says what it read and never that it read nothing.
+fn object<'a>(
+    f: &mut fmt::Formatter<'_>,
+    open: &str,
+    places: impl Iterator<Item = (Place, &'a [u8], Text)>,
+) -> fmt::Result {
+    let mut written = 0;
+    for (place, bytes, text) in places {
+        f.write_str(if written == 0 { open } else { "," })?;
+        write!(f, r#""{}":{}"#, Key(place), Quote(bytes, text))?;
+        written += 1;
+    }
+    if written == 0 {
+        return Ok(());
+    }
+    f.write_str("}")
 }
 
 /// Where one quote was read: an argument register of the call, or the
@@ -1929,19 +2124,41 @@ struct Said<'a>(Texts<'a>);
 
 impl fmt::Display for Said<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (n, (place, bytes, text)) in self.0.each().enumerate() {
-            let space = if n == 0 { "" } else { " " };
-            write!(f, "{space}{place} {}", Quote(bytes, text))?;
-        }
-        Ok(())
+        line(f, self.0.texts())
     }
 }
 
-/// A window read at an argument, written as a JSON string of what it
-/// read as: Latin-1 a byte for a narrow run, UTF-16 for a wide one,
-/// escaped as every other string of the stream is. A run longer than
+/// And the same dumps, for the line of their own they have: the two
+/// readings are two questions, so a reader of the log is not handed a
+/// call's strings and its buffers in one breath.
+struct Dumped<'a>(Texts<'a>);
+
+impl fmt::Display for Dumped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        line(f, self.0.dumps())
+    }
+}
+
+/// Those places for one line of the log, each after the place it was
+/// read at.
+fn line<'a>(
+    f: &mut fmt::Formatter<'_>,
+    places: impl Iterator<Item = (Place, &'a [u8], Text)>,
+) -> fmt::Result {
+    for (n, (place, bytes, text)) in places.enumerate() {
+        let space = if n == 0 { "" } else { " " };
+        write!(f, "{space}{place} {}", Quote(bytes, text))?;
+    }
+    Ok(())
+}
+
+/// A window read at a place, written as a JSON string of what it read
+/// as: Latin-1 a byte for a narrow run, UTF-16 for a wide one, escaped
+/// as every other string of the stream is, and lowercase hex for a
+/// window that read as no text at all. A run longer than
 /// [`TEXT_CHARS`] ends in `...`, which is the quote saying it was cut
-/// and not the program's own text.
+/// and not the program's own text; a dump is [`BYTE_WINDOW`] bytes at
+/// most and says its own length by having it.
 ///
 /// Written from the bytes rather than through [`events::Str`] or
 /// `events::Utf16` because neither can be handed these: a `&str` would
@@ -1964,6 +2181,11 @@ impl fmt::Display for Quote<'_> {
                 let units = pairs.map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
                 for c in char::decode_utf16(units) {
                     escaped(f, c.unwrap_or(char::REPLACEMENT_CHARACTER))?;
+                }
+            }
+            Text::Bytes(len) => {
+                for &b in bytes.iter().take(len.min(BYTE_WINDOW)) {
+                    write!(f, "{b:02x}")?;
                 }
             }
         }
@@ -1999,26 +2221,35 @@ impl fmt::Display for Name<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARGS, BUDGET, CALL_PLACES, Carried, Fields, MAX_ANSWERS, MAX_BUDGET, MAX_REPEAT,
-        MAX_STRINGS, Quote, READ, RET_OFFSET, RETURN_PLACES, Reads, STRIDE, Said, TEXT_CHARS,
-        TEXT_WINDOW, Text, Texts, answer_budget, holds, repeat_budget, split_budget, string_budget,
-        text_in, trap_at,
+        ARGS, BUDGET, BYTE_WINDOW, CALL_PLACES, Calls, Carried, Dumped, Fields, MAX_ANSWERS,
+        MAX_BUDGET, MAX_BYTES, MAX_REPEAT, MAX_STRINGS, Quote, READ, RET_OFFSET, RETURN_PLACES,
+        Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget, byte_budget,
+        holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
     };
 
-    /// The quotes of one record built as the fault path builds them,
+    /// The reads of one record built as the fault path builds them,
     /// from what the window at each place holds: `(place, bytes)` by
     /// the place's own index in the record's list of them
-    /// ([`CALL_PLACES`], [`RETURN_PLACES`]).
-    fn quotes<const N: usize>(
-        at: &[(usize, &[u8])],
-    ) -> ([Option<Text>; N], [[u8; TEXT_WINDOW]; N]) {
+    /// ([`CALL_PLACES`], [`RETURN_PLACES`]). Text where the window
+    /// reads as text and the bytes themselves where it does not, which
+    /// is `quote` with both budgets given; the window is the whole of
+    /// one, as the fault path's is, so a dump of it is
+    /// [`BYTE_WINDOW`] bytes however few were put there.
+    fn reads<const N: usize>(at: &[(usize, &[u8])]) -> ([Option<Text>; N], [[u8; TEXT_WINDOW]; N]) {
         let mut found = [None; N];
         let mut bytes = [[0u8; TEXT_WINDOW]; N];
         for &(i, raw) in at {
             bytes[i][..raw.len()].copy_from_slice(raw);
-            found[i] = text_in(&bytes[i]);
+            found[i] = Some(text_in(&bytes[i]).unwrap_or(Text::Bytes(BYTE_WINDOW)));
         }
         (found, bytes)
+    }
+
+    /// `<n>` bytes of a dump that were never written, which a window
+    /// read past what a callee filled in holds: the caller's own
+    /// zeroes, as the test program's buffer has them.
+    fn zeroes(n: usize) -> alloc::string::String {
+        "00".repeat(n)
     }
 
     /// The same bytes a `*W` call would be handed: UTF-16, little
@@ -2064,7 +2295,7 @@ mod tests {
     /// recorded the first time only.
     #[test]
     fn a_first_call_is_the_fields_of_one_json_event() {
-        let (found, bytes) = quotes::<ARGS>(&[]);
+        let (found, bytes) = reads::<ARGS>(&[]);
         let fields = Fields {
             pid: 12,
             process: "WINWORD.EXE",
@@ -2133,13 +2364,13 @@ mod tests {
     #[test]
     fn a_call_s_text_is_keyed_by_the_argument_it_was_read_at() {
         let (found, bytes) =
-            quotes::<ARGS>(&[(1, b"ErrorMessage\0"), (2, &wide("Mso20win32client"))]);
+            reads::<ARGS>(&[(1, b"ErrorMessage\0"), (2, &wide("Mso20win32client"))]);
         let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
         let shown = alloc::format!("{text}");
         assert_eq!(shown, r#","text":{"1":"ErrorMessage","2":"Mso20win32client"}"#);
         let said = alloc::format!("{}", Said(text));
         assert_eq!(said, r#"arg 1 "ErrorMessage" arg 2 "Mso20win32client""#);
-        let (found, bytes) = quotes::<ARGS>(&[]);
+        let (found, bytes) = reads::<ARGS>(&[]);
         let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
         assert_eq!(alloc::format!("{text}"), "");
         assert_eq!(alloc::format!("{}", Said(text)), "");
@@ -2155,7 +2386,7 @@ mod tests {
     #[test]
     fn a_return_s_text_is_keyed_by_the_place_it_was_read_at() {
         let filled = b"filled at the return\0";
-        let (found, bytes) = quotes::<{ ARGS + 1 }>(&[(0, filled), (1, filled)]);
+        let (found, bytes) = reads::<{ ARGS + 1 }>(&[(0, filled), (1, filled)]);
         let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
         assert_eq!(
             alloc::format!("{text}"),
@@ -2167,7 +2398,7 @@ mod tests {
         );
         // An answer that is a number and arguments that were text at
         // the call: the return read nothing, and says nothing.
-        let (found, bytes) = quotes::<{ ARGS + 1 }>(&[]);
+        let (found, bytes) = reads::<{ ARGS + 1 }>(&[]);
         let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
         assert_eq!(alloc::format!("{text}"), "");
         assert_eq!(alloc::format!("{}", Said(text)), "");
@@ -2189,6 +2420,69 @@ mod tests {
     /// rather than read as a smaller one, because a trace with fewer
     /// quotes than were asked for reads as calls whose arguments were
     /// no text.
+    /// A place that reads as no text is dumped as the bytes it holds,
+    /// in an object of its own and keyed by the same place: so one
+    /// record carries a quote of one argument and a dump of another,
+    /// and each has the log line of its own that says which it is.
+    #[test]
+    fn a_place_that_is_no_text_is_dumped_beside_the_quotes() {
+        let (found, bytes) = reads::<ARGS>(&[(1, b"ErrorMessage\0"), (3, &[1, 2, 3, 4, 5, 6])]);
+        let text = Texts { places: &CALL_PLACES, found: &found, bytes: &bytes };
+        let hex = alloc::format!("010203040506{}", zeroes(BYTE_WINDOW - 6));
+        assert_eq!(
+            alloc::format!("{text}"),
+            alloc::format!(r#","text":{{"1":"ErrorMessage"}},"bytes":{{"3":"{hex}"}}"#)
+        );
+        assert_eq!(alloc::format!("{}", Said(text)), r#"arg 1 "ErrorMessage""#);
+        assert_eq!(alloc::format!("{}", Dumped(text)), alloc::format!(r#"arg 3 "{hex}""#));
+    }
+
+    /// The structure a call answers by value, which is the one reading
+    /// there is of such a call: the answer and the argument the buffer
+    /// was handed at are the same pointer, so the dump is the same
+    /// bytes twice and the place is what tells them apart -- and
+    /// nothing of it reads as text, which is why quoting such a call
+    /// says nothing at all (docs/ROADMAP.md, Word's startup).
+    #[test]
+    fn a_structure_answered_by_value_is_dumped_at_the_answer_and_at_its_argument() {
+        let structure = [0x01u8, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        assert_eq!(text_in(&structure), None);
+        let (found, bytes) = reads::<{ ARGS + 1 }>(&[(0, &structure), (1, &structure)]);
+        let text = Texts { places: &RETURN_PLACES, found: &found, bytes: &bytes };
+        let hex = alloc::format!("0123456789abcdef{}", zeroes(BYTE_WINDOW - 8));
+        assert_eq!(
+            alloc::format!("{text}"),
+            alloc::format!(r#","bytes":{{"answer":"{hex}","0":"{hex}"}}"#)
+        );
+        assert_eq!(
+            alloc::format!("{}", Dumped(text)),
+            alloc::format!(r#"answer "{hex}" arg 0 "{hex}""#)
+        );
+        assert_eq!(alloc::format!("{}", Said(text)), "");
+    }
+
+    /// The calls a summary line counts are counted one at a time: a
+    /// run whose quotes or dumps were all carried by one call must not
+    /// read as "1 calls".
+    #[test]
+    fn the_calls_that_carried_something_are_counted_one_at_a_time() {
+        assert_eq!(alloc::format!("{}", Calls(0)), "0 calls");
+        assert_eq!(alloc::format!("{}", Calls(1)), "1 call");
+        assert_eq!(alloc::format!("{}", Calls(134)), "134 calls");
+    }
+
+    /// `imports_bytes=` takes a number of dumps, by `imports_strings=`'s
+    /// own rule: a number out of range is refused outright rather than
+    /// read as a smaller one.
+    #[test]
+    fn a_byte_budget_is_a_number_of_dumps_or_nothing() {
+        assert_eq!(byte_budget("8"), Some(8));
+        assert_eq!(byte_budget(&alloc::format!("{MAX_BYTES}")), Some(MAX_BYTES));
+        assert_eq!(byte_budget("0"), None);
+        assert_eq!(byte_budget(&alloc::format!("{}", u64::from(MAX_BYTES) + 1)), None);
+        assert_eq!(byte_budget("32 bytes"), None);
+    }
+
     #[test]
     fn a_string_budget_is_a_number_of_quotes_or_nothing() {
         assert_eq!(string_budget("8"), Some(8));
