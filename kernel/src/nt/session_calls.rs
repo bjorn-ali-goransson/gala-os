@@ -199,7 +199,7 @@ pub(super) fn gala_session(call: &mut Call<'_>) -> NtStatus {
                 INPUT_WHEEL => desktop::Injected::Wheel(i64::from(a as i32)),
                 _ => return NtStatus::INVALID_PARAMETER,
             };
-            match desktop::inject(shell, input) {
+            match desktop::inject(shell, &desk.windows, input) {
                 Ok(launch) => {
                     if let Some(program) = launch {
                         super::super::action::start_from_menu(id, program);

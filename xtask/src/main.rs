@@ -10876,6 +10876,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell_events_test", "kernel32.dll", "Windows/System32"),
     ("shell_events_test", "user32.dll", "Windows/System32"),
     ("shell_events_test", "gdi32.dll", "Windows/System32"),
+    // Hot keys and the shell's keys (user/hotkey_test).
+    ("hotkey_test", "ntdll.dll", "Windows/System32"),
+    ("hotkey_test", "kernel32.dll", "Windows/System32"),
+    ("hotkey_test", "user32.dll", "Windows/System32"),
+    ("hotkey_test", "gdi32.dll", "Windows/System32"),
     ("no_i8042", "ntdll.dll", "Windows/System32"),
     ("no_i8042", "kernel32.dll", "Windows/System32"),
     ("no_i8042", "user32.dll", "Windows/System32"),
@@ -11265,6 +11270,7 @@ const USER_PROGRAMS: &[&str] = &[
     "appbar_test",
     "topmost_test",
     "shell_events_test",
+    "hotkey_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -13534,6 +13540,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "tray_test",
     "topmost_test",
     "shell_events_test",
+    "hotkey_test",
     "d2d1_window",
     // A framebuffer for the docked agent panel (AGENT_SCREEN).
     "agent",
@@ -16326,6 +16333,28 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "shell_events_test: minimized by the desktop",
             "shell_events_test: restored by the desktop",
             "shell_events_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Hot keys (user/hotkey_test; ROADMAP SH step 1, part 3):
+        // RegisterHotKey's errors, a program's Ctrl+Alt+K as WM_HOTKEY
+        // to its thread, and the shell's keys (Win+E, the Windows key
+        // alone) to the shell's window once it has one (SetShellWindow);
+        // HOTKEY_SCREEN presses them.
+        name: "hotkey_test",
+        cmdline: "qemu_exit run=hotkey_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hotkey_test: registered",
+            "desktop: hot key 1 (Ctrl+Alt+K) to pid",
+            "hotkey_test: hot key 1",
+            "hotkey_test: shell keys",
+            "desktop: hot key 3 (Win+E) to pid",
+            "hotkey_test: hot key 3",
+            "desktop: hot key 4 (Win) to pid",
+            "hotkey_test: hot key 4",
+            "hotkey_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -21513,6 +21542,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("tray_test", "needs a screen (the notification area is on the taskbar)"),
     ("topmost_test", "needs a screen (what is on top is checked on it)"),
     ("shell_events_test", "needs a screen (the desktop's window actions are its shell's)"),
+    ("hotkey_test", "needs a screen (its keys are pressed on the desktop)"),
     ("d2d1_window", "needs a screen (a window drawn with Direct2D)"),
     ("wow64_tray_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("no_i8042", "a machine with no PS/2 controller: gala-um has no I/O ports and no input thread"),
@@ -25071,6 +25101,17 @@ const TRAY_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// user/hotkey_test's keys: Ctrl+Alt+K once it has registered it, then
+/// Win+E and the Windows key alone once it is the shell.
+const HOTKEY_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "hotkey_test: registered",
+    steps: &[
+        ScreenStep { after: "", input: &["sendkey ctrl-alt-k"], pixels: &[] },
+        ScreenStep { after: "hotkey_test: shell keys", input: &["sendkey meta_l-e"], pixels: &[] },
+        ScreenStep { after: "hotkey_test: hot key 3", input: &["sendkey meta_l"], pixels: &[] },
+    ],
+};
+
 /// user/topmost_test's windows: the normal one red at (100, 100), the
 /// topmost one green at (300, 200), overlapping at (400, 300); the tool
 /// window blue at (760, 120). Each state is checked while the program
@@ -25496,6 +25537,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
     ("topmost_test", TOPMOST_SCREEN),
+    ("hotkey_test", HOTKEY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),

@@ -467,6 +467,9 @@ syscall_stubs! {
     GalaAppBar = 0x7f75, fn(op: u32, request: *mut u8, length: usize);
     // The desktop's pointer (GetCursorPos).
     GalaCursorPos = 0x7f76, fn(point: *mut i32);
+    // Hot keys (RegisterHotKey) and the shell's window (SetShellWindow).
+    GalaHotKey = 0x7f77, fn(op: u32, hwnd: u64, id: i32, modifiers: u32, vk: u32);
+    GalaShellWindow = 0x7f78, fn(op: u32, hwnd: u64, out: *mut u64);
     // gala's test-only clock control and its mocked random source (R7).
     GalaClockControl = 0x7f4c, fn(operation: u32, a: i64, b: i64, state: *mut u8);
     GalaRandom = 0x7f4d, fn(buffer: *mut u8, length: usize);

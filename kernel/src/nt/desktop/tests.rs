@@ -1277,14 +1277,20 @@ fn the_console_moves_between_desktops_keeping_their_windows() {
 fn injected_input_reaches_a_desktop_a_test_frame_shows() {
     let (two, b) = shell_with_window(2, 10, 0x0000_00ff);
     let at = |buttons| Injected::Pointer { x: 41 + 30, y: 63 + 20, buttons };
-    assert_eq!(inject(&two, at(2)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+    assert_eq!(
+        inject(&two, &crate::nt::window::Windows::new(), at(2)).err(),
+        Some(NtStatus::INVALID_DEVICE_STATE)
+    );
     move_console(&two, Some(Presenter::Test(Frame::new(640, 480).unwrap()))).unwrap();
     for buttons in [0, 2, 0] {
-        assert!(matches!(inject(&two, at(buttons)), Ok(None)));
+        assert!(matches!(inject(&two, &crate::nt::window::Windows::new(), at(buttons)), Ok(None)));
     }
     let key = Injected::Key { vk: b'H', scan: 0x23, extended: false, down: true };
-    assert!(matches!(inject(&two, key), Ok(None)));
-    assert!(matches!(inject(&two, Injected::Wheel(1)), Ok(None)));
+    assert!(matches!(inject(&two, &crate::nt::window::Windows::new(), key), Ok(None)));
+    assert!(matches!(
+        inject(&two, &crate::nt::window::Windows::new(), Injected::Wheel(1)),
+        Ok(None)
+    ));
     let mut d = two.d.lock();
     assert_eq!(d.s.active, Some(b));
     let lp = 20 << 16 | 30;
@@ -1300,11 +1306,21 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
     );
     drop(d);
     // Clamped to the desktop, as the mouse is.
-    assert!(matches!(inject(&two, Injected::Pointer { x: -50, y: 9000, buttons: 0 }), Ok(None)));
+    assert!(matches!(
+        inject(
+            &two,
+            &crate::nt::window::Windows::new(),
+            Injected::Pointer { x: -50, y: 9000, buttons: 0 }
+        ),
+        Ok(None)
+    ));
     assert_eq!(two.d.lock().pointer, (0, 479));
     // Shown by nothing again: no input.
     move_console(&two, Some(Presenter::None)).unwrap();
-    assert_eq!(inject(&two, at(0)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+    assert_eq!(
+        inject(&two, &crate::nt::window::Windows::new(), at(0)).err(),
+        Some(NtStatus::INVALID_DEVICE_STATE)
+    );
 }
 
 /// A bare desktop (nothing can show it: the server profile, no screen and
@@ -1836,4 +1852,60 @@ fn a_clicked_popup_takes_the_activation_only_for_its_press() {
     // topmost framed window.
     d.destroy(q, 7).unwrap();
     assert_eq!(d.s.active, Some(a));
+}
+
+/// A hot key (RegisterHotKey) takes its key's down from the active
+/// window; its up still goes there. The shell's Win+E and Windows key
+/// take the desktop's own place (no File Explorer, no start menu).
+#[test]
+fn a_hot_key_takes_its_keys_from_the_desktop_and_the_active_window() {
+    use crate::nt::window::{HotKey, MOD_ALT, MOD_CONTROL, MOD_WIN, Windows};
+    let (shell, a) = shell_with_window(2, 10, 0x0000_00ff);
+    move_console(&shell, Some(Presenter::Test(Frame::new(640, 480).unwrap()))).unwrap();
+    let windows = Windows::new();
+    let hwnd =
+        windows.register(10, crate::nt::window::Info { tid: 1, ..Default::default() }).unwrap();
+    let hot =
+        |id, modifiers, vk| HotKey { pid: 10, tid: 1, hwnd, id, modifiers, vk, norepeat: false };
+    windows.register_hot_key(hot(1, MOD_CONTROL | MOD_ALT, u32::from(b'K'))).unwrap();
+    let key = |vk: u8, down| {
+        let k = Injected::Key { vk, scan: 0, extended: false, down };
+        assert!(matches!(inject(&shell, &windows, k), Ok(None)));
+    };
+    for (vk, down) in [(0x11, true), (0x12, true), (b'K', true), (b'K', false)] {
+        key(vk, down);
+    }
+    let mut posted = [crate::nt::window::Posted::EMPTY; 4];
+    assert_eq!(windows.take_posted(10, &mut posted), 1);
+    assert_eq!((posted[0].hwnd, posted[0].wparam), (hwnd, 1));
+    {
+        let mut d = shell.d.lock();
+        assert_eq!(d.s.active, Some(a));
+        let keys: Vec<_> = messages(&mut d, 10).into_iter().map(|m| m.0).collect();
+        // Ctrl and Alt down, K up: the K's down was the hot key's.
+        assert_eq!(keys, [WM_KEYDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP]);
+    }
+    key(0x12, false);
+    key(0x11, false);
+
+    // The shell's keys: Win+E, then the Windows key alone.
+    windows.set_shell_window(10, hwnd).unwrap();
+    windows.register_hot_key(hot(3, MOD_WIN, u32::from(b'E'))).unwrap();
+    windows.register_hot_key(hot(4, MOD_WIN, 0x5b)).unwrap();
+    let mut d = shell.d.lock();
+    d.key(0x5b, 0x5b, true, true);
+    assert_eq!(d.hot_candidate(b'E', true), Some((MOD_WIN, u32::from(b'E'), false)));
+    d.hot_key_taken(b'E', true);
+    // The E's repeat is the same hot key's; the Windows key's release,
+    // after E, is nobody's.
+    assert_eq!(d.hot_candidate(b'E', true), Some((MOD_WIN, u32::from(b'E'), true)));
+    d.key(b'E', 0x12, false, false);
+    assert_eq!(d.hot_candidate(0x5b, false), None);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(d.take_launch().is_none());
+    d.key(0x5b, 0x5b, true, true);
+    assert_eq!(d.hot_candidate(0x5b, false), Some((MOD_WIN, 0x5b, false)));
+    d.hot_key_taken(0x5b, false);
+    d.key(0x5b, 0x5b, true, false);
+    assert!(!d.menu_open());
 }

@@ -205,6 +205,84 @@ struct Registry {
     /// maps to draw into the window (GetDC of another process's window:
     /// Chromium's GPU process paints the browser's window).
     surfaces: Vec<Surface>,
+    /// RegisterHotKey's hot keys (at most MAX_HOT_KEYS).
+    hot_keys: Vec<HotKey>,
+    /// SetShellWindow's window, (pid, hwnd): the shell, which alone may
+    /// take the desktop's own keys (`SHELL_KEYS`).
+    shell: Option<(u32, u64)>,
+}
+
+/// RegisterHotKey's modifiers (fsModifiers), MOD_NOREPEAT aside.
+pub const MOD_ALT: u32 = 1;
+pub const MOD_CONTROL: u32 = 2;
+pub const MOD_SHIFT: u32 = 4;
+pub const MOD_WIN: u32 = 8;
+pub const MOD_NOREPEAT: u32 = 0x4000;
+/// WM_HOTKEY, posted to a hot key's window (or its thread, for hwnd 0).
+pub const WM_HOTKEY: u32 = 0x0312;
+/// How many hot keys the session's processes may hold together.
+pub const MAX_HOT_KEYS: usize = 256;
+const VK_LWIN: u32 = 0x5b;
+const VK_RWIN: u32 = 0x5c;
+const VK_ESCAPE: u32 = 0x1b;
+
+/// The desktop's own keys, which only the shell (SetShellWindow's
+/// process) may register: Win+E (File Explorer), the Windows key alone
+/// (the start menu: gala's convention is (MOD_WIN, VK_LWIN) for its
+/// release with no other key, as Windows has no hot key for it) and
+/// Ctrl+Shift+Esc (Task Manager). While nobody holds them the desktop
+/// does what they do itself.
+pub const SHELL_KEYS: [(u32, u32); 4] = [
+    (MOD_WIN, b'E' as u32),
+    (MOD_WIN, VK_LWIN),
+    (MOD_WIN, VK_RWIN),
+    (MOD_CONTROL | MOD_SHIFT, VK_ESCAPE),
+];
+
+/// Whether (`modifiers`, `vk`) is a key the system keeps for itself, as
+/// Windows does Win+arrows (Snap): no process registers it.
+pub fn system_key(modifiers: u32, vk: u32) -> bool {
+    modifiers == MOD_WIN && (0x25..=0x28).contains(&vk)
+}
+
+/// A hot key's keys as the log names them: "Ctrl+Alt+K", "Win+E", "Win"
+/// (the Windows key alone), "Ctrl+Shift+0x1b".
+pub struct Combo(pub u32, pub u32);
+
+impl core::fmt::Display for Combo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Combo(mods, vk) = *self;
+        if mods == MOD_WIN && (vk == VK_LWIN || vk == VK_RWIN) {
+            return f.write_str("Win");
+        }
+        for (bit, name) in
+            [(MOD_CONTROL, "Ctrl+"), (MOD_ALT, "Alt+"), (MOD_SHIFT, "Shift+"), (MOD_WIN, "Win+")]
+        {
+            if mods & bit != 0 {
+                f.write_str(name)?;
+            }
+        }
+        match vk {
+            0x30..=0x39 | 0x41..=0x5a => write!(f, "{}", vk as u8 as char),
+            VK_ESCAPE => f.write_str("Esc"),
+            _ => write!(f, "{vk:#x}"),
+        }
+    }
+}
+
+/// A hot key: WM_HOTKEY(`id`) to `hwnd` (0: thread `tid`'s queue) when its
+/// keys go down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotKey {
+    pub pid: u32,
+    pub tid: u32,
+    pub hwnd: u64,
+    pub id: i32,
+    /// MOD_ALT/CONTROL/SHIFT/WIN.
+    pub modifiers: u32,
+    pub vk: u32,
+    /// MOD_NOREPEAT: a held key's repeats don't post it again.
+    pub norepeat: bool,
 }
 
 /// The section a top-level window's pixels are in.
@@ -411,6 +489,8 @@ impl Windows {
             queues: Vec::new(),
             filters: Vec::new(),
             surfaces: Vec::new(),
+            hot_keys: Vec::new(),
+            shell: None,
         }))
     }
 
@@ -896,9 +976,136 @@ impl Windows {
             return Err(NtStatus::INVALID_HANDLE);
         }
         r.filters.retain(|f| !(f.pid == pid && f.hwnd == hwnd));
+        // Its hot keys go with it (Windows unregisters them), and the shell
+        // slot when it was the shell's window.
+        r.hot_keys.retain(|h| !(h.pid == pid && h.hwnd == hwnd));
+        if r.shell == Some((pid, hwnd)) {
+            r.shell = None;
+        }
         drop(r);
         self.prune_surfaces();
         Ok(())
+    }
+
+    /// RegisterHotKey for thread `tid` of process `pid`: `key.hwnd` (0:
+    /// the thread's queue) gets WM_HOTKEY when its keys go down.
+    /// STATUS_INVALID_HANDLE for no such window, STATUS_ACCESS_DENIED for
+    /// another thread's window (ERROR_WINDOW_OF_OTHER_THREAD),
+    /// STATUS_INVALID_PARAMETER for unknown modifiers or no key,
+    /// STATUS_OBJECT_NAME_COLLISION when the keys are taken (by another
+    /// hot key, by the system, or the desktop's own keys for any process
+    /// but the shell's: ERROR_HOTKEY_ALREADY_REGISTERED),
+    /// STATUS_INSUFFICIENT_RESOURCES past MAX_HOT_KEYS.
+    pub fn register_hot_key(&self, key: HotKey) -> Result<(), NtStatus> {
+        if key.modifiers & !(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN) != 0
+            || key.vk == 0
+            || key.vk > 0xff
+        {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        let mut r = self.0.lock();
+        if key.hwnd != 0 {
+            let w =
+                r.windows.iter().find(|w| w.hwnd == key.hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
+            if w.pid != key.pid || w.tid != key.tid {
+                return Err(NtStatus::ACCESS_DENIED);
+            }
+        }
+        let shells = r.shell.is_some_and(|(p, _)| p == key.pid);
+        if system_key(key.modifiers, key.vk)
+            || (SHELL_KEYS.contains(&(key.modifiers, key.vk)) && !shells)
+            || r.hot_keys.iter().any(|h| h.modifiers == key.modifiers && h.vk == key.vk)
+        {
+            return Err(NtStatus::OBJECT_NAME_COLLISION);
+        }
+        // Registering an id again for the same window replaces it (as on
+        // Windows, which then changes the keys).
+        r.hot_keys.retain(|h| {
+            !(h.pid == key.pid
+                && h.hwnd == key.hwnd
+                && h.id == key.id
+                && (key.hwnd != 0 || h.tid == key.tid))
+        });
+        if r.hot_keys.len() >= MAX_HOT_KEYS {
+            return Err(NtStatus::INSUFFICIENT_RESOURCES);
+        }
+        r.hot_keys.try_push(key).map_err(|_| NtStatus::NO_MEMORY)
+    }
+
+    /// UnregisterHotKey: hot key `id` of `hwnd` (0: thread `tid`'s);
+    /// STATUS_NOT_FOUND when it has none (ERROR_HOTKEY_NOT_REGISTERED).
+    pub fn unregister_hot_key(
+        &self,
+        pid: u32,
+        tid: u32,
+        hwnd: u64,
+        id: i32,
+    ) -> Result<HotKey, NtStatus> {
+        let mut r = self.0.lock();
+        let i = r
+            .hot_keys
+            .iter()
+            .position(|h| {
+                h.pid == pid && h.hwnd == hwnd && h.id == id && (hwnd != 0 || h.tid == tid)
+            })
+            .ok_or(NtStatus::NOT_FOUND)?;
+        Ok(r.hot_keys.swap_remove(i))
+    }
+
+    /// The hot key (`modifiers`, `vk`) is, if any: WM_HOTKEY is posted to
+    /// it (wParam its id, lParam the key in the high word and the
+    /// modifiers in the low, as on Windows). The hot key and its owner's
+    /// event to set (by the caller, outside the lock); None when nobody
+    /// holds the keys. `repeat`: the key was already down (a held key's
+    /// repeat), which MOD_NOREPEAT hot keys ignore (Some, nothing posted).
+    pub fn hot_key(
+        &self,
+        modifiers: u32,
+        vk: u32,
+        repeat: bool,
+    ) -> Option<(HotKey, Result<Option<ObjectRef>, NtStatus>)> {
+        let mut r = self.0.lock();
+        let key = *r.hot_keys.iter().find(|h| h.modifiers == modifiers && h.vk == vk)?;
+        if repeat && key.norepeat {
+            return Some((key, Ok(None)));
+        }
+        if r.posted.len() >= MAX_POSTED {
+            return Some((key, Err(NtStatus::INSUFFICIENT_RESOURCES)));
+        }
+        let posted = Posted {
+            pid: key.pid,
+            tid: if key.hwnd == 0 { key.tid } else { 0 },
+            hwnd: key.hwnd,
+            message: WM_HOTKEY,
+            wparam: key.id as u32 as u64,
+            lparam: u64::from(vk << 16 | modifiers),
+        };
+        if r.posted.try_push(posted).is_err() {
+            return Some((key, Err(NtStatus::NO_MEMORY)));
+        }
+        Some((key, Ok(r.listeners.iter().find(|(p, _)| *p == key.pid).map(|(_, e)| e.clone()))))
+    }
+
+    /// SetShellWindow: process `pid`'s window `hwnd` is the shell's.
+    /// STATUS_INVALID_HANDLE for no such window, STATUS_ACCESS_DENIED for
+    /// another process's, STATUS_OBJECT_NAME_COLLISION when there is a
+    /// shell window already (Windows' SetShellWindow fails then too).
+    pub fn set_shell_window(&self, pid: u32, hwnd: u64) -> Result<(), NtStatus> {
+        let mut r = self.0.lock();
+        let w = r.windows.iter().find(|w| w.hwnd == hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
+        if w.pid != pid {
+            return Err(NtStatus::ACCESS_DENIED);
+        }
+        if r.shell.is_some() {
+            return Err(NtStatus::OBJECT_NAME_COLLISION);
+        }
+        r.shell = Some((pid, hwnd));
+        Ok(())
+    }
+
+    /// GetShellWindow: the shell's window, 0 for none.
+    pub fn shell_window(&self) -> u64 {
+        self.0.lock().shell.map_or(0, |(_, h)| h)
     }
 
     /// Any process's window `hwnd`.
@@ -981,6 +1188,10 @@ impl Windows {
             r.listeners.retain(|(p, _)| *p != pid);
             r.queues.retain(|&(p, _)| p != pid);
             r.filters.retain(|f| f.pid != pid);
+            r.hot_keys.retain(|h| h.pid != pid);
+            if r.shell.is_some_and(|(p, _)| p == pid) {
+                r.shell = None;
+            }
             // Its own sends go; sends to it fail (their senders wake).
             abandon_sends(&mut r, |m| m.from_pid == pid);
         }
@@ -999,7 +1210,14 @@ impl Windows {
                     || f.hwnd == 0
                     || windows.iter().any(|w| w.hwnd == f.hwnd && !(w.pid == pid && w.tid == tid))
             });
+            if let Some((_, h)) = r.shell
+                && r.windows.iter().any(|w| w.hwnd == h && w.pid == pid && w.tid == tid)
+            {
+                r.shell = None;
+            }
             r.windows.retain(|w| !(w.pid == pid && w.tid == tid));
+            // Its hot keys go: its windows' and its queue's.
+            r.hot_keys.retain(|h| !(h.pid == pid && h.tid == tid));
             r.posted.retain(|m| !(m.pid == pid && m.tid == tid && m.tid != 0));
             r.queues.retain(|&(p, t)| !(p == pid && t == tid));
             abandon_sends(&mut r, |m| m.from_pid == pid && m.from_tid == tid);
@@ -1062,6 +1280,89 @@ fn abandon_sends(r: &mut Registry, from: impl Fn(&Sent) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hot(pid: u32, tid: u32, hwnd: u64, id: i32, modifiers: u32, vk: u32) -> HotKey {
+        HotKey { pid, tid, hwnd, id, modifiers, vk, norepeat: false }
+    }
+
+    /// RegisterHotKey's rules: a window of the caller's thread; keys held
+    /// once; Win+arrows the system's; the desktop's own keys only for the
+    /// shell's process (SetShellWindow, once); UnregisterHotKey of an id
+    /// that has none fails; a window's end takes its hot keys and the
+    /// shell slot with it.
+    #[test]
+    fn hot_keys_are_held_once_and_the_shell_alone_takes_the_desktops_keys() {
+        let reg = Windows::new();
+        let w = reg.register(5, Info { tid: 50, ..Info::default() }).unwrap();
+        let other = reg.register(6, Info { tid: 60, ..Info::default() }).unwrap();
+        let k = u32::from(b'K');
+        let ctrl_alt = MOD_CONTROL | MOD_ALT;
+        reg.register_hot_key(hot(5, 50, 0, 1, ctrl_alt, k)).unwrap();
+        let taken = Err(NtStatus::OBJECT_NAME_COLLISION);
+        assert_eq!(reg.register_hot_key(hot(6, 60, 0, 2, ctrl_alt, k)), taken);
+        assert_eq!(
+            reg.register_hot_key(hot(6, 60, w, 2, MOD_ALT, k)),
+            Err(NtStatus::ACCESS_DENIED)
+        );
+        assert_eq!(
+            reg.register_hot_key(hot(5, 51, w, 2, MOD_ALT, k)),
+            Err(NtStatus::ACCESS_DENIED)
+        );
+        assert_eq!(
+            reg.register_hot_key(hot(5, 50, 7, 2, MOD_ALT, k)),
+            Err(NtStatus::INVALID_HANDLE)
+        );
+        assert_eq!(
+            reg.register_hot_key(hot(5, 50, w, 2, 0x10, k)),
+            Err(NtStatus::INVALID_PARAMETER)
+        );
+        assert_eq!(reg.register_hot_key(hot(5, 50, w, 3, MOD_WIN, 0x25)), taken);
+        assert_eq!(reg.register_hot_key(hot(5, 50, w, 3, MOD_WIN, u32::from(b'E'))), taken);
+        assert_eq!(reg.unregister_hot_key(5, 50, 0, 99), Err(NtStatus::NOT_FOUND));
+        // The key goes to the thread's queue: WM_HOTKEY, id, key and
+        // modifiers.
+        let (key, posted) = reg.hot_key(ctrl_alt, k, false).unwrap();
+        assert_eq!((key.id, posted.map(|e| e.is_some())), (1, Ok(false)));
+        let mut out = [Posted::EMPTY; 2];
+        assert_eq!(reg.take_posted(5, &mut out), 1);
+        assert_eq!(
+            (out[0].tid, out[0].hwnd, out[0].message, out[0].wparam, out[0].lparam),
+            (50, 0, WM_HOTKEY, 1, u64::from(k << 16 | ctrl_alt))
+        );
+        assert!(reg.hot_key(MOD_ALT, k, false).is_none());
+        assert_eq!(reg.unregister_hot_key(5, 50, 0, 1).map(|h| h.vk), Ok(k));
+        assert!(reg.hot_key(ctrl_alt, k, false).is_none());
+
+        // The shell: one window, the caller's own.
+        assert_eq!(reg.shell_window(), 0);
+        assert_eq!(reg.set_shell_window(5, other), Err(NtStatus::ACCESS_DENIED));
+        reg.set_shell_window(5, w).unwrap();
+        assert_eq!(reg.set_shell_window(6, other), taken);
+        assert_eq!(reg.shell_window(), w);
+        reg.register_hot_key(hot(5, 50, w, 3, MOD_WIN, u32::from(b'E'))).unwrap();
+        reg.register_hot_key(hot(5, 50, w, 4, MOD_WIN, 0x5b)).unwrap();
+        assert_eq!(reg.register_hot_key(hot(5, 50, w, 5, MOD_WIN, 0x26)), taken);
+        // A repeat of a MOD_NOREPEAT hot key is taken, and not posted.
+        let quiet = HotKey { norepeat: true, ..hot(5, 50, w, 6, MOD_ALT, 0x70) };
+        reg.register_hot_key(quiet).unwrap();
+        assert_eq!(
+            reg.hot_key(MOD_ALT, 0x70, true).map(|(h, p)| (h.id, p.map(|e| e.is_some()))),
+            Some((6, Ok(false)))
+        );
+        assert_eq!(reg.take_posted(5, &mut out), 0);
+        // The window goes: its hot keys and the shell slot with it.
+        reg.unregister(5, w).unwrap();
+        assert_eq!(reg.shell_window(), 0);
+        assert!(reg.hot_key(MOD_WIN, u32::from(b'E'), false).is_none());
+        assert_eq!(reg.register_hot_key(hot(6, 60, other, 3, MOD_WIN, u32::from(b'E'))), taken);
+        // A process's end takes its thread hot keys.
+        reg.register_hot_key(hot(6, 60, 0, 1, ctrl_alt, k)).unwrap();
+        reg.process_ended(6);
+        reg.register_hot_key(hot(5, 50, 0, 1, ctrl_alt, k)).unwrap();
+        assert_eq!(format!("{}", Combo(ctrl_alt, k)), "Ctrl+Alt+K");
+        assert_eq!(format!("{}", Combo(MOD_WIN, 0x5b)), "Win");
+        assert_eq!(format!("{}", Combo(MOD_CONTROL | MOD_SHIFT, 0x1b)), "Ctrl+Shift+Esc");
+    }
 
     #[test]
     fn records_round_trip_and_windows_are_found_by_anyone() {

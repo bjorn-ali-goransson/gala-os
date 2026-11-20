@@ -767,6 +767,9 @@ pub struct Desktop {
     /// release doesn't open the start menu).
     win_key: bool,
     win_used: bool,
+    /// The key whose down a hot key took and that is still held: its
+    /// repeats are the same hot key's (MOD_NOREPEAT ignores them).
+    held_hot: Option<u8>,
     /// The notification area's icons and balloon (`tray`).
     tray: tray::Tray,
     /// The app bars (SHAppBarMessage): the strips they take from the
@@ -829,6 +832,7 @@ impl Desktop {
             bar_menu: None,
             win_key: false,
             win_used: false,
+            held_hot: None,
             tray: tray::Tray::new(),
             appbars: appbar::AppBars::new(),
             card: None,
@@ -872,6 +876,7 @@ impl Desktop {
     pub fn leave_console(&mut self) -> Vec<Rect> {
         let mut damage = if self.buttons != 0 { self.pointer(0, 0, 0) } else { Vec::new() };
         (self.alt, self.win_key, self.win_used) = (false, false, false);
+        self.held_hot = None;
         if self.menu.is_some() {
             self.close_menu();
             self.refresh();
@@ -1253,7 +1258,52 @@ impl Desktop {
     /// (E0-prefixed). The shell's keys (the Windows key, Snap, the start
     /// menu's search) are the shell's; the others go to the active window
     /// (`State::key_to_active`).
+    /// The hot key (modifiers, key, repeat) key `vk` going `down` (or up)
+    /// would be, if any (`window::Windows::hot_key` says whether a process
+    /// holds it): a key other than a modifier going down with the
+    /// modifiers held, or the Windows key going up with no other key
+    /// since it went down ((MOD_WIN, VK_LWIN or VK_RWIN): gala's hot key
+    /// for the Windows key alone, ARCHITECTURE "Hot keys").
+    pub fn hot_candidate(&self, vk: u8, down: bool) -> Option<(u32, u32, bool)> {
+        use crate::nt::window::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+        if vk == 0x5b || vk == 0x5c {
+            return (!down && self.win_key && !self.win_used).then_some((
+                MOD_WIN,
+                u32::from(vk),
+                false,
+            ));
+        }
+        if !down || matches!(vk, 0x10..=0x12 | 0xa0..=0xa5) {
+            return None;
+        }
+        let mods = [
+            (self.alt, MOD_ALT),
+            (self.ctrl, MOD_CONTROL),
+            (self.shift, MOD_SHIFT),
+            (self.win_key, MOD_WIN),
+        ]
+        .iter()
+        .filter(|(held, _)| *held)
+        .fold(0, |m, (_, bit)| m | bit);
+        Some((mods, u32::from(vk), self.held_hot == Some(vk)))
+    }
+
+    /// A hot key took key `vk`'s down (or the Windows key's release): the
+    /// Windows key's release then opens no start menu, and its repeats
+    /// are known as such until it goes up.
+    pub fn hot_key_taken(&mut self, vk: u8, down: bool) {
+        if self.win_key {
+            self.win_used = true;
+        }
+        if down {
+            self.held_hot = Some(vk);
+        }
+    }
+
     pub fn key(&mut self, vk: u8, scan: u8, extended: bool, down: bool) {
+        if !down && self.held_hot == Some(vk) {
+            self.held_hot = None;
+        }
         if vk == VK_MENU {
             self.alt = down;
         }
@@ -3934,7 +3984,11 @@ pub enum Injected {
 /// when a Test presenter shows it: STATUS_INVALID_DEVICE_STATE otherwise
 /// (the console's desktop gets the PS/2 devices, one shown by nothing
 /// gets nothing). Returns the program its start menu asked to start.
-pub fn inject(shell: &Shell, input: Injected) -> Result<Option<Launch>, NtStatus> {
+pub fn inject(
+    shell: &Shell,
+    windows: &crate::nt::window::Windows,
+    input: Injected,
+) -> Result<Option<Launch>, NtStatus> {
     {
         let d = shell.d.lock();
         if !d.s.live || d.presenter.kind() != Kind::Test {
@@ -3945,7 +3999,9 @@ pub fn inject(shell: &Shell, input: Injected) -> Result<Option<Launch>, NtStatus
         Injected::Pointer { x, y, buttons } => {
             pointer_on(shell, buttons, |d| d.pointer_at(x, y, buttons))
         }
-        Injected::Key { vk, scan, extended, down } => key_on(shell, vk, scan, extended, down),
+        Injected::Key { vk, scan, extended, down } => {
+            key_on(shell, windows, vk, scan, extended, down)
+        }
         Injected::Wheel(notches) => {
             wheel_on(shell, notches);
             None
@@ -4806,14 +4862,21 @@ fn wheel_on(shell: &Shell, notches: i64) {
 /// program its start menu asked to start (Enter in the menu), if any.
 pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) -> Option<(u32, Launch)> {
     let desk = console()?;
-    key_on(&desk.shell, vk, scan, extended, down).map(|p| (desk.shell.session, p))
+    key_on(&desk.shell, &desk.windows, vk, scan, extended, down).map(|p| (desk.shell.session, p))
 }
 
 /// No tiles (input that cannot open the start menu).
 const NO_TILES: ([Entry; MAX_TILES], usize) =
     ([Entry { program: 0, installed: false }; MAX_TILES], 0);
 
-fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option<Launch> {
+fn key_on(
+    shell: &Shell,
+    windows: &crate::nt::window::Windows,
+    vk: u8,
+    scan: u8,
+    extended: bool,
+    down: bool,
+) -> Option<Launch> {
     // The Windows key's release may open the start menu: which programs
     // exist and what the Linux section lists (outside the desktop's lock:
     // the file system, the registry).
@@ -4830,7 +4893,19 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option
             d.set_linux(listing);
         }
     }
-    d.key(vk, scan, extended, down);
+    // A hot key (RegisterHotKey) takes the key's down before the desktop
+    // and the active window see it (the registry's lock is a leaf: taken
+    // under the desktop's).
+    let mut hot = None;
+    if let Some((mods, key, repeat)) = d.hot_candidate(vk, down)
+        && let Some((taken, posted)) = windows.hot_key(mods, key, repeat)
+    {
+        d.hot_key_taken(vk, down);
+        hot = Some((taken, posted, repeat));
+    }
+    if !(hot.is_some() && down) {
+        d.key(vk, scan, extended, down);
+    }
     redraw_damage(&mut d);
     let launch = d.take_launch();
     if vk == 0x1b && launch.and_then(Launch::program).is_some_and(|p| p.name == TASK_MANAGER) {
@@ -4842,6 +4917,22 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) -> Option
     let wakes = d.take_wakes();
     let posts = d.take_tray_posts();
     drop(d);
+    match hot {
+        Some((key, Ok(event), repeat)) => {
+            if !repeat && cfg!(not(test)) {
+                let combo = crate::nt::window::Combo(key.modifiers, key.vk);
+                crate::info!("desktop: hot key {} ({combo}) to pid {}", key.id, key.pid);
+            }
+            if let Some(e) = event {
+                crate::nt::wait::set_signal(&e, 1);
+            }
+        }
+        Some((key, Err(e), _)) if cfg!(not(test)) => {
+            let combo = crate::nt::window::Combo(key.modifiers, key.vk);
+            crate::warn!("desktop: hot key {} ({combo}) to pid {} dropped: {e:?}", key.id, key.pid);
+        }
+        _ => {}
+    }
     signal(wakes);
     tell_tray(shell, posts);
     launch

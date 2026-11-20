@@ -830,9 +830,13 @@ shell part) leaves it.
    2b. Linux (Wayland, X) windows get HWNDs, so ACTION_WINDOWS lists
       them, the window verbs reach them and their activation raises
       the same events.
-   3. The shell's keys: the Windows key, Win+E and Ctrl+Shift+Esc reach
-      the shell as hot keys (RegisterHotKey; Win alone as Windows'
-      shell gets it); Win+arrows stay the kernel's.
+   3. Done: the shell's keys: RegisterHotKey/UnregisterHotKey deliver
+      WM_HOTKEY; SetShellWindow's process alone may take Win+E,
+      Ctrl+Shift+Esc and the Windows key alone (gala's (MOD_WIN,
+      VK_LWIN)), and the desktop's built-in actions step aside while
+      it holds them; Win+arrows stay the kernel's. Test: `hotkey_test`
+      (ARCHITECTURE "Hot keys", "The shell's window and the shell's
+      keys").
    4. Launches: what the start menu starts from the input thread today
       (Linux distributions, installs, console programs in conhost)
       through GalaDesktopAction verbs under the caller's token.

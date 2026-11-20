@@ -8543,6 +8543,35 @@ the program always sees WM_SIZE/WM_MOVE.
   foreground (refused: ...)`). Invariant: user32's foreground window and
   the desktop's active window agree after a successful call, so keys
   go where GetForegroundWindow says.
+- **Hot keys** (GalaHotKey, 0x7f77; `window::Windows::register_hot_key`):
+  RegisterHotKey's keys go to the hot key's window (or, for hwnd NULL,
+  its thread's queue) as WM_HOTKEY (wParam the id, lParam the key in
+  the high word and the modifiers in the low) whichever window is
+  active, through the registry's posted messages. The desktop asks the
+  registry in `key_on` before it or the active window sees the key
+  (`Desktop::hot_candidate`): a key other than a modifier going down
+  with Ctrl/Alt/Shift/Win held. A hot key takes the down only: the
+  up still reaches the active window, as on Windows. MOD_NOREPEAT
+  ignores a held key's repeats (`held_hot`). Rules: the window is the
+  calling thread's (else ERROR_WINDOW_OF_OTHER_THREAD); keys are held
+  once, by anyone (ERROR_HOTKEY_ALREADY_REGISTERED); Win+arrows are
+  the system's (Snap) and never registered; at most 256 hot keys per
+  session. A window's, thread's or process's end takes its hot keys.
+  Logged: `desktop: pid P registers hot key N (Ctrl+Alt+K) to window
+  H`, its refusal with the status, `desktop: hot key N (combo) to pid
+  P` at each delivery, a dropped one (queue full) as a warning.
+- **The shell's window and the shell's keys** (GalaShellWindow,
+  0x7f78): SetShellWindow makes the caller's window the shell's, once
+  (a second fails, as on Windows; GetShellWindow returns it, NULL
+  without one); the slot empties with the window or its process. Only
+  the shell's process may register the desktop's own keys
+  (`window::SHELL_KEYS`): Win+E, Ctrl+Shift+Esc and the Windows key
+  alone. Windows has no hot key for the bare Windows key; gala's
+  convention is (MOD_WIN, VK_LWIN) (or VK_RWIN), delivered when the key
+  goes up with no other key since it went down. While a shell holds
+  them the desktop's built-in actions (File Explorer, Task Manager,
+  the start menu) don't run; while none does, they do (the kernel's
+  shell until `shasha.exe`, ROADMAP SH). Test: `hotkey_test`.
 - **Capture** (GalaWindowCapture): the window gets every mouse message
   in its client coordinates (negative outside it) wherever the pointer
   is; captions, the taskbar and the start menu get nothing meanwhile.
@@ -8608,6 +8637,8 @@ registry ("Plan: windows across processes").
 | 0x7f74 | GalaTrayIcon(op, *request, length, *rect) | Shell_NotifyIcon's NIM_* on the notification area, or 0x10: an icon's screen rectangle ("The notification area") |
 | 0x7f75 | GalaAppBar(op, *request, length) | SHAppBarMessage's ABM_NEW, ABM_REMOVE, ABM_QUERYPOS and ABM_SETPOS ("App bars") |
 | 0x7f76 | GalaCursorPos(*point) | GetCursorPos: the desktop's pointer (two i32), whichever process last had a mouse message |
+| 0x7f77 | GalaHotKey(op, hwnd, id, modifiers, vk) | RegisterHotKey (op 0) and UnregisterHotKey (op 1) ("Hot keys") |
+| 0x7f78 | GalaShellWindow(op, hwnd, *hwnd) | SetShellWindow (op 0) and GetShellWindow (op 1) ("The shell's window and the shell's keys") |
 | 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
@@ -10864,7 +10895,7 @@ chrome.dll delay-loads most of what it uses and resolves some DLLs'
 imports all at once (user32, gdi32) through GetProcAddress, which does
 not return `gala_stubs` stubs. So every function it delay-imports from
 those DLLs is a real export; the ones without a use on gala yet fail the
-documented way and record themselves (user32: DDE, hot keys,
+documented way and record themselves (user32: DDE,
 SetCursorPos, window regions, layered windows, SendInput; window
 stations and desktops a program creates are refused until stage 3).
 `tools/import_survey.py` lists what is still missing or stubbed.

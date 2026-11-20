@@ -450,6 +450,8 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f74, &[U, U, U, U]),             // GalaTrayIcon
     (0x7f75, &[U, U, U]),                // GalaAppBar
     (0x7f76, &[U]),                      // GalaCursorPos
+    (0x7f77, &[U, U, Hi, U, U, U]),      // GalaHotKey
+    (0x7f78, &[U, U, Hi, U]),            // GalaShellWindow
     // Window stations and desktops: their handles are kernel handles.
     (0x7fa0, &[U, U, U, U, U, Oh]), // GalaUserObjectOpen
     (0x7fa1, &[U, U, Oh]),          // GalaUserObjectConnection

@@ -236,6 +236,10 @@ pub const GALA_TRAY_ICON: u32 = 0x7f74;
 pub const GALA_APP_BAR: u32 = 0x7f75;
 /// GalaCursorPos (gala's own: GetCursorPos, the desktop's pointer).
 pub const GALA_CURSOR_POS: u32 = 0x7f76;
+/// GalaHotKey (gala's own: RegisterHotKey, UnregisterHotKey).
+pub const GALA_HOT_KEY: u32 = 0x7f77;
+/// GalaShellWindow (gala's own: SetShellWindow, GetShellWindow).
+pub const GALA_SHELL_WINDOW: u32 = 0x7f78;
 /// gala's test-only clock control (`clock=control`; ARCHITECTURE "Clock
 /// control"), also in user/ntrt.
 pub const GALA_CLOCK_CONTROL: u32 = 0x7f4c;
@@ -479,6 +483,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_TRAY_ICON, "GalaTrayIcon", 4, gala_tray_icon),
     (GALA_APP_BAR, "GalaAppBar", 3, gala_app_bar),
     (GALA_CURSOR_POS, "GalaCursorPos", 1, gala_cursor_pos),
+    (GALA_HOT_KEY, "GalaHotKey", 5, gala_hot_key),
+    (GALA_SHELL_WINDOW, "GalaShellWindow", 3, gala_shell_window),
     (GALA_CLOCK_CONTROL, "GalaClockControl", 4, gala_clock_control),
     (GALA_RANDOM, "GalaRandom", 2, gala_random),
     (GALA_DESKTOP_ACTION, "GalaDesktopAction", 5, gala_desktop_action),
@@ -3120,6 +3126,91 @@ fn gala_cursor_pos(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// GalaHotKey(Op, Hwnd, Id, Modifiers, Vk): Op 0 registers hot key Id of
+/// window Hwnd (0: the calling thread's queue) for Modifiers (MOD_*, with
+/// MOD_NOREPEAT) and virtual key Vk (RegisterHotKey); Op 1 unregisters
+/// it (UnregisterHotKey; Modifiers and Vk unused). The statuses are
+/// `Windows::register_hot_key`'s and `unregister_hot_key`'s.
+fn gala_hot_key(call: &mut Call<'_>) -> NtStatus {
+    use super::window::{HotKey, MOD_NOREPEAT};
+    let (op, hwnd, id) = (arg!(call, 0) as u32, arg!(call, 1), arg!(call, 2) as u32 as i32);
+    let (pid, tid) = (call.process.id as u32, thread::current_id().unwrap_or(0) as u32);
+    let windows = &call.process.desk.windows;
+    match op {
+        0 => {
+            let (mods, vk) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
+            let key = HotKey {
+                pid,
+                tid,
+                hwnd,
+                id,
+                modifiers: mods & !MOD_NOREPEAT,
+                vk,
+                norepeat: mods & MOD_NOREPEAT != 0,
+            };
+            let combo = super::window::Combo(key.modifiers, vk);
+            match windows.register_hot_key(key) {
+                Ok(()) => {
+                    // The thread now has a queue (WM_HOTKEY to hwnd 0 is a
+                    // thread message).
+                    let _ = note_queue(call);
+                    crate::info!(
+                        "desktop: pid {pid} registers hot key {id} ({combo}) to window {hwnd:#x}"
+                    );
+                    NtStatus::SUCCESS
+                }
+                Err(e) => {
+                    crate::info!(
+                        "desktop: pid {pid} cannot register hot key {id} ({combo}) to window \
+                         {hwnd:#x}: {e:?}"
+                    );
+                    e
+                }
+            }
+        }
+        1 => match windows.unregister_hot_key(pid, tid, hwnd, id) {
+            Ok(key) => {
+                let combo = super::window::Combo(key.modifiers, key.vk);
+                crate::info!("desktop: pid {pid} unregisters hot key {id} ({combo})");
+                NtStatus::SUCCESS
+            }
+            Err(e) => e,
+        },
+        _ => NtStatus::INVALID_PARAMETER,
+    }
+}
+
+/// GalaShellWindow(Op, Hwnd, *Hwnd): Op 0 makes the caller's window Hwnd
+/// the shell's (SetShellWindow: STATUS_OBJECT_NAME_COLLISION when there is
+/// one); Op 1 writes the shell's window (0: none) to *Hwnd
+/// (GetShellWindow).
+fn gala_shell_window(call: &mut Call<'_>) -> NtStatus {
+    let (op, hwnd) = (arg!(call, 0) as u32, arg!(call, 1));
+    let pid = call.process.id as u32;
+    match op {
+        0 => match call.process.desk.windows.set_shell_window(pid, hwnd) {
+            Ok(()) => {
+                crate::info!("desktop: pid {pid}'s window {hwnd:#x} is the shell's window");
+                NtStatus::SUCCESS
+            }
+            Err(e) => {
+                crate::info!(
+                    "desktop: pid {pid}'s window {hwnd:#x} cannot be the shell's window: {e:?}"
+                );
+                e
+            }
+        },
+        1 => {
+            let shell = call.process.desk.windows.shell_window();
+            if call.process.write(arg!(call, 2), &shell.to_le_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
 }
 
 /// GalaWindowInput(*Records, MaxRecords, *Count): takes the input waiting

@@ -183,12 +183,6 @@ pub extern "system" fn IsWindowArranged(_hwnd: usize) -> i32 {
     0
 }
 
-/// GetShellWindow: NULL (no shell desktop window owned by a shell process).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetShellWindow() -> usize {
-    0
-}
-
 // ---- Cursor, keyboard state, display queries, pointer input ---------------
 
 /// ClipCursor(lpRect): accepted; gala does not confine the cursor yet.
@@ -927,19 +921,6 @@ pub extern "system" fn SetWindowPlacement(hwnd: usize, placement: *const u8) -> 
     };
     super::tree::SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x14); // NOZORDER | NOACTIVATE
     super::window::ShowWindow(hwnd, show as i32);
-    1
-}
-
-/// RegisterHotKey / UnregisterHotKey: global hot keys are not delivered
-/// yet (reported; the registration is accepted).
-#[unsafe(no_mangle)]
-pub extern "system" fn RegisterHotKey(_hwnd: usize, id: i32, _modifiers: u32, vk: u32) -> i32 {
-    super::window::unsupported(b"user32.dll!RegisterHotKey", (id as u64) << 16 | u64::from(vk));
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn UnregisterHotKey(_hwnd: usize, _id: i32) -> i32 {
     1
 }
 

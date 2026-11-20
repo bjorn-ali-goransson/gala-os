@@ -29,6 +29,8 @@ unsafe extern "system" {
     fn GalaWindowPostThread(tid: u32, message: u32, wparam: u64, lparam: u64) -> u32;
     fn GalaWindowSendAbandon(id: u64) -> u32;
     fn GalaWindowFilter(hwnd: u64, message: u32, action: u32, ext: *mut u32) -> u32;
+    fn GalaHotKey(op: u32, hwnd: u64, id: i32, modifiers: u32, vk: u32) -> u32;
+    fn GalaShellWindow(op: u32, hwnd: u64, out: *mut u64) -> u32;
 }
 
 /// The kernel's answer when UIPI blocks a message (a lower integrity
@@ -1175,4 +1177,69 @@ pub extern "system" fn ChangeWindowMessageFilter(message: u32, flag: u32) -> i32
     }
     // SAFETY: no output.
     filter_result(unsafe { GalaWindowFilter(0, message, flag, core::ptr::null_mut()) })
+}
+
+// ---- Hot keys and the shell's window ---------------------------------------
+
+/// A hot key's or the shell window's status as GetLastError tells it.
+fn hot_key_result(status: u32) -> i32 {
+    const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
+    const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+    const STATUS_OBJECT_NAME_COLLISION: u32 = 0xc000_0035;
+    const STATUS_NOT_FOUND: u32 = 0xc000_0225;
+    const STATUS_INSUFFICIENT_RESOURCES: u32 = 0xc000_009a;
+    if status == 0 {
+        return 1;
+    }
+    crate::window::set_last_error(match status {
+        STATUS_INVALID_HANDLE => 1400, // ERROR_INVALID_WINDOW_HANDLE
+        STATUS_ACCESS_DENIED => 1408,  // ERROR_WINDOW_OF_OTHER_THREAD
+        STATUS_INVALID_PARAMETER => 87,
+        STATUS_OBJECT_NAME_COLLISION => 1409, // ERROR_HOTKEY_ALREADY_REGISTERED
+        STATUS_NOT_FOUND => 1419,             // ERROR_HOTKEY_NOT_REGISTERED
+        STATUS_INSUFFICIENT_RESOURCES => 1450, // ERROR_NO_SYSTEM_RESOURCES
+        _ => 31,                              // ERROR_GEN_FAILURE
+    });
+    0
+}
+
+/// RegisterHotKey: WM_HOTKEY(`id`) to `hwnd` (NULL: the calling thread's
+/// queue) when `vk` goes down with `modifiers` (MOD_ALT, MOD_CONTROL,
+/// MOD_SHIFT, MOD_WIN, MOD_NOREPEAT), whichever window has the focus.
+/// Keys another hot key holds, Win+arrows, and the shell's own keys
+/// (Win+E, the Windows key, Ctrl+Shift+Esc) for any process but the
+/// shell's fail with ERROR_HOTKEY_ALREADY_REGISTERED (ARCHITECTURE "Hot
+/// keys").
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterHotKey(hwnd: usize, id: i32, modifiers: u32, vk: u32) -> i32 {
+    // SAFETY: no pointers.
+    hot_key_result(unsafe { GalaHotKey(0, hwnd as u64, id, modifiers, vk) })
+}
+
+/// UnregisterHotKey: hot key `id` of `hwnd` (NULL: the calling thread's);
+/// ERROR_HOTKEY_NOT_REGISTERED when there is none.
+#[unsafe(no_mangle)]
+pub extern "system" fn UnregisterHotKey(hwnd: usize, id: i32) -> i32 {
+    // SAFETY: no pointers.
+    hot_key_result(unsafe { GalaHotKey(1, hwnd as u64, id, 0, 0) })
+}
+
+/// SetShellWindow: `hwnd` (the caller's) is the shell's window, which
+/// lets its process take the desktop's own keys. Fails (FALSE) when there
+/// is a shell window already, as on Windows.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetShellWindow(hwnd: usize) -> i32 {
+    // SAFETY: no output.
+    hot_key_result(unsafe { GalaShellWindow(0, hwnd as u64, core::ptr::null_mut()) })
+}
+
+/// GetShellWindow: the shell's window (SetShellWindow), NULL for none.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetShellWindow() -> usize {
+    let mut hwnd = 0u64;
+    // SAFETY: our output.
+    if unsafe { GalaShellWindow(1, 0, &mut hwnd) } != 0 {
+        return 0;
+    }
+    hwnd as usize
 }
