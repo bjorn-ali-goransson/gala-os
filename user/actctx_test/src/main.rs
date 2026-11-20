@@ -249,6 +249,10 @@ const WINDOW_CLASS: u32 = 3;
 const COM_SERVER: u32 = 4;
 const COM_PROGID: u32 = 7;
 const RETURN_HACTCTX: u32 = 1;
+// DLL redirection record flags.
+const REDIRECT_BASE_NAME: u32 = 1;
+const REDIRECT_OMITS_ROOT: u32 = 2;
+const REDIRECT_EXPAND: u32 = 4;
 const QUERY_NO_ADDREF: u32 = 0x8000_0000;
 const QUERY_USE_ACTIVE: u32 = 0x4;
 const QUERY_IS_HMODULE: u32 = 0x8;
@@ -399,6 +403,13 @@ impl Checks {
 fn eq_ci(a: &[u16], b: &[u16]) -> bool {
     let up = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
     a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| up(x) == up(y))
+}
+
+/// `n` UTF-16 units at `p`: a path in a section is counted and not
+/// terminated (the next key's text follows it).
+fn counted<'a>(p: usize, n: usize) -> &'a [u16] {
+    // SAFETY: inside a section the call returned.
+    unsafe { core::slice::from_raw_parts(p as *const u16, n) }
 }
 
 /// A NUL-terminated UTF-16 string's units.
@@ -572,6 +583,11 @@ const DEP1: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5
 const DEP2: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5.4.3" processorArchitecture="ARCH" /><file name="testlib.dll"></file><file name="testlib2.dll" hash="63c978c2b53d6cf72b42fb7308f9af12ab19ec53" hashalg="SHA1" /></assembly>"#;
 
 const DEP3: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5.4.3" processorArchitecture="ARCH"/><file name="testlib.dll"/><file name="testlib2.dll" hash="63c978c2b53d6cf72b42fb7308f9af12ab19ec53" hashalg="SHA1"><windowClass>wndClass</windowClass><windowClass>wndClass2</windowClass></file></assembly>"#;
+
+/// loadFrom paths: a plain file beside a directory with and without
+/// its backslash, a path that is the file's own name, and two that hold
+/// a variable to expand.
+const LOADFROM: &str = r#"<assemblyIdentity version="1.0.0.0" name="Wine.Test" type="win32" processorArchitecture="ARCH"/><file name="plain.dll"/><file name="dironly.dll" loadFrom="sub\"/><file name="dirnoslash.dll" loadFrom="sub"/><file name="samename.dll" loadFrom="samename.dll"/><file name="expanddir.dll" loadFrom="%SystemRoot%\"/><file name="upper.dll" loadFrom="%SYSTEMROOT%\Upper.DLL"/></assembly>"#;
 
 const WRONG_DEP1: &str = r#"<assemblyIdentity type="win32" name="testdep" version="6.5.4.4" processorArchitecture="ARCH" /></assembly>"#;
 
@@ -839,7 +855,7 @@ fn find_dll(c: &mut Checks, name: &str, roster: u32, h: Handle) -> Result<(), u3
     c.eq(d.version.into(), 1)?;
     c.eq(d.length.into(), 20)?;
     c.eq(rd32(d.data).into(), 20)?;
-    c.eq(rd32(d.data + 4).into(), 2)?; // PATH_OMITS_ASSEMBLY_ROOT
+    c.eq(rd32(d.data + 4).into(), REDIRECT_OMITS_ROOT.into())?;
     c.eq(rd32(d.data + 8).into(), 0)?;
     c.eq(rd32(d.data + 12).into(), 0)?;
     c.eq(rd32(d.data + 16).into(), 0)?;
@@ -861,6 +877,42 @@ fn find_dll(c: &mut Checks, name: &str, roster: u32, h: Handle) -> Result<(), u3
     // SAFETY: the reference the call took.
     unsafe { ReleaseActCtx(d.actctx) };
     Ok(())
+}
+
+/// FindActCtxSectionStringW of DLL `name`, whose file has a `loadFrom`
+/// path: the 20-byte record is followed by an array of `(length,
+/// section offset)` path segments -- one, for one `loadFrom` -- and by
+/// their text, as the manifest wrote it and unexpanded. The flags say
+/// what the text is: `REDIRECT_BASE_NAME` unless it ends in a
+/// backslash, `REDIRECT_EXPAND` when it holds a variable to expand, and
+/// `REDIRECT_OMITS_ROOT` only for a file with no path at all
+/// (`find_dll`).
+fn find_dll_path(c: &mut Checks, name: &str, redirect: &str, flags: u32) -> Result<(), u32> {
+    let n = Wide::of(name);
+    let mut d = KeyedData::new();
+    // SAFETY: valid arguments.
+    unsafe {
+        c.ok(
+            FindActCtxSectionStringW(0, null(), DLL_REDIRECTION, n.p(), &mut d) != 0,
+            GetLastError().into(),
+        )?;
+    }
+    let want = Wide::of(redirect);
+    let bytes = 2 * want.n as u32;
+    // The record, then where it says its one path is.
+    c.eq(rd32(d.data).into(), 20)?;
+    c.eq(rd32(d.data + 4).into(), flags.into())?;
+    c.eq(rd32(d.data + 8).into(), bytes.into())?;
+    c.eq(rd32(d.data + 12).into(), 1)?;
+    let segments = (d.data - d.base + 20) as u32;
+    c.eq(rd32(d.data + 16).into(), segments.into())?;
+    // The segment and the text behind it, inside the record's length.
+    c.eq(rd32(d.data + 20).into(), bytes.into())?;
+    c.eq(rd32(d.data + 24).into(), u64::from(segments + 8))?;
+    c.eq(d.length.into(), u64::from(28 + bytes))?;
+    c.text(counted(d.base + segments as usize + 8, want.n), want.s(), false)?;
+    c.eq(d.global as u64, 0)?;
+    c.eq(d.roster.into(), 1)
 }
 
 /// FindActCtxSectionStringW of window class `name`: the record, its
@@ -1366,6 +1418,25 @@ fn manifests(c: &mut Checks) -> Result<(), u32> {
         ReleaseActCtx(h);
     }
     remove("test3.manifest");
+
+    section("loadfrom paths");
+    put("test4.manifest", text(&[HEAD, LOADFROM]).b());
+    let h = create("test4.manifest");
+    c.ok(h != INVALID, 0)?;
+    // SAFETY: the context made above.
+    unsafe { c.ok(ActivateActCtx(h, &mut cookie) != 0, 0)? };
+    find_dll(c, "plain.dll", 1, h)?;
+    find_dll_path(c, "dironly.dll", r"sub\", 0)?;
+    find_dll_path(c, "dirnoslash.dll", "sub", REDIRECT_BASE_NAME)?;
+    find_dll_path(c, "samename.dll", "samename.dll", REDIRECT_BASE_NAME)?;
+    find_dll_path(c, "expanddir.dll", r"%SystemRoot%\", REDIRECT_EXPAND)?;
+    find_dll_path(c, "upper.dll", r"%SYSTEMROOT%\Upper.DLL", REDIRECT_EXPAND | REDIRECT_BASE_NAME)?;
+    // SAFETY: as above.
+    unsafe {
+        c.ok(DeactivateActCtx(0, cookie) != 0, 0)?;
+        ReleaseActCtx(h);
+    }
+    remove("test4.manifest");
 
     section("wndcls sections");
     put("testdep1.manifest", text(&[HEAD, WNDCLS1]).b());

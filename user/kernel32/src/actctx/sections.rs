@@ -14,9 +14,11 @@
 //! - A GUID section's header is 40 bytes (magic "GsHd" 0x64487347, size,
 //!   count, index_offset, names_offset, names_len), its index 28 bytes
 //!   per key (GUID, data_offset, data_len, roster index).
-//! - DLL redirection data: 20 bytes (size, flags 2
-//!   PATH_OMITS_ASSEMBLY_ROOT, total path length, path count, path
-//!   offset); window class data: 24 bytes (size, 0, versioned name's
+//! - DLL redirection data: 20 bytes (size, flags, total path length,
+//!   path count, section offset of the path array), with a `loadFrom`
+//!   path's one entry (its length, its section offset) and its text
+//!   behind the record, inside the record's length (`redirect`);
+//!   window class data: 24 bytes (size, 0, versioned name's
 //!   length and offset from the record, module name's length and offset
 //!   from the section) with the versioned name ("<version>!<class>" or
 //!   the class) and the module after it; COM server data: 120 bytes
@@ -42,8 +44,36 @@ const CLASS_DATA: usize = 24;
 pub const COM_DATA: usize = 120;
 const PROGID_DATA: usize = 12;
 
-/// ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_OMITS_ASSEMBLY_ROOT.
+// ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH flags.
+const INCLUDES_BASE_NAME: u32 = 1;
 const OMITS_ASSEMBLY_ROOT: u32 = 2;
+const PATH_EXPAND: u32 = 4;
+
+/// One path entry in a DLL redirection record: its length and offset.
+const PATH_ENTRY: usize = 8;
+
+/// A DLL redirection record's flags, and the bytes behind its 20 for a
+/// `loadFrom` path: the path entry and the path's text.
+///
+/// A file with no path gets OMITS_ASSEMBLY_ROOT and nothing behind the
+/// record. A path gets INCLUDES_BASE_NAME unless it ends in a backslash
+/// (then it names a directory to load the file from), and PATH_EXPAND
+/// when it holds a variable; the two are independent, and the text is
+/// kept as the manifest wrote it, unexpanded, for the caller to expand
+/// (`actctx_test`, measured on Windows).
+fn redirect(path: &[u16]) -> (u32, usize) {
+    if path.is_empty() {
+        return (OMITS_ASSEMBLY_ROOT, 0);
+    }
+    let mut flags = 0;
+    if path.last() != Some(&u16::from(b'\\')) {
+        flags |= INCLUDES_BASE_NAME;
+    }
+    if path.contains(&u16::from(b'%')) {
+        flags |= PATH_EXPAND;
+    }
+    (flags, PATH_ENTRY + 2 * path.len())
+}
 
 fn aligned(len: usize) -> usize {
     (len + 3) & !3
@@ -79,11 +109,17 @@ impl Out {
 
     /// `s` and its NUL at `at`.
     fn wide(&mut self, at: usize, s: &[u16]) {
+        self.counted(at, s);
+        self.0.as_mut_slice()[at + 2 * s.len()..at + 2 * s.len() + 2].fill(0);
+    }
+
+    /// `s` at `at` without a terminator: a path in a record is counted,
+    /// and the next key's name follows it.
+    fn counted(&mut self, at: usize, s: &[u16]) {
         let b = self.0.as_mut_slice();
         for (i, &c) in s.iter().enumerate() {
             b[at + 2 * i..at + 2 * i + 2].copy_from_slice(&c.to_le_bytes());
         }
-        b[at + 2 * s.len()..at + 2 * s.len() + 2].fill(0);
     }
 
     fn string_header(&mut self, count: usize, index_offset: usize, global: (usize, usize)) {
@@ -144,14 +180,19 @@ fn dll_section(model: &Model) -> Option<Buf<u8>> {
     if files.is_empty() {
         return Some(Buf::new());
     }
-    let names: usize = files.iter().map(|f| aligned(2 * (f.name.len as usize + 1))).sum();
     let index_offset = STRING_HEADER;
-    let total = index_offset + files.len() * (STRING_INDEX + DLL_DATA) + names;
+    let mut total = index_offset + files.len() * STRING_INDEX;
+    for f in files {
+        total += aligned(2 * (f.name.len as usize + 1));
+        total += aligned(DLL_DATA + redirect(model.str(f.load_from)).1);
+    }
     let mut o = Out::new(total)?;
     o.string_header(files.len(), index_offset, (0, 0));
     let mut at = index_offset + files.len() * STRING_INDEX;
     for (i, f) in files.iter().enumerate() {
         let name = model.str(f.name);
+        let path = model.str(f.load_from);
+        let (flags, behind) = redirect(path);
         let data = at + aligned(2 * (name.len() + 1));
         o.wide(at, name);
         o.string_index(
@@ -162,13 +203,24 @@ fn dll_section(model: &Model) -> Option<Buf<u8>> {
                 at as u32,
                 2 * name.len() as u32,
                 data as u32,
-                DLL_DATA as u32,
+                (DLL_DATA + behind) as u32,
                 f.assembly + 1,
             ],
         );
         o.u32(data, DLL_DATA as u32);
-        o.u32(data + 4, OMITS_ASSEMBLY_ROOT);
-        at = data + DLL_DATA;
+        o.u32(data + 4, flags);
+        if !path.is_empty() {
+            // The one path entry behind the record, and its text behind
+            // that: lengths in bytes, offsets from the section.
+            let bytes = 2 * path.len() as u32;
+            o.u32(data + 8, bytes);
+            o.u32(data + 12, 1);
+            o.u32(data + 16, (data + DLL_DATA) as u32);
+            o.u32(data + DLL_DATA, bytes);
+            o.u32(data + DLL_DATA + 4, (data + DLL_DATA + PATH_ENTRY) as u32);
+            o.counted(data + DLL_DATA + PATH_ENTRY, path);
+        }
+        at = data + aligned(DLL_DATA + behind);
     }
     Some(o.0)
 }

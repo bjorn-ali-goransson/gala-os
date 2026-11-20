@@ -67,6 +67,9 @@ pub struct Assembly {
 pub struct File {
     pub name: Str,
     pub assembly: u32,
+    /// Its `loadFrom` path, as the manifest wrote it and unexpanded
+    /// (empty without one); the DLL redirection section hands it out.
+    pub load_from: Str,
 }
 
 #[derive(Clone, Copy)]
@@ -111,7 +114,6 @@ pub const SKIPPED_TYPELIB: u32 = 1;
 pub const SKIPPED_PROXY_STUB: u32 = 2;
 pub const SKIPPED_CLR: u32 = 4;
 pub const SKIPPED_WINRT: u32 = 8;
-pub const SKIPPED_LOAD_FROM: u32 = 16;
 
 /// Everything a context knows; strings live in `pool`.
 pub struct Model {
@@ -858,6 +860,7 @@ impl Model {
     fn file_elem(&mut self, r: &mut Reader<'_>, elem: &Elem, index: u32) -> Res<()> {
         let mut end = false;
         let mut name = None;
+        let mut load_from = Str { at: 0, len: 0 };
         while let Some(a) = r.next_attr(&mut end)? {
             let v = r.text(a.value);
             if r.attr_is(&a, b"name") {
@@ -867,12 +870,12 @@ impl Model {
                     return r.refuse(b"<file> hash is not 40 hex digits");
                 }
             } else if r.attr_is(&a, b"loadFrom") {
-                self.skipped |= SKIPPED_LOAD_FROM;
+                load_from = self.keep(v).ok_or(Refused { reason: b"no memory", at: 0 })?;
             }
         }
         let Some(name) = name else { return r.refuse(b"<file> without a name") };
         let file = self.files.len() as u32;
-        if !self.files.push(File { name, assembly: index }) {
+        if !self.files.push(File { name, assembly: index, load_from }) {
             return Err(Refused { reason: b"no memory", at: 0 });
         }
         if end {

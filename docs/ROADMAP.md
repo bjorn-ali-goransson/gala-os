@@ -2655,7 +2655,7 @@ need gala's.
      kernelbase.spec, which `exports.txt` follows, lacks them).
      Left: the sections gala reads but does not build (typelibs,
      interface proxy/stubs, CLR classes and surrogates, WinRT
-     activatable classes, loadFrom; recorded), QueryActCtxSettingsW.
+     activatable classes; recorded), QueryActCtxSettingsW.
      `office_api_test` and `wow64_office_api_test` pass on CI's Windows
      (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
