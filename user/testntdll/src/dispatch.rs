@@ -44,6 +44,11 @@ pub(crate) extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
 /// reports unhandled crashes; to be checked against Windows). Unhandled:
 /// the process ends with the exception code.
 pub extern "system" fn dispatch_exception(record: *mut u8, context: *mut u8) -> ! {
+    // The frames are about to be walked, so the returns this thread's
+    // calls through armed import slots are waiting for go back where
+    // those calls left them first (`imports_answers=`): a trap address
+    // left in a frame is where the walk would end.
+    crate::unwinding(crate::seh::context_sp(context));
     let mut pointers = ExceptionPointers { record, context };
     // Snapshots, so that handlers may (un)register handlers themselves.
     let (exception, continue_) = with_handlers(|t| (t.exception, t.continue_));

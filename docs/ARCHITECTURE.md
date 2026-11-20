@@ -598,8 +598,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `trace_from=<dll>!<Interface>::<Method>[:<n>]` | every call a program makes into a DLL gala wrote, from the first time it reaches that method, `n` at most (default 4096), as `call` events; needs `events=call`, and the processes are the ones `events_pid=`/`events_match=` choose. What the missing-features ledger cannot show, its records being one a call site: a repeat (OBSERVABILITY "Call tracing"; scenarios `trace_from_test`, `trace_from_budget_test`) |
 | `imports=<program>[!<dll>][:<n>]` | the first call a program makes through each of its import slots, `n` slots at most (default 4096), as `import` events; needs `events=call`. The loader reserves a region it never commits and the kernel writes a trap address into each armed slot, so the first call faults into the kernel's page-fault path, is recorded, and goes on with the slot repaired. The one instrument that sees a call into a DLL gala did not write (OBSERVABILITY "Import tracing"; scenario `iat_trace_test`) |
 | `imports_repeat=<n>` | keep each armed slot armed instead of repairing it, so that every call through it faults and is recorded and not only the first, `n` later calls at most: the stream becomes the sequence of calls the program made rather than the set of names it reached. Needs `imports=`; costs one page fault per call while a slot is armed, which is what the budget bounds (scenario `iat_repeat`) |
-| `imports_answers=<n>` | trap the return of each call through an armed slot as well, `n` calls at most, so that the stream says what a call answered and not only what it was handed: the kernel keeps the return address the call left and puts the slot's second trap address in its place, so the return faults with the answer still in the register the ABI returns it in. Needs `imports=`; costs a second fault for each call answered, and a callee that reads its own return address while that return is trapped sees the trap (scenarios `iat_ret_test`, `iat_answers`) |
-| `imports_answers=<n>` | trap the return of each call through an armed slot as well, `n` calls at most, so that the stream says what a call answered and not only what it was handed: the kernel keeps the return address the call left and puts the slot's second trap address in its place, so the return faults with the answer still in the register the ABI returns it in. Needs `imports=`; costs a second fault for each call answered, and a callee that reads its own return address sees the trap while its return is trapped (scenarios `iat_ret_test`, `iat_answers`) |
+| `imports_answers=<n>` | trap the return of each call through an armed slot as well, `n` calls at most, so that the stream says what a call answered and not only what it was handed: the kernel keeps the return address the call left and puts the slot's second trap address in its place, so the return faults with the answer still in the register the ABI returns it in. A thread's pending returns go back where its calls left them when gala's own ntdll says a walk of that thread's frames is beginning (exception dispatch, RtlUnwindEx), so that the program's own unwinder can walk through them; those calls are then recorded without an answer. Needs `imports=`; costs a second fault for each call answered, and a callee that reads its own return address while that return is trapped sees the trap (scenarios `iat_ret_test`, `iat_answers`, `iat_unwind_test`, `iat_unwind`) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -1477,6 +1476,17 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
   functions without unwind data pop their return address) and calls each
   UNW_FLAG_EHANDLER handler with a DISPATCHER_CONTEXT, until one returns
   ExceptionContinueExecution.
+- An epilogue is recognised by decoding its last instruction, never by
+  its prefix and opcode: an indirect jump is `FF /4`, and the ModRM's
+  register field is the whole of what tells it from the other `FF`
+  instructions -- among them the `inc` or `dec` of a 64-bit operand
+  (`48 ff c0`) that follows a great many calls. Reading `48 ff` as a
+  jump makes the return address of every such call look like the start
+  of an epilogue with nothing to undo, so the frame is unwound with its
+  stack allocation still in place, the return address is read from the
+  callee's own scratch space and the walk ends there: no handler above
+  that frame is ever asked (scenario `iat_unwind_test`, whose callback
+  returns into exactly that instruction).
 - The DISPATCHER_CONTEXT has its documented size and fields, with
   ControlPcIsUnwound set when the frame's ControlPc is a return address:
   RtlVirtualUnwind marks a CONTEXT it unwound to a call with

@@ -550,7 +550,8 @@ syscall_stubs! {
     // gala's own: import tracing (`imports=`, nt::traceimports). Op 0
     // asks whether this process's import slots are armed and for the DLL
     // they must come from, op 1 reports imports just bound so that the
-    // kernel can arm them.
+    // kernel can arm them, op 2 says that a walk of this thread's frames
+    // is about to begin (`unwinding`).
     GalaImports = 0x7f2c, fn(op: u64, a: u64, b: u64, c: u64);
     // gala's own: the exception no handler took, before the top-level
     // filter runs (null: the filter continued); the kernel's crash report
@@ -2034,6 +2035,34 @@ struct Traced {
     dll_len: usize,
 }
 
+/// From the kernel's answer to `GalaImports` op 0: the returns of calls
+/// through the armed slots are trapped as well (`imports_answers=`), so
+/// a walk of this thread's own frames has to ask for the pending ones
+/// back first. Its own static and not a field of [`Traced`], which is
+/// read under the loader lock, because [`unwinding`] is called from
+/// exception dispatch on any thread; relaxed, the loader having written
+/// it before any import of ours could have been called.
+static ANSWERS_TRAPPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Says that a walk of this thread's frames begins at `sp`, so that the
+/// kernel puts the returns this thread's calls through armed import
+/// slots are waiting for back where those calls left them.
+///
+/// A trap address is in no image and in no function table, so a frame
+/// still holding one is where the walk ends: the handlers above it are
+/// never asked and an exception the program would have caught kills it
+/// instead. Nothing but the program can say when a walk begins, an
+/// exception raised in user mode (RtlRaiseException, and with it every
+/// C++ throw) being dispatched without a single system call. Costs one
+/// relaxed load where the option is not in use, which is every run but
+/// a traced one.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn unwinding(sp: u64) {
+    if ANSWERS_TRAPPED.load(core::sync::atomic::Ordering::Relaxed) {
+        GalaImports(2, sp, 0, 0);
+    }
+}
+
 struct TracedImports(core::cell::UnsafeCell<Traced>);
 
 // SAFETY: used under the loader lock.
@@ -2054,15 +2083,20 @@ fn imports_traced(dll: &[u8]) -> bool {
     let state = unsafe { &mut *TRACED_IMPORTS.0.get() };
     if !state.asked {
         state.asked = true;
-        let mut len = 0usize;
+        // Two words out, whatever this build's pointer is wide: the
+        // name's length and the flags.
+        let mut answer = [0u64; 2];
         let status = GalaImports(
             0,
             state.dll.as_mut_ptr() as u64,
             state.dll.len() as u64,
-            &mut len as *mut usize as u64,
+            answer.as_mut_ptr() as u64,
         );
         state.wanted = status == STATUS_SUCCESS;
-        state.dll_len = if state.wanted { len.min(state.dll.len()) } else { 0 };
+        state.dll_len = if state.wanted { (answer[0] as usize).min(state.dll.len()) } else { 0 };
+        if state.wanted && answer[1] & 1 != 0 {
+            ANSWERS_TRAPPED.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     state.wanted && (state.dll_len == 0 || state.dll[..state.dll_len].eq_ignore_ascii_case(dll))
 }

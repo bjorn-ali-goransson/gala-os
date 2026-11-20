@@ -4056,17 +4056,24 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
 /// GalaImports(Op, A, B, C): the loader's half of `imports=`
 /// (nt::traceimports). Op 0 asks whether this process's imports are
 /// armed: A is a buffer of B bytes taking the DLL they must come from
-/// and C a `u64` taking its length (0: every DLL). The answer is SUCCESS
-/// when they are and OBJECT_NAME_NOT_FOUND when they are not, so a
-/// process that is not the one named pays one system call for its whole
-/// life. Op 1 reports imports the loader has just bound: A is an array
-/// of B entries of four words each (the import slot's address, the
-/// export's address, the name's address and its length), and C a
+/// and C a `[u64; 2]` taking its length (0: every DLL) and a word of
+/// flags, bit 0 of which says that the returns of those calls are
+/// trapped as well (`imports_answers=`, so op 2 is worth making). The
+/// answer is SUCCESS when they are armed and OBJECT_NAME_NOT_FOUND when
+/// they are not, so a process that is not the one named pays one system
+/// call for its whole life. Op 1 reports imports the loader has just
+/// bound: A is an array of B entries of four words each (the import
+/// slot's address, the export's address, the name's address and its
+/// length), and C a
 /// `[u64; 3]` holding the base and size of the region the loader
 /// reserved for their trap addresses and the index in it the chunk
 /// starts at (so that one region serves several calls). Each entry that
 /// the budget covers has its slot written with `base + index * STRIDE`,
-/// so the next call through it faults there.
+/// so the next call through it faults there. Op 2 says that a walk of
+/// the calling thread's frames begins at the stack pointer A, so that
+/// the returns its calls through armed slots are still waiting for go
+/// back where those calls left them: only the program knows, an
+/// exception raised in user mode reaching no kernel path.
 fn gala_imports(call: &mut Call<'_>) -> NtStatus {
     /// One reported import: slot, target, name, name length.
     const ENTRY: u64 = 4 * 8;
@@ -4079,7 +4086,11 @@ fn gala_imports(call: &mut Call<'_>) -> NtStatus {
             let mut name = [0u8; super::traceimports::NAME_LEN];
             let len = len.min(name.len());
             let written = super::traceimports::dll(&mut name[..len]);
-            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+            let mut answer = [0u8; 16];
+            answer[..8].copy_from_slice(&(written as u64).to_ne_bytes());
+            let trapped = u64::from(super::traceimports::answers_trapped());
+            answer[8..].copy_from_slice(&trapped.to_ne_bytes());
+            if call.process.write(arg!(call, 3), &answer).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
             if written != 0 && call.process.write(ptr, &name[..written]).is_err() {
@@ -4128,6 +4139,10 @@ fn gala_imports(call: &mut Call<'_>) -> NtStatus {
                     break;
                 }
             }
+            NtStatus::SUCCESS
+        }
+        2 => {
+            super::traceimports::unwinding(&call.process, arg!(call, 1));
             NtStatus::SUCCESS
         }
         _ => NtStatus::INVALID_PARAMETER,

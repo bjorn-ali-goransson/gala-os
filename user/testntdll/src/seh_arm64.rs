@@ -989,6 +989,13 @@ fn call_handler(
 
 // --- Dispatch ----------------------------------------------------------
 
+/// The stack pointer of a CONTEXT: where a walk of the frames it
+/// describes begins (`crate::unwinding`).
+pub(crate) fn context_sp(context: *const u8) -> u64 {
+    // SAFETY: a CONTEXT, whose Sp is at CTX_SP.
+    unsafe { context.add(CTX_SP).cast::<u64>().read_unaligned() }
+}
+
 /// Calls the exception handlers of the frames from `context` outwards;
 /// true if one returned ExceptionContinueExecution (the caller resumes
 /// `context`). Never inlined: its CONTEXT copies must not enlarge the
@@ -1042,6 +1049,10 @@ extern "system" fn unwind_to(
     return_value: u64,
     start: *const u8,
 ) -> ! {
+    // A walk of this thread's frames begins here, so the returns its
+    // calls through armed import slots are waiting for go back where
+    // those calls left them first (`imports_answers=`).
+    crate::unwinding(context_sp(start));
     let mut own_record = [0u8; RECORD_SIZE];
     let record = if record.is_null() {
         own_record[..4].copy_from_slice(&STATUS_UNWIND.to_le_bytes());
