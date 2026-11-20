@@ -46,6 +46,11 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::fmt::Write;
 
+use gala_ui::win::Gdi;
+use gala_ui::{Canvas, Placed, Set};
+use taskmgr::window::{
+    self, CPU_COLOR, Load, Look, MEMORY_COLOR, Msg as ViewMsg, Picture, View, WHITE,
+};
 use taskmgr::{Column, End, Group, History, Perf, Proc, Row, Shares, Sort, Trails};
 
 type Bool = i32;
@@ -103,6 +108,14 @@ unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handle;
     fn TerminateProcess(h: Handle, code: u32) -> Bool;
     fn GetTickCount() -> u32;
+    fn GetStdHandle(which: u32) -> Handle;
+    fn WriteFile(
+        h: Handle,
+        buf: *const u8,
+        n: u32,
+        written: *mut u32,
+        overlapped: *mut c_void,
+    ) -> Bool;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -131,41 +144,14 @@ unsafe extern "system" {
     fn PostQuitMessage(code: i32);
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
-    fn FillRect(hdc: Handle, rect: *const Rect, brush: Handle) -> i32;
+    fn GetDC(hwnd: Hwnd) -> Handle;
+    fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: Bool) -> Bool;
     fn SetTimer(hwnd: Hwnd, id: usize, ms: u32, f: *const c_void) -> usize;
     fn FindWindowW(class: *const u16, title: *const u16) -> Hwnd;
     fn SetForegroundWindow(hwnd: Hwnd) -> Bool;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
-}
-
-#[link(name = "gdi32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn CreateSolidBrush(color: u32) -> Handle;
-    #[allow(clippy::too_many_arguments)]
-    fn CreateFontW(
-        height: i32,
-        width: i32,
-        escapement: i32,
-        orientation: i32,
-        weight: i32,
-        italic: u32,
-        underline: u32,
-        strike: u32,
-        charset: u32,
-        out_precision: u32,
-        clip_precision: u32,
-        quality: u32,
-        pitch: u32,
-        face: *const u16,
-    ) -> Handle;
-    fn SelectObject(hdc: Handle, object: Handle) -> Handle;
-    fn DeleteObject(object: Handle) -> Bool;
-    fn SetTextColor(hdc: Handle, color: u32) -> u32;
-    fn SetBkMode(hdc: Handle, mode: i32) -> i32;
-    fn TextOutW(hdc: Handle, x: i32, y: i32, text: *const u16, n: i32) -> Bool;
-    fn GetTextExtentPoint32W(hdc: Handle, text: *const u16, n: i32, size: *mut [i32; 2]) -> Bool;
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -207,50 +193,12 @@ const WM_MOUSEWHEEL: u32 = 0x020a;
 const VK_DELETE: usize = 0x2e;
 const VK_UP: usize = 0x26;
 const VK_DOWN: usize = 0x28;
-const TRANSPARENT: i32 = 1;
 const PROCESS_TERMINATE: u32 = 0x0001;
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
 const SIGTERM: u32 = 15;
 const SIGKILL: u32 = 9;
 
-// Windows 11's light look (COLORREF: 0x00BBGGRR).
-const fn rgb(r: u32, g: u32, b: u32) -> u32 {
-    r | g << 8 | b << 16
-}
-const BACKGROUND: u32 = rgb(0xf3, 0xf3, 0xf3);
-const CONTENT: u32 = rgb(0xfb, 0xfb, 0xfb);
-const TEXT: u32 = rgb(0x1b, 0x1b, 0x1b);
-const TEXT_DIM: u32 = rgb(0x5d, 0x5d, 0x5d);
-const LINE: u32 = rgb(0xe5, 0xe5, 0xe5);
-const ACCENT: u32 = rgb(0x00, 0x5f, 0xb8);
-const SELECTED: u32 = rgb(0xcc, 0xe4, 0xf7);
-const NAV_SELECTED: u32 = rgb(0xe3, 0xe3, 0xe3);
-const HEADING: u32 = rgb(0xf0, 0xf0, 0xf0);
-const WINDOWS_TILE: u32 = rgb(0x00, 0x78, 0xd4);
-const LINUX_TILE: u32 = rgb(0xe9, 0x54, 0x20);
-const HUNG: u32 = rgb(0xc4, 0x2b, 0x1c);
-const CPU_COLOR: u32 = rgb(0x11, 0x7d, 0xbb);
-const MEMORY_COLOR: u32 = rgb(0x8b, 0x12, 0xae);
-const DISK_COLOR: u32 = rgb(0x4d, 0xa6, 0x0c);
-const NETWORK_COLOR: u32 = rgb(0xa7, 0x4f, 0x01);
-
-// The layout (client coordinates).
-const TOP_H: i32 = 48;
-const NAV_W: i32 = 176;
-const NAV_Y: i32 = 56;
-const NAV_H: i32 = 40;
-const PAGE_Y: i32 = 56;
-const COLS_Y: i32 = 100;
-const COLS_H: i32 = 28;
-const ROWS_Y: i32 = COLS_Y + COLS_H;
-const ROW_H: i32 = 24;
-const SEARCH: Rect = Rect { left: 260, top: 8, right: 640, bottom: 40 };
-const BUTTON_W: i32 = 120;
 const HISTORY: usize = 60;
-// Performance's list of metrics on the left: the name, the value and the
-// peak in the first 100 pixels of a row, the last minute in the rest.
-const SIDE_W: i32 = 196;
-const SIDE_ROW_H: i32 = 56;
 /// The Memory column's smallest scale, in per mille of the machine's
 /// memory: below this the rows' lines stay on the floor instead of
 /// magnifying a megabyte into a mountain.
@@ -260,42 +208,8 @@ const MEMORY_FLOOR: u32 = 10;
 /// over it.
 const GRAPH_SHADE: u32 = 600;
 const CELL_SHADE: u32 = 820;
-
-const PROCESS_COLUMNS: &[(Column, i32)] = &[
-    (Column::Name, 300),
-    (Column::Pid, 70),
-    (Column::Status, 120),
-    (Column::User, 110),
-    (Column::Cpu, 80),
-    (Column::Memory, 110),
-];
-const DETAIL_COLUMNS: &[(Column, i32)] = &[
-    (Column::Name, 126),
-    (Column::Pid, 48),
-    (Column::Status, 70),
-    (Column::User, 64),
-    (Column::Cpu, 52),
-    (Column::CpuTime, 68),
-    (Column::Memory, 72),
-    (Column::Commit, 76),
-    (Column::Threads, 56),
-    (Column::Handles, 58),
-    (Column::Platform, 120),
-    (Column::CommandLine, 400),
-];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Processes,
-    Performance,
-    Details,
-}
-
-const VIEWS: [(View, &str); 3] = [
-    (View::Processes, "Processes"),
-    (View::Performance, "Performance"),
-    (View::Details, "Details"),
-];
+/// A graph's gridlines.
+const GRID: u32 = 0xf0f0f0;
 
 /// What is selected: a process (by PID) or a group's heading.
 #[derive(Clone, PartialEq, Eq)]
@@ -330,9 +244,6 @@ struct State {
     trails: Trails,
     /// Linux processes sent SIGTERM: (pid, when SIGKILL follows).
     pending: Vec<(u64, u32)>,
-    font: Handle,
-    bold: Handle,
-    title_font: Handle,
 }
 
 struct Global(core::cell::UnsafeCell<Option<State>>);
@@ -355,6 +266,24 @@ fn wide(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
     v.push(0);
     v
+}
+
+/// A line on standard output (`taskmgr: ...`).
+fn log(text: &str) {
+    let mut s = String::from("taskmgr: ");
+    s.push_str(text);
+    s.push_str("\r\n");
+    let mut n = 0;
+    // SAFETY: a valid buffer; the standard output handle (or none).
+    unsafe {
+        WriteFile(
+            GetStdHandle(-11i32 as u32),
+            s.as_ptr(),
+            s.len() as u32,
+            &mut n,
+            core::ptr::null_mut(),
+        )
+    };
 }
 
 /// The ledger's line for a column this program cannot show
@@ -525,304 +454,129 @@ impl State {
 
 // ---- Drawing ----------------------------------------------------------------
 
-struct Dc(Handle);
-
-impl Dc {
-    fn fill(&self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        let r = Rect { left: x, top: y, right: x + w, bottom: y + h };
-        // SAFETY: a brush made and freed here.
-        unsafe {
-            let b = CreateSolidBrush(color);
-            FillRect(self.0, &r, b);
-            DeleteObject(b);
-        }
-    }
-
-    fn frame(&self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        self.fill(x, y, w, 1, color);
-        self.fill(x, y + h - 1, w, 1, color);
-        self.fill(x, y, 1, h, color);
-        self.fill(x + w - 1, y, 1, h, color);
-    }
-
-    fn width(&self, text: &[u16]) -> i32 {
-        let mut size = [0i32; 2];
-        // SAFETY: a valid string with its length.
-        unsafe { GetTextExtentPoint32W(self.0, text.as_ptr(), text.len() as i32, &mut size) };
-        size[0]
-    }
-
-    /// `text` at (x, y) in `font` and `color`, cut with "..." to `max`
-    /// pixels; right-aligned in `max` with `right`.
-    #[allow(clippy::too_many_arguments)]
-    fn text(&self, x: i32, y: i32, max: i32, text: &str, font: Handle, color: u32, right: bool) {
-        // SAFETY: plain calls on our DC.
-        unsafe {
-            SelectObject(self.0, font);
-            SetTextColor(self.0, color);
-        }
-        let mut t: Vec<u16> = text.encode_utf16().collect();
-        if self.width(&t) > max {
-            let dots: [u16; 3] = [46, 46, 46];
-            while !t.is_empty() && self.width(&t) + self.width(&dots) > max {
-                t.pop();
-            }
-            t.extend_from_slice(&dots);
-        }
-        let x = if right { x + max - self.width(&t) } else { x };
-        // SAFETY: a valid string with its length.
-        unsafe { TextOutW(self.0, x, y, t.as_ptr(), t.len() as i32) };
-    }
-}
-
-/// A colour between `a` and `b` (`t` of 1000 towards `b`).
-fn mix(a: u32, b: u32, t: u32) -> u32 {
-    let t = t.min(1000);
-    let ch = |s: u32| {
-        let (x, y) = ((a >> s) & 0xff, (b >> s) & 0xff);
-        ((x * (1000 - t) + y * t) / 1000) << s
-    };
-    ch(0) | ch(8) | ch(16)
-}
-
-fn paint(s: &State, dc: &Dc) {
-    let (w, h) = s.size;
-    dc.fill(0, 0, w, h, BACKGROUND);
-    // The title and the search box.
-    dc.text(16, 14, 200, "Task Manager", s.bold, TEXT, false);
-    let r = SEARCH;
-    dc.fill(r.left, r.top, r.right - r.left, r.bottom - r.top, rgb(0xff, 0xff, 0xff));
-    dc.frame(r.left, r.top, r.right - r.left, r.bottom - r.top, rgb(0xd0, 0xd0, 0xd0));
-    dc.fill(
-        r.left + 1,
-        r.bottom - 2,
-        r.right - r.left - 2,
-        1,
-        if s.search.is_empty() { LINE } else { ACCENT },
-    );
-    if s.search.is_empty() {
-        dc.text(
-            r.left + 12,
-            r.top + 8,
-            356,
-            "Type a name or PID to search",
-            s.font,
-            TEXT_DIM,
-            false,
-        );
-    } else {
-        let mut t = s.search.clone();
-        t.push('|');
-        dc.text(r.left + 12, r.top + 8, 356, &t, s.font, TEXT, false);
-    }
-    // The navigation.
-    for (i, (view, name)) in VIEWS.iter().enumerate() {
-        let y = NAV_Y + NAV_H * i as i32;
-        if *view == s.view {
-            dc.fill(6, y, NAV_W - 12, NAV_H - 4, NAV_SELECTED);
-            dc.fill(6, y + 10, 3, NAV_H - 24, ACCENT);
-        }
-        dc.text(24, y + 11, NAV_W - 32, name, s.font, TEXT, false);
-    }
-    // The page.
-    dc.fill(NAV_W, TOP_H, w - NAV_W, h - TOP_H, CONTENT);
-    dc.fill(NAV_W, TOP_H, 1, h - TOP_H, LINE);
-    dc.fill(NAV_W, TOP_H, w - NAV_W, 1, LINE);
-    let title = VIEWS.iter().find(|(v, _)| *v == s.view).map_or("", |(_, n)| n);
-    dc.text(NAV_W + 20, PAGE_Y + 4, 300, title, s.title_font, TEXT, false);
-    match s.view {
-        View::Processes => paint_processes(s, dc),
-        View::Details => paint_details(s, dc),
-        View::Performance => paint_performance(s, dc),
-    }
-}
-
-/// The End task button (enabled with a selection that can end).
-fn paint_button(s: &State, dc: &Dc) {
-    let (w, _) = s.size;
-    let x = w - BUTTON_W - 20;
-    let enabled = s.selected_row().is_some_and(|r| taskmgr::end_of(&r, &s.procs) != End::Nothing);
-    let (face, color) = if enabled { (ACCENT, rgb(0xff, 0xff, 0xff)) } else { (LINE, TEXT_DIM) };
-    dc.fill(x, PAGE_Y, BUTTON_W, 32, face);
-    dc.text(x + 28, PAGE_Y + 8, BUTTON_W - 28, "End task", s.font, color, false);
-}
-
-fn paint_header(s: &State, dc: &Dc, columns: &[(Column, i32)], sort: Sort, x0: i32) {
-    let (w, _) = s.size;
-    dc.fill(NAV_W + 1, COLS_Y, w - NAV_W - 1, COLS_H, CONTENT);
-    dc.fill(NAV_W + 1, COLS_Y + COLS_H - 1, w - NAV_W - 1, 1, LINE);
-    let mut x = x0;
-    for &(column, width) in columns {
-        if x >= w {
-            break;
-        }
-        let mut t = String::from(column.title());
-        if column == Column::Cpu && s.view == View::Processes && !s.cpu_total.is_empty() {
-            let _ = write!(t, " {}%", s.cpu_total.last() / 10);
-        }
-        if sort.column == column {
-            t.push_str(if sort.descending { " v" } else { " ^" });
-        }
-        let right = is_number(column);
-        dc.text(x + 6, COLS_Y + 6, width - 12, &t, s.font, TEXT_DIM, right);
-        dc.fill(x + width - 1, COLS_Y + 4, 1, COLS_H - 8, LINE);
-        x += width;
-    }
-}
-
-fn is_number(c: Column) -> bool {
-    matches!(
-        c,
-        Column::Pid
-            | Column::Cpu
-            | Column::Memory
-            | Column::CpuTime
-            | Column::Commit
-            | Column::Threads
-            | Column::Handles
-    )
-}
-
-/// One process's cells from `x0` on row `y` over `back` (the row's
-/// own background, which its sparklines are drawn over), the Memory
-/// column's sparklines scaled to `memory_scale` (the largest row
-/// listed).
-#[allow(clippy::too_many_arguments)]
-fn paint_cells(
-    s: &State,
-    dc: &Dc,
-    i: usize,
-    columns: &[(Column, i32)],
-    x0: i32,
-    y: i32,
-    processes_view: bool,
-    memory_scale: u32,
-    back: u32,
-) {
-    let (w, _) = s.size;
-    let p = &s.procs[i];
-    let share = s.shares.get(i).copied().unwrap_or(0);
-    let mut x = x0;
-    for &(column, width) in columns {
-        if x >= w {
-            break;
-        }
-        let width = width.min(w - x);
-        // CPU and memory cells tinted by their weight, as Windows does.
-        let mut cell = back;
-        if column == Column::Cpu && share > 0 {
-            cell = mix(rgb(0xff, 0xf4, 0xc4), rgb(0xff, 0xd3, 0x4f), share * 4);
-            dc.fill(x, y, width, ROW_H, cell);
-        }
-        // The process's last minute behind its number (ROADMAP TM):
-        // the CPU against all the processors and the memory against the
-        // largest row listed, so the rows are comparable with each
-        // other. A row with no samples yet draws nothing, where an idle
-        // one is a flat line on the cell's floor.
-        let line = match column {
-            Column::Cpu => s.trails.cpu(p).map(|h| (h, 1000, CPU_COLOR)),
-            Column::Memory => s.trails.memory(p).map(|h| (h, memory_scale, MEMORY_COLOR)),
-            _ => None,
-        };
-        if let Some((history, scale, color)) = line {
-            let (cw, ch) = (width - 4, ROW_H - 6);
-            spark(dc, x + 2, y + 3, cw, ch, history, scale, color, cell, CELL_SHADE, history.len());
-        }
-        let mut text = taskmgr::cell(p, share, column, processes_view);
-        let mut color = TEXT;
-        if column == Column::Status && p.not_responding() {
-            color = HUNG;
-        }
-        if column == Column::Name {
-            // A tile with the first letter: blue for Windows, orange for Linux.
-            let tile = if p.is_linux() { LINUX_TILE } else { WINDOWS_TILE };
-            let indent = if processes_view { 22 } else { 6 };
-            dc.fill(x + indent, y + 4, 16, 16, tile);
-            let letter: String =
-                text.chars().next().map(|c| c.to_ascii_uppercase()).into_iter().collect();
-            dc.text(x + indent + 4, y + 4, 12, &letter, s.bold, rgb(0xff, 0xff, 0xff), false);
-            let off = indent + 24;
-            dc.text(x + off, y + 4, width - off - 6, &text, s.font, color, false);
-        } else {
-            if text.is_empty() {
-                text.push(' ');
-            }
-            dc.text(x + 6, y + 4, width - 12, &text, s.font, color, is_number(column));
-        }
-        x += width;
-    }
-}
-
-fn paint_processes(s: &State, dc: &Dc) {
-    let (w, h) = s.size;
-    paint_button(s, dc);
-    let x0 = NAV_W + 8;
-    paint_header(s, dc, PROCESS_COLUMNS, s.sort, x0);
-    let rows = s.rows();
-    let visible = ((h - ROWS_Y) / ROW_H).max(0) as usize;
+/// The window's view of `s`: what `window::view` is given.
+fn with_look<R>(s: &State, f: impl FnOnce(&Look) -> R) -> R {
+    let rows = if s.view == View::Processes { s.rows() } else { Vec::new() };
+    let details = if s.view == View::Details { s.details() } else { Vec::new() };
     let selected = s.selected_row();
-    let memory_scale = s.trails.memory_scale(
-        rows.iter().filter_map(|r| match r {
-            Row::Process(i) => s.procs.get(*i),
-            Row::Heading(..) => None,
-        }),
-        MEMORY_FLOOR,
-    );
-    for (k, row) in rows.iter().skip(s.scroll).take(visible).enumerate() {
-        let y = ROWS_Y + ROW_H * k as i32;
-        let is_selected = selected.as_ref() == Some(row);
-        match row {
-            Row::Heading(g, n) => {
-                dc.fill(
-                    NAV_W + 1,
-                    y,
-                    w - NAV_W - 1,
-                    ROW_H,
-                    if is_selected { SELECTED } else { HEADING },
-                );
-                let mut t = g.heading();
-                let _ = write!(t, " ({n})");
-                dc.text(
-                    x0 + 6,
-                    y + 4,
-                    420,
-                    &t,
-                    s.bold,
-                    if matches!(g, Group::Linux(_)) { LINUX_TILE } else { ACCENT },
-                    false,
-                );
-            }
-            Row::Process(i) => {
-                if is_selected {
-                    dc.fill(NAV_W + 1, y, w - NAV_W - 1, ROW_H, SELECTED);
-                }
-                let back = if is_selected { SELECTED } else { CONTENT };
-                paint_cells(s, dc, *i, PROCESS_COLUMNS, x0, y, true, memory_scale, back);
-            }
-        }
-    }
-    if rows.is_empty() {
-        dc.text(x0 + 6, ROWS_Y + 8, 400, "No results", s.font, TEXT_DIM, false);
+    let can_end = selected.as_ref().is_some_and(|r| taskmgr::end_of(r, &s.procs) != End::Nothing);
+    let listed: Vec<&Proc> = if s.view == View::Processes {
+        rows.iter()
+            .filter_map(|r| match r {
+                Row::Process(i) => s.procs.get(*i),
+                Row::Heading(..) => None,
+            })
+            .collect()
+    } else {
+        details.iter().filter_map(|&i| s.procs.get(i)).collect()
+    };
+    let memory_scale = s.trails.memory_scale(listed.into_iter(), MEMORY_FLOOR);
+    let look = Look {
+        size: s.size,
+        view: s.view,
+        search: &s.search,
+        procs: &s.procs,
+        shares: &s.shares,
+        sort: if s.view == View::Details { s.detail_sort } else { s.sort },
+        rows: &rows,
+        details: &details,
+        scroll: s.scroll,
+        selected: selected.as_ref(),
+        can_end,
+        memory_scale,
+        perf: s.perf.as_ref(),
+        load: load(s),
+    };
+    f(&look)
+}
+
+fn load(s: &State) -> Load<'_> {
+    Load {
+        cpu_total: &s.cpu_total,
+        cpus: &s.cpus,
+        memory: &s.memory,
+        disk: &s.disk,
+        network: &s.network,
+        processes: &s.processes,
+        threads: &s.threads,
+        handles: &s.handles,
     }
 }
 
-fn paint_details(s: &State, dc: &Dc) {
+/// The window's view laid out, measured with `g`; None (logged) when
+/// gala_ui refuses it.
+fn laid_out(s: &State, g: &mut Gdi) -> Option<Vec<Placed<ViewMsg>>> {
     let (w, h) = s.size;
-    paint_button(s, dc);
-    let x0 = NAV_W + 8;
-    paint_header(s, dc, DETAIL_COLUMNS, s.detail_sort, x0);
-    let list = s.details();
-    let visible = ((h - ROWS_Y) / ROW_H).max(0) as usize;
-    let memory_scale =
-        s.trails.memory_scale(list.iter().filter_map(|&i| s.procs.get(i)), MEMORY_FLOOR);
-    for (k, &i) in list.iter().skip(s.scroll).take(visible).enumerate() {
-        let y = ROWS_Y + ROW_H * k as i32;
-        let selected = s.selection == Selection::Process(s.procs[i].pid);
-        if selected {
-            dc.fill(NAV_W + 1, y, w - NAV_W - 1, ROW_H, SELECTED);
+    match with_look(s, |l| gala_ui::place(&window::view(l), w as f32, Some(h as f32), g)) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            let mut l = String::from("view: ");
+            let _ = write!(l, "{e}");
+            log(&l);
+            None
         }
-        let back = if selected { SELECTED } else { CONTENT };
-        paint_cells(s, dc, i, DETAIL_COLUMNS, x0, y, false, memory_scale, back);
+    }
+}
+
+/// gala_ui's canvas on the window's DC, which draws the view's
+/// pictures (`window::Picture`): the rows' sparklines and
+/// Performance's graphs.
+struct Pictures<'a> {
+    g: Gdi,
+    s: &'a State,
+}
+
+impl Canvas for Pictures<'_> {
+    fn fill(&mut self, rect: [i32; 4], color: u32, radius: i32) {
+        self.g.fill(rect, color, radius);
+    }
+    fn frame(&mut self, rect: [i32; 4], color: u32, radius: i32) {
+        self.g.frame(rect, color, radius);
+    }
+    fn text(&mut self, rect: [i32; 4], text: &str, color: u32, size: f32, bold: bool, set: Set) {
+        self.g.text(rect, text, color, size, bold, set);
+    }
+    fn image(&mut self, [x, y, w, ht]: [i32; 4], src: &str) {
+        let s = self.s;
+        let g = &mut self.g;
+        match Picture::parse(src) {
+            // A row with no samples yet draws nothing, where an idle one
+            // is a flat line on the cell's floor.
+            Some(Picture::Trail { memory, proc, scale, back }) => {
+                let Some(p) = s.procs.get(proc) else { return };
+                let (history, color) = if memory {
+                    (s.trails.memory(p), MEMORY_COLOR)
+                } else {
+                    (s.trails.cpu(p), CPU_COLOR)
+                };
+                if let Some(h) = history {
+                    spark(g, x, y, w, ht, h, scale, color, back, CELL_SHADE, h.len());
+                }
+            }
+            Some(Picture::Graph { series, scale, color }) => {
+                graph(g, x, y, w, ht, load(s).series(series), scale, color)
+            }
+            Some(Picture::Spark { series, scale, color }) => {
+                g.fill([x, y, w, ht], WHITE, 0);
+                g.frame([x, y, w, ht], window::mix(color, WHITE, 700), 0);
+                if let Some(h) = load(s).series(series) {
+                    let (iw, ih) = (w - 2, ht - 2);
+                    spark(g, x + 1, y + 1, iw, ih, h, scale, color, WHITE, GRAPH_SHADE, h.cap());
+                }
+            }
+            None => {
+                let mut l = String::from("picture: not one of the view's: ");
+                l.push_str(src);
+                log(&l);
+            }
+        }
+    }
+}
+
+fn paint(s: &State, hdc: Handle) {
+    let mut g = Gdi::new(hdc);
+    if let Some(p) = laid_out(s, &mut g) {
+        gala_ui::paint(&p, None, &mut Pictures { g, s });
     }
 }
 
@@ -842,7 +596,7 @@ fn paint_details(s: &State, dc: &Dc) {
 /// pixel a sample, and whole pixels would draw that as a staircase.
 #[allow(clippy::too_many_arguments)]
 fn spark(
-    dc: &Dc,
+    c: &mut dyn Canvas,
     x: i32,
     y: i32,
     w: i32,
@@ -862,7 +616,7 @@ fn spark(
     let (Some(&(first, _)), Some(&(last, _))) = (points.first(), points.last()) else {
         return;
     };
-    let light = mix(color, rgb(0xff, 0xff, 0xff), shade);
+    let light = window::mix(color, WHITE, shade);
     // The line's height where each column meets the next, from the
     // samples it joins; a column is what `stroke` makes of its two.
     let mut edge: Vec<i32> = Vec::new();
@@ -881,26 +635,26 @@ fn spark(
         // the line covers whole has none of either.
         let rest = 1000 - covers.min(1000);
         let base = match (under * 1000).checked_div(rest) {
-            Some(share) => mix(back, light, share),
+            Some(share) => window::mix(back, light, share),
             None => light,
         };
-        mix(base, color, covers)
+        window::mix(base, color, covers)
     };
     for px in first..=last {
         let a = edge[px as usize] + half;
         let b = if px < last { edge[px as usize + 1] + half } else { a };
         let s = taskmgr::stroke(a, b, h);
         if s.top == s.bottom {
-            dc.fill(x + px, y + s.top, 1, 1, blend(s.covers_top, s.under));
+            c.fill([x + px, y + s.top, 1, 1], blend(s.covers_top, s.under), 0);
         } else {
-            dc.fill(x + px, y + s.top, 1, 1, mix(back, color, s.covers_top));
+            c.fill([x + px, y + s.top, 1, 1], window::mix(back, color, s.covers_top), 0);
             if s.bottom > s.top + 1 {
-                dc.fill(x + px, y + s.top + 1, 1, s.bottom - s.top - 1, color);
+                c.fill([x + px, y + s.top + 1, 1, s.bottom - s.top - 1], color, 0);
             }
-            dc.fill(x + px, y + s.bottom, 1, 1, blend(s.covers_bottom, s.under));
+            c.fill([x + px, y + s.bottom, 1, 1], blend(s.covers_bottom, s.under), 0);
         }
         if s.bottom + 1 < h {
-            dc.fill(x + px, y + s.bottom + 1, 1, h - s.bottom - 1, light);
+            c.fill([x + px, y + s.bottom + 1, 1, h - s.bottom - 1], light, 0);
         }
     }
 }
@@ -909,7 +663,7 @@ fn spark(
 /// minute its ring holds, under gridlines, filling from the right.
 #[allow(clippy::too_many_arguments)]
 fn graph(
-    dc: &Dc,
+    c: &mut dyn Canvas,
     x: i32,
     y: i32,
     w: i32,
@@ -918,18 +672,18 @@ fn graph(
     scale: u32,
     color: u32,
 ) {
-    dc.fill(x, y, w, h, rgb(0xff, 0xff, 0xff));
+    c.fill([x, y, w, h], WHITE, 0);
     for k in 1..4 {
-        dc.fill(x, y + h * k / 4, w, 1, rgb(0xf0, 0xf0, 0xf0));
+        c.fill([x, y + h * k / 4, w, 1], GRID, 0);
     }
     for k in 1..6 {
-        dc.fill(x + w * k / 6, y, 1, h, rgb(0xf0, 0xf0, 0xf0));
+        c.fill([x + w * k / 6, y, 1, h], GRID, 0);
     }
-    dc.frame(x, y, w, h, color);
+    c.frame([x, y, w, h], color, 0);
     if let Some(history) = history {
-        let white = rgb(0xff, 0xff, 0xff);
+        let white = WHITE;
         spark(
-            dc,
+            c,
             x + 1,
             y + 1,
             w - 2,
@@ -944,223 +698,45 @@ fn graph(
     }
 }
 
-/// Performance's list of metrics on the left (`SIDE_W` wide from `x`,
-/// a row every `SIDE_ROW_H` from `top`): each processor, memory, disk,
-/// network and the process, thread and handle counts, each with its
-/// value and the last minute beside it as a sparkline, as Windows'
-/// Performance sidebar. CPU and memory are scaled to 100 %, the
-/// throughputs and the counts to their own peak, which is written under
-/// the value.
-fn paint_side(s: &State, dc: &Dc, x: i32, top: i32, h: i32, perf: &Perf) {
-    type Metric<'a> = (String, String, Option<String>, &'a History, u32, u32);
-    let mut rows: Vec<Metric> = Vec::new();
-    rows.push((
-        String::from("CPU"),
-        taskmgr::percent(s.cpu_total.last()),
-        None,
-        &s.cpu_total,
-        1000,
-        CPU_COLOR,
-    ));
-    for (i, history) in s.cpus.iter().enumerate() {
-        let mut name = String::from("CPU ");
-        let _ = write!(name, "{i}");
-        rows.push((name, taskmgr::percent(history.last()), None, history, 1000, CPU_COLOR));
-    }
-    let mut in_use = taskmgr::percent(s.memory.last());
-    let _ = write!(in_use, " ({})", taskmgr::memory(perf.memory_used));
-    rows.push((String::from("Memory"), in_use, None, &s.memory, 1000, MEMORY_COLOR));
-    for (name, history, color, present, missing) in [
-        ("Disk", &s.disk, DISK_COLOR, perf.has_disk, "No disk"),
-        ("Network", &s.network, NETWORK_COLOR, perf.has_network, "No network adapter"),
-    ] {
-        let mut peak = String::from("peak ");
-        peak.push_str(&taskmgr::speed(u64::from(history.max())));
-        let value =
-            if present { taskmgr::speed(u64::from(history.last())) } else { String::from(missing) };
-        rows.push((
-            String::from(name),
-            value,
-            present.then_some(peak),
-            history,
-            history.max().max(1),
-            color,
-        ));
-    }
-    for (name, history) in
-        [("Processes", &s.processes), ("Threads", &s.threads), ("Handles", &s.handles)]
-    {
-        let mut value = String::new();
-        let _ = write!(value, "{}", history.last());
-        let mut peak = String::from("peak ");
-        let _ = write!(peak, "{}", history.max());
-        rows.push((String::from(name), value, Some(peak), history, history.max().max(1), ACCENT));
-    }
-    let rh = SIDE_ROW_H.min((h - top - 8) / rows.len().max(1) as i32);
-    for (k, (name, value, peak, history, scale, color)) in rows.iter().enumerate() {
-        let ry = top + rh * k as i32;
-        let bh = rh - 18;
-        if bh < 8 {
-            break;
-        }
-        dc.text(x, ry, 96, name, s.bold, TEXT, false);
-        dc.text(x, ry + 17, 96, value, s.font, TEXT_DIM, false);
-        if let Some(peak) = peak {
-            dc.text(x, ry + 32, 96, peak, s.font, TEXT_DIM, false);
-        }
-        let (bx, bw) = (x + 100, SIDE_W - 100);
-        dc.fill(bx, ry, bw, bh, rgb(0xff, 0xff, 0xff));
-        dc.frame(bx, ry, bw, bh, mix(*color, rgb(0xff, 0xff, 0xff), 700));
-        spark(
-            dc,
-            bx + 1,
-            ry + 1,
-            bw - 2,
-            bh - 2,
-            history,
-            *scale,
-            *color,
-            rgb(0xff, 0xff, 0xff),
-            GRAPH_SHADE,
-            history.cap(),
-        );
-    }
-}
-
-fn paint_performance(s: &State, dc: &Dc) {
-    let (w, h) = s.size;
-    let sx = NAV_W + 20;
-    let x0 = sx + SIDE_W + 12;
-    let width = w - x0 - 20;
-    let Some(perf) = &s.perf else { return };
-    paint_side(s, dc, sx, COLS_Y + 44, h, perf);
-    // CPU: the whole width, a graph per processor.
-    let mut t = String::from("CPU");
-    let _ = write!(t, "   {}%   {} processors", s.cpu_total.last() / 10, perf.cpus.len());
-    dc.text(x0, COLS_Y, width, &t, s.bold, TEXT, false);
-    let mut t = String::new();
-    let _ = write!(
-        t,
-        "Processes {}   Threads {}   Handles {}",
-        perf.processes, perf.threads, perf.handles
-    );
-    dc.text(x0, COLS_Y + 20, width, &t, s.font, TEXT_DIM, false);
-    let n = perf.cpus.len().max(1) as i32;
-    let per_row = n.min(4);
-    let rows = (n + per_row - 1) / per_row;
-    let top = COLS_Y + 44;
-    let cpu_h = (h - top) / 2 - 24;
-    let gw = (width - 8 * (per_row - 1)) / per_row;
-    let gh = (cpu_h - 8 * (rows - 1)) / rows;
-    for i in 0..n {
-        let (col, row) = (i % per_row, i / per_row);
-        let gx = x0 + col * (gw + 8);
-        let gy = top + row * (gh + 8);
-        graph(dc, gx, gy, gw, gh, s.cpus.get(i as usize), 1000, CPU_COLOR);
-        let mut t = String::from("CPU ");
-        let _ = write!(t, "{}  {}%", i, s.cpus.get(i as usize).map_or(0, |h| h.last()) / 10);
-        dc.text(gx + 6, gy + 4, gw - 12, &t, s.font, TEXT_DIM, false);
-    }
-    // Memory, disk, network side by side below.
-    let by = top + cpu_h + 16;
-    let bw = (width - 16) / 3;
-    let bh = h - by - 52;
-    let panels: [(&str, u32, &History, u32, String, bool); 3] = [
-        (
-            "Memory",
-            MEMORY_COLOR,
-            &s.memory,
-            1000,
-            {
-                let mut t = taskmgr::memory(perf.memory_used);
-                t.push_str(" of ");
-                t.push_str(&taskmgr::memory(perf.memory_total));
-                t.push_str(" in use");
-                t
-            },
-            true,
-        ),
-        (
-            "Disk",
-            DISK_COLOR,
-            &s.disk,
-            s.disk.max().max(1 << 20),
-            taskmgr::speed(u64::from(s.disk.last())),
-            perf.has_disk,
-        ),
-        (
-            "Network",
-            NETWORK_COLOR,
-            &s.network,
-            s.network.max().max(64 << 10),
-            taskmgr::speed(u64::from(s.network.last())),
-            perf.has_network,
-        ),
-    ];
-    for (k, (name, color, history, scale, value, present)) in panels.iter().enumerate() {
-        let px = x0 + k as i32 * (bw + 8);
-        dc.text(px, by, bw, name, s.bold, TEXT, false);
-        let shown = if *present {
-            value.clone()
-        } else if k == 1 {
-            String::from("No disk")
-        } else {
-            String::from("No network adapter")
-        };
-        dc.text(px, by + 20, bw, &shown, s.font, TEXT_DIM, false);
-        graph(dc, px, by + 44, bw, bh, Some(*history), *scale, *color);
-    }
-}
-
 // ---- Input ------------------------------------------------------------------
+
+/// What a click at (x, y) hits: the part's id (logged) and its message.
+fn clicked(s: &State, x: i32, y: i32) -> Option<ViewMsg> {
+    // SAFETY: our window's DC, released below after the Gdi is dropped.
+    let hdc = unsafe { GetDC(s.hwnd) };
+    if hdc.is_null() {
+        record_missing("GetDC (the window's layout)");
+        return None;
+    }
+    let hit = laid_out(s, &mut Gdi::new(hdc))
+        .and_then(|p| gala_ui::click(&p, x, y).map(|(id, m)| (String::from(id), m)));
+    // SAFETY: the DC GetDC gave.
+    unsafe { ReleaseDC(s.hwnd, hdc) };
+    let (id, m) = hit?;
+    let mut l = String::from("click ");
+    l.push_str(&id);
+    log(&l);
+    Some(m)
+}
 
 /// A click at (x, y).
 fn click(s: &mut State, x: i32, y: i32) {
-    let (w, _) = s.size;
-    for (i, (view, _)) in VIEWS.iter().enumerate() {
-        let top = NAV_Y + NAV_H * i as i32;
-        if x < NAV_W && y >= top && y < top + NAV_H {
-            s.view = *view;
+    match clicked(s, x, y) {
+        Some(ViewMsg::Nav(v)) => {
+            s.view = v;
             s.scroll = 0;
-            return;
         }
-    }
-    if s.view == View::Performance {
-        return;
-    }
-    let bx = w - BUTTON_W - 20;
-    if (bx..bx + BUTTON_W).contains(&x) && (PAGE_Y..PAGE_Y + 32).contains(&y) {
-        s.end_task();
-        return;
-    }
-    let (columns, processes_view) =
-        if s.view == View::Processes { (PROCESS_COLUMNS, true) } else { (DETAIL_COLUMNS, false) };
-    if (COLS_Y..COLS_Y + COLS_H).contains(&y) {
-        let mut cx = NAV_W + 8;
-        for &(column, width) in columns {
-            if x >= cx && x < cx + width {
-                if processes_view {
-                    s.sort = s.sort.clicked(column);
-                } else {
-                    s.detail_sort = s.detail_sort.clicked(column);
-                }
-                return;
-            }
-            cx += width;
+        Some(ViewMsg::EndTask) => s.end_task(),
+        Some(ViewMsg::Sort(c)) if s.view == View::Details => {
+            s.detail_sort = s.detail_sort.clicked(c)
         }
-        return;
-    }
-    if y >= ROWS_Y && x > NAV_W {
-        let k = ((y - ROWS_Y) / ROW_H) as usize + s.scroll;
-        s.selection = if processes_view {
-            match s.rows().get(k) {
-                Some(Row::Heading(g, _)) => Selection::Group(g.clone()),
-                Some(Row::Process(i)) => Selection::Process(s.procs[*i].pid),
-                None => Selection::None,
-            }
-        } else {
-            s.details().get(k).map_or(Selection::None, |&i| Selection::Process(s.procs[i].pid))
-        };
+        Some(ViewMsg::Sort(c)) => s.sort = s.sort.clicked(c),
+        Some(ViewMsg::Select(Row::Heading(g, _))) => s.selection = Selection::Group(g),
+        Some(ViewMsg::Select(Row::Process(i))) => {
+            s.selection = s.procs.get(i).map_or(Selection::None, |p| Selection::Process(p.pid))
+        }
+        Some(ViewMsg::Deselect) => s.selection = Selection::None,
+        None => {}
     }
 }
 
@@ -1195,9 +771,7 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             let mut ps: PaintStruct = unsafe { core::mem::zeroed() };
             // SAFETY: our window.
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-            // SAFETY: our DC.
-            unsafe { SetBkMode(hdc, TRANSPARENT) };
-            paint(s, &Dc(hdc));
+            paint(s, hdc);
             // SAFETY: the paint structure BeginPaint filled.
             unsafe { EndPaint(hwnd, &ps) };
             0
@@ -1261,12 +835,6 @@ fn redraw(hwnd: Hwnd) {
     unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
 }
 
-fn font(height: i32, weight: i32) -> Handle {
-    let face = wide("Segoe UI");
-    // SAFETY: a valid face name.
-    unsafe { CreateFontW(height, 0, 0, 0, weight, 0, 0, 0, 0, 0, 0, 0, 0, face.as_ptr()) }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
     let class = wide("TaskManagerWindow");
@@ -1307,9 +875,6 @@ pub extern "C" fn mainCRTStartup() -> ! {
             handles: History::new(HISTORY),
             trails: Trails::new(HISTORY),
             pending: Vec::new(),
-            font: font(-13, 400),
-            bold: font(-13, 600),
-            title_font: font(-20, 600),
         });
     }
     let s = state();

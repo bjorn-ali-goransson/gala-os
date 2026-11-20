@@ -17,7 +17,8 @@
 //! - [`History`], a fixed ring of samples, [`line`], its points in a
 //!   box (a Performance graph's, a row's sparkline), and [`Trails`],
 //!   one ring pair per process behind the CPU and Memory columns'
-//!   sparklines.
+//!   sparklines;
+//! - [`window`]: the window as a `gala_ui` view.
 //!
 //! `no_std` with `alloc`: `taskmgr.exe` is freestanding (`gala_heap`).
 
@@ -31,6 +32,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::Write;
+
+pub mod window;
 
 /// The kernel's record flags (nt::tasks).
 pub const FLAG_LINUX: u32 = 1;

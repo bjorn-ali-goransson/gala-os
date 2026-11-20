@@ -2865,7 +2865,9 @@ A root is what its workload opened on real 26.04, traced:
 - Host tests: `cargo test -p kernel --lib nt::tasks` (the layout),
   `nt::desktop` (Ctrl+Shift+Esc, the taskbar's menu, the tile), `cargo
   test -p taskmgr` (parsing, groups, sorting, search, CPU shares,
-  formats, End task's targets). `cargo clippy -p taskmgr --lib --tests`
+  formats, End task's targets, the window's view: `window::tests`
+  checks each part's rectangle, the clicks' messages and the pictures'
+  `src`). `cargo clippy -p taskmgr --lib --tests`
   checks the library on the host (the program links Windows DLLs).
 - Reading a run: `desktop: Ctrl+Shift+Esc: Task Manager`, `desktop:
   start menu starts Task Manager: ...`, `tasks: pid N (Taskmgr.exe)
@@ -2874,7 +2876,12 @@ A root is what its workload opened on real 26.04, traced:
   signal 15: 0x00000000`, `... ends linux distribution (bb: 1
   process(es)): 0x00000000` (the process's name is its path's: System32's
   `Taskmgr.exe`); `events=process` has `tasks query`, `tasks end`,
-  `process terminate` and `lx signal`.
+  `process terminate` and `lx signal`. The program's own lines are
+  `taskmgr: click <id>` for each click that hit a part (e.g.
+  `taskmgr: click NavigationPane.Performance`, `taskmgr: click
+  ProcessList.Process.<pid>`, `taskmgr: click EndTaskButton`), and
+  `taskmgr: view: <error>` or `taskmgr: picture: ...` when gala_ui
+  refused the view or a picture was not drawn.
 - Pitfalls: Task Manager's window is at a fixed place (120, 40) so the
   clicks land; each End task step's search leaves the victim at row 1
   under its group's heading at row 0, so a new process whose name

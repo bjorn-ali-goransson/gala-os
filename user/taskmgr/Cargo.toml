@@ -19,6 +19,10 @@ name = "taskmgr"
 test = false
 bench = false
 
+[dependencies]
+# The window is a gala_ui view (`window::view`).
+gala_ui = { path = "../ui" }
+
 [target.'cfg(windows)'.dependencies]
 # The bin's allocator (the host tests have std's).
 gala_heap = { path = "../gala_heap" }

@@ -32,14 +32,18 @@ pub trait Canvas {
     /// A one-pixel line around the inside of `rect`.
     fn frame(&mut self, rect: [i32; 4], color: u32, radius: i32);
     fn text(&mut self, rect: [i32; 4], text: &str, color: u32, size: f32, bold: bool, set: Set);
+    /// The image `src` in `rect`: the program names its pictures and
+    /// draws them (a sparkline, a graph); a canvas that knows none
+    /// draws nothing.
+    fn image(&mut self, _rect: [i32; 4], _src: &str) {}
 }
 
 /// Draws `placed` (as [`crate::place`] gives it) in paint order: each
 /// element's background, then its border, then its text inset by its
 /// padding. An empty input shows its placeholder in [`PLACEHOLDER`];
 /// the input whose id is `focus` gets a [`FOCUS`] bar along its bottom.
-/// A rule without a background is drawn in its colour. An image draws
-/// nothing yet (ARCHITECTURE "UI components": limits).
+/// A rule without a background is drawn in its colour. An image is
+/// drawn by the canvas ([`Canvas::image`]) over its background.
 pub fn paint<M>(placed: &[Placed<M>], focus: Option<&str>, canvas: &mut dyn Canvas) {
     for p in placed {
         let [x, y, w, h] = p.rect;
@@ -74,6 +78,7 @@ pub fn paint<M>(placed: &[Placed<M>], focus: Option<&str>, canvas: &mut dyn Canv
                     canvas.fill([x, y + h - FOCUS_BAR, w, FOCUS_BAR], FOCUS, 0);
                 }
             }
+            Kind::Image if !p.src.is_empty() => canvas.image(p.rect, &p.src),
             _ => {}
         }
     }
@@ -82,7 +87,7 @@ pub fn paint<M>(placed: &[Placed<M>], focus: Option<&str>, canvas: &mut dyn Canv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Measure, Node, button, column, input, place, row, rule, text};
+    use crate::{Measure, Node, button, column, image, input, place, row, rule, text};
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -107,6 +112,9 @@ mod tests {
         }
         fn text(&mut self, r: [i32; 4], t: &str, c: u32, size: f32, bold: bool, set: Set) {
             self.0.push(format!("text {r:?} {t:?} {c:06x} {size} {bold} {set:?}"));
+        }
+        fn image(&mut self, r: [i32; 4], src: &str) {
+            self.0.push(format!("image {r:?} {src}"));
         }
     }
 
@@ -165,5 +173,14 @@ mod tests {
     fn a_rule_is_its_colour_and_empty_elements_draw_nothing() {
         let v: Node<()> = column().color(0x8a8a8a).child(rule()).child(row().id("Empty"));
         assert_eq!(draw(&v, None), ["fill [0, 0, 200, 1] 8a8a8a r0"]);
+    }
+
+    #[test]
+    fn an_image_is_the_canvas_s_over_its_background() {
+        let v: Node<()> = column().child(image("trail:cpu:4").width(40).height(10).bg(0xfbfbfb));
+        assert_eq!(
+            draw(&v, None),
+            ["fill [0, 0, 40, 10] fbfbfb r0", "image [0, 0, 40, 10] trail:cpu:4"]
+        );
     }
 }

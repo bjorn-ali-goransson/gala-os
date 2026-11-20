@@ -6364,7 +6364,12 @@ layer inside them).
      gained `.ellipsis` for it). Scrolling stays the program's: the
      view holds the rows from the scroll position that fit, so
      `gala_ui` needed no scrolling for it.
-   - Task Manager (`user/taskmgr`: tabs, the process list).
+   - Done: Task Manager's window (`taskmgr::window::view`: the
+     navigation, the search box, End task, the headers, the rows, the
+     Performance page; clicks through `gala_ui::click`). `gala_ui`
+     gained `Canvas::image` for it: the sparklines and graphs are
+     images the program draws. The 1 s refresh stays its own
+     WM_TIMER, as Explorer's scrolling stays Explorer's.
    - The taskbar and start menu: drawn by the kernel's desktop
      (`kernel/src/nt/desktop/paint.rs`), where allocation must be
      fallible and `gala_ui` and Taffy allocate infallibly. Open:
@@ -6375,8 +6380,7 @@ layer inside them).
    - Subscriptions and messages from outside: a component says which
      timers it wants (`subscriptions()`, from its state), and work on
      another thread posts a message into the window's message loop,
-     logged as any other. Task Manager's refresh needs it first, then
-     the change agent's replies.
+     logged as any other. The change agent's replies need it first.
    - Nested components: `Node::map` turns a child component's messages
      into its parent's, so a piece two windows share (the change card)
      is one component, with one state tree and one log (no hooks, no

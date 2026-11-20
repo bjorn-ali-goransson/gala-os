@@ -24657,6 +24657,9 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::AnyIn(300, 175, 700, 22, 0x5d5d5d), // the column headers
                 PixelCheck::AnyIn(305, 201, 30, 460, 0xe95420), // Linux tiles
                 PixelCheck::AnyIn(305, 201, 30, 460, 0x0078d4), // Windows tiles
+                // Below its rows the page's background, not what the
+                // Performance view drew there: the whole page repainted.
+                PixelCheck::Most(310, 420, 800, 240, 0xfbfbfb, 99),
             ],
         },
         ScreenStep {

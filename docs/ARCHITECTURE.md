@@ -14995,6 +14995,28 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
   (typing anywhere goes there, Esc clears it: a process matches by its
   shown name, its image or the start of its PID), refreshed every
   second (SetTimer).
+- **The window is a `gala_ui` view** ("UI components"):
+  `taskmgr::window::view` builds it from a borrowed `Look` of the state
+  (the title and search box, the navigation, the page's title, End
+  task, the column headers, the rows, Performance's graphs and list),
+  host-tested for each part's rectangle, text and message. The parts
+  that are clicked have automation ids (SearchBox,
+  NavigationPane.<view>, EndTaskButton, ColumnHeader.<column>,
+  ProcessList, ProcessList.Process.<pid>,
+  ProcessList.Group.<heading>). The sparklines and graphs are images
+  whose `src` is a `window::Picture` (`trail:cpu:<process>:<scale>:<cell
+  colour>`, `graph:<series>:...`, `spark:<series>:...`): the view says
+  where and of what, and `main.rs`'s canvas (`Pictures`, over
+  `gala_ui::win::Gdi`) draws them with `spark` and `graph`; a `src` it
+  does not know is logged `taskmgr: picture: not one of the view's`.
+  A click lays the view out again for the state as it is and goes
+  through `gala_ui::click` (logged `taskmgr: click <id>`) to the
+  window's message (`window::Msg`); a refused view is logged
+  `taskmgr: view: <error>`. The timer, the wheel and the keys stay the
+  program's: the view is built from the state at each paint, so the
+  refresh needed nothing of `gala_ui`. The geometry is the hand-drawn
+  window's (the screen checks of `TASKMGR_SCREEN` hold), with the
+  last column cut at the window's edge and the text in `Gdi`'s fonts.
 - **Processes**: grouped as Windows groups them, Apps (a process with a
   taskbar window, shown by its window's title) and Background
   processes, then the Linux groups by distribution ("Linux: <name>";
@@ -15014,7 +15036,7 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
 - **Performance**: a graph per processor (busy per mille between
   samples), memory in use, disk and network throughput, a minute of
   history each (`taskmgr::History`), the process, thread and handle
-  counts. A list on the left (`paint_side`, `SIDE_W` wide, a row every
+  counts. A list on the left (`window::side`, `SIDE_W` wide, a row every
   `SIDE_ROW_H`) gives every metric its name, its value, its peak where
   one is meant, and the same minute as a sparkline, as Windows'
   Performance sidebar: the CPU total, each processor, memory, disk,
@@ -15401,7 +15423,9 @@ The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
   message (logged `set value <id>: <msg>`). SetValue on an element
   that is no longer an input answers UIA_E_ELEMENTNOTENABLED.
 
-Limits: no scrolling; images are laid out but not drawn; no Invoke
+Limits: no scrolling; an image is drawn by the program's canvas
+(`Canvas::image`, given the image's rectangle and `src`; Task
+Manager's sparklines), and a canvas that knows none draws nothing; no Invoke
 pattern yet, so UIA clients press buttons through the mouse; elements without an id are
 not in UIA; typing has no caret, selection or keyboard navigation
 (Tab) and takes no surrogate pairs; one window per thread; messages
