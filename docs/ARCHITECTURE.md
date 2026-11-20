@@ -8739,6 +8739,16 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   popup `window::activate` recorded with its owner, while it is there
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
+- **A box with nothing to show it** (`lib.rs`): MessageBoxW writes the
+  caption and the text to the program's standard error and answers IDOK,
+  as if its only button had been pressed; and it records what was said
+  in the ledger, `user32.dll!MessageBoxW(<the text>)` with the kind as
+  the detail, because a program that gives up says so in a box and
+  leaves nothing else behind -- Word's startup ends in one -- while two
+  lines on the program's own standard error carry no time, no process
+  and no caller. The ledger gives the sentence the time and the count it
+  gives every gap (`win32_misc_test`; OBSERVABILITY "Missing-features
+  ledger").
 - **The message queue**: one per process (256 entries), filtered by
   thread. A message that finds every entry taken is lost (PostMessage
   returns 0, a key `pump` takes or the WM_CHAR TranslateMessage makes
