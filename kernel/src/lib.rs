@@ -408,6 +408,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports") {
         nt::traceimports::set(spec);
     }
+    // `imports_repeat=<n>`: keep each armed slot armed, so that every
+    // call through it is recorded and not only the first (the stream
+    // becomes a sequence; nt::traceimports). Needs `imports=`.
+    if let Some(spec) = cmdline.value("imports_repeat") {
+        nt::traceimports::set_repeat(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }

@@ -18,9 +18,20 @@
 //! register the stale value sits in, the read taken again. So reading
 //! an import's first byte gives the export's first byte, armed or not.
 //!
-//! Prints `iat_trace_test: trapped` (on gala, with the option given) or
-//! `: direct` (on Windows, or with no option), then `iat_trace_test: ok`
-//! -- or exits with the number of the failing check.
+//! `imports_repeat=<n>` keeps a slot armed instead, so that every call
+//! through it faults and is recorded and not only the first. From the
+//! program's side that is the slot still holding the trap address after
+//! a call has gone through it, calls that answer what they always did
+//! while it does, and the export's address back in the slot once the
+//! budget for those records is spent. The count checked is the budget
+//! `iat_repeat` gives (three records, so four calls through the slot:
+//! the fourth finds the budget spent and repairs it), this side having
+//! no way to read a budget the kernel was handed.
+//!
+//! Prints `iat_trace_test: repeating` (with `imports_repeat=`),
+//! `: trapped` (on gala, with `imports=` alone) or `: direct` (on
+//! Windows, or with no option), then `iat_trace_test: ok` -- or exits
+//! with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -195,9 +206,35 @@ fn run() -> Result<(), u32> {
         c.eq(core::ptr::read_volatile(&raw const GALA_VALUE), INITIAL_VALUE)?;
     }
 
+    // With `imports_repeat=` the kernel leaves the slot armed, so the
+    // call above faulted and the slot holds the trap address still:
+    // what is recorded is every call through it and not only the first.
+    let repeating = slot(add) != direct[0];
+    if repeating {
+        c.ok(trapped, 0)?;
+        // Each of those calls answers what it always did, and the slot
+        // is the export's again once the records asked for are spent.
+        // The bound is what makes a budget that outlives the loop a
+        // failing check below rather than a loop that does not end.
+        let mut calls = 0;
+        while slot(add) != direct[0] && calls < 16 {
+            calls += 1;
+            // SAFETY: as above, through a slot that is armed again.
+            unsafe { c.eq(gala_add(calls, 1), calls + 1)? };
+        }
+        // Three records (`iat_repeat`'s budget) and a fourth call that
+        // finds it spent and repairs the slot -- the first call above
+        // having taken none of it. An exact count is this side's whole
+        // claim about the sequence: the records themselves are events,
+        // which go to the debug console and not the serial log, and
+        // what the log carries is the kernel's count of them.
+        c.ok(calls == 4, calls)?;
+    }
+
     // And afterwards each slot holds its export's address, so every
     // later call goes straight there: the trace costs the first call
-    // through a slot and nothing after it.
+    // through a slot and nothing after it, or the calls the repeat
+    // budget above paid for.
     c.ok(slot(add) == direct[0], slot(add) as u64)?;
     c.ok(slot(get) == direct[1], slot(get) as u64)?;
     // SAFETY: as above, now through a slot the kernel has written.
@@ -206,7 +243,11 @@ fn run() -> Result<(), u32> {
     }
     c.ok(slot(value) == find_export(dll, b"GALA_VALUE").unwrap_or(0), slot(value) as u64)?;
 
-    print(if trapped { "iat_trace_test: trapped\r\n" } else { "iat_trace_test: direct\r\n" });
+    print(match (repeating, trapped) {
+        (true, _) => "iat_trace_test: repeating\r\n",
+        (false, true) => "iat_trace_test: trapped\r\n",
+        (false, false) => "iat_trace_test: direct\r\n",
+    });
     Ok(())
 }
 

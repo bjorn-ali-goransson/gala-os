@@ -627,14 +627,26 @@ narrowed once the first one says where to look. The last `imports:` line
 says how many slots were armed and how many of them were reached: armed
 and never reached is the program saying it never used that import.
 
-What it gives is a **set of names, not a sequence**: one record a slot,
-so an import the program had already called leaves nothing the second
-time -- the opposite trade from `trace_from=`. For a window late in a
-long run, read it as which entry points are reached there *for the first
-time*; everything the program touched during startup is already spent.
+What it gives on its own is a **set of names, not a sequence**: one
+record a slot, so an import the program had already called leaves
+nothing the second time. For a window late in a long run, read it as
+which entry points are reached there *for the first time*; everything
+the program touched during startup is already spent.
+
+`imports_repeat=<n>` trades that back: the slot stays armed, so every
+call through it is recorded, for `n` calls past each slot's first. The
+cost is a fault a call, so narrow the arming first and let the set say
+where to look:
+
+```sh
+XTASK_CMDLINE='events=call events_match=WINWORD imports=WINWORD.EXE!mso40uiWin32Client.dll imports_repeat=4096' \
+  cargo xtask boot-test 'office_word$'
+```
+
 Imports of variables are not armed at all, and nor are delay-load
-imports or anything resolved with GetProcAddress (OBSERVABILITY "Import
-tracing").
+imports or anything resolved with GetProcAddress; a function's slot read
+as data is disarmed where it is read, which ends its repeat
+(OBSERVABILITY "Import tracing").
 
 ### Network tests
 
