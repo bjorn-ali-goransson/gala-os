@@ -1997,12 +1997,14 @@ need gala's.
    answered S_OK, no `d2d1.dll!` line among them. So Word asks the
    device the three things, is refused nothing, and gives up without
    reaching Direct2D at all. What it does between that second
-   `GetDeviceRemovedReason` and the box is therefore not a call into a
-   DLL gala wrote, which leaves dxgi: Word's one dxgi record is
-   `CreateDXGIFactory1(interface)` unsupported three times at 37.4 s,
-   before the device calls, and dxgi's slots are not wrapped (`DLLS` in
-   `xtask/src/gentrace.rs` holds d2d1 and d3d10_1), so adding it is
-   what would put the whole graphics path in one stream.
+   `GetDeviceRemovedReason` and the box is therefore no call into a
+   DLL gala wrote at all. Nor is the run's one dxgi record Word's:
+   `CreateDXGIFactory1(interface)` unsupported three times at 37.4 s
+   is the Vulkan loader asking for IDXGIFactory6 as it sorts adapters
+   (below), and the refusal leaves it holding no factory, so a wrapped
+   dxgi slot would have no object to be called on either. The decision
+   is in Word's own code or in a Microsoft DLL, where the stack at the
+   box's write and the import trace below are what can reach.
    Both paths end the same way, which `events=file`
    on a short-path run shows (`open`, `key` and `value` events,
    OBSERVABILITY "Event stream"): the last thing before the box is
