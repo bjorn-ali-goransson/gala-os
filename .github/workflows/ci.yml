@@ -359,11 +359,26 @@ jobs:
           key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
           restore-keys: gala-prebuilt-${{ matrix.shard }}-
       - name: Restore the Linux roots' packages (the debs job's)
+        id: debs
         uses: actions/cache/restore@v4
         with:
           path: target/prebuilt/debs
           key: gala-debs-${{ hashFiles('xtask/src/main.rs') }}
-          fail-on-cache-miss: true
+          restore-keys: gala-debs-
+      - name: Fetch the packages that cache did not hold
+        # A cache is an optimisation and never a dependency: the shard
+        # fetches what it is missing rather than failing for it. The
+        # repository is over the 10 GiB cache limit, so the `debs` job's
+        # entry can be evicted between a run and a rerun of its failed
+        # jobs -- which skips `debs`, there being nothing wrong with it --
+        # and a demanded key then fails every shard for a download. What
+        # made one shared fetch worth having (six shards' connections
+        # reset by archive.ubuntu.com) the mirror answers, so this costs
+        # the shard a download and no one a run.
+        if: steps.debs.outputs.cache-hit != 'true'
+        env:
+          XTASK_UBUNTU_MIRROR: http://azure.archive.ubuntu.com/ubuntu
+        run: cargo xtask fetch-debs
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6

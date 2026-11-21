@@ -7460,6 +7460,21 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
+- **CI caches keyed on what every branch changes**: every cache key in
+  `ci.yml` ends in `hashFiles('xtask/src/main.rs')`, and test-first makes
+  a new boot scenario change that file, so each branch writes its own
+  set -- six prebuilt caches of about 900 MiB and the Linux roots'
+  packages at 320 MiB, over 5 GiB of a repository limit of 10 GiB. The
+  limit is therefore always met and eviction always running: one
+  branch's caches push out the last branch's, and a rerun of a run's
+  failed jobs can find that the packages the `debs` job wrote are gone
+  (which is why the boot shards fetch for themselves what their restore
+  did not hold, instead of demanding the key). What the keys should name
+  is what decides the contents: the pins. They sit among the scenarios
+  in a file of 29 777 lines, so the fix is to move them to their own
+  module and hash that -- the packages' pins for `gala-debs-`, the
+  prebuilt programs' for `gala-prebuilt-` -- after which a branch that
+  adds a scenario shares both caches instead of replacing them.
 - **`arm_lx_inkscape` stalled once on CI** (1 of 5 runs; 0 of 9
   locally, 4 of them at once beside busy host loops): after glycin
   SIGKILLed its image loader (as it does on every run), Inkscape's main
