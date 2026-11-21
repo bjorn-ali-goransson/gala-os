@@ -637,6 +637,13 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
 
+/// A row saying a program got this far: an answer gala gave, which a
+/// caller cannot tell from a measurement (crate::spi, note_metric).
+pub(crate) fn reached(what: &[u8], detail: u64) {
+    // SAFETY: our string.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 9, detail) };
+}
+
 // ---- gdi32, loaded when first needed ----
 
 pub(crate) struct Gdi {

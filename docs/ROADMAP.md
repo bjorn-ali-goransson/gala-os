@@ -2751,6 +2751,26 @@ need gala's.
      the same box, the same status 0 after 30.8 s, no document drawn.
      The ledger carries no pid, so that attribution is the scenario's
      and not the row's: Word is the only process with a window in it.
+     The next gap of that shape is the settings themselves.
+     SystemParametersInfoW answered 31 actions and refused the rest,
+     and nine of its answers were values no Windows gives: every
+     animation and fade off, UI effects off and client-area animation
+     off, where a Windows desktop answers TRUE for all nine. That is
+     the question Word's own `AnimationDisabledReason` asks on the
+     deciding thread. `spi_test` measures every action on the Windows
+     machine first: the values every Windows answers the same as
+     values, the two that are a machine's own (the foreground lock
+     timeout, the taskbar's flash count) as answered at all, and the
+     desktop's sizes as the relations Windows holds them in. Those
+     relations found a drift inside gala: the non-client metrics said a
+     caption button was 32 wide while GetSystemMetrics said 46, a menu
+     bar 20 tall against the metric's 19, and a small caption 20 wide
+     against 46; the structure now reads every size from
+     GetSystemMetrics, which is Windows' own invariant, so the two
+     cannot drift again (the metrics once answered 0 for a scroll bar
+     where this structure said 17). 24 more actions Windows answers are
+     answered, and every action a program is answered leaves a reached
+     row. Word asks for eight of them, all in the last three seconds of its life: client-area animation at 36255 ms and UI effects at 36633 ms, the two that were wrong, then high contrast and the non-client metrics beside the 34 system metrics at 36637 ms, the screen reader at 37629 ms, and font smoothing and the caret's width at 39033 ms, 150 ms before the box. With the nine answers right Word lives 1.5 s longer (32.3 s against 30.8 s) and gets 0.7 s further before the box (39187 ms against 38509 ms), reading the two text settings it did not reach before -- but the box is the same one, with the same (13), and no document is drawn. So the settings were a real divergence on the deciding path and not its cause; what Word does in the 150 ms between the caret's width and the box is where that path ends.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
