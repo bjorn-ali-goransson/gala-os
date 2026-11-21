@@ -1906,9 +1906,41 @@ need gala's.
    method on the brush it asked for, no BeginDraw, no geometry, and no
    exception the program handles itself -- and with nothing of the frame
    drawn Word prints "Word was unable to start. (13)" and exits with
-   status 0 after 31.2 s. What it does between that call and the message
-   is the next thing to read, from the system-call stream rather than
-   from the DLLs; the message itself is Word's own
+   status 0 after 31.2 s. What it does between that call and the
+   message is read, and holds no gap: it opens the absent
+   `16.0\Word\Options\Debug` key eight times, reads the four display
+   answers gala gives it (SystemParametersInfo 0x4a, 0x200a and 0x2006,
+   GetSystemMetrics 45 and 46), loads `uxtheme.dll` and probes the
+   Common-Controls side-by-side assembly -- the message box being built
+   -- and makes no further Direct2D, DirectWrite or DXGI call, and no
+   call of any kind that fails. The twelve registry values it looks for
+   and does not find in that last second are options a fresh Windows
+   profile lacks as well (`ForceConcurrencyOverride`,
+   `ScreenReaderPresent`, `NoClearTypeNW`, `NoTranslucentSelection` and
+   the three font-smoothing thresholds, read twice each; named by the
+   `value` events of `events=file`), so no absent value decides it.
+   Word decides on answers gala gave, which moves the question from
+   which call is missing to what those answers say -- and it writes its
+   own account of the exit to the registry right after the message: 401
+   bytes of REG_BINARY to `Office\Common\GracefulExit\WINWORD\12:2` and
+   2 bytes to `:3`, the previous run's 360-byte
+   `CrashPersistence\WINWORD\12:4` read and deleted first. Gala
+   persists the registry, so dumping
+   `C:/Windows/System32/config/gala.reglog` (OBSERVABILITY "Guest
+   files") and reading its `GREG` records
+   (`kernel/src/nt/reglog.rs`) is where that blob can be read. Word
+   writes no log of its own to read instead: of the nine ULS logs the
+   run leaves, every one is the install's (SETUP, OFFICECL, INTEGRAT)
+   and none is WINWORD's, and those eight probes of the absent
+   `Word\Options\Debug` key are the likeliest place its own logging is
+   switched on. DXVK's two logs, dumped with the run, say the stack
+   under the frame is live and name nothing gala refuses:
+   `winword_d3d11.log` has the D3D11 device created on llvmpipe with a
+   597 MiB device-local heap, and the three `DXGI: Found monitors not
+   associated with any adapter, using fallback` warnings in
+   `winword_dxgi.log` are the absent Vulkan device LUID below, where
+   that warning is read line by line, and not a gap. The
+   message itself is Word's own
    `user32!MessageBoxW` with `WWLIB.DLL` and `WWINTL.DLL` on the stack,
    which is what a stack capture of the write says
    (`stack_at=NtWriteFile:8 stack_from=wwlib`, OBSERVABILITY "Stack
@@ -7563,6 +7595,23 @@ Each entry: what, why it matters, the structural fix, the owning item.
   wakeup. The state dump now lists each Linux process's children
   (running, zombies) and its wait4/waitid waiters with the pid each
   wants, so the next stall names what the threads waited for.
+- **`arm_lx_xdesktop` timed out once on CI** (its siblings
+  `arm_lx_gtk`, 27 s, and `arm_lx_xterm`, 29.8 s, passed in the same
+  job, as did the longer `arm_lx_inkscape` and `arm_lx_gimp_batch`):
+  after the desktop showed its window (`desktop: shown window
+  'Xwayland on :1'`), a shell forked a child that ran `/usr/bin/xkbcomp`
+  to exit 0 and did it again, three times over, and then the watchdog
+  said `thread 9 (sh) has been in the kernel for 20 s without blocking
+  or reaching user mode (CPU 1, rip 0xffffffff8030b608)`. The flight
+  recorder's last records are that process's `read` calls, one every
+  3 ms or so, to the end of the run. A kernel thread that does not
+  block for 20 s is the defect, whatever the shell meant to read; the
+  host was loaded at the time (load 8.11 on 4 CPUs, 40.4 s of the run
+  waiting for a host CPU), which is why it was seen there and not
+  locally, but a loaded host only makes the spin visible. Where to
+  start: that `rip` against the kernel's map, and what the `read`
+  answers in the loop -- a pipe whose writer is gone, answering 0
+  forever, would do it.
 - **A lock can be marked held by a thread that is not running**
   (`sync::lockdep`): a held-lock slot belongs to the CPU and carries the
   thread that took it, and `none_held_at_switch` panics if a thread
