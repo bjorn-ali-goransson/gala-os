@@ -1,9 +1,13 @@
 ; Office's own verbose logging, the switch Microsoft's own
 ; troubleshooting guide asks for ("Enable enterprise logging for
 ; Microsoft 365 Apps"): EnableLogging under the user's
-; Office\16.0\Common\Logging, which Word reads on startup, and the
-; Click-to-Run override's LogLevel and PipelineLogging. All three keys
-; are in office_word's ledger as absent. The logs land in %TEMP% as
+; Office\16.0\Common\Logging, and the Click-to-Run override's LogLevel
+; and PipelineLogging. Of office_word's processes only
+; OfficeClickToRun.exe reads EnableLogging (the `value` events of
+; `events=file` name which process read a value); WINWORD never opens
+; that key at all, and every log the scenario leaves is the installer's
+; or OFFICECL's, so this seed does not make Word say anything. All
+; three keys are in office_word's ledger as absent. The logs land in %TEMP% as
 ; MachineName-Date-time.log, which is why the scenario dumps the user's
 ; Temp. Loaded after registry.seed (module string `registry`).
 
