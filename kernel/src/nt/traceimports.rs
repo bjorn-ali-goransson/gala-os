@@ -108,6 +108,20 @@
 //! line: a name missing from a trace must read as the filter's doing
 //! and not as the program not having called it.
 //!
+//! That filter answers "which imports", and the other half of a wide
+//! trace is "whose". One import is a slot in every image that imports
+//! it, so a program's heap, string and locale imports are armed once
+//! per module, and the modules a question is not about spend the budget
+//! under the very same names as the one it is: no list of names
+//! separates them, the noise being the same call from another image.
+//! `imports_in=<image>` arms the slots in one image and leaves every
+//! other image's alone. That is the field a record already carries --
+//! its `from`, the image whose import table the call went through --
+//! asked of the arming instead of of the records afterwards, so that
+//! "what does WWLIB.DLL call" is a question one budget can hold, where
+//! `imports=<program>!<dll>` asks only what the program calls into one
+//! DLL, from wherever in it.
+//!
 //! What it costs: one page fault per slot (the kernel's own fault path,
 //! plus a linear scan of the slots armed and two protection changes to
 //! write the slot), and nothing after it -- or, under
@@ -291,16 +305,31 @@ pub const NAME_LEN: usize = super::tracecall::NAME_LEN;
 pub const STRIDE: u64 = 16;
 
 /// What `imports=` named: the program whose imports are armed, and the
-/// DLL they must come from (empty: every DLL it imports from).
+/// DLL they must come from (empty: every DLL it imports from); and what
+/// `imports_in=` named, the one image whose slots are armed (empty:
+/// every image of the process).
 struct Spec {
     program: [u8; NAME_LEN],
     program_len: usize,
     dll: [u8; NAME_LEN],
     dll_len: usize,
+    image: [u8; NAME_LEN],
+    image_len: usize,
 }
 
-static SPEC: IrqMutex<Spec> =
-    IrqMutex::new(Spec { program: [0; NAME_LEN], program_len: 0, dll: [0; NAME_LEN], dll_len: 0 });
+static SPEC: IrqMutex<Spec> = IrqMutex::new(Spec {
+    program: [0; NAME_LEN],
+    program_len: 0,
+    dll: [0; NAME_LEN],
+    dll_len: 0,
+    image: [0; NAME_LEN],
+    image_len: 0,
+});
+
+/// Whether `imports_in=` named an image, so that a run without it says
+/// nothing about the option and one that gave it without `imports=`
+/// says that nothing was armed.
+static IN_NAMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether `imports=` was given at all, so the fault path and the system
 /// call answer with one relaxed load instead of taking a lock.
@@ -797,6 +826,59 @@ pub fn program_wanted(process: &str) -> bool {
     }
     let stored = SPEC.lock();
     process.as_bytes().eq_ignore_ascii_case(&stored.program[..stored.program_len])
+}
+
+/// `imports_in=<image>`: arm only the slots that are in that image --
+/// the `from` of a record, the image whose import table the call goes
+/// through -- and leave every other image of the process alone.
+///
+/// `imports=<program>!<dll>` narrows a trace by the DLL a call goes
+/// *to*, and the two questions are not the same one: "what does this
+/// program call" and "what does this one of its DLLs call". A whole
+/// program's arming spends its budget wherever the calls are, which in
+/// a program the size of Word is the renderer and the shims and not the
+/// module a question is about, and no list of names to leave out
+/// (`imports_except=`) reaches that, the noise being the same calls
+/// under the same names from a different image. The image is the field
+/// a record already carries, so this names it.
+///
+/// Refused outright rather than cut to a default, for the reason the
+/// budgets are: a trace that quietly armed every image reads afterwards
+/// as the module having made calls it did not.
+pub fn set_in(spec: &str) {
+    if spec.is_empty() || spec.len() > NAME_LEN {
+        warn!(
+            "imports: imports_in={spec} reads one image name of {NAME_LEN} bytes at most, \
+             such as WWLIB.DLL: no image is named, so the slots of every \
+             image are armed"
+        );
+        return;
+    }
+    {
+        let mut stored = SPEC.lock();
+        stored.image[..spec.len()].copy_from_slice(spec.as_bytes());
+        stored.image_len = spec.len();
+    }
+    IN_NAMED.store(true, Ordering::Release);
+    info!(
+        "imports: only the import slots in {spec} are armed and every other image's \
+         slots are left alone (imports_in=)"
+    );
+}
+
+/// The image the armed slots must be in, written into `out`; the length
+/// written, or 0 for every image (and for a buffer too short to hold the
+/// name, which would otherwise arm an image nobody named).
+pub fn in_image(out: &mut [u8]) -> usize {
+    if !wanted() {
+        return 0;
+    }
+    let stored = SPEC.lock();
+    if stored.image_len > out.len() {
+        return 0;
+    }
+    out[..stored.image_len].copy_from_slice(&stored.image[..stored.image_len]);
+    stored.image_len
 }
 
 /// The DLL the armed imports must come from, written into `out`; the
@@ -1945,6 +2027,12 @@ pub fn log_stats() {
                  slot was armed and nothing was excluded"
             );
         }
+        if IN_NAMED.load(Ordering::Relaxed) {
+            info!(
+                "imports: imports_in= was given without imports=, so no slot was \
+                 armed in that image or any other"
+            );
+        }
         return;
     }
     let (armed, done) = (ARMED.load(Ordering::Relaxed), RECORDED.load(Ordering::Relaxed));
@@ -1969,11 +2057,22 @@ pub fn log_stats() {
              no slot of the budget, no fault and no record (imports_except=)"
         );
     }
+    let mut one = [0u8; NAME_LEN];
+    let one_len = in_image(&mut one);
+    let in_one = core::str::from_utf8(&one[..one_len]).unwrap_or("?");
     if armed == 0 {
-        info!(
-            "imports: no import of {program} from {from} was armed: it never ran, \
-             it imports nothing from there, or every slot was a data import (imports=)"
-        );
+        if one_len != 0 {
+            info!(
+                "imports: no import of {program} from {from} in {in_one} was armed: no \
+                 image of that name was loaded, it imports nothing from there, or every \
+                 slot was a data import (imports_in=)"
+            );
+        } else {
+            info!(
+                "imports: no import of {program} from {from} was armed: it never ran, \
+                 it imports nothing from there, or every slot was a data import (imports=)"
+            );
+        }
         return;
     }
     if done == 0 && !events::enabled(Category::Call) {
@@ -1998,6 +2097,13 @@ pub fn log_stats() {
         );
     } else {
         info!("imports: first calls recorded: {done} of {armed} slots armed{read} (imports=)");
+    }
+    if one_len != 0 {
+        info!(
+            "imports: only the slots in {in_one} were armed, so every record's `from` is \
+             that image and the calls other images made through the same imports are not \
+             here (imports_in=)"
+        );
     }
     log_images(armed);
     let asked = REPEAT_ASKED.load(Ordering::Relaxed);

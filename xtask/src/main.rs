@@ -8385,6 +8385,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("iat_from", "ntdll.dll", "Windows/System32"),
     ("iat_from", "testdll.dll", "gala"),
     ("iat_from", "testdll2.dll", "gala"),
+    ("iat_from_in", "ntdll.dll", "Windows/System32"),
+    ("iat_from_in", "testdll.dll", "gala"),
+    ("iat_from_in", "testdll2.dll", "gala"),
     ("iat_ret_test", "ntdll.dll", "Windows/System32"),
     ("iat_ret_test", "testdll.dll", "gala"),
     ("iat_unwind_test", "ntdll.dll", "Windows/System32"),
@@ -14091,6 +14094,7 @@ const ARM64_TWINS: &[&str] = &[
     "iat_trace_test",
     "iat_repeat",
     "iat_from",
+    "iat_from_in",
     "iat_ret_test",
     "iat_answers",
     "iat_except",
@@ -19469,6 +19473,33 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: first calls recorded: 3 of 3 slots armed (imports=)",
             "imports: those 3 slots are in 2 images: testdll2.dll 2, \
              iat_from_test.exe 1 (imports=)",
+        ],
+    },
+    Scenario {
+        // OT3d: `imports_in=`, the image whose slots are armed. The
+        // same arming as `iat_from` above, narrowed to testdll2's
+        // image: of the three slots for imports from testdll.dll the
+        // two in testdll2 are armed and this program's own is left
+        // alone, though it is an import of the same name from the same
+        // DLL -- which is the thing no filter on an import's name can
+        // do, and what makes "what does this one DLL call" a question
+        // a budget can hold. The program checks that its own slot was
+        // never armed and that testdll2's two agree, and the kernel's
+        // lines say which image the slots were in.
+        name: "iat_from_in",
+        cmdline: "qemu_exit events=call run=iat_from_test.exe args=inner \
+                  imports=iat_from_test.exe!testdll.dll imports_in=testdll2.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_from_test: trapped",
+            "iat_from_test: ok",
+            "exited with status 0x00000000",
+            "imports: only the import slots in testdll2.dll are armed and every \
+             other image's slots are left alone (imports_in=)",
+            "imports: first calls recorded: 2 of 2 slots armed (imports=)",
+            "imports: only the slots in testdll2.dll were armed, so every record's \
+             `from` is that image",
+            "imports: those 2 slots are in 1 image: testdll2.dll 2 (imports=)",
         ],
     },
     Scenario {

@@ -2539,13 +2539,11 @@ need gala's.
      box stands. So no record Word keeps says why, which closes the
      last place a verdict could have been written down: the box is
      reached, the exit is clean, and Word's own account of the session
-     is identity and clocks. What is left is the loop named above --
-     `#16040` answering the buffer it was handed, `#15239` and
-     `#59438` beside it -- and what that buffer holds, which
-     `imports_strings=` and `imports_bytes=` quote at a call and at a
-     trapped return (OBSERVABILITY "Import tracing"). The arming is
-     already narrow enough for it
-     (`imports=WINWORD.EXE!Mso20Win32Client.dll:8192`).
+     is identity and clocks. Nor is the loop named above what is left:
+     the buffers its `#16040` answers are quoted and dumped now
+     (above, scenarios `import_answer_text` and
+     `import_answer_bytes`) and hold a table of numbers Office parses,
+     so the mso ordinals decide nothing either.
      What fails of the reading is keys a fresh Windows does not have
      either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
@@ -7024,6 +7022,19 @@ among the slowest hand-offs.
      it is the same narrowing `imports=<program>!<dll>` is from the
      other side: keep the program whole and name what to leave out,
      for a question that spans several DLLs.
+     The other half of that narrowing is the image, since one import is
+     a slot in every image that imports it: `imports_in=<image>` arms
+     the slots in that image alone and leaves every other image's as
+     they were (scenario `iat_from_in` with an ARM64 twin, where this
+     program's own slot for `testdll.dll!gala_add` is left alone while
+     testdll2's slot for that same name is armed). No list of names
+     reaches this, the noise being the same call under the same name
+     from another image: a whole-program window of Word armed 21136
+     slots in 46 images, 8118 of them MSO.DLL's and 3280 WWLIB.DLL's,
+     so "what does wwlib call" could not be asked at all. The image is
+     the field a record already carries -- its `from` -- asked of the
+     arming instead of of the records afterwards, so it costs no more
+     than the comparison the loader already makes once per module.
 
    The kernel's half of the same question is done:
    `stack_at=<service>[:<n>]` logs the calling thread's user stack the

@@ -22,11 +22,20 @@
 //! supplier, so this program's slot for `gala2_add3` is testdll2's
 //! export throughout and is what finds that image.
 //!
+//! Which image a slot is in is a question of its own, and `imports_in=`
+//! is how it is asked: `args=inner` expects a run that armed only the
+//! slots in testdll2.dll. Then the same import of the same name from
+//! the same DLL is armed in testdll2's image and left alone in this
+//! program's, which no filter on the import's name could tell apart --
+//! and the call through the unarmed slot answers as it always did, so
+//! the narrowing costs the program nothing.
+//!
 //! The records themselves are `import` events, which the debug console
 //! carries and the serial log does not; what the log carries is the
 //! kernel's count of the slots it armed and of the images they are in.
 //!
-//! Prints `iat_from_test: trapped` (on gala, with `imports=`) or
+//! Prints `iat_from_test: trapped` (on gala, with `imports=`; under
+//! `args=inner`, with the slots in testdll2.dll armed) or
 //! `: direct` (on Windows, or with no option), then
 //! `iat_from_test: ok` -- or exits with the number of the failing
 //! check.
@@ -147,9 +156,32 @@ fn reserved(c: &mut Checks, at: usize) -> Result<bool, u32> {
     Ok(mbi.state == MEM_RESERVE)
 }
 
+/// Whether the command line's last word is `word`.
+fn last_arg_is(word: &str) -> bool {
+    // SAFETY: PEB+0x20 is ProcessParameters; its CommandLine is a
+    // UNICODE_STRING at +0x70.
+    let cmd = unsafe {
+        let pp = *(peb().add(0x20) as *const *const u8);
+        let len = usize::from(*(pp.add(0x70) as *const u16)) / 2;
+        core::slice::from_raw_parts(*(pp.add(0x78) as *const *const u16), len)
+    };
+    let cmd = match cmd.iter().rposition(|&ch| ch != u16::from(b' ')) {
+        Some(end) => &cmd[..=end],
+        None => return false,
+    };
+    let word = word.as_bytes();
+    cmd.len() > word.len()
+        && cmd[cmd.len() - word.len() - 1] == u16::from(b' ')
+        && cmd[cmd.len() - word.len()..].iter().zip(word).all(|(&a, &b)| a == u16::from(b))
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let image = &raw const __ImageBase as usize;
+    // `args=inner`: the run armed the slots in testdll2.dll alone
+    // (`imports_in=`), so this program's own slot for the same import
+    // is the export's address throughout.
+    let inner_only = last_arg_is("inner");
 
     // Our own imports: one from testdll.dll, which the trace arms, and
     // two from testdll2.dll, which it does not.
@@ -189,8 +221,20 @@ fn run() -> Result<(), u32> {
     let trapped = reserved(&mut c, slot(add))?;
     let (armed_add, armed_get) =
         (reserved(&mut c, slot(inner_add))?, reserved(&mut c, slot(inner_get))?);
-    c.eq(armed_add as u64, trapped as u64)?;
-    c.eq(armed_get as u64, trapped as u64)?;
+    let traced = if inner_only {
+        // Narrowed to testdll2's image: our own slot for
+        // `testdll.dll!gala_add` is never armed, though it is an import
+        // of the same name from the same DLL as one of testdll2's two.
+        // On Windows nothing is armed at all, which is the same claim
+        // about this slot and why the check is not conditional.
+        c.eq(trapped as u64, 0)?;
+        c.eq(armed_get as u64, armed_add as u64)?;
+        armed_add
+    } else {
+        c.eq(armed_add as u64, trapped as u64)?;
+        c.eq(armed_get as u64, trapped as u64)?;
+        trapped
+    };
 
     // The calls answer what they always did, armed or not: ours
     // straight into testdll, and testdll2's two from inside it.
@@ -218,7 +262,7 @@ fn run() -> Result<(), u32> {
     c.eq(slot(inner_add) as u64, exports[0] as u64)?;
     c.eq(slot(inner_get) as u64, exports[1] as u64)?;
 
-    print(if trapped { "iat_from_test: trapped\r\n" } else { "iat_from_test: direct\r\n" });
+    print(if traced { "iat_from_test: trapped\r\n" } else { "iat_from_test: direct\r\n" });
     Ok(())
 }
 
