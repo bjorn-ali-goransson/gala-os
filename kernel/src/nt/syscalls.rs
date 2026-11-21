@@ -4140,7 +4140,12 @@ fn gala_trace(call: &mut Call<'_>) -> NtStatus {
 /// waiting for go back where those calls left them; C takes a `u64`, the
 /// return address of the call the walk begins in where B is that call's
 /// return trap and 0 where it is not. Only the program knows a walk has
-/// begun, an exception raised in user mode reaching no kernel path.
+/// begun, an exception raised in user mode reaching no kernel path. Op 3
+/// asks of `imports_in=` what op 0 asks of the supplying DLL: A is a
+/// buffer of B bytes taking the one image whose slots are to be armed
+/// and C a `u64` taking its length (0: every image of the process). Its
+/// own op rather than another word of op 0's answer, so that each name
+/// is read into a buffer of its own.
 fn gala_imports(call: &mut Call<'_>) -> NtStatus {
     /// One reported import: slot, target, name, name length.
     const ENTRY: u64 = 4 * 8;
@@ -4212,6 +4217,22 @@ fn gala_imports(call: &mut Call<'_>) -> NtStatus {
             let pc = arg!(call, 2);
             let ret = super::traceimports::unwinding(&call.process, arg!(call, 1), pc);
             if call.process.write(arg!(call, 3), &ret.to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            NtStatus::SUCCESS
+        }
+        3 => {
+            if !super::traceimports::program_wanted(call.process.name) {
+                return NtStatus::OBJECT_NAME_NOT_FOUND;
+            }
+            let (ptr, len) = (arg!(call, 1), arg!(call, 2) as usize);
+            let mut name = [0u8; super::traceimports::NAME_LEN];
+            let len = len.min(name.len());
+            let written = super::traceimports::in_image(&mut name[..len]);
+            if call.process.write(arg!(call, 3), &(written as u64).to_ne_bytes()).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            if written != 0 && call.process.write(ptr, &name[..written]).is_err() {
                 return NtStatus::ACCESS_VIOLATION;
             }
             NtStatus::SUCCESS

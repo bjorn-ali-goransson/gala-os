@@ -443,6 +443,13 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Some(spec) = cmdline.value("imports_except") {
         nt::traceimports::set_except(spec);
     }
+    // `imports_in=<image>`: arm only the slots in that image -- the
+    // `from` of a record -- which narrows a trace by the module a call
+    // comes *from* where `imports=<program>!<dll>` narrows it by the
+    // one it goes to (nt::traceimports). Needs `imports=`.
+    if let Some(spec) = cmdline.value("imports_in") {
+        nt::traceimports::set_in(spec);
+    }
     if let Some(hz) = cmdline.value("sample_hz").and_then(|v| v.parse::<u64>().ok()) {
         time::set_sample_hz(hz);
     }

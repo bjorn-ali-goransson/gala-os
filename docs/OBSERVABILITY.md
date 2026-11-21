@@ -40,7 +40,7 @@ rather than free text.
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
 | Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
-| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
+| Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed, `imports_in=<image>` for the one image whose slots are armed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
@@ -1298,7 +1298,10 @@ that read as no text as hex instead, which is the whole of what a
 structure answered by value says (`import_answer_bytes`, below).
 `imports_except=<text>[,<text>...]` leaves the imports whose
 `<dll>!<name>` holds one of the texts unarmed, so that the budget goes
-to the rest (`iat_except`, below).
+to the rest (`iat_except`, below), and `imports_in=<image>` arms the
+slots in one image and leaves every other image's alone, which is what
+makes a trace of what one DLL calls rather than of what the program does
+(`iat_from_in`, below).
 
 What those budgets bound is the records and not the faults, which is
 what makes `imports=` with `events_from=<seconds>` a trace of **a
@@ -1599,6 +1602,30 @@ data first, which disarms the slot (below), so that one leaves a
   DLL is what made that affordable, and this is the same narrowing
   from the other side: keep the program whole and name what to leave
   out, for the question that spans several DLLs.
+- **Or one image's slots, with `imports_in=<image>`.** The filter above
+  answers "which imports"; this answers "whose". One import is a slot in
+  every image that imports it, so a program's heap, string and locale
+  imports are armed once per module, and the modules a question is not
+  about spend the budget under the very same names as the one it is --
+  which no list of names separates, the noise being the same call from
+  another image. `imports_in=<image>` arms the slots in that image alone
+  and leaves every other image's as they were. That is the field a
+  record already carries -- its `from`, the image whose import table the
+  call went through -- asked of the arming instead of of the records
+  afterwards, so it costs no more than the comparison the loader already
+  makes once per module. "What does WWLIB.DLL call" is then a question
+  one budget can hold, where `imports=<program>!<dll>` asks only what
+  the program calls into one DLL, from wherever in it. What it is for,
+  measured on Word: a whole-program window armed 21136 slots in 46
+  images, of which 8118 are MSO.DLL's and 3280 WWLIB.DLL's, so the
+  budget went where the calls are and not where the question was.
+  A name no loaded image has is not refused but says so in the summary
+  (no slot was armed, and which name was asked for), and a run that gave
+  it without `imports=` says that nothing was armed at all. Scenario
+  `iat_from_in` with an ARM64 twin: the slots of `iat_from` narrowed to
+  testdll2's image, where this program's own slot for
+  `testdll.dll!gala_add` is left alone though testdll2's slot for that
+  same name is armed.
 - **Functions only.** An imported variable cannot be trapped: the value
   a read of its slot gives *is* what the program then uses, and no fault
   announces that read. So the loader arms a slot only when the address

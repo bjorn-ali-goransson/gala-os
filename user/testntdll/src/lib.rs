@@ -1959,7 +1959,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         // into a DLL gala did not write (nt::traceimports). After the
         // protection is back as it was, because the kernel writes the
         // slots itself, as a debugger's write does.
-        if imports_traced(&name[..len]) {
+        if imports_traced(&name[..len], &who[..who_len]) {
             arm_imports(base, desc, iat, count, c_str(base + rd32(desc + 12) as usize));
         }
         desc += 20;
@@ -2035,6 +2035,8 @@ struct Traced {
     wanted: bool,
     dll: [u8; MAX_NAME],
     dll_len: usize,
+    image: [u8; MAX_NAME],
+    image_len: usize,
 }
 
 /// From the kernel's answer to `GalaImports` op 0: the returns of calls
@@ -2089,12 +2091,16 @@ static TRACED_IMPORTS: TracedImports = TracedImports(core::cell::UnsafeCell::new
     wanted: false,
     dll: [0; MAX_NAME],
     dll_len: 0,
+    image: [0; MAX_NAME],
+    image_len: 0,
 }));
 
 /// Whether the imports this image takes from `dll` are to be armed
 /// (`imports=`; see `arm_imports`). `dll` is a normalized name, compared
-/// with the option's as a file name is: without regard to case.
-fn imports_traced(dll: &[u8]) -> bool {
+/// with the option's as a file name is: without regard to case; and so
+/// is `who`, the image taking them, against `imports_in=`'s name, which
+/// is the image a record's `from` names.
+fn imports_traced(dll: &[u8], who: &[u8]) -> bool {
     // SAFETY: the loader lock is held (see `TracedImports`).
     let state = unsafe { &mut *TRACED_IMPORTS.0.get() };
     if !state.asked {
@@ -2113,8 +2119,23 @@ fn imports_traced(dll: &[u8]) -> bool {
         if state.wanted && answer[1] & 1 != 0 {
             ANSWERS_TRAPPED.store(true, core::sync::atomic::Ordering::Relaxed);
         }
+        // The image `imports_in=` named, in its own op and its own
+        // buffer (`GalaImports` op 3).
+        if state.wanted {
+            let mut written = 0u64;
+            let got = GalaImports(
+                3,
+                state.image.as_mut_ptr() as u64,
+                state.image.len() as u64,
+                &mut written as *mut u64 as u64,
+            );
+            state.image_len =
+                if got == STATUS_SUCCESS { (written as usize).min(state.image.len()) } else { 0 };
+        }
     }
-    state.wanted && (state.dll_len == 0 || state.dll[..state.dll_len].eq_ignore_ascii_case(dll))
+    state.wanted
+        && (state.dll_len == 0 || state.dll[..state.dll_len].eq_ignore_ascii_case(dll))
+        && (state.image_len == 0 || state.image[..state.image_len].eq_ignore_ascii_case(who))
 }
 
 /// One import reported to the kernel (`GalaImports` op 1): the address of
