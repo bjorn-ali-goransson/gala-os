@@ -1949,23 +1949,28 @@ need gala's.
    refuses -- the three `DXGI: Found monitors not associated with any
    adapter, using fallback` warnings in `winword_dxgi.log` are the
    absent Vulkan device LUID below, where that warning is read line by
-   line, and not a gap -- but `winword_d3d11.log` holds the one place
-   something stops short. Word creates **two** devices on llvmpipe, and
-   the log ends inside the second. The first, at feature level 10_1,
-   prints fifteen lines through `Binding model: Descriptor heap`; the
-   second, at 11_0, prints three and ends at `Creating resource
-   descriptor heap (8192 kB)`, without the twelve the first printed
-   after that one (the descriptor sizes, the memory type mask, the
-   sampler heap). Two runs end it at the same line, 580 lines each, so
-   that is where the second device's creation stops and not where the
-   dump cut it; the thread is the one that shows the box (tid 16, which
-   opens both DXVK logs), so nothing is waiting on another thread. What
-   that creation returned, and whether DXVK gave up where it logs
-   nothing, is the next thing to read. It is not gala refusing the
-   second device: `d3d11_test` asks for one the way Word does -- a
-   second `D3D11CreateDevice` while the first device and its swap chain
-   are alive, at its own feature level (10_1), with a texture made on
-   it -- and it passes. The
+   line, and not a gap. `winword_d3d11.log` holds **two** devices on
+   llvmpipe, both whole: each creation and each finish is there, the
+   10_1 device's and the 11_0 one's, and the file ends on the second's
+   resource descriptor heap because nothing is asked of DXVK after it
+   (how to read its blocks, and the mis-split that makes the second
+   look like a device that stopped, is below). The Direct3D 10.1 device
+   is one of the two and Word is given it: the ledger has
+   `d3d10_1.dll!D3D10CreateDevice1` answered 0 at 46260 ms, and its one
+   unsupported flag (`ALLOW_NULL_FROM_MAP`, detail 16) recorded at
+   45657 ms where the call began, so the 603 ms between them is
+   lavapipe building a device Word then holds, and the box comes after
+   it. Holding two devices at once is not what stops Word either:
+   `d3d11_test` asks for a second one the way Word does -- a second
+   `D3D11CreateDevice` while the first device and its swap chain are
+   alive, at its own feature level (10_1), with a texture made on it --
+   and it passes. What Word asks the device it was given is the next
+   thing to read, and the ledger cannot say: it holds no
+   `d3d10_1.dll!ID3D10Device1::` row at all, so every method Word
+   called is one gala answers, and which they were and in what order is
+   what `trace_from=` records (OBSERVABILITY "Call tracing"; `cargo
+   xtask gen-trace` wraps d2d1's slots today, so wrapping d3d10_1's is
+   the step). The
    message itself is Word's own `user32!MessageBoxW`, and the stack at
    its write names who asked for it: `Mso20win32client.dll`'s frame
    directly above user32's, then `MSO.DLL` and `Mso30win32client.dll`
@@ -2563,7 +2568,16 @@ need gala's.
      8 MiB resource descriptor heap, with nothing after it and one
      warning in the file (external memory features unsupported), and
      `winword_dxgi.log` holds only the monitor-metadata errors named
-     above.
+     above. Read its 580 lines by their blocks, or the second device
+     reads as one that stopped: the two creations are byte-identical
+     273-line blocks (lines 1-273 and 274-546, `Creating device:`
+     through the whole feature dump), and both finishes follow them --
+     descriptor sizes, the buffer memory-type mask, the 64 kB sampler
+     heap, the binding model, the maximum and the chosen feature level,
+     and `Creating resource descriptor heap (8192 kB)` as the last line
+     of each. Split the file at `Using feature level` instead and the
+     first device appears to print twelve lines the second lacks, which
+     are the second device's own finish.
      Word can be asked to log for itself, and what it logs says the last
      thing it does over the Click-to-Run channel is licensing, and that
      licensing is not what stops it. Microsoft's own public switches
