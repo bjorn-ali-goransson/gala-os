@@ -8228,12 +8228,36 @@ session's is shown by nothing unless GalaSession attaches a presenter
 #### The notification area
 
 Code: `desktop/tray.rs` (the icons, their messages, the balloon; host
-tests there and in `desktop/tests.rs`), shell32's `tray.rs`
+tests there and in `desktop/tests.rs`), `user/shasha/src/tray.rs` (the
+same model in the user-mode shell, host-tested there) and shasha's
+`main.rs` (its window's side), shell32's `tray.rs`
 (Shell_NotifyIconW/A, Shell_NotifyIconGetRect), user32's GalaIconArgb.
 Test: `tray_test` and its x86 twin `wow64_tray_test` (Windows'
 expectations from Microsoft's documentation and Wine's shell32
 systray.c; on gala also `gala tray`, its clicks and a mouse click
-through the screen check).
+through the screen check); with `args=screen shell` in scenario
+`shasha_tray`, the same requests answered by shasha, a real left and
+right click on its icon and the balloon's pixels.
+
+- **Who answers**: Shell_NotifyIcon asks the window of class
+  `Shell_TrayWnd` (Explorer's taskbar's; shasha's strip has it) with
+  WM_COPYDATA (SendMessageTimeout, SMTO_ABORTIFHUNG, 4 s; wParam the
+  icon's window): dwData 1 is the NIM_ message (u32) then GalaTrayIcon's
+  request layout, answered TRUE/FALSE; 3 and 4 are the request alone,
+  answered with the icon's top-left or bottom-right screen corner
+  (MAKELONG(x, y), -1 when it is not shown) for
+  Shell_NotifyIconGetRect. With no such window shell32 uses the
+  kernel's GalaTrayIcon and the desktop's area below (a stopgap that
+  goes with the kernel's shell code, ROADMAP SH step 1). shasha keeps
+  the same rules as the kernel's (64 icons, the same refusals, the
+  same messages and balloon); a version 4 icon's point is its slot's
+  middle; an icon goes when its window is gone (checked with IsWindow
+  whenever the window list is read again, and when a post fails). Its
+  slots are 32 x 40 gala_ui rows (UIA AutomationId
+  `TrayIcon<hwnd>_<id>`; no name yet: gala_ui has no accessible name
+  apart from text) left of the clock, the 16 x 16 picture drawn with
+  GdiAlphaBlend; its balloon is a hidden gala_ui popup "Notification"
+  (360 x 96, above the clock) shown while one is on.
 
 - **Icons**: per desktop, at most 64, each keyed by its window and id
   (or its GUID with NIF_GUID), with the process that added it, its
@@ -8306,7 +8330,15 @@ through the screen check).
   with the status); every message a `window` event `tray` (op, session,
   pid, hwnd, id, flags, status); a post that fails for another reason
   than a gone window is a warning; gone windows' icons are logged as
-  removed.
+  removed. In shasha: `shasha: notification-area icon added/modified/
+  deleted/focused: window <hwnd> id <n> "<tip>"`, `... set to version
+  <v>`, `shasha: notification-area NIM_<op> (<n>) for window <hwnd> id
+  <n> refused: <why>`, `... malformed (<n> bytes)`, `... click/right
+  click on icon <id> at x,y: <n> message(s) posted`, `... icon dropped:
+  window <hwnd> id <n> is gone`, `... balloon shown for window <hwnd>
+  id <n>: "<title>"`, `balloon timed out/clicked/gone`, `... its
+  picture is not drawn`; shell32 records a request the shell did not
+  answer in time (`Shell_NotifyIcon(the taskbar did not answer)`).
 
 #### App bars
 
@@ -8439,8 +8471,10 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   (`taskbar_back`), so a session is never without a taskbar. A screen
   size change moves the shell's bar to the new strip (the shell is not
   told yet).
-- **Limits**: no notification area, wallpaper or window icons in
-  shasha yet; the menu has no pinned or recent programs, user or power
+- **The notification area**: shasha's strip is `Shell_TrayWnd` and
+  answers Shell_NotifyIcon ("The notification area").
+- **Limits**: no wallpaper or window icons in shasha yet, no overflow
+  for more icons than fit; the menu has no pinned or recent programs, user or power
   buttons, or keyboard navigation of its tiles; the shell is not restarted when it ends
   (ROADMAP SH step 2).
 - **Observability**: shasha's lines (`shasha: started`, `shasha: the
@@ -15589,7 +15623,9 @@ The tree (the crate's documentation has a whole component):
 - `id` is the element's UI Automation AutomationId: unique; `button`
   and `input` take one, and an element with a handler must have one.
 - Handlers are messages (the `Component` trait's `Msg`): `.on_click(m)`
-  is the message a click sends, `.on_input(Msg::Request)` makes the
+  is the message a click sends, `.on_right_click(m)` a right click's
+  (`right_click`, an element's own: a right click on an element with
+  only `on_click` sends nothing), `.on_input(Msg::Request)` makes the
   message for the text typed. The program logs each message it handles
   with the element's id, calls `update`, and builds and lays out the
   view again.
@@ -15619,7 +15655,15 @@ The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
   (GWLP_USERDATA) and is used only on the window's thread.
   `Component::message` also sees WM_ACTIVATE (whose default handling
   still runs) and WM_HOTKEY. `win::focus(hwnd, id)` gives the focus
-  to an input.
+  to an input. `Options.class` names the window's class (shasha's
+  `Shell_TrayWnd`; none: gala_ui's own). WM_COPYDATA and messages from
+  WM_USER on go first to `Component::answer`, whose value is the
+  message's result (the view laid out again after it), then to
+  `message`. `win::picture(hwnd, src, w, h, pixels)` gives an `image`
+  element its straight-alpha ARGB pixels (drawn premultiplied with
+  GdiAlphaBlend, scaled to the element; `forget_picture` drops one);
+  `win::element_rect(hwnd, id)` is an element's client rectangle as
+  last laid out.
 - Re-entry: while the window handles a message the component is taken
   out of GWLP_USERDATA, so a message its own update causes
   (ShowWindow's WM_SIZE and WM_ACTIVATE, SetWindowPos) finds none and
@@ -15641,7 +15685,7 @@ The window (`gala_ui::win`, Windows only; `user/ui_test` its test):
   itself (Explorer's change cards) lays out and draws a view with it.
 - Input: WM_LBUTTONDOWN gives the focus to the input under the
   pointer; WM_LBUTTONUP is `click`, then the log line `click <id>:
-  <msg>`, `update`, and the view built and laid out again (WM_SIZE
+  <msg>` (WM_RBUTTONUP: `right_click`, `right click <id>: <msg>`), `update`, and the view built and laid out again (WM_SIZE
   too); WM_CHAR edits the focused input's text (backspace removes a
   character, other printable characters are appended) and sends
   `typed`'s message, logged `input <id>: <msg>`.

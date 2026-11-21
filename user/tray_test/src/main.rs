@@ -22,14 +22,21 @@
 //!   not), Shell_NotifyIconGetRect (a rectangle; a failure for an unknown
 //!   icon, its HRESULT an `info` line), a balloon (NIF_INFO), NIM_DELETE with cbSize 3, the ANSI
 //!   form, an icon named by its GUID.
-//! - On gala only (64-bit: `gala tray` and `gala tray click`, the
-//!   desktop's named actions): the icon is listed with its tip, a click
-//!   is WM_LBUTTONDOWN, WM_LBUTTONUP and NIN_SELECT, a right click
-//!   WM_RBUTTONDOWN, WM_RBUTTONUP and WM_CONTEXTMENU, each in version 4's
-//!   layout (wParam the point, the icon's middle; lParam the event and
-//!   the id); NIN_BALLOONSHOW came with the balloon. With the argument
+//! - On gala only: NIN_BALLOONSHOW came with the balloon. With the
+//!   desktop's own notification area (no `Shell_TrayWnd`; 64-bit: `gala
+//!   tray` and `gala tray click`, the desktop's named actions): the icon
+//!   is listed with its tip, a click is WM_LBUTTONDOWN, WM_LBUTTONUP and
+//!   NIN_SELECT, a right click WM_RBUTTONDOWN, WM_RBUTTONUP and
+//!   WM_CONTEXTMENU, each in version 4's layout (wParam the point, the
+//!   icon's middle; lParam the event and the id); with the argument
 //!   `screen` the test then waits for a real click on the icon (xtask's
-//!   screen check: `tray_test: click the icon` on the serial log).
+//!   screen check: `tray_test: click the icon` on the serial log). With
+//!   shasha's (`Shell_TrayWnd`, the taskbar of a user-mode shell, as
+//!   Explorer's on Windows; the argument `shell` waits for it) and
+//!   `screen`: a real click on the icon
+//!   (`tray_test: TrayIcon at X,Y (pointer at PX,PY)`, then `click the
+//!   icon`) and a real right click (`right click the icon`) bring the
+//!   same three messages each.
 //!
 //! Prints `tray_test: ok` (`wow64_tray_test` for the x86 build), or
 //! `<name>: check N got X (line L)` and exits with N.
@@ -107,6 +114,7 @@ unsafe extern "system" {
     fn PeekMessageW(msg: *mut Msg, hwnd: Handle, min: u32, max: u32, remove: u32) -> i32;
     fn DispatchMessageW(msg: *const Msg) -> isize;
     fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+    fn GetCursorPos(point: *mut [i32; 2]) -> i32;
     fn DestroyIcon(icon: Handle) -> i32;
     fn GetIconInfo(icon: Handle, info: *mut IconInfo) -> i32;
     fn CreateIconFromResourceEx(
@@ -798,21 +806,95 @@ fn named_actions(_: &mut Checks, _: Handle, _: usize) -> Result<(), u32> {
 
 /// Whether the command line asks for the screen part (`screen`).
 fn screen_arg() -> bool {
+    has_arg(b"screen")
+}
+
+/// Whether the command line holds `word` (ASCII).
+fn has_arg(word: &[u8]) -> bool {
     // SAFETY: the process's command line, NUL-terminated.
     unsafe {
         let p = GetCommandLineW();
         let mut i = 0;
-        let want: [u16; 6] = [115, 99, 114, 101, 101, 110];
         loop {
             if *p.add(i) == 0 {
                 return false;
             }
-            if (0..6).all(|k| *p.add(i + k) == want[k]) {
+            if word.iter().enumerate().all(|(k, &b)| *p.add(i + k) == b as u16) {
                 return true;
             }
             i += 1;
         }
     }
+}
+
+/// Prints `<name>: TrayIcon at X,Y (pointer at PX,PY)`: where xtask's
+/// `click_on` and `right_click_on` find the icon.
+fn say_icon(at: (i32, i32)) {
+    let mut p = [0i32; 2];
+    // SAFETY: our POINT.
+    unsafe { GetCursorPos(&mut p) };
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": TrayIcon at ")
+        .dec(at.0 as u64)
+        .s(b",")
+        .dec(at.1 as u64)
+        .s(b" (pointer at ")
+        .dec(p[0] as u64)
+        .s(b",")
+        .dec(p[1] as u64)
+        .s(b")\r\n")
+        .print();
+}
+
+/// The callbacks from `before` on that a click makes (the mouse's
+/// moves and the balloon's notices left out), as (wParam, lParam).
+fn clicks(before: usize) -> ([(usize, usize); 8], usize) {
+    let mut out = [(0, 0); 8];
+    let mut n = 0;
+    for k in before..COUNT.load(Ordering::Relaxed) {
+        let (wp, lp) = got(k);
+        let event = lp & 0xffff;
+        if event == 0x200 || (0x402..=0x405).contains(&event) {
+            continue;
+        }
+        if n < out.len() {
+            out[n] = (wp, lp);
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
+/// A real click and a real right click on the icon (shasha's taskbar):
+/// each brings its three messages in version 4's layout.
+#[cfg_attr(target_arch = "x86", allow(dead_code))]
+fn real_clicks(c: &mut Checks, middle: (i32, i32), packed: usize) -> Result<(), u32> {
+    say_icon(middle);
+    for (word, events) in [
+        (&b"click the icon"[..], [WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT]),
+        (&b"right click the icon"[..], [WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU]),
+    ] {
+        let before = COUNT.load(Ordering::Relaxed);
+        if events[0] == WM_RBUTTONDOWN {
+            say_icon(middle);
+        }
+        say(word);
+        // SAFETY: a plain call.
+        let end = unsafe { GetTickCount64() } + 300_000;
+        // SAFETY: as above.
+        while clicks(before).1 < 3 && unsafe { GetTickCount64() } < end {
+            pump_until(COUNT.load(Ordering::Relaxed) + 1, 1_000);
+        }
+        let (got3, n) = clicks(before);
+        c.eq(n as u64, 3)?;
+        for (k, event) in events.into_iter().enumerate() {
+            c.eq(got3[k].0 as u64, packed as u64)?;
+            c.eq(got3[k].1 as u64, (event | 1 << 16) as u64)?;
+        }
+    }
+    say(b"clicked");
+    Ok(())
 }
 
 fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
@@ -821,7 +903,19 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
     // SAFETY: plain calls with our structures; the window and icons made
     // here are destroyed.
     unsafe {
-        if !gala && FindWindowW(W::new("Shell_TrayWnd").ptr(), core::ptr::null()) == 0 {
+        // A shell's taskbar (Explorer's; shasha's on gala) holds the
+        // icons; without one, on gala, the desktop's own does.
+        // With the argument `shell` a shell started with the session
+        // (gala's `shell=shasha`) is still coming up: wait for its bar,
+        // as a program started at logon waits for TaskbarCreated.
+        let bar_class = W::new("Shell_TrayWnd");
+        let end = GetTickCount64() + if has_arg(b"shell") { 60_000 } else { 0 };
+        while FindWindowW(bar_class.ptr(), core::ptr::null()) == 0 && GetTickCount64() < end {
+            pump_until(usize::MAX, 100);
+        }
+        let shell_bar = FindWindowW(bar_class.ptr(), core::ptr::null()) != 0;
+        let desktop_tray = gala && !shell_bar;
+        if !gala && !shell_bar {
             say(b"tray skipped (no notification area: Explorer's taskbar is not running)");
             return Ok(());
         }
@@ -891,8 +985,8 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
         c.eq(Shell_NotifyIconW(NIM_SETFOCUS, &d) as u64, 0)?;
         d.uid = 1;
 
-        if gala {
-            let packed = (middle.0 as u16 as usize) | (middle.1 as u16 as usize) << 16;
+        let packed = (middle.0 as u16 as usize) | (middle.1 as u16 as usize) << 16;
+        if desktop_tray {
             named_actions(c, hwnd, packed)?;
         }
 
@@ -907,7 +1001,9 @@ fn tray(c: &mut Checks, icon: Handle) -> Result<(), u32> {
             c.ok(pump_until(before + 1, 30_000), 0)?;
             let (_, lp) = got(before);
             c.eq((lp & 0xffff) as u64, NIN_BALLOONSHOW as u64)?;
-            if screen_arg() {
+            if screen_arg() && shell_bar {
+                real_clicks(c, middle, packed)?;
+            } else if screen_arg() {
                 // xtask moves the mouse to the icon and clicks it.
                 let before = COUNT.load(Ordering::Relaxed);
                 say(b"click the icon");

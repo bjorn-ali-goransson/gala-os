@@ -3921,7 +3921,7 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   type and rectangle, and announces it (`uia_client::announce`: `<who>:
   <id> at X,Y (pointer at PX,PY)`); the step's input `click_on <who>:
   <id>` moves the pointer by the difference and clicks (xtask's
-  `expand_input`). So a layout change moves the click with the element,
+  `expand_input`; `right_click_on` with the right button). So a layout change moves the click with the element,
   and the elements' names are tested where they matter. Pixel checks
   are for what only pixels show: that a window or a part of it is drawn
   where it should be (`Most` of a surface's colour), wallpaper, cursor,

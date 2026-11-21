@@ -82,7 +82,7 @@ pub mod uia;
 pub mod win;
 
 pub use paint::{Canvas, FOCUS, FOCUS_BAR, PLACEHOLDER, Set, paint};
-pub use place::{DEFAULT_SIZE, Measure, Placed, click, hit, place, typed};
+pub use place::{DEFAULT_SIZE, Measure, Placed, click, hit, place, right_click, typed};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -112,6 +112,14 @@ pub trait Component {
         wparam: usize,
         lparam: isize,
     ) -> Option<Self::Msg> {
+        let _ = (window, msg, wparam, lparam);
+        None
+    }
+    /// The same messages, answered: the window message's result when the
+    /// program has one (WM_COPYDATA's request done or refused, a count
+    /// read back), asked before [`Component::message`]. The view is built
+    /// again after an answer (the state may have changed).
+    fn answer(&mut self, window: usize, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
         let _ = (window, msg, wparam, lparam);
         None
     }
@@ -263,6 +271,8 @@ pub struct Node<M> {
     pub style: Style,
     pub children: Vec<Node<M>>,
     pub on_click: Option<M>,
+    /// The message a right click (the button's release) sends.
+    pub on_right_click: Option<M>,
     pub on_input: Option<fn(String) -> M>,
 }
 
@@ -276,6 +286,7 @@ fn node<M>(kind: Kind) -> Node<M> {
         style: Style::default(),
         children: Vec::new(),
         on_click: None,
+        on_right_click: None,
         on_input: None,
     }
 }
@@ -445,6 +456,12 @@ impl<M> Node<M> {
     /// The message a click sends.
     pub fn on_click(mut self, m: M) -> Self {
         self.on_click = Some(m);
+        self
+    }
+
+    /// The message a right click sends.
+    pub fn on_right_click(mut self, m: M) -> Self {
+        self.on_right_click = Some(m);
         self
     }
     /// The message for the text typed into an `input`.

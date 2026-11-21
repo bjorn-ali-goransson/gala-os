@@ -19,8 +19,12 @@
 //!   the host's a second time; a WM_SIZE among them lays the view out
 //!   again once the handling ends, and a DestroyWindow among them frees
 //!   the host then.
-//! - Logged: each message handled (`click <id>: <msg>`, `input <id>:
-//!   <msg>`), and a view that could not be laid out (`view: <error>`:
+//! - Pictures: an `image` element shows the picture its `src` names,
+//!   given to the window with [`picture`] (straight-alpha 0xAARRGGBB
+//!   pixels, blended over what is under it); one never given draws
+//!   nothing.
+//! - Logged: each message handled (`click <id>: <msg>`, `right click
+//!   <id>: <msg>`, `input <id>: <msg>`), and a view that could not be laid out (`view: <error>`:
 //!   the window keeps the last one), through the program's `log`.
 
 use alloc::boxed::Box;
@@ -32,7 +36,9 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::{Canvas, Component, Measure, Placed, Set, click, hit, paint, place, typed, uia};
+use crate::{
+    Canvas, Component, Measure, Placed, Set, click, hit, paint, place, right_click, typed, uia,
+};
 
 /// A window handle.
 pub type Hwnd = *mut c_void;
@@ -178,6 +184,46 @@ unsafe extern "system" {
     fn SetTextColor(dc: Handle, color: u32) -> u32;
     fn SetBkMode(dc: Handle, mode: i32) -> i32;
     fn RoundRect(dc: Handle, l: i32, t: i32, r: i32, b: i32, w: i32, h: i32) -> i32;
+    fn CreateCompatibleDC(dc: Handle) -> Handle;
+    fn DeleteDC(dc: Handle) -> i32;
+    fn CreateDIBSection(
+        dc: Handle,
+        info: *const BitmapInfoHeader,
+        usage: u32,
+        bits: *mut *mut c_void,
+        section: Handle,
+        offset: u32,
+    ) -> Handle;
+    #[allow(clippy::too_many_arguments)]
+    fn GdiAlphaBlend(
+        dst: Handle,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        src: Handle,
+        sx: i32,
+        sy: i32,
+        sw: i32,
+        sh: i32,
+        blend: u32,
+    ) -> i32;
+}
+
+/// BITMAPINFOHEADER (a 32-bit DIB needs no colour table).
+#[repr(C)]
+struct BitmapInfoHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    size_image: u32,
+    x_ppm: i32,
+    y_ppm: i32,
+    clr_used: u32,
+    clr_important: u32,
 }
 
 #[link(name = "oleaut32", kind = "raw-dylib")]
@@ -209,6 +255,9 @@ const WM_GETOBJECT: u32 = 0x003d;
 const WM_CHAR: u32 = 0x0102;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONUP: u32 = 0x0205;
+/// BLENDFUNCTION {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA} as a DWORD.
+const BLEND_PER_PIXEL: u32 = 0x01ff_0000;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -306,6 +355,20 @@ pub struct Options<'a> {
     /// Made without being shown: a menu the program shows when asked
     /// (ShowWindow).
     pub hidden: bool,
+    /// The window's class name, when others find the window by it
+    /// (FindWindow: a shell's taskbar is `Shell_TrayWnd`); None for
+    /// "GalaUiWindow".
+    pub class: Option<&'a str>,
+}
+
+/// A picture an `image` element shows (its `src`): `width` x `height`
+/// straight-alpha 0xAARRGGBB pixels, top row first.
+#[derive(Clone)]
+struct Picture {
+    src: String,
+    width: i32,
+    height: i32,
+    pixels: Vec<u32>,
 }
 
 /// What other threads read of the window, behind `busy`.
@@ -330,6 +393,8 @@ struct State {
     /// A WM_SIZE came while the host was handling a message: laid out
     /// again once it is done.
     resized: bool,
+    /// The pictures given ([`picture`]).
+    pictures: Vec<Picture>,
 }
 
 impl Shared {
@@ -369,6 +434,7 @@ fn strip<M>(placed: &[Placed<M>]) -> Vec<Placed<()>> {
             placeholder: p.placeholder.clone(),
             src: p.src.clone(),
             on_click: p.on_click.as_ref().map(|_| ()),
+            on_right_click: p.on_right_click.as_ref().map(|_| ()),
             on_input: None,
             background: p.background,
             border: p.border,
@@ -467,6 +533,11 @@ impl<C: Component> Window for Host<C> {
                     self.handle(hwnd, "click", &id, m);
                 }
             }
+            WM_RBUTTONUP => {
+                let (id, m) = right_click(&self.placed, x, y)?;
+                let id = String::from(id);
+                self.handle(hwnd, "right click", &id, m);
+            }
             WM_CHAR => {
                 let focus = self.shared.with(|s| s.focus.clone())?;
                 let p = self.placed.iter().find(|p| p.id.as_deref() == Some(&focus))?;
@@ -513,6 +584,10 @@ impl<C: Component> Window for Host<C> {
                 return (msg == WM_HOTKEY).then_some(0);
             }
             WM_COPYDATA | WM_USER.. => {
+                if let Some(r) = self.component.answer(hwnd as usize, msg, wparam, lparam) {
+                    self.layout(hwnd);
+                    return Some(r);
+                }
                 let m = self.component.message(hwnd as usize, msg, wparam, lparam)?;
                 self.handle(hwnd, "message", &format!("{msg:#x}"), m);
                 // WM_COPYDATA's TRUE: taken.
@@ -621,10 +696,47 @@ pub fn focus(hwnd: Hwnd, id: &str) -> bool {
     ok
 }
 
+/// Where element `id` of window `hwnd` (a window from [`open`]) is, in
+/// the window's client coordinates (x, y, w, h), as last laid out.
+pub fn element_rect(hwnd: Hwnd, id: &str) -> Option<[i32; 4]> {
+    let shared = shared_of(hwnd)?;
+    shared.with(|s| uia::find(&s.tree, id).map(|i| s.tree[i].rect))
+}
+
 /// Asks for window `hwnd`'s WM_PAINT (a handle, never dereferenced here).
 fn repaint(hwnd: Hwnd) {
     // SAFETY: a window handle; InvalidateRect checks it.
     unsafe { InvalidateRect(hwnd, core::ptr::null(), 0) };
+}
+
+/// Gives window `hwnd` (a window from [`open`]) the picture `src` names
+/// (`width` x `height` straight-alpha 0xAARRGGBB pixels, top row
+/// first), replacing one of the same name, and draws it again: false
+/// when `hwnd` is no such window or the pixels are not that many.
+pub fn picture(hwnd: Hwnd, src: &str, width: i32, height: i32, pixels: &[u32]) -> bool {
+    if width <= 0 || height <= 0 || pixels.len() != (width * height) as usize {
+        return false;
+    }
+    let Some(shared) = shared_of(hwnd) else { return false };
+    let mut copy = Vec::new();
+    if copy.try_reserve_exact(pixels.len()).is_err() {
+        return false;
+    }
+    copy.extend_from_slice(pixels);
+    let p = Picture { src: String::from(src), width, height, pixels: copy };
+    shared.with(|s| {
+        s.pictures.retain(|q| q.src != p.src);
+        s.pictures.push(p);
+    });
+    repaint(hwnd);
+    true
+}
+
+/// Forgets window `hwnd`'s picture `src` (its elements draw nothing).
+pub fn forget_picture(hwnd: Hwnd, src: &str) {
+    if let Some(shared) = shared_of(hwnd) {
+        shared.with(|s| s.pictures.retain(|q| q.src != src));
+    }
 }
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -633,8 +745,9 @@ static REGISTERED: AtomicBool = AtomicBool::new(false);
 /// gets each message handled and each view refused (module docs). None when the window
 /// could not be made. Closing the window ends [`pump`].
 pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) -> Option<Hwnd> {
-    let class = wide("GalaUiWindow");
-    if !REGISTERED.swap(true, Ordering::AcqRel) {
+    let class = wide(o.class.unwrap_or("GalaUiWindow"));
+    // A class of the program's own is registered for its window.
+    if o.class.is_some() || !REGISTERED.swap(true, Ordering::AcqRel) {
         let wc = WndClassW {
             style: 0,
             proc_: wndproc,
@@ -650,8 +763,10 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
         };
         // SAFETY: a class structure naming a live string and our procedure.
         if unsafe { RegisterClassW(&wc) } == 0 {
-            log("RegisterClassW failed");
-            REGISTERED.store(false, Ordering::Release);
+            log(&format!("RegisterClassW {} failed", o.class.unwrap_or("GalaUiWindow")));
+            if o.class.is_none() {
+                REGISTERED.store(false, Ordering::Release);
+            }
             return None;
         }
     }
@@ -687,6 +802,7 @@ pub fn open<C: Component + 'static>(component: C, o: &Options, log: fn(&str)) ->
             focus: None,
             alive: true,
             resized: false,
+            pictures: Vec::new(),
         }),
     });
     let mut h = Host { component, placed: Vec::new(), shared: shared.clone(), log };
@@ -729,7 +845,8 @@ pub fn draw(hwnd: Hwnd, dc: Handle) -> bool {
 }
 
 fn draw_into(shared: &Shared, hwnd: Hwnd, dc: Handle) {
-    let (tree, focus) = shared.with(|s| (s.tree.clone(), s.focus.clone()));
+    let (tree, focus, pictures) =
+        shared.with(|s| (s.tree.clone(), s.focus.clone(), s.pictures.clone()));
     let mut r = Rect::default();
     // SAFETY: our window; a brush for the background, deleted after.
     unsafe {
@@ -739,6 +856,7 @@ fn draw_into(shared: &Shared, hwnd: Hwnd, dc: Handle) {
         DeleteObject(b);
     }
     let mut g = Gdi::new(dc);
+    g.pictures = pictures;
     paint(&tree, focus.as_deref(), &mut g);
 }
 
@@ -750,12 +868,14 @@ pub struct Gdi {
     dc: Handle,
     fonts: Vec<((u32, bool), Handle)>,
     old_font: Handle,
+    /// What `image` elements show (a window's, [`picture`]).
+    pictures: Vec<Picture>,
 }
 
 impl Gdi {
     /// On `dc`, which outlives it.
     pub fn new(dc: Handle) -> Gdi {
-        Gdi { dc, fonts: Vec::new(), old_font: core::ptr::null_mut() }
+        Gdi { dc, fonts: Vec::new(), old_font: core::ptr::null_mut(), pictures: Vec::new() }
     }
 
     fn font(&mut self, size: f32, bold: bool) {
@@ -899,6 +1019,57 @@ impl Canvas for Gdi {
         }
         self.draw_text(text, &mut r, format);
     }
+
+    /// The picture `src` names, scaled to `at` and blended over what is
+    /// there (GdiAlphaBlend with its premultiplied pixels).
+    fn image(&mut self, at: [i32; 4], src: &str) {
+        let Some(p) = self.pictures.iter().find(|p| p.src == src) else { return };
+        let info = BitmapInfoHeader {
+            size: size_of::<BitmapInfoHeader>() as u32,
+            width: p.width,
+            // Negative: top row first.
+            height: -p.height,
+            planes: 1,
+            bit_count: 32,
+            compression: 0,
+            size_image: 0,
+            x_ppm: 0,
+            y_ppm: 0,
+            clr_used: 0,
+            clr_important: 0,
+        };
+        let mut bits: *mut c_void = core::ptr::null_mut();
+        // SAFETY: a DC and a DIB section of the picture's size, both
+        // deleted below; the section's bits are width x height u32s.
+        unsafe {
+            let mem = CreateCompatibleDC(self.dc);
+            if mem.is_null() {
+                return;
+            }
+            let dib = CreateDIBSection(mem, &info, 0, &mut bits, core::ptr::null_mut(), 0);
+            if dib.is_null() || bits.is_null() {
+                DeleteDC(mem);
+                return;
+            }
+            let out = core::slice::from_raw_parts_mut(bits.cast::<u32>(), p.pixels.len());
+            for (o, &px) in out.iter_mut().zip(&p.pixels) {
+                *o = premultiplied(px);
+            }
+            let old = SelectObject(mem, dib);
+            let [x, y, w, h] = at;
+            GdiAlphaBlend(self.dc, x, y, w, h, mem, 0, 0, p.width, p.height, BLEND_PER_PIXEL);
+            SelectObject(mem, old);
+            DeleteObject(dib);
+            DeleteDC(mem);
+        }
+    }
+}
+
+/// A straight-alpha 0xAARRGGBB pixel with its colour scaled by its alpha.
+fn premultiplied(px: u32) -> u32 {
+    let a = px >> 24;
+    let scale = |shift: u32| ((((px >> shift) & 0xff) * a + 127) / 255) << shift;
+    a << 24 | scale(16) | scale(8) | scale(0)
 }
 
 // ---- UI Automation: the providers ----

@@ -863,9 +863,8 @@ shell part) leaves it.
       the active one; the list follows WinEvents. When shasha ends the
       desktop's own taskbar is back on the same strip. Test:
       `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
-      "The user-mode shell"). Not yet in shasha: the notification
-      area (the tray's icons are the kernel taskbar's), the wallpaper,
-      the window buttons' icons; the shell's bar is not told when the
+      "The user-mode shell"). Not yet in shasha: the wallpaper, the
+      window buttons' icons; the shell's bar is not told when the
       screen changes size.
    7. Done: shasha's own start menu, a gala_ui window ("Start", popup,
       topmost, hidden until opened) centred above the taskbar: the
@@ -880,7 +879,24 @@ shell part) leaves it.
       ACTION_MENU stopgap is gone. Test: `shasha_test`, scenario
       `shasha`. Not yet: pinned/recent programs, the user and power
       buttons, keyboard navigation of the tiles.
-   Then the tray and the wallpaper in `shasha.exe`,
+   8. Done: shasha's notification area. The strip's window has
+      Explorer's class `Shell_TrayWnd`; shell32's Shell_NotifyIcon
+      finds it and sends its request (WM_COPYDATA: NIM_ message and
+      request, or an icon's corners for Shell_NotifyIconGetRect), and
+      the kernel's GalaTrayIcon is used only when no such window exists
+      (a stopgap that goes with the kernel's shell code). The icons are
+      gala_ui slots left of the clock with their pictures (gala_ui
+      `image` drawn with GdiAlphaBlend); a click or right click posts
+      the icon's window the callbacks of its version (version 4: the
+      point and NIN_SELECT/WM_CONTEXTMENU); an icon whose window is
+      gone is dropped; a balloon is shasha's "Notification" window
+      above the clock for 7 s or until clicked. gala_ui gained
+      right clicks, pictures, element rectangles, a window class and
+      answers to sent messages. Test: `tray_test` with `args=screen
+      shell`, scenario `shasha_tray` (real clicks through
+      `click_on`/`right_click_on`, the balloon's pixels). Not yet: the
+      overflow (more icons than fit), keyboard focus of the icons.
+   Then the wallpaper in `shasha.exe`,
    shasha the default shell, and the kernel's shell code (about 4-5k
    lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
    Linux and install tiles) removed.

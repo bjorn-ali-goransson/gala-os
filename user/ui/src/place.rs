@@ -34,6 +34,7 @@ pub struct Placed<M> {
     pub placeholder: String,
     pub src: String,
     pub on_click: Option<M>,
+    pub on_right_click: Option<M>,
     pub on_input: Option<fn(String) -> M>,
     pub background: Option<u32>,
     pub border: Option<u32>,
@@ -64,6 +65,12 @@ pub fn hit<M>(placed: &[Placed<M>], x: i32, y: i32) -> Option<&Placed<M>> {
 pub fn click<M: Clone>(placed: &[Placed<M>], x: i32, y: i32) -> Option<(&str, M)> {
     let p = hit(placed, x, y)?;
     Some((p.id.as_deref()?, p.on_click.clone()?))
+}
+
+/// What a right click at (x, y) does, as [`click`].
+pub fn right_click<M: Clone>(placed: &[Placed<M>], x: i32, y: i32) -> Option<(&str, M)> {
+    let p = hit(placed, x, y)?;
+    Some((p.id.as_deref()?, p.on_right_click.clone()?))
 }
 
 /// The message for `text` typed into the input `id`, when it takes text.
@@ -143,7 +150,9 @@ impl<'a, M: Clone> Builder<'a, M> {
         if self.path.len() > MAX_DEPTH {
             return Err(self.err(format!("nested deeper than {MAX_DEPTH}")));
         }
-        if n.id.is_none() && (n.on_click.is_some() || n.on_input.is_some()) {
+        if n.id.is_none()
+            && (n.on_click.is_some() || n.on_right_click.is_some() || n.on_input.is_some())
+        {
             return Err(self.err("a handler needs an id"));
         }
         if n.on_input.is_some() && n.kind != Kind::Input {
@@ -238,6 +247,7 @@ impl<'a, M: Clone> Builder<'a, M> {
             placeholder: n.placeholder.clone(),
             src: n.src.clone(),
             on_click: n.on_click.clone(),
+            on_right_click: n.on_right_click.clone(),
             on_input: n.on_input,
             background: s.background,
             border: s.border,
@@ -596,5 +606,24 @@ mod tests {
         // A click on what sends nothing is no message.
         assert!(click(&p, 2, 2).is_none());
         assert!(typed(&p, "MakeButton", String::new()).is_none());
+    }
+
+    #[test]
+    fn a_right_click_is_its_own_handler() {
+        let view = crate::row::<Msg>()
+            .child(
+                crate::text("both")
+                    .id("Both")
+                    .on_click(Msg::Make)
+                    .on_right_click(Msg::Request("menu".to_string())),
+            )
+            .child(crate::text("left").id("Left").on_click(Msg::Make));
+        let p = lay(&view, 400.0);
+        let [x, y, ..] = at(&p, "Both").rect;
+        assert_eq!(click(&p, x + 1, y + 1), Some(("Both", Msg::Make)));
+        assert_eq!(right_click(&p, x + 1, y + 1), Some(("Both", Msg::Request("menu".to_string()))));
+        // A right click on what has only a click is nothing.
+        let [x, y, ..] = at(&p, "Left").rect;
+        assert!(right_click(&p, x + 1, y + 1).is_none());
     }
 }

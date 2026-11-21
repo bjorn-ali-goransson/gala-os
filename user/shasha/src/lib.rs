@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use gala_ui::{Align, Justify, Node, button, row, text};
 
 mod menu;
+pub mod tray;
 pub use menu::{
     MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Program, StartMenu, TILES_IN_ROW, parse_programs,
     program_id,
@@ -73,12 +74,21 @@ pub enum Msg {
     Windows(Vec<Task>),
     /// The clock's text (`HH:MM`).
     Clock(String),
+    /// A click on a notification-area icon (its window and id).
+    TrayClick(u64, u32),
+    /// A right click on one.
+    TrayRightClick(u64, u32),
+    /// The notification area changed (a Shell_NotifyIcon, a balloon's
+    /// time, an icon's window gone): the view is built again.
+    TrayChanged,
 }
 
 #[derive(Default)]
 pub struct Taskbar {
     pub tasks: Vec<Task>,
     pub clock: String,
+    /// The notification area, left of the clock.
+    pub tray: tray::Tray,
 }
 
 /// The AutomationId of window `hwnd`'s button.
@@ -135,7 +145,11 @@ impl Taskbar {
             Msg::Clock(c) => self.clock = c,
             // The program asks the desktop; the list it reads back after
             // the WinEvents says what came of it.
-            Msg::Start | Msg::Task(_) => {}
+            Msg::Start
+            | Msg::Task(_)
+            | Msg::TrayClick(..)
+            | Msg::TrayRightClick(..)
+            | Msg::TrayChanged => {}
         }
     }
 
@@ -182,6 +196,8 @@ impl Taskbar {
                 row()
                     .grow(1)
                     .justify(Justify::End)
+                    .align(Align::Center)
+                    .child(self.tray.view(Msg::TrayClick, Msg::TrayRightClick))
                     .child(text(self.clock.clone()).id("Clock").size(13).width(56)),
             )
     }

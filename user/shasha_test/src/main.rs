@@ -6,7 +6,7 @@
 //! with the screen scenario clicking the taskbar's buttons, found by UI
 //! Automation:
 //!
-//! - the taskbar's window ("Taskbar", a GalaUiWindow) is the shell's
+//! - the taskbar's window ("Taskbar", of class Shell_TrayWnd as Explorer's) is the shell's
 //!   window (GetShellWindow) and the strip at the bottom of the screen,
 //!   `HEIGHT` (48) high and the whole width; ABM_GETTASKBARPOS answers
 //!   with that strip on the bottom edge, and the work area ends above it;
@@ -406,7 +406,7 @@ fn run() -> Result<(), u32> {
 
         // The taskbar, started with the session: the shell's window, the
         // strip, the bar ABM_GETTASKBARPOS names.
-        let (class, title) = (W::new("GalaUiWindow"), W::new("Taskbar"));
+        let (class, title) = (W::new("Shell_TrayWnd"), W::new("Taskbar"));
         let found = pump(STEP_MS, || {
             let t = FindWindowW(class.ptr(), title.ptr());
             t != 0 && GetShellWindow() == t && window_rect(t) == strip
@@ -492,12 +492,12 @@ fn run() -> Result<(), u32> {
         c.ok(start.is_some(), 0)?;
         uia_client::announce(NAME, "StartButton", &start.unwrap_or_else(|| unreachable!()));
         say(b"menu ready");
-        let menu_title = W::new("Start");
+        let (menu_class, menu_title) = (W::new("GalaUiWindow"), W::new("Start"));
         let shown = pump(STEP_MS, || {
-            let m = FindWindowW(class.ptr(), menu_title.ptr());
+            let m = FindWindowW(menu_class.ptr(), menu_title.ptr());
             m != 0 && IsWindowVisible(m) != 0 && GetForegroundWindow() == m
         });
-        let menu = FindWindowW(class.ptr(), menu_title.ptr());
+        let menu = FindWindowW(menu_class.ptr(), menu_title.ptr());
         c.ok(menu != 0, 0)?;
         c.ok(shown, GetForegroundWindow() as i64)?;
         let r = window_rect(menu);

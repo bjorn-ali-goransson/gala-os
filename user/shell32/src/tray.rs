@@ -10,6 +10,15 @@
 //! taskbar draws at 16 x 16. Where gala runs no shell (a bare desktop:
 //! no screen, the server profile) there is no notification area and the
 //! calls fail as on Windows without Explorer (recorded).
+//!
+//! A shell's taskbar (`Shell_TrayWnd`: shasha's on gala, Explorer's on
+//! Windows) holds the icons when there is one: the request goes to it by
+//! WM_COPYDATA ([`to_shell`]: dwData [`COPY_NOTIFY`], the message, then
+//! the same request GalaTrayIcon takes), its answer TRUE or FALSE, and
+//! Shell_NotifyIconGetRect asks it for the icon's corners
+//! ([`COPY_TOP_LEFT`], [`COPY_BOTTOM_RIGHT`]). The kernel's tray answers
+//! only where no such window is (the desktop's own taskbar: a stopgap
+//! until the kernel's shell code is gone, ROADMAP SH step 1).
 
 use crate::unsupported;
 use core::ffi::c_void;
@@ -32,6 +41,78 @@ unsafe extern "system" {
     fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, m: i32) -> i32;
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> *const c_void;
+}
+
+/// WM_COPYDATA's dwData to `Shell_TrayWnd`: a Shell_NotifyIcon (the
+/// message, then the request).
+pub const COPY_NOTIFY: usize = 1;
+/// The icon's top left corner (MAKELONG(left, top)), -1 when not there.
+pub const COPY_TOP_LEFT: usize = 3;
+/// Its bottom right corner (MAKELONG(right, bottom)).
+pub const COPY_BOTTOM_RIGHT: usize = 4;
+const WM_COPYDATA: u32 = 0x004a;
+const SMTO_ABORTIFHUNG: u32 = 0x0002;
+/// How long the taskbar has to answer (Windows' shell waits as long).
+const SHELL_TIMEOUT_MS: u32 = 4000;
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    data: usize,
+    size: u32,
+    bytes: *const u8,
+}
+
+/// user32's function `name` (NUL-terminated), 0 without it.
+fn user32_fn(name: &core::ffi::CStr) -> usize {
+    const USER32: [u16; 11] = [117, 115, 101, 114, 51, 50, 46, 100, 108, 108, 0];
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let m = LoadLibraryW(USER32.as_ptr());
+        if m == 0 { 0 } else { GetProcAddress(m, name.as_ptr().cast()) as usize }
+    }
+}
+
+/// The shell's taskbar (`Shell_TrayWnd`), when one runs.
+fn shell_bar() -> usize {
+    let find = user32_fn(c"FindWindowW");
+    if find == 0 {
+        return 0;
+    }
+    const CLASS: [u16; 14] = [83, 104, 101, 108, 108, 95, 84, 114, 97, 121, 87, 110, 100, 0];
+    // SAFETY: user32's documented signature; a NUL-terminated class.
+    let find: extern "system" fn(*const u16, *const u16) -> usize =
+        unsafe { core::mem::transmute(find) };
+    find(CLASS.as_ptr(), core::ptr::null())
+}
+
+/// Sends `bytes` to the shell's taskbar `bar` by WM_COPYDATA (dwData
+/// `kind`, wParam the icon's window): its answer, None when it gave
+/// none in time (recorded).
+fn to_shell(bar: usize, kind: usize, from: usize, bytes: &[u8]) -> Option<isize> {
+    let send = user32_fn(c"SendMessageTimeoutW");
+    if send == 0 {
+        return None;
+    }
+    // SAFETY: user32's documented signature.
+    let send: extern "system" fn(usize, u32, usize, isize, u32, u32, *mut isize) -> isize =
+        unsafe { core::mem::transmute(send) };
+    let cd = CopyData { data: kind, size: bytes.len() as u32, bytes: bytes.as_ptr() };
+    let mut answer = 0isize;
+    let sent = send(
+        bar,
+        WM_COPYDATA,
+        from,
+        &cd as *const CopyData as isize,
+        SMTO_ABORTIFHUNG,
+        SHELL_TIMEOUT_MS,
+        &mut answer,
+    );
+    if sent == 0 {
+        unsupported(b"shell32.dll!Shell_NotifyIcon(the taskbar did not answer)", kind as u64);
+        return None;
+    }
+    Some(answer)
 }
 
 const NIM_SETVERSION: u32 = 4;
@@ -247,6 +328,14 @@ fn notify(message: u32, d: &DataW, size: usize, sizes: [usize; 4]) -> i32 {
             None => unsupported(b"shell32.dll!Shell_NotifyIcon(icon not readable)", d.icon as u64),
         }
     }
+    let bar = shell_bar();
+    if bar != 0 {
+        // The message, then the request.
+        let mut b = [0u8; 4 + REQUEST];
+        b[..4].copy_from_slice(&message.to_le_bytes());
+        b[4..].copy_from_slice(&r.0);
+        return i32::from(to_shell(bar, COPY_NOTIFY, d.hwnd, &b) == Some(1));
+    }
     // SAFETY: our request of REQUEST bytes.
     let status = unsafe { GalaTrayIcon(message, r.0.as_ptr(), REQUEST, core::ptr::null_mut()) };
     if status == STATUS_NOT_SUPPORTED {
@@ -345,6 +434,25 @@ pub extern "system" fn Shell_NotifyIconGetRect(id: *const Identifier, rect: *mut
         for (i, w) in id.guid.iter().enumerate() {
             r.put32(40 + 4 * i, *w);
         }
+    }
+    let bar = shell_bar();
+    if bar != 0 {
+        let corner = |kind| {
+            let a = to_shell(bar, kind, id.hwnd, &r.0)? as u32;
+            (a != u32::MAX).then_some((a as u16 as i16 as i32, (a >> 16) as u16 as i16 as i32))
+        };
+        let (Some((l, t)), Some((rr, b))) = (corner(COPY_TOP_LEFT), corner(COPY_BOTTOM_RIGHT))
+        else {
+            return E_FAIL;
+        };
+        // SAFETY: the caller's RECT (left, top, right, bottom).
+        unsafe {
+            *rect = l;
+            *rect.add(1) = t;
+            *rect.add(2) = rr;
+            *rect.add(3) = b;
+        }
+        return S_OK;
     }
     let mut xywh = [0i32; 4];
     // SAFETY: our request and rectangle.

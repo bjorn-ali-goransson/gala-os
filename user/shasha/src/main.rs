@@ -27,6 +27,17 @@
 //!   starts its program (ACTION_START, a console program in a console
 //!   window of its own) and hides the menu; another window becoming
 //!   active hides it too (WM_ACTIVATE), as on Windows.
+//! - **The notification area** (part 8): the strip's window is
+//!   `Shell_TrayWnd`, the class Explorer's taskbar has, which shell32's
+//!   Shell_NotifyIcon finds and sends its request to (WM_COPYDATA,
+//!   dwData 1: the NIM_ message and the request; 3 and 4: an icon's
+//!   corners for Shell_NotifyIconGetRect). The icons are slots left of
+//!   the clock (`shasha::tray`); a click or right click on one posts its
+//!   window the callback messages, the point the slot's middle. An icon
+//!   whose window is gone goes when the window list is read again or a
+//!   post to it fails. A balloon (NIF_INFO) is a third window
+//!   ("Notification", a popup above the clock) for BALLOON_SECONDS of
+//!   the clock's seconds, or until it is clicked.
 //! - **The clock**: the local time, read each second (WM_TIMER), the
 //!   view changed when the minute does.
 //!
@@ -39,8 +50,11 @@
 //! window list that changed (how many windows), every click and the
 //! desktop's answer (its NTSTATUS when refused), the menu opening (how
 //! many programs) and closing (why), each program started (its path and
-//! pid, or the status), the hot key refused, and gala_ui's line for each
-//! message handled (`click Task20010: ...`).
+//! pid, or the status), the hot key refused, every notification-area
+//! request (`notification-area icon added: window W id N "tip"`, or
+//! refused and why), every click on an icon and what it posted, a post
+//! that failed (the icon dropped), each balloon shown and how it went,
+//! and gala_ui's line for each message handled (`click Task20010: ...`).
 
 #![no_std]
 #![no_main]
@@ -50,11 +64,15 @@ extern crate alloc;
 use gala_heap as _;
 
 use alloc::format;
+use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use gala_ui::{Component, Node, win};
+use gala_ui::{Component, Node, column, text, win};
+use shasha::tray::{self, Button, Key, Refused};
 use shasha::{
     Click, HEIGHT, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Msg, StartMenu, Taskbar, clock_text,
     parse_programs, parse_windows,
@@ -106,11 +124,24 @@ const MOD_WIN: u32 = 0x0008;
 const VK_LWIN: u32 = 0x5b;
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
+const SW_SHOWNOACTIVATE: i32 = 4;
 /// Read the window list again (the WinEvent hook's, posted).
 const WM_APP_WINDOWS: u32 = 0x8001;
 /// Show or hide the start menu (the Start button's, posted to the menu).
 const WM_APP_TOGGLE: u32 = 0x8002;
 const CLOCK_TIMER: usize = 1;
+const WM_COPYDATA: u32 = 0x004a;
+/// The balloon changed (the taskbar's, posted to the balloon's window).
+const WM_APP_BALLOON: u32 = 0x8003;
+/// The balloon was clicked (posted to the taskbar's window).
+const WM_APP_BALLOON_CLICK: u32 = 0x8004;
+/// WM_COPYDATA's dwData from shell32 (user/shell32/src/tray.rs).
+const COPY_NOTIFY: usize = 1;
+const COPY_TOP_LEFT: usize = 3;
+const COPY_BOTTOM_RIGHT: usize = 4;
+/// The balloon's window.
+const BALLOON_WIDTH: i32 = 360;
+const BALLOON_HEIGHT: i32 = 96;
 /// The start menu's hot key's id (the Windows key alone).
 const MENU_HOT_KEY: i32 = 1;
 
@@ -153,6 +184,8 @@ unsafe extern "system" {
     fn SetWindowPos(hwnd: Handle, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32)
     -> Bool;
     fn PostMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> Bool;
+    fn IsWindow(hwnd: Handle) -> Bool;
+    fn ClientToScreen(hwnd: Handle, point: *mut [i32; 2]) -> Bool;
     fn SetShellWindow(hwnd: Handle) -> Bool;
     fn ShowWindow(hwnd: Handle, cmd: i32) -> Bool;
     fn IsWindowVisible(hwnd: Handle) -> Bool;
@@ -206,6 +239,20 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// The start menu's window (0 until it is made).
 static MENU: AtomicUsize = AtomicUsize::new(0);
+/// The balloon's window (0 until it is made).
+static BALLOON: AtomicUsize = AtomicUsize::new(0);
+
+/// COPYDATASTRUCT.
+#[repr(C)]
+struct CopyData {
+    data: usize,
+    size: u32,
+    bytes: *const u8,
+}
+
+/// The balloon on show: its title and text (the taskbar's to set, the
+/// balloon's window's to draw; both on this thread).
+type Shown = Rc<RefCell<Option<(String, String)>>>;
 
 fn window() -> Handle {
     WINDOW.load(Ordering::Acquire) as Handle
@@ -331,6 +378,157 @@ extern "system" fn changed(
 
 struct App {
     bar: Taskbar,
+    balloon: Shown,
+}
+
+impl App {
+    /// Icon `key`'s slot on the screen (x, y, w, h), as last laid out.
+    fn slot(&self, key: (u64, u32)) -> Option<[i32; 4]> {
+        let [x, y, w, h] = win::element_rect(window(), &tray::icon_id(key.0, key.1))?;
+        let mut p = [x, y];
+        // SAFETY: our window; a POINT.
+        unsafe { ClientToScreen(window(), &mut p) };
+        Some([p[0], p[1], w, h])
+    }
+
+    /// A Shell_NotifyIcon from shell32 (WM_COPYDATA's `bytes`): TRUE
+    /// when done.
+    fn notify(&mut self, bytes: &[u8]) -> isize {
+        let Some((message, d)) = tray::parse_notify(bytes) else {
+            log(&format!("notification-area request refused: malformed ({} bytes)", bytes.len()));
+            return 0;
+        };
+        let verb = match message {
+            tray::NIM_ADD => "added",
+            tray::NIM_MODIFY => "modified",
+            tray::NIM_DELETE => "deleted",
+            tray::NIM_SETFOCUS => "focused",
+            tray::NIM_SETVERSION => "set to version",
+            _ => "asked",
+        };
+        let who = format!("window {:#x} id {}", d.hwnd, d.uid);
+        let before = self.bar.tray.balloon.clone();
+        match self.bar.tray.apply_message(message, &d) {
+            Ok(()) => {
+                let id = tray::icon_id(d.hwnd, d.uid);
+                match message {
+                    tray::NIM_SETVERSION => {
+                        log(&format!("notification-area icon {who} {verb} {}", d.version))
+                    }
+                    _ => {
+                        // The tip it has now (a NIM_MODIFY without NIF_TIP
+                        // keeps its own).
+                        let tip = self
+                            .bar
+                            .tray
+                            .find(Key::of(&d))
+                            .map(|i| self.bar.tray.icons[i].tip.clone());
+                        log(&format!(
+                            "notification-area icon {verb}: {who} \"{}\"",
+                            tip.unwrap_or(d.tip)
+                        ))
+                    }
+                }
+                if message == tray::NIM_DELETE {
+                    win::forget_picture(window(), &id);
+                } else if d.flags & tray::NIF_ICON != 0 && d.side > 0 {
+                    let side = d.side as i32;
+                    if !win::picture(window(), &id, side, side, &d.icon) {
+                        log(&format!("notification-area icon {who}: its picture is not drawn"));
+                    }
+                }
+                self.balloon_changed(before);
+                self.post();
+                1
+            }
+            Err(why) => {
+                let why = match why {
+                    Refused::Exists => "it is there",
+                    Refused::Missing => "no such icon",
+                    Refused::Full => "the area is full",
+                    Refused::Malformed => "not a NIM_ message",
+                };
+                log(&format!(
+                    "notification-area {} ({message}) for {who} refused: {why}",
+                    nim_name(message)
+                ));
+                0
+            }
+        }
+    }
+
+    /// Shell_NotifyIconGetRect's corner (`kind`) of the icon shell32's
+    /// request names: MAKELONG(x, y), -1 when it is not shown.
+    fn corner(&self, kind: usize, bytes: &[u8]) -> isize {
+        let Some(d) = tray::parse_request(bytes) else { return -1 };
+        let Some(i) = self.bar.tray.find(Key::of(&d)) else { return -1 };
+        let icon = &self.bar.tray.icons[i];
+        let Some([x, y, w, h]) = self.slot((icon.hwnd, icon.uid)) else { return -1 };
+        let (cx, cy) = if kind == COPY_TOP_LEFT { (x, y) } else { (x + w, y + h) };
+        (u32::from(cx as u16) | u32::from(cy as u16) << 16) as i32 as isize
+    }
+
+    /// Posts what the notification area has for programs' windows; an
+    /// icon whose window is gone (the post fails) goes with it.
+    fn post(&mut self) {
+        for p in core::mem::take(&mut self.bar.tray.posts) {
+            // SAFETY: a window handle the program gave; PostMessageW
+            // checks it.
+            let ok = unsafe {
+                PostMessageW(p.hwnd as Handle, p.message, p.wparam as usize, p.lparam as isize)
+            } != 0;
+            if !ok {
+                for (h, u) in self.bar.tray.drop_gone(|h| h == p.hwnd) {
+                    log(&format!("notification-area icon dropped: window {h:#x} id {u} is gone"));
+                    win::forget_picture(window(), &tray::icon_id(h, u));
+                }
+            }
+        }
+    }
+
+    /// Tells the balloon's window when the balloon is not `before`.
+    fn balloon_changed(&mut self, before: Option<tray::Balloon>) {
+        let now = &self.bar.tray.balloon;
+        let same = match (&before, now) {
+            (Some(a), Some(b)) => {
+                (a.hwnd, a.uid, &a.title, &a.text) == (b.hwnd, b.uid, &b.title, &b.text)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        match now {
+            Some(b) => log(&format!(
+                "notification-area balloon shown for window {:#x} id {}: \"{}\"",
+                b.hwnd, b.uid, b.title
+            )),
+            None => log("notification-area balloon gone"),
+        }
+        *self.balloon.borrow_mut() = now.as_ref().map(|b| (b.title.clone(), b.text.clone()));
+        let w = BALLOON.load(Ordering::Acquire) as Handle;
+        // SAFETY: our balloon window (or none: refused).
+        if unsafe { PostMessageW(w, WM_APP_BALLOON, 0, 0) } == 0 {
+            log("the balloon's window is not there: the balloon is not drawn");
+        }
+    }
+
+    /// A click on icon `key` with `button`.
+    fn click(&mut self, key: (u64, u32), button: Button) {
+        let Some([x, y, w, h]) = self.slot(key) else { return };
+        let at = (x + w / 2, y + h / 2);
+        self.bar.tray.click(key, button, at);
+        let what = if button == Button::Left { "click" } else { "right click" };
+        log(&format!(
+            "notification-area {what} on icon {} at {},{}: {} message(s) posted",
+            tray::icon_id(key.0, key.1),
+            at.0,
+            at.1,
+            self.bar.tray.posts.len()
+        ));
+        self.post();
+    }
 }
 
 impl Component for App {
@@ -369,23 +567,153 @@ impl Component for App {
             Msg::Windows(tasks) => {
                 log(&format!("{} window(s) listed", tasks.len()));
             }
-            Msg::Clock(_) => {}
+            Msg::TrayClick(h, u) => self.click((*h, *u), Button::Left),
+            Msg::TrayRightClick(h, u) => self.click((*h, *u), Button::Right),
+            Msg::Clock(_) | Msg::TrayChanged => {}
         }
         self.bar.update(msg);
+    }
+
+    fn answer(&mut self, _: usize, msg: u32, _: usize, lparam: isize) -> Option<isize> {
+        if msg != WM_COPYDATA || lparam == 0 {
+            return None;
+        }
+        // SAFETY: WM_COPYDATA's COPYDATASTRUCT and its bytes, alive for
+        // the send.
+        let (kind, bytes) = unsafe {
+            let cd = &*(lparam as *const CopyData);
+            let bytes = if cd.bytes.is_null() {
+                &[][..]
+            } else {
+                core::slice::from_raw_parts(cd.bytes, cd.size as usize)
+            };
+            (cd.data, bytes)
+        };
+        match kind {
+            COPY_NOTIFY => Some(self.notify(bytes)),
+            COPY_TOP_LEFT | COPY_BOTTOM_RIGHT => Some(self.corner(kind, bytes)),
+            _ => None,
+        }
     }
 
     fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<Msg> {
         match msg {
             WM_APP_WINDOWS => {
+                // An icon whose window is gone goes (as Windows' shell
+                // drops it).
+                // SAFETY: handles the programs gave; IsWindow checks them.
+                let dropped = self.bar.tray.drop_gone(|h| unsafe { IsWindow(h as Handle) } == 0);
+                for (h, u) in &dropped {
+                    log(&format!("notification-area icon dropped: window {h:#x} id {u} is gone"));
+                    win::forget_picture(window(), &tray::icon_id(*h, *u));
+                }
                 let tasks = windows()?;
-                (tasks != self.bar.tasks).then_some(Msg::Windows(tasks))
+                if tasks != self.bar.tasks {
+                    Some(Msg::Windows(tasks))
+                } else {
+                    (!dropped.is_empty()).then_some(Msg::TrayChanged)
+                }
+            }
+            WM_APP_BALLOON_CLICK => {
+                let before = self.bar.tray.balloon.clone();
+                log("notification-area balloon clicked");
+                self.bar.tray.balloon_clicked();
+                self.balloon_changed(before);
+                self.post();
+                Some(Msg::TrayChanged)
             }
             WM_TIMER if wparam == CLOCK_TIMER => {
+                let before = self.bar.tray.balloon.clone();
+                if self.bar.tray.tick() {
+                    log("notification-area balloon timed out");
+                    self.balloon_changed(before);
+                    self.post();
+                }
                 let c = clock();
                 (c != self.bar.clock).then_some(Msg::Clock(c))
             }
             _ => None,
         }
+    }
+}
+
+/// Shell_NotifyIcon's message `m` by name.
+fn nim_name(m: u32) -> &'static str {
+    match m {
+        tray::NIM_ADD => "NIM_ADD",
+        tray::NIM_MODIFY => "NIM_MODIFY",
+        tray::NIM_DELETE => "NIM_DELETE",
+        tray::NIM_SETFOCUS => "NIM_SETFOCUS",
+        tray::NIM_SETVERSION => "NIM_SETVERSION",
+        _ => "an unknown message",
+    }
+}
+
+/// The balloon's window: the title and text the taskbar set.
+struct BalloonWindow {
+    shown: Shown,
+}
+
+#[derive(Clone, Debug)]
+enum BalloonMsg {
+    Changed,
+    Click,
+}
+
+impl Component for BalloonWindow {
+    type Msg = BalloonMsg;
+
+    fn view(&self) -> Node<BalloonMsg> {
+        let (title, body) = self.shown.borrow().clone().unwrap_or_default();
+        column()
+            .id("Balloon")
+            .bg(0xffffff)
+            .border(0xd7dce3)
+            .padding(12)
+            .gap(4)
+            .on_click(BalloonMsg::Click)
+            .child(text(title).id("BalloonTitle").bold().size(14).ellipsis())
+            .child(text(body).id("BalloonText").size(13))
+    }
+
+    fn update(&mut self, msg: BalloonMsg) {
+        let hwnd = BALLOON.load(Ordering::Acquire) as Handle;
+        match msg {
+            BalloonMsg::Changed => {
+                let cmd = if self.shown.borrow().is_some() { SW_SHOWNOACTIVATE } else { SW_HIDE };
+                // SAFETY: our window.
+                unsafe { ShowWindow(hwnd, cmd) };
+            }
+            BalloonMsg::Click => {
+                // SAFETY: our taskbar window; it tells the icon.
+                unsafe { PostMessageW(window(), WM_APP_BALLOON_CLICK, 0, 0) };
+            }
+        }
+    }
+
+    fn message(&mut self, _: usize, msg: u32, _: usize, _: isize) -> Option<BalloonMsg> {
+        (msg == WM_APP_BALLOON).then_some(BalloonMsg::Changed)
+    }
+}
+
+/// Makes the balloon's window (hidden) above the strip at `bar_top`, at
+/// the right of a screen `sw` wide.
+fn make_balloon(sw: i32, bar_top: i32, shown: Shown) {
+    let options = win::Options {
+        title: "Notification",
+        x: sw - BALLOON_WIDTH - MENU_GAP,
+        y: bar_top - MENU_GAP - BALLOON_HEIGHT,
+        width: BALLOON_WIDTH,
+        height: BALLOON_HEIGHT,
+        topmost: true,
+        popup: true,
+        no_activate: true,
+        hidden: true,
+        class: None,
+    };
+    match win::open(BalloonWindow { shown }, &options, log) {
+        Some(hwnd) => BALLOON.store(hwnd as usize, Ordering::Release),
+        None => log("the balloon's window could not be made: balloons are not drawn"),
     }
 }
 
@@ -484,6 +812,7 @@ fn make_menu(sw: i32, bar_top: i32) {
         popup: true,
         no_activate: false,
         hidden: true,
+        class: None,
     };
     let Some(hwnd) = win::open(Menu { menu: StartMenu::default() }, &options, log) else {
         log("the start menu's window could not be made: Start does nothing");
@@ -513,8 +842,12 @@ pub extern "C" fn mainCRTStartup() -> ! {
         popup: true,
         no_activate: true,
         hidden: false,
+        // Where shell32's Shell_NotifyIcon finds the notification area.
+        class: Some("Shell_TrayWnd"),
     };
-    let app = App { bar: Taskbar { tasks: Vec::new(), clock: clock() } };
+    let shown: Shown = Rc::new(RefCell::new(None));
+    let bar = Taskbar { tasks: Vec::new(), clock: clock(), tray: tray::Tray::default() };
+    let app = App { bar, balloon: shown.clone() };
     let Some(hwnd) = win::open(app, &options, log) else {
         log("the window could not be made");
         // SAFETY: plain call.
@@ -557,6 +890,7 @@ pub extern "C" fn mainCRTStartup() -> ! {
         None => log("the desktop keeps its taskbar"),
     }
     make_menu(sw, sh - HEIGHT);
+    make_balloon(sw, sh - HEIGHT, shown);
     // The events that change the list: the active window, minimize and
     // restore; a window made, gone, shown, hidden or renamed.
     for (min, max) in [

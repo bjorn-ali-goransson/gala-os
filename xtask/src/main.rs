@@ -9484,6 +9484,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shasha", "oleaut32.dll", "Windows/System32"),
     ("shasha", "uiautomationcore.dll", "Windows/System32"),
     ("shasha", "comctl32.dll", "Windows/System32"),
+    // The notification area in shasha's taskbar (ROADMAP SH step 1,
+    // part 8): tray_test's icon held, drawn and clicked by shasha.
+    ("shasha_tray", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("shasha_tray", "user/bin/shasha.exe", "Windows/System32"),
+    ("shasha_tray", "ntdll.dll", "Windows/System32"),
+    ("shasha_tray", "kernel32.dll", "Windows/System32"),
+    ("shasha_tray", "msvcrt.dll", "Windows/System32"),
+    ("shasha_tray", "advapi32.dll", "Windows/System32"),
+    ("shasha_tray", "bcryptprimitives.dll", "Windows/System32"),
+    ("shasha_tray", "user32.dll", "Windows/System32"),
+    ("shasha_tray", "gdi32.dll", "Windows/System32"),
+    ("shasha_tray", "shell32.dll", "Windows/System32"),
+    ("shasha_tray", "ole32.dll", "Windows/System32"),
+    ("shasha_tray", "oleaut32.dll", "Windows/System32"),
+    ("shasha_tray", "uiautomationcore.dll", "Windows/System32"),
+    ("shasha_tray", "comctl32.dll", "Windows/System32"),
     ("agent", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("agent", "user/bin/agent.exe", "Windows/System32"),
     ("agent", "ntdll.dll", "Windows/System32"),
@@ -13590,6 +13606,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "agent_chat",
     // shasha's taskbar, clicked (SHASHA_SCREEN).
     "shasha",
+    "shasha_tray",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -16499,6 +16516,31 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "desktop: the taskbar's bar is gone: the desktop's taskbar is back",
             "shasha_test: the taskbar after shasha [0,752,1280,800]",
             "shasha_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The notification area in shasha's taskbar (ROADMAP SH step 1,
+        // part 8; ARCHITECTURE "The notification area"): Shell_NotifyIcon
+        // hands the icon to `Shell_TrayWnd` by WM_COPYDATA, shasha draws
+        // it left of the clock, and a real click and right click on it
+        // (SHASHA_TRAY_SCREEN) bring the version 4 callbacks.
+        name: "shasha_tray",
+        cmdline: "qemu_exit wallpaper=night agent=off shell=shasha run=tray_test.exe args=screen%20shell",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "shasha: started",
+            "tray_test: icons",
+            "shasha: notification-area icon added: window",
+            "tray_test: TrayIcon at",
+            "tray_test: click the icon",
+            "shasha: notification-area click on icon",
+            "tray_test: right click the icon",
+            "shasha: notification-area right click on icon",
+            "tray_test: clicked",
+            "xtask: screen ok",
+            "shasha: notification-area icon deleted: window",
+            "tray_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -23629,8 +23671,9 @@ struct ScreenStep {
     /// QEMU queues a few PS/2 packets of at most 255 and hands the rest of a
     /// larger move over with later events. `click_on <who>: <element>`
     /// clicks an element where a test program found it through UI
-    /// Automation (`expand_input`): what a test clicks is found by name,
-    /// not by a position written here.
+    /// Automation or the API that places it (`expand_input`), and
+    /// `right_click_on` right-clicks it: what a test clicks is found by
+    /// name, not by a position written here.
     input: &'static [&'static str],
     pixels: &'static [PixelCheck],
 }
@@ -24422,6 +24465,28 @@ const WSL_TERMINAL_SCREEN: ScreenCheck = ScreenCheck {
 /// menu: the Start button clicked (the menu's surface, 520 x 420 centred
 /// above the taskbar from (380, 320), checked where no tile is), `task`
 /// typed, Task Manager's tile clicked; the Windows key alone; a click on
+/// tray_test's icon in shasha's notification area: where it is, the
+/// program asks Shell_NotifyIconGetRect and announces (`TrayIcon at`),
+/// and it waits for a real click, then a real right click.
+const SHASHA_TRAY_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "tray_test: click the icon",
+    steps: &[
+        ScreenStep {
+            // 1: the icon's balloon, shasha's "Notification" window
+            // (white, 360 x 96 above the clock: 908..1268 x 644..740).
+            after: "tray_test: click the icon",
+            input: &[],
+            pixels: &[PixelCheck::AnyIn(920, 656, 336, 72, 0xffffff)],
+        },
+        ScreenStep { after: "", input: &["click_on tray_test: TrayIcon"], pixels: &[] },
+        ScreenStep {
+            after: "tray_test: right click the icon",
+            input: &["right_click_on tray_test: TrayIcon"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// shasha_test's second window (the menu gone: the wallpaper's dark
 /// night where it was).
 const SHASHA_SCREEN: ScreenCheck = ScreenCheck {
@@ -25738,6 +25803,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("agent_chat", AGENT_CHAT_SCREEN),
     ("wsl_terminal", WSL_TERMINAL_SCREEN),
     ("tray_test", TRAY_SCREEN),
+    ("shasha_tray", SHASHA_TRAY_SCREEN),
     ("topmost_test", TOPMOST_SCREEN),
     ("hotkey_test", HOTKEY_SCREEN),
     ("d2d1_window", D2D1_WINDOW_SCREEN),
@@ -26390,10 +26456,15 @@ fn check_screen(
 /// last line `<who>: <element> at X,Y (pointer at PX,PY)` names where it
 /// is and where the pointer is, and the click is the moves between them
 /// (at most 255 pixels per axis each, as `ScreenStep::input` says) and a
-/// press and release. Any other command is itself.
+/// press and release; `right_click_on` is the same with the right
+/// button (QEMU's button 2). Any other command is itself.
 fn expand_input(command: &str, log: &Path) -> Result<Vec<String>> {
-    let Some(who) = command.strip_prefix("click_on ") else {
-        return Ok(vec![command.to_string()]);
+    let (who, button) = match command.strip_prefix("click_on ") {
+        Some(who) => (who, 1),
+        None => match command.strip_prefix("right_click_on ") {
+            Some(who) => (who, 2),
+            None => return Ok(vec![command.to_string()]),
+        },
     };
     let text = fs::read_to_string(log).map_err(|e| format!("reading {log:?}: {e}"))?;
     let want = format!("{who} at ");
@@ -26403,7 +26474,7 @@ fn expand_input(command: &str, log: &Path) -> Result<Vec<String>> {
     })?;
     let (target, pointer) = parse_click_line(line)
         .ok_or_else(|| format!("click_on: unreadable {want:?} line: {line:?}"))?;
-    Ok(click_commands(target, pointer))
+    Ok(click_commands(target, pointer, button))
 }
 
 /// `X,Y (pointer at PX,PY)` as the two points.
@@ -26417,8 +26488,9 @@ fn parse_click_line(s: &str) -> Option<((i64, i64), (i64, i64))> {
 }
 
 /// The monitor commands that move the pointer from `pointer` to `target`
-/// in steps of at most 255 per axis, then click there.
-fn click_commands(target: (i64, i64), pointer: (i64, i64)) -> Vec<String> {
+/// in steps of at most 255 per axis, then click there with `button`
+/// (QEMU's mask: 1 left, 2 right).
+fn click_commands(target: (i64, i64), pointer: (i64, i64), button: u8) -> Vec<String> {
     let (mut dx, mut dy) = (target.0 - pointer.0, target.1 - pointer.1);
     let mut out = Vec::new();
     while dx != 0 || dy != 0 {
@@ -26427,7 +26499,7 @@ fn click_commands(target: (i64, i64), pointer: (i64, i64)) -> Vec<String> {
         dx -= sx;
         dy -= sy;
     }
-    out.push("mouse_button 1".to_string());
+    out.push(format!("mouse_button {button}"));
     out.push("mouse_button 0".to_string());
     out
 }
@@ -31909,7 +31981,7 @@ mod ps2_pace {
         );
         assert_eq!(parse_click_line("1240,24"), None);
         assert_eq!(
-            click_commands((1240, 24), (640, 400)),
+            click_commands((1240, 24), (640, 400), 1),
             [
                 "mouse_move 255 -255",
                 "mouse_move 255 -121",
@@ -31918,7 +31990,8 @@ mod ps2_pace {
                 "mouse_button 0"
             ]
         );
-        assert_eq!(click_commands((5, 5), (5, 5)), ["mouse_button 1", "mouse_button 0"]);
+        assert_eq!(click_commands((5, 5), (5, 5), 1), ["mouse_button 1", "mouse_button 0"]);
+        assert_eq!(click_commands((5, 5), (5, 5), 2), ["mouse_button 2", "mouse_button 0"]);
     }
 
     /// Every screen step's input is a command whose bytes are known and
@@ -31932,9 +32005,12 @@ mod ps2_pace {
             let (mut b, mut v) = (0, 0);
             for (n, step) in check.steps.iter().enumerate() {
                 // A click_on stands for the longest moves it can make.
-                let input = step.input.iter().flat_map(|c| match c.strip_prefix("click_on ") {
-                    Some(_) => click_commands((1279, 799), (0, 0)),
-                    None => vec![c.to_string()],
+                let input = step.input.iter().flat_map(|c| {
+                    if c.starts_with("click_on ") || c.starts_with("right_click_on ") {
+                        click_commands((1279, 799), (0, 0), 2)
+                    } else {
+                        vec![c.to_string()]
+                    }
                 });
                 for command in input {
                     let command = command.as_str();
