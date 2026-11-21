@@ -6,12 +6,14 @@
 //! posted messages (each tagged with its thread); GetMessage takes the
 //! calling thread's, else makes WM_PAINT for one of its invalid windows,
 //! else waits on the queue's event. SendMessage calls the window
-//! procedure directly. Metrics: a 1-pixel border and a 30-pixel caption
-//! (kernel/src/nt/desktop.rs).
+//! procedure directly. Metrics: the desktop's frame is BORDER and
+//! CAPTION here and in kernel/src/nt/desktop.rs; GetSystemMetrics
+//! answers from them (ARCHITECTURE "Window, Transform and title
+//! bars").
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) type Handle = *mut c_void;
 pub(crate) type Hwnd = usize;
@@ -3631,6 +3633,7 @@ pub extern "system" fn GetDoubleClickTime() -> u32 {
 /// (ROADMAP OF).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
+    note_metric(index);
     let (screen, work) = crate::monitor::screen();
     match index {
         // The screen, the work area and the monitors.
@@ -3690,16 +3693,8 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
     }
 }
 
-/// An index GetSystemMetrics has no answer of gala's own for: 0, and a
-/// ledger row naming it (`user32.dll!GetSystemMetrics(<index>)`,
-/// "unsupported", the index as the detail). Windows answers a size or a
-/// flag for every index it documents and 0 for almost none of them, so
-/// a 0 here is a guess that no caller can tell from a measurement --
-/// which is what makes it worth a row: the row is the question, and
-/// what a real Windows answers for that index decides whether it is a
-/// divergence (`metrics_test`, ROADMAP OF).
-fn unknown_metric(index: i32) -> i32 {
-    let mut name = [0u8; 48];
+/// `user32.dll!GetSystemMetrics(<index>)` in `name`, its length back.
+fn metric_name(index: i32, name: &mut [u8; 48]) -> usize {
     let mut n = 0;
     for &b in b"user32.dll!GetSystemMetrics(" {
         name[n] = b;
@@ -3722,7 +3717,53 @@ fn unknown_metric(index: i32) -> i32 {
         at += 1;
     }
     name[n] = b')';
-    n += 1;
+    n + 1
+}
+
+/// Every index a program asks for, once: the first call for an index
+/// leaves a "reached" ledger row naming it, and nothing after it does.
+///
+/// This is what finds a divergence in a value gala answers
+/// successfully. A wrong size is not refused and leaves nothing behind
+/// -- the caller lays its windows out from it and goes on -- so the
+/// only way to ask whether a metric mattered to a program is to know
+/// that it read it. The ledger's own `hits` then says how often, and
+/// its `first` and `last` when, against the rest of the run.
+///
+/// Bounded by construction, which is what makes it affordable in a
+/// layout loop: one row and one kernel call an index for the life of
+/// the process, at most 134 of them, whatever a program asks. An index
+/// Windows does not document has no bit here and is left to
+/// `unknown_metric`, which records it as a gap instead.
+fn note_metric(index: i32) {
+    static ASKED: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    let bit = match index {
+        0..=127 => index as u32,
+        0x1000 => 128,
+        0x2000..=0x2004 => 129 + (index - 0x2000) as u32,
+        _ => return,
+    };
+    let (word, mask) = ((bit / 64) as usize, 1u64 << (bit % 64));
+    if ASKED[word].fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut name = [0u8; 48];
+    let n = metric_name(index, &mut name);
+    // SAFETY: our string.
+    unsafe { GalaRecordMissing(name.as_ptr(), n, 9, u64::from(index as u32)) };
+}
+
+/// An index GetSystemMetrics has no answer of gala's own for: 0, and a
+/// ledger row naming it (`user32.dll!GetSystemMetrics(<index>)`,
+/// "unsupported", the index as the detail). Windows answers a size or a
+/// flag for every index it documents and 0 for almost none of them, so
+/// a 0 here is a guess that no caller can tell from a measurement --
+/// which is what makes it worth a row: the row is the question, and
+/// what a real Windows answers for that index decides whether it is a
+/// divergence (`metrics_test`, ROADMAP OF).
+fn unknown_metric(index: i32) -> i32 {
+    let mut name = [0u8; 48];
+    let n = metric_name(index, &mut name);
     unsupported(&name[..n], u64::from(index as u32));
     0
 }

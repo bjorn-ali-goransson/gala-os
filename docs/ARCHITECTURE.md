@@ -16199,6 +16199,16 @@ What user32 provides for this (`user/user32`):
   question: what a real Windows answers for that index decides whether
   it is a divergence. This is the rule for a value a program is handed
   rather than refused ("Gaps are never silent").
+- Every index a program asks for leaves a "reached" row the first time
+  it is asked (`note_metric`): one row and one kernel call an index for
+  the life of the process, at most 134 of them, so a layout loop pays
+  nothing for it. This is how a divergence in a value gala answers
+  successfully is found at all. A wrong size is not refused and leaves
+  nothing behind -- the caller lays its windows out from it and goes on
+  -- so the only way to ask whether a metric mattered to a program is to
+  know that it read it, how often (the row's `hits`) and when (`first`,
+  `last`) against the rest of the run. What Word reads is 34 indices,
+  all of them in the last two seconds of its life (ROADMAP OF).
 - GetDesktopWindow is a handle below the window table (0xfff0,
   `tree::DESKTOP`) that IsWindow accepts and whose GetWindowRect is the
   screen. It is not a real parent: top-level windows have parent 0, and

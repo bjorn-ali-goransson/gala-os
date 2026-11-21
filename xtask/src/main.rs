@@ -16525,6 +16525,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "metrics_test: ok",
+            r#"ledger: {"service":"user32.dll!GetSystemMetrics(0)","what":"reached""#,
             r#"ledger: {"service":"user32.dll!GetSystemMetrics(32767)","what":"unsupported""#,
             "exited with status 0x00000000",
         ],
