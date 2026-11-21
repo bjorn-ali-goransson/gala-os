@@ -13496,17 +13496,33 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
             r#""ev":"value","pid":4,"key":"#,
             r#""name":"CurrentBuild","kind":1,"bytes":"#,
             r#""name":"NoSuchValue","status":3221225524"#,
+            // What the value held, not only how much of it: the build
+            // number read as text, which is the whole point of the
+            // field -- a read that is answered used to leave its size
+            // and nothing of its answer.
+            r#""data":"26100""#,
             // An enumerate says the index it asked for, the name being
             // that index's answer; one past the last value has no name
             // to say (STATUS_NO_MORE_ENTRIES, which is a warning and not
             // an error, so the status alone would read as success).
-            r#""index":1,"name":"num","kind":4,"bytes":4,"status":0"#,
+            r#""index":1,"name":"num","kind":4,"bytes":4,"data":2596069104,"status":0"#,
             r#""index":7,"name":"","status":2147483674"#,
             // A value written, the default value among them: its name is
             // empty, and the event must still say which key and what.
             r#""ev":"value set","pid":4,"#,
-            r#""name":"num","kind":4,"bytes":4,"status":0"#,
+            r#""name":"num","kind":4,"bytes":4,"data":305419896,"status":0"#,
+            // The same name written again with another number: the data
+            // is what tells the two writes apart.
+            r#""name":"num","kind":4,"bytes":4,"data":2596069104,"status":0"#,
             r#""name":"","kind":1,"bytes":"#,
+            // A number of each width, a string with its terminator
+            // trimmed, and bytes that are not text at all as hex.
+            r#""name":"q","kind":11,"bytes":8,"data":1234605616436508552,"status":0"#,
+            r#""name":"str","kind":1,"bytes":12,"data":"hello","status":0"#,
+            r#""name":"bin","kind":3,"bytes":3,"data":"010203","status":0"#,
+            // A multi-string keeps the separators it is made of, so the
+            // one field shows where its parts end.
+            r#""name":"multi","kind":7,"bytes":12,"data":"a\u0000bc","status":0"#,
             // A value deleted, and the same name deleted again.
             r#""ev":"value deleted","pid":4,"#,
             r#""name":"bin","status":3221225524"#,

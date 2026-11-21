@@ -247,10 +247,11 @@ struct Valued<'a> {
     name: &'a [u16],
     /// The index an enumerate asked for; a call by name has none.
     index: Option<usize>,
-    /// The type and the size of the data the call read, wrote or meant
-    /// to write, where there was any: an empty value is a different
-    /// answer from an absent one, and this is the difference.
-    held: Option<(u32, usize)>,
+    /// What the value held, where the call had anything: its type, its
+    /// size and the first [`PEEK`] bytes of its data. An empty value is
+    /// a different answer from an absent one, and this is the
+    /// difference.
+    held: Option<Peek>,
     status: NtStatus,
 }
 
@@ -266,15 +267,96 @@ impl core::fmt::Display for At {
     }
 }
 
+/// Value types as the registry stores them, the ones a value event
+/// reads its data as.
+const REG_SZ: u32 = 1;
+const REG_EXPAND_SZ: u32 = 2;
+const REG_DWORD: u32 = 4;
+const REG_DWORD_BIG_ENDIAN: u32 = 5;
+const REG_MULTI_SZ: u32 = 7;
+const REG_QWORD: u32 = 11;
+
+/// How much of a value's data a value event carries. A number of any
+/// width fits whole and a name or a short path very nearly; longer data
+/// is cut here, and the event's `bytes` says how much there was, so a
+/// cut needs no field of its own to be seen. The bound is what keeps a
+/// program that walks a hive of long values from turning the stream
+/// into a second copy of the hive.
+const PEEK: usize = 64;
+
+/// What a value held: its type, how much data there was, and the first
+/// [`PEEK`] bytes of it. The bytes are copied while the registry is
+/// still locked, because the event is written after the lock is let go.
+#[derive(Clone, Copy)]
+struct Peek {
+    kind: u32,
+    bytes: usize,
+    head: [u8; PEEK],
+    /// How much of `head` the value filled: `bytes`, or [`PEEK`] where
+    /// it was cut.
+    len: usize,
+}
+
+impl Peek {
+    fn of(kind: u32, data: &[u8]) -> Self {
+        let len = data.len().min(PEEK);
+        let mut head = [0u8; PEEK];
+        head[..len].copy_from_slice(&data[..len]);
+        Peek { kind, bytes: data.len(), head, len }
+    }
+
+    /// The data as its type says to read it: a number for the integer
+    /// types that are the width they claim, the text of a string with
+    /// the NULs at its end trimmed (a multi-string keeps the ones
+    /// between its parts, so the one field shows where they end), and
+    /// the bytes as hex for everything else -- a type gala does not
+    /// know, and an integer narrower than it claims, which is not a
+    /// number and is shown as what it is instead of being guessed at.
+    fn write_data(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let head = &self.head[..self.len];
+        match self.kind {
+            REG_DWORD if head.len() >= 4 => {
+                write!(f, "{}", u32::from_le_bytes([head[0], head[1], head[2], head[3]]))
+            }
+            REG_DWORD_BIG_ENDIAN if head.len() >= 4 => {
+                write!(f, "{}", u32::from_be_bytes([head[0], head[1], head[2], head[3]]))
+            }
+            REG_QWORD if head.len() >= 8 => {
+                let mut eight = [0u8; 8];
+                eight.copy_from_slice(&head[..8]);
+                write!(f, "{}", u64::from_le_bytes(eight))
+            }
+            REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ => {
+                let mut units = [0u16; PEEK / 2];
+                let mut n = head.len() / 2;
+                for (i, unit) in units.iter_mut().take(n).enumerate() {
+                    *unit = u16::from_le_bytes([head[2 * i], head[2 * i + 1]]);
+                }
+                while n > 0 && units[n - 1] == 0 {
+                    n -= 1;
+                }
+                write!(f, "{}", crate::events::Utf16(&units[..n]))
+            }
+            _ => {
+                use core::fmt::Write as _;
+                f.write_char('"')?;
+                for byte in head {
+                    write!(f, "{byte:02x}")?;
+                }
+                f.write_char('"')
+            }
+        }
+    }
+}
+
 /// What a value held, written where the call had any.
-struct Held(Option<(u32, usize)>);
+struct Held(Option<Peek>);
 
 impl core::fmt::Display for Held {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.0 {
-            Some((kind, bytes)) => write!(f, r#","kind":{kind},"bytes":{bytes}"#),
-            None => Ok(()),
-        }
+        let Some(peek) = self.0 else { return Ok(()) };
+        write!(f, r#","kind":{},"bytes":{},"data":"#, peek.kind, peek.bytes)?;
+        peek.write_data(f)
     }
 }
 
@@ -442,7 +524,7 @@ pub(super) fn nt_query_value_key(call: &mut Call<'_>) -> NtStatus {
     let class = arg!(call, 2) as u32;
     let found = registry::with(|r| {
         let value = r.value(id, &name)?;
-        let held = (value.kind, value.data.len());
+        let held = Peek::of(value.kind, &value.data);
         Ok((registry::value_information(value, class)?, held))
     });
     let ((data, fixed), held) = match found {
@@ -478,7 +560,7 @@ pub(super) fn nt_enumerate_value_key(call: &mut Call<'_>) -> NtStatus {
     let naming = crate::events::enabled(crate::events::Category::File);
     let found = registry::with(|r| {
         let value = r.value_at(id, index)?;
-        let held = (value.kind, value.data.len());
+        let held = Peek::of(value.kind, &value.data);
         let name = if naming { registry::copy_name(&value.name)? } else { Vec::new() };
         Ok((registry::value_information(value, class)?, held, name))
     });
@@ -545,7 +627,7 @@ pub(super) fn nt_set_value_key(call: &mut Call<'_>) -> NtStatus {
         key: id,
         name: &name,
         index: None,
-        held: Some((kind, size)),
+        held: Some(Peek::of(kind, &data)),
         status,
     };
     emit_value(call, said);
@@ -838,5 +920,101 @@ fn notify_change(
             }
         }
         (status, _) => status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// Raw bytes. The reading above names no constant for it -- bytes are
+    /// what every type it does not know falls back to -- so the tests that
+    /// check that fallback name it here.
+    const REG_BINARY: u32 = 3;
+
+    /// What a value event writes for a value of this type and data.
+    fn held(kind: u32, data: &[u8]) -> String {
+        format!("{}", Held(Some(Peek::of(kind, data))))
+    }
+
+    /// UTF-16 bytes with the NUL a string value ends with.
+    fn sz(s: &str) -> Vec<u8> {
+        let mut out: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        out.push(0);
+        out.push(0);
+        out
+    }
+
+    #[test]
+    fn a_number_is_read_at_the_width_its_type_claims() {
+        assert_eq!(
+            held(REG_DWORD, &0x1234_5678u32.to_le_bytes()),
+            r#","kind":4,"bytes":4,"data":305419896"#
+        );
+        assert_eq!(
+            held(REG_DWORD_BIG_ENDIAN, &0x1234_5678u32.to_be_bytes()),
+            r#","kind":5,"bytes":4,"data":305419896"#
+        );
+        assert_eq!(
+            held(REG_QWORD, &0x1122_3344_5566_7788u64.to_le_bytes()),
+            r#","kind":11,"bytes":8,"data":1234605616436508552"#
+        );
+    }
+
+    #[test]
+    fn an_integer_narrower_than_its_type_is_the_bytes_it_is_and_not_a_guess() {
+        assert_eq!(held(REG_DWORD, &[1, 2, 3]), r#","kind":4,"bytes":3,"data":"010203""#);
+        assert_eq!(held(REG_QWORD, &[1, 2, 3, 4]), r#","kind":11,"bytes":4,"data":"01020304""#);
+    }
+
+    #[test]
+    fn a_string_loses_the_nuls_at_its_end() {
+        assert_eq!(held(REG_SZ, &sz("hello")), r#","kind":1,"bytes":12,"data":"hello""#);
+        assert_eq!(held(REG_EXPAND_SZ, &sz("%TMP%")), r#","kind":2,"bytes":12,"data":"%TMP%""#);
+    }
+
+    #[test]
+    fn a_multi_string_keeps_the_nuls_between_its_parts() {
+        // Where its parts end is the only thing that says how many
+        // there are, so the separators are part of the answer.
+        assert_eq!(
+            held(REG_MULTI_SZ, &sz("a\0bc\0")),
+            r#","kind":7,"bytes":12,"data":"a\u0000bc""#
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_text_are_hex() {
+        assert_eq!(held(REG_BINARY, &[1, 2, 3]), r#","kind":3,"bytes":3,"data":"010203""#);
+        // A type gala does not know is not read as anything.
+        assert_eq!(held(999, &[0xab, 0xcd]), r#","kind":999,"bytes":2,"data":"abcd""#);
+    }
+
+    #[test]
+    fn an_empty_value_is_not_an_absent_one() {
+        assert_eq!(held(REG_SZ, &[]), r#","kind":1,"bytes":0,"data":"""#);
+        assert_eq!(format!("{}", Held(None)), "");
+    }
+
+    #[test]
+    fn data_past_the_peek_is_cut_and_bytes_says_how_much_there_was() {
+        let long: Vec<u8> = (0..100u8).collect();
+        // The first PEEK bytes, whole, and nothing of the rest. Spelled out
+        // rather than probed for, because consecutive bytes spell each
+        // other's digits: 0x04 0x05 is "0405", which holds "40".
+        let head: String = long[..PEEK].iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(held(REG_BINARY, &long), format!(r#","kind":3,"bytes":100,"data":"{head}""#));
+    }
+
+    #[test]
+    fn a_string_past_the_peek_is_cut_on_a_whole_character() {
+        let long: Vec<u8> = sz(&"ab".repeat(40));
+        let written = held(REG_SZ, &long);
+        // PEEK is even, so the cut never lands inside a UTF-16 unit.
+        assert!(written.starts_with(r#","kind":1,"bytes":162,"data":"abab"#), "{written}");
+        assert_eq!(written.len(), r#","kind":1,"bytes":162,"data":"""#.len() + PEEK / 2);
     }
 }
