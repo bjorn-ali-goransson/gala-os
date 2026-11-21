@@ -1168,7 +1168,14 @@ method that answers records a second line a call:
   reached: no call recorded`. The value was understood and the method
   was not reached, which is as much of an answer as a thousand calls
   would have been, and the opposite of a stream that is quiet for
-  reasons unknown.
+  reasons unknown. It says the method was not reached **in that run**,
+  which is not the same as the program not calling it: a stream armed
+  from boot changes the path a long start-up takes, not only its speed
+  (ROADMAP item OF), so a program that gives up earlier than it
+  otherwise would never reaches the method, and the line is then true
+  and misleading at once. Arm the trace with `events_from=` past the
+  start-up, or read the order off the ledger of an untraced run, before
+  concluding that a call is not made.
 - **Arguments** are the words the method was handed: a pointer is its
   address, a number is itself, a float is its bits (the event is JSON,
   which has room for the bits and not for the value), and a pair small
