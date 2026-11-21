@@ -854,16 +854,33 @@ pub fn arm(process: &Process, base: u64, index: u64, slot: u64, target: u64, nam
     // included, which is the higher of its two (`imports_answers=`).
     LOW.fetch_min(trap, Ordering::Relaxed);
     HIGH.fetch_max(trap + RET_OFFSET, Ordering::Relaxed);
-    if let Err(status) = put(process, slot, trap) {
-        // The slot still holds the export's address, so the program is
-        // unaffected; the entry stays behind as dead weight and is not
-        // counted, which is why the two numbers are worth comparing.
-        warn!(
-            "imports: the slot at {slot:#x} of {} could not be written ({:#x}): not armed",
-            Name(&entry),
-            status.0
-        );
-        return false;
+    if let Err(e) = put(process, slot, trap) {
+        if e.step.landed() {
+            // The trap address went in, so the slot is armed and the
+            // program faults into the tracer as meant; what stayed
+            // behind is the page's relaxed protection, which the
+            // program can now write to. Counted among the armed,
+            // because it is one.
+            warn!(
+                "imports: the slot at {slot:#x} of {} is armed, but {} ({:#x}): \
+                 its page stays writable (imports=)",
+                Name(&entry),
+                e.step.said(),
+                e.status.0
+            );
+        } else {
+            // The slot still holds the export's address, so the program
+            // is unaffected; the entry stays behind as dead weight and
+            // is not counted, which is why the two numbers are worth
+            // comparing.
+            warn!(
+                "imports: the slot at {slot:#x} of {} is not armed: {} ({:#x})",
+                Name(&entry),
+                e.step.said(),
+                e.status.0
+            );
+            return false;
+        }
     }
     ARMED.fetch_add(1, Ordering::Relaxed);
     true
@@ -934,17 +951,32 @@ pub fn resolve(process: &Process, frame: &mut TrapFrame, addr: u64, call: bool) 
     // return reads the others and the answer, and not these again.
     let quoted =
         if writing && (first || again) { record(process, frame, &entry, first) } else { None };
-    if !again && let Err(status) = put(process, entry.slot, entry.target) {
-        // The call still goes on (the instruction pointer below is what
-        // sends it), so this costs a fault a call from here rather than
-        // the call itself; a run that reads as slow says why.
-        warn!(
-            "imports: the slot at {:#x} of {} could not be put back ({:#x}): \
-             every call through it faults",
-            entry.slot,
-            Name(&entry),
-            status.0
-        );
+    if !again && let Err(e) = put(process, entry.slot, entry.target) {
+        if e.step.landed() {
+            // The export's address went back in, so calls from here
+            // cost nothing; the page is left writable.
+            warn!(
+                "imports: the slot at {:#x} of {} holds its export again, but {} \
+                 ({:#x}): its page stays writable",
+                entry.slot,
+                Name(&entry),
+                e.step.said(),
+                e.status.0
+            );
+        } else {
+            // The call still goes on (the instruction pointer below is
+            // what sends it), so this costs a fault a call from here
+            // rather than the call itself; a run that reads as slow
+            // says why.
+            warn!(
+                "imports: the slot at {:#x} of {} could not be put back -- {} \
+                 ({:#x}): every call through it faults",
+                entry.slot,
+                Name(&entry),
+                e.step.said(),
+                e.status.0
+            );
+        }
     }
     // The call's answer, where `imports_answers=` asks for one and the
     // stream carries the call: an answer to a call the stream does not
@@ -984,14 +1016,26 @@ fn read_as_data(
             "read as data, not called (imports=)",
             addr,
         );
-        if let Err(status) = put(process, entry.slot, entry.target) {
-            warn!(
-                "imports: the slot at {:#x} of {} could not be put back ({:#x}) \
-                 after its value was read as data",
-                entry.slot,
-                Name(entry),
-                status.0
-            );
+        if let Err(e) = put(process, entry.slot, entry.target) {
+            if e.step.landed() {
+                warn!(
+                    "imports: the slot at {:#x} of {} holds its export again after its \
+                     value was read as data, but {} ({:#x}): its page stays writable",
+                    entry.slot,
+                    Name(entry),
+                    e.step.said(),
+                    e.status.0
+                );
+            } else {
+                warn!(
+                    "imports: the slot at {:#x} of {} could not be put back after its \
+                     value was read as data -- {} ({:#x}): every call through it faults",
+                    entry.slot,
+                    Name(entry),
+                    e.step.said(),
+                    e.status.0
+                );
+            }
         }
     }
     if frame.swap_reg(addr, entry.target) {
@@ -1655,19 +1699,63 @@ fn trap_at(base: u64, index: u64) -> u64 {
     base + index * STRIDE
 }
 
+/// Which step of [`put`] failed. The three are not the same thing to
+/// the program being traced, which is why a warning names one: the
+/// restore is the only step that runs after the write, so it is the
+/// only one whose failure leaves the value in the slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PutStep {
+    /// The page the slot is in could not be made writable.
+    Relax,
+    /// The slot itself could not be written.
+    Write,
+    /// The page's protection could not be put back as it was.
+    Restore,
+}
+
+impl PutStep {
+    /// What a warning calls this step.
+    fn said(self) -> &'static str {
+        match self {
+            PutStep::Relax => "its page could not be made writable",
+            PutStep::Write => "the slot could not be written",
+            PutStep::Restore => "its page's protection could not be put back",
+        }
+    }
+
+    /// Whether `value` reached the slot. Only the restore runs after
+    /// the write, so only its failure leaves the slot holding what was
+    /// meant for it -- on a page that stays writable, which the
+    /// program can now write to and nothing else is wrong with.
+    fn landed(self) -> bool {
+        self == PutStep::Restore
+    }
+}
+
+/// A failed [`put`]: the step and the status it failed with.
+#[derive(Clone, Copy)]
+struct PutFailed {
+    step: PutStep,
+    status: NtStatus,
+}
+
 /// Puts `value` in the import slot at `slot`. An import address table
 /// sits in a read-only part of its image, so the page is made writable,
 /// written and put back as it was -- what NtWriteVirtualMemory does for
 /// a debugger's write, and what keeps the program's own view of its
 /// memory the one it would have had.
-fn put(process: &Process, slot: u64, value: u64) -> Result<(), NtStatus> {
-    let (old, base, size) = vm::protect(process, slot, 8, vad::PAGE_READWRITE)?;
+fn put(process: &Process, slot: u64, value: u64) -> Result<(), PutFailed> {
+    let (old, base, size) = vm::protect(process, slot, 8, vad::PAGE_READWRITE)
+        .map_err(|status| PutFailed { step: PutStep::Relax, status })?;
     let written = process.write_u64(slot, value);
     let back = vm::protect(process, base, size, old);
     if written.is_err() {
-        return Err(NtStatus::ACCESS_VIOLATION);
+        // The write faulted, whatever the page's protection says now;
+        // the restore above ran whether it did or not, so the page is
+        // not left relaxed by this path.
+        return Err(PutFailed { step: PutStep::Write, status: NtStatus::ACCESS_VIOLATION });
     }
-    back.map(|_| ())
+    back.map(|_| ()).map_err(|status| PutFailed { step: PutStep::Restore, status })
 }
 
 /// Takes one slot from the budget, or None once it is spent. Taken
@@ -1762,10 +1850,18 @@ pub fn log_stats() {
         return;
     }
     if done == 0 && !events::enabled(Category::Call) {
-        info!(
-            "imports: {armed} slots armed and nothing written: `events=call` was \
-             not given, so no call was recorded (imports=)"
-        );
+        if let Some(secs) = events::pending(Category::Call) {
+            info!(
+                "imports: {armed} slots armed and nothing written: the stream does not \
+                 start until {secs} s after boot (events_from=) and the run ended first, \
+                 so no call was recorded (imports=)"
+            );
+        } else {
+            info!(
+                "imports: {armed} slots armed and nothing written: `events=call` was \
+                 not given, so no call was recorded (imports=)"
+            );
+        }
         return;
     }
     if LEFT.load(Ordering::Relaxed) == 0 {
@@ -2222,10 +2318,28 @@ impl fmt::Display for Name<'_> {
 mod tests {
     use super::{
         ARGS, BUDGET, BYTE_WINDOW, CALL_PLACES, Calls, Carried, Dumped, Fields, MAX_ANSWERS,
-        MAX_BUDGET, MAX_BYTES, MAX_REPEAT, MAX_STRINGS, Quote, READ, RET_OFFSET, RETURN_PLACES,
-        Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget, byte_budget,
-        holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
+        MAX_BUDGET, MAX_BYTES, MAX_REPEAT, MAX_STRINGS, PutStep, Quote, READ, RET_OFFSET,
+        RETURN_PLACES, Reads, STRIDE, Said, TEXT_CHARS, TEXT_WINDOW, Text, Texts, answer_budget,
+        byte_budget, holds, repeat_budget, split_budget, string_budget, text_in, trap_at,
     };
+
+    #[test]
+    fn only_a_failed_restore_leaves_the_value_in_the_slot() {
+        // The restore is the only step after the write, so it is the
+        // only one whose failure the program sees as a slot that holds
+        // what was meant for it.
+        assert!(!PutStep::Relax.landed());
+        assert!(!PutStep::Write.landed());
+        assert!(PutStep::Restore.landed());
+        // And each failure says which step it was: a warning that
+        // named none of them is what made a failed restore read as a
+        // fault a call.
+        let said = [PutStep::Relax.said(), PutStep::Write.said(), PutStep::Restore.said()];
+        for (i, one) in said.iter().enumerate() {
+            assert!(!one.is_empty());
+            assert!(!said[..i].contains(one), "{one} is said of two steps");
+        }
+    }
 
     /// The reads of one record built as the fault path builds them,
     /// from what the window at each place holds: `(place, bytes)` by

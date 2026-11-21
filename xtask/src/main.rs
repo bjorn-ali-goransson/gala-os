@@ -8402,6 +8402,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_window_test", "testdll.dll", "gala"),
     ("import_window", "ntdll.dll", "Windows/System32"),
     ("import_window", "testdll.dll", "gala"),
+    ("import_window_late", "ntdll.dll", "Windows/System32"),
+    ("import_window_late", "testdll.dll", "gala"),
     ("import_strings_test", "ntdll.dll", "Windows/System32"),
     ("import_strings_test", "testdll.dll", "gala"),
     ("import_strings", "ntdll.dll", "Windows/System32"),
@@ -19365,6 +19367,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 999 later calls recorded of 1024 (imports_repeat=)",
             "imports: 2000 quotes of 4096, carried by 1000 calls \
              (imports_strings=)",
+        ],
+    },
+    Scenario {
+        // OT3b: the window a run never reaches. The same program and
+        // the same armed slot, with a second the scenario's 15 seconds
+        // are nowhere near: the stream never opens, so not one of the
+        // thousands of calls through that slot is recorded, and the
+        // stats say which of the two reasons it was. `events=call` was
+        // given here; the sentence that names the mask instead is what
+        // sent a reader of a Word trace looking for a mask that was
+        // right (ROADMAP OT).
+        name: "import_window_late",
+        cmdline: "qemu_exit events=call events_from=600 run=import_window_test.exe \
+                  imports=import_window_test.exe!testdll.dll imports_repeat=1024",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "import_window_test: ok",
+            "exited with status 0x00000000",
+            "events: the stream starts 600 s after boot (events_from=)",
+            "slots armed and nothing written: the stream does not start until 600 s \
+             after boot (events_from=) and the run ended first",
         ],
     },
     Scenario {

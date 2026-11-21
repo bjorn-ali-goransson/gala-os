@@ -656,6 +656,13 @@ calls before the stream starts cost their faults alone (below noise
 beside a record) and the whole budget is there for the window, the
 first call it carries recorded as a first call.
 
+Take the second from a run of the same shape as the one being traced.
+Tracing moves the timeline it is aimed at: the same Word startup is
+86 s with slots armed, 202 s with every call recorded and 213 s with the
+answers trapped too, so a second read off the slow run misses the window
+in the fast one entirely -- and the stream never opens, which the stats
+then say.
+
 ```sh
 XTASK_CMDLINE='events=call events_match=WINWORD events_from=32 imports=WINWORD.EXE!MSO.DLL imports_repeat=65536 imports_strings=65536' \
   cargo xtask boot-test 'office_word$'

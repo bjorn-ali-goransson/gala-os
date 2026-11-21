@@ -6562,7 +6562,10 @@ among the slowest hand-offs.
      written takes none of it and leaves the slot armed, so
      `events_from=` beside the repeat spends the budget on one window
      of a run and not on its first moments (scenario `import_window`
-     with an ARM64 twin). Nor is the answer:
+     with an ARM64 twin), and a window the run never reaches leaves the
+     stream shut, which the stats say in those words rather than
+     blaming the mask (scenario `import_window_late`). Nor is the
+     answer:
      `imports_answers=<n>` keeps the return address the call left and
      puts the slot's second trap address in its place, so the return
      faults too, with the answer still in the register the ABI returns
