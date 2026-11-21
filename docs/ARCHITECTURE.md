@@ -11614,7 +11614,12 @@ expected answers are those of `user/d3d10_1_test` run on Windows.
   type Direct3D 11 has none of, no feature level, flags it drops -- with
   what was asked for (`level << 32 | flags << 8 | driver type`), so a
   program that gets no device says why (OBSERVABILITY "Missing-features
-  ledger").
+  ledger"). None of those records is written per method: the stubs come
+  from one `recorders!` macro and the implemented slots' records from
+  `cargo xtask gen-trace` (WORKFLOW "Generated code"), and both kinds
+  report to an armed `trace_from=` trace, so a program's calls into this
+  device can be read in order and not only as one row each
+  (OBSERVABILITY "Call tracing", scenario `trace_from_d3d10_test`).
 - **Limits**: a device asked for with an SDK version other than
   D3D10_1_SDK_VERSION is E_INVALIDARG (Windows'), D3D10CreateStateBlock
   is still G0's stub, and `d3d10.dll` (Direct3D 10.0 and its effects)

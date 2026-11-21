@@ -39,7 +39,7 @@ rather than free text.
 | State dump on NMI / SIGQUIT | `kernel/src/statedump.rs` | `statedump:` lines on a timeout |
 | Crash reports (programs) | `kernel/src/nt/crashreport.rs` | `crash report:` lines |
 | Stack captures (who called) | `kernel/src/nt/stack_at.rs` | `stack_at=<service>[:<n>]`, `stack_from=<module>`, `stack_words=<n>`; `stack:` lines |
-| Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/d2d1/src/trace.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
+| Call tracing (into gala's DLLs) | `kernel/src/nt/tracecall.rs`, `user/trace_common.rs` | `trace_from=<dll>!<Interface>::<Method>[:<n>]` with `events=call`; `call` events, `trace:` lines |
 | Import tracing (into any DLL) | `kernel/src/nt/traceimports.rs`, `arm_imports` in `user/testntdll/src/lib.rs` | `imports=<program>[!<dll>][:<n>]` (with `imports_repeat=<n>` for every call through a slot, not only the first, `imports_answers=<n>` for what each call answered, `imports_strings=<n>` for what reads as text at a call and at a trapped return, `imports_bytes=<n>` for the bytes at the places that read as none, `imports_except=<text>[,<text>...]` for the imports to leave unarmed) with `events=call`; `import` and `ret` events, each with `from`, the image whose import slot the call went through; `imports:` lines |
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Hot swap marks (not a real run) | `kernel/src/hotswap.rs`, `xtask/src/hotswap.rs` | `hotswap:` lines (a kernel swap's `hotswap: kernel: ...`: its identity, the window, each patched function, the stack check and how long the CPUs were stopped), `"ev":"hotswap"`, the `hotswap` ledger entry, crash reports, state dumps, triage; `XTASK_HOTSWAP_WHY=1` for why xtask counts a function as changed |
@@ -1160,9 +1160,10 @@ stack:   (7 of the 128 stack words read from 0x1ffa08 point into an image)
 `trace_from=<dll>!<Interface>::<Method>[:<n>]` records every call a
 program makes into a DLL gala wrote, from the moment it first reaches
 the method named, `n` calls at most (default 4096; the kernel's half in
-`kernel/src/nt/tracecall.rs`, the DLL's in `user/d2d1/src/trace.rs`;
-scenarios `trace_from_test`, `trace_from_budget_test` and
-`trace_from_answer_test`). The calls are
+`kernel/src/nt/tracecall.rs`, the DLLs' in `user/trace_common.rs`, one
+file each traced DLL declares as its own `trace` module; scenarios
+`trace_from_test`, `trace_from_budget_test`, `trace_from_answer_test`
+and `trace_from_d3d10_test`). The calls are
 `call` events, so `events=call` turns the stream on and
 `events_pid=`/`events_match=` choose the process, as for every other
 category.
@@ -1232,7 +1233,7 @@ method that answers records a second line a call:
   enough to pass by value -- a `Point`, a `SizeU` -- is its two halves,
   low first. Eight words at most; no method gala wraps has more. A type
   the `Arg` trait does not cover fails the build rather than recording a
-  zero (`user/d2d1/src/trace.rs`).
+  zero (`user/trace_common.rs`).
 - **What it answered** is a line of its own, a `ret` event naming the
   same method, right after the call's. A method that returns nothing has
   none, so a trace of such methods records no answers at all and says so
@@ -1243,18 +1244,35 @@ method that answers records a second line a call:
   between a call and its answer -- never the other way about, which
   would read as an answer to a call the program never made.
 - **Limits**: the DLLs whose slots `cargo xtask gen-trace` wraps (d2d1
-  today: `DLLS` in `xtask/src/gentrace.rs`), and one armed method a run.
+  and d3d10_1 today: `DLLS` in `xtask/src/gentrace.rs`), and one armed
+  method a run.
   QueryInterface, AddRef and Release are not among the wrapped slots:
   every object shares one implementation of each, so they are written by
-  hand and the generator does not reach them. An interface a DLL refuses
+  hand and the generator does not reach them. A slot that already
+  records a row of its own on every call -- d3d10_1's eighty-seven
+  E_NOTIMPL stubs, which answer under their own name -- reports to an
+  armed trace as well, and leaves no second `reached` row for it
+  (`// gen-trace records <module>`, so the generator leaves such a
+  module alone): what the trace adds there is the order, which a row
+  counted `x12` cannot give. An interface a DLL refuses
   is still in the ledger (`<object> QueryInterface`, with the IID's first
   dword), so what the trace misses there is the order: which object was
   asked, between which other calls.
-  Arming is per process, because the flag lives in the DLL's own data;
-  the budget is the run's, shared by every process that traces. Once
-  armed, *every* traced call in that process is recorded, not only the
-  method named -- the method is where recording starts, not what is
-  recorded.
+  Arming is per DLL per process, because the flag lives in that DLL's
+  own data; the budget is the run's, shared by every DLL and process
+  that traces. Once armed, *every* traced call that program makes into
+  *that* DLL is recorded, not only the method named -- the method is
+  where recording starts, not what is recorded. A call into another of
+  gala's DLLs is not: armed at
+  `d3d10_1.dll!ID3D10Device::CheckMultisampleQualityLevels`, an
+  `office_word` run records the three Direct3D 10.1 calls Word makes
+  and none of the Direct2D calls that follow them, and arming a d2d1
+  method on such a run is answered `was never reached` instead. So two
+  questions about one program's two DLLs are two runs; ROADMAP OT3b's
+  next piece is for the slot's own one-shot to ask the kernel whether
+  a trace is live, which it already calls into to record its `reached`
+  row, so a trace would span every DLL gala wrote at no new cost per
+  call.
 
 ### Import tracing (`imports=`)
 

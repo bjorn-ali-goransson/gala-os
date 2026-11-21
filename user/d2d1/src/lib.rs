@@ -58,7 +58,25 @@ mod mesh;
 mod raster;
 mod state;
 mod target;
+// The DLL half of `trace_from=` and the records a generated vtable
+// wrapper leaves, one file shared with gala's other traced DLLs
+// (`user/trace_common.rs`, OBSERVABILITY "Call tracing").
+#[path = "../../trace_common.rs"]
 pub mod trace;
+
+// The two types of this DLL a traced method takes by value, as the
+// words their events carry (`trace_common.rs`'s `Arg`).
+impl trace::Arg for Point {
+    fn word(&self) -> u64 {
+        u64::from(self.x.to_bits()) | (u64::from(self.y.to_bits()) << 32)
+    }
+}
+
+impl trace::Arg for SizeU {
+    fn word(&self) -> u64 {
+        u64::from(self.width) | (u64::from(self.height) << 32)
+    }
+}
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -125,10 +143,14 @@ const LEDGER_NOT_IMPLEMENTED: u32 = 3;
 const LEDGER_OTHER: u32 = 5;
 const LEDGER_REACHED: u32 = 9;
 
+/// This DLL's name as the ledger spells it: the prefix of every row
+/// it writes and of every name a trace reports (`trace_common.rs`).
+const DLL_NAME: &[u8] = b"d2d1.dll!";
+
 fn record_kind(what: &[u8], kind: u32, detail: u64) {
     let mut name = [0u8; 96];
     let mut n = 0;
-    for &b in b"d2d1.dll!".iter().chain(what) {
+    for &b in DLL_NAME.iter().chain(what) {
         if n == name.len() {
             break;
         }
@@ -154,74 +176,6 @@ pub fn gap(what: &[u8], detail: u64) {
 /// ledger").
 pub fn answered(what: &[u8], hr: HResult) {
     record_kind(what, LEDGER_OTHER, hr as u32 as u64);
-}
-
-/// Records `d2d1.dll!<what>` the first time a program reaches the call
-/// site: a call that works leaves nothing else behind, so the ledger
-/// would go quiet exactly where a program stops in the middle of a path
-/// this DLL answers. Once per site -- the record is the path a program
-/// took through this DLL, not a count, and a drawing loop pays one
-/// relaxed atomic a call (OBSERVABILITY "Missing-features ledger").
-#[macro_export]
-macro_rules! reached {
-    ($what:expr) => {{
-        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        // A relaxed load once it has been recorded, not a locked
-        // exchange: the call is on a drawing loop.
-        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
-            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
-        {
-            $crate::reached_now($what);
-        }
-    }};
-}
-
-/// `reached!`'s record, and -- once `trace_from=` has armed this method
-/// -- every call after it. A generated vtable wrapper uses this rather
-/// than `reached!` so that an investigation can read a *sequence*: the
-/// one-shot record says a method was reached once, which leaves the
-/// calls between the last thing that worked and a failure invisible by
-/// construction.
-///
-/// What it costs a program that is not being traced is two relaxed
-/// loads a call. The compare against the `trace_from=` value is folded
-/// into the one-shot, so it is paid once per slot and never on a
-/// drawing loop (crate::trace, OBSERVABILITY "Call tracing").
-#[macro_export]
-macro_rules! traced {
-    ($what:expr, [$($arg:expr),* $(,)?]) => {{
-        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
-            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
-        {
-            $crate::reached_now($what);
-            $crate::trace::arm_if_named($what);
-        }
-        if $crate::trace::on() {
-            $crate::trace::record($what, &[$($crate::trace::Arg::word(&$arg)),*]);
-        }
-    }};
-}
-
-/// What a traced call answered, recorded right after the call itself
-/// (`trace_from=`). The generator puts this in the wrapper of every slot
-/// whose method returns anything; a method that returns nothing has no
-/// answer to record. An answer costs what a call costs and comes out of
-/// the same budget, so a trace can end between a call and its answer but
-/// can never show an answer whose call it did not record.
-#[macro_export]
-macro_rules! answered_call {
-    ($what:expr, $answer:expr) => {{
-        if $crate::trace::on() {
-            $crate::trace::record_answer($what, $crate::trace::Arg::word(&$answer));
-        }
-    }};
-}
-
-/// `reached!`'s record. Call it through the macro, which keeps it to the
-/// first time.
-pub fn reached_now(what: &[u8]) {
-    record_kind(what, LEDGER_REACHED, 0);
 }
 
 /// A method gala does not implement: recorded, E_NOTIMPL.

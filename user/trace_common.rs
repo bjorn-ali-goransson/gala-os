@@ -1,26 +1,122 @@
 //! The DLL half of `trace_from=` (docs/OBSERVABILITY.md, "Call
-//! tracing"; the kernel's half is `kernel/src/nt/tracecall.rs`).
+//! tracing"; the kernel's half is `kernel/src/nt/tracecall.rs`), and the
+//! records a generated vtable wrapper leaves.
 //!
-//! A COM call into this DLL is an indirect call through a vtable in the
-//! program's own address space, so the kernel never sees one. The
-//! generated wrapper around each vtable slot (`cargo xtask gen-trace`)
-//! does, and this is what it reports through.
+//! One file, `user/trace_common.rs`, shared by every DLL whose vtable
+//! slots `cargo xtask gen-trace` wraps (`DLLS` in
+//! `xtask/src/gentrace.rs`): each declares it as its own `trace` module
+//! with `#[path]`, as `gpu_common.rs` is included by the GPU stubs. A
+//! DLL that declares it brings three things of its own -- `DLL_NAME`,
+//! its name as the ledger spells it (`b"d2d1.dll!"`), `record_kind`,
+//! which writes one ledger row, and `LEDGER_REACHED` among its ledger
+//! kinds -- and may add an [`Arg`] impl for a type of its own that one
+//! of its methods takes by value (d2d1's `Point`, `SizeU`).
+//!
+//! A COM call from a program into one of gala's DLLs is an indirect call
+//! through a vtable in the program's own address space, so the kernel
+//! never sees one. The generated wrapper around each slot does, and this
+//! is what it reports through.
 //!
 //! What it costs when nothing is traced is the point. A wrapper's
-//! one-shot `reached!` record already pays one relaxed load a call; this
-//! adds a second, and nothing else -- no string compare, no system call,
-//! no formatting. The compare against the `trace_from=` value happens
-//! once per slot, folded into the one-shot the wrapper was going to pay
-//! anyway, so a drawing loop that calls FillRectangle a thousand times
-//! compares no names at all.
-//!
-//! Once armed, each call is one system call carrying the method's name
-//! and its arguments as words, and a second carrying what the method
-//! answered, for a method that returns anything at all. The kernel
-//! answers whether to keep going, so a spent budget stops the trace
-//! where it is rather than letting a run pay for lines nobody will read.
+//! one-shot [`reached!`] record already pays one relaxed load a call;
+//! this adds a second, and nothing else -- no string compare, no system
+//! call, no formatting. The compare against the `trace_from=` value
+//! happens once per slot, folded into the one-shot the wrapper was going
+//! to pay anyway, so a drawing loop that calls FillRectangle a thousand
+//! times compares no names at all.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+
+/// Records `<dll>!<what>` the first time a program reaches the call
+/// site: a call that works leaves nothing else behind, so the ledger
+/// would go quiet exactly where a program stops in the middle of a path
+/// this DLL answers. Once per site -- the record is the path a program
+/// took through this DLL, not a count, and a drawing loop pays one
+/// relaxed atomic a call (OBSERVABILITY "Missing-features ledger").
+#[macro_export]
+macro_rules! reached {
+    ($what:expr) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        // A relaxed load once it has been recorded, not a locked
+        // exchange: the call is on a drawing loop.
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            $crate::trace::reached_now($what);
+        }
+    }};
+}
+
+/// `reached!`'s record, and -- once `trace_from=` has armed this method
+/// -- every call after it. A generated vtable wrapper uses this rather
+/// than `reached!` so that an investigation can read a *sequence*: the
+/// one-shot record says a method was reached once, which leaves the
+/// calls between the last thing that worked and a failure invisible by
+/// construction.
+///
+/// What it costs a program that is not being traced is two relaxed
+/// loads a call. The compare against the `trace_from=` value is folded
+/// into the one-shot, so it is paid once per slot and never on a
+/// drawing loop (OBSERVABILITY "Call tracing").
+#[macro_export]
+macro_rules! traced {
+    ($what:expr, [$($arg:expr),* $(,)?]) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            $crate::trace::reached_now($what);
+            $crate::trace::arm_if_named($what);
+        }
+        if $crate::trace::on() {
+            $crate::trace::record($what, &[$($crate::trace::Arg::word(&$arg)),*]);
+        }
+    }};
+}
+
+/// `traced!` for a call that already records a ledger row of its own
+/// every time it is made -- a recorder stub, which answers E_NOTIMPL
+/// under its own name (d3d10_1's `recorders!`). The one-shot arms the
+/// trace as `traced!`'s does and leaves no `reached` row, because the
+/// stub's own row already says the method was reached; what the trace
+/// adds is the order, which a row counted `x12` cannot give. A slot
+/// that records itself is traced by having been written that way, so
+/// the generator leaves it alone (`// gen-trace records <module>`).
+#[macro_export]
+macro_rules! traced_recorded {
+    ($what:expr, [$($arg:expr),* $(,)?]) => {{
+        static SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !SEEN.load(core::sync::atomic::Ordering::Relaxed)
+            && !SEEN.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            $crate::trace::arm_if_named($what);
+        }
+        if $crate::trace::on() {
+            $crate::trace::record($what, &[$($crate::trace::Arg::word(&$arg)),*]);
+        }
+    }};
+}
+
+/// What a traced call answered, recorded right after the call itself
+/// (`trace_from=`). The generator puts this in the wrapper of every slot
+/// whose method returns anything; a method that returns nothing has no
+/// answer to record. An answer costs what a call costs and comes out of
+/// the same budget, so a trace can end between a call and its answer but
+/// can never show an answer whose call it did not record.
+#[macro_export]
+macro_rules! answered_call {
+    ($what:expr, $answer:expr) => {{
+        if $crate::trace::on() {
+            $crate::trace::record_answer($what, $crate::trace::Arg::word(&$answer));
+        }
+    }};
+}
+
+/// `reached!`'s record, in the including DLL's own ledger. Call it
+/// through the macro, which keeps it to the first time.
+pub fn reached_now(what: &[u8]) {
+    crate::record_kind(what, crate::LEDGER_REACHED, 0);
+}
 
 /// As long as the ledger's names, which is what a `trace_from=` value
 /// names (`record_kind`, and `tracecall::NAME_LEN` in the kernel).
@@ -28,7 +124,7 @@ const NAME_LEN: usize = 96;
 
 /// The most argument words one call carries (`tracecall::ARGS`). A
 /// method with more is recorded with its first [`ARGS`]; none of the
-/// methods this DLL wraps has more.
+/// methods these DLLs wrap has more.
 const ARGS: usize = 8;
 
 /// GalaTrace's operations.
@@ -169,12 +265,12 @@ fn ask() -> usize {
     len
 }
 
-/// `d2d1.dll!<what>` in `out`, as the ledger spells a name: the value
-/// names the method the way the ledger's rows do, so one is read off the
-/// other.
+/// `<dll>!<what>` in `out`, as the ledger spells a name: the value names
+/// the method the way the ledger's rows do, so one is read off the
+/// other. The prefix is the including DLL's own (`crate::DLL_NAME`).
 fn full_name(what: &[u8], out: &mut [u8; NAME_LEN]) -> usize {
     let mut n = 0;
-    for &b in b"d2d1.dll!".iter().chain(what) {
+    for &b in crate::DLL_NAME.iter().chain(what) {
         if n == out.len() {
             break;
         }
@@ -237,17 +333,5 @@ impl Arg for f32 {
 impl Arg for bool {
     fn word(&self) -> u64 {
         u64::from(*self)
-    }
-}
-
-impl Arg for crate::Point {
-    fn word(&self) -> u64 {
-        u64::from(self.x.to_bits()) | (u64::from(self.y.to_bits()) << 32)
-    }
-}
-
-impl Arg for crate::SizeU {
-    fn word(&self) -> u64 {
-        u64::from(self.width) | (u64::from(self.height) << 32)
     }
 }
