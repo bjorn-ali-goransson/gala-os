@@ -585,12 +585,24 @@ pub fn start_agent() {
 }
 
 /// Where the user-mode shell is installed (ARCHITECTURE "The user-mode
-/// shell").
+/// shell"): an image with a screen installs it there, as Windows ships
+/// Explorer; the boot's C:\gala copy is a test program's module and is
+/// not started (without System32's DLLs it does not load).
 pub const SHASHA: &str = "C:\\Windows\\System32\\shasha.exe";
 
-/// Starts the user-mode shell with the session (`shell=shasha`), when it
-/// is installed; else the desktop keeps its own taskbar and says why.
+/// Starts the user-mode shell with the session (the default; `shell=
+/// desktop` leaves it out), when it is installed; else the desktop keeps
+/// its own taskbar and says why.
 pub fn start_shell() {
+    // A shell the previous kernel handed over goes on (not a second one,
+    // which the shell window would refuse).
+    if let Some(p) = crate::handover::carry::resumed("shasha.exe") {
+        crate::info!(
+            "desktop: the user-mode shell goes on from the previous kernel (pid {})",
+            p.id
+        );
+        return;
+    }
     match super::process::open_program(SHASHA) {
         Ok(_) => {
             let _ = start_path(SHASHA, "", None);

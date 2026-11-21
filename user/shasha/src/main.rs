@@ -132,6 +132,8 @@ const WA_INACTIVE: usize = 0;
 const WM_HOTKEY: u32 = 0x0312;
 const MOD_WIN: u32 = 0x0008;
 const VK_LWIN: u32 = 0x5b;
+const VK_ESCAPE: usize = 0x1b;
+const WM_KEYDOWN: u32 = 0x0100;
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
 const SW_SHOWNOACTIVATE: i32 = 4;
@@ -971,11 +973,12 @@ impl Component for Menu {
             MenuMsg::Toggle if shown => self.hide(hwnd, "toggled"),
             MenuMsg::Toggle => self.show(hwnd),
             MenuMsg::Deactivated if shown => self.hide(hwnd, "another window is active"),
+            MenuMsg::Escape if shown => self.hide(hwnd, "Esc"),
             MenuMsg::Launch(i) => {
                 self.launch(*i);
                 self.hide(hwnd, "a program started");
             }
-            MenuMsg::Deactivated | MenuMsg::Query(_) => {}
+            MenuMsg::Deactivated | MenuMsg::Escape | MenuMsg::Query(_) => {}
         }
         self.menu.update(msg);
     }
@@ -984,6 +987,7 @@ impl Component for Menu {
         match msg {
             WM_APP_TOGGLE => Some(MenuMsg::Toggle),
             WM_HOTKEY if wparam == MENU_HOT_KEY as usize => Some(MenuMsg::Toggle),
+            WM_KEYDOWN if wparam == VK_ESCAPE => Some(MenuMsg::Escape),
             // SAFETY: our window.
             WM_ACTIVATE
                 if wparam & 0xffff == WA_INACTIVE

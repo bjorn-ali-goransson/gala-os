@@ -1833,6 +1833,16 @@ fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
         (),
         Some(d.present(id, r, &pixels, stride / 4)?)
     ))));
+    // Each copy, so a trace shows who keeps the desktop busy and with
+    // how much (a window drawn again and again for nothing).
+    crate::events::emit(
+        crate::events::Category::Window,
+        "window",
+        format_args!(
+            r#""op":"present","id":{id},"pid":{},"x":{},"y":{},"w":{},"h":{}"#,
+            call.process.id, r.x, r.y, r.w, r.h
+        ),
+    );
     NtStatus::SUCCESS
 }
 

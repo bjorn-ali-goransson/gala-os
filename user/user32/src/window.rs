@@ -1765,6 +1765,10 @@ fn client_dc(hwnd: Hwnd) -> Handle {
         (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
     };
     keep_dc(hdc, hwnd);
+    // DCB_ENABLE | DCB_RESET: what it draws accumulates from the start,
+    // so ReleaseDC and the idle moment show it only when it drew (a DC
+    // that only measured text, as a layout does, sends nothing).
+    (g.set_bounds)(hdc, core::ptr::null(), 4 | 1);
     // The window's thread, not the one asking: what another thread draws
     // on this DC shows as it is drawn (`drew`), since no idle moment of
     // this window's thread need follow it.
@@ -1807,11 +1811,9 @@ const KEPT_DCS: usize = 64;
 struct KeptDc {
     hdc: usize,
     hwnd: Hwnd,
-    /// Bounds accumulate (it was out at an idle moment).
-    bounded: bool,
 }
 
-const NO_KEPT: KeptDc = KeptDc { hdc: 0, hwnd: 0, bounded: false };
+const NO_KEPT: KeptDc = KeptDc { hdc: 0, hwnd: 0 };
 
 struct KeptTable {
     lock: AtomicBool,
@@ -1842,7 +1844,7 @@ fn keep_dc(hdc: Handle, hwnd: Hwnd) {
     }
     let kept = with_kept(|t| match t.iter_mut().find(|k| k.hdc == 0) {
         Some(k) => {
-            *k = KeptDc { hdc: hdc as usize, hwnd, bounded: false };
+            *k = KeptDc { hdc: hdc as usize, hwnd };
             KEPT_COUNT.fetch_add(1, Ordering::Relaxed);
             true
         }
@@ -1884,25 +1886,22 @@ fn present_kept() {
             continue;
         }
         let hdc = k.hdc as Handle;
-        let drew = if k.bounded {
-            let mut drawn = [0i32; 4];
-            // DCB_RESET (1); DCB_SET (3) when something was drawn.
-            (g.get_bounds)(hdc, &mut drawn, 1) & 3 == 3
-        } else {
-            // DCB_ENABLE | DCB_RESET: accumulate from now on; what it drew
-            // before is not known, so all of it shows once.
-            (g.set_bounds)(hdc, core::ptr::null(), 4 | 1);
-            with_kept(|t| {
-                if let Some(e) = t.iter_mut().find(|e| e.hdc == k.hdc) {
-                    e.bounded = true;
-                }
-            });
-            true
-        };
+        let drew = drew_on(g, hdc, true);
         if drew {
             mark_dirty(k.hwnd);
         }
     }
+}
+
+/// Whether window DC `hdc` drew since its bounds were last reset (then
+/// reset if `reset`): also true when its program turned accumulation
+/// off (SetBoundsRect DCB_DISABLE), what it drew then not known.
+fn drew_on(g: &Gdi, hdc: Handle, reset: bool) -> bool {
+    // Flags 0: the state (DCB_DISABLE, 8), nothing changed.
+    let off = (g.set_bounds)(hdc, core::ptr::null(), 0) & 8 != 0;
+    let mut drawn = [0i32; 4];
+    // DCB_RESET (1) in flags; DCB_SET (3) back when something was drawn.
+    off || (g.get_bounds)(hdc, &mut drawn, u32::from(reset)) & 3 == 3
 }
 
 /// A DC over `pixels` (w x h, rows `stride` pixels apart), or null.
@@ -2093,7 +2092,8 @@ pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
     }
 }
 
-/// ReleaseDC: what was drawn shows.
+/// ReleaseDC: what was drawn shows (nothing to show when it drew
+/// nothing).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
     if hwnd == 0 {
@@ -2102,7 +2102,9 @@ pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
     if window(hwnd).is_none() {
         return crate::surface::release_foreign(hwnd, hdc).unwrap_or(0);
     }
-    present(hwnd);
+    if gdi().is_some_and(|g| drew_on(g, hdc, false)) {
+        present(hwnd);
+    }
     forget_dc(hdc);
     gdi().map_or(0, |g| (g.delete_dc)(hdc))
 }

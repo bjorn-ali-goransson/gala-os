@@ -225,7 +225,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Podman and Docker on Linux, reached from Windows | in progress | the WSL facade's core (`wsl`, `wsl_terminal`); next the Linux side first: rootless Podman, then cgroups, networking, rootful Podman and Docker Engine, nesting, then Kubernetes (k3s, kind); then Docker's Windows CLI over a relayed `\\.\pipe\docker_engine` and Podman for Windows; Docker Desktop in "Later" |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); next: all of GIMP's plug-ins |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); step 5: X11 programs through rootless Xwayland, gala its window manager, xterm on a pty (`lx_xterm`), GTK under X11 (`lx_gtk_x11`); step 6's first part: a distribution's desktop in one window (`lx_xdesktop`); step 7: Linux distributions in the start menu (`linux_menu`); step 9: GIMP 3.2 in batch mode, its saved file Ubuntu 26.04's byte for byte (`lx_gimp_batch`; System V shared memory: `lx_shm`; sysinfo: `lx_sysinfo`), and on the desktop: its window, in.png opened, Colors > Invert and File > Export, the exported file Ubuntu 26.04's byte for byte (`lx_gimp`); open: `lx_gimp_batch`'s file-png plug-in now and then finding its pipe's reader gone ("Broken pipe" in the transcript, WORKFLOW "Known intermittent"); next: all of GIMP's plug-ins |
 | AR | ARM64 port | in progress | the aarch64 kernel boots on QEMU `virt` with its own page tables, GIC, scheduler, CPUs, virtio disk and network (`arm_*` scenarios); ARM64 Windows programs run through gala's ntdll, bound to ARM64 DLLs, with threads, SEH and APCs; 156 x64 scenarios run on it as ARM64 twins; state dumps at a timeout; Linux programs run on aarch64 too (40 `arm_lx_*` twins); virtio-input keyboard and mouse; kernel handover; next (the owner) the desktop on ARM: the boot ends on a usable desktop (`desktop_at_boot`) and GTK runs (`arm_lx_gtk`); the popup hang left |
 | VM | Virtual machines on gala | later | wanted, not scheduled (the owner); step 1: QEMU's emulation (TCG) as an ordinary program, a small Linux guest booted inside gala; step 2: gala as the hypervisor (VT-x/AMD-V, ARM's EL2) behind Linux's `/dev/kvm`, then the Windows Hypervisor Platform (`WinHvPlatform.dll`) |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code, then 32-bit x86 (WOW64 on ARM; Office's x86 installer); after AR |
@@ -913,9 +913,26 @@ shell part) leaves it.
       broadcast to every top-level window, SPI_SETDESKWALLPAPER with
       NULL (the value from the registry again), the watermark (drawn
       only by the kernel's wallpaper).
-   Then shasha the default shell, and the kernel's shell code (about
-   4-5k lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
-   Linux and install tiles) removed.
+   10. Done: shasha is the default shell. The kernel starts
+      `C:\Windows\System32\shasha.exe` with every session that has a
+      screen unless `shell=desktop`; the image (every UEFI scenario and
+      the release) ships it and `ribbons.qoi`; a handover carries the
+      running shasha instead of starting a second one; Esc closes its
+      start menu. The kernel's self-tests run before it starts. Painting
+      got cheaper on the way: a GetDC DC that only measured text no
+      longer sends its window to the desktop (user32 `drew_on`), and
+      gala_ui prepares a picture once rather than on each paint (the
+      wallpaper made shasha's start cost seconds under emulation and
+      took Task Manager's busy window below its share). The window
+      event `present` shows each copy. Tests: every UEFI scenario now
+      boots with it (`desktop_at_boot` checks shasha's taskbar, wallpaper
+      and start menu: Windows key, Esc). Not yet: the task buttons'
+      icons; the scenarios that test the kernel's own shell (`start_menu`,
+      `linux_menu`, `tray_test`, `hotkey_test`, which plays the shell)
+      run with `shell=desktop` until it is removed.
+   Then the kernel's shell code (about 4-5k lines of `nt/desktop`: the
+   menu, taskbar, tray, wallpaper, the Linux and install tiles)
+   removed, its scenarios moved to shasha.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash
    record in the event stream; windows stay usable meanwhile (Win+arrows

@@ -13,7 +13,12 @@
 //!   processor; a mask of no or unknown processors is STATUS_INVALID_PARAMETER,
 //!   and ThreadBasicInformation reports the mask;
 //! - waits and wakes across processors: 1000 event round trips between two
-//!   threads pinned to different processors.
+//!   threads pinned to different processors;
+//! - a running thread keeps its processor while another processor is
+//!   idle: a thread pinned to processor 0 spins while this one, free to
+//!   run anywhere, sleeps a millisecond 1000 times; each wake runs on the
+//!   idle processor and the spinner is not switched out for it (its
+//!   ContextSwitches grow by a handful at most, not one per quantum).
 //!
 //! The multi-processor checks need NumberOfProcessors >= 2 (else skipped).
 //! Prints `smpsched_test: ok` or exits with the number of the failing check.
@@ -27,6 +32,7 @@ use ntrt::*;
 
 const THREAD_AFFINITY_MASK: u32 = 4;
 const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
+const STATUS_TIMEOUT: NtStatus = 0x0000_0102;
 const ROUNDS: u32 = 1000;
 
 struct Checks(u32);
@@ -204,6 +210,26 @@ extern "C" fn event_partner(cpu: usize) -> ! {
     exit_thread(STATUS_SUCCESS)
 }
 
+// A spinner pinned to processor 0 while the main thread sleeps and wakes.
+static SPIN_DONE: AtomicU32 = AtomicU32::new(0);
+const NAPS: u32 = 1000;
+
+extern "C" fn pinned_spinner(_: usize) -> ! {
+    if pin(CURRENT_THREAD, 1) != STATUS_SUCCESS {
+        exit_thread(1);
+    }
+    let give_up = GIVE_UP.load(Ordering::Relaxed) as i64;
+    let mut spins = 0u32;
+    while SPIN_DONE.load(Ordering::Acquire) == 0 {
+        spins = spins.wrapping_add(1);
+        if spins.is_multiple_of(1 << 16) && past(give_up) {
+            exit_thread(2);
+        }
+        core::hint::spin_loop();
+    }
+    exit_thread(STATUS_SUCCESS)
+}
+
 type GetProcessorNumber = extern "system" fn() -> u32;
 
 fn run() -> Result<(), u32> {
@@ -325,6 +351,48 @@ fn run() -> Result<(), u32> {
     let (s, code, _, _) = thread_basic_info(h);
     c.eq(s.into(), ok)?;
     c.eq(code.into(), ok)?;
+
+    // A spinner on processor 0 and this thread, free to run anywhere,
+    // napping: each wake has the other processor, idle, to run on.
+    // Windows leaves the spinner where it is (about none of its
+    // ContextSwitches). The bound is far below the one-per-quantum a
+    // scheduler gives that preempts a running thread for work an idle
+    // processor was woken to take (a 10 ms quantum: 100 and more over
+    // the 1000 naps), and far above the few switches other work on
+    // processor 0 (the system's own threads) can cause.
+    c.eq(pin(CURRENT_THREAD, all).into(), ok)?;
+    let (s, nap) = create_event(EVENT_ALL_ACCESS, SYNCHRONIZATION_EVENT, false);
+    c.eq(s.into(), ok)?;
+    SPIN_DONE.store(0, Ordering::Relaxed);
+    GIVE_UP.store(deadline(GIVE_UP_SECONDS) as u64, Ordering::Relaxed);
+    let (s, h, spinner) = create_thread(pinned_spinner, 0, false);
+    c.eq(s.into(), ok)?;
+    // Until it runs pinned (its first switch-in is not the one counted).
+    for _ in 0..50 {
+        let _ = wait(nap, Some(-10_000));
+    }
+    let before = context_switches(list, &[spinner]);
+    let mut napped = 0u32;
+    for _ in 0..NAPS {
+        if wait(nap, Some(-10_000)) == STATUS_TIMEOUT {
+            napped += 1;
+        }
+    }
+    let after = context_switches(list, &[spinner]);
+    SPIN_DONE.store(1, Ordering::Release);
+    c.eq(napped.into(), NAPS.into())?;
+    c.eq(wait(h, Some(-50_000_000)).into(), ok)?;
+    let (s, code, _, _) = thread_basic_info(h);
+    c.eq(s.into(), ok)?;
+    c.eq(code.into(), ok)?;
+    let (Some(before), Some(after)) = (before, after) else {
+        return c.ok(false, u64::from(STATUS_INFO_LENGTH_MISMATCH));
+    };
+    let switches = after.saturating_sub(before);
+    let mut line = *b"smpsched_test: spinner context switches 00000000\r\n";
+    line[40..48].copy_from_slice(&hex32(switches as u32));
+    write_file(stdout(), &line);
+    c.ok(switches < 20, switches)?;
     Ok(())
 }
 

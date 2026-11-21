@@ -941,6 +941,13 @@ fn pipe_write(
             (room, st.readers, fits)
         };
         if readers == 0 {
+            // Logged: a writer that finds its reader gone tells when the
+            // pipe lost it (lx_gimp_batch's plug-in's "Broken pipe",
+            // WORKFLOW "Known intermittent").
+            crate::info!(
+                "lx: pid {}: write to a pipe with no reader ({done} of {count} bytes written): SIGPIPE, EPIPE",
+                call.process.id
+            );
             sigcalls::sigpipe(call);
             return partial(done, EPIPE);
         }

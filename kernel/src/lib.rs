@@ -432,16 +432,22 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     {
         error!("wayland: cannot start the server: {e:?}");
     }
-    // The user-mode shell (ARCHITECTURE "The user-mode shell"):
-    // `shell=shasha` starts shasha.exe with the session, before the agent
-    // panel (whose strip goes above the taskbar it takes). Without it the
-    // desktop draws its own taskbar.
+    // The kernel's self-tests check whole-kernel counts (free frames, the
+    // heap) around each test, so they run before the session's first
+    // program, which allocates alongside them.
+    if cmdline.flag("selftest") {
+        selftest::run_all();
+    }
+    // The user-mode shell (ARCHITECTURE "The user-mode shell"): shasha.exe
+    // starts with the session (the default, or `shell=shasha`), before the
+    // agent panel (whose strip goes above the taskbar it takes);
+    // `shell=desktop` leaves it out and the desktop draws its own taskbar.
     match cmdline.value("shell") {
-        None | Some("desktop") => {}
-        Some("shasha") if nt::desktop::is_bare() => {
+        Some("desktop") => info!("desktop: no user-mode shell: shell=desktop"),
+        None | Some("shasha") if nt::desktop::is_bare() => {
             info!("desktop: no user-mode shell: the desktop is bare (no screen and no presenter=)");
         }
-        Some("shasha") => nt::action::start_shell(),
+        None | Some("shasha") => nt::action::start_shell(),
         Some(other) => warn!("desktop: shell={other} is not a shell (shasha, desktop)"),
     }
     // The agent panel (ARCHITECTURE "The agent panel"): started with the
@@ -582,9 +588,6 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     if cmdline.flag("net_echo") {
         net::echo_test();
-    }
-    if cmdline.flag("selftest") {
-        selftest::run_all();
     }
     time::wait_hang_test(cmdline.flag("hangtest"));
 

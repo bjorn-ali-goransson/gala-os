@@ -584,7 +584,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `trace` | log every system call (arguments, status) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
-| `shell=shasha` | start the user-mode shell `shasha.exe` with the session; it takes the taskbar ("The user-mode shell"); `shell=desktop` or none: the desktop's own taskbar |
+| `shell=` | `shasha` or none (the default): start the user-mode shell `shasha.exe` with the session; it takes the taskbar ("The user-mode shell"); `shell=desktop`: the desktop's own taskbar, start menu and wallpaper (the kernel's shell, until it is removed) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
@@ -934,6 +934,16 @@ Invariants:
   moves the caller at once and others at their CPU's next tick.
 - Waking: `make_ready` sends a reschedule IPI (vector 0x31, empty handler:
   it only ends `hlt`) to one idle CPU allowed to run the thread.
+- Preemption is for work no idle CPU takes (`work_needs`): at its
+  quantum's end a running thread keeps its CPU while each queued thread
+  that may run there has another idle CPU to run on (one each, in queue
+  order); that CPU was woken for it or finds it at its next tick. Taking
+  the work on the busy CPU instead swaps the two threads' CPUs and leaves
+  the running one queued until the idle CPU wakes, which a loaded host
+  makes long: Task Manager's busy thread lost a third of its processor
+  so. smpsched_test counts it (a spinner pinned to processor 0 while
+  another thread naps 1000 times: `smpsched_test: spinner context
+  switches N`, a handful, not one per quantum).
 - Per-CPU hardware state (MSRs, APIC, CR4, XCR0) is set up in each CPU's
   own setup path, never from a thread after scheduling starts: threads
   move between CPUs (the boot thread too).
@@ -2210,11 +2220,17 @@ Invariants:
 - **Waitable timers** (`nt::timer`; `timer_test`): NtSetTimer converts
   the due time to a tick (`due_tick`: never early) and registers the
   timer; a kernel thread, `timers`, sleeps until the earliest due tick
-  (at most 10 ticks), signals expired timers, queues their APC routine
+  (or until woken, with none armed), signals expired timers, queues their APC routine
   to the thread that set them and re-arms periodic ones. Doing this in
   thread context lets it allocate and drop references; timers whose last
   handle is closed are dropped. Synchronization timers reset when a wait
   is satisfied. Invariants:
+  - The worker never polls: whatever changes what it waits for (a timer
+    armed or adopted, the system time moved) wakes it (`wake_worker`),
+    and a wake asked for while it computes its next wake-up is not lost
+    (`WAKES`, read when a round begins and again after `prepare_wait`).
+    Looking every 10 ticks instead woke it 100 times a second for
+    nothing, each time taking a processor from a running thread.
   - NtSetTimer sets the timer's state (due tick) before listing it,
     because the worker prunes listed timers that are not armed.
   - The worker decides an expiry and signals it in one hold of the
@@ -8422,12 +8438,21 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
 `shell=` option (`lib.rs`). Test: `shasha_test`, screen scenario
 `shasha` (ROADMAP SH step 1).
 
-- **Started**: `shell=shasha` on the command line starts
+- **Started**: by default (or `shell=shasha`) the kernel starts
   `C:\Windows\System32\shasha.exe` with the session, under the boot
-  user's token, before the agent panel; without it (or `shell=desktop`)
-  the desktop draws its own taskbar, as it does when shasha.exe is not
-  installed (`desktop: no user-mode shell: ... not opened`) or the
-  desktop is bare.
+  user's token, after the self-tests (`selftest`, whose whole-kernel
+  counts a running program would disturb) and before the agent panel
+  (`desktop: started C:\Windows\System32\shasha.exe (pid 4)`: the
+  session's first program, so a `run=` program is pid 12). With
+  `shell=desktop` the desktop draws its own taskbar, as it does when
+  shasha.exe is not installed (`desktop: no user-mode shell: ... not
+  opened ...: the desktop's taskbar stays`) or the desktop is bare.
+  The image ships it: xtask adds `user/bin/shasha.exe` to every UEFI
+  scenario's modules and to the release's system (with
+  `Windows/Web/Wallpaper/ribbons.qoi`, the default wallpaper's file).
+  After a handover a carried shasha goes on (`desktop: the user-mode
+  shell goes on from the previous kernel (pid 4)`) and no second one
+  starts, which SetShellWindow would refuse.
 - **Its window**: a gala_ui popup strip at the bottom of the screen,
   topmost and never activated (WS_EX_NOACTIVATE, shown with
   SW_SHOWNOACTIVATE: a click on it leaves the active window active, so
@@ -8500,7 +8525,9 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   the shell's process may take) toggle it; opening clears the search,
   shows the window, asks for the foreground and focuses `Search`
   (gala_ui's `win::focus`). WM_ACTIVATE with WA_INACTIVE while shown
-  (another window became active) closes it, as Windows' does.
+  (another window became active) closes it, as Windows' does, and so
+  does Esc while it is shown (gala_ui hands WM_KEYDOWN to the
+  component, which closes it: `shasha: the start menu closes: Esc`).
 - **When shasha ends** (its process, or its bar removed) the taskbar's
   bar is gone and the desktop places its own again on the same strip
   (`taskbar_back`), so a session is never without a taskbar. A screen
@@ -9144,8 +9171,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (GalaWindowPresent) when a thread goes idle (no message to retrieve,
   or MsgWaitForMultipleObjects about to wait) or once drawing has gone
   on for 50 ms without a break. One change (a resize repaints every
-  child; wx calls GetDC/ReleaseDC to measure text) is then one copy, not
-  hundreds.
+  child) is then one copy, not hundreds. A DC from GetDC accumulates
+  its bounds from the start (`client_dc`: SetBoundsRect DCB_ENABLE), and
+  ReleaseDC and the idle moment add its window only when it drew
+  (`drew_on`; a DC whose program turned accumulation off counts as
+  drawn): a DC that only measured text (wx; gala_ui lays every view out
+  on one) sends nothing, where the whole window went again -- 4 MB for
+  the shell's desktop, seconds of processor time under emulation.
   **What a thread that is not the window's draws on a DC of it shows as
   it is drawn**, with no idle moment to wait for: user32 tells gdi32
   which thread each window DC was handed out for

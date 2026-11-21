@@ -307,6 +307,37 @@ impl Scheduler {
         self.ready.iter().any(|&id| self.runnable_here(id, cpu))
     }
 
+    /// Whether queued work needs CPU `cpu` itself: a queued thread that
+    /// may run here and that no other idle CPU is there to take (each
+    /// idle CPU taking one, in queue order). A running thread is not
+    /// preempted at its quantum's end for work an idle CPU will run: that
+    /// CPU was woken for it (`make_ready`), or finds it at its next tick
+    /// or before it halts (`idle_loop`). Preempting instead swaps the two
+    /// threads' CPUs and leaves the running one waiting until the idle
+    /// CPU wakes, which a loaded host makes long (Task Manager's busy
+    /// thread lost a third of its processor to that).
+    fn work_needs(&self, cpu: usize) -> bool {
+        let mut taken = 0u64;
+        for &id in &self.ready {
+            if !self.runnable_here(id, cpu) {
+                continue;
+            }
+            let other = (0..smp::MAX_CPUS).find(|&c| {
+                let o = &self.cpus[c];
+                c != cpu
+                    && taken & (1 << c) == 0
+                    && o.online
+                    && Some(o.current) == o.idle
+                    && self.runnable_here(id, c)
+            });
+            match other {
+                Some(c) => taken |= 1 << c,
+                None => return true,
+            }
+        }
+        false
+    }
+
     /// Takes the first queued thread that may run on `cpu`.
     fn pick(&mut self, cpu: usize) -> Option<ThreadId> {
         let i = self.ready.iter().position(|&id| self.runnable_here(id, cpu))?;
@@ -1005,9 +1036,12 @@ pub(crate) fn on_tick_here() {
             return;
         }
         let has_work = s.has_work(here);
+        let idle = Some(s.cpus[here].current) == s.cpus[here].idle;
+        // What a running thread is preempted for: work no idle CPU takes.
+        let work_here = if idle { has_work } else { s.work_needs(here) };
         let cpu = &mut s.cpus[here];
         cpu.quantum_left = cpu.quantum_left.saturating_sub(1);
-        let idle_with_work = Some(cpu.current) == cpu.idle && has_work;
+        let idle_with_work = idle && has_work;
         if cpu.quantum_left == 0 || idle_with_work {
             cpu.need_resched = true;
         }
@@ -1023,7 +1057,7 @@ pub(crate) fn on_tick_here() {
         if must_move {
             cpu.need_resched = true;
         }
-        cpu.need_resched && (has_work || must_move)
+        cpu.need_resched && (work_here || must_move)
     };
     if preempt {
         schedule();

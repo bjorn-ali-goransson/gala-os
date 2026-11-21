@@ -18,9 +18,13 @@ use crate::sync::IrqMutex;
 static TIMERS: IrqMutex<Vec<ObjectRef>> = IrqMutex::new(Vec::new());
 static WORKER: IrqMutex<Option<ThreadId>> = IrqMutex::named("timer.worker", None);
 
-/// Longest the worker sleeps without looking (covers a timer armed while
-/// it was computing its next wake-up).
-const MAX_SLEEP_TICKS: u64 = 10;
+/// Counts the worker's wake-ups asked for (`wake_worker`): one asked for
+/// while it was computing its next wake-up, before it waits, is seen when
+/// it does. With it the worker sleeps until the earliest due time, or
+/// until woken when none is armed, instead of looking every few ticks
+/// (which woke it 100 times a second for nothing and took processors
+/// from running threads: smpsched_test's spinner).
+static WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// 100 ns units per timer tick.
 const UNITS_PER_TICK: u64 = 10_000_000 / platform::TICK_HZ;
@@ -48,6 +52,7 @@ pub fn init() -> Result<(), NtStatus> {
 }
 
 fn wake_worker() {
+    WAKES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     if let Some(tid) = *WORKER.lock() {
         platform::wake(tid);
     }
@@ -145,6 +150,7 @@ pub fn system_time_changed() {
 
 fn worker(_: usize) {
     loop {
+        let asked = WAKES.load(core::sync::atomic::Ordering::SeqCst);
         let now = platform::ticks();
         let system_now = platform::system_time();
         let timers: Vec<ObjectRef> = {
@@ -166,7 +172,7 @@ fn worker(_: usize) {
             }
             copy
         };
-        let mut next = now + MAX_SLEEP_TICKS;
+        let mut next = u64::MAX;
         for object in &timers {
             let Some(timer) = timer_of(object) else { continue };
             // Decided and signaled in one hold of the timer's lock: a
@@ -220,7 +226,12 @@ fn worker(_: usize) {
             }
         }
         drop(timers);
-        platform::prepare_wait(Some(next.max(now + 1)));
+        platform::prepare_wait((next != u64::MAX).then(|| next.max(now + 1)));
+        // Asked for since this round began (a timer armed meanwhile): the
+        // wait ends at once (a wake after `prepare_wait` is not lost).
+        if WAKES.load(core::sync::atomic::Ordering::SeqCst) != asked {
+            platform::wake(platform::current());
+        }
         platform::wait();
     }
 }

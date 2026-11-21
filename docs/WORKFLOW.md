@@ -3970,7 +3970,10 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   notch three more, a button change one event per button changed and a
   SYN, a key four: down, SYN, up, SYN); the same host test refuses a
   twin's command it does not know. A twin is screen-checked as its x64
-  scenario (`screen_check` looks through `twin_base`). Under the
+  scenario (`screen_check` looks through `twin_base`), so its image
+  has what its base's screen shows: the shell too, shasha.exe's ARM64
+  build (`modules_of`; without it, arm_taskmgr's "sh" search lacked
+  the shell's row and its Linux group sat a group higher). Under the
   `events=window` mask, each button change the desktop takes is an
   event `pointer` (where, and what got it: `Start`, `LinuxEntry(0)`,
   `capture <window>`), and the exit's `input:` line counts the presses.
@@ -4376,6 +4379,18 @@ Scenarios that fail now and then, and what is known.
   notification event reset by one woken waiter before another looked).
   Open; whether it recurs on the pinned QEMU is not recorded.
   `target/failed/java_http.log` is the starting point if it does.
+- **lx_gimp_batch's "Broken pipe"**: about 1 run in 4, across many
+  commits, the transcript gains `(file-png:108): LibGimp-WARNING **:
+  ... file-png: gimp_flush(): error: Broken pipe`: the plug-in that
+  loads in.png (it runs about 6 s, where the first file-png, which only
+  registers, runs 1.3 s) finds GIMP's end of its pipe closed when it
+  writes its last message, and exits 0; the saved file is right. The
+  pipe's reader count is per open description (`lx::state::Fd`), so
+  either GIMP closed it before reading that message or a close dropped
+  it early. Open. The serial log's `write to a pipe with no reader`
+  line dates the write; what closed the read end (GIMP's
+  `gimp_plug_in_close` from a hang-up, or a reader count gone wrong)
+  is the next thing to find.
 - **Watchdogs firing during boot**: look first at the `apic:` / `tsc:`
   lines (the triage shows their figures near the guest line). A TSC
   calibrated at tens of MHz instead of about 2.8 GHz makes guest time

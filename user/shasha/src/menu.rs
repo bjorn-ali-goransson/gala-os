@@ -44,6 +44,8 @@ pub enum MenuMsg {
     Toggle,
     /// Another window became active: hidden.
     Deactivated,
+    /// Esc pressed in the menu: hidden (as Windows' Start).
+    Escape,
     /// The search's text.
     Query(String),
     /// A tile (the program's index in the list).

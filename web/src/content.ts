@@ -215,8 +215,9 @@ export const componentGroups: ComponentGroup[] = [
     items: [
       {
         name: "Compositor and shell",
+        path: "user/shasha",
         status: "works",
-        what: "Windows, a taskbar, a start menu with search, snapping, wallpapers, UI Automation for testers and screen readers.",
+        what: "Windows, a taskbar, a start menu with search, a notification area, snapping, wallpapers, UI Automation for testers and screen readers. The taskbar, start menu and wallpaper are an ordinary program, shasha.exe, not part of the kernel.",
       },
       {
         name: "Task manager",

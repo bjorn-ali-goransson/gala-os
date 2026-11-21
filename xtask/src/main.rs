@@ -9486,9 +9486,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shasha", "uiautomationcore.dll", "Windows/System32"),
     ("shasha", "comctl32.dll", "Windows/System32"),
     // The notification area in shasha's taskbar (ROADMAP SH step 1,
-    // part 8): tray_test's icon held, drawn and clicked by shasha.
+    // part 8): tray_test's icon held, drawn and clicked by shasha (the
+    // default shell, installed in every image with a screen).
     ("shasha_tray", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
-    ("shasha_tray", "user/bin/shasha.exe", "Windows/System32"),
     ("shasha_tray", "ntdll.dll", "Windows/System32"),
     ("shasha_tray", "kernel32.dll", "Windows/System32"),
     ("shasha_tray", "msvcrt.dll", "Windows/System32"),
@@ -15637,24 +15637,31 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // installed: `gala install 7zip.7zip` without a window, its
         // progress on the tile); START_MENU_SCREEN clicks them.
         name: "desktop_at_boot",
-        // A machine booted as the downloadable images are (no qemu_exit,
-        // a console program and nothing else): once the boot's work is
-        // done the console session's desktop is on the screen, the
-        // taskbar and start button drawn, the start menu answering the
-        // keyboard and the mouse (DESKTOP_AT_BOOT_SCREEN). xtask stops
-        // the machine after the screen check.
+        // A machine booted as the downloadable images are (their system:
+        // FULL_SYSTEM_SCENARIOS; no qemu_exit, a console program and
+        // nothing else): once the boot's work is done the console
+        // session's desktop is on the screen, shasha's taskbar and
+        // wallpaper drawn, its start menu answering the Windows key and
+        // Esc (DESKTOP_AT_BOOT_SCREEN). xtask stops the machine after the
+        // screen check.
         cmdline: "run=hello.exe",
         exit_status: XTASK_STOPS,
         expect: &[
             "Hello from user mode!",
             "boot: the boot thread's work is done; it ends",
             "desktop: session 1 is live",
+            "desktop: started C:\\Windows\\System32\\shasha.exe (pid",
+            "shasha: the wallpaper is C:\\Windows\\Web\\Wallpaper\\ribbons.qoi",
+            "shasha: the start menu opens",
+            "shasha: the start menu closes: Esc",
             "xtask: screen ok",
         ],
     },
     Scenario {
         name: "start_menu",
-        cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
+        // The kernel's own start menu (shell=desktop: no shasha) until SH
+        // removes it and the test moves to shasha's (ROADMAP SH).
+        cmdline: "qemu_exit shell=desktop wallpaper=night run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "start_menu_test: listed",
@@ -16333,7 +16340,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // clicks, then a real click (TRAY_SCREEN); PNG icons and
         // LoadIconMetric. UEFI: a screen.
         name: "tray_test",
-        cmdline: "qemu_exit wallpaper=night run=tray_test.exe args=screen",
+        // The kernel's own notification area (shell=desktop: no shasha) until SH
+        // removes it and the test moves to shasha's (ROADMAP SH).
+        cmdline: "qemu_exit shell=desktop wallpaper=night run=tray_test.exe args=screen",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "tray_test: icons",
@@ -16459,7 +16468,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // alone) to the shell's window once it has one (SetShellWindow);
         // HOTKEY_SCREEN presses them.
         name: "hotkey_test",
-        cmdline: "qemu_exit run=hotkey_test.exe",
+        // hotkey_test plays the shell (its window the shell window, the
+        // shell's keys its own): no shasha holds it (shell=desktop).
+        cmdline: "qemu_exit shell=desktop run=hotkey_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "hotkey_test: registered",
@@ -16537,11 +16548,13 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // part 8; ARCHITECTURE "The notification area"): Shell_NotifyIcon
         // hands the icon to `Shell_TrayWnd` by WM_COPYDATA, shasha draws
         // it left of the clock, and a real click and right click on it
-        // (SHASHA_TRAY_SCREEN) bring the version 4 callbacks.
+        // (SHASHA_TRAY_SCREEN) bring the version 4 callbacks. No
+        // `shell=`: shasha is the default shell, installed with the screen.
         name: "shasha_tray",
-        cmdline: "qemu_exit wallpaper=night agent=off shell=shasha run=tray_test.exe args=screen%20shell",
+        cmdline: "qemu_exit wallpaper=night agent=off run=tray_test.exe args=screen%20shell",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
+            "desktop: started C:\\Windows\\System32\\shasha.exe (pid",
             "shasha: started",
             "tray_test: icons",
             "shasha: notification-area icon added: window",
@@ -17856,7 +17869,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "firmware: UEFI x86_64",
-            "handover: carrying 1 process(es), 10 thread(s)",
+            // The shell (one thread) comes across with the test program.
+            "handover: carrying 2 process(es), 11 thread(s)",
+            "handover: resumed process handover_k32_test.exe (pid 12): 10 thread(s)",
+            "desktop: the user-mode shell goes on from the previous kernel (pid 4)",
             "handover: resumed process handover_k32_test.exe",
             "handover_k32_test: ok",
             "exited with status 0x00000000",
@@ -17891,7 +17907,10 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "firmware: UEFI x86_64",
-            "handover: carrying 1 process(es), 4 thread(s)",
+            // The shell (one thread) comes across with the test program.
+            "handover: carrying 2 process(es), 5 thread(s)",
+            "handover: resumed process handover_test.exe (pid 12): 4 thread(s)",
+            "desktop: the user-mode shell goes on from the previous kernel (pid 4)",
             "handover: resumed process handover_test.exe",
             "handover_test: ok",
             "exited with status 0x00000000",
@@ -19303,7 +19322,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
                   args=C:\\gala\\setup.exe%20/configure%20C:\\gala\\config_full.xml \
                   dump=C:/gala/odtlog,C:/Users/Public,C:/Windows/Temp",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["consolerun.exe (pid 4) exited with status 0x00000000"],
+        expect: &["run: consolerun.exe finished with status 0x00000000"],
     },
     Scenario {
         // OF (manual): Word on the install office_install_local made, on
@@ -19328,7 +19347,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "consolerun: started pid ",
             "xtask: screen ok",
-            "consolerun.exe (pid 4) exited with status 0x00000000",
+            "run: consolerun.exe finished with status 0x00000000",
         ],
     },
     Scenario {
@@ -19346,7 +19365,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "consolerun: started pid ",
             "xtask: screen ok",
-            "consolerun.exe (pid 4) exited with status 0x00000000",
+            "run: consolerun.exe finished with status 0x00000000",
         ],
     },
     Scenario {
@@ -20509,7 +20528,9 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // terminal and XTerm from its context menu, and hides the
         // section; linux_menu_test follows the registry.
         name: "linux_menu",
-        cmdline: "qemu_exit wayland=on xwayland=on events=wsl,window wallpaper=night linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
+        // The kernel's own start menu's Linux tiles (shell=desktop: no shasha) until SH
+        // removes it and the test moves to shasha's (ROADMAP SH).
+        cmdline: "qemu_exit shell=desktop wayland=on xwayland=on events=wsl,window wallpaper=night linux_mirror=http://10.0.2.100 run=linux_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "linux_menu_test: ready",
@@ -20566,7 +20587,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "taskmgr_test: task manager closed",
             "xtask: screen ok",
             "taskmgr_test: ok",
-            "process taskmgr_test.exe (pid 4) exited with status 0x00000000",
+            "run: taskmgr_test.exe finished with status 0x00000000",
         ],
     },
     Scenario {
@@ -20608,7 +20629,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "explorer_test: explorer closed",
             "xtask: screen ok",
             "explorer_test: ok",
-            "process explorer_test.exe (pid 4) exited with status 0x00000000",
+            "run: explorer_test.exe finished with status 0x00000000",
         ],
     },
     Scenario {
@@ -20617,7 +20638,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "Hello from user mode!",
-            "process hello.exe (pid 4) exited with status 0x00000000",
+            "run: hello.exe finished with status 0x00000000",
             BOOT_OK_MARKER,
         ],
     },
@@ -20675,6 +20696,10 @@ fn events_flag() -> String {
     let extra = env::var("XTASK_CMDLINE").map(|c| format!(" {c}")).unwrap_or_default();
     format!("{events}{record}{extra}")
 }
+
+/// The user-mode shell's checked-in build, installed in every image with a
+/// screen (`extra_modules`).
+const SHELL: &str = "user/bin/shasha.exe";
 
 /// Scenarios that ship named sets of EXTRA_MODULES instead of their own
 /// (the same set: they share a VM); a scenario listed more than once
@@ -20891,6 +20916,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
 /// what they will (office_install: ODT starts the 64-bit
 /// OfficeClickToRun.exe, whose imports are only seen in the run).
 const FULL_SYSTEM_SCENARIOS: &[&str] = &[
+    "desktop_at_boot",
     "office_install",
     "office_install_gui",
     "office_install_local",
@@ -20967,10 +20993,18 @@ const GLIBC_ARM64: &[(Module, Module)] = &[
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
+    modules_of(name, true)
+}
+
+/// `extra_modules`, with the shell an image with a screen installs when
+/// `shell`. A twin with a screen (arm_taskmgr, arm_explorer) has it too,
+/// its ARM64 build: its screen checks are its base's, made with the
+/// shell's taskbar and its process listed.
+fn modules_of(name: &str, shell: bool) -> Vec<(&'static str, &'static str)> {
     // A twin ships its x64 scenario's files (their ARM64 builds), glibc's
     // as aarch64's (GLIBC_ARM64).
     if let Some(base) = twin_base(name) {
-        let mut modules = extra_modules(base);
+        let mut modules = modules_of(base, shell);
         for m in &mut modules {
             if let Some((_, arm)) = GLIBC_ARM64.iter().find(|(x64, _)| x64 == m) {
                 *m = *arm;
@@ -21003,6 +21037,12 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     if FULL_SYSTEM_SCENARIOS.contains(&name) {
         modules.extend(system_modules());
     }
+    // An image with a screen has the shell installed, as Windows ships
+    // Explorer: the kernel starts it with the session (ARCHITECTURE "The
+    // user-mode shell"); its DLLs come with it (below).
+    if shell && UEFI_SCENARIOS.contains(&name) && !modules.contains(&(SHELL, "Windows/System32")) {
+        modules.push((SHELL, "Windows/System32"));
+    }
     // What those modules import, so the set is closed: a DLL whose
     // dependency is not in the image does not load, and the program dies
     // of a module nobody listed. gala's DLLs carry Windows' own
@@ -21018,7 +21058,9 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     while i < modules.len() {
         let (file, _) = modules[i];
         i += 1;
-        if file.contains('/') {
+        // A program from user/bin is followed too (the shell's DLLs).
+        let program = file.starts_with("user/bin/") && file.ends_with(".exe");
+        if file.contains('/') && !program {
             continue;
         }
         for dep in static_imports(file) {
@@ -21055,7 +21097,8 @@ fn shipped_dll(file: &str) -> PathBuf {
 /// 23 gala-um programs that load advapi32 and its kin with it. Empty if
 /// the file is neither checked in nor built, or is no PE.
 fn static_imports(file: &str) -> Vec<&'static str> {
-    let Ok(image) = fs::read(shipped_dll(file)) else {
+    let path = if file.contains('/') { root().join(file) } else { shipped_dll(file) };
+    let Ok(image) = fs::read(path) else {
         return Vec::new();
     };
     let names = import_names(&image);
@@ -25131,31 +25174,34 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
             // unselected, where "sleep" goes on and End task left it
             // selected: the click below waits for this search, not the
             // last one's screen.
+            // The shell, shasha.exe, matches "sh" too: its group (the
+            // background processes) comes first, the Linux group a group
+            // (48 px) below.
             input: &["sendkey esc", "sendkey s", "sendkey h"],
             pixels: &[
                 TASKMGR_FILTERED,
-                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
-                PixelCheck::Most(369, 229, 20, 18, 0xfbfbfb, 100),
+                PixelCheck::AnyIn(130, 253, 200, 16, 0xe95420),
+                PixelCheck::Most(369, 277, 20, 18, 0xfbfbfb, 100),
             ],
         },
         ScreenStep {
             after: "",
             input: &[
-                "mouse_move -255 92",
+                "mouse_move -255 140",
                 "mouse_move -255 0",
                 "mouse_move -48 0",
                 "mouse_button 1",
                 "mouse_button 0",
             ],
             pixels: &[
-                PixelCheck::AnyIn(130, 205, 200, 16, 0xe95420),
-                PixelCheck::At(700, 240, 0xcce4f7),
+                PixelCheck::AnyIn(130, 253, 200, 16, 0xe95420),
+                PixelCheck::At(700, 288, 0xcce4f7),
             ],
         },
         ScreenStep {
             after: "",
             input: &[
-                "mouse_move 255 -92",
+                "mouse_move 255 -140",
                 "mouse_move 255 0",
                 "mouse_move 48 0",
                 "mouse_button 1",
@@ -25220,40 +25266,28 @@ const TASKMGR_SCREEN: ScreenCheck = ScreenCheck {
 /// aims at what an earlier key in the same step changed".
 const TASKMGR_FILTERED: PixelCheck = PixelCheck::Most(310, 300, 800, 260, 0xfbfbfb, 99);
 
-/// desktop_at_boot's screen: the desktop with no window, the start button
-/// alone in the taskbar's middle (640, 776), the pointer at the screen's
-/// (640, 400). The Windows key opens the start menu, Esc closes it, and a
-/// click on the start button opens it again (a click on an open menu
-/// would close it: the last step also says Esc did).
+/// desktop_at_boot's screen: shasha's desktop with no window, its taskbar
+/// (shasha's surface) and the wallpaper. The Windows key opens shasha's
+/// start menu, Esc closes it. (The start button's click is the shasha
+/// scenario's, which finds it through UI Automation.)
 const DESKTOP_AT_BOOT_SCREEN: ScreenCheck = ScreenCheck {
-    marker: "desktop: session 1 is live",
+    marker: "shasha: the taskbar at",
     steps: &[
         ScreenStep {
-            after: "",
+            after: "shasha: the wallpaper is",
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
-                PixelCheck::AnyIn(600, 760, 80, 30, 0x167fd6), // the fortress
-                PixelCheck::Varied(0, 0, 1280, 700, 2),        // a wallpaper
+                PixelCheck::Most(0, 760, 1280, 32, 0xeef1f6, 50), // the taskbar
+                PixelCheck::Varied(0, 0, 1280, 700, 16),          // the wallpaper
             ],
         },
         ScreenStep {
             after: "",
             input: &["sendkey meta_l"],
-            pixels: &[
-                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
-                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-            ],
+            // The menu's surface, its bottom rows.
+            pixels: &[PixelCheck::Most(400, 700, 480, 30, 0xeef1f6, 80)],
         },
-        ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
-        ScreenStep {
-            after: "",
-            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
-            pixels: &[
-                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
-                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-            ],
-        },
+        ScreenStep { after: "shasha: the start menu opens", input: &["sendkey esc"], pixels: &[] },
     ],
 };
 
@@ -25468,30 +25502,23 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
                 PixelCheck::At(101 + 100, 133 + 70, 0xff0000), // FillRect's red
                 PixelCheck::At(101 + 300, 133 + 200, 0xffffff), // COLOR_WINDOW
                 PixelCheck::AnyIn(101 + 20, 133 + 140, 140, 16, 0x0000ff), // the text
-                PixelCheck::AnyIn(880, 780, 40, 12, 0xe0e7f3), // the taskbar
-                PixelCheck::AnyIn(600, 760, 32, 30, 0x167fd6), // the fortress
-                PixelCheck::AnyIn(640, 788, 48, 8, 0x005fb8), // the active window's pill
-                PixelCheck::AnyIn(648, 760, 32, 24, 0xff8000), // its class icon
-                PixelCheck::At(121, 117, 0xff8000),        // and in its caption
+                // The taskbar is shasha's (the shasha scenario's).
+                PixelCheck::At(121, 117, 0xff8000), // the class icon in its caption
             ],
         },
         ScreenStep {
             after: "",
-            // From the middle to the start button (615, 776), a click.
-            input: &["mouse_move 0 255", "mouse_move -25 121", "mouse_button 1", "mouse_button 0"],
-            pixels: &[
-                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
-                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // "Command Prompt"
-                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // "Hello window"
-            ],
+            // From the middle down to the taskbar (615, 776), where the
+            // steps after start from. (The start menu is shasha's: the
+            // shasha and desktop_at_boot scenarios open it.)
+            input: &["mouse_move 0 255", "mouse_move -25 121"],
+            pixels: &[],
         },
         ScreenStep {
             after: "",
-            // Escape closes the menu; to client (250, 50) at (351, 183)
-            // and a click: the program's green square.
+            // To client (250, 50) at (351, 183) and a click: the
+            // program's green square.
             input: &[
-                "sendkey esc",
                 "mouse_move -132 -198",
                 "mouse_move -132 -198",
                 "mouse_move 0 -197",
@@ -31017,6 +31044,10 @@ fn system_modules() -> Vec<(&'static str, &'static str)> {
         .collect();
     modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
     modules.push(("user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"));
+    // The shell, as Windows ships Explorer, and the wallpaper it shows
+    // (the desktop picks it, the only one present).
+    modules.push((SHELL, "Windows/System32"));
+    modules.push(("kernel/assets/wallpapers/ribbons.qoi", "Windows/Web/Wallpaper"));
     modules
 }
 
@@ -31064,8 +31095,9 @@ fn release_tree(release: bool, dir: &Path) -> Result {
 mod release_tree_tests {
     use super::*;
 
-    /// A release is the system: gala's DLLs in System32 and the root
-    /// store, no test DLL or program.
+    /// A release is the system: gala's DLLs in System32, the root store
+    /// and the shell (shasha.exe, the one program), no test DLL or other
+    /// program.
     #[test]
     fn release_modules_are_the_system() {
         let m = system_modules();
@@ -31073,8 +31105,9 @@ mod release_tree_tests {
             assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
         }
         assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        assert!(m.contains(&(SHELL, "Windows/System32")));
         for (file, _) in &m {
-            assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
+            assert!(!is_test_dll(file) && (*file == SHELL || !file.ends_with(".exe")), "{file}");
             assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");
         }
         // `cargo xtask iso` ships the same system, and the test DLLs apart.

@@ -195,6 +195,22 @@ unsafe extern "system" {
         offset: u32,
     ) -> Handle;
     #[allow(clippy::too_many_arguments)]
+    fn StretchDIBits(
+        dc: Handle,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        sx: i32,
+        sy: i32,
+        sw: i32,
+        sh: i32,
+        bits: *const c_void,
+        info: *const BitmapInfoHeader,
+        usage: u32,
+        rop: u32,
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn GdiAlphaBlend(
         dst: Handle,
         x: i32,
@@ -254,11 +270,14 @@ const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETOBJECT: u32 = 0x003d;
 const WM_CHAR: u32 = 0x0102;
+const WM_KEYDOWN: u32 = 0x0100;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
 /// BLENDFUNCTION {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA} as a DWORD.
 const BLEND_PER_PIXEL: u32 = 0x01ff_0000;
+const DIB_RGB_COLORS: u32 = 0;
+const SRCCOPY: u32 = 0x00cc_0020;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -363,13 +382,18 @@ pub struct Options<'a> {
 }
 
 /// A picture an `image` element shows (its `src`): `width` x `height`
-/// straight-alpha 0xAARRGGBB pixels, top row first.
+/// 0xAARRGGBB pixels, top row first, premultiplied once when given
+/// (`picture`) and shared, so a paint neither copies nor converts them
+/// (a wallpaper is 4 MB: copying and blending it on every paint made
+/// the shell's start take seconds of processor time under emulation).
 #[derive(Clone)]
 struct Picture {
     src: String,
     width: i32,
     height: i32,
-    pixels: Vec<u32>,
+    pixels: Arc<[u32]>,
+    /// Every pixel opaque: copied as it is, not blended.
+    opaque: bool,
 }
 
 /// What other threads read of the window, behind `busy`.
@@ -585,6 +609,12 @@ impl<C: Component> Window for Host<C> {
                 }
                 return (msg == WM_HOTKEY).then_some(0);
             }
+            // A key: the program's when it has a message for it (Esc
+            // closing a menu), else the default handling's.
+            WM_KEYDOWN => {
+                let m = self.component.message(hwnd as usize, msg, wparam, lparam)?;
+                self.handle(hwnd, "key", &format!("{wparam:#x}"), m);
+            }
             WM_COPYDATA | WM_USER.. => {
                 if let Some(r) = self.component.answer(hwnd as usize, msg, wparam, lparam) {
                     self.layout(hwnd);
@@ -724,8 +754,9 @@ pub fn picture(hwnd: Hwnd, src: &str, width: i32, height: i32, pixels: &[u32]) -
     if copy.try_reserve_exact(pixels.len()).is_err() {
         return false;
     }
-    copy.extend_from_slice(pixels);
-    let p = Picture { src: String::from(src), width, height, pixels: copy };
+    copy.extend(pixels.iter().map(|&px| premultiplied(px)));
+    let opaque = pixels.iter().all(|&px| px >> 24 == 0xff);
+    let p = Picture { src: String::from(src), width, height, pixels: Arc::from(copy), opaque };
     shared.with(|s| {
         s.pictures.retain(|q| q.src != p.src);
         s.pictures.push(p);
@@ -1022,10 +1053,12 @@ impl Canvas for Gdi {
         self.draw_text(text, &mut r, format);
     }
 
-    /// The picture `src` names, scaled to `at` and blended over what is
-    /// there (GdiAlphaBlend with its premultiplied pixels).
+    /// The picture `src` names, scaled to `at`: an opaque one copied
+    /// (StretchDIBits), else blended over what is there (GdiAlphaBlend
+    /// with its premultiplied pixels).
     fn image(&mut self, at: [i32; 4], src: &str) {
         let Some(p) = self.pictures.iter().find(|p| p.src == src) else { return };
+        let [x, y, w, h] = at;
         let info = BitmapInfoHeader {
             size: size_of::<BitmapInfoHeader>() as u32,
             width: p.width,
@@ -1040,6 +1073,28 @@ impl Canvas for Gdi {
             clr_used: 0,
             clr_important: 0,
         };
+        if p.opaque {
+            // SAFETY: our DC; the picture's width x height pixels, as
+            // `info` describes them.
+            unsafe {
+                StretchDIBits(
+                    self.dc,
+                    x,
+                    y,
+                    w,
+                    h,
+                    0,
+                    0,
+                    p.width,
+                    p.height,
+                    p.pixels.as_ptr().cast(),
+                    &info,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                )
+            };
+            return;
+        }
         let mut bits: *mut c_void = core::ptr::null_mut();
         // SAFETY: a DC and a DIB section of the picture's size, both
         // deleted below; the section's bits are width x height u32s.
@@ -1054,11 +1109,8 @@ impl Canvas for Gdi {
                 return;
             }
             let out = core::slice::from_raw_parts_mut(bits.cast::<u32>(), p.pixels.len());
-            for (o, &px) in out.iter_mut().zip(&p.pixels) {
-                *o = premultiplied(px);
-            }
+            out.copy_from_slice(&p.pixels);
             let old = SelectObject(mem, dib);
-            let [x, y, w, h] = at;
             GdiAlphaBlend(self.dc, x, y, w, h, mem, 0, 0, p.width, p.height, BLEND_PER_PIXEL);
             SelectObject(mem, old);
             DeleteObject(dib);
