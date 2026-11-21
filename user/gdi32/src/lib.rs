@@ -34,7 +34,7 @@ mod unimplemented;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use font::LogFont;
 use surface::Surface;
 
@@ -663,30 +663,145 @@ pub extern "system" fn DeleteDC(hdc: Handle) -> i32 {
     })
 }
 
-/// GetDeviceCaps: the display's (memory DCs are compatible with it).
+/// The raster operations a Windows display answers for RASTERCAPS:
+/// RC_BITBLT, RC_BITMAP64, RC_GDI20_OUTPUT, RC_DI_BITMAP, RC_DIBTODEV,
+/// RC_BIGFONT, RC_STRETCHBLT, RC_FLOODFILL, RC_STRETCHDIB and
+/// RC_OP_DX_OUTPUT (32409).
+const RASTER_CAPS: i32 =
+    0x0001 | 0x0008 | 0x0010 | 0x0080 | 0x0200 | 0x0400 | 0x0800 | 0x1000 | 0x2000 | 0x4000;
+
+/// The text a Windows display answers for TEXTCAPS: TC_OP_CHARACTER,
+/// TC_OP_STROKE, TC_CP_STROKE, TC_UA_ABLE, TC_SO_ABLE, TC_RA_ABLE and
+/// TC_VA_ABLE (0x7807) -- character and stroke output, clipping to a
+/// stroke, underline, strike out, and rotation at right angles and at
+/// any angle.
+const TEXT_CAPS: i32 = 0x0001 | 0x0002 | 0x0004 | 0x0800 | 0x1000 | 0x2000 | 0x4000;
+
+/// GetDeviceCaps: what the device can do, and how big it is (the
+/// display's; memory DCs are compatible with it, and answer the same,
+/// as Windows' do -- the caps are the device's, not the bitmap's).
+///
+/// Three kinds of answer, as GetSystemMetrics has (user32's `window`):
+///
+/// - What GDI's drawing model offers: every curve, every line but a
+///   bare pixel, every polygon, the text above, the raster operations
+///   above, a square pixel (36 by 36, 51 across), an unlimited supply
+///   of brushes and pens, 20 reserved palette entries, ICM in the
+///   device. These are Windows' own constants, the same on every
+///   Windows display, so they are answered as it answers them. A cap
+///   answered 0 is not a missing answer to the caller -- it is the
+///   device saying it cannot do that at all, and the program takes
+///   another path: TEXTCAPS 0 said this device draws no text, and
+///   ASPECTX 0 that a pixel is nothing wide. Where gala claims a cap
+///   whose operation it has not implemented, that operation records
+///   what is missing when it is called, which is worth more than
+///   diverting the program here (ARCHITECTURE "Gaps are never
+///   silent").
+/// - This machine's numbers: the resolution, the dpi, the panel's
+///   millimetres (derived from the dpi, as a machine whose monitor
+///   reports no size does) and the refresh rate.
+/// - 0 for every index, with no error, when the handle is not a DC.
+///
+/// Every index a program asks for leaves a `reached` row and an index
+/// with no answer an `unsupported` one, so what a program read is in
+/// the ledger either way (`note_cap`, `unknown_cap`).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDeviceCaps(hdc: Handle, index: i32) -> i32 {
     if with_dc(hdc, |_, _| ()).is_none() {
         return 0;
     }
+    note_cap(index);
     let (w, h) = screen();
     match index {
-        2 => 1,                                                    // TECHNOLOGY: DT_RASDISPLAY
-        4 => (w * 254 + 480) / 960,                                // HORZSIZE (mm)
-        6 => (h * 254 + 480) / 960,                                // VERTSIZE
-        8 | 118 => w,                                              // HORZRES, DESKTOPHORZRES
-        10 | 117 => h,                                             // VERTRES, DESKTOPVERTRES
-        12 => 32,                                                  // BITSPIXEL
-        14 => 1,                                                   // PLANES
-        24 => -1,                                                  // NUMCOLORS: more than 256
-        38 => 0x0001 | 0x0008 | 0x0080 | 0x0200 | 0x0800 | 0x2000, // RASTERCAPS
-        88 | 90 => 96,                                             // LOGPIXELSX/Y
-        104 => 0,                                                  // SIZEPALETTE
-        108 => 24,                                                 // COLORRES
-        116 => 60,                                                 // VREFRESH
-        120 => 0x3, // SHADEBLENDCAPS: const and pixel alpha
-        _ => 0,
+        0 => 0x4000,                // DRIVERVERSION
+        2 => 1,                     // TECHNOLOGY: DT_RASDISPLAY
+        4 => (w * 254 + 480) / 960, // HORZSIZE (mm)
+        6 => (h * 254 + 480) / 960, // VERTSIZE
+        8 | 118 => w,               // HORZRES, DESKTOPHORZRES
+        10 | 117 => h,              // VERTRES, DESKTOPVERTRES
+        12 => 32,                   // BITSPIXEL
+        14 => 1,                    // PLANES
+        16 | 18 => -1,              // NUMBRUSHES, NUMPENS: no limit
+        20 | 22 => 0,               // NUMMARKERS, NUMFONTS: not a plotter
+        24 => -1,                   // NUMCOLORS: more than 256
+        26 => 0,                    // PDEVICESIZE
+        28 => 511,                  // CURVECAPS: every curve
+        30 => 254,                  // LINECAPS: every line but a bare pixel
+        32 => 255,                  // POLYGONALCAPS: every polygon
+        34 => TEXT_CAPS,            // TEXTCAPS
+        36 => 1,                    // CLIPCAPS: CP_RECTANGLE
+        38 => RASTER_CAPS,          // RASTERCAPS
+        40 | 42 => 36,              // ASPECTX, ASPECTY: a square pixel
+        44 => 51,                   // ASPECTXY: its diagonal
+        88 | 90 => 96,              // LOGPIXELSX/Y
+        104 => 0,                   // SIZEPALETTE: no palette
+        106 => 20,                  // NUMRESERVED
+        108 => 24,                  // COLORRES
+        110..=115 => 0,             // the printer's page and scaling factor
+        116 => 60,                  // VREFRESH
+        119 => 1,                   // BLTALIGNMENT: a byte
+        120 => 0,                   // SHADEBLENDCAPS: the device blends nothing itself
+        121 => 2,                   // COLORMGMTCAPS: CM_DEVICE_ICM
+        _ => unknown_cap(index),
     }
+}
+
+/// `gdi32.dll!GetDeviceCaps(<index>)` in `name`, and its length.
+fn caps_name(index: i32, name: &mut [u8; 48]) -> usize {
+    let mut n = 0;
+    for &b in b"gdi32.dll!GetDeviceCaps(" {
+        name[n] = b;
+        n += 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    let mut left = index as u32;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (left % 10) as u8;
+        left /= 10;
+        if left == 0 {
+            break;
+        }
+    }
+    while at < digits.len() {
+        name[n] = digits[at];
+        n += 1;
+        at += 1;
+    }
+    name[n] = b')';
+    n + 1
+}
+
+/// A `reached` row for the first call that asks for `index`, so that
+/// which caps a program read is answerable afterwards -- a cap gala
+/// answers wrongly is otherwise indistinguishable from one it answers
+/// well. One row per index, however many times it is asked (the index
+/// is the row's detail); an index outside the documented range is left
+/// to `unknown_cap`.
+fn note_cap(index: i32) {
+    static ASKED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    let bit = match index {
+        0..=127 => index as u32,
+        _ => return,
+    };
+    let (word, mask) = ((bit / 64) as usize, 1u64 << (bit % 64));
+    if ASKED[word].fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let mut name = [0u8; 48];
+    let n = caps_name(index, &mut name);
+    // SAFETY: our string; "reached" (9).
+    unsafe { GalaRecordMissing(name.as_ptr(), n, 9, u64::from(index as u32)) };
+}
+
+/// An index with no answer here: 0, as Windows answers one it does not
+/// know, and a row saying which index it was.
+fn unknown_cap(index: i32) -> i32 {
+    let mut name = [0u8; 48];
+    let n = caps_name(index, &mut name);
+    unsupported(&name[..n], u64::from(index as u32));
+    0
 }
 
 // ---- Objects ----

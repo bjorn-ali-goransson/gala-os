@@ -9529,8 +9529,35 @@ then riched20.dll).
 - **DCs**: a window's client area (`GalaCreateSurfaceDC`; child windows
   through `GalaCreateChildDC`), memory DCs drawing on their selected
   bitmap, and the display DC (CreateDCW("DISPLAY")), which draws nothing
-  but answers GetDeviceCaps (the screen from GalaScreenInfo, 96 dpi, 32
-  bpp).
+  but answers the device caps (below).
+- **Device caps** (GetDeviceCaps, `caps_test`, which measures every
+  index Windows documents on Windows first): three kinds of answer, as
+  GetSystemMetrics has. What GDI's drawing model offers is Windows' own
+  constants, the same on every Windows display: every curve (511),
+  every line but a bare pixel (254), every polygon (255), text that can
+  be underlined, struck out and rotated at right angles and at any
+  angle (0x7807), the raster operations a display has (32409), a square
+  pixel (36 by 36, 51 across), an unlimited supply of brushes and pens,
+  20 reserved palette entries, ICM in the device, no blending in the
+  device itself (SHADEBLENDCAPS 0, as a Windows display answers) and a
+  blit aligned to a byte. This machine's numbers are the screen's
+  resolution (GalaScreenInfo, the desktop's the same), 96 dpi, 32 bpp,
+  60 Hz and the panel's millimetres derived from the dpi, as a machine
+  whose monitor reports no size does. A memory DC created from the
+  screen answers what the screen answers -- the caps are the device's,
+  not the selected bitmap's -- and a handle that is not a DC answers 0
+  for every index, with no error.
+- A cap answered 0 is not a missing answer to the caller but the device
+  saying it cannot do that at all, and the program takes another path
+  for it: TEXTCAPS 0 said this device draws no text and ASPECTX 0 that
+  a pixel is nothing wide. So every index a program asks for leaves a
+  "reached" row (`gdi32.dll!GetDeviceCaps(<index>)`, the index as the
+  detail, one row and one kernel call an index for the life of the
+  process) and an index with no answer an "unsupported" one, which is
+  the rule for a value a program is handed rather than refused ("Gaps
+  are never silent"). Where gala claims a cap whose operation it has
+  not implemented, that operation records what is missing when it is
+  called, which is worth more than diverting the program at the cap.
 - **Bounds** (SetBoundsRect, GetBoundsRect): every pixel write goes
   through `Surface::put`/`put_raw`, which add it to the DC's bounds
   while accumulation is on (DCB_ENABLE; a pointer into a per-slot table
