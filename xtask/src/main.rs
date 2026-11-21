@@ -19146,7 +19146,8 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "trace_from_test: ok",
             "exited with status 0x00000000",
-            "trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)",
+            "trace: every call into a DLL gala wrote from the first \
+             d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)",
             "trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi, into \
              d2d1.dll (trace_from=)",
         ],

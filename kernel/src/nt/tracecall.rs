@@ -188,7 +188,10 @@ pub fn set_from(text: &str) {
     }
     LEFT.store(budget, Ordering::Relaxed);
     WANTED.store(true, Ordering::Release);
-    info!("trace: every call into that DLL from the first {name}, {budget} at most (trace_from=)");
+    info!(
+        "trace: every call into a DLL gala wrote from the first {name}, {budget} at most \
+         (trace_from=)"
+    );
 }
 
 /// Splits `<name>[:<n>]`. A method name holds `::` of its own, so the

@@ -1177,7 +1177,7 @@ the case it was built for: 9.2 ms of Direct2D calls between
 of a method already recorded.
 
 ```
-trace: every call into that DLL from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)
+trace: every call into a DLL gala wrote from the first d2d1.dll!ID2D1Factory::GetDesktopDpi, 4096 at most (trace_from=)
 {"t":..,"cpu":0,"by":8,"ev":"call","pid":4,"process":"trace_from_test.exe","call":"d2d1.dll!ID2D1Factory::GetDesktopDpi","args":[5368713216,829424,829428]}
 trace: 25 calls recorded from d2d1.dll!ID2D1Factory::GetDesktopDpi (trace_from=)
 trace: 0 of those calls recorded what they answered (trace_from=)

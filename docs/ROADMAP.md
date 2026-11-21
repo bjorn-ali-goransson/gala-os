@@ -1988,7 +1988,22 @@ need gala's.
    one goes on through the render target to `CreateSolidColorBrush`
    and the box nine milliseconds after it; an untraced control run
    took the short path too, so the variance is Word's own and not what
-   the stream costs. Both paths end the same way, which `events=file`
+   the stream costs. The short path's silence after the device call is
+   measured now rather than inferred: those runs were armed per DLL,
+   which could not have recorded a Direct2D call if Word had made one,
+   and four runs armed at the same method since the arming became the
+   process's record the same three calls and nothing else -- three
+   `call` events and three `ret` events in the whole stream, all three
+   answered S_OK, no `d2d1.dll!` line among them. So Word asks the
+   device the three things, is refused nothing, and gives up without
+   reaching Direct2D at all. What it does between that second
+   `GetDeviceRemovedReason` and the box is therefore not a call into a
+   DLL gala wrote, which leaves dxgi: Word's one dxgi record is
+   `CreateDXGIFactory1(interface)` unsupported three times at 37.4 s,
+   before the device calls, and dxgi's slots are not wrapped (`DLLS` in
+   `xtask/src/gentrace.rs` holds d2d1 and d3d10_1), so adding it is
+   what would put the whole graphics path in one stream.
+   Both paths end the same way, which `events=file`
    on a short-path run shows (`open`, `key` and `value` events,
    OBSERVABILITY "Event stream"): the last thing before the box is
    `uxtheme.dll` loaded from System32 after the Office16 miss, then
