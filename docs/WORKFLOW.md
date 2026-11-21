@@ -415,7 +415,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_REPEAT=n` | boot one scenario's image n times ("Flaky tests and repeats") |
 | `XTASK_REPEAT_JOBS=n` | VMs at once for repeats (default one per two host CPUs) |
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
-| `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots") |
+| `XTASK_SHOTS=<s>,<s>,...` | screendumps of a boot test's screen at those seconds (`target/screenshots/<scenario>-<t>s.png`; "Screenshots"; fractions work). A shot falls due only between a screen scenario's steps, not while one waits for its line, so a replayed conversation that happens inside one wait is not caught by them: for the screen at a step, the step's own dump (`target/failed/<scenario>.screen<N>.png`, written when it fails) is what shows it |
 | `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
 | `XTASK_SNAPSHOTS=<dir>` | where machine snapshots are saved, listed and resumed from instead of `target/snapshots` (a directory on the file system of the scenario's disk image: `/dev/shm/snapshots` for Office; "Machine snapshots") |
 | `XTASK_REUSE_DISK=1` | boot a disk scenario on the image a failed run kept (`<iso>.disk.img`) instead of a fresh one, and keep it after a pass: a later stage of a long run without its earlier ones ("Disk tests") |

@@ -23,9 +23,11 @@
 //!   <folder>`), with Run ("...Run", a Button named Run) and Cancel
 //!   ("...Cancel", named Cancel); nothing has run (the folder still has
 //!   its three files only); Run is announced and clicked;
-//! - the step's result ("...Result") says exit code 0, and the reply card
-//!   ("Reply0") the model's final answer (not one of the loop's states,
-//!   nor "No answer: ...");
+//! - the reply ("Reply0") is the model's final answer (not one of the
+//!   loop's states, nor "No answer: ..."), and the step, ended, is a
+//!   closed line ("...Summary" its command; no "...Result" or
+//!   "...Folder"); the line ("...Toggle") is announced and clicked, and
+//!   opens on its result ("...Result"), which says exit code 0;
 //! - the folder has one more file: the archive, whose first bytes are a
 //!   gzip's (1f 8b), a bzip2's (`BZh`) or a tar's (`ustar` at 257), and
 //!   which `busybox tar -t` lists with the three files and `busybox tar
@@ -35,7 +37,8 @@
 //!
 //! Prints `agent_run_test: files made in <folder>`, `agent_run_test:
 //! typed`, `agent_run_test: command: <it>`, `agent_run_test: step shown`,
-//! `agent_run_test: answered: <it>`, `agent_run_test: archive <name>, N
+//! `agent_run_test: answered: <it>`, `agent_run_test: step closed`,
+//! `agent_run_test: step opened`, `agent_run_test: archive <name>, N
 //! bytes`, `agent_run_test: listed: <tar -t's output>`, `agent_run_test:
 //! archive checked`, `agent_run_test: ok`, or `agent_run_test: check N
 //! got X (line L)` and exits with N.
@@ -650,10 +653,24 @@ fn run() -> Result<(), u32> {
         let said = said.as_str();
         Line::new().s(NAME.as_bytes()).s(b": answered: ").flat(said.as_bytes()).s(b"\r\n").print();
         c.ok(!said.is_empty() && !said.starts_with("No answer"), 0)?;
-        let result = find("Request0Step0Result");
-        c.ok(result.is_some_and(|e| e.name().as_str().starts_with("Exit code 0")), 0)?;
+        // Ended, the step is a closed line: its command, no details.
+        let summary = find("Request0Step0Summary");
+        c.ok(summary.is_some_and(|e| e.name().as_str() == command.as_str()), 0)?;
+        c.ok(find("Request0Step0Result").is_none(), 0)?;
+        c.ok(find("Request0Step0Folder").is_none(), 0)?;
         // One step: the model asked for nothing more.
         c.ok(find("Request0Step1").is_none(), 0)?;
+        // The scenario clicks the line: it opens on the step's result.
+        let line = find("Request0Step0Toggle");
+        c.ok(line.is_some(), 0)?;
+        uia_client::announce(NAME, "Details", &line.unwrap_or_else(|| unreachable!()));
+        say(b"step closed");
+        let opened = wait(STEP_MS, || {
+            find("Request0Step0Result")
+                .is_some_and(|e| e.name().as_str().starts_with("Exit code 0"))
+        });
+        c.ok(opened, 0)?;
+        say(b"step opened");
 
         // The archive: the one new file in the folder.
         let n = files_in(folder, &mut found);

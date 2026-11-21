@@ -65,6 +65,10 @@ const MUTED: u32 = 0x616161;
 const ACCENT: u32 = 0x005fb8;
 const CHIP: u32 = 0xe6eef8;
 const FAILED: u32 = 0xc42b1c;
+const OK: u32 = 0x0f7b0f;
+/// The prompt's frame: darker than a card's, so the box reads as one
+/// to type in.
+const INPUT_LINE: u32 = 0x8a8a8a;
 
 /// The most calls of the model one request makes: its first, and one
 /// after each round of tool calls; a request whose model still calls the
@@ -174,6 +178,10 @@ pub struct Call {
     pub command: String,
     pub explanation: String,
     pub step: Step,
+    /// Whether the user opened its details (`Msg::Toggle`): a step that
+    /// is waiting or running shows them anyway, one that ended shows a
+    /// line until opened.
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -466,6 +474,9 @@ pub enum Msg {
     /// The user clicked step `.1` of request `.0`'s Run, or Cancel.
     Run(usize, usize),
     Cancel(usize, usize),
+    /// The user clicked step `.1` of request `.0`'s line: its details
+    /// open, or close.
+    Toggle(usize, usize),
     /// The command of step `.1` of request `.0` ended (the program's
     /// worker thread).
     Ran(usize, usize, Ran),
@@ -515,7 +526,9 @@ pub fn program_name(file: &str) -> String {
     String::from(stem)
 }
 
-/// A request's reply card: "Reply{i}", named with what it says.
+/// A request's answer: "Reply{i}", named with what it says. The
+/// agent's words are set on the panel, the user's in a bubble
+/// (`request`), so who said what is plain.
 fn reply(i: usize, r: &Request) -> Node<Msg> {
     let calls = || r.rounds.iter().flat_map(|round| &round.calls);
     let (t, color) = match &r.answer {
@@ -529,16 +542,28 @@ fn reply(i: usize, r: &Request) -> Node<Msg> {
         }
         _ => (String::from("Asking the model..."), MUTED),
     };
-    column()
-        .padding(8)
-        .radius(6)
-        .bg(CHIP)
-        .child(text(t).id(alloc::format!("Reply{i}")).size(13).color(color))
+    text(t).id(alloc::format!("Reply{i}")).size(13).color(color)
 }
 
-/// Step `n` of request `i`: "Request{i}Step{n}", with the command, the
-/// folder and the explanation, then Run and Cancel while it waits, else
-/// where it stands ("Request{i}Step{n}Result").
+/// What step `c` came to, in a word or two for its line, and the colour.
+fn badge(c: &Call) -> (&'static str, u32) {
+    match &c.step {
+        Step::Waiting => ("", MUTED),
+        Step::Running => ("Running...", MUTED),
+        Step::Declined => ("Cancelled", MUTED),
+        Step::Refused(_) => ("Not run", FAILED),
+        Step::Ran(Ran { code: None, .. }) => ("Did not start", FAILED),
+        Step::Ran(Ran { code: Some(0), .. }) => ("Done", OK),
+        Step::Ran(Ran { code: Some(_), .. }) => ("Failed", FAILED),
+    }
+}
+
+/// Step `n` of request `i`: "Request{i}Step{n}". Waiting, it shows the
+/// command, the folder and the explanation with Run and Cancel, so what
+/// is run is seen before it is. Otherwise it is a line
+/// ("Request{i}Step{n}Toggle": its command, what it came to, Show) that
+/// opens on a click to the same details and where it stands
+/// ("Request{i}Step{n}Result").
 fn step(i: usize, n: usize, c: &Call, work: &Work) -> Node<Msg> {
     let id = |part: &str| alloc::format!("Request{i}Step{n}{part}");
     let folder = match work {
@@ -571,36 +596,103 @@ fn step(i: usize, n: usize, c: &Call, work: &Work) -> Node<Msg> {
         }
     };
     let waiting = c.step == Step::Waiting;
-    column()
-        .id(id(""))
+    let open = waiting || c.step == Step::Running || c.open;
+    // The command is the line's own text once there is a line (cut to
+    // one line while closed, whole when open), so details give it only
+    // while the step waits.
+    let details = column()
         .gap(4)
-        .padding(8)
-        .radius(6)
-        .bg(SURFACE)
-        .border(LINE)
-        .child(text(command).id(id("Command")).size(13).bold())
+        .child_if(waiting, text(command.clone()).id(id("Command")).size(12).color(INK))
         .child(text(folder).id(id("Folder")).size(12).color(MUTED))
         .child_if(
             !c.explanation.is_empty(),
-            text(c.explanation.clone()).id(id("Explanation")).size(12),
-        )
+            text(c.explanation.clone()).id(id("Explanation")).size(12).color(MUTED),
+        );
+    let card = column().id(id("")).gap(6).padding(8).radius(6).bg(CARD).border(LINE);
+    if waiting {
+        return card
+            .child(text("Run this command?").size(12).bold().color(MUTED))
+            .child(details)
+            .child(
+                row()
+                    .gap(8)
+                    .child(
+                        button(id("Run"), "Run")
+                            .width(64)
+                            .height(28)
+                            .bg(ACCENT)
+                            .color(0xffffff)
+                            .on_click(Msg::Run(i, n)),
+                    )
+                    .child(
+                        button(id("Cancel"), "Cancel")
+                            .width(64)
+                            .height(28)
+                            .on_click(Msg::Cancel(i, n)),
+                    ),
+            );
+    }
+    let (word, tint) = badge(c);
+    let line = row()
+        .id(id("Toggle"))
+        .gap(8)
+        .align(Align::Center)
+        .on_click(Msg::Toggle(i, n))
+        .child({
+            let summary = text(command).id(id("Summary")).size(12).bold().grow(1);
+            let summary = if open { summary } else { summary.ellipsis() };
+            summary.on_click(Msg::Toggle(i, n))
+        })
+        .child(text(word).size(12).color(tint))
         .child_if(
-            waiting,
-            row()
-                .gap(8)
-                .child(
-                    button(id("Run"), "Run")
-                        .width(64)
-                        .height(28)
-                        .bg(ACCENT)
-                        .color(0xffffff)
-                        .on_click(Msg::Run(i, n)),
+            c.step != Step::Running,
+            text(if c.open { "Hide" } else { "Show" }).size(12).color(ACCENT),
+        );
+    card.child(line)
+        .child_if(open, details)
+        .child_if(open, text(status).id(id("Result")).size(12).color(color))
+}
+
+/// Request `i`: the program it was for, what the user asked (a bubble
+/// on the right, "Request{i}Text"), then the agent's side: what it said
+/// beside its calls, its steps and its answer.
+fn request(i: usize, r: &Request) -> Node<Msg> {
+    let mut agent = column().gap(6);
+    let mut n = 0;
+    for round in &r.rounds {
+        if let Some(t) = round.text.as_ref().filter(|t| !t.trim().is_empty()) {
+            agent = agent.child(text(t.clone()).size(13).color(INK));
+        }
+        for c in &round.calls {
+            agent = agent.child(step(i, n, c, &r.work));
+            n += 1;
+        }
+    }
+    column()
+        .id(alloc::format!("Request{i}"))
+        .gap(6)
+        .child(
+            column()
+                .align(Align::End)
+                .gap(2)
+                .child_if(!r.program.is_empty(), text(r.program.clone()).size(11).color(MUTED))
+                .child_if(
+                    r.element.is_some(),
+                    text(alloc::format!("On: {}", r.element.as_deref().unwrap_or("")))
+                        .id(alloc::format!("Request{i}Element"))
+                        .size(11)
+                        .color(MUTED),
                 )
                 .child(
-                    button(id("Cancel"), "Cancel").width(64).height(28).on_click(Msg::Cancel(i, n)),
+                    column().max_width(256).padding((8, 12)).radius(12).bg(ACCENT).child(
+                        text(r.text.clone())
+                            .id(alloc::format!("Request{i}Text"))
+                            .size(14)
+                            .color(0xffffff),
+                    ),
                 ),
         )
-        .child_if(!waiting, text(status).id(id("Result")).size(12).color(color))
+        .child(agent.child_if(r.answer.is_some(), reply(i, r)))
 }
 
 /// The working folder for a window of program `c`, from the folder it
@@ -674,38 +766,8 @@ impl Panel {
                 .bg(CHIP)
                 .child(text("No window is active").id("ContextProgram").size(13).color(MUTED)),
         };
-        let requests: Vec<Node<Msg>> = self
-            .requests
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                column()
-                    .id(alloc::format!("Request{i}"))
-                    .gap(4)
-                    .padding(10)
-                    .radius(6)
-                    .bg(CARD)
-                    .border(LINE)
-                    .child(text(r.program.clone()).size(12).bold().color(MUTED))
-                    .child(text(r.text.clone()).id(alloc::format!("Request{i}Text")).size(14))
-                    .child_if(
-                        r.element.is_some(),
-                        text(alloc::format!("On: {}", r.element.as_deref().unwrap_or("")))
-                            .id(alloc::format!("Request{i}Element"))
-                            .size(12)
-                            .color(MUTED),
-                    )
-                    .children(
-                        r.rounds
-                            .iter()
-                            .flat_map(|round| &round.calls)
-                            .enumerate()
-                            .map(|(n, c)| step(i, n, c, &r.work))
-                            .collect::<Vec<_>>(),
-                    )
-                    .child_if(r.answer.is_some(), reply(i, r))
-            })
-            .collect();
+        let requests: Vec<Node<Msg>> =
+            self.requests.iter().enumerate().map(|(i, r)| request(i, r)).collect();
         let empty = self.requests.is_empty();
         let folder = match (&self.about, work_of(self.context.as_ref(), &self.folders)) {
             (None, Work::Windows { folder, .. }) => Some(folder),
@@ -739,7 +801,7 @@ impl Panel {
                 column()
                     .id("Requests")
                     .grow(1)
-                    .gap(8)
+                    .gap(16)
                     .padding(12)
                     .child_if(
                         empty,
@@ -757,6 +819,10 @@ impl Panel {
                             .placeholder("Ask the agent")
                             .grow(1)
                             .height(32)
+                            .padding((0, 8))
+                            .radius(4)
+                            .bg(CARD)
+                            .border(INPUT_LINE)
                             .on_input(Msg::Draft),
                     )
                     .child_if(
@@ -848,7 +914,15 @@ impl Panel {
                     }
                     Err(why) => (String::new(), String::new(), Step::Refused(why)),
                 };
-                Call { id: c.id, name: c.name, arguments: c.arguments, command, explanation, step }
+                Call {
+                    id: c.id,
+                    name: c.name,
+                    arguments: c.arguments,
+                    command,
+                    explanation,
+                    step,
+                    open: false,
+                }
             })
             .collect();
         r.rounds.push(Round { text, calls });
@@ -910,6 +984,11 @@ impl Panel {
                 }
                 c.step = Step::Declined;
                 self.after_steps(i);
+            }
+            Msg::Toggle(i, n) => {
+                if let Some(c) = self.call_mut(i, n) {
+                    c.open = !c.open;
+                }
             }
             Msg::Ran(i, n, ran) => {
                 let Some(c) = self.call_mut(i, n) else { return };
@@ -993,6 +1072,18 @@ mod tests {
 
     fn centre(e: &Placed<Msg>) -> (i32, i32) {
         (e.rect[0] + e.rect[2] / 2, e.rect[1] + e.rect[3] / 2)
+    }
+
+    /// The panel laid out once step `n` of request `i` is opened, by a
+    /// click on its line as the user would.
+    fn opened(p: &mut Panel, i: usize, n: usize) -> Vec<Placed<Msg>> {
+        let placed = lay(p, WIDTH, 752);
+        let line = alloc::format!("Request{i}Step{n}Toggle");
+        let (x, y) = centre(at(&placed, &line));
+        let (_, msg) = gala_ui::click(&placed, x, y).unwrap();
+        assert_eq!(msg, Msg::Toggle(i, n));
+        p.update(msg);
+        lay(p, WIDTH, 752)
     }
 
     /// The model's call that is due, as the program would make it: the
@@ -1416,6 +1507,13 @@ mod tests {
         p.update(Msg::Send);
         assert_eq!(asking(&mut p).map(|a| a.0), Some(0));
         assert_eq!(p.take_due(), None);
+        // What the user asked is a bubble on the right, apart from the
+        // agent's side; the prompt is a framed box.
+        let placed = lay(&p, WIDTH, 752);
+        let asked = at(&placed, "Request0Text").rect;
+        assert!(asked[0] > WIDTH / 3 && asked[0] + asked[2] >= WIDTH - 32, "{asked:?}");
+        assert_eq!(at(&placed, "Prompt").border, Some(INPUT_LINE));
+        assert_eq!(at(&placed, "Prompt").background, Some(CARD));
         p.update(Msg::Answer(0, calls(&[("call_1", "run", TAR)])));
         // Shown with Run and Cancel; nothing is due until Run.
         assert_eq!(p.take_due(), None);
@@ -1457,7 +1555,23 @@ mod tests {
         assert_eq!(at(&placed, "Request0Step0Result").text, "Running...");
         assert_eq!(at(&placed, "Reply0").text, "Running the command...");
         p.update(Msg::Ran(0, 0, Ran { code: Some(0), output: String::new(), bytes: 0 }));
-        assert_eq!(at(&lay(&p, WIDTH, 752), "Request0Step0Result").text, "Exit code 0, no output.");
+        // Ended, the step is a line: its command and what it came to,
+        // the details shown only once it is opened, and closed again.
+        let placed = lay(&p, WIDTH, 752);
+        assert_eq!(
+            at(&placed, "Request0Step0Summary").text,
+            "busybox tar -czf files.tar.gz one.txt two.txt"
+        );
+        assert!(placed.iter().any(|e| e.text == "Done"));
+        for hidden in ["Result", "Command", "Folder", "Explanation", "Run"] {
+            let id = alloc::format!("Request0Step0{hidden}");
+            assert!(placed.iter().all(|e| e.id.as_deref() != Some(id.as_str())), "{id}");
+        }
+        let placed = opened(&mut p, 0, 0);
+        assert_eq!(at(&placed, "Request0Step0Result").text, "Exit code 0, no output.");
+        assert_eq!(at(&placed, "Request0Step0Folder").text, alloc::format!("In {FOLDER}"));
+        let placed = opened(&mut p, 0, 0);
+        assert!(placed.iter().all(|e| e.id.as_deref() != Some("Request0Step0Result")));
         // The model is asked again, with the call and its result.
         let (i, body) = asking(&mut p).unwrap();
         assert_eq!((i, p.requests[0].asked), (0, 2));
@@ -1487,7 +1601,7 @@ mod tests {
         p.take_due();
         let output = "x".repeat(chat::MAX_OUTPUT);
         p.update(Msg::Ran(0, 0, Ran { code: Some(2), output, bytes: 20000 }));
-        let shown = at(&lay(&p, WIDTH, 752), "Request0Step0Result").text.clone();
+        let shown = at(&opened(&mut p, 0, 0), "Request0Step0Result").text.clone();
         assert!(shown.starts_with("Exit code 2:\nxxx"), "{shown}");
         assert!(shown.ends_with("x\n(20000 bytes in all)"), "{shown}");
         // SHOWN of the output's, and Exit's.
@@ -1503,7 +1617,7 @@ mod tests {
         let gone = Ran { code: None, output: "CreateProcessW failed: 2".into(), bytes: 0 };
         p.update(Msg::Ran(0, 0, gone));
         assert_eq!(
-            at(&lay(&p, WIDTH, 752), "Request0Step0Result").text,
+            at(&opened(&mut p, 0, 0), "Request0Step0Result").text,
             "Could not run it: CreateProcessW failed: 2"
         );
         assert!(asking(&mut p).unwrap().1.contains("Could not run it: CreateProcessW failed: 2."));
@@ -1517,14 +1631,15 @@ mod tests {
         asking(&mut p);
         p.update(Msg::Answer(0, calls(&[("c1", "run", TAR)])));
         p.update(Msg::Cancel(0, 0));
-        assert_eq!(at(&lay(&p, WIDTH, 752), "Request0Step0Result").text, "Cancelled: not run.");
+        assert_eq!(at(&opened(&mut p, 0, 0), "Request0Step0Result").text, "Cancelled: not run.");
         let (_, body) = asking(&mut p).unwrap();
         assert!(body.contains("\"content\":\"The user declined to run this command.\""), "{body}");
         // A tool that is not run, and run without a command: refused, and
         // the model is asked again at once.
         p.update(Msg::Answer(0, calls(&[("c2", "shell", "{}"), ("c3", "run", "{}")])));
-        let placed = lay(&p, WIDTH, 752);
-        assert_eq!(at(&placed, "Request0Step1Command").text, "shell");
+        opened(&mut p, 0, 1);
+        let placed = opened(&mut p, 0, 2);
+        assert_eq!(at(&placed, "Request0Step1Summary").text, "shell");
         assert_eq!(
             at(&placed, "Request0Step1Result").text,
             "Not run: there is no tool named \"shell\"."
@@ -1553,7 +1668,7 @@ mod tests {
             let (_, body) = asking(&mut p).unwrap();
             assert!(body.contains("every run is refused"), "{body}");
             p.update(Msg::Answer(0, calls(&[("c1", "run", TAR)])));
-            let placed = lay(&p, WIDTH, 752);
+            let placed = opened(&mut p, 0, 0);
             assert!(placed.iter().all(|e| e.id.as_deref() != Some("Request0Step0Run")));
             assert_eq!(at(&placed, "Request0Step0Result").text, alloc::format!("Not run: {why}."));
             // Run cannot start it either.

@@ -16753,6 +16753,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
             " bytes, round 2 of 8",
             "agent: answer 0: ",
             "agent_run_test: answered: ",
+            "agent_run_test: Details at",
+            "agent_run_test: step closed",
+            "agent: click Request0Step0",
+            ": Toggle(0, 0)",
+            "agent_run_test: step opened",
             "agent_run_test: archive ",
             "agent_run_test: listed: ",
             "agent_run_test: archive checked",
@@ -24696,10 +24701,10 @@ const AGENT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[PixelCheck::Most(960, 64, 320, 600, 0xf3f3f3, 80)],
         },
         ScreenStep {
-            // 4: a hand-off listed: its white card under the context.
+            // 4: a hand-off listed: its accent bubble under the context.
             after: "agent_test: handed off",
             input: &[],
-            pixels: &[PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff)],
+            pixels: &[PixelCheck::AnyIn(972, 90, 296, 140, 0x005fb8)],
         },
         ScreenStep {
             // 5: a click on the test's own window ends it (the run ends
@@ -24766,7 +24771,7 @@ const TASKMGR_AGENT_SCREEN: ScreenCheck = ScreenCheck {
             input: &["sendkey alt-f4"],
             pixels: &[
                 PixelCheck::Most(1170, 400, 100, 300, 0xf3f3f3, 80),
-                PixelCheck::AnyIn(1170, 90, 98, 160, 0xffffff),
+                PixelCheck::AnyIn(1170, 90, 98, 160, 0x005fb8),
             ],
         },
     ],
@@ -24800,13 +24805,11 @@ const AGENT_CHAT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
-            // 3: answered: the reply card under the request's.
+            // 3: answered: the request in the accent's bubble (the
+            // reply, under it, is the panel's own text on its grey).
             after: "agent_chat_test: reply listed",
             input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff),
-                PixelCheck::AnyIn(972, 140, 296, 200, 0xe6eef8),
-            ],
+            pixels: &[PixelCheck::AnyIn(972, 90, 296, 140, 0x005fb8)],
         },
         ScreenStep { after: "", input: &["click_on agent_chat_test: TestWindow"], pixels: &[] },
     ],
@@ -24814,8 +24817,9 @@ const AGENT_CHAT_SCREEN: ScreenCheck = ScreenCheck {
 
 /// The panel's run tool (scenario `agent_run`): the prompt clicked and
 /// `compress all the files` typed; Send clicked; the step's Run clicked
-/// once the step (a card on the panel's grey, in the request's white
-/// card) shows; the panel's Hide clicked once the archive is checked.
+/// once the step (a white card on the panel's grey) shows; once it has
+/// ended and closed to a line, the line clicked open; the panel's Hide
+/// clicked once the archive is checked.
 const AGENT_RUN_SCREEN: ScreenCheck = ScreenCheck {
     marker: "agent_run_test: Prompt at",
     steps: &[
@@ -24866,12 +24870,22 @@ const AGENT_RUN_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep { after: "", input: &["click_on agent_run_test: Run"], pixels: &[] },
         ScreenStep {
-            // 4: answered: the reply card under the step.
-            after: "agent_run_test: answer listed",
+            // 4: answered: the request in the accent's bubble, the ended
+            // step a closed line on a white card; then the line clicked
+            // open.
+            after: "agent_run_test: step closed",
             input: &[],
-            pixels: &[PixelCheck::AnyIn(972, 90, 296, 600, 0xe6eef8)],
+            pixels: &[
+                PixelCheck::AnyIn(972, 90, 296, 200, 0x005fb8),
+                PixelCheck::AnyIn(972, 90, 296, 400, 0xffffff),
+            ],
         },
-        ScreenStep { after: "", input: &["click_on agent_run_test: HideButton"], pixels: &[] },
+        ScreenStep { after: "", input: &["click_on agent_run_test: Details"], pixels: &[] },
+        ScreenStep {
+            after: "agent_run_test: answer listed",
+            input: &["click_on agent_run_test: HideButton"],
+            pixels: &[],
+        },
     ],
 };
 
@@ -24912,13 +24926,13 @@ const EXPLORER_AGENT_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep { after: "", input: &["sendkey ret"], pixels: &[] },
         ScreenStep {
-            // 6: listed: the panel's white card; the card over Explorer
+            // 6: listed: the panel's accent bubble; the card over Explorer
             // gone, Explorer's white list where its grey (0xf9f9f9) title
             // and description were.
             after: "explorer: change: closed (handed to the agent panel)",
             input: &[],
             pixels: &[
-                PixelCheck::AnyIn(972, 90, 296, 140, 0xffffff),
+                PixelCheck::AnyIn(972, 90, 296, 140, 0x005fb8),
                 PixelCheck::Most(240, 262, 400, 40, 0xffffff, 95),
             ],
         },

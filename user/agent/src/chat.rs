@@ -583,6 +583,7 @@ mod tests {
             command: String::new(),
             explanation: String::new(),
             step,
+            open: false,
         }
     }
 

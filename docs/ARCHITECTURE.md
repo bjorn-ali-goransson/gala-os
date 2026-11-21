@@ -8684,6 +8684,13 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   name (`HideButton` "Hide", `DockTab` "Agent", `ContextProgram`,
   `ContextTitle`, `Prompt`, `SendButton`), from gala_ui's tree, and
   other processes see them (uiautomationcore's providers).
+- **The conversation's look**: what the user asked
+  (`Request{i}Text`) is a bubble in the accent on the right, its
+  program in small grey over it; the agent's side is set on the
+  panel's grey on the left: what the model said beside its calls, the
+  steps, and the answer (`Reply{i}`, plain text: no card), so who
+  said what is plain. A step is a white card. The prompt is a framed
+  white box (gala_ui's inputs draw no frame of their own).
 - **Hand-off**: a program hands a request to the panel with
   WM_COPYDATA (SendMessageW to the window FindWindowW finds by
   `handoff::CLASS` and `TITLE`), `dwData` `handoff::KIND`
@@ -8763,10 +8770,16 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   folder, one program per line since gala's cmd.exe has no `&`, `|`
   or batch files, busybox's tar and gzip since there is no tar.exe;
   or why every run is refused: no folder, no cmd.exe, a Linux folder).
-  Each call of a reply (`chat::reply`: text, or calls) is a step in
-  the request's card, `Request{i}Step{n}`: the command, the folder and
-  the model's explanation, with `Run` and `Cancel`; nothing runs until
-  Run is clicked. A run is `cmd.exe /c` with CREATE_NO_WINDOW, its
+  Each call of a reply (`chat::reply`: text, or calls) is a step,
+  `Request{i}Step{n}`. Waiting, it shows "Run this command?", the
+  command, the folder and the model's explanation, with `Run` and
+  `Cancel`: nothing runs until Run is clicked, and what runs is seen
+  before. Running, it shows the same with "Running...". Once it has
+  ended it closes to a line (`...Toggle`): the command cut to one line
+  (`...Summary`), what it came to (Done, Failed, Did not start,
+  Cancelled, Not run) and Show; a click on the line (`Msg::Toggle`)
+  opens it on the command whole, the folder, the explanation and the
+  result (`...Result`), and Hide closes it again. A run is `cmd.exe /c` with CREATE_NO_WINDOW, its
   standard output and error on one pipe, waited for on a worker
   thread; the exit code and at most `chat::MAX_OUTPUT` (16 KiB) of the
   output go back (the card shows at most `SHOWN`, 600 characters).
@@ -8780,7 +8793,8 @@ Automation; AGENT_SCREEN clicks them with `click_on`). ROADMAP LY
   command), and a Linux folder's runs are refused. Scenario
   `agent_run` (`user/agent_run_test`, AGENT_RUN_SCREEN): Explorer on a
   folder of three files, "compress all the files" sent, the step's Run
-  clicked, the archive listed with busybox's tar by the test.
+  clicked, the ended step a closed line clicked open on its result,
+  the archive listed with busybox's tar by the test.
 - **Not there yet** (ROADMAP): asking on a hand-off; running in a
   Linux distribution's folder; tools that read more about a process
   handed to it (its threads, stacks and handles: ROADMAP TM step 1's
