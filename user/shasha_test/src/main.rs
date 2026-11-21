@@ -6,8 +6,12 @@
 //! with the screen scenario clicking the taskbar's buttons, found by UI
 //! Automation:
 //!
-//! - the taskbar's window ("Taskbar", of class Shell_TrayWnd as Explorer's) is the shell's
-//!   window (GetShellWindow) and the strip at the bottom of the screen,
+//! - the desktop window ("Program Manager", of class Progman as
+//!   Explorer's) is the shell's window (GetShellWindow), shown over the
+//!   whole screen; the wallpaper (SPI_GETDESKWALLPAPER) is the picture
+//!   the boot chose, `C:\Windows\Web\Wallpaper\night.qoi`;
+//! - the taskbar's window ("Taskbar", of class Shell_TrayWnd as
+//!   Explorer's) is the strip at the bottom of the screen,
 //!   `HEIGHT` (48) high and the whole width; ABM_GETTASKBARPOS answers
 //!   with that strip on the bottom edge, and the work area ends above it;
 //! - its UI Automation elements: "StartButton" a Button named "Start",
@@ -30,7 +34,14 @@
 //!   the menu; the Windows key alone (gala's hot key for it, the shell's)
 //!   shows it again with the search cleared; a click on another window
 //!   (which then is active) hides it;
-//! - shasha ended (TerminateProcess): its window is gone, there is no
+//! - the desktop (part 9): a click on it (the scenario's, at an empty
+//!   point this test announces) makes the desktop window the foreground
+//!   window, and it stays under the others: a click on window two then
+//!   reaches window two, which becomes active again;
+//!   SPI_SETDESKWALLPAPER with `C:\Windows\Web\Wallpaper\dunes.qoi`
+//!   succeeds and SPI_GETDESKWALLPAPER reads it back (shasha, told
+//!   with WM_SETTINGCHANGE, shows it: the scenario's expected line);
+//! - shasha ended (TerminateProcess): its windows are gone, there is no
 //!   shell window, and the desktop's own taskbar holds the strip again
 //!   (ABM_GETTASKBARPOS the same strip, the work area unchanged).
 //!
@@ -40,8 +51,14 @@
 //! Prints `shasha_test: listed`, `shasha_test: activated`, `shasha_test:
 //! minimized`, `shasha_test: menu ready`, `shasha_test: menu open`,
 //! `shasha_test: filtered`, `shasha_test: started`, `shasha_test: menu
-//! again`, `shasha_test: closed` and `shasha_test: ok`, or `shasha_test: check N got X
-//! (line L)` and exits with N.
+//! again`, `shasha_test: closed`, `shasha_test: desktop ready`,
+//! `shasha_test: desktop clicked`, `shasha_test: two above`,
+//! `shasha_test: wallpaper set` and `shasha_test: ok`, or `shasha_test:
+//! check N got X (line L)` and exits with N.
+//!
+//! Assumed and not pinned either: that a click on the desktop makes
+//! Progman itself the foreground window (Windows may give it to a
+//! WorkerW window of Explorer's).
 
 #![no_std]
 #![no_main]
@@ -99,7 +116,7 @@ unsafe extern "system" {
     fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> i32;
     fn GetShellWindow() -> Handle;
     fn GetWindowThreadProcessId(hwnd: Handle, pid: *mut u32) -> u32;
-    fn SystemParametersInfoW(action: u32, param: u32, out: *mut Rect, ini: u32) -> i32;
+    fn SystemParametersInfoW(action: u32, param: u32, out: *mut u8, ini: u32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
 }
 
@@ -156,6 +173,12 @@ struct AppBarData {
 const ABM_GETTASKBARPOS: u32 = 5;
 const ABE_BOTTOM: u32 = 3;
 const SPI_GETWORKAREA: u32 = 0x30;
+const SPI_SETDESKWALLPAPER: u32 = 0x14;
+const SPI_GETDESKWALLPAPER: u32 = 0x73;
+/// SPIF_UPDATEINIFILE | SPIF_SENDCHANGE.
+const SPIF_SAVE_AND_TELL: u32 = 3;
+const NIGHT: &str = "C:\\Windows\\Web\\Wallpaper\\night.qoi";
+const DUNES: &str = "C:\\Windows\\Web\\Wallpaper\\dunes.qoi";
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
@@ -314,8 +337,39 @@ fn pump(ms: u64, done: impl Fn() -> bool) -> bool {
 fn work_area() -> Rect {
     let mut r = Rect::default();
     // SAFETY: our RECT.
-    unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r, 0) };
+    unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut r).cast(), 0) };
     r
+}
+
+/// SPI_GETDESKWALLPAPER's path, whether it succeeded.
+fn wallpaper(out: &mut [u16; 262]) -> bool {
+    // SAFETY: our buffer, its length in units.
+    unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, 262, out.as_mut_ptr().cast(), 0) != 0 }
+}
+
+/// Whether `w` (NUL-ended) is `s`.
+fn same(w: &[u16], s: &str) -> bool {
+    let n = w.iter().position(|&c| c == 0).unwrap_or(w.len());
+    n == s.len() && w.iter().zip(s.bytes()).all(|(&a, b)| a == u16::from(b))
+}
+
+/// Prints `<name> at x,y (pointer at px,py)` for the scenario's click.
+fn announce_point(name: &[u8], x: i32, y: i32) {
+    let (px, py) = uia_client::pointer();
+    Line::new()
+        .s(NAME.as_bytes())
+        .s(b": ")
+        .s(name)
+        .s(b" at ")
+        .dec(x.into())
+        .s(b",")
+        .dec(y.into())
+        .s(b" (pointer at ")
+        .dec(px.into())
+        .s(b",")
+        .dec(py.into())
+        .s(b")\r\n")
+        .print();
 }
 
 fn window_rect(hwnd: Handle) -> Rect {
@@ -404,17 +458,33 @@ fn run() -> Result<(), u32> {
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         let strip = Rect { left: 0, top: sh - HEIGHT, right: sw, bottom: sh };
 
-        // The taskbar, started with the session: the shell's window, the
-        // strip, the bar ABM_GETTASKBARPOS names.
+        // The desktop window, started with the session: the shell's
+        // window, over the whole screen; the boot's wallpaper.
+        let screen = Rect { left: 0, top: 0, right: sw, bottom: sh };
+        let (desk_class, desk_title) = (W::new("Progman"), W::new("Program Manager"));
+        let found = pump(STEP_MS, || {
+            let d = FindWindowW(desk_class.ptr(), desk_title.ptr());
+            d != 0 && GetShellWindow() == d && IsWindowVisible(d) != 0
+        });
+        let desk = FindWindowW(desk_class.ptr(), desk_title.ptr());
+        c.ok(desk != 0, 0)?;
+        say_rect(b"the desktop", window_rect(desk));
+        c.ok(found, GetShellWindow() as i64)?;
+        c.ok(window_rect(desk) == screen, window_rect(desk).right.into())?;
+        let mut path = [0u16; 262];
+        c.ok(wallpaper(&mut path), 0)?;
+        c.ok(same(&path, NIGHT), path[0].into())?;
+
+        // The taskbar: the strip, the bar ABM_GETTASKBARPOS names.
         let (class, title) = (W::new("Shell_TrayWnd"), W::new("Taskbar"));
         let found = pump(STEP_MS, || {
             let t = FindWindowW(class.ptr(), title.ptr());
-            t != 0 && GetShellWindow() == t && window_rect(t) == strip
+            t != 0 && window_rect(t) == strip
         });
         let bar = FindWindowW(class.ptr(), title.ptr());
         c.ok(bar != 0, 0)?;
         say_rect(b"the taskbar", window_rect(bar));
-        c.ok(found, GetShellWindow() as i64)?;
+        c.ok(found, window_rect(bar).top.into())?;
         let (ok, edge, r) = taskbar();
         c.eq(ok as i64, 1)?;
         c.eq(edge.into(), ABE_BOTTOM.into())?;
@@ -446,6 +516,13 @@ fn run() -> Result<(), u32> {
         let uia = Uia::new();
         c.ok(uia.is_ok(), uia.as_ref().err().copied().unwrap_or(0).into())?;
         let uia = uia.unwrap_or_else(|_| unreachable!());
+        // The boot's wallpaper shown: the element named after its file.
+        let named = |want: &str| {
+            uia.window(desk)
+                .and_then(|d| uia.find(&d, "Wallpaper"))
+                .is_some_and(|e| e.name() == want)
+        };
+        c.ok(pump(STEP_MS, || named(NIGHT)), 0)?;
         let find = |id: &str| -> Option<Element> { uia.find(&uia.window(bar)?, id) };
         let start = find("StartButton");
         c.ok(start.as_ref().is_some_and(|e| e.name() == "Start"), 0)?;
@@ -554,19 +631,7 @@ fn run() -> Result<(), u32> {
         let w = window_rect(two);
         let (x, y) = ((w.left + w.right) / 2, w.top + 12);
         c.ok(y < window_rect(menu).top, y.into())?;
-        let (px, py) = uia_client::pointer();
-        Line::new()
-            .s(NAME.as_bytes())
-            .s(b": WindowTwo at ")
-            .dec(x.into())
-            .s(b",")
-            .dec(y.into())
-            .s(b" (pointer at ")
-            .dec(px.into())
-            .s(b",")
-            .dec(py.into())
-            .s(b")\r\n")
-            .print();
+        announce_point(b"WindowTwo", x, y);
         say(b"menu again");
 
         // Clicked away: the menu hides, the window clicked is active.
@@ -575,6 +640,41 @@ fn run() -> Result<(), u32> {
         let gone = pump(STEP_MS, || FindWindowW(core::ptr::null(), tm_title.ptr()) == 0);
         c.ok(gone, 0)?;
         say(b"closed");
+
+        // A click on the desktop (an empty point right of window two,
+        // above the strip): the desktop window is active...
+        let (dx, dy) = (sw - 180, sh - HEIGHT - 150);
+        c.ok(dx > window_rect(two).right, dx.into())?;
+        announce_point(b"Desktop", dx, dy);
+        say(b"desktop ready");
+        let clicked = pump(STEP_MS, || GetForegroundWindow() == desk);
+        c.ok(clicked, GetForegroundWindow() as i64)?;
+        c.ok(IsWindowVisible(two) != 0, 0)?;
+        // ... and under window two: a click on it reaches it.
+        let w = window_rect(two);
+        announce_point(b"WindowTwo", (w.left + w.right) / 2, w.top + 12);
+        say(b"desktop clicked");
+        let above = pump(STEP_MS, || GetForegroundWindow() == two);
+        c.ok(above, GetForegroundWindow() as i64)?;
+        say(b"two above");
+
+        // Another wallpaper: saved, read back; shasha is told.
+        let dunes = W::new(DUNES);
+        c.eq(
+            SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER,
+                0,
+                dunes.ptr().cast_mut().cast(),
+                SPIF_SAVE_AND_TELL,
+            )
+            .into(),
+            1,
+        )?;
+        c.ok(wallpaper(&mut path), 0)?;
+        c.ok(same(&path, DUNES), path[0].into())?;
+        // Shown: shasha's "Wallpaper" element is named after its file.
+        c.ok(pump(STEP_MS, || named(DUNES)), 0)?;
+        say(b"wallpaper set");
 
         // shasha ended: no shell window, the desktop's taskbar holds the
         // strip again.
@@ -588,8 +688,11 @@ fn run() -> Result<(), u32> {
         // so the strip seen next is the desktop's own taskbar's.
         c.eq(WaitForSingleObject(h, 10_000).into(), 0)?;
         CloseHandle(h);
-        let gone =
-            pump(STEP_MS, || FindWindowW(class.ptr(), title.ptr()) == 0 && GetShellWindow() == 0);
+        let gone = pump(STEP_MS, || {
+            FindWindowW(class.ptr(), title.ptr()) == 0
+                && FindWindowW(desk_class.ptr(), desk_title.ptr()) == 0
+                && GetShellWindow() == 0
+        });
         c.ok(gone, GetShellWindow() as i64)?;
         let back = pump(STEP_MS, || taskbar().0 == 1 && taskbar().2 == strip);
         let (_, edge, r) = taskbar();

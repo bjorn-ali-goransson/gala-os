@@ -9469,6 +9469,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // desktop starts it with the session (`shell=shasha`); shasha_test
     // checks it while the screen scenario clicks its buttons.
     ("shasha", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("shasha", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
     ("shasha", "user/bin/shasha.exe", "Windows/System32"),
     ("shasha", "user/bin/cmd.exe", "Windows/System32"),
     ("shasha", "user/bin/taskmgr.exe", "Windows/System32"),
@@ -16482,13 +16483,19 @@ const BASE_SCENARIOS: &[Scenario] = &[
         // then shasha's start menu (part 7): the Start button opens it,
         // `task` typed filters it to Task Manager's tile, whose click
         // starts it; the Windows key opens it again and a click on
-        // another window closes it; shasha ended, the desktop's taskbar
-        // is back. Installed: Command Prompt and Task Manager.
+        // another window closes it; then the desktop (part 9): shasha's
+        // Progman is the shell's window, kept at the bottom, showing the
+        // wallpaper; a click on it activates it, a click on window two
+        // brings that back; SPI_SETDESKWALLPAPER changes the picture
+        // shasha shows; shasha ended, the desktop's taskbar is back.
+        // Installed: Command Prompt and Task Manager.
         name: "shasha",
         cmdline: "qemu_exit wallpaper=night events=window agent=off shell=shasha run=shasha_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "desktop: started C:\\Windows\\System32\\shasha.exe (pid",
+            "shasha: the wallpaper is C:\\Windows\\Web\\Wallpaper\\night.qoi (1280 x 800)",
+            "is the shell's window, kept at the bottom",
             "shasha: started",
             "desktop: the taskbar's bar is window",
             "shasha: the taskbar at 0,752 1280x48",
@@ -16513,6 +16520,12 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "shasha_test: menu again",
             "shasha: the start menu closes: another window is active",
             "shasha_test: closed",
+            "shasha_test: desktop ready",
+            "shasha_test: desktop clicked",
+            "shasha_test: two above",
+            "told of the wallpaper",
+            "shasha: the wallpaper is C:\\Windows\\Web\\Wallpaper\\dunes.qoi (1280 x 800)",
+            "shasha_test: wallpaper set",
             "desktop: the taskbar's bar is gone: the desktop's taskbar is back",
             "shasha_test: the taskbar after shasha [0,752,1280,800]",
             "shasha_test: ok",
@@ -24523,6 +24536,20 @@ const SHASHA_SCREEN: ScreenCheck = ScreenCheck {
         ScreenStep { after: "shasha_test: started", input: &["sendkey meta_l"], pixels: &[] },
         ScreenStep {
             after: "shasha_test: menu again",
+            input: &["click_on shasha_test: WindowTwo"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // 9: the desktop clicked: the wallpaper (a picture, many
+            // colours) where no window is. (The changed wallpaper is
+            // checked by shasha_test through UI Automation: its pixels
+            // here could be the desktop's own, once shasha has ended.)
+            after: "shasha_test: desktop ready",
+            input: &["click_on shasha_test: Desktop"],
+            pixels: &[PixelCheck::Varied(1000, 440, 260, 280, 16)],
+        },
+        ScreenStep {
+            after: "shasha_test: desktop clicked",
             input: &["click_on shasha_test: WindowTwo"],
             pixels: &[],
         },

@@ -2968,15 +2968,18 @@ fn gala_app_bar(call: &mut Call<'_>) -> NtStatus {
     let (callback, edge) = (u32_at(8), u32_at(12));
     let (l, t, r, b) = (i32_at(16), i32_at(20), i32_at(24), i32_at(28));
     let rect = Rect { x: l, y: t, w: r - l, h: b - t };
-    // The taskbar is handed only to the session's shell (SetShellWindow),
-    // by the process whose window that is (ARCHITECTURE "The user-mode
-    // shell").
+    // The taskbar is handed only to a window of the session's shell: the
+    // process whose window the shell's window (SetShellWindow, the
+    // desktop's Progman) is (ARCHITECTURE "The user-mode shell").
     if op == super::desktop::appbar::ABM_GALA_TASKBAR {
         let windows = &call.process.desk.windows;
-        let owner = windows.owner_pid(hwnd).map(u64::from);
-        if hwnd == 0 || windows.shell_window() != hwnd || owner != Some(call.process.id) {
+        let me = Some(call.process.id);
+        let shell = windows.shell_window();
+        let shells = shell != 0 && windows.owner_pid(shell).map(u64::from) == me;
+        if hwnd == 0 || !shells || windows.owner_pid(hwnd).map(u64::from) != me {
             crate::info!(
-                "desktop: pid {}: the taskbar refused to window {hwnd:#x}: not its shell window",
+                "desktop: pid {}: the taskbar refused to window {hwnd:#x}: not the shell's \
+                 (the shell's window is {shell:#x})",
                 call.process.id
             );
             return NtStatus::ACCESS_DENIED;
@@ -3197,6 +3200,20 @@ fn gala_shell_window(call: &mut Call<'_>) -> NtStatus {
         0 => match call.process.desk.windows.set_shell_window(pid, hwnd) {
             Ok(()) => {
                 crate::info!("desktop: pid {pid}'s window {hwnd:#x} is the shell's window");
+                // On the screen: under every other window, as Windows
+                // keeps the shell's (Progman, the wallpaper).
+                let id = call.process.desk.windows.query(hwnd).map_or(0, |i| i.desktop);
+                if id != 0 && super::desktop::has_shell(&call.process.desk.shell) {
+                    let owner = call.process.id;
+                    if let Err(e) = super::desktop::with(&call.process.desk.shell, |d| {
+                        d.set_bottom(id, owner)?;
+                        Ok(((), None))
+                    }) {
+                        crate::info!(
+                            "desktop: the shell's window {hwnd:#x} (window {id}) not kept at the bottom: {e:?}"
+                        );
+                    }
+                }
                 NtStatus::SUCCESS
             }
             Err(e) => {

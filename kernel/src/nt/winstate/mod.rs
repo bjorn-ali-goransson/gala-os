@@ -333,6 +333,10 @@ pub struct Window<X> {
     /// In the topmost band (WS_EX_TOPMOST, GalaWindowSetTopmost): above
     /// the other windows whichever is active, with the popups.
     pub topmost: bool,
+    /// The shell's desktop window (SetShellWindow: Progman, which shows
+    /// the wallpaper): in the bottom layer, under every other window
+    /// whichever is active, as Windows keeps the shell's window.
+    pub bottom: bool,
     /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
     /// (straight alpha); empty: none (the taskbar shows a lettered tile).
     pub icon: Vec<u32>,
@@ -362,6 +366,18 @@ impl<X> Window<X> {
     /// In the upper layer: a popup or in the topmost band.
     pub fn upper(&self) -> bool {
         self.popup || self.topmost
+    }
+
+    /// Its layer, bottom to top: 0 the shell's desktop window (a popup
+    /// too, as shasha's is), 1 the rest, 2 the upper layer (`upper`).
+    pub fn layer(&self) -> u8 {
+        if self.bottom {
+            0
+        } else if self.upper() {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn shown(&self) -> bool {
@@ -652,6 +668,7 @@ impl<X: Default> State<X> {
             popup,
             frameless,
             topmost: false,
+            bottom: false,
             look: 0,
             chrome: X::default(),
         };
@@ -1376,17 +1393,15 @@ impl<X: Default> State<X> {
         out
     }
 
-    /// To the top of its layer: the other windows stay below the upper
-    /// one (the popups and the topmost band, `Window::upper`).
+    /// To the top of its layer (`Window::layer`): the other windows stay
+    /// below the upper layer (the popups and the topmost band) and above
+    /// the shell's desktop window.
     pub fn raise(&mut self, id: u32) {
         let Some(i) = self.index(id) else { return };
         let w = self.windows.remove(i);
         let bounds = w.bounds(self.shadow);
-        let at = if w.upper() {
-            self.windows.len()
-        } else {
-            self.windows.iter().position(|o| o.upper()).unwrap_or(self.windows.len())
-        };
+        let layer = w.layer();
+        let at = self.windows.iter().position(|o| o.layer() > layer).unwrap_or(self.windows.len());
         // Back in (the capacity it left), then into place.
         let _ = self.windows.try_push(w);
         self.windows[at..].rotate_right(1);
@@ -1400,6 +1415,18 @@ impl<X: Default> State<X> {
     /// top of the layer it is now in, as Windows puts it.
     pub fn set_topmost(&mut self, id: u32, owner: u64, on: bool) -> Result<(), NtStatus> {
         self.find(id, owner)?.topmost = on;
+        self.raise(id);
+        if let Some(w) = self.window(id) {
+            let bounds = w.bounds(self.shadow);
+            self.add_damage(bounds);
+        }
+        Ok(())
+    }
+
+    /// `owner`'s window `id` is the shell's desktop window (SetShellWindow):
+    /// into the bottom layer, under every other window.
+    pub fn set_bottom(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.find(id, owner)?.bottom = true;
         self.raise(id);
         if let Some(w) = self.window(id) {
             let bounds = w.bounds(self.shadow);

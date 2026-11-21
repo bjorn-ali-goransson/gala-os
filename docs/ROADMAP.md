@@ -863,8 +863,8 @@ shell part) leaves it.
       the active one; the list follows WinEvents. When shasha ends the
       desktop's own taskbar is back on the same strip. Test:
       `shasha_test` with the screen scenario `shasha` (ARCHITECTURE
-      "The user-mode shell"). Not yet in shasha: the wallpaper, the
-      window buttons' icons; the shell's bar is not told when the
+      "The user-mode shell"). Not yet in shasha: the window buttons'
+      icons; the shell's bar is not told when the
       screen changes size.
    7. Done: shasha's own start menu, a gala_ui window ("Start", popup,
       topmost, hidden until opened) centred above the taskbar: the
@@ -896,9 +896,25 @@ shell part) leaves it.
       shell`, scenario `shasha_tray` (real clicks through
       `click_on`/`right_click_on`, the balloon's pixels). Not yet: the
       overflow (more icons than fit), keyboard focus of the icons.
-   Then the wallpaper in `shasha.exe`,
-   shasha the default shell, and the kernel's shell code (about 4-5k
-   lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
+   9. Done: shasha's wallpaper. shasha's desktop window (class
+      `Progman`, "Program Manager", popup over the whole screen) is the
+      shell window (SetShellWindow; the taskbar's strip is now handed to
+      any window of the shell window's process) and the kernel keeps it
+      under every other window (winstate's bottom layer: a click
+      activates it without raising it). It shows the file the
+      `Control Panel\Desktop` value `Wallpaper` names (QOI, decoded and
+      covered in shasha); SystemParametersInfo's SPI_GETDESKWALLPAPER
+      reads that value and SPI_SETDESKWALLPAPER changes it
+      (GalaDesktopAction's Wallpaper, which now takes a `.qoi` path and
+      saves the value), the shell window is told with WM_SETTINGCHANGE,
+      and the "Wallpaper" element is named after the file shown. Test:
+      `shasha_test`, scenario `shasha` (ARCHITECTURE "The user-mode
+      shell"). Not yet: other picture formats, the WM_SETTINGCHANGE
+      broadcast to every top-level window, SPI_SETDESKWALLPAPER with
+      NULL (the value from the registry again), the watermark (drawn
+      only by the kernel's wallpaper).
+   Then shasha the default shell, and the kernel's shell code (about
+   4-5k lines of `nt/desktop`: the menu, taskbar, tray, wallpaper, the
    Linux and install tiles) removed.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash

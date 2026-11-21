@@ -43,6 +43,9 @@ pub const ACTION_CLOSE: u32 = 7;
 pub const ACTION_SNAP: u32 = 8;
 pub const ACTION_MOVE: u32 = 9;
 pub const ACTION_WALLPAPER: u32 = 10;
+/// WM_SETTINGCHANGE and its wParam for the wallpaper.
+const WM_SETTINGCHANGE: u32 = 0x001a;
+const SPI_SETDESKWALLPAPER: u64 = 0x14;
 pub const ACTION_PROGRAMS: u32 = 11;
 /// The notification area's icons (`gala tray`).
 pub const ACTION_TRAY: u32 = 12;
@@ -391,9 +394,33 @@ fn run_other(
             desktop::tray_click(&caller.desk.shell, key, button)?;
         }
         ACTION_WALLPAPER => {
-            let mut name = [0u8; 32];
+            let mut name = [0u8; 260];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
             desktop::set_wallpaper(&caller.desk.shell, name)?;
+            // The shell hears of it as Windows tells every top-level
+            // window (WM_SETTINGCHANGE, SPI_SETDESKWALLPAPER), and shows
+            // the new value.
+            let shell = caller.desk.windows.shell_window();
+            if shell != 0 {
+                match caller.desk.windows.post_from_system(
+                    shell,
+                    WM_SETTINGCHANGE,
+                    SPI_SETDESKWALLPAPER,
+                    0,
+                ) {
+                    Ok(event) => {
+                        if let Some(e) = event {
+                            super::wait::set_signal(&e, 1);
+                        }
+                        crate::info!(
+                            "desktop: the shell's window {shell:#x} told of the wallpaper"
+                        );
+                    }
+                    Err(e) => crate::warn!(
+                        "desktop: the shell's window {shell:#x} not told of the wallpaper: {e:?}"
+                    ),
+                }
+            }
         }
         ACTION_LINUX_PROGRESS => {
             let mut name = [0u8; desktop::linux::NAME];

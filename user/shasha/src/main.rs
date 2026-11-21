@@ -40,6 +40,14 @@
 //!   the clock's seconds, or until it is clicked.
 //! - **The clock**: the local time, read each second (WM_TIMER), the
 //!   view changed when the minute does.
+//! - **The wallpaper** (part 9): the desktop window, "Program Manager"
+//!   of class `Progman` as Explorer's, a popup over the whole screen
+//!   that is the shell's window (SetShellWindow; the desktop keeps it
+//!   under every other window). It shows the picture the user's
+//!   "Wallpaper" value names (SPI_GETDESKWALLPAPER), a QOI picture
+//!   scaled to cover the screen (`shasha::wallpaper`), read again when
+//!   it is told the value changed (WM_SETTINGCHANGE,
+//!   SPI_SETDESKWALLPAPER); without one, a plain colour.
 //!
 //! The view and what a message does to it are the library (`shasha`);
 //! this file does what is outside it.
@@ -54,6 +62,7 @@
 //! request (`notification-area icon added: window W id N "tip"`, or
 //! refused and why), every click on an icon and what it posted, a post
 //! that failed (the icon dropped), each balloon shown and how it went,
+//! each wallpaper shown (`the wallpaper is PATH (W x H)`) or not and why,
 //! and gala_ui's line for each message handled (`click Task20010: ...`).
 
 #![no_std]
@@ -71,8 +80,9 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use gala_ui::{Component, Node, column, text, win};
+use gala_ui::{Component, Node, column, image, text, win};
 use shasha::tray::{self, Button, Key, Refused};
+use shasha::wallpaper;
 use shasha::{
     Click, HEIGHT, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Msg, StartMenu, Taskbar, clock_text,
     parse_programs, parse_windows,
@@ -176,10 +186,23 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn GetLocalTime(t: *mut SystemTime);
     fn GetLastError() -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *const c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn GetFileSizeEx(file: Handle, size: *mut i64) -> Bool;
+    fn ReadFile(file: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
+    fn CloseHandle(h: Handle) -> Bool;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn SystemParametersInfoW(action: u32, param: u32, out: *mut u16, ini: u32) -> Bool;
     fn GetSystemMetrics(index: i32) -> i32;
     fn SetWindowPos(hwnd: Handle, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32)
     -> Bool;
@@ -241,6 +264,17 @@ static WINDOW: AtomicUsize = AtomicUsize::new(0);
 static MENU: AtomicUsize = AtomicUsize::new(0);
 /// The balloon's window (0 until it is made).
 static BALLOON: AtomicUsize = AtomicUsize::new(0);
+/// The desktop window, Progman (0 until it is made).
+static DESKTOP: AtomicUsize = AtomicUsize::new(0);
+
+const WM_SETTINGCHANGE: u32 = 0x001a;
+const SPI_SETDESKWALLPAPER: usize = 0x14;
+const SPI_GETDESKWALLPAPER: u32 = 0x73;
+const GENERIC_READ: u32 = 0x8000_0000;
+const FILE_SHARE_READ: u32 = 1;
+const OPEN_EXISTING: u32 = 3;
+/// The desktop's colour without a wallpaper.
+const DESKTOP_COLOUR: u32 = 0x1f55b8;
 
 /// COPYDATASTRUCT.
 #[repr(C)]
@@ -696,6 +730,169 @@ impl Component for BalloonWindow {
     }
 }
 
+/// The desktop window: the wallpaper over the whole screen.
+struct DesktopWindow {
+    width: i32,
+    height: i32,
+    /// The wallpaper's path, the key of its picture and so the name
+    /// UI Automation gives the "Wallpaper" element; empty for none.
+    shown: String,
+}
+
+#[derive(Clone, Debug)]
+enum DesktopMsg {
+    /// The "Wallpaper" value changed (WM_SETTINGCHANGE; also posted to
+    /// itself once at the start).
+    Changed,
+}
+
+impl Component for DesktopWindow {
+    type Msg = DesktopMsg;
+
+    fn view(&self) -> Node<DesktopMsg> {
+        column().id("Desktop").bg(DESKTOP_COLOUR).child_if(
+            !self.shown.is_empty(),
+            image(self.shown.clone()).id("Wallpaper").width(self.width).height(self.height),
+        )
+    }
+
+    fn update(&mut self, msg: DesktopMsg) {
+        match msg {
+            DesktopMsg::Changed => {
+                self.shown = show_wallpaper(self.width, self.height, &self.shown);
+            }
+        }
+    }
+
+    fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<DesktopMsg> {
+        (msg == WM_SETTINGCHANGE && wparam == SPI_SETDESKWALLPAPER).then_some(DesktopMsg::Changed)
+    }
+}
+
+/// The whole of file `path`, or why not.
+fn read_file(path: &str) -> Result<Vec<u8>, String> {
+    let name: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-ended name; our handle, buffer and lengths.
+    unsafe {
+        let h = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            core::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            core::ptr::null_mut(),
+        );
+        if h as isize == -1 {
+            return Err(format!("cannot open it (error {})", GetLastError()));
+        }
+        let mut size = 0i64;
+        let mut data = Vec::new();
+        let ok = GetFileSizeEx(h, &mut size) != 0
+            && (0..=64 << 20).contains(&size)
+            && data.try_reserve_exact(size as usize).is_ok();
+        if ok {
+            data.resize(size as usize, 0);
+        }
+        let mut read = 0u32;
+        let ok = ok
+            && ReadFile(h, data.as_mut_ptr(), size as u32, &mut read, core::ptr::null_mut()) != 0
+            && read as i64 == size;
+        let e = GetLastError();
+        CloseHandle(h);
+        if !ok {
+            return Err(format!("cannot read it ({size} bytes, error {e})"));
+        }
+        Ok(data)
+    }
+}
+
+/// Shows the wallpaper SPI_GETDESKWALLPAPER names on the desktop window,
+/// covering a `w` x `h` screen, in place of the one shown (`old`): the
+/// path shown, empty when none is (the desktop's colour). Logged.
+fn show_wallpaper(w: i32, h: i32, old: &str) -> String {
+    let hwnd = DESKTOP.load(Ordering::Acquire) as Handle;
+    let mut path = [0u16; 262];
+    // SAFETY: our buffer, its length in units.
+    let got = unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, 262, path.as_mut_ptr(), 0) };
+    let len = path.iter().position(|&c| c == 0).unwrap_or(0);
+    let path = String::from_utf16_lossy(&path[..len]);
+    if !old.is_empty() {
+        win::forget_picture(hwnd, old);
+    }
+    if got == 0 || path.is_empty() {
+        log(&if got == 0 {
+            // SAFETY: plain call.
+            format!("no wallpaper: SPI_GETDESKWALLPAPER failed (error {})", unsafe {
+                GetLastError()
+            })
+        } else {
+            String::from("no wallpaper: the desktop's colour")
+        });
+        return String::new();
+    }
+    let shown = read_file(&path)
+        .and_then(|data| wallpaper::decode_qoi(&data).map_err(|e| format!("{e:?}")))
+        .and_then(|p| {
+            let size = (p.w, p.h);
+            wallpaper::cover(&p, w, h).map(|c| (size, c)).map_err(|e| format!("{e:?}"))
+        });
+    match shown {
+        Ok(((pw, ph), c)) if win::picture(hwnd, &path, c.w, c.h, &c.pixels) => {
+            log(&format!("the wallpaper is {path} ({pw} x {ph})"));
+            path
+        }
+        Ok(_) => {
+            log(&format!("the wallpaper {path} is not shown: the window took no picture"));
+            String::new()
+        }
+        Err(why) => {
+            log(&format!("the wallpaper {path} is not shown: {why}"));
+            String::new()
+        }
+    }
+}
+
+/// Makes the desktop window (Progman), the shell's window, over a `w` x
+/// `h` screen and shows the wallpaper on it: None when it could not be
+/// made or another shell holds the session.
+fn make_desktop(w: i32, h: i32) -> Option<Handle> {
+    let options = win::Options {
+        title: "Program Manager",
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+        topmost: false,
+        popup: true,
+        no_activate: false,
+        // Shown once it is the shell's window, under the others.
+        hidden: true,
+        // Where programs find the desktop (FindWindow), as Explorer's.
+        class: Some("Progman"),
+    };
+    let desktop = DesktopWindow { width: w, height: h, shown: String::new() };
+    let Some(hwnd) = win::open(desktop, &options, log) else {
+        log("the desktop window could not be made");
+        return None;
+    };
+    let hwnd = hwnd as Handle;
+    DESKTOP.store(hwnd as usize, Ordering::Release);
+    // SAFETY: our window.
+    if unsafe { SetShellWindow(hwnd) } == 0 {
+        // Another shell holds the session: this one does not take over.
+        log("not the shell: SetShellWindow refused");
+        return None;
+    }
+    // The wallpaper, as when it changes (the view keeps its path).
+    // SAFETY: our window.
+    unsafe {
+        PostMessageW(hwnd, WM_SETTINGCHANGE, SPI_SETDESKWALLPAPER, 0);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    Some(hwnd)
+}
+
 /// Makes the balloon's window (hidden) above the strip at `bar_top`, at
 /// the right of a screen `sw` wide.
 fn make_balloon(sw: i32, bar_top: i32, shown: Shown) {
@@ -832,6 +1029,12 @@ pub extern "C" fn mainCRTStartup() -> ! {
     log("started");
     // SAFETY: plain calls.
     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    // The desktop window first: the shell's window, which the strip's
+    // app bar needs.
+    if make_desktop(sw, sh).is_none() {
+        // SAFETY: plain call.
+        unsafe { ExitProcess(2) }
+    }
     let options = win::Options {
         title: "Taskbar",
         x: 0,
@@ -854,13 +1057,6 @@ pub extern "C" fn mainCRTStartup() -> ! {
         unsafe { ExitProcess(1) }
     };
     WINDOW.store(hwnd as usize, Ordering::Release);
-    // SAFETY: our window.
-    if unsafe { SetShellWindow(hwnd) } == 0 {
-        // Another shell holds the session: this one does not take over.
-        log("not the shell: SetShellWindow refused");
-        // SAFETY: plain call.
-        unsafe { ExitProcess(2) }
-    }
     match take_taskbar(hwnd) {
         Some(r) => {
             log(&format!(

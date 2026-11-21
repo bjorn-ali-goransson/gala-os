@@ -101,7 +101,8 @@ pub trait Component {
     fn update(&mut self, msg: Self::Msg);
     /// A window message the window does not handle itself (WM_COPYDATA,
     /// WM_USER and up: the program's own, a notification's callback;
-    /// WM_ACTIVATE, whose default handling is still done after; WM_HOTKEY):
+    /// WM_ACTIVATE, whose default handling is still done after; WM_HOTKEY;
+    /// WM_SETTINGCHANGE):
     /// the program's message for it, if any, handled as a click's is
     /// (logged, `update`, the view built again). `window` is the
     /// window's handle.

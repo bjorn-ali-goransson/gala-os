@@ -27,6 +27,7 @@ use gala_ui::{Align, Justify, Node, button, row, text};
 
 mod menu;
 pub mod tray;
+pub mod wallpaper;
 pub use menu::{
     MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Program, StartMenu, TILES_IN_ROW, parse_programs,
     program_id,

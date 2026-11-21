@@ -1959,3 +1959,16 @@ fn the_shell_takes_the_taskbar_and_the_desktops_comes_back_when_it_ends() {
     assert_eq!(d.hit(sx, sy), Hit::Start);
     assert_eq!(d.s.work().h, strip.y);
 }
+
+#[test]
+fn a_wallpaper_is_named_or_a_qoi_files_path() {
+    assert_eq!(wallpaper_path("Night"), Some("\\Windows\\Web\\Wallpaper\\night.qoi"));
+    assert_eq!(
+        wallpaper_path("C:\\Windows\\Web\\Wallpaper\\dunes.qoi"),
+        Some("\\Windows\\Web\\Wallpaper\\dunes.qoi")
+    );
+    assert_eq!(wallpaper_path("\\Users\\gala\\a.QOI"), Some("\\Users\\gala\\a.QOI"));
+    assert_eq!(wallpaper_path("C:\\Users\\gala\\a.png"), None);
+    assert_eq!(wallpaper_path("D:\\a.qoi"), None);
+    assert_eq!(wallpaper_path("sunset"), None);
+}

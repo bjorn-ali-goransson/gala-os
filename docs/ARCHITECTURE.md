@@ -8410,8 +8410,12 @@ and the SHAppBarMessage reference).
 #### The user-mode shell
 
 Code: `user/shasha` (`shasha.exe`: the taskbar's model, view and
-update in `lib.rs`, host-tested there; the window, the shell window,
+update in `lib.rs`, host-tested there; the QOI decoder and the cover
+scaling in `wallpaper.rs`, host-tested; the windows, the shell window,
 the app bar, the WinEvent hooks and the verbs in `main.rs`),
+`Window::bottom` and `WinState::set_bottom` (`nt/winstate`), the
+wallpaper's value (`Desktop::set_wallpaper`, `save_wallpaper`) and
+user32's SPI_GET/SETDESKWALLPAPER (`user/user32/src/spi.rs`),
 `AppBars::hand_taskbar` (`desktop/appbar.rs`), `Desktop::own_taskbar`
 and `taskbar_back` (`desktop/mod.rs`), the shell window check in
 `gala_app_bar` (`syscalls.rs`), `action::start_shell` and the
@@ -8427,14 +8431,45 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
 - **Its window**: a gala_ui popup strip at the bottom of the screen,
   topmost and never activated (WS_EX_NOACTIVATE, shown with
   SW_SHOWNOACTIVATE: a click on it leaves the active window active, so
-  a click on the active window's button can minimize it). It is the
+  a click on the active window's button can minimize it).
+- **The desktop window**: shasha's first window, a gala_ui popup of
+  class `Progman` titled "Program Manager" (where programs find
+  Explorer's) over the whole screen, created hidden. It is the
   session's shell window (SetShellWindow; a second shell is refused and
-  shasha ends with 2).
+  shasha ends with 2), and the kernel then keeps it at the bottom
+  (`set_bottom`, from the SetShellWindow syscall): winstate's
+  bottom layer, under the normal and topmost ones, so a window raised
+  or created always lands above it, and a click on it activates it
+  (GALA_WM_MOUSEACTIVATE, a popup's) without raising it. Shown with
+  SW_SHOWNOACTIVATE.
+- **The wallpaper**: the desktop window is the desktop's colour with
+  one gala_ui `image` (`Wallpaper`) whose picture key is the file's
+  path, so UI Automation names the element after the file shown. The
+  file is the one SPI_GETDESKWALLPAPER names, read and decoded in
+  shasha (`wallpaper::decode_qoi`, from the specification, alpha
+  kept; at most 8192 px a side and 64 MB) and scaled to cover the
+  screen (`cover`: nearest pixel, the overflow cut evenly from both
+  sides). It is shown at the start (shasha posts itself the change)
+  and again on WM_SETTINGCHANGE with SPI_SETDESKWALLPAPER; gala_ui
+  hands WM_SETTINGCHANGE to its components. An empty value, or a
+  file that cannot be read or decoded, leaves the colour (logged).
+- **The wallpaper's value**: `HKEY_CURRENT_USER\Control Panel\Desktop`
+  `Wallpaper` (REG_SZ, `C:` and the path; empty for the drawn one),
+  written by the desktop whenever its wallpaper is chosen (the boot's
+  `wallpaper=` included). user32's SPI_GETDESKWALLPAPER reads it
+  (the caller's own user key, from its token's SID); SPI_SETDESKWALLPAPER
+  hands the path to GalaDesktopAction's Wallpaper, which takes a
+  wallpaper's name or a `.qoi` path (with or without `C:`; a missing
+  file is NOT_FOUND, ERROR_FILE_NOT_FOUND to the caller), saves the
+  value and posts the shell window WM_SETTINGCHANGE (wparam
+  SPI_SETDESKWALLPAPER). Only the shell window is told, not every
+  top-level window as Windows broadcasts.
 - **Taking the taskbar**: GalaAppBar's ABM_GALA_TASKBAR (0x100, gala's
   own) with that window makes it the bar that is the taskbar, in the
   desktop's place: the same edge and strip, so the work area and the
-  other bars are unchanged and none is told. The syscall lets only the
-  process whose window is the shell window ask (else ACCESS_DENIED,
+  other bars are unchanged and none is told. The syscall lets only a
+  window of the process whose window is the shell window ask (the bar
+  is Shell_TrayWnd, the shell window Progman; else ACCESS_DENIED,
   logged); `hand_taskbar` refuses a window that is another bar
   already. From then on the desktop neither draws the taskbar nor
   answers clicks on its strip (`own_taskbar`); shasha's window is
@@ -8473,18 +8508,26 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   told yet).
 - **The notification area**: shasha's strip is `Shell_TrayWnd` and
   answers Shell_NotifyIcon ("The notification area").
-- **Limits**: no wallpaper or window icons in shasha yet, no overflow
+- **Limits**: no window icons in shasha yet, no overflow
   for more icons than fit; the menu has no pinned or recent programs, user or power
   buttons, or keyboard navigation of its tiles; the shell is not restarted when it ends
-  (ROADMAP SH step 2).
+  (ROADMAP SH step 2). The wallpaper is QOI only and has no
+  watermark (the kernel's wallpaper draws one); SPI_SETDESKWALLPAPER
+  with NULL is unsupported (the ledger, FALSE).
 - **Observability**: shasha's lines (`shasha: started`, `shasha: the
+  wallpaper is <path> (W x H)`, `shasha: the wallpaper <path> is not
+  shown: <why>`, `shasha: no wallpaper: <why>`, `shasha: the
   taskbar at x,y wxh`, or `shasha: the taskbar's strip is not handed
   over: <status>` with `shasha: the desktop keeps its taskbar`, `shasha:
   <n> window(s) listed`, `shasha: activate/minimize window <hwnd>` and
   `... refused: <status>`); the kernel's `desktop: the taskbar's bar is
   window <hwnd> of pid <p> (the shell's) at x,y wxh: the desktop no
   longer draws it`, `desktop: pid <p>: the taskbar refused to window
-  <hwnd>: not its shell window`, `desktop: pid <p>: the taskbar not
+  <hwnd>: not the shell's (the shell's window is <hwnd>)`, `desktop:
+  window <id> is the shell's window, kept at the bottom` (or `desktop:
+  the shell's window <hwnd> (window <id>) not kept at the bottom:
+  <status>`), `desktop: wallpaper value C:<path>`, `desktop: the
+  shell's window <hwnd> told of the wallpaper` (or `not told ...`), `desktop: pid <p>: the taskbar not
   handed to window <hwnd> (...)`, `desktop: the taskbar's bar is gone:
   the desktop's taskbar is back`, the menu's `shasha: the start menu
   opens: <n> program(s): <names>`, `shasha: the start menu closes:
@@ -8667,8 +8710,12 @@ the program always sees WM_SIZE/WM_MOVE.
   (user32's WS_EX_TOPMOST, at CreateWindowEx or by SetWindowPos
   HWND_TOPMOST; HWND_NOTOPMOST takes it out, at the top of the rest)
   is kept with the popups above every other window, whichever is
-  active: `Window::upper` (popup or topmost) is the layer `raise`
-  keeps. user32 orders its own windows the same way (`tree::z_key`:
+  active: `Window::layer` is what `raise` keeps: the shell's desktop
+  window (`Window::bottom`, set by `set_bottom` for the shell window's
+  owner only) at the bottom whatever its style, then the normal
+  windows, then the upper ones (`Window::upper`: popup or topmost).
+  Invariant: a window is never raised above a higher layer's or
+  under a lower layer's. user32 orders its own windows the same way (`tree::z_key`:
   the band first, then z) for WindowFromPoint and the top-level lists.
   A desktop window user32 recreates (`set_frame`) is put back in it.
 - **The foreground** (GalaWindowForeground, 0x7f5e): SetForegroundWindow

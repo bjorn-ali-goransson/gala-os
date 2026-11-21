@@ -84,6 +84,32 @@ fn windows_keep_their_place_order_focus_and_last_pixels() {
 }
 
 #[test]
+fn the_shells_desktop_window_stays_at_the_bottom() {
+    let mut s = state();
+    let a = s.create(1, 10, 10, 300, 200, &title("A"), 0).unwrap();
+    s.show(a, 1, true).unwrap();
+    // A popup, as shasha's Progman is: the bottom still.
+    let desk = s.create(2, 0, 0, 1280, 800, &title("Program Manager"), STYLE_POPUP).unwrap();
+    s.show(desk, 2, true).unwrap();
+    // Only the owner makes its window the shell's.
+    assert_eq!(s.set_bottom(desk, 1).err(), Some(NtStatus::INVALID_HANDLE));
+    s.set_bottom(desk, 2).unwrap();
+    assert_eq!(s.windows.first().map(|w| w.id), Some(desk));
+    // Brought to the front (a click on the desktop, its program's input
+    // last): active, still under.
+    s.last_input = Some(2);
+    s.foreground(desk, 2).unwrap();
+    assert_eq!(s.active, Some(desk));
+    assert_eq!(s.windows.first().map(|w| w.id), Some(desk));
+    // A window shown after it goes above it.
+    let b = s.create(1, 20, 20, 300, 200, &title("B"), 0).unwrap();
+    s.show(b, 1, true).unwrap();
+    s.raise(desk);
+    assert_eq!(s.windows.first().map(|w| w.id), Some(desk));
+    assert_eq!(s.windows.last().map(|w| w.id), Some(b));
+}
+
+#[test]
 fn popups_stay_above_and_never_activate() {
     let mut s = state();
     let a = s.create(1, 10, 10, 300, 200, &title("A"), 0).unwrap();

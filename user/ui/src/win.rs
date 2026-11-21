@@ -249,6 +249,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
 const WM_ACTIVATE: u32 = 0x0006;
 const WM_HOTKEY: u32 = 0x0312;
+const WM_SETTINGCHANGE: u32 = 0x001a;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETOBJECT: u32 = 0x003d;
@@ -575,9 +576,10 @@ impl<C: Component> Window for Host<C> {
                 release(root);
                 return Some(r);
             }
-            // Activation and hot keys: the program's to act on, and
-            // WM_ACTIVATE's default handling (the focus) still done.
-            WM_ACTIVATE | WM_HOTKEY => {
+            // Activation, hot keys and settings changed: the program's to
+            // act on, and WM_ACTIVATE's default handling (the focus)
+            // still done.
+            WM_ACTIVATE | WM_HOTKEY | WM_SETTINGCHANGE => {
                 if let Some(m) = self.component.message(hwnd as usize, msg, wparam, lparam) {
                     self.handle(hwnd, "message", &format!("{msg:#x}"), m);
                 }

@@ -2164,6 +2164,15 @@ impl Desktop {
         Ok(())
     }
 
+    /// `owner`'s window `id` is the shell's desktop window
+    /// (SetShellWindow): at the bottom, under every other window.
+    pub fn set_bottom(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.s.set_bottom(id, owner)?;
+        #[cfg(not(test))]
+        crate::info!("desktop: window {id} is the shell's window, kept at the bottom");
+        Ok(())
+    }
+
     /// `owner`'s window `id` into the topmost band or out of it
     /// (GalaWindowSetTopmost).
     pub fn set_topmost(&mut self, id: u32, owner: u64, on: bool) -> Result<(), NtStatus> {
@@ -3615,9 +3624,54 @@ pub fn choose_wallpaper(choice: Option<&str>) {
         Some(p) => {
             crate::info!("desktop: wallpaper {name} ({} x {})", p.w, p.h);
             *PICTURE.lock() = Some(p);
+            save_wallpaper(path);
         }
         None => crate::warn!("desktop: cannot load wallpaper {name}"),
     }
+}
+
+/// HKCU\Control Panel\Desktop, where Windows keeps the wallpaper's path
+/// ("Wallpaper", REG_SZ; empty for none): SystemParametersInfo's
+/// SPI_GETDESKWALLPAPER reads it, the shell (shasha) shows it.
+const DESKTOP_KEY: &str = "Control Panel\\Desktop";
+
+/// Saves the wallpaper's file (`path` on the system volume, from its
+/// root; empty for the drawn one) as the boot user's "Wallpaper" value,
+/// `C:` and the path; logged.
+fn save_wallpaper(path: &str) {
+    use super::registry::{self, ROOT};
+    let now = platform::system_time();
+    let saved = registry::with(|r| {
+        let mut at = ROOT;
+        for part in USER_HIVE.split('\\').chain(DESKTOP_KEY.split('\\')) {
+            let (w, n) = wide_name::<64>(part);
+            at = r.create(at, &w[..n], 0, &[], now)?.0;
+        }
+        let mut data = Vec::new();
+        let drive = if path.is_empty() { "" } else { "C:" };
+        for u in drive.encode_utf16().chain(path.encode_utf16()).chain([0]) {
+            data.try_extend_from_slice(&u.to_le_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        let (w, n) = wide_name::<16>("Wallpaper");
+        r.set_value(at, &w[..n], REG_SZ, &data, now)
+    });
+    match saved {
+        Ok(()) => crate::info!("desktop: wallpaper value C:{path}"),
+        Err(e) => crate::warn!("desktop: cannot save the wallpaper value C:{path}: {e:?}"),
+    }
+}
+
+/// A wallpaper's file from SetDesktopWallpaper's text: one of WALLPAPERS
+/// by name, or a `.qoi` file's path (`C:\...` or from the root).
+fn wallpaper_path(name: &str) -> Option<&str> {
+    if let Some((_, path)) = WALLPAPERS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        return Some(path);
+    }
+    let path = name.strip_prefix("C:").or_else(|| name.strip_prefix("c:")).unwrap_or(name);
+    (path.starts_with('\\')
+        && path.len() > 4
+        && path[path.len() - 4..].eq_ignore_ascii_case(".qoi"))
+    .then_some(path)
 }
 
 /// Composes area `r` of the desktop and hands it to its presenter
@@ -4963,20 +5017,23 @@ fn tell_tray(shell: &Shell, posts: Vec<tray::Post>) {
     }
 }
 
-/// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
-/// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
-/// a missing file, STATUS_NOT_SUPPORTED without shasha's shell.
+/// Shows wallpaper `name` (one of WALLPAPERS, a `.qoi` file's path, or
+/// "drawn") from now on and saves it as the "Wallpaper" value
+/// (GalaDesktopAction; SPI_SETDESKWALLPAPER): STATUS_OBJECT_NAME_NOT_FOUND
+/// for another name or a missing file, STATUS_NOT_SUPPORTED without a
+/// screen.
 pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    let picture = if name.eq_ignore_ascii_case("drawn") {
+    let path = if name.eq_ignore_ascii_case("drawn") {
+        ""
+    } else {
+        wallpaper_path(name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?
+    };
+    let picture = if path.is_empty() {
         None
     } else {
-        let (_, path) = WALLPAPERS
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
         let data = super::file::lookup(path)
             .and_then(super::file::read_all)
             .map_err(|_| NtStatus::OBJECT_NAME_NOT_FOUND)?;
@@ -5002,6 +5059,7 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     }
     drop(d);
     crate::info!("desktop: wallpaper {name}");
+    save_wallpaper(path);
     Ok(())
 }
 
