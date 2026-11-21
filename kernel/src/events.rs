@@ -99,6 +99,14 @@ const NAMES: [(&str, u32); 19] = [
 
 static MASK: AtomicU32 = AtomicU32::new(0);
 
+/// The mask `events_from=` put aside while the stream has not started,
+/// and the second it starts at (0: nothing put aside). An instrument that
+/// found nothing to write reads this to say which of the two happened --
+/// the category was never asked for, or it was and the run ended before
+/// the stream opened -- rather than blaming the mask for both.
+static PENDING: AtomicU32 = AtomicU32::new(0);
+static PENDING_SECS: AtomicU32 = AtomicU32::new(0);
+
 /// `events_pid=a,b,..`: the processes whose system calls are written (at
 /// most `PIDS`; none listed: every process). The `syscall` category is the
 /// stream's bulk; one process of a large program is often all that is
@@ -178,6 +186,29 @@ pub fn set_mask(mask: u32) {
     MASK.store(mask, Ordering::Relaxed);
 }
 
+/// Puts `mask` aside until `secs` after boot. Apart from `start_later` so
+/// that the bookkeeping is the same, and testable, on a host where the
+/// thread that opens the stream does not exist.
+pub fn put_aside(mask: u32, secs: u64) {
+    PENDING.store(mask, Ordering::Relaxed);
+    PENDING_SECS.store(secs.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+}
+
+/// Takes the put-aside mask up again and returns it; the stream is open
+/// from here, so nothing is pending.
+pub fn take_up() -> u32 {
+    PENDING_SECS.store(0, Ordering::Relaxed);
+    PENDING.swap(0, Ordering::Relaxed)
+}
+
+/// `Some(seconds)` where events of `category` are wanted but the stream
+/// has not started yet (`events_from=`), else `None`. Read at the end of
+/// a run it says the stream never opened at all.
+pub fn pending(category: Category) -> Option<u64> {
+    (PENDING.load(Ordering::Relaxed) & category as u32 != 0)
+        .then(|| PENDING_SECS.load(Ordering::Relaxed) as u64)
+}
+
 /// `events_from=<seconds>`: the mask set so far is put aside and set again
 /// that many seconds after boot by a kernel thread, which logs the start
 /// (`events: the stream starts now`). Events before then are not written,
@@ -188,10 +219,11 @@ pub fn start_later(secs: u64) {
     if mask == 0 {
         return;
     }
+    put_aside(mask, secs);
     crate::info!("events: the stream starts {secs} s after boot (events_from=)");
     let arg = ((secs.min(u32::MAX as u64)) << 32 | mask as u64) as usize;
     if let Err(e) = crate::sched::spawn("eventsfrom", start_at, arg) {
-        MASK.store(mask, Ordering::Relaxed);
+        MASK.store(take_up(), Ordering::Relaxed);
         crate::warn!("events: cannot wait for events_from= ({e:?}): the stream starts now");
     }
 }
@@ -201,6 +233,7 @@ fn start_at(arg: usize) {
     let (secs, mask) = ((arg as u64) >> 32, arg as u32);
     let now_ms = crate::time::raw_monotonic_ns() / 1_000_000;
     crate::sched::sleep_ms((secs * 1000).saturating_sub(now_ms));
+    take_up();
     MASK.store(mask, Ordering::Relaxed);
     crate::info!(
         "events: the stream starts now (uptime_ms={})",
@@ -343,6 +376,19 @@ impl fmt::Display for Utf16<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_put_aside_mask_is_pending_until_it_is_taken_up() {
+        let wanted = Category::Call as u32 | Category::Fault as u32;
+        assert_eq!(pending(Category::Call), None);
+        put_aside(wanted, 170);
+        assert_eq!(pending(Category::Call), Some(170));
+        assert_eq!(pending(Category::Fault), Some(170));
+        assert_eq!(pending(Category::Syscall), None);
+        assert_eq!(take_up(), wanted);
+        assert_eq!(pending(Category::Call), None);
+        assert_eq!(pending(Category::Fault), None);
+    }
 
     #[test]
     fn masks() {

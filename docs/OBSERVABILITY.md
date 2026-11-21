@@ -235,7 +235,24 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 boot (a kernel thread sets the mask then and logs `events: the stream
 starts now`): a failure late in a long run without the run's whole
 stream (office_install's staging, half an hour in:
-`XTASK_CMDLINE=events_from=2100`).
+`XTASK_CMDLINE=events_from=2100`). A run that ends before that second
+never opens the stream at all, and an instrument that found nothing to
+write says that (`the stream does not start until 170 s after boot
+(events_from=) and the run ended first`) rather than blaming the mask
+it was given.
+
+Writing an import slot is three steps -- the page is made writable, the
+slot written, the protection put back -- and a warning about one names
+which of the three failed, because they do not leave the same thing
+behind. A slot whose page could not be relaxed, or whose write faulted,
+still holds what it held: being armed it keeps trapping, so `every call
+through it faults`, and being unarmed it is not counted among the armed
+(`is not armed`). A slot whose protection could not be put back holds
+the value that was written: the trace is exactly as meant and costs
+nothing per call, and what is left behind is a page the program can
+write to (`its page stays writable`). A log that read as the first case
+when it was the third sent a reader looking for a cost that was not
+there.
 
 #### What the stream costs
 
@@ -1217,6 +1234,16 @@ Scenario `import_window`, with an ARM64 twin: two batches of a thousand
 calls through one armed import with the stream starting between them,
 and the second batch recorded whole on a budget the first would
 otherwise have spent.
+
+A window a run never reaches is the other end of that, and the stats
+say so rather than blaming the mask they were given: scenario
+`import_window_late` is the same program with the stream set 600 s
+after boot, which its ten seconds never see, and what it pins is the
+sentence (`the stream does not start until 600 s after boot
+(events_from=) and the run ended first`). The one it printed before
+said "`events=call` was not given" of a run whose command line gave it,
+which is how a Word trace aimed at the 170th second read as a mask
+that was wrong (ROADMAP OT).
 
 **A trace of several threads is read per thread.** Every record names
 the thread that made the call in the line's own `by` -- the client id
