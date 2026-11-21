@@ -70,6 +70,93 @@ static RECORDED: AtomicU64 = AtomicU64::new(0);
 /// method that returns anything at all.
 static ANSWERED: AtomicU64 = AtomicU64::new(0);
 
+/// The most of gala's DLLs one trace names. A program reaches two or
+/// three of them, and a run that named more than this would be naming
+/// DLLs gala has not written.
+const DLL_COUNT: usize = 8;
+
+/// As much of a DLL's name as is kept. `bcryptprimitives.dll` is the
+/// longest name gala ships, and a name longer than this is left out of
+/// the list rather than cut: a cut name reads as a DLL nobody shipped.
+const DLL_NAME_LEN: usize = 24;
+
+/// The DLLs the recorded calls were made into. The arming is the
+/// process's rather than one DLL's (`user/trace_common.rs`), so a trace
+/// armed at a Direct3D 10.1 method records the Direct2D calls that
+/// follow it -- and which DLLs a run covered is then something the
+/// summary has to say, or a reader cannot tell a program that used one
+/// DLL from a trace that reached only one of two.
+static DLLS: IrqMutex<Dlls> = IrqMutex::new(Dlls::new());
+
+/// The names [`DLLS`] holds, kept sorted so that a run's summary reads
+/// the same whichever DLL the program happened to reach first.
+struct Dlls {
+    names: [[u8; DLL_NAME_LEN]; DLL_COUNT],
+    lens: [usize; DLL_COUNT],
+    count: usize,
+}
+
+impl Dlls {
+    const fn new() -> Self {
+        Dlls { names: [[0; DLL_NAME_LEN]; DLL_COUNT], lens: [0; DLL_COUNT], count: 0 }
+    }
+
+    /// Notes one name, if it is new and there is room for it.
+    fn note(&mut self, name: &[u8]) {
+        if name.is_empty() || name.len() > DLL_NAME_LEN {
+            return;
+        }
+        let mut at = self.count;
+        for i in 0..self.count {
+            if self.name(i) == name {
+                return;
+            }
+            if at == self.count && name < self.name(i) {
+                at = i;
+            }
+        }
+        if self.count == DLL_COUNT {
+            return;
+        }
+        for i in (at..self.count).rev() {
+            self.names[i + 1] = self.names[i];
+            self.lens[i + 1] = self.lens[i];
+        }
+        self.names[at] = [0; DLL_NAME_LEN];
+        self.names[at][..name.len()].copy_from_slice(name);
+        self.lens[at] = name.len();
+        self.count += 1;
+    }
+
+    fn name(&self, i: usize) -> &[u8] {
+        &self.names[i][..self.lens[i]]
+    }
+}
+
+/// [`Dlls`] as a sentence names a list: `d2d1.dll`, or
+/// `d2d1.dll and d3d10_1.dll`, or three with commas between.
+struct List<'a>(&'a Dlls);
+
+impl fmt::Display for List<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for i in 0..self.0.count {
+            if i > 0 {
+                f.write_str(if i + 1 == self.0.count { " and " } else { ", " })?;
+            }
+            f.write_str(core::str::from_utf8(self.0.name(i)).unwrap_or("?"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Notes the DLL a recorded call was made into: the name before its
+/// `!`, as the ledger spells it. A short scan and a lock per *recorded*
+/// call, and nothing at all for a call that is not recorded.
+fn note_dll(call: &str) {
+    let Some(end) = call.find('!') else { return };
+    DLLS.lock().note(&call.as_bytes()[..end]);
+}
+
 /// `trace_from=<dll>!<Interface>::<Method>[:<n>]`. A value that is not
 /// one is refused outright rather than cut to the default: a budget that
 /// silently differed from the one asked for reads afterwards as the
@@ -101,7 +188,10 @@ pub fn set_from(text: &str) {
     }
     LEFT.store(budget, Ordering::Relaxed);
     WANTED.store(true, Ordering::Release);
-    info!("trace: every call into that DLL from the first {name}, {budget} at most (trace_from=)");
+    info!(
+        "trace: every call into a DLL gala wrote from the first {name}, {budget} at most \
+         (trace_from=)"
+    );
 }
 
 /// Splits `<name>[:<n>]`. A method name holds `::` of its own, so the
@@ -156,6 +246,7 @@ pub fn record(process: &str, pid: u64, name: &[u8], args: &[u64]) -> bool {
     }
     let Some(left) = take_line() else { return false };
     let text = core::str::from_utf8(name).unwrap_or("?");
+    note_dll(text);
     events::emit(
         Category::Call,
         "call",
@@ -211,6 +302,8 @@ pub fn log_stats() {
     let done = RECORDED.load(Ordering::Relaxed);
     let stored = FROM.lock();
     let name = core::str::from_utf8(&stored.0[..stored.1]).unwrap_or("?");
+    let dlls = DLLS.lock();
+    let into = List(&dlls);
     if done == 0 {
         info!("trace: {name} was never reached: no call recorded (trace_from=)");
     } else if LEFT.load(Ordering::Relaxed) == 0 {
@@ -219,11 +312,11 @@ pub fn log_stats() {
         // before the program did, rather than let a run read as a
         // program that stopped calling.
         info!(
-            "trace: {done} calls recorded from {name} (trace_from=); \
+            "trace: {done} calls recorded from {name}, into {into} (trace_from=); \
              the budget is spent, so the trace stops here, not the program"
         );
     } else {
-        info!("trace: {done} calls recorded from {name} (trace_from=)");
+        info!("trace: {done} calls recorded from {name}, into {into} (trace_from=)");
     }
     // A separate line, because it counts a different thing: how many of
     // those calls were made to a method that returns anything at all.
@@ -311,7 +404,56 @@ impl fmt::Display for Words<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, BUDGET, Fields, MAX_BUDGET, split_budget};
+    use super::{Answer, BUDGET, Dlls, Fields, List, MAX_BUDGET, split_budget};
+
+    fn dlls(names: &[&str]) -> Dlls {
+        let mut set = Dlls::new();
+        for name in names {
+            set.note(name.as_bytes());
+        }
+        set
+    }
+
+    /// The DLLs a trace covered, as the run's summary names them: one
+    /// entry per DLL however many calls were made into it, sorted so
+    /// that the line does not depend on which the program reached
+    /// first, and a sentence's `and` before the last.
+    #[test]
+    fn the_dlls_a_trace_covered_are_named_once_each_in_order() {
+        assert_eq!(alloc::format!("{}", List(&dlls(&[]))), "");
+        assert_eq!(alloc::format!("{}", List(&dlls(&["d2d1.dll"]))), "d2d1.dll");
+        assert_eq!(
+            alloc::format!("{}", List(&dlls(&["d3d10_1.dll", "d2d1.dll", "d3d10_1.dll"]))),
+            "d2d1.dll and d3d10_1.dll"
+        );
+        assert_eq!(
+            alloc::format!("{}", List(&dlls(&["d3d10_1.dll", "dwrite.dll", "d2d1.dll"]))),
+            "d2d1.dll, d3d10_1.dll and dwrite.dll"
+        );
+    }
+
+    /// A name past what is kept is left out rather than cut: a cut name
+    /// reads as a DLL nobody shipped. So does an empty one, which is
+    /// what a call name beginning with its `!` would leave.
+    #[test]
+    fn a_name_that_does_not_fit_is_left_out() {
+        let long = "d".repeat(super::DLL_NAME_LEN + 1);
+        assert_eq!(alloc::format!("{}", List(&dlls(&[&long, "", "d2d1.dll"]))), "d2d1.dll");
+    }
+
+    /// Past the room there is, the names already noted stay as they
+    /// are: a list that dropped its first entry to make room for a
+    /// ninth would read as the trace having missed the DLL it started
+    /// in.
+    #[test]
+    fn past_the_room_there_is_the_names_already_noted_stay() {
+        let many: alloc::vec::Vec<alloc::string::String> =
+            (0..super::DLL_COUNT + 2).map(|i| alloc::format!("d{i}.dll")).collect();
+        let refs: alloc::vec::Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let set = dlls(&refs);
+        assert_eq!(set.count, super::DLL_COUNT);
+        assert_eq!(set.name(0), b"d0.dll");
+    }
 
     /// What the event stream carries, which no boot scenario sees: the
     /// scenarios match the serial log, and the events are split out of

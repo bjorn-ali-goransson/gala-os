@@ -1988,7 +1988,24 @@ need gala's.
    one goes on through the render target to `CreateSolidColorBrush`
    and the box nine milliseconds after it; an untraced control run
    took the short path too, so the variance is Word's own and not what
-   the stream costs. Both paths end the same way, which `events=file`
+   the stream costs. The short path's silence after the device call is
+   measured now rather than inferred: those runs were armed per DLL,
+   which could not have recorded a Direct2D call if Word had made one,
+   and four runs armed at the same method since the arming became the
+   process's record the same three calls and nothing else -- three
+   `call` events and three `ret` events in the whole stream, all three
+   answered S_OK, no `d2d1.dll!` line among them. So Word asks the
+   device the three things, is refused nothing, and gives up without
+   reaching Direct2D at all. What it does between that second
+   `GetDeviceRemovedReason` and the box is therefore no call into a
+   DLL gala wrote at all. Nor is the run's one dxgi record Word's:
+   `CreateDXGIFactory1(interface)` unsupported three times at 37.4 s
+   is the Vulkan loader asking for IDXGIFactory6 as it sorts adapters
+   (below), and the refusal leaves it holding no factory, so a wrapped
+   dxgi slot would have no object to be called on either. The decision
+   is in Word's own code or in a Microsoft DLL, where the stack at the
+   box's write and the import trace below are what can reach.
+   Both paths end the same way, which `events=file`
    on a short-path run shows (`open`, `key` and `value` events,
    OBSERVABILITY "Event stream"): the last thing before the box is
    `uxtheme.dll` loaded from System32 after the Office16 miss, then
@@ -6672,8 +6689,8 @@ among the slowest hand-offs.
      would read as a program that stopped calling
      (`kernel/src/nt/tracecall.rs`, `user/trace_common.rs`, scenarios
      `trace_from_test`, `trace_from_budget_test`,
-     `trace_from_answer_test` and `trace_from_d3d10_test`,
-     OBSERVABILITY "Call tracing"). What a
+     `trace_from_answer_test`, `trace_from_d3d10_test` and
+     `trace_from_across_test`, OBSERVABILITY "Call tracing"). What a
      call answered is recorded with it: the generator knows which
      methods return something and puts a second record in those
      wrappers, so the answer is a `ret` event naming the same method,
@@ -6682,15 +6699,21 @@ among the slowest hand-offs.
      end between a call and its answer, never the other way about. It
      closes the blind spot the first reading of Word's window ran into,
      where six identical calls read the same whether each one succeeded
-     or each one failed. Its gaps: one armed method a run, and arming is per DLL per process,
-     so once armed every traced call that program makes into *that*
-     DLL is recorded, not only the method named, and none of the calls
-     it makes into another of gala's DLLs -- the Word reading ran into
-     that, where the d3d10_1 trace that recorded its three device
-     calls recorded none of the Direct2D calls after them, so two DLLs
-     are two runs until the one-shot asks the kernel whether a trace
-     is live (OBSERVABILITY "Call tracing"); the OpenTelemetry export does not map `call` or
-     `ret` events yet (the same gap `ledger:` rows have, OT5).
+     or each one failed. The arming is the process's, not one DLL's:
+     once armed, every traced call that program makes into a DLL gala
+     wrote is recorded, not only the method named and not only its
+     DLL. The flag stays each DLL's own static, so a traced call still
+     costs one relaxed load; what lets two DLLs' statics reach each
+     other is ntdll, where each offers its flag on its first wrapped
+     call and the DLL that arms sets them all (`GalaTraceJoin`,
+     `user/testntdll/src/trace.rs`), and the run's summary names the
+     DLLs the calls were made into. Armed per DLL it could not: the
+     Word reading lost every Direct2D call that followed the three
+     device calls it recorded, and a reading of one program's two DLLs
+     took two runs whose streams could not be interleaved. Its gaps:
+     one armed method a run; the OpenTelemetry export does not map
+     `call` or `ret` events yet (the same gap `ledger:` rows have,
+     OT5).
    - **The import slots, for the DLLs gala did not write.** Done.
      `imports=<program>[!<dll>][:<n>]` records the first call a program
      makes through each of its import slots, `n` at most (default

@@ -596,14 +596,16 @@ XTASK_CMDLINE='events=call events_match=WINWORD \
   cargo xtask boot-test 'office_word$'
 ```
 
-Every call into that DLL after the first `CreateSolidColorBrush` is a
-`call` event with its arguments, 4096 at most (`:<n>` asks for another
-budget). Into *that* DLL: arming is per DLL, so the Direct2D calls
-Word makes after a Direct3D 10.1 method is armed are not recorded, and
-a question about two of gala's DLLs is two runs. The name is the one a `ledger:` row spells, so pick the last
-method the ledger shows the program reaching and arm there. `events=call`
-is what carries them and `events_match=`/`events_pid=` choose the
-process, as for every other category.
+Every call into one of gala's DLLs after the first
+`CreateSolidColorBrush` is a `call` event with its arguments, 4096 at
+most (`:<n>` asks for another budget). Any of them: the arming is the
+process's, so the Direct2D calls a program makes after a Direct3D 10.1
+method is armed are recorded too, and the summary at the end of the run
+names the DLLs the calls were made into. The name is the one a
+`ledger:` row spells, so pick the last method the ledger shows the
+program reaching and arm there. `events=call` is what carries them and
+`events_match=`/`events_pid=` choose the process, as for every other
+category.
 
 The run's last `trace:` line says what happened: how many calls were
 recorded, that the method was never reached (the value was understood,

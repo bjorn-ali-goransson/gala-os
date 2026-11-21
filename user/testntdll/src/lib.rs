@@ -50,6 +50,7 @@ mod seh;
 mod seh;
 mod sync;
 mod tls;
+mod trace;
 mod unimplemented;
 
 /// How the search for a handler went, as the kernel is given it with an
