@@ -2500,19 +2500,24 @@ need gala's.
      then `NoTranslucentSelection` 460 ms before it, by which time it
      has set a page size (`Word\Wizards\PageSize`, 14 bytes) and
      registered its startup item (`Word\Resiliency\StartupItems`, 28
-     bytes). Those last 460 ms hold no value read, no call into a DLL
-     gala wrote and no exception, so Word decides on what it already
-     has. The one thing it has that gala saw and did not keep is what
-     it wrote itself: 4.9 s before the box it reads
+     bytes). That last stretch before the box -- 460 ms in one run, 293
+     in another -- holds no value read, no call into a DLL gala wrote
+     and no exception, so Word decides on what it already has. The one
+     thing it has that gala saw is what it wrote itself: five seconds
+     before the box it reads
      `Software\Microsoft\Office\Common\Graphics\AdapterInformation`
      -- the version-less key, not the absent `Office\16.0\Common\Graphics`
      below, which reads alike -- under the adapter's own name
      (`00010005-00000000-00000000-00000000_00000023-00000000-0000FFFF-0000FFFF`),
      finds it absent and writes a 4-byte DWORD there: its verdict on
-     this adapter, whose size the stream records and whose value it
-     does not. So a `value set`'s data is what the stream wants next,
-     and since Word's `(13)` is documented nowhere public the
-     instrument is the only thing that can answer it. What fails of the
+     this adapter. The verdict is `1`, written 6 ms after the read that
+     found nothing, which the stream says because a value event now
+     carries its data (OBSERVABILITY's `file` category). What Word
+     means by that number is its own, documented nowhere public, and
+     one observation of one adapter cannot settle it; what the reading
+     buys is the experiment -- seed the value before Word starts and
+     see which numbers change the box, and whether the write is a
+     verdict at all or a cache Word fills on its way past. What fails of the
      reading is keys a fresh Windows does not
      have either (`...\Office\16.0\Common\Graphics`,
      `16.0\Word\Options\Debug`) and, 70 ms before the box, gala's
