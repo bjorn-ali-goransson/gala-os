@@ -8382,6 +8382,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("import_test", "testdll.dll", "gala"),
     ("iat_trace_test", "ntdll.dll", "Windows/System32"),
     ("iat_trace_test", "testdll.dll", "gala"),
+    ("iat_from", "ntdll.dll", "Windows/System32"),
+    ("iat_from", "testdll.dll", "gala"),
+    ("iat_from", "testdll2.dll", "gala"),
     ("iat_ret_test", "ntdll.dll", "Windows/System32"),
     ("iat_ret_test", "testdll.dll", "gala"),
     ("iat_unwind_test", "ntdll.dll", "Windows/System32"),
@@ -11160,6 +11163,7 @@ const USER_PROGRAMS: &[&str] = &[
     "guard_test",
     "import_test",
     "iat_trace_test",
+    "iat_from_test",
     "iat_ret_test",
     "iat_unwind_test",
     "import_cost_test",
@@ -13414,8 +13418,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         // really several.
         "import_threads",
         &[
-            r#""by":8,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!GetTempPathW""#,
-            r#""by":12,"ev":"import","pid":4,"process":"lock_test.exe","call":"kernel32.dll!LockFileEx""#,
+            r#""by":8,"ev":"import","pid":4,"process":"lock_test.exe","from":"lock_test.exe","call":"kernel32.dll!GetTempPathW""#,
+            r#""by":12,"ev":"import","pid":4,"process":"lock_test.exe","from":"lock_test.exe","call":"kernel32.dll!LockFileEx""#,
         ],
     ),
     (
@@ -13432,7 +13436,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         // then, which is the whole reason to read one at a return.
         "import_answer_text",
         &[
-            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","call":"testdll.dll!gala_fill","answer":"#,
+            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","from":"import_strings_test.exe","call":"testdll.dll!gala_fill","answer":"#,
             r#","text":{"answer":"filled at the return","0":"filled at the return"}}"#,
         ],
     ),
@@ -13447,7 +13451,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         &[
             r#""call":"testdll.dll!gala_bytes","args":["#,
             r#","bytes":{"0":"0000000000000000000000000000000000000000000000000000000000000000"}}"#,
-            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","call":"testdll.dll!gala_bytes","answer":"#,
+            r#""ev":"ret","pid":4,"process":"import_strings_test.exe","from":"import_strings_test.exe","call":"testdll.dll!gala_bytes","answer":"#,
             r#","bytes":{"answer":"0123456789abcdef0123456789abcdef00000000000000000000000000000000","0":"0123456789abcdef0123456789abcdef00000000000000000000000000000000"}}"#,
         ],
     ),
@@ -13940,6 +13944,7 @@ const ARM64_TWINS: &[&str] = &[
     "import_test",
     "iat_trace_test",
     "iat_repeat",
+    "iat_from",
     "iat_ret_test",
     "iat_answers",
     "iat_except",
@@ -19175,6 +19180,11 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: the first call through each import of iat_trace_test.exe \
              from testdll.dll, 4096 at most (imports=)",
             "imports: first calls recorded: 1 of 2 slots armed, 1 read as data (imports=)",
+            // One image is one image: a program whose imports are all
+            // its own is the common case, and it must not read as a
+            // count that has gone wrong. The slot read as data was
+            // armed, so it is among these.
+            "imports: those 2 slots are in 1 image: iat_trace_test.exe 2 (imports=)",
         ],
     },
     Scenario {
@@ -19201,6 +19211,36 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "imports: 3 later calls recorded of 3, the budget spent: a slot is \
              repaired on the next call through it and only first calls are \
              recorded past that (imports_repeat=)",
+        ],
+    },
+    Scenario {
+        // OT3b: the module an armed slot belongs to, which is what a
+        // record of a call needs to say who made it. The program
+        // imports `gala_add` from testdll.dll and two exports of
+        // testdll2.dll, which imports `gala_add` and `gala_get_value`
+        // from testdll.dll in turn, so naming testdll.dll as the
+        // supplier arms three slots in two images and two of them are
+        // the same import: without the importing module an `import`
+        // event for the program's own call to `gala_add` and one for
+        // testdll2's are the same line twice. The program checks from
+        // its side that all three were armed and repaired -- in a
+        // DLL's image as well as its own -- and the kernel's lines say
+        // how many slots it armed and which images they are in, the
+        // records themselves being events the serial log does not
+        // carry.
+        name: "iat_from",
+        cmdline: "qemu_exit events=call run=iat_from_test.exe \
+                  imports=iat_from_test.exe!testdll.dll",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "iat_from_test: trapped",
+            "iat_from_test: ok",
+            "exited with status 0x00000000",
+            "imports: the first call through each import of iat_from_test.exe \
+             from testdll.dll, 4096 at most (imports=)",
+            "imports: first calls recorded: 3 of 3 slots armed (imports=)",
+            "imports: those 3 slots are in 2 images: testdll2.dll 2, \
+             iat_from_test.exe 1 (imports=)",
         ],
     },
     Scenario {

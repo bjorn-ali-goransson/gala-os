@@ -549,6 +549,13 @@ impl Module {
     pub(crate) fn name(&self) -> &str {
         core::str::from_utf8(&self.name[..self.len]).unwrap_or("?")
     }
+
+    /// Where the image is mapped, which is what identifies it: a name
+    /// is not unique (one DLL mapped into two processes, two processes
+    /// of one program) and a base within a process is.
+    pub(crate) fn base(&self) -> u64 {
+        self.base
+    }
 }
 
 /// The image containing `addr`: the executable or a mapped image view.
