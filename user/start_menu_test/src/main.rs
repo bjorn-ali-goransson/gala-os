@@ -1,29 +1,49 @@
-//! The start menu's apps (ROADMAP SM): gala's own Command Prompt beside
-//! catalog entries that install on a click. Driven by xtask's screen
-//! check (scenario `start_menu`, UEFI): this program checks what `gala
-//! programs` lists, says `start_menu_test: ready`, and then waits for
-//! what the clicks start: the Command Prompt (cmd.exe in a console
-//! window) and `gala install 7zip.7zip` (a second console window). gala's
-//! own shell, so there is no Windows run to compare with; on Windows it
-//! says so and passes.
+//! The start menu's apps (ROADMAP SM, SH step 1 part 11): shasha's start
+//! menu lists gala's own Command Prompt beside the catalog's programs,
+//! which install on a click. Driven by xtask's screen check (scenario
+//! `start_menu`, UEFI), which clicks what this program finds through UI
+//! Automation and announces (`click_on start_menu_test: <element>`).
+//! gala's own shell and catalog, so there is no Windows run to compare
+//! with; on Windows it says so and passes.
 //!
 //! - `gala programs` lists the Command Prompt at
 //!   C:\Windows\System32\cmd.exe (the scenario ships gala's cmd.exe
 //!   there too, so Windows' place is preferred to C:\gala) and no
 //!   catalog entry: none is installed.
-//! - A click on the Command Prompt's tile starts cmd.exe with its own
-//!   console window (conhost.exe), which stays when cmd ends.
-//! - A click on 7-Zip's tile (not installed: a download badge) starts
-//!   `gala install 7zip.7zip` in another console window, which stays
-//!   after gala ends (its output in view) until it is closed (Alt+F4).
+//! - The taskbar's Start button shows the "Start" window, which holds a
+//!   tile per installed program (`ProgramCommandPrompt`, a Button named
+//!   "Command Prompt", with no state under it). A click on it starts
+//!   cmd.exe with its own console window (conhost.exe), which stays when
+//!   cmd ends, and hides the menu.
+//! - The menu again: a tile per catalog program that is not installed,
+//!   after the installed ones: 7-Zip's (`Program7Zip`, a Button named
+//!   "7-Zip") with a Text `Program7ZipState` reading "Not installed".
+//!   A click on it asks for `gala install 7zip.7zip` without a window
+//!   and the menu stays open: the state follows the install, here
+//!   (offline: no network card) to "The install failed.".
+//! - No second console window comes of that click: a console window
+//!   would be made in the click's own handling and would stay when gala
+//!   ends (the Command Prompt's does), so none by the time the failure
+//!   shows means none was made.
 //!
-//! Prints `start_menu_test: ok` or exits with the number of the failing
-//! check.
+//! Assumed and not pinned: the AutomationIds and the state's words are
+//! gala's own choice (shasha's menu).
+//!
+//! Prints `start_menu_test: listed`, `start_menu_test: menu open`,
+//! `start_menu_test: command prompt window`, `start_menu_test: catalog
+//! shown`, `start_menu_test: install failed shown`, `start_menu_test: no
+//! install window` and `start_menu_test: ok`, or `start_menu_test: check
+//! N got X (line L)` and exits with N.
 
 #![no_std]
 #![no_main]
 
 use core::ffi::c_void;
+
+use ntrt as _;
+use uia_client::{BUTTON, Element, TEXT, Uia};
+
+const NAME: &str = "start_menu_test";
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -67,29 +87,69 @@ unsafe extern "system" {
         info: *mut [usize; 3],
     ) -> Bool;
     fn Sleep(ms: u32);
+    fn GetTickCount64() -> u64;
 }
 
-// The compiler's own calls (copies, stack probes) bind to these.
-#[allow(dead_code)]
-#[link(name = "ntdll", kind = "raw-dylib")]
-unsafe extern "C" {
-    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
-    fn __chkstk();
-    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
-    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
-}
-
-#[unsafe(no_mangle)]
-pub static _fltused: i32 = 0;
-
-/// core's unwind tables name it; nothing unwinds (panics end the process).
-#[unsafe(no_mangle)]
-pub extern "C" fn __CxxFrameHandler3() -> ! {
-    // SAFETY: ends the process.
-    unsafe { ExitProcess(0xdeac) }
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn FindWindowW(class: *const u16, title: *const u16) -> usize;
+    fn IsWindowVisible(hwnd: usize) -> Bool;
 }
 
 const STARTF_USESTDHANDLES: u32 = 0x100;
+/// How long a step may take: the scenario's clicks come once this test
+/// has printed what the step waits for.
+const STEP_MS: u64 = 60_000;
+/// How long the Command Prompt's console window may take to show (cmd
+/// and conhost started from the menu on a busy host).
+const CONSOLE_MS: u64 = 240_000;
+
+// ---- Output ---------------------------------------------------------------
+
+struct Line {
+    buf: [u8; 300],
+    n: usize,
+}
+
+impl Line {
+    fn new() -> Self {
+        Self { buf: [0; 300], n: 0 }
+    }
+
+    fn s(mut self, s: &[u8]) -> Self {
+        for &b in s {
+            if self.n < self.buf.len() {
+                self.buf[self.n] = b;
+                self.n += 1;
+            }
+        }
+        self
+    }
+
+    fn dec(self, v: i64) -> Self {
+        let mut d = [0u8; 21];
+        let mut i = d.len();
+        let neg = v < 0;
+        let mut v = v.unsigned_abs();
+        loop {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        if neg {
+            i -= 1;
+            d[i] = b'-';
+        }
+        self.s(&d[i..])
+    }
+
+    fn print(self) {
+        out(&self.buf[..self.n]);
+    }
+}
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -105,13 +165,36 @@ fn out(text: &[u8]) {
     };
 }
 
-fn hex(v: u32) -> [u8; 8] {
-    let mut s = [0u8; 8];
-    for (i, c) in s.iter_mut().enumerate() {
-        let d = (v >> (28 - 4 * i)) & 0xf;
-        *c = if d < 10 { b'0' + d as u8 } else { b'a' + d as u8 - 10 };
+fn say(what: &[u8]) {
+    Line::new().s(NAME.as_bytes()).s(b": ").s(what).s(b"\r\n").print();
+}
+
+struct Checks(u32);
+
+impl Checks {
+    #[track_caller]
+    fn ok(&mut self, cond: bool, got: i64) -> Result<(), u32> {
+        self.0 += 1;
+        if cond {
+            return Ok(());
+        }
+        Line::new()
+            .s(NAME.as_bytes())
+            .s(b": check ")
+            .dec(i64::from(self.0))
+            .s(b" got ")
+            .dec(got)
+            .s(b" (line ")
+            .dec(i64::from(core::panic::Location::caller().line()))
+            .s(b")\r\n")
+            .print();
+        Err(self.0)
     }
-    s
+
+    #[track_caller]
+    fn eq(&mut self, got: i64, want: i64) -> Result<(), u32> {
+        self.ok(got == want, got)
+    }
 }
 
 /// UTF-16 of an ASCII string, NUL-terminated, in a fixed buffer.
@@ -123,17 +206,24 @@ struct W {
 impl W {
     fn new(text: &str) -> W {
         let mut w = W { b: [0; 256], n: 0 };
-        for &c in text.as_bytes() {
-            if w.n < w.b.len() - 1 {
-                w.b[w.n] = u16::from(c);
-                w.n += 1;
-            }
-        }
+        w.push(text);
         w
     }
 
-    fn ptr(&mut self) -> *mut u16 {
-        self.b[self.n] = 0;
+    fn push(&mut self, text: &str) {
+        for &c in text.as_bytes() {
+            if self.n < self.b.len() - 1 {
+                self.b[self.n] = u16::from(c);
+                self.n += 1;
+            }
+        }
+    }
+
+    fn ptr(&self) -> *const u16 {
+        self.b.as_ptr()
+    }
+
+    fn ptr_mut(&mut self) -> *mut u16 {
         self.b.as_mut_ptr()
     }
 }
@@ -163,6 +253,13 @@ impl Output {
             })
             .count()
     }
+
+    /// Printed before a failed check: what gala said.
+    fn show(&self) {
+        out(b"start_menu_test: gala said:\r\n");
+        out(self.text());
+        out(b"\r\n");
+    }
 }
 
 /// Runs `C:\gala\gala.exe <args>`: its exit code and output.
@@ -172,13 +269,8 @@ fn gala(args: &str) -> (u32, Output) {
     let sa = SecurityAttributes { length: 24, descriptor: null, inherit: 1 };
     let (mut r, mut w) = (null, null);
     let mut line = W::new("gala.exe ");
-    for &c in args.as_bytes() {
-        if line.n < line.b.len() - 1 {
-            line.b[line.n] = u16::from(c);
-            line.n += 1;
-        }
-    }
-    let mut exe = W::new("C:\\gala\\gala.exe");
+    line.push(args);
+    let exe = W::new("C:\\gala\\gala.exe");
     // SAFETY: plain calls with our buffers and handles.
     unsafe {
         if CreatePipe(&mut r, &mut w, &sa, 0) == 0 {
@@ -194,7 +286,7 @@ fn gala(args: &str) -> (u32, Output) {
         let mut info = [0usize; 3];
         let ok = CreateProcessW(
             exe.ptr(),
-            line.ptr(),
+            line.ptr_mut(),
             null,
             null,
             1,
@@ -226,47 +318,28 @@ fn gala(args: &str) -> (u32, Output) {
     }
 }
 
-fn fail(check: u32, got: u32, o: &Output) -> ! {
-    out(b"start_menu_test: check ");
-    out(&hex(check));
-    out(b" got ");
-    out(&hex(got));
-    out(b":\r\n");
-    out(o.text());
-    out(b"\r\n");
-    // SAFETY: ends the process.
-    unsafe { ExitProcess(check) }
-}
-
-/// Polls `gala ps` every half second, for at most `secs` seconds, until
-/// `done` says so; the last listing.
-fn wait_for(secs: u32, done: impl Fn(&Output) -> bool) -> (bool, Output) {
-    let mut last = gala("ps").1;
-    for _ in 0..secs * 2 {
-        if done(&last) {
-            return (true, last);
+/// Polls every half second for up to `ms`, or until `done`.
+fn poll(ms: u64, mut done: impl FnMut() -> bool) -> bool {
+    // SAFETY: plain call.
+    let end = unsafe { GetTickCount64() } + ms;
+    loop {
+        if done() {
+            return true;
+        }
+        // SAFETY: plain call.
+        if unsafe { GetTickCount64() } >= end {
+            return false;
         }
         // SAFETY: plain call.
         unsafe { Sleep(500) };
-        last = gala("ps").1;
     }
-    (done(&last), last)
 }
 
-/// Polls `gala ps` every half second for `secs` seconds: whether `stays`
-/// held in every listing (the last one is its own witness when it does
-/// not).
-fn wait_while(secs: u32, stays: impl Fn(&Output) -> bool) -> (bool, Output) {
-    let mut last = gala("ps").1;
-    for _ in 0..secs * 2 {
-        if !stays(&last) {
-            return (false, last);
-        }
-        // SAFETY: plain call.
-        unsafe { Sleep(500) };
-        last = gala("ps").1;
-    }
-    (stays(&last), last)
+/// The console windows running (`gala ps`'s conhost.exe lines), and the
+/// listing.
+fn consoles() -> (usize, Output) {
+    let o = gala("ps").1;
+    (o.count_lines_ending(b"conhost.exe"), o)
 }
 
 /// Whether this is gala (its ntdll has gala's own exports).
@@ -278,49 +351,118 @@ fn on_gala() -> bool {
     }
 }
 
+fn run() -> Result<(), u32> {
+    let mut c = Checks(0);
+    // The Command Prompt in System32; nothing of the catalog.
+    let (code, o) = gala("programs");
+    let listed = code == 0 && o.has(b"Command Prompt") && o.has(b"C:\\Windows\\System32\\cmd.exe");
+    let catalog = o.has(b"7-Zip") || o.has(b"Python");
+    if !listed || catalog {
+        o.show();
+    }
+    c.ok(listed, code.into())?;
+    c.ok(!catalog, 0)?;
+
+    // The taskbar's Start button, through UI Automation.
+    let uia = Uia::new();
+    c.ok(uia.is_ok(), uia.as_ref().err().copied().unwrap_or(0).into())?;
+    let uia = uia.unwrap_or_else(|_| unreachable!());
+    let (bar_class, bar_title) = (W::new("Shell_TrayWnd"), W::new("Taskbar"));
+    let (menu_class, menu_title) = (W::new("GalaUiWindow"), W::new("Start"));
+    // SAFETY: our NUL-ended names.
+    let bar = || unsafe { FindWindowW(bar_class.ptr(), bar_title.ptr()) };
+    let start = || uia.window(bar()).and_then(|b| uia.find(&b, "StartButton"));
+    c.ok(poll(STEP_MS, || start().is_some()), bar() as i64)?;
+    let s = start().unwrap_or_else(|| unreachable!());
+    c.eq(s.control_type().into(), BUTTON.into())?;
+    uia_client::announce(NAME, "StartButton", &s);
+    say(b"listed");
+
+    // The scenario's click: the menu, its Command Prompt tile.
+    // SAFETY: our NUL-ended names.
+    let menu = || unsafe { FindWindowW(menu_class.ptr(), menu_title.ptr()) };
+    // SAFETY: plain call.
+    let shown = || menu() != 0 && unsafe { IsWindowVisible(menu()) } != 0;
+    let in_menu = |id: &str| -> Option<Element> { uia.find(&uia.window(menu())?, id) };
+    let tile = |id: &str, name: &str| in_menu(id).is_some_and(|e| e.name() == name);
+    let open = poll(STEP_MS, || shown() && tile("ProgramCommandPrompt", "Command Prompt"));
+    c.ok(open, menu() as i64)?;
+    let t = in_menu("ProgramCommandPrompt").unwrap_or_else(|| unreachable!());
+    c.eq(t.control_type().into(), BUTTON.into())?;
+    // Installed: no state under it.
+    c.ok(in_menu("ProgramCommandPromptState").is_none(), 0)?;
+    uia_client::announce(NAME, "CommandPrompt", &t);
+    say(b"menu open");
+
+    // The tile's click: cmd.exe's console window (gala's cmd has no
+    // interactive prompt yet: it says so there and ends; the window
+    // stays), and the menu hidden.
+    let mut last = None;
+    let console = poll(CONSOLE_MS, || {
+        let (n, o) = consoles();
+        last = Some(o);
+        n >= 1
+    });
+    if !console && let Some(o) = &last {
+        o.show();
+    }
+    c.ok(console, 0)?;
+    c.ok(poll(STEP_MS, || !shown()), 0)?;
+    let s = start();
+    c.ok(s.is_some(), 0)?;
+    uia_client::announce(NAME, "StartButton", &s.unwrap_or_else(|| unreachable!()));
+    say(b"command prompt window");
+
+    // The menu again: 7-Zip's tile after the installed programs, not
+    // installed.
+    let state = |want: &str| in_menu("Program7ZipState").is_some_and(|e| e.name() == want);
+    let listed =
+        poll(STEP_MS, || shown() && tile("Program7Zip", "7-Zip") && state("Not installed"));
+    c.ok(listed, menu() as i64)?;
+    let t = in_menu("Program7Zip").unwrap_or_else(|| unreachable!());
+    c.eq(t.control_type().into(), BUTTON.into())?;
+    let st = in_menu("Program7ZipState").unwrap_or_else(|| unreachable!());
+    c.eq(st.control_type().into(), TEXT.into())?;
+    // After the installed programs: further down, or further right in
+    // the same row.
+    let (r7, cmd) = (t.rect(), in_menu("ProgramCommandPrompt").map(|e| e.rect()));
+    let after = cmd.is_some_and(|r| r.top < r7.top || (r.top == r7.top && r.left < r7.left));
+    c.ok(after, r7.top.into())?;
+    uia_client::announce(NAME, "SevenZip", &t);
+    say(b"catalog shown");
+
+    // Its click: the install, without a window; the menu stays open and
+    // the state follows it to the failure (offline).
+    let failed = poll(STEP_MS, || shown() && state("The install failed."));
+    c.ok(failed, shown().into())?;
+    say(b"install failed shown");
+
+    // No second console window.
+    let (n, o) = consoles();
+    if n >= 2 {
+        o.show();
+    }
+    c.ok(n < 2, n as i64)?;
+    say(b"no install window");
+    Ok(())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
     if !on_gala() {
-        out(b"start_menu_test: skipped (gala's start menu)\r\n");
+        say(b"skipped (gala's start menu)");
         // SAFETY: ends the process.
         unsafe { ExitProcess(0) }
     }
-    // 1: the Command Prompt in System32; nothing of the catalog.
-    let (code, o) = gala("programs");
-    if code != 0 || !o.has(b"Command Prompt") || !o.has(b"C:\\Windows\\System32\\cmd.exe") {
-        fail(1, code, &o);
+    match run() {
+        Ok(()) => {
+            say(b"ok");
+            // SAFETY: ends the process.
+            unsafe { ExitProcess(0) }
+        }
+        // SAFETY: ends the process.
+        Err(n) => unsafe { ExitProcess(n) },
     }
-    if o.has(b"7-Zip") || o.has(b"Python") {
-        fail(2, code, &o);
-    }
-    out(b"start_menu_test: listed\r\n");
-    // The screen check clicks the tiles now.
-    out(b"start_menu_test: ready\r\n");
-    // 3: the Command Prompt's tile: cmd.exe's console window (gala's
-    // cmd has no interactive prompt yet: it says so there and ends; the
-    // window stays).
-    let (seen, o) = wait_for(240, |o| o.count_lines_ending(b"conhost.exe") >= 1);
-    if !seen {
-        fail(3, 0, &o);
-    }
-    out(b"start_menu_test: command prompt window\r\n");
-    // 4: 7-Zip's tile, which the screen check clicks once it has read
-    // the line above: `gala install 7zip.7zip` without a console window
-    // (the tile shows where the install is instead). A console window
-    // would be created in the click's own handling and would stay when
-    // gala ends (check 3's does), so watching the Command Prompt's one
-    // console for a while after the click is enough to see that no
-    // second one was made; that the click arrived at all, that gala ran
-    // and how its install ended are the scenario's serial
-    // expectations, and the bar on the tile is the screen check's.
-    let (none, o) = wait_while(10, |o| o.count_lines_ending(b"conhost.exe") < 2);
-    if !none {
-        fail(4, 0, &o);
-    }
-    out(b"start_menu_test: no install window\r\n");
-    out(b"start_menu_test: ok\r\n");
-    // SAFETY: ends the process.
-    unsafe { ExitProcess(0) }
 }
 
 #[panic_handler]

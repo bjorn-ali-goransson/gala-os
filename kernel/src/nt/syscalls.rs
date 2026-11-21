@@ -8191,9 +8191,9 @@ mod job_calls;
 /// GalaDesktopAction(*Request, RequestLength, *Output, OutputLength,
 /// *ReturnLength): one of the shell's named actions (nt::action has the
 /// request's layout): start a program, list the taskbar's windows or the
-/// start menu's programs, act on a window named by its HWND, choose the
-/// wallpaper. The window actions are STATUS_NOT_SUPPORTED without shasha
-/// on the screen. Output that does not fit is cut at a whole entry
+/// start menu's programs or its catalog's tiles, act on a window named by
+/// its HWND, choose the wallpaper. The window actions are
+/// STATUS_NOT_SUPPORTED without shasha on the screen. Output that does not fit is cut at a whole entry
 /// (ReturnLength says how much was written).
 fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
     use super::action;
@@ -8242,6 +8242,7 @@ fn gala_desktop_action(call: &mut Call<'_>) -> NtStatus {
     let entry = match request.action {
         action::ACTION_WINDOWS => action::WINDOW_ENTRY,
         action::ACTION_PROGRAMS => action::PROGRAM_ENTRY,
+        action::ACTION_CATALOG => action::CATALOG_ENTRY,
         _ => out.len().max(1),
     };
     let n = if out.len() <= room {

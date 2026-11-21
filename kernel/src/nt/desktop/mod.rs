@@ -730,6 +730,12 @@ pub struct Desktop {
     /// the console writes to the serial port. Every caller drains it in
     /// the same breath, so it holds one call's worth.
     quieted: Vec<Quieted>,
+    /// How a catalog tile's install changed since the shell's window was
+    /// last told (`take_catalog_changed`): a package install began,
+    /// moved on, ended or went quiet. The free functions that change
+    /// one tell shasha's window after the lock (`tell_catalog`), as a
+    /// method may not post or log.
+    catalog_changed: CatalogChange,
     /// What the "Linux distributions" section lists (registered
     /// distributions and the user's choices), its tiles, the installs
     /// under way, the context menu open in the start menu, what it asked
@@ -809,6 +815,7 @@ impl Desktop {
             installs: Vec::new(),
             installers: Vec::new(),
             quieted: Vec::new(),
+            catalog_changed: CatalogChange::None,
             progress: Vec::new(),
             context: None,
             linux_launch: None,
@@ -1617,6 +1624,7 @@ impl Desktop {
         self.installs.retain(|(p, _)| !listed(*p));
         if self.installs.len() != was {
             self.menu_dirty = true;
+            self.catalog_change(CatalogChange::State);
         }
         if self.programs.as_slice() != programs {
             self.programs.clear();
@@ -2270,6 +2278,7 @@ impl Desktop {
         if self.installs.try_push((e.program, pkg::Progress::Resolving)).is_ok() {
             self.launch = Some(e.program);
         }
+        self.catalog_change(CatalogChange::State);
         self.menu_dirty = true;
     }
 
@@ -2408,8 +2417,44 @@ impl Desktop {
             }
         }
         self.watch_only_waiting();
+        let state = |s: Option<pkg::Progress>| s.as_ref().map(core::mem::discriminant);
+        self.catalog_change(if state(before) == state(progress) {
+            CatalogChange::Bar
+        } else {
+            CatalogChange::State
+        });
         self.menu_dirty = true;
         self.refresh();
+    }
+
+    /// A user-mode shell's tile asked for `program`'s install
+    /// (GalaDesktopAction's Install, `nt::action::run_launch`): it is
+    /// resolving from now on, as a click on the kernel menu's tile makes
+    /// it (`tile_click`), so that the installer's pid is watched
+    /// (`install_started`) and a progress report finds it under way. One
+    /// already under way starts again from the beginning: the new
+    /// `gala install` is the one whose word counts.
+    pub fn begin_install(&mut self, program: usize) {
+        self.installs.retain(|(p, _)| *p != program);
+        let _ = self.installs.try_push((program, pkg::Progress::Resolving));
+        self.catalog_change(CatalogChange::State);
+        self.menu_dirty = true;
+    }
+
+    /// Where `program`'s install is, if one is under way or ended
+    /// without its package showing up (the catalog's tiles).
+    pub fn install_of(&self, program: usize) -> Option<pkg::Progress> {
+        self.installs.iter().find(|(p, _)| *p == program).map(|&(_, s)| s)
+    }
+
+    fn catalog_change(&mut self, c: CatalogChange) {
+        self.catalog_changed = self.catalog_changed.max(c);
+    }
+
+    /// How the catalog's tiles changed since the last call
+    /// (`catalog_changed`), and from now on not.
+    pub fn take_catalog_changed(&mut self) -> CatalogChange {
+        core::mem::replace(&mut self.catalog_changed, CatalogChange::None)
     }
 
     /// What became of the `gala install` a tile asked for, as
@@ -2461,6 +2506,7 @@ impl Desktop {
                 };
                 self.installs.retain(|(q, _)| *q != p);
                 let _ = self.installs.try_push((p, pkg::Progress::Lost(at)));
+                self.catalog_change(CatalogChange::State);
                 at
             }
             Installing::Linux(n) => {
@@ -3850,8 +3896,10 @@ pub fn process_ended(shell: &Shell, owner: u64) {
     tell_quiet(&mut d);
     redraw_damage(&mut d);
     let wakes = d.take_wakes();
+    let catalog = d.take_catalog_changed();
     drop(d);
     signal(wakes);
+    tell_catalog(shell.session, catalog);
 }
 
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
@@ -4406,6 +4454,9 @@ pub fn install_progress(
     }
     d.install_progress(program, progress);
     redraw_damage(&mut d);
+    let catalog = d.take_catalog_changed();
+    drop(d);
+    tell_catalog(shell.session, catalog);
     Ok(())
 }
 
@@ -4421,6 +4472,112 @@ pub fn install_started(session: u32, program: &'static Program, pid: Option<u64>
     tell_quiet(&mut d);
     not_watched(watched, pid);
     redraw_damage(&mut d);
+    let catalog = d.take_catalog_changed();
+    drop(d);
+    tell_catalog(session, catalog);
+}
+
+/// A user-mode shell's tile asked for catalog entry `program`'s install
+/// (GalaDesktopAction's Install): its tile is resolving
+/// (`Desktop::begin_install`) before the installer starts, and the
+/// shell's window hears of it.
+pub fn begin_install(shell: &Shell, program: usize) {
+    let mut d = shell.d.lock();
+    d.begin_install(program);
+    redraw_damage(&mut d);
+    let catalog = d.take_catalog_changed();
+    drop(d);
+    tell_catalog(shell.session, catalog);
+}
+
+/// A catalog tile of the user-mode shell's start menu: the entry, whether
+/// its program is on this machine, and where its install is (None: none
+/// under way or ended). The installed state comes first: a program that
+/// is there is installed whatever an install of it last said.
+#[derive(Clone, Copy)]
+pub struct CatalogTile {
+    pub program: &'static Program,
+    pub installed: bool,
+    pub install: Option<pkg::Progress>,
+}
+
+/// The catalog's tiles for `shell`'s start menu (GalaDesktopAction's
+/// Catalog): every entry with a package, in PROGRAMS order, once per
+/// name (`list_programs`). Reads the file system before the desktop's
+/// lock.
+pub fn catalog(shell: &Shell) -> Vec<CatalogTile> {
+    let (tiles, n) = available_programs();
+    let d = shell.d.lock();
+    let mut out = Vec::new();
+    for e in &tiles[..n] {
+        let Some(program) = PROGRAMS.get(e.program).filter(|p| p.package.is_some()) else {
+            continue;
+        };
+        let install = if e.installed { None } else { d.install_of(e.program) };
+        if out.try_push(CatalogTile { program, installed: e.installed, install }).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+/// gala's own message to the shell's window (shasha's Progman): a
+/// catalog tile changed, read the catalog again (GalaDesktopAction's
+/// Catalog). In the system range Windows leaves unused (0x0390..0x03DF),
+/// so that no program's own message is taken for it.
+pub const WM_GALA_CATALOG: u32 = 0x03a0;
+
+/// How a catalog tile changed (`Desktop::take_catalog_changed`): not
+/// at all, its bar alone (a download moving on), or its state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CatalogChange {
+    None,
+    Bar,
+    State,
+}
+
+/// Tells session `session`'s shell window that the catalog changed
+/// (`WM_GALA_CATALOG`), as `change` says it did: a state that changed
+/// leaves a line; a bar that moved does not (a download moves it each
+/// percent, and the install's own line says each tenth), unless the
+/// post fails.
+fn tell_catalog(session: u32, change: CatalogChange) {
+    if change == CatalogChange::None {
+        return;
+    }
+    let Some(desk) = super::session::desk(session) else { return };
+    let logged = change == CatalogChange::State;
+    tell_shell_window(&desk.windows, WM_GALA_CATALOG, 0, "the catalog", logged);
+}
+
+/// Posts `message` (`wparam`) to the shell's window (shasha's Progman,
+/// the window that called SetShellWindow) as the system, and wakes its
+/// program; logged as telling it of `what` (when `logged`; a failure
+/// always is). Nothing without one (no user-mode shell runs).
+pub fn tell_shell_window(
+    windows: &super::window::Windows,
+    message: u32,
+    wparam: u64,
+    what: &str,
+    logged: bool,
+) {
+    let shell = windows.shell_window();
+    if shell == 0 {
+        return;
+    }
+    match windows.post_from_system(shell, message, wparam, 0) {
+        Ok(event) => {
+            if let Some(e) = event {
+                super::wait::set_signal(&e, 1);
+            }
+            if logged {
+                crate::info!("desktop: the shell's window {shell:#x} told of {what}");
+            }
+        }
+        Err(e) => {
+            crate::warn!("desktop: the shell's window {shell:#x} not told of {what}: {e:?}");
+        }
+    }
 }
 
 /// What an install that went quiet leaves behind: a log line and a
@@ -4437,7 +4594,8 @@ pub fn install_started(session: u32, program: &'static Program, pid: Option<u64>
 fn not_watched(watched: bool, pid: Option<u64>) {
     if let (false, Some(pid)) = (watched, pid) {
         crate::warn!(
-            "desktop: start menu: the install in pid {pid} is not watched (at most              {MAX_INSTALLERS} are): its tile waits for the next listing"
+            "desktop: start menu: the install in pid {pid} is not watched (at most \
+             {MAX_INSTALLERS} are): its tile waits for the next listing"
         );
         super::ledger::record("start menu", "install not watched", 0);
     }
@@ -4472,7 +4630,7 @@ pub fn linux_install_started(session: u32, name: linux::Name, pid: Option<u64>) 
 
 /// The catalog entry whose package is `id`: winget's ids, matched without
 /// case as `gala install` matches them.
-fn program_with_package(id: &[u8]) -> Option<usize> {
+pub fn program_with_package(id: &[u8]) -> Option<usize> {
     let id = core::str::from_utf8(id).ok()?;
     PROGRAMS.iter().position(|p| p.package.is_some_and(|w| w.eq_ignore_ascii_case(id)))
 }

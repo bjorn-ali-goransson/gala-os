@@ -1873,3 +1873,43 @@ fn a_wallpaper_is_named_or_a_qoi_files_path() {
     assert_eq!(wallpaper_path("D:\\a.qoi"), None);
     assert_eq!(wallpaper_path("sunset"), None);
 }
+
+/// A user-mode shell's tile asks for an install (GalaDesktopAction's
+/// Install): the install is resolving before its installer starts, so
+/// that the installer is watched and its end without a word turns the
+/// tile quiet; every change is one the shell's window is to hear of.
+#[test]
+fn the_shells_tile_install_is_watched_and_every_change_tells_the_shell() {
+    let mut d = Desktop::new();
+    let zip = PROGRAMS.iter().position(|p| p.name == "7-Zip").unwrap();
+    d.set_programs(&[Entry { program: zip, installed: false }]);
+    assert_eq!(d.take_catalog_changed(), CatalogChange::None);
+    d.begin_install(zip);
+    assert_eq!(d.install_of(zip), Some(pkg::Progress::Resolving));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+    assert_eq!(d.take_catalog_changed(), CatalogChange::None, "taken once");
+    assert!(d.install_started(zip, Some(7)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::None, "a pid watched changes no tile");
+    // A download moving on moves the bar alone; a state is a state.
+    d.install_progress(zip, Some(pkg::Progress::Downloading(10)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+    d.install_progress(zip, Some(pkg::Progress::Downloading(20)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::Bar);
+    d.install_progress(zip, Some(pkg::Progress::Failed(4)));
+    assert_eq!(d.install_of(zip), Some(pkg::Progress::Failed(4)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+    // An installer that ends after its last word changes nothing more.
+    d.installers_gone(&[7]);
+    assert_eq!(d.take_catalog_changed(), CatalogChange::None);
+    // Again, and this time it ends without a word.
+    d.begin_install(zip);
+    assert!(d.install_started(zip, Some(8)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+    d.installers_gone(&[8]);
+    assert_eq!(d.install_of(zip), Some(pkg::Progress::Lost(5)));
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+    // A listing that finds it installed ends what is left of it.
+    d.set_programs(&[Entry { program: zip, installed: true }]);
+    assert_eq!(d.install_of(zip), None);
+    assert_eq!(d.take_catalog_changed(), CatalogChange::State);
+}

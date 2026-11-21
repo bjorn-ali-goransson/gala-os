@@ -27,6 +27,15 @@
 //!   starts its program (ACTION_START, a console program in a console
 //!   window of its own) and hides the menu; another window becoming
 //!   active hides it too (WM_ACTIVATE), as on Windows.
+//! - **The catalog's tiles** (part 11): after the installed programs,
+//!   the catalog's entries not on this machine (ACTION_CATALOG), read
+//!   when the menu opens and whenever the desktop says a tile changed:
+//!   the kernel posts gala's WM_GALA_CATALOG to the shell's window (the
+//!   desktop window), which passes it on to the menu's (WM_APP_CATALOG).
+//!   A click on one not installed, failed or gone quiet asks for its
+//!   install (ACTION_INSTALL with the winget id, `gala install <id>`
+//!   without a window) and the menu stays open, its tile showing the
+//!   install's state and bar; a click on one under way does nothing.
 //! - **The notification area** (part 8): the strip's window is
 //!   `Shell_TrayWnd`, the class Explorer's taskbar has, which shell32's
 //!   Shell_NotifyIcon finds and sends its request to (WM_COPYDATA,
@@ -58,7 +67,11 @@
 //! window list that changed (how many windows), every click and the
 //! desktop's answer (its NTSTATUS when refused), the menu opening (how
 //! many programs) and closing (why), each program started (its path and
-//! pid, or the status), the hot key refused, every notification-area
+//! pid, or the status), each install asked for (`7-Zip: install
+//! 7zip.7zip asked: pid N`, or refused with the status) or not (one
+//! under way), each catalog tile whose state changed (`catalog: 7-Zip
+//! failed (gala exit 4)`), the catalog not read (the status) or the
+//! desktop's word not passed on, the hot key refused, every notification-area
 //! request (`notification-area icon added: window W id N "tip"`, or
 //! refused and why), every click on an icon and what it posted, a post
 //! that failed (the icon dropped), each balloon shown and how it went,
@@ -84,8 +97,8 @@ use gala_ui::{Component, Node, column, image, text, win};
 use shasha::tray::{self, Button, Key, Refused};
 use shasha::wallpaper;
 use shasha::{
-    Click, HEIGHT, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Msg, StartMenu, Taskbar, clock_text,
-    parse_programs, parse_windows,
+    CATALOG_ENTRY, Click, HEIGHT, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Msg, StartMenu,
+    Taskbar, clock_text, parse_catalog, parse_programs, parse_windows,
 };
 
 type Handle = *mut c_void;
@@ -147,6 +160,13 @@ const WM_COPYDATA: u32 = 0x004a;
 const WM_APP_BALLOON: u32 = 0x8003;
 /// The balloon was clicked (posted to the taskbar's window).
 const WM_APP_BALLOON_CLICK: u32 = 0x8004;
+/// Read the catalog again (the desktop window's, posted to the menu on
+/// the kernel's WM_GALA_CATALOG).
+const WM_APP_CATALOG: u32 = 0x8005;
+/// gala's own message to the shell's window: a start menu catalog tile
+/// changed (kernel/src/nt/desktop `WM_GALA_CATALOG`, in the system range
+/// Windows leaves unused).
+const WM_GALA_CATALOG: u32 = 0x03a0;
 /// WM_COPYDATA's dwData from shell32 (user/shell32/src/tray.rs).
 const COPY_NOTIFY: usize = 1;
 const COPY_TOP_LEFT: usize = 3;
@@ -173,6 +193,8 @@ const ACTION_ACTIVATE: u32 = 3;
 const ACTION_MINIMIZE: u32 = 4;
 const ACTION_START: u32 = 1;
 const ACTION_PROGRAMS: u32 = 11;
+const ACTION_INSTALL: u32 = 16;
+const ACTION_CATALOG: u32 = 18;
 /// ACTION_START's flag: a console program in a console window of its own.
 const LAUNCH_CONSOLE_WINDOW: i32 = 1;
 const LIST_HEADER: usize = 8;
@@ -180,6 +202,7 @@ const PROGRAM_ENTRY: usize = 8 + 2 * 32 + 2 * 128;
 const MAX_PROGRAMS: usize = 64;
 const WINDOW_ENTRY: usize = 40 + 2 * 128;
 const MAX_WINDOWS: usize = 64;
+const MAX_CATALOG: usize = 64;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -371,6 +394,17 @@ fn programs() -> Option<Vec<shasha::Program>> {
         return None;
     }
     Some(parse_programs(&b[..n.min(b.len())]))
+}
+
+/// The desktop's catalog tiles, or None (logged).
+fn catalog() -> Option<Vec<shasha::CatalogEntry>> {
+    let mut b: Vec<u8> = alloc::vec![0; LIST_HEADER + MAX_CATALOG * CATALOG_ENTRY];
+    let (status, n) = action(ACTION_CATALOG, 0, &mut b);
+    if status != 0 {
+        log(&format!("the catalog is not read: status {status:#x}"));
+        return None;
+    }
+    Some(parse_catalog(&b[..n.min(b.len())]))
 }
 
 fn clock() -> alloc::string::String {
@@ -767,6 +801,17 @@ impl Component for DesktopWindow {
     }
 
     fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<DesktopMsg> {
+        if msg == WM_GALA_CATALOG {
+            // The start menu's to read: this window is the shell's, the
+            // one the kernel tells.
+            // SAFETY: a plain post to our own window (or none).
+            if unsafe { PostMessageW(menu_window(), WM_APP_CATALOG, 0, 0) } == 0 {
+                // SAFETY: plain call.
+                let e = unsafe { GetLastError() };
+                log(&format!("the catalog's change is not passed to the start menu: error {e}"));
+            }
+            return None;
+        }
         (msg == WM_SETTINGCHANGE && wparam == SPI_SETDESKWALLPAPER).then_some(DesktopMsg::Changed)
     }
 }
@@ -927,6 +972,7 @@ impl Menu {
         let names: Vec<&str> = programs.iter().map(|p| p.name.as_str()).collect();
         log(&format!("the start menu opens: {} program(s): {}", programs.len(), names.join(", ")));
         self.menu.open(programs);
+        self.read_catalog();
         // SAFETY: our window.
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
@@ -941,6 +987,34 @@ impl Menu {
         log(&format!("the start menu closes: {why}"));
         // SAFETY: our window.
         unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+
+    /// The catalog again, each tile whose state changed logged.
+    fn read_catalog(&mut self) {
+        let Some(c) = catalog() else { return };
+        for line in self.menu.set_catalog(c) {
+            log(&line);
+        }
+    }
+
+    /// Catalog tile `i` clicked: its install asked for (ACTION_INSTALL,
+    /// no window), unless one is under way. The menu stays.
+    fn install(&mut self, i: usize) {
+        let Some(e) = self.menu.catalog.get(i).cloned() else { return };
+        if e.state.running() {
+            log(&format!("{}: its install is {}: the click does nothing", e.name, e.state.word()));
+            return;
+        }
+        let mut out = [0u8; 8];
+        let (status, n) = request(ACTION_INSTALL, 0, [0; 4], &e.id, &mut out);
+        if status == 0 && n >= 4 {
+            let pid = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+            log(&format!("{}: install {} asked: pid {pid}", e.name, e.id));
+        } else {
+            log(&format!("{}: install {} refused: status {status:#x}", e.name, e.id));
+        }
+        // Where it is now (resolving), without waiting for the word.
+        self.read_catalog();
     }
 
     fn launch(&mut self, i: usize) {
@@ -978,6 +1052,8 @@ impl Component for Menu {
                 self.launch(*i);
                 self.hide(hwnd, "a program started");
             }
+            MenuMsg::Install(i) => self.install(*i),
+            MenuMsg::CatalogChanged => self.read_catalog(),
             MenuMsg::Deactivated | MenuMsg::Escape | MenuMsg::Query(_) => {}
         }
         self.menu.update(msg);
@@ -986,6 +1062,7 @@ impl Component for Menu {
     fn message(&mut self, window: usize, msg: u32, wparam: usize, _: isize) -> Option<MenuMsg> {
         match msg {
             WM_APP_TOGGLE => Some(MenuMsg::Toggle),
+            WM_APP_CATALOG => Some(MenuMsg::CatalogChanged),
             WM_HOTKEY if wparam == MENU_HOT_KEY as usize => Some(MenuMsg::Toggle),
             WM_KEYDOWN if wparam == VK_ESCAPE => Some(MenuMsg::Escape),
             // SAFETY: our window.

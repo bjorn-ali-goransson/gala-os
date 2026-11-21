@@ -18,12 +18,18 @@
 //! | 36..40 | zero |
 //! | 40..   | the text (UTF-16): Start's program and arguments, Wallpaper's name, LinuxProgress's distribution, InstallProgress's package id |
 //!
-//! The output: Start writes the new process id (u64). Windows and
-//! Programs write a header (u32 version 1, u32 how many there are), then
-//! as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY bytes each).
-//! Actions 12 and 13 were the kernel taskbar's notification area (its
-//! icons and a click on one): they are gone with it, as shasha's icons
-//! are UI Automation elements (`TrayIcon<hwnd>_<id>`), and stay unused.
+//! The output: Start writes the new process id (u64). Windows, Programs
+//! and Catalog write a header (u32 version 1, u32 how many there are),
+//! then as many entries as fit (WINDOW_ENTRY / PROGRAM_ENTRY /
+//! CATALOG_ENTRY bytes each). Actions 12 and 13 were the kernel taskbar's
+//! notification area (its icons and a click on one): they are gone with
+//! it, as shasha's icons are UI Automation elements
+//! (`TrayIcon<hwnd>_<id>`), and stay unused.
+//!
+//! A catalog tile that changes (an install asked for, moving on, ended
+//! or gone quiet) posts gala's `WM_GALA_CATALOG` (0x03A0, in Windows'
+//! unused system range) to the shell's window, which reads Catalog
+//! again (`desktop::tell_catalog`).
 
 use super::desktop::{self, Action, SnapTo};
 use super::status::NtStatus;
@@ -71,6 +77,11 @@ pub const ACTION_INSTALL: u32 = 16;
 /// (LINUX_*), args[2] the install's suggestion (`SUGGESTIONS` index) or
 /// the application (its index among the distribution's applications).
 pub const ACTION_LINUX: u32 = 17;
+/// A user-mode shell's start menu (ROADMAP SH step 1, part 11): the
+/// catalog's tiles, CATALOG_ENTRY bytes each, in the start menu's order
+/// (`desktop::catalog`): STATUS_NOT_SUPPORTED where no shell runs, as
+/// Programs.
+pub const ACTION_CATALOG: u32 = 18;
 
 /// The launch verbs' flags (Start, Install, Linux: args[0]): start a
 /// console program in a console window of its own (conhost.exe, as
@@ -113,6 +124,24 @@ pub const WINDOW_ENTRY: usize = 40 + 2 * desktop::LISTED_TITLE;
 pub const PROGRAM_ENTRY: usize = 8 + 2 * PROGRAM_NAME + 2 * PROGRAM_PATH;
 const PROGRAM_NAME: usize = 32;
 const PROGRAM_PATH: usize = 128;
+/// A catalog tile: the name's and the package id's lengths (2 x u32), the
+/// state (u32, CATALOG_*), how much of its bar is filled (u32 percent,
+/// `pkg::Progress::percent`; 0 without an install), gala's exit code
+/// (i32, for a failed install, else 0), the name (32 UTF-16 units) and
+/// the package id (64).
+pub const CATALOG_ENTRY: usize = 20 + 2 * PROGRAM_NAME + 2 * CATALOG_ID;
+const CATALOG_ID: usize = 64;
+/// A catalog tile's states: its program is not on this machine and no
+/// install is under way; it is; its install is resolving, downloading,
+/// installing; it failed (with gala's exit code); its `gala install`
+/// ended without a word (`pkg::Progress::Lost`).
+pub const CATALOG_NOT_INSTALLED: u32 = 0;
+pub const CATALOG_INSTALLED: u32 = 1;
+pub const CATALOG_RESOLVING: u32 = 2;
+pub const CATALOG_DOWNLOADING: u32 = 3;
+pub const CATALOG_INSTALLING: u32 = 4;
+pub const CATALOG_FAILED: u32 = 5;
+pub const CATALOG_LOST: u32 = 6;
 
 /// A decoded request.
 #[derive(Debug, PartialEq, Eq)]
@@ -231,7 +260,7 @@ fn run_launch(r: &Request, caller: &Caller) -> Result<Output, NtStatus> {
         }
         ACTION_INSTALL => {
             let id = text.filter(|id| package_id(id)).ok_or(NtStatus::INVALID_PARAMETER)?;
-            ("install", start_install(id, token))
+            ("install", install_for_shell(id, token, &caller.desk))
         }
         _ => {
             let r = linux_request(text, r.args[1], r.args[2])?;
@@ -359,6 +388,18 @@ fn run_other(
                 program_entry(&mut out, name, path)?;
             }
         }
+        ACTION_CATALOG => {
+            if !desktop::has_shell(&caller.desk.shell) {
+                return Err(NtStatus::NOT_SUPPORTED);
+            }
+            let tiles = desktop::catalog(&caller.desk.shell);
+            list_header(&mut out, tiles.len())?;
+            for t in &tiles {
+                let (state, percent, exit) = catalog_state(t.installed, t.install);
+                let id = t.program.package.unwrap_or("");
+                catalog_entry(&mut out, t.program.name, id, state, percent, exit)?;
+            }
+        }
         ACTION_WALLPAPER => {
             let mut name = [0u8; 260];
             let name = ascii(&r.text, &mut name).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
@@ -366,27 +407,13 @@ fn run_other(
             // The shell hears of it as Windows tells every top-level
             // window (WM_SETTINGCHANGE, SPI_SETDESKWALLPAPER), and shows
             // the new value.
-            let shell = caller.desk.windows.shell_window();
-            if shell != 0 {
-                match caller.desk.windows.post_from_system(
-                    shell,
-                    WM_SETTINGCHANGE,
-                    SPI_SETDESKWALLPAPER,
-                    0,
-                ) {
-                    Ok(event) => {
-                        if let Some(e) = event {
-                            super::wait::set_signal(&e, 1);
-                        }
-                        crate::info!(
-                            "desktop: the shell's window {shell:#x} told of the wallpaper"
-                        );
-                    }
-                    Err(e) => crate::warn!(
-                        "desktop: the shell's window {shell:#x} not told of the wallpaper: {e:?}"
-                    ),
-                }
-            }
+            desktop::tell_shell_window(
+                &caller.desk.windows,
+                WM_SETTINGCHANGE,
+                SPI_SETDESKWALLPAPER,
+                "the wallpaper",
+                true,
+            );
         }
         ACTION_LINUX_PROGRESS => {
             let mut name = [0u8; desktop::linux::NAME];
@@ -437,6 +464,49 @@ fn program_entry(out: &mut Vec<u8>, name: &str, path: &str) -> Result<(), NtStat
     push(out, &(p as u32).to_le_bytes())?;
     for (text, room) in [(name, PROGRAM_NAME), (path, PROGRAM_PATH)] {
         let mut units = [0u16; PROGRAM_PATH];
+        for (u, b) in units.iter_mut().zip(text.bytes().take(room)) {
+            *u = u16::from(b);
+        }
+        for u in &units[..room] {
+            push(out, &u.to_le_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// A catalog tile's state, bar and exit code (CATALOG_ENTRY's): an
+/// installed program is installed whatever its install last said.
+pub fn catalog_state(installed: bool, install: Option<desktop::pkg::Progress>) -> (u32, u32, i32) {
+    use desktop::pkg::Progress;
+    let Some(p) = install.filter(|_| !installed) else {
+        return (if installed { CATALOG_INSTALLED } else { CATALOG_NOT_INSTALLED }, 0, 0);
+    };
+    let state = match p {
+        Progress::Resolving => CATALOG_RESOLVING,
+        Progress::Downloading(_) => CATALOG_DOWNLOADING,
+        Progress::Installing => CATALOG_INSTALLING,
+        Progress::Failed(_) => CATALOG_FAILED,
+        Progress::Lost(_) => CATALOG_LOST,
+    };
+    let exit = if let Progress::Failed(e) = p { e } else { 0 };
+    (state, u32::from(p.percent()), exit)
+}
+
+fn catalog_entry(
+    out: &mut Vec<u8>,
+    name: &str,
+    id: &str,
+    state: u32,
+    percent: u32,
+    exit: i32,
+) -> Result<(), NtStatus> {
+    let (n, i) = (name.len().min(PROGRAM_NAME), id.len().min(CATALOG_ID));
+    for v in [n as u32, i as u32, state, percent] {
+        push(out, &v.to_le_bytes())?;
+    }
+    push(out, &exit.to_le_bytes())?;
+    for (text, room) in [(name, PROGRAM_NAME), (id, CATALOG_ID)] {
+        let mut units = [0u16; CATALOG_ID];
         for (u, b) in units.iter_mut().zip(text.bytes().take(room)) {
             *u = u16::from(b);
         }
@@ -615,6 +685,54 @@ fn start_install(id: &str, token: Option<super::object::ObjectRef>) -> Result<St
     start_path(gala, args, token)
 }
 
+/// GalaDesktopAction's Install of package `id` for the caller's desktop
+/// `desk`: a catalog entry's tile is resolving before `gala install`
+/// starts (`desktop::begin_install`), and the installer's pid is watched
+/// so that one ending without a word leaves the tile quiet instead of
+/// waiting for ever (`installer_registered`). A package the catalog does
+/// not list just installs.
+fn install_for_shell(
+    id: &str,
+    token: Option<super::object::ObjectRef>,
+    desk: &super::session::Desk,
+) -> Result<Started, NtStatus> {
+    let program = desktop::program_with_package(id.as_bytes())
+        .and_then(|k| desktop::PROGRAMS.get(k).map(|p| (k, p)))
+        .filter(|_| desktop::has_shell(&desk.shell));
+    let Some((k, program)) = program else {
+        return start_install(id, token);
+    };
+    desktop::begin_install(&desk.shell, k);
+    let started = start_install(id, token);
+    installer_registered(desk.session, program, started.as_ref().ok());
+    started
+}
+
+/// Tells the desktop which `gala install` `program`'s tile waits for a
+/// word from (None: it never started). A process can end before it is
+/// watched, and its end found no install to quiet then: one that has
+/// ended by now is told as gone (`desktop::process_ended` again), so
+/// the tile does not wait for a word that will not come.
+fn installer_registered(
+    session: u32,
+    program: &'static desktop::Program,
+    started: Option<&Started>,
+) {
+    desktop::install_started(session, program, started.map(|s| s.pid));
+    if let Some(s) = started
+        && s.process.exit_status().is_some()
+    {
+        crate::info!(
+            "desktop: start menu: {}'s installer (pid {}) ended before it was watched",
+            program.name,
+            s.pid
+        );
+        if let Some(desk) = super::session::desk(session) {
+            desktop::process_ended(&desk.shell, s.pid);
+        }
+    }
+}
+
 /// A desktop's start menu asked for `program` (the mouse or keys on the
 /// console, or injected input): started as the boot user, whose session
 /// is the console's at boot; a catalog entry not installed yet runs
@@ -695,7 +813,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
             ("missing", "", Err(NtStatus::OBJECT_NAME_NOT_FOUND))
         }
     };
-    let (pid, status) = match started {
+    let (pid, status) = match &started {
         Ok(s) => (s.pid, 0),
         Err(e) => (0, e.0),
     };
@@ -713,7 +831,7 @@ pub fn start_from_menu(session: u32, launch: desktop::Launch) {
     // that is not on this machine and has no package, `MenuRequest`'s
     // Missing, ends here too).
     if op != "start" {
-        desktop::install_started(session, program, (status == 0).then_some(pid));
+        installer_registered(session, program, started.as_ref().ok());
     }
 }
 
@@ -1092,6 +1210,50 @@ mod tests {
         assert_eq!(menu_request(find("Python"), &mut |p| p == python), MenuRequest::Start(1));
         let cmd = "C:\\gala\\cmd.exe";
         assert_eq!(menu_request(find("Command Prompt"), &mut |p| p == cmd), MenuRequest::Start(1));
+    }
+
+    /// A catalog tile's state: an installed program is installed
+    /// whatever its install last said; otherwise where its install is,
+    /// its bar (`Progress::percent`) and, when it failed, gala's code.
+    #[test]
+    fn catalog_tiles_say_where_their_install_is() {
+        use desktop::pkg::Progress;
+        assert_eq!(catalog_state(false, None), (CATALOG_NOT_INSTALLED, 0, 0));
+        assert_eq!(catalog_state(true, None), (CATALOG_INSTALLED, 0, 0));
+        assert_eq!(catalog_state(true, Some(Progress::Failed(4))), (CATALOG_INSTALLED, 0, 0));
+        assert_eq!(catalog_state(false, Some(Progress::Resolving)), (CATALOG_RESOLVING, 5, 0));
+        assert_eq!(
+            catalog_state(false, Some(Progress::Downloading(50))),
+            (CATALOG_DOWNLOADING, 40, 0)
+        );
+        assert_eq!(catalog_state(false, Some(Progress::Installing)), (CATALOG_INSTALLING, 85, 0));
+        assert_eq!(catalog_state(false, Some(Progress::Failed(4))), (CATALOG_FAILED, 100, 4));
+        assert_eq!(catalog_state(false, Some(Progress::Lost(40))), (CATALOG_LOST, 40, 0));
+    }
+
+    /// A catalog entry's bytes, as shasha reads them.
+    #[test]
+    fn catalog_entries_are_laid_out_as_documented() {
+        let mut out = Vec::new();
+        catalog_entry(&mut out, "7-Zip", "7zip.7zip", CATALOG_FAILED, 100, 4).unwrap();
+        assert_eq!(out.len(), CATALOG_ENTRY);
+        assert_eq!(CATALOG_ENTRY, 212);
+        let u32_at = |at: usize| u32::from_le_bytes(out[at..at + 4].try_into().unwrap());
+        assert_eq!([u32_at(0), u32_at(4), u32_at(8), u32_at(12), u32_at(16)], [5, 9, 5, 100, 4]);
+        let units = |at: usize, n: usize| -> String {
+            let u: Vec<u16> =
+                out[at..at + 2 * n].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&u).unwrap()
+        };
+        assert_eq!(units(20, 5), "7-Zip");
+        assert_eq!(units(20 + 64, 9), "7zip.7zip");
+        // A name too long for its room is cut there, its length too.
+        let mut out = Vec::new();
+        let long = "n".repeat(40);
+        catalog_entry(&mut out, &long, "a.b", CATALOG_NOT_INSTALLED, 0, -1).unwrap();
+        assert_eq!(out.len(), CATALOG_ENTRY);
+        assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 32);
+        assert_eq!(i32::from_le_bytes(out[16..20].try_into().unwrap()), -1);
     }
 
     #[test]

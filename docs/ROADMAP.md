@@ -758,11 +758,9 @@ instead of waiting for ever: the desktop watches the installer's pid,
 which `start_from_menu` reports, and the process ending leaves the tile
 grey under a question mark with its bar where it got to, a click trying
 again and the same notification. A console program started from the menu
-gets its own console window. Tests: the desktop's, `nt::action`'s and galapkg's host
-tests, scenario `start_menu` (start_menu_test and a screen check: the
-tiles, the Command Prompt clicked, 7-Zip's install started with no
-console window of its own, its tile's bar red when it failed and its
-notification above the notification area).
+gets its own console window. Tests: the desktop's, `nt::action`'s and
+galapkg's host tests; shasha's start menu has the same install tiles
+now (SH step 1, part 11) and scenario `start_menu` tests them there.
 TimKosse.FileZilla.Client is not in winget-pkgs today: its tile's bar
 turns red and `gala install`'s "no package" is in the log (the portable
 C:\filezilla placement of the FileZilla scenarios still counts as
@@ -927,8 +925,8 @@ shell part) leaves it.
       event `present` shows each copy. Tests: every UEFI scenario now
       boots with it (`desktop_at_boot` checks shasha's taskbar, wallpaper
       and start menu: Windows key, Esc). Not yet: the task buttons'
-      icons; the scenarios that test the kernel's own shell (`start_menu`,
-      `linux_menu`, `hotkey_test`, which plays the shell) run with
+      icons; the scenarios that test the kernel's own shell
+      (`linux_menu`, `hotkey_test`, which plays the shell) run with
       `shell=desktop` until it is removed.
    11. The kernel's shell code removed, its scenarios moved to shasha.
       Done: the notification area. The kernel's tray (`desktop/tray.rs`,
@@ -940,9 +938,27 @@ shell part) leaves it.
       `wow64_tray_test` became a UEFI shasha scenario, and without a
       shell (`no_i8042`) the tray part is skipped as Shell_NotifyIcon
       fails. The kernel start menu's install notices are log lines
-      until that menu goes. Next: shasha's start menu gains the install
-      tiles (`start_menu`), the Linux tiles (`linux_menu`) and the shell
-      keys (`hotkey_test`); then the kernel's menu, taskbar, clock and
+      until that menu goes.
+      Done: the install tiles. shasha's start menu lists, after the
+      installed programs, the catalog's entries not on this machine
+      (GalaDesktopAction's Catalog: name, winget id, state, bar, gala's
+      exit code), each a tile with its button, its state's words
+      (`<id>State`: "Not installed" beside an accent badge, "Resolving",
+      "Downloading N%", "Installing", "The install failed[: why].", "The
+      install stopped without a word.") and its bar (red when it failed,
+      grey when it went quiet). A click asks for the install
+      (GalaDesktopAction's Install, which now marks the tile resolving
+      and watches the installer's pid as the kernel menu's click did)
+      and the menu stays open; each change of a tile posts gala's
+      WM_GALA_CATALOG (0x03A0) to the shell's window, and shasha reads
+      the catalog again. Test: `start_menu` now runs against shasha
+      (`start_menu_test` through UI Automation: the Command Prompt
+      started from the menu, 7-Zip's tile "Not installed", clicked, its
+      install failing with gala's exit 4 in the scenario's network and
+      no console window for it). Not yet: an install's notification
+      above shasha's notification area (the kernel logs it).
+      Next: the Linux tiles (`linux_menu`) and the shell keys
+      (`hotkey_test`); then the kernel's menu, taskbar, clock and
       wallpaper (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and
       most of `mod.rs`) and `shell=desktop` go.
 2. Supervision: the session (RS B4's session manager, the kernel until

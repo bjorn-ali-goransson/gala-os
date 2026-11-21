@@ -266,6 +266,9 @@ const WM_SIZE: u32 = 0x0005;
 const WM_ACTIVATE: u32 = 0x0006;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_SETTINGCHANGE: u32 = 0x001a;
+/// gala's own message to the shell's window (the kernel's `desktop::WM_GALA_CATALOG`,
+/// in the system range Windows leaves unused): the catalog changed.
+const WM_GALA_CATALOG: u32 = 0x03a0;
 const WM_PAINT: u32 = 0x000f;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETOBJECT: u32 = 0x003d;
@@ -608,6 +611,13 @@ impl<C: Component> Window for Host<C> {
                     self.handle(hwnd, "message", &format!("{msg:#x}"), m);
                 }
                 return (msg == WM_HOTKEY).then_some(0);
+            }
+            // gala's own word to the shell's window that the start
+            // menu's catalog changed: the program's to act on.
+            WM_GALA_CATALOG => {
+                if let Some(m) = self.component.message(hwnd as usize, msg, wparam, lparam) {
+                    self.handle(hwnd, "message", &format!("{msg:#x}"), m);
+                }
             }
             // A key: the program's when it has a message for it (Esc
             // closing a menu), else the default handling's.

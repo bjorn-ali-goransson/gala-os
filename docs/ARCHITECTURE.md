@@ -8106,8 +8106,10 @@ session's is shown by nothing unless GalaSession attaches a presenter
   `desktop: start menu: <name> is not installed: <gala> install <id>
   (no window)`, `desktop: started <path> (pid N) in a console window`)
   and a `window` event `start menu` (op start, install or missing;
-  session, name, target, pid, status). Scenario `start_menu`
-  (start_menu_test, screen check).
+  session, name, target, pid, status). The desktop's host tests test
+  this menu; scenario `start_menu` (start_menu_test, screen check)
+  tests shasha's, which draws the same install state ("The user-mode
+  shell").
   - **An install happens on the tile**, as a Linux distribution's does:
     the install runs with no window at all, the menu stays open and the
     tile keeps the click's place with a progress bar in the row under
@@ -8496,6 +8498,28 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   (another window became active) closes it, as Windows' does, and so
   does Esc while it is shown (gala_ui hands WM_KEYDOWN to the
   component, which closes it: `shasha: the start menu closes: Esc`).
+- **The catalog's tiles** (ROADMAP SH step 1, part 11): after the
+  installed programs, the catalog's entries whose program is not on
+  this machine (GalaDesktopAction ACTION_CATALOG; an entry already
+  among the programs is not listed twice), filtered by the search too.
+  A tile is a column with the entry's button (`Program<name>`, as an
+  installed program's), a Text `Program<name>State` with where it is
+  (`shasha::state_text`: "Not installed" beside an accent badge,
+  "Resolving", "Downloading N%" with N the bar's percent so that words
+  and bar agree, "Installing", "The install failed." or "The install
+  failed: <why>." with the clause of `pkg::install_failure`, "The
+  install stopped without a word." for one gone quiet) and, once an
+  install was asked for, its bar `Program<name>Bar` (accent, red when it
+  failed, grey when it went quiet). A click on one not installed,
+  failed or gone quiet asks for ACTION_INSTALL with its winget id (no
+  window) and reads the catalog at once; the menu stays open. A click
+  on one under way does nothing. The catalog is read when the menu
+  opens and whenever the kernel posts gala's WM_GALA_CATALOG (0x03A0,
+  in the system range Windows leaves unused) to the shell's window
+  (Progman, whose component posts WM_APP_CATALOG to the menu's: gala_ui
+  hands 0x03A0 to the component). Invariant: the kernel's install
+  state is the one truth for both menus; shasha keeps only the last
+  catalog it read.
 - **When shasha ends** (its process, or its bar removed) the taskbar's
   bar is gone and the desktop places its own again on the same strip
   (`taskbar_back`), so a session is never without a taskbar. A screen
@@ -8528,6 +8552,17 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   opens: <n> program(s): <names>`, `shasha: the start menu closes:
   <why>` (toggled, another window is active, a program started),
   `shasha: start <name> (<path>): pid <p>` or `... refused: <status>`,
+  the catalog's `shasha: <name>: install <id> asked: pid <p>` (or
+  `... refused: status <s>`, or `shasha: <name>: its install is
+  <state>: the click does nothing`), `shasha: catalog: <name> <state>`
+  for each tile whose state changed (every tile on the first read;
+  `failed (gala exit <n>)`), `shasha: the catalog is not read: status
+  <s>`, `shasha: the catalog's change is not passed to the start menu:
+  error <e>`, the kernel's `desktop: the shell's window <hwnd> told of
+  the catalog` for each state change (a bar that moves is posted
+  without a line) or `... not told of the catalog: <status>`, and
+  `desktop: start menu: <name>'s installer (pid <p>) ended before it
+  was watched`,
   `shasha: the Windows key is not the start menu's: RegisterHotKey
   error <e>`, and the start's `desktop: started ...shasha.exe (pid
   <p>)`.
@@ -8957,7 +8992,23 @@ CLI-first.
   - Windows (the taskbar's list: HWND, process id, screen id, flags
     minimized/maximized/active/snapped, the outer rectangle, the title;
     a versioned list header), Programs (the start menu's existing
-    programs).
+    programs), Catalog (the catalog's tiles in the menu's order: name,
+    winget id, state 0 not installed, 1 installed, 2 resolving, 3
+    downloading, 4 installing, 5 failed, 6 gone quiet; the bar's
+    percent and gala's exit code; an installed program is installed
+    whatever its install last said: `action::catalog_state`).
+  - Install with a catalog entry's id marks its tile resolving before
+    `gala install` starts (`desktop::begin_install`) and has the
+    desktop watch the installer's pid (`install_started`), as a click on
+    the kernel menu's tile does; an installer that ended before it was
+    watched is told as gone at once (`installer_registered`), so a tile
+    never waits for a word that will not come. Any other id just
+    installs.
+  - Each change of a catalog tile (an install asked for, its progress,
+    its end, gone quiet, a listing that finds it installed) posts
+    WM_GALA_CATALOG (0x03A0) to the shell's window as the system, after
+    the desktop's lock (`desktop::tell_catalog`); a user-mode shell
+    reads Catalog again.
   - Activate, Minimize, Maximize, Restore, Close, Snap, Move.
   - Wallpaper (the picture is decoded and scaled outside the desktop's
     lock, then swapped in and the screen redrawn; "drawn" is the drawn
@@ -8970,7 +9021,7 @@ CLI-first.
   goes from HWND to the desktop's window and back. Without shasha's
   shell (`desktop::has_shell`: false on a bare desktop, so with
   `profile=server` or no screen) the window actions,
-  Windows, Programs and Wallpaper are STATUS_NOT_SUPPORTED, checked
+  Windows, Programs, Catalog and Wallpaper are STATUS_NOT_SUPPORTED, checked
   before the window, so a server always says so. List output
   that does not fit is cut at a whole entry.
 - **Access**: the window actions pass UIPI against the window's process

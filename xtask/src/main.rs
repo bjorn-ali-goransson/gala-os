@@ -8533,12 +8533,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("conpty_test", "gdi32.dll", "Windows/System32"),
     ("conpty_test", "user/bin/conhost.exe", "Windows/System32"),
     // start_menu: gala's cmd.exe and conhost.exe in System32 as on Windows
-    // (also C:\gala's boot modules: the menu prefers System32), and what
-    // `gala install` loads (advapi32: the registry).
+    // (also C:\gala's boot modules: the menu prefers System32), what
+    // `gala install` loads (advapi32: the registry), and the UI
+    // Automation client start_menu_test is (ole32's CoCreateInstance of
+    // CUIAutomation, in uiautomationcore.dll).
     ("start_menu", "user/bin/cmd.exe", "Windows/System32"),
     ("start_menu", "user/bin/conhost.exe", "Windows/System32"),
     ("start_menu", "advapi32.dll", "Windows/System32"),
     ("start_menu", "bcryptprimitives.dll", "Windows/System32"),
+    ("start_menu", "ole32.dll", "Windows/System32"),
+    ("start_menu", "oleaut32.dll", "Windows/System32"),
+    ("start_menu", "uiautomationcore.dll", "Windows/System32"),
     // launch_test: what the launch verbs start (conhost.exe for console
     // windows, wsl.exe for Linux terminals, in System32 as on Windows) and
     // what the test and `gala install` load.
@@ -15626,10 +15631,6 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
-        // console window) and an install-on-click tile (7-Zip, not
-        // installed: `gala install 7zip.7zip` without a window, its
-        // progress on the tile); START_MENU_SCREEN clicks them.
         name: "desktop_at_boot",
         // A machine booted as the downloadable images are (their system:
         // FULL_SYSTEM_SCENARIOS; no qemu_exit, a console program and
@@ -15652,27 +15653,45 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP SM, SH step 1 part 11: shasha's start menu, its Command
+        // Prompt (gala's cmd.exe in a console window) and an
+        // install-on-click catalog tile (7-Zip, not installed: `gala
+        // install 7zip.7zip` without a window, its state on the tile,
+        // read through ACTION_CATALOG); START_MENU_SCREEN clicks what
+        // start_menu_test finds through UI Automation.
         name: "start_menu",
-        // The kernel's own start menu (shell=desktop: no shasha) until SH
-        // removes it and the test moves to shasha's (ROADMAP SH).
-        cmdline: "qemu_exit shell=desktop wallpaper=night run=start_menu_test.exe",
+        cmdline: "qemu_exit wallpaper=night agent=off run=start_menu_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
+            "start_menu_test: StartButton at",
             "start_menu_test: listed",
-            "desktop: start menu starts Command Prompt: C:\\Windows\\System32\\cmd.exe",
+            "shasha: the start menu opens: ",
+            "start_menu_test: menu open",
+            "shasha: start Command Prompt (C:\\Windows\\System32\\cmd.exe): pid",
+            "shasha: the start menu closes: a program started",
             "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
             "gala's cmd.exe has no interactive prompt yet",
             "start_menu_test: command prompt window",
-            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip \
-             (no window)",
+            "start_menu_test: catalog shown",
+            // The tile's click: the install asked for, as the caller,
+            // without a window, and registered with the desktop so a
+            // gala.exe that dies without a word turns the tile "lost".
             "desktop: started C:\\gala\\gala.exe (pid",
+            "desktop: pid ",
+            "asks for install \"7zip.7zip\" (flags 0x0): started",
+            "shasha: 7-Zip: install 7zip.7zip asked: pid",
             "desktop: start menu: install 7zip.7zip: resolving (0%)",
+            "desktop: the shell's window ",
+            " told of the catalog",
+            "shasha: catalog: 7-Zip resolving",
             // Offline (no network card, no winhttp.dll): gala says why in
             // the log, which is where a windowless install's output goes,
-            // and the tile's bar turns red (the screen check).
+            // and the tile says the install failed.
             "gala: source https://github.com/microsoft/winget-pkgs: listing",
             "desktop: start menu: install 7zip.7zip: failed (gala exit 4)",
             "desktop: start menu: 7-Zip: The install failed.",
+            "shasha: catalog: 7-Zip failed (gala exit 4)",
+            "start_menu_test: install failed shown",
             "start_menu_test: no install window",
             "xtask: screen ok",
             "start_menu_test: ok",
@@ -25267,95 +25286,34 @@ const DESKTOP_AT_BOOT_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// start_menu_test's clicks, on what it found through UI Automation:
+/// the Start button, the Command Prompt's tile, the Start button again
+/// and 7-Zip's catalog tile. What they did is the test's to check (the
+/// menu's elements, the console windows) and the log's (the install).
 const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
-    marker: "start_menu_test: ready",
+    marker: "start_menu_test: listed",
     steps: &[
         ScreenStep {
-            after: "",
-            // To the start button (640, 776: alone on the taskbar), a
-            // click: the menu.
-            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
-            pixels: &[
-                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
-                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // Command Prompt
-                PixelCheck::AnyIn(372, 264, 85, 14, 0x1b1b1b), // "Command"
-                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // Hello window
-                PixelCheck::AnyIn(598, 248, 12, 12, 0x005fb8), // Office's badge
-                PixelCheck::AnyIn(550, 264, 85, 30, 0x1b1b1b), // "Microsoft Office"
-                PixelCheck::AnyIn(865, 248, 12, 12, 0x005fb8), // Python's badge
-                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
-            ],
-        },
-        ScreenStep {
-            after: "",
-            // The Command Prompt's tile (414, 242), a click: cmd.exe in
-            // a console window.
-            input: &[
-                "mouse_move -226 -255",
-                "mouse_move 0 -255",
-                "mouse_move 0 -24",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
+            after: "start_menu_test: listed",
+            input: &["click_on start_menu_test: StartButton"],
             pixels: &[],
         },
         ScreenStep {
-            after: "desktop: shown window 'cmd.exe'",
-            // conhost's window at (60, 60): Campbell's background, and
-            // what cmd said (its first line) in Campbell's grey.
-            input: &[],
-            pixels: &[
-                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
-                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
-            ],
+            after: "start_menu_test: menu open",
+            input: &["click_on start_menu_test: CommandPrompt"],
+            pixels: &[],
         },
         ScreenStep {
-            after: "",
-            // Back to the start button (615, 776, beside the console
-            // window's button now), the menu again: the Command
-            // Prompt is recent now; 7-Zip still has its badge.
-            input: &[
-                "mouse_move 201 255",
-                "mouse_move 0 255",
-                "mouse_move 0 24",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
-            pixels: &[
-                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
-                PixelCheck::AnyIn(392, 596, 32, 32, 0x333333), // recent: Command Prompt
-            ],
-        },
-        ScreenStep {
-            // After the line the test program prints when it has the
-            // Command Prompt's window, so that its watch for a second
-            // console window covers this click.
             after: "start_menu_test: command prompt window",
-            // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
-            // without a window, the tile showing where the install is.
-            input: &[
-                "mouse_move -23 -255",
-                "mouse_move 0 -195",
-                "mouse_button 1",
-                "mouse_button 0",
-            ],
+            input: &["click_on start_menu_test: StartButton"],
             pixels: &[],
         },
         ScreenStep {
-            after: "desktop: start menu: install 7zip.7zip: failed",
-            // 7-Zip's tile has its bar, red (the install failed:
-            // offline), in the row under the name: the tile is
-            // (550, 300, 85, 80), so the bar is at (562, 368), 61 wide
-            // and 4 high (kernel/src/nt/desktop). The bar is drawn by
-            // the menu, so it is also what says the menu stayed open on
-            // the click; the wallpaper is there otherwise.
-            //
-            // That the install ended is told in the log (the line
-            // "desktop: start menu: 7-Zip: The install failed.");
-            // no card: the notification area is shasha's.
-            input: &[],
-            pixels: &[PixelCheck::AnyIn(562, 368, 61, 4, 0xc42b1c)],
+            // After the line the test prints once the tile reads "Not
+            // installed", so that its watch covers the click.
+            after: "start_menu_test: catalog shown",
+            input: &["click_on start_menu_test: SevenZip"],
+            pixels: &[],
         },
     ],
 };

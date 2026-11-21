@@ -29,8 +29,8 @@ mod menu;
 pub mod tray;
 pub mod wallpaper;
 pub use menu::{
-    MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Program, StartMenu, TILES_IN_ROW, parse_programs,
-    program_id,
+    CATALOG_ENTRY, CatalogEntry, CatalogState, MENU_GAP, MENU_HEIGHT, MENU_WIDTH, MenuMsg, Program,
+    StartMenu, TILES_IN_ROW, parse_catalog, parse_programs, program_id, state_text,
 };
 
 /// The taskbar's height (the desktop's own taskbar's, TASKBAR).
