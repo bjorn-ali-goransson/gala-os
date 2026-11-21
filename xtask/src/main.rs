@@ -13403,6 +13403,41 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // What a program asked the registry for, which the ledger
+        // cannot say: it keeps one row an absent key and nothing at all
+        // about values, so the value a program read last before it gave
+        // up is in the stream or nowhere.
+        "events_registry",
+        &[
+            // A read that found its value and one that found none: the
+            // difference between them is the type and the size, which an
+            // empty value has and an absent one has not.
+            r#""ev":"value","pid":4,"key":"#,
+            r#""name":"CurrentBuild","kind":1,"bytes":"#,
+            r#""name":"NoSuchValue","status":3221225524"#,
+            // An enumerate says the index it asked for, the name being
+            // that index's answer; one past the last value has no name
+            // to say (STATUS_NO_MORE_ENTRIES, which is a warning and not
+            // an error, so the status alone would read as success).
+            r#""index":1,"name":"num","kind":4,"bytes":4,"status":0"#,
+            r#""index":7,"name":"","status":2147483674"#,
+            // A value written, the default value among them: its name is
+            // empty, and the event must still say which key and what.
+            r#""ev":"value set","pid":4,"#,
+            r#""name":"num","kind":4,"bytes":4,"status":0"#,
+            r#""name":"","kind":1,"bytes":"#,
+            // A value deleted, and the same name deleted again.
+            r#""ev":"value deleted","pid":4,"#,
+            r#""name":"bin","status":3221225524"#,
+            // A key created rather than opened leaves the `key` event
+            // an open leaves -- this one refused, a non-volatile key
+            // asked for under a volatile one, which is a status no open
+            // could have returned and so is the create's own event.
+            r#""ev":"key","pid":4,"base":"#,
+            r#""path":"stable","status":3221225857"#,
+        ],
+    ),
+    (
         // Which thread a recorded call belongs to, which is the `by` of
         // its line (the thread whose work wrote the event; for a
         // recorded call, the thread that made it). lock_test holds a
@@ -15156,6 +15191,16 @@ const BASE_SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=syscall run=object_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["object_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // What a program asked the registry for and what it got, named
+        // (see EVENT_EXPECT): the values registry_test reads, the one it
+        // asks for under a key that has no such value, the keys it
+        // creates and the values it writes.
+        name: "events_registry",
+        cmdline: "qemu_exit events=file run=registry_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["registry_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // `events_from=` starts the stream late (here at once, after the
@@ -21143,6 +21188,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
     ("events_object", "object_test"),
+    ("events_registry", "registry_test"),
     ("import_threads", "lock_test"),
     ("import_answer_text", "import_strings_test"),
     ("import_answer_bytes", "import_strings_test"),
