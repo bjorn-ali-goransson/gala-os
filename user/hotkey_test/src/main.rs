@@ -1,6 +1,8 @@
-//! Hot keys (ROADMAP SH step 1, part 3): RegisterHotKey and
+//! Hot keys (ROADMAP SH step 1, parts 3 and 11): RegisterHotKey and
 //! UnregisterHotKey as Microsoft documents them, and the shell's keys,
-//! which only the shell may take. Expected results are Windows':
+//! which only the shell holds. It runs as a program of a session whose
+//! shell is shasha.exe, as a Windows program runs beside Explorer.
+//! Expected results are Windows':
 //!
 //! - RegisterHotKey(NULL, id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'K')
 //!   succeeds; the same keys again (whatever MOD_NOREPEAT) fail with
@@ -9,18 +11,21 @@
 //! - Pressing the keys posts WM_HOTKEY to the registering thread (hwnd
 //!   NULL): wParam the id, lParam MAKELONG(the modifiers without
 //!   MOD_NOREPEAT, the virtual key).
-//! - Win+E is the shell's (Windows' explorer holds it), and Win+Left
-//!   Snap's: another program's RegisterHotKey fails with
-//!   ERROR_HOTKEY_ALREADY_REGISTERED.
-//! - SetShellWindow makes a window the shell's (once per desktop:
-//!   another call fails); GetShellWindow returns it. The shell may then
-//!   take Win+E and the Windows key alone ((MOD_WIN, VK_LWIN): gala's
-//!   way of offering it), which come to its window as WM_HOTKEY instead
-//!   of the kernel's built-in File Explorer and start menu. Win+Left
-//!   stays Snap's, even for the shell.
+//! - The shell's window is another process's (GetShellWindow: the
+//!   shell's desktop window, class `Progman`), and SetShellWindow, once
+//!   per desktop, fails for this one.
+//! - Win+E is the shell's (Explorer holds it), and so is the Windows key
+//!   alone ((MOD_WIN, VK_LWIN): gala's way of offering it); Win+Left is
+//!   Snap's: this program's RegisterHotKey fails with
+//!   ERROR_HOTKEY_ALREADY_REGISTERED for each.
+//! - Pressed, Win+E opens a File Explorer window (`CabinetWClass`) and
+//!   the Windows key the shell's start menu (its "Start" window shown);
+//!   neither reaches this program.
 //!
-//! The scenario presses the keys after `registered` and `shell keys`.
-//! Prints `hotkey_test: ok`, or `hotkey_test: check N got X (line L)` and
+//! The shell is ready, its keys taken, once its desktop window shows
+//! (shasha shows it last). The scenario presses the keys after
+//! `registered`, `shell keys` and `file explorer`. Prints
+//! `hotkey_test: ok`, or `hotkey_test: check N got X (line L)` and
 //! exits with N.
 
 #![no_std]
@@ -44,6 +49,7 @@ unsafe extern "system" {
     fn SetLastError(e: u32);
     fn Sleep(ms: u32);
     fn GetTickCount64() -> u64;
+    fn GetCurrentProcessId() -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -74,6 +80,11 @@ unsafe extern "system" {
     fn UnregisterHotKey(hwnd: Handle, id: i32) -> i32;
     fn SetShellWindow(hwnd: Handle) -> i32;
     fn GetShellWindow() -> Handle;
+    fn IsWindowVisible(hwnd: Handle) -> i32;
+    fn GetWindowThreadProcessId(hwnd: Handle, pid: *mut u32) -> u32;
+    fn GetClassNameW(hwnd: Handle, buf: *mut u16, n: i32) -> i32;
+    fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+    fn PostMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[repr(C)]
@@ -104,6 +115,7 @@ struct Msg {
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const SW_SHOW: i32 = 5;
 const WM_HOTKEY: u32 = 0x0312;
+const WM_CLOSE: u32 = 0x0010;
 const MOD_ALT: u32 = 0x1;
 const MOD_CONTROL: u32 = 0x2;
 const MOD_WIN: u32 = 0x8;
@@ -293,11 +305,51 @@ fn refused(
     }
 }
 
+/// Dispatches messages until `cond` holds or `ms` pass: whether it held.
+fn wait_for(ms: u64, mut cond: impl FnMut() -> bool) -> bool {
+    // SAFETY: plain calls.
+    let end = unsafe { GetTickCount64() } + ms;
+    loop {
+        wait_hot_key(0);
+        if cond() {
+            return true;
+        }
+        // SAFETY: plain calls.
+        if unsafe { GetTickCount64() } >= end {
+            return false;
+        }
+        // SAFETY: plain call.
+        unsafe { Sleep(10) };
+    }
+}
+
+/// Window `hwnd`'s process.
+fn pid_of(hwnd: Handle) -> u32 {
+    let mut pid = 0;
+    // SAFETY: our DWORD.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    pid
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let class = W::new("HotKeyTest");
     // SAFETY: plain calls on our class and window.
     unsafe {
+        // The shell: another process's desktop window, shown once its
+        // keys are taken.
+        let ready = wait_for(600_000, || {
+            let s = GetShellWindow();
+            s != 0 && IsWindowVisible(s) != 0
+        });
+        c.ok(ready, 0)?;
+        let shell = GetShellWindow();
+        let shell_pid = pid_of(shell);
+        c.ok(shell_pid != 0 && shell_pid != GetCurrentProcessId(), i64::from(shell_pid))?;
+        let mut name = [0u16; 16];
+        let n = GetClassNameW(shell, name.as_mut_ptr(), 16);
+        c.ok(name[..n.clamp(0, 16) as usize] == W::new("Progman").0[..7], i64::from(n))?;
+
         let wc = WndClass {
             style: 0,
             proc_,
@@ -344,8 +396,12 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(i64::from(UnregisterHotKey(0, 99)), 0)?;
         c.eq(i64::from(GetLastError()), i64::from(ERROR_HOTKEY_NOT_REGISTERED))?;
+        // The shell's window is once per desktop: not this program's.
+        c.eq(i64::from(SetShellWindow(w)), 0)?;
+        c.eq(GetShellWindow() as i64, shell as i64)?;
         // The shell's keys and Snap's are not a program's to take.
         refused(&mut c, w, 3, MOD_WIN, u32::from(b'E'), ERROR_HOTKEY_ALREADY_REGISTERED)?;
+        refused(&mut c, w, 4, MOD_WIN, VK_LWIN, ERROR_HOTKEY_ALREADY_REGISTERED)?;
         refused(&mut c, w, 5, MOD_WIN, VK_LEFT, ERROR_HOTKEY_ALREADY_REGISTERED)?;
         clear();
         say(b"registered");
@@ -359,32 +415,31 @@ fn run() -> Result<(), u32> {
         say(b"hot key 1");
         c.eq(i64::from(UnregisterHotKey(0, 1)), 1)?;
 
-        // The shell's window: once per desktop.
-        c.eq(GetShellWindow() as i64, 0)?;
-        c.eq(i64::from(SetShellWindow(w)), 1)?;
-        c.eq(GetShellWindow() as i64, w as i64)?;
-        c.eq(i64::from(SetShellWindow(w)), 0)?;
-        c.eq(i64::from(RegisterHotKey(w, 3, MOD_WIN, u32::from(b'E'))), 1)?;
-        c.eq(i64::from(RegisterHotKey(w, 4, MOD_WIN, VK_LWIN)), 1)?;
-        refused(&mut c, w, 5, MOD_WIN, VK_LEFT, ERROR_HOTKEY_ALREADY_REGISTERED)?;
+        // The shell's keys do what the shell does with them: Win+E a
+        // File Explorer window ...
         clear();
         say(b"shell keys");
-        c.ok(wait_hot_key(60_000), 0)?;
-        c.eq(HOT_HWND.load(Ordering::Relaxed) as i64, w as i64 + 1)?;
-        c.eq(HOT_ID.load(Ordering::Relaxed) as i64, 3)?;
-        c.eq(HOT_LPARAM.load(Ordering::Relaxed) as i64, make_lparam(MOD_WIN, u32::from(b'E')))?;
-        say(b"hot key 3");
-        clear();
-        c.ok(wait_hot_key(60_000), 0)?;
-        c.eq(HOT_HWND.load(Ordering::Relaxed) as i64, w as i64 + 1)?;
-        c.eq(HOT_ID.load(Ordering::Relaxed) as i64, 4)?;
-        c.eq(HOT_LPARAM.load(Ordering::Relaxed) as i64, make_lparam(MOD_WIN, VK_LWIN))?;
-        say(b"hot key 4");
-        c.eq(i64::from(UnregisterHotKey(w, 3)), 1)?;
-        c.eq(i64::from(UnregisterHotKey(w, 4)), 1)?;
+        let cabinet = W::new("CabinetWClass");
+        let explorer = || FindWindowW(cabinet.ptr(), core::ptr::null());
+        c.ok(wait_for(600_000, || explorer() != 0), 0)?;
+        let e = explorer();
+        c.ok(pid_of(e) != GetCurrentProcessId(), i64::from(pid_of(e)))?;
+        c.eq(HOT_HWND.load(Ordering::Relaxed) as i64, 0)?;
+        c.ok(PostMessageW(e, WM_CLOSE, 0, 0) != 0, 0)?;
+        c.ok(wait_for(600_000, || explorer() == 0), 0)?;
+        say(b"file explorer");
+        // ... and the Windows key the shell's start menu.
+        let start = W::new("Start");
+        let menu = || {
+            let m = FindWindowW(core::ptr::null(), start.ptr());
+            m != 0 && pid_of(m) == shell_pid && IsWindowVisible(m) != 0
+        };
+        c.ok(wait_for(600_000, menu), 0)?;
+        c.eq(HOT_HWND.load(Ordering::Relaxed) as i64, 0)?;
+        say(b"start menu");
         c.ok(DestroyWindow(w) != 0, 0)?;
-        // The shell's window went with it.
-        c.eq(GetShellWindow() as i64, 0)?;
+        // The shell's window is the shell's still.
+        c.eq(GetShellWindow() as i64, shell as i64)?;
     }
     Ok(())
 }

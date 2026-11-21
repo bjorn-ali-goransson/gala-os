@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 
 use gala_ui::{Align, Justify, Node, button, row, text};
 
+pub mod keys;
 pub mod linux;
 mod menu;
 pub mod tray;

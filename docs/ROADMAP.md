@@ -832,10 +832,10 @@ shell part) leaves it.
       events. Test: `linux_hwnd_test` (ARCHITECTURE "Linux windows in
       the window registry").
    3. Done: the shell's keys: RegisterHotKey/UnregisterHotKey deliver
-      WM_HOTKEY; SetShellWindow's process alone may take Win+E,
-      Ctrl+Shift+Esc and the Windows key alone (gala's (MOD_WIN,
-      VK_LWIN)), and the desktop's built-in actions step aside while
-      it holds them; Win+arrows stay the kernel's. Test: `hotkey_test`
+      WM_HOTKEY; SetShellWindow's process alone may take Win+E and the
+      Windows key alone (gala's (MOD_WIN, VK_LWIN)), and the desktop's
+      built-in actions step aside while it holds them; Win+arrows and
+      Ctrl+Shift+Esc stay the system's. Test: `hotkey_test`
       (ARCHITECTURE "Hot keys", "The shell's window and the shell's
       keys").
    4. Done: launches: what the start menu starts (Linux distributions,
@@ -925,8 +925,7 @@ shell part) leaves it.
       event `present` shows each copy. Tests: every UEFI scenario now
       boots with it (`desktop_at_boot` checks shasha's taskbar, wallpaper
       and start menu: Windows key, Esc). Not yet: the task buttons'
-      icons; `hotkey_test`, which plays the shell, runs with
-      `shell=desktop` until it is removed.
+      icons.
    11. The kernel's shell code removed, its scenarios moved to shasha.
       Done: the notification area. The kernel's tray (`desktop/tray.rs`,
       the taskbar's icons, tips and balloon), the GalaTrayIcon syscall
@@ -979,9 +978,26 @@ shell part) leaves it.
       section's choices (dismissing a suggestion, collapsing and hiding
       the section, which LinuxList's dismissals honour but shasha
       cannot make) and the tiles' icons.
-      Next: the shell keys (`hotkey_test`); then the kernel's menu, taskbar, clock and
-      wallpaper (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and
-      most of `mod.rs`) and `shell=desktop` go.
+      Done: the shell keys. The shell holds Win (the start menu) and
+      Win+E (File Explorer): shasha registers both on its Progman
+      window once its taskbar and menu exist, then shows that window,
+      so a visible shell window means its keys are taken. Win+E starts
+      `<windows>\explorer.exe` (GetWindowsDirectoryW, ACTION_START);
+      the Windows key toggles shasha's menu. The system keeps
+      Win+arrows (Snap) and Ctrl+Shift+Esc (Task Manager), which no
+      program may register, so they work whether a shell runs or not.
+      The kernel desktop's own Windows-key menu and Win+E step aside
+      while a hot key holds them (`Windows::holds_hot_key`) and act
+      only under `shell=desktop`. Test: `hotkey_test` now runs beside
+      shasha (the shell window is shasha's Progman; the program is
+      refused the shell's keys and SetShellWindow; Win+E reaches
+      shasha, which opens File Explorer; the Windows key opens
+      shasha's menu; neither reaches the program); `explorer` and
+      `explorer_agent` press Win+E once shasha has taken it.
+      Next: the kernel's menu, taskbar, clock and wallpaper
+      (`nt/desktop`'s `paint.rs`, `linux.rs`, `pkg.rs` and most of
+      `mod.rs`), its Windows-key and Win+E fallbacks, and
+      `shell=desktop` go.
 2. Supervision: the session (RS B4's session manager, the kernel until
    then) restarts a shell that ends, with its exit status and crash
    record in the event stream; windows stay usable meanwhile (Win+arrows

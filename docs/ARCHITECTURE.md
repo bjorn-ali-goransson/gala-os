@@ -8407,8 +8407,9 @@ user32's SPI_GET/SETDESKWALLPAPER (`user/user32/src/spi.rs`),
 `AppBars::hand_taskbar` (`desktop/appbar.rs`), `Desktop::own_taskbar`
 and `taskbar_back` (`desktop/mod.rs`), the shell window check in
 `gala_app_bar` (`syscalls.rs`), `action::start_shell` and the
-`shell=` option (`lib.rs`). Test: `shasha_test`, screen scenario
-`shasha` (ROADMAP SH step 1).
+`shell=` option (`lib.rs`), the shell's keys (`user/shasha/src/keys.rs`,
+`Windows::holds_hot_key`). Tests: `shasha_test`, screen scenario
+`shasha`; `hotkey_test` (the shell's keys) (ROADMAP SH step 1).
 
 - **Started**: by default (or `shell=shasha`) the kernel starts
   `C:\Windows\System32\shasha.exe` with the session, under the boot
@@ -8493,8 +8494,7 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   `NoMatch` says when none does). A tile's click starts the program
   (ACTION_START, the path quoted, LAUNCH_CONSOLE_WINDOW) and closes
   the menu. The Start button (a posted WM_APP message) and the Windows
-  key (RegisterHotKey MOD_WIN+VK_LWIN on the menu's window, a key only
-  the shell's process may take) toggle it; opening clears the search,
+  key (the shell's key, below) toggle it; opening clears the search,
   shows the window, asks for the foreground and focuses `Search`
   (gala_ui's `win::focus`). WM_ACTIVATE with WA_INACTIVE while shown
   (another window became active) closes it, as Windows' does, and so
@@ -8547,6 +8547,24 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   (Progman passes the wparam on with WM_APP_CATALOG). Limits: no
   dismiss cross, collapse or hide (the kernel menu's choices; LinuxList
   leaves out the suggestions the user dismissed there), no icons.
+- **The shell's keys** (ROADMAP SH step 1, part 11; `shasha::keys`,
+  host tests there): the keys Windows' shell answers, registered with
+  RegisterHotKey for the desktop window (Progman), which only the
+  shell's process may (`window::SHELL_KEYS`): the Windows key alone
+  ((MOD_WIN, VK_LWIN), gala's hot key for it) toggles the start menu
+  (Progman posts the menu's window WM_APP_TOGGLE, as the Start button
+  does), and Win+E starts File Explorer (ACTION_START with
+  `explorer.exe` in the Windows directory, GetWindowsDirectoryW, where
+  Windows has it). They are shasha's last step at the start, after
+  every window they act on is made, and the desktop window is shown
+  after them: a shown GetShellWindow is the sign that the shell is
+  ready and holds its keys, which a program that presses them goes by
+  (`hotkey_test`; screen checks wait for `shasha: the shell's keys:`).
+  While shasha holds them the kernel desktop's own actions for them
+  (its start menu, its File Explorer) do not run, and the Windows key's
+  release no longer gathers the kernel menu's programs. Win+arrows
+  (Snap) and Ctrl+Shift+Esc (Task Manager) are the system's, not the
+  shell's: they work with no shell or a hung one, as on Windows.
 - **When shasha ends** (its process, or its bar removed) the taskbar's
   bar is gone and the desktop places its own again on the same strip
   (`taskbar_back`), so a session is never without a taskbar. A screen
@@ -8600,8 +8618,14 @@ and `taskbar_back` (`desktop/mod.rs`), the shell window check in
   passed to the start menu: error <e>`, the kernel's `desktop: the
   shell's window <hwnd> told of the Linux section` for each state change
   (a bar that moves is posted without a line),
-  `shasha: the Windows key is not the start menu's: RegisterHotKey
-  error <e>`, and the start's `desktop: started ...shasha.exe (pid
+  `shasha: the shell's keys: Win (the start menu), Win+E (File
+  Explorer)` (or `shasha: the shell's key <key> (<what>) is not taken:
+  RegisterHotKey error <e>` for each refused, `... none taken`),
+  `shasha: Win+E: start File Explorer (<path>): pid <p>` (or `...
+  refused: status <s>`, `shasha: Win+E: no File Explorer:
+  GetWindowsDirectoryW error <e>`), `shasha: Win: the start menu is not
+  there`, with the kernel's `desktop: hot key <n> (<keys>) to pid <p>`
+  for each, and the start's `desktop: started ...shasha.exe (pid
   <p>)`.
 
 #### The agent panel
@@ -8817,8 +8841,9 @@ the program always sees WM_SIZE/WM_MOVE.
   up still reaches the active window, as on Windows. MOD_NOREPEAT
   ignores a held key's repeats (`held_hot`). Rules: the window is the
   calling thread's (else ERROR_WINDOW_OF_OTHER_THREAD); keys are held
-  once, by anyone (ERROR_HOTKEY_ALREADY_REGISTERED); Win+arrows are
-  the system's (Snap) and never registered; at most 256 hot keys per
+  once, by anyone (ERROR_HOTKEY_ALREADY_REGISTERED); Win+arrows (Snap)
+  and Ctrl+Shift+Esc (Task Manager) are the system's and never
+  registered; at most 256 hot keys per
   session. A window's, thread's or process's end takes its hot keys.
   Logged: `desktop: pid P registers hot key N (Ctrl+Alt+K) to window
   H`, its refusal with the status, `desktop: hot key N (combo) to pid
@@ -8828,13 +8853,21 @@ the program always sees WM_SIZE/WM_MOVE.
   (a second fails, as on Windows; GetShellWindow returns it, NULL
   without one); the slot empties with the window or its process. Only
   the shell's process may register the desktop's own keys
-  (`window::SHELL_KEYS`): Win+E, Ctrl+Shift+Esc and the Windows key
-  alone. Windows has no hot key for the bare Windows key; gala's
-  convention is (MOD_WIN, VK_LWIN) (or VK_RWIN), delivered when the key
-  goes up with no other key since it went down. While a shell holds
-  them the desktop's built-in actions (File Explorer, Task Manager,
-  the start menu) don't run; while none does, they do (the kernel's
-  shell until `shasha.exe`, ROADMAP SH). Test: `hotkey_test`.
+  (`window::SHELL_KEYS`): Win+E and the Windows key alone. Windows has
+  no hot key for the bare Windows key; gala's convention is (MOD_WIN,
+  VK_LWIN) (or VK_RWIN), delivered when the key goes up with no other
+  key since it went down. shasha holds them ("The user-mode shell", the
+  shell's keys). While a shell holds them the desktop's built-in actions
+  (File Explorer, the start menu) don't run, and the Windows key's
+  release does not gather the desktop menu's lists
+  (`Windows::holds_hot_key`); while none does, they do (the kernel's
+  shell, `shell=desktop`, until it goes: ROADMAP SH step 1, part 11).
+  The system keeps Win+arrows (Snap) and Ctrl+Shift+Esc (Task Manager)
+  for itself (`window::system_key`): nobody registers them, the shell
+  neither, so they work whether a shell runs or not (ROADMAP SH step 3).
+  Test: `hotkey_test`, a program beside shasha (the shell's window and
+  keys refused to it; shasha's Win+E and Windows key pressed and their
+  windows seen).
 - **Capture** (GalaWindowCapture): the window gets every mouse message
   in its client coordinates (negative outside it) wherever the pointer
   is; captions, the taskbar and the start menu get nothing meanwhile.
@@ -15509,7 +15542,8 @@ context menu, the start menu's tile). Test: `taskmgr_test`, scenario
     `cat`'s CPU cell background above the floor its line rests on.
 - **Opening it** (`nt::desktop`, `TASK_MANAGER`): the start menu's tile
   (a PROGRAMS entry listed when System32 has it), Ctrl+Shift+Esc (the
-  desktop tracks Ctrl and Shift; no program sees that Esc; logged
+  system's key, not the shell's: the desktop tracks Ctrl and Shift, no
+  program sees that Esc nor may register it; logged
   `desktop: Ctrl+Shift+Esc: Task Manager`) and the taskbar's context
   menu (a right click on its free space: a card above the taskbar with
   "Task Manager", on a light card; any press closes it;
@@ -15533,7 +15567,7 @@ File Explorer, with the WSL distributions beside the drives. Code:
 shellns`), `user/shell32/src/namespace.rs` (IShellFolder, IShellItem and
 the item ID list functions), `user/explorer` (gala's `explorer.exe`: the
 library is the view's model and the window's view, `cargo test -p
-explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu's tile). Test:
+explorer`; `main.rs` the window's program), shasha (Win+E), `nt::desktop` (the start menu's tile). Test:
 `explorer_test`, scenario `explorer` (screen check `EXPLORER_SCREEN`).
 
 ### The namespace (step 1)
@@ -15699,9 +15733,11 @@ explorer`; `main.rs` the window's program), `nt::desktop` (Win+E, the start menu
   the window. `change_ui.rs` lays it out with gdi32 (`gala_ui::win::Gdi`),
   paints it and routes clicks through `gala_ui::click` to the flow,
   logging `explorer: change: click <id>`.
-- **Win+E** (`nt::desktop`, `FILE_EXPLORER`): the desktop starts File
-  Explorer's PROGRAMS entry as the start menu's tile does (logged
-  `desktop: Win+E: File Explorer`); no program sees the E.
+- **Win+E** (the shell's key: shasha, "The user-mode shell"): shasha
+  starts `%SystemRoot%\explorer.exe` (logged `shasha: Win+E: start File
+  Explorer (<path>): pid <p>`); no other program sees the E. With
+  `shell=desktop` the kernel desktop starts File Explorer's PROGRAMS
+  entry instead (`desktop: Win+E: File Explorer`), until that shell goes.
 - **Its place**: the window opens at 100,40, 1080 x 700, moved and if
   need be narrowed into the work area (`explorer::fit` on
   SPI_GETWORKAREA), so it opens beside an app bar such as the docked

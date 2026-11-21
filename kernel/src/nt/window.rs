@@ -226,23 +226,23 @@ const VK_LWIN: u32 = 0x5b;
 const VK_RWIN: u32 = 0x5c;
 const VK_ESCAPE: u32 = 0x1b;
 
-/// The desktop's own keys, which only the shell (SetShellWindow's
-/// process) may register: Win+E (File Explorer), the Windows key alone
-/// (the start menu: gala's convention is (MOD_WIN, VK_LWIN) for its
-/// release with no other key, as Windows has no hot key for it) and
-/// Ctrl+Shift+Esc (Task Manager). While nobody holds them the desktop
-/// does what they do itself.
-pub const SHELL_KEYS: [(u32, u32); 4] = [
-    (MOD_WIN, b'E' as u32),
-    (MOD_WIN, VK_LWIN),
-    (MOD_WIN, VK_RWIN),
-    (MOD_CONTROL | MOD_SHIFT, VK_ESCAPE),
-];
+/// The shell's keys, which only the shell (SetShellWindow's process) may
+/// register: Win+E (File Explorer) and the Windows key alone (the start
+/// menu: gala's convention is (MOD_WIN, VK_LWIN) for its release with no
+/// other key, as Windows has no hot key for it). While nobody holds them
+/// the desktop does what they do itself (the kernel's shell, until it
+/// goes: ROADMAP SH step 1, part 11).
+pub const SHELL_KEYS: [(u32, u32); 3] =
+    [(MOD_WIN, b'E' as u32), (MOD_WIN, VK_LWIN), (MOD_WIN, VK_RWIN)];
 
-/// Whether (`modifiers`, `vk`) is a key the system keeps for itself, as
-/// Windows does Win+arrows (Snap): no process registers it.
+/// Whether (`modifiers`, `vk`) is a key the system keeps for itself: no
+/// process registers it, the shell neither. Win+arrows (Snap) and
+/// Ctrl+Shift+Esc (Task Manager) work whether a shell runs or not, as
+/// Task Manager opens on Windows with Explorer gone (ROADMAP SH step 3,
+/// what must not depend on the shell).
 pub fn system_key(modifiers: u32, vk: u32) -> bool {
-    modifiers == MOD_WIN && (0x25..=0x28).contains(&vk)
+    (modifiers == MOD_WIN && (0x25..=0x28).contains(&vk))
+        || (modifiers == (MOD_CONTROL | MOD_SHIFT) && vk == VK_ESCAPE)
 }
 
 /// A hot key's keys as the log names them: "Ctrl+Alt+K", "Win+E", "Win"
@@ -1032,6 +1032,12 @@ impl Windows {
         r.hot_keys.try_push(key).map_err(|_| NtStatus::NO_MEMORY)
     }
 
+    /// Whether a hot key holds (`modifiers`, `vk`): the desktop's own
+    /// action for those keys will not run.
+    pub fn holds_hot_key(&self, modifiers: u32, vk: u32) -> bool {
+        self.0.lock().hot_keys.iter().any(|h| h.modifiers == modifiers && h.vk == vk)
+    }
+
     /// UnregisterHotKey: hot key `id` of `hwnd` (0: thread `tid`'s);
     /// STATUS_NOT_FOUND when it has none (ERROR_HOTKEY_NOT_REGISTERED).
     pub fn unregister_hot_key(
@@ -1339,9 +1345,14 @@ mod tests {
         reg.set_shell_window(5, w).unwrap();
         assert_eq!(reg.set_shell_window(6, other), taken);
         assert_eq!(reg.shell_window(), w);
+        assert!(!reg.holds_hot_key(MOD_WIN, 0x5b));
         reg.register_hot_key(hot(5, 50, w, 3, MOD_WIN, u32::from(b'E'))).unwrap();
         reg.register_hot_key(hot(5, 50, w, 4, MOD_WIN, 0x5b)).unwrap();
+        assert!(reg.holds_hot_key(MOD_WIN, 0x5b));
         assert_eq!(reg.register_hot_key(hot(5, 50, w, 5, MOD_WIN, 0x26)), taken);
+        // Task Manager's keys are the system's, even for the shell.
+        let ctrl_shift = MOD_CONTROL | MOD_SHIFT;
+        assert_eq!(reg.register_hot_key(hot(5, 50, w, 5, ctrl_shift, 0x1b)), taken);
         // A repeat of a MOD_NOREPEAT hot key is taken, and not posted.
         let quiet = HotKey { norepeat: true, ..hot(5, 50, w, 6, MOD_ALT, 0x70) };
         reg.register_hot_key(quiet).unwrap();

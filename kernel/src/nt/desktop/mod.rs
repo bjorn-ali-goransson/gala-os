@@ -1348,7 +1348,8 @@ impl Desktop {
             self.shift = down;
         }
         // Ctrl+Shift+Esc: Task Manager, whatever has the focus (no program
-        // sees the Esc).
+        // sees the Esc), the system's whether a shell runs or not
+        // (`window::system_key`).
         if vk == 0x1b && self.ctrl && self.shift {
             if down {
                 self.close_menu();
@@ -5018,10 +5019,13 @@ fn key_on(
     extended: bool,
     down: bool,
 ) -> Option<Launch> {
-    // The Windows key's release may open the start menu: which programs
-    // exist and what the Linux section lists (outside the desktop's lock:
-    // the file system, the registry).
-    let opens = (vk == 0x5b || vk == 0x5c) && !down;
+    // The Windows key's release may open the desktop's own start menu:
+    // which programs exist and what the Linux section lists (outside the
+    // desktop's lock: the file system, the registry), unless a hot key
+    // (the shell's) holds the key and the desktop's menu stays shut.
+    let opens = (vk == 0x5b || vk == 0x5c)
+        && !down
+        && !windows.holds_hot_key(crate::nt::window::MOD_WIN, u32::from(vk));
     let (available, n) = if opens { available_programs() } else { NO_TILES };
     let listing = if opens { Some(linux_listing()) } else { None };
     let mut d = shell.d.lock();

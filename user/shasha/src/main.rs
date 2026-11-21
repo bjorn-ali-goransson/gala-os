@@ -19,9 +19,8 @@
 //!   for ACTION_ACTIVATE or ACTION_MINIMIZE (`Taskbar::click`).
 //! - **The start menu** (part 7): a second window, "Start" (a popup,
 //!   topmost, made hidden), centred above the strip. The Start button
-//!   and the Windows key alone (RegisterHotKey (MOD_WIN, VK_LWIN), gala's
-//!   hot key for it, which only the shell's process may take) show it
-//!   if hidden, else hide it. Shown, it lists the desktop's installed
+//!   and the Windows key alone (the shell's key, below) show it if
+//!   hidden, else hide it. Shown, it lists the desktop's installed
 //!   programs again (ACTION_PROGRAMS), clears the search, comes to the
 //!   front and puts the keyboard focus on the search. A tile's click
 //!   starts its program (ACTION_START, a console program in a console
@@ -60,6 +59,13 @@
 //!   post to it fails. A balloon (NIF_INFO) is a third window
 //!   ("Notification", a popup above the clock) for BALLOON_SECONDS of
 //!   the clock's seconds, or until it is clicked.
+//! - **The shell's keys** (part 11; `shasha::keys`): the Windows key
+//!   alone (RegisterHotKey (MOD_WIN, VK_LWIN), gala's hot key for it)
+//!   and Win+E, registered for the desktop window, which only the
+//!   shell's process may do. The Windows key toggles the start menu;
+//!   Win+E starts File Explorer (`explorer.exe` in the Windows
+//!   directory). They are taken last at the start, and the desktop
+//!   window shown after them: its showing says the shell is ready.
 //! - **The clock**: the local time, read each second (WM_TIMER), the
 //!   view changed when the minute does.
 //! - **The wallpaper** (part 9): the desktop window, "Program Manager"
@@ -88,7 +94,10 @@
 //! answer (`linux: Ubuntu: install asked: pid N`, refused with the
 //! status, or what the click does not do), each distribution whose state
 //! changed and each terminal or application listed (`linux: Ubuntu
-//! downloading`, `linux: Ubuntu lists XTerm`), the section not read, the hot key refused, every notification-area
+//! downloading`, `linux: Ubuntu lists XTerm`), the section not read, the
+//! shell's keys taken (`the shell's keys: Win (the start menu), ...`) and
+//! each refused (the error), each File Explorer started for Win+E (its
+//! path and pid, or the status), every notification-area
 //! request (`notification-area icon added: window W id N "tip"`, or
 //! refused and why), every click on an icon and what it posted, a post
 //! that failed (the icon dropped), each balloon shown and how it went,
@@ -111,6 +120,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use gala_ui::{Component, Node, column, image, text, win};
+use shasha::keys::{SHELL_KEYS, ShellKey, explorer_path};
 use shasha::tray::{self, Button, Key, Refused};
 use shasha::wallpaper;
 use shasha::{
@@ -160,8 +170,6 @@ const WM_TIMER: u32 = 0x0113;
 const WM_ACTIVATE: u32 = 0x0006;
 const WA_INACTIVE: usize = 0;
 const WM_HOTKEY: u32 = 0x0312;
-const MOD_WIN: u32 = 0x0008;
-const VK_LWIN: u32 = 0x5b;
 const VK_ESCAPE: usize = 0x1b;
 const WM_KEYDOWN: u32 = 0x0100;
 const SW_HIDE: i32 = 0;
@@ -194,8 +202,6 @@ const COPY_BOTTOM_RIGHT: usize = 4;
 /// The balloon's window.
 const BALLOON_WIDTH: i32 = 360;
 const BALLOON_HEIGHT: i32 = 96;
-/// The start menu's hot key's id (the Windows key alone).
-const MENU_HOT_KEY: i32 = 1;
 
 /// gala's app bar op: the caller's window (the shell's) becomes the
 /// taskbar's bar in the desktop's place (kernel desktop::appbar).
@@ -248,6 +254,7 @@ unsafe extern "system" {
     fn GetFileSizeEx(file: Handle, size: *mut i64) -> Bool;
     fn ReadFile(file: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
+    fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -371,8 +378,7 @@ fn action(action: u32, hwnd: u64, out: &mut [u8]) -> (u32, usize) {
 /// GalaDesktopAction's `action` on window `hwnd` with `args` and `text`.
 fn request(action: u32, hwnd: u64, args: [i32; 4], text: &str, out: &mut [u8]) -> (u32, usize) {
     let units: Vec<u16> = text.encode_utf16().collect();
-    let mut b: Vec<u8> = Vec::new();
-    b.resize(REQUEST_HEADER + 2 * units.len(), 0);
+    let mut b: Vec<u8> = alloc::vec![0; REQUEST_HEADER + 2 * units.len()];
     b[0..4].copy_from_slice(&REQUEST_VERSION.to_le_bytes());
     b[4..8].copy_from_slice(&action.to_le_bytes());
     b[8..16].copy_from_slice(&hwnd.to_le_bytes());
@@ -399,8 +405,7 @@ fn request(action: u32, hwnd: u64, args: [i32; 4], text: &str, out: &mut [u8]) -
 
 /// The desktop's window list, or None (logged) when it cannot be read.
 fn windows() -> Option<Vec<shasha::Task>> {
-    let mut b: Vec<u8> = Vec::new();
-    b.resize(LIST_HEADER + MAX_WINDOWS * WINDOW_ENTRY, 0);
+    let mut b: Vec<u8> = alloc::vec![0; LIST_HEADER + MAX_WINDOWS * WINDOW_ENTRY];
     let (status, n) = action(ACTION_WINDOWS, 0, &mut b);
     if status != 0 {
         log(&format!("the window list is not read: status {status:#x}"));
@@ -411,8 +416,7 @@ fn windows() -> Option<Vec<shasha::Task>> {
 
 /// The desktop's installed programs, or None (logged).
 fn programs() -> Option<Vec<shasha::Program>> {
-    let mut b: Vec<u8> = Vec::new();
-    b.resize(LIST_HEADER + MAX_PROGRAMS * PROGRAM_ENTRY, 0);
+    let mut b: Vec<u8> = alloc::vec![0; LIST_HEADER + MAX_PROGRAMS * PROGRAM_ENTRY];
     let (status, n) = action(ACTION_PROGRAMS, 0, &mut b);
     if status != 0 {
         log(&format!("the program list is not read: status {status:#x}"));
@@ -838,6 +842,22 @@ impl Component for DesktopWindow {
     }
 
     fn message(&mut self, _: usize, msg: u32, wparam: usize, _: isize) -> Option<DesktopMsg> {
+        if msg == WM_HOTKEY {
+            // The shell's keys come to this window (`ready`).
+            match ShellKey::from_id(wparam) {
+                Some(ShellKey::Start) => {
+                    // The menu's window acts on it, as on the Start
+                    // button's click.
+                    // SAFETY: our menu window (or none: refused).
+                    if unsafe { PostMessageW(menu_window(), WM_APP_TOGGLE, 0, 0) } == 0 {
+                        log("Win: the start menu is not there");
+                    }
+                }
+                Some(ShellKey::Explorer) => start_explorer(),
+                None => log(&format!("hot key {wparam}: not one of the shell's")),
+            }
+            return None;
+        }
         if msg == WM_GALA_CATALOG {
             // The start menu's to read: this window is the shell's, the
             // one the kernel tells. The wparam says which list.
@@ -969,13 +989,64 @@ fn make_desktop(w: i32, h: i32) -> Option<Handle> {
         log("not the shell: SetShellWindow refused");
         return None;
     }
-    // The wallpaper, as when it changes (the view keeps its path).
+    // The wallpaper, as when it changes (the view keeps its path). The
+    // window shows once the shell is ready (`ready`).
     // SAFETY: our window.
-    unsafe {
-        PostMessageW(hwnd, WM_SETTINGCHANGE, SPI_SETDESKWALLPAPER, 0);
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    }
+    unsafe { PostMessageW(hwnd, WM_SETTINGCHANGE, SPI_SETDESKWALLPAPER, 0) };
     Some(hwnd)
+}
+
+/// The shell is ready: its keys taken for the desktop window `hwnd`
+/// (RegisterHotKey, the shell's process alone may), then the window shown.
+/// Its showing is the sign programs can go by (IsWindowVisible of
+/// GetShellWindow): the shell's keys are the shell's from then on.
+fn ready(hwnd: Handle) {
+    let mut taken = Vec::new();
+    for k in SHELL_KEYS {
+        let (modifiers, vk) = k.keys();
+        // SAFETY: our window.
+        if unsafe { RegisterHotKey(hwnd, k.id(), modifiers, vk) } != 0 {
+            taken.push(format!("{} ({})", k.name(), k.does()));
+        } else {
+            // SAFETY: plain call.
+            let e = unsafe { GetLastError() };
+            log(&format!(
+                "the shell's key {} ({}) is not taken: RegisterHotKey error {e}",
+                k.name(),
+                k.does()
+            ));
+        }
+    }
+    if taken.is_empty() {
+        log("the shell's keys: none taken");
+    } else {
+        log(&format!("the shell's keys: {}", taken.join(", ")));
+    }
+    // SAFETY: our window.
+    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+}
+
+/// Win+E: a File Explorer window (explorer.exe in the Windows directory,
+/// where Windows has it). Logged with its pid or the status.
+fn start_explorer() {
+    let mut dir = [0u16; 260];
+    // SAFETY: our buffer, its length in units.
+    let n = unsafe { GetWindowsDirectoryW(dir.as_mut_ptr(), 260) } as usize;
+    if n == 0 || n >= dir.len() {
+        // SAFETY: plain call.
+        let e = unsafe { GetLastError() };
+        log(&format!("Win+E: no File Explorer: GetWindowsDirectoryW error {e}"));
+        return;
+    }
+    let path = explorer_path(&String::from_utf16_lossy(&dir[..n]));
+    let mut out = [0u8; 8];
+    let (status, got) = request(ACTION_START, 0, [0; 4], &format!("\"{path}\""), &mut out);
+    if status == 0 && got >= 4 {
+        let pid = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+        log(&format!("Win+E: start File Explorer ({path}): pid {pid}"));
+    } else {
+        log(&format!("Win+E: start File Explorer ({path}) refused: status {status:#x}"));
+    }
 }
 
 /// Makes the balloon's window (hidden) above the strip at `bar_top`, at
@@ -1141,7 +1212,6 @@ impl Component for Menu {
             WM_APP_TOGGLE => Some(MenuMsg::Toggle),
             WM_APP_CATALOG if wparam == CHANGED_LINUX => Some(MenuMsg::LinuxChanged),
             WM_APP_CATALOG if wparam == CHANGED_CATALOG => Some(MenuMsg::CatalogChanged),
-            WM_HOTKEY if wparam == MENU_HOT_KEY as usize => Some(MenuMsg::Toggle),
             WM_KEYDOWN if wparam == VK_ESCAPE => Some(MenuMsg::Escape),
             // SAFETY: our window.
             WM_ACTIVATE
@@ -1156,7 +1226,7 @@ impl Component for Menu {
 }
 
 /// Makes the start menu's window (hidden) above the strip at `bar_top`
-/// on a screen `sw` wide, and takes the Windows key for it.
+/// on a screen `sw` wide.
 fn make_menu(sw: i32, bar_top: i32) {
     let options = win::Options {
         title: "Start",
@@ -1175,12 +1245,6 @@ fn make_menu(sw: i32, bar_top: i32) {
         return;
     };
     MENU.store(hwnd as usize, Ordering::Release);
-    // SAFETY: our window.
-    if unsafe { RegisterHotKey(hwnd, MENU_HOT_KEY, MOD_WIN, VK_LWIN) } == 0 {
-        // SAFETY: plain call.
-        let e = unsafe { GetLastError() };
-        log(&format!("the Windows key is not the start menu's: RegisterHotKey error {e}"));
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -1190,10 +1254,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     // The desktop window first: the shell's window, which the strip's
     // app bar needs.
-    if make_desktop(sw, sh).is_none() {
+    let Some(desktop) = make_desktop(sw, sh) else {
         // SAFETY: plain call.
         unsafe { ExitProcess(2) }
-    }
+    };
     let options = win::Options {
         title: "Taskbar",
         x: 0,
@@ -1265,6 +1329,8 @@ pub extern "C" fn mainCRTStartup() -> ! {
         }
         PostMessageW(hwnd, WM_APP_WINDOWS, 0, 0);
     }
+    // Last, with everything its keys act on made.
+    ready(desktop);
     let code = win::pump();
     log("ended");
     // SAFETY: plain call.

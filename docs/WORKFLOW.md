@@ -212,6 +212,13 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   `gala windows`, check what the program saw), and only then bind the
   mouse or a key to the same action. A `gala` command is also the easy
   way to put a screen test's window where its pixel checks expect it.
+- **A shell key pressed too early goes nowhere.** shasha takes Win and
+  Win+E (RegisterHotKey on its Progman window) only once its taskbar
+  and menu exist, and shows Progman after: a screen step that presses
+  one waits for `shasha: the shell's keys: ...` (xtask's
+  `SHELL_KEYS_TAKEN`), a test program for a visible GetShellWindow.
+  Before that the key is no one's (no menu, no File Explorer).
+  Win+arrows and Ctrl+Shift+Esc are the system's and need no wait.
 
 ## Building, running and testing
 
@@ -2902,7 +2909,9 @@ A root is what its workload opened on real 26.04, traced:
   checks `\\wsl.localhost` paths (part A) and shell32's namespace (part
   B), registers `.galatxt` (HKCU\Software\Classes) to its own `open`
   mode, writes `C:\explorer.d\files\notes.galatxt` and prints
-  `explorer_test: ready`; EXPLORER_SCREEN presses Win+E, types
+  `explorer_test: ready`; EXPLORER_SCREEN presses Win+E once shasha
+  logs that it holds the shell's keys (Win+E is shasha's: it starts
+  `C:\Windows\explorer.exe`), types
   `C:\explorer.d\files` in the address bar, copies the file (Ctrl+C),
   clicks the navigation pane's Linux node, opens `bb` and its `tmp`
   (row clicks, Enter), pastes (Ctrl+V), finds the copy with the search
@@ -2924,9 +2933,11 @@ A root is what its workload opened on real 26.04, traced:
 - Host tests: `cargo test -p shellns` (lists, parsing and display
   names, order), `cargo test -p explorer --lib` (rows, sorting, search,
   formats, the change flow's states), `cargo test -p kernel --lib nt::wslfs` and
-  `nt::desktop` (Win+E). `cargo clippy -p explorer --lib --tests` and
+  `nt::desktop` (Win+E under `shell=desktop`), `cargo test -p shasha
+  --lib keys` (the shell's keys). `cargo clippy -p explorer --lib --tests` and
   `-p shellns --tests` check them on the host.
-- Reading a run: `desktop: Win+E: File Explorer`, explorer.exe's
+- Reading a run: `desktop: hot key <id> (Win+E) to pid <shasha>`,
+  `shasha: Win+E: start File Explorer (<path>): pid <n>`, explorer.exe's
   `explorer: navigate <parsing name> (<n> items)`, `explorer: copy
   ...`, `explorer: paste ...: ok`, `explorer: open <path>: started`,
   `explorer: changed <dir>: <n> items (+added) (-removed)`, `explorer:

@@ -10930,7 +10930,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("linux_hwnd_test", "kernel32.dll", "Windows/System32"),
     ("linux_hwnd_test", "user32.dll", "Windows/System32"),
     ("linux_hwnd_test", "gdi32.dll", "Windows/System32"),
-    // Hot keys and the shell's keys (user/hotkey_test).
+    // Hot keys and the shell's keys (user/hotkey_test): explorer.exe
+    // where Windows has it, for the shell's Win+E.
+    ("hotkey_test", "user/bin/explorer.exe", "Windows"),
     ("hotkey_test", "ntdll.dll", "Windows/System32"),
     ("hotkey_test", "kernel32.dll", "Windows/System32"),
     ("hotkey_test", "user32.dll", "Windows/System32"),
@@ -16462,25 +16464,27 @@ const BASE_SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // Hot keys (user/hotkey_test; ROADMAP SH step 1, part 3):
-        // RegisterHotKey's errors, a program's Ctrl+Alt+K as WM_HOTKEY
-        // to its thread, and the shell's keys (Win+E, the Windows key
-        // alone) to the shell's window once it has one (SetShellWindow);
+        // Hot keys (user/hotkey_test; ROADMAP SH step 1, parts 3 and
+        // 11): RegisterHotKey's errors and a program's Ctrl+Alt+K as
+        // WM_HOTKEY to its thread, beside shasha, the shell: the shell's
+        // window and keys are not the program's, and shasha's Win+E
+        // opens File Explorer and its Windows key the start menu;
         // HOTKEY_SCREEN presses them.
         name: "hotkey_test",
-        // hotkey_test plays the shell (its window the shell window, the
-        // shell's keys its own): no shasha holds it (shell=desktop).
-        cmdline: "qemu_exit shell=desktop run=hotkey_test.exe",
+        cmdline: "qemu_exit run=hotkey_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
+            "shasha: the shell's keys: Win (the start menu), Win+E (File Explorer)",
             "hotkey_test: registered",
             "desktop: hot key 1 (Ctrl+Alt+K) to pid",
             "hotkey_test: hot key 1",
             "hotkey_test: shell keys",
-            "desktop: hot key 3 (Win+E) to pid",
-            "hotkey_test: hot key 3",
-            "desktop: hot key 4 (Win) to pid",
-            "hotkey_test: hot key 4",
+            "(Win+E) to pid",
+            "shasha: Win+E: start File Explorer (C:\\Windows\\explorer.exe): pid",
+            "hotkey_test: file explorer",
+            "(Win) to pid",
+            "shasha: the start menu opens",
+            "hotkey_test: start menu",
             "hotkey_test: ok",
             "exited with status 0x00000000",
         ],
@@ -16650,7 +16654,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "agent: started docked",
             "agent: docked at 960,0 320x752",
-            "desktop: Win+E: File Explorer",
+            "shasha: Win+E: start File Explorer (C:\\Windows\\explorer.exe): pid",
             "explorer: window at 0,40 960x700 (work area [0, 0, 960, 752])",
             "explorer: window menu",
             "explorer: change: request card opened (for the agent panel)",
@@ -20623,7 +20627,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "explorer_test: plumbing ok",
             "explorer_test: namespace ok",
             "explorer_test: ready",
-            "desktop: Win+E: File Explorer",
+            "shasha: Win+E: start File Explorer (C:\\Windows\\explorer.exe): pid",
             "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
             "explorer: navigate C:\\explorer.d\\files (1 items)",
             "explorer: navigate ::{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6} (",
@@ -24581,7 +24585,8 @@ const AGENT_CHAT_SCREEN: ScreenCheck = ScreenCheck {
 const EXPLORER_AGENT_SCREEN: ScreenCheck = ScreenCheck {
     marker: "agent: docked at",
     steps: &[
-        ScreenStep { after: "agent: docked at", input: &["sendkey meta_l-e"], pixels: &[] },
+        // Win+E is the shell's once shasha has taken it.
+        ScreenStep { after: SHELL_KEYS_TAKEN, input: &["sendkey meta_l-e"], pixels: &[] },
         ScreenStep {
             // 2: Explorer opened beside the docked panel (inside the work
             // area: its place is in the log), the panel's surface intact.
@@ -24623,7 +24628,8 @@ const EXPLORER_AGENT_SCREEN: ScreenCheck = ScreenCheck {
 const EXPLORER_SCREEN: ScreenCheck = ScreenCheck {
     marker: "explorer_test: ready",
     steps: &[
-        ScreenStep { after: "explorer_test: ready", input: &["sendkey meta_l-e"], pixels: &[] },
+        // Win+E is the shell's once shasha has taken it.
+        ScreenStep { after: SHELL_KEYS_TAKEN, input: &["sendkey meta_l-e"], pixels: &[] },
         ScreenStep {
             // 1: This PC: selected in the navigation pane, C: listed.
             after: "explorer: navigate ::{20D04FE0-3AEA-1069-A2D8-08002B30309D} (",
@@ -25211,14 +25217,20 @@ const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// shasha's line once it holds the shell's keys (the Windows key, Win+E):
+/// a screen step that presses one waits for it, besides its own marker.
+const SHELL_KEYS_TAKEN: &str =
+    "shasha: the shell's keys: Win (the start menu), Win+E (File Explorer)";
+
 /// user/hotkey_test's keys: Ctrl+Alt+K once it has registered it, then
-/// Win+E and the Windows key alone once it is the shell.
+/// the shell's (shasha's) Win+E, and the Windows key alone once the File
+/// Explorer it opened is closed.
 const HOTKEY_SCREEN: ScreenCheck = ScreenCheck {
     marker: "hotkey_test: registered",
     steps: &[
         ScreenStep { after: "", input: &["sendkey ctrl-alt-k"], pixels: &[] },
         ScreenStep { after: "hotkey_test: shell keys", input: &["sendkey meta_l-e"], pixels: &[] },
-        ScreenStep { after: "hotkey_test: hot key 3", input: &["sendkey meta_l"], pixels: &[] },
+        ScreenStep { after: "hotkey_test: file explorer", input: &["sendkey meta_l"], pixels: &[] },
     ],
 };
 
