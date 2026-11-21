@@ -8977,6 +8977,35 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
     ("d3d10_1_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
     ("d3d10_1_test", "user/bin/d3d10_1_test.exe", "gala"),
+    // trace_from_d3d10_test: d3d10_1_test's disk, with the trace armed.
+    ("trace_from_d3d10_test", "ntdll.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "kernel32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "msvcrt.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "ucrtbase.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "user32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "gdi32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "advapi32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "version.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "setupapi.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "cfgmgr32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "dxgi.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "shell32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "shlwapi.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "ole32.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "d2d1.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "d3d10_1.dll", "Windows/System32"),
+    (
+        "trace_from_d3d10_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("trace_from_d3d10_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("trace_from_d3d10_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/d3d11.dll", "gala"),
+    ("trace_from_d3d10_test", "target/prebuilt/dxvk/dxvk-3.1.1/x64/dxgi.dll", "gala"),
+    ("trace_from_d3d10_test", "user/bin/d3d10_1_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -19128,6 +19157,30 @@ const BASE_SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             "trace: 30 calls recorded from d2d1.dll!ID2D1Factory::ReloadSystemMetrics (trace_from=)",
             "trace: 5 of those calls recorded what they answered (trace_from=)",
+        ],
+    },
+    Scenario {
+        // The same facility on a second DLL (OBSERVABILITY "Call
+        // tracing"): `cargo xtask gen-trace` wraps d3d10_1's slots as
+        // well as d2d1's, so what a program asks of a Direct3D 10.1
+        // device can be read the same way. ROADMAP item OF needs that
+        // of Word: its device answers every call Word makes, so the
+        // ledger holds no row of one and the order is invisible.
+        // Armed at CopyResource, the last device call d3d10_1_test
+        // makes, the run records that call and the two the staging
+        // texture takes after it (Map, Unmap), one of which answers an
+        // HRESULT -- so the counts say both vtables are wrapped, the
+        // device's and the texture's, and that an answer is recorded
+        // where there is one.
+        name: "trace_from_d3d10_test",
+        cmdline: "qemu_exit run=d3d10_1_test.exe events=call \
+                  trace_from=d3d10_1.dll!ID3D10Device::CopyResource",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "d3d10_1_test: ok",
+            "exited with status 0x00000000",
+            "trace: 3 calls recorded from d3d10_1.dll!ID3D10Device::CopyResource (trace_from=)",
+            "trace: 1 of those calls recorded what they answered (trace_from=)",
         ],
     },
     Scenario {
