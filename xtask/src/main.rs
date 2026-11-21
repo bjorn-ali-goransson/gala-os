@@ -15731,6 +15731,7 @@ const BASE_SCENARIOS: &[Scenario] = &[
         expect: &[
             "d3d11_test: device llvmpipe",
             "d3d11_test: read back 0x336699 0xffcc00",
+            "d3d11_test: second device ok",
             "d3d11_test: presented",
             "xtask: screen ok",
             "d3d11_test: ok",

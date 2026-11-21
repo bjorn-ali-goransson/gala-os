@@ -1931,20 +1931,56 @@ need gala's.
    (`kernel/src/nt/reglog.rs`) is where that blob can be read. Word
    writes no log of its own to read instead: of the nine ULS logs the
    run leaves, every one is the install's (SETUP, OFFICECL, INTEGRAT)
-   and none is WINWORD's, and those eight probes of the absent
-   `Word\Options\Debug` key are the likeliest place its own logging is
-   switched on. DXVK's two logs, dumped with the run, say the stack
-   under the frame is live and name nothing gala refuses:
-   `winword_d3d11.log` has the D3D11 device created on llvmpipe with a
-   597 MiB device-local heap, and the three `DXGI: Found monitors not
-   associated with any adapter, using fallback` warnings in
-   `winword_dxgi.log` are the absent Vulkan device LUID below, where
-   that warning is read line by line, and not a gap. The
-   message itself is Word's own
-   `user32!MessageBoxW` with `WWLIB.DLL` and `WWINTL.DLL` on the stack,
-   which is what a stack capture of the write says
-   (`stack_at=NtWriteFile:8 stack_from=wwlib`, OBSERVABILITY "Stack
-   captures": 633 of DXVK's log writes passed over, 3 captured). Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
+   and none is WINWORD's. The probes of the absent `Word\Options\Debug`
+   and `16.0\Common\Debug` keys are not where its logging is switched
+   on, which is measured rather than assumed: seeded empty, the two keys
+   make Word name every value it looks for in them -- `TCOTrace` in
+   `Common\Debug`, and `ShowScreenUpdates`, `DisablePTSLineCache`,
+   `SlowTyping`, `SlowTypingChunkMax`, `NoUpgradeLegacyObjects`,
+   `ForcedXDpi` and `ForcedYDpi` in `Word\Options\Debug` -- every one a
+   drawing or typing knob a fresh profile lacks as well, with no log
+   among them, and the run ends at the same message at the same second.
+   An absent key names nothing it was asked for, so a key seeded empty
+   is how a program is made to say what it wanted: the `value` events of
+   `events=file` then carry each name. Office's own logging switch,
+   seeded in `user/office_install/uls_logging.regseed`, is read only by
+   OfficeClickToRun.exe; Word never opens `16.0\Common\Logging` at
+   all. DXVK's two logs, dumped with the run, name nothing gala
+   refuses -- the three `DXGI: Found monitors not associated with any
+   adapter, using fallback` warnings in `winword_dxgi.log` are the
+   absent Vulkan device LUID below, where that warning is read line by
+   line, and not a gap. `winword_d3d11.log` holds **two** devices on
+   llvmpipe, both whole: each creation and each finish is there, the
+   10_1 device's and the 11_0 one's, and the file ends on the second's
+   resource descriptor heap because nothing is asked of DXVK after it
+   (how to read its blocks, and the mis-split that makes the second
+   look like a device that stopped, is below). The Direct3D 10.1 device
+   is one of the two and Word is given it: the ledger has
+   `d3d10_1.dll!D3D10CreateDevice1` answered 0 at 46260 ms, and its one
+   unsupported flag (`ALLOW_NULL_FROM_MAP`, detail 16) recorded at
+   45657 ms where the call began, so the 603 ms between them is
+   lavapipe building a device Word then holds, and the box comes after
+   it. Holding two devices at once is not what stops Word either:
+   `d3d11_test` asks for a second one the way Word does -- a second
+   `D3D11CreateDevice` while the first device and its swap chain are
+   alive, at its own feature level (10_1), with a texture made on it --
+   and it passes. What Word asks the device it was given is the next
+   thing to read, and the ledger cannot say: it holds no
+   `d3d10_1.dll!ID3D10Device1::` row at all, so every method Word
+   called is one gala answers, and which they were and in what order is
+   what `trace_from=` records (OBSERVABILITY "Call tracing"; `cargo
+   xtask gen-trace` wraps d2d1's slots today, so wrapping d3d10_1's is
+   the step). The
+   message itself is Word's own `user32!MessageBoxW`, and the stack at
+   its write names who asked for it: `Mso20win32client.dll`'s frame
+   directly above user32's, then `MSO.DLL` and `Mso30win32client.dll`
+   among WWLIB's own frames down to `WINWORD.EXE` itself, with
+   `WWINTL.DLL` beside the write. Aim the capture at the module that is
+   *in* the call: `stack_at=NtWriteFile:6 stack_from=user32
+   stack_words=400` catches the box's two writes and nothing else
+   (OBSERVABILITY "Stack captures"), where `stack_from=wwlib` spends
+   captures on C2R64's own log writes early in the run, WWLIB being
+   only a dead word on those stacks. Excel's ends with EXCEL.EXE raising 0xc06d007f after 30 s: the
    delay-load helper's "not found" for user32's WaitForInputIdle, the
    one gap its run names -- nothing of Office's shared code fails in
    it, so Excel's next step is that function and a rerun. The ledger's
@@ -2532,7 +2568,16 @@ need gala's.
      8 MiB resource descriptor heap, with nothing after it and one
      warning in the file (external memory features unsupported), and
      `winword_dxgi.log` holds only the monitor-metadata errors named
-     above.
+     above. Read its 580 lines by their blocks, or the second device
+     reads as one that stopped: the two creations are byte-identical
+     273-line blocks (lines 1-273 and 274-546, `Creating device:`
+     through the whole feature dump), and both finishes follow them --
+     descriptor sizes, the buffer memory-type mask, the 64 kB sampler
+     heap, the binding model, the maximum and the chosen feature level,
+     and `Creating resource descriptor heap (8192 kB)` as the last line
+     of each. Split the file at `Using feature level` instead and the
+     first device appears to print twelve lines the second lacks, which
+     are the second device's own finish.
      Word can be asked to log for itself, and what it logs says the last
      thing it does over the Click-to-Run channel is licensing, and that
      licensing is not what stops it. Microsoft's own public switches

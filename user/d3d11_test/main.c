@@ -18,6 +18,12 @@
  *   (CopySubresourceRegion), puts a block there with no shader.
  * - Copied to a staging texture and mapped, the corner is 0x336699 and
  *   the middle 0xffcc00.
+ * - A second device, created while the first is alive and its own
+ *   feature level asked for (10_1, as a program that wants no more
+ *   asks), succeeds and reports 10_1: a process may hold as many
+ *   devices as it likes, and Word's startup holds two (ROADMAP item
+ *   OF). A texture on the second device proves it works, not only that
+ *   the call returned.
  * - Present(0, 0) puts the frame on the screen, which xtask checks; a
  *   click in the window ends the program (it waits up to 60 s for one:
  *   without one, a failure).
@@ -72,6 +78,11 @@ typedef HRESULT(WINAPI *PFN_CREATE)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UI
                                     const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **,
                                     ID3D11Device **, D3D_FEATURE_LEVEL *,
                                     ID3D11DeviceContext **);
+
+typedef HRESULT(WINAPI *PFN_CREATE_DEVICE)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
+                                           const D3D_FEATURE_LEVEL *, UINT, UINT,
+                                           ID3D11Device **, D3D_FEATURE_LEVEL *,
+                                           ID3D11DeviceContext **);
 
 /* The pixel at (x, y) of a mapped B8G8R8A8 row of `pitch` bytes, as
  * 0xRRGGBB. */
@@ -203,6 +214,36 @@ int main(void) {
     CHECK(corner == 0x336699);
     CHECK(middle == 0xffcc00);
 
+    /* A second device while the first is alive, which is what Word's
+     * startup does: D3D11CreateDevice (no swap chain) with one feature
+     * level asked for. */
+    PFN_CREATE_DEVICE create_device =
+        (PFN_CREATE_DEVICE)(void *)GetProcAddress(d3d11, "D3D11CreateDevice");
+    CHECK(create_device != NULL);
+    const D3D_FEATURE_LEVEL want_second[] = {D3D_FEATURE_LEVEL_10_1};
+    ID3D11Device *dev2 = NULL;
+    ID3D11DeviceContext *ctx2 = NULL;
+    D3D_FEATURE_LEVEL level2 = 0;
+    HR(create_device(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, want_second, 1, D3D11_SDK_VERSION,
+                     &dev2, &level2, &ctx2));
+    CHECK(dev2 && ctx2);
+    CHECK(level2 == D3D_FEATURE_LEVEL_10_1);
+    D3D11_TEXTURE2D_DESC sd;
+    memset(&sd, 0, sizeof sd);
+    sd.Width = 64;
+    sd.Height = 64;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_DEFAULT;
+    sd.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D *second = NULL;
+    HR(ID3D11Device_CreateTexture2D(dev2, &sd, NULL, &second));
+    ID3D11Texture2D_Release(second);
+    printf("d3d11_test: second device ok\n");
+    fflush(stdout);
+
     HR(IDXGISwapChain_Present(swap, 0, 0));
     printf("d3d11_test: presented\n");
     fflush(stdout);
@@ -215,6 +256,8 @@ int main(void) {
     }
     CHECK(clicked);
 
+    ID3D11DeviceContext_Release(ctx2);
+    ID3D11Device_Release(dev2);
     ID3D11Texture2D_Release(staging);
     ID3D11RenderTargetView_Release(block_rtv);
     ID3D11Texture2D_Release(block);
