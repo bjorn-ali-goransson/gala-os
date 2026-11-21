@@ -2692,6 +2692,46 @@ need gala's.
      service in the whole run: the ledger has neither a `missing dll`
      nor a `load failed` for it, and gala's loader records both
      ("Gaps are never silent", `load_module` in `user/testntdll`).
+     The graphics tail is the same run to run, which is what makes the
+     readings above measurements and not one run's weather. Two further
+     runs from boot are twins of each other and of the run recorded
+     here: eleven d2d1 calls reached, the same eleven, ending in
+     ID2D1RenderTarget::CreateSolidColorBrush, and the box 64 ms and
+     57 ms after that brush; Word's lifetime 31992 ms and 31276 ms, its
+     first reach for the Click-to-Run pipe at 9788 ms, 86 refusals of
+     it. Seen once and not since, so it is recorded and not built on: a
+     run that gave up with a Direct3D device in hand and no
+     CreateTexture2D after it, 328 ledger rows and not one "reached"
+     row from d2d1. Its artifacts were overwritten by the next failing
+     run of the same scenario before it could be read twice, which is
+     the pitfall as much as the finding -- a reading worth keeping gets
+     copied out of `target/failed/` before anything else runs.
+     Word's 30 s is not a deadline, and nothing is to be read into how
+     close the box is to it. The lifetimes cluster (30774, 30817,
+     31016, 31276, 31992 ms) because untraced runs do the same work at
+     the same speed, not because Word gives up on a clock: in the
+     fully-traced run D3D10CreateDevice1 alone runs from 290749 ms to
+     336451 ms and Word is alive after it, having waited out a 45.7 s
+     call. A deadline hypothesis would cost a run to test; this one is
+     answered by runs already taken.
+     A gap of the shape this investigation keeps meeting is closed, and
+     it is the first one found by asking what gala answers rather than
+     what it refuses. GetSystemMetrics answered every index it had no
+     answer for with 0 and recorded nothing -- 73 of the indices a
+     program asks for, about thirty of them diverging from Windows,
+     SM_CXVSCROLL and SM_CYMAXIMIZED among them. That is exactly the
+     kind of value the standing reading of the box ("what Word holds,
+     it was given earlier") is about: handed over, believed, and a
+     guess no caller can tell from a measurement. `metrics_test`
+     measures every index Windows documents on the Windows machine
+     first and checks gala against it -- the theme's sizes as values,
+     the frame's as the relations Windows holds them in, because gala's
+     caption is 32 pixels where that Windows' is 23 -- and gala answers
+     all but two now (ARCHITECTURE "Window, Transform and title
+     bars"), each of those two a ledger row every run instead of a 0.
+     SM_CLEANBOOT (67), which Microsoft documents a Click-to-Run Office
+     as refusing to start for, was already right (0) and is not the
+     cause.
    - The UCRT (the owner's decision: gala's own; also the answer to
      PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
      resolve to it), x64 and x86, msvcrt's source with the UCRT's own
